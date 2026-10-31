@@ -123,7 +123,7 @@ qualify an instrument as measured or realistic.
 
 ### String starters with their original material sources
 
-The nine **Strings** starters include their original material manifests and
+The ten **Strings** starters include their original material manifests and
 tables. Required body and stop profiles are loaded and selected with them.
 Configure the existing `xtask matdb-pack` compiler as well as the string renderer:
 
@@ -144,13 +144,34 @@ complete input set; a failed source load leaves the current experiment intact.
 
 These are the existing native examples: pluck/bow, measured cello-G coefficients,
 nonlinear preload with or without a stop, tensor body memory, plate microphone,
-independent cavity/exterior gases, layered relaxation and material shear contact.
+independent cavity/exterior gases, layered relaxation, axial hair compliance and
+material shear contact.
 They retain their original numerical resolutions and stated limitations. The
 Lampis coefficients describe a measured cello string on a manufactured
-laboratory plate; the other bodies and materials are integration fixtures.
+laboratory plate. The hair-compliance source retains a published reduced model;
+the remaining bodies and materials are integration fixtures.
 They do not establish complete violin, cello or bass realism. No geometry,
 material coefficient, gas law, tuning adjustment or playback gain is supplied
 by the browser.
+
+### Material bow-hair compliance
+
+The **Strings — material bow-hair compliance** starter loads the canonical
+`material_strings/compliant-ribbon.material-strings` input verbatim, with its
+original wire, body and horsehair manifests and tables already attached. The
+[native source recipe](../../crates/fs-couple/examples/material_strings/README.md)
+also describes direct command-line use. The same attachment and original-manifest
+controls used by the other physics paths supply the hair material; the browser
+introduces no physical coefficients.
+
+Change the source's hair material, radius, free length, contacting-hair count or
+bowing station. The native contact system derives the hair's spring and dashpot
+and retains their state through scheduled motion and bow release. The selected
+`quasistatic-continuation` is the published spring-dashpot approximation, with
+prescribed normal loading and no fiber inertia. The starter still uses authored
+Coulomb friction and a manufactured string/body fixture. It demonstrates the
+material-to-mechanics connection; it is not a validated rosin law or a complete
+violin/cello specimen. Compare variants at the same pressure-to-PCM scale.
 
 ### Heated string with evolving material and finite gas
 

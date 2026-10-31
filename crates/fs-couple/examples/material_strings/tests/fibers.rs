@@ -1092,3 +1092,130 @@ fn fiber_supports_refuse_missing_expansion_slack_strain_and_uninitialized_memory
     thermal.bow_fibers.as_mut().unwrap().thermal_reference_kelvin = Some(270.0);
     assert!(compile_fiber_source(&thermal, thermal_fiber_pack(1.0), &gate).is_err());
 }
+
+fn quasistatic_text() -> String {
+    include_str!("../compliant-ribbon.material-strings").replace("48000 4096", "48000 256")
+}
+
+fn quasistatic_pack(young: f64, viscosity: Option<f64>) -> NormalizedPack {
+    let mut claims = ClaimSet::new();
+    for (name, dims, value) in [
+        ("young_modulus_static", Pressure::DIMS, Some(young)),
+        ("density", Density::DIMS, Some(1100.0)),
+        ("kelvin_voigt_young_viscosity_pw98_model", DynViscosity::DIMS, viscosity),
+    ] {
+        let Some(value) = value else { continue; };
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims), value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained()
+                .with("frequency", 0.0, 0.0).with("relative_humidity_known", 0.0, 0.0),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+            provenance: Provenance { source: "synthetic quasistatic fiber integration test".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+    }
+    NormalizedPack::new("quasistatic-test", "fixture", fs_blake3::ContentHash([13; 32]),
+        "manufactured freely redistributable data", claims, vec![], vec![]).unwrap()
+}
+
+fn compile_quasistatic_source(s: &input::Spec) -> fs_couple::bowed_string::runtime::reciprocal::bank::multiple::compliant_ribbon::HairRibbonProperties {
+    let gate = CancelGate::new_clock_free();
+    s.bow_compliance.as_ref().unwrap().compile(s, &mut Catalog::new(),
+        &mut |_| Ok(quasistatic_pack(7e9, Some(1e6)).into()), &gate).unwrap()
+}
+
+#[test]
+fn quasistatic_fiber_compliance_scales_with_material_geometry_not_quadrature() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::compliant_ribbon::CompliantBowRibbon;
+    let s = input::Spec::parse(quasistatic_text().as_bytes()).unwrap();
+    let ribbon = |s: &input::Spec| {
+        let (width, cells) = s.bow_ribbon.unwrap();
+        CompliantBowRibbon::new(StringBowLocation { string: 0, station_fraction: 0.2 },
+            0.5, width, cells, compile_quasistatic_source(s)).unwrap()
+    };
+    let baseline = ribbon(&s);
+    let (k, d) = (baseline.lumped_tangential_stiffness_n_m(), baseline.lumped_tangential_damping_kg_s());
+    for (width, cells) in [(0.005, 1), (0.02, 3)] {
+        let mut changed = s.clone();
+        changed.bow_ribbon = Some((width, cells));
+        let actual = ribbon(&changed);
+        assert_eq!(actual.lumped_tangential_stiffness_n_m(), k);
+        assert_eq!(actual.lumped_tangential_damping_kg_s(), d);
+        assert!((actual.cell_tangential_stiffness_n_m() * cells as f64 - k).abs() < 1e-10);
+    }
+    let mut doubled = s.clone();
+    doubled.bow_compliance.as_mut().unwrap().fiber_count *= 2;
+    assert_eq!(ribbon(&doubled).lumped_tangential_stiffness_n_m(), 2.0 * k);
+    assert_eq!(ribbon(&doubled).lumped_tangential_damping_kg_s(), 2.0 * d);
+    let mut longer = s.clone();
+    longer.bow_compliance.as_mut().unwrap().length_m *= 2.0;
+    assert_eq!(ribbon(&longer).lumped_tangential_stiffness_n_m(), 0.5 * k);
+    assert_eq!(ribbon(&longer).lumped_tangential_damping_kg_s(), 0.5 * d);
+}
+
+#[test]
+fn quasistatic_material_compliance_reaches_shared_pressure_and_exact_wav_path() {
+    scoped(|cx, gate| {
+        let make = |young, viscosity| {
+            input::Spec::parse(quasistatic_text().as_bytes()).unwrap().compile(cx, gate, |name| {
+                Ok(if name.starts_with("bow-hair-") { quasistatic_pack(young, Some(viscosity)) }
+                else { pack(name, 7800.0, 200_000.0, None) })
+            }).unwrap()
+        };
+        let mut soft = make(7e9, 1e6);
+        let mut stiff = make(28e9, 1e6);
+        let mut viscous = make(7e9, 4e6);
+        assert_eq!(soft.spec.bytes, stiff.spec.bytes);
+        assert_eq!(soft.spec.bytes, viscous.spec.bytes);
+        let baseline = soft.performance.bank().source().compliant_ribbon().unwrap();
+        let changed = stiff.performance.bank().source().compliant_ribbon().unwrap();
+        assert_eq!(changed.lumped_tangential_stiffness_n_m(), 4.0 * baseline.lumped_tangential_stiffness_n_m());
+        assert_eq!(changed.lumped_tangential_damping_kg_s(), baseline.lumped_tangential_damping_kg_s());
+        let expected = pressure(&mut soft, 37);
+        let stiffness_pressure = pressure(&mut stiff, 128);
+        let viscosity_pressure = pressure(&mut viscous, 128);
+        assert!(expected.iter().any(|p| p.abs() > 1e-12));
+        assert!(expected.iter().zip(stiffness_pressure).any(|(a,b)| (a-b).abs() > 1e-12));
+        assert!(expected.iter().zip(viscosity_pressure).any(|(a,b)| (a-b).abs() > 1e-12));
+        let frame = soft.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(frame.ports.iter().any(|p| p.series_drive_dissipation_j > 0.0));
+        let (encoded, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48000, 0.01).unwrap();
+        let (output, summary) = make(7e9, 1e6).write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        assert_eq!(output.into_inner(), encoded);
+        assert_eq!(summary.clipped_samples, clips as u64);
+    });
+}
+
+#[test]
+fn quasistatic_fibers_refuse_implicit_loss_or_conflicting_material_query() {
+    let text = quasistatic_text();
+    for (from, to) in [
+        ("quasistatic-continuation", "measured-broadband"),
+        ("bow_ribbon 0.01 3\n", ""),
+        ("16 3 0.8", "4 3 0.8"),
+        ("0.65 50 0.5", "0.65 0 0.5"),
+        ("0.65 50 0.5", "0.65 50 1"),
+        ("relative_humidity_known 0", "frequency 0"),
+        ("density viscosity", "young_modulus_static viscosity"),
+        ("forces retain", "bow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2\nforces retain"),
+    ] {
+        assert!(input::Spec::parse(text.replace(from, to).as_bytes()).is_err(), "{to}");
+    }
+    let gate = CancelGate::new_clock_free();
+    let original = input::Spec::parse(text.as_bytes()).unwrap();
+    let resolve = |s: &input::Spec| s.bow_compliance.as_ref().unwrap().compile(s,
+        &mut Catalog::new(), &mut |_| Ok(quasistatic_pack(7e9, None).into()), &gate);
+    assert!(resolve(&original).is_err(), "missing viscosity became zero damping");
+    let lossless = input::Spec::parse(text.replace(
+        "viscosity kelvin_voigt_young_viscosity_pw98_model", "lossless-reference").as_bytes()).unwrap();
+    assert_eq!(resolve(&lossless).unwrap().distributed_damping_kg_s_m, 0.0);
+    let mut outside = lossless.clone();
+    outside.bow_compliance.as_mut().unwrap().axes[0].1 = 1000.0;
+    assert!(resolve(&outside).is_err(), "source frequency validity was silently widened");
+    let mut conflict = original.clone();
+    conflict.material_states.insert(conflict.bow_compliance.as_ref().unwrap().pack.clone(),
+        vec![("relative_humidity_known".into(), 1.0)]);
+    assert!(conflict.network_dimensions(false).is_err());
+}

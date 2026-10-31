@@ -356,6 +356,70 @@ temperature and rate behavior. The executable retains the complete pack,
 query receipts, geometry and derived layer coefficients in the same source
 catalog and diagnostics.
 
+### Source-selected axial bow compliance
+
+`compliant-ribbon.material-strings` connects source-selected fiber stiffness and
+viscosity to the existing finite-width bow, canonical gesture scheduler and
+pressure writer. Its string and body remain the ordinary manufactured fixtures;
+its hair response selects the explicitly approximate spring-dashpot model in
+[Pitteroff and Woodhouse (1998), Part I, pp. 546–549](https://euphonics.org/wp-content/uploads/2022/03/Pitteroff_1.pdf).
+This is a controlled physical-model comparison, not a validated violin render.
+
+After the initial wire/body build, compile the hair source and run:
+
+```bash
+cargo run -p xtask -- matdb-pack \
+  --manifest data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998/manifest.tsv \
+  --out "$demo/bow-hair-horse-pitteroff-woodhouse-acustica1998.fsmatpk"
+cargo run --release -p fs-couple --example material_strings -- \
+  "$demo/compliant-ribbon.material-strings" "$demo/compliant-ribbon.wav"
+```
+
+The optional record follows `bow_ribbon` and is exclusive with `bow_fibers`:
+
+```text
+bow_compliance quasistatic-continuation PACK RADIUS_M LENGTH_M FIBER_COUNT CONTACT_FRACTION AXIS_COUNT AXIS VALUE ... YOUNG_PROPERTY DENSITY_PROPERTY viscosity VISCOSITY_PROPERTY
+```
+
+The source query is explicit because a static, unconditioned hair measurement
+must not be relabeled as a measurement at the body's temperature or the audio
+clock. Extra coordinates in `material-state PACK ...` join that query; repeated
+or conflicting coordinates refuse. The literal `quasistatic-continuation`
+selects the approximation: the admitted source point supplies a massless axial
+spring-dashpot law during playback. Source validity remains unchanged, and the
+native log retains both the selection and the resulting physical coefficients.
+
+For `N` straight fibers of area `A`, free length `L`, with contact at fraction
+`gamma`, the two fixed-end branches give
+`S = N*A*E/[L*gamma*(1-gamma)]` and
+`D = N*A*eta/[L*gamma*(1-gamma)]`. Each width cell receives its fraction of
+these totals. Changing material, radius, length or engaged fiber count changes
+the coupled reaction; changing ribbon cell count leaves total compliance and
+damping unchanged. The original bowed string must retain at least four modes
+per contact cell, in addition to ordinary temporal and source admission.
+
+The supplied record selects the paper's nominal 50 hairs, diameter 0.19 mm,
+length 0.65 m and midpoint contact. The 7 GPa static modulus gives approximately
+61,068 N/m total stiffness; the published approximate 10 kg/s dashpot is encoded
+as an equivalent Young viscosity in the same source pack. That conversion uses
+the declared nominal geometry. It is not a measured broadband material law:
+the paper explicitly extrapolates its low-frequency damping data. The source
+observation and property name retain this distinction. No recording or
+per-note sound target sets either coefficient.
+
+Replacing `viscosity VISCOSITY_PROPERTY` with `lossless-reference` selects an
+explicit undamped comparison. An absent, incompatible or out-of-domain
+viscosity in the normal form refuses; it cannot silently become zero.
+
+Each cell retains independent contact slip and series elastic state in the
+original joint solve. The total prescribed normal load is divided once across
+the ribbon; normal pressure does not emerge from this approximation. Density
+is retained as source data but supplies no inertia in this massless rung.
+Resolved fiber waves, normal deflection, stick flexure, moving contact membership
+and thermal rosin are separate mechanisms. Use `bow_fibers` below when their
+required material data and its richer mechanical assumptions are available.
+The example's Coulomb law is a declared contact fixture, not measured rosin.
+
 ### Material fibers in the same bow/string/body solve
 
 `fiber-ribbon.material-strings` adds an explicitly described fiber bundle to

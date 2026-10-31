@@ -221,24 +221,12 @@ fn bow_hair_pack() -> std::collections::BTreeMap<String, f64> {
 /// The stated lumped tangential ribbon damping [kg/s] at the stated reference
 /// width, for the violin bow (pexfp.154 DONE-WHEN 2, MagentaBadger 6556 item 1).
 ///
-/// Provenance (b, else c). P&W state NO single lumped dashpot; their damping
-/// statement is the loss factor "of order 0.02 to 0.05, rising with frequency".
-/// A 2 M alpha derivation needs a matched (attached mass, decay rate,
-/// eigenfrequency) triple; the pack carries decay rate 1..14 /s as scalars and
-/// the attached mass (11..62 g) and eigenfrequency (10..100 Hz) only in the
-/// pw98-dynamic observation text, as broad ranges that are not paired per
-/// measurement. The derivation therefore does not close on the pack to a single
-/// value: over the printed (M, alpha) bounds the ribbon dashpot spans
-/// n_H*2*M*alpha in [1.1, 86.8] kg/s; the eigenfrequency-consistent estimate
-/// D = 2 alpha S / w0^2 (M from the eigenfrequency and the derived stiffness,
-/// alpha and f0 at the range midpoints) is about 8.9 kg/s; the hand-typed model
-/// value is 10 kg/s. These agree; only the unmatched midpoint product 2 M alpha
-/// (27.4 kg/s) disagrees. Because the pack lacks a consistent (M, eigenfrequency)
-/// scalar pair, this is a FLAGGED STATED ASSUMPTION (c), never a measurement row:
-/// D = 10 kg/s, which sits on the consistent estimate and inside the bracket.
-/// `g2_*` prints the whole derivation next to this value as the cross-check.
-const STATED_RIBBON_DAMPING_KG_S: f64 = 10.0;
-
+/// P&W explicitly publish D = 10 kg/s on p. 548 and in Table I. On p. 547
+/// they derive the single-hair estimate from low-frequency decay tests and
+/// state that its frequency-independent continuation is an approximation.
+/// This is the paper's reduced model, not a measured broadband viscosity or a
+/// matched single-hair dataset. The range-based diagnostic below is only a
+/// consistency check; it does not fit or determine the rendered coefficient.
 /// Measured horse bow-hair, Pitteroff & Woodhouse 1998 model violin bow, read
 /// from the matdb pack. The hair radius is the pack diameter range's MIDPOINT
 /// (computed here, MagentaBadger 6556 item 2); gamma = 0.5 is a documented
@@ -257,7 +245,7 @@ fn violin_hair() -> HairRibbonProperties {
         excitation_fraction: 0.5, // gamma: a documented modelling choice (6556)
         // Stated assumption D, carried as the distributed d = D / b_ref so the
         // lumped tangential damping D = d * b_ref is width-free (frankensim-o7qbp).
-        distributed_damping_kg_s_m: STATED_RIBBON_DAMPING_KG_S / reference_width_m,
+        distributed_damping_kg_s_m: p["nominal_ribbon_damping_pw98_model"] / reference_width_m,
         reference_width_m,
         density_kg_m3: p["density"],
     }
@@ -325,6 +313,61 @@ fn ribbon_drives(cells: usize, speed: f64, load: f64) -> Vec<FrictionDrive> {
         };
         cells
     ]
+}
+
+/// G3: the common performance route must retain the original total bow load,
+/// compliant hair state and the released instrument's vibration. Manual joint
+/// stepping is an independent check of the schedule-to-physical-port mapping.
+#[test]
+fn g3_compliant_ribbon_schedules_one_total_load_and_preserves_release() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::MultiBowPerformanceConfig;
+    use fs_couple::pcm_wav::observation::PressureRenderer;
+    use fs_scenario::gesture::{GestureEvent, GestureSchedule, GestureTarget, GestureTrack, GestureValue};
+
+    with_cx(|cx, gate| {
+        let cells = 5;
+        let make = || base(cx, gate)
+            .with_compliant_bow_ribbon(0.02, cells, violin_hair(), ribbon_limits(), gate)
+            .unwrap();
+        let mut manual = make();
+        let scheduled = make();
+        let ribbon = scheduled.source().ribbon().expect("retained contact quadrature");
+        assert_eq!(ribbon.stations().len(), cells);
+        assert_eq!(ribbon.centre(), options().bow);
+        let schedule = GestureSchedule::try_new(1000, vec![GestureTrack {
+            id: "stroke".into(),
+            target: GestureTarget::BowStroke { string: 0 },
+            initial: GestureValue::Bow {
+                velocity_m_per_s: 0.01, normal_force_n: 0.2, station: 0.2,
+            },
+            events: vec![GestureEvent {
+                time_s: 0.004, transition_s: 0.0,
+                value: GestureValue::Bow {
+                    velocity_m_per_s: 0.0, normal_force_n: 0.0, station: 0.2,
+                },
+            }],
+        }]).unwrap();
+        let mut performance = scheduled.into_scheduled_ribbon(schedule, "stroke".into(),
+            MultiBowPerformanceConfig { samples: 384, max_block: 48,
+                max_work: 100_000, max_events: 1000 }).unwrap();
+        let zero = vec![0.0; manual.system().mode_count()];
+        let mut expected = Vec::new();
+        let mut actual = vec![0.0; 384];
+        let mut drive = vec![FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 }; cells];
+        for sample in 0..384 {
+            let total = if sample < 192 {
+                FrictionDrive { speed_m_s: 0.01, normal_force_n: 0.2 }
+            } else { FrictionDrive { speed_m_s: 0.0, normal_force_n: 0.0 } };
+            manual.source().ribbon().unwrap().project_drive(total, &mut drive).unwrap();
+            let frame = manual.step(&zero, &drive).unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            expected.push(frame.observer_pressure_pa);
+        }
+        for chunk in actual.chunks_mut(48) { performance.block(chunk).unwrap(); }
+        assert_eq!(actual, expected);
+        assert!(actual[192..].iter().any(|p| p.abs() > 1e-12), "release muted the bank");
+        assert_eq!(performance.bank().system().last_frame(), manual.system().last_frame());
+    });
 }
 
 #[test]
@@ -1008,7 +1051,7 @@ fn run_rung(
 /// Print the damping provenance cross-check (MagentaBadger 6556 item 1): the
 /// stated value, the eigenfrequency-consistent 2 M alpha estimate, the full
 /// (M, alpha) bracket, and S at the diameter range ends (6556 item 2). All from
-/// the pack; no gate run. The gate uses `STATED_RIBBON_DAMPING_KG_S`.
+/// the pack; no gate run. The gate uses the published model's retained source row.
 fn print_damping_provenance(hair: &HairRibbonProperties) {
     let p = bow_hair_pack();
     let n_h = p["hairs_in_contact_with_string_at_most"];
@@ -1042,7 +1085,7 @@ fn print_damping_provenance(hair: &HairRibbonProperties) {
     let a_hi = 0.5 * p["hair_diameter_printed_range_high"];
     println!(
         "{{\"provenance\":\"ribbon_damping\",\"stated_D_kg_s\":{},\"derived_D_eigen_consistent_kg_s\":{:.3},\"midpoint_product_D_kg_s\":{:.3},\"bracket_kg_s\":[{:.3},{:.3}],\"S_n_m\":{:.1},\"S_at_diameter_lo_n_m\":{:.1},\"S_at_diameter_hi_n_m\":{:.1},\"hair_radius_m\":{:e}}}",
-        STATED_RIBBON_DAMPING_KG_S,
+        p["nominal_ribbon_damping_pw98_model"],
         d_eigen,
         d_mid_product,
         bracket.iter().cloned().fold(f64::INFINITY, f64::min),

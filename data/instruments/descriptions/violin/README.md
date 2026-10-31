@@ -144,6 +144,45 @@ do not supply the full frequency/temperature-dependent constitutive data
 needed to replace those assumptions. The point-contact recipe remains the
 default and is available for the controlled comparison.
 
+## Add source-selected hair compliance
+
+`cannone-hair-compliance.material-strings` adds the published approximate axial
+hair response from Pitteroff and Woodhouse (1998), Part I, pp. 546–549, to the
+same four-string Cannone assembly. The source selects 50 engaged hairs of
+nominal diameter 0.19 mm and free length 0.65 m, driven at midspan. Three
+spatial cells retain their own slip and series elastic state in the same
+coupled solver and common gesture timeline. This is a declared bow-family
+model, not a measurement of Cannone's bow or the reference recording's bow.
+
+```bash
+hair_dir="$(mktemp -d)"
+hair=bow-hair-horse-pitteroff-woodhouse-acustica1998
+cargo run -p xtask -- matdb-pack \
+  --manifest "data/matdb/seed-v1/$hair/manifest.tsv" \
+  --out "$hair_dir/$hair.fsmatpk"
+NOTES=G3 \
+MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-hair-compliance.material-strings" \
+data/instruments/descriptions/violin/render.sh \
+  target/release/material_strings /path/to/new-hair-compliance-run \
+  --pack "$hair.fsmatpk=$hair_dir/$hair.fsmatpk"
+```
+
+The selected source point is static and of unstated humidity; the file declares
+its quasistatic continuation explicitly. Young modulus and geometry determine
+about 61 kN/m total axial stiffness. The 10 kg/s total dashpot is the paper's
+published reduced-model approximation, normalized to an equivalent material
+viscosity with that same geometry. The paper explicitly extrapolates its
+low-frequency damping measurements; this does not establish the real hair's
+broadband response. Source records preserve that distinction.
+
+Changing these source data changes contact force, the original string/body
+motion and pressure directly. Neither compliance nor loss is applied as an
+audio filter. Normal force is still prescribed uniformly, and the existing
+Stribeck contact law is retained as an authored assumption. This option does
+not resolve bow-stick flexure, distributed hair-wave motion, rosin temperature
+or a measured rosin shear law. It is an additional physical rung for controlled
+comparison, not evidence that the violin now matches a recording.
+
 ## Apply a measured varnish to the existing violin
 
 `cannone-h8-varnish-memory.assembly` adds an explicitly authored 20 µm film

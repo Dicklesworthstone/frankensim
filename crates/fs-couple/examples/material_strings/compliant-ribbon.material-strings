@@ -1,0 +1,19 @@
+frankensim-material-strings-v1
+audio 48000 4096 0.01 128
+state 293.15 1000
+gas mixture 293.15 101325 mole 2 N2 0.8 O2 0.2
+body body.fsmatpk 0.4 0.3 0.001 2 1
+strings 1
+string wire.fsmatpk 0.5 0.0003 20 16 3 0.8 3000 0.1
+cavity neck 0.003 0.01 0.02 100 1
+friction coulomb 0.8 0.4
+bow_ribbon 0.01 3
+bow_compliance quasistatic-continuation bow-hair-horse-pitteroff-woodhouse-acustica1998.fsmatpk 0.000095 0.65 50 0.5 2 frequency 0 relative_humidity_known 0 young_modulus_static density viscosity kelvin_voigt_young_viscosity_pw98_model
+forces retain 0 0
+schedule
+frankensim-gesture-schedule-v1
+control_rate_hz	700
+tracks	1
+track	bow	bow	0
+initial	bow	1e-2	1e-2	2e-1
+events	0

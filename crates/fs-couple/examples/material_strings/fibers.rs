@@ -17,6 +17,126 @@ use fs_couple::material_assembly::concentric::{
     with_concentric_section, with_concentric_thermal_extension,
 };
 use fs_qty::Time;
+use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::compliant_ribbon::HairRibbonProperties;
+
+/// Explicit low-inertia axial reduction of parallel fibers. The selected
+/// source point remains distinct from the simulation clock: choosing a static
+/// modulus is a declared constitutive continuation, not broadband measurement.
+/// Density remains in the retained source inputs for the resolved-wave comparison;
+/// the spring-dashpot owner does not introduce a fictitious lumped fiber mass.
+#[derive(Clone, Debug)]
+pub struct QuasistaticInput {
+    pub pack: String,
+    pub radius_m: f64,
+    pub length_m: f64,
+    pub fiber_count: usize,
+    pub station_fraction: f64,
+    pub axes: Vec<(String, f64)>,
+    pub young_property: String,
+    pub density_property: String,
+    /// None is only the explicitly selected lossless reference. A missing
+    /// property in the viscosity form is an error, never zero damping.
+    pub viscosity_property: Option<String>,
+}
+
+impl QuasistaticInput {
+    fn requirements(&self) -> Result<Vec<Requirement>> {
+        let mut result = vec![
+            Requirement::try_new(&self.young_property, Pressure::DIMS, Admit::StrictlyPositive)?,
+            Requirement::try_new(&self.density_property, Density::DIMS, Admit::StrictlyPositive)?,
+        ];
+        if let Some(name) = &self.viscosity_property {
+            result.push(Requirement::try_new(name, DynViscosity::DIMS, Admit::NonNegative)?);
+        }
+        for (index, item) in result.iter().enumerate() {
+            if result[..index].iter().any(|previous| previous.name() == item.name()) {
+                return Err("quasistatic fiber source roles must name distinct physical properties".into());
+            }
+        }
+        Ok(result)
+    }
+
+    fn source_axes(&self, spec: &input::Spec) -> Result<Vec<(String, f64)>> {
+        let mut axes = self.axes.clone();
+        axes.extend(spec.material_states.get(&self.pack).into_iter().flatten().cloned());
+        if axes.len() > fs_couple::material_source::MAX_RECORD_AXES
+            || axes.iter().enumerate().any(|(i, (name, value))|
+                name.is_empty() || name.len() > 128 || !value.is_finite()
+                    || axes[..i].iter().any(|(other, _)| other == name))
+        {
+            return Err("quasistatic fiber coordinates require at most eight distinct finite source axes".into());
+        }
+        Ok(axes)
+    }
+
+    pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
+        let (_, cells) = spec.bow_ribbon.ok_or("bow_compliance requires a finite bow_ribbon")?;
+        if spec.bow_fibers.is_some() {
+            return Err("choose quasistatic bow_compliance or resolved bow_fibers, not both".into());
+        }
+        if !self.radius_m.is_finite() || self.radius_m <= 0.0
+            || !self.length_m.is_finite() || self.length_m <= 0.0
+            || self.fiber_count == 0 || self.fiber_count > (1 << 24)
+            || !self.station_fraction.is_finite()
+            || !(0.0 < self.station_fraction && self.station_fraction < 1.0)
+        {
+            return Err("quasistatic fibers require positive geometry/count and an interior support station".into());
+        }
+        self.requirements()?;
+        self.source_axes(spec)?;
+        for track in spec.schedule.tracks() {
+            let string = fs_scenario::gesture::path::legacy_member(&track.target, "bow")
+                .ok_or("quasistatic ribbon requires an original bow track")?;
+            if spec.strings.get(string).is_none_or(|wire| wire.bending_modes < 4 * cells) {
+                return Err("quasistatic ribbon requires at least four string modes per contact cell".into());
+            }
+        }
+        Ok(())
+    }
+
+    pub fn compile(
+        &self,
+        spec: &input::Spec,
+        catalog: &mut Catalog,
+        loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
+        gate: &CancelGate,
+    ) -> Result<HairRibbonProperties> {
+        self.preflight(spec)?;
+        poll(gate)?;
+        load_pack(&self.pack, catalog, loader)?;
+        let card = &catalog[&self.pack].card;
+        let query = fs_couple::material_source::MaterialRecord {
+            pack: self.pack.clone(), state: card.id().process.clone(), axes: self.source_axes(spec)?,
+        }.query_point(card)?;
+        let source = resolve_material_state_point(card, &query, &self.requirements()?, Pick::SingleClaimOnly)?;
+        let value = |name: &str| -> Result<f64> {
+            Ok(source.property(name).ok_or("missing resolved fiber property")?.value_si())
+        };
+        let youngs_modulus_pa = value(&self.young_property)?;
+        let density_kg_m3 = value(&self.density_property)?;
+        let viscosity = self.viscosity_property.as_ref().map(|name| value(name)).transpose()?.unwrap_or(0.0);
+        // Both fixed-end branches act in parallel at x = gamma L. The same
+        // geometric factor converts E to S and material viscosity to D; width
+        // and numerical cell count never change either total.
+        let area = self.fiber_count as f64 * core::f64::consts::PI * self.radius_m.powi(2);
+        let factor = area / (self.length_m * self.station_fraction * (1.0 - self.station_fraction));
+        let damping = factor * viscosity;
+        let stiffness = factor * youngs_modulus_pa;
+        let (width_m, _) = spec.bow_ribbon.ok_or("missing ribbon geometry")?;
+        if !stiffness.is_finite() || stiffness <= 0.0 || !damping.is_finite()
+            || (viscosity > 0.0 && damping == 0.0)
+        {
+            return Err("source-derived quasistatic fiber response is unrepresentable".into());
+        }
+        poll(gate)?;
+        Ok(HairRibbonProperties {
+            youngs_modulus_pa, hair_radius_m: self.radius_m,
+            hairs_in_contact: self.fiber_count as f64, free_length_m: self.length_m,
+            excitation_fraction: self.station_fraction, density_kg_m3,
+            distributed_damping_kg_s_m: damping / width_m, reference_width_m: width_m,
+        })
+    }
+}
 
 /// Source roles for the fiber's isotropic Young relaxation spectrum. The same
 /// law acts on axial extension and bending; these are not independent loss fits.

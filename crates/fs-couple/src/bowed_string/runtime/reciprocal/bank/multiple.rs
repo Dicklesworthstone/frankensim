@@ -42,6 +42,7 @@ pub struct MultiBowStringBankSource {
     stops: Vec<stops::MaterialStringStop>,
     bow_contact_loads: Vec<contact_load::BowContactLoad>,
     ribbon: Option<ribbon::UniformBowRibbon>,
+    compliant_ribbon: Option<compliant_ribbon::CompliantBowRibbon>,
     fiber_ribbon: Option<ribbon::MaterialFiberRibbon>,
     body_surfaces: Vec<surfaces::BowBodySurface>,
 }
@@ -117,7 +118,7 @@ impl ReciprocalStringBank {
         poll(gate)?;
         Ok(MultiBowStringBank { source: MultiBowStringBankSource {
             bank: self.source, bows, joint, stops: Vec::new(), bow_contact_loads: Vec::new(),
-            ribbon: None, fiber_ribbon: None, body_surfaces: Vec::new(),
+            ribbon: None, compliant_ribbon: None, fiber_ribbon: None, body_surfaces: Vec::new(),
         }, cards: self.cards, system, stop_stations: None, bow_stations: None })
     }
 }

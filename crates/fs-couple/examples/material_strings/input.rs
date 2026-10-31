@@ -235,6 +235,7 @@ pub struct Spec {
     /// Every film has a v3 route to physical fibers; its mass/history stays on the string.
     pub retained_string_films: bool,
     pub bow_ribbon: Option<(f64, usize)>, pub forces: Option<MaterialForceProgram>,
+    pub bow_compliance: Option<fibers::QuasistaticInput>,
     pub bow_fibers: Option<fibers::Input>,
     /// Prescribed position along the string, separate from tangential speed/load.
     pub bow_station_motion: Option<bow_motion::Input>,
@@ -927,6 +928,31 @@ impl Spec {
             }
             Some((width, cells))
         } else { None };
+        let bow_compliance = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_compliance") {
+            let mut row = r.row("bow_compliance")?;
+            if row.word()? != "quasistatic-continuation" {
+                return Err("bow_compliance requires explicit quasistatic-continuation of its source point".into());
+            }
+            let pack = row.path()?;
+            let radius_m = row.positive()?;
+            let length_m = row.positive()?;
+            let fiber_count = row.count(1 << 24)?;
+            let station_fraction = row.scalar()?;
+            let count = row.count(fs_couple::material_source::MAX_RECORD_AXES)?;
+            let mut axes = Vec::with_capacity(count);
+            for _ in 0..count { axes.push((row.label()?, row.scalar()?)); }
+            let young_property = row.label()?;
+            let density_property = row.label()?;
+            let viscosity_property = match row.word()? {
+                "viscosity" => Some(row.label()?),
+                "lossless-reference" => None,
+                _ => return Err("bow_compliance requires a source viscosity property or explicit lossless-reference".into()),
+            };
+            row.end()?;
+            Some(fibers::QuasistaticInput { pack, radius_m, length_m, fiber_count,
+                station_fraction, axes, young_property, density_property, viscosity_property })
+        } else { None };
         let bow_fibers = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("bow_fibers") {
             let mut row = r.row("bow_fibers")?;
@@ -1082,7 +1108,7 @@ impl Spec {
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, geometric_stretching,
             longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
-            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_fibers,
+            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.validate_material_states()?;
         spec.bow_station_program(&CancelGate::new_clock_free())?;
@@ -1270,6 +1296,7 @@ impl Spec {
         -> Result<(usize, usize, usize)>
     {
         self.string_memory_states()?;
+        if let Some(compliance) = &self.bow_compliance { compliance.preflight(self)?; }
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         if let Some(memory)=&self.longitudinal_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))

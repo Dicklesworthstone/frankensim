@@ -30,19 +30,22 @@
 //! independent of the ribbon width `b`; a finite-width calculation spreads it
 //! over the contact (P&W p. 547: distributed quantities multiplied by `b` for a
 //! point bow, divided by `b` for a finite width). Every number is DATA (hair
-//! Young's modulus, radius, count, free length, and the measured distributed
+//! Young's modulus, radius, count, free length, and declared distributed
 //! damping): swap the material and the compliance changes with NO code change.
+//! P&W's constant dashpot is a published approximation extrapolated from their
+//! low-frequency measurements (p. 547), not a measured broadband viscosity.
 //!
 //! This module owns NO time loop and NO friction law. It derives the hair
 //! compliance from data and lays out the finite-width contact cells, each with
-//! its own tangential spring/dashpot. The normal-load distribution (M4.1) and
-//! the differential slip (M4.2) EMERGE from the joint `MultiFrictionModalSystem`
-//! solve; they are not prescribed here. Compare P&W Fig. 9: a rigid finite bow
+//! its own tangential spring/dashpot. Tangential traction and differential slip
+//! emerge from the joint `MultiFrictionModalSystem` solve. Normal loading is
+//! uniform and prescribed unless a separate normal-contact owner is bound.
+//! Compare P&W Fig. 9: a rigid finite bow
 //! carries singular edge forces, which the hair compliance spreads into a
 //! smooth interior distribution.
 
 use super::super::{ReciprocalStringBank, StringBowLocation};
-use super::{MaterialBowContact, MultiBowStringBank};
+use super::{MultiBowStringBank, MultiBowStringBankSource};
 use crate::bowed_string::runtime::reciprocal::{ReciprocalStringError, invalid, poll};
 use crate::modal_acoustic_time::ModalAcousticState;
 use crate::render::schedule::force::coupled::contact::friction::{
@@ -50,9 +53,9 @@ use crate::render::schedule::force::coupled::contact::friction::{
 };
 use fs_exec::CancelGate;
 
-/// Measured hair-ribbon material and geometry. Every field is DATA, e.g. the
-/// matdb pack `bow-hair-horse-pitteroff-woodhouse-acustica1998` (Pitteroff &
-/// Woodhouse 1998). Nothing here is derived or defaulted.
+/// Declared hair-ribbon material and geometry. Values can be measured inputs
+/// or explicitly identified reduced-model approximations; this type does not
+/// promote their authority. Nothing here is defaulted.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HairRibbonProperties {
     /// Real part of the hair Young's modulus `E_H` [Pa] (bowing-plane
@@ -66,8 +69,9 @@ pub struct HairRibbonProperties {
     pub free_length_m: f64,
     /// Excitation point `gamma` as a fraction of the free length (mid-bow 0.5).
     pub excitation_fraction: f64,
-    /// Measured damping `d` distributed per unit ribbon width [(kg/s)/m], from
-    /// the single-hair decay tests (`d = n_H D_hair / b`; P&W violin: 1000).
+    /// Damping `d` distributed per unit ribbon width [(kg/s)/m]. P&W use
+    /// `d = n_H D_hair / b = 1000` for the model violin bow, with explicitly
+    /// assumed frequency-independent continuation of low-frequency data.
     /// Zero models an undamped hair.
     pub distributed_damping_kg_s_m: f64,
     /// Ribbon width `b_ref` [m] at which `distributed_damping_kg_s_m` was stated
@@ -131,8 +135,8 @@ impl HairRibbonProperties {
 /// of `UniformBowRibbon` plus a per-cell tangential spring/dashpot derived from
 /// hair data. Contact zero is the original bound centre; other cells follow
 /// from left to right. This is the compliant counterpart of the rigid
-/// `UniformBowRibbon`; the normal-load distribution and the differential slip
-/// are resolved by the joint contact solver, not stored here.
+/// `UniformBowRibbon`; differential slip is resolved by the joint solver.
+/// The default normal-load distribution remains explicitly uniform.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompliantBowRibbon {
     centre: StringBowLocation,
@@ -229,7 +233,7 @@ impl CompliantBowRibbon {
     pub fn stations(&self) -> &[f64] {
         &self.stations
     }
-    /// Measured hair data this ribbon derived its compliance from.
+    /// Declared hair data this ribbon derived its compliance from.
     #[must_use]
     pub const fn properties(&self) -> &HairRibbonProperties {
         &self.properties
@@ -364,20 +368,11 @@ impl ReciprocalStringBank {
             cells,
             hair,
         )?;
-        let law = self.system.port().law.clone();
-        let friction = self.source.options.friction;
-        let additional = ribbon.stations[1..]
-            .iter()
-            .map(|&station_fraction| MaterialBowContact {
-                location: StringBowLocation {
-                    string: centre.string,
-                    station_fraction,
-                },
-                law: law.clone(),
-                friction,
-            })
-            .collect();
-        let bank = self.with_additional_bows(additional, joint, gate)?;
+        // Preserve the same source-bound spatial quadrature as the rigid and
+        // resolved-fiber rungs. Besides avoiding a second station builder,
+        // this retains the total-load projection used by scheduled playback:
+        // one bow track must not become `cells` independent full-load bows.
+        let bank = self.with_uniform_bow_ribbon(width_m, cells, joint, gate)?;
         // One series spring-dashpot per contact cell; the hairs in parallel are
         // the ribbon's lumped stiffness S, so each of the n cells carries S/n.
         let (k, c) = (
@@ -386,7 +381,7 @@ impl ReciprocalStringBank {
         );
         let drives = (0..ribbon.stations.len()).map(|i| (i, k, c)).collect();
         let super::MultiBowStringBank {
-            source,
+            mut source,
             cards,
             system,
             stop_stations,
@@ -395,6 +390,7 @@ impl ReciprocalStringBank {
         let system = system
             .with_series_compliant_drives(drives, gate)
             .map_err(ReciprocalStringError::Friction)?;
+        source.compliant_ribbon = Some(ribbon);
         Ok(super::MultiBowStringBank {
             source,
             cards,
@@ -402,6 +398,14 @@ impl ReciprocalStringBank {
             stop_stations,
             bow_stations,
         })
+    }
+}
+
+impl MultiBowStringBankSource {
+    /// Retained massless axial spring-dashpot model on the original ribbon.
+    /// This is distinct from the resolved axial/normal fiber-wave model.
+    pub const fn compliant_ribbon(&self) -> Option<&CompliantBowRibbon> {
+        self.compliant_ribbon.as_ref()
     }
 }
 

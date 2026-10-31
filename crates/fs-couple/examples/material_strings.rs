@@ -488,6 +488,10 @@ impl input::Spec {
         let mut bank=if let Some(fibers)=&self.bow_fibers {
             let ribbon=fibers.compile(&self,&mut catalog,&mut loader,gate)?;
             bank.with_tensioned_fiber_ribbon(ribbon,fibers.station_fraction,joint,gate)?
+        } else if let Some(compliance)=&self.bow_compliance {
+            let hair=compliance.compile(&self,&mut catalog,&mut loader,gate)?;
+            let (width,cells)=self.bow_ribbon.ok_or("bow_compliance requires ribbon geometry")?;
+            bank.with_compliant_bow_ribbon(width,cells,hair,joint,gate)?
         } else if let Some((width,cells))=self.bow_ribbon {
             bank.with_uniform_bow_ribbon(width,cells,joint,gate)?
         } else {
@@ -889,6 +893,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         eprintln!("axial_bearings={:?}",ready.spec.axial_bearings);
     }
     if let Some(ribbon)=ready.performance.bank().source().ribbon() { eprintln!("bow_ribbon={ribbon:?}"); }
+    if let Some(ribbon)=ready.performance.bank().source().compliant_ribbon() {
+        eprintln!("bow_compliance={:?}; stiffness_N_m={}; damping_kg_s={}; source={:?}; quasistatic axial continuation, not resolved fiber waves or thermal rosin",
+            ribbon.properties(),ribbon.lumped_tangential_stiffness_n_m(),
+            ribbon.lumped_tangential_damping_kg_s(),ready.spec.bow_compliance);
+    }
     if let Some(fibers)=ready.performance.bank().source().fiber_ribbon() {
         eprintln!("bow_fibers={:?}; resolution={:?}; mass_kg={}; station={}; support_motion={:?}; rigid-end material fibers, not validated thermal rosin",
             fibers.model().geometry(),fibers.model().resolution(),fibers.model().mass_kg(),fibers.station_fraction(),

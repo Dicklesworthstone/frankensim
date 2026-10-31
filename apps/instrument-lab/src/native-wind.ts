@@ -36,6 +36,7 @@ import observedStringSource from "../../../crates/fs-couple/examples/material_st
 import regionalCavityStringSource from "../../../crates/fs-couple/examples/material_strings/regional-cavity.material-strings?raw";
 import layeredStringSource from "../../../crates/fs-couple/examples/material_strings/relaxing-layered-strings.material-strings?raw";
 import shearStringSource from "../../../crates/fs-couple/examples/material_strings/shear-layer-bow.material-strings?raw";
+import compliantRibbonSource from "../../../crates/fs-couple/examples/material_strings/compliant-ribbon.material-strings?raw";
 import finiteGasStringSource from "../../../crates/fs-couple/examples/finite_gas_string/browser-feedback-flow.string?raw";
 import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeCoatingStrainGuard, type NativeFiniteGasStringSources, type NativeMaterialManifest, type NativeRenderer } from "./native-wind-client.mjs";
 import { el } from "./util";
@@ -56,6 +57,7 @@ const starterSourceFiles = import.meta.glob<string>([
   "../../../crates/fs-couple/examples/material_strings/*.stops",
   "../../../crates/fs-couple/examples/material_modal_valve/tensor-blade*.tsv",
   "../../../data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/*.tsv",
+  "../../../data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998/*.tsv",
 ], {query: "?raw", import: "default"});
 const stringStarters: Readonly<Record<string, {
   sources: Readonly<Record<string, string>>;
@@ -378,6 +380,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "Starter: layered strings with independent source relaxation spectra. Original relaxing-wire and body sources are included. Change their attached tables or the layer geometry in the performance; the shared constitutive solver retains each layer's history.",
     help: "This perfectly bonded concentric-section model retains original per-layer moduli and relaxation times. It does not add sliding helical windings. Keep the stated end-load or displacement comparison and pressure scale when comparing material substitutions.",
+  },
+  {
+    name: "material_strings/compliant-ribbon.material-strings",
+    label: "Strings — material bow-hair compliance",
+    renderer: "strings",
+    source: compliantRibbonSource,
+    decimate: false,
+    intro: "Starter: the bow drives a finite ribbon of compliant hair coupled to the original string, body and cavity. Original wire, body and horsehair sources are included. Change the attached hair material table, radius, length, contacting-hair count or contact position in the source to change its mechanical response.",
+    help: "The native solver derives hair stiffness and damping from the selected material properties and geometry, retaining spring energy and contact history during gestures and release. The source explicitly selects the published quasistatic spring-dashpot continuation; it omits fiber inertia and uses a prescribed normal load. The fixture retains an authored Coulomb interface, so it does not establish rosin-contact physics or realistic violin/cello sound. Keep the pressure scale fixed when comparing variants.",
   },
   {
     name: "material_strings/shear-layer-bow.material-strings",

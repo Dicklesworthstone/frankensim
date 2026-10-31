@@ -117,3 +117,20 @@ fn bow_hair_pack_passes_physicality_gates() {
         );
     }
 }
+
+#[test]
+fn published_dashpot_reduction_retains_its_nominal_geometry_and_model_status() {
+    let p = load_pack("bow-hair-horse-pitteroff-woodhouse-acustica1998");
+    // P&W Part I pp. 546-548: the model uses 50 hairs of nominal diameter
+    // 0.19 mm and length 0.65 m, driven at their midpoint. This conversion is
+    // geometry normalization of the published D, not a fit to instrument audio.
+    let factor = 50.0 * std::f64::consts::PI * 0.000095_f64.powi(2) / (0.65 * 0.5 * 0.5);
+    let damping = factor * p["kelvin_voigt_young_viscosity_pw98_model"];
+    assert!((damping - p["nominal_ribbon_damping_pw98_model"]).abs() < 1e-13);
+    assert_eq!(p["nominal_ribbon_damping_pw98_model"], 10.0);
+    let spring = factor * p["young_modulus_static"];
+    assert!((spring / 60_000.0 - 1.0).abs() < 0.02, "the paper rounds S to 6e4 N/m");
+    let text = std::fs::read_to_string(repo_root().join(
+        "data/matdb/seed-v1/bow-hair-horse-pitteroff-woodhouse-acustica1998/properties.tsv")).unwrap();
+    assert!(text.contains("MODEL DATA, NOT A MEASURED BROADBAND CONSTITUTIVE LAW"));
+}
