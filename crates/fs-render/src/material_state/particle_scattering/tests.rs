@@ -1,5 +1,8 @@
 //! Material/source -> dispersive population -> original native grid transport.
 
+#[path = "indexed/tests.rs"]
+mod indexed_cells;
+
 use super::*;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_evidence::ValidityDomain;

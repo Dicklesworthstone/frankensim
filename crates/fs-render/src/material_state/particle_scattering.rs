@@ -6,6 +6,9 @@
 //! never freezes an index at a representative colour. Particles are passive,
 //! homogeneous spheres with independent, unpolarized scattering.
 
+mod indexed;
+pub use indexed::MaterialParticleCellGrid;
+
 use super::bulk_optics::BulkOpticalLaw;
 use super::{MaterialOpticalBinding, MaterialOpticalError};
 use fs_blake3::{ContentHash, DomainHasher};

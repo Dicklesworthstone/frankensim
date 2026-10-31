@@ -2,13 +2,16 @@
 
 use super::{GasGridBindingError, MaterialGasScatteringBinding};
 use crate::volumes::VolumeGrid;
-use crate::volumes::transport::scattering::ScatteringGrid;
+use crate::volumes::transport::scattering::{ScatteringGrid, ScatteringOptics};
 use crate::volumes::transport::{
-    AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum, VolumeTransportError,
+    AbsorbingGrid, AbsorbingGridBudget, CellPalette, CellPaletteBudget, MassAbsorptionSpectrum,
+    VolumeTransportError,
 };
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_material::gas_scattering::RayleighGasState;
+use std::collections::BTreeMap;
+use std::sync::Arc;
 
 impl MaterialGasScatteringBinding {
     /// Borrow a heterogeneous accepted gas snapshot at this binding's fixed
@@ -98,6 +101,90 @@ pub struct MaterialGasScatteringCellGrid<'a> {
 }
 
 impl<'a> MaterialGasScatteringCellGrid<'a> {
+    /// Bind accepted cells whose composition, molecular sources and angular
+    /// scattering may differ spatially. The original `VolumeGrid` supplies the
+    /// one cell-centred, x-major geometry in metres; density remains kg/m³.
+    /// Every density value must exactly match its original accepted gas state.
+    ///
+    /// Distinct material model identities receive separate native optical
+    /// palette entries, in deterministic first-cell order. Repeated models
+    /// reuse one spectrum and phase even when their pressure/temperature differ.
+    /// Only a `u32` index is stored per cell; gas states and density stay borrowed.
+    /// `palette_budget` explicitly bounds both model storage and the cell map.
+    ///
+    /// The native transport owner uses each cell's own inverse-fourth mass
+    /// coefficient and depolarized phase, with no averaged composition or
+    /// replacement traversal. This remains elastic, nonemitting molecular
+    /// transport. Use `MaterialGasScatteringBinding::bind_cell_grid` when one
+    /// fixed declared composition is required instead.
+    pub fn try_new(
+        cx: &Cx<'_>,
+        grid: VolumeGrid<'a>,
+        states: &'a [RayleighGasState],
+        palette_budget: CellPaletteBudget,
+        budget: AbsorbingGridBudget,
+    ) -> Result<Self, GasGridBindingError> {
+        checkpoint(cx)?;
+        if grid.data.len() > budget.max_grid_cells || grid.data.len() > palette_budget.max_cells {
+            return Err(GasGridBindingError::Transport(VolumeTransportError::Budget));
+        }
+        if states.len() != grid.data.len() {
+            return Err(GasGridBindingError::StateCount);
+        }
+        let density_kg_m3 = grid.data;
+        let absorption = AbsorbingGrid::try_new(
+            cx,
+            grid,
+            MassAbsorptionSpectrum::constant(0.0).map_err(GasGridBindingError::Transport)?,
+            None,
+            budget,
+        )
+        .map_err(GasGridBindingError::Transport)?;
+        let mut models = BTreeMap::<[u8; 32], u32>::new();
+        let mut values = Vec::new();
+        let mut cell_indices = Vec::with_capacity(states.len());
+        let mut hash = DomainHasher::new("org.frankensim.render.material-gas-composition-grid.v1");
+        for (cell, state) in states.iter().enumerate() {
+            if cell % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            if density_kg_m3[cell] != state.gas().density {
+                return Err(GasGridBindingError::DensityMismatch { index: cell });
+            }
+            let model = state.model_identity();
+            let index = if let Some(&index) = models.get(model.as_bytes()) {
+                index
+            } else {
+                if values.len() >= palette_budget.max_models || values.len() >= u32::MAX as usize {
+                    return Err(GasGridBindingError::Transport(VolumeTransportError::Budget));
+                }
+                let index = u32::try_from(values.len())
+                    .map_err(|_| GasGridBindingError::Transport(VolumeTransportError::Budget))?;
+                let binding = MaterialGasScatteringBinding::try_new(*state)
+                    .map_err(GasGridBindingError::Transport)?;
+                values.push(ScatteringOptics {
+                    scattering: binding.scattering,
+                    phase: binding.phase,
+                });
+                models.insert(*model.as_bytes(), index);
+                index
+            };
+            cell_indices.push(index);
+            hash.update(state.content_identity().as_bytes());
+        }
+        let palette = CellPalette::try_new(cx, values, Arc::from(cell_indices), palette_budget)
+            .map_err(GasGridBindingError::Transport)?;
+        let medium = ScatteringGrid::try_new_indexed(cx, absorption, palette)
+            .map_err(GasGridBindingError::Transport)?;
+        hash.update(medium.content_identity().as_bytes());
+        Ok(Self {
+            states,
+            density_kg_m3,
+            medium,
+            identity: hash.finalize(),
+        })
+    }
+
     /// Direct input to the native path tracer and physical-grid photometry.
     #[must_use]
     pub const fn medium(&self) -> &ScatteringGrid<'a> {
@@ -117,7 +204,7 @@ impl<'a> MaterialGasScatteringCellGrid<'a> {
         self.density_kg_m3
     }
 
-    /// Complete accepted state sequence, declared fixed model and native grid.
+    /// Complete accepted state sequence, declared optical models and native grid.
     /// State changes remain visible even when their density is unchanged.
     #[must_use]
     pub const fn content_identity(&self) -> ContentHash {

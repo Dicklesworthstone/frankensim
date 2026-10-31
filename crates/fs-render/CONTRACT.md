@@ -2628,6 +2628,55 @@ per-lane phase moments, disjoint angular support, and achromatic replay. Native
 path regressions additionally exercise wavelength-resolved single-scattering
 integrals and a conservative multiple-scattering environment furnace.
 
+### Cell-resolved optical composition
+
+`CellPalette<T>` retains prepared optical models and a shared immutable `u32`
+index per native physical cell, with explicit model/cell budgets and bounded
+cancellation checks. Absorption and scattering can share the same map or use
+different maps on the same original grid. `AbsorbingGrid::try_new_indexed` and
+`ScatteringGrid::try_new_indexed` preserve borrowed density/temperature buffers
+and require every declared model to cover the same exact wavelength interval.
+Neither table order nor an unused model supplies an implicit physical material.
+
+Exact DDA attenuation, spectral-channel free flight and ordered LTE source
+integration use each traversed cell's coefficients. A stack-local cache reuses
+wavelength evaluations across runs of the same material pair; there is no
+per-ray palette allocation or constitutive solve. Collision likelihoods use the
+complete accumulated spectral optical depth and the local extinction/scattering
+ratio. The original collision cell supplies the phase law to continuation and
+all direct-light/MIS techniques, avoiding position reclassification at a face.
+Global `phase()`/`phase_ref()` queries return `None` for indexed scattering;
+`phase_at_cell` is the authoritative angular query. Tracer semantics version 7
+adds cell selection while retaining uniform-model arithmetic and random streams.
+
+Beam power deposition and multiple-scattering heating use the same local
+absorption/scattering split; elastic scattering never becomes immediate heat.
+Absorption-only spectral lanes are recognized across every occupied cell, not
+from a representative entry. Photometric contraction envelopes maximize over
+actual occupied material pairs and their own angular integrals. Vacuum and LTE
+support likewise depend on mapped, positive-density cells. Models remain
+piecewise constant within each cell; no interpolation across material identities
+or uncertainty certificate is inferred. Analytical regressions cover layered
+spectral attenuation/source integration, collision-weighted angular response,
+native direct lighting, local heating, uniform replay and admission refusals.
+
+`MaterialGasScatteringCellGrid::try_new` admits accepted gas cells with different
+compositions, molecular references and depolarization. It deduplicates exact
+material model identities in deterministic first-cell order, prepares one
+inverse-fourth spectrum and phase per model, and retains the original gas states
+and exact density buffer. Pressure/temperature changes within one model reuse
+its optical entry. The existing fixed-composition binding remains available;
+both paths describe elastic, nonemitting molecular scattering.
+
+`MaterialParticleCellGrid` binds a palette of original prepared particle spectra,
+allowing material, accepted temperature and size distribution to vary by cell.
+Absorption and scattering reuse the same immutable material-index map. Dilution
+is checked with each mapped particle material's own bulk density; an optional
+LTE field must equal that material's accepted temperature endpoint in every
+cell. All declared hosts remain index one. These adapters preserve source and
+state identities and feed the existing native transport; they do not add dense
+particle correlations, a refracting carrier interface, or inferred gas chemistry.
+
 ### Calibrated spectral fixture paths
 
 `PathLuminanceJob` connects the same `PhotometricSource` states to the original

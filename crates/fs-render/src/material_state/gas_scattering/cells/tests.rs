@@ -257,3 +257,151 @@ fn g4_cancelled_cell_binding_publishes_no_grid_and_preserves_original_buffers() 
         assert_eq!(field.density_kg_m3(), &density);
     });
 }
+
+#[test]
+fn g1_composition_grid_uses_each_cells_spectrum_phase_and_reuses_fixed_models() {
+    with_cx(|cx, _| {
+        let make = |fractions| {
+            MolecularRayleighMixture::try_new(
+                &[GasSpec::dry_air_ussa1976(); 2],
+                Composition::new(CompositionBasis::MoleFraction, fractions).unwrap(),
+                &[
+                    MolecularRayleigh::try_new(0.00015, 2.5e25, 550.0, 0.0, ContentHash([1; 32]))
+                        .unwrap(),
+                    MolecularRayleigh::try_new(0.0006, 2.5e25, 550.0, 0.3, ContentHash([2; 32]))
+                        .unwrap(),
+                ],
+                None,
+            )
+            .unwrap()
+        };
+        let a = make(vec![0.75, 0.25]);
+        let b = make(vec![0.25, 0.75]);
+        let states = [
+            a.evaluate(300.0, 100_000.0).unwrap(),
+            b.evaluate(300.0, 100_000.0).unwrap(),
+            a.evaluate(600.0, 100_000.0).unwrap(),
+        ];
+        let density = states.map(|state| state.gas().density);
+        let field = MaterialGasScatteringCellGrid::try_new(
+            cx,
+            VolumeGrid::new([1, 1, 3], &density, [0.0; 3], [1.0, 1.0, 1000.0]),
+            &states,
+            CellPaletteBudget {
+                max_models: 2,
+                max_cells: 3,
+            },
+            AbsorbingGridBudget {
+                max_grid_cells: 3,
+                ..budget()
+            },
+        )
+        .unwrap();
+        assert_eq!(field.states().as_ptr(), states.as_ptr());
+        assert_eq!(field.density_kg_m3().as_ptr(), density.as_ptr());
+        let palette = field.medium().scattering_palette().unwrap();
+        assert_eq!(palette.values().len(), 2);
+        assert_eq!(palette.cell_indices().as_ref(), &[0, 1, 0]);
+        for (index, state) in states.iter().enumerate() {
+            for cosine in [-1.0, 0.0, 0.6] {
+                near(
+                    field
+                        .medium()
+                        .phase_at_cell(index)
+                        .unwrap()
+                        .eval_cos(cosine)
+                        .unwrap(),
+                    state.phase_per_sr(cosine).unwrap(),
+                );
+            }
+        }
+        assert_ne!(
+            states[0].depolarization_ratio(),
+            states[1].depolarization_ratio()
+        );
+        let wavelengths = [380.0, 417.3, 550.0, 780.0];
+        let transmission = field
+            .medium()
+            .transmittance(
+                cx,
+                Point3::new(0.5, 0.5, 0.0),
+                Vec3::new(0.0, 0.0, 1.0),
+                3000.0,
+                &wavelengths,
+            )
+            .unwrap();
+        for (got, wavelength) in transmission.into_iter().zip(wavelengths) {
+            let tau: f64 = states
+                .iter()
+                .map(|state| 1000.0 * state.scattering_per_m(wavelength).unwrap())
+                .sum();
+            near(got, (-tau).exp());
+        }
+    });
+}
+
+#[test]
+fn g0_composition_grid_enforces_source_palette_budget_density_and_cancellation() {
+    with_cx(|cx, gate| {
+        let states = [
+            model(&[1.0], &[1]).evaluate(300.0, 100_000.0).unwrap(),
+            model(&[1.0], &[2]).evaluate(300.0, 100_000.0).unwrap(),
+        ];
+        let density = density(&states);
+        let palette_budget = CellPaletteBudget {
+            max_models: 2,
+            max_cells: 2,
+        };
+        // Numerically equal optical data from different declared sources are
+        // distinct models, not deduplicated by coefficient coincidence.
+        assert!(matches!(
+            MaterialGasScatteringCellGrid::try_new(
+                cx,
+                grid(&density),
+                &states,
+                CellPaletteBudget {
+                    max_models: 1,
+                    ..palette_budget
+                },
+                budget(),
+            ),
+            Err(GasGridBindingError::Transport(VolumeTransportError::Budget))
+        ));
+        let field = MaterialGasScatteringCellGrid::try_new(
+            cx,
+            grid(&density),
+            &states,
+            palette_budget,
+            budget(),
+        )
+        .unwrap();
+        assert_eq!(
+            field.medium().scattering_palette().unwrap().values().len(),
+            2
+        );
+        let invalid = [density[0], density[1] * 2.0];
+        assert!(matches!(
+            MaterialGasScatteringCellGrid::try_new(
+                cx,
+                grid(&invalid),
+                &states,
+                palette_budget,
+                budget(),
+            ),
+            Err(GasGridBindingError::DensityMismatch { index: 1 })
+        ));
+        gate.request();
+        assert!(matches!(
+            MaterialGasScatteringCellGrid::try_new(
+                cx,
+                grid(&density),
+                &states,
+                palette_budget,
+                budget(),
+            ),
+            Err(GasGridBindingError::Transport(
+                VolumeTransportError::Cancelled
+            ))
+        ));
+    });
+}
