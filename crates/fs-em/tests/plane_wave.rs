@@ -23,6 +23,9 @@ use fs_qty::{Dims, Time};
 const E: f64 = 1e-11;
 const M: f64 = 1e-6;
 
+#[path = "plane_wave/illumination.rs"]
+mod illumination;
+
 fn source(
     properties: &[(&str, Dims, f64)],
     validity: ValidityDomain,
@@ -331,7 +334,7 @@ mod finite_layers {
     use fs_math::det;
     use std::f64::consts::PI;
 
-    fn debye(epsilon_inf: f64, delta: f64, area: f64, gap: f64) -> ResolvedDebyeCapacitor {
+    pub(super) fn debye(epsilon_inf: f64, delta: f64, area: f64, gap: f64) -> ResolvedDebyeCapacitor {
         let state = source(
             &[
                 (EPS_NAME, EPS, epsilon_inf),

@@ -31,6 +31,12 @@ use fs_material::{
 };
 use fs_math::{c64::C64, det};
 
+mod illumination;
+pub use illumination::{
+    CoherentLayerIllumination, IlluminationBudget, LayerIlluminationPower,
+    PreparedLayerIllumination,
+};
+
 /// Preparation storage and allocation-free angle work are bounded by this cap.
 pub const MAX_LAYERS: usize = 64;
 
@@ -186,22 +192,8 @@ impl<'a> PlanarDielectricLayers<'a> {
                 transmitted = C64::ZERO;
                 transmitted_power = 0.0;
             } else {
-                let right = states[i + 1];
-                let electric = slab.matrix[0][0] * right[0] + slab.matrix[0][1] * right[1];
-                let magnetic = slab.matrix[1][0] * right[0] + slab.matrix[1][1] * right[1];
-                let normalization = positive(maximum(electric).max(maximum(magnetic)))?;
-                states[i] = [
-                    divided(electric, normalization),
-                    divided(magnetic, normalization),
-                ];
-                // For a passive tail E and H/Y_inc have nonnegative real
-                // cross-power: their sum avoids the cancellation of
-                // 1-r_left*r_right at a high-reflectivity film resonance.
-                let incident = states[i][0] + states[i][1];
-                if incident == C64::ZERO || !finite(incident) {
-                    return Err(bad("film incident field is unrepresentable"));
-                }
-                let gain = divided(slab.scale, normalization) * ((right[0] + right[1]) / incident);
+                let (state, gain) = propagate_state(slab, states[i + 1])?;
+                states[i] = state;
                 gains[i] = gain;
                 transmitted = gain * transmitted;
                 transmitted_power = gain.scale(det::sqrt(transmitted_power)).norm_sq();
@@ -255,6 +247,33 @@ fn maximum(z: C64) -> f64 {
 }
 fn divided(z: C64, scale: f64) -> C64 {
     C64::new(z.re / scale, z.im / scale)
+}
+
+// The original bounded E/H recursion, shared by one-sided and simultaneous
+// two-sided illumination. A homogeneous slab is symmetric in these common
+// real reference ports, so reversing its orientation uses the same operator.
+fn propagate_state(slab: Slab, tail: [C64; 2]) -> Result<([C64; 2], C64), ReflectionError> {
+    if slab.scale == C64::ZERO {
+        return Ok(([slab.matrix[0][0], slab.matrix[1][0]], C64::ZERO));
+    }
+    let electric = slab.matrix[0][0] * tail[0] + slab.matrix[0][1] * tail[1];
+    let magnetic = slab.matrix[1][0] * tail[0] + slab.matrix[1][1] * tail[1];
+    let normalization = positive(maximum(electric).max(maximum(magnetic)))?;
+    let state = [
+        divided(electric, normalization),
+        divided(magnetic, normalization),
+    ];
+    // Passive E and H/Y_ref have nonnegative real cross-power. Their sum
+    // avoids subtracting nearly unit reflections at a film resonance.
+    let incident = state[0] + state[1];
+    if incident == C64::ZERO || !finite(incident) {
+        return Err(bad("film incident field is unrepresentable"));
+    }
+    let gain = divided(slab.scale, normalization) * ((tail[0] + tail[1]) / incident);
+    if !finite(gain) {
+        return Err(bad("film transmission gain is unrepresentable"));
+    }
+    Ok((state, gain))
 }
 
 fn admittance_state(

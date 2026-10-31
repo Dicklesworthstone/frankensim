@@ -1789,6 +1789,43 @@ Debye/geometry invariance, weak-film loss, critical films/exits and thick absorb
 homogeneous isotropic planar model: finite coherence length, roughness,
 anisotropy and mesh Maxwell evolution are outside its scope.
 
+### Two-sided coherent illumination and layer heating
+
+`PlanarDielectricLayers::prepare_illumination` retains the same source-bound
+film operator and prepares simultaneous illumination from its two physical
+faces. Inputs are peak tangential electric fields in V/m, with one frequency,
+transverse wavevector, polarization and exp(+i omega t) clock. Both exterior
+channels must propagate in lossless media. Internal films may still be lossy,
+evanescent, exactly critical or opaque; the existing one-sided API retains
+its separate admission of lossy and total-internal-reflection exit media.
+
+Two bounded sweeps prepare the complete physical E-field scattering matrix
+and each film's positive even/odd loss transfers. Evaluation combines complex
+source fields before computing outgoing powers or heat, including phase
+cancellation and enhancement. Returned boundary E and power-conjugate H are
+in V/m and A/m; port powers and each authored film's heat are in W/m². The
+different exterior modal admittances enter transmission and reciprocity.
+Layer heating comes directly from dissipative modes, so weak absorption is
+retained without subtracting nearly equal incident and outgoing fluxes.
+Wholly lossless films have exactly zero heat.
+
+Prepared coherent evaluations allocate nothing and cost O(layers). Explicit
+source factors describe a positive second moment C=B B*, with one peak-phasor
+time-average factor 1/2; an independent-source helper supplies only diagonal
+factors. Statistical evaluations preserve interference within each factor,
+sum mutually uncorrelated factors, and obey caller mode/layer-work budgets
+and cancellation. These are monochromatic ensemble averages, not spectral
+densities, an inferred bandwidth, or a spatial coherence model. The report
+does not advance temperatures or debit heat into a thermal owner; a coupled
+consumer must book the returned finite-film absorption exactly once.
+
+Focused regressions compare simultaneous-source interface continuity,
+admittance-weighted reciprocity, independent E/H boundary equations and
+per-layer Poynting work; phase-controlled thin-film heating; full complex
+source covariance; and opaque, critical and evanescent internal limits.
+Material frequency qualification and non-planar Maxwell evolution remain
+outside this analytic boundary model.
+
 ## Source-backed nonlinear electrostatics and differential capacitance
 
 `electrostatic::nonlinear::PlanarNonlinearElectrostatics` retains the original
