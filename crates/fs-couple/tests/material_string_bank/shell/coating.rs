@@ -76,7 +76,26 @@ fn prepared_with_limit(
     coated: bool,
     strain_limit: f64,
 ) -> ReciprocalStringBank {
+    prepared_with_substrate(cx, gate, coated, strain_limit, false)
+}
+
+fn prepared_with_substrate(
+    cx: &Cx<'_>, gate: &CancelGate, coated: bool, strain_limit: f64, substrate: bool,
+) -> ReciprocalStringBank {
     let mut body = shell(700.0, 0.02, 0.17, gate);
+    if substrate {
+        use fs_couple::shear_shell::constant_loss::relaxation::{
+            SubstrateRelaxationOptions, SubstrateStorageReference,
+        };
+        let source = shell_material_with_loss_anchor(
+            700.0, 1000.0, Some(core::f64::consts::TAU*200.0));
+        body.specimen = body.specimen.with_region_material("wood", &source, gate).unwrap()
+            .with_substrate_relaxation(SubstrateRelaxationOptions {
+                storage_reference: SubstrateStorageReference::AtAngularFrequency(
+                    core::f64::consts::TAU*1000.0),
+                max_memory_coordinates: 32,
+            }, gate).unwrap();
+    }
     body.projection_budget.max_projection_terms = 64_000_000;
     if coated {
         body.specimen = body
@@ -622,5 +641,68 @@ fn g4_coating_monitor_budgets_cancellation_and_late_preload_are_explicit() {
             "late preload bypassed the initial observation"
         );
         assert_eq!(changed.samples_rendered(), 0);
+    });
+}
+
+#[test]
+fn g1_substrate_dispersion_reaches_shared_pressure_and_preserves_coating_heat_ranges() {
+    with_cx(|cx, gate| {
+        let bank = prepared_with_substrate(cx, gate, true, 0.0003, true);
+        let substrate = bank.source().material_shell_substrate_relaxation().unwrap();
+        let substrate_rows = substrate.coupling_rows_per_s().to_vec();
+        let coating = bank.source().material_shell_coating_relaxation().unwrap();
+        let coating_count = coating.relaxation_times_s().len();
+        assert!(!substrate_rows.is_empty());
+        assert!(coating_count > 0);
+        assert_eq!(bank.system().material_memory().len(), substrate_rows.len()+coating_count);
+        // Selected substrate loss belongs to the causal histories. It cannot
+        // also remain as the old modal-frequency-rescaled dashpot.
+        assert!(bank.source().material_shell_image().unwrap().damping()
+            .matrix_per_s().iter().all(|value| *value == 0.0));
+        let response = bank.material_shell_bridge_harmonic_response(
+            core::f64::consts::TAU*1000.0, 0, fs_math::c64::C64::from_re(1e-3),
+            100_000_000, gate).unwrap();
+        assert!(response.coating_dissipation_w > 0.0);
+        assert!(response.other_material_dissipation_w > 0.0);
+        let total = response.released.dynamics.material_dissipation_w;
+        assert!((total-response.coating_dissipation_w-response.other_material_dissipation_w)
+            .abs() < 1e-11*total);
+        assert!(response.released.dynamics.power_residual_w.abs()
+            < 1e-8*response.released.dynamics.external_power_w.abs().max(1e-20));
+        let history = bank.system().material_memory().to_vec();
+        let mut rebuilt = bank.with_residual_flexibility(gate).unwrap();
+        assert_eq!(rebuilt.system().material_memory(), history);
+        assert_eq!(rebuilt.source().material_shell_substrate_relaxation().unwrap()
+            .coupling_rows_per_s(), substrate_rows);
+        let zero = vec![0.0; rebuilt.system().mode_count()];
+        for _ in 0..32 {
+            let frame = rebuilt.step(&zero, drive()).unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert!(rebuilt.system().material_memory()[..substrate_rows.len()]
+            .iter().any(|value| value.abs() > 1e-18));
+        let work = rebuilt.material_shell_coating_observation_work(gate).unwrap().unwrap();
+        let coating = rebuilt.material_shell_coating_observation(work, gate).unwrap().unwrap();
+        assert_eq!(coating.branch_count, coating_count);
+        assert!(coating.stored_energy_j > 0.0);
+        assert!(rebuilt.system().material_energy_j().unwrap() > coating.stored_energy_j);
+    });
+}
+
+#[test]
+fn g0_substrate_selection_survives_coating_and_material_recompilation() {
+    with_cx(|cx, gate| {
+        let bank = prepared_with_substrate(cx, gate, true, 0.0003, true);
+        let original = &bank.source().material_shell().unwrap().specimen;
+        let selected = original.substrate_relaxation_options().unwrap();
+        let recoated = original.with_coatings(
+            original.coatings().iter().map(|film| film.input().clone()).collect(), gate).unwrap();
+        assert_eq!(recoated.substrate_relaxation_options(), Some(selected));
+        let rematerial = recoated.with_region_material("wood",
+            &shell_material_with_loss_anchor(710.0, 1100.0,
+                Some(core::f64::consts::TAU*200.0)), gate).unwrap();
+        assert_eq!(rematerial.substrate_relaxation_options(), Some(selected));
+        assert!(rematerial.with_region_material("wood", &shell_material(700.0, 1000.0), gate).is_err(),
+            "selected memory silently lost its original source anchor");
     });
 }

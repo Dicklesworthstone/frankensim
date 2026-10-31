@@ -179,8 +179,10 @@ impl ResolvedShearShell {
         poll(gate)?; options.validate()?;
         let substrate = compile_material_shear_shell(self.mesh.clone(),
             self.regions.iter().map(|r| r.input.clone()).collect(), self.budget, gate)?;
-        let mut rebuilt = apply_coatings(substrate,
-            self.coatings.iter().map(|film| film.input.clone()).collect(), Some(options), gate)?
+        let coated = apply_coatings(substrate,
+            self.coatings.iter().map(|film| film.input.clone()).collect(), Some(options), gate)?;
+        let mut rebuilt = crate::shear_shell::constant_loss::relaxation::apply_selection(
+            coated, self.substrate_relaxation, gate)?
             .with_interfaces(self.interfaces.iter().map(|i| i.input().clone()).collect(),
                 self.interface_budget, gate)?;
         rebuilt.pressure_surfaces = self.pressure_surfaces.clone();

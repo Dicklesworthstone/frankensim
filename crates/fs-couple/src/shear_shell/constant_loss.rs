@@ -14,8 +14,13 @@
 //! `plate_viscosity::hysteretic` does for plates): the Kelvin-Voigt modal matrix `C` of the same viscosities becomes
 //! `C_ab s_a s_b` with `s_a = sqrt(omega_ref G(omega_a) / omega_a)`, so mode a's loss factor `C_aa / omega_a` is its
 //! strain-energy-weighted `eta` times `G(omega_a)`. A congruence by a positive diagonal keeps `C` positive
-//! semidefinite. The storage modulus stays the pack's: the dispersion the same series implies is not applied.
+//! semidefinite. This legacy modal approximation leaves storage fixed. Selecting
+//! [`relaxation::SubstrateRelaxationOptions`] instead installs the SAME positive spectrum as
+//! causal material histories, including its storage dispersion and an explicit stiffness reference.
 use fs_math::det;
+
+/// Causal substrate storage/loss in the original shell and body-memory owners.
+pub mod relaxation;
 
 /// Maxwell branches of the unit loss spectrum.
 pub const BRANCHES: usize = 5;
@@ -94,6 +99,16 @@ impl ConstantLossSpectrum {
         self.rates_rad_s.iter().zip(&self.weights).map(|(&rate, &g)| g * debye(omega / rate)).sum()
     }
 
+    /// Storage increment per unit loss stiffness, paired with `shape(omega)`.
+    /// This is sum g_j (omega tau_j)^2/(1+(omega tau_j)^2), not an
+    /// independently fitted frequency correction. Finite frequencies use a
+    /// reciprocal form above each relaxation rate to avoid overflow.
+    #[must_use]
+    pub fn storage_shape(&self, omega: f64) -> f64 {
+        self.rates_rad_s.iter().zip(&self.weights)
+            .map(|(&rate, &g)| g * debye_storage(omega / rate)).sum()
+    }
+
     /// `(relaxation rate [rad/s], weight)` per branch; the relaxation time is the rate's inverse.
     pub fn branches(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
         self.rates_rad_s.iter().copied().zip(self.weights.iter().copied())
@@ -102,7 +117,24 @@ impl ConstantLossSpectrum {
 
 /// One Maxwell branch's loss per unit weight, `x / (1 + x^2)` at `x = omega tau`.
 fn debye(x: f64) -> f64 {
-    x / (1.0 + x * x)
+    // Preserve the original audio-band arithmetic; use the reciprocal only
+    // when squaring a very large frequency ratio would lose its finite tail.
+    if x.abs() <= 1.0e150 {
+        x / (1.0 + x * x)
+    } else {
+        let inverse = 1.0 / x;
+        inverse / (1.0 + inverse * inverse)
+    }
+}
+
+fn debye_storage(x: f64) -> f64 {
+    if x.abs() <= 1.0 {
+        let square = x * x;
+        square / (1.0 + square)
+    } else {
+        let inverse = 1.0 / x;
+        1.0 / (1.0 + inverse * inverse)
+    }
 }
 
 /// Rescale a row-major `n x n` Kelvin-Voigt modal viscosity matrix [1/s] (mass-normalized modes at angular frequencies

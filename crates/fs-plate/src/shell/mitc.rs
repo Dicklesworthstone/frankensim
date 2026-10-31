@@ -349,6 +349,14 @@ impl ShearShellSection {
         (&self.membrane, &self.bending)
     }
 
+    /// Principal transverse-shear resultants [K13, K13/23, K23] in N/m,
+    /// including the declared physical correction factor exactly once.
+    /// These are unrotated, like `principal_matrices`.
+    #[must_use]
+    pub fn principal_transverse_shear_n_m(&self) -> [f64; 3] {
+        self.shear_n_m.map(|value| self.shear_correction * value)
+    }
+
     fn matrices(&self) -> ([f64; 9], [f64; 9], [[f64; 2]; 2]) {
         let (a, _, d, shear) = self.coupled_matrices();
         (a, d, shear)

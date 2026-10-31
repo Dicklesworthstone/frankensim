@@ -10,8 +10,9 @@
 //! Z q = F. No Prony fit, new eigensolve or extrapolation of the measured
 //! constitutive law enters this fixed-basis response.
 //!
-//! Background wood/glue damping remains the fixed reduced operator selected
-//! when the image was made. Only the film law is evaluated at the common drive
+//! Unselected wood/glue damping remains the fixed reduced operator selected
+//! when the image was made. Explicit substrate memory adds its same causal
+//! storage and loss at the drive frequency. The film law is evaluated at the common drive
 //! frequency. This is an unloaded structural response: signed volume velocity
 //! is exposed, but no cavity/radiation impedance, bridge/string feedback, sound
 //! pressure or perceptual-quality claim is inferred from it.
@@ -57,6 +58,8 @@ pub struct ShellCoatingHarmonicResponse {
     pub external_power_w: f64,
     /// Fixed image wood/glue viscosity, excluding film and separate interfaces.
     pub background_dissipation_w: f64,
+    /// Positive heat of explicitly selected substrate Maxwell histories [W].
+    pub substrate_dissipation_w: f64,
     /// Original material-interface dashpots; elastic terms are already in K0.
     pub interface_dissipation_w: f64,
     /// `omega E''_f q* H_f q/2` [W], in projected source-film order.
@@ -70,6 +73,7 @@ pub struct ShellCoatingHarmonicResponse {
 impl ShellCoatingHarmonicResponse {
     pub fn total_dissipation_w(&self) -> f64 {
         self.background_dissipation_w
+            + self.substrate_dissipation_w
             + self.interface_dissipation_w
             + self.film_dissipation_w.iter().sum::<f64>()
     }
@@ -82,6 +86,7 @@ struct Image<'a> {
     exterior: &'a [f64],
     cavity: &'a [f64],
     films: Option<&'a ShellCoatingRelaxation>,
+    substrate: Option<&'a crate::shear_shell::constant_loss::relaxation::ShellSubstrateRelaxation>,
     interfaces: Vec<(&'a [f64], f64)>,
 }
 
@@ -154,6 +159,7 @@ impl MaterialShellImage {
                 exterior: self.volume_shapes_m2_per_sqrt_kg(),
                 cavity: self.cavity_volume_shapes_m2_per_sqrt_kg(),
                 films,
+                substrate: self.substrate_relaxation(),
                 interfaces: self
                     .source()
                     .interfaces()
@@ -208,6 +214,7 @@ impl MaterialShellAssemblyImage {
                 exterior: self.volume_shapes_m2_per_sqrt_kg(),
                 cavity: self.cavity_volume_shapes_m2_per_sqrt_kg(),
                 films,
+                substrate: self.substrate_relaxation(),
                 interfaces: self
                     .source()
                     .components
@@ -286,7 +293,7 @@ fn solve_image(
             .len()
             .checked_mul(2)?
             .checked_add(image.interfaces.len())?
-            .checked_add(6)?
+            .checked_add(if image.substrate.is_some() { 8 } else { 6 })?
             .checked_add(n)?;
         let observations = image
             .force_ports
@@ -301,6 +308,8 @@ fn solve_image(
     if n == 0
         || n > crate::shear_shell::MAX_SHELL_MODES
         || image.films.is_some_and(|memory| memory.mode_count() != n)
+        || image.substrate.is_some_and(|memory| memory.mode_count() != n
+            || memory.loss_stiffness_per_s2().len() != n*n)
         || force.len() != n
         || force.iter().any(|&f| !finite(f))
         || !omega.is_finite()
@@ -346,6 +355,18 @@ fn solve_image(
             }
         }
     }
+    let substrate_loss = if let Some(memory) = image.substrate {
+        let band = memory.source_band_rad_s();
+        if omega < band.0 || omega > band.1 {
+            return Err(invalid("harmonic substrate response exceeds original material/fit support"));
+        }
+        let (storage, loss) = memory.modulus_shapes(omega);
+        let increment = C64::new(storage, -loss);
+        for (value, &h) in operator.iter_mut().zip(memory.loss_stiffness_per_s2()) {
+            *value = *value + increment.scale(h);
+        }
+        loss
+    } else { 0.0 };
     let mut losses = Vec::with_capacity(films.len());
     for film in films {
         poll(gate)?;
@@ -441,6 +462,9 @@ fn solve_image(
             .map(|(&f, &v)| (f.conj() * v).re)
             .sum::<f64>();
     let background_dissipation_w = 0.5 * quadratic(image.background, &v, gate)?;
+    let substrate_dissipation_w = if let Some(memory) = image.substrate {
+        0.5 * omega * substrate_loss * quadratic(memory.loss_stiffness_per_s2(), &q, gate)?
+    } else { 0.0 };
     let mut interface_dissipation_w = 0.0;
     for &(row, damping) in &image.interfaces {
         poll(gate)?;
@@ -464,11 +488,12 @@ fn solve_image(
     let exterior_volume_velocity_m3_s = projection(image.exterior, &v);
     let cavity_volume_velocity_m3_s = projection(image.cavity, &v);
     let power_residual_w =
-        background_dissipation_w + interface_dissipation_w + film_dissipation_w.iter().sum::<f64>()
+        background_dissipation_w + substrate_dissipation_w + interface_dissipation_w + film_dissipation_w.iter().sum::<f64>()
             - external_power_w;
     if [
         external_power_w,
         background_dissipation_w,
+        substrate_dissipation_w,
         interface_dissipation_w,
         power_residual_w,
     ]
@@ -496,6 +521,7 @@ fn solve_image(
         cavity_volume_velocity_m3_s,
         external_power_w,
         background_dissipation_w,
+        substrate_dissipation_w,
         interface_dissipation_w,
         film_dissipation_w,
         power_residual_w,

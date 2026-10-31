@@ -17,6 +17,7 @@ use fs_plate::shell::mitc::{MitcBudget, NodalDirectors, ShellConstraint, ShellMa
 
 mod point;
 mod relaxation;
+mod substrate;
 pub use point::{MaterialShellPoint, ShellPointGeometry};
 
 /// Complete source-bound curved body and physical connection geometry.
@@ -80,6 +81,8 @@ impl ReciprocalStringBank {
     /// [`Self::with_material_shell_coating_relaxation`] before playback, so the
     /// film's projected histories join that same mechanical owner. The material
     /// strings frontend performs this binding after its gas-inertia selection.
+    /// Explicit substrate relaxation is attached atomically by this constructor,
+    /// before coatings, and follows the same source-preserving cold rebuilds.
     ///
     /// This retains the original reciprocal bow, sympathetic strings, torsion,
     /// gas loading and scheduled performance. It is an unloaded linear assembly
@@ -152,8 +155,7 @@ impl ReciprocalStringBank {
         bank.source.material_shell_assembly = Some(body);
         bank.source.material_shell_assembly_image = Some(projected);
         bank.source.material_cavity = cavity;
-        poll(gate)?;
-        Ok(bank)
+        bank.finish_substrate_relaxation(gate)
     }
 
     /// Compile true curved shear-deformable shell mechanics into the existing
@@ -175,6 +177,8 @@ impl ReciprocalStringBank {
     /// [`Self::with_material_shell_coating_relaxation`] on the returned cold
     /// bank before playback to attach the complete projected film histories.
     /// The material strings frontend performs this binding automatically.
+    /// Explicit substrate memory is attached here automatically, initially
+    /// relaxed, and participates in every subsequent force/pressure solve.
     /// # Errors
     /// Incomplete/detached ports, material/geometry/cavity mismatch, bandwidth,
     /// budget, spectral/section refusal or cancellation.
@@ -244,7 +248,6 @@ impl ReciprocalStringBank {
         bank.source.material_shell=Some(body);
         bank.source.material_shell_image=Some(projected);
         bank.source.material_cavity=cavity;
-        poll(gate)?;
-        Ok(bank)
+        bank.finish_substrate_relaxation(gate)
     }
 }

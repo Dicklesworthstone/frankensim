@@ -123,6 +123,10 @@ impl MaterialStringBankSource {
         if count > 256 {
             return Err(invalid("source string memory exceeds the original state ceiling"));
         }
+        let substrate = self.material_shell_substrate_relaxation()
+            .map_or(0, |image| image.relaxation_times_s().len());
+        count = count.checked_add(substrate)
+            .ok_or_else(|| invalid("complete source substrate history extent overflow"))?;
         Ok(count)
     }
 
@@ -201,6 +205,9 @@ impl MaterialStringBankSource {
             }
             start += component.modes().len();
         }
+        // Explicit substrate memory is a source history, before optional
+        // coating/body additions. The same ordering survives cold rebuilds.
+        branches.extend(self.shell_substrate_memory_branches(system, gate)?);
         Ok(branches)
     }
 
@@ -216,6 +223,7 @@ impl MaterialStringBankSource {
             && self.longitudinal_waves.as_ref().and_then(|axial| axial.material_relaxation()).is_none()
             && self.material_chart_tensor_relaxation.is_none()
             && self.material_shell_coating_relaxation.is_none()
+            && self.material_shell_substrate_relaxation().is_none()
             && self.spatial_cavity.as_ref().and_then(|cavity|cavity.thermal_loss()).is_none()
             && self.strings.iter().all(|m| m.source.bending_relaxation().is_none()
                 && m.source.torsional_relaxation().is_none()) {

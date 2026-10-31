@@ -166,6 +166,8 @@ impl ResolvedShearShell {
             gate,
         )?;
         let coated = apply_coatings(substrate, inputs, self.coating_relaxation, gate)?;
+        let coated = super::constant_loss::relaxation::apply_selection(
+            coated, self.substrate_relaxation, gate)?;
         let mut coated = coated.with_interfaces(
             self.interfaces.iter().map(|i| i.input().clone()).collect(),
             self.interface_budget,
@@ -210,14 +212,17 @@ impl ResolvedShearShell {
         // frozen film C. Include complete branch accumulation and factor work.
         let memory = self.coating_relaxation.map_or(Some(0), |options|
             options.projection_terms(modes, self.coatings.len()))?;
-        projected.checked_add(memory)
+        let substrate_memory = self.substrate_relaxation.map_or(Some(0),
+            |options| options.projection_terms(modes))?;
+        projected.checked_add(memory)?.checked_add(substrate_memory)
     }
 
     /// Project all substrate and film loss on the SAME physical mode vectors.
     /// Anchored wood loss uses its original law. Each film instead uses its own
     /// E''(omega)/omega, exactly on modal diagonals and by geometric-mean
     /// congruence on cross terms. Storage and condensation remain at the authored
-    /// reference; no extra damping, modal diagonalization or memory is inserted.
+    /// reference. Explicitly hereditary substrate groups and films are excluded
+    /// here because their existing Maxwell histories supply storage and loss.
     /// Returns row-major modal C [1/s] when vectors are M-orthonormal.
     #[allow(clippy::too_many_arguments)]
     pub fn project_material_viscosity(
@@ -252,8 +257,11 @@ impl ResolvedShearShell {
         }
         self.validate_coating_frequencies(omega, gate)?;
         let spectrum = super::constant_loss::ConstantLossSpectrum::fit();
-        let mut matrix = Vec::new();
+        let mut matrix = vec![0.0; n*n];
         for (law, viscosity) in self.loss_groups()? {
+            // Its complete causal spectrum supplies this loss once, alongside
+            // storage, on the same projected strain form.
+            if law.is_some() && self.substrate_relaxation.is_some() { continue; }
             poll(gate)?;
             let mut part = project_viscosity(
                 &self.mesh,

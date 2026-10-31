@@ -5,7 +5,9 @@
 //! A source that states `constant_loss_reference_omega` has its loss factors
 //! read at every retained mode's own frequency instead ([`constant_loss`]).
 //! Substrate materials are homogeneous through their own thickness, at a frozen
-//! source state. Explicit source-backed surface films use the original laminate
+//! source state. An explicit substrate-relaxation selection also retains the
+//! Maxwell storage dispersion on the original mechanical memory owner.
+//! Explicit source-backed surface films use the original laminate
 //! and MITC owners, retaining extension/bending and mass coupling. Geometry,
 //! support and numerical resolution remain independent inputs.
 //! No body frequency, damping ratio, carved-instrument preset or fitting to sound
@@ -123,6 +125,7 @@ pub struct ResolvedShearShell {
     coatings: Vec<ResolvedShellCoating>,
     coating_viscosity: Vec<Vec<ShearShellViscosity>>,
     coating_relaxation: Option<coating::relaxation::CoatingRelaxationOptions>,
+    substrate_relaxation: Option<constant_loss::relaxation::SubstrateRelaxationOptions>,
     budget: MitcBudget,
     mass_kg: f64,
     interfaces: Vec<connections::ResolvedShellConnection>,
@@ -182,6 +185,7 @@ impl ResolvedShearShell {
         let rebuilt = compile_material_shear_shell(self.mesh.clone(), inputs, self.budget, gate)?;
         let rebuilt = coating::apply_coatings(rebuilt,
             self.coatings.iter().map(|c| c.input().clone()).collect(), self.coating_relaxation, gate)?;
+        let rebuilt = constant_loss::relaxation::apply_selection(rebuilt, self.substrate_relaxation, gate)?;
         let mut rebuilt = rebuilt.with_interfaces(self.interfaces.iter().map(|i| i.input().clone()).collect(),
             self.interface_budget, gate)?;
         // Pressure geometry is unchanged by a material rebind. Retain both the
@@ -324,7 +328,8 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
     let mass_kg:f64=sections.iter().zip(element_areas).map(|(s,a)|s.areal_mass_kg_m2()*a).sum();
     if !mass_kg.is_finite() || mass_kg<=0.0 { return Err(invalid("total shell mass is unrepresentable")); }
     Ok(ResolvedShearShell { mesh,regions,element_regions:assigned,sections,viscosity,
-        coatings:Vec::new(),coating_viscosity:Vec::new(),coating_relaxation:None,budget,mass_kg,
+        coatings:Vec::new(),coating_viscosity:Vec::new(),coating_relaxation:None,
+        substrate_relaxation:None,budget,mass_kg,
         interfaces:Vec::new(), interface_budget:fs_plate::shell::mitc::connections::ShellConnectionBudget {
             max_connections:0, max_terms:0, max_work:0,
         }, pressure_surfaces:None })

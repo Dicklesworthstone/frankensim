@@ -12,6 +12,9 @@ use fs_plate::shell::{ShellMesh, mitc::{ConstraintFrame, MitcBudget, NodalDirect
     ShellConstraint, ShellMass}};
 
 fn shell_material(rho:f64, eta:f64) -> ResolvedMaterialStatePoint {
+    shell_material_with_loss_anchor(rho, eta, None)
+}
+fn shell_material_with_loss_anchor(rho:f64, eta:f64, anchor:Option<f64>) -> ResolvedMaterialStatePoint {
     let mut entries=vec![("density",Density::DIMS,rho),
         ("young_modulus_1",Pressure::DIMS,1.0e9),("young_modulus_2",Pressure::DIMS,4.0e8),
         ("poisson_ratio_12",Dims::NONE,0.25),("shear_modulus_12",Pressure::DIMS,1.8e8),
@@ -21,6 +24,10 @@ fn shell_material(rho:f64, eta:f64) -> ResolvedMaterialStatePoint {
         .map(|(key,value)|(key,DynViscosity::DIMS,value)));
     entries.extend(TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES.into_iter()
         .zip([0.4*eta,0.8*eta,0.05*eta]).map(|(key,value)|(key,DynViscosity::DIMS,value)));
+    if let Some(anchor) = anchor {
+        entries.push((fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA,
+            fs_couple::shear_shell::CONSTANT_LOSS_REFERENCE_OMEGA_DIMS, anchor));
+    }
     let mut claims=ClaimSet::new(); let mut requirements=Vec::new();
     for (key,dims,value) in entries {
         claims.insert_claim(PropertyClaim { key:PropertyKey::new(key,dims),

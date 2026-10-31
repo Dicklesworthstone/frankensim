@@ -98,6 +98,7 @@ pub struct MaterialShellAssemblyImage {
     interface_columns: Vec<Vec<Vec<f64>>>,
     tie_receipt: TieReceipt,
     coating_relaxation: Option<super::coating::relaxation::ShellCoatingRelaxation>,
+    substrate_relaxation: Option<super::constant_loss::relaxation::ShellSubstrateRelaxation>,
 }
 
 impl MaterialShellAssemblyImage {
@@ -134,6 +135,11 @@ impl MaterialShellAssemblyImage {
     /// assembled body. Wood and glue viscosity remain in `damping()` once.
     pub fn coating_relaxation(&self) -> Option<&super::coating::relaxation::ShellCoatingRelaxation> {
         self.coating_relaxation.as_ref()
+    }
+    /// Causal substrate memory aggregated over the same complete body basis.
+    /// Unselected Kelvin--Voigt regions and glue remain in `damping()`.
+    pub fn substrate_relaxation(&self) -> Option<&super::constant_loss::relaxation::ShellSubstrateRelaxation> {
+        self.substrate_relaxation.as_ref()
     }
     /// Component-major material-interface rows, in each component's source order.
     pub fn interface_columns(&self) -> &[Vec<Vec<f64>>] {
@@ -501,6 +507,7 @@ impl MaterialShellAssembly {
         }
         let mut interface_columns = Vec::with_capacity(self.components.len());
         let mut coating_forms = Vec::new();
+        let mut substrate_forms = Vec::new();
         let mut exterior_area = 0.0;
         for (i, part) in self.components.iter().enumerate() {
             poll(gate)?;
@@ -529,6 +536,9 @@ impl MaterialShellAssembly {
                 &physical_modes[i], &omega, part.assembly_budget,
                 budget.max_projection_terms, gate)?)?;
             coating_forms.extend(source.project_coating_forms(&part.directors,
+                &physical_modes[i], &omega, part.assembly_budget,
+                budget.max_projection_terms, gate)?);
+            substrate_forms.extend(source.project_substrate_form(&part.directors,
                 &physical_modes[i], &omega, part.assembly_budget,
                 budget.max_projection_terms, gate)?);
             let laws: Vec<_> = source.interfaces.iter().map(|i| i.law().clone()).collect();
@@ -569,6 +579,8 @@ impl MaterialShellAssembly {
                 coating_forms, &omega, options, budget.max_projection_terms, gate)?,
             None => None,
         };
+        let substrate_relaxation = super::constant_loss::relaxation::ShellSubstrateRelaxation::from_projected(
+            substrate_forms, &omega, budget.max_projection_terms, gate)?;
         poll(gate)?;
         Ok(MaterialShellAssemblyImage {
             source: self.clone(),
@@ -582,6 +594,7 @@ impl MaterialShellAssembly {
             interface_columns,
             tie_receipt: tied.receipt,
             coating_relaxation,
+            substrate_relaxation,
         })
     }
 
