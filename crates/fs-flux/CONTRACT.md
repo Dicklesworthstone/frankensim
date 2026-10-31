@@ -1910,14 +1910,48 @@ with accepted step count. The common linear concentration-reference term is
 cancelled analytically; inventory rounding is checked separately. Only this
 fixed-volume mode reports `diffusion_free_energy_change_j: Some(...)`; it does
 not claim a caloric, electrochemical or mechanically open free-energy balance.
-All numerical/source workspaces are admitted at preparation; successful
-advances allocate nothing and late failure publishes no partial inventory/time.
+Constant-data numerical/source workspaces are admitted at preparation;
+successful constant-data advances allocate nothing. Late failure publishes no
+partial inventory/time.
+
+`SolutionDiffusionLink::from_material_sources` uses the same timeline with
+`fs_material::osmosis::diffusion::source::MaterialSolutionMaxwellStefan`.
+Every binary pair retains its original immutable card, exact property and
+selected claim. Source resolution refreshes actual typed temperature and all
+solvent/solute amount concentrations at both endpoints and the arithmetic face;
+the face value enters the existing shared friction law. An admissible face
+does not excuse an unsupported endpoint or joint interpolation gap. No source
+is switched, extrapolated or inferred from the thermodynamic model.
+
+Each proposed source-backed pair update is qualified before either inventory
+is changed, and all sourced links are qualified again after the complete sweep:
+later links can change an earlier link's endpoint. Thus the final accepted
+window remains inside every pinned source's actual support. These are hard
+source refusals, not requests to relax a source boundary. Constant and sourced
+connections can coexist under the same whole-window species/free-energy gates.
+`solution_diffusion_links` exposes original cards and pinned IDs for explicit
+terminal queries. Runtime source receipts are returned by the material owner
+and discarded by the timeline; no last-query cache is claimed.
+
+Source queries allocate through the original material resolver. Each sourced
+face flux requires three resolutions per binary pair; candidate and end-of-sweep
+qualification repeat those resolutions. This source work is additional to the
+reported physical face-evaluation count. Prepared workspace admission includes
+the full estimated retained card payload per pair, including unselected claims,
+observations and models, plus model, mapping and numerical arrays. Shared cards
+may be charged repeatedly. The charge excludes allocator-specific overhead and
+transient queries/receipts; it is not an RSS or peak-memory guarantee. The
+constant-data allocation-free numerical route remains unchanged.
 
 Focused native tests compare binary relaxation with an independent nonlinear
 solvent-frame ODE, tighten temporal error, demonstrate finite uphill ternary
 transport with decreasing free energy, permute branched links and concentration
 references, and exercise actual source-boundary, tiny-step, work, cancellation,
 sealed-face and layout/workspace refusals.
+Source-backed tests additionally compare unequal-volume evolution to an
+independent concentration-dependent mobility ODE, distinguish frozen mobility,
+and cover later-edge support loss, late failure atomicity, unsupported initial
+endpoints and retained source workspace admission.
 
 ## Finite-storage transient concentration films
 

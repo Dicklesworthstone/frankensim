@@ -14,7 +14,7 @@ use fs_material::osmosis::{
     OsmosisError,
     diffusion::{
         SolutionDiffusionError, SolutionDiffusionSolve, SolutionDiffusionWorkspace,
-        SolutionMaxwellStefan,
+        SolutionMaxwellStefan, source::MaterialSolutionMaxwellStefan,
     },
 };
 
@@ -54,8 +54,13 @@ pub struct SolutionDiffusionLink {
     right: usize,
     area_m2: f64,
     distance_m: f64,
-    material: SolutionMaxwellStefan,
+    material: DiffusionMaterial,
     workspace: SolutionDiffusionWorkspace,
+}
+#[derive(Clone, Debug)]
+enum DiffusionMaterial {
+    Constant(SolutionMaxwellStefan),
+    Source(Box<MaterialSolutionMaxwellStefan>),
 }
 impl SolutionDiffusionLink {
     /// Endpoints are canonicalized because diffusion has no imposed direction.
@@ -67,14 +72,49 @@ impl SolutionDiffusionLink {
         distance_m: f64,
         material: SolutionMaxwellStefan,
     ) -> Result<Self, OsmoticNetworkError> {
+        Self::prepare(
+            left,
+            right,
+            area_m2,
+            distance_m,
+            DiffusionMaterial::Constant(material),
+        )
+    }
+    /// State-dependent original material pairs. The same finite-volume
+    /// controller and shared friction solver are used; source queries allocate.
+    /// Every pair keeps its original selected claim across the complete window.
+    pub fn from_material_sources(
+        left: usize,
+        right: usize,
+        area_m2: f64,
+        distance_m: f64,
+        material: MaterialSolutionMaxwellStefan,
+    ) -> Result<Self, OsmoticNetworkError> {
+        Self::prepare(
+            left,
+            right,
+            area_m2,
+            distance_m,
+            DiffusionMaterial::Source(Box::new(material)),
+        )
+    }
+    fn prepare(
+        left: usize,
+        right: usize,
+        area_m2: f64,
+        distance_m: f64,
+        material: DiffusionMaterial,
+    ) -> Result<Self, OsmoticNetworkError> {
         if left == right || !area_m2.is_finite() || area_m2 < 0.0 || !positive(distance_m) {
             return Err(OsmoticNetworkError::Invalid(
                 "distinct endpoints, nonnegative area and positive diffusion distance required",
             ));
         }
-        let workspace = material
-            .workspace()
-            .map_err(OsmoticNetworkError::SolutionDiffusion)?;
+        let workspace = match &material {
+            DiffusionMaterial::Constant(law) => law.workspace(),
+            DiffusionMaterial::Source(law) => law.workspace(),
+        }
+        .map_err(OsmoticNetworkError::SolutionDiffusion)?;
         Ok(Self {
             left: left.min(right),
             right: left.max(right),
@@ -87,20 +127,66 @@ impl SolutionDiffusionLink {
     pub const fn endpoints(&self) -> [usize; 2] {
         [self.left, self.right]
     }
+    /// Original physical owner. For source-backed links its stored binary
+    /// matrix describes only the reference state; advances always refresh it.
     pub fn material(&self) -> &SolutionMaxwellStefan {
-        &self.material
+        match &self.material {
+            DiffusionMaterial::Constant(law) => law,
+            DiffusionMaterial::Source(law) => law.reference_law(),
+        }
+    }
+    /// Original immutable cards, complete pair assignments and selected IDs.
+    /// Runtime source receipts are transient, not a last-successful-state cache.
+    pub fn material_sources(&self) -> Option<&MaterialSolutionMaxwellStefan> {
+        match &self.material {
+            DiffusionMaterial::Constant(_) => None,
+            DiffusionMaterial::Source(law) => Some(law),
+        }
     }
     fn heap_bytes(&self) -> usize {
-        self.material.heap_bytes() + self.workspace.workspace_bytes()
+        let material = match &self.material {
+            DiffusionMaterial::Constant(law) => law.heap_bytes(),
+            DiffusionMaterial::Source(law) => {
+                core::mem::size_of::<MaterialSolutionMaxwellStefan>()
+                    + law.estimated_heap_payload_bytes()
+            }
+        };
+        material.saturating_add(self.workspace.workspace_bytes())
+    }
+    fn qualify_sources(
+        &self,
+        volumes: [f64; 2],
+        amounts: [&[f64]; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), OsmoticNetworkError> {
+        if let Some(source) = self.material_sources() {
+            source
+                .resolve_inventories(volumes, amounts, cancelled)
+                .map_err(diffusion_source)?;
+        }
+        Ok(())
     }
 }
 
 impl OsmoticNetwork {
+    /// Prepared diffusion links, including original source cards and pinned
+    /// claim identities. Current endpoint receipts can be queried explicitly
+    /// through `material_sources`; the timeline retains no query cache.
+    pub fn solution_diffusion_links(&self) -> &[SolutionDiffusionLink] {
+        &self.diffusion
+    }
+
     /// Prepare a diffusion-only network of the SAME original convex solution
     /// model, species order and fixed solvent volumes. All solutes must be
     /// strictly present; this initial law does not invent zero-log limits.
     ///
-    /// Reuses the existing bounded allocation-free adaptive timeline. Explicit
+    /// Reuses the existing bounded adaptive timeline. Constant-data links retain
+    /// allocation-free advancement. Material-source links allocate original
+    /// queries and receipts at every stage; these transient allocations are not
+    /// covered by `maximum_workspace_bytes`. That limit charges retained arrays,
+    /// models and the estimated FULL card payload per source pair, including
+    /// unselected claims/observations/models and excluding allocator overhead.
+    /// No runtime source receipts are retained in the prepared network. Explicit
     /// conservative diffusion stages replace membrane water-root stages in this
     /// mode; the method remains first order and may need small steps. Mechanical
     /// pressure laws are retained but perform no work because volumes are fixed.
@@ -151,9 +237,9 @@ impl OsmoticNetwork {
         }
         for link in &links {
             if link.right >= cells.len()
-                || link.material.species().len() != species.len()
+                || link.material().species().len() != species.len()
                 || !link
-                    .material
+                    .material()
                     .species()
                     .iter()
                     .zip(&species)
@@ -163,10 +249,10 @@ impl OsmoticNetwork {
                     "diffusion faces must retain the exact original species order and existing endpoints",
                 ));
             }
-            link.material
+            link.material()
                 .admit_solution(&cells[link.left].solution)
                 .map_err(OsmoticNetworkError::SolutionDiffusion)?;
-            link.material
+            link.material()
                 .admit_solution(&cells[link.right].solution)
                 .map_err(OsmoticNetworkError::SolutionDiffusion)?;
         }
@@ -187,6 +273,19 @@ impl OsmoticNetwork {
                 budget_bytes: maximum_workspace_bytes,
             },
         )?;
+        for link in &links {
+            link.qualify_sources(
+                [
+                    cells[link.left].solution.solvent_volume_m3(),
+                    cells[link.right].solution.solvent_volume_m3(),
+                ],
+                [
+                    cells[link.left].solution.solute_moles(),
+                    cells[link.right].solution.solute_moles(),
+                ],
+                &mut || false,
+            )?;
+        }
         let mut network = Self::new(species, cells, Vec::new(), remaining)?;
         network.workspace_bytes += required;
         network.diffusion = links;
@@ -197,6 +296,13 @@ impl OsmoticNetwork {
 
 fn source(error: OsmosisError) -> OsmoticNetworkError {
     OsmoticNetworkError::SolutionDiffusion(SolutionDiffusionError::Thermodynamics(error))
+}
+fn diffusion_source(error: SolutionDiffusionError) -> OsmoticNetworkError {
+    if error == SolutionDiffusionError::Cancelled {
+        OsmoticNetworkError::Cancelled
+    } else {
+        OsmoticNetworkError::SolutionDiffusion(error)
+    }
 }
 fn finite(value: f64) -> Result<f64, OsmoticNetworkError> {
     if value.is_finite() {
@@ -216,7 +322,7 @@ pub(super) fn sweep(
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
-    for link in links {
+    for link in links.iter_mut() {
         poll(cancelled)?;
         if link.area_m2 == 0.0 {
             continue;
@@ -228,23 +334,31 @@ pub(super) fn sweep(
         *evaluations = evaluations
             .checked_add(1)
             .ok_or(OsmoticNetworkError::WorkBudget)?;
-        link.material
-            .flux_into(
-                left,
-                right,
-                link.distance_m,
-                controls.constitutive,
-                &mut link.workspace,
-                &mut flux[..n],
-                &mut *cancelled,
-            )
-            .map_err(|error| {
-                if error == SolutionDiffusionError::Cancelled {
-                    OsmoticNetworkError::Cancelled
-                } else {
-                    OsmoticNetworkError::SolutionDiffusion(error)
-                }
-            })?;
+        match &link.material {
+            DiffusionMaterial::Constant(material) => material
+                .flux_into(
+                    left,
+                    right,
+                    link.distance_m,
+                    controls.constitutive,
+                    &mut link.workspace,
+                    &mut flux[..n],
+                    &mut *cancelled,
+                )
+                .map(|_| ()),
+            DiffusionMaterial::Source(material) => material
+                .flux_into(
+                    left,
+                    right,
+                    link.distance_m,
+                    controls.constitutive,
+                    &mut link.workspace,
+                    &mut flux[..n],
+                    &mut *cancelled,
+                )
+                .map(|_| ()),
+        }
+        .map_err(diffusion_source)?;
         let area_time = dt * link.area_m2;
         if !positive(area_time) {
             return Err(OsmoticNetworkError::StepUnderflow);
@@ -302,7 +416,7 @@ pub(super) fn sweep(
                 after[i] = next[i] / old.solvent_volume_m3();
             }
             let density = link
-                .material
+                .material()
                 .thermodynamics()
                 .reference_cancelled_free_energy_change_j_m3(&before[..n], &after[..n])
                 .map_err(OsmosisError::from)
@@ -322,8 +436,10 @@ pub(super) fn sweep(
                 },
             ));
         }
-        poll(cancelled)?;
         let volumes = [left.solvent_volume_m3(), right.solvent_volume_m3()];
+        // Old flux samples do not qualify a newly proposed physical state.
+        link.qualify_sources(volumes, [&next_left[..n], &next_right[..n]], cancelled)?;
+        poll(cancelled)?;
         cells[link.left]
             .solution
             .replace_inventories(volumes[0], &next_left[..n])
@@ -332,6 +448,21 @@ pub(super) fn sweep(
             .solution
             .replace_inventories(volumes[1], &next_right[..n])
             .map_err(source)?;
+    }
+    // A later connection may move an earlier connection's endpoint outside its
+    // pinned source support. Qualify the WHOLE candidate sweep before the
+    // enclosing controller can accept it, including its final time endpoint.
+    for link in links.iter() {
+        if link.material_sources().is_none() {
+            continue;
+        }
+        poll(cancelled)?;
+        let (left, right) = (&cells[link.left].solution, &cells[link.right].solution);
+        link.qualify_sources(
+            [left.solvent_volume_m3(), right.solvent_volume_m3()],
+            [left.solute_moles(), right.solute_moles()],
+            cancelled,
+        )?;
     }
     Ok(())
 }

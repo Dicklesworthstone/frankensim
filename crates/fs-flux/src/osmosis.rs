@@ -22,8 +22,10 @@
 //! chemical-potential laws. Separate owners provide finite-storage films in
 //! [`transient`] and ideal fast-ion water exchange in [`donnan`]. None supplies
 //! solvent inertia, a heat balance or mechanical inertia.
-//! Successful advances allocate no memory. All workspace is prepared up front;
-//! failed, cancelled or exhausted advances publish neither state nor time.
+//! Water transport and constant-data diffusion advances allocate no memory.
+//! Material-sourced solution diffusion allocates transient original queries and
+//! receipts; its prepared-storage estimate is not a peak-memory bound. Failed,
+//! cancelled or exhausted advances publish neither state nor time.
 
 /// Nonideal Maxwell–Stefan diffusion at fixed solvent volume on this timeline.
 pub mod diffusion;
@@ -298,6 +300,9 @@ pub struct OsmoticStepReport {
     /// Trials rejected for source, root or error-control reasons.
     pub rejected_steps: usize,
     /// Scalar water residuals or solution-diffusion face evaluations, including rejected trials.
+    /// Material-source qualification queries are additional work: each sourced
+    /// face evaluates three original claims per binary pair, and proposed/final
+    /// sweep states repeat this qualification. They are not scalar residuals.
     pub residual_evaluations: usize,
     /// Largest accepted step-doubling error divided by its requested scale.
     pub maximum_scaled_error: f64,
