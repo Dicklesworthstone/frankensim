@@ -368,6 +368,7 @@ impl BoundaryGrid3 {
                             coupling: PartialSaturationBodyExchange3 {
                                 hydrodynamic: response.hydrodynamic,
                                 walls: super::super::WallMomentumExchange3::default(),
+                                periodic: super::super::PeriodicMomentumTransport3::default(),
                                 forcing: super::super::PartialSaturationForcing3::default(),
                                 velocity_midpoint: response.velocity_midpoint,
                                 angular_velocity_midpoint: response.angular_velocity_midpoint,

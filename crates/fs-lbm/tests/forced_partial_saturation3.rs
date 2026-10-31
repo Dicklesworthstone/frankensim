@@ -267,7 +267,16 @@ fn zero_occupancy_retains_native_guo_populations_bit_for_bit() {
 
 #[test]
 fn forced_assembly_closes_independent_world_momentum_with_shared_cells_and_walls() {
-    let mut g = grid(true);
+    forced_assembly_balance(true);
+}
+
+#[test]
+fn forced_periodic_assembly_closes_independent_world_angular_momentum() {
+    forced_assembly_balance(false);
+}
+
+fn forced_assembly_balance(walls: bool) {
+    let mut g = grid(walls);
     let f = fields();
     let mut bodies = [body(0), body(1)];
     let external = [
@@ -276,6 +285,7 @@ fn forced_assembly_closes_independent_world_momentum_with_shared_cells_and_walls
     ];
     let imposed = imposed();
     let mut max_defect = 0.0_f64;
+    let mut max_transport = 0.0_f64;
     for _ in 0..32 {
         let initial = snapshot(&g);
         let old = bodies;
@@ -318,15 +328,19 @@ fn forced_assembly_closes_independent_world_momentum_with_shared_cells_and_walls
         }
         for i in 0..3 {
             let dp = p[i] + report.walls.wall_impulse[i] - imposed.0[i];
-            let dh = h[i] + report.walls.wall_angular_impulse[i] - imposed.1[i];
+            let transport = report.periodic.angular_momentum_change[i];
+            let dh = h[i] + report.walls.wall_angular_impulse[i] - imposed.1[i] - transport;
+            max_transport = max_transport.max(transport.abs());
             max_defect = max_defect.max(dp.abs()).max(dh.abs());
             close(dp, 0.0, 2e-12);
             close(dh, 0.0, 9e-12);
             close(report.forcing.impulse[i], imposed.0[i], 4e-17);
             close(report.forcing.angular_impulse[i], imposed.1[i], 3e-16);
         }
-        assert!(report.walls.measured_links > 0);
+        assert_eq!(report.walls.measured_links > 0, walls);
+        assert_eq!(report.periodic.face_crossings > 0, !walls);
     }
+    assert_eq!(max_transport > 1e-6, !walls);
     eprintln!("32 forced shared-cell ticks, maximum world balance defect {max_defect:e}");
 }
 
@@ -354,7 +368,16 @@ fn momentum(b: MovingPartialSaturationBody3) -> ([f64; 3], [f64; 3]) {
 
 #[test]
 fn moving_forced_full_tensor_bodies_keep_world_balance_and_single_force_ownership() {
-    let mut g = grid(true);
+    moving_forced_balance(true);
+}
+
+#[test]
+fn moving_periodic_bodies_keep_world_angular_balance_and_single_transport_ownership() {
+    moving_forced_balance(false);
+}
+
+fn moving_forced_balance(walls: bool) {
+    let mut g = grid(walls);
     let shape = BodyFrameEllipsoid3::sphere(0.34).unwrap();
     let mut samplers = [
         BodyFrameSampler3::new(&g, 6).unwrap(),
@@ -402,11 +425,14 @@ fn moving_forced_full_tensor_bodies_keep_world_balance_and_single_force_ownershi
                 );
             }
             assert_eq!(receipt.bodies[a].coupling.forcing, Default::default());
+            assert_eq!(receipt.bodies[a].coupling.periodic, Default::default());
             close(receipt.bodies[a].work_residual, 0.0, 2e-16);
         }
         for i in 0..3 {
             let dp = p[i] + receipt.coupling.walls.wall_impulse[i] - imposed.0[i];
-            let dh = h[i] + receipt.coupling.walls.wall_angular_impulse[i] - imposed.1[i];
+            let dh = h[i] + receipt.coupling.walls.wall_angular_impulse[i]
+                - imposed.1[i]
+                - receipt.coupling.periodic.angular_momentum_change[i];
             max_defect = max_defect.max(dp.abs()).max(dh.abs());
             close(dp, 0.0, 2e-12);
             close(dh, 0.0, 9e-12);
@@ -424,7 +450,7 @@ fn moving_forced_full_tensor_bodies_keep_world_balance_and_single_force_ownershi
 
 #[test]
 fn forced_single_and_singleton_assembly_retain_identical_results() {
-    let (mut single, mut assembly) = (grid(true), grid(true));
+    let (mut single, mut assembly) = (grid(false), grid(false));
     let fractions = fields();
     let (mut body, mut bodies) = (body(0), [body(0)]);
     for _ in 0..12 {
@@ -452,6 +478,8 @@ fn forced_single_and_singleton_assembly_retain_identical_results() {
         assert_eq!(a.hydrodynamic, b.bodies[0].hydrodynamic);
         assert_eq!(a.forcing, b.forcing);
         assert_eq!(a.walls, b.walls);
+        assert_eq!(a.periodic, b.periodic);
+        assert!(a.periodic.face_crossings > 0);
         assert_eq!(a.momentum_residual, b.bodies[0].momentum_residual);
     }
 }

@@ -29,7 +29,8 @@ pub use partial_saturation::{
     LubricatedPlanesExchange3, LubricationPlane3, PartialSaturationBodiesExchange3,
     PartialSaturationBody3, PartialSaturationBodyExchange3, PartialSaturationBodyResponse3,
     PartialSaturationError3, PartialSaturationExchange3, PartialSaturationForcing3,
-    PlaneLubricationExchange3, SphereLubrication3, SphereLubricationExchange3,
+    PeriodicMomentumTransport3, PlaneLubricationExchange3, SphereLubrication3,
+    SphereLubricationExchange3,
 };
 mod body_motion;
 pub use body_motion::{

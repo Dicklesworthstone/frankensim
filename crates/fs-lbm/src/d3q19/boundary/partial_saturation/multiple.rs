@@ -47,6 +47,9 @@ pub struct PartialSaturationBodiesExchange3<const N: usize> {
     pub bodies: [PartialSaturationBodyResponse3; N],
     /// All stationary voxel/exterior wall exchange, counted only once.
     pub walls: WallMomentumExchange3,
+    /// Periodic coordinate-wrap angular transport, counted only once over the
+    /// actual composite populations, not once per immersed body.
+    pub periodic: PeriodicMomentumTransport3,
     /// Imposed fluid body-force impulse, torque and local midpoint work once
     /// over the whole fluid, including retained interior populations.
     pub forcing: PartialSaturationForcing3,
@@ -249,6 +252,7 @@ impl BoundaryGrid3 {
                     let receipt = PartialSaturationBodiesExchange3 {
                         bodies: [(*exchange).into(); N],
                         walls: exchange.walls,
+                        periodic: exchange.periodic,
                         forcing: exchange.forcing,
                         lubrication: SphereLubricationExchange3::default(),
                         population_mass_residual: 0.0,
@@ -342,6 +346,7 @@ impl BoundaryGrid3 {
         let mut report = PartialSaturationBodiesExchange3 {
             bodies: [PartialSaturationBodyResponse3::default(); N],
             walls: WallMomentumExchange3::default(),
+            periodic: PeriodicMomentumTransport3::default(),
             forcing: PartialSaturationForcing3::default(),
             lubrication: SphereLubricationExchange3::default(),
             population_mass_residual: 0.0,
@@ -508,6 +513,7 @@ impl BoundaryGrid3 {
             .checked()
             .map_err(|_| invalid("assembly wall exchange overflowed"))?;
         report.forcing = report.forcing.checked()?;
+        report.periodic = self.periodic_momentum_transport(gate)?;
         for a in 0..N {
             checkpoint(gate)?;
             let response = &mut report.bodies[a];

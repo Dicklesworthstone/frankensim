@@ -677,6 +677,17 @@ rollback. Their addition does not establish executed native validation.
   O(selected links), allocates no per-step buffer, and sums density only once
   per selected boundary cell. Quantities use lattice units, with cell centers
   at `(x+0.5,y+0.5,z+0.5)` and torque evaluated at the halfway intersection.
+- `PeriodicMomentumTransport3` closes the periodic-cell angular account for
+  single/multiple immersed bodies and their moving/material/lubricated wrappers.
+  It measures the actual post-collision populations' coordinate jumps in
+  O(periodic boundary area), without allocation or changed population arithmetic.
+  The fluid/body balance includes its signed `angular_momentum_change` alongside
+  external and wall moments. The value is independent of moment origin; diagonal
+  double wraps retain both jumps, while wall-owned links are excluded. One
+  assembly-level receipt owns the transport, never each body's nested response.
+  Periodicity preserves linear momentum, but does not imply conservation of
+  angular momentum inside the represented cell. This receipt is not a body
+  torque or an open-boundary flux model.
 - `plan_scaling(reynolds, char_length_lu, u_lattice) -> ScalingPlan { tau,
   viscosity, u_lattice, mach, tau_margin, stable }` — the lattice-scaling
   assistant. `ScalingPlan::color()` (verified when comfortably stable, else

@@ -14,8 +14,8 @@
 
 use super::{
     BoundaryGrid3, BoundaryLink3, CancelGate, CollisionError3, CollisionModel3, E3, Face3,
-    FaceBoundary3, OPP3, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force,
-    collide_cell3, equilibrium3,
+    FaceBoundary3, OPP3, PullSource, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force,
+    collide_cell3, equilibrium3, planar_face_cells,
 };
 
 mod multiple;
@@ -83,6 +83,25 @@ pub struct PartialSaturationForcing3 {
     pub midpoint_work: f64,
 }
 
+/// Angular transport caused by periodic coordinate identification, in lattice
+/// units. A population crossing a seam retains its mass and linear momentum,
+/// but its stored position jumps by a domain length. Thus angular momentum
+/// about a fixed origin is not invariant in the represented periodic cell.
+/// This is a boundary transport term, not a torque on an immersed body.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct PeriodicMomentumTransport3 {
+    /// Actual change in fluid-population angular momentum from coordinate
+    /// wraps: `sum((x_destination - x_source - c_q) cross (f_post * c_q))`.
+    /// Add this to the force and wall terms when closing the full fluid/body
+    /// balance. It is independent of the chosen fixed moment origin.
+    pub angular_momentum_change: [f64; 3],
+    /// Number of fluid-population face crossings. A diagonal that crosses two
+    /// periodic faces contributes once to each face's coordinate jump. Wall-
+    /// owned links, including periodic/wall corners and solid neighbors across
+    /// a periodic seam, are excluded.
+    pub face_crossings: usize,
+}
+
 impl PartialSaturationForcing3 {
     fn add(
         &mut self,
@@ -131,8 +150,10 @@ pub struct PartialSaturationBodyExchange3 {
     pub hydrodynamic: PartialSaturationExchange3,
     /// Exchange with all stationary voxel and exterior wall links, measured
     /// from the actual blended populations about the same requested origin.
-    /// Periodic transport angular flux is not included in this wall receipt.
+    /// Periodic coordinate transport is owned separately by `periodic`.
     pub walls: WallMomentumExchange3,
+    /// Actual periodic angular transport, counted once over the whole fluid.
+    pub periodic: PeriodicMomentumTransport3,
     /// External fluid forcing, counted once over all retained fluid cells.
     pub forcing: PartialSaturationForcing3,
     /// Translational velocity used by the fluid collision.
@@ -274,6 +295,63 @@ fn physical_populations(
 }
 
 impl BoundaryGrid3 {
+    /// Measure the same post-collision populations that will be pulled through
+    /// the periodic seams. Work is O(periodic boundary area), no volume scan or
+    /// buffer is added, and cancellation is bounded by 32 boundary cells.
+    ///
+    /// Each crossed face contributes only its own coordinate jump. The free
+    /// displacement c_q has zero cross product with its momentum, so this also
+    /// handles diagonal double wraps without choosing an arbitrary seam owner.
+    fn periodic_momentum_transport(&self, gate: &CancelGate) -> Result<PeriodicMomentumTransport3> {
+        let dims = self.dimensions();
+        let mut report = PeriodicMomentumTransport3::default();
+        for face in Face3::ALL {
+            if self.boundaries.face(face) != FaceBoundary3::Periodic {
+                continue;
+            }
+            let axis = face.axis();
+            let sign = face.normal()[axis];
+            let mut jump = [0.0; 3];
+            jump[axis] = f64::from(sign) * dims[axis] as f64;
+            for (index, cell) in planar_face_cells(dims, face).enumerate() {
+                if index.is_multiple_of(32) {
+                    checkpoint(gate)?;
+                }
+                if self.is_solid(cell[0], cell[1], cell[2]) {
+                    continue;
+                }
+                for (q, (x, y, z)) in E3.into_iter().enumerate().skip(1) {
+                    let direction = [x, y, z];
+                    if direction[axis] != -sign {
+                        continue;
+                    }
+                    let PullSource::Fluid { tile, lane } =
+                        self.classify_pull(&self.solid, cell[0], cell[1], cell[2], q)
+                    else {
+                        continue;
+                    };
+                    let population = self.post[q][tile].0[lane];
+                    let angular = cross(jump, direction.map(|c| f64::from(c) * population));
+                    for (total, contribution) in
+                        report.angular_momentum_change.iter_mut().zip(angular)
+                    {
+                        *total += contribution;
+                    }
+                    report.face_crossings += 1;
+                }
+            }
+        }
+        checkpoint(gate)?;
+        if !report
+            .angular_momentum_change
+            .into_iter()
+            .all(f64::is_finite)
+        {
+            return Err(invalid("periodic angular transport overflowed"));
+        }
+        Ok(report)
+    }
+
     /// Couple one six-DOF rigid velocity to the native D3Q19 fluid, then stream.
     ///
     /// `solid_fractions[(z*ny+y)*nx+x]` lies in `[0,1]`; positive fractions
@@ -562,6 +640,7 @@ impl BoundaryGrid3 {
             .checked()
             .map_err(|_| invalid("wall exchange overflowed"))?;
         let forcing = forcing.checked()?;
+        let periodic = self.periodic_momentum_transport(gate)?;
         let dv = core::array::from_fn(|i| after[i] - body.velocity[i]);
         let dw = core::array::from_fn(|i| omega_after[i] - body.angular_velocity[i]);
         let dp = dv.map(|v| body.mass * v);
@@ -650,6 +729,7 @@ impl BoundaryGrid3 {
         let receipt = PartialSaturationBodyExchange3 {
             hydrodynamic: exchange,
             walls,
+            periodic,
             forcing,
             velocity_midpoint: midpoint,
             angular_velocity_midpoint: omega_mid,
