@@ -4,8 +4,10 @@
 //! evolves momentum, fill and its conservative mass ledger. The complete source
 //! point supplies rho, mu (or nu), and optionally uniform sigma; no caloric
 //! property is fabricated. Geometry, timestep, gravity and the numerical wall
-//! ghost are explicit scenario data. No thermal, moving-wall, gas-flow, wetting
-//! calibration or conservative surface-energy evolution is introduced here.
+//! ghost are explicit scenario data. The optional motion entry prescribes a
+//! tangentially moving, completely flooded planar wall with reciprocal exchange.
+//! No thermal, moving geometry, gas flow, wetting calibration or conservative
+//! surface-energy evolution is introduced here.
 //! The `enthalpy` owner adds thermal evolution. The `rheology` owner resolves
 //! physical shear rate at fixed temperature, retaining sourced capillarity;
 //! `enthalpy::rheology` instead evolves temperature and shear together.
@@ -23,6 +25,8 @@ use crate::{CS2, ScalingPlan};
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
 mod pressure;
+mod motion;
+pub use motion::MaterialPlanarWallMotionReport3;
 /// Geometric, moment-preserving ingress of an already-liquid tetrahedral body.
 pub mod transfer;
 /// Conservative moving-liquid enthalpy and source-temperature viscosity.

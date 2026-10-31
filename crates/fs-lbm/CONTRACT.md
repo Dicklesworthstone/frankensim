@@ -3908,6 +3908,40 @@ these formulas (not Rust execution) gave returned/residual pressure L2 ratios
 it does not meet or establish the plan's -40 dB interface target. Native and
 multidimensional qualification remain necessary before stronger claims.
 
+### Moving a completely flooded planar wall beneath a free surface
+
+The native `step_with_planar_wall_motion` and frozen-material
+`step_with_planar_wall_motion_si` advance the SAME VOF collision, streaming,
+capillary and conversion owner with a prescribed tangential halfway-wall
+velocity. Reflected populations and their outgoing partners supply reciprocal
+liquid/wall impulse and velocity-dot-impulse mechanical work. Every selected
+plane cell must remain fully liquid before and after the step; gas, partial
+wetting, a moving contact line, or normal wall motion refuses. The plane has
+zero swept normal volume, so this entry does not claim the cover/vacate or
+conservative moving-geometry remap required by the broader MR69 bead.
+
+Admission checks absolute and wall-relative physical Mach, positive wet
+populations, the explicit relative mass-defect tolerance, and cancellation on
+one private native candidate. The material wrapper additionally retains its
+original source, dx/dt units and scenario speed bound, completing SI output
+admission before installing that candidate. Velocity rebinds are checked on
+every call. Zero prescribed motion leaves stationary population bits unchanged.
+
+Raw momentum exchange retains the numerical density-one pressure for its
+momentum account. Reports separately identify this reference impulse and the
+pressure-perturbation force. An absolute SI wall load requires the existing
+explicit pressure reference; the lattice pressure datum is never presented as
+an absolute physical pressure. Tangential work is independent of that datum.
+The actuator is prescribed, with no finite-wall inertia, thermal deposition,
+kinetic-energy closure, moving-contact calibration or curved moving-body claim.
+
+Five native regressions specify analytical six-plane shear impulse/work, true
+VOF motion, zero-motion bit parity, mechanical power reversal, inertial/relative
+speed admission and transactional early/late refusal. Three sourced-material
+regressions specify SI/native parity, pressure-reference shifts, viscosity-only
+changes in actual flow/reaction, and late scenario-bound rollback. Native test
+execution remains a separate gate; authored tests are not a passing claim.
+
 ## Source-resolved rheology in moving liquid (MR23/MR27)
 
 The explicit `free_surface3_from_cells_with_rheology` ingress carries shared

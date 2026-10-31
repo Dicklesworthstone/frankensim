@@ -30,6 +30,8 @@ use fs_qty::{Density, Dims, QuantitySpec};
 mod adhesion_wetting;
 #[path = "material_free_surface3/wetting.rs"]
 mod dynamic_wetting;
+#[path = "material_free_surface3/motion.rs"]
+mod moving_wall;
 
 fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()

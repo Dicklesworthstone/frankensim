@@ -34,7 +34,9 @@
 //! require a resolved single interface; near walls and unresolved topology
 //! the smoothed-fill closure remains. The imposed equilibrium-angle
 //! closure is limited to one planar domain wall; it supplies no hysteresis,
-//! thermocapillary stress, moving substrate or surface-energy balance.
+//! thermocapillary stress, moving contact-line geometry or surface-energy balance.
+//! Prescribed tangential motion of a completely flooded domain wall is a
+//! separate optional entry; its geometric plane and liquid cell coverage stay fixed.
 
 use std::collections::BTreeMap;
 
@@ -49,6 +51,8 @@ mod pressure;
 mod curvature;
 mod forcing;
 mod geometry;
+mod motion;
+pub use motion::PlanarWallMotionReport3;
 pub(crate) mod thermocapillary;
 pub(crate) mod transport;
 pub(crate) mod wetting;
@@ -193,6 +197,13 @@ pub enum FreeSurfaceError3 {
         /// Failed pressure admission condition.
         reason: &'static str,
     },
+    /// Prescribed wall motion or its accepted fluid endpoint is unsupported.
+    InvalidWallMotion {
+        /// Offending cell for a local geometry, population or velocity refusal.
+        coordinates: Option<[usize; 3]>,
+        /// Failed physical or numerical admission condition.
+        reason: &'static str,
+    },
     /// A bounded companion transport could not retain the native mass routes.
     Transport(&'static str),
     /// Cancellation was observed before physical state publication.
@@ -228,6 +239,9 @@ impl core::fmt::Display for FreeSurfaceError3 {
                 coordinates,
                 reason,
             } => write!(f, "free-surface gas pressure at {coordinates:?} refused: {reason}"),
+            FreeSurfaceError3::InvalidWallMotion { coordinates, reason } => {
+                write!(f, "free-surface wall motion at {coordinates:?} refused: {reason}")
+            }
             FreeSurfaceError3::Transport(reason) => {
                 write!(f, "free-surface companion transport refused: {reason}")
             }
@@ -992,9 +1006,20 @@ impl FreeSurface3 {
     fn step_inner(
         &mut self,
         gate: &CancelGate,
+        transport: Option<&mut MassTransport3>,
+        local_tau: Option<&BTreeMap<(u64, usize), f64>>,
+        gas_pressure: Option<&pressure::GasPressure3<'_>>,
+    ) -> Result<(), FreeSurfaceError3> {
+        self.step_inner_with_wall(gate, transport, local_tau, gas_pressure, None)
+    }
+
+    fn step_inner_with_wall(
+        &mut self,
+        gate: &CancelGate,
         mut transport: Option<&mut MassTransport3>,
         local_tau: Option<&BTreeMap<(u64, usize), f64>>,
         gas_pressure: Option<&pressure::GasPressure3<'_>>,
+        mut moving_wall: Option<&mut motion::PlanarWallStep3>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         if let Some(field) = &self.local_sigma {
@@ -1143,7 +1168,13 @@ impl FreeSurface3 {
                     let sy = cy - i64::from(E3[q].1);
                     let sz = cz - i64::from(E3[q].2);
                     *out = match self.grid.resolve_source(sx, sy, sz) {
-                        None => post[&key][lane][OPP3[q]],
+                        None => {
+                            let outgoing = post[&key][lane][OPP3[q]];
+                            match moving_wall.as_deref_mut() {
+                                Some(wall) => wall.reflect([sx, sy, sz], q, rho_pre, outgoing)?,
+                                None => outgoing,
+                            }
+                        },
                         Some((src_slot, src_lane)) => {
                             let src_key = self.grid.active_keys()[src_slot];
                             match self.tiles[&src_key].cells[src_lane] {
