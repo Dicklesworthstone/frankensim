@@ -1,13 +1,15 @@
-//! Source-bound, quasisteady capillary transport through a circular tube.
+//! Source-owned capillary transport through a circular tube.
 //!
 //! The original liquid and ordered substrate/liquid interface own density,
 //! viscosity, surface tension and equilibrium wetting. This adapter supplies
-//! no material defaults and evolves only the meniscus position. Coefficients
-//! remain frozen at the complete admitted source point; neither heat nor a
+//! no material defaults. Optional inertance adds physical column velocity;
+//! coefficients stay frozen at the complete admitted source point. Neither heat nor a
 //! dynamic contact-line law is inferred from an equilibrium angle.
 
 /// Sourced rate-dependent contact-line friction and advancing/receding pinning.
 pub mod contact_line;
+/// Original-material inertial motion and adaptive complete-interval integration.
+pub mod inertia;
 /// Coupled filling, gas compression and heating through original material owners.
 pub mod sealed;
 

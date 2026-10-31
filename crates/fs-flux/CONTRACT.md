@@ -2035,3 +2035,36 @@ a small mechanical residual alone is not a trajectory-error estimate.
 Focused executable checks cover independent startup, drainage and damped-rise
 limits, both motion directions, hysteretic stopping, all energy channels,
 timed downstream pressure and refusal/cancellation boundaries.
+
+## Source-owned inertial capillary intervals
+
+`MaterialCapillaryTube::with_inertia` and `with_inertia_two_fluid` retain
+the original liquid and ordered wetting owners. The latter also borrows the
+original displaced-fluid owner and evaluates its admitted transport once.
+Both phases' densities determine moving mass; their viscosities determine
+separate drag. Explicit added lengths, four directional reservoir coefficients
+and the operating speed limit are declared in `CapillaryInertiaParameters`.
+No material name, guessed entrance length or hidden regularizer supplies them.
+
+`SourceInertialCapillary::step_candidate` consumes a complete interval
+through bounded stopping events. It restarts at exact rest, allowing pinning
+or reversal without reflecting velocity. `advance_candidate` adds
+independent length, velocity and stopping-time error scales around the existing
+PI controller. Early-stop trials preserve a post-stop remainder, avoiding
+repeated shrinking toward an earlier coarse stopping estimate. The full
+coarse/fine discrepancy is used across branch changes; smooth intervals use
+the midpoint factor of three. Only accepted conservative half steps contribute.
+
+Complete-interval mass, pressure work, wall energy and gravitational terms
+are reconstructed from actual endpoints; kinetic change uses a stable product
+identity. Accepted bulk, line, pinning and reservoir losses are summed with
+compensation. Source restrictions, cancellation, event/attempt budgets,
+time stagnation and unsupported tube ends refuse the candidate atomically.
+Zero duration and a shorter final remainder preserve the exact requested clock.
+Estimates are local temporal controls, not certified global error bounds.
+
+Regressions exercise added-mass dry startup, directional two-fluid exchange,
+coast/stop/pin behavior, purely viscous asymptotic coasting and refusal boundaries.
+The numerical owner/driver paths have executed with explicit numeric source-view
+doubles; native original-card integration tests are supplied for the normal
+workspace build and must not be confused with that narrower execution evidence.

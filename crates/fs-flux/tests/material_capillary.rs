@@ -553,3 +553,6 @@ mod sealed;
 
 #[path = "material_capillary/contact_line.rs"]
 mod contact_line;
+
+#[path = "material_capillary/inertia.rs"]
+mod inertia;
