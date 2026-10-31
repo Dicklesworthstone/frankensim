@@ -29,9 +29,29 @@ existing scaled `fs-modal` owner; cancellation reaches its native complex QR
 through `quadratic_eigenvalues_with_cancel`, with 120 sweeps per active window.
 `campbell_samples` returns complete pole sets at 1–256 caller-supplied speeds
 for those fixed coefficients. All complex poles, including active/unstable
-ones, remain visible. These are numerical samples: no eigenvectors, persistent
-mode identities, certified critical-speed brackets, stability threshold or
-forced-response peak is inferred. Speed-dependent bearing coefficients require
+ones, remain visible. `spectral_abscissa` retains the maximum computed pole
+real part without an engineering deadband. `stability_transition_brackets`
+uses only sign changes of that complete spectral abscissa and bounded bisection;
+it never follows a sorted pole index, so active cross-coupled bearings can expose
+a numerical onset interval even when QR order changes. Tangential touches with
+no sampled sign change are intentionally not claimed.
+
+`synchronous_critical_speed_brackets` likewise avoids manufactured mode
+identity. At each nonnegative shaft speed it counts positive-frequency poles
+below the declared synchronous line `omega_exc = order * Omega`. A change in
+that integer count brackets one or more Campbell crossings. The routine bisects
+the first count change and continues through the remainder of the supplied
+interval, retaining unresolved simultaneous/nearby crossings as
+`crossing_count > 1`. A changed positive-frequency pole inventory during
+refinement refuses rather than reclassifying an overdamped/real-pole event as a
+critical speed. This count invariant is insensitive to ordinary branch swaps,
+but an even number of crossings can cancel between coarse sample endpoints;
+the caller must resolve the speed grid.
+
+These are deterministic **numerical brackets**, not certified eigenvalue or
+coefficient-uncertainty enclosures. There are still no eigenvectors or persistent
+physical mode identities, and no forced-response peak, flexible-shaft continuum
+or Floquet certificate is inferred. Speed-dependent bearing coefficients require
 a newly supplied physical operating point, not just another sample speed.
 
 `harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
@@ -53,10 +73,14 @@ Signed-speed unbalance uses `A^T F`, and recovered bearing work keeps its sign.
 This is a rigid, constant-speed linearization, without flexible-shaft,
 spin-acceleration or asymmetric-rotor Floquet claims.
 
-Focused regressions use independent Jeffcott amplitude/phase and critical-speed
-references, gyroscopic circular-mode splitting, dense coordinate congruence,
-cross-coupled/active work, original force residuals and cancellation/refusal.
-They do not close the broader certified Campbell/Floquet/whirl bead.
+Focused regressions use independent Jeffcott amplitude/phase, gyroscopic circular
+mode splitting, dense coordinate congruence, cross-coupled/active work and
+original force residuals. A manufactured nonsymmetric rotor has an exact
+sign-changing marginal speed at 0.5 rad/s; a closed-form isotropic gyroscopic
+rotor has two exact 1x and two exact 2x synchronous crossings. Those oracles
+check bracket width, count direction, gyroscopic-sign invariance, bounded work,
+cancellation and malformed-grid refusal without assigning modal labels. They do
+not close the broader certified Campbell/Floquet/whirl bead.
 
 ## Spatial gravity on native rigid-body dynamics
 
