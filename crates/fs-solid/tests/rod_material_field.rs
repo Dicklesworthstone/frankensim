@@ -2,14 +2,20 @@
 //! All property values below are synthetic, not measured material qualifications.
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
-use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
-use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection};
-use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
-    ScalarPropertyRequirement, resolve_material_state_point};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
+use fs_material::section::{
+    ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection,
+};
+use fs_material::state_point::{
+    MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+    resolve_material_state_point,
+};
 use fs_qty::{Density, Pressure};
-use fs_solid::rod::{Rod, RodSection, TipLoad};
 use fs_solid::rod::material_field::{SpatialMaterialRod, SpatialRodError};
+use fs_solid::rod::{Rod, RodSection, TipLoad, WorldTipLoad};
 
 #[path = "rod_material_field/reference.rs"]
 mod reference;
@@ -136,4 +142,125 @@ fn invalid_inputs_and_cancellation_preserve_the_last_accepted_pose() {
     assert_eq!(rod.positions_m(), before);
     assert_eq!(rod.energy_j().unwrap(), energy);
     assert_eq!(rod.sections(), &[source.clone(), source]);
+}
+
+#[test]
+fn world_tip_couple_closes_actual_force_and_moment_balance_after_finite_bending() {
+    use fs_ga::Vec3;
+    let gate = CancelGate::new();
+    let mut rod =
+        SpatialMaterialRod::try_straight(1.2, vec![section(1.0), section(0.5), section(2.0)])
+            .unwrap();
+    let mut follower = rod.clone();
+    let load = WorldTipLoad {
+        force: [0.2, 0.1, -0.1],
+        moment: [0.7, 1.2, -0.8],
+    };
+    rod.solve_static_world(&load, 8, 1e-9, &gate).unwrap();
+    let root = rod.root_support_reaction(&gate).unwrap();
+    let force = Vec3::new(load.force[0], load.force[1], load.force[2]);
+    let moment = Vec3::new(load.moment[0], load.moment[1], load.moment[2]);
+    let tip = rod.positions_m()[3];
+    let arm = Vec3::new(tip[0], tip[1], tip[2]);
+    let total = arm.cross(force) + moment;
+    for c in 0..3 {
+        assert!((root.force_n[c].unwrap() + load.force[c]).abs() < 2e-8);
+    }
+    for (reaction, applied) in root
+        .moment_body_nm
+        .unwrap()
+        .into_iter()
+        .zip([total.x, total.y, total.z])
+    {
+        assert!((reaction + applied).abs() < 2e-8);
+    }
+    assert!(
+        rod.support_reactions_world(&load, &gate)
+            .unwrap()
+            .free_residual_norm
+            < 1e-9
+    );
+    follower
+        .solve_static(
+            &TipLoad {
+                force: load.force,
+                moment: load.moment,
+            },
+            8,
+            1e-9,
+            &gate,
+        )
+        .unwrap();
+    let delta: f64 = follower.positions_m()[3]
+        .iter()
+        .zip(&tip)
+        .map(|(a, b)| (a - b).powi(2))
+        .sum();
+    assert!(
+        delta.sqrt() > 1e-3,
+        "a world-held torque must not become a follower couple"
+    );
+
+    let before = rod.positions_m().to_vec();
+    let frames = rod.frames().to_vec();
+    gate.request();
+    assert_eq!(
+        rod.solve_static_world(&load, 1, 1e-9, &gate),
+        Err(SpatialRodError::Cancelled)
+    );
+    assert_eq!(
+        rod.support_reactions_world(&load, &gate),
+        Err(SpatialRodError::Cancelled)
+    );
+    assert_eq!(rod.positions_m(), before);
+    assert_eq!(rod.frames(), frames);
+}
+
+#[test]
+fn clamped_tip_reaction_uses_the_actual_support_frame_for_a_world_couple() {
+    use fs_ga::{So3, So3Tangent, Vec3};
+    use fs_solid::rod::material_field::supports::RodSupport;
+    let gate = CancelGate::new();
+    let frame = So3::exp(So3Tangent::new(Vec3::new(0.2, -0.1, 0.3))).unwrap();
+    let mut rod = SpatialMaterialRod::try_straight(1.0, vec![section(1.0)])
+        .unwrap()
+        .with_supports(
+            &[RodSupport {
+                node: 1,
+                position_m: [Some(1.0), Some(0.0), Some(0.0)],
+                frame: Some(frame),
+            }],
+            &gate,
+        )
+        .unwrap();
+    let load = WorldTipLoad {
+        force: [0.0; 3],
+        moment: [0.5, -0.4, 0.6],
+    };
+    assert_eq!(
+        rod.solve_static_world(&load, 1, 1e-9, &gate).unwrap(),
+        vec![0.0]
+    );
+    let actual = rod.support_reactions_world(&load, &gate).unwrap();
+    let local = frame.inverse().rotate(Vec3::new(0.5, -0.4, 0.6)).unwrap();
+    let expected = rod
+        .support_reactions(
+            &TipLoad {
+                force: [0.0; 3],
+                moment: [local.x, local.y, local.z],
+            },
+            &gate,
+        )
+        .unwrap();
+    assert_eq!(actual, expected);
+    assert!(
+        rod.support_reactions_world(
+            &WorldTipLoad {
+                moment: [f64::INFINITY, 0.0, 0.0],
+                ..load
+            },
+            &gate
+        )
+        .is_err()
+    );
 }

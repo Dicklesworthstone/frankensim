@@ -2,16 +2,21 @@
 //! Synthetic coefficients exercise wiring and equations, not material calibration.
 use fs_evidence::ValidityDomain;
 use fs_exec::CancelGate;
-use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId,
-    PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel};
-use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection};
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim, PropertyKey,
+    PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
 use fs_material::section::thermal::ConcentricThermoelasticSection;
-use fs_material::state_point::{INVERSE_TEMPERATURE_DIMS, MaterialPropertySelection,
-    ScalarAdmissibility, ScalarPropertyRequirement, integrate_isotropic_thermal_expansion,
-    resolve_material_state_point};
+use fs_material::section::{
+    ConcentricElasticSection, ConcentricMaterialLayer, ConcentricShearSection,
+};
+use fs_material::state_point::{
+    INVERSE_TEMPERATURE_DIMS, MaterialPropertySelection, ScalarAdmissibility,
+    ScalarPropertyRequirement, integrate_isotropic_thermal_expansion, resolve_material_state_point,
+};
 use fs_qty::{Density, Pressure, Temperature};
-use fs_solid::rod::TipLoad;
 use fs_solid::rod::material_field::{SpatialMaterialRod, SpatialRodError};
+use fs_solid::rod::{TipLoad, WorldTipLoad};
 
 fn at(temperature: f64, expansion_scales: &[f64]) -> (ConcentricShearSection, ConcentricThermoelasticSection) {
     let point = QueryPoint::new().with("T", temperature).unwrap();
@@ -84,6 +89,47 @@ fn local_heating_changes_expansion_and_compliance_in_the_same_solve() {
     near(heated.positions_m()[2][0] - 1.0, extension, 3e-5);
     assert_eq!(plain.positions_m()[2], [1.0, 0.0, 0.0]);
     assert!(plain.thermal_sections().is_none());
+}
+
+#[test]
+fn world_held_torsion_uses_each_heated_segments_actual_shear_modulus() {
+    let gate = CancelGate::new();
+    let (sa, ta) = at(350.0, &[1.0]);
+    let (sb, tb) = at(400.0, &[1.0]);
+    let sources = vec![sa, sb];
+    let mut rod = SpatialMaterialRod::try_straight(1.0, sources.clone())
+        .unwrap()
+        .with_thermal_sections(vec![ta, tb], 0.02, &gate)
+        .unwrap();
+    let load = WorldTipLoad {
+        force: [0.0; 3],
+        moment: [0.03, 0.0, 0.0],
+    };
+    rod.solve_static_world(&load, 1, 1e-9, &gate).unwrap();
+    let polar = core::f64::consts::PI * 0.05_f64.powi(4) / 2.0;
+    let mut expected_twist = 0.0;
+    for (i, shear) in [3e5, 2e5].into_iter().enumerate() {
+        let twist_rate = load.moment[0] / (shear * polar);
+        near(rod.segment_strains(i).unwrap().1[0], twist_rate, 2e-7);
+        near(
+            rod.segment_resultants(i).unwrap().1[0],
+            load.moment[0],
+            2e-7,
+        );
+        expected_twist += 0.5 * twist_rate;
+    }
+    near(
+        rod.frames()[2].log().unwrap().angular.x,
+        expected_twist,
+        2e-7,
+    );
+    assert_eq!(rod.sections(), sources);
+    assert!(
+        rod.support_reactions_world(&load, &gate)
+            .unwrap()
+            .free_residual_norm
+            < 1e-9
+    );
 }
 
 #[test]

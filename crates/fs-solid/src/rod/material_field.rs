@@ -29,7 +29,7 @@ pub mod tension;
 pub mod motion;
 mod derivatives;
 
-use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad};
+use super::{MAX_MATERIAL_ROD_SEGMENTS, Rod, RodSection, TipLoad, TipLoading, WorldTipLoad};
 use crate::SolidError;
 
 /// Original solid/material failure, input refusal, or cancellation.
@@ -265,11 +265,43 @@ impl SpatialMaterialRod {
     /// Refuses invalid loads/budgets, all source/solver failures and cancellation.
     /// Every failure, including a late load-step failure, preserves the old pose.
     pub fn solve_static(
-        &mut self, load: &TipLoad, steps: usize, tolerance: f64, gate: &CancelGate,
+        &mut self,
+        load: &TipLoad,
+        steps: usize,
+        tolerance: f64,
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, SpatialRodError> {
+        self.solve_static_loading(load.into(), steps, tolerance, gate)
+    }
+
+    /// Equilibrate the original spatial/thermal material rod under a world-held
+    /// tip force and couple. Existing supports, intrinsic shape, gravity and
+    /// tensile members compose in the same residual and consistent tangent.
+    /// Only a complete accepted pose replaces the original state.
+    ///
+    /// # Errors
+    /// Refuses invalid loads/budgets, source/solver failures and cancellation,
+    /// with the same atomic state boundary as [`Self::solve_static`].
+    pub fn solve_static_world(
+        &mut self,
+        load: &WorldTipLoad,
+        steps: usize,
+        tolerance: f64,
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, SpatialRodError> {
+        self.solve_static_loading(load.into(), steps, tolerance, gate)
+    }
+
+    fn solve_static_loading(
+        &mut self,
+        load: TipLoading,
+        steps: usize,
+        tolerance: f64,
+        gate: &CancelGate,
     ) -> Result<Vec<f64>, SpatialRodError> {
         checkpoint(gate)?;
         if steps == 0 || steps > 256 || !tolerance.is_finite() || tolerance <= 0.0
-            || !load.force.iter().chain(&load.moment).all(|v| v.is_finite())
+            || !load.is_finite()
         {
             return Err(SpatialRodError::Invalid("finite loads, positive tolerance and 1..=256 load steps are required"));
         }

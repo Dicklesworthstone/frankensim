@@ -50,13 +50,93 @@ pub struct Rod {
     pub section: RodSection,
 }
 
-/// Dead end-loading at the rod tip.
+/// World-held force and body-held follower moment at the rod tip.
+/// Use [`WorldTipLoad`] when the applied couple stays fixed in laboratory axes.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct TipLoad {
     /// Dead force on the last node (world frame).
     pub force: [f64; 3],
-    /// Dead moment on the last node (body frame of the tip).
+    /// Follower moment on the last node (body frame of the tip), in N m.
     pub moment: [f64; 3],
+}
+
+/// Force and free couple held fixed in WORLD axes at the moving rod tip.
+///
+/// The moment is about the tip, not the world origin. Every Newton residual
+/// and support-reaction query evaluates its actual body components `R_tip^T M`.
+/// A constant spatial couple is generally nonconservative on SO(3); no scalar
+/// `-M dot Log(R)` load potential or load-history work is inferred.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WorldTipLoad {
+    /// Force on the last node, in newtons and world coordinates.
+    pub force: [f64; 3],
+    /// Free couple on the last node, in newton metres and world coordinates.
+    pub moment: [f64; 3],
+}
+
+#[derive(Clone, Copy)]
+enum TipLoading {
+    Body(TipLoad),
+    World(WorldTipLoad),
+}
+
+impl From<&TipLoad> for TipLoading {
+    fn from(load: &TipLoad) -> Self {
+        Self::Body(*load)
+    }
+}
+
+impl From<&WorldTipLoad> for TipLoading {
+    fn from(load: &WorldTipLoad) -> Self {
+        Self::World(*load)
+    }
+}
+
+impl TipLoading {
+    fn force(self) -> [f64; 3] {
+        match self {
+            Self::Body(load) => load.force,
+            Self::World(load) => load.force,
+        }
+    }
+
+    fn moment(self) -> [f64; 3] {
+        match self {
+            Self::Body(load) => load.moment,
+            Self::World(load) => load.moment,
+        }
+    }
+
+    fn is_finite(self) -> bool {
+        self.force()
+            .iter()
+            .chain(&self.moment())
+            .all(|value| value.is_finite())
+    }
+
+    fn body_moment(self, frame: So3) -> Result<[f64; 3], SolidError> {
+        let moment = self.moment();
+        match self {
+            Self::Body(_) => Ok(moment),
+            Self::World(_) => {
+                let body = frame
+                    .inverse()
+                    .rotate(Vec3::new(moment[0], moment[1], moment[2]))
+                    .map_err(group_error)?;
+                Ok([body.x, body.y, body.z])
+            }
+        }
+    }
+
+    // For a body/right update R exp(delta), d(R^T M) = (R^T M) cross delta.
+    // The external load is SUBTRACTED from the residual, hence -hat(R^T M).
+    fn residual_tangent(self, frame: So3, factor: f64) -> Result<[[f64; 3]; 3], SolidError> {
+        if matches!(self, Self::Body(_)) {
+            return Ok([[0.0; 3]; 3]);
+        }
+        let [x, y, z] = self.body_moment(frame)?.map(|value| factor * value);
+        Ok([[0.0, z, -y], [-z, 0.0, x], [y, -x, 0.0]])
+    }
 }
 
 fn group_error(error: GaError) -> SolidError {
@@ -120,6 +200,15 @@ impl Rod {
         6 * (self.positions.len() - 1)
     }
 
+    fn tip_frame(&self) -> Result<So3, SolidError> {
+        if self.positions.len() < 2 || self.frames.len() != self.positions.len() {
+            return Err(SolidError::InvalidInput {
+                what: "rod tip loading requires matching positions and frames for at least two nodes".into(),
+            });
+        }
+        Ok(self.frames[self.positions.len() - 1])
+    }
+
     fn apply_increment(&mut self, delta: &[f64], scale: f64) -> Result<(), SolidError> {
         for node in 1..self.positions.len() {
             let k = 6 * (node - 1);
@@ -141,7 +230,9 @@ impl Rod {
     /// Body/right residual with exact tip-load subtraction. Native owners use
     /// analytical assembly; arbitrary callbacks retain energy differentiation.
     fn residual<E: From<SolidError>>(
-        &self, load: &TipLoad, factor: f64,
+        &self,
+        load: impl Into<TipLoading>,
+        factor: f64,
         energy: &impl RodEnergy<E>,
         checkpoint: &impl Fn() -> Result<(), E>,
         translation_scale_m: f64,
@@ -153,13 +244,19 @@ impl Rod {
 
     #[allow(clippy::too_many_arguments)]
     fn residual_on<E: From<SolidError>>(
-        &self, load: &TipLoad, factor: f64,
+        &self,
+        load: impl Into<TipLoading>,
+        factor: f64,
         energy: &impl RodEnergy<E>,
         checkpoint: &impl Fn() -> Result<(), E>,
         translation_scale_m: f64,
-        coordinates: &[usize], column: Option<usize>,
+        coordinates: &[usize],
+        column: Option<usize>,
     ) -> Result<Vec<f64>, E> {
         checkpoint()?;
+        let load = load.into();
+        let force = load.force();
+        let moment = load.body_moment(self.tip_frame()?)?;
         let mut r = vec![0.0; self.ndof()];
         if let Some(exact) = energy.linearize(self, &[], false, checkpoint)? {
             for &k in coordinates {
@@ -168,8 +265,8 @@ impl Rod {
                 if column.is_some_and(|c| !energy.coupled(node, c / 6 + 1)) { continue; }
                 let mut value = exact.gradient[node][component];
                 if node + 1 == self.positions.len() {
-                    value -= factor * if component < 3 { load.force[component] }
-                        else { load.moment[component - 3] };
+                    value -= factor * if component < 3 { force[component] }
+                        else { moment[component - 3] };
                 }
                 if !value.is_finite() {
                     return Err(SolidError::InvalidInput { what: "rod residual is not finite".into() }.into());
@@ -192,8 +289,8 @@ impl Rod {
             derivatives::perturb(&mut minus, node, component, -eps)?;
             let mut value = energy.derivative(self, &plus, &minus, node, component, eps)?;
             if node + 1 == self.positions.len() {
-                value -= factor * if component < 3 { load.force[component] }
-                    else { load.moment[component - 3] };
+                value -= factor * if component < 3 { force[component] }
+                    else { moment[component - 3] };
             }
             if !value.is_finite() {
                 return Err(SolidError::InvalidInput {
@@ -224,18 +321,47 @@ impl Rod {
         self.solve_static_with_energy(load, steps, tol, &UniformEnergy, &|| Ok(()), None, 1.0)
     }
 
+    /// Solve with a force and couple fixed in world coordinates.
+    /// The original Lie-group Newton owner includes the exact derivative of
+    /// the changing body-frame load. The root retains its original clamp.
+    ///
+    /// # Errors
+    /// Refuses nonfinite loads, invalid load-step/tolerance inputs, kinematic
+    /// errors or Newton failure. As with [`Self::solve_static`], raw rods may
+    /// retain accepted intermediate Newton states after a solver failure.
+    pub fn solve_static_world(
+        &mut self,
+        load: &WorldTipLoad,
+        steps: usize,
+        tol: f64,
+    ) -> Result<Vec<f64>, SolidError> {
+        self.solve_static_with_energy(load, steps, tol, &UniformEnergy, &|| Ok(()), None, 1.0)
+    }
+
     // Both uniform and spatial material paths use the SAME nodal update,
     // residual, tangent, load stepping and line search. Additional supports
     // project the same residual onto their free coordinates. No solver fork.
     #[allow(clippy::too_many_lines, clippy::too_many_arguments)] // one Newton/line-search owner
     fn solve_static_with_energy<E: From<SolidError>>(
-        &mut self, load: &TipLoad, steps: usize, tol: f64,
+        &mut self,
+        load: impl Into<TipLoading>,
+        steps: usize,
+        tol: f64,
         energy: &impl RodEnergy<E>,
         checkpoint: &impl Fn() -> Result<(), E>,
         free_dofs: Option<&[usize]>,
         translation_scale_m: f64,
     ) -> Result<Vec<f64>, E> {
         checkpoint()?;
+        let load = load.into();
+        if steps == 0 || steps > 256 || !tol.is_finite() || tol <= 0.0 || !load.is_finite() {
+            return Err(SolidError::InvalidInput {
+                what: "rod solve needs finite loads, positive tolerance and 1..=256 load steps"
+                    .into(),
+            }
+            .into());
+        }
+        self.tip_frame()?;
         let full_n = self.ndof();
         let free = match free_dofs {
             Some(dofs) => dofs.to_vec(),
@@ -289,7 +415,7 @@ impl Rod {
                 }
                 // Exact element assembly where the energy owner supplies it.
                 // Arbitrary callbacks keep the original complete FD fallback.
-                let kmat = if let Some(exact) = energy.linearize(self, &free, true, checkpoint)? {
+                let mut kmat = if let Some(exact) = energy.linearize(self, &free, true, checkpoint)? {
                     exact.tangent.ok_or_else(|| SolidError::InternalInvariant {
                         what: "rod analytical owner omitted a requested tangent".into(),
                     })?
@@ -323,6 +449,18 @@ impl Rod {
                     }
                     kmat
                 };
+                if matches!(load, TipLoading::World(_)) {
+                    let tip_rotation = full_n - 3;
+                    let tangent = load.residual_tangent(self.tip_frame()?, factor)?;
+                    for (row, &coordinate) in free.iter().enumerate() {
+                        if coordinate < tip_rotation { continue; }
+                        for (col, &direction) in free.iter().enumerate() {
+                            if direction >= tip_rotation {
+                                kmat[row * n + col] += tangent[coordinate - tip_rotation][direction - tip_rotation];
+                            }
+                        }
+                    }
+                }
                 checkpoint()?;
                 let f = fs_la::factor::lu(&kmat, n).map_err(|_| SolidError::SolveFailed {
                     iters: 0,
@@ -333,7 +471,7 @@ impl Rod {
                 let mut d = vec![0.0; full_n];
                 for (&k, &value) in free.iter().zip(&reduced) { d[k] = value; }
                 checkpoint()?;
-                // Backtracking on the residual norm (dead moments make
+                // Backtracking on the residual norm (applied couples make
                 // Π alone an incomplete merit function).
                 let mut alpha = 1.0f64;
                 let mut accepted = false;
@@ -499,15 +637,48 @@ impl MaterialRod {
         steps: usize,
         tolerance: f64,
     ) -> Result<Vec<f64>, SolidError> {
+        self.solve_static_loading(load.into(), steps, tolerance)
+    }
+
+    /// Solve the same source-bound rod under world-held force and couple.
+    /// The source section, original Newton owner and atomic publication of
+    /// [`Self::solve_static`] remain authoritative.
+    ///
+    /// # Errors
+    /// Refuses the same invalid inputs and solver/source failures as the
+    /// body-held-moment entry point, without changing the accepted geometry.
+    pub fn solve_static_world(
+        &mut self,
+        load: &WorldTipLoad,
+        steps: usize,
+        tolerance: f64,
+    ) -> Result<Vec<f64>, SolidError> {
+        self.solve_static_loading(load.into(), steps, tolerance)
+    }
+
+    fn solve_static_loading(
+        &mut self,
+        load: TipLoading,
+        steps: usize,
+        tolerance: f64,
+    ) -> Result<Vec<f64>, SolidError> {
         if steps == 0 || steps > 256 || !tolerance.is_finite() || tolerance <= 0.0
-            || !load.force.iter().chain(&load.moment).all(|value| value.is_finite())
+            || !load.is_finite()
         {
             return Err(SolidError::InvalidInput {
                 what: "material rod solve needs finite loads, positive tolerance and 1..=256 load steps".into(),
             });
         }
         let mut candidate = self.rod.clone();
-        let residuals = candidate.solve_static(load, steps, tolerance)?;
+        let residuals = candidate.solve_static_with_energy(
+            load,
+            steps,
+            tolerance,
+            &UniformEnergy,
+            &|| Ok(()),
+            None,
+            1.0,
+        )?;
         if !candidate.positions.iter().flatten().all(|value| value.is_finite())
             || !candidate.energy()?.is_finite()
         {
@@ -557,6 +728,188 @@ mod tests {
         ConcentricElasticSection::try_new(0.0, layers).unwrap().with_shear_modulus("shear_modulus", 0.8).unwrap()
     }
     fn near(a: f64, b: f64) { assert!((a-b).abs() < 2e-11 * a.abs().max(b.abs()), "{a} != {b}"); }
+
+    #[test]
+    fn world_tip_couple_tangent_matches_independent_body_rotation_differences() {
+        let frame = So3::exp(fs_ga::So3Tangent::new(Vec3::new(0.7, -0.3, 0.5))).unwrap();
+        let moment = Vec3::new(0.8, -0.5, 0.4);
+        let load = TipLoading::from(&WorldTipLoad {
+            force: [0.0; 3],
+            moment: [moment.x, moment.y, moment.z],
+        });
+        let factor = 0.6;
+        let tangent = load.residual_tangent(frame, factor).unwrap();
+        let eps = 2e-6;
+        for col in 0..3 {
+            let mut axis = [0.0; 3];
+            axis[col] = eps;
+            let direction = Vec3::new(axis[0], axis[1], axis[2]);
+            let plus = frame
+                .body_plus(fs_ga::So3Tangent::new(direction))
+                .unwrap()
+                .inverse()
+                .rotate(moment)
+                .unwrap();
+            let minus = frame
+                .body_plus(fs_ga::So3Tangent::new(direction.scale(-1.0)))
+                .unwrap()
+                .inverse()
+                .rotate(moment)
+                .unwrap();
+            let derivative = (plus - minus).scale(-factor / (2.0 * eps));
+            for (row, value) in [derivative.x, derivative.y, derivative.z]
+                .into_iter()
+                .enumerate()
+            {
+                assert!((tangent[row][col] - value).abs() < 2e-10);
+            }
+        }
+        let body = TipLoading::from(&TipLoad {
+            force: [0.0; 3],
+            moment: [0.8, -0.5, 0.4],
+        });
+        assert_eq!(body.residual_tangent(frame, factor).unwrap(), [[0.0; 3]; 3]);
+    }
+
+    #[test]
+    fn world_loaded_rod_equilibrium_is_covariant_under_lab_frame_changes() {
+        let section = RodSection {
+            ea: 200.0,
+            ga: 80.0,
+            gj: 0.7,
+            ei: 2.0,
+        };
+        let mut original = Rod::straight(1.0, 3, section);
+        let mut transformed = original.clone();
+        let rotation = So3::exp(fs_ga::So3Tangent::new(Vec3::new(0.4, -0.8, 0.3))).unwrap();
+        let shift = Vec3::new(0.8, -0.2, 0.6);
+        for (position, frame) in transformed
+            .positions
+            .iter_mut()
+            .zip(&mut transformed.frames)
+        {
+            let world = rotation
+                .rotate(Vec3::new(position[0], position[1], position[2]))
+                .unwrap()
+                + shift;
+            *position = [world.x, world.y, world.z];
+            *frame = rotation.compose(*frame).unwrap();
+        }
+        let load = WorldTipLoad {
+            force: [0.1, 0.08, -0.06],
+            moment: [0.3, 0.4, -0.2],
+        };
+        let rotate = |v: [f64; 3]| {
+            let out = rotation.rotate(Vec3::new(v[0], v[1], v[2])).unwrap();
+            [out.x, out.y, out.z]
+        };
+        original.solve_static_world(&load, 4, 1e-10).unwrap();
+        transformed
+            .solve_static_world(
+                &WorldTipLoad {
+                    force: rotate(load.force),
+                    moment: rotate(load.moment),
+                },
+                4,
+                1e-10,
+            )
+            .unwrap();
+        for node in 0..original.positions.len() {
+            let point = original.positions[node];
+            let expected = rotation
+                .rotate(Vec3::new(point[0], point[1], point[2]))
+                .unwrap()
+                + shift;
+            for (actual, want) in transformed.positions[node]
+                .into_iter()
+                .zip([expected.x, expected.y, expected.z])
+            {
+                assert!((actual - want).abs() < 1e-9);
+            }
+            let wanted = rotation.compose(original.frames[node]).unwrap();
+            let angle = wanted
+                .inverse()
+                .compose(transformed.frames[node])
+                .unwrap()
+                .log()
+                .unwrap();
+            assert!(angle.angular.norm() < 1e-9);
+        }
+        near(original.energy().unwrap(), transformed.energy().unwrap());
+    }
+
+    #[test]
+    fn world_held_torsion_uses_the_same_uniform_material_section() {
+        let source = section(2.0, None);
+        let mut rod = MaterialRod::try_straight(0.8, 2, source.clone()).unwrap();
+        let load = WorldTipLoad {
+            force: [0.0; 3],
+            moment: [0.1, 0.0, 0.0],
+        };
+        rod.solve_static_world(&load, 1, 1e-9).unwrap();
+        let want = load.moment[0] / source.torsional_stiffness_n_m2();
+        for segment in 0..2 {
+            assert!((rod.rod().strains(segment).unwrap().1[0] - want).abs() < 1e-10);
+        }
+        assert_eq!(rod.material_section(), &source);
+        let pose = rod.rod().positions.clone();
+        assert!(
+            rod.solve_static_world(
+                &WorldTipLoad {
+                    moment: [f64::NAN, 0.0, 0.0],
+                    ..load
+                },
+                1,
+                1e-9
+            )
+            .is_err()
+        );
+        assert_eq!(rod.rod().positions, pose);
+    }
+
+    #[test]
+    fn world_couple_uses_one_load_tangent_with_arbitrary_energy_fallback() {
+        let mut native = Rod::straight(
+            0.8,
+            1,
+            RodSection {
+                ea: 80.0,
+                ga: 40.0,
+                gj: 0.7,
+                ei: 1.5,
+            },
+        );
+        let mut fallback = native.clone();
+        let load = WorldTipLoad {
+            force: [0.1, 0.05, 0.0],
+            moment: [0.2, 0.35, -0.15],
+        };
+        native.solve_static_world(&load, 2, 1e-8).unwrap();
+        fallback
+            .solve_static_with_energy(&load, 2, 1e-8, &Rod::energy, &|| Ok(()), None, 1.0)
+            .unwrap();
+        for (a, b) in native.positions[1].iter().zip(&fallback.positions[1]) {
+            assert!((a - b).abs() < 2e-7);
+        }
+        let difference = native.frames[1]
+            .inverse()
+            .compose(fallback.frames[1])
+            .unwrap()
+            .log()
+            .unwrap();
+        assert!(difference.angular.norm() < 2e-7);
+    }
+
+    #[test]
+    fn tip_loads_refuse_malformed_raw_rod_frames_before_indexing() {
+        let mut rod = Rod::straight(1.0, 1,
+            RodSection { ea: 80.0, ga: 40.0, gj: 0.7, ei: 1.5 });
+        rod.frames.clear();
+        let before = rod.positions.clone();
+        assert!(rod.solve_static_world(&WorldTipLoad::default(), 1, 1e-8).is_err());
+        assert!(rod.solve_static(&TipLoad::default(), 1, 1e-8).is_err());
+        assert_eq!(rod.positions, before);
+    }
 
     #[test]
     fn shared_layer_integrals_drive_actual_axial_shear_torsion_and_bending_energy() {

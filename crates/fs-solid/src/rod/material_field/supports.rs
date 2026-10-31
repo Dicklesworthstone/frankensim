@@ -5,10 +5,10 @@
 //! fixes the complete SO(3) frame, not selected quaternion components. No
 //! penalty springs or stiffness-dependent artificial constraint coefficients.
 
+use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
+use crate::rod::{TipLoad, TipLoading, WorldTipLoad};
 use fs_exec::CancelGate;
 use fs_ga::So3;
-use super::{SpatialMaterialRod, SpatialRodError, checkpoint};
-use crate::rod::TipLoad;
 
 /// Additional ideal, fixed nodal support; geometry and loads remain independent
 /// of material-card authority. None leaves that coordinate unconstrained.
@@ -109,10 +109,34 @@ impl SpatialMaterialRod {
     /// # Errors
     /// Refuses nonfinite loads/residuals, source/kinematic failures and cancellation.
     pub fn support_reactions(
-        &self, load: &TipLoad, gate: &CancelGate,
+        &self,
+        load: &TipLoad,
+        gate: &CancelGate,
+    ) -> Result<RodSupportReactions, SpatialRodError> {
+        self.support_reactions_loading(load.into(), gate)
+    }
+
+    /// Recover support reactions for the exact world-held load used by
+    /// [`Self::solve_static_world`], expressed in each support's native frame.
+    ///
+    /// # Errors
+    /// Refuses invalid loads, source/kinematic errors and cancellation as in
+    /// [`Self::support_reactions`], without mutating the specimen.
+    pub fn support_reactions_world(
+        &self,
+        load: &WorldTipLoad,
+        gate: &CancelGate,
+    ) -> Result<RodSupportReactions, SpatialRodError> {
+        self.support_reactions_loading(load.into(), gate)
+    }
+
+    fn support_reactions_loading(
+        &self,
+        load: TipLoading,
+        gate: &CancelGate,
     ) -> Result<RodSupportReactions, SpatialRodError> {
         checkpoint(gate)?;
-        if !load.force.iter().chain(&load.moment).all(|x| x.is_finite()) {
+        if !load.is_finite() {
             return Err(SpatialRodError::Invalid("reaction loads must be finite"));
         }
         self.equilibrium_energy_for(&self.rod)?;
