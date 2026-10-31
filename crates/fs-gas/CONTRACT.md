@@ -315,8 +315,9 @@ This reference-state method is bounded to a frozen ideal mixture, constant
 acceleration and constant area. It does not claim balance for arbitrary
 nonisothermal atmospheres, self-gravity, multicomponent/reaction transport or
 an entropy/positivity theorem. Large disturbances may still refuse source
-admission. Coupling into a network or caller-owned end port refuses until that
-interface declares a common gravitational-potential and energy convention.
+admission. Frozen networks use the explicit shared-potential constructor described
+below. Arbitrary caller-owned end ports still refuse without their own declared
+gravitational-potential and energy convention.
 
 ## Isentropic hydrostatic atmospheres
 
@@ -347,8 +348,8 @@ gravity-force consistency converges with the reference quadrature and caloric
 solve. G1/G3/G4 cases check analytic constant-Cp polytropes, independent 70-digit
 variable-Cp conserved integrals, force balance, gas-plus-potential energy, formation
 reference invariance and cancellation/restart. The existing constant-area,
-constant-acceleration, frozen ideal-mixture, physical-boundary and network/port
-restrictions apply. This is a convectively neutral source isentrope, not arbitrary
+constant-acceleration, frozen ideal-mixture and physical-boundary restrictions
+apply; network coupling requires the shared-potential declaration below. This is a convectively neutral source isentrope, not arbitrary
 entropy stratification, an evolving chemistry/phase equilibrium, or a global
 entropy/positivity theorem.
 
@@ -2188,3 +2189,48 @@ the reacting network, including simultaneous plenum compression, and through
 the molecular D/A/D owner. They reconstruct species and physical-energy changes
 from the complete reports. These tests are authored but native execution remains
 subject to the repository's existing build-resource limits.
+
+## Gravity-aware finite-plenum networks
+
+`GasNetwork1d::new_with_gravity` couples the original isothermal and isentropic
+branches through one explicit `NetworkGravity` convention. Each branch retains
+its signed local acceleration and reference position, with
+`phi(x) = branch_offset - g*(x-x_ref)`. A branch without gravity has constant
+potential. Every rigid compact plenum has one declared specific potential;
+all incident physical faces must meet it. Admission subtracts branch/plenum
+datums before adding the local head, with tolerance based on that physical
+difference rather than a large arbitrary absolute zero. Missing declarations,
+mismatched heights, non-finite or unrepresentable storage refuse.
+
+Connected characteristic ports reconstruct the physical hydrostatic face from
+the original retained reference and current cell perturbation. Volume-averaged
+end-cell pressure is not substituted. Identical admitted resting traces reuse
+the original source evaluation. `Euler1d::hydrostatic_reference_face` exposes
+the retained face state for consistent compact-volume initialization. Each
+port still evaluates one source-owned characteristic flux transferred with
+opposite signs. Gravity work uses the original branch face-mass-flux identity;
+no extra junction work term is introduced.
+
+Gas reports retain branch kinetic/internal energy and compact internal energy
+and now explicitly account for branch gravity work. `NetworkGravityReport`
+separately balances gas plus midpoint branch/compact potential storage against
+external gas energy and `phi*mass` transport. All potential terms are accumulated
+after subtracting the first branch offset. The exposed reference and centered
+storage/transport preserve resolved work under a large common datum; the
+absolute-potential residual is `R_centered + phi_ref*R_mass`. Absolute source
+formation energy additionally uses the existing `e_ref*mass` convention. Direct
+subtraction of huge absolute storage levels is not used for the conditioned
+residual. No per-cell arrays are allocated during stepping.
+
+Six native regressions cover exact joined isothermal/isentropic rest with both
+reconstruction orders, transient exchange among three elevations with independent
+storage reconstruction, external potential-energy transport, bitwise flow and
+conditioned-balance invariance under a representable `2^40 J/kg` potential shift
+and `1e18` formation datum, physical height/refusal checks, and rollback at the
+final publication poll. All six new tests and all 80 native dynamics tests pass.
+
+A compact node cannot represent a hydrostatic column spanning different
+elevations. Original constant-area/constant-acceleration frozen-ideal-mixture
+assumptions remain. This adds neither arbitrary entropy stratification, gravity
+for reacting or diffusive networks, moving nodes, self-gravity, nor an
+entropy/positivity certificate.

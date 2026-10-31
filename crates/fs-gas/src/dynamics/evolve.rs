@@ -754,8 +754,14 @@ pub(super) fn operator(
     }
     let reconstruct = |i: usize, sign: f64| {
         if let Some(balance) = hydrostatic {
-            if states[i] == balance.cells[i].0 && slopes[i] == [0.0; 3] {
-                return Ok(balance.faces[i + usize::from(sign > 0.0)]);
+            if slopes[i] == [0.0; 3] {
+                return balance.end_trace(
+                    gas,
+                    states[i],
+                    primitive[i],
+                    i,
+                    i + usize::from(sign > 0.0),
+                );
             }
             let [rho, u, p] = trace_values(i, sign, slopes[i]);
             return gas.state_at(rho, u, p);

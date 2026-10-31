@@ -87,8 +87,30 @@ impl HydrostaticBalance {
                 + mesh.face_areas()[i + 1] * (mesh.positions()[i + 1] - center) * faces[i + 1].mass)
     }
 
-    fn potential(&self, x: f64) -> f64 {
+    pub(super) fn potential(&self, x: f64) -> f64 {
         -self.reference.acceleration() * (x - self.reference.reference_position())
+    }
+
+    /// The same zero-slope physical-face reconstruction used by a passage end.
+    /// A compact-volume port must not substitute the end cell's volume average.
+    pub(super) fn end_trace(
+        &self,
+        gas: &FrozenGas,
+        state: Conserved,
+        primitive: Primitive,
+        cell: usize,
+        face: usize,
+    ) -> Result<(Conserved, Primitive), Error> {
+        if state == self.cells[cell].0 {
+            return Ok(self.faces[face]);
+        }
+        let reference = self.cells[cell].1;
+        let boundary = self.faces[face].1;
+        gas.state_at(
+            boundary.density + (primitive.density - reference.density),
+            boundary.velocity + (primitive.velocity - reference.velocity),
+            boundary.pressure + (primitive.pressure - reference.pressure),
+        )
     }
 }
 
@@ -106,8 +128,9 @@ impl Euler1d {
     /// the perturbation while continuing the hydrostatic profile to the face.
     /// Reservoir conditions refer to the physical end face. Source updates can
     /// perturb the initial state before ordinary [`Self::step`] evolution.
-    /// End ports and gas-network assembly currently refuse this owner because
-    /// their shared gravitational-potential datum has not yet been declared.
+    /// Gas networks require their explicit shared gravitational-potential
+    /// declaration. Arbitrary caller-owned end ports still require a separate
+    /// potential convention and remain unsupported by `step_with_ports`.
     pub fn new_isothermal_atmosphere(
         gas: FrozenGas,
         mesh: Mesh1d,
@@ -195,6 +218,14 @@ impl Euler1d {
     /// Retained physical reference whenever hydrostatic gravity is enabled.
     pub fn hydrostatic_reference(&self) -> Option<HydrostaticReference> {
         self.hydrostatic.as_ref().map(|balance| balance.reference)
+    }
+
+    /// Original reference atmosphere at a physical face, with its cached source
+    /// evaluation. This initializes a matching compact plenum without replacing
+    /// the original caloric law or mistaking a cell average for a face state.
+    /// Returns `None` without an atmosphere or for an out-of-range face index.
+    pub fn hydrostatic_reference_face(&self, face: usize) -> Option<(Conserved, Primitive)> {
+        self.hydrostatic.as_ref()?.faces.get(face).copied()
     }
 
     /// Discrete gravitational potential energy, `sum rho_i V_i phi(x_i)` [J].

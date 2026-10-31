@@ -2,7 +2,10 @@ use super::super::evolve::{forward, operator, totals};
 use super::super::{
     Boundaries, Conserved, Error, Reconstruction, StepControl, StepReport, Totals, poll, positive,
 };
-use super::{Accumulator, BranchEnd, GasNetwork1d, NetworkStepReport, NetworkTotals, PortExchange};
+use super::{
+    Accumulator, BranchEnd, GasNetwork1d, NetworkGravityReport, NetworkStepReport, NetworkTotals,
+    PortExchange,
+};
 use fs_qty::Time;
 
 impl GasNetwork1d {
@@ -53,11 +56,20 @@ impl GasNetwork1d {
         let mut before = Accumulator::default();
         for (index, branch) in self.branches.iter_mut().enumerate() {
             for (i, &state) in branch.states.iter().enumerate() {
-                let p = branch.gas.decode(
-                    state,
-                    Some(branch.work.primitive[i].temperature),
-                    &mut cancelled,
-                )?;
+                let p = if let Some(balance) = branch
+                    .hydrostatic
+                    .as_ref()
+                    .filter(|b| b.cells[i].0 == state)
+                {
+                    poll(&mut cancelled)?;
+                    balance.cells[i].1
+                } else {
+                    branch.gas.decode(
+                        state,
+                        Some(branch.work.primitive[i].temperature),
+                        &mut cancelled,
+                    )?
+                };
                 branch.work.primitive[i] = p;
                 let area =
                     0.5 * branch.mesh.face_areas()[i] + 0.5 * branch.mesh.face_areas()[i + 1];
@@ -104,6 +116,9 @@ impl GasNetwork1d {
             rate = rate.max(sum);
         }
         let before = before.totals();
+        let potential_before = self
+            .centered_potential_storage(false, &mut cancelled)?
+            .energy;
         let mut dt = maximum_duration.value().min(0.9 * controls.cfl / rate);
         let mut last = Error::Invalid("no admissible network time increment");
         let mut first_order_retry = false;
@@ -123,7 +138,7 @@ impl GasNetwork1d {
             match self.attempt(dt, controls.cfl, reconstruction, &mut cancelled) {
                 Ok(maximum_rate) => {
                     let report = self.prepare_report(
-                        before,
+                        (before, potential_before),
                         dt,
                         maximum_rate,
                         halvings,
@@ -220,21 +235,39 @@ impl GasNetwork1d {
             } else {
                 branch.states[cell]
             };
-            let primitive =
+            let primitive = if let Some(balance) =
+                branch.hydrostatic.as_ref().filter(|b| b.cells[cell].0 == q)
+            {
+                balance.cells[cell].1
+            } else {
                 branch
                     .gas
-                    .decode(q, Some(branch.work.primitive[cell].temperature), cancelled)?;
+                    .decode(q, Some(branch.work.primitive[cell].temperature), cancelled)?
+            };
             branch.work.primitive[cell] = primitive;
+            let (q, primitive) = if let Some(balance) = &branch.hydrostatic {
+                balance.end_trace(&branch.gas, q, primitive, cell, face)?
+            } else {
+                (q, primitive)
+            };
             let plenum_state = if second {
                 self.work.plenum_stage[connection.plenum]
             } else {
                 self.plenums[connection.plenum].state
             };
+            // Identical admitted conservative states have the same original
+            // thermodynamics. Reuse the face's immutable evaluation instead of
+            // introducing an inversion-roundoff pressure difference at rest.
+            let plenum_primitive = if q == plenum_state {
+                primitive
+            } else {
+                self.work.plenum_primitive[connection.plenum]
+            };
             let flux = branch.gas.plenum_flux(
                 q,
                 primitive,
                 plenum_state,
-                self.work.plenum_primitive[connection.plenum],
+                plenum_primitive,
                 connection.end.normal(),
                 cancelled,
             )?;
@@ -286,7 +319,7 @@ impl GasNetwork1d {
                 &branch.mesh,
                 branch.boundaries,
                 reconstruction,
-                None,
+                branch.hydrostatic.as_ref(),
                 &mut branch.work.primitive,
                 &mut branch.work.slopes,
                 &mut branch.work.faces,
@@ -327,7 +360,7 @@ impl GasNetwork1d {
                     &branch.mesh,
                     &branch.work.primitive,
                     &branch.work.faces,
-                    None,
+                    branch.hydrostatic.as_ref(),
                 );
                 if !branch.gas.admissible_state(advanced) {
                     return Err(Error::Invalid(
@@ -338,11 +371,17 @@ impl GasNetwork1d {
                     let candidate = Conserved::from_array(core::array::from_fn(|k| {
                         0.5 * branch.states[i].array()[k] + 0.5 * advanced.array()[k]
                     }));
-                    branch.gas.decode(
-                        candidate,
-                        Some(branch.work.primitive[i].temperature),
-                        cancelled,
-                    )?;
+                    if !branch
+                        .hydrostatic
+                        .as_ref()
+                        .is_some_and(|b| b.cells[i].0 == candidate)
+                    {
+                        branch.gas.decode(
+                            candidate,
+                            Some(branch.work.primitive[i].temperature),
+                            cancelled,
+                        )?;
+                    }
                     branch.work.candidate[i] = candidate;
                 } else {
                     branch.work.stage[i] = advanced;
@@ -388,7 +427,7 @@ impl GasNetwork1d {
 
     fn prepare_report(
         &mut self,
-        before: NetworkTotals,
+        before: (NetworkTotals, f64),
         dt: f64,
         maximum_rate: f64,
         halvings: usize,
@@ -396,8 +435,11 @@ impl GasNetwork1d {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         let factor = 0.5 * dt;
+        let (before, potential_before) = before;
         let mut after = Accumulator::default();
         let mut boundary = Accumulator::default();
+        let mut gravity_work_sum = Accumulator::default();
+        let mut potential_boundary = Accumulator::default();
         let (mut fallbacks, mut limited) = (0, 0);
         for (index, branch) in self.branches.iter().enumerate() {
             poll(cancelled)?;
@@ -419,11 +461,18 @@ impl GasNetwork1d {
             let branch_after = totals(&branch.work.candidate, branch.mesh.volumes(), cancelled)?;
             let branch_before = self.work.branch_before[index];
             let impulse = factor * (a.area_force + b.area_force);
+            let gravity_impulse = factor * (a.gravity_force + b.gravity_force);
+            let gravity_work = factor * (a.gravity_power + b.gravity_power);
+            gravity_work_sum.add(0.0, gravity_work)?;
             let residual = Totals::from_array(core::array::from_fn(|k| {
                 branch_after.array()[k]
                     - branch_before.array()[k]
                     - end_change.array()[k]
-                    - if k == 1 { impulse } else { 0.0 }
+                    - match k {
+                        1 => impulse + gravity_impulse,
+                        2 => gravity_work,
+                        _ => 0.0,
+                    }
             }));
             if !branch_after
                 .array()
@@ -449,8 +498,8 @@ impl GasNetwork1d {
                 left_boundary_change,
                 right_boundary_change,
                 area_momentum_impulse: impulse,
-                gravity_momentum_impulse: 0.0,
-                gravity_work: 0.0,
+                gravity_momentum_impulse: gravity_impulse,
+                gravity_work,
                 conservation_residual: residual,
             };
             after.add(branch_after.mass, branch_after.energy)?;
@@ -463,12 +512,34 @@ impl GasNetwork1d {
                         factor * left_area * (a.left.mass + b.left.mass),
                         factor * left_area * (a.left.energy + b.left.energy),
                     )?;
+                    if let Some(gravity) = &self.gravity {
+                        potential_boundary.add(
+                            0.0,
+                            left_boundary_change.mass
+                                * gravity.centered_branch_potential(
+                                    index,
+                                    branch,
+                                    branch.mesh.positions()[0],
+                                ),
+                        )?;
+                    }
                 }
                 if self.endpoint_connections[index][1].is_none() {
                     boundary.add(
                         -factor * right_area * (a.right.mass + b.right.mass),
                         -factor * right_area * (a.right.energy + b.right.energy),
                     )?;
+                    if let Some(gravity) = &self.gravity {
+                        potential_boundary.add(
+                            0.0,
+                            right_boundary_change.mass
+                                * gravity.centered_branch_potential(
+                                    index,
+                                    branch,
+                                    branch.mesh.positions()[branch.states.len()],
+                                ),
+                        )?;
+                    }
                 }
             }
             fallbacks += a.fallbacks + b.fallbacks;
@@ -505,13 +576,45 @@ impl GasNetwork1d {
             self.work.port_exchange_candidate[port] = exchange;
         }
         let (after, boundary_change) = (after.totals(), boundary.totals());
+        let gravity_work = gravity_work_sum.totals().energy;
         let conservation_residual = NetworkTotals {
             mass: after.mass - before.mass - boundary_change.mass,
-            energy: after.energy - before.energy - boundary_change.energy,
+            energy: after.energy - before.energy - boundary_change.energy - gravity_work,
         };
         if !conservation_residual.mass.is_finite() || !conservation_residual.energy.is_finite() {
             return Err(Error::Invalid("non-finite complete network balance"));
         }
+        let gravity = if let Some(frame) = &self.gravity {
+            let after_centered_potential_energy =
+                self.centered_potential_storage(true, cancelled)?.energy;
+            let boundary_centered_potential_energy_change = potential_boundary.totals().energy;
+            // Every term was accumulated AFTER subtracting the same potential
+            // reference. Merely differencing absolute potential storage would
+            // discard small resolved gravity work under a large common datum.
+            let total_residual = (after.energy - before.energy - boundary_change.energy)
+                + (after_centered_potential_energy
+                    - potential_before
+                    - boundary_centered_potential_energy_change);
+            let absolute_conservation_residual =
+                total_residual + frame.reference() * conservation_residual.mass;
+            if !total_residual.is_finite()
+                || !absolute_conservation_residual.is_finite()
+                || !(after_centered_potential_energy + frame.reference() * after.mass).is_finite()
+            {
+                return Err(Error::Invalid("non-finite gas-plus-potential balance"));
+            }
+            Some(NetworkGravityReport {
+                reference_potential_j_kg: frame.reference(),
+                before_centered_potential_energy: potential_before,
+                after_centered_potential_energy,
+                boundary_centered_potential_energy_change,
+                gravity_work,
+                conservation_residual: total_residual,
+                absolute_conservation_residual,
+            })
+        } else {
+            None
+        };
         Ok(NetworkStepReport {
             elapsed: Time::new(dt),
             maximum_cfl: maximum_rate * dt,
@@ -523,6 +626,7 @@ impl GasNetwork1d {
             after,
             boundary_change,
             conservation_residual,
+            gravity,
         })
     }
 }

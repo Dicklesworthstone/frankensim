@@ -19,7 +19,9 @@ use super::{
 };
 use fs_qty::Time;
 
+mod gravity;
 mod step;
+pub use gravity::{NetworkGravity, NetworkGravityReport};
 
 /// Explicit topology bound, in addition to the aggregate cell-storage bound.
 pub const MAX_NETWORK_BRANCHES: usize = 4096;
@@ -154,8 +156,11 @@ pub struct NetworkStepReport {
     pub after: NetworkTotals,
     /// Accepted inflow through external branch ends only. Connected ports are internal.
     pub boundary_change: NetworkTotals,
-    /// `after - before - boundary_change`, in the common energy gauge.
+    /// Gas `after - before - boundary_change - gravity_work`, in the common
+    /// formation-energy gauge. Momentum remains a per-branch quantity.
     pub conservation_residual: NetworkTotals,
+    /// Separate gas-plus-potential balance when a shared potential is declared.
+    pub gravity: Option<NetworkGravityReport>,
 }
 
 struct NetworkWorkspace {
@@ -185,6 +190,7 @@ pub struct GasNetwork1d {
     plenums: Vec<Plenum>,
     connections: Vec<PlenumConnection>,
     endpoint_connections: Vec<[Option<usize>; 2]>,
+    gravity: Option<NetworkGravity>,
     work: NetworkWorkspace,
     port_exchanges: Vec<PortExchange>,
     branch_reports: Vec<StepReport>,
@@ -201,6 +207,32 @@ impl GasNetwork1d {
         branches: Vec<Euler1d>,
         plenums: Vec<Plenum>,
         connections: Vec<PlenumConnection>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::construct(branches, plenums, connections, None, cancelled)
+    }
+
+    /// Couple passages with gravity under one explicit potential convention.
+    ///
+    /// Each compact plenum occupies one potential: all of its connected faces
+    /// must meet at that potential. Original isothermal/isentropic branch
+    /// references retain their own signed acceleration and local coordinates.
+    /// Constant offsets only translate their potential zero; they do no work.
+    pub fn new_with_gravity(
+        branches: Vec<Euler1d>,
+        plenums: Vec<Plenum>,
+        connections: Vec<PlenumConnection>,
+        gravity: NetworkGravity,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::construct(branches, plenums, connections, Some(gravity), cancelled)
+    }
+
+    fn construct(
+        branches: Vec<Euler1d>,
+        plenums: Vec<Plenum>,
+        connections: Vec<PlenumConnection>,
+        gravity: Option<NetworkGravity>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         poll(&mut cancelled)?;
@@ -215,7 +247,7 @@ impl GasNetwork1d {
         let mut cells = plenums.len();
         for branch in &branches {
             poll(&mut cancelled)?;
-            if branch.hydrostatic_reference().is_some() {
+            if branch.hydrostatic_reference().is_some() && gravity.is_none() {
                 return Err(Error::Invalid(
                     "network gravity needs a shared potential datum",
                 ));
@@ -254,6 +286,9 @@ impl GasNetwork1d {
             }
             *slot = Some(port);
         }
+        if let Some(potential) = &gravity {
+            potential.admit(&branches, &plenums, &connections, &mut cancelled)?;
+        }
         let mut plenum_primitive = allocated(plenums.len(), Primitive::default())?;
         let mut storage = Accumulator::default();
         for branch in &branches {
@@ -290,6 +325,7 @@ impl GasNetwork1d {
             plenums,
             connections,
             endpoint_connections,
+            gravity,
             work,
             port_exchanges,
             branch_reports,
@@ -315,6 +351,10 @@ impl GasNetwork1d {
     /// Retained deterministic connection order used for all port reductions.
     pub fn connections(&self) -> &[PlenumConnection] {
         &self.connections
+    }
+    /// Retained immutable potential declaration, if gravity was explicitly admitted.
+    pub const fn gravity(&self) -> Option<&NetworkGravity> {
+        self.gravity.as_ref()
     }
     /// Most recent accepted common report, or None before the first step.
     pub const fn last_report(&self) -> Option<NetworkStepReport> {
