@@ -1223,7 +1223,12 @@ impl FreeSurface3 {
                     let sx = cx - i64::from(E3[q].0);
                     let sy = cy - i64::from(E3[q].1);
                     let sz = cz - i64::from(E3[q].2);
-                    *out = match self.grid.resolve_source(sx, sy, sz) {
+                    *out = if self.planar_piston_contains([sx, sy, sz]) {
+                        // Covered piston cells remain wall geometry even when
+                        // their sparse tile stays active for later retreat.
+                        post[&key][lane][OPP3[q]]
+                    } else {
+                        match self.grid.resolve_source(sx, sy, sz) {
                         None => {
                             let outgoing = post[&key][lane][OPP3[q]];
                             match moving_wall.as_deref_mut() {
@@ -1262,6 +1267,7 @@ impl FreeSurface3 {
                                 Cell3::Fluid | Cell3::Interface => post[&src_key][src_lane][q],
                             }
                         }
+                    }
                     };
                 }
                 new_populations.push((key, lane, new_f));

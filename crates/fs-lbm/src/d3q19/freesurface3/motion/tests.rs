@@ -293,6 +293,12 @@ fn g1_g3_planar_piston_translates_actual_vof_state_without_resetting_momentum() 
         p[axis] = boundary;
         assert!(surface.sample_at(p[0], p[1], p[2]).is_none());
 
+        // Continuation uses the covered slab as a wall, not as active gas.
+        let mut continued = surface.clone();
+        continued.step().unwrap();
+        close(continued.ledger_mass(), mass);
+        assert!(continued.sample_at(p[0], p[1], p[2]).is_none());
+
         let retreat = surface
             .remap_planar_piston_one_cell(wall, false, 1e-12, &CancelGate::new_clock_free())
             .unwrap();
