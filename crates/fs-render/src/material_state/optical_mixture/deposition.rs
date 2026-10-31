@@ -5,6 +5,9 @@
 //! mass fractions and absorption laws retained by that same accepted mixture.
 //! Scattered radiation remains in the unchanged native beam account.
 
+/// Constituent means and per-cell errors from the original scattering histories.
+pub mod scattering;
+
 use super::{
     MaterialOpticalComponent, MaterialOpticalMixtureError, MaterialOpticalMixtureGrid, checkpoint,
 };

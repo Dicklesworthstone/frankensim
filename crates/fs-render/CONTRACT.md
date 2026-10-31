@@ -3018,6 +3018,35 @@ Optics and source power remain a fixed accepted snapshot; changed states need
 rebinding. This bridge adds incident absorption, not an emission debit or a
 net radiative-equilibrium solve.
 
+### Constituent absorption after multiple scattering
+
+`MaterialOpticalMixtureGrid::deposit_multiple_scattering_power_by_component`
+runs the original native estimator once and partitions its retained cell heat
+by the same fixed spectral absorption shares used for beam deposition.
+`ConstituentScatteringDeposition` retains the complete unchanged native report,
+including ballistic and diffuse escape, unresolved radiation, correlated
+whole-history totals, sample counts, work counts, seed and source configuration.
+The partition introduces no retracing, additional random draws or thermal debit.
+
+Rows retain native sparse cell order and original component/source identities.
+At a fixed cell and wavelength, every history's constituent heat is the same
+constant fraction of the native cell heat; the reported mean and estimated
+standard error therefore scale by that fraction. A sampled absorbing lane with
+no observed deposition reports unknown constituent error (`None`), while
+deterministic or structurally zero lanes retain `Some(0)`. An observed sample
+can also have zero empirical variance; this remains a fixed-sample estimate,
+not a confidence bound. Absent sampled cells remain unobserved, not proven
+unheated. No aggregate constituent standard error across cells is invented:
+the native cell report does not retain the covariance needed for that sum.
+
+The existing constituent row/work budgets bound only retained output, without
+expanding sparse histories to a full-grid inventory. Compensated sums check
+partition closure against native cell and total mean powers and retain the
+roundoff residual. Original collision caps and precision-limited histories
+remain visible as unresolved radiation; neither scattering nor an unresolved
+tail is credited as heat. This report does not create a stochastic constituent
+thermal observer or assert net radiative equilibrium.
+
 ### Calibrated spectral fixture paths
 
 `PathLuminanceJob` connects the same `PhotometricSource` states to the original

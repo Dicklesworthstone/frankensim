@@ -5,6 +5,9 @@ use crate::material_state::optical_mixture::deposition::{
     ConstituentBeamDeposition, ConstituentDepositionBudget,
 };
 
+#[path = "scattering/tests.rs"]
+mod scattering;
+
 fn with_two_populations(cx: &Cx<'_>, run: impl FnOnce(&MaterialOpticalMixtureGrid<'_>)) {
     let a = particles(cx, 0, 300.0);
     let b = particles(cx, 1, 300.0);
