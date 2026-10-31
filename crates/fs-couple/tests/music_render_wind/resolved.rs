@@ -130,3 +130,28 @@ fn both_aperture_roles_survive_native_render_and_sidecar_on_either_face() {
         assert!(source.contains("\"kind\":\"prescribed-pressure-offset\""));
     }
 }
+
+#[test]
+fn resolved_command_accepts_native_thermoviscous_field_schema() {
+    let dir = directory();
+    let text = include_str!("../../examples/resolved-thermoviscous.performance")
+        .replace("output 1920 1", "output 16 1")
+        .replace("ramp 384 0 293.15 20 295\nhold 768 20 295\nramp 1152 20 295 0 293.15\nhold 1920 0 293.15",
+            "hold 16 0 293.15");
+    let input = dir.join("resolved-thermoviscous.performance");
+    let output = dir.join("resolved-thermoviscous.wav");
+    std::fs::write(&input, text).unwrap();
+    success(Command::new(env!("CARGO_BIN_EXE_music_render"))
+        .arg("resolved").arg(&input).arg(&output)
+        .args(["--block", "4", "--decimate", "--self-contained"]).output().unwrap());
+    assert!(output.exists());
+    let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+    for token in ["\\\"fixture\\\":\\\"resolved-thermoviscous-input\\\"",
+        "\\\"resolved_thermoviscous_input\\\":{",
+        "frankensim-resolved-thermoviscous-dg-performance-v1",
+        "\\\"vertices\\\":8", "\\\"tetrahedra\\\":6",
+        "original nonlinear NSF source into complete 3-D thermoviscous field"]
+    {
+        assert!(metadata.contains(token), "{token}: {metadata}");
+    }
+}

@@ -73,6 +73,9 @@ pub struct ResolvedThermoviscousDgInfo {
     pub primary_duct_port: usize,
     pub band_hz: [f64; 2],
     pub bulk_to_shear_ratio: f64,
+    pub sample_rate_hz: u32,
+    pub samples: u64,
+    pub full_scale_pa: f64,
 }
 
 pub struct ResolvedThermoviscousDgInput {
@@ -129,6 +132,7 @@ impl ResolvedThermoviscousDgInput {
         if source_text.contains(marker) { return Err(bad("resolved_source may occur only once")); }
         let source = ResolvedDgFilePerformance::from_bytes(source_text.as_bytes(), maximum_block,
             Arc::clone(&gate))?;
+        let source_info = source.info();
 
         let mut reader = Reader { lines: field_text.lines(), line: 1 };
         let band = reader.row("field_band")?;
@@ -234,6 +238,9 @@ impl ResolvedThermoviscousDgInput {
                 vertices: vertex_count, tetrahedra: tet_count, wall_faces: wall_count,
                 isothermal_faces: isothermal.len(), source_port, primary_duct_port,
                 band_hz, bulk_to_shear_ratio,
+                sample_rate_hz: source_info.sample_rate_hz,
+                samples: source_info.samples,
+                full_scale_pa: source_info.full_scale_pa,
             }, points, mesh, walls, isothermal, ports, source,
         })
     }

@@ -6,13 +6,14 @@ const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
 const finite = value => typeof value === 'string' && numeric.test(value) && Number.isFinite(Number(value));
 const sourceRows = source => source.replace(/^\ufeff/, '').split(/\r\n|\r|\n/)
   .map(line => line.trim()).filter(line => line && !line.startsWith('#'));
-const resolvedSchema = 'frankensim-resolved-dg-performance-v1';
+const resolvedSchemas = new Set(['frankensim-resolved-dg-performance-v1',
+  'frankensim-resolved-thermoviscous-dg-performance-v1']);
 
 /** Locate only supported primitive records; aliases, packs and unknown forms stay untouched. */
 export function nativeGasRegions(source) {
   const regions = [], rows = [];
   const records = sourceRows(source);
-  const resolved = records[0] === resolvedSchema;
+  const resolved = resolvedSchemas.has(records[0]);
   // The finite-atmosphere owners read one original thermochemical record from
   // an attached file, without a performance keyword or a second gas model.
   const gasRecord = records.length === 1 && /^thermochemical(?:\s|$)/.test(records[0]);

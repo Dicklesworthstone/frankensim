@@ -13,7 +13,8 @@ export const SUPPORTED_SCHEMAS = ['frankensim-reed-performance-v1', 'frankensim-
   'frankensim-plate-valve-performance-v1', 'frankensim-flue-performance-v1'];
 export const STRING_SCHEMAS = ['frankensim-material-strings-v1', 'frankensim-material-strings-v2',
   'frankensim-material-strings-v3'];
-export const RESOLVED_SCHEMAS = ['frankensim-resolved-dg-performance-v1'];
+export const RESOLVED_SCHEMAS = ['frankensim-resolved-dg-performance-v1',
+  'frankensim-resolved-thermoviscous-dg-performance-v1'];
 export const FINITE_GAS_STRING_SCHEMAS = ['frankensim-finite-gas-string-v1'];
 
 export class NativeWindError extends Error {

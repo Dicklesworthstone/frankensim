@@ -4,6 +4,7 @@ import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-mediu
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
+import resolvedThermoviscousSource from "../../../crates/fs-couple/examples/resolved-thermoviscous.performance?raw";
 import pressureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-pressure.performance?raw";
 import warmRampResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-warm-ramp.performance?raw";
 import splitApertureResolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg-split-aperture.performance?raw";
@@ -94,6 +95,15 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a flute jet drives a spatial duct with a radiating outlet and mouth. Change the bore and exterior gas compositions independently; the native pressure observer propagates each source through the declared exterior atmosphere.",
     help: "dg_exterior supplies density, sound speed, viscosity, conductivity and heat capacities to the shared Stokes–Kirchhoff propagation law. observer_gas selects that law and its numerical budgets; lossless is an explicit comparison. Native decimation observes the unchanged 96 kHz mechanics at 48 kHz. This short integration fixture uses an interim jet model and is not a measured flute.",
+  },
+  {
+    name: "resolved-thermoviscous.performance",
+    label: "Resolved flow — 3-D thermoviscous field and radiating bore",
+    renderer: "resolved",
+    source: resolvedThermoviscousSource,
+    decimate: true,
+    intro: "Starter: warm resolved nonlinear flow drives a complete three-dimensional thermoviscous acoustic volume before the original radiating DG bore. Edit the tetrahedral field, wall partition, source geometry or breath history and render through the same native resolved performer.",
+    help: "The field mesh is explicit SI geometry and must sit outside the nonlinear NSF volume. Its source port must coincide with the selected NSF interface; its downstream port receives the original DG load. This first native rung deliberately refuses finite-source, upstream-field and reciprocal-mouth attachments rather than dropping them. It is manufactured integration geometry, not a measured flute or convergence claim.",
   },
   {
     name: "resolved-dg.performance",
