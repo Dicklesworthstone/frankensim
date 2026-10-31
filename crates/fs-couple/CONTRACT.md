@@ -16900,3 +16900,39 @@ The original angular/support/work acceptance gates therefore retain all joint
 work terms. The single-point API delegates to this shared path. Tests use the
 analytic consistent tetrahedral inverse, including negative cross-vertex
 mobility, support elimination, combined impulse work and endpoint agreement.
+
+## Point impulses on continuing geometrically exact rods
+
+`rod_motion::RodMotion::apply_point_impulses` applies simultaneous terminal or
+attachment impulses to the existing centered or eccentric trajectory. Each
+`impulse::RodPointImpulse` identifies a material node, a point offset in its
+rotating material frame, a world linear impulse and an optional world free
+couple. The original source-derived central inertia supplies the angular
+response. The point arm is shifted by the actual mass-centroid offset, retaining
+translation/rotation coupling, products of inertia and world spin plus orbital
+angular momentum.
+
+The operation changes actual nodal momenta without advancing pose, time, elastic
+motion, cached forces or accepted step count. Duplicate-node impulses accumulate
+before the jump, retaining their frozen-mass work cross terms. Stationary
+translations and frame clamps receive balancing linear impulses and pure couples
+about the material node while doing no work. The existing refusal of eccentric
+free rotors with constrained material-node translation remains authoritative.
+
+`impulse::RodImpulseControls` requires positive finite absolute tolerances for
+linear impulse, angular impulse and work. Acceptance checks each node and the
+complete batch; opposite unresolved transfers cannot cancel into an accepted
+global account. Actual stored linear-momentum and central-spin increments
+determine world angular change about the supplied origin. The kinetic increment
+uses those actual increments dotted with mean velocities, and the work residual
+subtracts impulses before multiplication. An unresolved transfer returns
+`RodMotionError::ImpulseBalance` without publishing the candidate. The report
+retains these stable changes, caller-applied impulses and support reactions.
+
+Cost is O(nodes + impulses) with O(nodes) scratch, using the existing prelowered
+inertia. Cancellation is checked per event and node. The caller supplies the
+physical strike, actuator or contact law and any loss partition. Tests compare
+an eccentric velocity jump with an independent six-by-six spatial-mass solve,
+check clamped/sliding support couples, propagate a reciprocal strike into native
+bending/torsion, and reject sub-resolution parallel kicks while retaining the
+stable energy of a resolved transverse kick against large baseline momentum.

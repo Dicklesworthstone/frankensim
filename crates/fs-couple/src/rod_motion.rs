@@ -361,6 +361,9 @@ pub use thermal::RodThermalRefresh;
 /// Reciprocal source-bound section thermodynamics on the finite heat timeline.
 pub mod enthalpy;
 
+/// Instantaneous terminal and attachment impulses on the same trajectory.
+pub mod impulse;
+
 /// A force AT the material node and a pure couple held in the WORLD frame.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct RodNodalWrench {
@@ -390,6 +393,8 @@ pub enum RodMotionError {
     EccentricPositionSupport { node: usize },
     Invalid(&'static str),
     Energy { defect_j: f64, limit_j: f64 },
+    /// A requested impulse was not resolved by the stored momentum update.
+    ImpulseBalance { linear_defect_n_s: f64, angular_defect_nm_s: f64, work_defect_j: f64 },
 }
 impl core::fmt::Display for RodMotionError {
     fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result {
@@ -403,6 +408,8 @@ impl core::fmt::Display for RodMotionError {
             Self::Invalid(s)=>write!(f,"rod motion: {s}"),
             Self::Energy {defect_j,limit_j}=>write!(f,
                 "rod motion energy defect {defect_j:e} J exceeds {limit_j:e} J"),
+            Self::ImpulseBalance {linear_defect_n_s,angular_defect_nm_s,work_defect_j}=>write!(f,
+                "rod impulse transfer exceeds its tolerances: linear {linear_defect_n_s:e} N s, angular {angular_defect_nm_s:e} N m s, work {work_defect_j:e} J"),
         }
     }
 }
