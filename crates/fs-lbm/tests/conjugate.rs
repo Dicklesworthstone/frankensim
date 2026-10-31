@@ -1792,6 +1792,68 @@ fn fv_natural_convection_cavity_matches_de_vahl_davis() {
     }
 }
 
+#[test]
+fn g3_negative_expansion_reverses_cavity_buoyancy_and_zero_expansion_conducts() {
+    // Heating a negative-expansion fluid makes it denser. Its hot wall must
+    // drive downward flow under downward gravity, exactly like positive
+    // expansion under reversed gravity. This exercises actual steady momentum
+    // and heat coupling, not just the sign of a force helper.
+    let n = 8;
+    let domain = VoxelDomain::new(n, n, 1, 1.0 / n as f64).unwrap();
+    let fluid = FluidProperties {
+        density_kg_m3: 1.0,
+        specific_heat_j_kg_k: 1.0,
+        conductivity_w_m_k: 1e-2,
+        kinematic_viscosity_m2_s: 0.71e-2,
+    };
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(301.0);
+    faces[1] = ThermalFace::Temperature(300.0);
+    let setup = ThermalSetup::new(faces);
+    let mut flow = SimpleConfig::new([
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::wall(),
+        FvBoundary::Symmetry,
+        FvBoundary::Symmetry,
+    ]);
+    flow.tolerance = 1e-8;
+    let beta = 1e3 * fluid.kinematic_viscosity_m2_s * fluid.conductivity_w_m_k / 9.81;
+    let run = |gravity, expansion| {
+        let config = FvBuoyancyConfig::new([0.0, gravity, 0.0], expansion, 300.5, flow.clone());
+        fv_natural_convection(&domain, &fluid, &[], &setup, &config, &CancelGate::new()).unwrap()
+    };
+    let negative = run(-9.81, -beta);
+    let reversed_gravity = run(9.81, beta);
+    assert_eq!(
+        negative.flow.velocity_m_s,
+        reversed_gravity.flow.velocity_m_s
+    );
+    assert_eq!(
+        negative.energy.temperature,
+        reversed_gravity.energy.temperature
+    );
+    assert!(negative.flow.velocity_m_s[domain.index(1, n / 2, 0)][1] < -1e-5);
+    assert!(negative.energy.report.balance.relative_residual < 1e-9);
+
+    let neutral = run(-9.81, 0.0);
+    assert!(
+        neutral
+            .flow
+            .velocity_m_s
+            .iter()
+            .flatten()
+            .all(|u| u.abs() < 1e-12)
+    );
+    for y in 0..n {
+        for x in 0..n {
+            let expected = 301.0 - (x as f64 + 0.5) / n as f64;
+            assert!((neutral.energy.temperature[domain.index(x, y, 0)] - expected).abs() < 1e-8);
+        }
+    }
+}
+
 /// Open vertical channel (chimney) between isothermal plates `n` cells
 /// apart and `n * aspect` tall, open at the bottom and top: the induced
 /// volume flow per unit depth over the Elenbaas fully developed limit

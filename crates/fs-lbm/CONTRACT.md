@@ -493,6 +493,11 @@ rollback. Their addition does not establish executed native validation.
   `rho*delta_u=F*dt` through switch-on/off/reversal and independent SI Lorentz
   acceleration in both dimensions. These checks do not supply a total-energy,
   unconditional-stability or temporal-order certificate for the split solver.
+  Onset perturbations shift the equilibrium velocity in the physical source
+  frame and retain the existing nonequilibrium stress, density and transverse
+  velocity; zero amplitude leaves population bits unchanged. Thermal collision
+  reuses the consumed momentum buffer as tightly packed scalar scratch, without
+  a separate full-grid allocation on each step or a changed public state layout.
 - `MaterialSlab::step_with_material_rheology` (2-D and 3-D) resolves shared
   material transport at actual temperature and local physical shear rate.
   The existing non-equilibrium stress estimators include the Guo half-force
@@ -2502,7 +2507,12 @@ faces are pressure openings that pass flow both ways (paired with
 `ThermalFace::Outflow { backflow_temperature }` for the ambient), with
 pressure measured from the reference hydrostatic state. The momentum source
 is `-rho beta (T - T_ref) g` on fluid cells (cell-sized staggered volumes
-average the two adjacent cells). The coupling starts from conduction
+average the two adjacent cells). The expansion coefficient is signed, as in
+the transient and material-owned paths: negative expansion reverses thermal
+buoyancy, and zero expansion reduces to forced flow or conduction. The focused
+cavity regression compares a negative-expansion fluid with reversed gravity
+at positive expansion and independently checks the zero-expansion limit.
+The coupling starts from conduction
 through still fluid with the openings held at ambient (a uniform reference
 field carries no buoyancy, and openings without flow anchor no temperature).
 Each coupling runs `sweeps_per_coupling`

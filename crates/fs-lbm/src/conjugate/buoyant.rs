@@ -42,7 +42,9 @@ use super::{ChtError, finite, finite_positive, poll};
 pub struct FvBuoyancyConfig {
     /// Gravitational acceleration vector, m/s^2.
     pub gravity_m_s2: [f64; 3],
-    /// Volumetric expansion coefficient `beta`, 1/K.
+    /// Signed volumetric expansion coefficient `beta`, 1/K. Negative values
+    /// represent fluids that become denser when heated in the admitted range;
+    /// zero disables thermal buoyancy. This remains a local linearization.
     pub expansion_per_k: f64,
     /// Temperature of the reference (ambient) state, K.
     pub reference_temperature_k: f64,
@@ -156,12 +158,6 @@ pub fn fv_natural_convection(
         finite("buoyancy.gravity_m_s2", g)?;
     }
     finite("buoyancy.expansion_per_k", config.expansion_per_k)?;
-    if config.expansion_per_k < 0.0 {
-        return Err(ChtError::InvalidInput {
-            field: "buoyancy.expansion_per_k",
-            reason: "must be non-negative".into(),
-        });
-    }
     finite(
         "buoyancy.reference_temperature_k",
         config.reference_temperature_k,

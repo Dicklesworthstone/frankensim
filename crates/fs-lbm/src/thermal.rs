@@ -109,8 +109,16 @@ impl ThermalLbm {
         CS2 * (self.tau_g - 0.5)
     }
 
-    /// Seed a sinusoidal vertical-velocity perturbation (onset mode).
+    /// Seed a sinusoidal vertical-velocity perturbation (onset mode), preserving
+    /// density, transverse velocity and force-corrected nonequilibrium stress.
     pub fn perturb(&mut self, amplitude: f64) {
+        assert!(
+            amplitude.is_finite(),
+            "perturbation amplitude must be finite"
+        );
+        if amplitude == 0.0 {
+            return;
+        }
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         for y in 1..ny - 1 {
             for x in 0..nx {
@@ -120,7 +128,21 @@ impl ThermalLbm {
                         std::f64::consts::PI * (y as f64 - 0.5) / (ny as f64 - 2.0),
                     );
                 let mm = self.grid.moments(i);
-                self.grid.f[i] = crate::equilibrium(mm.rho, mm.u[0], amplitude.mul_add(s, mm.u[1]));
+                let next = [mm.u[0], amplitude.mul_add(s, mm.u[1])];
+                let before = crate::equilibrium(mm.rho, mm.u[0], mm.u[1]);
+                let after = crate::equilibrium(mm.rho, next[0], next[1]);
+                let force = core::array::from_fn(|axis| {
+                    self.grid.g[axis].mul_add(mm.rho, self.grid.fext[i][axis])
+                });
+                // Populations carry the Guo half source. Inject the prescribed
+                // velocity in the unforced frame, then restore the same force
+                // at the new velocity. Replacing f by feq would add F/(2 rho)
+                // and erase the existing viscous stress in a buoyant slab.
+                forcing::reframe2(&mut self.grid.f[i], mm.u, force, [0.0; 2]);
+                for q in 0..Q {
+                    self.grid.f[i][q] += after[q] - before[q];
+                }
+                forcing::reframe2(&mut self.grid.f[i], next, [0.0; 2], force);
             }
         }
     }
@@ -156,7 +178,9 @@ impl ThermalLbm {
     }
 
     fn step_with_forces_inner(
-        &mut self, external: Option<&[[f64; 2]]>, thermal_tau: Option<&[f64]>,
+        &mut self,
+        external: Option<&[[f64; 2]]>,
+        thermal_tau: Option<&[f64]>,
     ) {
         let (nx, ny) = (self.grid.nx, self.grid.ny);
         // Boussinesq: per-cell force via the external-force field.
@@ -179,8 +203,9 @@ impl ThermalLbm {
             }
         }
         self.grid.step(&mut self.scratch);
-        // Temperature collide.
-        let mut post = vec![[0.0f64; 5]; nx * ny];
+        // Momentum streaming has consumed its post-collision buffer. Reuse
+        // its first 5*N scalars as a tightly packed temperature buffer; the
+        // next flow collision overwrites it before use. No thermal allocation.
         for y in 1..ny - 1 {
             for x in 0..nx {
                 let i = self.grid.idx(x, y);
@@ -189,7 +214,8 @@ impl ThermalLbm {
                 let eq = geq(t, mm.u[0], mm.u[1]);
                 let tau_g = thermal_tau.map_or(self.tau_g, |field| field[i]);
                 for q in 0..5 {
-                    post[i][q] = self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
+                    self.scratch.as_flattened_mut()[5 * i + q] =
+                        self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
                 }
             }
         }
@@ -218,10 +244,10 @@ impl ThermalLbm {
                                 self.t_top
                             };
                             // Anti-bounce-back: fixed halfway temperature.
-                            2.0f64.mul_add(W5[q] * tw, -post[i][OPP5[q]])
+                            2.0f64.mul_add(W5[q] * tw, -self.scratch.as_flattened()[5 * i + OPP5[q]])
                         }
-                        Some(si) => post[si][q],
-                        None => post[i][OPP5[q]],
+                        Some(si) => self.scratch.as_flattened()[5 * si + q],
+                        None => self.scratch.as_flattened()[5 * i + OPP5[q]],
                     };
                 }
             }

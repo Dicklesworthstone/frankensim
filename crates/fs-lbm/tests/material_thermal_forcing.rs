@@ -141,3 +141,98 @@ fn external_loads_are_not_implicitly_accumulated_or_retained() {
     assert_eq!(two.grid.fext[two.grid.idx(1, 3)][0], 0.0);
     assert_eq!(three.grid.fext[three.grid.idx(1, 1, 3)][0], 0.0);
 }
+
+fn stress<const D: usize, const Q: usize>(
+    populations: &[f64; Q],
+    directions: [[f64; D]; Q],
+    rho: f64,
+    velocity: [f64; D],
+    force: [f64; D],
+) -> [[f64; D]; D] {
+    core::array::from_fn(|a| {
+        core::array::from_fn(|b| {
+            populations
+                .iter()
+                .zip(directions)
+                .map(|(f, e)| f * e[a] * e[b])
+                .sum::<f64>()
+                + 0.5 * (velocity[a] * force[b] + force[a] * velocity[b])
+                - rho * velocity[a] * velocity[b]
+                - if a == b { rho / 3.0 } else { 0.0 }
+        })
+    })
+}
+
+#[test]
+fn g1_buoyant_onset_perturbation_changes_only_the_requested_physical_velocity() {
+    let mut two = ThermalLbm::slab(4, 6, 0.8, 0.7, 0.002);
+    let mut three = ThermalLbm3::slab(4, 2, 6, 0.8, 0.7, 0.002);
+    two.grid.g = [0.0003, -0.0002];
+    let loads2 = vec![[0.0001, -0.0004]; two.gpop.len()];
+    let loads3 = vec![[0.0001, 0.0003, -0.0004]; three.gpop.len()];
+    for _ in 0..3 {
+        two.step_with_external_forces(&loads2).unwrap();
+        three.step_with_external_forces(&loads3).unwrap();
+    }
+    let bits2 = two.grid.f.clone();
+    let bits3 = three.grid.f.clone();
+    two.perturb(0.0);
+    three.perturb(0.0);
+    assert_eq!(two.grid.f, bits2);
+    assert_eq!(three.grid.f, bits3);
+
+    let i2 = two.grid.idx(1, 3);
+    let i3 = three.grid.idx(1, 1, 3);
+    // A nonzero shear defect must survive; replacing populations by equilibrium
+    // would accidentally remove it even if the half-force velocity were fixed.
+    two.grid.f[i2][1] += 0.001;
+    two.grid.f[i2][3] += 0.001;
+    two.grid.f[i2][0] -= 0.002;
+    three.grid.f[i3][1] += 0.001;
+    three.grid.f[i3][2] += 0.001;
+    three.grid.f[i3][0] -= 0.002;
+    let before2 = two.grid.moments(i2);
+    let before3 = three.grid.moments3(i3);
+    let force2 = core::array::from_fn(|a| two.grid.g[a].mul_add(before2.rho, two.grid.fext[i2][a]));
+    let force3 = three.grid.fext[i3];
+    let e2 = [
+        [0.0, 0.0],
+        [1.0, 0.0],
+        [0.0, 1.0],
+        [-1.0, 0.0],
+        [0.0, -1.0],
+        [1.0, 1.0],
+        [-1.0, 1.0],
+        [-1.0, -1.0],
+        [1.0, -1.0],
+    ];
+    let e3 = fs_lbm::d3q19::E3.map(|(x, y, z)| [f64::from(x), f64::from(y), f64::from(z)]);
+    let stress2 = stress(&two.grid.f[i2], e2, before2.rho, before2.u, force2);
+    let stress3 = stress(&three.grid.f[i3], e3, before3.0, before3.1, force3);
+    let amplitude = 0.001;
+    let increment = amplitude
+        * fs_math::det::sin(std::f64::consts::TAU / 4.0)
+        * fs_math::det::sin(std::f64::consts::PI * 2.5 / 6.0);
+    two.perturb(amplitude);
+    three.perturb(amplitude);
+    let after2 = two.grid.moments(i2);
+    let after3 = three.grid.moments3(i3);
+    assert!((after2.rho - before2.rho).abs() < 2e-14);
+    assert!((after3.0 - before3.0).abs() < 2e-14);
+    for a in 0..2 {
+        let expected = before2.u[a] + if a == 1 { increment } else { 0.0 };
+        assert!((after2.u[a] - expected).abs() < 2e-14);
+    }
+    for a in 0..3 {
+        let expected = before3.1[a] + if a == 2 { increment } else { 0.0 };
+        assert!((after3.1[a] - expected).abs() < 2e-14);
+    }
+    let after_stress2 = stress(&two.grid.f[i2], e2, after2.rho, after2.u, force2);
+    let after_stress3 = stress(&three.grid.f[i3], e3, after3.0, after3.1, force3);
+    for (a, b) in stress2.iter().flatten().zip(after_stress2.iter().flatten()) {
+        assert!((a - b).abs() < 2e-14);
+    }
+    for (a, b) in stress3.iter().flatten().zip(after_stress3.iter().flatten()) {
+        assert!((a - b).abs() < 2e-14);
+    }
+}

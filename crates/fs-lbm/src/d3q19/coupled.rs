@@ -446,8 +446,16 @@ impl ThermalLbm3 {
         CS2_T7 * (self.tau_g - 0.5)
     }
 
-    /// Seed a sinusoidal vertical-velocity roll (onset mode) spanning x.
+    /// Seed a sinusoidal vertical-velocity roll (onset mode) spanning x,
+    /// preserving density, transverse velocity and force-corrected viscous stress.
     pub fn perturb(&mut self, amplitude: f64) {
+        assert!(
+            amplitude.is_finite(),
+            "perturbation amplitude must be finite"
+        );
+        if amplitude == 0.0 {
+            return;
+        }
         let (nx, ny, nz) = (self.grid.nx, self.grid.ny, self.grid.nz);
         for z in 1..nz - 1 {
             for y in 0..ny {
@@ -458,7 +466,15 @@ impl ThermalLbm3 {
                             std::f64::consts::PI * (z as f64 - 0.5) / (nz as f64 - 2.0),
                         );
                     let (rho, u) = self.grid.moments3(i);
-                    self.grid.f[i] = equilibrium3(rho, [u[0], u[1], amplitude.mul_add(s, u[2])]);
+                    let next = [u[0], u[1], amplitude.mul_add(s, u[2])];
+                    let before = equilibrium3(rho, u);
+                    let after = equilibrium3(rho, next);
+                    let force = self.grid.fext[i];
+                    crate::thermal::forcing::reframe3(&mut self.grid.f[i], u, force, [0.0; 3]);
+                    for q in 0..Q3 {
+                        self.grid.f[i][q] += after[q] - before[q];
+                    }
+                    crate::thermal::forcing::reframe3(&mut self.grid.f[i], next, [0.0; 3], force);
                 }
             }
         }
@@ -536,8 +552,9 @@ impl ThermalLbm3 {
             }
         }
         self.grid.step();
-        // Temperature collide (BGK toward the advected equilibrium).
-        let mut post = vec![[0.0f64; 7]; nx * ny * nz];
+        // Flow streaming has consumed grid.post. Its first 7*N scalars now
+        // hold tightly packed thermal collision; the next flow collision
+        // overwrites them before use. No full-grid allocation per step.
         for z in 1..nz - 1 {
             for y in 0..ny {
                 for x in 0..nx {
@@ -547,7 +564,8 @@ impl ThermalLbm3 {
                     let eq = geq3(t, u);
                     let tau_g = thermal_tau.map_or(self.tau_g, |field| field[i]);
                     for q in 0..7 {
-                        post[i][q] = self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
+                        self.grid.post.as_flattened_mut()[7 * i + q] =
+                            self.gpop[i][q] + (eq[q] - self.gpop[i][q]) / tau_g;
                     }
                 }
             }
@@ -565,9 +583,9 @@ impl ThermalLbm3 {
                         self.gpop[i][q] = if self.grid.is_wall_layer(sz) {
                             let tw = if sz == 0 { self.t_bottom } else { self.t_top };
                             // Anti-bounce-back: fixed halfway temperature.
-                            2.0f64.mul_add(W7[q] * tw, -post[i][OPP7[q]])
+                            2.0f64.mul_add(W7[q] * tw, -self.grid.post.as_flattened()[7 * i + OPP7[q]])
                         } else {
-                            post[self.grid.idx(sx, sy, sz)][q]
+                            self.grid.post.as_flattened()[7 * self.grid.idx(sx, sy, sz) + q]
                         };
                     }
                 }
