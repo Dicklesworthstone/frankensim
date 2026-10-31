@@ -26,6 +26,8 @@ pub const MAX_ROTOR_DOFS: usize = 32;
 pub const MAX_CAMPBELL_SAMPLES: usize = 256;
 /// Native complex QR sweep bound for each active eigenvalue window.
 pub const ROTOR_QR_SWEEPS_PER_WINDOW: usize = 120;
+/// Bounded bisection work for one numerically detected stability transition.
+pub const MAX_STABILITY_BISECTIONS: usize = 80;
 
 /// No partial physical response or sample series is returned on refusal.
 #[derive(Debug, Clone, PartialEq)]
@@ -100,6 +102,27 @@ pub struct RotorPoleReport {
     /// All 2n poles [1/s], in native canonical (real, imaginary) order.
     /// Positive real parts are retained; no stability threshold is inferred.
     pub poles_per_s: Vec<C64>,
+}
+
+/// A numerically isolated sign-changing stability transition in shaft speed.
+///
+/// The interval endpoints retain opposite signs of the spectral abscissa unless
+/// an evaluated endpoint was exactly zero, in which case the interval collapses
+/// to that sample. This is a deterministic numerical bracket, NOT an interval-
+/// arithmetic proof: pole errors, coefficient uncertainty and speed-dependent
+/// bearing physics remain outside this result.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotorStabilityBracket {
+    /// Lower signed shaft speed [rad/s].
+    pub lower_spin_rad_s: f64,
+    /// Upper signed shaft speed [rad/s].
+    pub upper_spin_rad_s: f64,
+    /// Maximum pole real part at the lower endpoint [1/s].
+    pub lower_spectral_abscissa_per_s: f64,
+    /// Maximum pole real part at the upper endpoint [1/s].
+    pub upper_spectral_abscissa_per_s: f64,
+    /// Number of midpoint pole evaluations used after the original samples.
+    pub bisections: usize,
 }
 
 /// Forced complex response in the caller's original coordinates and units.
@@ -247,6 +270,129 @@ impl RotorBearingModel {
     /// order. Returns complete pole sets, never persistent sorted-index modes
     /// or certified critical-speed brackets. Real bearing speed dependence
     /// requires newly supplied physical C/K matrices at each operating point.
+    /// Locate sign-changing linear-stability transitions over an ordered speed grid.
+    ///
+    /// Stability is measured by the spectral abscissa `max Re(lambda)` of the
+    /// ORIGINAL quadratic pencil. Adjacent samples with opposite signs are
+    /// bisected without assigning persistent pole indices, so crossings caused by
+    /// cross-coupled or active bearing terms remain visible. Exactly-zero sampled
+    /// endpoints are returned as collapsed brackets. Tangential touches that do
+    /// not change sign are intentionally not claimed.
+    ///
+    /// `spin_tolerance_rad_s` bounds the final speed interval. This routine
+    /// does not turn the native QR result into a certified eigenvalue enclosure;
+    /// it only guarantees deterministic bounded refinement of the observed sign
+    /// change. Real speed-dependent bearings require rebuilding their coefficients.
+    pub fn stability_transition_brackets(
+        &self,
+        spin_samples_rad_s: &[f64],
+        spin_tolerance_rad_s: f64,
+        maximum_bisections: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<RotorStabilityBracket>, RotorError> {
+        poll(&mut cancelled)?;
+        if spin_samples_rad_s.len() < 2
+            || spin_samples_rad_s.len() > MAX_CAMPBELL_SAMPLES
+            || spin_samples_rad_s.iter().any(|x| !x.is_finite())
+            || spin_samples_rad_s.windows(2).any(|pair| pair[1] <= pair[0])
+            || !spin_tolerance_rad_s.is_finite()
+            || spin_tolerance_rad_s <= 0.0
+            || !(1..=MAX_STABILITY_BISECTIONS).contains(&maximum_bisections)
+        {
+            return Err(RotorError::Invalid(
+                "ordered finite speed samples, positive speed tolerance and bounded bisections required",
+            ));
+        }
+        let mut samples = Vec::with_capacity(spin_samples_rad_s.len());
+        for &speed in spin_samples_rad_s {
+            poll(&mut cancelled)?;
+            let alpha = self.at_speed(speed, &mut cancelled)?
+                .spectral_abscissa(&mut cancelled)?;
+            samples.push((speed, alpha));
+        }
+        let mut brackets = Vec::new();
+        let mut last_exact: Option<u64> = None;
+        for window in samples.windows(2) {
+            poll(&mut cancelled)?;
+            let (mut lo, mut a_lo) = window[0];
+            let (mut hi, mut a_hi) = window[1];
+            if a_lo == 0.0 {
+                if last_exact != Some(lo.to_bits()) {
+                    brackets.push(RotorStabilityBracket {
+                        lower_spin_rad_s: lo,
+                        upper_spin_rad_s: lo,
+                        lower_spectral_abscissa_per_s: 0.0,
+                        upper_spectral_abscissa_per_s: 0.0,
+                        bisections: 0,
+                    });
+                    last_exact = Some(lo.to_bits());
+                }
+                continue;
+            }
+            if a_hi == 0.0 {
+                if last_exact != Some(hi.to_bits()) {
+                    brackets.push(RotorStabilityBracket {
+                        lower_spin_rad_s: hi,
+                        upper_spin_rad_s: hi,
+                        lower_spectral_abscissa_per_s: 0.0,
+                        upper_spectral_abscissa_per_s: 0.0,
+                        bisections: 0,
+                    });
+                    last_exact = Some(hi.to_bits());
+                }
+                continue;
+            }
+            if a_lo.is_sign_positive() == a_hi.is_sign_positive() {
+                continue;
+            }
+            let mut used = 0usize;
+            while hi - lo > spin_tolerance_rad_s && used < maximum_bisections {
+                poll(&mut cancelled)?;
+                let mid = finite(0.5 * lo + 0.5 * hi)?;
+                if mid == lo || mid == hi {
+                    break;
+                }
+                let a_mid = self.at_speed(mid, &mut cancelled)?
+                    .spectral_abscissa(&mut cancelled)?;
+                used += 1;
+                if a_mid == 0.0 {
+                    lo = mid;
+                    hi = mid;
+                    a_lo = 0.0;
+                    a_hi = 0.0;
+                    break;
+                }
+                if a_mid.is_sign_positive() == a_lo.is_sign_positive() {
+                    lo = mid;
+                    a_lo = a_mid;
+                } else {
+                    hi = mid;
+                    a_hi = a_mid;
+                }
+            }
+            brackets.push(RotorStabilityBracket {
+                lower_spin_rad_s: lo,
+                upper_spin_rad_s: hi,
+                lower_spectral_abscissa_per_s: a_lo,
+                upper_spectral_abscissa_per_s: a_hi,
+                bisections: used,
+            });
+        }
+        if let Some(&(speed, alpha)) = samples.last() {
+            if alpha == 0.0 && last_exact != Some(speed.to_bits()) {
+                brackets.push(RotorStabilityBracket {
+                    lower_spin_rad_s: speed,
+                    upper_spin_rad_s: speed,
+                    lower_spectral_abscissa_per_s: 0.0,
+                    upper_spectral_abscissa_per_s: 0.0,
+                    bisections: 0,
+                });
+            }
+        }
+        poll(&mut cancelled)?;
+        Ok(brackets)
+    }
+
     pub fn campbell_samples(
         &self,
         spin_rad_s: &[f64],
@@ -281,6 +427,22 @@ impl RotorOperatingPoint<'_> {
     /// Complete assembled C + Omega G, without modal decoupling.
     pub fn velocity_operator(&self) -> &[f64] {
         &self.velocity_operator
+    }
+
+    /// Maximum real part of the complete quadratic pole set [1/s].
+    /// Negative means every computed mode decays; positive retains an observed
+    /// unstable mode. No engineering deadband or uncertainty margin is inferred.
+    pub fn spectral_abscissa(
+        &self,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, RotorError> {
+        let report = self.poles(&mut cancelled)?;
+        let mut alpha = f64::NEG_INFINITY;
+        for pole in report.poles_per_s {
+            poll(&mut cancelled)?;
+            alpha = alpha.max(pole.re);
+        }
+        finite(alpha)
     }
 
     /// Original scaled quadratic poles; no eigenvectors or accuracy certificates.
