@@ -4,6 +4,9 @@ use super::*;
 use fs_blake3::ContentHash;
 use fs_couple::moisture::{adaptive::*, cartesian::*};
 
+#[path = "adaptive/shared.rs"]
+mod shared;
+
 fn nonlinear() -> MoistureNonlinearConfig {
     MoistureNonlinearConfig {
         relative_tolerance: 1e-12,

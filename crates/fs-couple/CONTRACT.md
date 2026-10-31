@@ -18124,8 +18124,8 @@ actual specimen exchanges once. Final incremental and independently accumulated
 stored-water balances must both meet the same fixed coupled tolerance; that
 allowance is not multiplied by participant count. Solution and all native field
 outputs publish atomically after source, inventory, work and cancellation
-checks. The single-field adaptive APIs remain intact; these new simultaneous
-multi-field methods advance one caller-specified physical interval.
+checks. These simultaneous methods advance one caller-specified physical
+interval; their shared adaptive entry points below complete a whole window.
 
 Focused authored tests cover manufactured simultaneous uptake/desorption,
 nonzero opposing exchanges at zero net bath depletion, permutation/replay,
@@ -18544,6 +18544,42 @@ Authored regressions exercise continuous-time discrete diffusion decay and
 refinement, Cartesian/slab reduction, finite-vapor two-store relaxation,
 constant-activity finite-solution water loss, typed increment refinement,
 domain/cancellation refusal and a late work failure with no partial result.
+
+`FiniteMoistureAtmosphere` and `FiniteMoistureSolution` additionally expose
+`advance_shared_adaptive_to` and `advance_shared_cartesian_adaptive_to`.
+They use that same temporal loop around the original simultaneous reservoir
+roots. Private snapshots retain separate stable-ID-tagged native field views,
+source bindings, cell counts and dry masses; no cells are concatenated into a
+surrogate geometry. Every specimen's componentwise moisture discrepancy and
+the one reservoir's RH/activity and water mass must satisfy their original
+temporal scales. Neither specimen averaging nor a zero net bath change can
+hide opposing local uptake/desorption errors.
+
+Accepted fine transfers accumulate separately for every original face of
+every specimen. `SharedMoistureAdvanceReport::specimens` retains each ID's
+whole-window water change, face transfers, residual and maximum accepted
+moisture error. The common summary independently closes original-to-final
+stored water against all accepted transfers and reservoir depletion, with
+the same fixed window tolerance rather than a participant/step multiplier.
+Finite vapor also rechecks every original carrier and total mass. Aggregate
+face slots are scalar sums of corresponding local slots, not a common spatial
+surface. The original fields and their last native transport/source receipts
+are returned as `SharedMoistureSolid`; source history stays bounded.
+
+All specimens must share the original clock and reservoir temperature; every
+half/full endpoint rechecks the actual common clock, original binding and
+stable IDs. Aggregate cells are bounded before cloning and on every original
+root call. The shared temporal evaluation ceiling counts complete coupled
+probes, including rejected attempts, and the existing scalar/nonlinear/linear
+bounds remain active inside each probe. A late source/domain, inventory, work
+or cancellation refusal discards the complete requested window. The caller's
+fixed physical source/volume/RH brackets must cover its entire duration.
+Existing single-field APIs and report types retain their behavior through the
+same controller. Focused authored regressions cover opposing-field refinement
+with stationary pure solvent, finite-vapor mean/difference relaxation through
+both geometries, stable-ID replay, signed per-specimen accounts, and refusal
+after a successfully computed private prefix. Native moisture execution remains
+a separate validation gate; these fixtures add no caloric or experimental claim.
 
 ## Complete modal reflection admission
 

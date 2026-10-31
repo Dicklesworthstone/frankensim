@@ -12,6 +12,13 @@
 //! convergence/increment failures and temporal error permit shorter retries.
 
 mod finite;
+mod shared;
+
+pub use shared::{
+    SharedAtmosphereMoistureAdvanceCandidate, SharedCartesianAtmosphereMoistureAdvanceCandidate,
+    SharedCartesianSolutionMoistureAdvanceCandidate, SharedMoistureAdvanceCandidate,
+    SharedSolutionMoistureAdvanceCandidate,
+};
 
 use super::binding::MoistureField;
 use super::cartesian::{MoistureCartesian, MoistureCartesianReport};
@@ -75,6 +82,56 @@ pub struct MoistureAdvanceReport<Step, const FACES: usize> {
     pub last_substep: Step,
 }
 
+impl<Step, const N: usize> MoistureAdvanceReport<Step, N> {
+    fn map_step<Next>(self, map: impl FnOnce(Step) -> Next) -> MoistureAdvanceReport<Next, N> {
+        MoistureAdvanceReport {
+            interval_s: self.interval_s,
+            comparisons: self.comparisons,
+            accepted_intervals: self.accepted_intervals,
+            accepted_substeps: self.accepted_substeps,
+            rejected_intervals: self.rejected_intervals,
+            evaluations: self.evaluations,
+            minimum_accepted_substep_s: self.minimum_accepted_substep_s,
+            maximum_accepted_substep_s: self.maximum_accepted_substep_s,
+            maximum_accepted_error_ratio: self.maximum_accepted_error_ratio,
+            suggested_step_s: self.suggested_step_s,
+            boundary_water_kg: self.boundary_water_kg,
+            stored_water_kg: self.stored_water_kg,
+            water_change_kg: self.water_change_kg,
+            reservoir_water_kg: self.reservoir_water_kg,
+            activity: self.activity,
+            transport_balance_residual_kg: self.transport_balance_residual_kg,
+            water_balance_residual_kg: self.water_balance_residual_kg,
+            maximum_carrier_mass_residual_kg: self.maximum_carrier_mass_residual_kg,
+            total_mass_residual_kg: self.total_mass_residual_kg,
+            last_substep: map(self.last_substep),
+        }
+    }
+}
+
+/// A complete-window account for one original specimen, in its own face order.
+#[derive(Clone, Debug)]
+pub struct MoistureSpecimenAdvanceReport<const FACES: usize> {
+    pub id: u64,
+    pub boundary_water_kg: [f64; FACES],
+    pub stored_water_kg: [f64; 2],
+    pub water_change_kg: f64,
+    pub transport_balance_residual_kg: f64,
+    /// Maximum accepted componentwise moisture error, without other specimens
+    /// or reservoir coordinates diluting this specimen's comparison.
+    pub maximum_accepted_error_ratio: f64,
+}
+
+/// One shared-reservoir duration with independently accountable native fields.
+#[derive(Clone, Debug)]
+pub struct SharedMoistureAdvanceReport<Step, const FACES: usize> {
+    /// Whole-system accounts; face totals sum the corresponding local face
+    /// slots, not a reconstructed common surface or a fictitious geometry.
+    pub summary: MoistureAdvanceReport<Step, FACES>,
+    /// Stable-ID order. Each entry retains its own signed accepted transfers.
+    pub specimens: Vec<MoistureSpecimenAdvanceReport<FACES>>,
+}
+
 /// No variant exposes a partially advanced physical field or reservoir.
 #[derive(Debug)]
 pub enum MoistureAdvanceError<E> {
@@ -101,6 +158,11 @@ pub enum MoistureAdvanceError<E> {
         target_s: f64,
     },
     WaterBalance {
+        residual_kg: f64,
+        tolerance_kg: f64,
+    },
+    SpecimenWaterBalance {
+        id: u64,
         residual_kg: f64,
         tolerance_kg: f64,
     },
@@ -141,8 +203,32 @@ impl WaterStep<6> for MoistureCartesianReport {
     }
 }
 
+// The single-field path keeps its view and transfer array inline. A shared
+// collection holds one view per genuine field, never concatenated cell storage.
+enum Specimens<T> {
+    One(T),
+    Many(Vec<T>),
+}
+impl<T> Specimens<T> {
+    fn as_slice(&self) -> &[T] {
+        match self {
+            Self::One(value) => std::slice::from_ref(value),
+            Self::Many(values) => values,
+        }
+    }
+}
+trait ReportTransfers<const N: usize> {
+    fn transfers(&self) -> Specimens<(u64, [f64; N])>;
+}
+struct OneReport<Step>(Step);
+impl<Step: WaterStep<N>, const N: usize> ReportTransfers<N> for OneReport<Step> {
+    fn transfers(&self) -> Specimens<(u64, [f64; N])> {
+        Specimens::One((0, self.0.boundary_water()))
+    }
+}
+
 struct Snapshot<'a> {
-    field: MoistureField<'a>,
+    fields: Specimens<(u64, MoistureField<'a>)>,
     reservoir_water_kg: Option<f64>,
     activity: Option<f64>,
 }
@@ -150,7 +236,7 @@ fn field_snapshot<F: ReservoirField<N>, const N: usize>(
     field: &F,
 ) -> Result<Snapshot<'_>, MoistureError> {
     Ok(Snapshot {
-        field: field.inventory(),
+        fields: Specimens::One((0, field.inventory())),
         reservoir_water_kg: None,
         activity: None,
     })
@@ -238,56 +324,101 @@ fn optional_error<E>(
         )),
     }
 }
+fn snapshot_clock<E>(snapshot: &Snapshot<'_>, cx: &Cx<'_>) -> Result<f64, MoistureAdvanceError<E>> {
+    let fields = snapshot.fields.as_slice();
+    let Some((_, first)) = fields.first() else {
+        return Err(MoistureAdvanceError::Invalid(
+            "adaptive moisture needs at least one native field",
+        ));
+    };
+    let time = first.time_s;
+    if !time.is_finite() || fields.windows(2).any(|pair| pair[0].0 >= pair[1].0) {
+        return Err(MoistureAdvanceError::Invalid(
+            "adaptive specimen IDs must be unique and sorted, with a finite clock",
+        ));
+    }
+    for (i, (_, field)) in fields.iter().enumerate() {
+        if i % 128 == 0 {
+            checkpoint(cx)?;
+        }
+        if field.time_s.to_bits() != time.to_bits() {
+            return Err(MoistureAdvanceError::TimeResolution {
+                time_s: field.time_s,
+                target_s: time,
+            });
+        }
+    }
+    Ok(time)
+}
+fn check_clock<E>(
+    snapshot: &Snapshot<'_>,
+    time: f64,
+    cx: &Cx<'_>,
+) -> Result<(), MoistureAdvanceError<E>> {
+    let actual = snapshot_clock(snapshot, cx)?;
+    if actual.to_bits() != time.to_bits() {
+        return Err(MoistureAdvanceError::TimeResolution {
+            time_s: actual,
+            target_s: time,
+        });
+    }
+    Ok(())
+}
+fn same_field(a: &(u64, MoistureField<'_>), b: &(u64, MoistureField<'_>)) -> bool {
+    a.0 == b.0
+        && a.1.identity == b.1.identity
+        && a.1.moisture.len() == b.1.moisture.len()
+        && a.1.dry_mass_per_cell_kg.to_bits() == b.1.dry_mass_per_cell_kg.to_bits()
+}
 fn distance<E>(
     old: &Snapshot<'_>,
     a: &Snapshot<'_>,
     b: &Snapshot<'_>,
     c: MoistureTimeControls,
+    field_errors: &mut [f64],
     cx: &Cx<'_>,
 ) -> Result<f64, MoistureAdvanceError<E>> {
-    if old.field.identity != a.field.identity
-        || old.field.identity != b.field.identity
-        || old.field.moisture.len() != a.field.moisture.len()
-        || old.field.moisture.len() != b.field.moisture.len()
-    {
+    let (old, coarse, fine) = (
+        old.fields.as_slice(),
+        a.fields.as_slice(),
+        b.fields.as_slice(),
+    );
+    if old.len() != coarse.len() || old.len() != fine.len() || old.len() != field_errors.len() {
         return Err(MoistureAdvanceError::Invalid(
-            "adaptive comparison changed the original moisture geometry/source binding",
+            "adaptive comparison changed the specimen collection",
         ));
     }
     let mut ratio: f64 = 0.0;
-    for (i, ((&before, &coarse), &fine)) in old
-        .field
-        .moisture
-        .iter()
-        .zip(a.field.moisture)
-        .zip(b.field.moisture)
-        .enumerate()
-    {
-        if i % 128 == 0 {
-            checkpoint(cx)?;
+    for (slot, ((before, coarse), fine)) in old.iter().zip(coarse).zip(fine).enumerate() {
+        checkpoint(cx)?;
+        if !same_field(before, coarse) || !same_field(before, fine) {
+            return Err(MoistureAdvanceError::Invalid(
+                "adaptive comparison changed an original moisture geometry/source binding",
+            ));
         }
-        ratio = ratio.max(scaled_error(
-            before,
-            coarse,
-            fine,
-            c.moisture_absolute_tolerance,
-            c.relative_tolerance,
-        )?);
+        let mut local: f64 = 0.0;
+        for (i, ((&before, &coarse), &fine)) in before
+            .1
+            .moisture
+            .iter()
+            .zip(coarse.1.moisture)
+            .zip(fine.1.moisture)
+            .enumerate()
+        {
+            if i % 128 == 0 {
+                checkpoint(cx)?;
+            }
+            local = local.max(scaled_error(
+                before,
+                coarse,
+                fine,
+                c.moisture_absolute_tolerance,
+                c.relative_tolerance,
+            )?);
+        }
+        field_errors[slot] = local;
+        ratio = ratio.max(local);
     }
-    ratio = ratio.max(optional_error(
-        old.activity,
-        a.activity,
-        b.activity,
-        c.activity_absolute_tolerance,
-        c.relative_tolerance,
-    )?);
-    ratio = ratio.max(optional_error(
-        old.reservoir_water_kg,
-        a.reservoir_water_kg,
-        b.reservoir_water_kg,
-        c.reservoir_water_absolute_tolerance_kg,
-        c.relative_tolerance,
-    )?);
     Ok(ratio)
 }
 
@@ -329,16 +460,37 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
     snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
     cx: &Cx<'_>,
 ) -> Result<(S, MoistureAdvanceReport<R, N>), MoistureAdvanceError<E>> {
+    let (state, report) = evolve_fields(
+        initial,
+        target_s,
+        controls,
+        |state, dt| propose(state, dt).map(|(state, step)| (state, OneReport(step))),
+        snapshot,
+        cx,
+    )?;
+    Ok((state, report.summary.map_step(|step| step.0)))
+}
+
+fn evolve_fields<S: Clone, R: ReportTransfers<N>, E: Retryable, const N: usize>(
+    initial: &S,
+    target_s: f64,
+    controls: MoistureTimeControls,
+    mut propose: impl FnMut(&S, f64) -> Result<(S, R), E>,
+    snapshot: impl for<'a> Fn(&'a S) -> Result<Snapshot<'a>, E>,
+    cx: &Cx<'_>,
+) -> Result<(S, SharedMoistureAdvanceReport<R, N>), MoistureAdvanceError<E>> {
     checkpoint(cx)?;
     let original = snapshot(initial).map_err(MoistureAdvanceError::FinalInventory)?;
-    let start = original.field.time_s;
+    let start = snapshot_clock(&original, cx)?;
     validate(start, target_s, controls)?;
     let mut state = initial.clone();
     let mut time = start;
     let mut next_dt = controls.initial_step_s;
     let (mut comparisons, mut accepted, mut rejected, mut evaluations) = (0, 0, 0, 0);
     let (mut minimum, mut maximum, mut maximum_error) = (f64::INFINITY, 0.0_f64, 0.0_f64);
-    let mut water = [WaterSum::default(); N];
+    let mut water = vec![[WaterSum::default(); N]; original.fields.as_slice().len()];
+    let mut field_errors = vec![0.0; water.len()];
+    let mut field_maximum_error = vec![0.0_f64; water.len()];
     let mut last = None;
     while time < target_s {
         checkpoint(cx)?;
@@ -378,19 +530,12 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
                 &mut propose,
                 cx,
             )?;
-            if snapshot(&half)
-                .map_err(MoistureAdvanceError::FinalInventory)?
-                .field
-                .time_s
-                .to_bits()
-                != middle.to_bits()
-            {
-                return Err(MoistureAdvanceError::TimeResolution {
-                    time_s: time,
-                    target_s: middle,
-                });
-            }
-            let first_water = first.boundary_water();
+            check_clock(
+                &snapshot(&half).map_err(MoistureAdvanceError::FinalInventory)?,
+                middle,
+                cx,
+            )?;
+            let first_water = first.transfers();
             drop(first);
             let (fine, report) = probe(
                 &half,
@@ -421,16 +566,27 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
         let before = snapshot(&state).map_err(MoistureAdvanceError::FinalInventory)?;
         let a = snapshot(&coarse).map_err(MoistureAdvanceError::FinalInventory)?;
         let b = snapshot(&fine).map_err(MoistureAdvanceError::FinalInventory)?;
-        if a.field.time_s.to_bits() != end.to_bits() || b.field.time_s.to_bits() != end.to_bits() {
-            return Err(MoistureAdvanceError::TimeResolution {
-                time_s: time,
-                target_s: end,
-            });
-        }
+        check_clock(&a, end, cx)?;
+        check_clock(&b, end, cx)?;
         // First-order local error for possibly unequal representable halves.
         let (u, v) = (h1 / span, h2 / span);
         let factor = (u * u + v * v) / (2.0 * u * v);
-        let error = factor * distance(&before, &a, &b, controls, cx)?;
+        let field_error = distance(&before, &a, &b, controls, &mut field_errors, cx)?;
+        let activity_error = optional_error(
+            before.activity,
+            a.activity,
+            b.activity,
+            controls.activity_absolute_tolerance,
+            controls.relative_tolerance,
+        )?;
+        let reservoir_error = optional_error(
+            before.reservoir_water_kg,
+            a.reservoir_water_kg,
+            b.reservoir_water_kg,
+            controls.reservoir_water_absolute_tolerance_kg,
+            controls.relative_tolerance,
+        )?;
+        let error = factor * field_error.max(activity_error).max(reservoir_error);
         if error > 1.0 {
             let smaller = (span * 0.5).max(controls.minimum_step_s);
             if smaller < span {
@@ -445,12 +601,26 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
             });
         }
         checkpoint(cx)?;
-        for (sum, (a, b)) in water
-            .iter_mut()
-            .zip(first_water.into_iter().zip(report.boundary_water()))
-        {
-            sum.add(a);
-            sum.add(b);
+        let second_water = report.transfers();
+        let (first_water, second_water) = (first_water.as_slice(), second_water.as_slice());
+        if first_water.len() != water.len() || second_water.len() != water.len() {
+            return Err(MoistureAdvanceError::Invalid(
+                "native moisture receipt lost a specimen's face transfers",
+            ));
+        }
+        for (i, sums) in water.iter_mut().enumerate() {
+            checkpoint(cx)?;
+            let id = original.fields.as_slice()[i].0;
+            if first_water[i].0 != id || second_water[i].0 != id {
+                return Err(MoistureAdvanceError::Invalid(
+                    "native moisture receipt changed stable specimen IDs",
+                ));
+            }
+            for (side, sum) in sums.iter_mut().enumerate() {
+                sum.add(first_water[i].1[side]);
+                sum.add(second_water[i].1[side]);
+            }
+            field_maximum_error[i] = field_maximum_error[i].max(factor * field_errors[i]);
         }
         accepted += 1;
         minimum = minimum.min(h1.min(h2));
@@ -467,21 +637,70 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
         next_dt = next_dt.clamp(controls.minimum_step_s, controls.maximum_step_s);
     }
     let final_state = snapshot(&state).map_err(MoistureAdvanceError::FinalInventory)?;
+    check_clock(&final_state, target_s, cx)?;
+    let (original_fields, final_fields) =
+        (original.fields.as_slice(), final_state.fields.as_slice());
+    if original_fields.len() != final_fields.len() {
+        return Err(MoistureAdvanceError::Invalid(
+            "final moisture endpoint lost a specimen",
+        ));
+    }
+    let mut specimens = Vec::with_capacity(water.len());
     let mut changed_water = WaterSum::default();
-    for (i, (new, old)) in final_state
-        .field
-        .moisture
-        .iter()
-        .zip(original.field.moisture)
-        .enumerate()
-    {
-        if i % 128 == 0 {
-            checkpoint(cx)?;
+    let mut stored = [WaterSum::default(); 2];
+    let mut all_faces = [WaterSum::default(); N];
+    for (slot, (old, new)) in original_fields.iter().zip(final_fields).enumerate() {
+        checkpoint(cx)?;
+        if !same_field(old, new) {
+            return Err(MoistureAdvanceError::Invalid(
+                "final moisture endpoint changed an original specimen binding",
+            ));
         }
-        changed_water.add((new - old) * original.field.dry_mass_per_cell_kg);
+        let mut changed = WaterSum::default();
+        for (i, (&after, &before)) in new.1.moisture.iter().zip(old.1.moisture).enumerate() {
+            if i % 128 == 0 {
+                checkpoint(cx)?;
+            }
+            changed.add((after - before) * old.1.dry_mass_per_cell_kg);
+        }
+        let change = changed.total();
+        let transfers = water[slot].map(WaterSum::total);
+        let mut transferred = WaterSum::default();
+        for (sum, value) in all_faces.iter_mut().zip(transfers) {
+            sum.add(value);
+            transferred.add(value);
+        }
+        let residual = change - transferred.total();
+        let stored_water_kg = [old.1.water_mass_kg(), new.1.water_mass_kg()];
+        if stored_water_kg.iter().any(|m| !m.is_finite()) {
+            return Err(MoistureAdvanceError::Invalid(
+                "unrepresentable original/final specimen water inventory",
+            ));
+        }
+        if original_fields.len() > 1
+            && (!residual.is_finite() || residual.abs() > controls.water_balance_tolerance_kg)
+        {
+            return Err(MoistureAdvanceError::SpecimenWaterBalance {
+                id: old.0,
+                residual_kg: residual,
+                tolerance_kg: controls.water_balance_tolerance_kg,
+            });
+        }
+        changed_water.add(change);
+        for (sum, value) in stored.iter_mut().zip(stored_water_kg) {
+            sum.add(value);
+        }
+        specimens.push(MoistureSpecimenAdvanceReport {
+            id: old.0,
+            boundary_water_kg: transfers,
+            stored_water_kg,
+            water_change_kg: change,
+            transport_balance_residual_kg: residual,
+            maximum_accepted_error_ratio: field_maximum_error[slot],
+        });
     }
     let change = changed_water.total();
-    let transfers = water.map(WaterSum::total);
+    let transfers = all_faces.map(WaterSum::total);
     let mut transferred_water = WaterSum::default();
     for value in transfers {
         transferred_water.add(value);
@@ -492,10 +711,7 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
         .zip(final_state.reservoir_water_kg)
         .map(|(a, b)| [a, b]);
     let balance = reservoir_water.map_or(transport_balance, |[a, b]| b - a + change);
-    let stored_water = [
-        original.field.water_mass_kg(),
-        final_state.field.water_mass_kg(),
-    ];
+    let stored_water = stored.map(WaterSum::total);
     if stored_water
         .iter()
         .chain(reservoir_water.as_ref().into_iter().flatten())
@@ -539,7 +755,13 @@ fn evolve<S: Clone, R: WaterStep<N>, E: Retryable, const N: usize>(
         last_substep: last.expect("positive completed duration contains accepted half steps"),
     };
     checkpoint(cx)?;
-    Ok((state, report))
+    Ok((
+        state,
+        SharedMoistureAdvanceReport {
+            summary: report,
+            specimens,
+        },
+    ))
 }
 
 impl MoistureSlab {

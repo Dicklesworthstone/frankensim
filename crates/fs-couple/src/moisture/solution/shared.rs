@@ -132,7 +132,7 @@ impl FiniteMoistureSolution {
         self.advance_fields(&fields, dt_s, maximum_total_cells, controls, cx)
     }
 
-    pub(super) fn advance_fields<F: ReservoirField<N>, const N: usize>(
+    pub(in crate::moisture) fn advance_fields<F: ReservoirField<N>, const N: usize>(
         &self,
         participants: &[ReservoirParticipant<'_, F, N>],
         dt_s: f64,
