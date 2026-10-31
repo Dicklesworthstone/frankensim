@@ -403,7 +403,7 @@ impl<'a> FiniteSolidBody<'a> {
         Ok(())
     }
 
-    fn current_positions(&self, cx: &Cx<'_>) -> Result<Vec<[f64; 3]>, FiniteSolidError> {
+    pub(super) fn current_positions(&self, cx: &Cx<'_>) -> Result<Vec<[f64; 3]>, FiniteSolidError> {
         let u = inflate(&self.state.q, &self.free, &self.fixed);
         let mut positions = self.problem.nodes_m.to_vec();
         for (node, position) in positions.iter_mut().enumerate() {

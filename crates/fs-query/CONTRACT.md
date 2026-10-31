@@ -587,3 +587,45 @@ at rel 0.016 (band 0.05).
   crowned across the width); the strip fixture's linear interpolation
   between the patent's stated endpoints is the ingest rule, not a
   patent statement.
+
+
+## Cached triangle distance and declared linear-path queries
+
+`triangle::{PreparedTriangleSurface, closest_triangle_point}` adds constant-work,
+allocation-free closest-point barycentrics for nondegenerate triangles, including
+closed-segment edge and vertex cases. Dimensionless edge scaling avoids squaring
+physical lengths. A prepared triangle-only view reuses the feature owner's
+deterministic median-split BVH. Current refit is linear in the prepared mesh and
+preserves topology and spatial partitioning. Queries return the nearest triangle
+and every triangle within the requested distance under explicit aggregate visit
+and output caps, canonical ordering and cancellation.
+
+Swept refit unions endpoint boxes for declared straight vertex interpolation.
+Its sphere query returns every triangle box intersecting the outward-rounded
+straight centre-segment enclosure. These are broad-phase supersets. Narrow
+closest-point distances and barycentrics are floating-point geometry, not
+interval distance certificates. Degenerate/range failures and exhausted bounds
+refuse without publishing an incomplete candidate set as complete.
+
+`triangle::sweep::linear_sphere_triangle` checks the complete declared linear
+path using fixed separating planes and the original `fs-ivl` directed interval
+owner. Approximate closest points only propose directions; they never admit a
+path. An exact expansion fallback admits axis-aligned touching/receding paths
+without treating a tolerance as permitted penetration. Unresolved windows are
+subdivided under an explicit work cap and return `PossibleContact`, including
+unresolved grazing; this is neither an asserted impact nor a time root.
+
+`linear_tetrahedron_orientation` checks the signed determinant throughout the
+same interpolation using the original cached reference orientation. Positive
+endpoint determinants alone cannot admit a path that collapses or inverts
+between them. This check does not establish global injectivity or constitutive
+admissibility between native integration endpoints. Both sweep queries certify
+only the specified linear coordinate interpolation, not an underlying curved
+mechanical trajectory.
+
+`tests/triangles.rs` covers analytic face/edge/vertex witnesses, extreme physical
+scales, large-deformation refits, fast swept crossings, bounds and cancellation.
+The sweep module's native fixtures cover hidden pass-through, exact receding
+touch versus one-ULP penetration, endpoint-positive intermediate tet collapse,
+and work/cancellation refusal.
+

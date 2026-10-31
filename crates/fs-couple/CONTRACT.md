@@ -17822,3 +17822,42 @@ It supplies no phase equilibrium, latent heat, reacting/nozzle exchange,
 friction/contact stops or exact-isentropy/nonnegative-entropy guarantee. Focused
 regression sources cover dense-gas motion and energy accounting, fixed-wall
 heating, real-EOS acoustic admission, and source/cancellation refusal with replay.
+
+
+## Current tetrahedral-surface contact geometry
+
+`finite_solid::contact::surface::FiniteSolidContactSurface` prepares the original
+`ClosedTetPressureSurface` exterior, binds its exact reference coordinates and
+connectivity, retains canonical face/tet incidence, and caches the query owner's
+triangle BVH. Queries refit current coordinates without rediscovering topology.
+They retain original tetrahedral barycentric material points and actual rigid
+sphere arms, including offset sphere centres and rigid orientation. Shared edge
+and vertex witnesses deduplicate by stable topology-derived contact IDs;
+permuting sphere inputs does not change the canonical result.
+
+The actual sphere and solid points remain distinct at positive gap. No common
+point is fabricated to suppress the angular couple from a tangential impulse.
+The complete geometry feeds the existing consistent-mass/full-inertia
+`rigid_contact_candidate`, preserving off-centre torque, physical frictional
+spin, and its original spin/orbital angular-momentum and work audits.
+
+Raw `sphere_separations` receipts retain negative gaps for event bracketing.
+`sphere_contacts` and `admitted_contacts` refuse penetration without changing
+either configuration. Inverted or collapsed current tets, interior or unresolved
+sphere centres, reference mismatch, invalid/range-limited geometry, duplicate
+sphere IDs, identifier overflow, cancellation and exhausted work/output bounds
+refuse. A sphere centre outside the refitted whole-surface AABB skips the
+per-tet containment scan; other centres receive the complete bounded test.
+
+This route describes discrete P1 geometry. The original volume mesh must be
+conforming and globally non-overlapping; local tet admission does not certify
+global injectivity. No arbitrary-flow CCD, penetration repair or physical
+impact-loss heat partition is inferred from the geometry query.
+
+`tests/finite_solid/contact/surface.rs` covers the deformed material trace,
+separate positive-gap witnesses, canonical edge/vertex deduplication, an actual
+off-centre full-inertia impact, Coulomb-induced spin of a homogeneous sphere,
+and penetration/interior/budget/cancellation refusals. The internal current-tet
+fixture checks inversion and collapse. These are authored numerical oracles,
+not experimental material validation.
+

@@ -16,6 +16,9 @@
 /// Directional interface sources through the same coupled mechanical event.
 pub mod elliptic;
 
+/// Current finite-solid surface witnesses for native rigid contact.
+pub mod surface;
+
 use super::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls, FiniteSolidPoint};
 use super::{Cx, FiniteSolidBody, FiniteSolidError};
 use fs_contact::frictional_multicontact::{

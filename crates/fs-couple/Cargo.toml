@@ -57,6 +57,7 @@ fs-phs = { path = "../fs-phs" }
 fs-plate = { path = "../fs-plate" }
 fs-ports = { path = "../fs-ports" }
 fs-qty = { path = "../fs-qty" }
+fs-query = { path = "../fs-query" }
 fs-rand = { path = "../fs-rand" }
 fs-rep-frep = { path = "../fs-rep-frep" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
@@ -80,7 +81,6 @@ fs-substrate = { path = "../fs-substrate" }
 fs-material = { path = "../fs-material" }
 fs-modal = { path = "../fs-modal" }
 fs-plate = { path = "../fs-plate" }
-fs-query = { path = "../fs-query" }
 fs-solver = { path = "../fs-solver" }
 fs-evidence = { path = "../fs-evidence" }
 [lints]

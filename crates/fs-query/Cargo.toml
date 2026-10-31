@@ -14,6 +14,7 @@ layer = "L2"
 fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-geom = { path = "../fs-geom" }
+fs-ivl = { path = "../fs-ivl" }
 fs-mesh = { path = "../fs-mesh" }
 fs-obs = { path = "../fs-obs" }
 fs-rep-frep = { path = "../fs-rep-frep" }

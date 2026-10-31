@@ -2437,6 +2437,7 @@ dependencies = [
  "fs-exec",
  "fs-geom",
  "fs-io",
+ "fs-ivl",
  "fs-material",
  "fs-mesh",
  "fs-obs",

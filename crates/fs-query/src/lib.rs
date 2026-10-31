@@ -78,6 +78,12 @@ pub use felt::{
 pub use features::{
     Feature, FeatureComplex, MAX_COMPLEX_FEATURES, ccd_candidates, ccd_candidates_with_inflation,
 };
+pub use features::triangles::{
+    PreparedTriangleSurface, RefitTriangleSurface, SweptTriangleCandidates,
+    SweptTriangleSurface, TriangleFeature, TrianglePoint, TrianglePointQuery,
+    TriangleQueryError, closest_triangle_point,
+};
+pub use features::triangles as triangle;
 pub use gap::{GapSample, ImplicitGapOracle};
 pub use inflation::{ContactInflation, ContactInflationError};
 

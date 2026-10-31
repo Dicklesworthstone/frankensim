@@ -19,6 +19,9 @@
 use crate::{ContactInflation, QueryError};
 use fs_exec::Cx;
 
+/// Cached triangle topology and current-coordinate distance queries.
+pub mod triangles;
+
 /// Hard bound on features per complex.
 pub const MAX_COMPLEX_FEATURES: usize = 1 << 20;
 

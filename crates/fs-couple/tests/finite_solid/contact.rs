@@ -1,6 +1,8 @@
 //! Actual simultaneous native rigid/solid Coulomb impacts and independent oracles.
 #[path = "contact/elliptic.rs"]
 mod elliptic;
+#[path = "contact/surface.rs"]
+mod surface;
 
 use super::*;
 use fs_contact::frictional_multicontact::NormalVelocityLaw;
