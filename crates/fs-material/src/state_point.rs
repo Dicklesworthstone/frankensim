@@ -67,6 +67,10 @@ pub const MAX_MATERIAL_PROPERTY_NAME_BYTES: usize = 128;
 pub const DENSITY_PROPERTY: &str = "density";
 /// Canonical property key for isotropic Young's modulus in pascals.
 pub const YOUNG_MODULUS_PROPERTY: &str = "young_modulus";
+/// Canonical property key for isotropic shear modulus in pascals.
+pub const SHEAR_MODULUS_PROPERTY: &str = "shear_modulus";
+/// Canonical property key for isotropic bulk modulus in pascals.
+pub const BULK_MODULUS_PROPERTY: &str = "bulk_modulus";
 /// Canonical property key for isotropic Poisson ratio.
 pub const POISSON_RATIO_PROPERTY: &str = "poisson_ratio";
 /// Canonical property key for uniaxial yield stress in pascals.
@@ -2041,19 +2045,7 @@ pub fn resolve_isotropic_elastic_state_point(
         )?,
     ];
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
-    let value = |name: &str| {
-        resolved
-            .property(name)
-            .expect("canonical isotropic-elastic requirement was resolved")
-            .value_si()
-    };
-    Ok(IsotropicElasticStatePoint {
-        density_kg_m3: value(DENSITY_PROPERTY),
-        young_modulus_pa: value(YOUNG_MODULUS_PROPERTY),
-        poisson_ratio: value(POISSON_RATIO_PROPERTY),
-        resolved,
-        derivation: None,
-    })
+    IsotropicElasticStatePoint::try_from_resolved(resolved)
 }
 
 /// Complete source-frame elastic matrix resolved from one immutable material

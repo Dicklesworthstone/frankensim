@@ -144,8 +144,9 @@ moduli do not become measured ultrasonic data. Native regressions connect
 source-selected bulk/shear constants and oriented full-tensor states to these
 derived responses while preserving original identities.
 
-The shared `linear3::source` adapter resolves isotropic or oriented
-orthotropic elastic constants and independently selected isotropic or three-axis
+The shared `linear3::source` adapter resolves explicitly selected isotropic
+Young/Poisson, Young/shear or bulk/shear source pairs, or oriented
+orthotropic elastic constants, and independently selected isotropic or three-axis
 integrated expansion. Both `fs-mbd-material` and spatial
 `fs-couple::solid_enthalpy` use this one lowering into the original Mandel
 tensor and eigenstrain owners. Current stiffness does not require current
@@ -154,6 +155,19 @@ Reference resolution can select density and the full elastic schema atomically.
 Every public lowering checks a complete matching property schema before
 accessing engineering constants. Source integration, compliance admission and
 proper-frame transforms remain in their original owners.
+
+All three isotropic source choices lower through
+`fs-material::state_point::ResolvedIsotropicElasticModuli`; derived E/nu values are not
+inserted into the card or relabeled as measurements. The selected pair, source
+receipts and reference inventory remain bound to the native material identity.
+Changing temperature re-resolves the same selected source schema before
+rebuilding stiffness, thermal stress and vibration inputs, while reference mass
+and inertia remain unchanged. G1/G3 tests exercise equivalent source pairs,
+temperature-dependent compliance, thermal stress, exact mass retention and
+source/identity refusals through the existing tetrahedral solve. This does not
+extend the separate reciprocal affine thermoelastic potential's E/nu derivative
+law: that consumer explicitly refuses alternative pairs until its thermal
+derivatives are supported.
 
 TET10 and HEX20/HEX27 expose `assemble_thermal_load` using the same
 isoparametric geometry, Mandel strain operator, elastic tensors, constraints

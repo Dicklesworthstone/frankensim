@@ -1,14 +1,15 @@
 //! One material model selection for shape, stress, inertia and vibration.
 use super::SolidMaterialError;
 use crate::linear3::TetElasticMaterial;
-use fs_blake3::ContentHash;
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::elastic::OrthotropicElastic;
 use fs_material::state_point::{
-    DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
-    ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
-    ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES, POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint,
-    ScalarAdmissibility, ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
+    BULK_MODULUS_PROPERTY, DENSITY_PROPERTY, IsotropicElasticParameters, MaterialPropertySelection,
+    MaterialStatePointError, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
+    ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
+    POISSON_RATIO_PROPERTY, ResolvedIsotropicElasticModuli, ResolvedMaterialStatePoint,
+    SHEAR_MODULUS_PROPERTY, ScalarAdmissibility, ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
     resolve_material_state_point,
 };
 use fs_qty::{Density, Dims, Pressure};
@@ -20,6 +21,12 @@ use fs_qty::{Density, Dims, Pressure};
 pub enum SolidStiffnessModel {
     /// Scalar E and nu, with the original isotropic tensor construction.
     Isotropic,
+    /// Scalar Young's and shear moduli, with Poisson ratio and bulk modulus
+    /// derived by the shared isotropic material owner. No E/nu claim is added.
+    IsotropicYoungShear,
+    /// Scalar bulk and shear moduli, with Young's modulus and Poisson ratio
+    /// derived by the shared isotropic material owner. No E/nu claim is added.
+    IsotropicBulkShear,
     /// Nine principal-axis engineering constants, rotated once into mesh axes.
     OrientedOrthotropic {
         /// Proper orthonormal rotation; columns are material axes in mesh coordinates.
@@ -50,6 +57,22 @@ impl SolidStiffnessModel {
                         upper: 0.5,
                     },
                 )?);
+            }
+            Self::IsotropicYoungShear | Self::IsotropicBulkShear => {
+                for property in [
+                    if self == Self::IsotropicYoungShear {
+                        YOUNG_MODULUS_PROPERTY
+                    } else {
+                        BULK_MODULUS_PROPERTY
+                    },
+                    SHEAR_MODULUS_PROPERTY,
+                ] {
+                    requirements.push(ScalarPropertyRequirement::try_new(
+                        property,
+                        Pressure::DIMS,
+                        ScalarAdmissibility::StrictlyPositive,
+                    )?);
+                }
             }
             Self::OrientedOrthotropic { .. } => {
                 for property in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
@@ -121,13 +144,14 @@ impl SolidStiffnessModel {
     ) -> Result<TetElasticMaterial, SolidMaterialError> {
         // This API is shared and public: incomplete or mismatched source
         // receipts must refuse rather than panic on a missing engineering constant.
-        for requirement in self.requirements()? {
+        let requirements = self.requirements()?;
+        for requirement in &requirements {
             let property = current.property(requirement.name()).ok_or(
                 MaterialStatePointError::InvalidDerived {
                     quantity: "missing_elastic_source_property",
                 },
             )?;
-            if property.requirement() != &requirement {
+            if property.requirement() != requirement {
                 return Err(MaterialStatePointError::InvalidDerived {
                     quantity: "elastic_source_requirement",
                 }
@@ -142,12 +166,44 @@ impl SolidStiffnessModel {
                 .value_si()
         };
         Ok(match self {
-            Self::Isotropic => TetElasticMaterial::try_new(
-                density,
-                value(YOUNG_MODULUS_PROPERTY),
-                value(POISSON_RATIO_PROPERTY),
-                identity.0,
-            )?,
+            Self::Isotropic | Self::IsotropicYoungShear | Self::IsotropicBulkShear => {
+                let parameters = match self {
+                    Self::Isotropic => IsotropicElasticParameters::YoungPoisson {
+                        young_modulus: requirements[0].clone(),
+                        poisson_ratio: requirements[1].clone(),
+                    },
+                    Self::IsotropicYoungShear => IsotropicElasticParameters::YoungShear {
+                        young_modulus: requirements[0].clone(),
+                        shear_modulus: requirements[1].clone(),
+                    },
+                    Self::IsotropicBulkShear => IsotropicElasticParameters::BulkShear {
+                        bulk_modulus: requirements[0].clone(),
+                        shear_modulus: requirements[1].clone(),
+                    },
+                    Self::OrientedOrthotropic { .. } => unreachable!("isotropic branch"),
+                };
+                let moduli = ResolvedIsotropicElasticModuli::try_from_resolved(
+                    current.clone(),
+                    &parameters,
+                )?;
+                let mut material = TetElasticMaterial::try_new(
+                    density,
+                    moduli.young_modulus_pa(),
+                    moduli.poisson_ratio(),
+                    identity.0,
+                )?;
+                if self != Self::Isotropic {
+                    // The caller owns the reference inventory; the material
+                    // projection owns the selected source roles and derivation.
+                    // Both must survive in the actual downstream tensor identity.
+                    let mut hash =
+                        DomainHasher::new("org.frankensim.fs-solid.isotropic-source-parameters.v1");
+                    hash.update(identity.as_bytes());
+                    hash.update(moduli.identity().as_bytes());
+                    material.material_state_identity = hash.finalize().0;
+                }
+                material
+            }
             Self::OrientedOrthotropic {
                 principal_to_mesh,
                 orientation_identity,
@@ -172,4 +228,3 @@ impl SolidStiffnessModel {
         })
     }
 }
-

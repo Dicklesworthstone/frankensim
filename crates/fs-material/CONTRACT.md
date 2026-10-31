@@ -2930,7 +2930,7 @@ aliases; this adapter does not infer isotropy from a material name or directiona
 measurements. Positive, finite and numerically representable isotropic stiffness
 is required before publishing the existing `IsotropicElasticStatePoint`.
 
-The original `resolved()` bundle contains only the selected source properties.
+The original resolver's `resolved()` bundle contains the selected source properties.
 `derivation()` retains their roles and nominal algebraic consequences separately;
 no derived constant is inserted as a measured claim. `identity()` binds the
 derivation and is used by the solid element, thermal-strain and reduction ingress.
@@ -2938,9 +2938,32 @@ Canonical Young/Poisson states retain their previous identities. Source marginal
 uncertainty remains attached; joint covariance is not assumed and uncertainty is
 not propagated. Additional unselected measurements are not reconciled automatically.
 
+`ResolvedIsotropicElasticModuli::try_from_resolved` projects that same checked
+algebra from an already resolved complete bundle without requiring density.
+Solid stiffness updates therefore retain the original reference mass inventory
+instead of asking for a new `rho(T)`. All thermal, electrical, optical or other
+properties in the supplied bundle remain present, with their exact original
+receipts. Source keys and consumer domains are checked again at adoption;
+finite-only resolution cannot bypass elastic stability or numerical
+representability. The projection identity binds source state, parameter roles,
+projection domains and nominal moduli. No additional source claim is created.
+
+`IsotropicElasticStatePoint::{try_from_resolved,
+try_from_resolved_with_parameters}` similarly adopt complete bundles for
+consumers that need density. Both elastic projections expose `at_query_point`,
+which refreshes every retained property through the existing shared resolver,
+pins the selected claims and rebuilds the same constitutive parameterization.
+An auxiliary property leaving support refuses the whole candidate, even if
+the elastic constants remain available. A stricter projection-only domain
+also remains enforced after refresh. Original canonical and independent-pair
+resolver identities remain unchanged; additional projection-only domains use
+the explicit parameter identity v2. This is endpoint evaluation, not a mass
+transfer, path-support proof, constitutive-history integration or heat solve.
+
 Focused regressions cover independent constitutive stress, source conditions,
-invalid pairs, conflicting claim pins, unit rescaling, and the actual tetrahedral
-mass/strain-energy and thermal-expansion identity path. This is a bounded MR11
+invalid pairs, conflicting claim pins, unit rescaling, complete-bundle adoption,
+multiaxis refresh and atomic auxiliary-property refusal, and the actual tetrahedral
+mass/strain-energy and thermal-expansion identity path. This is a bounded MR11/MR08
 parameter-conversion slice, not complete derived-property or material validation.
 
 ### Reversible adhesion driving equilibrium liquid wetting
