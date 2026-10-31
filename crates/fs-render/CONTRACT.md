@@ -37,6 +37,13 @@ differentiable lift). Pure Rust throughout.
   Snell refraction and total internal reflection, plus smooth-delta and
   single-scattering isotropic-GGX reflection/transmission. Radiance transport
   uses the documented `(eta_i/eta_t)^2` transmission convention.
+  Native spectral bulk absorption retains 2–16 declared vacuum-wavelength
+  knots covering exactly 380–780 nm, with nonnegative intensity coefficients
+  in inverse metres and deterministic linear interpolation. Imaginary-index
+  inputs convert knotwise as `alpha = 4*pi*k/lambda_m`, retaining the stated
+  linear-alpha approximation and weakly absorbing dielectric interface model.
+  No RGB fit, opacity floor, or extrapolation is introduced. Thin-path absorbed
+  fractions use `expm1`, and material identities retain every admitted knot.
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear
@@ -57,8 +64,11 @@ differentiable lift). Pure Rust throughout.
   scene state. Underlying optical model refusals remain structured errors.
   Binding identities establish replay consistency, not measurement authority;
   conductor source status is `MaterialStateClaims`, preserving query identity
-  without labeling authored or unmeasured inputs as measured. Dielectric RGB
-  lifting remains an approximation. This optical binding adds no thermal
+  without labeling authored or unmeasured inputs as measured. Dielectrics retain
+  native nine-knot intensity absorption with typed power-nepers/metre semantics;
+  the separately selected legacy RGB schema retains its lifting approximation.
+  The material resolver refuses ambiguous or incomplete absorption schemas.
+  This optical binding adds no thermal
   emission, birefringence, phase evolution, or measured-spectrum validation.
   Focused G0/G1 regressions in the
   existing Euler scene-adapter unit seam exercise both generic optical families,

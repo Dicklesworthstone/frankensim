@@ -15,7 +15,7 @@ use fs_matdb::{
     ClaimId, ClaimSet, InterfaceSystemCard, MatDbError, MaterialAnswer, MaterialCard,
     MaterialStateId, PropertyKey, PropertyUsageReceiptError, QueryPoint, SelectionPolicy,
 };
-use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+use fs_qty::semantic::{AttenuationConvention, QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 use crate::elastic::OrthotropicElastic;
@@ -139,6 +139,28 @@ pub const VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES: [&str; 3] = [
     "optical_transmittance_linear_g",
     "optical_transmittance_linear_b",
 ];
+/// Canonical material-card keys for bulk spectral absorption [1/m] at
+/// [`VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM`]. Values attenuate radiance/power as
+/// `exp(-alpha * distance_m)`; amplitude-neper and decibel coefficients are
+/// different quantity kinds and cannot silently fill these roles.
+pub const VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES: [&str; 9] = [
+    "optical_absorption_per_m_380nm",
+    "optical_absorption_per_m_430nm",
+    "optical_absorption_per_m_480nm",
+    "optical_absorption_per_m_530nm",
+    "optical_absorption_per_m_580nm",
+    "optical_absorption_per_m_630nm",
+    "optical_absorption_per_m_680nm",
+    "optical_absorption_per_m_730nm",
+    "optical_absorption_per_m_780nm",
+];
+/// Exact quantity schema for spectral Beer-Lambert intensity absorption.
+pub const VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY: QuantitySpec =
+    QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Attenuation(AttenuationConvention::PowerNepersPerMetre),
+        ValueForm::Static,
+    ));
+
 /// Canonical material-card key for the Beer-Lambert reference distance [m].
 pub const VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY: &str =
     "optical_transmittance_reference_distance_m";
@@ -2666,16 +2688,39 @@ pub struct VisibleConductorStatePoint {
 
 /// Visible homogeneous-dielectric response resolved at one material state.
 ///
-/// Cauchy coefficients are retained in SI (`B` in m2, `C` in m4). The
-/// reference transmittance and distance define the homogeneous Beer-Lambert
-/// absorption model consumed by the spectral renderer. Surface roughness is
-/// deliberately not a bulk-material property and is bound separately.
+/// Cauchy coefficients are retained in SI (`B` in m2, `C` in m4). Absorption
+/// retains either the source spectrum or an explicitly RGB-based reference;
+/// a spectrum is never projected through RGB. Surface roughness is deliberately
+/// not a bulk-material property and is bound separately.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VisibleDielectricStatePoint {
     resolved: ResolvedMaterialStatePoint,
     cauchy_coefficients_si: [f64; 3],
-    reference_transmittance_linear_rgb: [f64; 3],
-    reference_distance_m: f64,
+    absorption: VisibleDielectricAbsorption,
+}
+
+/// Source parameterization of a homogeneous dielectric's bulk absorption.
+///
+/// These coefficients exclude interface reflection and scattering. A measured
+/// external slab transmittance must first be corrected under an explicit
+/// interface/geometry model; it cannot be relabeled as internal transmittance.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum VisibleDielectricAbsorption {
+    /// RGB reference intended for the existing spectral-lifting approximation.
+    ReferenceRgb {
+        /// Internal linear-RGB transmittance at the reference distance.
+        transmittance_linear_rgb: [f64; 3],
+        /// Positive propagation distance through the homogeneous medium [m].
+        reference_distance_m: f64,
+    },
+    /// Intensity absorption at [`VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM`] [1/m].
+    ///
+    /// The renderer interpolates alpha, not transmittance, linearly between
+    /// knots. Features finer than this source grid are not resolved.
+    Spectral {
+        /// Nonnegative radiance/power absorption, without RGB lifting.
+        absorption_per_m: [f64; 9],
+    },
 }
 
 /// Data-selected visible optical constitutive family at one material state.
@@ -2717,16 +2762,10 @@ impl VisibleDielectricStatePoint {
         self.cauchy_coefficients_si
     }
 
-    /// Linear-RGB transmittance at [`Self::reference_distance_m`].
+    /// Absorption in its original source parameterization.
     #[must_use]
-    pub const fn reference_transmittance_linear_rgb(&self) -> [f64; 3] {
-        self.reference_transmittance_linear_rgb
-    }
-
-    /// Beer-Lambert reference distance [m].
-    #[must_use]
-    pub const fn reference_distance_m(&self) -> f64 {
-        self.reference_distance_m
+    pub const fn absorption(&self) -> VisibleDielectricAbsorption {
+        self.absorption
     }
 }
 
@@ -2787,16 +2826,40 @@ pub fn resolve_visible_conductor_state_point(
 
 /// Resolve a homogeneous visible dielectric at one exact material state.
 ///
-/// No chemistry name selects an optical model. All seven properties must be
-/// present on one immutable material card and valid at the same query point.
-/// Transmittance is admitted only in `(0, 1]`; malformed or partial optical
-/// data refuses atomically rather than falling back to a visual preset.
+/// No chemistry name selects an optical model. Cauchy dispersion and either
+/// nine intensity-absorption knots or an RGB transmittance/distance reference
+/// must resolve from one immutable card at the same state. Spectral absorption
+/// has an explicit power-neper-per-metre quantity kind; amplitude coefficients
+/// are refused even though their dimensions match.
+///
+/// The presence of any spectral property selects the complete spectral schema;
+/// missing, wrongly typed or out-of-domain knots never fall back to RGB.
+/// Simultaneously declared spectral and RGB schemas require an explicit
+/// `PinnedByProperty` plan selecting one, or resolution refuses ambiguity.
 pub fn resolve_visible_dielectric_state_point(
     card: &MaterialCard,
     point: &QueryPoint,
     selection: MaterialPropertySelection,
 ) -> Result<VisibleDielectricStatePoint, MaterialStatePointError> {
-    let mut requirements = Vec::with_capacity(7);
+    let declares = |name: &str| match &selection {
+        MaterialPropertySelection::PinnedByProperty(plan) => {
+            plan.iter().any(|(property, _)| property == name)
+        }
+        _ => !card.claims_for(name).is_empty(),
+    };
+    let spectral = VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES
+        .iter()
+        .any(|name| declares(name));
+    let rgb = VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES
+        .iter()
+        .any(|name| declares(name))
+        || declares(VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY);
+    if spectral && rgb {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "ambiguous_visible_dielectric_absorption",
+        });
+    }
+    let mut requirements = Vec::with_capacity(if spectral { 12 } else { 7 });
     requirements.push(ScalarPropertyRequirement::try_new(
         VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
         Dims::NONE,
@@ -2812,18 +2875,28 @@ pub fn resolve_visible_dielectric_state_point(
         LENGTH_FOURTH_DIMS,
         ScalarAdmissibility::NonNegative,
     )?);
-    for name in VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES {
+    if spectral {
+        for name in VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES {
+            requirements.push(ScalarPropertyRequirement::try_with_quantity(
+                name,
+                VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+                ScalarAdmissibility::NonNegative,
+            )?);
+        }
+    } else {
+        for name in VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES {
+            requirements.push(ScalarPropertyRequirement::try_new(
+                name,
+                Dims::NONE,
+                ScalarAdmissibility::StrictlyPositive,
+            )?);
+        }
         requirements.push(ScalarPropertyRequirement::try_new(
-            name,
-            Dims::NONE,
+            VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
+            Dims([1, 0, 0, 0, 0, 0]),
             ScalarAdmissibility::StrictlyPositive,
         )?);
     }
-    requirements.push(ScalarPropertyRequirement::try_new(
-        VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
-        Dims([1, 0, 0, 0, 0, 0]),
-        ScalarAdmissibility::StrictlyPositive,
-    )?);
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
     let value = |name: &str| {
         resolved
@@ -2831,23 +2904,29 @@ pub fn resolve_visible_dielectric_state_point(
             .expect("canonical visible-dielectric requirement was resolved")
             .value_si()
     };
-    let reference_transmittance_linear_rgb = VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES.map(value);
-    if reference_transmittance_linear_rgb
-        .iter()
-        .any(|value| *value > 1.0)
-    {
-        return Err(MaterialStatePointError::InvalidDerived {
-            quantity: "visible_dielectric_reference_transmittance",
-        });
-    }
+    let absorption = if spectral {
+        VisibleDielectricAbsorption::Spectral {
+            absorption_per_m: VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.map(value),
+        }
+    } else {
+        let transmittance_linear_rgb = VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES.map(value);
+        if transmittance_linear_rgb.iter().any(|value| *value > 1.0) {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "visible_dielectric_reference_transmittance",
+            });
+        }
+        VisibleDielectricAbsorption::ReferenceRgb {
+            transmittance_linear_rgb,
+            reference_distance_m: value(VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY),
+        }
+    };
     Ok(VisibleDielectricStatePoint {
         cauchy_coefficients_si: [
             value(VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY),
             value(VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY),
             value(VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY),
         ],
-        reference_transmittance_linear_rgb,
-        reference_distance_m: value(VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY),
+        absorption,
         resolved,
     })
 }
@@ -4861,14 +4940,11 @@ mod tests {
         assert!((cauchy[1] - 4.1e-15).abs() <= 1.0e-30);
         assert_eq!(cauchy[2].to_bits(), 0.0_f64.to_bits());
         assert_eq!(
-            resolved
-                .reference_transmittance_linear_rgb()
-                .map(f64::to_bits),
-            [0.98_f64, 0.98_f64, 0.94_f64].map(f64::to_bits)
-        );
-        assert_eq!(
-            resolved.reference_distance_m().to_bits(),
-            0.01_f64.to_bits()
+            resolved.absorption(),
+            VisibleDielectricAbsorption::ReferenceRgb {
+                transmittance_linear_rgb: [0.98, 0.98, 0.94],
+                reference_distance_m: 0.01,
+            },
         );
         assert_eq!(resolved.resolved().card_identity(), card.content_hash());
 
@@ -4881,6 +4957,147 @@ mod tests {
             Err(MaterialStatePointError::InvalidDerived {
                 quantity: "visible_dielectric_reference_transmittance"
             })
+        ));
+    }
+
+    // Synthetic spectra isolate source/state/quantity plumbing. They are not
+    // measured glass data and make no material-identification claim.
+    fn spectral_dielectric_card(
+        count: usize,
+        quantity: QuantitySpec,
+        include_rgb: bool,
+    ) -> MaterialCard {
+        let base = dielectric_optical_card(0.98);
+        let mut claims = ClaimSet::new();
+        for (_, property) in base.claims().claims_ordered() {
+            if include_rgb || property.key.name().starts_with("optical_cauchy_") {
+                claims.insert_claim(property.clone()).unwrap();
+            }
+        }
+        for (index, name) in VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES
+            .iter()
+            .take(count)
+            .enumerate()
+        {
+            let low = if index == 3 { 100.0 } else { 0.0 };
+            let mut property = claim(
+                name,
+                quantity.dims(),
+                vec![(250.0, low), (600.0, low + 20.0)],
+                600.0,
+            );
+            property.key = PropertyKey::with_quantity(*name, quantity);
+            claims.insert_claim(property).unwrap();
+        }
+        MaterialCard::assemble(base.id().clone(), claims, Vec::new()).unwrap()
+    }
+
+    /// G0/G3: full spectra retain their temperature/source identities and an
+    /// absorption feature that an RGB reference cannot express independently.
+    #[test]
+    fn g0_spectral_dielectric_absorption_is_atomic_and_state_resolved() {
+        let card = spectral_dielectric_card(9, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY, false);
+        let resolve = |temperature| {
+            resolve_visible_dielectric_state_point(
+                &card,
+                &point(temperature),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+        };
+        let middle = resolve(425.0).unwrap();
+        assert_eq!(middle.resolved().properties().len(), 12);
+        assert_eq!(middle.resolved().card_identity(), card.content_hash());
+        let VisibleDielectricAbsorption::Spectral { absorption_per_m } = middle.absorption() else {
+            panic!("source spectrum must never become RGB");
+        };
+        assert_eq!(
+            absorption_per_m,
+            [10.0, 10.0, 10.0, 110.0, 10.0, 10.0, 10.0, 10.0, 10.0]
+        );
+        assert_ne!(
+            resolve(250.0).unwrap().resolved().identity(),
+            middle.resolved().identity()
+        );
+        assert!(matches!(
+            resolve(700.0),
+            Err(MaterialStatePointError::Query {
+                source: MatDbError::NoClaimInDomain { .. },
+                ..
+            })
+        ));
+        assert!(matches!(
+            resolve_visible_optical_state_point(
+                &card,
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Ok(VisibleOpticalStatePoint::Dielectric(_))
+        ));
+    }
+
+    /// G0: equal inverse-length dimensions cannot erase intensity/amplitude
+    /// conventions, missing knots, or a competing RGB model.
+    #[test]
+    fn g0_spectral_dielectric_refuses_wrong_kinds_partial_data_and_ambiguous_models() {
+        for quantity in [
+            QuantitySpec::dimensional(Dims([-1, 0, 0, 0, 0, 0])),
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre),
+                ValueForm::Static,
+            )),
+            QuantitySpec::semantic(SemanticType::new(
+                QuantityKind::Attenuation(AttenuationConvention::DecibelsPerMetre),
+                ValueForm::Static,
+            )),
+        ] {
+            assert!(
+                resolve_visible_dielectric_state_point(
+                    &spectral_dielectric_card(9, quantity, false),
+                    &point(425.0),
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err()
+            );
+        }
+        assert!(
+            resolve_visible_dielectric_state_point(
+                &spectral_dielectric_card(8, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY, false),
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_err()
+        );
+        let ambiguous = spectral_dielectric_card(9, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY, true);
+        assert!(matches!(
+            resolve_visible_dielectric_state_point(
+                &ambiguous,
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(MaterialStatePointError::InvalidDerived {
+                quantity: "ambiguous_visible_dielectric_absorption",
+            })
+        ));
+        // Explicit source selection resolves ambiguity without material-name
+        // heuristics or silently dropping any selected property.
+        let selected = ambiguous
+            .claims()
+            .claims_ordered()
+            .filter(|(_, property)| {
+                property.key.name().starts_with("optical_cauchy_")
+                    || VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.contains(&property.key.name())
+            })
+            .map(|(id, property)| (property.key.name().to_owned(), id))
+            .collect();
+        let resolved = resolve_visible_dielectric_state_point(
+            &ambiguous,
+            &point(425.0),
+            MaterialPropertySelection::PinnedByProperty(selected),
+        )
+        .unwrap();
+        assert!(matches!(
+            resolved.absorption(),
+            VisibleDielectricAbsorption::Spectral { .. }
         ));
     }
 

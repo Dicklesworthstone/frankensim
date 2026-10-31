@@ -99,13 +99,18 @@ fn condition(axis: &str, temperature: f64) -> QueryPoint {
 }
 
 fn condition_card(axis: &str) -> MaterialCard {
+    condition_card_with_spectrum(axis, None)
+}
+
+fn condition_card_with_spectrum(axis: &str, absorption_per_m: Option<[f64; 9]>) -> MaterialCard {
     use fs_material::state_point::{
+        VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
         VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY, VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
         VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY, VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
         VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES,
     };
     let mut claims = ClaimSet::new();
-    for (name, dims, value) in [
+    let mut rows = vec![
         (SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS, 0.2),
         (VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY, Dims::NONE, 1.5),
         (
@@ -118,36 +123,45 @@ fn condition_card(axis: &str) -> MaterialCard {
             Dims([4, 0, 0, 0, 0, 0]),
             0.0,
         ),
-        (
+    ];
+    if let Some(coefficients) = absorption_per_m {
+        rows.extend(
+            VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES
+                .into_iter()
+                .zip(coefficients)
+                .map(|(name, value)| (name, Dims([-1, 0, 0, 0, 0, 0]), value)),
+        );
+    } else {
+        rows.push((
             VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY,
             Dims([1, 0, 0, 0, 0, 0]),
             1.0,
-        ),
-        (
-            VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[0],
-            Dims::NONE,
-            1.0,
-        ),
-        (
-            VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[1],
-            Dims::NONE,
-            1.0,
-        ),
-        (
-            VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES[2],
-            Dims::NONE,
-            1.0,
-        ),
-    ] {
-        let varying = name == SURFACE_EMISSIVITY_PROPERTY;
+        ));
+        rows.extend(
+            VISIBLE_DIELECTRIC_TRANSMITTANCE_PROPERTIES
+                .into_iter()
+                .map(|name| (name, Dims::NONE, 1.0)),
+        );
+    }
+    for (name, dims, value) in rows {
+        let spectral = VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.contains(&name);
+        let varying = spectral || name == SURFACE_EMISSIVITY_PROPERTY;
         claims
             .insert_claim(PropertyClaim {
-                key: PropertyKey::new(name, dims),
+                key: if spectral {
+                    PropertyKey::with_quantity(name, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY)
+                } else {
+                    PropertyKey::new(name, dims)
+                },
                 value: if varying {
                     PropertyValue::Curve {
                         abscissa: axis.into(),
                         abscissa_dims: Temperature::DIMS,
-                        knots: vec![(1200.0, 0.2), (1800.0, 0.6)],
+                        knots: if spectral {
+                            vec![(1200.0, value), (1800.0, 2.0 * value)]
+                        } else {
+                            vec![(1200.0, 0.2), (1800.0, 0.6)]
+                        },
                         dims,
                     }
                 } else {
@@ -307,6 +321,61 @@ fn g0_optical_binding_retains_quantity_meaning_at_identical_numeric_coordinates(
         MaterialOpticalBinding::try_dielectric(&accepted, &optical, None, ContentHash([19; 32]),),
         Err(MaterialOpticalError::StateMismatch)
     ));
+}
+
+#[test]
+fn g1_spectral_material_absorption_reaches_the_same_accepted_dielectric() {
+    use fs_material::state_point::{
+        VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM, resolve_visible_dielectric_state_point,
+    };
+    use fs_render::dielectric::BeerLambertParameters;
+
+    let coefficients = [0.0, 2.0, 4.0, 8.0, 16.0, 12.0, 8.0, 4.0, 2.0];
+    let card = condition_card_with_spectrum("Ts", Some(coefficients));
+    let mut identities = Vec::new();
+    for (temperature_k, factor) in [(1200.0, 1.0), (1800.0, 2.0)] {
+        let point = condition("Ts", temperature_k);
+        let accepted = state_at(&card, &point);
+        let optical = resolve_visible_dielectric_state_point(
+            &card,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("complete typed intensity absorption");
+        let binding = MaterialOpticalBinding::try_dielectric(
+            &accepted,
+            &optical,
+            None,
+            ContentHash([19; 32]),
+        )
+        .expect("shared accepted optical state");
+        let Material::Dielectric { glass, .. } = binding.material() else {
+            panic!("spectral glass must reach the native dielectric material");
+        };
+        let BeerLambertParameters::Spectral { spectrum } = glass.absorption().parameters() else {
+            panic!("material spectrum was reduced to RGB");
+        };
+        assert_eq!(spectrum.knots().len(), 9);
+        for ((&wavelength_nm, &coefficient), &knot) in VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM
+            .iter()
+            .zip(&coefficients)
+            .zip(spectrum.knots())
+        {
+            assert_eq!(knot, (wavelength_nm, factor * coefficient));
+            let expected = (-factor * coefficient * 0.1).exp();
+            let actual = glass
+                .absorption()
+                .transmittance(wavelength_nm, 0.1)
+                .unwrap();
+            assert!((actual - expected).abs() < 3.0e-15);
+        }
+        assert_eq!(binding.accepted_state_identity(), accepted.identity());
+        identities.push(binding.identity());
+    }
+    assert_ne!(
+        identities[0], identities[1],
+        "changed accepted absorption must change identity"
+    );
 }
 
 #[test]

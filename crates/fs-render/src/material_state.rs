@@ -10,8 +10,8 @@
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_conduction::radiation::SurfaceEmissivity;
 use fs_material::state_point::{
-    ResolvedMaterialStatePoint, VisibleConductorStatePoint, VisibleDielectricStatePoint,
-    VisibleOpticalStatePoint,
+    ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM, VisibleConductorStatePoint,
+    VisibleDielectricAbsorption, VisibleDielectricStatePoint, VisibleOpticalStatePoint,
 };
 
 use crate::conductor::{
@@ -235,7 +235,9 @@ impl MaterialOpticalBinding {
 
     /// Bind dielectric optics, converting SI Cauchy coefficients to the
     /// renderer's micrometre coefficient convention. Evaluation wavelengths
-    /// remain nanometres. `None` selects a smooth boundary.
+    /// remain nanometres. Native spectral intensity absorption is retained at
+    /// its original knots; only the explicit legacy RGB schema is lifted.
+    /// `None` selects a smooth boundary.
     pub fn try_dielectric(
         mechanical: &ResolvedMaterialStatePoint,
         optical: &VisibleDielectricStatePoint,
@@ -244,12 +246,27 @@ impl MaterialOpticalBinding {
     ) -> Result<Self, MaterialOpticalError> {
         Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
         let [a, b_m2, c_m4] = optical.cauchy_coefficients_si();
+        let absorption = match optical.absorption() {
+            VisibleDielectricAbsorption::ReferenceRgb {
+                transmittance_linear_rgb,
+                reference_distance_m,
+            } => BeerLambertAbsorption::try_from_rgb_transmittance(
+                transmittance_linear_rgb,
+                reference_distance_m,
+            )?,
+            VisibleDielectricAbsorption::Spectral { absorption_per_m } => {
+                let knots: [(f64, f64); 9] = core::array::from_fn(|index| {
+                    (
+                        VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM[index],
+                        absorption_per_m[index],
+                    )
+                });
+                BeerLambertAbsorption::try_from_spectral_extinction(&knots)?
+            }
+        };
         let glass = DielectricGlass::new(
             CauchyIor::try_new(a, b_m2 * 1.0e12, c_m4 * 1.0e24)?,
-            BeerLambertAbsorption::try_from_rgb_transmittance(
-                optical.reference_transmittance_linear_rgb(),
-                optical.reference_distance_m(),
-            )?,
+            absorption,
             GlassProvenance::Custom,
         );
         let surface = match roughness_alpha {
