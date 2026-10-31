@@ -12,7 +12,9 @@
 //! This is a steady negligible-storage film, with explicitly authored species
 //! sources and mixture/humidity context. No competitive sorption, swelling,
 //! plasticization, nonideal fugacity, thermal
-//! transpiration or transient breakthrough is modeled. Pure-gas measurements
+//! transpiration is modeled by the steady path. The separate transient owner
+//! retains finite sorbed inventory with explicit diffusivity and solubility.
+//! Pure-gas measurements
 //! do not automatically qualify mixed-gas operation.
 
 use std::collections::BTreeMap;
@@ -25,56 +27,27 @@ use crate::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use crate::thermochemical_gas::energy::parcel::transfer::snapshot::{
     MAX_SNAPSHOT_PARCELS, MAX_SNAPSHOT_TRANSFERS};
 use fs_matdb::{MaterialCard, QueryPoint};
-use fs_qty::Dims;
 use fs_thermochem::SpeciesId;
+
+mod coefficients;
+pub use coefficients::{MolarPermeability, MolarPermeance, MembraneDiffusivity,
+    MolarHenrySolubility, MembraneCoefficientError, MOLAR_PERMEABILITY_DIMS,
+    MOLAR_PERMEANCE_DIMS, MEMBRANE_DIFFUSIVITY_DIMS, MOLAR_HENRY_SOLUBILITY_DIMS};
+/// Finite sorbed inventory and breakthrough under prescribed isothermal reservoirs.
+pub mod transient;
 
 mod series;
 pub use series::{MembranePath, MembraneSeriesElement, MembraneInterfaceMaterial,
     MembraneElementSample, MembraneElementLaw, MAX_MEMBRANE_ELEMENTS,
     MOLAR_INTERFACE_PERMEANCE_PROPERTY};
 
-pub const MOLAR_PERMEABILITY_DIMS: Dims = Dims([0, -1, 1, 0, 0, 1]);
-pub const MOLAR_PERMEANCE_DIMS: Dims = Dims([-1, -1, 1, 0, 0, 1]);
 pub const MOLAR_PERMEABILITY_PROPERTY: &str = "gas_molar_permeability";
 pub const MAX_MEMBRANE_SPECIES: usize = 32;
 
-/// Dense-film diffusivity times molar Henry solubility, in mol/(m s Pa).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MolarPermeability(f64);
-impl MolarPermeability {
-    /// Zero is an explicitly impermeable species.
-    pub fn try_new(value_mol_m_s_pa: f64) -> Result<Self, GasEnergyError> {
-        if !value_mol_m_s_pa.is_finite() || value_mol_m_s_pa < 0.0 {
-            return Err(GasEnergyError::Invalid("molar permeability must be finite and nonnegative"));
-        }
-        Ok(Self(value_mol_m_s_pa))
+impl From<MembraneCoefficientError> for GasEnergyError {
+    fn from(error: MembraneCoefficientError) -> Self {
+        Self::Invalid(error.message())
     }
-    pub const fn value_si(self) -> f64 { self.0 }
-    /// Thickness conversion is explicit; intrinsic porous k cannot enter here.
-    pub fn permeance(self, thickness_m: f64) -> Result<MolarPermeance, GasEnergyError> {
-        if !positive(thickness_m) {
-            return Err(GasEnergyError::Invalid("membrane thickness must be positive and finite"));
-        }
-        let value = self.0 / thickness_m;
-        if !value.is_finite() || (self.0 > 0.0 && value == 0.0) {
-            return Err(GasEnergyError::Invalid("membrane permeance is unrepresentable"));
-        }
-        Ok(MolarPermeance(value))
-    }
-}
-/// Pressure-normalized molar flux, in mol/(m2 s Pa).
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MolarPermeance(f64);
-impl MolarPermeance {
-    /// Explicit pressure-normalized molar flux coefficient. This does not
-    /// convert a bulk permeability, mass-based coefficient or STP volume.
-    pub fn try_new(value_mol_m2_s_pa: f64) -> Result<Self, GasEnergyError> {
-        if !value_mol_m2_s_pa.is_finite() || value_mol_m2_s_pa < 0.0 {
-            return Err(GasEnergyError::Invalid("molar permeance must be finite and nonnegative"));
-        }
-        Ok(Self(value_mol_m2_s_pa))
-    }
-    pub const fn value_si(self) -> f64 { self.0 }
 }
 
 #[derive(Clone, Debug)]

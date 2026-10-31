@@ -6833,3 +6833,41 @@ transient Nernst--Planck transport or solute partial-volume corrections. Focused
 native regressions exercise thermodynamic derivatives, convexity including the
 64-species blocked factorization, analytical finite-bath partitions, multivalent
 charge balance, salt-free limits, free-energy minimization and atomic refusals.
+
+### Finite-inventory dense membrane breakthrough
+
+`membrane::transient::ResolvedMembraneDiffusion` adds isothermal transient
+permeation for one pure permeant in a planar laminate. Original material cards
+separately supply `gas_membrane_diffusivity` [m²/s] and
+`gas_molar_henry_solubility` [mol/(m³ Pa)]; `P = D S` uses the same typed
+permeability/permeance owner as steady transport. No intrinsic porous k, mass
+basis, STP volume or measured diffusion coefficient is inferred from permeability.
+
+Cell-centered finite volumes retain actual `S dx` storage and harmonic
+half-cell/interlayer resistance. The existing tridiagonal backward-Euler solver
+owns elimination; equal-duration steps on the same immutable grid reuse its
+factorization. Each immutable candidate reports actual face fluxes, reservoir
+transfers, stored amount/change, reconstructed Henry pressures and local/global
+amount-balance residuals. Stability does not imply resolved breakthrough:
+first-order time stepping and spatial resolution require refinement. Geometry
+and work are bounded to 64 layers and 4096 cells, with bounded cancellation polls.
+
+Original material and ordered-interface claims stay pinned and are requalified
+at actual old/new cell and face pressure extrema. Unsupported source states,
+unrepresentable arithmetic, failed amount budgets and cancellation publish no
+physical state. Exact zero D or interface permeance closes that path while
+retaining authored loading, including inventory trapped between multiple seals.
+Positive Henry solubility is required for finite-storage cells. An undetermined
+zero-volume trace between coincident seals cannot qualify an explicit interface
+source and is never assigned an invented pressure.
+
+Reservoir pressures and uniform temperature are prescribed externally. This
+rung supplies no finite-gas energy coupling, heat of sorption, competitive mixed-
+gas uptake, nonlinear sorption, swelling or concentration-dependent diffusivity.
+Analytical regression sources compare initial delay, Fourier-series breakthrough
+and storage, temporal/spatial convergence and the homogeneous `L²/(6D)` lag;
+other cases cover heterogeneous/interface steady limits, Henry partitioning,
+unloading, seals, amount conservation and transactional cancellation. Source
+regressions check original receipts, local domains, ordered identities and
+unsupported coefficient bases without claiming measured membrane accuracy.
+

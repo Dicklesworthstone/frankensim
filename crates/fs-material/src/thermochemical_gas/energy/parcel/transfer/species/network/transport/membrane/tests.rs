@@ -10,7 +10,7 @@ use super::super::{GasTransportPaths,GasTransportSolve,GasTransportError,step_ca
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ClaimSet,InterpolationPolicy,MaterialStateId,PropertyClaim,PropertyKey,
     PropertyValue,Provenance,UncertaintyModel};
-use fs_qty::{Pressure,QuantitySpec,semantic::{QuantityKind,SemanticType,ValueForm}};
+use fs_qty::{Dims,Pressure,QuantitySpec,semantic::{QuantityKind,SemanticType,ValueForm}};
 use fs_thermochem::{Composition,CompositionBasis,mixture::FrozenIdealGasMixtureModelV1};
 
 fn typed(k:QuantityKind)->QuantitySpec {QuantitySpec::semantic(SemanticType::new(k,ValueForm::Static))}

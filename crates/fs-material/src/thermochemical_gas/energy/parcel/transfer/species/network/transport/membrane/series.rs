@@ -88,7 +88,7 @@ fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasEnergyError> {
     if cancelled() { Err(GasEnergyError::Cancelled) } else { Ok(()) }
 }
 
-fn admit_henry(property: &ResolvedScalarProperty) -> Result<(), GasEnergyError> {
+pub(super) fn admit_henry(property: &ResolvedScalarProperty) -> Result<(), GasEnergyError> {
     if !property.is_constant_at_fixed_temperature()
         || property.source_axes().iter().any(|(name, _)| name != "temperature")
         || !property.is_static_at_fixed_external_conditions()
