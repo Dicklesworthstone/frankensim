@@ -9,6 +9,7 @@ use super::*;
 use fs_math::eft::two_sum;
 
 const DEGREE: usize = 16;
+const ORDERS: usize = DEGREE + 1;
 const MOMENTS: usize = (DEGREE + 1) * (DEGREE + 2) / 2;
 const DIRECTIONS: usize = (DEGREE / 2 + 1) * (DEGREE + 1);
 
@@ -104,6 +105,54 @@ fn directions() -> &'static [Direction] {
     })
 }
 
+fn coefficients(surface: &PreparedSurface) -> Result<Vec<f64>, HelmholtzError> {
+    let moments = moments(surface)?;
+    let n = surface.modes;
+    let mut coefficients = reserved(
+        DIRECTIONS * ORDERS * n,
+        "Rayleigh directional Taylor coefficients",
+    )?;
+    coefficients.resize(DIRECTIONS * ORDERS * n, 0.0);
+    for (index, direction) in directions().iter().enumerate() {
+        let mut xp = [1.0; ORDERS];
+        let mut yp = xp;
+        for order in 1..ORDERS {
+            xp[order] = xp[order - 1] * direction.x / order as f64;
+            yp[order] = yp[order - 1] * direction.y / order as f64;
+        }
+        for order in 0..ORDERS {
+            let sign = if matches!(order % 4, 0 | 3) {
+                1.0
+            } else {
+                -1.0
+            };
+            let output = (index * ORDERS + order) * n;
+            let mut correction = [0.0; MAX_MODAL_RAYLEIGH_FIELDS];
+            for q in 0..=order {
+                let coefficient = sign * xp[order - q] * yp[q];
+                let input = (order * (order + 1) / 2 + q) * n;
+                for mode in 0..n {
+                    add(
+                        &mut coefficients[output + mode],
+                        &mut correction[mode],
+                        coefficient * moments[input + mode],
+                    );
+                }
+            }
+            for mode in 0..n {
+                let value = &mut coefficients[output + mode];
+                *value += correction[mode];
+                if !value.is_finite() {
+                    return Err(invalid(
+                        "Rayleigh directional coefficient exceeds finite numerical range",
+                    ));
+                }
+            }
+        }
+    }
+    Ok(coefficients)
+}
+
 pub(super) fn matrix(
     surface: &PreparedSurface,
     k: f64,
@@ -111,16 +160,18 @@ pub(super) fn matrix(
 ) -> Result<Vec<f64>, HelmholtzError> {
     let cells = surface.count as u128;
     let fields = surface.modes as u128;
-    // Include the one-time moment build even when the cache already exists.
-    // The ordinary reactance work remains and no field is dropped to fit.
+    // Conservatively include both geometry projections on every admission,
+    // even when the cache exists. Ordinary reactance work also remains;
+    // no field is dropped to fit. At the field cap the coefficient cache
+    // occupies 153 * 17 * 128 doubles, about 2.54 MiB.
     admit_modal_work(
         cells * fields * (cells + fields)
             + MOMENTS as u128 * cells * fields
-            + DIRECTIONS as u128 * fields * (MOMENTS as u128 + fields),
+            + DIRECTIONS as u128 * fields * (MOMENTS as u128 + ORDERS as u128 + fields),
     )?;
-    let moments = surface
-        .resistance_moments
-        .get_or_init(|| moments(surface))
+    let coefficients = surface
+        .resistance_coefficients
+        .get_or_init(|| coefficients(surface))
         .as_ref()
         .map_err(Clone::clone)?;
     let n = surface.modes;
@@ -129,35 +180,27 @@ pub(super) fn matrix(
     let mut correction = reserved(n * n, "Rayleigh angular Gram corrections")?;
     correction.resize(n * n, 0.0);
     let kd = k * surface.maximum_distance_m;
-    for direction in directions() {
-        let mut xp = [1.0; DEGREE + 1];
-        let mut yp = xp;
-        for order in 1..=DEGREE {
-            xp[order] = xp[order - 1] * (kd * direction.x) / order as f64;
-            yp[order] = yp[order - 1] * (kd * direction.y) / order as f64;
-        }
+    let mut powers = [1.0; ORDERS];
+    for order in 1..ORDERS {
+        powers[order] = powers[order - 1] * kd;
+    }
+    // Geometry, direction cosines and factorials are already contracted.
+    // Each frequency needs 17 terms per direction/field rather than 153.
+    for (index, direction) in directions().iter().enumerate() {
         let (mut re, mut im, mut cr, mut ci) = (
             [0.0; MAX_MODAL_RAYLEIGH_FIELDS],
             [0.0; MAX_MODAL_RAYLEIGH_FIELDS],
             [0.0; MAX_MODAL_RAYLEIGH_FIELDS],
             [0.0; MAX_MODAL_RAYLEIGH_FIELDS],
         );
-        for order in 0..=DEGREE {
-            let sign = if matches!(order % 4, 0 | 3) {
-                1.0
-            } else {
-                -1.0
-            };
-            for q in 0..=order {
-                let coefficient = sign * xp[order - q] * yp[q];
-                let offset = (order * (order + 1) / 2 + q) * n;
-                for mode in 0..n {
-                    let term = coefficient * moments[offset + mode];
-                    if order % 2 == 0 {
-                        add(&mut re[mode], &mut cr[mode], term);
-                    } else {
-                        add(&mut im[mode], &mut ci[mode], term);
-                    }
+        for (order, power) in powers.iter().enumerate() {
+            let offset = (index * ORDERS + order) * n;
+            for mode in 0..n {
+                let term = power * coefficients[offset + mode];
+                if order % 2 == 0 {
+                    add(&mut re[mode], &mut cr[mode], term);
+                } else {
+                    add(&mut im[mode], &mut ci[mode], term);
                 }
             }
         }

@@ -67,9 +67,10 @@ pub struct PreparedSurface {
     radii: Vec<f64>,
     weighted_shape: Vec<f64>,
     positions: Vec<[f64; 2]>,
-    /// Source moments are reusable across a low-frequency sweep. No modal
-    /// coordinate is removed; this only changes evaluation of the sinc kernel.
-    resistance_moments: OnceLock<Result<Vec<f64>, HelmholtzError>>,
+    /// Signed source moments are projected once into direction/degree
+    /// coefficients for reuse across low-frequency sweeps. Every modal
+    /// coordinate is retained; this only changes evaluation of the sinc kernel.
+    resistance_coefficients: OnceLock<Result<Vec<f64>, HelmholtzError>>,
     /// Strict upper triangle, in row order: about 1.07 GB at the cell cap.
     distances: Vec<f64>,
     maximum_radius_m: f64,
@@ -150,7 +151,7 @@ impl PreparedSurface {
             }
         }
         Ok(Self { count, modes, areas, radii, weighted_shape, positions,
-            resistance_moments: OnceLock::new(), distances, maximum_radius_m, maximum_distance_m })
+            resistance_coefficients: OnceLock::new(), distances, maximum_radius_m, maximum_distance_m })
     }
 
     /// Largest distance between two cell centres [m]. The kernel's longest travel

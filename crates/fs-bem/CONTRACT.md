@@ -564,9 +564,14 @@ the same point-area sinc operator, evaluated without subtracting almost equal
 monopole powers for a weak dipole, quadrupole or higher cancelling field.
 Degree-16 outgoing amplitudes have an absolute exponential remainder below
 `2.2e-20 * sum(abs(area * shape))`; the 17-point polar / 34-point azimuth rule
-integrates their degree-32 products exactly in exact arithmetic. Source moments
-and angular nodes are reused across frequencies, and their work is included in
-the existing modal ceiling. The equivalent-disc reactance remains bit-identical.
+integrates their degree-32 products exactly in exact arithmetic. Cartesian
+moments are projected once into compensated direction/degree coefficients;
+each further frequency contracts 17 coefficients instead of 153 monomials per
+direction and field. This geometry cache uses `153 * 17 * fields` doubles
+(2.54 MiB at the 128-field cap), replacing the Cartesian moment cache. Angular
+nodes are also reused. Both geometry projections and recurring frequency work
+are included in the existing modal ceiling. The equivalent-disc reactance
+remains bit-identical.
 G1 tests compare orders 1, 2 and 4 with independent positive sine-power angular
 integrals down to 0.001 Hz; G3 compares the overlapping sinc branch and translated,
 rotated and reordered sources. No eigenvalue clipping or loss floor is applied.
@@ -1279,4 +1284,3 @@ independent high-precision phase/absorption references, oblique normal-power
 balance, shared-fluid substitution, original Robin solve equality, total-wall
 work and invalid source support. Authored Rust tests require native execution;
 the test definitions alone establish no passing numerical qualification.
-
