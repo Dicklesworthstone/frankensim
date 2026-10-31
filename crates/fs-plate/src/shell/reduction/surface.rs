@@ -90,7 +90,7 @@ impl ShellReduction {
             .ok_or_else(|| bad("surface point facet out of range"))?;
         let offsets = directors(self, nodal_thickness_m)?;
         let point_offsets = tri.map(|node| offsets[node].map(|v|v*face.sign()));
-        let rows = super::super::point::triangle_point_rows(barycentric, direction, point_offsets)
+        let rows = crate::shell::point::triangle_point_rows(barycentric, direction, point_offsets)
             .map_err(|e| bad(e.reason()))?;
         let mut weights = vec![0.0; self.mode_count()];
         let mut position_m = [0.0; 3];

@@ -17657,3 +17657,36 @@ temperature/role/texture substitution, a rotated ellipse with full three-axis
 mobility, active/inactive source ordering, original claim retention and source,
 finite-gap angular-balance and cancellation refusal. Coefficients are synthetic.
 
+## Permanent creep on the spatial solid/enthalpy history
+
+`solid_enthalpy::creep::ZeroExpansionCreepSolid` binds one original Norton
+material source and actual caloric cell to each native reference tetrahedron.
+The type explicitly selects zero thermal expansion, constant elastic storage
+and fixed reference density/volume. The material owner's shared caloric
+admission verifies the original card, complete fixed source context, pinned
+Cp/density claims and wholly solid supported interval. No missing coefficient
+is inferred from a material name or a melting point.
+
+Each interval reuses `SmallStrainTetProblem::solve_creep_from` and the original
+`DepositionSimulation`. Local temperature controls Arrhenius kinetics; native
+stress redistribution and retained permanent creep change the actual loaded
+shape. Every coupling trial starts from the same accepted displacement, tensor
+history, enthalpies, observer and clock. Final mechanics are solved again at
+the returned spatial temperature field. Per-cell absolute heat defects prevent
+cancellation between underheated and overheated cells; separate temperature,
+thermal and combined work gates precede publication of the complete candidate.
+
+Only physical creep dissipation enters the existing thermal source hook.
+Backward-Euler loss, applied/support work and elastic storage retain their
+native distinct accounts. All existing observer hooks, including interval
+sources and reservoir conductances, are forwarded; conduction, boundary heat,
+events and additional thermal cells retain their original owner and energy
+account. This is a quasistatic small-strain reduction; time/spatial refinement,
+cell temperature uniformity and fixed thermal geometry remain caller/model
+obligations. It adds no phase change, inertia, damage or service-life claim.
+
+Manufactured `tests/solid_creep_enthalpy.rs` compares heated constant-stress
+creep with an independent scalar thermal/kinetic equation, varies material rate
+and thermal substeps, conducts heat through a nonuniform six-tetrahedron loaded
+bar, checks original source identities, and exercises reservoir/interval-source
+composition and transactional failure/cancellation.

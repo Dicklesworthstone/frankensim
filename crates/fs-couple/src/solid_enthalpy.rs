@@ -19,6 +19,8 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
+/// Permanent sub-yield creep exchanges physical heat with spatial enthalpy.
+pub mod creep;
 /// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
 pub mod plastic;
 /// Reciprocal source thermodynamics on the native elastic equilibrium/heat history.

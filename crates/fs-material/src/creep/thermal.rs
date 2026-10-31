@@ -154,7 +154,7 @@ impl<'a> ZeroExpansionCaloricPoint<'a> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, FeedbackError> {
         poll(&mut cancelled)?;
-        let density = admit_caloric(card, &source, caloric, &mut cancelled)?;
+        let density = admit_zero_expansion_caloric(card, &source, caloric, &mut cancelled)?;
         require(
             positive(initial.mass_kg)
                 && positive(initial.surface_area_m2)
@@ -403,7 +403,11 @@ impl<'a> ZeroExpansionCaloricPoint<'a> {
     }
 }
 
-fn admit_caloric(
+/// Admit the original caloric and creep sources for the explicit zero-expansion
+/// reduction, returning their constant reference density [kg/m³]. Uniform and
+/// spatial consumers share this same-card, fixed-context, pinned Cp/density and
+/// fully solid temperature-domain admission; absent expansion data is not zero.
+pub fn admit_zero_expansion_caloric(
     card: &MaterialCard,
     source: &NortonCreepSource<'_>,
     caloric: &ResolvedHeatCapacityCurve,
