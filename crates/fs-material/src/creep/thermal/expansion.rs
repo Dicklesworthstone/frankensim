@@ -58,6 +58,10 @@ pub struct ThermalCreepState<S> {
     temperature_k: f64,
 }
 impl<S> ThermalCreepState<S> {
+    /// Reconstruct a retained thermal history without advancing either owner.
+    pub fn from_parts(mechanical: S, temperature_k: f64) -> Self {
+        Self { mechanical, temperature_k }
+    }
     pub const fn temperature_k(&self) -> f64 {
         self.temperature_k
     }
@@ -211,6 +215,25 @@ where
     }
     pub fn thermoelastic(&self) -> &ResolvedThermoelastic {
         &self.thermal
+    }
+
+    /// Original expansion state retained at this endpoint, including its claim receipt.
+    pub fn expansion_material(&self) -> &ResolvedMaterialStatePoint {
+        &self.thermal.expansion
+    }
+
+    /// Integrated sourced free strain at any admitted history temperature.
+    pub fn free_strain_at_temperature(&self, temperature_k: f64) -> Result<f64, CreepError> {
+        self.potential
+            .at_temperature(temperature_k)
+            .map_err(thermal_error)?
+            .free_strain()
+            .map_err(thermal_error)
+    }
+
+    /// Integrated sourced free strain at this law's endpoint temperature.
+    pub fn current_free_strain(&self) -> Result<f64, CreepError> {
+        self.thermal.free_strain().map_err(thermal_error)
     }
 
     fn mechanical_strain(

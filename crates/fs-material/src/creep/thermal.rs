@@ -15,6 +15,8 @@
 /// Sourced thermal expansion, entropy and reciprocal heat around the same
 /// permanent-creep laws, for consumers retaining the full thermal history.
 pub mod expansion;
+/// Exact free-sided reductions of sourced thermocreep for fibers and members.
+pub mod uniaxial;
 
 use super::source::{CreepSourceError, NortonCreepSource};
 use super::{CreepError, CreepIncrement, CreepState, CreepTolerances};
