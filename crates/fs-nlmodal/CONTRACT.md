@@ -92,6 +92,13 @@ the crash cascade with structurally exact energy accounting.
   clamped beam formula. G1 checks the bending and Euler-load limits;
   G3 checks mass/stiffness and geometric scaling, including representable
   frequencies whose squares lie outside the f64 range.
+  The shared `prestressed_beam_omega_at_wavenumber` accepts each boundary
+  image's spatial eigenvalue; the moving-end Galerkin image uses the same law
+  at half-integer wavenumbers. For nonnegative tension, a scaled norm of
+  tension and bending frequencies avoids squaring large frequencies or
+  dividing by tension. Additional G0/G1 tests cover phase/group-speed ratios,
+  limiting spectra and invalid data. The slender-beam law makes no claim for
+  transverse shear, rotary inertia, postbuckling or nonlinear stability.
 - `longitudinal::LongitudinalString` — the same moderate-slope axial
   material strain `u_x + (y_x² + z_x²)/2` with explicit finite longitudinal
   inertia. The caller supplies one or two cosine slope series, including

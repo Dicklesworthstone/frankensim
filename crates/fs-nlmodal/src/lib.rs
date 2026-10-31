@@ -1126,18 +1126,14 @@ pub fn kirchhoff_carrier_moving_end(
     })
 }
 
-/// Linear angular frequency of sine mode `k` (1-based) on a uniform,
-/// pinned-pinned Euler–Bernoulli beam: `ω² = κ² (T + EI κ²) / μ`,
-/// `κ = k π / L`. `ei == 0` is the flexible taut-string limit;
-/// `tension == 0` retains the simply-supported beam's bending spectrum.
-/// This is a 1-D continuum law (cables, stays, wires, strings), not an
-/// instrument primitive or the free-free/clamped beam spectrum.
+/// Linear angular frequency [rad/s] of pinned sine mode `k` (1-based).
 ///
-/// Positive tension stiffens the beam; negative tension represents compression.
-/// At that mode's Euler load the result is zero. Beyond it the modal stiffness
-/// is negative and this real-valued frequency is NaN, never clamped to a stable
-/// oscillator. NaN also denotes invalid/nonfinite parameters, negative `ei`,
-/// nonpositive length/density, or the nonexistent sine mode `k == 0`.
+/// Uses the same Euler–Bernoulli dispersion as
+/// [`prestressed_beam_omega_at_wavenumber`], with `κ = k π/L`.
+/// Zero tension retains the pure bending spectrum; `ei == 0` gives the
+/// flexible taut-string limit. Negative tension retains the linear Euler
+/// compression boundary: zero stiffness gives zero frequency, and an unstable
+/// mode gives NaN. Invalid geometry or data also returns NaN.
 #[must_use]
 pub fn prestressed_beam_omega(
     length: f64,
@@ -1146,30 +1142,170 @@ pub fn prestressed_beam_omega(
     ei: f64,
     k: usize,
 ) -> f64 {
-    if !length.is_finite()
-        || length <= 0.0
+    if !length.is_finite() || length <= 0.0 || k == 0 {
+        return f64::NAN;
+    }
+    prestressed_beam_omega_at_wavenumber(
+        k as f64 * core::f64::consts::PI / length,
+        tension,
+        lin_density,
+        ei,
+    )
+}
+
+/// Euler–Bernoulli angular frequency [rad/s] at spatial wavenumber `κ` [rad/m].
+///
+/// `ω² = (T κ² + EI κ⁴)/μ`, directly from
+/// `μ u_tt = T u_xx - EI u_xxxx`. The caller owns boundary conditions and
+/// selects its spatial spectrum; this function does not infer support types.
+/// It is shared by pinned strings and the moving-end Galerkin reduction.
+///
+/// Combining the tension and bending frequencies with a scaled norm avoids
+/// dividing by tension or squaring large frequencies. Thus the zero-tension
+/// beam and small-stiffness string limits remain continuous. Compressed modes
+/// retain the signed stiffness sum and the linear Euler threshold. Invalid
+/// geometry, density or bending stiffness and nonfinite inputs return NaN;
+/// unrepresentable arithmetic is not clamped. Both restoring terms may be zero.
+///
+/// This slender, small-slope model omits rotary inertia and transverse shear:
+/// its formal high-wavenumber speeds are not a broadband material-speed claim.
+/// The linear compression limit does not model postbuckling or nonlinear stability.
+/// See Ducceschi and Bilbao, JASA 140 (2016), doi:10.1121/1.4962553.
+#[must_use]
+pub fn prestressed_beam_omega_at_wavenumber(
+    wave_number: f64,
+    tension: f64,
+    lin_density: f64,
+    ei: f64,
+) -> f64 {
+    if !wave_number.is_finite()
+        || wave_number < 0.0
         || !tension.is_finite()
         || !lin_density.is_finite()
         || lin_density <= 0.0
         || !ei.is_finite()
         || ei < 0.0
-        || k == 0
     {
         return f64::NAN;
     }
-    let kappa = k as f64 * core::f64::consts::PI / length;
-    // Substituting sin(kappa*x) into mu*w_tt + EI*w_xxxx - T*w_xx = 0
-    // adds the bending and axial stiffness BEFORE taking the square root.
-    // Factoring through sqrt(T) instead makes a finite bending mode 0*infinity
-    // at zero tension, overflows near it, and loses stable compressed modes.
-    let modal_load = if ei == 0.0 {
-        tension
-    } else {
-        tension + (ei * kappa) * kappa
-    };
-    // Taking roots before the mass quotient also retains representable
-    // frequencies whose squared value would overflow or underflow.
-    kappa * (det::sqrt(modal_load) / det::sqrt(lin_density))
+    if wave_number == 0.0 {
+        return 0.0;
+    }
+    if tension < 0.0 {
+        let modal_load = if ei == 0.0 {
+            tension
+        } else {
+            tension + (ei * wave_number) * wave_number
+        };
+        return wave_number * (det::sqrt(modal_load) / det::sqrt(lin_density));
+    }
+    // Separate square roots avoid overflowing T/μ or EI/μ while their
+    // square roots are still representable.
+    let root_mass = det::sqrt(lin_density);
+    let omega_tension = wave_number * (det::sqrt(tension) / root_mass);
+    if ei == 0.0 {
+        return omega_tension;
+    }
+    let omega_bending = wave_number * (wave_number * (det::sqrt(ei) / root_mass));
+    let scale = omega_tension.max(omega_bending);
+    if scale == 0.0 || !scale.is_finite() {
+        return scale;
+    }
+    let ratio = omega_tension.min(omega_bending) / scale;
+    scale * det::sqrt(1.0 + ratio * ratio)
+}
+
+#[cfg(test)]
+mod beam_dispersion_tests {
+    use super::{prestressed_beam_omega, prestressed_beam_omega_at_wavenumber};
+
+    fn close(actual: f64, expected: f64) {
+        assert!(actual.is_finite(), "nonfinite dispersion: {actual}");
+        assert!(
+            (actual - expected).abs() <= 4.0e-14 * expected.abs(),
+            "dispersion {actual} != {expected}"
+        );
+    }
+
+    // G1: independently substitute sine eigenfunctions in μ u_tt = T u_xx - EI u_xxxx.
+    #[test]
+    fn g1_modes_follow_the_tension_plus_bending_operator() {
+        let (length, tension, mass, ei): (f64, f64, f64, f64) = (0.65, 80.0, 0.003, 0.006);
+        for mode in [1, 2, 7, 32, 1024] {
+            let kappa = mode as f64 * core::f64::consts::PI / length;
+            let expected = ((tension * kappa * kappa + ei * kappa.powi(4)) / mass).sqrt();
+            close(prestressed_beam_omega(length, tension, mass, ei, mode), expected);
+        }
+    }
+
+    #[test]
+    fn g1_string_and_zero_tension_beam_limits_are_continuous() {
+        let (length, tension, mass, ei): (f64, f64, f64, f64) = (0.8, 60.0, 0.005, 0.02);
+        for mode in [1, 2, 10, 80] {
+            let kappa = mode as f64 * core::f64::consts::PI / length;
+            close(
+                prestressed_beam_omega(length, tension, mass, 0.0, mode),
+                kappa * (tension / mass).sqrt(),
+            );
+            let bending = kappa * kappa * (ei / mass).sqrt();
+            for small_tension in [0.0, f64::from_bits(1), f64::MIN_POSITIVE, 1.0e-200] {
+                close(
+                    prestressed_beam_omega(length, small_tension, mass, ei, mode),
+                    bending,
+                );
+            }
+            for small_ei in [f64::from_bits(1), f64::MIN_POSITIVE, 1.0e-200] {
+                close(
+                    prestressed_beam_omega(length, tension, mass, small_ei, mode),
+                    kappa * (tension / mass).sqrt(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_phase_and_group_speeds_have_the_physical_dispersion() {
+        let kappa = 7.0;
+        let h = 1.0e-4;
+        let mass = 0.02;
+        for (tension, ei) in [(80.0, 0.0), (0.0, 0.01), (80.0, 0.01)] {
+            let omega = |k| prestressed_beam_omega_at_wavenumber(k, tension, mass, ei);
+            let phase_speed = omega(kappa) / kappa;
+            let group_speed = (omega(kappa + h) - omega(kappa - h)) / (2.0 * h);
+            let expected_ratio = (tension + 2.0 * ei * kappa * kappa)
+                / (tension + ei * kappa * kappa);
+            assert!((group_speed / phase_speed - expected_ratio).abs() < 2.0e-9);
+        }
+    }
+
+    #[test]
+    fn g0_large_finite_frequencies_do_not_square_or_divide_by_tension() {
+        // The squared frequency and both T/μ and EI/μ overflow; ω remains finite.
+        close(
+            prestressed_beam_omega_at_wavenumber(1.0e50, 1.0e200, 1.0e-200, 1.0e200),
+            1.0e300,
+        );
+        assert_eq!(prestressed_beam_omega_at_wavenumber(3.0, 0.0, 1.0, 0.0), 0.0);
+        assert_eq!(prestressed_beam_omega_at_wavenumber(0.0, 1.0, 1.0, 1.0), 0.0);
+    }
+
+    #[test]
+    fn g0_invalid_stiffness_never_becomes_a_flexible_string() {
+        for ei in [-1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(prestressed_beam_omega(1.0, 1.0, 1.0, ei, 1).is_nan());
+        }
+        for invalid in [-1.0, f64::NAN, f64::INFINITY] {
+            assert!(prestressed_beam_omega(invalid, 1.0, 1.0, 1.0, 1).is_nan());
+            assert!(prestressed_beam_omega(1.0, 1.0, invalid, 1.0, 1).is_nan());
+            assert!(prestressed_beam_omega_at_wavenumber(invalid, 1.0, 1.0, 1.0).is_nan());
+        }
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(prestressed_beam_omega(1.0, invalid, 1.0, 1.0, 1).is_nan());
+        }
+        assert!(prestressed_beam_omega(0.0, 1.0, 1.0, 1.0, 1).is_nan());
+        assert!(prestressed_beam_omega(1.0, 1.0, 0.0, 1.0, 1).is_nan());
+        assert!(prestressed_beam_omega(1.0, 1.0, 1.0, 1.0, 0).is_nan());
+    }
 }
 
 /// First-order Duffing backbone: for

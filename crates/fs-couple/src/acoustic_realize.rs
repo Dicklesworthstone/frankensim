@@ -2458,15 +2458,61 @@ fn moving_end_opening(string: &PrestressedString, x: &[f64], n_s: usize, station
 }
 
 fn moving_end_omega(string: &PrestressedString, k_zero: usize) -> f64 {
-    let n = k_zero as f64 + 0.5;
-    let wave = det::sqrt(string.tension_n / string.lin_density_kg_m);
-    let omega = n * core::f64::consts::PI * wave / string.length_m;
-    if !(string.bending_stiffness_n_m2 > 0.0) {
-        return omega;
+    // This image owns its half-integer cosine basis; the material dispersion
+    // remains the same law used by pinned strings, fibers and impact wires.
+    fs_nlmodal::prestressed_beam_omega_at_wavenumber(
+        (k_zero as f64 + 0.5) * core::f64::consts::PI / string.length_m,
+        string.tension_n,
+        string.lin_density_kg_m,
+        string.bending_stiffness_n_m2,
+    )
+}
+
+#[cfg(test)]
+mod moving_end_dispersion_tests {
+    use super::*;
+
+    // G1/G3: both boundary images substitute their own spatial eigenvalue
+    // in the same tension+bending operator, including the bending limit.
+    #[test]
+    fn moving_end_and_pinned_images_share_constitutive_dispersion() {
+        let mut string = PrestressedString {
+            length_m: 0.65,
+            tension_n: 70.0,
+            lin_density_kg_m: 0.004,
+            axial_stiffness_n: 0.0,
+            width_m: 0.001,
+            n_modes: 8,
+            damping_ratio: 0.0,
+            rayleigh: None,
+            bending_stiffness_n_m2: 0.006,
+            kelvin_voigt_bending: None,
+            relaxation_bending: None,
+            polarization_detune: 0.0,
+            moving_end: true,
+            tension_loss_factor: None,
+        };
+        for tension in [70.0, 1.0e-300, 0.0] {
+            string.tension_n = tension;
+            for k_zero in 0..string.n_modes {
+                let kappa = (k_zero as f64 + 0.5) * core::f64::consts::PI / string.length_m;
+                let expected = ((tension * kappa.powi(2)
+                    + string.bending_stiffness_n_m2 * kappa.powi(4))
+                    / string.lin_density_kg_m).sqrt();
+                let actual = moving_end_omega(&string, k_zero);
+                assert!(actual.is_finite());
+                assert!((actual - expected).abs() <= 4.0e-14 * expected);
+                // A pinned member of twice this span has the same odd spatial
+                // eigenvalues; this compares the two public consumer paths.
+                let mut pinned = string.clone();
+                pinned.length_m *= 2.0;
+                pinned.moving_end = false;
+                assert_eq!(actual, string_mode_omega(&pinned, 2 * k_zero + 1));
+            }
+        }
+        string.bending_stiffness_n_m2 = f64::NAN;
+        assert!(moving_end_omega(&string, 0).is_nan());
     }
-    let inharm = core::f64::consts::PI * core::f64::consts::PI * string.bending_stiffness_n_m2
-        / (string.tension_n * string.length_m * string.length_m);
-    omega * det::sqrt(1.0 + inharm * n * n)
 }
 
 fn free_fixed_pluck_modal(pluck: Pluck, string: &PrestressedString, k_zero: usize) -> f64 {
