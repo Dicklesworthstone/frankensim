@@ -61,6 +61,20 @@ material scaling and domain/representability refusals.
   cancellation, quadrature, path phase, near-field momentum, standing-wave
   intensity, rigid motion, dynamic-range residuals, and bounded admission;
   `tests/material.rs` exercises the real material-bound flow consumer.
+- `curle3d::CompactForceObserver` prepares a stationary 3D point-force observer
+  from one coherent `FluidAcousticState` and physical source/observer positions.
+  For actual force ON the fluid [N], full pressure is
+  `n.F(t-r/c)/(4 pi r²) + n.Fdot(t-r/c)/(4 pi c r)`; its far-field method
+  explicitly omits induction. There is no extra density factor: material
+  density belongs in source mechanics, while material sound speed remains in
+  propagation. Forces must be 3D SI totals, never force per unit span. The
+  prepared operator exposes `r/c`; callers evaluate retarded source history or
+  use their existing delay filter exactly once. Evaluation is constant-work,
+  allocation-free and uses fixed-order reductions. `tests/curle3d.rs` checks
+  the independently differentiated retarded Green function, radial laws,
+  signed directivity, rigid motion, density independence and refusals. This is
+  an ideal free-space transfer for prescribed forces, not validation of a
+  source model, finite-size compactness, enclosure scattering or measured SPL.
 - `bickley::bickley_rayleigh_mode` — Rayleigh-equation shooting
   solver (RK4 + complex secant, half-line with symmetry boundary
   conditions and the exact `phi' = -alpha phi` far-field decay) for

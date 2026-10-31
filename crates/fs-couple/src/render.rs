@@ -50,9 +50,11 @@ use crate::reed_bore::{
     FastSolveStats, ReedSolverMode, blowing_envelope, reed_structural, solve_reed_wave,
 };
 use crate::thin_plate::PlateBank;
+use fs_aeroac::curle3d::CompactForceObserver;
 use fs_dcontact::Obstacle;
 use fs_duct::{Duct, MouthLoad, Termination};
 use fs_exec::CancelGate;
+use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::GasState;
 use fs_scenario::BeatingReed;
 
@@ -259,7 +261,8 @@ pub(crate) struct ReedLay {
 pub struct ReedObserverParts {
     /// Bore pressure at the reed: an internal observation, never propagated.
     pub internal_pa: f64,
-    /// Plate radiation plus the jet monopole, both evaluated at `listener_m`.
+    /// Plate radiation plus the on-axis jet force dipole at `listener_m`.
+    /// This legacy proxy is on the source clock; its consumer owns propagation.
     pub radiated_pa: f64,
 }
 
@@ -278,7 +281,7 @@ pub struct ReedBoreVoice {
     inlet_gas: GasState,
     viscous_slit: Option<crate::bernoulli_aperture::viscous::ViscousSlit>,
     rho: f64,
-    sound_speed: f64,
+    jet_observer: CompactForceObserver,
     zc: f64,
     area_bore: f64,
     listener_m: f64,
@@ -657,6 +660,13 @@ impl ReedBoreVoice {
                 what: "listener distance must be positive and finite",
             });
         }
+        let jet_observer = CompactForceObserver::new(
+            gas.acoustic_state().map_err(|e| AcousticRealizeError::Ambient(e.to_string()))?,
+            [listener_m, 0.0, 0.0],
+            [0.0; 3],
+        ).map_err(|_| AcousticRealizeError::InvalidDescription {
+            what: "compact jet observer geometry must have finite propagation coefficients",
+        })?;
         let inlet_r = inlet_radius()?;
         let area_bore = core::f64::consts::PI * inlet_r * inlet_r;
         let zc = gas.density * gas.sound_speed / area_bore;
@@ -690,7 +700,7 @@ impl ReedBoreVoice {
             inlet_gas: *gas,
             viscous_slit: None,
             rho: gas.density,
-            sound_speed: gas.sound_speed,
+            jet_observer,
             zc,
             area_bore,
             listener_m,
@@ -1006,8 +1016,14 @@ impl ReedBoreVoice {
             let f_jet = (p_m - p_bore) * self.reed.width_m * opening;
             let dfdt = (f_jet - self.f_jet_prev) / self.dt;
             self.f_jet_prev = f_jet;
-            let jet_pa = self.rho * dfdt
-                / (4.0 * core::f64::consts::PI * self.listener_m * self.sound_speed);
+            // Actual pressure-times-area force is already in N. This legacy
+            // on-axis far-field proxy stays on the source clock; its existing
+            // observer consumer owns delay. It is not a separate exterior
+            // source to add to the physical duct-outlet microphone.
+            let jet_pa = self.jet_observer.far_field_at_retarded([dfdt, 0.0, 0.0])
+                .map_err(|_| AcousticRealizeError::Reed {
+                    what: "compact jet radiation left the finite set",
+                })?;
             p_obs += jet_pa;
             *slot = p_obs;
             self.last_parts = ReedObserverParts { internal_pa: p_bore, radiated_pa: plate_pa + jet_pa };

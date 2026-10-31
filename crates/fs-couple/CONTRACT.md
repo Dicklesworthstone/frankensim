@@ -3299,6 +3299,16 @@ clarinet is one filling of those objects.
   distance and passes unfiltered and undelayed
   (`internal_part_unpropagated`). Under `observer_law none` the proxy is the
   voice's own sum, bit for bit.
+  The legacy jet contribution is an explicitly on-axis compact FORCE dipole:
+  `F = (p_m-p_bore) width opening` is already in newtons, and the shared
+  `fs-aeroac::curle3d::CompactForceObserver` supplies `Fdot/(4 pi c r)` without
+  another density multiplier. It is prepared once from the inlet material;
+  density still controls the reed flow and bore impedance. The proxy keeps its
+  historical far-field/source-clock scope; its consumer supplies propagation.
+  Plate volume-acceleration monopoles retain their required density factor.
+  The physical baffled-outlet path instead propagates its outgoing duct wave
+  through the existing exterior-fluid observer; an enclosed reed's proxy is
+  not added as an independently exposed exterior source.
   `ReedPerformance::observer_admission` reports the listener gas's figure
   (`air_path::omitted_observer_absorption`, from its record; a field cell is
   unrecorded) at the observer's range and band top (the receiver's declared

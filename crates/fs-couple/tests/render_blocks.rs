@@ -70,6 +70,44 @@ fn reed_voice() -> ReedBoreVoice {
 }
 
 #[test]
+fn reed_force_radiation_uses_newtons_once_across_density_and_range() {
+    let reed = BeatingReed { attack_s: 0.0, blowing_pressure_pa: 500.0, ..reed() };
+    for pressure_pa in [50_000.0, 100_000.0, 200_000.0] {
+        let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, pressure_pa).unwrap();
+        let make = |distance| ReedBoreVoice::new(
+            &clarinet_ish(), &gas, reed, Termination::IdealOpen, PlateBank::default(),
+            distance, RATE, N, None,
+        ).unwrap();
+        let mut near = make(0.5);
+        let mut far = make(2.0);
+        let mut previous_force = 0.0;
+        let mut peak: f64 = 0.0;
+        for _ in 0..512 {
+            let mut sample = [0.0];
+            near.step_block(&mut sample).unwrap();
+            far.step_block(&mut sample).unwrap();
+            let parts = near.last_observer_parts();
+            let distant = far.last_observer_parts();
+            // Reconstruct force independently from the observable bore pressure
+            // and static reed closing law; density still changes the source flow.
+            let delta_p = reed.blowing_pressure_pa - parts.internal_pa;
+            let opening = reed.rest_opening_m * (1.0 - delta_p / reed.closing_pressure_pa).clamp(0.0, 1.0);
+            let force = delta_p * reed.width_m * opening;
+            let force_rate = (force - previous_force) * f64::from(RATE);
+            let expected = force_rate / (4.0 * std::f64::consts::PI * gas.sound_speed * 0.5);
+            assert!((parts.radiated_pa - expected).abs() < 2e-12 * expected.abs().max(1.0),
+                "rho={}, actual={}, expected={expected}", gas.density, parts.radiated_pa);
+            assert_eq!(parts.internal_pa.to_bits(), distant.internal_pa.to_bits());
+            assert_eq!(near.outgoing_pressure_pa().to_bits(), far.outgoing_pressure_pa().to_bits());
+            assert!((parts.radiated_pa - 4.0 * distant.radiated_pa).abs() < 1e-14);
+            peak = peak.max(parts.radiated_pa.abs());
+            previous_force = force;
+        }
+        assert!(peak > 1e-4, "force radiation must be exercised at every density");
+    }
+}
+
+#[test]
 fn massive_reed_material_mass_reaches_rendered_pressure_across_blocks() {
     let duct = Duct {
         segments: vec![Segment::Cylinder {

@@ -14,6 +14,8 @@
 //! observes an explicitly supplied three-dimensional physical volume source in
 //! pascals, under its own compact-source and linear-propagation limits; it does
 //! not promote the flow-derived spectra into calibrated SPL predictions.
+//! The separate [`curle3d`] owner accepts prescribed 3D SI forces and retains
+//! the same distinction between an acoustic transfer and source validation.
 //!
 //! Modules:
 //! - [`bessel`]: self-contained deterministic J0/J1/Y0/Y1 and the
@@ -25,6 +27,9 @@
 //! - [`curle2d`]: 2D frequency-domain Curle dipole radiation
 //!   (e^{-i omega t} convention, matching the workspace acoustics
 //!   doctrine).
+//! - [`curle3d`]: free-space radiation of prescribed compact 3D forces [N],
+//!   with induction, dipole directivity and explicit retarded-time semantics.
+//!   This separate SI operator does not promote 2D data or validate source levels.
 //! - [`bickley`]: Rayleigh-equation instability oracle for the
 //!   Bickley jet `U = sech^2(y)` — the analytic reference the fs-lbm
 //!   jet runs are validated against. Its own pins are SELF-VERIFIED
@@ -53,6 +58,7 @@
 pub mod bessel;
 pub mod bickley;
 pub mod curle2d;
+pub mod curle3d;
 pub mod forced_jet;
 pub mod jetcard;
 pub mod jetlab;
