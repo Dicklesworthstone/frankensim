@@ -18,7 +18,8 @@
 //! large rotations, air drag and thermal rosin. The separate explicit
 //! `with_material_relaxation` binding retains each source Young-modulus arm
 //! in both axial and bending response, through the same coupled contact owner.
-//! It admits linear strain only; nonlinear hereditary strain is not inferred.
+//! With nonlinear strain selected, axial memory follows that same complete
+//! strain and retains the geometric mean; bending memory remains separate.
 //! Fixed-state Kelvin--Voigt coefficients require explicit source data;
 //! missing loss is never replaced with an invented Q. Refine BOTH the span
 //! modes and ribbon cells; the sample-rate owner refuses unresolved modes.

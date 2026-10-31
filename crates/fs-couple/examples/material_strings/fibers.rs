@@ -219,9 +219,9 @@ impl Input {
             if !matches!(self.prestress, StringPrestress::FixedTension(_)) {
                 return Err("fixed-extension fiber preload requires an initialized hereditary strain history; use an explicit maintained force with fiber memory".into());
             }
-            if self.strain.is_some() {
-                return Err("fiber relaxation requires linear strain; nonlinear material-history transport is not available".into());
-            }
+            // The joint material-history owner admits the selected nonlinear
+            // strain. Its geometric mean adds one state per original arm and
+            // cell; the authored budget is checked when the section resolves.
         }
         if let Some((limits, config)) = self.strain {
             limits.validate()?;

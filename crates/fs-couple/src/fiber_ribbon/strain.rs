@@ -17,6 +17,8 @@ use fs_math::det;
 use fs_nlmodal::{KcStringParams, longitudinal::LongitudinalString};
 use fs_phs::Storage;
 
+pub(super) mod relaxation;
+
 /// Continuous-span constitutive bounds, independent of numerical resolution.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiberStrainLimits {
@@ -42,18 +44,20 @@ impl FiberStrainLimits {
     }
 }
 
-/// Physical strain and total-tension bounds of one original quadrature strip.
+/// Physical strain and equilibrium-elastic tension of one original strip.
+/// Additional Maxwell stress/storage requires the joint owner's accepted memory
+/// and is not included in this displacement-only observation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiberStrainObservation {
     /// Additional mean axial material strain, dimensionless.
     pub mean_dynamic_strain: f64,
     /// Conservative absolute strain bound over the complete fiber span.
     pub maximum_abs_dynamic_strain: f64,
-    /// Lower bound of strip tensile force [N], including installed preload.
+    /// Lower bound of equilibrium-elastic tensile force [N], including preload.
     pub minimum_tension_n: f64,
-    /// Upper bound of strip tensile force [N], including installed preload.
+    /// Upper bound of equilibrium-elastic tensile force [N], including preload.
     pub maximum_tension_n: f64,
-    /// Full extensional energy, including retained linear axial storage [J].
+    /// Equilibrium extensional energy, including linear axial storage [J].
     pub strain_energy_j: f64,
 }
 
@@ -92,9 +96,9 @@ impl TensionedFiberRibbon {
         config: NonlinearModalConfig,
     ) -> Result<Self, FiberRibbonError> {
         limits.validate()?;
-        if self.strain.is_some() || self.relaxation.is_some() || config.validate().is_err() {
+        if self.strain.is_some() || config.validate().is_err() {
             return Err(FiberRibbonError::Invalid(
-                "fiber strain needs one cold binding, no linearized material history, and finite slope, strain and solve bounds",
+                "fiber strain needs one cold binding and finite slope, strain and solve bounds",
             ));
         }
         let share = self.geometry.fiber_count as f64 / self.resolution.cells as f64;
@@ -163,7 +167,7 @@ impl TensionedFiberRibbon {
                 .map_err(FiberRibbonError::Modal)?;
             self.cell = cell;
         }
-        self.strain = Some(FiberStrain {
+        let strain = FiberStrain {
             model,
             slope_scales,
             tension_n,
@@ -171,7 +175,17 @@ impl TensionedFiberRibbon {
             viscous_coefficient_j_s,
             limits,
             config,
-        });
+        };
+        if let Some(memory) = &mut self.relaxation {
+            memory.with_finite_strain(
+                &strain,
+                self.geometry.length_m,
+                share,
+                self.cell.modes(),
+                self.cell.sample_period_s(),
+            )?;
+        }
+        self.strain = Some(strain);
         Ok(self)
     }
 

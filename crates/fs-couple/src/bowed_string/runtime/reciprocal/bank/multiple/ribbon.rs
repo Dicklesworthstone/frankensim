@@ -166,6 +166,8 @@ impl ReciprocalStringBank {
     /// An explicitly bound fiber strain law couples its normal deflection and
     /// axial extension through that same owner. It retains all existing string
     /// nonlinear storage and requires the same numerical solve configuration.
+    /// Selected Maxwell spectra then follow that complete strain, including
+    /// mean geometric stretch, while bending keeps its independent histories.
     ///
     /// Bind cold. Contact station is fixed along the
     /// fibers: this is a local frozen-station bowing model in a uniformly
@@ -207,14 +209,37 @@ impl ReciprocalStringBank {
                 .map_err(fiber_memory_error)?;
             self.system = self.system.with_additional_material_relaxation(branches, None, gate)
                 .map_err(ReciprocalStringError::Friction)?;
-            memory.validate_band(self.system.linear_frequency_upper_bound_rad_s(),
-                self.system.sample_period_s()).map_err(fiber_memory_error)?;
-            self.source.validate_body_memory_frequencies(&self.system, gate)?;
-            self.source.validate_material_bridge_frequencies(&self.system, gate)?;
         }
         if let Some((bindings, config)) = ribbon.strain_bindings(component_start) {
             self.system = self.system.with_mapped_nonlinear_potentials(bindings, config, gate)
                 .map_err(ReciprocalStringError::Friction)?;
+        }
+        if let Some(memory) = ribbon.material_relaxation() {
+            let bindings = memory.strain_bindings(component_start);
+            if !bindings.is_empty() {
+                // The source budget already covers all ribbon bending and
+                // strain states. Preserve earlier nonlinear histories as well;
+                // the joint owner independently enforces its 256-state ceiling.
+                let count = self.system.nonlinear_material_memory().iter().map(|m| m.len()).sum::<usize>()
+                    .checked_add(bindings.iter().map(|b| b.law.memory_count()).sum::<usize>())
+                    .ok_or_else(|| invalid("complete fiber material history count overflows"))?;
+                self.system = self.system.with_mapped_material_histories(bindings, count, gate)
+                    .map_err(ReciprocalStringError::Friction)?;
+            }
+            memory.validate_band(self.system.linear_frequency_upper_bound_rad_s(),
+                self.system.sample_period_s()).map_err(fiber_memory_error)?;
+            if self.source.longitudinal_waves.is_some() {
+                super::super::nonlinear::longitudinal::relaxation::finite_strain::validate_sources(
+                    &self.source, &self.system, gate).map_err(|error| match error {
+                        crate::render::plate::impact::ImpactError::Cancelled =>
+                            ReciprocalStringError::Network(crate::render::schedule::force::coupled::ModalCouplingError::Cancelled),
+                        error => ReciprocalStringError::Material(
+                            crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string())),
+                    })?;
+            } else {
+                self.source.validate_body_memory_frequencies(&self.system, gate)?;
+                self.source.validate_material_bridge_frequencies(&self.system, gate)?;
+            }
         }
         let mut bank = self.with_uniform_bow_ribbon(ribbon.geometry().width_m, cells, joint, gate)?;
         let attachments = (0..cells).map(|port| FrictionSurfaceAttachment { port,

@@ -287,6 +287,94 @@ fn material_fiber_history_changes_contact_and_survives_support_motion_and_callba
 }
 
 #[test]
+fn full_strain_fiber_memory_composes_in_both_orders_and_retains_original_coordinates() {
+    with_cx(|cx, gate| {
+        let (ribbon, spectrum) = specimen(3, 1e9, 0.0003, (0.0, 1e8), gate);
+        let strain_first = ribbon
+            .clone()
+            .with_axial_transverse_strain(strain_limits(), strain_config())
+            .unwrap()
+            .with_material_relaxation(spectrum.clone(), 30, gate)
+            .unwrap();
+        let memory_first = ribbon
+            .with_material_relaxation(spectrum, 30, gate)
+            .unwrap()
+            .with_axial_transverse_strain(strain_limits(), strain_config())
+            .unwrap();
+        for source in [&strain_first, &memory_first] {
+            let memory = source.material_relaxation().unwrap();
+            assert!(memory.has_finite_strain());
+            assert_eq!(memory.memory_states(), 30);
+            assert_eq!(memory.channels().len(), 4);
+            assert!(memory.channels().iter().all(|channel| channel.mode >= 2));
+        }
+        let mut a = base(cx, gate, 7800.0)
+            .with_tensioned_fiber_ribbon(strain_first, 0.4, ribbon_limits(), gate)
+            .unwrap();
+        let mut b = base(cx, gate, 7800.0)
+            .with_tensioned_fiber_ribbon(memory_first, 0.4, ribbon_limits(), gate)
+            .unwrap();
+        assert_eq!(a.system().material_memory().len(), 12);
+        assert_eq!(
+            a.system()
+                .nonlinear_material_memory()
+                .iter()
+                .map(|m| m.len())
+                .sum::<usize>(),
+            18
+        );
+        let component = a.source().fiber_ribbon().unwrap().component_start();
+        let first: usize = a.system().components()[..component]
+            .iter()
+            .map(|c| c.modes().len())
+            .sum();
+        let mut force = vec![0.0; a.system().mode_count()];
+        // A physical force on the retained NORMAL fiber mode must also drive
+        // its original axial material memory through geometric stretching.
+        force[first + 2] = 5e-6;
+        let drives = vec![drive(0.01, 0.03); 3];
+        for _ in 0..64 {
+            a.step(&force, &drives).unwrap();
+            b.step(&force, &drives).unwrap();
+            let frame = a.system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+        assert_eq!(states(&a), states(&b));
+        assert_eq!(a.system().material_memory(), b.system().material_memory());
+        assert_eq!(
+            a.system().nonlinear_material_memory(),
+            b.system().nonlinear_material_memory()
+        );
+        assert!(
+            a.system()
+                .nonlinear_material_memory()
+                .iter()
+                .any(|memory| memory[0] > 0.0)
+        );
+        let before: Vec<_> = a
+            .system()
+            .nonlinear_material_memory()
+            .iter()
+            .map(|m| m.to_vec())
+            .collect();
+        let state = states(&a);
+        let bending = a.system().material_memory().to_vec();
+        gate.request();
+        assert!(a.step_under_gate(&force, &drives, gate).is_err());
+        assert_eq!(states(&a), state);
+        assert_eq!(a.system().material_memory(), bending);
+        assert_eq!(
+            a.system()
+                .nonlinear_material_memory()
+                .iter()
+                .map(|m| m.to_vec())
+                .collect::<Vec<_>>(),
+            before
+        );
+    });
+}
+
+#[test]
 fn material_fiber_memory_refuses_incompatible_sources_clocks_and_incomplete_laws() {
     let gate = CancelGate::new_clock_free();
     let (ribbon, spectrum) = specimen(3, 1e9, 0.0003, (0.0, 1e8), &gate);
@@ -306,6 +394,8 @@ fn material_fiber_memory_refuses_incompatible_sources_clocks_and_incomplete_laws
             .with_material_relaxation(spectrum.clone(), 24, &gate)
             .is_err()
     );
+    // The linear 24-state budget omits the six mean-strain memories; neither
+    // builder order may silently drop them when nonlinear strain is selected.
     assert!(
         admitted
             .with_axial_transverse_strain(strain_limits(), strain_config())

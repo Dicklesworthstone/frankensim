@@ -8,11 +8,17 @@
 //! Fiber count per strip scales A, I and mu equally, so width refinement
 //! partitions the physical material without changing its constitutive poles.
 //!
-//! This is fixed-state linear viscoelasticity, with maintained tensile preload.
-//! It does not relax that preload or the nonlinear u_x+y_x^2/2 strain. The
-//! latter therefore cannot be composed until it has its own hereditary owner.
+//! Composed with the original nonlinear fiber strain, axial arms act on
+//! u_x+y_x^2/2 through the shared mean/cosine Maxwell owner. Bending arms keep
+//! their original curvature coordinates. The maintained preload does not relax.
+//! Source state is fixed; no temperature evolution or material slip is inferred.
 
-use super::{FiberRibbonError, TensionedFiberRibbon};
+use super::strain::{FiberStrain, relaxation::FiberStrainHistory};
+use super::{FiberRibbonError, ModalAcousticMode, TensionedFiberRibbon};
+use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
+    ModalCoordinate,
+    history::{MappedModalHistoryBinding, ModalMaterialHistory},
+};
 use fs_exec::CancelGate;
 use fs_material::section::relaxation::ConcentricPronySection;
 use fs_math::det;
@@ -38,8 +44,11 @@ pub struct FiberRibbonRelaxation {
     channels: Vec<FiberRelaxationChannel>,
     cells: usize,
     modes_per_cell: usize,
+    axial_modes: usize,
     max_memory_states: usize,
     omega_band_rad_s: (f64, f64),
+    finite_strain: bool,
+    strain_history: Option<FiberStrainHistory>,
 }
 
 impl TensionedFiberRibbon {
@@ -54,7 +63,10 @@ impl TensionedFiberRibbon {
     ///
     /// The original exact coupled owner retains all new histories from cold
     /// construction through normal/tangential contact and support motion.
-    /// Missing data, a second binding, nonlinear fiber strain, insufficient
+    /// When nonlinear fiber strain is selected, every axial arm retains its
+    /// geometric mean and original axial harmonics in that same transaction.
+    /// The two builder calls may be made in either order. Missing data, a
+    /// second binding, insufficient
     /// memory, incomplete source bandwidth or unresolved material times refuse.
     pub fn with_material_relaxation(
         mut self,
@@ -64,12 +76,11 @@ impl TensionedFiberRibbon {
     ) -> Result<Self, FiberRibbonError> {
         poll(gate)?;
         if self.relaxation.is_some()
-            || self.strain.is_some()
             || !(1..=256).contains(&max_memory_states)
             || source.elastic() != self.axial.elastic()
         {
             return Err(FiberRibbonError::Invalid(
-                "fiber memory needs one linear cold binding of the identical material section and 1..=256 states",
+                "fiber memory needs one cold binding of the identical material section and 1..=256 states",
             ));
         }
         let positive_arms = source
@@ -141,18 +152,31 @@ impl TensionedFiberRibbon {
                 }
             }
         }
-        let image = FiberRibbonRelaxation {
+        let mut image = FiberRibbonRelaxation {
             source,
             channels,
             cells: self.resolution.cells,
             modes_per_cell: self.cell.modes().len(),
+            axial_modes: self.resolution.axial_modes,
             max_memory_states,
             omega_band_rad_s: band,
+            finite_strain: false,
+            strain_history: None,
         };
         image.validate_band(
             det::sqrt(instantaneous.into_iter().fold(0.0, f64::max)),
             self.cell.sample_period_s(),
         )?;
+        if let Some(strain) = &self.strain {
+            let share = self.geometry.fiber_count as f64 / self.resolution.cells as f64;
+            image.with_finite_strain(
+                strain,
+                self.geometry.length_m,
+                share,
+                self.cell.modes(),
+                self.cell.sample_period_s(),
+            )?;
+        }
         poll(gate)?;
         self.relaxation = Some(image);
         Ok(self)
@@ -176,19 +200,91 @@ impl FiberRibbonRelaxation {
     pub const fn source(&self) -> &ConcentricPronySection {
         &self.source
     }
-    /// One cell's pattern, ordered by layer, arm, then axial/normal mode.
+    /// One cell's active linear pattern, ordered by layer, arm and mode.
+    /// With full strain selected this contains bending channels only.
     pub fn channels(&self) -> &[FiberRelaxationChannel] {
         &self.channels
     }
     /// Complete history count over ALL original quadrature cells.
     pub fn memory_states(&self) -> usize {
-        self.cells * self.channels.len()
+        self.cells
+            * (self.channels.len()
+                + self
+                    .strain_history
+                    .as_ref()
+                    .map_or(0, ModalMaterialHistory::memory_count))
+    }
+    /// Whether axial memory follows the same nonlinear strain as elastic storage.
+    pub const fn has_finite_strain(&self) -> bool {
+        self.finite_strain
     }
     pub const fn max_memory_states(&self) -> usize {
         self.max_memory_states
     }
     pub const fn omega_band_rad_s(&self) -> (f64, f64) {
         self.omega_band_rad_s
+    }
+
+    pub(super) fn with_finite_strain(
+        &mut self,
+        strain: &FiberStrain,
+        length_m: f64,
+        share: f64,
+        modes: &[ModalAcousticMode],
+        dt: f64,
+    ) -> Result<(), FiberRibbonError> {
+        let history = FiberStrainHistory::from_source(strain, &self.source, length_m, share)?;
+        let bending = self
+            .channels
+            .iter()
+            .filter(|c| c.mode >= self.axial_modes)
+            .count();
+        let per_cell = bending.checked_add(
+            history
+                .as_ref()
+                .map_or(0, ModalMaterialHistory::memory_count),
+        );
+        let total = per_cell.and_then(|n| n.checked_mul(self.cells));
+        if total.is_none_or(|n| n > self.max_memory_states) {
+            return Err(FiberRibbonError::Invalid(
+                "fiber full-strain history needs mean, axial and bending states within its original budget",
+            ));
+        }
+        let mut frequencies: Vec<_> = modes
+            .iter()
+            .map(|m| m.angular_frequency_rad_s.powi(2))
+            .collect();
+        for channel in self.channels.iter().filter(|c| c.mode >= self.axial_modes) {
+            frequencies[channel.mode] += channel.coupling_per_s.powi(2);
+        }
+        let bound = history
+            .as_ref()
+            .map_or(0.0, |law| law.stiffness_bound(None));
+        self.validate_band(
+            det::sqrt(frequencies.into_iter().fold(0.0, f64::max) + bound),
+            dt,
+        )?;
+        self.channels.retain(|c| c.mode >= self.axial_modes);
+        self.strain_history = history;
+        self.finite_strain = true;
+        Ok(())
+    }
+
+    pub(crate) fn strain_bindings(&self, first_component: usize) -> Vec<MappedModalHistoryBinding> {
+        self.strain_history.as_ref().map_or_else(Vec::new, |law| {
+            (0..self.cells)
+                .map(|cell| MappedModalHistoryBinding {
+                    coordinates: (0..self.modes_per_cell)
+                        .map(|mode| ModalCoordinate {
+                            component: first_component + cell,
+                            mode,
+                        })
+                        .collect(),
+                    law: Box::new(law.clone()),
+                    initial_memory: None,
+                })
+                .collect()
+        })
     }
 
     pub(crate) fn validate_band(&self, high: f64, dt: f64) -> Result<(), FiberRibbonError> {

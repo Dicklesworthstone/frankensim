@@ -145,9 +145,89 @@ fn missing_fiber_spectrum_or_insufficient_history_budget_cannot_render() {
         ("bow_fiber_memory 24", "bow_fiber_memory 0"),
         ("bow_fiber_memory 24", "bow_fiber_memory 257"),
         ("fiber_delta_slow fiber_tau_slow", "fiber_delta_fast fiber_tau_fast"),
-        ("forces retain", "bow_fiber_strain 0.2 0.1 64 1000 1e-10 1e-8\nforces retain"),
     ] {
         assert!(input::Spec::parse(memory_text().replace(from, to).as_bytes()).is_err(), "{to}");
+    }
+}
+
+fn strain_memory_text() -> String {
+    include_str!("../fiber-strain-contact.material-strings")
+        .replace("48000 4096", "48000 129")
+        .replace("bow_fiber_strain", concat!(
+            "bow_fiber_memory 30 young_modulus 2 fiber_delta_fast fiber_tau_fast ",
+            "fiber_delta_slow fiber_tau_slow\nbow_fiber_strain"))
+}
+
+#[test]
+fn selected_fiber_memory_acts_on_full_strain_through_contact_pressure_and_wav() {
+    scoped(|cx, gate| {
+        let text = strain_memory_text();
+        let make = |delta| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
+            cx, gate, None,
+            Some(crate::stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes()).unwrap()),
+            |name| Ok(if name == "fiber.fsmatpk" { memory_pack(delta, false) }
+                else { pack(name, 7800.0, 200_000.0, None) }),
+        ).unwrap();
+        let (mut soft, mut stiff) = (make(0.6e9), make(3e9));
+        assert_eq!(soft.spec.bytes, stiff.spec.bytes);
+        let model = soft.performance.bank().source().fiber_ribbon().unwrap().model();
+        let memory = model.material_relaxation().unwrap();
+        assert!(model.strain().is_some() && memory.has_finite_strain());
+        // Three original cells, two material arms, each with three strain
+        // histories (mean + two axial harmonics) and two bending histories.
+        assert_eq!(memory.memory_states(), 30);
+        assert_eq!(soft.performance.bank().system().material_memory().len(), 12);
+        let initial: Vec<_> = soft.performance.bank().system().nonlinear_material_memory()
+            .into_iter().map(<[f64]>::to_vec).collect();
+        assert_eq!(initial.iter().map(Vec::len).sum::<usize>(), 18);
+        let mut output = Vec::new();
+        let mut pressure_change = 0.0;
+        let mut contact_change = 0.0;
+        for _ in 0..129 {
+            let (mut a, mut b) = ([0.0], [0.0]);
+            soft.performance.block(&mut a).unwrap();
+            stiff.performance.block(&mut b).unwrap();
+            output.push(a[0]);
+            pressure_change += (a[0] - b[0]).abs();
+            let a = soft.performance.bank().system().last_frame().unwrap();
+            let b = stiff.performance.bank().system().last_frame().unwrap();
+            contact_change += a.ports.iter().zip(&b.ports)
+                .map(|(a, b)| (a.traction_n - b.traction_n).abs()
+                    + (a.normal_force_n - b.normal_force_n).abs()).sum::<f64>();
+            assert!(a.energy_residual_j.abs() <= a.energy_tolerance_j);
+            assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
+        }
+        assert!(pressure_change > 1e-12 && contact_change > 1e-12);
+        assert!(soft.performance.bank().system().nonlinear_material_memory().iter()
+            .zip(&initial).any(|(after, before)| after.iter().zip(before)
+                .any(|(a, b)| (a - b).abs() > 1e-16)));
+        let mut chunked = make(0.6e9);
+        assert_eq!(output, pressure(&mut chunked, 37));
+        assert_eq!(soft.performance.bank().system().nonlinear_material_memory(),
+            chunked.performance.bank().system().nonlinear_material_memory());
+        assert_eq!(soft.performance.bank().system().material_memory(),
+            chunked.performance.bank().system().material_memory());
+        let (wav, summary) = make(0.6e9).write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        let (expected, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&output, 48000, 0.01).unwrap();
+        assert_eq!(wav.into_inner(), expected);
+        assert_eq!(summary.samples, 129);
+        assert_eq!(summary.clipped_samples, clips as u64);
+    });
+}
+
+#[test]
+fn full_fiber_strain_memory_requires_its_geometric_mean_budget_and_original_sources() {
+    let gate = CancelGate::new_clock_free();
+    let text = strain_memory_text();
+    let spec = input::Spec::parse(text.as_bytes()).unwrap();
+    let (model, _) = compile_fiber_source(&spec, memory_pack(0.6e9, false), &gate).unwrap();
+    assert_eq!(model.material_relaxation().unwrap().memory_states(), 30);
+    for (text, omit_time) in [
+        (text.replace("bow_fiber_memory 30", "bow_fiber_memory 29"), false),
+        (text, true),
+    ] {
+        let spec = input::Spec::parse(text.as_bytes()).unwrap();
+        assert!(compile_fiber_source(&spec, memory_pack(0.6e9, omit_time), &gate).is_err());
     }
 }
 
