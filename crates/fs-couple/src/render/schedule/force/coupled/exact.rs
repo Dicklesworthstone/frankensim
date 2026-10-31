@@ -3,13 +3,18 @@
 use super::*;
 use fs_math::det;
 use fs_phs::linear_exact::{
-    LinearSplit, LinearSplitBudget, integrated_resistance_loss,
-    integrated_resistance_loss_with_witness, split_quadratic, step_render,
+    HeatCache, LinearSplit, LinearSplitBudget, integrated_resistance_loss_cached,
+    integrated_resistance_loss_with_witness_cached, split_quadratic, step_render_cached,
 };
+// The uncached twins are the reference the tests (and `use super::*` in the submodules' tests) compare against.
+#[cfg(test)]
+use fs_phs::linear_exact::{integrated_resistance_loss, step_render};
 use fs_phs::{PortHamiltonian, QuadraticStorage, ResistanceWitness, StepRecord};
 
 pub(super) mod prepared;
 pub(super) mod dg;
+#[cfg(test)]
+mod heat_cache_tests;
 
 pub(super) struct ExactNetwork {
     blocks: Vec<(Vec<usize>, ExactBlock)>,
@@ -270,12 +275,13 @@ impl ExactNetwork {
         for (indices, block) in &self.blocks {
             let local_external: Vec<_> = indices.iter().map(|&i| external[i]).collect();
             let local_u = block.held_input(&local_external)?;
-            let local = step_render(
+            let local = step_render_cached(
                 &block.system,
                 &block.split,
                 &self.local_state(indices, block, &x),
                 &local_u,
                 dt,
+                &block.heat,
             )
             .map_err(ModalCouplingError::Propagation)?;
             for (j, &i) in indices.iter().enumerate() {
@@ -366,7 +372,7 @@ impl ExactNetwork {
             } else {
                 // Recover this island's independently integrated total for
                 // the existing channel split, never apportion a global loss.
-                step_render(&block.system, &block.split, &local_x, &local_u, dt)
+                step_render_cached(&block.system, &block.split, &local_x, &local_u, dt, &block.heat)
                     .map_err(ModalCouplingError::Propagation)?
                     .dissipated
             };
@@ -408,13 +414,14 @@ impl ExactNetwork {
             } else if block.connection_r.iter().all(|v| *v == 0.0) {
                 0.0
             } else {
-                integrated_resistance_loss_with_witness(
+                integrated_resistance_loss_with_witness_cached(
                     &block.system,
                     &block.split,
                     &local_x,
                     &local_u,
                     dt,
                     &block.connection_witness,
+                    &block.heat,
                 )
                 .map_err(ModalCouplingError::Propagation)?
             };
@@ -451,6 +458,9 @@ struct ExactBlock {
     radiation_r: Vec<f64>,
     memory_indices: Vec<usize>,
     radiation_indices: Vec<usize>,
+    /// Positive-heat factors of this fixed system, reused only on a bit-equal key (`fs_phs::linear_exact::HeatCache`).
+    /// Owned by the block, never shared; a disabled one rebuilds on every call.
+    heat: HeatCache,
 }
 
 impl ExactBlock {
@@ -646,6 +656,7 @@ impl ExactBlock {
             radiation_r,
             memory_indices: Vec::new(),
             radiation_indices: Vec::new(),
+            heat: HeatCache::new(),
         })
     }
 
@@ -665,12 +676,13 @@ impl ExactBlock {
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
         // A derivative with respect to held force has zero initial state and
         // zero rest load. No finite-difference material or trajectory probes.
-        let rec = step_render(
+        let rec = step_render_cached(
             &self.system,
             &self.split,
             &vec![0.0; self.system.state_dim()],
             column,
             dt,
+            &self.heat,
         )
         .map_err(ModalCouplingError::Propagation)?;
         Ok(rec.x[..2 * self.rest_force.len()].chunks_exact(2).map(|s| s[0]).collect())
@@ -689,8 +701,10 @@ impl ExactBlock {
             // allocation is used to invent a constitutive loss channel.
             let integrate = |resistance: &[f64]| {
                 if resistance.iter().all(|v| *v == 0.0) { return Ok(0.0); }
-                integrated_resistance_loss(&self.system, &self.split, x, u, dt, resistance)
-                    .map_err(ModalCouplingError::Propagation)
+                integrated_resistance_loss_cached(
+                    &self.system, &self.split, x, u, dt, resistance, &self.heat,
+                )
+                .map_err(ModalCouplingError::Propagation)
             };
             let component = integrate(&self.component_r)?;
             let connection = self.connection_loss(x, u, dt)?;
@@ -708,9 +722,10 @@ impl ExactBlock {
         if self.connection_r.iter().all(|v| *v == 0.0) {
             return Ok((total, 0.0, 0.0, 0.0));
         }
-        let component =
-            integrated_resistance_loss(&self.system, &self.split, x, u, dt, &self.component_r)
-                .map_err(ModalCouplingError::Propagation)?;
+        let component = integrated_resistance_loss_cached(
+            &self.system, &self.split, x, u, dt, &self.component_r, &self.heat,
+        )
+        .map_err(ModalCouplingError::Propagation)?;
         let connection = self.connection_loss(x, u, dt)?;
         let scale = self
             .system
@@ -730,8 +745,8 @@ impl ExactBlock {
         if self.connection_r.iter().all(|value| *value == 0.0) {
             return Ok(0.0);
         }
-        integrated_resistance_loss_with_witness(
-            &self.system, &self.split, x, u, dt, &self.connection_witness,
+        integrated_resistance_loss_with_witness_cached(
+            &self.system, &self.split, x, u, dt, &self.connection_witness, &self.heat,
         ).map_err(ModalCouplingError::Propagation)
     }
 
@@ -788,8 +803,10 @@ impl ExactBlock {
                         .ok_or_else(|| invalid("complete physical dashpot source row required"))?;
                     let witness = ResistanceWitness::try_from_source_rows(n, resistance, row.clone())
                         .map_err(ModalCouplingError::Propagation)?;
-                    integrated_resistance_loss_with_witness(&self.system, &self.split, x, u, dt, &witness)
-                        .map_err(ModalCouplingError::Propagation)?
+                    integrated_resistance_loss_with_witness_cached(
+                        &self.system, &self.split, x, u, dt, &witness, &self.heat,
+                    )
+                    .map_err(ModalCouplingError::Propagation)?
                 };
                 let work =
                     finite(-0.5 * link.stiffness_n_m * (after - before) * (after + before) - loss)?;

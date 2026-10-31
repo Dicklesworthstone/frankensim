@@ -38,6 +38,11 @@ pub use multiport_scattering::{
 mod common_flow_zoh;
 mod common_flow;
 mod nonlinear;
+mod heat_cache;
+pub use heat_cache::{
+    HeatCache, integrated_resistance_loss_cached, integrated_resistance_loss_with_witness_cached,
+    step_render_cached,
+};
 pub use common_flow_zoh::PreparedCommonFlowZoh;
 pub use common_flow::CommonFlowProjection;
 pub use nonlinear::PreparedNonlinearZoh;
@@ -663,8 +668,19 @@ pub fn step_render(
     u: &[f64],
     dt: f64,
 ) -> Result<StepRecord, PhsError> {
+    step_render_with(sys, split, x0, u, dt, None)
+}
+
+fn step_render_with(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    heat: Option<&HeatCache>,
+) -> Result<StepRecord, PhsError> {
     if split.quadratic.exact {
-        return step_split(sys, split, LinearPropagator::ExactZoh, x0, u, dt);
+        return step_split_with(sys, split, LinearPropagator::ExactZoh, x0, u, dt, heat);
     }
     if sys.n != split.n
         || sys.m != split.m
@@ -729,6 +745,18 @@ pub fn step_split(
     u: &[f64],
     dt: f64,
 ) -> Result<StepRecord, PhsError> {
+    step_split_with(sys, split, prop, x0, u, dt, None)
+}
+
+fn step_split_with(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    prop: LinearPropagator,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    heat: Option<&HeatCache>,
+) -> Result<StepRecord, PhsError> {
     if sys.n != split.n
         || sys.m != split.m
         || sys.j != split.j
@@ -748,7 +776,7 @@ pub fn step_split(
         return Err(refuse("finite state/input and nonnegative dt required"));
     }
     match prop {
-        LinearPropagator::ExactZoh => exact_zoh(sys, split, x0, u, dt),
+        LinearPropagator::ExactZoh => exact_zoh(sys, split, x0, u, dt, heat),
         LinearPropagator::FrequencyMatched => {
             let correction = split.quadratic_correction(dt)?;
             let storage = MatchedStorage {
@@ -766,8 +794,9 @@ fn exact_zoh(
     x0: &[f64],
     u: &[f64],
     dt: f64,
+    heat: Option<&HeatCache>,
 ) -> Result<StepRecord, PhsError> {
-    exact_zoh_loss(sys, split, x0, u, dt, &sys.r, None, true)
+    exact_zoh_loss(sys, split, x0, u, dt, &sys.r, None, true, heat)
 }
 
 /// Integrate one declared PSD resistance channel along the SAME complete
@@ -782,7 +811,7 @@ pub fn integrated_resistance_loss(
     dt: f64,
     resistance: &[f64],
 ) -> Result<f64, PhsError> {
-    integrated_resistance_loss_inner(sys, split, x0, u, dt, resistance, None)
+    integrated_resistance_loss_inner(sys, split, x0, u, dt, resistance, None, None)
 }
 
 /// Integrate a source's checked positive resistance squares along the SAME
@@ -797,9 +826,10 @@ pub fn integrated_resistance_loss_with_witness(
     dt: f64,
     witness: &crate::ResistanceWitness,
 ) -> Result<f64, PhsError> {
-    integrated_resistance_loss_inner(sys, split, x0, u, dt, &witness.matrix, Some(witness))
+    integrated_resistance_loss_inner(sys, split, x0, u, dt, &witness.matrix, Some(witness), None)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn integrated_resistance_loss_inner(
     sys: &PortHamiltonian,
     split: &LinearSplit,
@@ -808,6 +838,7 @@ fn integrated_resistance_loss_inner(
     dt: f64,
     resistance: &[f64],
     witness: Option<&crate::ResistanceWitness>,
+    heat: Option<&HeatCache>,
 ) -> Result<f64, PhsError> {
     let n = split.n;
     if sys.n != n
@@ -831,7 +862,7 @@ fn integrated_resistance_loss_inner(
     }
     crate::require_symmetric(resistance, n, "loss channel R")?;
     crate::require_psd(resistance, n, "loss channel R")?;
-    Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, witness, false)?.dissipated)
+    Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, witness, false, heat)?.dissipated)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -844,6 +875,7 @@ fn exact_zoh_loss(
     loss_resistance: &[f64],
     loss_witness: Option<&crate::ResistanceWitness>,
     check_balance: bool,
+    heat_cache: Option<&HeatCache>,
 ) -> Result<StepRecord, PhsError> {
     if !split.quadratic.exact {
         return Err(refuse("ZOH requires identically quadratic storage"));
@@ -918,12 +950,9 @@ fn exact_zoh_loss(
             end[i] += flow.transition[i * d + j] * initial[j];
         }
     }
-    let heat = match loss_witness {
-        Some(witness) => positive_heat::PositiveHeat::from_factor(
-            sys, split, dt, loss_resistance, witness.root.clone(),
-        )?,
-        None => positive_heat::PositiveHeat::new(sys, split, dt, loss_resistance)?,
-    };
+    // The factor reads the system, split, clock and channel only, never x0 or u: a holder that steps one fixed
+    // system reuses it (bit-equal key); everyone else builds it here exactly as before.
+    let heat = heat_cache::obtain(heat_cache, sys, split, dt, loss_resistance, loss_witness)?;
     let dissipated = heat.evaluate(sys, x0, u)?;
     let x: Vec<_> = (0..n)
         .map(|i| (0..n).map(|j| inverse[i * n + j] * end[j]).sum())
