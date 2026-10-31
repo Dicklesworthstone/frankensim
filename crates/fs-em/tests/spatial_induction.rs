@@ -2,6 +2,8 @@
 //! Synthetic materials qualify equations/discretization, not empirical devices.
 #[path = "spatial_induction/nonlinear.rs"]
 mod nonlinear;
+#[path = "spatial_induction/orthotropic.rs"]
+mod orthotropic;
 use fs_em::spatial::{
     SpatialMagneticError, SpatialMagneticMaterial, SpatialRecoilMaterial,
     vector_potential::{

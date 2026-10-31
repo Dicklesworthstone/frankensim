@@ -15,11 +15,12 @@ use super::{
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_material::{
-    conductor::ResolvedConductorState, field_storage::admit_magnetic_temperature_refresh,
+    conductor::spatial::SpatialConductorMaterial,
+    field_storage::admit_magnetic_temperature_refresh,
 };
 use std::sync::Arc;
 
-impl<'m> SpatialInduction<'m> {
+impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
     /// Advance the same accepted history with complete endpoint source bundles.
     ///
     /// Magnetic cells must remain original induced-linear materials; their
@@ -40,11 +41,11 @@ impl<'m> SpatialInduction<'m> {
         velocity_m_s: &[[f64; 3]],
         duration_s: f64,
         materials: Vec<SpatialMagneticMaterial>,
-        conductors: Vec<Option<ResolvedConductorState>>,
+        conductors: Vec<Option<C>>,
         assembly: WeightedAssemblyLimits,
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialInductionCandidate<'m>> {
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
         poll(cancelled)?;
         let old = &self.prepared;
         if materials.len() != old.problem.materials().len() || conductors.len() != materials.len() {
@@ -79,8 +80,7 @@ impl<'m> SpatialInduction<'m> {
                     unreachable!("linear source map admitted above")
                 };
                 if source.material() != material
-                    || original.source_basis() != source.source_basis()
-                    || original.source_key() != source.source_key()
+                    || !original.has_same_electrical_source(source)
                     || original
                         .with_material(source.material().clone())
                         .map_err(|_| {

@@ -10,7 +10,7 @@ use super::{
     Result, SpatialInductionCell, SpatialInductionControls, SpatialInductionLimits, add, csr,
     finite, positive, product, row_map,
 };
-use fs_material::conductor::ResolvedConductorState;
+use fs_material::conductor::spatial::{SpatialConductivity, SpatialConductorMaterial};
 use fs_rep_mesh::TetComplex;
 use fs_sparse::Csr;
 use std::collections::{BTreeMap, VecDeque};
@@ -49,7 +49,7 @@ impl Geometry<'_> {
 pub(super) struct ConductionCell {
     pub cell: usize,
     pub component: usize,
-    pub sigma: f64,
+    pub sigma: SpatialConductivity,
     pub volume: f64,
     pub indices: [Option<usize>; 10],
     pub charges: [usize; 4],
@@ -57,8 +57,8 @@ pub(super) struct ConductionCell {
     pub basis: [[[f64; 3]; 10]; 4],
 }
 #[derive(Clone)]
-pub(super) struct Coupling {
-    pub sources: Vec<Option<ResolvedConductorState>>,
+pub(super) struct Coupling<C: SpatialConductorMaterial> {
+    pub sources: Vec<Option<C>>,
     pub cells: Vec<ConductionCell>,
     pub edge_unknown: Vec<Option<usize>>,
     pub fixed_edges: Vec<bool>,
@@ -91,18 +91,18 @@ fn join(parent: &mut [usize], a: usize, b: usize) -> bool {
         true
     }
 }
-impl Coupling {
+impl<C: SpatialConductorMaterial> Coupling<C> {
     /// Prepare once from a source-admitted field's actual trace and cochain.
     #[allow(clippy::too_many_arguments)]
     pub fn prepare(
         g: Geometry<'_>,
         initial: &[f64],
         fixed_edges: Vec<bool>,
-        sources: Vec<Option<ResolvedConductorState>>,
+        sources: Vec<Option<C>>,
         magnetic_entry_bound: usize,
         limits: SpatialInductionLimits,
         flux_tolerance_wb: f64,
-        mut admit: impl FnMut(usize, &ResolvedConductorState) -> Result<()>,
+        mut admit: impl FnMut(usize, &C) -> Result<()>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(Self, Vec<f64>)> {
         poll(cancelled)?;
@@ -212,10 +212,8 @@ impl Coupling {
                 continue;
             };
             admit(cell, source)?;
-            if !source
-                .source_property()
-                .is_static_at_fixed_external_conditions()
-                || !positive(source.resistivity_ohm_m().recip())
+            if !source.has_admitted_static_sources()
+                || !positive(source.conductivity().maximum_conductivity_s_m())
             {
                 return Err(invalid("positive fixed-condition conductivity required"));
             }
@@ -271,7 +269,7 @@ impl Coupling {
             cells.push(ConductionCell {
                 cell,
                 component: component[cell],
-                sigma: source.resistivity_ohm_m().recip(),
+                sigma: source.conductivity(),
                 volume: g.geometry.geometry.vol_signed[cell].abs(),
                 indices,
                 charges,
@@ -300,8 +298,8 @@ impl Coupling {
     pub fn refresh_sources(
         &self,
         g: Geometry<'_>,
-        sources: Vec<Option<ResolvedConductorState>>,
-        mut admit: impl FnMut(usize, &ResolvedConductorState) -> Result<()>,
+        sources: Vec<Option<C>>,
+        mut admit: impl FnMut(usize, &C) -> Result<()>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         poll(cancelled)?;
@@ -322,11 +320,9 @@ impl Coupling {
                 .as_ref()
                 .expect("unchanged conducting support");
             admit(cell.cell, source)?;
-            cell.sigma = source.resistivity_ohm_m().recip();
-            if !positive(cell.sigma)
-                || !source
-                    .source_property()
-                    .is_static_at_fixed_external_conditions()
+            cell.sigma = source.conductivity();
+            if !positive(cell.sigma.maximum_conductivity_s_m())
+                || !source.has_admitted_static_sources()
             {
                 return Err(invalid("positive fixed-condition conductivity required"));
             }
@@ -434,7 +430,8 @@ impl Coupling {
                     )));
                 }
             }
-            let peclet = finite(0.5 * permeability_bound[c.cell] * c.sigma * speed * diameter)?;
+            let peclet = finite(0.5 * permeability_bound[c.cell]
+                * c.sigma.maximum_conductivity_s_m() * speed * diameter)?;
             observed = observed.max(peclet);
             if peclet > maximum_peclet {
                 return Err(invalid(
@@ -447,7 +444,7 @@ impl Coupling {
                     continue;
                 };
                 drive[i] = finite(
-                    drive[i] + c.sigma * product(c.basis.map(|q| q[a]), initial_motion, c.volume),
+                    drive[i] + conductivity_product(c.sigma, c.basis.map(|q| q[a]), initial_motion, c.volume),
                 )?;
                 for b in 0..6 {
                     if let Some(j) = c.indices[b] {
@@ -456,7 +453,7 @@ impl Coupling {
                             &mut rows,
                             i,
                             j,
-                            finite(c.sigma * product(c.basis.map(|q| q[a]), motion, c.volume))?,
+                            finite(conductivity_product(c.sigma, c.basis.map(|q| q[a]), motion, c.volume))?,
                         )?;
                     }
                 }
@@ -506,9 +503,12 @@ impl Coupling {
                 let motion = cross(velocity[k], stage_b[c.cell]);
                 std::array::from_fn(|j| laboratory[k][j] + motion[j])
             });
-            let current = conductor.map(|e| e.map(|v| v * c.sigma));
+            let current = conductor.map(|e| c.sigma.current_density_a_m2(e));
             let force = current.map(|j| cross(j, stage_b[c.cell]));
-            let heat = finite(dt * c.sigma * product(conductor, conductor, c.volume))?;
+            let heat = finite(match c.sigma {
+                SpatialConductivity::Scalar(s) => dt * s * product(conductor, conductor, c.volume),
+                SpatialConductivity::Tensor(_) => dt * product(conductor, current, c.volume),
+            })?;
             let work = finite(dt * product(velocity, force, c.volume))?;
             if heat < 0.0 {
                 return Err(invalid("negative Ohmic dissipation"));
@@ -548,6 +548,21 @@ impl Coupling {
     }
 }
 
+// Exact coefficient-weighted P1 integral; scalar sources retain their original
+// arithmetic while the tensor acts inside the same Whitney/charge bilinear form.
+fn conductivity_product(
+    sigma: SpatialConductivity,
+    a: [[f64; 3]; 4],
+    b: [[f64; 3]; 4],
+    volume: f64,
+) -> f64 {
+    match sigma {
+        SpatialConductivity::Scalar(s) => s * product(a, b, volume),
+        SpatialConductivity::Tensor(_) =>
+            product(a, b.map(|v| sigma.current_density_a_m2(v)), volume),
+    }
+}
+
 fn assemble_mass(
     g: Geometry<'_>,
     cells: &[ConductionCell],
@@ -561,7 +576,7 @@ fn assemble_mass(
         for a in 0..10 {
             for b in a..10 {
                 let value = finite(
-                    c.sigma * product(c.basis.map(|q| q[a]), c.basis.map(|q| q[b]), c.volume),
+                    conductivity_product(c.sigma, c.basis.map(|q| q[a]), c.basis.map(|q| q[b]), c.volume),
                 )?;
                 if a == b && a < 6 {
                     let e = g.cells[c.cell].edges[a];
@@ -579,9 +594,9 @@ fn assemble_mass(
     Ok((csr(mass), diagonal))
 }
 
-pub(super) fn admit_step(
+pub(super) fn admit_step<C: SpatialConductorMaterial>(
     g: Geometry<'_>,
-    coupling: &Coupling,
+    coupling: &Coupling<C>,
     old_time: f64,
     current: &[[f64; 3]],
     velocity: &[[f64; 3]],

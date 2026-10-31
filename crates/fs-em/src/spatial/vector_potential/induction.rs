@@ -25,7 +25,7 @@ pub mod thermal;
 use super::super::{SpatialMagneticError, SpatialMagneticMaterial, dot, finite, invalid, poll};
 use super::{SpatialVectorField, SpatialVectorMagnetostatics, apply};
 use coupling::{Coupling, Geometry, admit_step};
-use fs_material::conductor::ResolvedConductorState;
+use fs_material::conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial};
 use fs_solver::{
     FgmresState, FlexiblePreconditioner, LinearOp, ResidualClaim, SolveReport, SolverRunProgress,
 };
@@ -119,35 +119,35 @@ impl SpatialInductionField {
         self.stored_energy_j
     }
 }
-pub struct SpatialInductionCandidate<'m> {
-    state: SpatialInduction<'m>,
+pub struct SpatialInductionCandidate<'m, C: SpatialConductorMaterial = ResolvedConductorState> {
+    state: SpatialInduction<'m, C>,
     step: SpatialInductionStep,
 }
-impl<'m> SpatialInductionCandidate<'m> {
-    pub fn state(&self) -> &SpatialInduction<'m> {
+impl<'m, C: SpatialConductorMaterial> SpatialInductionCandidate<'m, C> {
+    pub fn state(&self) -> &SpatialInduction<'m, C> {
         &self.state
     }
     pub fn step(&self) -> &SpatialInductionStep {
         &self.step
     }
-    pub fn into_parts(self) -> (SpatialInduction<'m>, SpatialInductionStep) {
+    pub fn into_parts(self) -> (SpatialInduction<'m, C>, SpatialInductionStep) {
         (self.state, self.step)
     }
 }
 #[derive(Clone)]
-pub struct SpatialInduction<'m> {
-    prepared: Arc<Prepared<'m>>,
+pub struct SpatialInduction<'m, C: SpatialConductorMaterial = ResolvedConductorState> {
+    prepared: Arc<Prepared<'m, C>>,
     potential_wb: Vec<f64>,
     impressed_current_a_m2: Vec<[f64; 3]>,
     time_s: f64,
 }
-struct Prepared<'m> {
+struct Prepared<'m, C: SpatialConductorMaterial> {
     problem: MagneticOwner<'m>,
-    coupling: Coupling,
+    coupling: Coupling<C>,
     magnetic: Csr,
 }
-impl Deref for Prepared<'_> {
-    type Target = Coupling;
+impl<C: SpatialConductorMaterial> Deref for Prepared<'_, C> {
+    type Target = Coupling<C>;
     fn deref(&self) -> &Self::Target {
         &self.coupling
     }
@@ -260,13 +260,26 @@ fn field(
     })
 }
 impl<'m> SpatialInduction<'m> {
+    /// Scalar-compatible entry point, including untyped all-insulator maps.
+    pub fn new(
+        initial: &SpatialVectorField<'m>,
+        sources: Vec<Option<ResolvedConductorState>>,
+        limits: SpatialInductionLimits,
+        flux_tolerance_wb: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::new_with_conductors(initial, sources, limits, flux_tolerance_wb, cancelled)
+    }
+}
+
+impl<'m, C: SpatialConductorMaterial> SpatialInduction<'m, C> {
     /// Continue an admitted native static field with fixed tangential A traces.
     /// None is an insulator; Some retains the exact original multiphysics bundle.
     /// Conducting components are joined by faces, never by incidental point/edge
     /// contact. They have separate floating scalar potentials and no terminals.
-    pub fn new(
+    pub fn new_with_conductors(
         initial: &SpatialVectorField<'m>,
-        sources: Vec<Option<ResolvedConductorState>>,
+        sources: Vec<Option<C>>,
         limits: SpatialInductionLimits,
         flux_tolerance_wb: f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -314,7 +327,7 @@ impl<'m> SpatialInduction<'m> {
     pub fn time_s(&self) -> f64 {
         self.time_s
     }
-    pub fn conductors(&self) -> &[Option<ResolvedConductorState>] {
+    pub fn conductors(&self) -> &[Option<C>] {
         &self.prepared.sources
     }
     pub fn impressed_current_density_a_m2(&self) -> &[[f64; 3]] {
@@ -345,7 +358,7 @@ impl<'m> SpatialInduction<'m> {
         duration_s: f64,
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialInductionCandidate<'m>> {
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
         self.step_prepared_candidate(
             Arc::clone(&self.prepared),
             endpoint_current_a_m2,
@@ -359,13 +372,13 @@ impl<'m> SpatialInduction<'m> {
     #[allow(clippy::too_many_arguments)]
     fn step_prepared_candidate(
         &self,
-        prepared: Arc<Prepared<'m>>,
+        prepared: Arc<Prepared<'m, C>>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         duration_s: f64,
         controls: SpatialInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialInductionCandidate<'m>> {
+    ) -> Result<SpatialInductionCandidate<'m, C>> {
         poll(cancelled)?;
         let p = &prepared;
         let problem = &*p.problem;

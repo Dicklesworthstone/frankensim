@@ -38,7 +38,7 @@ use fs_feec::{
     weighted::{CellWeight, WeightedError, weighted_mass_matrix},
 };
 use fs_material::{
-    conductor::ResolvedConductorState,
+    conductor::{ResolvedConductorState, spatial::SpatialConductorMaterial},
     field_storage::{
         admit_magnetic_temperature_refresh, admit_source_temperature_refresh,
         linear_magnetic_permeability,
@@ -124,9 +124,9 @@ pub struct SpatialNonlinearInductionStep {
     pub report: SpatialNonlinearInductionReport,
 }
 #[derive(Clone)]
-pub struct SpatialNonlinearInduction<'m> {
+pub struct SpatialNonlinearInduction<'m, C: SpatialConductorMaterial = ResolvedConductorState> {
     problem: MagneticOwner<'m>,
-    prepared: Arc<Prepared>,
+    prepared: Arc<Prepared<C>>,
     potential_wb: Vec<f64>,
     impressed_current_a_m2: Vec<[f64; 3]>,
     time_s: f64,
@@ -146,8 +146,8 @@ impl Deref for MagneticOwner<'_> {
         }
     }
 }
-struct Prepared {
-    coupling: Coupling,
+struct Prepared<C: SpatialConductorMaterial> {
+    coupling: Coupling<C>,
     permeability_bound: Vec<f64>,
 }
 
@@ -185,18 +185,18 @@ fn permeability_bounds(
         })
         .collect()
 }
-pub struct SpatialNonlinearInductionCandidate<'m> {
-    state: SpatialNonlinearInduction<'m>,
+pub struct SpatialNonlinearInductionCandidate<'m, C: SpatialConductorMaterial = ResolvedConductorState> {
+    state: SpatialNonlinearInduction<'m, C>,
     step: SpatialNonlinearInductionStep,
 }
-impl<'m> SpatialNonlinearInductionCandidate<'m> {
-    pub fn state(&self) -> &SpatialNonlinearInduction<'m> {
+impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInductionCandidate<'m, C> {
+    pub fn state(&self) -> &SpatialNonlinearInduction<'m, C> {
         &self.state
     }
     pub fn step(&self) -> &SpatialNonlinearInductionStep {
         &self.step
     }
-    pub fn into_parts(self) -> (SpatialNonlinearInduction<'m>, SpatialNonlinearInductionStep) {
+    pub fn into_parts(self) -> (SpatialNonlinearInduction<'m, C>, SpatialNonlinearInductionStep) {
         (self.state, self.step)
     }
 }
@@ -258,9 +258,9 @@ struct Evaluation {
     norm: f64,
 }
 #[allow(clippy::too_many_arguments)]
-fn evaluate(
+fn evaluate<C: SpatialConductorMaterial>(
     problem: &SpatialNonlinearVectorMagnetostatics,
-    c: &Coupling,
+    c: &Coupling<C>,
     old: &[f64],
     x: &mut [f64],
     dt: f64,
@@ -301,11 +301,24 @@ fn evaluate(
     })
 }
 impl<'m> SpatialNonlinearInduction<'m> {
-    /// Continue an admitted saturated/current-carrying field. Its actual fixed
-    /// tangential trace and original constitutive sources remain authoritative.
+    /// Scalar-compatible constructor; use new_with_conductors for tensors.
     pub fn new(
         initial: &SpatialNonlinearVectorField<'m>,
         sources: Vec<Option<ResolvedConductorState>>,
+        limits: SpatialInductionLimits,
+        flux_tolerance_wb: f64,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::new_with_conductors(initial, sources, limits, flux_tolerance_wb, cancelled)
+    }
+}
+
+impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
+    /// Continue an admitted saturated/current-carrying field. Its actual fixed
+    /// tangential trace and original constitutive sources remain authoritative.
+    pub fn new_with_conductors(
+        initial: &SpatialNonlinearVectorField<'m>,
+        sources: Vec<Option<C>>,
         limits: SpatialInductionLimits,
         flux_tolerance_wb: f64,
         cancelled: &mut impl FnMut() -> bool,
@@ -352,7 +365,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
     pub fn potential_wb(&self) -> &[f64] {
         &self.potential_wb
     }
-    pub fn conductors(&self) -> &[Option<ResolvedConductorState>] {
+    pub fn conductors(&self) -> &[Option<C>] {
         &self.prepared.coupling.sources
     }
     pub fn impressed_current_density_a_m2(&self) -> &[[f64; 3]] {
@@ -379,7 +392,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         duration_s: f64,
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+    ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
         self.step_prepared_candidate(
             self.problem.clone(),
             Arc::clone(&self.prepared),
@@ -407,10 +420,10 @@ impl<'m> SpatialNonlinearInduction<'m> {
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         duration_s: f64,
-        conductors: Vec<Option<ResolvedConductorState>>,
+        conductors: Vec<Option<C>>,
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+    ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
         let coupling = self.coupling_at(&self.problem, conductors, cancelled)?;
         self.step_prepared_candidate(
             self.problem.clone(),
@@ -439,10 +452,10 @@ impl<'m> SpatialNonlinearInduction<'m> {
         velocity_m_s: &[[f64; 3]],
         duration_s: f64,
         materials: Vec<SpatialNonlinearMaterial>,
-        conductors: Vec<Option<ResolvedConductorState>>,
+        conductors: Vec<Option<C>>,
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+    ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
         poll(cancelled)?;
         if materials.len() != self.problem.materials().len() {
             return Err(invalid("complete original magnetic correspondence required").into());
@@ -487,9 +500,9 @@ impl<'m> SpatialNonlinearInduction<'m> {
     fn coupling_at(
         &self,
         problem: &SpatialNonlinearVectorMagnetostatics,
-        conductors: Vec<Option<ResolvedConductorState>>,
+        conductors: Vec<Option<C>>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<Coupling> {
+    ) -> Result<Coupling<C>> {
         Ok(self.prepared.coupling.refresh_sources(
             geometry(problem),
             conductors,
@@ -502,8 +515,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
                 problem.materials()[cell]
                     .admit_fixed_material_refresh(source.material())
                     .map_err(SpatialMagneticError::Material)?;
-                if original.source_basis() != source.source_basis()
-                    || original.source_key() != source.source_key()
+                if !original.has_same_electrical_source(source)
                     || original
                         .with_material(source.material().clone())
                         .map_err(|_| {
@@ -525,13 +537,13 @@ impl<'m> SpatialNonlinearInduction<'m> {
     fn step_prepared_candidate(
         &self,
         problem: MagneticOwner<'m>,
-        prepared: Arc<Prepared>,
+        prepared: Arc<Prepared<C>>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
         duration_s: f64,
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+    ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
         poll(cancelled)?;
         let controls = settings.induction;
         let c = &prepared.coupling;

@@ -7,6 +7,8 @@
 
 /// Shared planar scalar/anisotropic conductivity with fixed material frames.
 pub mod planar;
+/// Shared 3D scalar/orthotropic conductivity with explicit principal directions.
+pub mod spatial;
 /// Pinned scalar transport at explicitly owned electric/current magnitudes.
 pub mod response;
 /// Source-bound electrothermal law nodes for the shared constitutive graph.

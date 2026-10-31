@@ -1190,6 +1190,39 @@ feedback/Ohmic/Lorentz work, separated floating conductors, fixed-recoil energy
 and source limits, and bounded/cancelled deterministic rollback. Synthetic
 materials qualify equations and discretization, not empirical devices.
 
+## Source-backed orthotropic conductivity in native 3D induction
+
+`fs_material::conductor::spatial` supplies a sealed shared conductor boundary
+for the original scalar source, three explicit principal sources and heterogeneous
+scalar/orthotropic cell maps. `ResolvedOrthotropicConductor3` retains the complete
+resolved material bundle, exact conductivity/resistivity basis and property keys,
+and finite orthonormal principal directions in physical mesh coordinates.
+Resistivity is inverted in the principal frame; the original tensor rotation
+owner forms the symmetric positive coefficient. Missing directions, incompatible
+units, nonstatic sources and unrepresentable positive tensors are refused.
+
+Both native induction histories, their candidates, temperature refresh and
+Maxwell/eggshell load adapters retain the same conductor type. Existing scalar
+`new` constructors preserve all-insulator type inference; `new_with_conductors`
+admits the shared source owner. One coefficient supplies Whitney/charge mass,
+both motional operators, J=sigma E, exact P1 E.J heat, charge conservation and
+J-cross-B mechanical work. The actual matrix infinity norm bounds the magnetic
+Peclet gate. Scalar arithmetic keeps its original multiplication order.
+
+Temperature refresh keeps every principal key, source basis and exact fixed
+frame; it cannot replace orientation or fall back to an unrelated scalar source.
+This does not add Hall response, frame evolution, ALE, electrical memory or a
+phase-mixing law. Magnetic constitutive and finite-caloric ownership remain in
+their existing subsystems.
+
+The focused `spatial_induction::orthotropic` cases specify independently
+integrated cube-mode decay and radial-motion heat/Lorentz work for aligned and
+oppositely rotated tensors, explicit principal resistivity inversion, source and
+frame refusal, scalar compatibility, heterogeneous cells and backward-Euler
+numerical-loss separation. The analytical charge-eliminated mass is
+tr(sigma)/40-(sigma_xy+sigma_xz+sigma_yz)/120, so a rotation changes the native
+trajectory and heat without a change to the physics code.
+
 ## Reversible saturation in three-dimensional A–phi histories
 
 `spatial::vector_potential::induction::nonlinear::SpatialNonlinearInduction`

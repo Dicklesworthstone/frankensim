@@ -27,7 +27,7 @@ use super::super::{
 use super::{SpatialMaxwellForceLimits, SurfaceGeometry, eggshell, integrate};
 use eggshell::PreparedSpatialEggshell;
 use fs_ga::{Se3, Wrench};
-use fs_material::{conductor::ResolvedConductorState, state_point::ResolvedMaterialStatePoint};
+use fs_material::{conductor::spatial::SpatialConductorMaterial, state_point::ResolvedMaterialStatePoint};
 
 // Private: arbitrary detached B/H samples cannot implement the public load API.
 // The same integration/admission code serves both original transient owners.
@@ -35,14 +35,14 @@ trait Owner {
     type Error: From<SpatialMagneticError>;
     fn geometry(&self) -> &SpatialGeometry;
     fn linear_source(&self, cell: usize) -> Option<&ResolvedMaterialStatePoint>;
-    fn conductors(&self) -> &[Option<ResolvedConductorState>];
+    fn conducting(&self, cell: usize) -> bool;
     fn current(&self) -> &[[f64; 3]];
     fn recover(
         &self,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialInductionField, Self::Error>;
 }
-impl Owner for SpatialInduction<'_> {
+impl<C: SpatialConductorMaterial> Owner for SpatialInduction<'_, C> {
     type Error = SpatialMagneticError;
     fn geometry(&self) -> &SpatialGeometry {
         &self.problem().geometry
@@ -53,8 +53,8 @@ impl Owner for SpatialInduction<'_> {
             SpatialMagneticMaterial::Recoil(_) => None,
         }
     }
-    fn conductors(&self) -> &[Option<ResolvedConductorState>] {
-        self.conductors()
+    fn conducting(&self, cell: usize) -> bool {
+        self.conductors()[cell].is_some()
     }
     fn current(&self) -> &[[f64; 3]] {
         self.impressed_current_density_a_m2()
@@ -66,7 +66,7 @@ impl Owner for SpatialInduction<'_> {
         self.field(cancelled)
     }
 }
-impl Owner for SpatialNonlinearInduction<'_> {
+impl<C: SpatialConductorMaterial> Owner for SpatialNonlinearInduction<'_, C> {
     type Error = SpatialNonlinearInductionError;
     fn geometry(&self) -> &SpatialGeometry {
         &self.problem().geometry
@@ -77,8 +77,8 @@ impl Owner for SpatialNonlinearInduction<'_> {
             _ => None,
         }
     }
-    fn conductors(&self) -> &[Option<ResolvedConductorState>] {
-        self.conductors()
+    fn conducting(&self, cell: usize) -> bool {
+        self.conductors()[cell].is_some()
     }
     fn current(&self) -> &[[f64; 3]] {
         self.impressed_current_density_a_m2()
@@ -96,7 +96,7 @@ fn admit<'a>(
     cell: usize,
     exterior: &mut Option<&'a ResolvedMaterialStatePoint>,
 ) -> Result<(), SpatialMagneticError> {
-    if owner.conductors()[cell].is_some() || owner.current()[cell].iter().any(|&x| x != 0.0) {
+    if owner.conducting(cell) || owner.current()[cell].iter().any(|&x| x != 0.0) {
         return Err(invalid(
             "induction Maxwell collar must be nonconducting and free of impressed current",
         ));
@@ -180,8 +180,8 @@ fn distributed<O: Owner>(
 }
 
 macro_rules! load_api {
-    ($owner:ty, $error:ty) => {
-        impl $owner {
+    ($owner:ident, $error:ty) => {
+        impl<C: SpatialConductorMaterial> $owner<'_, C> {
             /// Instantaneous Maxwell wrench from retained transient B/H. The
             /// complete closed surface must have source-identical insulating
             /// linear material on both sides. Pose and moment origin follow
@@ -221,8 +221,8 @@ macro_rules! load_api {
         }
     };
 }
-load_api!(SpatialInduction<'_>, SpatialMagneticError);
+load_api!(SpatialInduction, SpatialMagneticError);
 load_api!(
-    SpatialNonlinearInduction<'_>,
+    SpatialNonlinearInduction,
     SpatialNonlinearInductionError
 );
