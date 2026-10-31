@@ -19,6 +19,9 @@ pub mod bdm;
 /// Newtonian circular-tube flow and gravity-aware capillary meniscus motion,
 /// each with an explicit quasisteady applicability boundary.
 pub mod capillary;
+/// Material-driven spherical bubble dynamics with bounded adaptive stepping.
+#[cfg(feature = "cavitation")]
+pub mod cavitation;
 /// Source-owned, conservative two-dimensional shock propagation and reflection.
 #[cfg(feature = "experimental-compressible")]
 pub mod compressible;

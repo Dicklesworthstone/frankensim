@@ -9,9 +9,11 @@
 //! is the outgoing Hankel function — no time-tail convolution, no
 //! 3D-formula-over-2D-data trap.
 //!
-//! HONEST SCOPE (the load-bearing law, pinned as data and by test):
-//! outputs are RELATIVE spectral shapes and scaling laws, never
-//! absolute SPL — see [`SCOPE_STATEMENT`].
+//! The incompressible-flow analogy families provide RELATIVE spectral shapes
+//! and scaling laws — see [`SCOPE_STATEMENT`]. The distinct [`monopole`] owner
+//! observes an explicitly supplied three-dimensional physical volume source in
+//! pascals, under its own compact-source and linear-propagation limits; it does
+//! not promote the flow-derived spectra into calibrated SPL predictions.
 //!
 //! Modules:
 //! - [`bessel`]: self-contained deterministic J0/J1/Y0/Y1 and the
@@ -55,11 +57,13 @@ pub mod forced_jet;
 pub mod jetcard;
 pub mod jetlab;
 pub mod material;
+/// Causal three-dimensional radiation from physical compact volume sources.
+pub mod monopole;
 pub mod noisetable;
 pub mod regime;
 pub mod slot_jet_3d;
 
-/// The honest-scope statement every exported artifact embeds (the
+/// The honest-scope statement the two-dimensional flow-derived artifacts embed (the
 /// bead's marketing-mutation guard asserts its presence): 2D line
 /// sources radiate with cylindrical spreading and the analogy here is
 /// a SHAPE and SCALING authority only.

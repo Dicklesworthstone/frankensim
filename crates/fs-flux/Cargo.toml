@@ -12,7 +12,8 @@ layer = "L3"
 
 [features]
 default = ["continuum", "quarter-wave"]
-continuum = ["dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
+continuum = ["cavitation", "dep:fs-la", "dep:fs-material", "dep:fs-solid", "dep:fs-solver", "dep:fs-sparse", "dep:fs-time"]
+cavitation = ["dep:fs-material"]
 quarter-wave = []
 experimental-compressible = ["dep:fs-gas", "dep:fs-qty"]
 

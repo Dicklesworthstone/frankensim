@@ -45,6 +45,8 @@ pub mod brass_loop;
 pub mod brass_sequence;
 pub mod broadband_radiation;
 pub mod cavity_phs;
+/// Shared material-bound cavitating films and opt-in bubble acoustic histories.
+pub mod cavitation;
 /// Shared Helmholtz storage and neck flow in the reciprocal modal network.
 pub mod cavity_modal;
 pub mod cinematic_stem;

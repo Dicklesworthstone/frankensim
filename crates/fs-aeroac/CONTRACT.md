@@ -5,9 +5,28 @@
 Layer L3. Low-Mach aeroacoustic source models (bead
 frankensim-fsim-aeroacoustic-sources-9ok02, IN PROGRESS — this crate
 is the first slice): the acoustic-analogy half of the honest hybrid
-over fs-lbm's incompressible base flows. Everything here is a
+over fs-lbm's incompressible base flows. That flow-derived family is a
 SHAPE/SCALING authority; ABSOLUTE SPL IS NEVER CLAIMED (the crate's
 scope law, pinned as data and by test).
+
+### Physical three-dimensional compact volume sources
+
+`monopole::CompactMonopoleObserver` is a separate physical-source observation:
+`p'(r,t+r/c) = rho V''(t)/(4 pi r)`, using one original fluid-acoustic snapshot.
+It returns pressure in pascals and its causal arrival time. Radius-dependent
+compactness, observer distance and a conservative source-surface pressure/bulk-
+modulus ratio must satisfy explicit limits. The declared maximum frequency must
+cover the emitted source's nonlinear harmonics; a drive frequency alone is not
+that guarantee. Nonfinite or unrepresentable values refuse without an output.
+Preparation and observation allocate no memory.
+
+The caller supplies physical volume acceleration. Spherical bubble dynamics can
+provide it through `4 pi R (R R'' + 2 R'^2)`. Incompressible-flow pressure is not
+silently reinterpreted as acoustic pressure. This free-field, compact, one-way
+linear model supplies neither boundary scattering nor shock propagation,
+attenuation, source radiation reaction or measured SPL qualification. Four G1/G3
+tests check independent harmonic pressure, causal delay, radiative spreading,
+material scaling and domain/representability refusals.
 
 ## Public types and semantics
 

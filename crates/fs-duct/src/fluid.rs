@@ -17,8 +17,12 @@
 //! no-slip, isothermal-boundary Zwikker–Kosten model, with full Bessel or
 //! explicitly admitted wide-tube response. A separate compliant wall or
 //! terminal load may also dissipate energy. Mean flow, molecular/bulk-viscous
-//! absorption, cavitation, nonlinear water hammer, multiphase acoustics and
-//! shell dynamics are outside this model. Gas-only tone-hole radiation is not
+//! absorption, evolving cavitation, nonlinear water hammer and shell dynamics
+//! are outside this model. A supplied
+//! [`fs_material::fluid_acoustics::FrozenHomogeneousMixture`] can drive the
+//! lossless path in its frozen-mass, homogeneous long-wavelength limit; bubble
+//! resonance, phase transfer and mixture transport losses are not inferred.
+//! Gas-only tone-hole radiation is not
 //! inferred for a liquid: those branches need their own pressure/flow boundary.
 //! The caller retains the source material and its original query receipts.
 

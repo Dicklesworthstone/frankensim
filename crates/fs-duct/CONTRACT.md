@@ -43,8 +43,13 @@ snapshot does not acquire additional source authority through this adapter.
 
 The lossless entry points require only density and adiabatic sound speed;
 wall and terminal dissipation remain optional. Neither the lossless nor the
-thermoviscous path supplies mean flow, cavitation, multiphase or finite-amplitude water hammer, a shell
-solve, or automatic liquid tone-hole radiation. Tone-hole branches refuse
+thermoviscous path supplies mean flow, evolving cavitation, finite-amplitude
+water hammer, a shell solve, or automatic liquid tone-hole radiation.
+`FrozenHomogeneousMixture` feeds the original lossless wave owner under its
+frozen-mass, common-pressure, long-wavelength assumptions. Its void-dependent
+compressibility changes phase speed and impedance; bubble resonance, phase
+transfer, slip and mixture transport losses remain outside that closure.
+Tone-hole branches refuse
 until their own boundary physics is explicitly represented. G1/G3 tests in
 `tests/fluid_acoustics.rs` compare native pressure/flow and matched travel
 phase for source-backed ideal mixtures and IF97 liquid states with independent

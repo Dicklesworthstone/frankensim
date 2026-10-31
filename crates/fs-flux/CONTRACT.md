@@ -1606,3 +1606,48 @@ polarization, nonisothermal heat/entropy balance, mechanical inertia, ionic
 reaction chemistry or experimentally validated membrane selectivity. Ordinary
 nonselective fluid links use zero reflection; gas solution-diffusion retains
 its separate existing physical law and permeability units.
+
+## Material-driven spherical cavitation
+
+The `cavitation` feature (included by `continuum`) exposes
+`cavitation::RayleighPlessetBubble`. It consumes the existing material owner's
+`CavitationState` and an explicit fixed polytropic gas inventory. Absolute
+liquid pressure, including metastable tension, drives spherical radius and wall
+velocity through vapor, gas, capillary and viscous stresses. The state and
+material definition are separate. No pressure floor, injected nucleus, gas EOS,
+minimum-radius rebound, or cavitation sound preset is inferred.
+
+The numerical owner uses a two-component Dormand--Prince 5(4) pair, fixed stack
+storage and endpoint-derivative reuse. Radius and velocity have separate SI
+absolute tolerances; maximum step, minimum step and trial-attempt count are
+explicit. An out-of-domain intermediate stage can retry with a smaller step,
+but cannot relax the admitted radius interval or wall-Mach limit (at most
+0.1). Cancellation polls before every RHS and publication. Failed or cancelled
+requests leave the caller's entire accepted state unchanged. Identical inputs,
+callbacks and call boundaries replay deterministically on the same ISA.
+Embedded local-error ratios are numerical indicators, not global enclosures;
+the caller resolves the pressure waveform and splits known discontinuities.
+
+Accepted observations expose geometric volume, its first and second time
+derivatives, liquid kinetic and surface energy, and instantaneous nonnegative
+viscous dissipation. Volume acceleration is a physical acoustic source input,
+not an observer pressure. The spherical infinite-liquid incompressible model
+excludes acoustic back-reaction, shocks, nonspherical collapse/erosion, nearby
+walls, interacting bubbles, gas diffusion, and evolving interfacial temperature.
+It uses the small vapor/liquid density-ratio approximation to interface
+kinematics: supplied vapor density must satisfy the caller's explicit ratio
+limit, which cannot exceed 0.1. Without optional vapor density this remains a
+caller-declared negligible-mass assumption. Geometric bubble volume is not
+silently interpreted as vapor mass or deposited latent heat. A
+finite-compressibility or thermally limited
+successor must supply those equations explicitly.
+
+Focused G0/G1/G3/G4/G5 sources check exact equilibrium, independent Rayleigh
+collapse quadrature and first-integral energy, the damped Minnaert limit,
+tensile-pressure growth, mechanical power and acoustic-volume identities,
+radius/Mach/work refusals, and cancellation with bit-identical retry. Physical
+equations follow [Brennen, chapters 2--4](https://media.library.caltech.edu/CaltechBOOK:1995.001/chap2.htm);
+the independent collapse oracle uses
+[Obreschkow et al., equations 3--8](https://arxiv.org/abs/1205.4202).
+These checks establish mathematical-model behavior, not experimental accuracy
+or a resolved multiphase CFD/film-cavitation result.

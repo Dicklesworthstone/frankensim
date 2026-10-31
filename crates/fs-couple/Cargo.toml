@@ -38,7 +38,7 @@ fs-evidence = { path = "../fs-evidence" }
 fs-exec = { path = "../fs-exec" }
 fs-feec = { path = "../fs-feec" }
 fs-fft = { path = "../fs-fft" }
-fs-flux = { path = "../fs-flux", optional = true, default-features = false, features = ["experimental-compressible"] }
+fs-flux = { path = "../fs-flux", optional = true, default-features = false }
 fs-gas = { path = "../fs-gas", optional = true, features = ["experimental-euler"] }
 fs-geom = { path = "../fs-geom" }
 fs-iface = { path = "../fs-iface" }
@@ -87,14 +87,24 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Bounded single-bubble dynamics coupled to native compact acoustic observation.
+cavitation = ["dep:fs-flux", "fs-flux/cavitation"]
 # Frontier rod-motion composition; native conformance remains explicitly gated.
 rod-dynamics = []
 # Spatial shock loads are explicit opt-in compositions of the original gas owners.
 experimental-shock-loading = ["dep:fs-gas"]
-experimental-compressible = ["experimental-shock-loading", "dep:fs-flux"]
+experimental-compressible = ["experimental-shock-loading", "dep:fs-flux", "fs-flux/experimental-compressible"]
 # The lip on the shared nonlinear Euler bore (fs-duct's image of fs-gas).
 nonlinear-brass = ["dep:fs-gas", "fs-duct/nonlinear-euler"]
 
 [[example]]
 name = "rod_motion"
 required-features = ["rod-dynamics"]
+
+[[example]]
+name = "cavitation"
+required-features = ["cavitation"]
+
+[[test]]
+name = "cavitation"
+required-features = ["cavitation"]

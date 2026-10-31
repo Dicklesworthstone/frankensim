@@ -18,6 +18,41 @@ use fs_qty::{Pressure, Temperature};
 use fs_thermochem::water::if97::{If97Region, If97State};
 use std::sync::Arc;
 
+#[test]
+fn frozen_bubbly_medium_reaches_the_original_lossless_wave_owner() {
+    use fs_material::fluid_acoustics::FrozenHomogeneousMixture;
+    let liquid = FluidAcousticState::try_new(1000.0, 1500.0).unwrap();
+    let gas = FluidAcousticState::try_new(1.2, 343.0).unwrap();
+    let alpha = 0.01;
+    let mixture = FrozenHomogeneousMixture::try_new(liquid, gas, alpha).unwrap();
+    let omega = 2.0 * core::f64::consts::PI * 500.0;
+    let radius: f64 = 0.015;
+    let wave = fluid::segment_wave(&mixture, radius, omega).unwrap();
+    // Independent compression of unit total volume at frozen phase masses.
+    let density = (1.0 - alpha) * 1000.0 + alpha * 1.2;
+    let compliance =
+        (1.0 - alpha) / (1000.0 * 1500.0_f64.powi(2)) + alpha / (1.2 * 343.0_f64.powi(2));
+    let expected_k = omega * (density * compliance).sqrt();
+    let area = core::f64::consts::PI * radius.powi(2);
+    assert!((wave.wavenumber.re / expected_k - 1.0).abs() < 3e-15);
+    assert!(
+        (wave.wavenumber.re * wave.characteristic_impedance.re * area / (omega * density) - 1.0)
+            .abs()
+            < 3e-15
+    );
+    assert_eq!(wave.wavenumber.im, 0.0);
+    assert_eq!(wave.characteristic_impedance.im, 0.0);
+    let pure = FrozenHomogeneousMixture::try_new(liquid, gas, 0.0).unwrap();
+    let pure_wave = fluid::segment_wave(&pure, radius, omega).unwrap();
+    let original = fluid::segment_wave(&liquid, radius, omega).unwrap();
+    assert_eq!(pure_wave.wavenumber, original.wavenumber);
+    assert_eq!(
+        pure_wave.characteristic_impedance,
+        original.characteristic_impedance
+    );
+    assert!(wave.wavenumber.re > 10.0 * original.wavenumber.re);
+}
+
 #[path = "fluid_acoustics/thermoviscous.rs"]
 mod thermoviscous;
 

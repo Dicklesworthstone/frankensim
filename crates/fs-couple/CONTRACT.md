@@ -1,5 +1,38 @@
 # CONTRACT: fs-couple
 
+## Shared material cavitation, films and bubble acoustic history
+
+`cavitation::MaterialCavitatingFilm` retains the original `CavitationProperties`
+source and binds its density, viscosity and equilibrium vapor pressure to the
+native `fs-tribo` cavitating Reynolds graph. Candidate states, pressure forces,
+transport and liquid-mass diagnostics come from that original solver. The
+surrounding mechanical owner must admit the pressure force in its own solve;
+prescribed-configuration endpoint forces do not establish integrated work or
+passivity. Material coefficients are frozen. Updating temperature/density needs
+a conservative transfer; re-creating a model is not that transfer. Neglected
+void mass is not a latent-heat source.
+When saturated vapor density is supplied, its ratio to liquid density must fit
+the explicitly declared dilute-vapor cap; a dense vapor state is refused.
+Missing vapor density retains an explicit caller applicability assumption.
+
+The opt-in `cavitation` feature adds `cavitation::bubble::MaterialBubble`. One
+source and accepted physical clock drive the native Rayleigh--Plesset owner and
+the original compact monopole observer. Density and sound speed must match
+exactly. Both the complete integration interval and observer-domain admission
+finish before state publication; cancellation or a downstream observer failure
+leaves radius, velocity and time unchanged. Acoustic arrival time includes
+distance/c. The source bandwidth is explicitly declared and must include emitted
+harmonics. The observer is one-way; its radiated signal is not also debited from
+an incompressible model as a self-consistent radiation damping term.
+
+`examples/cavitation.rs` uses original IF97 saturation and transport for a
+separating/refilling film and a driven gas/vapor bubble. Surface tension remains
+explicit input. Focused integration regressions cover two-temperature material
+substitution, analytical mass/force, deterministic histories, exact medium
+binding and atomic cancellation/observer refusal. They do not claim finite
+latent-heat feedback, nonspherical collapse, wall jets, erosion, fully coupled
+multiphase CFD, or experimental validation.
+
 ## Joint sourced dry friction and finite contact heat
 
 A `DryFrictionBinding::new_temperature_source` retains the original
