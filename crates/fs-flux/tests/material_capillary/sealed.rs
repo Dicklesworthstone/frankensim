@@ -1,4 +1,9 @@
 //! Actual NASA-9/material integration; manufactured fixtures, no empirical claims.
+#[path = "sealed/advance.rs"]
+mod advance;
+#[path = "sealed/contact_line.rs"]
+mod contact_line;
+
 use super::*;
 use fs_flux::capillary::material::sealed::{
     SealedCapillaryError, SealedCapillaryGeometry, SealedCapillaryInput, SealedCapillarySolve,

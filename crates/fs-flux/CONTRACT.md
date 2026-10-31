@@ -1540,7 +1540,8 @@ homogeneous properties and vents to a prescribed outlet pressure. Passing a
 gas owner does not activate compressibility, sealed-gas storage or inertia.
 The caller must assign the displaced phase to the fluid pair admitted by the
 tension/wetting sources; this generic transport view cannot establish that
-equivalence. There is no inferred source data, dynamic contact-line law,
+equivalence. Contact-line friction/hysteresis require the explicit sourced
+`with_contact_line` opt-in described below. There is no inferred source data,
 thermal evolution or flow beyond an inlet/outlet event. A raw transport
 fixture remains unsourced. These bounded scalar bindings allocate no memory
 during an accepted step and contain no internal cancellation point.
@@ -1760,8 +1761,8 @@ The bounded implicit-midpoint solve uses the SAME gas midpoint pressure for
 liquid motion and gas boundary work, and its original analytic volume tangent
 for safeguarded Newton iteration. The receiving immutable candidate retains
 the accepted gas state and separate inlet work, wall surface-energy change,
-liquid gravity, viscous dissipation, signed liquid mass, gas heat and actual
-gas storage increments. Whole-system energy and mechanical pressure/length
+liquid gravity, bulk viscous dissipation, optional contact-line and pinning
+losses, signed liquid mass, gas heat and actual gas storage increments. Whole-system energy and mechanical pressure/length
 tolerances must pass independently. Viscous dissipation is not silently added
 to supplied gas heat or duplicated as a second loss.
 
@@ -1770,7 +1771,8 @@ heat, exhausted convergence, unsupported downward-gravity conditioning, and
 oversized unheated equilibrium crossings refuse before publication. Tube-end
 crossing requires a smaller step or an appropriate boundary/event model;
 the owner never clamps motion and consumes a full interval's heat at an
-invented partial event. This is a second-order time discretization, not the
+invented partial event. Smooth branches use a second-order midpoint time
+discretization; nonsmooth wetting transitions need refinement. This is not the
 exact finite-time Washburn or exact finite isentropic gas operation.
 
 Focused tests exercise independently manufactured perfect-gas midpoint states,
@@ -1780,8 +1782,9 @@ refinement check against an independently integrated continuous adiabatic law.
 The liquid remains frozen, incompressible and Newtonian at its original source
 point. The gas is spatially uniform, with its original frozen composition;
 internal gas pressure gradients/viscous resistance, liquid/gas inertia,
-dynamic contact-angle laws, liquid heating, dissolution and phase change
-are outside this rung. The caller explicitly assigns the gas to the declared
+liquid heating, dissolution and phase change are outside this rung. Optional
+linear contact-line friction and static hysteresis follow the shared sourced
+law below; no general dynamic-wetting closure is inferred. The caller explicitly assigns the gas to the declared
 wetting environment; material-name strings do not establish that assignment.
 
 ### Polarized membrane faces in finite networks
@@ -1898,3 +1901,65 @@ reports voltage, conserved inventories and ideal-plus-mechanical energy.
 Focused regressions cover linear and nonlinear analytical solutions,
 counterion-only limits, multivalent charge conservation, stiff hydraulics,
 orientation, energy decay, volume depletion, workspace limits and atomic retry.
+
+
+## Sourced contact-line friction and hysteresis
+
+`MaterialCapillaryTube::with_contact_line` opts the original tube owner into
+the shared `fs-material::liquid::surface::contact_line` binding. The original
+ordered wetting bundle owns Young angle, advancing/receding thresholds and
+independent line friction. Its checked borrowed view preserves source identity,
+rejects unsupported evolving rate/history coefficients, and is also used by
+the existing planar bridge through its compatible resolver re-export.
+Explicit speed and apparent-angle departure limits belong to the consumer.
+
+The open two-fluid operator adds `zeta*R/4` to
+`mu_l*x + mu_d*(L-x)`, selecting advancing, receding or pinned force branches.
+It reuses the exact affine-force travel integral, bounded inversion and positive
+loss moments. At zero speed the apparent angle balances the static reaction;
+a pinned meniscus creates no mechanical work or dissipation. The moving law
+obeys `cos(theta_app) = cos(theta_branch) - zeta*u/sigma`.
+Both interval endpoints bound speed and apparent angle throughout this
+constant-property open-tube trajectory. The scalar core allocates nothing.
+
+Young wall free energy stays separate from both bulk-fluid losses,
+`D_line/dt = 2*pi*R*zeta*u^2`, and nonnegative threshold pinning work.
+The existing nested viscous fields remain bulk-only; the wrapper's
+`total_dissipation_j` supplies the complete mechanical balance. Source-owned
+horizontal, inclined and two-fluid methods consume the same optional binding.
+
+The sealed midpoint owner includes these same resistance and threshold terms
+in its safeguarded scalar solve and its independent energy balance. Gas heat
+still enters the original closed parcel exactly once. Initial/endpoint branch
+checks reject hidden reversals, oversized stopping crossings and heated pinned
+steps that end outside the static interval. Mean and physical endpoint speeds
+and apparent angles must satisfy the declared operating limits. Adaptive
+substeps sample the interior; these checks are not a continuous-trajectory
+domain enclosure. Tube inertia, deposited films, changing meniscus end-cap
+storage, temperature-dependent liquid evolution and a general Cox--Voinov or
+molecular-kinetic law remain outside this bounded linear-friction closure.
+
+## Adaptive sealed capillary intervals
+
+`SealedGasCapillary::advance_candidate` integrates a complete constant-boundary
+interval or refuses without changing the original owner. One coarse midpoint
+step is compared with two half steps in position, gas temperature and pressure,
+using independent absolute tolerances and a relative tolerance. Only the
+actual half-step states and transfers can be accepted; the gas state is never
+Richardson-extrapolated. Smooth-branch errors use the midpoint factor of three;
+detected pinning/depinning/reversal changes use the full discrepancy, reset the
+existing PI controller's history and limit immediate growth.
+
+Rejected trials add no time, heat, work or dissipation. Compensated sums retain
+accepted liquid mass/volume, pressure work, wall/gravity storage, all three loss
+channels and original gas heat/work/storage/entropy increments. The complete
+interval independently passes its energy gate. Step/attempt limits,
+cancellation, unresolved minimum-step error and represented-time stagnation
+refuse publication. A shorter final interval reaches the exact requested time;
+unsupported tube-end events never become clipped partial successes. These are
+local error estimates, not certified global solution-error bounds.
+
+Source-backed regressions cover complete-window conservation, rejected-trial
+accounting, continuous adiabatic refinement, heated depinning against an
+independent onset split, explicit source-domain refusals, cancellation,
+bounded work, minimum-step failure and final-tail accounting.

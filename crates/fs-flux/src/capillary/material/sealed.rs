@@ -7,13 +7,18 @@
 //! pair; no gas identity is inferred from free-form material names.
 //!
 //! This is an implicit-midpoint time discretization, not an exact finite-time
-//! Washburn solution. Reduce dt on boundary, source-domain or convergence
-//! refusal. No end-event time or clipped motion is fabricated. Unheated steps
-//! also refuse reversal of the overdamped endpoint driving pressure.
+//! Washburn solution. [`advance`] provides bounded adaptive full-interval
+//! integration. No end-event time or clipped motion is fabricated. Unheated
+//! steps refuse reversal of the overdamped endpoint driving pressure.
+//! An optional original contact-line source adds advancing/receding pinning
+//! and linear friction while retaining the equilibrium wall free energy.
 //! The gas is spatially uniform: gas through-flow resistance, inertia,
-//! dynamic contact angles, liquid heating and phase change are outside this law.
+//! meniscus end-cap storage, liquid heating and phase change are outside this law.
+
+pub mod advance;
 
 use super::MaterialCapillaryTube;
+use crate::capillary::ContactLineMotion;
 use crate::capillary::sealed_mechanics as mechanics;
 use core::f64::consts::PI;
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
@@ -123,11 +128,17 @@ pub struct SealedCapillaryStep {
     pub wall_surface_energy_change_j: f64,
     pub gravitational_energy_change_j: f64,
     pub liquid_viscous_dissipation_j: f64,
+    pub contact_line_viscous_dissipation_j: f64,
+    pub pinning_dissipation_j: f64,
+    /// Absent for equilibrium-only wetting; otherwise the admitted midpoint branch.
+    pub contact_line_motion: Option<ContactLineMotion>,
+    /// Angle conjugate to the discrete mean contact-line velocity, when enabled.
+    pub apparent_contact_angle_radians: Option<f64>,
     /// Original gas owner's actual work, stored-energy increment, heat and residual.
     pub gas: GasHeatVolumeStep,
     pub midpoint_gas_pressure_pa: f64,
     pub pressure_residual_pa: f64,
-    /// Inlet work + heat - gas storage - wall/gravity storage - liquid dissipation.
+    /// Inlet work + heat - gas storage - wall/gravity storage - all dissipation.
     pub energy_balance_residual_j: f64,
     pub iterations: usize,
 }
@@ -182,6 +193,9 @@ impl<'a> SealedGasCapillary<'a> {
     /// Propose one complete, immutable step. Cancellation, invalid source
     /// states, tube ends and energy refusal leave this owner exactly unchanged.
     /// Viscous loss is reported as dissipation, not implicitly injected into gas heat.
+    /// Contact-line speed/angle limits are checked at the original and candidate
+    /// endpoints and at the discrete mean, with adaptive substeps resolving the
+    /// interior. A full continuous-trajectory domain enclosure is not claimed.
     pub fn step_candidate(
         &self,
         input: SealedCapillaryInput,
@@ -211,6 +225,17 @@ impl<'a> SealedGasCapillary<'a> {
         let density = self.tube.liquid.density_kg_m3();
         let capillary_pressure =
             2.0 * self.tube.surface_tension_n_m * self.tube.contact_angle_cosine / g.radius_m;
+        let contact_line = self.tube.contact_line.map(|line| {
+            let pressure_scale = 2.0 * self.tube.surface_tension_n_m / g.radius_m;
+            mechanics::ContactLine {
+                resistance_pa_s_m: 2.0 * line.source.friction_pa_s() / g.radius_m,
+                advancing_threshold_pa: pressure_scale
+                    * (self.tube.contact_angle_cosine
+                        - line.source.advancing_angle_radians().cos()),
+                receding_threshold_pa: pressure_scale
+                    * (line.source.receding_angle_radians().cos() - self.tube.contact_angle_cosine),
+            }
+        });
         let motion = mechanics::solve(
             mechanics::Input {
                 radius: g.radius_m,
@@ -223,6 +248,7 @@ impl<'a> SealedGasCapillary<'a> {
                 inlet_pressure: input.inlet_pressure_pa,
                 gravity: input.opposing_gravity_m_s2,
                 duration: input.duration_s,
+                contact_line,
             },
             mechanics::Controls {
                 iterations: controls.maximum_iterations,
@@ -271,26 +297,107 @@ impl<'a> SealedGasCapillary<'a> {
         let endpoint_drive = (input.inlet_pressure_pa - gas.state().state().pressure)
             + capillary_pressure
             - density * input.opposing_gravity_m_s2 * motion.length;
-        if heat == 0.0
-            && ((motion.volume > 0.0 && endpoint_drive < -controls.pressure_absolute_tolerance_pa)
-                || (motion.volume < 0.0
-                    && endpoint_drive > controls.pressure_absolute_tolerance_pa))
-        {
+        let initial_drive = (input.inlet_pressure_pa - self.gas.state().state().pressure)
+            + capillary_pressure
+            - density * input.opposing_gravity_m_s2 * g.wet_length_m;
+        let pressure_tolerance = controls.pressure_absolute_tolerance_pa;
+        let crosses_branch = if let Some(line) = contact_line {
+            match motion.contact_line_motion {
+                Some(ContactLineMotion::Pinned) => {
+                    initial_drive > line.advancing_threshold_pa + pressure_tolerance
+                        || initial_drive < -line.receding_threshold_pa - pressure_tolerance
+                        || endpoint_drive > line.advancing_threshold_pa + pressure_tolerance
+                        || endpoint_drive < -line.receding_threshold_pa - pressure_tolerance
+                }
+                Some(ContactLineMotion::Advancing) => {
+                    initial_drive < -line.receding_threshold_pa - pressure_tolerance
+                        || endpoint_drive < line.advancing_threshold_pa - pressure_tolerance
+                }
+                Some(ContactLineMotion::Receding) => {
+                    initial_drive > line.advancing_threshold_pa + pressure_tolerance
+                        || endpoint_drive > -line.receding_threshold_pa + pressure_tolerance
+                }
+                None => unreachable!("mechanics retains an enabled contact-line law"),
+            }
+        } else {
+            heat == 0.0
+                && ((motion.volume > 0.0 && endpoint_drive < -pressure_tolerance)
+                    || (motion.volume < 0.0 && endpoint_drive > pressure_tolerance))
+        };
+        if crosses_branch {
             return Err(SealedCapillaryError::StepTooLarge(
-                "unheated overdamped equilibrium overshoot; reduce dt",
+                "overdamped endpoint crossed its wetting branch; reduce dt",
             ));
         }
+        let apparent_contact_angle_radians = if let Some(line) = self.tube.contact_line {
+            let velocity = (motion.length - g.wet_length_m) / input.duration_s;
+            let pressure_scale = 2.0 * self.tube.surface_tension_n_m / g.radius_m;
+            let cosine = self.tube.contact_angle_cosine
+                - (motion.pinning_pressure
+                    + 2.0 * line.source.friction_pa_s() * velocity / g.radius_m)
+                    / pressure_scale;
+            let admit_sample = |velocity: f64, cosine: f64| {
+                if !velocity.is_finite()
+                    || !cosine.is_finite()
+                    || velocity.abs() > line.limits.maximum_speed_m_s
+                    || cosine.abs() > 1.0 + 32.0 * f64::EPSILON
+                {
+                    return Err(SealedCapillaryError::Invalid(
+                        "contact-line speed or apparent angle outside its declared domain",
+                    ));
+                }
+                let angle = cosine.clamp(-1.0, 1.0).acos();
+                if (angle - line.source.equilibrium_angle_radians()).abs()
+                    > line.limits.maximum_angle_departure_radians
+                {
+                    return Err(SealedCapillaryError::Invalid(
+                        "apparent angle exceeds its declared departure bound",
+                    ));
+                }
+                Ok(angle)
+            };
+            let angle = admit_sample(velocity, cosine)?;
+            // Check actual initial/final constitutive velocities as well as the
+            // discrete mean. A small mean cannot hide an inadmissible endpoint
+            // transient. Adaptive substeps supply interior samples; this is not
+            // an analytic whole-trajectory domain certificate.
+            let coefficients = contact_line.expect("the original contact-line law was retained");
+            for (drive, length) in [
+                (initial_drive, g.wet_length_m),
+                (endpoint_drive, motion.length),
+            ] {
+                let threshold = drive.clamp(
+                    -coefficients.receding_threshold_pa,
+                    coefficients.advancing_threshold_pa,
+                );
+                let resistance = 8.0 * self.tube.liquid.dynamic_viscosity_pa_s() * length
+                    / (g.radius_m * g.radius_m)
+                    + coefficients.resistance_pa_s_m;
+                let endpoint_velocity = (drive - threshold) / resistance;
+                let endpoint_cosine = self.tube.contact_angle_cosine
+                    - (threshold + coefficients.resistance_pa_s_m * endpoint_velocity)
+                        / pressure_scale;
+                admit_sample(endpoint_velocity, endpoint_cosine)?;
+            }
+            Some(angle)
+        } else {
+            None
+        };
         let mass = density * motion.volume;
         let residual = (motion.inlet_work + heat - gas_step.stored_energy_change_j)
             - motion.wall_energy
             - motion.gravity_energy
-            - motion.dissipation;
+            - motion.dissipation
+            - motion.contact_line_dissipation
+            - motion.pinning_dissipation;
         let scale = motion.inlet_work.abs()
             + heat.abs()
             + gas_step.stored_energy_change_j.abs()
             + motion.wall_energy.abs()
             + motion.gravity_energy.abs()
-            + motion.dissipation;
+            + motion.dissipation
+            + motion.contact_line_dissipation
+            + motion.pinning_dissipation;
         let tolerance =
             controls.energy_absolute_tolerance_j + controls.energy_relative_tolerance * scale;
         if !mass.is_finite()
@@ -327,6 +434,10 @@ impl<'a> SealedGasCapillary<'a> {
                 wall_surface_energy_change_j: motion.wall_energy,
                 gravitational_energy_change_j: motion.gravity_energy,
                 liquid_viscous_dissipation_j: motion.dissipation,
+                contact_line_viscous_dissipation_j: motion.contact_line_dissipation,
+                pinning_dissipation_j: motion.pinning_dissipation,
+                contact_line_motion: motion.contact_line_motion,
+                apparent_contact_angle_radians,
                 gas: gas_step,
                 midpoint_gas_pressure_pa: midpoint_pressure,
                 pressure_residual_pa: motion.pressure_residual,

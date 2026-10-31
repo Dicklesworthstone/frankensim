@@ -1,7 +1,16 @@
 //! Scalar midpoint mechanics shared by the original-material sealed-tube owner.
 //! The pressure callback owns the gas; this module supplies no replacement EOS.
 
+use super::ContactLineMotion;
 use core::f64::consts::PI;
+
+/// Geometry-scaled coefficients of the original linear line/pinning law.
+#[derive(Clone, Copy)]
+pub(crate) struct ContactLine {
+    pub resistance_pa_s_m: f64,
+    pub advancing_threshold_pa: f64,
+    pub receding_threshold_pa: f64,
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Input {
@@ -15,6 +24,7 @@ pub(crate) struct Input {
     pub inlet_pressure: f64,
     pub gravity: f64,
     pub duration: f64,
+    pub contact_line: Option<ContactLine>,
 }
 #[derive(Clone, Copy)]
 pub(crate) struct Controls {
@@ -35,6 +45,10 @@ pub(crate) struct Motion<T> {
     pub wall_energy: f64,
     pub gravity_energy: f64,
     pub dissipation: f64,
+    pub contact_line_dissipation: f64,
+    pub pinning_dissipation: f64,
+    pub pinning_pressure: f64,
+    pub contact_line_motion: Option<ContactLineMotion>,
     pub pressure_residual: f64,
     pub iterations: usize,
     pub pressure: Pressure<T>,
@@ -87,28 +101,49 @@ pub(crate) fn solve<T, E, C: FnMut() -> bool>(
     let area = PI * i.radius * i.radius;
     let resistance = 8.0 * i.viscosity / (i.radius * i.radius * i.duration);
     let gravity = i.density * i.gravity;
+    if let Some(line) = i.contact_line {
+        if ![
+            line.resistance_pa_s_m,
+            line.advancing_threshold_pa,
+            line.receding_threshold_pa,
+        ]
+        .into_iter()
+        .all(|x| x.is_finite() && x >= 0.0)
+        {
+            return Err(Error::Invalid(
+                "finite nonnegative contact-line coefficients required",
+            ));
+        }
+    }
+    let line_resistance = i
+        .contact_line
+        .map_or(0.0, |line| line.resistance_pa_s_m / i.duration);
     if ![area, resistance]
         .into_iter()
         .all(|x| x.is_finite() && x > 0.0)
         || !gravity.is_finite()
+        || !line_resistance.is_finite()
     {
         return Err(Error::Invalid(
             "capillary geometry/resistance is unrepresentable",
         ));
     }
     // Downward gravity is admitted only where its negative derivative is
-    // offset by the liquid resistance alone; gas stiffness then adds margin.
-    let mut lower = if gravity < 0.0 {
-        (-0.5 * gravity / resistance).next_up()
+    // offset by liquid plus contact-line resistance; gas stiffness adds margin.
+    let nonliquid_slope = 0.5 * gravity + line_resistance;
+    let mut lower = if nonliquid_slope < 0.0 {
+        (-nonliquid_slope / resistance).next_up()
     } else {
         0.0
     };
     let mut upper = i.length;
-    if lower > i.initial || lower >= upper || resistance * lower + 0.5 * gravity < 0.0 {
+    if lower > i.initial || lower >= upper || resistance * lower + nonliquid_slope < 0.0 {
         return Err(Error::NonMonotone);
     }
     let mut x = i.initial;
     let mut last_residual = 0.0;
+    let mut pinning_pressure = 0.0;
+    let mut contact_line_motion = None;
     for iteration in 0..controls.iterations {
         if cancelled() {
             return Err(Error::Cancelled);
@@ -137,9 +172,28 @@ pub(crate) fn solve<T, E, C: FnMut() -> bool>(
         }
         let midpoint = i.initial + 0.5 * displacement;
         let viscous_pressure = resistance * midpoint * displacement;
-        let residual = viscous_pressure
-            - ((i.inlet_pressure - pressure.value) + i.capillary_pressure - gravity * midpoint);
-        let tangent = resistance * x + 0.5 * gravity - area * pressure.derivative;
+        let drive = (i.inlet_pressure - pressure.value) + i.capillary_pressure - gravity * midpoint;
+        if iteration == 0 {
+            if let Some(line) = i.contact_line {
+                if drive > line.advancing_threshold_pa {
+                    pinning_pressure = line.advancing_threshold_pa;
+                    contact_line_motion = Some(ContactLineMotion::Advancing);
+                    lower = lower.max(i.initial);
+                } else if drive < -line.receding_threshold_pa {
+                    pinning_pressure = -line.receding_threshold_pa;
+                    contact_line_motion = Some(ContactLineMotion::Receding);
+                    upper = upper.min(i.initial);
+                } else {
+                    // Static pinning is a reaction inside its admissible interval,
+                    // not a force that creates heat at zero contact-line speed.
+                    pinning_pressure = drive;
+                    contact_line_motion = Some(ContactLineMotion::Pinned);
+                }
+            }
+        }
+        let line_pressure = line_resistance * displacement;
+        let residual = (viscous_pressure + line_pressure) + pinning_pressure - drive;
+        let tangent = resistance * x + nonliquid_slope - area * pressure.derivative;
         if !residual.is_finite() || !tangent.is_finite() || tangent <= 0.0 {
             return Err(Error::Invalid(
                 "mechanical residual or positive tangent is unrepresentable",
@@ -154,10 +208,22 @@ pub(crate) fn solve<T, E, C: FnMut() -> bool>(
             let wall_energy = -i.capillary_pressure * volume;
             let gravity_energy = gravity * midpoint * volume;
             let dissipation = viscous_pressure * volume;
-            if ![volume, inlet_work, wall_energy, gravity_energy, dissipation]
-                .into_iter()
-                .all(f64::is_finite)
+            let contact_line_dissipation = line_pressure * volume;
+            let pinning_dissipation = pinning_pressure * volume;
+            if ![
+                volume,
+                inlet_work,
+                wall_energy,
+                gravity_energy,
+                dissipation,
+                contact_line_dissipation,
+                pinning_dissipation,
+            ]
+            .into_iter()
+            .all(f64::is_finite)
                 || dissipation < 0.0
+                || contact_line_dissipation < 0.0
+                || pinning_dissipation < 0.0
             {
                 return Err(Error::Invalid("mechanical work is unrepresentable"));
             }
@@ -171,6 +237,10 @@ pub(crate) fn solve<T, E, C: FnMut() -> bool>(
                 wall_energy,
                 gravity_energy,
                 dissipation,
+                contact_line_dissipation,
+                pinning_dissipation,
+                pinning_pressure,
+                contact_line_motion,
                 pressure_residual: residual,
                 iterations: iteration + 1,
                 pressure,
@@ -219,6 +289,7 @@ mod tests {
             inlet_pressure: 100000.0,
             gravity: 0.0,
             duration: 1.0,
+            contact_line: None,
         }
     }
     fn controls() -> Controls {
@@ -268,6 +339,167 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn contact_line_pins_finite_driving_force_without_work_and_keeps_gas_candidate() {
+        for drive in [-150.0, 125.0] {
+            for heat in [0.0, 1e-5] {
+                let mut i = input();
+                i.gravity = 9.81;
+                i.contact_line = Some(ContactLine {
+                    resistance_pa_s_m: 60000.0,
+                    advancing_threshold_pa: 200.0,
+                    receding_threshold_pa: 250.0,
+                });
+                let midpoint_pressure = pressure(i, heat, i.gas_volume).value;
+                i.inlet_pressure = midpoint_pressure - i.capillary_pressure
+                    + i.density * i.gravity * i.initial
+                    + drive;
+                let mut evaluations = 0;
+                let step = solve(
+                    i,
+                    controls(),
+                    |v, _| {
+                        evaluations += 1;
+                        let p = pressure(i, heat, v);
+                        Ok::<_, ()>(Pressure {
+                            value: p.value,
+                            derivative: p.derivative,
+                            payload: v,
+                        })
+                    },
+                    &mut || false,
+                )
+                .unwrap();
+                assert_eq!(evaluations, 1);
+                assert_eq!(step.iterations, 1);
+                assert_eq!(step.contact_line_motion, Some(ContactLineMotion::Pinned));
+                assert_eq!(step.length, i.initial);
+                assert_eq!(step.volume, 0.0);
+                assert_eq!(step.pressure.payload, i.gas_volume);
+                assert_eq!(step.pressure.value, midpoint_pressure);
+                assert!((step.pinning_pressure - drive).abs() < 1e-10);
+                assert_eq!(step.pressure_residual, 0.0);
+                for work in [
+                    step.inlet_work,
+                    step.wall_energy,
+                    step.gravity_energy,
+                    step.dissipation,
+                    step.contact_line_dissipation,
+                    step.pinning_dissipation,
+                ] {
+                    assert_eq!(work, 0.0);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn contact_line_manufactured_advance_and_recession_close_independent_energy() {
+        // Geometrically consistent Young/threshold angles and line coefficient:
+        // Pc=2*sigma*cos(theta_Y)/R, pinning=2*sigma*delta_cos/R,
+        // pressure friction=2*zeta*u/R. No dynamic angle replaces wall energy.
+        let (sigma, young_cosine, advancing_cosine, receding_cosine, zeta) =
+            (0.03, 0.5, 0.35, 0.7, 3.0);
+        for displacement in [0.001, -0.001] {
+            for heat in [0.0, 1e-5] {
+                let mut i = input();
+                i.viscosity = 0.05;
+                i.gravity = 9.81;
+                i.capillary_pressure = 2.0 * sigma * young_cosine / i.radius;
+                let line = ContactLine {
+                    resistance_pa_s_m: 2.0 * zeta / i.radius,
+                    advancing_threshold_pa: 2.0 * sigma * (young_cosine - advancing_cosine)
+                        / i.radius,
+                    receding_threshold_pa: 2.0 * sigma * (receding_cosine - young_cosine)
+                        / i.radius,
+                };
+                i.contact_line = Some(line);
+                let (branch, branch_cosine, signed_threshold) = if displacement > 0.0 {
+                    (
+                        ContactLineMotion::Advancing,
+                        advancing_cosine,
+                        line.advancing_threshold_pa,
+                    )
+                } else {
+                    (
+                        ContactLineMotion::Receding,
+                        receding_cosine,
+                        -line.receding_threshold_pa,
+                    )
+                };
+                let target = i.initial + displacement;
+                let midpoint = 0.5 * (i.initial + target);
+                let area = PI * i.radius.powi(2);
+                let p = pressure(i, heat, i.gas_volume - area * displacement).value;
+                i.inlet_pressure = p - i.capillary_pressure
+                    + i.density * i.gravity * midpoint
+                    + 8.0 * i.viscosity * midpoint * displacement / (i.radius.powi(2) * i.duration)
+                    + line.resistance_pa_s_m * displacement / i.duration
+                    + signed_threshold;
+                let step = solve(
+                    i,
+                    controls(),
+                    |v, _| {
+                        let p = pressure(i, heat, v);
+                        Ok::<_, ()>(Pressure {
+                            value: p.value,
+                            derivative: p.derivative,
+                            payload: v,
+                        })
+                    },
+                    &mut || false,
+                )
+                .unwrap();
+                assert!((step.length - target).abs() < 1e-13);
+                assert_eq!(step.contact_line_motion, Some(branch));
+                assert_eq!(step.pinning_pressure, signed_threshold);
+                assert_eq!(step.pressure.payload, i.gas_volume - step.volume);
+
+                let delta = step.length - i.initial;
+                let speed = delta / i.duration;
+                let middle = 0.5 * (i.initial + step.length);
+                let bulk_loss = 8.0 * PI * i.viscosity * middle * speed.powi(2) * i.duration;
+                let line_loss = 2.0 * PI * i.radius * zeta * speed.powi(2) * i.duration;
+                let pinning_loss =
+                    2.0 * PI * i.radius * sigma * (young_cosine - branch_cosine) * delta;
+                let wall_energy = -2.0 * PI * i.radius * sigma * young_cosine * delta;
+                let gravity_energy =
+                    0.5 * i.density * area * i.gravity * (step.length.powi(2) - i.initial.powi(2));
+                for (actual, expected) in [
+                    (step.dissipation, bulk_loss),
+                    (step.contact_line_dissipation, line_loss),
+                    (step.pinning_dissipation, pinning_loss),
+                    (step.wall_energy, wall_energy),
+                    (step.gravity_energy, gravity_energy),
+                ] {
+                    assert!(
+                        (actual - expected).abs() < 2e-13 * expected.abs(),
+                        "{actual} vs {expected}"
+                    );
+                }
+                assert!(bulk_loss > 0.0 && line_loss > 0.0 && pinning_loss > 0.0);
+
+                // Reconstruct gas internal-energy change from its two endpoint
+                // caloric states, independently of the solver's work fields.
+                let final_volume = i.gas_volume - area * delta;
+                let final_pressure = (step.pressure.value * (i.gas_volume + final_volume)
+                    - 100000.0 * i.gas_volume)
+                    / final_volume;
+                let gas_energy_change =
+                    (final_pressure * final_volume - 100000.0 * i.gas_volume) / 0.4;
+                let residual = i.inlet_pressure * area * delta + heat
+                    - gas_energy_change
+                    - wall_energy
+                    - gravity_energy
+                    - bulk_loss
+                    - line_loss
+                    - pinning_loss;
+                assert!(residual.abs() < 5e-16, "{residual}");
+            }
+        }
+    }
+
     #[test]
     fn adiabatic_motion_converges_to_continuous_gas_compression_at_second_order() {
         let base = input();
