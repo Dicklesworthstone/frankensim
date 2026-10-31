@@ -638,6 +638,8 @@ pub(super) struct Solver<'a> {
     planar_loss: [Vec<f64>; 3],
     /// Porous `(mu / kappa, rho C / 2)` per cell and axis (empty: none).
     porous: Vec<[(f64, f64); 3]>,
+    /// Nonzero separable quadratic drag needs a frozen nonlinear residual.
+    porous_nonlinear: bool,
     /// Symmetric cross-coordinate Darcy resistance. Empty for every original
     /// scalar/grid-diagonal path; compiled once with the source epoch.
     porous_cross: Vec<DarcyCross>,
@@ -972,6 +974,7 @@ impl<'a> Solver<'a> {
                     .collect(),
             },
             planar_loss,
+            porous_nonlinear: porous.iter().any(|cell| cell.iter().any(|(_, c)| *c != 0.0)),
             porous,
             porous_cross: Vec::new(),
             fan_face,
@@ -1396,7 +1399,7 @@ impl<'a> Solver<'a> {
         let mass = imbalance / (self.rho * largest_flux);
         // Only a prospective convergence result needs the additional frozen
         // coupled residual. Ordinary diagonal paths keep their exact arithmetic.
-        if !self.porous_cross.is_empty()
+        if (!self.porous_cross.is_empty() || self.porous_nonlinear)
             && mass <= self.config.tolerance && steady <= self.config.tolerance
         {
             steady = self.coupled_darcy_residual(gate)?;
@@ -2548,7 +2551,7 @@ pub(super) fn material_solver<'a>(
 ) -> Result<Solver<'a>, ChtError> {
     material_solver_with_darcy_tensor(
         domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
-        drag_pa_s_m2, None, config, gate,
+        drag_pa_s_m2, None, None, config, gate,
     )
 }
 
@@ -2560,13 +2563,14 @@ pub(in crate::conjugate) fn simple_flow_with_darcy_tensor(
     fluid: &FluidProperties,
     dynamic_viscosity_pa_s: &[f64],
     drag_pa_s_m2: &[[[f64; 3]; 3]],
+    forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
     let solver = material_solver_with_darcy_tensor(
         domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
-        None, Some(drag_pa_s_m2), config, gate,
+        None, Some(drag_pa_s_m2), forchheimer_resistance_kg_m4, config, gate,
     )?;
     solve_steady(solver, fluid, config, gate)
 }
@@ -2579,6 +2583,7 @@ pub(super) fn material_solver_with_darcy_tensor<'a>(
     force_density_n_m3: Option<&[[f64; 3]]>,
     drag_pa_s_m2: Option<&[f64]>,
     darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
+    forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
     config: &'a SimpleConfig,
     gate: &CancelGate,
 ) -> Result<Solver<'a>, ChtError> {
@@ -2642,6 +2647,34 @@ pub(super) fn material_solver_with_darcy_tensor<'a>(
             for axis in 0..3 {
                 solver.porous[c][axis].0 += matrix[axis][axis];
                 finite("simple.material_darcy_resistance", solver.porous[c][axis].0)?;
+            }
+        }
+    }
+    if let Some(drag) = forchheimer_resistance_kg_m4 {
+        if drag.len() != domain.cell_count() {
+            return Err(ChtError::InvalidInput {
+                field: "simple.forchheimer_resistance_kg_m4",
+                reason: "one directional quadratic resistance per voxel is required".into(),
+            });
+        }
+        if solver.porous.is_empty() {
+            solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
+        }
+        for (c, beta) in drag.iter().enumerate() {
+            if c % 256 == 0 { poll(gate)?; }
+            for (axis, &coefficient) in beta.iter().enumerate() {
+                finite("simple.forchheimer_resistance_kg_m4", coefficient)?;
+                if coefficient < 0.0 || (!domain.is_fluid(c) && coefficient != 0.0) {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.forchheimer_resistance_kg_m4",
+                        reason: "quadratic resistance must be nonnegative and zero in solid voxels".into(),
+                    });
+                }
+                // This input is rho*beta, already in the SAME native force
+                // coefficient units. Authored Volume uses C=2*beta instead.
+                solver.porous[c][axis].1 += coefficient;
+                finite("simple.forchheimer_resistance_kg_m4", solver.porous[c][axis].1)?;
+                solver.porous_nonlinear |= coefficient != 0.0;
             }
         }
     }

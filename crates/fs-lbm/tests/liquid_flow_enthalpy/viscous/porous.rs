@@ -11,6 +11,8 @@ use fs_material::state_point::{
 
 #[path = "porous/rotated.rs"]
 mod rotated;
+#[path = "porous/forchheimer.rs"]
+mod forchheimer;
 
 const K_NAMES: [&str; 3] = ["intrinsic_k_1", "intrinsic_k_2", "intrinsic_k_3"];
 const GRID_ALIGNED_AXES: [[f64; 3]; 3] = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];

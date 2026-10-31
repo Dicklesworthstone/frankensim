@@ -153,6 +153,9 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     /// coefficients drive both native force and local heat; do not add the
     /// mushy_drag_pa_s_m2 account a second time.
     pub darcy_resistance_pa_s_m2: Option<Vec<[[f64; 3]; 3]>>,
+    /// rho*beta in grid axes [kg/m4] for the explicitly calibrated separable
+    /// quadratic force. No factor 1/2. None when every source beta is zero.
+    pub forchheimer_resistance_kg_m4: Option<Vec<[f64; 3]>>,
     /// Molecular heat and independent actuator work at this same source epoch.
     /// Present only after explicit quasisteady closed creeping-flow admission.
     /// Transient heat has a separate endpoint unsteady_mechanical_step receipt.
@@ -476,9 +479,10 @@ where
     /// This opt-in explicitly removes momentum convection from each native
     /// solve. Only tangential moving/stationary walls and symmetry are admitted;
     /// fixed no-slip solid voxels are supported. Openings, buoyancy, fans,
-    /// turbulence and configured resistances refuse. An attached `Self::with_mushy_mobility` supplies the
-    /// only optional drag: its actual mu/K(phi(h)) becomes heat in the ORIGINAL
-    /// equilibrium mixture cell. The fixed skeleton performs zero reaction work;
+    /// turbulence and configured resistances refuse. `Self::with_mushy_mobility`
+    /// supplies mu/K(phi(h)); `Self::with_porous_materials` supplies original
+    /// permeability and optional calibrated Forchheimer drag. Their actual loss
+    /// becomes heat in the ORIGINAL equilibrium cell. The fixed skeleton performs zero reaction work;
     /// its heat and latent energy belong to that same fixed-reference-mass h.
     /// Separate phase temperatures/velocities and moving skeletons are excluded.
     /// Source viscosity and the actual returned velocity must satisfy the declared
@@ -486,7 +490,8 @@ where
     /// `Self::with_body_force_heating` also accounts for prescribed body work.
     ///
     /// The original registered h/T law, source receipts and cell masses remain
-    /// the sole thermal owners. Each actual substep adds molecular plus Darcy heat
+    /// the sole thermal owners. Each actual substep adds molecular, Darcy and
+    /// explicitly sourced Forchheimer heat
     /// once to the existing source map, alongside any wrapped source. The audit uses
     /// that step's accepted duration. Heat already appears in the original
     /// thermal audit's external_heat_j; never add actuator supply a second time.
@@ -852,7 +857,7 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
-        let (porous_samples, darcy_resistance_pa_s_m2) =
+        let (porous_samples, darcy_resistance_pa_s_m2, forchheimer_resistance_kg_m4) =
             self.porous_drag(&samples, mushy_drag_pa_s_m2.as_deref(), check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.unsteady {
             // Thermal CFL and advection use the accepted old momentum. Its
@@ -881,7 +886,7 @@ where
             if let Some(owner) = &self.viscous_heating {
                 let (flow, power) = if let Some(drag) = &darcy_resistance_pa_s_m2 {
                     crate::conjugate::simple::viscous_heat::creeping_material_heat_with_darcy_tensor(
-                        domain, fluid, &viscosities, None, Some(drag),
+                        domain, fluid, &viscosities, None, Some(drag), forchheimer_resistance_kg_m4.as_deref(),
                         self.external_force_n_m3.as_deref(), self.config, owner.controls, self.gate,
                     )?
                 } else if let Some(force) = &self.external_force_n_m3 {
@@ -919,7 +924,7 @@ where
             } else if let Some(drag) = &darcy_resistance_pa_s_m2 {
                 (
                     crate::conjugate::simple::simple_flow_with_darcy_tensor(
-                        domain, fluid, &viscosities, drag,
+                        domain, fluid, &viscosities, drag, forchheimer_resistance_kg_m4.as_deref(),
                         buoyancy_force_n_m3.as_deref(), self.config, self.gate,
                     )?,
                     None,
@@ -963,6 +968,7 @@ where
             }
         };
         check_gate(self.gate, check)?;
+        self.admit_forchheimer_speed(&porous_samples, &flow, check)?;
         let (flows, boundaries) =
             mass_graph(domain, &flow.field, self.density_kg_m3, self.input, check)?;
         let old = self
@@ -1002,6 +1008,7 @@ where
             mushy_drag_pa_s_m2,
             porous_samples,
             darcy_resistance_pa_s_m2,
+            forchheimer_resistance_kg_m4,
             viscous_power,
         });
         self.solves += usize::from(native_solve);

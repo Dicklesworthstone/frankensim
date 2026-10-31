@@ -141,7 +141,8 @@ impl Solver<'_> {
     }
 
     /// Reassemble all three residuals on ONE frozen current velocity/pressure
-    /// iterate. Sequential component solves alone can hide stale cross forces.
+    /// iterate. Sequential component solves alone can hide stale cross forces
+    /// or a nonlinear Forchheimer coefficient evaluated at an earlier speed.
     /// This probe never changes velocities, pressure or correction diagonals.
     pub(super) fn coupled_darcy_residual(&mut self, gate: &CancelGate) -> Result<f64, ChtError> {
         let mut rms = [0.0_f64; 3];
@@ -157,7 +158,7 @@ impl Solver<'_> {
 
     /// The final tight pressure projection must not invalidate momentum.
     pub(super) fn admit_projected_darcy(&mut self, gate: &CancelGate) -> Result<f64, ChtError> {
-        if self.porous_cross.is_empty() {
+        if self.porous_cross.is_empty() && !self.porous_nonlinear {
             return Ok(0.0);
         }
         let residual = self.coupled_darcy_residual(gate)?;

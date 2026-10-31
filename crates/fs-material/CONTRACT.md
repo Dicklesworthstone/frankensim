@@ -6265,6 +6265,28 @@ Focused synthetic regressions exercise rotated temperature-dependent tensors,
 fixed pressure and quantity metadata, whole-bundle source pinning, exact seals,
 and immutable refusals; native test execution remains pending in this environment.
 
+### Source-bound separable Forchheimer coefficients
+
+`PermeabilityTemperatureLaw::with_forchheimer` attaches three exact beta keys
+already present in the SAME original resolved material bundle. The static
+dimensional quantity is inverse metres. Beta is independently supplied,
+finite and nonnegative; neither intrinsic permeability nor an Ergun relation
+invents it. The convention in each declared principal direction is
+`f_i = -rho beta_i |u_i| u_i`, with superficial velocity and NO factor one half.
+This is an explicitly calibrated separable directional closure. Even equal
+beta components do not make it the rotationally invariant vector law
+`-rho beta |u| u`. The consumer must represent the declared material axes.
+
+Temperature continuation preserves all selected claims, auxiliary conditions,
+source requirements and the explicit positive finite maximum magnitude of each
+superficial velocity component. The caller must supply a calibration applicable
+to the chosen fluid and specimen. Consumers enforce the speed support on their
+actual velocity degrees of freedom; they must not admit an over-limit face by
+averaging cancelling velocities. Zero beta remains exactly zero. This source
+owner introduces no momentum solver, pore-speed conversion, thermal store,
+turbulence, saturation or compressibility closure. The native fs-lbm coupling
+uses the original face force and its separate cubic physical heat account.
+
 ## Conservative frozen-gas endpoint coordinates for native moving walls
 
 `ClosedGasParcel::at_volume_internal_energy_increment` reconstructs a complete

@@ -3,8 +3,9 @@
 //! This entry solves steady Stokes flow in a closed Cartesian box, including
 //! fixed no-slip solid voxels. Molecular viscosity may vary by fluid cell;
 //! exterior walls may move tangentially. A declared stationary linear Darcy
-//! frame may absorb work as local heat. Inertia, momentum convection, openings,
-//! moving solids, nonlinear resistance, turbulence and fans are excluded.
+//! frame and explicitly calibrated separable Forchheimer resistance may absorb
+//! work as local heat. Inertia, momentum convection, openings, moving solids,
+//! turbulence and fans are excluded from this quasisteady entry.
 //! Exterior walls and explicit body-force actuators supply work; neither
 //! pressure-constraint work nor momentum residual is heat.
 //! It has no kinetic-energy store and makes no Navier--Stokes energy claim.
@@ -50,18 +51,23 @@ pub struct ViscousHeatControls {
     pub power_tolerance_w: f64,
 }
 
-/// Actual molecular stress and optional stationary Darcy power at one epoch.
+/// Actual molecular stress and stationary porous-loss power at one epoch.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViscousPower {
     /// Nonnegative physical heat in native voxel order [W].
     pub cell_heat_w: Vec<f64>,
-    /// Total molecular plus Darcy heat [W], deposited exactly once.
+    /// Total molecular, Darcy and Forchheimer heat [W], deposited exactly once.
     pub heat_w: f64,
     pub molecular_heat_w: f64,
     pub darcy_heat_w: f64,
+    /// Physical cubic loss from the native rho*beta*|u|u force, not time loss.
+    pub forchheimer_heat_w: f64,
     /// Darcy contribution in native voxel order. None without a declared drag
     /// frame; zero entries at zero drag. Already included in cell_heat_w.
     pub cell_darcy_heat_w: Option<Vec<f64>>,
+    /// Cubic-loss subaccount, already included in cell_heat_w.
+    /// None when all native quadratic coefficients are zero.
+    pub cell_forchheimer_heat_w: Option<Vec<f64>>,
     /// Signed actuator supply at each Face3::ALL boundary [W].
     pub wall_power_w: [f64; 6],
     /// Tangential force exerted by each actuator on the fluid [N]. Normal
@@ -92,7 +98,9 @@ impl ViscousPower {
             heat_w: 0.0,
             molecular_heat_w: 0.0,
             darcy_heat_w: 0.0,
+            forchheimer_heat_w: 0.0,
             cell_darcy_heat_w: darcy.then(|| vec![0.0; domain.cell_count()]),
+            cell_forchheimer_heat_w: None,
             wall_power_w: [0.0; 6],
             wall_tangential_force_n: [[0.0; 3]; 6],
             supplied_wall_power_w: 0.0,
@@ -273,7 +281,7 @@ fn creeping_material_heat(
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
     creeping_material_heat_with_darcy_tensor(
-        domain, fluid, viscosity_pa_s, drag_pa_s_m2, None,
+        domain, fluid, viscosity_pa_s, drag_pa_s_m2, None, None,
         force_density_n_m3, config, controls, gate,
     )
 }
@@ -286,6 +294,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
     viscosity_pa_s: &[f64],
     drag_pa_s_m2: Option<&[f64]>,
     darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
+    forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     controls: ViscousHeatControls,
@@ -300,6 +309,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
         force_density_n_m3,
         drag_pa_s_m2,
         darcy_resistance_pa_s_m2,
+        forchheimer_resistance_kg_m4,
         config,
         gate,
     )?;
@@ -314,6 +324,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
         force_density_n_m3,
         drag_pa_s_m2,
         darcy_resistance_pa_s_m2,
+        forchheimer_resistance_kg_m4,
         config,
         gate,
     )?;
@@ -649,6 +660,9 @@ impl Solver<'_> {
             *value = finite_value("viscous_heat.power", *value + amount)?;
             Ok(())
         };
+        let mut cell_forchheimer_heat_w = self.porous_nonlinear
+            .then(|| vec![0.0; domain.cell_count()]);
+        let mut staggered_forchheimer_w = 0.0;
         let (cell_darcy_heat_w, darcy_heat_w) = if self.porous.is_empty() {
             (None, 0.0)
         } else {
@@ -661,16 +675,14 @@ impl Solver<'_> {
                 let at = domain.coords(c);
                 for a in 0..3 {
                     let (beta, inertial) = self.porous[c][a];
-                    if inertial != 0.0 {
-                        return Err(invalid_power(
-                            "only stationary linear Darcy heating is admitted",
-                        ));
-                    }
                     // The two MAC half cells, not the square of an averaged
                     // cell-centre velocity. Fixed normal boundary faces are zero.
                     for plus in [false, true] {
                         let u = self.vel[a][self.cell_face(a, at, plus)];
                         add(cell_heat, (0.5 * domain.volume(c)) * beta * u * u)?;
+                        if let Some(cubic) = &mut cell_forchheimer_heat_w {
+                            add(&mut cubic[c], (0.5 * domain.volume(c)) * inertial * u.abs() * u * u)?;
+                        }
                     }
                 }
                 if !self.porous_cross.is_empty() {
@@ -681,6 +693,9 @@ impl Solver<'_> {
                 }
                 if *cell_heat != 0.0 {
                     add(&mut heat[c], *cell_heat)?;
+                }
+                if let Some(cubic) = &cell_forchheimer_heat_w {
+                    add(&mut heat[c], cubic[c])?;
                 }
             }
             // Independent traversal of the exact implicit momentum coefficient
@@ -700,6 +715,15 @@ impl Solver<'_> {
                         self.comp_face_area(a, index) * (0.5 * wm).mul_add(bm, 0.5 * wp * bp);
                     let u = self.vel[a][index];
                     add(&mut staggered_drag_w, coefficient * u * u)?;
+                    if self.porous_nonlinear {
+                        let cm = self.porous[cell_of(self.n, minus)][a].1;
+                        let cp = self.porous[cell_of(self.n, plus)][a].1;
+                        // This is the coefficient used by momentum at THIS
+                        // frozen velocity, after the nonlinear residual gate.
+                        let coefficient = self.comp_face_area(a, index)
+                            * (0.5 * wm).mul_add(cm * u.abs(), 0.5 * wp * cp * u.abs());
+                        add(&mut staggered_forchheimer_w, coefficient * u * u)?;
+                    }
                     if !self.porous_cross.is_empty() {
                         add(&mut staggered_drag_w, self.darcy_cross_force(a, minus, plus) * u)?;
                     }
@@ -714,6 +738,12 @@ impl Solver<'_> {
             add(&mut quadrature_w, staggered_drag_w)?;
             (Some(drag_heat), total)
         };
+        let forchheimer_heat_w = finite_value("viscous_heat.forchheimer",
+            cell_forchheimer_heat_w.as_ref().map_or(0.0, |cells| cells.iter().sum()))?;
+        if (forchheimer_heat_w - staggered_forchheimer_w).abs() > controls.power_tolerance_w {
+            return Err(invalid_power("Forchheimer momentum work and original-cell heat partition disagree"));
+        }
+        add(&mut quadrature_w, staggered_forchheimer_w)?;
         let heat_w = finite_value("viscous_heat.total", heat.iter().sum())?;
         let supplied_wall_power_w = finite_value("viscous_heat.supply", wall_power_w.iter().sum())?;
         let (cell_body_power_w, supplied_body_power_w) = if self.force.is_empty() {
@@ -745,11 +775,11 @@ impl Solver<'_> {
             ));
         }
         if (heat_w - quadrature_w).abs() > controls.power_tolerance_w
-            || (heat_w - molecular_heat_w - darcy_heat_w).abs() > controls.power_tolerance_w
+            || (heat_w - molecular_heat_w - darcy_heat_w - forchheimer_heat_w).abs() > controls.power_tolerance_w
             || pressure_constraint_power_w.abs() > controls.power_tolerance_w
         {
             return Err(invalid_power(
-                "independent constraint, molecular and Darcy power partitions do not close",
+                "independent constraint, molecular, Darcy and Forchheimer power partitions do not close",
             ));
         }
         poll(gate)?;
@@ -759,6 +789,8 @@ impl Solver<'_> {
             molecular_heat_w,
             darcy_heat_w,
             cell_darcy_heat_w,
+            forchheimer_heat_w,
+            cell_forchheimer_heat_w,
             wall_power_w,
             wall_tangential_force_n,
             supplied_wall_power_w,

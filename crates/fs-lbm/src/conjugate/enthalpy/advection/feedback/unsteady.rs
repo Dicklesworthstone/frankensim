@@ -82,10 +82,10 @@ where
         Ok(self)
     }
 
-    /// Evolve native inertia and deposit only physical molecular/Darcy heat.
+    /// Evolve native inertia and deposit physical molecular and porous heat.
     ///
     /// This explicitly selects unsteady Stokes: native backward-Euler inertia,
-    /// full source-resolved stress and stationary mushy Darcy drag remain, but
+    /// full source-resolved stress and stationary Darcy/Forchheimer drag remain, but
     /// momentum convection is omitted under the declared Reynolds ceiling.
     /// Old accepted velocity still advects h. Once its combined CFL/event step
     /// is known, ONE native momentum solve supplies endpoint physical heat for
@@ -100,7 +100,8 @@ where
     /// Material Boussinesq force uses density from the same starting epoch and
     /// adds to any external force in the native momentum RHS. Its signed work
     /// is a separately reported subset of total body work, never a second heat
-    /// source. Only molecular and Darcy dissipation enter the thermal owner.
+    /// source. Molecular, Darcy and explicitly sourced Forchheimer dissipation
+    /// enter the thermal owner with separate physical-loss subaccounts.
     /// The reference-density inertia and fixed cell masses remain unchanged.
     ///
     /// Phase locking of a moving face, openings, fans, configured resistance
@@ -404,11 +405,14 @@ where
                 if applied.darcy_resistance_pa_s_m2.is_some() { None }
                     else { applied.mushy_drag_pa_s_m2.as_deref() },
                 applied.darcy_resistance_pa_s_m2.as_deref(),
+                applied.forchheimer_resistance_kg_m4.as_deref(),
                 start_s,
                 dt_s,
                 end_s,
                 self.gate,
             )?;
+        let flow = &self.unsteady.as_ref().expect("advanced native momentum").flow;
+        self.admit_forchheimer_speed(&applied.porous_samples, flow, check)?;
         check_gate(self.gate, check)?;
         Ok(())
     }

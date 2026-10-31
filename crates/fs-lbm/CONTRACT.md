@@ -3349,6 +3349,45 @@ to match the final temperature after kinetic capture heat. These numerical
 fixtures are authored regressions, not experimental material validation; native
 execution remains a separate verification requirement.
 
+### Source-bound calibrated porous inertia and heat
+
+The original `with_porous_materials` binding also consumes an explicitly
+attached `PermeabilityTemperatureLaw::with_forchheimer` source. Its three beta
+claims share the original complete material bundle, fixed conditions and
+temperature continuation with permeability. The material convention is
+`rho beta_i |u_i| u_i`, without a factor one half. The native adapter passes
+`rho beta_i` directly to its existing quadratic MAC momentum coefficient;
+the older authored `FlowResistance::Volume` convention uses `C_i = 2 beta_i`.
+No coefficient is inferred from permeability, porosity or particle diameter.
+
+This is a calibrated separable material-principal-direction closure, not the
+rotation-invariant vector law `rho beta |u| u`. Nonzero beta therefore requires
+a signed permutation of native grid axes. Equal beta entries do not remove
+this restriction. Exactly zero beta preserves the complete oblique linear
+Darcy path without nonlinear storage or extra residual probes. Each source's
+explicit maximum superficial component speed is checked on every original
+normal face at source/accepted endpoints, including retained transient motion.
+
+The SAME half-cell momentum coefficient supplies nonnegative local cubic heat
+`sum_a V/2 rho beta_a (|u_a-|^3 + |u_a+|^3)`. An independent face traversal
+checks this heat against actual nonlinear momentum work. `ViscousPower`
+exposes `forchheimer_heat_w` and `cell_forchheimer_heat_w`; both steady and
+unsteady heat audits expose `forchheimer_heat_j`. These are subaccounts of the
+existing total physical heat, not additional thermal inputs. Linear Darcy,
+molecular viscosity and backward-Euler numerical loss keep their distinct
+meanings. Nonlinear solves check the complete residual at the final frozen
+velocity, including after pressure projection, before accepting motion/heat.
+
+All updates use the original caloric storage and candidate transaction.
+Source, speed, frame, arithmetic, convergence or cancellation failure publishes
+neither momentum nor heat. The fixed, zero-velocity, locally thermally
+equilibrated skeleton, admitted constant density, creeping-flow heat ceiling
+and existing opening restrictions remain. This does not establish turbulent,
+compressible, moving-skeleton or uncalibrated high-Reynolds-number flow.
+The focused material-flow fixtures check source-only beta substitution,
+direction permutation, signed quadratic circulation, exact zero-beta recovery,
+temperature feedback, physical/numerical energy partition and rollback.
+
 ### Tetrahedral liquid geometry and momentum enter native VOF
 
 `material::free_surface::transfer` connects the same resolved liquid scaling to

@@ -58,6 +58,7 @@ pub struct UnsteadyHeatingAudit {
     pub generated_heat_j: f64,
     pub molecular_heat_j: f64,
     pub darcy_heat_j: f64,
+    pub forchheimer_heat_j: f64,
     /// Inelastic kinetic capture by an explicitly stationary phase support.
     /// Separate from molecular/Darcy viscosity and numerical time loss.
     pub support_capture_heat_j: f64,
@@ -116,6 +117,7 @@ impl UnsteadyHeatingAudit {
             (&mut next.generated_heat_j, step.power.heat_w),
             (&mut next.molecular_heat_j, step.power.molecular_heat_w),
             (&mut next.darcy_heat_j, step.power.darcy_heat_w),
+            (&mut next.forchheimer_heat_j, step.power.forchheimer_heat_w),
             (
                 &mut next.pressure_constraint_work_j,
                 step.power.pressure_constraint_power_w,
@@ -140,6 +142,7 @@ impl UnsteadyHeatingAudit {
         if next.residual_j.abs() > allowance
             || next.pressure_constraint_work_j.abs() > allowance
             || (next.generated_heat_j - next.molecular_heat_j - next.darcy_heat_j
+                - next.forchheimer_heat_j
                 - next.support_capture_heat_j).abs() > allowance
         {
             return Err(invalid_power(

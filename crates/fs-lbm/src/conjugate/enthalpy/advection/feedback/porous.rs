@@ -40,7 +40,14 @@ where
     /// storage once under local thermal equilibrium. That chart must represent
     /// the intended participating heat capacity; this binding invents no extra
     /// skeleton store or mass. Fixed geometry/density and linear Darcy flow
-    /// remain assumptions. Sealed axes refuse without a velocity constraint.
+    /// remain assumptions unless the original source explicitly attaches
+    /// calibrated Forchheimer beta. That separable nonlinear law requires a
+    /// signed permutation of grid axes; equal beta entries do not admit an
+    /// oblique frame. Zero beta preserves the complete rotated Darcy path.
+    /// Its cubic work uses the SAME native face velocities, heats this cell
+    /// once and remains a separate physical-loss account. The explicit speed
+    /// support is checked on every native face component. Sealed axes refuse
+    /// without a velocity constraint.
     /// Attach once before the first advance; no live skeleton replacement or
     /// momentum reset is supplied.
     pub fn with_porous_materials(
@@ -87,7 +94,43 @@ where
         &mut self,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), MaterialFlowError<O::Error>> {
-        self.porous_endpoint = self.porous_drag(&self.endpoint, None, check)?.0;
+        let samples = self.porous_drag(&self.endpoint, None, check)?.0;
+        if let Some(owner) = &self.unsteady {
+            self.admit_forchheimer_speed(&samples, &owner.flow, check)?;
+        } else if let Some(applied) = &self.applied {
+            self.admit_forchheimer_speed(&samples, &applied.flow, check)?;
+        }
+        self.porous_endpoint = samples;
+        Ok(())
+    }
+
+    pub(super) fn admit_forchheimer_speed(
+        &self,
+        samples: &[PorousFlowSample],
+        flow: &FvFlow,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), MaterialFlowError<O::Error>> {
+        for sample in samples {
+            check_gate(self.gate, check)?;
+            let Some(beta) = sample.material.forchheimer_beta_per_m() else {
+                continue;
+            };
+            if beta.iter().all(|value| *value == 0.0) {
+                continue;
+            }
+            let maximum = sample
+                .material
+                .maximum_superficial_speed_m_s()
+                .expect("source beta carries a speed domain");
+            for side in 0..6 {
+                let speed = (flow.field.outward(self.domain, sample.voxel, side)
+                    / self.domain.face_area(sample.voxel, side / 2))
+                .abs();
+                if !speed.is_finite() || speed > maximum {
+                    return Err(invalid("native superficial face speed exceeds the original Forchheimer calibration").into());
+                }
+            }
+        }
         Ok(())
     }
 
@@ -96,17 +139,27 @@ where
         samples: &[FlowMaterialSample<F, T>],
         mushy: Option<&[f64]>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<(Vec<PorousFlowSample>, Option<Vec<[[f64; 3]; 3]>>), MaterialFlowError<O::Error>> {
+    ) -> Result<
+        (
+            Vec<PorousFlowSample>,
+            Option<Vec<[[f64; 3]; 3]>>,
+            Option<Vec<[f64; 3]>>,
+        ),
+        MaterialFlowError<O::Error>,
+    > {
         let Some(bindings) = &self.porous else {
-            return Ok((Vec::new(), None));
+            return Ok((Vec::new(), None, None));
         };
         let mut drag = vec![[[0.0; 3]; 3]; self.domain.cell_count()];
+        let mut quadratic: Option<Vec<[f64; 3]>> = None;
         if let Some(mushy) = mushy {
             for (voxel, (row, value)) in drag.iter_mut().zip(mushy).enumerate() {
                 if voxel % 256 == 0 {
                     check_gate(self.gate, check)?;
                 }
-                for axis in 0..3 { row[axis][axis] = *value; }
+                for axis in 0..3 {
+                    row[axis][axis] = *value;
+                }
             }
         }
         let mut sources = Vec::new();
@@ -123,15 +176,60 @@ where
                 })?;
             let permeability = material.permeability();
             let principal = permeability.principal_m2();
+            let nonlinear = material
+                .forchheimer_beta_per_m()
+                .filter(|beta| beta.iter().any(|value| *value != 0.0));
+            let mut grid_axes = [0usize; 3];
+            if nonlinear.is_some() {
+                for (i, axis) in permeability.material_axes_in_world().iter().enumerate() {
+                    let Some(a) = axis.iter().position(|component| component.abs() == 1.0) else {
+                        return Err(invalid(
+                            "separable Forchheimer sources require signed grid-axis permutations",
+                        )
+                        .into());
+                    };
+                    if axis
+                        .iter()
+                        .enumerate()
+                        .any(|(b, value)| b != a && *value != 0.0)
+                    {
+                        return Err(invalid(
+                            "separable Forchheimer sources require signed grid-axis permutations",
+                        )
+                        .into());
+                    }
+                    grid_axes[i] = a;
+                }
+            }
             for &k in principal {
                 if !k.is_finite() || k <= 0.0 {
                     return Err(invalid("native Darcy drag requires positive intrinsic permeability; sealed axes need explicit constraints").into());
                 }
             }
             if let Some(transport) = sample.transport.mobile_transport() {
+                if let Some(beta) = nonlinear {
+                    let coefficients =
+                        quadratic.get_or_insert_with(|| vec![[0.0; 3]; self.domain.cell_count()]);
+                    for i in 0..3 {
+                        let value = self.density_kg_m3 * beta[i];
+                        if !value.is_finite() || (beta[i] > 0.0 && value <= 0.0) {
+                            return Err(invalid(
+                                "source-bound Forchheimer resistance is not representable",
+                            )
+                            .into());
+                        }
+                        coefficients[sample.voxel][grid_axes[i]] = value;
+                    }
+                }
                 let resistance = principal.map(|k| transport.dynamic_viscosity_pa_s() / k);
-                if resistance.iter().any(|value| !value.is_finite() || *value <= 0.0) {
-                    return Err(invalid("source-bound principal Darcy resistance is not representable").into());
+                if resistance
+                    .iter()
+                    .any(|value| !value.is_finite() || *value <= 0.0)
+                {
+                    return Err(invalid(
+                        "source-bound principal Darcy resistance is not representable",
+                    )
+                    .into());
                 }
                 let axes = permeability.material_axes_in_world();
                 let isotropic = principal[0] == principal[1] && principal[1] == principal[2];
@@ -142,11 +240,19 @@ where
                         let value = if isotropic {
                             if a == b { resistance[0] } else { 0.0 }
                         } else {
-                            (0..3).map(|i| resistance[i] * axes[i][a] * axes[i][b]).sum()
+                            (0..3)
+                                .map(|i| resistance[i] * axes[i][a] * axes[i][b])
+                                .sum()
                         };
                         let coefficient = drag[sample.voxel][a][b] + value;
-                        if !value.is_finite() || (a == b && value <= 0.0) || !coefficient.is_finite() {
-                            return Err(invalid("source-bound rotated Darcy resistance is not representable").into());
+                        if !value.is_finite()
+                            || (a == b && value <= 0.0)
+                            || !coefficient.is_finite()
+                        {
+                            return Err(invalid(
+                                "source-bound rotated Darcy resistance is not representable",
+                            )
+                            .into());
                         }
                         drag[sample.voxel][a][b] = coefficient;
                         drag[sample.voxel][b][a] = coefficient;
@@ -159,6 +265,6 @@ where
                 material,
             });
         }
-        Ok((sources, Some(drag)))
+        Ok((sources, Some(drag), quadratic))
     }
 }
