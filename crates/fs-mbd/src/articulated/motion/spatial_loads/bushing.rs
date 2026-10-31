@@ -153,6 +153,52 @@ pub fn step_free_floating_bushings(
         duration,
         &mut cancelled,
         |map, base, cancelled| evaluate(map, base, loads, bushings, cancelled),
+        None,
+    )?;
+    finish_with_bushings(model, evaluated, loads, bushings, &mut cancelled)
+}
+
+/// Advance finite bushings and spatial loads with state-dependent joint effort
+/// in the same original explicit Lie-midpoint step.
+///
+/// The callback receives elapsed times `0` and `duration / 2`, the complete
+/// actual stage state, and an effort slice reset to
+/// `loads.held.generalized_force`. It may add to or replace those efforts.
+/// Bushing strain, strain rate and actuator effort use the same stage state;
+/// their separate storage, damping and actuator-work accounts remain intact.
+///
+/// The effort conventions of [`super::super::step_free_floating_with_effort`]
+/// and rotational chart boundaries of [`step_free_floating_bushings`] apply.
+/// Resolve both actuator response and the fastest bushing mode by refinement;
+/// this explicit selector does not perform a stiff controller solve.
+///
+/// # Errors
+/// Original motion/load/bushing refusals, invalid or over-limit stage effort,
+/// cancellation, or a callback error. Native inputs remain immutable on refusal;
+/// caller-owned callback side effects are not rolled back.
+pub fn step_free_floating_bushings_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    bushings: &[SpatialBushing],
+    duration: f64,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
+    poll(&mut cancelled)?;
+    admit(model, loads, bushings, &mut cancelled)?;
+    let evaluated = step_evaluated(
+        model,
+        state,
+        loads.held,
+        duration,
+        &mut cancelled,
+        |map, base, cancelled| evaluate(map, base, loads, bushings, cancelled),
+        Some(&mut effort),
     )?;
     finish_with_bushings(model, evaluated, loads, bushings, &mut cancelled)
 }

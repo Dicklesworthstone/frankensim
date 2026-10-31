@@ -919,6 +919,29 @@ trajectories, full off-center force/angular impulse, branched mixed-joint free
 momentum and COM drift, second-order convergence to the exact symmetric-top
 solution, frame covariance, distant admitted origins and atomic refusal/cancellation.
 
+### State-dependent internal actuator effort
+
+`articulated::motion::step_free_floating_with_effort` evaluates a caller's joint
+effort law at the actual initial and reconstructed midpoint states, at elapsed
+times zero and `dt/2`. Each output slice starts from the admitted held efforts,
+so motor torque-speed curves, torsional springs/dampers and smooth controllers
+can add to or replace them. The original ABA and locked-inertia momentum map
+retain the full carrier reaction; internal motor torque never becomes external
+angular impulse. The exact accepted midpoint effort and relative joint rate
+supply actuator work. Revolute/helical effort is in N m; prismatic effort is in N.
+
+`spatial_loads::step_free_floating_spatial_with_effort` composes the same law
+with original moving-point spatial loads and finite axial connections at those
+same stages; `spatial_loads::bushing::step_free_floating_bushings_with_effort`
+also retains anisotropic finite-rotation bushing forces, storage and damping.
+Held APIs retain their original arithmetic and borrow their effort
+slice; driven APIs reuse one O(joints) buffer. Finite-value and native effort
+limits are checked at both stages, and cancellation brackets each callback.
+Inputs remain immutable on every refusal; caller-owned callback side effects
+are not rolled back. Second order applies to smooth resolved load laws. This
+explicit lane does not imply stiff stability, motor electrical-state coupling,
+hybrid controller switching or a dissipation/thermal model for callback effort.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared

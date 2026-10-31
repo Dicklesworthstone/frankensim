@@ -176,9 +176,68 @@ pub fn step_free_floating(
                 load: map.loads(base, loads, cancelled)?,
             })
         },
+        None,
     )?
     .step)
 }
+
+/// Advance with internal actuator efforts evaluated at both actual motion stages.
+///
+/// `effort` is called in start/midpoint order with elapsed times `0` and
+/// `duration / 2`, the complete stage state, and one entry per original joint
+/// coordinate. Before each call the output slice is reset to
+/// `loads.generalized_force`; the callback may add to or replace those held
+/// efforts. Revolute/helical efforts are torques in N m and prismatic efforts
+/// are forces in N. An absolute clock can be captured by the callback.
+///
+/// Torque-speed curves, torsional spring/damper laws and smooth controllers
+/// therefore use the actual stage rates and configuration. The original ABA
+/// supplies equal/opposite base recoil, and the same midpoint effort supplies
+/// `actuator_work`. Internal effort is never added to external spatial impulse.
+/// A single O(joints) scratch buffer is reused across the two evaluations.
+///
+/// Second-order accuracy requires a smooth load law and a timestep resolving
+/// its response; this is an explicit scheme, without stiff stability, contact
+/// switching or a coupled electrical-state solve. The callback owns any
+/// constitutive storage or dissipation interpretation of its effort. Native
+/// inputs remain immutable on refusal, but callback-owned side effects cannot
+/// be rolled back. Cancellation is checked before and after each callback;
+/// callers own cancellation within a long-running callback.
+///
+/// # Errors
+/// The original motion admissions, including finite efforts and native effort
+/// limits at both stages, cancellation, or an error returned by the callback.
+pub fn step_free_floating_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: FreeFloatingMotionLoads<'_>,
+    duration: f64,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<FreeFloatingMotionStep, FreeFloatingMotionError> {
+    Ok(step_evaluated(
+        model,
+        state,
+        loads,
+        duration,
+        &mut cancelled,
+        |map, base, cancelled| {
+            Ok(EvaluatedStage {
+                body_wrench: Cow::Borrowed(loads.external_body_wrench),
+                load: map.loads(base, loads, cancelled)?,
+            })
+        },
+        Some(&mut effort),
+    )?
+    .step)
+}
+
+type EffortLaw<'a> = dyn FnMut(f64, &FreeFloatingMotionState, &mut [f64]) -> Result<(), FreeFloatingMotionError>
+    + 'a;
 
 fn step_evaluated<'a, C: FnMut() -> bool>(
     model: &ArticulatedModel,
@@ -191,6 +250,7 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         FreeFloatingBaseState,
         &mut C,
     ) -> Result<EvaluatedStage<'a>, FreeFloatingMotionError>,
+    mut effort: Option<&mut EffortLaw<'_>>,
 ) -> Result<EvaluatedStep, FreeFloatingMotionError> {
     poll(cancelled)?;
     if !duration.is_finite() || duration <= 0.0 {
@@ -224,12 +284,18 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
     )?;
     poll(cancelled)?;
     let initial_stage = evaluate(&initial_map, state.base, cancelled)?;
+    let mut stage_effort = Cow::Borrowed(loads.generalized_force);
+    if let Some(law) = effort.as_deref_mut() {
+        poll(cancelled)?;
+        law(0.0, state, stage_effort.to_mut())?;
+        poll(cancelled)?;
+    }
     let initial_dynamics = free_floating_forward_dynamics(
         model,
         state.base,
         &state.joint_position,
         &state.joint_velocity,
-        loads.generalized_force,
+        &stage_effort,
         loads.gravity_world,
         &initial_stage.body_wrench,
     )?;
@@ -258,12 +324,20 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
     midpoint.base = midpoint_map.reconstruct(midpoint_rotation, midpoint_coordinates)?;
     poll(cancelled)?;
     let midpoint_stage = evaluate(&midpoint_map, midpoint.base, cancelled)?;
+    if let Some(law) = effort.as_deref_mut() {
+        poll(cancelled)?;
+        stage_effort
+            .to_mut()
+            .copy_from_slice(loads.generalized_force);
+        law(half, &midpoint, stage_effort.to_mut())?;
+        poll(cancelled)?;
+    }
     let midpoint_dynamics = free_floating_forward_dynamics(
         model,
         midpoint.base,
         &midpoint.joint_position,
         &midpoint.joint_velocity,
-        loads.generalized_force,
+        &stage_effort,
         loads.gravity_world,
         &midpoint_stage.body_wrench,
     )?;
@@ -306,8 +380,7 @@ fn step_evaluated<'a, C: FnMut() -> bool>(
         &state_after.joint_velocity,
     )?;
     let actuator_work = duration
-        * loads
-            .generalized_force
+        * stage_effort
             .iter()
             .zip(&midpoint.joint_velocity)
             .map(|(force, rate)| force * rate)

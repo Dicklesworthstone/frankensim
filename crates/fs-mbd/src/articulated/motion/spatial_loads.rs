@@ -119,6 +119,50 @@ pub fn step_free_floating_spatial(
         duration,
         &mut cancelled,
         |map, base, cancelled| evaluate(map, base, loads, cancelled),
+        None,
+    )?;
+    finish_spatial(model, evaluated, loads, &mut cancelled)
+}
+
+/// Advance spatial loads and finite axial connections with stage-dependent
+/// internal joint efforts through the same native Lie-midpoint owner.
+///
+/// The callback receives elapsed time `0` or `duration / 2`, the actual complete
+/// stage state, and a reusable effort slice reset to `loads.held.generalized_force`
+/// before each call. It may add to or replace those efforts. Spatial material
+/// loads and connections are evaluated on the same stage geometry and rates;
+/// their impulse, storage and loss accounting remains with the original owner.
+///
+/// See [`super::step_free_floating_with_effort`] for effort units, smoothness,
+/// work, cancellation and callback-side-effect conventions. The explicit step
+/// must resolve both actuator dynamics and the fastest connection mode.
+///
+/// # Errors
+/// Original motion/spatial admissions, invalid or over-limit stage efforts,
+/// cancellation, or an error returned by the effort callback. Inputs are
+/// immutable and no state is published on refusal.
+pub fn step_free_floating_spatial_with_effort(
+    model: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    loads: SpatialMotionLoads<'_>,
+    duration: f64,
+    mut effort: impl FnMut(
+        f64,
+        &FreeFloatingMotionState,
+        &mut [f64],
+    ) -> Result<(), FreeFloatingMotionError>,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<SpatialMotionStep, FreeFloatingMotionError> {
+    poll(&mut cancelled)?;
+    admit(model, loads, &mut cancelled)?;
+    let evaluated = step_evaluated(
+        model,
+        state,
+        loads.held,
+        duration,
+        &mut cancelled,
+        |map, base, cancelled| evaluate(map, base, loads, cancelled),
+        Some(&mut effort),
     )?;
     finish_spatial(model, evaluated, loads, &mut cancelled)
 }
