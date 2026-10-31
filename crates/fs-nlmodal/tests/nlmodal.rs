@@ -444,6 +444,84 @@ fn small_thick_panel_certifies_three_odd_odd_modes() {
 }
 
 #[test]
+fn g1_high_mode_plate_couplings_match_analytic_harmonic_integrals() {
+    // Independent product-to-sum integration, with integral sin(j*pi*x)
+    // exactly zero for even j and 2/(j*pi) for odd j, including negative j.
+    let integrals = |s: usize, a: usize, b: usize| {
+        let (s, a, b) = (s as i32, a as i32, b as i32);
+        let integral = |j: i32| {
+            if j % 2 == 0 {
+                0.0
+            } else {
+                2.0 / (j as f64 * core::f64::consts::PI)
+            }
+        };
+        let difference = integral(s + a - b) + integral(s - a + b);
+        let sum = integral(s + a + b) + integral(s - a - b);
+        (0.25 * (difference - sum), 0.25 * (difference + sum))
+    };
+    let params = VkPlateParams {
+        lx: 0.7,
+        ly: 0.4,
+        ..steel_plate()
+    };
+    let disp = [
+        SineMode { m: 1, n: 1 },
+        SineMode { m: 6, n: 2 },
+        SineMode { m: 4, n: 6 },
+        SineMode { m: 13, n: 9 },
+    ];
+    let stress = [
+        SineMode { m: 3, n: 5 },
+        SineMode { m: 2, n: 1 },
+        SineMode { m: 4, n: 4 },
+        SineMode { m: 1, n: 1 },
+    ];
+    let model = von_karman_ss_plate(&params, &disp, &stress).unwrap();
+    assert!(model.quadrature_residual < 3.0e-8);
+    let area = params.lx * params.ly;
+    let normalization = 8.0 / (params.rho * params.h * area * area.sqrt());
+    for (channel, &s) in model.storage.channels.iter().zip(&stress) {
+        for (i, &a) in disp.iter().enumerate() {
+            for (j, &b) in disp.iter().enumerate() {
+                let (sx, cx) = integrals(s.m, a.m, b.m);
+                let (sy, cy) = integrals(s.n, a.n, b.n);
+                let (ax, ay) = (
+                    a.m as f64 * core::f64::consts::PI / params.lx,
+                    a.n as f64 * core::f64::consts::PI / params.ly,
+                );
+                let (bx, by) = (
+                    b.m as f64 * core::f64::consts::PI / params.lx,
+                    b.n as f64 * core::f64::consts::PI / params.ly,
+                );
+                let raw = ((ax * by).powi(2) + (ay * bx).powi(2)) * sx * sy
+                    - 2.0 * ax * ay * bx * by * cx * cy;
+                let expected = normalization * area * raw;
+                let actual = channel.coupling[i * disp.len() + j];
+                assert!(
+                    (actual - expected).abs() < 2.0e-10 * expected.abs().max(1.0),
+                    "stress {s:?}, modes {a:?}/{b:?}: {actual} vs {expected}"
+                );
+                assert_eq!(
+                    actual.to_bits(),
+                    channel.coupling[j * disp.len() + i].to_bits()
+                );
+                if (s.m + a.m + b.m) % 2 == 0 || (s.n + a.n + b.n) % 2 == 0 {
+                    assert_eq!(
+                        actual, 0.0,
+                        "forbidden harmonic channel must be exactly zero"
+                    );
+                }
+            }
+        }
+    }
+    // Both signs of real, non-diagonal harmonic interactions remain present.
+    assert!(model.storage.channels[0].coupling[disp.len() + 2] > 0.0);
+    assert!(model.storage.channels[2].coupling[2 * disp.len()] < 0.0);
+    assert!(model.storage.channels[0].coupling[3 * disp.len()] < 0.0);
+}
+
+#[test]
 fn coupling_is_nonvacuous_and_certified_against_asymmetry() {
     let model =
         von_karman_ss_plate(&steel_plate(), &modes_grid(2, 2), &modes_grid(3, 3)).expect("plate");

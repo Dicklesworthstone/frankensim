@@ -574,29 +574,40 @@ fn coupling_integral(
     nodes: &[f64],
     weights: &[f64],
 ) -> f64 {
+    // Reflection about either midline changes the integrand's sign when the
+    // three half-wave indices sum to an even number. Enforce that exact
+    // selection rule instead of injecting roundoff-sized forbidden channels.
+    if (stress.m ^ a.m ^ b.m) & 1 == 0 || (stress.n ^ a.n ^ b.n) & 1 == 0 {
+        return 0.0;
+    }
+    // Sine products make the Hessian bracket separable. With S=sin(s*pi*x),
+    // the two needed integrals are integral S*sin(a*pi*x)*sin(b*pi*x) and
+    // integral S*cos(a*pi*x)*cos(b*pi*x), on the unit interval. Each tensor
+    // quadrature therefore costs O(Q), rather than evaluating a Q-by-Q grid.
+    // Both independent quadrature orders remain owned by the constructor.
+    let axis = |s: usize, a: usize, b: usize| {
+        let ks = s as f64 * core::f64::consts::PI;
+        let ka = a as f64 * core::f64::consts::PI;
+        let kb = b as f64 * core::f64::consts::PI;
+        let (mut sine, mut cosine) = (0.0, 0.0);
+        for (&x, &weight) in nodes.iter().zip(weights) {
+            let (sa, ca) = det::sin_cos(ka * x);
+            let (sb, cb) = det::sin_cos(kb * x);
+            let weighted_stress = weight * det::sin(ks * x);
+            sine += weighted_stress * sa * sb;
+            cosine += weighted_stress * ca * cb;
+        }
+        (sine, cosine)
+    };
+    let (sine_x, cosine_x) = axis(stress.m, a.m, b.m);
+    let (sine_y, cosine_y) = axis(stress.n, a.n, b.n);
     let kx = |m: usize| m as f64 * core::f64::consts::PI / lx;
     let ky = |n: usize| n as f64 * core::f64::consts::PI / ly;
-    let (sax, say) = (kx(stress.m), ky(stress.n));
     let (pax, pay) = (kx(a.m), ky(a.n));
     let (pbx, pby) = (kx(b.m), ky(b.n));
-    let mut acc = 0.0;
-    for (i, &xi) in nodes.iter().enumerate() {
-        let x = xi * lx;
-        for (jn, &yj) in nodes.iter().enumerate() {
-            let y = yj * ly;
-            let psi = det::sin(sax * x) * det::sin(say * y);
-            // Phi_a derivatives.
-            let a_xx = -pax * pax * det::sin(pax * x) * det::sin(pay * y);
-            let a_yy = -pay * pay * det::sin(pax * x) * det::sin(pay * y);
-            let a_xy = pax * pay * det::cos(pax * x) * det::cos(pay * y);
-            let b_xx = -pbx * pbx * det::sin(pbx * x) * det::sin(pby * y);
-            let b_yy = -pby * pby * det::sin(pbx * x) * det::sin(pby * y);
-            let b_xy = pbx * pby * det::cos(pbx * x) * det::cos(pby * y);
-            let l = a_xx * b_yy + a_yy * b_xx - 2.0 * a_xy * b_xy;
-            acc += weights[i] * weights[jn] * psi * l;
-        }
-    }
-    acc * lx * ly
+    let normal = (pax * pax * pby * pby + pay * pay * pbx * pbx) * sine_x * sine_y;
+    let shear = 2.0 * pax * pay * pbx * pby * cosine_x * cosine_y;
+    (normal - shear) * lx * ly
 }
 
 /// Parameter/mode-list validation for [`von_karman_ss_plate`].
@@ -1335,8 +1346,74 @@ pub fn single_mode_beta(storage: &SosModalStorage, k: usize) -> f64 {
 
 #[cfg(test)]
 mod fd_probe {
-    use super::{SineMode, SosModalStorage, StressChannel, fd_coupling, fd_d2, sample_sine};
+    use super::{
+        SineMode, SosModalStorage, StressChannel, coupling_integral, fd_coupling, fd_d2, gauss_01,
+        sample_sine,
+    };
     use fs_phs::Storage;
+
+    #[test]
+    fn g1_separable_bracket_matches_independent_area_quadrature() {
+        // Evaluate the physical Hessian bracket point by point, without the
+        // production separation or parity shortcut and with native trig.
+        let direct = |lx: f64,
+                      ly: f64,
+                      s: SineMode,
+                      a: SineMode,
+                      b: SineMode,
+                      nodes: &[f64],
+                      weights: &[f64]| {
+            let wave = |m: SineMode| {
+                (
+                    m.m as f64 * core::f64::consts::PI / lx,
+                    m.n as f64 * core::f64::consts::PI / ly,
+                )
+            };
+            let (sx, sy) = wave(s);
+            let (ax, ay) = wave(a);
+            let (bx, by) = wave(b);
+            let mut result = 0.0;
+            for (&xi, &wx) in nodes.iter().zip(weights) {
+                for (&eta, &wy) in nodes.iter().zip(weights) {
+                    let (x, y) = (lx * xi, ly * eta);
+                    let psi = (sx * x).sin() * (sy * y).sin();
+                    let av = (ax * x).sin() * (ay * y).sin();
+                    let bv = (bx * x).sin() * (by * y).sin();
+                    let axy = ax * ay * (ax * x).cos() * (ay * y).cos();
+                    let bxy = bx * by * (bx * x).cos() * (by * y).cos();
+                    result += wx
+                        * wy
+                        * psi
+                        * ((-ax * ax * av) * (-by * by * bv) + (-ay * ay * av) * (-bx * bx * bv)
+                            - 2.0 * axy * bxy);
+                }
+            }
+            result * lx * ly
+        };
+        let mode = |m, n| SineMode { m, n };
+        let triples = [
+            (mode(1, 1), mode(1, 1), mode(1, 1)),
+            (mode(3, 5), mode(6, 2), mode(4, 6)),
+            (mode(4, 4), mode(4, 6), mode(1, 1)),
+            (mode(3, 5), mode(13, 9), mode(1, 1)),
+            (mode(2, 1), mode(1, 1), mode(1, 1)),
+        ];
+        for order in [96, 109] {
+            let (nodes, weights) = gauss_01(order);
+            for (lx, ly) in [(0.7, 0.4), (2.3, 0.9)] {
+                for (s, a, b) in triples {
+                    let actual = coupling_integral(lx, ly, s, a, b, &nodes, &weights);
+                    let expected = direct(lx, ly, s, a, b, &nodes, &weights);
+                    assert!(
+                        (actual - expected).abs() < 2.0e-10 * expected.abs().max(1.0),
+                        "order {order}, {s:?}, {a:?}, {b:?}: {actual} vs {expected}"
+                    );
+                    let swapped = coupling_integral(lx, ly, s, b, a, &nodes, &weights);
+                    assert!((actual - swapped).abs() < 2.0e-12 * actual.abs().max(1.0));
+                }
+            }
+        }
+    }
 
     #[test]
     fn quadratic_metadata_preserves_the_live_stress_remainder() {
