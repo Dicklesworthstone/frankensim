@@ -456,6 +456,42 @@ RC dynamics, and refuse a positive-mutual coarse discretization without altering
 its field matrix. Full native integration execution is still required in an
 environment able to compile the pinned dependency graph.
 
+### Charge-constrained floating electrodes
+
+`electrostatic::network::floating` prepares mixed voltage/total-charge control
+on the original Maxwell matrix. Each floating conductor remains equipotential
+while its total free charge is held at the supplied value, including nonzero
+trapped charge. The retained terminals keep original order; floating inputs use
+their explicitly selected order. Topological gauge admission includes common
+electrodes joining disconnected dielectric pieces and refuses an entirely
+unreferenced component before numerical factorization.
+
+The original `fs-la` Cholesky owner factors the diagonally equilibrated floating
+block once. Subsequent queries reuse that factor and the retained-to-floating
+voltage map, without new FE solves. Explicit terminal and dense-work allowances
+bound preparation; cancellation is checked around the bounded dense factor and
+through assembly and field recovery. The Schur complement retains the actual
+floating path rather than deleting its matrix row. It is a differential
+capacitance at fixed floating charge; nonzero charge also produces an affine
+charge offset and stored energy, recovered by the mixed-control solve.
+
+Every accepted solution recovers the original spatial field and independent
+weak electrode reactions. Actual-amplitude total-charge and terminal/field
+energy gates apply separately from reduction residuals. Voltage differences
+remain separate from their common reference to preserve small physical fields.
+The full electrode state initializes the existing native capacitor network and
+its charge/energy history without discarding the floating nodes. Positive
+mutual entries on a coarse field discretization do not prevent this SPD block
+solve, although they still refuse pair-capacitor circuit lowering.
+
+Focused `electrostatic::network::floating` regressions cover analytic neutral
+and charged three-electrode fields, several simultaneous charge constraints,
+capacitance scaling, common-potential and terminal permutation invariance,
+native RC decay at conserved floating charge, physical resistor heat, gauge
+refusal, independent actual-state gates and cancellation/retry. This is frozen
+linear planar electrostatics: no changing geometry/material work, dielectric
+dispersion, spatial-error certificate or empirical device validation is added.
+
 ## Spatial material DC current and native resistor heat
 
 `conduction::PlanarConduction` binds each original planar triangle to the

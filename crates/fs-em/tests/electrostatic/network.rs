@@ -1,4 +1,6 @@
 //! G1/G3: source-derived multi-electrode storage reaches the native circuit.
+mod floating;
+
 use super::{controls, dielectric, limits, near, slab};
 use fs_em::electrostatic::{
     ElectrostaticError, PlanarElectrostatics, network::CapacitanceMatrixControls,

@@ -6,6 +6,9 @@
 //! A passive circuit reduction uses -C_ij for each pair; positive off-diagonal
 //! entries refuse reduction rather than being clipped or fitted.
 
+/// Charge-constrained floating electrodes on the original capacitance matrix.
+pub mod floating;
+
 use super::{
     ElectricField, ElectrostaticControls, ElectrostaticError, PlanarElectrostatics, finite, poll,
     positive,
