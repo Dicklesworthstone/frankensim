@@ -9,6 +9,8 @@
 
 /// Constant-mass, fixed-volume equilibrium heating with atomic publication.
 pub mod parcel;
+/// Explicit homogeneous-equilibrium pressure, entropy and acoustic response.
+pub mod acoustics;
 
 use fs_qty::{Density, Pressure, Temperature};
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
@@ -203,8 +205,9 @@ impl PureFluidEquilibriumPhase {
     }
 }
 
-/// Complete source-bound calorics at the conserved density. No homogeneous
-/// gas transport or acoustic trait is attached to this equilibrium state.
+/// Complete source-bound calorics at the conserved density. Acoustic consumers
+/// explicitly select the homogeneous-equilibrium view; no gas transport or
+/// acoustic relaxation policy is silently attached to this base state.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PureFluidEquilibriumState {
     reference: FrozenIdealGasMixtureEvaluationV1,

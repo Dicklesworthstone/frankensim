@@ -8058,7 +8058,9 @@ reference state; cancellation is polled inside those searches and before
 publication. Increment solves integrate the original NASA energy change before
 combining PR departures, so even a large formation datum is counted once and
 does not erase small heat input. Source domains remain authoritative; no
-two-phase transport, acoustic, interfacial or reaction closure is inferred.
+two-phase transport, interfacial or reaction closure is inferred. The base
+caloric state selects no acoustic relaxation policy; the explicit view below
+admits the homogeneous-equilibrium limit.
 Absolute-energy inversion refuses if adjacent represented energies cannot
 resolve the requested energy/temperature tolerances or the entire caloric span
 collapses; the source-anchored increment API remains available for large datums.
@@ -8475,3 +8477,36 @@ Seven focused regressions check independently prescribed increments and each bra
 Thermal Chaboche supports explicitly selected linear and power-law Perzyna kinetics through the joint native Chaboche return. resolve_enthalpy_for_step and advance_with_energy_for_step require the actual positive physical interval; endpoint iterations retain the same original history and duration. Endpoint viscosity, stress scale and exponent resolve from the original pinned source bundle. Thermal transport of each independent backstress precedes the joint return. Yield, viscosity and dynamic recovery contribute physical dissipation once; viscosity adds no free energy or entropy. Duration-free rate calls refuse.
 
 Three additional thermal regressions independently check nonproportional tangent/flow, complete two-temperature energy and entropy, positive viscous/recovery dissipation, source kinetic refresh, physical-duration relaxation, frozen-history retries and exact absent-branch/n=1 reductions. Static recovery, sub-yield creep, varying gamma, finite-deformation plasticity and experimental thermal-cyclic calibration remain outside this implementation.
+
+## Explicit equilibrium acoustic view and conservative pressure Jacobian
+
+`PureFluidEquilibriumState::equilibrium_acoustics` borrows the original admitted
+state and explicitly selects instantaneous phase and thermal equilibrium with
+common phase velocity. Its `HomogeneousEquilibriumAcoustics` view implements
+the existing `FluidAcoustics` contract, so original acoustic consumers receive
+coherent density, sound speed, bulk modulus, compressibility and impedance
+without reconstructing a substitute EOS. Homogeneous liquid/vapor branches
+reuse the original PR caloric mechanics. Strict two-phase interiors use the
+original coexistence Clapeyron slope and moving-phase Cv with the source NASA
+ideal Cv counted once. Exact or unresolved saturated endpoints refuse a
+bidirectional acoustic law rather than silently choosing a one-sided response.
+
+The same view exposes pressure and entropy derivatives in physical `(T,rho)`
+coordinates, the isentropic temperature slope, and the conservative derivatives
+`p_u|rho = p_T/Cv` and
+`p_rho|u = p_rho|T + (p_T/Cv)(T p_T-p)/rho^2` for mass-specific internal energy.
+They close `c^2 = p_rho|u + p p_u|rho/rho^2` without subtracting formation
+energies. The original state, source receipt and admitted density remain
+available through the borrowed view. Gas transport cards are not required;
+no mixed Cp, finite-rate relaxation, phase slip, surface storage, attenuation
+or frequency-validity prediction is supplied.
+
+The public `nonideal_equilibrium_acoustics` target checks independent
+Maxwell-area/isentropic methane EOS oracles, full-state pressure/entropy and
+conserved-energy finite differences, lower equilibrium sound speed than the
+existing frozen Wood closure for matching phases, original homogeneous
+mechanics, endpoint refusal and bitwise invariance under a `1e20 J/kg` source
+energy shift. The NASA caloric fixture is synthetic and checks constitutive
+consistency, not experimental methane sound-speed accuracy. Generic acoustic
+trait use retains the original thermodynamic state instead of flattening it
+into an unrelated material model.

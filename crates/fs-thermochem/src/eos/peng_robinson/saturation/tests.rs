@@ -283,6 +283,61 @@ fn g1_equilibrium_isochoric_tangent_differentiates_moving_phase_volumes() {
 }
 
 #[test]
+fn g1_equilibrium_response_has_maxwell_and_isentropic_closure_without_mixed_cp() {
+    let saturation = solve(methane(), 150.0);
+    for quality in [0.01, 0.1, 0.5, 0.9] {
+        let mixture = saturation.at_vapor_fraction(quality).unwrap();
+        let response = mixture.equilibrium_response(2.5 * R).unwrap();
+        let v = mixture.molar_volume().value();
+        let rho = mixture.mass_density_kg_m3();
+        assert_eq!(response.dp_dv_t_pa_mol_m3, 0.0);
+        assert_eq!(response.ds_dv_t_pa_k, response.dp_dt_v_pa_k);
+        close(
+            response.ds_dt_v_j_mol_k2 * 150.0,
+            response.molar_cv_j_mol_k,
+            2e-15,
+        );
+        close(
+            -v * response.dp_dv_s_pa_mol_m3,
+            response.adiabatic_bulk_modulus_pa,
+            2e-15,
+        );
+        close(
+            rho * response.sound_speed_m_s * response.sound_speed_m_s,
+            response.adiabatic_bulk_modulus_pa,
+            2e-15,
+        );
+        // More original-reference thermal storage changes equilibrium response;
+        // no assumed gamma or ideal p/rho acoustics may hide this dependence.
+        assert!(
+            mixture
+                .equilibrium_response(5.0 * R)
+                .unwrap()
+                .sound_speed_m_s
+                < response.sound_speed_m_s
+        );
+    }
+}
+
+#[test]
+fn g4_equilibrium_response_refuses_nondifferentiable_endpoints_and_bad_reference_cv() {
+    let saturation = solve(methane(), 150.0);
+    for quality in [0.0, 1.0, f64::MIN_POSITIVE] {
+        assert!(
+            saturation
+                .at_vapor_fraction(quality)
+                .unwrap()
+                .equilibrium_response(2.5 * R)
+                .is_err()
+        );
+    }
+    let mixed = saturation.at_vapor_fraction(0.5).unwrap();
+    for cv in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(mixed.equilibrium_response(cv).is_err());
+    }
+}
+
+#[test]
 fn g4_critical_domain_cancellation_and_whole_call_work_limits_refuse() {
     let model = pure(methane());
     let bracket = [Pressure::new(1e5), Pressure::new(4.4e6)];

@@ -21,6 +21,9 @@ use crate::eos::IdealGasMolarVolumeQuantityV1 as MolarVolume;
 use fs_math::det;
 use fs_qty::{Pressure, Temperature};
 
+mod response;
+pub use response::PengRobinsonEquilibriumResponseV1;
+
 // For x=v/b>1 the minimum of (x²+2x-1)²/[2(x+1)(x-1)²]
 // lies at x³-3x²-3x-3=0. These separate the pure-PR spinodal branches.
 const CRITICAL_VOLUME_OVER_B: f64 = 3.951_373_035_591_441;

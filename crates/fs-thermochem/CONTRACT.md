@@ -1649,8 +1649,9 @@ the lever rule; density uses conserved mass over additive phase volume. Latent
 enthalpy/internal energy, Clapeyron slope and amount-weighted residual h/u/s
 come from the original departure functions. Their matching ideal reference is
 added once by the caller; there is no extra latent source or ideal-mixing
-entropy between identical phases. Two-phase transport, acoustics,
-interfaces, metastable kinetics and chemical reactions are separate closures.
+entropy between identical phases. Two-phase transport, interfaces, metastable
+kinetics and chemical reactions are separate closures. The explicit equilibrium
+pressure/entropy response below adds its own acoustic assumptions.
 
 Six focused regressions compare independently computed Maxwell-area methane
 and ethane saturation states, differentiated Clapeyron response and latent
@@ -1690,3 +1691,29 @@ material transport still needs a new receipt for changed populations or volume.
 L1 returns local moments and does not own time evolution or a plasma solver.
 Focused tests compare refreshed summaries with separately constructed models,
 including both screening choices, source-domain rejection and cancellation.
+
+## Homogeneous-equilibrium pressure and entropy response
+
+`PengRobinsonSaturatedMixtureV1::equilibrium_response` differentiates the
+original pure-fluid coexistence under instantaneous thermal and phase
+equilibration. In the resolved interior of the dome, `p = p_sat(T)`,
+`ds = (Cv_eq/T) dT + p_sat' dv`, and `(dp/dv)_s = -T (p_sat')^2/Cv_eq`.
+The supplied original ideal molar Cv is added exactly once to the existing
+moving-phase residual tangent. Both complete single-phase capacities must be
+positive; no mixed constant-pressure heat capacity is invented.
+
+Common phase velocity and negligible interfacial storage give
+`K_s = -v (dp/dv)_s` and `c^2 = K_s/rho`. Exact or numerically unresolved
+phase endpoints refuse this bidirectional small-signal response because the
+interior and homogeneous branches have distinct one-sided derivatives.
+Original saturation admissibility, including critical coalescence refusal,
+remains authoritative. This equilibrium limit supplies no phase relaxation
+times, valid frequency band, slip, nucleation, bubble resonance or attenuation.
+
+The frozen and equilibrated acoustic closures are physically distinct; see
+Lund and Flåtten (2010), *Equilibrium conditions and sound velocities in
+two-phase flows*,
+<https://www.sintef.no/globalassets/project/co2-dynamics/publications/lund_an10.pdf>.
+Core regressions check the Maxwell relation, pressure-volume/energy closure,
+original ideal-Cv dependence and endpoint/reference refusal. Material-level
+regressions independently perturb full entropy-preserving equilibrium states.

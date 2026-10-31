@@ -3,7 +3,8 @@
 //! The original material or EOS owns density and adiabatic sound speed. This
 //! view derives `K_s = rho c²`, `beta_s = 1/K_s` and `Z = rho c` without an
 //! ideal-gas assumption. It describes local, small-signal, nondispersive bulk
-//! response, not shear waves, attenuation, multiphase acoustics or cavitation.
+//! response, not shear waves, attenuation or cavitation. Each original owner
+//! explicitly selects its phase and relaxation closure; this view supplies none.
 //! Source-card wrappers retain every query and usage receipt. The numerical
 //! snapshot itself does not confer source or experimental authority.
 

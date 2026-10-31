@@ -22,6 +22,13 @@
 //! [`fs_material::fluid_acoustics::FrozenHomogeneousMixture`] can drive the
 //! lossless path in its frozen-mass, homogeneous long-wavelength limit; bubble
 //! resonance, phase transfer and mixture transport losses are not inferred.
+//! An explicitly selected
+//! [`fs_material::thermochemical_gas::nonideal::equilibrium::acoustics::HomogeneousEquilibriumAcoustics`]
+//! instead supplies its original fully relaxed, homogeneous equilibrium bulk
+//! response. That choice requires phase/thermal relaxation to be fast compared
+//! with the acoustic period and remains a local linearization: this pipe owner
+//! evolves neither phase inventories nor nonlinear phase fronts. Neither mixture
+//! supplies thermoviscous loss coefficients through the lossless interface.
 //! Gas-only tone-hole radiation is not
 //! inferred for a liquid: those branches need their own pressure/flow boundary.
 //! The caller retains the source material and its original query receipts.

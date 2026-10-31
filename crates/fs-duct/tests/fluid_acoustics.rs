@@ -59,6 +59,9 @@ mod thermoviscous;
 #[path = "fluid_acoustics/regional.rs"]
 mod regional;
 
+#[path = "fluid_acoustics/equilibrium.rs"]
+mod equilibrium;
+
 fn options() -> ComposeOptions {
     ComposeOptions {
         preserve_well_conditioned_bits: false,
