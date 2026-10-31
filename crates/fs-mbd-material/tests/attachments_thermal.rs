@@ -15,6 +15,10 @@ use fs_material::state_point::{
     resolve_interface_state_point,
 };
 use fs_material::thermal::interface::ThermalInterfacePoint;
+use fs_material::conductor::{
+    ELECTRICAL_RESISTIVITY_DIMS, ELECTRICAL_RESISTIVITY_PROPERTY, ResolvedConductor,
+    resolve_uniform_conductor,
+};
 use fs_mbd::articulated::{FreeFloatingBaseState, JointModel};
 use fs_mbd::articulated::motion::{FreeFloatingMotionLoads, FreeFloatingMotionState};
 use fs_mbd::articulated::motion::spatial_loads::SpatialMotionLoads;
@@ -28,7 +32,11 @@ use fs_mbd_material::thermal::heating::LinkHeating;
 use fs_mbd_material::{RegionBinding, VolumeMoments};
 use fs_qty::{QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-use fs_thermal::enthalpy::{CellId, DepositionError, StepConfig};
+use fs_thermal::enthalpy::{
+    CellId, DepositionError, DepositionObserver, DepositionSimulation, Event, StepConfig,
+};
+use fs_thermal::observers::ObserverCouplingError;
+use std::collections::BTreeMap;
 
 const ZERO: Vec3 = Vec3 { x: 0.0, y: 0.0, z: 0.0 };
 const PROPERTIES: [(&str, &str); 3] = [("kx", "cx"), ("ky", "cy"), ("kz", "cz")];
@@ -272,4 +280,161 @@ fn explicit_cell_identity_work_budget_and_late_cancellation_preserve_both_histor
         assert_eq!(cell.specific_h_j_kg, 0.);
     }
     close(initial.bindings()[0].bushing.axes()[0].stiffness_n_m(), 6.);
+}
+
+fn conducting_card() -> MaterialCard {
+    let base = card(5., 0., 500.);
+    let mut claims = base.claims().clone();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(ELECTRICAL_RESISTIVITY_PROPERTY, ELECTRICAL_RESISTIVITY_DIMS),
+        value: PropertyValue::Curve {
+            abscissa: "T".into(), abscissa_dims: Temperature::DIMS,
+            knots: vec![(300., 5.), (400., 10.)], dims: ELECTRICAL_RESISTIVITY_DIMS,
+        },
+        validity: ValidityDomain::unconstrained().with("T", 300., 400.).with("pressure", 1e5, 2e5),
+        interpolation: InterpolationPolicy::LinearInside,
+        uncertainty: UncertaintyModel::Unstated, observations: vec![],
+        provenance: Provenance {
+            source: "synthetic resistor, not measurements".into(),
+            license: "CC0-1.0".into(), artifact: None,
+        },
+    }).unwrap();
+    MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+}
+
+/// The existing uniform-conductor law supplies I²R, with the original card
+/// refreshed from the actual heated cell. This fixture owns the ideal supply's
+/// work; the generic bushing owner does not infer an electrical-energy ledger.
+#[derive(Clone)]
+struct ElectricalHeat<'a> {
+    card: &'a MaterialCard,
+    conductor: ResolvedConductor,
+    energy_j: f64,
+    intervals: Vec<[f64; 2]>,
+    fail_endpoint: bool,
+}
+impl<'a> ElectricalHeat<'a> {
+    fn new(card: &'a MaterialCard) -> Self {
+        Self {
+            card,
+            conductor: resolve_uniform_conductor(card, &point(300., 1e5),
+                MaterialPropertySelection::SingleClaimOnly, 1., 1.).unwrap(),
+            energy_j: 0., intervals: vec![], fail_endpoint: false,
+        }
+    }
+}
+impl DepositionObserver for ElectricalHeat<'_> {
+    type Error = DepositionError;
+    fn requires_step_interval(&self) -> bool { true }
+    fn limit_timestep_s(&mut self, _: &DepositionSimulation<'_>, proposed: f64,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<f64, Self::Error> {
+        Ok(proposed.min(DT))
+    }
+    fn step_sources(&mut self, _: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        check()?;
+        let power = self.conductor.joule_power_w(2.).map_err(|_| DepositionError::MaterialDomain)?;
+        self.energy_j += dt * power;
+        self.intervals.push([start, end]);
+        Ok(BTreeMap::from([(CellId(0), power)]))
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> { Ok(()) }
+    fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> {
+        check()?;
+        if self.fail_endpoint { return Err(DepositionError::InvalidInput("electrical endpoint refused")); }
+        let query = point(thermal.temperature_k(CellId(0))?, 1e5);
+        let material = self.conductor.material().at_query_point(self.card, &query)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        self.conductor = self.conductor.with_material(material)
+            .map_err(|_| DepositionError::MaterialDomain)?;
+        Ok(())
+    }
+}
+
+#[test]
+fn source_generated_heat_shares_bushing_motion_temperature_and_restart() {
+    let a = conducting_card();
+    let b = card(10., 0., 500.);
+    let curves = [&a, &b].map(|m| caloric(m, 1e5, SolidLiquidPhase::Solid));
+    let model = mechanism(&a, &b);
+    let interface = interface(&a, &b);
+    let context = context();
+    let initial = HeatedBushings::new(
+        &model, links([&a, &b], [&curves[0], &curves[1]]),
+        vec![binding(&model, &interface, [&a, &b], &context)],
+        state(), vec![], budget(), config(), || Ok(()),
+    ).unwrap();
+    let source = ElectricalHeat::new(&a);
+    let wrenches = [Wrench::new(ZERO, ZERO); 2];
+    let (first, accepted, report) = initial.advance_with(
+        &source, DT, loads(&wrenches), config(), controls(), || Ok(()),
+    ).unwrap();
+    let (unheated, native_report) = initial.advance_to(
+        DT, loads(&wrenches), config(), controls(), || Ok(()),
+    ).unwrap();
+    // Same first native midpoint, plus exactly I² R dt = .4 J into side A.
+    assert_eq!(first.state(), unheated.state());
+    close(report.dissipated_heat_j, native_report.dissipated_heat_j);
+    close(accepted.energy_j, 0.4);
+    close(report.external_heat_j, 2.4);
+    close(report.thermal.external_heat_j, 2.4 + report.dissipated_heat_j);
+    let ta = 300. + (2.4 + 0.25 * report.dissipated_heat_j) / 10.;
+    let tb = 300. + 0.75 * report.dissipated_heat_j / 20.;
+    close(first.thermal().temperature_k(CellId(0)).unwrap(), ta);
+    close(accepted.conductor.resistance_ohm(), 5. * (1. + 0.01 * (ta - 300.)));
+    for (i, axis) in first.bindings()[0].bushing.axes().iter().enumerate() {
+        close(axis.resolved().state_coordinate("TA").unwrap(), ta);
+        close(axis.resolved().state_coordinate("TB").unwrap(), tb);
+        let rise = (ta + tb) / 2. - 300.;
+        close(axis.stiffness_n_m(), [6., 12., 18.][i] * (1. + rise / 100.));
+        close(axis.damping_n_s_m(), [0.3, 0.42, 0.66][i] * (1. + 2. * rise / 100.));
+    }
+    // The source's step cap restricts BOTH physical owners, even with a larger
+    // requested thermal step. Continuing source and bushing histories coincide.
+    let large_step = StepConfig { max_dt_s: 2. * DT, ..config() };
+    let (whole, whole_source, total) = initial.advance_with(
+        &source, 2. * DT, loads(&wrenches), large_step, controls(), || Ok(()),
+    ).unwrap();
+    let (continued, continued_source, _) = first.advance_with(
+        &accepted, 2. * DT, loads(&wrenches), config(), controls(), || Ok(()),
+    ).unwrap();
+    assert_eq!(whole_source.intervals, vec![[0., DT], [DT, 2. * DT]]);
+    assert_eq!(whole_source.intervals, continued_source.intervals);
+    assert_eq!(whole.state(), continued.state());
+    close(whole_source.energy_j, 0.4 + DT * 20. * (1. + 0.01 * (ta - 300.)));
+    close(total.external_heat_j, 4. + whole_source.energy_j);
+    for id in [CellId(0), CellId(1)] {
+        close(whole.thermal().temperature_k(id).unwrap(), continued.thermal().temperature_k(id).unwrap());
+    }
+    assert!(total.total_energy_residual_j.abs() < controls().energy_tolerance_j);
+    let (without_supply, _) = initial.advance_to(
+        2. * DT, loads(&wrenches), config(), controls(), || Ok(()),
+    ).unwrap();
+    assert!((whole.state().joint_velocity[0] - without_supply.state().joint_velocity[0]).abs() > 1e-8);
+    assert!(source.intervals.is_empty());
+    assert_eq!(source.energy_j, 0.);
+    assert_eq!(initial.state(), &state());
+
+    let refusing = ElectricalHeat { fail_endpoint: true, ..source.clone() };
+    assert!(matches!(initial.advance_with(
+        &refusing, DT, loads(&wrenches), config(), controls(), || Ok(()),
+    ), Err(ObserverCouplingError::First(DepositionError::InvalidInput("electrical endpoint refused")))));
+    assert!(matches!(initial.advance_with(
+        &source, DT, loads(&wrenches), config(),
+        BushingHeatControls { maximum_parameter_work_j: 0., ..controls() }, || Ok(()),
+    ), Err(ObserverCouplingError::Second(_))));
+    let mut checkpoints = 0;
+    initial.advance_with(&source, DT, loads(&wrenches), config(), controls(), || {
+        checkpoints += 1; Ok(())
+    }).unwrap();
+    let mut visited = 0;
+    assert!(matches!(initial.advance_with(&source, DT, loads(&wrenches), config(), controls(), || {
+        visited += 1;
+        if visited == checkpoints { Err(DepositionError::Cancelled) } else { Ok(()) }
+    }), Err(ObserverCouplingError::Thermal(DepositionError::Cancelled))));
+    assert!(refusing.intervals.is_empty());
+    assert_eq!(initial.thermal().time_s(), 0.);
+    assert_eq!(initial.thermal().cells()[&CellId(0)].specific_h_j_kg, 0.);
 }

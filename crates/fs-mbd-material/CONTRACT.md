@@ -737,3 +737,21 @@ Two native regression groups cover independent midpoint motion/loss, unequal
 finite heat capacities, external heating, actual paired/mean temperatures,
 all-axis source refresh, nonzero strained-spring parameter work, continuing
 histories and late rollback. Their execution remains unverified in this session.
+
+`HeatedBushings::advance_with` composes an existing `DepositionObserver` through
+the shared `CoupledObservers` owner. Generated heat, material-dependent thermal
+transport, observer timestep restrictions and native bushing damping use the
+same accepted intervals and caloric state. Each source is deposited once;
+the supplied observer receives the accepted endpoint before all original
+interface coefficients refresh. Its retained history and the complete bushing
+history are returned together only after final energy and cancellation checks.
+
+The bushing report classifies supplied-observer heat as external to its own
+mechanical/caloric subsystem; any electrical, chemical or other storage and work
+remain the supplying observer's responsibility. Conservative observer transfers
+retain their original thermal accounting. Composition remains an explicit split,
+not a strong nonlinear solve or an inferred total-energy law for arbitrary owners.
+The `attachments_thermal` generated-heat regression uses the existing source-bound
+uniform-conductor law at the actual cell temperature. It checks independent I²R
+heat, all-axis interface feedback, changed subsequent native motion, a shared
+observer step limit, restart and failure/cancellation rollback of every history.

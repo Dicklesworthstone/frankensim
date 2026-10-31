@@ -25,6 +25,7 @@ use fs_thermal::enthalpy::{
     CellId, DepositionBudget, DepositionError, DepositionObserver, DepositionSimulation,
     EnergyAudit, Event, StepConfig, TimedEvent,
 };
+use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use std::collections::BTreeMap;
 
 /// Original ordered interface and explicit partition of its physical loss.
@@ -81,7 +82,8 @@ pub struct BushingHeatReport {
     /// Raw native thermal audit; its external heat already includes damping.
     pub thermal: EnergyAudit,
     pub dissipated_heat_j: f64,
-    /// Authored boundary/source heat, excluding the internal damping transfer.
+    /// Boundary/source and composed-observer heat, excluding bushing damping.
+    /// A composed domain's own storage/work balance remains with that observer.
     pub external_heat_j: f64,
     /// Signed U_new(q_after)-U_old(q_after), supplied by the parameter controller.
     pub elastic_parameter_work_j: f64,
@@ -170,13 +172,63 @@ impl<'a> HeatedBushings<'a> {
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, BushingHeatReport), BushingHeatError> {
         checkpoint()?;
+        let observer = self.observer(loads, controls)?;
+        let (thermal, observer, audit) = self.thermal.advance_observed(
+            &observer, target_s, thermal_config, &mut checkpoint,
+        )?;
+        self.finish(thermal, observer, audit, &mut checkpoint)
+    }
+
+    /// Compose another physical source/transport owner on these SAME substeps.
+    ///
+    /// Its heat is added to native damping once; conductance overrides, event
+    /// boundaries and step limits remain with the original thermal scheduler.
+    /// The supplied observer runs first at each callback, and bushing sources
+    /// and coefficient refresh see the same start/end thermal states. Both
+    /// histories publish only after the coupled energy and final cancellation
+    /// checks succeed. Clone must retain independent mutable physical history.
+    ///
+    /// The report treats non-bushing heat as external to this mechanical and
+    /// caloric subsystem. If the observer owns electrical, chemical or other
+    /// storage, its returned history must account for that supply; this method
+    /// does not infer a total-energy law for an arbitrary composed domain.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub fn advance_with<O: DepositionObserver>(
+        &self,
+        observer: &O,
+        target_s: f64,
+        loads: SpatialMotionLoads<'_>,
+        thermal_config: StepConfig,
+        controls: BushingHeatControls,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, O, BushingHeatReport), ObserverCouplingError<O::Error, BushingHeatError>> {
+        checkpoint()?;
+        let mechanics = self.observer(loads, controls).map_err(ObserverCouplingError::Second)?;
+        let pair = CoupledObservers::new(observer.clone(), mechanics);
+        let (thermal, pair, audit) = self.thermal.advance_observed(
+            &pair, target_s, thermal_config, &mut checkpoint,
+        )?;
+        let (observer, mechanics) = pair.into_parts();
+        let (next, report) = self.finish(thermal, mechanics, audit, &mut checkpoint)
+            .map_err(|error| match error {
+                BushingHeatError::Thermal(error) => ObserverCouplingError::Thermal(error),
+                error => ObserverCouplingError::Second(error),
+            })?;
+        Ok((next, observer, report))
+    }
+
+    fn observer<'b>(
+        &'b self,
+        loads: SpatialMotionLoads<'b>,
+        controls: BushingHeatControls,
+    ) -> Result<EvolvingBushings<'a, 'b>, BushingHeatError> {
         if !loads.connections.is_empty()
             || !nonnegative(controls.maximum_parameter_work_j)
             || !nonnegative(controls.energy_tolerance_j)
         {
             return Err(BushingHeatError::Invalid("unrouted connections or invalid work budgets"));
         }
-        let observer = EvolvingBushings {
+        Ok(EvolvingBushings {
             regions: &self.regions,
             bindings: self.bindings.clone(),
             state: self.state.clone(),
@@ -190,14 +242,20 @@ impl<'a> HeatedBushings<'a> {
             supplied: 0.0,
             mechanical_change: 0.0,
             mechanical_residual: 0.0,
-        };
-        let (thermal, observer, audit) = self.thermal.advance_observed(
-            &observer, target_s, thermal_config, &mut checkpoint,
-        )?;
+        })
+    }
+
+    fn finish(
+        &self,
+        thermal: DepositionSimulation<'a>,
+        observer: EvolvingBushings<'a, '_>,
+        audit: EnergyAudit,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, BushingHeatReport), BushingHeatError> {
         let external = finite(audit.external_heat_j - observer.heat)?;
         let residual = finite(observer.mechanical_change + audit.stored_energy_change_j
             - observer.supplied - observer.parameter - external)?;
-        if residual.abs() > controls.energy_tolerance_j || observer.pending.is_some() {
+        if residual.abs() > observer.controls.energy_tolerance_j || observer.pending.is_some() {
             return Err(BushingHeatError::Invalid("coupled bushing energy balance failed"));
         }
         checkpoint()?;
