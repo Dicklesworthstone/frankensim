@@ -6376,6 +6376,33 @@ example reuses existing synthetic source-card input and emits pressure, density,
 temperature, conserved mass, heat capacity, sound speed and joule residuals as
 CSV. Its manufactured mixture supplies no empirical or vessel-safety claim.
 
+### Conserved mass with real-gas volume work
+
+`nonideal::energy::parcel::ClosedRealGasParcel` retains the same inventory and
+source model while physical volume changes. Density follows conserved mass
+divided by the accepted volume. Its reversible adiabatic operation reconstructs
+temperature from the original NASA ideal-reference entropy plus the PR residual
+entropy, with total `Cv/T` as the safeguarded root tangent. Both initial and final
+densities enter caloric and entropy increments; the reference departure is never
+silently recomputed at the candidate density. Species energy/entropy references
+and fixed-composition mixing constants cancel before subtraction.
+
+Accepted work by the gas is `-m Delta u` on the admitted isentrope. The separate
+volume/internal-energy endpoint supports a consumer-owned heat/work balance,
+including a zero-energy-change expansion whose real-gas temperature changes.
+The endpoint API supplies no heat/work split, piston dynamics or time integration.
+Fixed-volume heat reuses `IsochoricRealGasParcel`; conversions retain its exact
+accepted state and inventory. Complete volume updates publish only after source
+admission, entropy/work consistency and the final cancellation check. The same
+homogeneous-branch limitations and original transport-card bounds apply.
+
+Independent high-precision binary-mixture regressions cover isentropic
+compression pressure, temperature and work, constant-internal-energy expansion
+cooling and entropy increase, partitioned work and reversal, shared material
+views, post-compression heating, source refusal and final-audit cancellation.
+The optional fourth `real_gas_vessel` argument is a final/initial volume ratio;
+after heating it emits the volume path, cumulative gas work and entropy residual.
+
 
 ## Native axial and plane-stress plasticity
 

@@ -9,6 +9,10 @@
 
 mod volume;
 
+/// Conserved-mass volume changes through the original real-gas energy/entropy laws.
+pub mod closed;
+pub use closed::ClosedRealGasParcel;
+
 use super::super::{ResolvedThermochemicalRealGasState, ThermochemicalPengRobinsonModel};
 use crate::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, GasHeatStep, poll, updated_point,

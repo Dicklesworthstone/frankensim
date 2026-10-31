@@ -1,4 +1,4 @@
-//! Conservative internal-energy inversion at one retained real-fluid density.
+//! Conservative internal-energy inversion with explicit real-fluid densities.
 //!
 //! NASA-9 supplies ideal-reference calorics and PR supplies the residual energy
 //! and Cv at the SAME composition, temperature and molar volume. The bounded
@@ -10,6 +10,8 @@
 
 /// Constant-mass storage with continuing fixed-volume real-gas heating.
 pub mod parcel;
+/// Entropy changes and reversible adiabatic density reconstruction.
+pub mod entropy;
 
 use fs_matdb::QueryPoint;
 use fs_qty::{Density, Temperature};
@@ -41,21 +43,8 @@ impl RealGasEnergySolution {
 struct CaloricSample {
     internal_energy_j_kg: f64,
     residual_energy_j_kg: f64,
-    residual_entropy_j_kg_k: f64,
     cv_j_kg_k: f64,
     pressure_pa: f64,
-}
-
-// Thermodynamic identity S^R = (H^R - G^R)/T at the same T/p/composition.
-// Reuse the source root and its already evaluated U^R, without repeating the
-// departure logarithm or introducing another EOS/reference entropy formula.
-fn residual_entropy(
-    root: &fs_thermochem::eos::peng_robinson::PengRobinsonPhaseRootV1,
-    temperature: f64, molar_mass: f64, residual_energy_j_kg: f64,
-) -> f64 {
-    residual_energy_j_kg / temperature
-        + fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molar_mass
-            * (root.compressibility_factor() - 1.0 - root.residual_gibbs_over_rt())
 }
 
 impl ThermochemicalPengRobinsonModel {
@@ -68,16 +57,14 @@ impl ThermochemicalPengRobinsonModel {
             .map_err(|error| failure("real-gas reference calorics", error))?;
         let molar_mass = properties.molar_mass().value();
         let residual_energy_j_kg = direct.root().residual_internal_energy_j_mol() / molar_mass;
-        let residual_entropy_j_kg_k = residual_entropy(direct.root(), t, molar_mass, residual_energy_j_kg);
         let internal_energy_j_kg = properties.u().value() / molar_mass + residual_energy_j_kg;
         let cv_j_kg_k = properties.mass_specific_cv().value()
             + direct.root().residual_cv_j_mol_k() / molar_mass;
         if !internal_energy_j_kg.is_finite() || !residual_energy_j_kg.is_finite()
-            || !residual_entropy_j_kg_k.is_finite()
             || !positive(cv_j_kg_k) {
             return Err(GasEnergyError::Invalid("finite real-gas energy and positive complete Cv required"));
         }
-        Ok(CaloricSample { internal_energy_j_kg, residual_energy_j_kg, residual_entropy_j_kg_k, cv_j_kg_k,
+        Ok(CaloricSample { internal_energy_j_kg, residual_energy_j_kg, cv_j_kg_k,
             pressure_pa: direct.pressure().value() })
     }
 
@@ -134,8 +121,21 @@ impl ThermochemicalPengRobinsonModel {
     pub fn specific_internal_energy_change_at_density(
         &self, density_kg_m3: f64, initial_temperature_k: f64, final_temperature_k: f64,
     ) -> Result<f64, GasEnergyError> {
-        let initial = self.caloric_at_density(density_kg_m3, initial_temperature_k)?;
-        let final_state = self.caloric_at_density(density_kg_m3, final_temperature_k)?;
+        self.specific_internal_energy_change_between_densities(density_kg_m3,
+            initial_temperature_k, density_kg_m3, final_temperature_k)
+    }
+
+    /// Original-law Delta u [J/kg] between two explicit density/temperature
+    /// endpoints. The ideal-reference increment depends on temperature; the PR
+    /// departure depends on BOTH temperature and density. Replacing the original
+    /// departure with one at the final density would erase expansion energy.
+    /// Neither heat nor boundary work is inferred from this constitutive query.
+    pub fn specific_internal_energy_change_between_densities(
+        &self, initial_density_kg_m3: f64, initial_temperature_k: f64,
+        final_density_kg_m3: f64, final_temperature_k: f64,
+    ) -> Result<f64, GasEnergyError> {
+        let initial = self.caloric_at_density(initial_density_kg_m3, initial_temperature_k)?;
+        let final_state = self.caloric_at_density(final_density_kg_m3, final_temperature_k)?;
         self.caloric_increment(initial_temperature_k, final_temperature_k,
             initial.residual_energy_j_kg, final_state.residual_energy_j_kg)
     }
@@ -161,28 +161,48 @@ impl ThermochemicalPengRobinsonModel {
     /// because the input falls below the requested absolute tolerance.
     pub fn reconstruct_density_internal_energy_increment(
         &self, context: &QueryPoint, density_kg_m3: f64, change_j_kg: f64,
+        controls: GasEnergySolve, cancelled: impl FnMut() -> bool,
+    ) -> Result<RealGasEnergySolution, GasEnergyError> {
+        self.reconstruct_density_internal_energy_increment_between_densities(
+            context, density_kg_m3, density_kg_m3, change_j_kg, controls, cancelled,
+        )
+    }
+
+    /// Recover the state at a new density from the original state's Delta u.
+    /// `context` supplies the reference temperature and source axes; explicit
+    /// initial density selects the original homogeneous branch without an
+    /// ambiguous PT root choice. Final density is independently conserved.
+    /// Zero Delta u at changed density is a real-gas Joule expansion/compression
+    /// endpoint, not an instruction to keep temperature fixed. The enclosing
+    /// consumer owns heat, work and the physical path between these endpoints.
+    pub fn reconstruct_density_internal_energy_increment_between_densities(
+        &self, context: &QueryPoint, initial_density_kg_m3: f64,
+        density_kg_m3: f64, change_j_kg: f64,
         controls: GasEnergySolve, mut cancelled: impl FnMut() -> bool,
     ) -> Result<RealGasEnergySolution, GasEnergyError> {
         controls.validate()?;
         poll(&mut cancelled)?;
         let (initial_temperature, _) = coordinates(context)?;
         let initial_t = initial_temperature.value();
-        if !positive(density_kg_m3) || !change_j_kg.is_finite()
+        if !positive(initial_density_kg_m3) || !positive(density_kg_m3) || !change_j_kg.is_finite()
             || initial_t < controls.minimum_temperature_k || initial_t > controls.maximum_temperature_k {
             return Err(GasEnergyError::Invalid("real-gas increment needs positive density, finite heat and bracketed reference temperature"));
         }
-        let initial = self.evaluate_density_temperature(context, density_kg_m3)?;
+        let initial = self.evaluate_density_temperature(context, initial_density_kg_m3)?;
         let residual_initial = initial.root().residual_internal_energy_j_mol()
             / self.mechanics().molar_mass().value();
-        if change_j_kg == 0.0 {
+        if change_j_kg == 0.0 && density_kg_m3 == initial_density_kg_m3 {
             poll(&mut cancelled)?;
             return Ok(RealGasEnergySolution { state: initial, residual_j_kg: 0.0, iterations: 0 });
         }
-        let tolerance = controls.energy_tolerance_j_kg.min(0.5 * change_j_kg.abs());
+        let tolerance = if change_j_kg == 0.0 { controls.energy_tolerance_j_kg }
+            else { controls.energy_tolerance_j_kg.min(0.5 * change_j_kg.abs()) };
         if !positive(tolerance) {
             return Err(GasEnergyError::Invalid("real-gas increment is below represented solve resolution"));
         }
-        let (lo, hi) = if change_j_kg > 0.0 { (initial_t, controls.maximum_temperature_k) }
+        let (lo, hi) = if density_kg_m3 != initial_density_kg_m3 {
+            (controls.minimum_temperature_k, controls.maximum_temperature_k)
+        } else if change_j_kg > 0.0 { (initial_t, controls.maximum_temperature_k) }
             else { (controls.minimum_temperature_k, initial_t) };
         let solved = root::solve(lo, hi, tolerance, controls.maximum_iterations, |t| {
             let sample = self.caloric_at_density(density_kg_m3, t)?;
@@ -199,8 +219,9 @@ impl ThermochemicalPengRobinsonModel {
         let change = self.caloric_increment(initial_t, state.temperature_k(), residual_initial,
             state.root().residual_internal_energy_j_mol() / self.mechanics().molar_mass().value())?;
         let residual = change - change_j_kg;
-        if state.temperature_k() == initial_t || change == 0.0
-            || change.is_sign_positive() != change_j_kg.is_sign_positive() {
+        if change_j_kg != 0.0 && (change == 0.0
+            || change.is_sign_positive() != change_j_kg.is_sign_positive()
+            || (density_kg_m3 == initial_density_kg_m3 && state.temperature_k() == initial_t)) {
             return Err(GasEnergyError::NotConverged { iterations: solved.iterations, residual_j_kg: residual });
         }
         finish(state, density_kg_m3, residual, solved.iterations, controls, &mut cancelled)

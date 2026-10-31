@@ -620,6 +620,34 @@ impl PengRobinsonPhaseRootV1 {
             + self.residual_internal_energy_j_mol()
     }
 
+    /// Entropy departure S^R [J/(mol K)] from an ideal gas at the SAME T,
+    /// density and frozen composition. Differentiating the PR residual
+    /// Helmholtz energy gives `R ln(1-b/v) + a'(T) I(v)`.
+    /// This reference is useful for conservative density/entropy changes;
+    /// it differs from the conventional same-pressure departure by `R ln Z`.
+    #[must_use]
+    pub fn residual_entropy_at_density_j_mol_k(&self) -> f64 {
+        let b = self.covolume_m3_per_mol;
+        let v = self.molar_volume_m3_per_mol;
+        let sqrt_2 = det::sqrt(2.0);
+        let log_volume = crate::entropy::log_ratio(
+            v + (1.0 + sqrt_2) * b, v + (1.0 - sqrt_2) * b,
+        );
+        UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * crate::entropy::log_ratio(v - b, v)
+            + self.attraction_temperature_derivative * log_volume / (2.0 * sqrt_2 * b)
+    }
+
+    /// Entropy departure S^R [J/(mol K)] from the ideal gas at the SAME T,
+    /// pressure and composition, consistent with `H^R/T - R*(G^R/RT)`.
+    /// Original ideal-reference and mixing entropies are supplied by the
+    /// thermochemical species owner; no phase-equilibrium entropy is inferred.
+    #[must_use]
+    pub fn residual_entropy_j_mol_k(&self) -> f64 {
+        self.residual_entropy_at_density_j_mol_k()
+            + UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K
+                * crate::entropy::log_ratio(self.compressibility_factor, 1.0)
+    }
+
     /// Residual constant-volume heat capacity C_v^R [J/(mol K)].
     #[must_use]
     pub fn residual_cv_j_mol_k(&self) -> f64 {
@@ -938,6 +966,33 @@ mod tests {
         assert!((cv / center.root().residual_cv_j_mol_k() - 1.0).abs() < 2.0e-8);
         let dpdt = (plus.pressure().value() - minus.pressure().value()) / (2.0 * h);
         assert!((dpdt / center.root().pressure_derivatives().0 - 1.0).abs() < 2.0e-9);
+    }
+
+    #[test]
+    fn g1_entropy_departure_closes_gibbs_caloric_and_maxwell_identities() {
+        let model = pure(methane());
+        let t = 300.0;
+        let rho = 50.0;
+        let evaluate = |temperature, density| model.evaluate_density_temperature(
+            Temperature::new(temperature), Density::new(density),
+        ).unwrap();
+        let state = evaluate(t, rho);
+        let root = state.root();
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let from_gibbs = root.residual_enthalpy_j_mol() / t
+            - r * root.residual_gibbs_over_rt();
+        assert!((root.residual_entropy_j_mol_k() - from_gibbs).abs() < 2.0e-12);
+        let dt = 1.0e-3;
+        let ds_dt = (evaluate(t + dt, rho).root().residual_entropy_at_density_j_mol_k()
+            - evaluate(t - dt, rho).root().residual_entropy_at_density_j_mol_k()) / (2.0 * dt);
+        assert!((ds_dt * t / root.residual_cv_j_mol_k() - 1.0).abs() < 2.0e-8);
+        let v = root.molar_volume_m3_per_mol();
+        let dv = v * 1.0e-5;
+        let m = model.molar_mass().value();
+        let ds_dv = (evaluate(t, m / (v + dv)).root().residual_entropy_at_density_j_mol_k()
+            - evaluate(t, m / (v - dv)).root().residual_entropy_at_density_j_mol_k()) / (2.0 * dv)
+            + r / v;
+        assert!((ds_dv / root.pressure_derivatives().0 - 1.0).abs() < 2.0e-8);
     }
 
     #[test]

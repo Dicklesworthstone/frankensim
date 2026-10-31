@@ -1619,3 +1619,14 @@ stability can be admitted. This coordinate extension enables conservative
 energy reconstruction; it does not implement a spatial compressible solver.
 The cubic residual-thermodynamics convention is described in
 <https://pages.nist.gov/teqp-docs/en/latest/models/cubics.html>.
+
+Residual entropy exposes its reference coordinates explicitly. The density
+form is relative to ideal gas at the same temperature and molar volume,
+`sR = R ln(1-b/v) + da/dT I(v)`. The pressure form adds `R ln Z`, giving
+`R ln(Z-B) + da/dT I(v)` relative to ideal gas at the same temperature and
+pressure. Both use the original PR attractive integral and mixing derivatives;
+they introduce no new caloric fit. Their finite differences recover `CvR/T`
+and the original pressure/temperature Maxwell derivative, while the pressure
+form retains the Gibbs identity with the existing residual enthalpy. These
+primitives support source-bound entropy inversion in `fs-material` without
+coupling this mechanical owner to transport cards or mutable parcel state.
