@@ -36,6 +36,12 @@ mod spectral_reference;
 #[path = "photometric_path/measured_reflectance.rs"]
 mod measured_reflectance;
 
+#[path = "photometric_path/equilibrium.rs"]
+mod equilibrium;
+
+#[path = "photometric_path/depth_remainder.rs"]
+mod depth_remainder;
+
 #[path = "photometric_path/point_energy.rs"]
 mod point_energy;
 

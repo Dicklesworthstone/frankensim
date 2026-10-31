@@ -50,7 +50,9 @@ impl SamplingUncertainty {
 /// This is neither a complete scene identity nor an accuracy certificate.
 /// Replay also requires the original scene, fixtures, medium, measurement
 /// geometry and remaining options. Calibration, spectral discretization,
-/// geometry/material/medium and finite-depth errors remain unbounded.
+/// geometry/material/medium errors remain unbounded. The separate optional
+/// [`super::DiffuseVacuumRemainder`] addresses only a restricted finite-depth
+/// model remainder; these settings alone establish no bound.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PathCalculationContext {
     /// Actual primary-sample policy of this job.

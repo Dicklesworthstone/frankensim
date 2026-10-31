@@ -1753,8 +1753,10 @@ table are retained under `data/cie`; `photometry::observer::OBSERVER_ID` names
 the data and interpolation convention. This removes the observer-fit mismatch
 at represented wavelengths, not spectral-bin/truncation or metrological error.
 
-Input calibration, geometry/material/medium uncertainty and omitted transport
-are not certified. Direct and path estimates carry `NumericalKind::NoClaim`,
+Input calibration, geometry/material/medium uncertainty and general omitted
+transport are not certified. The restricted diffuse-vacuum depth bound below
+concerns only that model's omitted reflection orders. Direct and path estimates
+carry `NumericalKind::NoClaim`,
 not a fictitious zero-width certificate; unknown total error is `None`.
 Sampling standard error and haze quadrature discrepancy are separate estimates,
 neither a confidence interval nor a total error bound. A zero estimate does not
@@ -1829,6 +1831,20 @@ progressive replay tests remain in the photometry batteries.
 - A conservative-scattering diffuse-cube furnace tests all-order radiance and
   energy balance at two path depths. Its acceptance tolerance does not provide
   a general bound on scattering-order truncation.
+- `photometric_path::equilibrium` couples colored diffuse walls, calibrated
+  wall emission and a spectrally absorbing, emitting, scattering gas at 3000 K.
+  Independent SI Planck constants and original CIE CSV rows define the
+  all-order equilibrium radiance and the probe reference `E = pi * L`.
+  Uniform and layered densities, a nonuniform tabulated phase, camera XYZ and
+  two differently oriented probes exercise absorption/emission balance and
+  conservative redistribution together. The benchmark separates a derived
+  model-tail allowance from its fixed IID sampling tolerance; it does not
+  assert continuous-spectrum accuracy or measured-material agreement.
+- `photometric_path::depth_remainder` checks the restricted public model bound
+  against an emitting cavity's independent geometric series, including the
+  native depth convention and lux conversion. It checks global colored
+  reflectance maxima, progress-independent metadata, exact black tails and
+  refusal of unsupported models while retaining numerical `NoClaim`.
 - `photometric_path::uncertainty_reference` measures one unresolved finite
   panel and two disjoint panels with different luminances. Independently
   flattened photopic spectra make each entire path a member of a known
@@ -2050,7 +2066,8 @@ first successful path publish together; a failed path exposes no incomplete
 probe. The original Welford accumulator estimates IID sampling standard error
 in lux after two paths. The exact direct term contributes no sampling variance.
 Owen–Sobol results carry no IID standard-error claim. Total error remains
-unknown, including the finite-depth remainder and physical-model uncertainty.
+unknown. Finite-depth model truncation is unbounded except in the restricted
+diffuse-vacuum case below, and physical-model uncertainty remains unknown.
 `photometric_stage --total-csv` writes positions, direct/continuous/total lux,
 estimated IID standard error, sample count, explicit unknown total bounds and
 a named sampling-uncertainty state for a stage grid using heterogeneous
@@ -2073,14 +2090,57 @@ value has the method's named SI unit. Uncomputed and out-of-range outputs
 return outer `None`. The typed estimate retains the existing Welford value
 bit-for-bit; legacy optional standard-error fields remain available. This
 distinguishes a one-path IID result from an Owen–Sobol result without inventing
-an IID estimate for correlated samples. Zero estimated sampling error still
-leaves numerical `NoClaim`, the finite-depth remainder, calibration,
-discretization and total error unchanged and unknown.
+an IID estimate for correlated samples. Zero estimated sampling error leaves
+numerical `NoClaim` and any finite-depth model bound unchanged; calibration,
+discretization and total error remain unknown.
 
 The headless example derives path metadata from these job accessors. Its total
 lux CSV appends `sampling_uncertainty` to identify the reason for a missing
 standard-error value; path-image summaries report an unavailable estimate
 when no IID values exist instead of substituting zero.
+
+### Restricted diffuse-vacuum depth remainder
+
+`PathLuminanceJob::diffuse_vacuum_remainder()` and the corresponding probe-job
+accessor return an optional `DiffuseVacuumRemainder`. Admission requires
+explicit vacuum, no active point fixtures, only `Material::SpectralDiffuse`
+surfaces and uniform Lambertian finite emitters without projector bindings.
+Every primitive participates, including hidden or unlit geometry. Let `q` be
+the largest reflectance knot over all materials; the piecewise-linear laws
+then satisfy `0 <= rho(lambda) <= q < 1`. A white surface with `q = 1`, any
+other material, a physical medium (even an empty grid) or any projector binding
+returns `None` for this metadata without rejecting an otherwise valid job.
+
+For this ideal model, the positive diffuse reflection operator has maximum
+spectral-radiance norm at most `q`. A conservative source envelope sums the
+admitted emitter radiance laws. Its photopic ceiling `S` is evaluated from
+each retained emitter coefficient, source-spectrum bin, published observer Y
+weight, 5 nm bin width and 683 lm/W factor. It does not assume that a stored
+spectrum's floating-point photopic normalization is exactly one. The omitted
+reflection orders at native depth `D` therefore satisfy
+`B_L = S * q^D / (1 - q)` in cd/m² and `B_E = pi * B_L` in lux. BSDF-only
+paths retain orders zero through `D - 1`; terminal next-event estimation can
+include an additional order, making this common bound conservative. A probe's
+initial hemisphere direction does not consume a transport vertex.
+
+The bound calculation uses outward interval arithmetic for the spectral sum,
+geometric tail and mathematical-pi conversion. Exponentiation takes
+logarithmic work even at the largest native depth. Exact black or zero-source
+tails can be zero; a positive underflow retains a nonzero outward upper bound.
+A bound that cannot be represented finitely returns `None`. Getters retain
+the depth, maximum reflectance, source ceiling and both SI bounds. This
+immutable scene/depth metadata is available before sampling and does not
+change as a job advances.
+
+This bounds only the ideal model's omitted reflection orders using its
+admitted radiance coefficients and represented spectral laws. It does not
+enclose sample deviation, floating-point transport/intersection arithmetic,
+errors in geometry or source flux/area normalization, spectral discretization,
+fixture calibration or disagreement with physical materials and fixtures.
+It is not an interval around a sampled result. In particular, a zero model
+tail does not change `NumericalKind::NoClaim`, estimated IID sampling error or
+the `None` total-error fields. General participating-media, point-source,
+projector and non-diffuse truncation bounds remain unavailable.
 
 ### Native CPU execution of calibrated paths
 

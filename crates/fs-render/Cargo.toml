@@ -19,6 +19,7 @@ fs-evidence = { path = "../fs-evidence", optional = true }
 fs-exec = { path = "../fs-exec", optional = true }
 fs-geom = { path = "../fs-geom", optional = true }
 fs-img = { path = "../fs-img", optional = true }
+fs-ivl = { path = "../fs-ivl", optional = true }
 fs-material = { path = "../fs-material", optional = true }
 fs-math = { path = "../fs-math" }
 fs-mbd-material = { path = "../fs-mbd-material", optional = true, features = ["thermoelastic-coupling"] }
@@ -56,7 +57,7 @@ differentiable = ["chart-backends", "dep:fs-ad"]
 tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs-substrate"]
 # Calibrated, headless fixture and finite-emitter transport in SI photometric units.
 # Explicitly opt-in while the observer/model error remains unbounded.
-photometry = ["tracer", "volumes"]
+photometry = ["tracer", "volumes", "dep:fs-ivl"]
 # Resolve optical/thermal appearance from the same material state as mechanics.
 material-state = ["tracer", "dep:fs-material", "dep:fs-conduction"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.

@@ -10,7 +10,7 @@ use super::*;
 use crate::camera::{Aperture, PhysicalCamera};
 use crate::photometry::area::PhotometricEmitters;
 use crate::photometry::medium::HomogeneousMedium;
-use crate::photometry::path::PointFixtureSampling;
+use crate::photometry::path::{DiffuseVacuumRemainder, PointFixtureSampling};
 use crate::photometry::source::{LUMINOUS_EFFICACY_LM_W, PhotometricSource};
 use crate::photometry::transport::PhotometricMedium;
 use crate::photometry::{
@@ -67,6 +67,7 @@ pub(crate) struct FixtureTransport<'scene, 'field> {
     lighting: SceneLighting<'scene>,
     medium: Option<PathMedium<'scene, 'field>>,
     settings: Settings,
+    diffuse_vacuum_remainder: Option<DiffuseVacuumRemainder>,
     key: [u32; 2],
     sobol: Option<Sobol>,
     path_sobol: Option<Sobol>,
@@ -174,6 +175,13 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             )?;
         }
         let areas = area::AreaLighting::try_new(scene, emitters.surfaces, cx)?;
+        let diffuse_vacuum_remainder = if matches!(medium, FixtureMedium::Vacuum)
+            && sources.iter().all(|source| source.flux_lm() == 0.0)
+        {
+            areas.diffuse_vacuum_remainder(scene, settings.max_depth, cx)?
+        } else {
+            None
+        };
         let (medium, medium_bounds_m, scattering) = match medium {
             FixtureMedium::Vacuum => (None, None, false),
             FixtureMedium::Absorbing(grid) if grid.is_vacuum() => (None, None, false),
@@ -220,6 +228,7 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
             lighting,
             medium,
             settings,
+            diffuse_vacuum_remainder,
             key,
             sobol,
             path_sobol,
@@ -237,6 +246,10 @@ impl<'scene, 'field> FixtureTransport<'scene, 'field> {
 
     pub(crate) fn point_sampling(&self) -> PointFixtureSampling {
         self.fixtures.point_sampling
+    }
+
+    pub(crate) const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {
+        self.diffuse_vacuum_remainder
     }
 
     #[cfg(test)]

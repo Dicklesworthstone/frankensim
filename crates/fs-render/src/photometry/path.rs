@@ -26,8 +26,10 @@ use super::{PhotometryError, TransportOptions};
 mod camera_tests;
 mod execution;
 mod illuminance;
+mod remainder;
 mod report;
 pub use illuminance::{IlluminanceSampling, PathIlluminanceEstimate, PathIlluminanceJob};
+pub use remainder::DiffuseVacuumRemainder;
 pub use report::{PathCalculationContext, SamplingUncertainty};
 
 /// Borrowed native physical media for spectral fixture paths.
@@ -414,6 +416,16 @@ impl<'scene, 'field> PathLuminanceJob<'scene, 'field> {
     #[must_use]
     pub const fn calculation_context(&self) -> PathCalculationContext {
         PathCalculationContext::new(self.sampler, self.seed, self.max_depth)
+    }
+
+    /// Bound only the ideal model's omitted reflection orders for admitted
+    /// diffuse, uniform-area-source vacuum scenes. This is independent of the
+    /// number of accepted samples; it does not bound sampling, numerical or
+    /// calibration error, and does not change this job's total-error claim.
+    /// Unsupported models or an unrepresentable bound return `None`.
+    #[must_use]
+    pub const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {
+        self.transport.diffuse_vacuum_remainder()
     }
 
     /// Row-major estimates without an additional image allocation.

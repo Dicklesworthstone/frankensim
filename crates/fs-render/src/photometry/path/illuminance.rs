@@ -11,7 +11,10 @@ use crate::tracer::{
 };
 use fs_exec::Cx;
 
-use super::{PathCalculationContext, PathMedium, PointFixtureSampling, SamplingUncertainty};
+use super::{
+    DiffuseVacuumRemainder, PathCalculationContext, PathMedium, PointFixtureSampling,
+    SamplingUncertainty,
+};
 
 /// Fixed sampling policy for surface probes, independent of image dimensions.
 #[derive(Debug, Clone, Copy)]
@@ -20,7 +23,8 @@ pub struct IlluminanceSampling {
     pub samples_per_probe: u32,
     /// Maximum reflecting or scattering vertices after the measurement point.
     /// One includes light reflected once or scattered once. Higher orders are
-    /// retained up to this ceiling; the omitted remainder has no error bound.
+    /// retained up to this ceiling. The general remainder is unbounded; see
+    /// [`PathIlluminanceJob::diffuse_vacuum_remainder`] for a restricted model bound.
     pub max_depth: u32,
     /// IID or the existing three-dimensional Owen–Sobol primary sampler.
     /// The latter samples hemisphere direction and wavelength; continuation
@@ -454,6 +458,16 @@ impl<'scene, 'field> PathIlluminanceJob<'scene, 'field> {
             self.sampling.seed,
             self.sampling.max_depth,
         )
+    }
+
+    /// Bound only the ideal model's omitted reflection orders for admitted
+    /// diffuse, uniform-area-source vacuum scenes. The returned lux bound
+    /// integrates its radiance ceiling over the probe's cosine hemisphere.
+    /// Sampling, numerical and calibration errors remain separate and unknown;
+    /// unsupported models or an unrepresentable bound return `None`.
+    #[must_use]
+    pub const fn diffuse_vacuum_remainder(&self) -> Option<DiffuseVacuumRemainder> {
+        self.transport.diffuse_vacuum_remainder()
     }
 
     /// Probe-order estimates without another result allocation.

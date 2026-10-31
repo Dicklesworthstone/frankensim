@@ -344,6 +344,80 @@ impl<'a> AreaLighting<'a> {
         self.active
     }
 
+    /// Conditional tail of the ideal diffuse transport operator. Call only
+    /// after native scene admission, with explicit vacuum and no active point
+    /// fixtures. Every material and source must satisfy the contraction model.
+    pub(in crate::tracer) fn diffuse_vacuum_remainder(
+        &self,
+        scene: &Scene,
+        max_depth: u32,
+        cx: &Cx<'_>,
+    ) -> Result<Option<crate::photometry::path::DiffuseVacuumRemainder>, PhotometryError> {
+        use crate::photometry::observer;
+        use crate::photometry::path::DiffuseVacuumRemainder;
+        use crate::photometry::source::BIN_WIDTH_NM;
+        use fs_ivl::Interval;
+
+        let mut max_reflectance = 0.0_f64;
+        for primitive in &scene.primitives {
+            cx.checkpoint()?;
+            let Material::SpectralDiffuse { reflectance } = &primitive.material else {
+                return Ok(None);
+            };
+            // The maximum of a piecewise-linear spectrum is at a knot. A
+            // photopic average would not bound colored reflection chains.
+            for &(_, value) in reflectance.knots() {
+                max_reflectance = max_reflectance.max(value);
+            }
+        }
+        if max_reflectance >= 1.0 {
+            return Ok(None);
+        }
+        let mut source_ceiling = Interval::point(0.0);
+        for emitter in &self.emitters {
+            cx.checkpoint()?;
+            if emitter.projector.is_some() {
+                return Ok(None);
+            }
+            if emitter.luminance_cd_m2 == 0.0 {
+                continue;
+            }
+            // Integrate the retained coefficients rather than assuming that
+            // floating-point SourceSpectrum normalization is exactly one.
+            // This bounds the admitted radiance law, not its geometric/flux
+            // normalization arithmetic or the original fixture calibration.
+            let mut photopic = Interval::point(0.0);
+            for (bin, &power) in emitter
+                .source
+                .spectrum()
+                .bins_w_per_lumen_nm()
+                .iter()
+                .enumerate()
+            {
+                cx.checkpoint()?;
+                if power > 0.0 {
+                    photopic = photopic
+                        + Interval::point(power) * Interval::point(observer::xyz_at_bin(bin)[1]);
+                }
+            }
+            source_ceiling = source_ceiling
+                + Interval::point(emitter.luminance_cd_m2)
+                    * photopic
+                    * Interval::point(BIN_WIDTH_NM)
+                    * Interval::point(LUMINOUS_EFFICACY_LM_W);
+        }
+        if !source_ceiling.hi().is_finite() {
+            return Ok(None);
+        }
+        // Nonnegativity is an exact property of the represented source law.
+        let source_ceiling = Interval::new(source_ceiling.lo().max(0.0), source_ceiling.hi());
+        Ok(DiffuseVacuumRemainder::from_envelope(
+            max_depth,
+            max_reflectance,
+            source_ceiling,
+        ))
+    }
+
     /// Spectral emission at the actual hit, with its complementary NEE weight.
     #[allow(clippy::too_many_arguments)]
     pub(in crate::tracer) fn hit_radiance(
