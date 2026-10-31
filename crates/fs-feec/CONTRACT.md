@@ -1392,3 +1392,26 @@ An existing H boundary-layer configuration refuses this complex-K path: its equi
 Three new pressure tests pass: exact complex closed-volume compression/work in an explicitly declared constant-pressure Galerkin coordinate; full P2 duct propagation versus independently evaluated complex-k analytic pressure/flow; and passive-phase/material/frequency/cancellation/unsupported-wall refusals. The P2 mesh 1/2/3 ladder (27/125/343 pressure DOFs) gives maximum field errors 7.483059143923117e-4 / 6.720372378422063e-5 / 1.496891498044034e-5, finest gate 3e-5. Original real-medium parity, reciprocity, loaded-wave work and positive volume dissipation pass. The nonorthogonal hybrid case additionally keeps H bulk, LNS caloric and finite-solid heat losses live and jointly balanced.
 
 Final focused native verification on the completed extensions: 25 distinct cases PASS across selected invocations, 14 new and 11 retained. Pressure multiport 7; resolved LNS/wall 7; FE hybrid 3; source hybrid 3; source finite walls 2; retained resolved source/duct 3. All newly added cases executed. Rust 1.100.0-nightly (2026-08-19); FE tests use the original-source Cargo seam. A redundant complete material rebuild was killed by memory pressure; coupled tests then compiled current FE/source files against the already verified complete original dependency artifacts from the same compiler, with coherent split-metadata/rlib pairs. No numerical substitutes or production dependency changes. DSR/RCH, the pinned toolchain and the canonical sibling constellation remain unavailable; this is not a full-workspace or instrument-render qualification.
+
+## Finite solid heat fields in resolved thermoviscous time evolution
+
+`ThermoviscousFe::prepare_time_with_thermal_fields` retains the actual finite
+slabs in the original full-field quadratic time owner. Each source region has
+an explicitly requested P1 mesh through its physical thickness, tensorized with
+every original P2 surface coefficient. The interface temperature is the fluid
+coordinate itself. Consistent wall mass includes interface/interior cross terms;
+the wall conductivity and volumetric capacity supply the physical Fourier
+operator and storage. The original isothermal or insulated backing is retained.
+The same solve advances fluid, molecular temperatures, finite-wall temperatures
+and structural coordinates, with a separate integrated solid-conduction channel.
+
+The complete state budget includes every added coordinate; no surface modes or
+material reservoirs are discarded. The full slab must satisfy the original
+normal-profile approximation down to DC, and the clock must sample the declared
+upper band. These admissions do not certify depth-mesh or waveform resolution.
+Refining the depth mesh converges to the original harmonic slab admittance;
+finite elements are not an exact finite-state replacement for that continuum.
+Unmeshed finite walls and semi-infinite walls refuse. The source adapter
+`prepare_time_with_wall_diffusion` retains the original wall samples and fluid
+calorics. Mean-temperature evolution, lateral wall conduction, changing geometry
+and wall thermoelastic expansion remain outside this fixed-equilibrium model.

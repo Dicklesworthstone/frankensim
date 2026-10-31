@@ -8,15 +8,17 @@
 //! original entry before the admitted fs-phs exact held-input owner is called.
 //!
 //! Fluid viscosity (shear plus bulk), fluid conduction, molecular heat exchange
-//! and original structural damping are integrated along that SAME trajectory.
+//! finite-wall normal conduction and original structural damping are integrated
+//! along that SAME trajectory.
 //! Pressure and structural-force work use their actual interval-integrated dual flows.
 //! No response curve, fitted decay or endpoint-loss approximation is involved.
 //!
 //! Original caloric reservoirs contribute their full P2 temperature fields,
 //! frozen heat capacity and positive translational/molecular heat exchange. Insulated
 //! and isothermal thermal boundaries constrain only the translational field.
-//! A finite conductive wall's frequency impedance is not a causal state and is
-//! refused. Geometry and equilibrium remain fixed; no mean flow, ALE,
+//! Finite solid slabs may retain their actual P1 normal heat fields, sharing
+//! the original P2 fluid interface; resolution is explicit, with no fitted poles.
+//! Geometry and equilibrium remain fixed; no mean flow, ALE,
 //! phase change, nonlinear mechanics or acoustic-resolution claim is inferred.
 
 use super::*;
@@ -29,7 +31,9 @@ use fs_phs::{PhsError, PortHamiltonian, PreparedStepError, QuadraticStorage};
 
 mod caloric;
 pub use caloric::ThermoviscousCaloricReservoir;
-const HEAT_CHANNELS: usize = 4;
+mod wall;
+pub use wall::{ConductiveWallTimeLayout, ThermoviscousWallDiscretization};
+const HEAT_CHANNELS: usize = 5;
 
 /// Original-owner refusals; no state is published on failure or cancellation.
 #[derive(Debug)]
@@ -74,7 +78,7 @@ fn invalid(what: &'static str) -> ThermoviscousTimeError {
 /// Explicit small-domain cold preparation and physical accounting admission.
 #[derive(Clone, Copy, Debug)]
 pub struct ThermoviscousTimeLimits {
-    /// Complete mixed and molecular fields plus every structural displacement.
+    /// Complete mixed, molecular and finite-wall fields plus every structural displacement.
     /// Exceeding the cap is a refusal; no original field is truncated.
     pub max_states: usize,
     /// Existing pHS flow-integral byte/work limits. Coordinate maps additionally
@@ -111,6 +115,11 @@ pub struct ThermoviscousTimeState {
     /// supplied reservoir order. A zero-capacity reservoir has an empty vector.
     /// Molecular fields have no independent isothermal boundary constraint.
     pub molecular_temperature_k: Vec<Vec<f64>>,
+    /// Full finite-solid temperature perturbations [K], in source-region order.
+    /// Each vector is depth-major, then the original P2 trace order from
+    /// `conductive_wall_layouts()`. The fluid interface and any zero-temperature
+    /// backing are shared/constrained coordinates and are not duplicated.
+    pub conductive_wall_temperature_k: Vec<Vec<f64>>,
     /// Original mass-normalized structural displacements [m sqrt(kg)].
     pub wall_displacement_m_sqrt_kg: Vec<f64>,
     /// Original mass-normalized structural velocities [m sqrt(kg)/s].
@@ -132,6 +141,8 @@ pub struct ThermoviscousTimeWork {
     /// Heat exchange between the translational and molecular temperatures.
     /// This is independent of viscosity and of spatial thermal conduction.
     pub molecular_relaxation_heat_j: f64,
+    /// Original finite-solid normal Fourier conduction, along the same trajectory.
+    pub solid_conductive_heat_j: f64,
 }
 impl ThermoviscousTimeWork {
     pub fn dissipated_j(self) -> f64 {
@@ -139,6 +150,7 @@ impl ThermoviscousTimeWork {
             + self.fluid_conductive_heat_j
             + self.structural_damping_heat_j
             + self.molecular_relaxation_heat_j
+            + self.solid_conductive_heat_j
     }
     pub fn supplied_j(self) -> f64 {
         self.pressure_work_j + self.structural_work_j
@@ -169,6 +181,7 @@ pub struct PreparedThermoviscousTime<'a, 'c> {
     frozen_cp_j_kg_k: f64,
     reservoirs: Vec<ThermoviscousCaloricReservoir>,
     reservoir_offsets: Vec<Option<usize>>,
+    conductive_wall_fields: wall::WallFields,
     system: PortHamiltonian,
     flow: PreparedQuadraticFlow,
     maximum_relative_energy_residual: f64,
@@ -176,7 +189,7 @@ pub struct PreparedThermoviscousTime<'a, 'c> {
 
 impl<'c> ThermoviscousFe<'c> {
     /// Prepare all original fields and wall coordinates for real held forces.
-    /// Frequency-dependent finite solid impedances are explicitly refused.
+    /// Finite slabs require explicit meshes through `prepare_time_with_thermal_fields`.
     pub fn prepare_time<'a>(
         &'a self,
         duration_s: f64,
@@ -213,6 +226,31 @@ impl<'c> ThermoviscousFe<'c> {
             duration_s,
             frozen_cp_j_kg_k,
             reservoirs,
+            None,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Evolve original fluid, molecular, finite solid and structural coordinates
+    /// together. Wall normal elements discretize the ORIGINAL heat equation,
+    /// not its frequency response. Refine the physical depth mesh to converge
+    /// to the original harmonic slab admittance; no finite count is exact.
+    pub fn prepare_time_with_thermal_fields<'a>(
+        &'a self,
+        duration_s: f64,
+        frozen_cp_j_kg_k: f64,
+        reservoirs: &[ThermoviscousCaloricReservoir],
+        walls: ThermoviscousWallDiscretization<'_>,
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousTimeError> {
+        PreparedThermoviscousTime::new(
+            self,
+            duration_s,
+            frozen_cp_j_kg_k,
+            reservoirs,
+            Some(walls),
             limits,
             cancelled,
         )
@@ -225,16 +263,15 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         duration_s: f64,
         frozen_cp_j_kg_k: f64,
         reservoirs: &[ThermoviscousCaloricReservoir],
+        wall_resolution: Option<ThermoviscousWallDiscretization<'_>>,
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self, ThermoviscousTimeError> {
         poll(cancelled)?;
-        if !model.conductive_walls().is_empty() {
-            return Err(invalid(
-                "causal finite conductive walls require their actual thermal memory states",
-            ));
-        }
-        let (base, reservoir_offsets) = caloric::layout(model, frozen_cp_j_kg_k, reservoirs)?;
+        let (caloric_end, reservoir_offsets) =
+            caloric::layout(model, frozen_cp_j_kg_k, reservoirs)?;
+        let (conductive_wall_fields, base) =
+            wall::WallFields::new(model, duration_s, wall_resolution, caloric_end, cancelled)?;
         let walls = model.pressure_start - 3 * model.velocity_count;
         let n = base + walls;
         let ports = model.loads.len() + walls;
@@ -258,6 +295,8 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             base,
             cancelled,
         )?;
+        let solid_conduction =
+            conductive_wall_fields.assemble(model, &mut mass, base, cancelled)?;
         let mut wall_scale = Vec::with_capacity(walls);
         for i in 0..walls {
             let row = 3 * model.velocity_count + i;
@@ -349,6 +388,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             poll(cancelled)?;
             for j in 0..base {
                 heat[3][i * n + j] = molecular_exchange[i * base + j] / (scale[i] * scale[j]);
+                heat[4][i * n + j] = solid_conduction[i * base + j] / (scale[i] * scale[j]);
             }
         }
         for i in 0..walls {
@@ -418,6 +458,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             frozen_cp_j_kg_k,
             reservoirs: reservoirs.to_vec(),
             reservoir_offsets,
+            conductive_wall_fields,
             system,
             flow,
             maximum_relative_energy_residual: limits.maximum_relative_energy_residual,
@@ -443,6 +484,15 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
     /// including zero-capacity entries (which own no dynamic coordinates).
     pub fn caloric_reservoirs(&self) -> &[ThermoviscousCaloricReservoir] {
         &self.reservoirs
+    }
+
+    /// Full original surface and normal-node ordering, in source-region order.
+    pub fn conductive_wall_layouts(&self) -> &[ConductiveWallTimeLayout] {
+        &self.conductive_wall_fields.layouts
+    }
+
+    pub fn maximum_wall_frequency_hz(&self) -> Option<f64> {
+        self.conductive_wall_fields.maximum_frequency_hz
     }
 
     /// Explicit all-rest initial condition, including structural coordinates.
@@ -476,6 +526,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 .chain(&state.wall_velocity_m_sqrt_kg_per_s)
                 .chain(state.velocity_m_s.iter().flatten())
                 .chain(state.molecular_temperature_k.iter().flatten())
+                .chain(state.conductive_wall_temperature_k.iter().flatten())
                 .any(|v| !v.is_finite())
         {
             return Err(invalid(
@@ -543,6 +594,8 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                 }
             }
         }
+        self.conductive_wall_fields
+            .encode(model, &state.conductive_wall_temperature_k, &mut x)?;
         for (value, scale) in x.iter_mut().zip(&self.scale) {
             *value *= scale;
         }
@@ -597,6 +650,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
                     })
                 })
                 .collect(),
+            conductive_wall_temperature_k: self.conductive_wall_fields.decode(model, &mixed),
             wall_displacement_m_sqrt_kg: self
                 .wall_scale
                 .iter()
@@ -677,6 +731,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             fluid_conductive_heat_j: candidate.integrals[1],
             structural_damping_heat_j: candidate.integrals[2],
             molecular_relaxation_heat_j: candidate.integrals[3],
+            solid_conductive_heat_j: candidate.integrals[4],
         };
         let scale = initial_energy_j
             .abs()

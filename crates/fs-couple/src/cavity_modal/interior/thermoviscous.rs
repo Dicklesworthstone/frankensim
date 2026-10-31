@@ -17,7 +17,7 @@
 use fs_duct::{DuctError, compose::TwoPort};
 use fs_feec::acoustics::thermoviscous::time::{
     PreparedThermoviscousTime, ThermoviscousCaloricReservoir, ThermoviscousTimeError,
-    ThermoviscousTimeLimits,
+    ThermoviscousTimeLimits, ThermoviscousWallDiscretization,
 };
 use fs_feec::acoustics::thermoviscous::{
     ThermoviscousError, ThermoviscousFe, ThermoviscousField, ThermoviscousMedium,
@@ -296,13 +296,42 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
     /// Causal full-field motion and work with this SAME immutable fluid source.
     /// The borrow retains the source, FE and structural model for every step.
     /// Original molecular capacities and rates own full P2 internal-temperature
-    /// fields in the same solve. Finite-wall impedances still require their
-    /// actual time states and are refused.
-    /// The clock must sample the declared source band; no frequency truncation
-    /// or proof of spatial/input-waveform resolution follows from that check.
+    /// fields in the same solve. Finite solids require explicit spatial meshes
+    /// through `prepare_time_with_wall_diffusion`.
     pub fn prepare_time<'a>(
         &'a self,
         duration_s: f64,
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousSourceError> {
+        self.prepare_time_fields(duration_s, None, limits, cancelled)
+    }
+
+    /// Evolve the original finite solid wall heat equations with the fluid,
+    /// molecular temperatures and moving structural coordinates. Each entry is
+    /// a P1 element count through the ORIGINAL material slab thickness, in
+    /// `wall_sources()` order. Every original surface P2 coefficient is retained.
+    ///
+    /// Material conductivity, volumetric heat capacity, physical thickness and
+    /// backside condition come from the original immutable source attachment.
+    /// The source band and its DC limit must admit local normal conduction.
+    /// Half-spaces refuse: a finite thickness cannot be silently invented.
+    /// Mesh/clock refinement remains necessary; sampling the band does not
+    /// establish that a waveform, penetration depth or spatial field is resolved.
+    pub fn prepare_time_with_wall_diffusion<'a>(
+        &'a self,
+        duration_s: f64,
+        normal_elements: &[usize],
+        limits: ThermoviscousTimeLimits,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousSourceError> {
+        self.prepare_time_fields(duration_s, Some(normal_elements), limits, cancelled)
+    }
+
+    fn prepare_time_fields<'a>(
+        &'a self,
+        duration_s: f64,
+        normal_elements: Option<&[usize]>,
         limits: ThermoviscousTimeLimits,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedThermoviscousTime<'a, 'c>, ThermoviscousSourceError> {
@@ -314,25 +343,41 @@ impl<'c, S> ThermoviscousInterior<'c, S> {
                 "resolved transient clock does not sample the declared source band",
             ));
         }
-        match &self.relaxation {
-            Some(source) => {
-                let reservoirs: Vec<_> = source
-                    .processes()
-                    .iter()
-                    .map(|process| ThermoviscousCaloricReservoir {
-                        heat_capacity_j_kg_k: process.heat_capacity_j_kg_k,
-                        relaxation_time_s: process.relaxation_time_s,
-                    })
-                    .collect();
-                Ok(self.fe.prepare_time_with_caloric_reservoirs(
-                    duration_s,
-                    source.frozen_cv_j_kg_k() + source.gas().specific_gas_constant,
-                    &reservoirs,
-                    limits,
-                    cancelled,
-                )?)
-            }
-            None => Ok(self.fe.prepare_time(duration_s, limits, cancelled)?),
+        let frozen_cp = self
+            .relaxation
+            .as_ref()
+            .map_or(self.fe.medium().cp_j_kg_k, |source| {
+                source.frozen_cv_j_kg_k() + source.gas().specific_gas_constant
+            });
+        let reservoirs: Vec<_> = self.relaxation.as_ref().map_or_else(Vec::new, |source| {
+            source
+                .processes()
+                .iter()
+                .map(|process| ThermoviscousCaloricReservoir {
+                    heat_capacity_j_kg_k: process.heat_capacity_j_kg_k,
+                    relaxation_time_s: process.relaxation_time_s,
+                })
+                .collect()
+        });
+        match normal_elements {
+            Some(elements) => Ok(self.fe.prepare_time_with_thermal_fields(
+                duration_s,
+                frozen_cp,
+                &reservoirs,
+                ThermoviscousWallDiscretization {
+                    normal_elements: elements,
+                    maximum_frequency_hz: self.band_hz[1],
+                },
+                limits,
+                cancelled,
+            )?),
+            None => Ok(self.fe.prepare_time_with_caloric_reservoirs(
+                duration_s,
+                frozen_cp,
+                &reservoirs,
+                limits,
+                cancelled,
+            )?),
         }
     }
 
