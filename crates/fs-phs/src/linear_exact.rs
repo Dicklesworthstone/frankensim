@@ -30,6 +30,10 @@ mod prepared_zoh;
 mod source_loss;
 pub(crate) mod positive_heat;
 mod scattering;
+mod multiport_scattering;
+pub use multiport_scattering::{
+    MultiportScatteringStepRecord, PreparedMultiportScatteringZoh, ScatteringPortRecord,
+};
 mod common_flow_zoh;
 mod common_flow;
 mod nonlinear;

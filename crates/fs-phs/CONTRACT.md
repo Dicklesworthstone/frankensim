@@ -1254,3 +1254,38 @@ storage callbacks; it does not bound constitutive model error or arithmetic
 hidden inside an independently supplied analytic callback. Owners using raw
 endpoint subtraction retain the original direct-row policy. The prepared
 analytic Jacobian uses the same correction admission as the canonical residual.
+
+## Exact joint scattering at multiple original ports
+
+`linear_exact::PreparedMultiportScatteringZoh` closes a nonempty, explicitly
+ordered set of original physical ports simultaneously. Each selected original
+input slot supplies held incident wave a in that port's original output units,
+with u=(2a-y)/Z and b=y-a for its declared positive reference impedance. Every
+unselected input and all returned mean outputs retain their original meanings.
+One complete quadratic generator includes all selected rank-one boundary loads;
+physical storage, material memory, physical resistance and cross-port dynamics
+remain intact. The original single-port owner delegates to this implementation.
+
+Preparation reuses the exact full-state flow and the existing positive integral
+factor owner. Each selected port independently integrates its own (y-a)^2/Z;
+small reflected energy is not recovered by subtracting large incident/storage
+energies. Reference loading is accounted as boundary exchange, separate from
+original material heat. The mean reflected wave is reported separately and its
+square must not be interpreted as the integrated outgoing power. Full-system
+and per-port work balances gate publication of the endpoint, all original mean
+outputs and every selected-port account together.
+
+The prepared mean relation is a dense selected-port map, retaining off-diagonal
+coupling and work from unselected held inputs. Warm prediction and stepping
+reuse bounded scratch with no owner allocations or exponentials. Cold positive
+factor work/memory grows with the selected-port count. Existing complete-state,
+port and exponential capacities still refuse oversized systems without state
+reduction; selected ports need not be fewer than states. Source bandwidth,
+spatial refinement, nonlinear closure and render acceptance remain consumers'
+responsibilities.
+
+Eight regressions in `tests/prepared_multiport_scattering.rs` compare a
+coupled material-memory trajectory and each wave integral against independently
+integrated original physical equations; verify interval subdivision, selection
+permutation, more ports than states, inactive ports, tiny matched reflection,
+single-port compatibility, transactional refusals and warm allocation reuse.
