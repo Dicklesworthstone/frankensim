@@ -27,6 +27,9 @@ pub const MAX_POLARIZED_SCENE_ITEMS: usize = 65_536;
 /// Maximum admitted surface-event budget for one synchronous path.
 pub const MAX_POLARIZED_PATH_EVENTS: u32 = 65_536;
 
+/// Curved paths through immutable gradient-index fields and native geometry.
+pub mod curved;
+
 /// Material or measurement attached to an existing stable geometry ID.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Interaction {
@@ -173,37 +176,9 @@ impl<'a> PolarizedScene<'a> {
         geometry: &'a InstanceScene,
         media: &'a [DielectricGlass],
         conductors: &'a [ConductorOptics],
-        mut bindings: Vec<SurfaceBinding>,
+        bindings: Vec<SurfaceBinding>,
     ) -> Result<Self, SceneError> {
-        if media.is_empty() || media.len() > MAX_POLARIZED_SCENE_ITEMS
-            || conductors.len() > MAX_POLARIZED_SCENE_ITEMS
-            || bindings.len() != geometry.instances().len()
-            || bindings.len() > MAX_POLARIZED_SCENE_ITEMS {
-            return Err(SceneError::InvalidBindings);
-        }
-        bindings.sort_unstable_by_key(|b| b.object_id);
-        for (binding, instance) in bindings.iter().zip(geometry.instances()) {
-            if binding.object_id != instance.object_id() { return Err(SceneError::InvalidBindings); }
-            match binding.interaction {
-                Interaction::Dielectric { outside, inside, .. } => {
-                    if outside >= media.len() || inside >= media.len() {
-                        return Err(SceneError::InvalidBindings);
-                    }
-                }
-                Interaction::Detector { reference_axis: a } => {
-                    if ![a.x, a.y, a.z].iter().all(|x| x.is_finite())
-                        || a.x.abs().max(a.y.abs()).max(a.z.abs()) == 0.0 {
-                        return Err(SceneError::InvalidBindings);
-                    }
-                }
-                Interaction::SmoothConductor { optics, medium } => {
-                    if optics >= conductors.len() || medium >= media.len() {
-                        return Err(SceneError::InvalidBindings);
-                    }
-                }
-                Interaction::Opaque => {}
-            }
-        }
+        let bindings = admit_bindings(geometry, media.len(), conductors.len(), bindings)?;
         Ok(Self { geometry, media, conductors, bindings })
     }
 
@@ -332,6 +307,51 @@ impl<'a> PolarizedScene<'a> {
         }
         finish(cx, result)
     }
+}
+
+fn admit_bindings(
+    geometry: &InstanceScene,
+    media_count: usize,
+    conductor_count: usize,
+    mut bindings: Vec<SurfaceBinding>,
+) -> Result<Vec<SurfaceBinding>, SceneError> {
+    if media_count == 0
+        || media_count > MAX_POLARIZED_SCENE_ITEMS
+        || conductor_count > MAX_POLARIZED_SCENE_ITEMS
+        || bindings.len() != geometry.instances().len()
+        || bindings.len() > MAX_POLARIZED_SCENE_ITEMS
+    {
+        return Err(SceneError::InvalidBindings);
+    }
+    bindings.sort_unstable_by_key(|b| b.object_id);
+    for (binding, instance) in bindings.iter().zip(geometry.instances()) {
+        if binding.object_id != instance.object_id() {
+            return Err(SceneError::InvalidBindings);
+        }
+        match binding.interaction {
+            Interaction::Dielectric {
+                outside, inside, ..
+            } => {
+                if outside >= media_count || inside >= media_count {
+                    return Err(SceneError::InvalidBindings);
+                }
+            }
+            Interaction::Detector { reference_axis: a } => {
+                if ![a.x, a.y, a.z].iter().all(|x| x.is_finite())
+                    || a.x.abs().max(a.y.abs()).max(a.z.abs()) == 0.0
+                {
+                    return Err(SceneError::InvalidBindings);
+                }
+            }
+            Interaction::SmoothConductor { optics, medium } => {
+                if optics >= conductor_count || medium >= media_count {
+                    return Err(SceneError::InvalidBindings);
+                }
+            }
+            Interaction::Opaque => {}
+        }
+    }
+    Ok(bindings)
 }
 
 fn finish(cx: &Cx<'_>, result: PathResult) -> Result<PathResult, SceneError> {

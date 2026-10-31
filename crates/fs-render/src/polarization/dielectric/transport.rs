@@ -363,6 +363,45 @@ impl PolarizedBeam {
             options,
             control,
         )?;
+        self.consume_propagation(self.ray(), self.wavelength_nm, propagation)
+    }
+
+    /// Internal continuation for the event owner, which already solved this
+    /// segment. Keep source coordinates/wavelength and local medium checks at
+    /// this boundary; callers cannot publish arbitrary propagation records.
+    pub(super) fn consume_propagation(
+        self,
+        initial_ray: Ray,
+        wavelength_nm: f64,
+        propagation: GradientIndexPropagation,
+    ) -> Result<BeamPropagation, BeamError> {
+        if initial_ray != self.ray() || wavelength_nm != self.wavelength_nm {
+            return Err(BeamError::MediumMismatch);
+        }
+        let medium = match self.medium {
+            BeamMedium::Homogeneous(material) => {
+                let field = crate::gradient_index::HomogeneousIndexField::new(&material);
+                if field.sample(self.origin, wavelength_nm)? != propagation.initial_sample
+                    || propagation.final_sample != propagation.initial_sample
+                {
+                    return Err(BeamError::MediumMismatch);
+                }
+                self.medium
+            }
+            BeamMedium::GradientIndex(local) => {
+                if local.position != self.origin
+                    || local.wavelength_nm != wavelength_nm
+                    || local.sample != propagation.initial_sample
+                {
+                    return Err(BeamError::MediumMismatch);
+                }
+                BeamMedium::GradientIndex(LocalGradientMedium {
+                    position: propagation.ray.origin,
+                    wavelength_nm,
+                    sample: propagation.final_sample,
+                })
+            }
+        };
         let frame = PolarizationFrame::try_new(propagation.ray.dir, propagation.transverse_axis)?;
         let transmission = propagation.power_transmittance();
         let power = physical_roundoff(
@@ -375,11 +414,6 @@ impl PolarizedBeam {
             self.power.i,
         )?;
         let origin = propagation.ray.origin;
-        let medium = BeamMedium::GradientIndex(LocalGradientMedium {
-            position: origin,
-            wavelength_nm: self.wavelength_nm,
-            sample: propagation.final_sample,
-        });
         Ok(BeamPropagation {
             beam: Self {
                 origin,

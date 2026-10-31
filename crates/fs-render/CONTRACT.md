@@ -123,6 +123,33 @@ differentiable lift). Pure Rust throughout.
   phase/group separation, absorption and tolerance refinement; G3 checks
   cover reverse paths, transported frames and composed segments; G4 checks
   include cancellation during rejected adaptive trials.
+
+- `polarization::dielectric::scene::curved` connects the field propagator,
+  native instance boundaries, spectral interfaces and calibrated receiving
+  meters into one forward ray-power path. `CurvedPolarizedScene` borrows
+  homogeneous glass or explicitly identified immutable gradient-index fields.
+  Each interface uses the actual local phase indices and existing smooth/GGX
+  Stokes sampler. Reflection retains its medium; transmission selects the
+  explicitly bound opposite medium. Smooth opaque metal bindings borrow the
+  same conductor/coating tables as the native polarized scene and retain the
+  local gradient medium's index, reflected phase and attenuated power.
+  The returned path accumulates physical
+  distance, phase/group optical lengths, absorption depth and numerical contact
+  resolution. A private beam continuation consumes each solved segment once.
+  Surface-event, total attempted-step and geometry-work budgets are cumulative;
+  cancellations and geometry/field refusals do not publish partial paths.
+  With `photometry`, `SpectralPowerMeter::record_curved` shares the original 80-bin observer and
+  all-launch normalization. Receiver and analyzer readings retain contact
+  resolution; truncated surviving paths remain explicitly unresolved.
+  Geometry/frame identities are checked through separate numerical contacts,
+  without constructing certified straight-ray hits. Fresh launches on
+  unresolved surfaces refuse, and limited results are not resume tokens.
+  This is numerical forward power transport with a required material-field
+  contact collar; it adds no scalar camera/BDPT curved visibility or ray-bundle
+  Jacobians. Analytic slab-to-finite-receiver and weighted reflection/transmission
+  regressions check exit position/direction, optical lengths, attenuation,
+  received watts and Stokes components through the actual native scene.
+
 - `conductor` module (feature `tracer`): fixed-capacity visible-band tables of
   absolute complex refractive index `eta(lambda) + i k(lambda)` in vacuum
   nanometres, strict inclusive 380--780 nm support, deterministic linear

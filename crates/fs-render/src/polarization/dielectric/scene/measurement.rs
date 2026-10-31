@@ -24,7 +24,10 @@ use crate::photometry::source::{
     BIN_WIDTH_NM, LUMINOUS_EFFICACY_LM_W, SPECTRAL_BINS, photopic_weight_nm, wavelength_nm,
 };
 use crate::polarization::Stokes;
-use super::{Interaction, PathResult, PathTermination, PolarizedScene};
+use crate::instances::InstanceScene;
+use super::super::transport::PolarizedBeam;
+use super::curved::{CurvedPathResult, CurvedPolarizedScene};
+use super::{Interaction, PathResult, PathTermination, PolarizedScene, SurfaceBinding};
 
 /// Measurement admission/range errors leave the accumulator unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,45 +81,106 @@ pub struct SpectralPowerMeter {
     frame_identity: ContentHash,
     reference_axis: Vec3,
     bins: [Bin; SPECTRAL_BINS],
+    max_contact_resolution_m: f64,
 }
 
 impl PolarizedScene<'_> {
     /// Bind a receiving meter to an admitted detector's actual geometry and axis.
     pub fn power_meter(&self, object_id: u64) -> Result<SpectralPowerMeter, MeterError> {
-        let index = self.bindings.binary_search_by_key(&object_id, |b| b.object_id)
-            .map_err(|_| MeterError::NotADetector)?;
-        let Interaction::Detector { reference_axis } = self.bindings[index].interaction else {
-            return Err(MeterError::NotADetector);
-        };
-        Ok(SpectralPowerMeter {
-            object_id, reference_axis,
-            frame_identity: self.geometry.instances()[index].frame_identity(),
-            bins: [Bin::default(); SPECTRAL_BINS],
-        })
+        SpectralPowerMeter::for_detector(self.geometry, &self.bindings, object_id)
+    }
+}
+
+impl CurvedPolarizedScene<'_> {
+    /// Bind the same spectral receiver to numerical curved contacts. Recorded
+    /// contact resolution remains explicit in the resulting reading.
+    pub fn power_meter(&self, object_id: u64) -> Result<SpectralPowerMeter, MeterError> {
+        SpectralPowerMeter::for_detector(self.geometry, &self.bindings, object_id)
     }
 }
 
 impl SpectralPowerMeter {
+    fn for_detector(
+        geometry: &InstanceScene,
+        bindings: &[SurfaceBinding],
+        object_id: u64,
+    ) -> Result<Self, MeterError> {
+        let index = bindings
+            .binary_search_by_key(&object_id, |b| b.object_id)
+            .map_err(|_| MeterError::NotADetector)?;
+        let Interaction::Detector { reference_axis } = bindings[index].interaction else {
+            return Err(MeterError::NotADetector);
+        };
+        Ok(SpectralPowerMeter {
+            object_id,
+            reference_axis,
+            frame_identity: geometry.instances()[index].frame_identity(),
+            bins: [Bin::default(); SPECTRAL_BINS],
+            max_contact_resolution_m: 0.0,
+        })
+    }
     /// Record one original launch outcome, not only successful detector hits.
     /// Wavelength must match the chosen native midpoint exactly. Re-recording a
     /// result is another statistical sample; IDs/deduplication remain caller-owned.
     pub fn record(&mut self, bin: usize, path: &PathResult) -> Result<(), MeterError> {
-        if bin >= SPECTRAL_BINS { return Err(MeterError::InvalidBin); }
-        if path.beam().wavelength_nm() != wavelength_nm(bin) {
+        self.record_sample(
+            bin,
+            path.beam(),
+            path.termination(),
+            path.last_hit()
+                .map(|hit| (hit.object_id, hit.frame_identity)),
+            0.0,
+        )
+    }
+
+    /// Record one curved launch with its numerical contact witness. Every
+    /// launched sample still belongs in the denominator. This consumes the
+    /// original instance identity, not a fabricated straight-ray hit, and
+    /// retains the largest encountered contact resolution in the reading.
+    pub fn record_curved(&mut self, bin: usize, path: &CurvedPathResult) -> Result<(), MeterError> {
+        self.record_sample(
+            bin,
+            path.beam(),
+            path.termination(),
+            path.last_contact()
+                .map(|hit| (hit.object_id, hit.frame_identity)),
+            path.max_contact_resolution_m(),
+        )
+    }
+
+    fn record_sample(
+        &mut self,
+        bin: usize,
+        input: &PolarizedBeam,
+        termination: PathTermination,
+        contact: Option<(u64, ContentHash)>,
+        contact_resolution_m: f64,
+    ) -> Result<(), MeterError> {
+        if bin >= SPECTRAL_BINS {
+            return Err(MeterError::InvalidBin);
+        }
+        if input.wavelength_nm() != wavelength_nm(bin) {
             return Err(MeterError::WavelengthMismatch);
+        }
+        if !contact_resolution_m.is_finite() || contact_resolution_m < 0.0 {
+            return Err(MeterError::NumericalRange);
         }
         let mut next = self.bins[bin];
         // Keep the normalizer exactly representable as a binary64 integer.
-        if next.launched >= (1_u64 << 53) { return Err(MeterError::NumericalRange); }
+        if next.launched >= (1_u64 << 53) {
+            return Err(MeterError::NumericalRange);
+        }
         next.launched += 1;
-        match path.termination() {
+        match termination {
             PathTermination::Detected => {
-                let hit = path.last_hit().ok_or(MeterError::DetectorGeometryMismatch)?;
-                if hit.object_id == self.object_id {
-                    if hit.frame_identity != self.frame_identity {
+                let (object_id, frame_identity) =
+                    contact.ok_or(MeterError::DetectorGeometryMismatch)?;
+                if object_id == self.object_id {
+                    if frame_identity != self.frame_identity {
                         return Err(MeterError::DetectorGeometryMismatch);
                     }
-                    let beam = path.beam().with_reference_axis(self.reference_axis)
+                    let beam = input
+                        .with_reference_axis(self.reference_axis)
                         .map_err(|_| MeterError::NumericalRange)?;
                     let s = beam.power();
                     for (sum, value) in next.stokes.iter_mut().zip([s.i, s.q, s.u, s.v]) {
@@ -126,11 +190,16 @@ impl SpectralPowerMeter {
                 }
             }
             PathTermination::SurfaceLimit | PathTermination::DistanceLimit => {
-                if path.beam().power().i > 0.0 { next.unresolved += 1; }
+                if input.power().i > 0.0 {
+                    next.unresolved += 1;
+                }
             }
-            PathTermination::Opaque | PathTermination::RejectedMicrofacet | PathTermination::Extinguished => {}
+            PathTermination::Opaque
+            | PathTermination::RejectedMicrofacet
+            | PathTermination::Extinguished => {}
         }
         self.bins[bin] = next;
+        self.max_contact_resolution_m = self.max_contact_resolution_m.max(contact_resolution_m);
         Ok(())
     }
 
@@ -165,6 +234,7 @@ impl SpectralPowerMeter {
             radiant: stokes(watts.map(Sum::total))?,
             photopic: stokes(lumens.map(Sum::total))?,
             launched, detected, unresolved,
+            max_contact_resolution_m: self.max_contact_resolution_m,
         })
     }
 }
@@ -177,6 +247,7 @@ pub struct DetectorReading {
     launched: u64,
     detected: u64,
     unresolved: u64,
+    max_contact_resolution_m: f64,
 }
 impl DetectorReading {
     pub const fn radiant_stokes_w(self) -> Stokes { self.radiant }
@@ -184,6 +255,12 @@ impl DetectorReading {
     pub const fn launched_paths(self) -> u64 { self.launched }
     pub const fn detected_paths(self) -> u64 { self.detected }
     pub const fn unresolved_paths(self) -> u64 { self.unresolved }
+
+    /// Maximum numerical curved-contact resolution; zero for legacy straight
+    /// paths. It is not a bound on accumulated geometric or radiometric error.
+    pub const fn max_contact_resolution_m(self) -> f64 {
+        self.max_contact_resolution_m
+    }
 
     /// Reject a result with surviving truncated paths. Success is not an MC
     /// confidence interval, geometry certificate or continuum error bound.
@@ -209,6 +286,7 @@ impl DetectorReading {
             radiant_w: project(self.radiant, axis)?,
             luminous_lm: project(self.photopic, axis)?,
             unresolved_paths: self.unresolved,
+            max_contact_resolution_m: self.max_contact_resolution_m,
         })
     }
 }
@@ -219,6 +297,9 @@ pub struct AnalyzerReading {
     pub radiant_w: f64,
     pub luminous_lm: f64,
     pub unresolved_paths: u64,
+    /// Same numerical contact scale retained by the original detector reading.
+    /// It is not an analyzer-power error bound.
+    pub max_contact_resolution_m: f64,
 }
 fn project(s: Stokes, axis: [f64; 3]) -> Result<f64, MeterError> {
     // Halve before adding: (I+Q)/2 would overflow for a large valid I=Q.
