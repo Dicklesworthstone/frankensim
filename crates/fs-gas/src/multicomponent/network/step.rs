@@ -1,10 +1,11 @@
 use super::super::evolve::{EndpointFlux, forward, operator, totals};
 use super::super::{
     Boundaries, Error, MAX_COMPONENTS, MAX_SPECIES, Reconstruction, StepControl, StepReport,
-    Totals, cell, poll, positive,
+    Totals, cell, poll, positive, sum,
 };
 use super::{
-    Accumulator, BranchEnd, MixtureNetwork1d, NetworkStepReport, NetworkTotals, PortExchange,
+    Accumulator, BranchEnd, MixtureNetwork1d, NetworkStepReport, NetworkTotals, PlenumBoundaryWork,
+    PortExchange,
 };
 use fs_qty::Time;
 
@@ -37,6 +38,63 @@ impl MixtureNetwork1d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        self.step_impl(maximum_duration, controls, None, cancelled)
+    }
+
+    /// Advance prescribed compact-volume motion and branch flow simultaneously.
+    ///
+    /// `volume_rates_m3_s` contains one finite signed dV/dt in retained plenum
+    /// order: negative compresses, positive expands. Rates stay constant over
+    /// the actual accepted duration, which may be shortened by acoustic or
+    /// volume-rate limits. Each SSP RK2 stage advances extensive species masses
+    /// and referenced internal energy, with the mechanical term `-p*dV/dt`
+    /// evaluated through the original local composition and NASA-9 calorics.
+    /// Shared port enthalpy fluxes remain equal and opposite at both stages.
+    ///
+    /// All-zero rates use the original rigid-volume arithmetic. Successful
+    /// steps allocate no new workspace. Refusal/cancellation retains every
+    /// state, volume, clock and accepted report. The per-plenum accepted volumes
+    /// and pressure work are available through `accepted_plenum_boundary_work`.
+    ///
+    /// This is a finite-time perfectly mixed chamber model coupled to resolved
+    /// branch waves. Chamber inertia, spatial piston shocks and wall motion of
+    /// the branches are not resolved; the caller supplies the mechanical motion.
+    pub fn step_with_volume_rates(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        volume_rates_m3_s: &[f64],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        poll(&mut cancelled)?;
+        if volume_rates_m3_s.len() != self.plenums.len() {
+            return Err(Error::Invalid(
+                "one volume rate is required for every plenum",
+            ));
+        }
+        let mut moving = false;
+        for &rate in volume_rates_m3_s {
+            poll(&mut cancelled)?;
+            if !rate.is_finite() {
+                return Err(Error::Invalid("plenum volume rates must be finite"));
+            }
+            moving |= rate != 0.0;
+        }
+        self.step_impl(
+            maximum_duration,
+            controls,
+            moving.then_some(volume_rates_m3_s),
+            cancelled,
+        )
+    }
+
+    fn step_impl(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        volume_rates: Option<&[f64]>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         poll(&mut cancelled)?;
@@ -83,6 +141,13 @@ impl MixtureNetwork1d {
                 &mut cancelled,
             )?;
             before.add_cell(plenum.state(), plenum.volume_m3)?;
+            if let Some(rates) = volume_rates {
+                let local = rates[i].abs() / plenum.volume_m3;
+                if !local.is_finite() {
+                    return Err(Error::Invalid("unrepresentable initial plenum volume rate"));
+                }
+                rate = rate.max(local);
+            }
         }
         for connection in &self.connections {
             poll(&mut cancelled)?;
@@ -124,7 +189,13 @@ impl MixtureNetwork1d {
             } else {
                 controls.reconstruction
             };
-            match self.attempt(dt, controls.cfl, reconstruction, &mut cancelled) {
+            match self.attempt(
+                dt,
+                controls.cfl,
+                reconstruction,
+                volume_rates,
+                &mut cancelled,
+            ) {
                 Ok(maximum_rate) => {
                     let report = self.prepare_report(
                         before,
@@ -146,6 +217,7 @@ impl MixtureNetwork1d {
                         plenum.state.partial_densities.copy_from_slice(&q[..n]);
                         plenum.state.momentum = 0.0;
                         plenum.state.energy = q[n + 1];
+                        plenum.volume_m3 = self.work.plenum_work_candidate[i].final_volume_m3;
                     }
                     core::mem::swap(
                         &mut self.port_exchanges,
@@ -155,6 +227,7 @@ impl MixtureNetwork1d {
                         &mut self.branch_reports,
                         &mut self.work.branch_report_candidate,
                     );
+                    core::mem::swap(&mut self.plenum_work, &mut self.work.plenum_work_candidate);
                     self.last_report = Some(report);
                     return Ok(report);
                 }
@@ -179,14 +252,35 @@ impl MixtureNetwork1d {
         dt: f64,
         cfl: f64,
         reconstruction: Reconstruction,
+        volume_rates: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
-        let a = self.evaluate(false, reconstruction, cancelled)?;
+        // Admit actual, represented geometry before evaluating either stage.
+        for (i, plenum) in self.plenums.iter().enumerate() {
+            poll(cancelled)?;
+            let rate = volume_rates.map_or(0.0, |rates| rates[i]);
+            let volume = plenum.volume_m3 + dt * rate;
+            if !positive(volume)
+                || (rate != 0.0 && volume == plenum.volume_m3)
+                || (rate != 0.0
+                    && (volume - plenum.volume_m3).is_sign_positive() != rate.is_sign_positive())
+            {
+                return Err(Error::Invalid(
+                    "plenum motion has no positive representable endpoint volume",
+                ));
+            }
+            self.work.plenum_work_candidate[i] = PlenumBoundaryWork {
+                initial_volume_m3: plenum.volume_m3,
+                final_volume_m3: volume,
+                work_on_gas_j: 0.0,
+            };
+        }
+        let a = self.evaluate(false, reconstruction, volume_rates, cancelled)?;
         admit_cfl(a, dt, cfl)?;
-        self.forward_stage(false, dt, cancelled)?;
-        let b = self.evaluate(true, reconstruction, cancelled)?;
+        self.forward_stage(false, dt, volume_rates, cancelled)?;
+        let b = self.evaluate(true, reconstruction, volume_rates, cancelled)?;
         admit_cfl(b, dt, cfl)?;
-        self.forward_stage(true, dt, cancelled)?;
+        self.forward_stage(true, dt, volume_rates, cancelled)?;
         Ok(a.max(b))
     }
 
@@ -194,6 +288,7 @@ impl MixtureNetwork1d {
         &mut self,
         second: bool,
         reconstruction: Reconstruction,
+        volume_rates: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, Error> {
         let n = self.gas().species_count();
@@ -213,6 +308,18 @@ impl MixtureNetwork1d {
                 Some(self.work.plenum_primitive[i].temperature),
                 cancelled,
             )?;
+            if let Some(rates) = volume_rates {
+                let volume = if second {
+                    self.work.plenum_work_candidate[i].final_volume_m3
+                } else {
+                    plenum.volume_m3
+                };
+                let rate = rates[i].abs() / volume;
+                if !rate.is_finite() {
+                    return Err(Error::Invalid("unrepresentable plenum stage volume rate"));
+                }
+                self.work.plenum_signal_rates[i] = rate;
+            }
         }
         for connection in &self.connections {
             poll(cancelled)?;
@@ -265,7 +372,12 @@ impl MixtureNetwork1d {
                 self.work.plenum_compensation[slot] = (next - self.work.plenum_rhs[slot]) - y;
                 self.work.plenum_rhs[slot] = next;
             }
-            let rate = 0.5 * area * (data.signal_speed / self.plenums[p].volume_m3);
+            let volume = if second {
+                self.work.plenum_work_candidate[p].final_volume_m3
+            } else {
+                self.plenums[p].volume_m3
+            };
+            let rate = 0.5 * area * (data.signal_speed / volume);
             if !positive(rate) {
                 return Err(Error::Invalid("unrepresentable mixture plenum face CFL"));
             }
@@ -327,6 +439,7 @@ impl MixtureNetwork1d {
         &mut self,
         second: bool,
         dt: f64,
+        volume_rates: Option<&[f64]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
         let n = self.gas().species_count();
@@ -377,6 +490,56 @@ impl MixtureNetwork1d {
             } else {
                 plenum.state()
             };
+            let volume_rate = volume_rates.map_or(0.0, |rates| rates[i]);
+            if volume_rate != 0.0 {
+                // Advance the moving control volume's extensive state. A
+                // density-only RK average would violate the geometric balance
+                // and create/destroy species during volume motion.
+                let initial_volume = plenum.volume_m3;
+                let final_volume = self.work.plenum_work_candidate[i].final_volume_m3;
+                let stage_volume = if second { final_volume } else { initial_volume };
+                let pressure_power = -self.work.plenum_primitive[i].pressure * volume_rate;
+                if !pressure_power.is_finite() {
+                    return Err(Error::Invalid("unrepresentable mechanical plenum power"));
+                }
+                for k in 0..n {
+                    let extensive = stage_volume * q.partial_densities[k]
+                        + dt * self.work.plenum_rhs[i * m + k];
+                    advanced[k] = if second {
+                        (0.5 * initial_volume * plenum.state.partial_densities[k] + 0.5 * extensive)
+                            / final_volume
+                    } else {
+                        extensive / final_volume
+                    };
+                }
+                advanced[n] = 0.0;
+                let extensive_energy = stage_volume * q.energy
+                    + dt * (self.work.plenum_rhs[i * m + n + 1] + pressure_power);
+                advanced[n + 1] = if second {
+                    (0.5 * initial_volume * plenum.state.energy + 0.5 * extensive_energy)
+                        / final_volume
+                } else {
+                    extensive_energy / final_volume
+                };
+                self.branches[0].gas.decode(
+                    &advanced[..m],
+                    Some(self.work.plenum_primitive[i].temperature),
+                    cancelled,
+                )?;
+                let work =
+                    self.work.plenum_work_candidate[i].work_on_gas_j + (0.5 * dt) * pressure_power;
+                if !work.is_finite() {
+                    return Err(Error::Invalid("unrepresentable mechanical plenum work"));
+                }
+                self.work.plenum_work_candidate[i].work_on_gas_j = work;
+                let destination = if second {
+                    &mut self.work.plenum_candidate[i * m..(i + 1) * m]
+                } else {
+                    &mut self.work.plenum_stage[i * m..(i + 1) * m]
+                };
+                destination.copy_from_slice(&advanced[..m]);
+                continue;
+            }
             let ratio = dt / plenum.volume_m3;
             for k in 0..n {
                 advanced[k] = q.partial_densities[k] + ratio * self.work.plenum_rhs[i * m + k];
@@ -485,11 +648,11 @@ impl MixtureNetwork1d {
             fallbacks += a.fallbacks + b.fallbacks;
             limited += a.limited + b.limited;
         }
-        for (i, plenum) in self.plenums.iter().enumerate() {
+        for i in 0..self.plenums.len() {
             poll(cancelled)?;
             after.add_cell(
                 cell(&self.work.plenum_candidate[i * m..(i + 1) * m], n),
-                plenum.volume_m3,
+                self.work.plenum_work_candidate[i].final_volume_m3,
             )?;
         }
         for (port, connection) in self.connections.iter().enumerate() {
@@ -517,6 +680,11 @@ impl MixtureNetwork1d {
         }
         let after = after.totals();
         let boundary_change = boundary.totals();
+        let boundary_work_on_gas_j = sum(self
+            .work
+            .plenum_work_candidate
+            .iter()
+            .map(|x| x.work_on_gas_j));
         let mut species_masses = [0.0; MAX_SPECIES];
         for (k, value) in species_masses[..n].iter_mut().enumerate() {
             *value = after.species_masses[k]
@@ -526,7 +694,7 @@ impl MixtureNetwork1d {
         let conservation_residual = NetworkTotals {
             species_masses,
             species_count: n,
-            energy: after.energy - before.energy - boundary_change.energy,
+            energy: after.energy - before.energy - boundary_change.energy - boundary_work_on_gas_j,
         };
         if !conservation_residual.energy.is_finite()
             || !conservation_residual.species_masses[..n]
@@ -547,6 +715,7 @@ impl MixtureNetwork1d {
             before,
             after,
             boundary_change,
+            boundary_work_on_gas_j,
             conservation_residual,
         })
     }

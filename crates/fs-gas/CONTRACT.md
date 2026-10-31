@@ -1854,6 +1854,28 @@ independently integrated physical work balance, reversible volume cycles, and
 state/clock/report preservation under early or late cancellation, source
 refusal and exact no-op.
 
+## Finite-time compression coupled to network transport
+
+`MixtureNetwork1d::step_with_volume_rates` evolves prescribed per-plenum dV/dt
+simultaneously with branch and characteristic-port flow through the original
+SSP RK2 stages. Species inventory and referenced internal energy advance
+extensively, with source-owned pressure work `-p dV/dt` accounted separately
+from transported energy. Accepted endpoint volumes and pressure work are
+available per plenum, and `NetworkStepReport::boundary_work_on_gas_j` closes
+the combined network energy balance with that same pressure quadrature.
+
+Positive representable volumes and acoustic/volume-rate CFL bounds gate atomic
+publication. All-zero rates preserve the rigid-step arithmetic; failure retains
+fields, volumes, clocks and accepted receipts. Work/report buffers are allocated
+at construction and reused. G1 tests compare 20/40/80-step compression and
+expansion ladders with independent constant/linear-Cp isentropes. Other focused
+tests check simultaneous port enthalpy/species/work closure, exact rigid
+identity, geometry/source-domain refusal and early/intermediate/final cancellation.
+
+The compact perfectly mixed chamber approximation remains. Rates are constant
+over each accepted step. Spatial piston shocks, branch-wall motion and piston
+inertia require other physical owners; this is not a spatial ALE solver.
+
 ## Original material calorics in finite gas walls
 
 `MaterialWallCaloric` binds the existing `PreparedHeatStorage` to finite

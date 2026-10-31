@@ -6,12 +6,13 @@
 //! shock/characteristic flow. Boundary work is the resulting change in gas
 //! internal energy; it is never injected as heat or approximated by p*Delta V.
 //!
-//! The operation is intentionally clock-free. A running network can accept the
-//! endpoint between transport steps, keeping its branches and clock unchanged.
-//! This is a quasistatic compression/expansion split, not a finite-speed
-//! moving-wall Riemann solver. The caller owns piston inertia, prescribed motion,
-//! heat leaks and the accuracy of splitting with branch flow. Refusal publishes
-//! neither a volume change nor a new report.
+//! The endpoint operation is intentionally clock-free. A running network can
+//! accept it between transport steps, keeping its branches and clock unchanged.
+//! For simultaneous finite-time port transport and volume motion, use
+//! [`MixtureNetwork1d::step_with_volume_rates`], which integrates pressure work
+//! and extensive storage in the transport owner's RK stages. Both paths assume
+//! a perfectly mixed chamber; neither resolves spatial piston shocks or piston
+//! inertia. Refusal publishes neither a volume change nor a new report.
 
 use super::{Accumulator, MixtureNetwork1d, NetworkTotals, Plenum};
 use crate::dynamics::wall::shared::CaloricLaw;
@@ -727,5 +728,309 @@ mod tests {
             network.accepted_branch_reports(),
             Some(branch_reports.as_slice())
         );
+    }
+
+    fn isolated_chamber(gas: &MixtureGas, pressure: f64) -> MixtureNetwork1d {
+        let branch = MixtureEuler1d::new(
+            gas.clone(),
+            Length::new(10.0),
+            0.01,
+            vec![gas.conserved(&[1.0, 0.0], 0.0, 1.0).unwrap(); 2],
+            Boundaries::Periodic,
+            || false,
+        )
+        .unwrap();
+        MixtureNetwork1d::new(
+            vec![branch],
+            vec![Plenum::new(1.0, gas.conserved(&[1.0, 0.0], 0.0, pressure).unwrap()).unwrap()],
+            vec![],
+            || false,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn g1_finite_time_chamber_compression_and_expansion_have_second_order_isentropic_limits() {
+        for variable in [false, true] {
+            let gas = caloric_gas(variable, 0.0);
+            for rate in [-2.0_f64, 2.0] {
+                let mut errors = Vec::new();
+                for steps in [20, 40, 80] {
+                    let mut network = isolated_chamber(&gas, 1.0);
+                    let before = physical_storage(&network);
+                    let dt = 0.25 / steps as f64;
+                    let mut work = 0.0;
+                    for _ in 0..steps {
+                        let report = network
+                            .step_with_volume_rates(
+                                Time::new(dt),
+                                StepControl::default(),
+                                &[rate],
+                                || false,
+                            )
+                            .unwrap();
+                        assert_eq!(report.elapsed.value(), dt);
+                        assert_eq!(report.halvings, 0);
+                        assert_eq!(report.boundary_change.energy, 0.0);
+                        work += report.boundary_work_on_gas_j;
+                        close(report.conservation_residual.energy, 0.0, 1.0, 3e-14);
+                    }
+                    let chamber = &network.plenums()[0];
+                    let volume = chamber.volume_m3();
+                    close(volume, 1.0 + rate * 0.25, 1.0, 2e-14);
+                    let actual = gas.primitive(chamber.state(), || false).unwrap();
+                    // Independent source integral for pure A, R=1:
+                    // Cv(T)=2.5+b*T; 2.5*ln(T)+b*(T-1)+ln(V)=0.
+                    let b = if variable { 0.25 } else { 0.0 };
+                    let (mut lo, mut hi) = (0.5_f64, 2.0_f64);
+                    for _ in 0..80 {
+                        let t = lo.midpoint(hi);
+                        if 2.5 * t.ln() + b * (t - 1.0) + volume.ln() > 0.0 {
+                            hi = t;
+                        } else {
+                            lo = t;
+                        }
+                    }
+                    let exact_temperature = lo.midpoint(hi);
+                    let exact_pressure = exact_temperature / volume;
+                    errors.push((actual.pressure - exact_pressure).abs());
+                    let after = physical_storage(&network);
+                    close(after.0[0], before.0[0], before.0[0], 3e-14);
+                    assert_eq!(after.0[1], 0.0);
+                    close(after.1 - before.1, work, work.abs(), 8e-14);
+                    assert_eq!(work.is_sign_positive(), rate.is_sign_negative());
+                }
+                for pair in errors.windows(2) {
+                    assert!(
+                        pair[1] > 1e-10,
+                        "refinement error reached roundoff: {errors:?}"
+                    );
+                    let order = (pair[0] / pair[1]).log2();
+                    assert!(
+                        (1.8..2.2).contains(&order),
+                        "observed order={order}, errors={errors:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn finite_time_connected_compression_closes_each_chambers_work_and_port_enthalpy() {
+        let gas = caloric_gas(true, 5.0);
+        let mut network = connected_chamber(&gas);
+        let before = physical_storage(&network);
+        let mut total_work = 0.0;
+        let mut transported_mass = 0.0;
+        for _ in 0..60 {
+            let original = network.plenums().to_vec();
+            let report = network
+                .step_with_volume_rates(
+                    Time::new(0.001),
+                    StepControl::default(),
+                    &[-0.02, 0.005],
+                    || false,
+                )
+                .unwrap();
+            let port = &network.accepted_port_exchanges().unwrap()[0];
+            let mechanical = network.accepted_plenum_boundary_work().unwrap();
+            for i in 0..2 {
+                let old = &original[i];
+                let next = &network.plenums()[i];
+                let work = &mechanical[i];
+                assert_eq!(work.initial_volume_m3, old.volume_m3());
+                assert_eq!(work.final_volume_m3, next.volume_m3());
+                let energy_change = next.volume_m3()
+                    * gas.absolute_energy_density(next.state()).unwrap()
+                    - old.volume_m3() * gas.absolute_energy_density(old.state()).unwrap();
+                let port_energy = if i == 0 {
+                    port.absolute_energy_to_plenum(&gas).unwrap()
+                } else {
+                    0.0
+                };
+                close(energy_change, port_energy + work.work_on_gas_j, 1.0, 2e-14);
+                for k in 0..2 {
+                    let mass_change = next.volume_m3() * next.state().partial_densities[k]
+                        - old.volume_m3() * old.state().partial_densities[k];
+                    let port_mass = if i == 0 {
+                        port.species_masses_to_plenum[k]
+                    } else {
+                        0.0
+                    };
+                    close(mass_change, port_mass, 1.0, 4e-17);
+                }
+            }
+            assert!(mechanical[0].work_on_gas_j > 0.0);
+            assert!(mechanical[1].work_on_gas_j < 0.0);
+            close(
+                report.boundary_work_on_gas_j,
+                mechanical[0].work_on_gas_j + mechanical[1].work_on_gas_j,
+                1.0,
+                2e-18,
+            );
+            close(report.conservation_residual.energy, 0.0, 1.0, 3e-14);
+            total_work += report.boundary_work_on_gas_j;
+            transported_mass += port.mass_to_plenum();
+        }
+        assert!(
+            transported_mass < -1e-6,
+            "compression did not drive finite-port outflow"
+        );
+        let after = physical_storage(&network);
+        for k in 0..2 {
+            close(after.0[k], before.0[k], 1.0, 2e-16);
+        }
+        close(after.1 - before.1, total_work, 1.0, 2e-13);
+    }
+
+    #[test]
+    fn zero_volume_rates_preserve_rigid_step_fields_and_reports_exactly() {
+        let gas = caloric_gas(true, 0.0);
+        let mut rigid = connected_chamber(&gas);
+        let mut moving = connected_chamber(&gas);
+        for network in [&mut rigid, &mut moving] {
+            network
+                .quasistatic_adiabatic_plenum_to(0, 0.003, || false)
+                .unwrap();
+        }
+        for _ in 0..4 {
+            let expected = rigid
+                .step(Time::new(0.001), StepControl::default(), || false)
+                .unwrap();
+            let actual = moving
+                .step_with_volume_rates(
+                    Time::new(0.001),
+                    StepControl::default(),
+                    &[0.0, -0.0],
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(actual.boundary_work_on_gas_j, 0.0);
+            assert_eq!(moving.plenums(), rigid.plenums());
+            assert_eq!(branch_states(&moving), branch_states(&rigid));
+            assert_eq!(moving.time(), rigid.time());
+            assert_eq!(
+                moving.accepted_port_exchanges(),
+                rigid.accepted_port_exchanges()
+            );
+            assert_eq!(
+                moving.accepted_branch_reports(),
+                rigid.accepted_branch_reports()
+            );
+            assert_eq!(
+                moving.accepted_plenum_boundary_work(),
+                rigid.accepted_plenum_boundary_work()
+            );
+        }
+    }
+
+    #[test]
+    fn finite_time_volume_rate_limits_admit_only_positive_geometry_and_source_states() {
+        let gas = caloric_gas(false, 0.0);
+        let mut network = isolated_chamber(&gas, 1.0);
+        let report = network
+            .step_with_volume_rates(Time::new(1.0), StepControl::default(), &[-100.0], || false)
+            .unwrap();
+        assert!(report.elapsed.value() < 0.01);
+        assert!(report.halvings > 0);
+        assert!(report.maximum_cfl <= StepControl::default().cfl);
+        let work = network.accepted_plenum_boundary_work().unwrap()[0];
+        assert_eq!(work.final_volume_m3, 1.0 - 100.0 * report.elapsed.value());
+        assert!(work.final_volume_m3 > 0.0 && work.final_volume_m3 < 1.0);
+        assert!(work.work_on_gas_j > 0.0);
+
+        let mut hot = isolated_chamber(&gas, 49.9);
+        let original = hot.plenums().to_vec();
+        let controls = StepControl {
+            maximum_halvings: 0,
+            ..StepControl::default()
+        };
+        assert!(matches!(
+            hot.step_with_volume_rates(Time::new(0.01), controls, &[-1.0], || false),
+            Err(Error::StepRetries { .. })
+        ));
+        assert_eq!(hot.plenums(), original);
+        assert_eq!(hot.time().value(), 0.0);
+        assert!(hot.last_report().is_none());
+        assert!(hot.accepted_plenum_boundary_work().is_none());
+    }
+
+    #[test]
+    fn finite_time_volume_refusal_and_early_late_cancellation_preserve_accepted_transaction() {
+        let gas = caloric_gas(true, 0.0);
+        let prepare = || {
+            let mut network = connected_chamber(&gas);
+            network
+                .step_with_volume_rates(
+                    Time::new(0.001),
+                    StepControl::default(),
+                    &[-0.02, 0.005],
+                    || false,
+                )
+                .unwrap();
+            network
+        };
+        let snapshot = |network: &MixtureNetwork1d| {
+            (
+                branch_states(network),
+                network.plenums().to_vec(),
+                network.time(),
+                network.last_report(),
+                network.accepted_port_exchanges().unwrap().to_vec(),
+                network.accepted_branch_reports().unwrap().to_vec(),
+                network.accepted_plenum_boundary_work().unwrap().to_vec(),
+            )
+        };
+        let mut network = prepare();
+        let before = snapshot(&network);
+        for rates in [
+            &[][..],
+            &[0.0][..],
+            &[f64::NAN, 0.0][..],
+            &[f64::MAX, 0.0][..],
+            &[f64::MIN_POSITIVE, 0.0][..],
+        ] {
+            assert!(
+                network
+                    .step_with_volume_rates(Time::new(0.001), StepControl::default(), rates, || {
+                        false
+                    })
+                    .is_err()
+            );
+            assert_eq!(snapshot(&network), before);
+        }
+        let mut polls = 0;
+        prepare()
+            .step_with_volume_rates(
+                Time::new(0.001),
+                StepControl::default(),
+                &[-0.02, 0.005],
+                || {
+                    polls += 1;
+                    false
+                },
+            )
+            .unwrap();
+        for stop in [1, polls / 2, polls] {
+            let mut network = prepare();
+            let before = snapshot(&network);
+            let mut seen = 0;
+            assert_eq!(
+                network
+                    .step_with_volume_rates(
+                        Time::new(0.001),
+                        StepControl::default(),
+                        &[-0.02, 0.005],
+                        || {
+                            seen += 1;
+                            seen >= stop
+                        }
+                    )
+                    .unwrap_err(),
+                Error::Cancelled
+            );
+            assert_eq!(snapshot(&network), before);
+        }
     }
 }

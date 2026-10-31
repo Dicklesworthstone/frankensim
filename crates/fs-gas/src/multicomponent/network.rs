@@ -3,9 +3,10 @@
 //! Each branch and compact volume retains the same original species bank and
 //! per-species energy references, while its actual composition evolves. One
 //! characteristic port flux supplies opposite exchanges to its two owners.
-//! Network plenums are rigid, adiabatic and perfectly mixed during a network
-//! transport step. The explicit `moving` owner can instead construct a
-//! quasistatic adiabatic volume-change candidate between accepted network steps;
+//! Network plenums are adiabatic and perfectly mixed during a network transport
+//! step. They may remain rigid or follow prescribed volume rates, with pressure
+//! work integrated in the same stages as port transport. The `moving` owner can
+//! also construct a quasistatic adiabatic volume-change candidate between accepted steps;
 //! it accounts boundary work without disguising it as heat or a pressure source.
 //! Incoming kinetic energy remains in plenum internal-energy balance. Stationary
 //! supports receive each port's separately reported axial impulse.
@@ -46,7 +47,7 @@ pub mod reactive;
 /// Clock-preserving radial drag and conservative heat exchange with wall storage.
 pub mod wall_exchange;
 
-/// Finite, stationary, perfectly mixed gas volume with evolving species.
+/// Finite, perfectly mixed gas volume with evolving species and zero bulk momentum.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Plenum {
     volume_m3: f64,
@@ -77,7 +78,7 @@ impl Plenum {
         }
         Ok(Self { volume_m3, state })
     }
-    /// Original rigid physical volume [m³].
+    /// Current physical volume [m³].
     pub const fn volume_m3(&self) -> f64 {
         self.volume_m3
     }
@@ -149,12 +150,24 @@ impl PortExchange {
     }
 }
 
+/// Accepted mechanical boundary exchange for one compact plenum.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PlenumBoundaryWork {
+    /// Physical volume at the beginning of the accepted step [m³].
+    pub initial_volume_m3: f64,
+    /// Physical volume at the end of the accepted step [m³].
+    pub final_volume_m3: f64,
+    /// Mechanical work done ON the gas [J], positive under compression.
+    /// Uses the same pressure quadrature as the extensive-energy update.
+    pub work_on_gas_j: f64,
+}
+
 /// Accepted common step; internal species and energy exchanges cancel globally.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetworkStepReport {
     /// Actual elapsed duration, no greater than the requested maximum.
     pub elapsed: Time,
-    /// Maximum branch or compact-volume face-speed CFL over both stages.
+    /// Maximum branch/port acoustic or compact-volume fractional-change CFL over both stages.
     pub maximum_cfl: f64,
     /// Number of globally rejected and halved trials.
     pub halvings: usize,
@@ -170,7 +183,10 @@ pub struct NetworkStepReport {
     pub after: NetworkTotals,
     /// Accepted inflow through external branch ends only.
     pub boundary_change: NetworkTotals,
-    /// `after - before - boundary_change`, per species and in the original energy gauges.
+    /// Mechanical work done ON all plenums [J], separate from transported energy.
+    pub boundary_work_on_gas_j: f64,
+    /// `after - before - boundary_change - boundary_work`, per species and in the
+    /// original energy gauges. Mechanical work changes energy only.
     pub conservation_residual: NetworkTotals,
 }
 
@@ -188,6 +204,7 @@ struct NetworkWorkspace {
     branch_before: Vec<Totals>,
     branch_report_candidate: Vec<StepReport>,
     port_exchange_candidate: Vec<PortExchange>,
+    plenum_work_candidate: Vec<PlenumBoundaryWork>,
 }
 
 /// Shared-clock species-bearing network of original Euler branches and finite plenums.
@@ -203,15 +220,16 @@ pub struct MixtureNetwork1d {
     endpoint_connections: Vec<[Option<usize>; 2]>,
     work: NetworkWorkspace,
     port_exchanges: Vec<PortExchange>,
+    plenum_work: Vec<PlenumBoundaryWork>,
     branch_reports: Vec<StepReport>,
     last_report: Option<NetworkStepReport>,
 }
 impl MixtureNetwork1d {
-    /// Connect physical branch ends to rigid finite volumes.
+    /// Connect physical branch ends to finite, perfectly mixed gas volumes.
     ///
     /// The combined branch-cell/plenum count is bounded by `MAX_EULER_CELLS`.
     /// Periodic branches may remain isolated but cannot have connected ends.
-    /// Each endpoint may appear once; an unconnected plenum retains its state.
+    /// Each endpoint may appear once; an unconnected rigid plenum retains its state.
     pub fn new(
         branches: Vec<MixtureEuler1d>,
         plenums: Vec<Plenum>,
@@ -294,8 +312,10 @@ impl MixtureNetwork1d {
             branch_before: allocated(branches.len(), empty_totals(n))?,
             branch_report_candidate: allocated(branches.len(), empty_report(n))?,
             port_exchange_candidate: allocated(connections.len(), empty_exchange(n))?,
+            plenum_work_candidate: allocated(plenums.len(), PlenumBoundaryWork::default())?,
         };
         let port_exchanges = allocated(connections.len(), empty_exchange(n))?;
+        let plenum_work = allocated(plenums.len(), PlenumBoundaryWork::default())?;
         let branch_reports = allocated(branches.len(), empty_report(n))?;
         poll(&mut cancelled)?;
         Ok(Self {
@@ -305,6 +325,7 @@ impl MixtureNetwork1d {
             endpoint_connections,
             work,
             port_exchanges,
+            plenum_work,
             branch_reports,
             last_report: None,
         })
@@ -336,6 +357,11 @@ impl MixtureNetwork1d {
     /// Accepted exchanges in original connection order, or None before stepping.
     pub fn accepted_port_exchanges(&self) -> Option<&[PortExchange]> {
         self.last_report.map(|_| self.port_exchanges.as_slice())
+    }
+    /// Accepted volumes and mechanical work in original plenum order.
+    /// Rigid-volume steps report identical endpoint volumes and exactly zero work.
+    pub fn accepted_plenum_boundary_work(&self) -> Option<&[PlenumBoundaryWork]> {
+        self.last_report.map(|_| self.plenum_work.as_slice())
     }
     /// Complete branch species/momentum/energy balances for the accepted step.
     pub fn accepted_branch_reports(&self) -> Option<&[StepReport]> {
