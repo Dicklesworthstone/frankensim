@@ -148,6 +148,105 @@ fn material(error: GasEnergyError) -> NsfDgError {
     }
 }
 
+impl FiniteReservoir {
+    /// Bind the same original material inventory for either acoustic assembly.
+    /// The caller separately admits its cold history and attachment ownership.
+    pub(super) fn bind<L: Lattice3<27>>(
+        zone: &NsfGrid3<L>, aperture: usize, volume_m3: f64,
+        limits: NsfFiniteReservoirLimits, gate: &CancelGate,
+    ) -> Result<Self, NsfDgError> {
+        poll(gate)?;
+        limits.validate()?;
+        if !volume_m3.is_finite() || volume_m3 <= 0.0 {
+            return Err(NsfDgError::Input(
+                "finite reservoir requires one cold positive volume and a source distinct from passive radiation",
+            ));
+        }
+        let opening = zone.reservoir_aperture_at(aperture).ok_or(NsfDgError::Input(
+            "finite reservoir requires an existing selected transverse opening",
+        ))?;
+        if opening.state.velocity_m_s != [0.0; 3] {
+            return Err(NsfDgError::Input(
+                "a quiescent finite rigid reservoir cannot prescribe ghost momentum",
+            ));
+        }
+        let gas = Inventory::new(zone.medium(), opening.state, volume_m3,
+            zone.temperature_window_k(), gate)?;
+        let authored_mass = opening.state.density_kg_m3 * volume_m3;
+        let mass_residual = gas.mass_kg() - authored_mass;
+        let sensible = gas.sensible_specific_energy_j_kg();
+        let storage = gas.mass_kg() * sensible;
+        if ![authored_mass, mass_residual, sensible, storage].into_iter().all(f64::is_finite)
+            || authored_mass <= 0.0 || storage == 0.0
+            || mass_residual.abs() > limits.mass_absolute_tolerance_kg
+        {
+            return Err(NsfDgError::Input(
+                "finite reservoir initial source inventory or sensible energy is unrepresentable",
+            ));
+        }
+        poll(gate)?;
+        Ok(Self { aperture, gas, limits })
+    }
+
+    pub(super) fn thermochemical(&self) -> Option<&ClosedGasParcel> {
+        self.gas.thermochemical()
+    }
+
+    pub(super) fn inventory(&self) -> NsfFiniteReservoirInventory {
+        NsfFiniteReservoirInventory {
+            aperture: self.aperture,
+            volume_m3: self.gas.volume_m3(),
+            mass_kg: self.gas.mass_kg(),
+            gas: *self.gas.state(),
+            sensible_energy_j: self.gas.mass_kg() * self.gas.sensible_specific_energy_j_kg(),
+            energy_reference_j_kg: self.gas.energy_reference_j_kg(),
+            source_kind: self.gas.source_kind(),
+        }
+    }
+
+    pub(super) const fn limits(&self) -> &NsfFiniteReservoirLimits {
+        &self.limits
+    }
+
+    pub(super) fn admit_drive(
+        owner: Option<&Self>, drive: NsfDgDrive,
+    ) -> Result<(), NsfDgError> {
+        match (owner, drive) {
+            (Some(owner), NsfDgDrive::FiniteReservoir { aperture })
+                if owner.aperture == aperture => Ok(()),
+            (Some(owner), NsfDgDrive::FiniteReservoirActuation {
+                aperture, maximum_relative_volume_change, ..
+            }) if owner.aperture == aperture => {
+                if !drive.is_finite()
+                    || !(0.0 < maximum_relative_volume_change
+                        && maximum_relative_volume_change < 1.0)
+                {
+                    return Err(NsfDgError::Input(
+                        "finite source actuation requires finite rates and a relative volume bound in (0,1)",
+                    ));
+                }
+                Ok(())
+            }
+            (None, NsfDgDrive::FiniteReservoir { .. }
+                | NsfDgDrive::FiniteReservoirActuation { .. }) => Err(NsfDgError::Input(
+                "finite reservoir drive requires its attached inventory",
+            )),
+            (Some(_), _) => Err(NsfDgError::Input(
+                "an attached finite reservoir exclusively owns its selected source control",
+            )),
+            (None, _) => Ok(()),
+        }
+    }
+
+    pub(super) fn state<L: Lattice3<27>>(
+        &self, zone: &NsfGrid3<L>,
+    ) -> Result<NsfOpenState, NsfDgError> {
+        let gas = self.gas.state();
+        zone.reservoir_aperture_state_for(self.aperture, gas.pressure, gas.temperature)
+            .map_err(NsfDgError::Flow)
+    }
+}
+
 impl<L: Lattice3<27>> NsfDg<L> {
     /// Attach one finite source to an existing quiescent transverse opening.
     ///
@@ -178,30 +277,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 "finite reservoir requires one cold positive volume and a source distinct from passive radiation",
             ));
         }
-        let opening = self.zone.reservoir_aperture_at(aperture).ok_or(NsfDgError::Input(
-            "finite reservoir requires an existing selected transverse opening",
-        ))?;
-        if opening.state.velocity_m_s != [0.0; 3] {
-            return Err(NsfDgError::Input(
-                "a quiescent finite rigid reservoir cannot prescribe ghost momentum",
-            ));
-        }
-        let gas = Inventory::new(self.zone.medium(), opening.state, volume_m3,
-            self.zone.temperature_window_k(), gate)?;
-        let authored_mass = opening.state.density_kg_m3 * volume_m3;
-        let mass_residual = gas.mass_kg() - authored_mass;
-        let sensible = gas.sensible_specific_energy_j_kg();
-        let storage = gas.mass_kg() * sensible;
-        if ![authored_mass, mass_residual, sensible, storage].into_iter().all(f64::is_finite)
-            || authored_mass <= 0.0 || storage == 0.0
-            || mass_residual.abs() > limits.mass_absolute_tolerance_kg
-        {
-            return Err(NsfDgError::Input(
-                "finite reservoir initial source inventory or sensible energy is unrepresentable",
-            ));
-        }
-        poll(gate)?;
-        self.finite_reservoir = Some(FiniteReservoir { aperture, gas, limits });
+        self.finite_reservoir = Some(FiniteReservoir::bind(
+            &self.zone, aperture, volume_m3, limits, gate,
+        )?);
         Ok(self)
     }
 
@@ -209,21 +287,13 @@ impl<L: Lattice3<27>> NsfDg<L> {
     /// Use finite_reservoir_inventory for either source family. Failed trials
     /// leave both forms of retained storage unchanged.
     pub fn finite_reservoir(&self) -> Option<&ClosedGasParcel> {
-        self.finite_reservoir.as_ref().and_then(|owner| owner.gas.thermochemical())
+        self.finite_reservoir.as_ref().and_then(FiniteReservoir::thermochemical)
     }
 
     /// Accepted finite storage and its source family, without losing named gas
     /// inventories merely because they do not have a NASA9 parcel receipt.
     pub fn finite_reservoir_inventory(&self) -> Option<NsfFiniteReservoirInventory> {
-        self.finite_reservoir.as_ref().map(|owner| NsfFiniteReservoirInventory {
-            aperture: owner.aperture,
-            volume_m3: owner.gas.volume_m3(),
-            mass_kg: owner.gas.mass_kg(),
-            gas: *owner.gas.state(),
-            sensible_energy_j: owner.gas.mass_kg() * owner.gas.sensible_specific_energy_j_kg(),
-            energy_reference_j_kg: owner.gas.energy_reference_j_kg(),
-            source_kind: owner.gas.source_kind(),
-        })
+        self.finite_reservoir.as_ref().map(FiniteReservoir::inventory)
     }
 
     pub fn finite_reservoir_aperture(&self) -> Option<usize> {
@@ -231,47 +301,21 @@ impl<L: Lattice3<27>> NsfDg<L> {
     }
 
     pub fn finite_reservoir_limits(&self) -> Option<&NsfFiniteReservoirLimits> {
-        self.finite_reservoir.as_ref().map(|owner| &owner.limits)
+        self.finite_reservoir.as_ref().map(FiniteReservoir::limits)
     }
 
     pub(super) fn admit_finite_reservoir_drive(
         &self, drive: NsfDgDrive,
     ) -> Result<(), NsfDgError> {
-        match (self.finite_reservoir.as_ref(), drive) {
-            (Some(owner), NsfDgDrive::FiniteReservoir { aperture })
-                if owner.aperture == aperture => Ok(()),
-            (Some(owner), NsfDgDrive::FiniteReservoirActuation {
-                aperture, maximum_relative_volume_change, ..
-            }) if owner.aperture == aperture => {
-                if !drive.is_finite()
-                    || !(0.0 < maximum_relative_volume_change
-                        && maximum_relative_volume_change < 1.0)
-                {
-                    return Err(NsfDgError::Input(
-                        "finite source actuation requires finite rates and a relative volume bound in (0,1)",
-                    ));
-                }
-                Ok(())
-            }
-            (None, NsfDgDrive::FiniteReservoir { .. }
-                | NsfDgDrive::FiniteReservoirActuation { .. }) => Err(NsfDgError::Input(
-                "finite reservoir drive requires its attached inventory",
-            )),
-            (Some(_), _) => Err(NsfDgError::Input(
-                "an attached finite reservoir exclusively owns its selected source control",
-            )),
-            (None, _) => Ok(()),
-        }
+        FiniteReservoir::admit_drive(self.finite_reservoir.as_ref(), drive)
     }
 
     pub(super) fn finite_reservoir_state(
         &self, aperture: usize,
     ) -> Result<NsfOpenState, NsfDgError> {
         self.admit_finite_reservoir_drive(NsfDgDrive::FiniteReservoir { aperture })?;
-        let gas = self.finite_reservoir.as_ref()
-            .expect("admitted finite reservoir").gas.state();
-        self.zone.reservoir_aperture_state_for(aperture, gas.pressure, gas.temperature)
-            .map_err(NsfDgError::Flow)
+        self.finite_reservoir.as_ref()
+            .expect("admitted finite reservoir").state(&self.zone)
     }
 
     pub(super) fn step_with_finite_reservoir(

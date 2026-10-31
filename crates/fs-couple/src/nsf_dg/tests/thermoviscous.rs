@@ -511,3 +511,254 @@ fn playback_admission_requires_an_attached_observation_and_complete_physical_con
     assert!(NsfThermoviscousDgPerformance::new_with_drives(advanced, 0,
         ApertureObservation::Inlet, RATE, vec![valid], 4, gate).is_err());
 }
+
+// G0/G3/G4: finite material sources retain their original storage while the
+// complete acoustic field and both finite passages feed back into the fluid.
+// The small chambers and Cartesian channel are manufactured coupling fixtures.
+fn finite_medium(thermochemical: bool) -> (NsfGasMedium, GasState) {
+    if thermochemical {
+        let source = ThermochemicalNsfGas::new(
+            super::source::model(-4000.0, 100500.0, 1.0),
+            super::source::point(300.0, 100000.0),
+            GasEnergySolve { minimum_temperature_k: 290.0, maximum_temperature_k: 320.0,
+                energy_tolerance_j_kg: 1e-6, maximum_iterations: 64 },
+        ).unwrap();
+        let gas = *source.model().evaluate(source.context()).unwrap().state();
+        (source.into(), gas)
+    } else {
+        use fs_material::gas_species::input::{GasRecord, read_gas_record};
+        use fs_qty::semantic::{Composition, CompositionBasis};
+        let GasRecord::Mixture(gas, parts) = read_gas_record(&mut
+            "mixture 300 100000 mole 3 N2 0.78 O2 0.21 Ar 0.01"
+                .split_ascii_whitespace(), None, None).unwrap()
+            else { panic!("fixture requires its original named mixture"); };
+        let source = fs_lbm::nsf3::NamedMixtureNsfGas::new(
+            parts.iter().map(|part| part.0).collect(),
+            Composition::new(CompositionBasis::MoleFraction,
+                parts.iter().map(|part| part.1).collect()).unwrap(),
+            gas.temperature, gas.pressure,
+        ).unwrap();
+        (source.into(), gas)
+    }
+}
+
+fn finite_zone(medium: NsfGasMedium, gas: GasState) -> NsfGrid3<D3q27> {
+    let face = NsfCharacteristicBoundary {
+        reference_pressure_pa: gas.pressure, reference_temperature_k: gas.temperature,
+        reference_velocity_m_s: [0.0; 3], incoming_characteristic_m_s: 0.0,
+    };
+    NsfGrid3::new(NsfSpec {
+        dims: [12, 3, 3], periodic: [false; 3], gas: medium,
+        temperature_k: gas.temperature, pressure_pa: gas.pressure,
+        dx_m: (3.0 * gas.specific_gas_constant * gas.temperature).sqrt() / f64::from(RATE),
+        temperature_window_k: [290.0, 320.0], maximum_mach: 0.2,
+        maximum_temperature_ratio: 1.0, bulk_to_shear_ratio: 0.73,
+        bulk_ratio_source: "manufactured finite-source composition fixture",
+        maximum_cells: 108, wall: WallThermal::Adiabatic, workers: 1, transport_points: 17,
+    }, |_| false, |_| (1.0, [0.0; 3], gas.temperature)).unwrap()
+        .with_characteristic_axis(NsfCharacteristicAxis {
+            axis: 0, faces: [face; 2], maximum_relative_perturbation: 0.05,
+        }).unwrap()
+        .with_reservoir_aperture(fs_lbm::nsf3::NsfReservoirAperture {
+            axis: 1, high: false, cells: vec![[5, 0, 1]],
+            state: fs_lbm::nsf3::NsfOpenState {
+                density_kg_m3: (gas.pressure + 2.0)
+                    / (gas.specific_gas_constant * gas.temperature),
+                velocity_m_s: [0.0; 3], temperature_k: gas.temperature,
+            },
+        }).unwrap()
+}
+
+fn finite_limits() -> NsfFiniteReservoirLimits {
+    NsfFiniteReservoirLimits {
+        maximum_relative_mass_exchange: 0.1, maximum_relative_energy_exchange: 0.1,
+        mass_absolute_tolerance_kg: 1e-16, energy_absolute_tolerance_j: 1e-9,
+        relative_tolerance: 1e-9,
+    }
+}
+
+fn finite_field_system<'a, 'c>(field: &'a ThermoviscousInterior<'c>,
+    medium: NsfGasMedium, high: bool, gate: &CancelGate)
+    -> NsfThermoviscousDg<'a, 'c, D3q27>
+{
+    let fluid = finite_zone(medium, *field.gas());
+    let area = 9.0 * fluid.law().dx_m.powi(2);
+    let mut budget = limits(1);
+    budget.maximum_cells = 108;
+    budget.maximum_cell_steps = 108 * budget.maximum_evaluations;
+    NsfThermoviscousDg::new(fluid, ThermoviscousDgLoad::new(
+        acoustic(field, area, 1.0 / f64::from(RATE), DgBoundary::Closed), 2, gate,
+    ).unwrap(), high, budget, gate).unwrap()
+}
+
+#[test]
+fn finite_material_source_replays_the_full_field_and_conserves_original_heat_and_work() {
+    let gate = CancelGate::new_clock_free();
+    let (mesh, unit) = kuhn_cube(1);
+    for thermochemical in [false, true] {
+        let (medium, gas) = finite_medium(thermochemical);
+        let side = 3.0 * finite_zone(medium.clone(), gas).law().dx_m;
+        let field = field_source(&mesh, &unit, side, gas);
+        for high in [false, true] {
+            let mut owner = finite_field_system(&field, medium.clone(), high, &gate)
+                .with_finite_reservoir(0, 1e-5, finite_limits(), &gate).unwrap();
+            let mut replay = finite_field_system(&field, medium.clone(), high, &gate);
+            for (rate, heat) in [(0.0, 0.0), (-2e-7, 0.01), (2e-7, -0.005), (0.0, 0.0)] {
+                let before = owner.finite_reservoir_inventory().unwrap();
+                let drive = if rate == 0.0 && heat == 0.0 {
+                    NsfDgDrive::FiniteReservoir { aperture: 0 }
+                } else {
+                    NsfDgDrive::FiniteReservoirActuation {
+                        aperture: 0, volume_rate_m3_s: rate, heat_power_w: heat,
+                        maximum_relative_volume_change: 0.01,
+                    }
+                };
+                let frame = owner.step_with_drive(drive, &gate).unwrap();
+                let actual = frame.finite_reservoir.as_ref().unwrap();
+                let after = owner.finite_reservoir_inventory().unwrap();
+                // The source holds its accepted material state while the same
+                // NSF + complete-field solve runs. Replaying that state through
+                // the prescribed primitive must reproduce every physical bit.
+                let original = replay.step_with_reservoir_aperture(0,
+                    before.gas.pressure, before.gas.temperature, &gate).unwrap();
+                assert_eq!(snapshot!(&owner), snapshot!(&replay));
+                assert_eq!(frame.field_exchange, original.field_exchange);
+                assert_eq!(frame.reservoir_exchanges, original.reservoir_exchanges);
+                assert_eq!(actual.source_exchange, frame.reservoir_exchanges[0]);
+                let (heat_j, work_j) = actual.actuation.map_or((0.0, 0.0), |receipt|
+                    (receipt.step.supplied_heat_j, receipt.step.work_by_gas_j));
+                assert!((after.mass_kg - before.mass_kg
+                    - actual.source_exchange.mass_out_kg).abs() <= 1e-16);
+                assert!((after.sensible_energy_j - before.sensible_energy_j
+                    - actual.source_exchange.total_energy_out_j - heat_j + work_j).abs() <= 1e-9);
+                assert_eq!(actual.initial_pressure_pa, before.gas.pressure);
+                assert_eq!(actual.final_pressure_pa, after.gas.pressure);
+                assert_eq!(actual.final_mass_kg, after.mass_kg);
+                assert!(actual.mass_residual_kg.abs() <= 1e-16);
+                assert!(actual.energy_residual_j.abs() <= 1e-9);
+                let dt = owner.load().duration_s();
+                assert!((after.volume_m3 - before.volume_m3 - rate * dt).abs()
+                    <= 4.0 * f64::EPSILON * before.volume_m3);
+                assert_eq!(heat_j, heat * dt);
+                if rate != 0.0 { assert_eq!(work_j.is_sign_positive(), rate.is_sign_positive()); }
+                match owner.zone().medium() {
+                    NsfGasMedium::Thermochemical(source) => {
+                        assert_eq!(after.source_kind, NsfFiniteReservoirSource::Thermochemical);
+                        assert_eq!(owner.finite_reservoir().unwrap().model(), source.model());
+                    }
+                    NsfGasMedium::NamedMixture(source) => {
+                        assert_eq!(after.source_kind, NsfFiniteReservoirSource::NamedMixture);
+                        assert!(owner.finite_reservoir().is_none());
+                        assert_eq!(after.gas, source.at(after.gas.temperature, after.gas.pressure).unwrap());
+                    }
+                    _ => panic!("finite source lost its original material owner"),
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn finite_source_failure_and_cancellation_preserve_chamber_fluid_field_and_every_duct() {
+    let gate = CancelGate::new_clock_free();
+    let (mesh, unit) = kuhn_cube(1);
+    let (medium, gas) = finite_medium(false);
+    let side = 3.0 * finite_zone(medium.clone(), gas).law().dx_m;
+    let field = field_source(&mesh, &unit, side, gas);
+    let mut owner = finite_field_system(&field, medium, true, &gate)
+        .with_finite_reservoir(0, 1e-5, finite_limits(), &gate).unwrap();
+    owner.step_with_drive(NsfDgDrive::FiniteReservoir { aperture: 0 }, &gate).unwrap();
+    let before = (snapshot!(&owner), owner.finite_reservoir_inventory(),
+        owner.zone().reservoir_aperture_at(0).unwrap().clone(),
+        owner.zone().last_reservoir_exchanges().to_vec());
+    // The rate is finite and belongs to the right owner, so its oversized
+    // physical volume increment is refused only after fluid/acoustic trials.
+    let invalid = NsfDgDrive::FiniteReservoirActuation {
+        aperture: 0, volume_rate_m3_s: -1.0, heat_power_w: 0.0,
+        maximum_relative_volume_change: 0.01,
+    };
+    assert!(owner.validate_drive(invalid).is_ok());
+    assert!(matches!(owner.step_with_drive(invalid, &gate), Err(NsfDgError::Input(
+        "finite reservoir actuation loses an increment or exceeds its positive bounded volume movement; refine the interval"))));
+    assert_eq!(before, (snapshot!(&owner), owner.finite_reservoir_inventory(),
+        owner.zone().reservoir_aperture_at(0).unwrap().clone(),
+        owner.zone().last_reservoir_exchanges().to_vec()));
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(matches!(owner.step_with_drive(NsfDgDrive::FiniteReservoir { aperture: 0 },
+        &cancelled), Err(NsfDgError::Cancelled)));
+    assert_eq!(before, (snapshot!(&owner), owner.finite_reservoir_inventory(),
+        owner.zone().reservoir_aperture_at(0).unwrap().clone(),
+        owner.zone().last_reservoir_exchanges().to_vec()));
+    for invalid in [
+        NsfDgDrive::Boundary(NsfBoundaryDrive::PressureOffset(1.0)),
+        NsfDgDrive::ReservoirAperture { aperture: 0, pressure_pa: 100001.0, temperature_k: 300.0 },
+        NsfDgDrive::FiniteReservoir { aperture: 1 },
+    ] { assert!(owner.validate_drive(invalid).is_err()); }
+    assert_eq!(owner.accepted_steps(), 1);
+}
+
+#[test]
+fn finite_source_feedback_reaches_playback_without_callback_dependence() {
+    let gate = Arc::new(CancelGate::new_clock_free());
+    let (mesh, unit) = kuhn_cube(1);
+    let (medium, gas) = finite_medium(false);
+    let side = 3.0 * finite_zone(medium.clone(), gas).law().dx_m;
+    let field = field_source(&mesh, &unit, side, gas);
+    let make = || finite_field_system(&field, medium.clone(), true, &gate)
+        .with_finite_reservoir(0, 1e-5, finite_limits(), &gate).unwrap();
+    let initial = make().finite_reservoir_inventory().unwrap();
+    let controls = vec![NsfDgDrive::FiniteReservoirActuation {
+        aperture: 0, volume_rate_m3_s: -2e-7, heat_power_w: 0.01,
+        maximum_relative_volume_change: 0.01,
+    }; 24];
+    let render = |system, controls| NsfThermoviscousDgPerformance::new_with_drives(
+        system, 1, ApertureObservation::Inlet, RATE, controls, 24, Arc::clone(&gate),
+    ).unwrap();
+    let mut whole = render(make(), controls.clone());
+    let mut parts = render(make(), controls);
+    let mut held = render(finite_field_system(&field, medium.clone(), true, &gate),
+        vec![NsfDgDrive::ReservoirAperture { aperture: 0,
+            pressure_pa: initial.gas.pressure, temperature_k: initial.gas.temperature }; 24]);
+    let mut a = [0.0; 24]; let mut b = [0.0; 24]; let mut fixed = [0.0; 24];
+    whole.block(&mut a).unwrap(); held.block(&mut fixed).unwrap();
+    for chunk in b.chunks_mut(5) { parts.block(chunk).unwrap(); }
+    assert_eq!(a, b);
+    assert_eq!(a[0], fixed[0]);
+    assert_ne!(a, fixed, "finite source work/heat must reach the original pressure observation");
+    assert_eq!(snapshot!(whole.system()), snapshot!(parts.system()));
+    assert_eq!(whole.system().finite_reservoir_inventory(), parts.system().finite_reservoir_inventory());
+    assert_ne!(whole.system().finite_reservoir_inventory().unwrap().gas.pressure, initial.gas.pressure);
+    assert_eq!(whole.samples_rendered(), 24);
+    assert_eq!(whole.system().accepted_steps(), 24);
+    assert!(whole.last_frame().unwrap().finite_reservoir.as_ref().unwrap().actuation.is_some());
+}
+
+#[test]
+fn complete_field_finite_source_requires_a_cold_owned_material_aperture() {
+    let gate = CancelGate::new_clock_free();
+    let (mesh, unit) = kuhn_cube(1);
+    let (medium, gas) = finite_medium(false);
+    let side = 3.0 * finite_zone(medium.clone(), gas).law().dx_m;
+    let field = field_source(&mesh, &unit, side, gas);
+    let make = || finite_field_system(&field, medium.clone(), true, &gate);
+    assert!(make().validate_drive(NsfDgDrive::FiniteReservoir { aperture: 0 }).is_err());
+    for (aperture, volume) in [(1, 1e-5), (0, 0.0), (0, f64::NAN)] {
+        assert!(make().with_finite_reservoir(aperture, volume, finite_limits(), &gate).is_err());
+    }
+    let owner = make().with_finite_reservoir(0, 1e-5, finite_limits(), &gate).unwrap();
+    assert_eq!(owner.finite_reservoir_aperture(), Some(0));
+    assert_eq!(owner.finite_reservoir_limits(), Some(&finite_limits()));
+    assert!(owner.with_finite_reservoir(0, 1e-5, finite_limits(), &gate).is_err());
+    let mut advanced = make();
+    advanced.step(0.0, &gate).unwrap();
+    assert!(advanced.with_finite_reservoir(0, 1e-5, finite_limits(), &gate).is_err());
+    let cancelled = CancelGate::new_clock_free(); cancelled.request();
+    assert!(matches!(make().with_finite_reservoir(0, 1e-5, finite_limits(), &cancelled),
+        Err(NsfDgError::Cancelled)));
+    let legacy = reference();
+    let medium = NsfGasMedium::from(GasSpec::dry_air_ussa1976());
+    let side = 3.0 * finite_zone(medium.clone(), legacy).law().dx_m;
+    let legacy_field = field_source(&mesh, &unit, side, legacy);
+    assert!(finite_field_system(&legacy_field, medium, true, &gate)
+        .with_finite_reservoir(0, 1e-5, finite_limits(), &gate).is_err());
+}
