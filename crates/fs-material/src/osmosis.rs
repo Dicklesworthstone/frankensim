@@ -4,8 +4,9 @@
 //! concentration is 1 mol/m³, and an already enumerated ion is not dissociated a
 //! second time. The solvent is incompressible with an explicitly supplied
 //! partial molar volume. Solute partial volumes, ion reactions, Donnan/electric
-//! potentials, concentration polarization outside the membrane, and temperature
-//! differences are not modeled here. Coefficients need their own measured
+//! potentials and temperature differences are not modeled here. Optional
+//! external concentration polarization is provided by [`polarization`].
+//! Coefficients need their own measured
 //! applicability; raw numerical constructors do not confer material authority.
 //!
 //! Positive flux is left to right. The common law is
@@ -23,6 +24,9 @@
 use crate::fluid_transport::FluidTransport;
 use fs_math::det;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
+
+/// Exact steady diffusive films coupled to the original selective membrane.
+pub mod polarization;
 
 /// Bounded independent-solute layout; an empty layout represents pure solvent.
 pub const MAX_OSMOTIC_SOLUTES: usize = 64;

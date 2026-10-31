@@ -6167,7 +6167,7 @@ ideal chemical-affinity claim. Consumers own integration, conservation,
 cancellation, pressure/storage work and any thermal balance.
 
 There is no ionic chemistry, Donnan potential, solute partial-volume, phase
-stability, external concentration-polarization, or experimental-validation
+stability, transient concentration-layer storage, or experimental-validation
 claim. Raw coefficients carry no material-card authority; source-backed users
 must retain the original coefficients' full solution and operating support.
 
@@ -6454,3 +6454,35 @@ cyclic energy, source refusals, and the exact zero-saturation limit. These are
 numerical implementation checks, not empirical calibration. Finite strain,
 nonlinear backstress recovery, damage, and temperature-dependent Voce energy
 coupling remain outside this law.
+
+### Quasi-steady concentration polarization
+
+`osmosis::polarization::PolarizedMembraneTransport` retains the original
+selective membrane and optional per-species liquid films on both faces.
+`FilmPermeance` is a strictly positive finite mass-transfer coefficient [m/s];
+the explicit diffusion-layer conversion is D/delta. An absent film is an exact
+identity. Film mass transfer is distinct from hydraulic permeance and does not
+add an invented mechanical pressure loss or a second membrane area.
+
+At each proposed solvent flux, the films use the original exponential-fit
+convection/diffusion law with solvent convection velocity Jv; the selective
+membrane keeps its original (1-sigma_i)Jv velocity. Analytic series elimination
+gives nonnegative bulk-to-bulk donor coefficients and positive reconstruction
+of both membrane-face concentrations. The original water law consumes those
+face concentrations. Leaking species retain their actual shared solute flux;
+the perfect-rejection exponential formula is not applied to permeating species.
+
+Prepared boxed arrays are bounded by the original 64-species limit. A cached
+coefficient value reuses each fit for the finite inventory update and face
+reconstruction without allocation or a nested water solve. Scaled arithmetic
+and logarithmic recovery preserve representable extreme-Peclet limits; there
+is no epsilon leak or silent enrichment cap. Unrepresentable physical faces
+refuse. `heap_bytes` counts the owned arrays for consumer memory admission.
+
+G0/G1/G3 checks use independent layer flux equations, harmonic diffusion
+resistance, full-rejection enrichment/depletion, orientation reversal, absent
+species, nonselective uniform transport, passive dissipation, and the limiting
+water flux at large hydraulic permeance. These are prescribed, negligible-
+storage film models, not resolved crossflow turbulence, evolving fouling,
+finite film storage, electrochemical polarization or calibrated membrane data.
+
