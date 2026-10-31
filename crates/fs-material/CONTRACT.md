@@ -5744,6 +5744,26 @@ arithmetic do not establish native runtime or experimental validation.
 
 Every nonzero gas-slip calibration and every prescribed gas-only wet-mobility state refuses this view, including unit-mobility endpoints. Full single-fluid pore occupation is the admitted case; liquid relative permeability, capillarity, changing saturation, skeleton deformation and storage are not inferred. Native tests cover original rotated/layered geometry, unchanged source receipts and domains, signed speed limits, exact seals, and gas-calibration refusal.
 
+### Temperature-dependent intrinsic permeability
+
+`porous::permeability::temperature::PermeabilityTemperatureLaw` binds three exact
+principal permeability keys in square metres to the original material card,
+complete selected source bundle, and explicit orthonormal material frame.
+Temperature refresh changes only the admitted absolute-temperature coordinate;
+pressure, other context, quantity meanings, and every selected claim stay pinned.
+It refuses unsupported source continuation instead of silently selecting another
+claim. Repeated keys explicitly declare equal principal values, and zero remains
+an exact sealed direction. This source owner retains the existing
+`IntrinsicPermeability` tensor and its normal-gradient convention.
+
+Consumers supply their actual fluid viscosity, momentum discretization and heat
+account. The law does not infer gas slip, relative permeability, evolving pore
+geometry, saturation or skeleton heat storage. A consumer whose native operator
+cannot represent oblique or sealed directions must refuse them explicitly.
+Focused synthetic regressions exercise rotated temperature-dependent tensors,
+fixed pressure and quantity metadata, whole-bundle source pinning, exact seals,
+and immutable refusals; native test execution remains pending in this environment.
+
 ## Conservative frozen-gas endpoint coordinates for native moving walls
 
 `ClosedGasParcel::at_volume_internal_energy_increment` reconstructs a complete

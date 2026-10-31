@@ -29,6 +29,8 @@ use fs_qty::{Dims, QuantitySpec};
 
 mod continuum;
 pub use continuum::ContinuumDarcyGeometry;
+/// Pinned intrinsic-permeability sources at an evolving local temperature.
+pub mod temperature;
 
 pub const INTRINSIC_PERMEABILITY_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
 /// Maximum compiled laminate size. Common-factor queries take constant work.
