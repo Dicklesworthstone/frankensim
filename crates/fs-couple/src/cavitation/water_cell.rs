@@ -36,6 +36,10 @@ use fs_thermochem::water::if97::If97State;
 #[path = "water_cell/acoustics.rs"]
 pub mod acoustics;
 
+/// Reciprocal finite-wall heat storage and native conducting-layer feedback.
+#[path = "water_cell/thermal.rs"]
+pub mod thermal;
+
 /// Source-inversion work, gross transport and absolute physical budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct WaterCellControls {

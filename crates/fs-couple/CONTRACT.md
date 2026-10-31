@@ -61,6 +61,24 @@ interpolation between this response and frozen-phase acoustics. Native checks
 compare the analytic tangent with independent reversible-work compression and
 exercise distinct propagation and heat-driven updates from the same inventory.
 
+`cavitation::water_cell::thermal::advance_water_wall` couples that finite
+water inventory to an original `EquilibriumPhaseState` and enthalpy chart.
+One bounded native heat-feedback solve debits Q from the finite wall and adds
+the identical Q to conserved water U. The original `LayerStackConduction`
+evaluates k(T), contact resistance and geometry at both proposed endpoint
+temperatures. Both owners publish only after source recovery, energy and
+temperature budgets, interface convergence and the final cancellation poll.
+Conserved storage, IF97 source-inversion defects, conducting-layer continuity
+and heat-root residuals remain separate. Entropy retains the native chart and
+raw IF97 endpoint changes; the remainder is not certified physical production.
+This backward-Euler closure requires uniform water/wall temperatures,
+negligible wall pV work, separate quasi-steady conducting layers with negligible
+storage, and negligible unresolved fluid-film resistance. It supplies no
+invented boiling coefficient or extra latent-heat source. Four new native
+regressions cover an independently manufactured finite-capacity endpoint,
+nonlinear layers driving evaporation/condensation, repeated energy accounting,
+and atomic late-cancellation/root/temperature refusals.
+
 Eight native regressions exercise withdrawal-induced vapor, refill condensation,
 conservative two-cell transfer, late cancellation, nonaccumulating inverse error,
 original phase acoustics and actual phase-change feedback into duct propagation.
