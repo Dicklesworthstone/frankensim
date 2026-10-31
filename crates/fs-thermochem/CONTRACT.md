@@ -990,7 +990,7 @@ Tests cover every published reference-table row at its stated precision,
 independent pressure differentiation, Clapeyron/Gibbs/pressure-work identities,
 critical coalescence, inversion, domain limits, work bounds, and cancellation.
 
-## Barycentric Maxwell-Stefan molecular diffusion
+## Maxwell-Stefan molecular diffusion with explicit reference frames
 
 `transport::maxwell_stefan` supplies a bounded L1 constitutive friction solve,
 without evolving any spatial field. `MaxwellStefanV1` retains canonical original
@@ -1000,16 +1000,23 @@ positive binary-diffusivity matrix in coherent SI.
 
 For `z_i=j_i/M_i`, it solves
 `sum_j (x_j z_i-x_i z_j)/D_ij = -c [grad(x_i)+(x_i-Y_i) grad(log p)]`
-with the barycentric constraint `sum_i M_i z_i=0`. The returned mass fluxes are
-relative to mass-averaged velocity, unlike the existing material parcel's
-molar-averaged public diffusion contract. Unequal molecular masses, coupled
+with the barycentric constraint `sum_i M_i z_i=0`. `evaluate` returns mass fluxes
+relative to mass-averaged velocity. `evaluate_molar` instead imposes `sum_i z_i=0`
+in that same friction solve, with distinct molar controls and result types;
+its mass fluxes generally do not sum to zero. The existing material parcel
+diffusion path consumes this molar-frame owner while retaining its original
+source queries, isothermal/isobaric admission and finite-volume exchange checks.
+Unequal molecular masses, coupled
 crossdiffusion and barodiffusion are retained. Exact zero mole fractions are
 admitted without division by x, seeding or flux clipping.
 
 The maximum is 128 species. Scaled pivot elimination reuses fixed-dimension
 matrix and output buffers. Every original friction row, including the gauge
-row replaced by the mass constraint, and the actual published mass-flux sum
-must close their explicit absolute/relative budgets before return. Cancellation
+row replaced by the chosen frame constraint, and the actual published primary
+flux sum must close their explicit absolute/relative budgets before return.
+Mass flux is primary in the barycentric frame; molar flux is primary in the
+molar frame and does not disappear merely because conversion to a much smaller
+mass flux underflows. Cancellation
 is polled at bounded assembly/elimination/check boundaries. Successful
 evaluations allocate no storage. The optional local pair-friction entropy
 production is absent at an exact-zero composition carrying nonzero flux; no
@@ -1023,6 +1030,11 @@ and maximum-species, invalid-data and late-cancellation behavior. Thermal
 (Soret) diffusion, external species forces, ions, nonideal activities and a
 fully discrete entropy theorem remain outside this algebra. Pair coefficients
 and their thermodynamic-state support remain caller-owned source data.
+Additional focused regressions cover the unequal-mass binary molar Fick limit,
+the independently reconstructed mass-to-molar reference-velocity transformation,
+frame-invariant pair-friction entropy, subnormal primary molar flux and reuse
+after cancellation. The frame change does not add physical transport, thermal
+diffusion, an empirical coefficient, or a fully discrete entropy claim.
 Primary formulation:
 <https://doc.comsol.com/6.4/doc/com.comsol.help.chem/chem_ug_chemsptrans.08.257.html>.
 

@@ -75,6 +75,142 @@ fn g1_binary_unequal_masses_match_analytic_barycentric_flux() {
 }
 
 #[test]
+fn g1_molar_binary_matches_fick_without_imposing_zero_mass_flux() {
+    let owner = model(&[0.002, 0.028]);
+    let mut workspace = owner.workspace().unwrap();
+    let evaluated = owner
+        .evaluate_molar(
+            &[0.25, 0.75],
+            &[0.2, -0.2],
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.0,
+            &matrix(2, 0.5),
+            MaxwellStefanMolarSolveV1::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    near(evaluated.molar_fluxes()[0], -0.1, 2e-14);
+    near(evaluated.molar_fluxes()[1], 0.1, 2e-14);
+    near(evaluated.mass_fluxes()[0], -0.0002, 2e-14);
+    near(evaluated.mass_fluxes()[1], 0.0028, 2e-14);
+    assert!(evaluated.molar_frame_residual_mol_m2_s().abs() < 1e-16);
+    assert!(sum(evaluated.mass_fluxes().iter().copied()).abs() > 0.002);
+    near(
+        evaluated.drag_entropy_production_w_m3_k().unwrap(),
+        -R * (-0.1 * 0.2 / 0.25 + 0.1 * -0.2 / 0.75),
+        3e-14,
+    );
+}
+
+#[test]
+fn g3_reference_frame_change_preserves_pair_friction_and_entropy() {
+    let owner = model(&[0.002, 0.028, 0.044]);
+    let x = [0.2, 0.3, 0.5];
+    let gradient = [0.1, -0.3, 0.2];
+    let pairs = [0.0, 2e-5, 3e-5, 2e-5, 0.0, 7e-6, 3e-5, 7e-6, 0.0];
+    let (_, barycentric, _, entropy) = run(&owner, &x, &gradient, 0.7, &pairs);
+    let drift = sum(barycentric.iter().copied());
+    let mut workspace = owner.workspace().unwrap();
+    let address = workspace.molar_flux.as_ptr();
+    let evaluated = owner
+        .evaluate_molar(
+            &x,
+            &gradient,
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.7,
+            &pairs,
+            MaxwellStefanMolarSolveV1::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    for i in 0..3 {
+        near(
+            evaluated.molar_fluxes()[i],
+            barycentric[i] - x[i] * drift,
+            1e-12,
+        );
+    }
+    near(
+        evaluated.drag_entropy_production_w_m3_k().unwrap(),
+        entropy.unwrap(),
+        1e-12,
+    );
+    assert_eq!(evaluated.molar_fluxes().as_ptr(), address);
+    assert!(evaluated.maximum_gradient_residual_per_m() < 1e-12);
+    assert!(evaluated.molar_frame_residual_mol_m2_s().abs() < 1e-19);
+}
+
+#[test]
+fn g0_molar_primary_flux_survives_mass_underflow_and_cancelled_workspace_reuse() {
+    let owner = model(&[0.002, 0.028]);
+    let mut workspace = owner.workspace().unwrap();
+    let gradient = f64::from_bits(2);
+    let pair = matrix(2, 1.0);
+    let mut polls = 0;
+    let evaluated = owner
+        .evaluate_molar(
+            &[0.5, 0.5],
+            &[gradient, -gradient],
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.0,
+            &pair,
+            MaxwellStefanMolarSolveV1::default(),
+            &mut workspace,
+            || {
+                polls += 1;
+                false
+            },
+        )
+        .unwrap();
+    assert_eq!(evaluated.molar_fluxes(), &[-gradient, gradient]);
+    assert!(evaluated.mass_fluxes().iter().all(|&value| value == 0.0));
+    assert_eq!(evaluated.maximum_gradient_residual_per_m(), 0.0);
+    for stop in [1, polls / 2, polls] {
+        let mut seen = 0;
+        assert_eq!(
+            owner
+                .evaluate_molar(
+                    &[0.5, 0.5],
+                    &[gradient, -gradient],
+                    Temperature::new(500.0),
+                    Pressure::new(R * 500.0),
+                    0.0,
+                    &pair,
+                    MaxwellStefanMolarSolveV1::default(),
+                    &mut workspace,
+                    || {
+                        seen += 1;
+                        seen == stop
+                    }
+                )
+                .unwrap_err(),
+            MaxwellStefanErrorV1::Cancelled
+        );
+    }
+    let evaluated = owner
+        .evaluate_molar(
+            &[1.0, 0.0],
+            &[0.1, -0.1],
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.0,
+            &pair,
+            MaxwellStefanMolarSolveV1::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    near(evaluated.molar_fluxes()[0], -0.1, 2e-14);
+    near(evaluated.molar_fluxes()[1], 0.1, 2e-14);
+    assert_eq!(evaluated.drag_entropy_production_w_m3_k(), None);
+}
+
+#[test]
 fn g1_ternary_crossdiffusion_moves_species_without_its_own_gradient() {
     let owner = model(&[1.0, 1.0, 1.0]);
     let d = [0.0, 1.0, 2.0, 1.0, 0.0, 3.0, 2.0, 3.0, 0.0];

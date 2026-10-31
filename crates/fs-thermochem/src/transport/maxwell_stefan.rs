@@ -1,8 +1,9 @@
-//! Neutral ideal-gas Maxwell–Stefan diffusion in the mass-averaged frame.
+//! Neutral ideal-gas Maxwell–Stefan diffusion in explicitly chosen frames.
 //!
 //! With `z_i = j_i/M_i`, solve
 //! `sum_j (x_j z_i - x_i z_j)/D_ij = -c [grad x_i + (x_i-Y_i) grad ln p]`
-//! together with `sum_i M_i z_i = 0`. This is a coupled friction solve, not
+//! together with `sum_i M_i z_i = 0` in the mass-averaged frame or
+//! `sum_i z_i = 0` in the molar-averaged frame. This is a coupled friction solve, not
 //! independent Fick laws. It remains regular at exact zero mole fractions;
 //! no division by `x_i` enters the linear system. Temperature specifies total
 //! molar concentration, not a Soret force. Thermal diffusion, external
@@ -41,6 +42,42 @@ impl Default for MaxwellStefanSolveV1 {
     }
 }
 
+/// Original-equation and molar-frame checks for a molar-averaged evaluation.
+/// A molar-frame flux generally transports nonzero net mass when species have
+/// different molecular masses; it must not be used as a barycentric flux.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct MaxwellStefanMolarSolveV1 {
+    /// Relative tolerance on each original row and the molar-frame sum.
+    pub relative_tolerance: f64,
+    /// Absolute original-equation and gradient-compatibility tolerance [1/m].
+    pub absolute_gradient_tolerance_per_m: f64,
+    /// Absolute sum of molar fluxes [mol/(m² s)].
+    pub absolute_molar_flux_tolerance_mol_m2_s: f64,
+}
+impl Default for MaxwellStefanMolarSolveV1 {
+    fn default() -> Self {
+        Self {
+            relative_tolerance: 1e-10,
+            absolute_gradient_tolerance_per_m: 1e-12,
+            absolute_molar_flux_tolerance_mol_m2_s: 1e-16,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum Frame {
+    MassAveraged,
+    MolarAveraged,
+}
+
+#[derive(Clone, Copy)]
+struct Solve {
+    relative_tolerance: f64,
+    absolute_gradient_tolerance_per_m: f64,
+    absolute_frame_tolerance: f64,
+    frame: Frame,
+}
+
 /// Refusal before a complete borrowed evaluation can be published.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaxwellStefanErrorV1 {
@@ -57,6 +94,13 @@ pub enum MaxwellStefanErrorV1 {
         /// Signed sum of published species mass fluxes [kg/(m² s)].
         mass_frame_residual_kg_m2_s: f64,
     },
+    /// An original equation or the molar-frame constraint missed its tolerance.
+    MolarResidual {
+        /// Largest original Maxwell–Stefan row discrepancy [1/m].
+        maximum_gradient_residual_per_m: f64,
+        /// Signed sum of published species molar fluxes [mol/(m² s)].
+        molar_frame_residual_mol_m2_s: f64,
+    },
     /// Bounded workspace reservation failed.
     AllocationRefused,
     /// Cancellation before complete publication.
@@ -64,7 +108,7 @@ pub enum MaxwellStefanErrorV1 {
 }
 impl core::fmt::Display for MaxwellStefanErrorV1 {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "barycentric Maxwell-Stefan diffusion: {self:?}")
+        write!(f, "Maxwell-Stefan diffusion: {self:?}")
     }
 }
 impl std::error::Error for MaxwellStefanErrorV1 {}
@@ -153,6 +197,78 @@ impl MaxwellStefanV1 {
         binary_diffusivities_m2_s: &[f64],
         controls: MaxwellStefanSolveV1,
         workspace: &'a mut MaxwellStefanWorkspaceV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaxwellStefanEvaluationV1<'a>, MaxwellStefanErrorV1> {
+        self.evaluate_in_frame(
+            mole_fractions,
+            gradients_per_m,
+            temperature,
+            pressure,
+            log_pressure_gradient_per_m,
+            binary_diffusivities_m2_s,
+            Solve {
+                relative_tolerance: controls.relative_tolerance,
+                absolute_gradient_tolerance_per_m: controls.absolute_gradient_tolerance_per_m,
+                absolute_frame_tolerance: controls.absolute_mass_flux_tolerance_kg_m2_s,
+                frame: Frame::MassAveraged,
+            },
+            workspace,
+            cancelled,
+        )
+    }
+
+    /// Evaluate in the molar-averaged frame with zero summed molar flux.
+    ///
+    /// The original friction equations, canonical source order and pressure
+    /// driving force are identical to [`Self::evaluate`]. Only the reference
+    /// velocity changes: `sum(z_i)=0` replaces `sum(M_i z_i)=0` in the same
+    /// scaled solve. Molar flux is the primary rounded output in this frame;
+    /// no conversion through a potentially underflowed mass flux is required.
+    /// Exact-zero fractions, workspace reuse and cancellation have the same
+    /// contract. Thermal diffusion and nonideal activities remain excluded.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_molar<'a>(
+        &self,
+        mole_fractions: &[f64],
+        gradients_per_m: &[f64],
+        temperature: Temperature,
+        pressure: Pressure,
+        log_pressure_gradient_per_m: f64,
+        binary_diffusivities_m2_s: &[f64],
+        controls: MaxwellStefanMolarSolveV1,
+        workspace: &'a mut MaxwellStefanWorkspaceV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaxwellStefanMolarEvaluationV1<'a>, MaxwellStefanErrorV1> {
+        self.evaluate_in_frame(
+            mole_fractions,
+            gradients_per_m,
+            temperature,
+            pressure,
+            log_pressure_gradient_per_m,
+            binary_diffusivities_m2_s,
+            Solve {
+                relative_tolerance: controls.relative_tolerance,
+                absolute_gradient_tolerance_per_m: controls.absolute_gradient_tolerance_per_m,
+                absolute_frame_tolerance: controls.absolute_molar_flux_tolerance_mol_m2_s,
+                frame: Frame::MolarAveraged,
+            },
+            workspace,
+            cancelled,
+        )
+        .map(|evaluation| MaxwellStefanMolarEvaluationV1 { evaluation })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn evaluate_in_frame<'a>(
+        &self,
+        mole_fractions: &[f64],
+        gradients_per_m: &[f64],
+        temperature: Temperature,
+        pressure: Pressure,
+        log_pressure_gradient_per_m: f64,
+        binary_diffusivities_m2_s: &[f64],
+        controls: Solve,
+        workspace: &'a mut MaxwellStefanWorkspaceV1,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaxwellStefanEvaluationV1<'a>, MaxwellStefanErrorV1> {
         poll(&mut cancelled)?;
@@ -167,7 +283,7 @@ impl MaxwellStefanV1 {
             || !positive(controls.relative_tolerance)
             || controls.relative_tolerance > 1e-3
             || !positive(controls.absolute_gradient_tolerance_per_m)
-            || !positive(controls.absolute_mass_flux_tolerance_kg_m2_s)
+            || !positive(controls.absolute_frame_tolerance)
             || mole_fractions
                 .iter()
                 .any(|x| !x.is_finite() || !(0.0..=1.0).contains(x))
@@ -252,7 +368,7 @@ impl MaxwellStefanV1 {
                 mass_fluxes: &workspace.mass_flux,
                 molar_fluxes: &workspace.molar_flux,
                 maximum_gradient_residual_per_m: drive_scale,
-                mass_frame_residual_kg_m2_s: 0.0,
+                frame_residual: 0.0,
                 drag_entropy_production_w_m3_k: Some(0.0),
             });
         }
@@ -274,7 +390,12 @@ impl MaxwellStefanV1 {
             }
             workspace.right[i] = -workspace.driving[i] / drive_scale;
         }
-        workspace.matrix[gauge * n..(gauge + 1) * n].copy_from_slice(&self.scaled_masses);
+        match controls.frame {
+            Frame::MassAveraged => {
+                workspace.matrix[gauge * n..(gauge + 1) * n].copy_from_slice(&self.scaled_masses)
+            }
+            Frame::MolarAveraged => workspace.matrix[gauge * n..(gauge + 1) * n].fill(1.0),
+        }
         workspace.right[gauge] = 0.0;
         solve(
             &mut workspace.matrix,
@@ -287,36 +408,63 @@ impl MaxwellStefanV1 {
             // The common c*D_min*drive scale can underflow even when the
             // solved amplitude makes the actual species flux representable.
             // Include every factor before rounding into the binary64 range.
-            let mass = scaled_product_ratio(
-                &[
-                    concentration,
-                    minimum_diffusion,
-                    drive_scale,
-                    workspace.right[i],
-                    self.molar_masses[i].value(),
-                ],
-                &[],
-            )?;
-            let molar = mass / self.molar_masses[i].value();
-            if !molar.is_finite() {
+            let molecular_mass = self.molar_masses[i].value();
+            let (mass, molar) = match controls.frame {
+                Frame::MassAveraged => {
+                    let mass = scaled_product_ratio(
+                        &[
+                            concentration,
+                            minimum_diffusion,
+                            drive_scale,
+                            workspace.right[i],
+                            molecular_mass,
+                        ],
+                        &[],
+                    )?;
+                    (mass, mass / molecular_mass)
+                }
+                Frame::MolarAveraged => {
+                    let molar = scaled_product_ratio(
+                        &[
+                            concentration,
+                            minimum_diffusion,
+                            drive_scale,
+                            workspace.right[i],
+                        ],
+                        &[],
+                    )?;
+                    (molar * molecular_mass, molar)
+                }
+            };
+            if !molar.is_finite() || !mass.is_finite() {
                 return Err(MaxwellStefanErrorV1::Arithmetic("species diffusion flux"));
             }
             workspace.mass_flux[i] = mass;
-            // All residuals concern the actually published mass flux, including
-            // the final molar/mass conversion's rounding.
             workspace.molar_flux[i] = molar;
-            workspace.right[i] = scaled_product_ratio(
-                &[mass],
-                &[
-                    self.molar_masses[i].value(),
-                    concentration,
-                    minimum_diffusion,
-                    drive_scale,
-                ],
-            )?;
+            // Residuals concern the primary flux actually published in the
+            // chosen frame, including conversion rounding in mass mode.
+            workspace.right[i] = match controls.frame {
+                Frame::MassAveraged => scaled_product_ratio(
+                    &[mass],
+                    &[
+                        molecular_mass,
+                        concentration,
+                        minimum_diffusion,
+                        drive_scale,
+                    ],
+                )?,
+                Frame::MolarAveraged => scaled_product_ratio(
+                    &[molar],
+                    &[concentration, minimum_diffusion, drive_scale],
+                )?,
+            };
         }
-        let mass_residual = sum(workspace.mass_flux.iter().copied());
-        let mass_scale = sum(workspace.mass_flux.iter().map(|j| j.abs()));
+        let constrained_flux = match controls.frame {
+            Frame::MassAveraged => &workspace.mass_flux,
+            Frame::MolarAveraged => &workspace.molar_flux,
+        };
+        let frame_residual = sum(constrained_flux.iter().copied());
+        let frame_scale = sum(constrained_flux.iter().map(|j| j.abs()));
         let mut maximum_residual = 0.0_f64;
         let mut rows_close = true;
         for i in 0..n {
@@ -343,17 +491,22 @@ impl MaxwellStefanV1 {
                 <= controls.absolute_gradient_tolerance_per_m
                     + controls.relative_tolerance * row_scale;
         }
-        if !mass_residual.is_finite() || !mass_scale.is_finite() {
-            return Err(MaxwellStefanErrorV1::Arithmetic("mass-frame residual"));
+        if !frame_residual.is_finite() || !frame_scale.is_finite() {
+            return Err(MaxwellStefanErrorV1::Arithmetic("diffusion-frame residual"));
         }
         if !rows_close
-            || mass_residual.abs()
-                > controls.absolute_mass_flux_tolerance_kg_m2_s
-                    + controls.relative_tolerance * mass_scale
+            || frame_residual.abs()
+                > controls.absolute_frame_tolerance + controls.relative_tolerance * frame_scale
         {
-            return Err(MaxwellStefanErrorV1::Residual {
-                maximum_gradient_residual_per_m: maximum_residual,
-                mass_frame_residual_kg_m2_s: mass_residual,
+            return Err(match controls.frame {
+                Frame::MassAveraged => MaxwellStefanErrorV1::Residual {
+                    maximum_gradient_residual_per_m: maximum_residual,
+                    mass_frame_residual_kg_m2_s: frame_residual,
+                },
+                Frame::MolarAveraged => MaxwellStefanErrorV1::MolarResidual {
+                    maximum_gradient_residual_per_m: maximum_residual,
+                    molar_frame_residual_mol_m2_s: frame_residual,
+                },
             });
         }
         let entropy = drag_entropy(
@@ -367,7 +520,7 @@ impl MaxwellStefanV1 {
             mass_fluxes: &workspace.mass_flux,
             molar_fluxes: &workspace.molar_flux,
             maximum_gradient_residual_per_m: maximum_residual,
-            mass_frame_residual_kg_m2_s: mass_residual,
+            frame_residual,
             drag_entropy_production_w_m3_k: entropy,
         })
     }
@@ -411,7 +564,7 @@ pub struct MaxwellStefanEvaluationV1<'a> {
     mass_fluxes: &'a [f64],
     molar_fluxes: &'a [f64],
     maximum_gradient_residual_per_m: f64,
-    mass_frame_residual_kg_m2_s: f64,
+    frame_residual: f64,
     drag_entropy_production_w_m3_k: Option<f64>,
 }
 impl MaxwellStefanEvaluationV1<'_> {
@@ -430,13 +583,45 @@ impl MaxwellStefanEvaluationV1<'_> {
     }
     /// Signed sum of the published mass fluxes [kg/(m² s)].
     pub const fn mass_frame_residual_kg_m2_s(&self) -> f64 {
-        self.mass_frame_residual_kg_m2_s
+        self.frame_residual
     }
     /// Local nonnegative pair-friction entropy production [W/(m³ K)].
     /// None denotes a nonzero flux at an exact-zero composition boundary or an
     /// unrepresentable diagnostic. This is not a discrete transport inequality.
     pub const fn drag_entropy_production_w_m3_k(&self) -> Option<f64> {
         self.drag_entropy_production_w_m3_k
+    }
+}
+
+/// Complete fluxes relative to the molar-averaged velocity. This distinct type
+/// cannot silently substitute for a mass-averaged constitutive evaluation.
+#[derive(Clone, Copy, Debug)]
+pub struct MaxwellStefanMolarEvaluationV1<'a> {
+    evaluation: MaxwellStefanEvaluationV1<'a>,
+}
+impl MaxwellStefanMolarEvaluationV1<'_> {
+    /// Canonical molar fluxes [mol/(m² s)] whose sum closes the declared budget.
+    pub const fn molar_fluxes(&self) -> &[f64] {
+        self.evaluation.molar_fluxes
+    }
+    /// Canonical mass fluxes in the same molar frame [kg/(m² s)]. Their sum is
+    /// generally nonzero; this is not the barycentric momentum-frame flux.
+    pub const fn mass_fluxes(&self) -> &[f64] {
+        self.evaluation.mass_fluxes
+    }
+    /// Largest original Maxwell–Stefan row discrepancy [1/m].
+    pub const fn maximum_gradient_residual_per_m(&self) -> f64 {
+        self.evaluation.maximum_gradient_residual_per_m
+    }
+    /// Signed sum of published species molar fluxes [mol/(m² s)].
+    pub const fn molar_frame_residual_mol_m2_s(&self) -> f64 {
+        self.evaluation.frame_residual
+    }
+    /// Frame-invariant pair-friction entropy production [W/(m³ K)].
+    /// The same exact-zero-composition and representability boundaries apply
+    /// as to the mass-averaged evaluation; no discrete entropy proof is implied.
+    pub const fn drag_entropy_production_w_m3_k(&self) -> Option<f64> {
+        self.evaluation.drag_entropy_production_w_m3_k
     }
 }
 
