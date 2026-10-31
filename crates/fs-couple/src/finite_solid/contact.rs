@@ -8,16 +8,21 @@
 //!
 //! Actual native velocities, spin/orbital momentum, stationary-support reaction
 //! and impulse work are checked before returning either candidate. Geometry is
-//! caller-supplied at an event; neither witness is relocated to hide a couple
-//! from a finite gap. No collision detection, configuration advance, penetration
-//! repair, continuous-contact trajectory, or impact-loss heat partition is
-//! inferred. Material-point weights and rigid arms remain the original ones.
+//! supplied to the core event; neither witness is relocated to hide a couple
+//! from a finite gap. The `surface` owner detects current sphere/solid witnesses;
+//! `step` composes bounded, path-admitted transient trajectories through the
+//! original native integrators. No penetration repair, sustained-contact solve
+//! or impact-loss heat partition is inferred. Material-point weights and rigid
+//! arms remain the original ones.
 
 /// Directional interface sources through the same coupled mechanical event.
 pub mod elliptic;
 
 /// Current finite-solid surface witnesses for native rigid contact.
 pub mod surface;
+
+/// Configuration-admitted coupled force/contact/trajectory candidates.
+pub mod step;
 
 use super::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls, FiniteSolidPoint};
 use super::{Cx, FiniteSolidBody, FiniteSolidError};

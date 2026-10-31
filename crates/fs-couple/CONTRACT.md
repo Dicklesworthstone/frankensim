@@ -17914,3 +17914,81 @@ distinct finite dielectric/conductor receivers with R(T), and atomic capacity,
 work-budget and cancellation refusal. `tests/dielectric_rebind.rs` exercises
 conserved native histories, signed parameter work and source/ideal-clamp refusal.
 All property data in these tests are explicitly authored numerical fixtures.
+
+`contact::step::free::rigid_free_flight_candidate` advances the original finite
+solid midpoint owner and each original rigid `step_verlet_with` owner over one
+positive interval. It retains native state receipts and returns both candidates
+only after complete momentum and work checks. Solid forces come from the same
+prepared external-load owner as the native solve. Rigid gravity is included
+once in force work; solid gravity remains an explicit caller-supplied load.
+
+The solid account uses consistent `M delta-v`, current midpoint coordinates and
+the full angular increment `x_average cross delta-p + delta-x cross p_average`.
+Original stationary-support reactions contribute external linear and angular
+impulse and zero work. The rigid account uses actual endpoint positions,
+attitudes and momenta, both endpoint force moments and rotated body-torque
+half-impulses. Native half-kick momenta and full inertia determine torque work;
+quaternion polarization resolves the actual spin change without subtracting
+two large world spins or assuming free-drift conservation.
+
+Stable kinetic changes, original strain changes, source work and signed solid
+and rigid-drift integration defects remain distinct. The absolute sum of the
+individual numerical defects is bounded, so opposite defects cannot hide each
+other. Momentum and work gates also bound the sums of individual-body residual
+magnitudes, so opposite lost kicks cannot cancel in the complete-system account.
+Unrepresentable kicks refuse. Inputs remain unchanged on native failure,
+cancellation or late audit rejection. This entry does not admit a collision
+path, certify trajectory accuracy, model exact externally forced Euler flow,
+or infer heat. Pressure-bound solids retain their explicit-pressure refusal.
+
+Focused G1/G3/G4 fixtures exercise constant acceleration and axial spin/work,
+deforming-solid and asymmetric-rigid conservation, stationary support reaction
+moments, and lost-kick/cancellation refusal. Material coefficients are synthetic.
+
+### Automatic transient rigid-sphere/finite-solid trajectories
+
+`finite_solid::contact::step::sphere_trajectory_candidate` composes the original
+current-surface detector, simultaneous consistent-mass/full-inertia contact
+solver and native smooth integrators. Each rigid body supplies one COM-centred
+sphere. The entire trajectory remains a private candidate until all requested
+time, geometry, physical balance and work gates succeed. Current contacts are
+resolved together at their actual positive activation gaps; original material
+witnesses are never moved to eliminate tangential angular couples.
+
+The prepared triangle BVH refits unions of native endpoint coordinates. Directed
+separating-plane bounds admit every declared straight sphere/triangle path;
+interval tetrahedron determinants exclude intermediate element collapse.
+Rigid-sphere pairs use the same directed separation authority with an upward
+radius-sum enclosure. A possible rigid/rigid encounter refuses because those
+rows are not yet part of the shared rigid/solid complementarity problem. No
+pairwise impulse substitute is applied. An unresolved solid-contact window
+retries a shorter original native step from the same unpublished post-impact
+state. Failed candidates do not advance any caller-owned q/v/a, attitude,
+momentum, time or accepted history.
+
+The declared straight coordinate interpolation is the numerical collision path,
+not an enclosure of the true nonlinear flow. Positive activation distance,
+maximum timestep and work caps are explicit refinement controls. Offset sphere
+centres need a curved rotational path and remain limited to discrete event
+queries. Sustained loaded contact, unresolved grazing and Zeno accumulation can
+exhaust progress or work bounds; they never create artificial rest or runout.
+Pressure-bound solids retain the native explicit-pressure refusal. This is not
+a general Moreau--Jean trajectory, global mesh-injectivity proof or a claimed
+global convergence order for impacts.
+
+Whole-call accounting retains stable kinetic/strain increments, original source
+work, stationary-support impulse and moment, signed/absolute smooth integration
+defects and total unallocated contact loss. Absolute local balance residuals
+accumulate before global cancellation. Native phase and endpoint clocks must
+agree with requested elapsed time within the declared binary64 rounding gate;
+unrepresentable timing refuses instead of overwriting native state. Gravity
+work is included once: the rigid integrator owns its gravity, while the solid's
+resolved gravity is part of its explicit held loads. No loss becomes heat
+without an independent physical partition.
+
+Focused G1/G3/G4 fixtures specify an automatically detected elastic bounce,
+friction-driven spin and support moment through real attitude evolution,
+otherwise unseen sphere-pair crossing, late budget/offset/cancellation rollback,
+and loss of requested time at a large native timestamp. These are authored
+analytic references, not experimental validation.
+

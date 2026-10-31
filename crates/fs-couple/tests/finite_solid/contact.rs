@@ -1,6 +1,8 @@
 //! Actual simultaneous native rigid/solid Coulomb impacts and independent oracles.
 #[path = "contact/elliptic.rs"]
 mod elliptic;
+#[path = "contact/step.rs"]
+mod step;
 #[path = "contact/surface.rs"]
 mod surface;
 
