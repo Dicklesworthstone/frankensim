@@ -586,6 +586,39 @@ radiative and finite-capacity references, data-only kinetics and surface-tension
 changes reaching native populations, continuation and refusal rollback.
 These are manufactured model checks, not experimental validation.
 
+### Finite-rate condensation and evaporation on native moving liquid
+
+`liquid_gas::evaporation::advance_liquid_with_gas` joins the original
+`fs-material::evaporation::gas` Stefan-film/caloric owner to actual native VOF
+mass and enthalpy. One caller-measured Cartesian patch binds an occupied liquid
+interface to adjacent in-domain gas. The original native caloric chart supplies
+temperature; its tracked mass selects a reproducible transfer before the gas
+caloric solve. The SAME selected mass debits the finite gas and credits native
+liquid. Latent and upstream-vapor sensible heat enter once, using the actual
+native post-transfer mass. No second liquid-film inventory is retained.
+
+The original native source refresh and momentum/enthalpy transport then advance
+one retained timestep. The immutable candidate publishes both participants
+together. Actual total and volatile mass balances include subsequent native
+transport drift; the source-relative thermal defect includes phase caloric
+reconstruction, native caloric representation and native advection separately.
+Original gas-species rounding remains separately mass-budgeted. Native external
+heat stays in its existing flow report and is not mistaken for latent heat.
+Attached electrical cores require the original conduction timeline and refuse
+this direct flow entry point. `tests/evaporating_liquid_gas.rs` covers condensation warming,
+evaporation cooling, finite backpressure on continuation, independent whole
+inventory energy/mass checks, reference shifts, capacity/geometry refusal and
+atomic cancellation. Its authored phase and transport data are manufactured
+coupling checks, not empirical water-rate validation.
+
+This bounded first-order split needs timestep refinement. Gas occupies a fixed
+connected control volume; native liquid volume follows its original constant
+density. Phase-law recession is diagnostic, not a second interface update.
+There is no inferred sealed-vessel displacement, gas traction/recoil, sensible
+film conduction, nucleation or phase-front overflow/exhaustion remap. Existing
+solved-surface stress and dynamic-contact histories retain their native refusal
+boundary. Exposure is held during this one interval and re-admitted on the next.
+
 ## Assembled shell adhesive dissipation
 
 `shear_shell::assembly::MaterialShellAssembly::reduce` projects the original

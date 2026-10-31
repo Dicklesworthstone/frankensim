@@ -117,6 +117,9 @@ impl From<GasEnergyError> for GasEvaporationError {
 #[derive(Clone, Debug, PartialEq)]
 pub struct GasEvaporationStep {
     pub duration_s: f64,
+    /// Original film flux integrated over area and duration, before the native
+    /// inventory representation selects its nearby admitted increment.
+    pub requested_transferred_mass_kg: f64,
     /// Positive liquid-to-gas evaporation; negative condensation.
     pub transferred_mass_kg: f64,
     pub surface_temperature_k: [f64; 2],
@@ -257,6 +260,43 @@ pub fn advance_surface_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
     mass_transfer_coefficient_m_s: f64,
     duration_s: f64,
     controls: GasEvaporationSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<GasEvaporationCandidate<'catalog>, GasEvaporationError> {
+    advance_surface_with_gas_mass_selection(
+        law,
+        binding,
+        liquid,
+        gas,
+        catalog,
+        temperature_from_enthalpy,
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+        Ok,
+        cancelled,
+    )
+}
+
+/// The same original film and caloric solve with a represented mass selector.
+///
+/// Native volume/mass owners may select the nearest increment they can store.
+/// The callback receives signed liquid-to-gas mass [kg] and runs BEFORE either
+/// caloric update. It cannot reverse a transfer, swallow a nonzero transfer,
+/// create one from zero or change it beyond the original absolute mass budget.
+/// Inventory, temperature and equilibrium limits apply to the selected amount.
+/// This does not permit clipping a physically inadmissible step to inventory.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_surface_with_gas_mass_selection<'catalog, L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    liquid: LiquidSurfaceState,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    temperature_from_enthalpy: impl Fn(f64) -> Result<f64, EvaporationError>,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+    select_mass: impl FnOnce(f64) -> Result<f64, GasEvaporationError>,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<GasEvaporationCandidate<'catalog>, GasEvaporationError> {
     use GasEvaporationError as Error;
@@ -308,14 +348,25 @@ pub fn advance_surface_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
         controls.latent_compatibility_tolerance_j_kg,
     )?;
     let exposure = liquid.area_m2 * duration_s;
-    let dm = exposure * flux.mass_flux_kg_m2_s;
+    let requested_dm = exposure * flux.mass_flux_kg_m2_s;
     if !nonnegative(exposure)
-        || !dm.is_finite()
+        || !requested_dm.is_finite()
         || (duration_s > 0.0 && liquid.area_m2 > 0.0 && exposure == 0.0)
-        || (exposure > 0.0 && flux.mass_flux_kg_m2_s != 0.0 && dm == 0.0)
+        || (exposure > 0.0 && flux.mass_flux_kg_m2_s != 0.0 && requested_dm == 0.0)
     {
         return Err(Error::Invalid(
             "exposure or nonzero transferred mass is unrepresentable",
+        ));
+    }
+    let dm = select_mass(requested_dm)?;
+    if !dm.is_finite()
+        || (requested_dm == 0.0 && dm != 0.0)
+        || (requested_dm != 0.0
+            && (dm == 0.0 || dm.is_sign_negative() != requested_dm.is_sign_negative()))
+        || (dm - requested_dm).abs() > controls.gas.mass_tolerance_kg
+    {
+        return Err(Error::Invalid(
+            "native phase mass selection changes or loses the physical transfer",
         ));
     }
     let old_vapor_mass = gas.species_mass_kg(&binding.species)?;
@@ -324,10 +375,12 @@ pub fn advance_surface_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
     } else {
         liquid.mass_kg
     };
+    let withdrawal = dm.abs().max(requested_dm.abs());
     if dm != 0.0
-        && (donor_mass <= 0.0 || dm.abs() / donor_mass > controls.maximum_inventory_fraction)
+        && (donor_mass <= 0.0 || withdrawal / donor_mass > controls.maximum_inventory_fraction)
     {
-        let duration = duration_s * ((controls.maximum_inventory_fraction * donor_mass) / dm.abs());
+        let duration =
+            duration_s * ((controls.maximum_inventory_fraction * donor_mass) / withdrawal);
         return Err(Error::StepSizeLimit {
             maximum_duration_s: duration.next_down().max(0.0),
             reason: "initial liquid or vapor inventory withdrawal limit",
@@ -459,6 +512,7 @@ pub fn advance_surface_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
     poll(&mut cancelled)?;
     let step = GasEvaporationStep {
         duration_s,
+        requested_transferred_mass_kg: requested_dm,
         transferred_mass_kg: dm,
         surface_temperature_k: [surface_t, final_surface_t],
         gas_temperature_k: [gas_t, final_gas_t],

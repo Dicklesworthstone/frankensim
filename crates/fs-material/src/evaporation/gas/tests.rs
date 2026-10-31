@@ -105,6 +105,121 @@ fn near(a: f64, b: f64, tol: f64) {
 }
 
 #[test]
+fn native_mass_selection_precedes_calorics_and_preserves_the_original_identity_path() {
+    let source = catalog(-1e7);
+    let gas = gas(&source, 320.0, 5000.0, 0.01);
+    let liquid = liquid(300.0);
+    let binding = binding(-1e7);
+    let original = advance_surface_with_gas(
+        &Phase,
+        &binding,
+        liquid,
+        &gas,
+        &source,
+        temperature,
+        0.02,
+        0.5,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    let identity = advance_surface_with_gas_mass_selection(
+        &Phase,
+        &binding,
+        liquid,
+        &gas,
+        &source,
+        temperature,
+        0.02,
+        0.5,
+        controls(),
+        Ok,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(original, identity);
+    let selected = original.step().transferred_mass_kg.next_down();
+    let mut calls = 0;
+    let candidate = advance_surface_with_gas_mass_selection(
+        &Phase,
+        &binding,
+        liquid,
+        &gas,
+        &source,
+        temperature,
+        0.02,
+        0.5,
+        controls(),
+        |requested| {
+            calls += 1;
+            assert_eq!(requested, original.step().transferred_mass_kg);
+            Ok(selected)
+        },
+        || false,
+    )
+    .unwrap();
+    assert_eq!(calls, 1);
+    assert_eq!(candidate.step().transferred_mass_kg, selected);
+    assert_eq!(
+        candidate.step().requested_transferred_mass_kg,
+        original.step().transferred_mass_kg
+    );
+    near(candidate.liquid().mass_kg, liquid.mass_kg - selected, 0.0);
+    near(
+        candidate.step().energy_residual_j,
+        0.0,
+        controls().gas.energy_tolerance_j,
+    );
+}
+
+#[test]
+fn native_mass_selection_cannot_drop_reverse_invent_or_exceed_its_physical_mass_budget() {
+    let source = catalog(-1e7);
+    let gas = gas(&source, 320.0, 5000.0, 0.01);
+    let liquid = liquid(300.0);
+    let binding = binding(-1e7);
+    for mode in 0..4 {
+        assert!(
+            advance_surface_with_gas_mass_selection(
+                &Phase,
+                &binding,
+                liquid,
+                &gas,
+                &source,
+                temperature,
+                0.02,
+                0.5,
+                controls(),
+                |requested| Ok(match mode {
+                    0 => 0.0,
+                    1 => -requested,
+                    2 => requested - 2.0 * controls().gas.mass_tolerance_kg,
+                    _ => f64::NAN,
+                }),
+                || false,
+            )
+            .is_err()
+        );
+    }
+    assert!(
+        advance_surface_with_gas_mass_selection(
+            &Phase,
+            &binding,
+            liquid,
+            &gas,
+            &source,
+            temperature,
+            0.0,
+            0.5,
+            controls(),
+            |_| Ok(1e-20),
+            || false,
+        )
+        .is_err()
+    );
+}
+
+#[test]
 fn dry_carrier_receives_vapor_and_actual_transport_pressure_and_temperature_change() {
     let catalog = catalog(0.0);
     let gas = gas(&catalog, 300.0, 0.0, 0.01);

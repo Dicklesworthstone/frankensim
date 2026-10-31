@@ -7,6 +7,9 @@
 //! buoyancy and any attached electrical response before native momentum evolves.
 //! This is a first-order reaction/thermal/flow split over one physical interval.
 
+/// Finite-rate phase transfer into actual native liquid mass and enthalpy.
+pub mod evaporation;
+
 use crate::cavity_phs::piston::reactive::{
     GasReaction, GasReactionError, GasReactionSolve, GasReactionStep,
 };

@@ -102,6 +102,37 @@ mod viscous_tests {
 }
 
 impl FreeSurface3 {
+    /// Read the tracked interface inventory and its population density without
+    /// reconstructing mass from the rounded fill fraction or scanning the grid.
+    pub(crate) fn transport_interface_mass(
+        &self,
+        location: MassLocation3,
+    ) -> Result<(f64, f64), FreeSurfaceError3> {
+        let MassLocation3::Cell(key, lane) = location else {
+            return Err(FreeSurfaceError3::Transport("phase transfer needs a located interface"));
+        };
+        let slot = self.grid.slot_of(key).ok_or(FreeSurfaceError3::Transport(
+            "phase transfer requires an active interface",
+        ))?;
+        let tile = self.tiles.get(&key).ok_or(FreeSurfaceError3::Transport(
+            "phase transfer requires an active interface",
+        ))?;
+        let mass = tile.mass[lane];
+        let density = self.grid.populations(slot, lane).iter().sum::<f64>();
+        if tile.cells[lane] != Cell3::Interface
+            || !density.is_finite()
+            || density <= 0.0
+            || !mass.is_finite()
+            || mass <= 0.0
+            || mass > density
+        {
+            return Err(FreeSurfaceError3::Transport(
+                "phase transfer needs positive bounded interface fill",
+            ));
+        }
+        Ok((mass, density))
+    }
+
     /// Replace only the represented liquid inventory of an existing interface.
     /// The caller owns a private candidate and the physical mass/energy audit.
     /// Populations and their physical velocity are unchanged: material crosses
@@ -114,23 +145,11 @@ impl FreeSurface3 {
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
+        let (_, density) = self.transport_interface_mass(location)?;
         let MassLocation3::Cell(key, lane) = location else {
             return Err(FreeSurfaceError3::Transport("phase transfer needs a located interface"));
         };
-        let slot = self.grid.slot_of(key).ok_or(FreeSurfaceError3::Transport(
-            "phase transfer requires an active interface",
-        ))?;
-        let tile = self.tiles.get(&key).ok_or(FreeSurfaceError3::Transport(
-            "phase transfer requires an active interface",
-        ))?;
-        let density = self.grid.populations(slot, lane).iter().sum::<f64>();
-        if tile.cells[lane] != Cell3::Interface
-            || !density.is_finite()
-            || density <= 0.0
-            || !tile.mass[lane].is_finite()
-            || tile.mass[lane] <= 0.0
-            || tile.mass[lane] > density
-            || !mass.is_finite()
+        if !mass.is_finite()
             || mass <= 0.0
             || mass > density
         {

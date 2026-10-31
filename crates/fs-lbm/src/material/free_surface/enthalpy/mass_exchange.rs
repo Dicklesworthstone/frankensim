@@ -8,6 +8,16 @@
 
 use super::*;
 
+/// Read-only selection of the mass increment the native interface can store.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FreeSurfaceMassProjection {
+    pub initial_mass_kg: f64,
+    pub final_mass_kg: f64,
+    /// Difference of native tracked masses, THEN mapped to kg. This preserves
+    /// small increments better than subtracting the two displayed SI totals.
+    pub mass_change_kg: f64,
+}
+
 /// One integrated interfacial transfer, positive into the liquid.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FreeSurfaceMassExchange {
@@ -81,6 +91,105 @@ pub struct FreeSurfaceMassExchangeReport {
 }
 
 impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
+    /// Admit one caller-measured Cartesian patch on a wet interface and its
+    /// face-adjacent in-domain gas. A wall, occupied neighbor or area larger
+    /// than the original cell face cannot become phase exposure.
+    pub fn admit_interface_gas_patch(
+        &self,
+        coordinates: [usize; 3],
+        gas: [usize; 3],
+        area_m2: f64,
+    ) -> Result<(), Error> {
+        self.project_interface_mass_exchange(coordinates, 0.0)?;
+        let separation = (0..3).fold(0usize, |sum, axis| {
+            sum.saturating_add(coordinates[axis].abs_diff(gas[axis]))
+        });
+        let [Ok(x), Ok(y), Ok(z)] = gas.map(i64::try_from) else {
+            return Err(Error::Invalid("phase gas coordinate is unrepresentable"));
+        };
+        let dx = self.flow.scaling.cell_size_m();
+        if separation != 1
+            || self.flow.lattice.transport_wall_at([x, y, z])
+            || self
+                .flow
+                .lattice
+                .sample_at(gas[0], gas[1], gas[2])
+                .is_some_and(|cell| cell.fill_fraction != 0.0)
+            || !area_m2.is_finite()
+            || area_m2 < 0.0
+            || area_m2 > dx * dx
+        {
+            return Err(Error::Invalid(
+                "phase exchange needs a bounded exposed patch and adjacent gas cell",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Original all-liquid caloric inverse, with the SAME fixed-density
+    /// admission used by native material refresh. No alternate phase chart.
+    pub fn liquid_temperature_at_specific_enthalpy_k(&self, h: f64) -> Result<f64, Error> {
+        buoyancy::liquid_temperature(
+            self.caloric,
+            h,
+            self.flow.scaling.material().density_kg_m3(),
+        )
+    }
+
+    /// Select a representable signed native mass transfer without changing
+    /// anything. A zero request reads the actual occupied interface inventory.
+    /// Coupling owners call this before their gas caloric solve and use the
+    /// returned mass_change_kg in exchange_interface_mass. Exhaustion, overflow
+    /// and a positive physical increment lost to rounding refuse.
+    pub fn project_interface_mass_exchange(
+        &self,
+        coordinates: [usize; 3],
+        requested_mass_kg: f64,
+    ) -> Result<FreeSurfaceMassProjection, Error> {
+        self.project_interface_mass_native(coordinates, requested_mass_kg)
+            .map(|(_, projection)| projection)
+    }
+
+    fn project_interface_mass_native(
+        &self,
+        coordinates: [usize; 3],
+        requested_mass_kg: f64,
+    ) -> Result<(f64, FreeSurfaceMassProjection), Error> {
+        let location = self.location_at(coordinates).ok_or(Error::Invalid(
+            "phase transfer needs an existing liquid interface",
+        ))?;
+        let (old, density) = self.flow.lattice.transport_interface_mass(location)?;
+        let unit = self.flow.scaling.mass_unit_kg();
+        let next = old + requested_mass_kg / unit;
+        let dm = (next - old) * unit;
+        let initial_mass_kg = old * unit;
+        let final_mass_kg = next * unit;
+        if !requested_mass_kg.is_finite()
+            || !next.is_finite()
+            || next <= 0.0
+            || next > density
+            || !initial_mass_kg.is_finite()
+            || initial_mass_kg <= 0.0
+            || !final_mass_kg.is_finite()
+            || final_mass_kg <= 0.0
+            || !dm.is_finite()
+            || (requested_mass_kg != 0.0 && dm == 0.0)
+            || old + dm / unit != next
+        {
+            return Err(Error::Invalid(
+                "interface mass selection is unrepresentable or needs a phase-front remap",
+            ));
+        }
+        Ok((
+            next,
+            FreeSurfaceMassProjection {
+                initial_mass_kg,
+                final_mass_kg,
+                mass_change_kg: dm,
+            },
+        ))
+    }
+
     /// Apply one integrated phase transfer to real native interface inventory.
     ///
     /// This transaction does not advance flow or time. An outer coupling owner
@@ -159,16 +268,11 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
         };
         for (&location, transfer) in &ordered {
             poll(gate)?;
-            let old_mass = masses[&location];
-            let new_mass = old_mass + transfer.mass_kg / mass_unit;
-            let dm = (new_mass - old_mass) * mass_unit;
-            if !dm.is_finite() || (transfer.mass_kg != 0.0 && dm == 0.0) {
-                return Err(Error::Invalid(
-                    "interface mass increment is unrepresentable",
-                ));
-            }
+            let (new_mass, projection) =
+                self.project_interface_mass_native(transfer.coordinates, transfer.mass_kg)?;
+            let dm = projection.mass_change_kg;
             lattice.transport_set_interface_mass(location, new_mass, gate)?;
-            let new_mass_kg = new_mass * mass_unit;
+            let new_mass_kg = projection.final_mass_kg;
             let old_h = self.h[&location];
             // The actual native dm owns the transfer. Center the update on the
             // old datum so a common caloric offset cannot manufacture heat.

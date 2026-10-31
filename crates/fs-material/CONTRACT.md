@@ -6363,6 +6363,14 @@ inventory, temperature departure and equilibrium-overshoot limits refuse an
 oversized step without publishing either phase. This frozen-film update is
 first order and requires physical timestep refinement.
 
+`advance_surface_with_gas_mass_selection` accepts a native inventory selector
+before the existing caloric solve. The selected signed transfer must preserve
+direction and nonzero mass within the original absolute mass budget. Both
+requested and selected donor withdrawals obey the inventory limit, and all
+subsequent temperature/equilibrium gates remain unchanged. The report retains
+the original film request and the selected debit. The original entry point
+delegates with the identity selector and retains its numerical behavior.
+
 `evaporation::gas::timeline::advance_deposition_with_gas` advances one admitted
 pure-liquid cell, its original heat/contact/source network and one finite gas
 on the same event-clipped clock. Births and every heat substep retain original

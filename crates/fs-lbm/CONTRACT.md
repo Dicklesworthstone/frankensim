@@ -389,6 +389,14 @@ reconciles the phase owner's internal energy with native enthalpy using the
 reported saturation-pressure volume work. The isothermal phase owner's latent
 heat duty is retained rather than deposited a second time into the liquid.
 
+`project_interface_mass_exchange` selects a reproducible increment from the
+actual tracked native mass before an external gas caloric solve; it does not
+recover mass by multiplying a rounded fill fraction. The original pure-liquid
+caloric inverse and bounded face-adjacent gas-patch admission are available to
+that coupling owner. `fs-couple::liquid_gas::evaporation` uses these read-only
+operations, the shared finite-rate phase owner and this native exchange to
+publish finite gas plus real VOF liquid together on one native flow interval.
+
 ### Finite atmosphere on the native free-surface thermal timeline
 
 `step_with_finite_gas_environment` gives the same moving-liquid thermal owner
