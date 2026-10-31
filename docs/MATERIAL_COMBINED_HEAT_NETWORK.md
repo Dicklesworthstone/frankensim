@@ -78,38 +78,60 @@ the spatial tensor-conduction owner. Source intervals, nonnegative principal
 conductivities, unit directions and unchanged material endpoints remain explicit
 admission conditions.
 
-## Planar induction and finite heat
+## Planar induction with complete material coolant
 
-The prepared assembly also exposes `step_eddy_thermal_candidate` for the
-original planar induction history. It uses the same thermal interfaces,
-integrated material layers, directional conductivities and enclosure radiation
-as ordinary heat/circuit stepping. All coefficients use the candidate cell
-temperatures that drive the field's conductivity and magnetic storage law.
-The original field solver supplies local Joule heat and parameter work; the
-shared magnetic caloric owner supplies reversible heat and `U = psi + T*S`.
+The original planar field owners consume the same complete `HeatAssembly`
+as three-dimensional induction, material circuits and solid mechanics.
+The public entries under `circuit_enthalpy::eddy::thermal` retain four
+distinct native material and time-integration models:
 
-The caller supplies the original triangle-to-cell regions and source-backed
-magnetic thermal laws. The prepared heat assembly remains the authority for
-the material cards, caloric cells and links. Thermal contact resistance and
-emissivity must be independent of unowned field coordinates. Graph resistors,
-graph electrical contacts and circuit source bindings refuse because a spatial
-field step does not evolve their current/work history.
+| Entry | Original magnetic owner |
+| --- | --- |
+| `fixed_heat_assembly_candidate` | Fixed permeability and midpoint linear induction |
+| `fixed_nonlinear_heat_assembly_candidate` | Fixed reversible nonlinear or recoil law |
+| `heat_assembly_candidate` | Source-backed affine permeability versus temperature |
+| `nonlinear_heat_assembly_candidate` | Explicit linear or separable nonlinear thermal constitutive law |
 
-The accepted report retains the complete `HeatNetworkSample` in
-`report.coupled.source.material.network`, including per-contact, integrated
-conduction and radiation results. Its top-level external-heat and physical
-internal-energy accounts exclude the closed enclosure's roundoff net. Both
-the native field/heat balance and the physical magnetic/caloric balance must
-pass before either accepted history is returned.
+Every proposed endpoint resolves the original conductor and complete heat
+provider at the same cell temperatures. Finite coolant retains its own
+caloric cell and material transport sources; its native link conductances
+transfer energy internally. Prescribed reservoirs, thermal interfaces,
+integrated material layers, directional conduction and enclosure radiation
+keep their original source reports. No initial cooling value is frozen into
+later steps, and no field or thermal history restarts after an accepted step.
 
-`step_nonlinear_eddy_thermal_candidate` uses the same assembly for a nonlinear
-field history. Each receiving region selects a `MagneticConstitutiveThermalLaw`:
-the existing linear permeability model or an explicitly sourced separable
-`H(B,T) = s(T) H_ref(B)` model. Linear conductors and nonlinear cores can share
-one thermal solve. The positive affine scale and original reference curve stay
-source-pinned; arbitrary two-coordinate magnetic laws are not inferred.
-Backward-Euler magnetic convexity loss remains a numerical export and is
-never deposited as material heat.
+The caller supplies the original triangle-to-cell regions and, for thermal
+magnetic models, their explicit caloric bindings. The prepared network remains
+authoritative for material cards, caloric objects and link ownership.
+Graph resistors, electrical contacts and circuit source bindings refuse
+because these field owners do not evolve their currents. Resolved providers
+also cannot introduce unowned electrical work. Thermal interface and
+emissivity laws must remain independent of unowned field coordinates.
+
+Each native field step supplies its actual local Ohmic heat once.
+Temperature-dependent magnetic owners additionally retain parameter work,
+field entropy, signed reversible heat and `U = psi + T*S`. The nonlinear
+backward-Euler magnetic loss remains a numerical export. All paths gate the
+balance with the closed enclosure's numerical net excluded from external heat.
+Fixed-law reports retain the standard raw circuit/enthalpy arithmetic: true
+external heat is `non_electrical_heat_j - dt * radiation_net_power_w()`.
+Thermal-law reports additionally expose the corrected physical internal-energy
+audit. Fixed-law entries retain their own equations and do not infer
+temperature-dependent magnetic energy.
+
+The full provider payload survives in the accepted source report, including
+finite-fluid temperatures and source selections. `PlanarInductionHeatError`
+distinguishes original magnetic/material failures from typed provider failures;
+cancellation and native work limits keep their existing classifications.
+The concrete prepared-network thermal methods delegate to these same paths.
+A refusal publishes neither accepted field nor thermal state.
+
+Fixed geometry, conducting occupancy, whole-volume solid field receivers,
+source domains and native capacity/field-envelope gates remain required.
+The separable thermal law is explicitly `H(B,T) = s(T) H_ref(B)` with an
+admitted positive affine scale; it does not infer an arbitrary magnetic
+surface, hysteresis or phase-change model. Thermal endpoint coupling still
+needs independent time refinement.
 
 ## Three-dimensional induction with complete material coolant
 

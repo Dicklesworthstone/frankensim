@@ -316,6 +316,23 @@ The core fit stays at its separately held preparation temperature and biased
 reference. This connection changes motion through the actual winding; it adds
 no unsupported core thermal, hysteretic or acoustic law.
 
+### Complete coolant on planar induction fields
+
+All four original planar induction variants consume this same complete
+`HeatAssembly` through `fs_couple::circuit_enthalpy::eddy::thermal`.
+Fixed linear and nonlinear magnetic laws retain their native field equations;
+explicit thermal laws retain field entropy, internal energy, parameter work
+and reversible heat. Each proposed thermal endpoint resolves original
+conductor sources and finite-fluid transport together. Passive coolant cells
+retain their original caloric storage outside the magnetic mesh.
+
+Native Ohmic heat enters its solid receivers once, nonlinear numerical loss
+stays separate, and closed-enclosure roundoff is excluded from external heat.
+The full fluid/heat payload and typed provider failures survive. Prepared
+circuit bindings and resolved electrical work without a field owner refuse.
+Original source, geometry, field and combined-capacity limits remain active;
+rejected candidates preserve both histories.
+
 ### Complete coolant on three-dimensional induction fields
 
 The original linear, fixed-law nonlinear and temperature-dependent nonlinear

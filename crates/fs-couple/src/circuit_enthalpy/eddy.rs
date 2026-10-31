@@ -13,7 +13,8 @@ pub mod nonlinear;
 pub mod thermal;
 
 use super::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients,
     DriverAccount, ThermalDriver, cell_driver_candidate, finite,
     magnetic::{
         Error, MagneticThermalError, MagneticThermalNetwork, MagneticThermalSample, MagneticRoutes, check, invalid,
@@ -32,19 +33,19 @@ pub struct EddyThermalSample<S = MaterialNetworkSample> {
     pub network: S,
     pub magnetic: Vec<MagneticThermalSample>,
 }
-pub struct EddyEnthalpyCandidate<'t, 'm> {
+pub struct EddyEnthalpyCandidate<'t, 'm, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     field: PlanarEddy<'m>,
-    report: CircuitEnthalpyReport<EddyThermalSample, EddyStep>,
+    pub(in crate::circuit_enthalpy) report: CircuitEnthalpyReport<EddyThermalSample<S>, EddyStep>,
 }
-impl<'t, 'm> EddyEnthalpyCandidate<'t, 'm> {
+impl<'t, 'm, S> EddyEnthalpyCandidate<'t, 'm, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn field(&self) -> &PlanarEddy<'m> {
         &self.field
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample, EddyStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample<S>, EddyStep> {
         &self.report
     }
     /// Publish BOTH histories together; returned eddy heat is already deposited.
@@ -53,7 +54,7 @@ impl<'t, 'm> EddyEnthalpyCandidate<'t, 'm> {
     ) -> (
         DepositionSimulation<'t>,
         PlanarEddy<'m>,
-        CircuitEnthalpyReport<EddyThermalSample, EddyStep>,
+        CircuitEnthalpyReport<EddyThermalSample<S>, EddyStep>,
     ) {
         (self.thermal, self.field, self.report)
     }
@@ -81,6 +82,12 @@ fn induction(e: EddyError) -> Error {
         EddyError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(MagneticThermalError::Induction(other)),
     }
+}
+
+// Preserve native interruption and work classifications while allowing a complete
+// heat assembly to retain its own source error type.
+fn native_error<E: From<MagneticThermalError>>(error: Error) -> CircuitEnthalpyError<E> {
+    error.map_source(Into::into)
 }
 
 // The fixed-mu and thermal-mu paths deposit exactly the same native sigma*E²
@@ -153,13 +160,6 @@ impl MagneticThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
-        if field.time_s().to_bits() != thermal.time_s().to_bits()
-            || self.cells.len() != thermal.cells().len()
-        {
-            return Err(invalid(
-                "matching magnetic/thermal clocks and complete thermal bindings required",
-            ));
-        }
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -168,8 +168,44 @@ impl MagneticThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
+        self.step_eddy_resolved_candidate(
+            thermal, target_s, field, impressed_jz_a_m2, controls, field_controls,
+            initial_energy_increments_j,
+            |trial| prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(material),
+            |sample| sample, &cancel,
+        )
+    }
+
+    // Fixed permeability retains the original midpoint source-work convention;
+    // a complete heat assembly replaces only the thermal coefficient callback.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy) fn step_eddy_resolved_candidate<
+        't, 'm, S, E: From<MagneticThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &PlanarEddy<'m>,
+        impressed_jz_a_m2: &[f64],
+        controls: CircuitEnthalpySolve,
+        field_controls: EddyControls,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'_>) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        snapshot: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<EddyEnthalpyCandidate<'t, 'm, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(native_error)?;
+        super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
+        if field.time_s().to_bits() != thermal.time_s().to_bits()
+            || self.cells.len() != thermal.cells().len()
+        {
+            return Err(native_error(invalid(
+                "matching magnetic/thermal clocks and complete thermal bindings required",
+            )));
+        }
         let triangles: Vec<_> = field.conductors().iter().map(|s| s.triangle).collect();
-        let routes = self.routes(thermal, field.problem(), &triangles, &cancel)?;
+        let routes = self.routes(thermal, field.problem(), &triangles, cancel)
+            .map_err(native_error)?;
         let conductors: BTreeMap<_, _> = field
             .conductors()
             .iter()
@@ -180,17 +216,15 @@ impl MagneticThermalNetwork<'_> {
             .iter()
             .map(|s| (s.triangle, s.region))
             .collect();
-        let initial = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
+        let initial = resolve(thermal)?;
         let (sources, _) = self.materials_at(
             thermal,
             field.problem(),
             &conductors,
-            &initial.source,
+            snapshot(&initial.source),
             &routes,
-            &cancel,
-        )?;
+            cancel,
+        ).map_err(native_error)?;
         if sources.len() != field.conductors().len()
             || sources
                 .iter()
@@ -202,9 +236,9 @@ impl MagneticThermalNetwork<'_> {
                         || !same_material(c.material(), s.conductor.material())
                 })
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "accepted conductor sources must match the actual thermal state",
-            ));
+            )));
         }
         let (thermal, field, report) = cell_driver_candidate(
             thermal,
@@ -212,18 +246,16 @@ impl MagneticThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
+                check(cancel).map_err(native_error)?;
+                let coefficients = resolve(state)?;
                 let (sources, magnetic) = self.materials_at(
                     state,
                     field.problem(),
                     &conductors,
-                    &coefficients.source,
+                    snapshot(&coefficients.source),
                     &routes,
-                    &cancel,
-                )?;
+                    cancel,
+                ).map_err(native_error)?;
                 let sources = sources
                     .into_iter()
                     .map(|(triangle, conductor)| EddyConductor {
@@ -240,7 +272,7 @@ impl MagneticThermalNetwork<'_> {
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
                     )
-                    .map_err(induction)?;
+                    .map_err(|error| native_error(induction(error)))?;
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
@@ -253,11 +285,11 @@ impl MagneticThermalNetwork<'_> {
                 })
             },
             |proposal: &PlanarEddyCandidate<'_>, dt, checkpoint| {
-                deposit_heat(proposal,&routes,dt,checkpoint)
+                deposit_heat(proposal, &routes, dt, checkpoint).map_err(native_error)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(native_error)?;
         Ok(EddyEnthalpyCandidate {
             thermal,
             field,

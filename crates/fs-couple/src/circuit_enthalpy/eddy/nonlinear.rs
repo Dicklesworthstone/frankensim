@@ -10,8 +10,10 @@
 pub mod thermal;
 
 use super::{
-    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, DrivenCoefficients,
+    CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
+    DrivenCoefficients,
     DriverAccount, EddyThermalSample, ThermalDriver, cell_driver_candidate, deposit_cell_heat,
+    native_error,
 };
 use crate::circuit_enthalpy::{
     magnetic::{
@@ -42,19 +44,19 @@ use fs_thermal::enthalpy::DepositionSimulation;
 use std::{cell::RefCell, collections::BTreeMap};
 
 /// Both accepted histories and their exact physical/numerical energy account.
-pub struct NonlinearEddyEnthalpyCandidate<'t, 'm> {
+pub struct NonlinearEddyEnthalpyCandidate<'t, 'm, S = MaterialNetworkSample> {
     thermal: DepositionSimulation<'t>,
     field: PlanarNonlinearEddy<'m>,
-    report: CircuitEnthalpyReport<EddyThermalSample, NonlinearEddyStep>,
+    pub(in crate::circuit_enthalpy) report: CircuitEnthalpyReport<EddyThermalSample<S>, NonlinearEddyStep>,
 }
-impl<'t, 'm> NonlinearEddyEnthalpyCandidate<'t, 'm> {
+impl<'t, 'm, S> NonlinearEddyEnthalpyCandidate<'t, 'm, S> {
     pub fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
     pub fn field(&self) -> &PlanarNonlinearEddy<'m> {
         &self.field
     }
-    pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample, NonlinearEddyStep> {
+    pub fn report(&self) -> &CircuitEnthalpyReport<EddyThermalSample<S>, NonlinearEddyStep> {
         &self.report
     }
     /// Commit both histories together. Reported Joule heat is already deposited;
@@ -64,7 +66,7 @@ impl<'t, 'm> NonlinearEddyEnthalpyCandidate<'t, 'm> {
     ) -> (
         DepositionSimulation<'t>,
         PlanarNonlinearEddy<'m>,
-        CircuitEnthalpyReport<EddyThermalSample, NonlinearEddyStep>,
+        CircuitEnthalpyReport<EddyThermalSample<S>, NonlinearEddyStep>,
     ) {
         (self.thermal, self.field, self.report)
     }
@@ -204,17 +206,8 @@ impl MagneticThermalNetwork<'_> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
-            thermal,
-            controls,
-            initial_energy_increments_j,
+            thermal, controls, initial_energy_increments_j,
         )?;
-        if field.time_s().to_bits() != thermal.time_s().to_bits()
-            || self.cells.len() != thermal.cells().len()
-        {
-            return Err(invalid(
-                "matching nonlinear magnetic/thermal clocks and complete cell bindings required",
-            ));
-        }
         let network = MaterialNetwork {
             cells: self.cells,
             resistors: &[],
@@ -223,8 +216,46 @@ impl MagneticThermalNetwork<'_> {
         let prepared = network
             .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
             .map_err(material)?;
+        self.step_nonlinear_eddy_resolved_candidate(
+            thermal, target_s, field, impressed_jz_a_m2, controls, field_controls,
+            initial_energy_increments_j,
+            |trial| prepared.resolve(trial, || (*cancel.borrow_mut())()).map_err(material),
+            |sample| sample, &cancel,
+        )
+    }
+
+    // The original fixed-law backward-Euler field step owns storage and
+    // numerical loss; only its complete thermal coefficient source is generic.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::circuit_enthalpy) fn step_nonlinear_eddy_resolved_candidate<
+        't, 'm, S, E: From<MagneticThermalError>,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &PlanarNonlinearEddy<'m>,
+        impressed_jz_a_m2: &[f64],
+        controls: CircuitEnthalpySolve,
+        field_controls: NonlinearEddyControls,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(&DepositionSimulation<'_>) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        snapshot: impl Fn(&S) -> &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<NonlinearEddyEnthalpyCandidate<'t, 'm, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(native_error)?;
+        crate::circuit_enthalpy::admit_driver_unknowns(
+            thermal, controls, initial_energy_increments_j,
+        )?;
+        if field.time_s().to_bits() != thermal.time_s().to_bits()
+            || self.cells.len() != thermal.cells().len()
+        {
+            return Err(native_error(invalid(
+                "matching nonlinear magnetic/thermal clocks and complete cell bindings required",
+            )));
+        }
         let triangles: Vec<_> = field.conductors().iter().map(|s| s.triangle).collect();
-        let routes = self.routes_for_mesh(thermal, field.problem().mesh(), &triangles, &cancel)?;
+        let routes = self.routes_for_mesh(thermal, field.problem().mesh(), &triangles, cancel)
+            .map_err(native_error)?;
         let conductors: BTreeMap<_, _> = field
             .conductors()
             .iter()
@@ -235,17 +266,15 @@ impl MagneticThermalNetwork<'_> {
             .iter()
             .map(|s| (s.triangle, s.region))
             .collect();
-        let initial = prepared
-            .resolve(thermal, || (*cancel.borrow_mut())())
-            .map_err(material)?;
+        let initial = resolve(thermal)?;
         let (sources, _) = self.nonlinear_materials_at(
             thermal,
             field.problem(),
             &conductors,
-            &initial.source,
+            snapshot(&initial.source),
             &routes,
-            &cancel,
-        )?;
+            cancel,
+        ).map_err(native_error)?;
         if sources.len() != field.conductors().len()
             || sources
                 .iter()
@@ -257,9 +286,9 @@ impl MagneticThermalNetwork<'_> {
                         || !same_material(conductor.material(), original.conductor.material())
                 })
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "accepted nonlinear conductor sources must match the actual thermal state",
-            ));
+            )));
         }
         let (thermal, field, report) = cell_driver_candidate(
             thermal,
@@ -267,18 +296,16 @@ impl MagneticThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |state, _| {
-                check(&cancel)?;
-                let coefficients = prepared
-                    .resolve(state, || (*cancel.borrow_mut())())
-                    .map_err(material)?;
+                check(cancel).map_err(native_error)?;
+                let coefficients = resolve(state)?;
                 let (sources, magnetic) = self.nonlinear_materials_at(
                     state,
                     field.problem(),
                     &conductors,
-                    &coefficients.source,
+                    snapshot(&coefficients.source),
                     &routes,
-                    &cancel,
-                )?;
+                    cancel,
+                ).map_err(native_error)?;
                 let sources = sources
                     .into_iter()
                     .map(|(triangle, conductor)| EddyConductor {
@@ -295,7 +322,7 @@ impl MagneticThermalNetwork<'_> {
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
                     )
-                    .map_err(induction)?;
+                    .map_err(|error| native_error(induction(error)))?;
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
@@ -309,10 +336,11 @@ impl MagneticThermalNetwork<'_> {
             },
             |proposal: &PlanarNonlinearEddyCandidate<'_>, dt, checkpoint| {
                 deposit_cell_heat(&proposal.step().cells, &routes, dt, checkpoint)
+                    .map_err(native_error)
             },
             || (*cancel.borrow_mut())(),
         )?;
-        check(&cancel)?;
+        check(cancel).map_err(native_error)?;
         Ok(NonlinearEddyEnthalpyCandidate {
             thermal,
             field,

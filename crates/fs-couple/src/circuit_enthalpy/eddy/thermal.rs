@@ -8,19 +8,24 @@ use super::super::{
     CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients, DrivenCoefficients,
     cell_driver_candidate, finite,
     magnetic::{
-        Error, MagneticThermalNetwork,
+        Error, MagneticThermalError, MagneticThermalNetwork,
         caloric::{MagneticEnergyCell, PreparedMagneticCaloric},
         check, invalid, material, same_material,
     },
     material::{MaterialNetwork, MaterialNetworkSample},
 };
-use super::{EddyThermalSample, deposit_heat, induction};
+use super::{EddyThermalSample, deposit_heat, induction, native_error};
 use fs_em::planar::eddy::{EddyConductor, EddyControls, EddyStep, PlanarEddy, PlanarEddyCandidate};
 use fs_feec::weighted::WeightedAssemblyLimits;
 use fs_thermal::enthalpy::DepositionSimulation;
 use std::{cell::RefCell, collections::BTreeMap};
 
 pub(in crate::circuit_enthalpy) mod heat;
+pub use heat::{
+    PlanarInductionHeatError, fixed_heat_assembly_candidate,
+    fixed_nonlinear_heat_assembly_candidate, heat_assembly_candidate,
+    nonlinear_heat_assembly_candidate,
+};
 
 pub use super::super::magnetic::caloric::{MagneticCaloricSample, MagneticThermalLaw};
 #[derive(Clone, Debug, PartialEq)]
@@ -105,7 +110,7 @@ impl MagneticThermalNetwork<'_> {
     // Both ordinary material conduction and the complete shared heat assembly
     // enter this same field/enthalpy residual and magnetic internal-energy audit.
     #[allow(clippy::too_many_arguments)]
-    pub(in crate::circuit_enthalpy) fn step_eddy_thermal_resolved_candidate<'t, 'm, S>(
+    pub(in crate::circuit_enthalpy) fn step_eddy_thermal_resolved_candidate<'t, 'm, S, E: From<MagneticThermalError>>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
@@ -116,24 +121,25 @@ impl MagneticThermalNetwork<'_> {
         field_controls: EddyControls,
         assembly: WeightedAssemblyLimits,
         initial_energy_increments_j: &[f64],
-        resolve: impl Fn(&DepositionSimulation<'_>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        resolve: impl Fn(&DepositionSimulation<'_>) -> Result<CircuitThermalCoefficients<S>, super::super::CircuitEnthalpyError<E>>,
         snapshot: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<EddyCaloricCandidate<'t, 'm, S>, Error> {
-        check(cancel)?;
+    ) -> Result<EddyCaloricCandidate<'t, 'm, S>, super::super::CircuitEnthalpyError<E>> {
+        check(cancel).map_err(native_error)?;
         super::super::admit_driver_unknowns(thermal, controls, initial_energy_increments_j)?;
         if field.time_s().to_bits() != thermal.time_s().to_bits()
             || self.cells.len() != thermal.cells().len()
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "matching field/thermal clocks and complete original cells required",
-            ));
+            )));
         }
         let triangles: Vec<_> = field.conductors().iter().map(|s| s.triangle).collect();
-        let routes = self.routes(thermal, field.problem(), &triangles, cancel)?;
+        let routes = self.routes(thermal, field.problem(), &triangles, cancel)
+            .map_err(native_error)?;
         let native = field
             .field(&mut || (*cancel.borrow_mut())())
-            .map_err(induction)?;
+            .map_err(|error| native_error(induction(error)))?;
         let originals: Vec<_> = field.problem().materials().iter().collect();
         let caloric = PreparedMagneticCaloric::new(
             self,
@@ -144,7 +150,7 @@ impl MagneticThermalNetwork<'_> {
             bindings,
             &routes,
             cancel,
-        )?;
+        ).map_err(native_error)?;
         let conductors: BTreeMap<_, _> = field
             .conductors()
             .iter()
@@ -163,7 +169,7 @@ impl MagneticThermalNetwork<'_> {
             snapshot(&initial_sample.source),
             &routes,
             cancel,
-        )?;
+        ).map_err(native_error)?;
         if accepted_sources.len() != field.conductors().len()
             || accepted_sources
                 .iter()
@@ -175,9 +181,9 @@ impl MagneticThermalNetwork<'_> {
                         || !same_material(c.material(), s.conductor.material())
                 })
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "accepted conductor sources must match actual thermal state",
-            ));
+            )));
         }
         let dt = target_s - thermal.time_s();
         let (thermal, field, report) = cell_driver_candidate(
@@ -186,7 +192,7 @@ impl MagneticThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |trial, _| {
-                check(cancel)?;
+                check(cancel).map_err(native_error)?;
                 let mut coefficients = resolve(trial)?;
                 let (sources, magnetic) = self.materials_at_thermal(
                     trial,
@@ -195,8 +201,8 @@ impl MagneticThermalNetwork<'_> {
                     snapshot(&coefficients.source),
                     &routes,
                     cancel,
-                )?;
-                caloric.validate_sources(trial, &magnetic, cancel)?;
+                ).map_err(native_error)?;
+                caloric.validate_sources(trial, &magnetic, cancel).map_err(native_error)?;
                 let proposal = field
                     .step_with_materials_candidate(
                         target_s,
@@ -214,7 +220,7 @@ impl MagneticThermalNetwork<'_> {
                         field_controls,
                         &mut || (*cancel.borrow_mut())(),
                     )
-                    .map_err(induction)?;
+                    .map_err(|error| native_error(induction(error)))?;
                 let exchange = caloric.deposit(
                     trial,
                     proposal
@@ -231,7 +237,7 @@ impl MagneticThermalNetwork<'_> {
                     dt,
                     controls.total_energy_tolerance_j,
                     cancel,
-                )?;
+                ).map_err(native_error)?;
                 Ok(DrivenCoefficients {
                     circuit: proposal,
                     sources_w: coefficients.sources_w,
@@ -249,7 +255,7 @@ impl MagneticThermalNetwork<'_> {
                 })
             },
             |proposal: &PlanarEddyCandidate<'_>, dt, checkpoint| {
-                deposit_heat(proposal, &routes, dt, checkpoint)
+                deposit_heat(proposal, &routes, dt, checkpoint).map_err(native_error)
             },
             || (*cancel.borrow_mut())(),
         )?;
@@ -262,11 +268,11 @@ impl MagneticThermalNetwork<'_> {
                 - external_heat_j,
         )?;
         if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "physical magnetic and caloric internal energy do not close external supply",
-            ));
+            )));
         }
-        check(cancel)?;
+        check(cancel).map_err(native_error)?;
         Ok(EddyCaloricCandidate {
             thermal,
             field,
