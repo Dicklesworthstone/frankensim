@@ -13,6 +13,12 @@ use core::f64::consts::PI;
 /// Conservative triangle-surface forces with exact endpoint area work.
 pub mod surface;
 
+mod two_fluid;
+pub use two_fluid::{
+    TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,
+    step_newtonian_two_fluid_circular_meniscus,
+};
+
 /// SI inputs admitted by the circular-capillary screening law.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct CircularCapillaryInput {
