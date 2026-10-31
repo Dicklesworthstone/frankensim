@@ -116,6 +116,10 @@ sum supplies the aggregate heat. Undamped and free modes report exactly zero;
 high-Q losses are not recovered by subtracting large mechanical energies.
 Per-mode and aggregate force-work/energy balance checks remain separate and
 refuse disagreement beyond their floating-point allowances before state commit.
+The held force's work is taken over the displacement increment the transition
+itself adds to the stored displacement (free, undamped and short damped steps
+carry it; the long damped step forms `q - q0`), never over `next - state`,
+whose rounding the force would multiply; the allowances are unchanged.
 
 A positive square-root Gramian is prepared beside each exact full/half-step
 transition. The same scalar transition owner resolves a short interval before

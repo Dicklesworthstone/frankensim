@@ -964,7 +964,8 @@ impl ModalAcousticTimeModel {
                 Some(coefficients) => coefficients[mode_index],
                 None => PreparedZohCoefficients::new(*mode, duration_s),
             };
-            let next = advance_exact_zoh_cached(*mode, *state, *force, prepared.transition);
+            let (next, displacement_increment) =
+                advance_exact_zoh_increment(*mode, *state, *force, prepared.transition);
             check_limit(
                 "absolute modal displacement",
                 next.displacement_m_sqrt_kg.abs(),
@@ -979,15 +980,13 @@ impl ModalAcousticTimeModel {
             let after = modal_energy(*mode, next);
             energy_before_j += before;
             energy_after_j += after;
-            // A free coordinate stores no positional energy. Subtracting its
-            // absolute positions can spuriously fail passivity near velocity
-            // reversal, especially after translating the coordinate origin.
-            // Integrate the held force over the exact polynomial increment.
-            let displacement_increment = if mode.angular_frequency_rad_s == 0.0 {
-                free_displacement_increment(state.velocity_m_sqrt_kg_per_s, *force, duration_s)
-            } else {
-                next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg
-            };
+            // The held force acts over the displacement increment the transition
+            // itself added to q0, never over `next - state`. Rounding q0 + increment
+            // onto the grid of q costs up to eps*|q|/2, and a force times that is
+            // the whole balance error whenever one step moves q by a small fraction
+            // of itself: the stored positions are then the wrong operands. This is
+            // also the free coordinate's reason (it stores no positional energy, and
+            // subtracting absolute positions can fail near velocity reversal).
             let work = force * displacement_increment;
             input_work_j += work;
             let (loss, allowance) = prepared
@@ -1279,19 +1278,36 @@ fn advance_exact_zoh_cached(
     force: f64,
     coefficients: ExactZohCoefficients,
 ) -> ModalAcousticState {
+    advance_exact_zoh_increment(mode, state, force, coefficients).0
+}
+
+// The same transition, bit for bit in q and v, that also returns the displacement
+// increment it added to q0. Free, undamped and damped short steps form q = q0 + increment,
+// so the increment is that exact addend and keeps the digits the sum rounds away; `q - q0`
+// cannot recover them. The damped long-step branch is a sum of three comparable terms with
+// no separate addend, so it returns `q - q0`.
+fn advance_exact_zoh_increment(
+    mode: ModalAcousticMode,
+    state: ModalAcousticState,
+    force: f64,
+    coefficients: ExactZohCoefficients,
+) -> (ModalAcousticState, f64) {
     let omega = mode.angular_frequency_rad_s;
     let q0 = state.displacement_m_sqrt_kg;
     let v0 = state.velocity_m_sqrt_kg_per_s;
-    let (q, v) = match coefficients {
+    let (q, v, displacement_increment) = match coefficients {
         ExactZohCoefficients::Free { duration_s } => {
             // Exact polynomial solution of q''=force under a held force.
             // Full, half and arbitrary durations use this same arithmetic.
             let delta_v = duration_s * force;
-            return ModalAcousticState {
-                displacement_m_sqrt_kg: state.displacement_m_sqrt_kg
-                    + free_displacement_increment(v0, force, duration_s),
-                velocity_m_sqrt_kg_per_s: v0 + delta_v,
-            };
+            let displacement_increment = free_displacement_increment(v0, force, duration_s);
+            return (
+                ModalAcousticState {
+                    displacement_m_sqrt_kg: state.displacement_m_sqrt_kg + displacement_increment,
+                    velocity_m_sqrt_kg_per_s: v0 + delta_v,
+                },
+                displacement_increment,
+            );
         }
         ExactZohCoefficients::Undamped {
             sine,
@@ -1308,23 +1324,28 @@ fn advance_exact_zoh_cached(
             velocity_decrement,
         } => {
             let restoring_force = force - omega * omega * q0;
-            let q = if position_decrement.abs() < 0.5 {
-                q0 + (velocity_gain * v0 + displacement_gain * restoring_force)
+            let (q, displacement_increment) = if position_decrement.abs() < 0.5 {
+                let increment = velocity_gain * v0 + displacement_gain * restoring_force;
+                (q0 + increment, increment)
             } else {
-                position_retention * q0 + velocity_gain * v0 + displacement_gain * force
+                let q = position_retention * q0 + velocity_gain * v0 + displacement_gain * force;
+                (q, q - q0)
             };
             let v = if velocity_decrement.abs() < 0.5 {
                 v0 + (velocity_gain * restoring_force - velocity_decrement * v0)
             } else {
                 velocity_retention * v0 + velocity_gain * restoring_force
             };
-            (q, v)
+            (q, v, displacement_increment)
         }
     };
-    ModalAcousticState {
-        displacement_m_sqrt_kg: q,
-        velocity_m_sqrt_kg_per_s: v,
-    }
+    (
+        ModalAcousticState {
+            displacement_m_sqrt_kg: q,
+            velocity_m_sqrt_kg_per_s: v,
+        },
+        displacement_increment,
+    )
 }
 
 // Advance about the current displacement rather than subtracting and adding
@@ -1337,17 +1358,20 @@ fn advance_undamped_zoh(
     force: f64,
     sine: f64,
     one_minus_cosine: f64,
-) -> ModalAcousticState {
+) -> (ModalAcousticState, f64) {
     let omega = mode.angular_frequency_rad_s;
     let q = state.displacement_m_sqrt_kg;
     let v = state.velocity_m_sqrt_kg_per_s;
     let displacement_increment =
         (v / omega) * sine + (force / (omega * omega) - q) * one_minus_cosine;
     let velocity_increment = (force / omega - omega * q) * sine - v * one_minus_cosine;
-    ModalAcousticState {
-        displacement_m_sqrt_kg: q + displacement_increment,
-        velocity_m_sqrt_kg_per_s: v + velocity_increment,
-    }
+    (
+        ModalAcousticState {
+            displacement_m_sqrt_kg: q + displacement_increment,
+            velocity_m_sqrt_kg_per_s: v + velocity_increment,
+        },
+        displacement_increment,
+    )
 }
 
 /// One exact zero-order-hold step of a single mode from `state` under the held generalized `force` over `dt`.
@@ -2447,6 +2471,235 @@ mod tests {
                 "mode {idx} velocity mismatch: {pred_v} vs {}",
                 s1.velocity_m_sqrt_kg_per_s
             );
+        }
+    }
+
+    // Held-force work over the displacement increment the transition itself added to q0.
+    //
+    // The four steps that first refused "independent viscous heat and held-force energy balance
+    // disagree" at 95b9c9e5a, when the work was formed as force * (next - state): the old-law cello
+    // C2 and double-bass E1 open-string cards and, under the hyperbolic bow law, cello C2 and
+    // double-bass A1 (partial 3 or 5 of a 65-205 Hz string at the 768 kHz bow substep). Every input
+    // is the exact f64 captured at the refusal, as bits. `exact_work` and `exact_heat` come from an
+    // independent 80-digit exponential of [[0,1,0],[-w^2,-2 zeta w,F],[0,0,0]] acting on [q0,v0,1],
+    // with those inputs lifted exactly: work = F (q1 - q0), heat = integral of 2 zeta w v^2.
+    struct RefusedStep {
+        omega: u64,
+        force: u64,
+        q0: u64,
+        v0: u64,
+        exact_work: f64,
+        exact_heat: f64,
+    }
+    const REFUSED_ZETA_BITS: u64 = 0x3f53_fafe_e44c_1a60;
+    const BOW_SUBSTEP_BITS: u64 = 0x3eb5_d867_c3ec_e2a5;
+    const REFUSED_STEPS: [RefusedStep; 4] = [
+        RefusedStep {
+            omega: 0x4093_45aa_98f2_4490,
+            force: 0x403f_024c_8db4_1037,
+            q0: 0x3e51_0e23_7118_2ec8,
+            v0: 0xbf01_481e_91e8_8b32,
+            exact_work: -5.164_046_616_300_688_5e-10,
+            exact_heat: 1.172_078_936_764_100_5e-15,
+        },
+        RefusedStep {
+            omega: 0x4094_36bc_910f_c724,
+            force: 0x4043_f4ce_ee39_e398,
+            q0: 0x3e64_e504_1662_8a0c,
+            v0: 0xbef7_368d_b8f6_02b8,
+            exact_work: 1.977_238_145_884_529_9e-10,
+            exact_heat: 9.811_487_601_742_133_9e-16,
+        },
+        RefusedStep {
+            omega: 0x4093_45aa_98f2_4490,
+            force: 0x4034_5047_8abb_7a73,
+            q0: 0xbe62_e8d0_d272_3d93,
+            v0: 0xbeed_8580_96f1_6e38,
+            exact_work: -2.161_101_970_446_351_2e-11,
+            exact_heat: 2.321_886_795_679_498_0e-16,
+        },
+        RefusedStep {
+            omega: 0x409a_ff80_fd79_77af,
+            force: 0x4042_c7f3_5ffe_981f,
+            q0: 0x3e52_aac7_9e51_f943,
+            v0: 0xbefb_3424_831b_5b3a,
+            exact_work: -7.447_397_818_591_547_4e-11,
+            exact_heat: 1.103_567_335_447_121_4e-15,
+        },
+    ];
+
+    fn refused_step_model(step: &RefusedStep) -> (ModalAcousticTimeModel, f64) {
+        let mode = ModalAcousticMode {
+            angular_frequency_rad_s: f64::from_bits(step.omega),
+            damping_ratio: f64::from_bits(REFUSED_ZETA_BITS),
+            pressure_per_modal_velocity: C64::ZERO,
+        };
+        let mut model = ModalAcousticTimeModel::try_new(768_000, vec![mode], budget()).unwrap();
+        model
+            .restore_states(&[ModalAcousticState {
+                displacement_m_sqrt_kg: f64::from_bits(step.q0),
+                velocity_m_sqrt_kg_per_s: f64::from_bits(step.v0),
+            }])
+            .unwrap();
+        assert_eq!(model.sample_period_s().to_bits(), BOW_SUBSTEP_BITS);
+        (model, f64::from_bits(step.force))
+    }
+
+    #[test]
+    fn g1_held_force_work_is_the_transition_increment_on_the_steps_that_refused() {
+        // Red before the change: each of these steps was refused at the unchanged tolerance.
+        for (index, step) in REFUSED_STEPS.iter().enumerate() {
+            let (mut model, force) = refused_step_model(step);
+            let dt = model.sample_period_s();
+            let before = modal_energy(model.modes[0], model.states()[0]);
+            let frame = model
+                .step_duration(&[force], dt)
+                .unwrap_or_else(|error| panic!("step {index} refused: {error:?}"));
+            // The balance compares the work with the stored energies, so the work is judged on the
+            // check's own scale, eps * max(|work|, E), not on |work|, which can be far below E.
+            let scale = f64::EPSILON
+                * step.exact_work.abs().max(before).max(frame.total_modal_energy_j);
+            let work_error = (frame.input_work_j - step.exact_work).abs();
+            assert!(
+                work_error <= 4.0 * scale,
+                "step {index}: work {:e} against exact {:e}, error {:.3} x eps*max(|work|, E)",
+                frame.input_work_j,
+                step.exact_work,
+                work_error / scale
+            );
+            println!(
+                "{{\"test\":\"work_on_refused_steps\",\"step\":{index},\"work_error_over_eps_scale\":{:.3}}}",
+                work_error / scale
+            );
+            let heat_error = (frame.viscous_dissipation_j - step.exact_heat).abs() / step.exact_heat;
+            assert!(
+                heat_error <= 8.0 * f64::EPSILON,
+                "step {index}: heat {:e} against exact {:e}",
+                frame.viscous_dissipation_j,
+                step.exact_heat
+            );
+        }
+    }
+
+    #[test]
+    fn g1_a_planted_heat_error_of_one_part_in_ten_thousand_still_refuses() {
+        for (index, step) in REFUSED_STEPS.iter().enumerate() {
+            let (mut model, force) = refused_step_model(step);
+            let dt = model.sample_period_s();
+            // The same cached transition, but a viscous integral prepared for a damping ratio 1e-4
+            // larger: the heat the work/energy balance is compared against is wrong by 1e-4 of itself.
+            let mut planted_mode = model.modes[0];
+            planted_mode.damping_ratio *= 1.0 + 1.0e-4;
+            let mut kernel = ExactZohKernel::new(&model.modes, dt);
+            let mut full = kernel.full.to_vec();
+            full[0].viscous_integral = ViscousIntegral::new(planted_mode, dt);
+            kernel.full = full.into_boxed_slice();
+            model.transition_kernel = Arc::new(kernel);
+            match model.step_duration(&[force], dt) {
+                Err(ModalAcousticTimeError::InvalidInput { what }) => assert_eq!(
+                    what, "independent viscous heat and held-force energy balance disagree",
+                    "step {index}"
+                ),
+                other => panic!("step {index}: a heat error of 1e-4 must refuse, got {other:?}"),
+            }
+        }
+    }
+
+    // The per-mode balance test of `step_duration_into`, written the same way with the same
+    // tolerance: |balance_loss - loss| / allowance, so a value above 1 refuses. It exists to measure
+    // how large a displacement error the balance can see. The two tests above run the real check;
+    // the assertions below tie this restatement to it on the same four steps, in both directions.
+    fn balance_margin(
+        mode: ModalAcousticMode,
+        state: ModalAcousticState,
+        next: ModalAcousticState,
+        force: f64,
+        work: f64,
+        prepared: &PreparedZohCoefficients,
+        duration_s: f64,
+    ) -> f64 {
+        let before = modal_energy(mode, state);
+        let after = modal_energy(mode, next);
+        let (loss, allowance) = prepared
+            .viscous_integral
+            .evaluate(mode, state, force, duration_s);
+        let balance_loss = work - (after - before);
+        let balance_allowance =
+            256.0 * f64::EPSILON * work.abs().max(before).max(after).max(f64::MIN_POSITIVE)
+                + allowance;
+        (balance_loss - loss).abs() / balance_allowance
+    }
+
+    #[test]
+    fn g1_a_displacement_error_far_above_roundoff_still_refuses() {
+        let mut smallest = Vec::new();
+        for (index, step) in REFUSED_STEPS.iter().enumerate() {
+            let (model, force) = refused_step_model(step);
+            let (mode, state, dt) = (model.modes[0], model.states()[0], model.sample_period_s());
+            let prepared = PreparedZohCoefficients::new(mode, dt);
+            let (next, increment) =
+                advance_exact_zoh_increment(mode, state, force, prepared.transition);
+            // Work from the stored positions, as before the change: refused, as the real check did.
+            let from_positions =
+                force * (next.displacement_m_sqrt_kg - state.displacement_m_sqrt_kg);
+            assert!(
+                balance_margin(mode, state, next, force, from_positions, &prepared, dt) > 1.0,
+                "step {index}"
+            );
+            // Work over the carried increment: accepted, as the real check now does.
+            let carried = force * increment;
+            let margin = |relative: f64| {
+                let planted = ModalAcousticState {
+                    displacement_m_sqrt_kg: next.displacement_m_sqrt_kg * (1.0 + relative),
+                    ..next
+                };
+                balance_margin(mode, state, planted, force, carried, &prepared, dt)
+            };
+            assert!(margin(0.0) < 1.0, "step {index}");
+            // The work no longer reads the stored displacement, so the balance sees an error in it
+            // only through the stored energy, w^2 |q| delta, where it used to see |F - w^2 q| delta.
+            // An error of 1e-12 of q still refuses, in either direction.
+            assert!(margin(1.0e-12) > 1.0 && margin(-1.0e-12) > 1.0, "step {index}");
+            let mut relative = 1.0e-17;
+            while relative < 1.0e-3 && !(margin(relative) > 1.0 && margin(-relative) > 1.0) {
+                relative *= 1.25;
+            }
+            smallest.push(relative);
+        }
+        println!(
+            "{{\"test\":\"displacement_error_sensitivity\",\"smallest_refused_relative_error\":{smallest:?}}}"
+        );
+        assert!(smallest.iter().all(|relative| *relative <= 2.0e-13), "{smallest:?}");
+    }
+
+    #[test]
+    fn g1_the_returned_increment_is_the_addend_of_the_displacement_it_forms() {
+        let dt = 1.0 / 48_000.0;
+        let state = ModalAcousticState {
+            displacement_m_sqrt_kg: 3.0e-6,
+            velocity_m_sqrt_kg_per_s: -2.0e-3,
+        };
+        // Free, undamped, damped short step, damped long step (omega dt = 2.5).
+        for (omega, zeta, long_step) in [
+            (0.0, 0.0, false),
+            (2000.0, 0.0, false),
+            (2000.0, 1.0e-3, false),
+            (120_000.0, 0.02, true),
+        ] {
+            let mode = ModalAcousticMode {
+                angular_frequency_rad_s: omega,
+                damping_ratio: zeta,
+                pressure_per_modal_velocity: C64::ZERO,
+            };
+            let coefficients = exact_zoh_coefficients(mode, dt);
+            let (next, increment) = advance_exact_zoh_increment(mode, state, 3.0, coefficients);
+            assert_state_bits_eq(next, advance_exact_zoh_cached(mode, state, 3.0, coefficients));
+            let q0 = state.displacement_m_sqrt_kg;
+            if long_step {
+                assert_eq!(increment.to_bits(), (next.displacement_m_sqrt_kg - q0).to_bits());
+            } else {
+                assert_eq!(next.displacement_m_sqrt_kg.to_bits(), (q0 + increment).to_bits());
+            }
         }
     }
 }
