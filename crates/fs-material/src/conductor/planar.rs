@@ -94,6 +94,53 @@ mod sealed {
     pub trait Sealed {}
 }
 
+/// Immutable positive DC response for the shared spatial current/heat owner.
+/// Source-resolved solid conductors and equilibrium-derived gas transport keep
+/// their own complete physical inputs. A derived gas law need not fabricate a
+/// measured electrical-property claim to use the same FEEC operator.
+pub trait PlanarOhmicResponse: sealed::Sealed + Clone {
+    /// Conductivity in the declared physical plane [S/m].
+    fn ohmic_conductivity(&self) -> PlanarConductivity;
+    /// Original material/geometry frame, when anisotropy requires one.
+    fn ohmic_frame(&self) -> Option<PlanarElectricalFrame>;
+    /// Whether the complete source snapshot supports stationary local transport.
+    fn has_admitted_ohmic_state(&self) -> bool;
+    /// Admission at the actual conductor-frame field, before publishing current
+    /// and Joule heat. Constitutive validity is not just an assembly-time check.
+    fn admits_ohmic_field(&self, electric_field_v_m: [f64; 2]) -> bool;
+}
+
+impl<T: PlanarConductorMaterial> PlanarOhmicResponse for T {
+    fn ohmic_conductivity(&self) -> PlanarConductivity {
+        self.conductivity()
+    }
+    fn ohmic_frame(&self) -> Option<PlanarElectricalFrame> {
+        self.frame()
+    }
+    fn has_admitted_ohmic_state(&self) -> bool {
+        self.has_admitted_static_sources()
+    }
+    fn admits_ohmic_field(&self, field: [f64; 2]) -> bool {
+        field.iter().all(|x| x.is_finite())
+    }
+}
+
+impl sealed::Sealed for crate::ionized_gas::IonizedGasConductivity {}
+impl PlanarOhmicResponse for crate::ionized_gas::IonizedGasConductivity {
+    fn ohmic_conductivity(&self) -> PlanarConductivity {
+        PlanarConductivity::Scalar(self.conductivity_s_m())
+    }
+    fn ohmic_frame(&self) -> Option<PlanarElectricalFrame> {
+        None
+    }
+    fn has_admitted_ohmic_state(&self) -> bool {
+        true
+    }
+    fn admits_ohmic_field(&self, field: [f64; 2]) -> bool {
+        self.admits_electric_field(field)
+    }
+}
+
 /// Shared source-bearing response for the existing planar field and heat
 /// owners. Implementations are the canonical scalar, orthotropic and mixed
 /// source objects below; a bare numerical tensor does not acquire authority.
@@ -108,7 +155,9 @@ pub trait PlanarConductorMaterial: sealed::Sealed + Clone {
     /// Keep the independent electrical quantity and its exact source binding.
     fn has_same_electrical_source(&self, other: &Self) -> bool {
         self.source_basis() == other.source_basis()
-            && self.source_property_names().eq(other.source_property_names())
+            && self
+                .source_property_names()
+                .eq(other.source_property_names())
     }
     fn conductivity(&self) -> PlanarConductivity;
     /// Rebuild the SAME law/basis/orientation around an atomically refreshed

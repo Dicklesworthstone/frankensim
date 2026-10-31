@@ -9,6 +9,40 @@ Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
 multi-case identifiability authority schema [F]. Ogden and tension-only
 HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
+## Equilibrium ionized-gas DC transport
+
+`ionized_gas::IonizedGasConductivity` consumes the exact source-bound
+`fs-thermochem::IdealGasEquilibriumV1` solution. Original charge numbers,
+particle masses and ideal-gas number densities supply the charged carriers.
+Each present carrier requires a separately selected positive material property
+in reciprocal seconds for its effective momentum-relaxation rate. The complete
+original source bundle, claim/key, query and usage receipts remain attached;
+temperature and pressure must match the equilibrium endpoint. No neutral-gas
+viscosity rule, species-name constant or fabricated electrical-property claim
+is substituted for these sources.
+
+The declared scalar law is `sigma=sum(n_s*(z_s*e)^2/(m_s*nu_s))`, with drag
+against a prescribed massive neutral background, zero magnetic field and zero
+frequency. It is a local constitutive closure; background dynamics, nonlocal
+transport, electron-ion two-fluid momentum transfer, Hall effects, electrical
+breakdown, non-LTE excitation and radiation are outside its scope. Explicit
+caller bounds admit the charged mole fraction, classical phase-space density,
+Coulomb coupling and carrier drift relative to thermal speed. These are domain
+limits, not certified error bounds or empirical validation. The actual field
+must satisfy the weak-drift limit before current and heat can be published.
+
+The sealed `conductor::planar::PlanarOhmicResponse` trait exposes the common
+static field response. Existing source-material conductor implementations use
+their unchanged electrical-property admission; gas states retain their
+thermochemical and collision sources instead. Material-specific contact and
+refresh APIs still require `PlanarConductorMaterial`.
+
+G0/G1/G3 tests in `tests/ionized_gas.rs` check actual carrier number density and
+mass conversion, conductivity and collision-rate scaling, temperature-driven
+ionization, complete source coverage and matching state, and separate transport
+domain refusals. Cancellation is polled per species before publication. There
+is no unsafe code, evolving state, default source, or new runtime dependency.
+
 ## Permanent secondary creep
 
 `creep::NortonCreep` adds sub-yield permanent deformation on the existing
