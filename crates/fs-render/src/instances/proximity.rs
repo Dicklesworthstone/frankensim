@@ -10,15 +10,15 @@ use super::*;
 pub use crate::charts::proximity::ProximityError;
 use crate::charts::proximity::{
     MeshPlanarPatches, ProximityBudget, ProximitySide, SurfaceProximity, SurfaceWitness,
-    array_point, box_clearance, chart_normal_cone, chart_proximity, chart_signed_distance,
-    point_array,
+    array_point, box_clearance, chart_normal_cone, chart_normal_differential, chart_proximity,
+    chart_signed_distance, point_array,
 };
-use fs_geom::{Aabb, TraceNormalCone};
+use fs_geom::{Aabb, NormalDifferential, TraceNormalCone};
 use fs_ivl::Interval;
 use std::collections::BTreeMap;
 
 /// Bit-affecting native clearance and planar departure semantics.
-pub const BOUNDARY_GEOMETRY_SEMANTICS_VERSION: u32 = 2;
+pub const BOUNDARY_GEOMETRY_SEMANTICS_VERSION: u32 = 3;
 
 type IVec = [Interval; 3];
 type IMat = [[Interval; 3]; 3];
@@ -278,6 +278,49 @@ impl PreparedPose {
             (Interval::point(local.hi()) * Interval::point(upper_scale)).hi(),
         )
     }
+
+    fn world_normal_differential(
+        self,
+        local: NormalDifferential,
+    ) -> Result<NormalDifferential, ProximityError> {
+        // The admitted transform is the actual affine map of the stored
+        // quaternion, not an assumed exact isometry. This is a numerical
+        // derivative, so use the nominal values of its interval inverse.
+        let inverse = self.inverse.map(|row| row.map(Interval::midpoint));
+        let n = [local.normal.x, local.normal.y, local.normal.z];
+        let raw: [f64; 3] = std::array::from_fn(|i| (0..3).map(|k| inverse[k][i] * n[k]).sum());
+        let raw_normal = Vec3::new(raw[0], raw[1], raw[2]);
+        let length = raw_normal.norm();
+        if !length.is_finite() || length <= 0.0 {
+            return Err(ProximityError::NumericalRange);
+        }
+        let normal = raw_normal.scale(1.0 / length);
+        let world_n = [normal.x, normal.y, normal.z];
+        // For u=A^-T n(A^-1(x-t)), D normalize(u) is
+        // (I - normalize(u) normalize(u)^T) / |u|.
+        let left: [[f64; 3]; 3] = std::array::from_fn(|i| {
+            std::array::from_fn(|j| {
+                (0..3)
+                    .map(|k| inverse[k][i] * local.derivative_per_m[k][j])
+                    .sum()
+            })
+        });
+        let derivative: [[f64; 3]; 3] = std::array::from_fn(|i| {
+            std::array::from_fn(|j| (0..3).map(|k| left[i][k] * inverse[k][j]).sum())
+        });
+        let normal_component: [f64; 3] =
+            std::array::from_fn(|j| (0..3).map(|i| world_n[i] * derivative[i][j]).sum());
+        let derivative_per_m: [[f64; 3]; 3] = std::array::from_fn(|i| {
+            std::array::from_fn(|j| (derivative[i][j] - world_n[i] * normal_component[j]) / length)
+        });
+        if derivative_per_m.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(ProximityError::NumericalRange);
+        }
+        Ok(NormalDifferential {
+            normal,
+            derivative_per_m,
+        })
+    }
 }
 
 /// Separate numerical point-query witness carrying native frame identity.
@@ -288,6 +331,19 @@ pub struct InstanceProximity {
     pub frame_identity: ContentHash,
     pub proximity: SurfaceProximity,
     pub local_witness: Option<SurfaceWitness>,
+}
+
+/// Local numerical normal derivative anchored to a validated retained frame.
+/// The point is the requested numerical endpoint, not a projected intersection.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InstanceNormalDifferential {
+    pub object_id: u64,
+    pub geometry_identity: ContentHash,
+    pub frame_identity: ContentHash,
+    pub boundary_id: usize,
+    pub feature_id: usize,
+    pub point: Point3,
+    pub differential: NormalDifferential,
 }
 
 fn query_instance(
@@ -531,6 +587,113 @@ impl<'scene> BoundaryGeometry<'scene> {
         Ok((clearance, best))
     }
 
+    /// Evaluate a numerical normal differential at a retained contact endpoint.
+    ///
+    /// The nearest native surface must match both retained IDs, lie within
+    /// `resolution_m`, and be distinguishable from other objects and patch
+    /// edges at that resolution. Planar mesh interiors have zero curvature;
+    /// charts must supply their own analytic differential explicitly. Work is
+    /// charged to the caller's existing cumulative budget.
+    #[allow(clippy::too_many_arguments)]
+    pub fn normal_differential_with_cx(
+        &self,
+        cx: &Cx<'_>,
+        object_id: u64,
+        frame_identity: ContentHash,
+        point: Point3,
+        resolution_m: f64,
+        budget: &mut ProximityBudget,
+    ) -> Result<InstanceNormalDifferential, ProximityError> {
+        cx.checkpoint()?;
+        budget.charge(cx)?;
+        if point_array(point).iter().any(|v| !v.is_finite())
+            || !resolution_m.is_finite()
+            || resolution_m <= 0.0
+        {
+            return Err(ProximityError::InvalidInput);
+        }
+        let (_, closest) = self.nearest(cx, point, budget, None)?;
+        let (index, proximity) = closest.ok_or(ProximityError::InvalidContactIdentity)?;
+        if proximity.object_id != object_id || proximity.frame_identity != frame_identity {
+            return Err(ProximityError::InvalidContactIdentity);
+        }
+        let world = proximity
+            .proximity
+            .witness
+            .ok_or(ProximityError::AmbiguousContact)?;
+        let representative_distance = inorm(isub(ivec(point), ivec(world.surface_point))).hi();
+        let representative_collar = (Interval::point(representative_distance)
+            + Interval::point(world.surface_point_error_m))
+        .hi();
+        if world.distance_upper_m > resolution_m || representative_collar > resolution_m {
+            return Err(ProximityError::AmbiguousContact);
+        }
+        let normal = world
+            .normal
+            .ok_or(ProximityError::UnsupportedNormalDifferential)?;
+        let (other, _) = self.nearest(cx, world.surface_point, budget, Some(index))?;
+        let contact_collar = (Interval::point(world.surface_point_error_m)
+            + Interval::point(2.0) * Interval::point(resolution_m))
+        .hi();
+        if other <= contact_collar {
+            return Err(ProximityError::AmbiguousContact);
+        }
+        let prepared = &self.prepared[index];
+        let (feature_id, differential) = match self.instances[index].geometry() {
+            SharedGeometry::Mesh(_) => {
+                let patches = prepared
+                    .patches
+                    .as_deref()
+                    .ok_or(ProximityError::InvalidGeometry)?;
+                let local = proximity
+                    .local_witness
+                    .ok_or(ProximityError::InvalidGeometry)?;
+                let triangle = local
+                    .triangle_index
+                    .ok_or(ProximityError::InvalidGeometry)?;
+                let feature_id = patches
+                    .patch_id(triangle)
+                    .ok_or(ProximityError::InvalidGeometry)?;
+                let local_radius = patches
+                    .departure_radius(cx, &local, budget)?
+                    .ok_or(ProximityError::AmbiguousContact)?;
+                let radius = lower_difference(
+                    (Interval::point(local_radius) * Interval::point(prepared.pose.min_scale)).lo(),
+                    world.surface_point_error_m,
+                );
+                if radius <= 4.0 * resolution_m {
+                    return Err(ProximityError::AmbiguousContact);
+                }
+                (
+                    feature_id as usize,
+                    NormalDifferential {
+                        normal,
+                        derivative_per_m: [[0.0; 3]; 3],
+                    },
+                )
+            }
+            SharedGeometry::Chart(chart) => {
+                let (local, _) = prepared.pose.local_point(point)?;
+                let differential = chart_normal_differential(chart.as_ref(), cx, local, budget)?;
+                let differential = prepared.pose.world_normal_differential(differential)?;
+                if differential.normal.dot(normal) <= 0.0 {
+                    return Err(ProximityError::InvalidGeometry);
+                }
+                (0, differential)
+            }
+        };
+        cx.checkpoint()?;
+        Ok(InstanceNormalDifferential {
+            object_id,
+            geometry_identity: proximity.geometry_identity,
+            frame_identity,
+            boundary_id: index,
+            feature_id,
+            point,
+            differential,
+        })
+    }
+
     #[cfg(feature = "tracer")]
     #[must_use]
     pub fn oracle<'query, 'arena>(
@@ -654,6 +817,46 @@ impl NativeBoundaryOracle<'_, '_, '_> {
     #[must_use]
     pub const fn last_error(&self) -> Option<ProximityError> {
         self.last_error
+    }
+
+    /// Differential at this path's last admitted contact, using the same
+    /// immutable frame and cumulative geometry budget as boundary propagation.
+    pub fn normal_differential(
+        &mut self,
+        contact: crate::gradient_index::event::BoundaryWitness,
+        point: Point3,
+    ) -> Result<InstanceNormalDifferential, ProximityError> {
+        let result = (|| {
+            if !self
+                .last_contact
+                .is_some_and(|(admitted, _)| admitted == contact)
+            {
+                return Err(ProximityError::InvalidContactIdentity);
+            }
+            let object = self
+                .geometry
+                .instances
+                .get(contact.boundary_id)
+                .ok_or(ProximityError::InvalidContactIdentity)?;
+            let differential = self.geometry.normal_differential_with_cx(
+                self.cx,
+                object.object_id(),
+                object.frame_identity(),
+                point,
+                self.contact_tolerance_m,
+                &mut self.budget,
+            )?;
+            if differential.boundary_id != contact.boundary_id
+                || differential.feature_id != contact.feature_id
+            {
+                return Err(ProximityError::InvalidContactIdentity);
+            }
+            Ok(differential)
+        })();
+        if let Err(error) = result {
+            self.last_error = Some(error);
+        }
+        result
     }
 
     fn query_native(
@@ -1078,6 +1281,278 @@ mod tests {
                     assert!((normal.norm() - 1.0).abs() < 2e-14);
                 }
             }
+        });
+    }
+
+    #[test]
+    fn g1_native_normal_differential_matches_placed_normal_field() {
+        with_cx(|cx, _| {
+            let angle = 0.73_f64;
+            let root14 = 14.0_f64.sqrt();
+            let transform = RigidTransform::try_new(
+                [
+                    (angle / 2.0).sin() / root14,
+                    2.0 * (angle / 2.0).sin() / root14,
+                    3.0 * (angle / 2.0).sin() / root14,
+                    (angle / 2.0).cos(),
+                ],
+                [1000.0, -2000.0, 3000.0],
+            )
+            .unwrap();
+            let objects = vec![instance(
+                4,
+                SharedGeometry::chart(fs_geom::fixtures::SphereChart {
+                    center: Point3::new(0.0, 0.0, 0.0),
+                    radius: 2.0,
+                }),
+                transform,
+            )];
+            let geometry = BoundaryGeometry::try_new(cx, &objects, 1000).unwrap();
+            let point = transform.transform_point(Point3::new(1.2, 0.0, 1.6));
+            let result = geometry
+                .normal_differential_with_cx(
+                    cx,
+                    4,
+                    objects[0].frame_identity(),
+                    point,
+                    1e-6,
+                    &mut ProximityBudget::new(1000),
+                )
+                .unwrap();
+            assert_eq!(result.object_id, 4);
+            assert_eq!(result.frame_identity, objects[0].frame_identity());
+            assert_eq!(result.geometry_identity, objects[0].geometry_identity());
+            assert_eq!(result.point, point);
+            // Independent finite differences of the original placed-normal
+            // query verify both matrix orientation and inverse placement.
+            for column in 0..3 {
+                let h = 1e-4;
+                let axis = [
+                    Vec3::new(h, 0.0, 0.0),
+                    Vec3::new(0.0, h, 0.0),
+                    Vec3::new(0.0, 0.0, h),
+                ][column];
+                let plus = objects[0]
+                    .nearest_surface_with_cx(cx, point.offset(axis), &mut ProximityBudget::new(100))
+                    .unwrap()
+                    .proximity
+                    .witness
+                    .unwrap()
+                    .normal
+                    .unwrap();
+                let minus = objects[0]
+                    .nearest_surface_with_cx(
+                        cx,
+                        point.offset(axis.scale(-1.0)),
+                        &mut ProximityBudget::new(100),
+                    )
+                    .unwrap()
+                    .proximity
+                    .witness
+                    .unwrap()
+                    .normal
+                    .unwrap();
+                let finite_difference = [
+                    (plus.x - minus.x) / (2.0 * h),
+                    (plus.y - minus.y) / (2.0 * h),
+                    (plus.z - minus.z) / (2.0 * h),
+                ];
+                for row in 0..3 {
+                    assert!(
+                        (result.differential.derivative_per_m[row][column]
+                            - finite_difference[row])
+                            .abs()
+                            < 2e-8
+                    );
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn g1_normal_differential_includes_covector_normalization() {
+        with_cx(|cx, _| {
+            // Stress the private affine algebra with an ellipsoidal image.
+            // Public rigid placements are nearly isometric, which by itself
+            // would not expose an omitted normalization derivative reliably.
+            let matrix =
+                [[2.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.5]].map(|r| r.map(Interval::point));
+            let inverse =
+                [[0.5, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 2.0]].map(|r| r.map(Interval::point));
+            let pose = PreparedPose {
+                matrix,
+                inverse,
+                translation: [Interval::point(0.0); 3],
+                min_scale: 0.5,
+                max_scale: 2.0,
+            };
+            let sphere = fs_geom::fixtures::SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 1.0,
+            };
+            let local = sphere
+                .trace_normal_differential(Point3::new(0.6, 0.0, 0.8), cx)
+                .unwrap();
+            let result = pose.world_normal_differential(local).unwrap();
+            // For this ellipsoid the independent normal field is normalize(Qx),
+            // Q=diag(1/4,1,4), evaluated at x=(1.2,0,.4).
+            let u: [f64; 3] = [0.3, 0.0, 1.6];
+            let length = (u[0] * u[0] + u[2] * u[2]).sqrt();
+            let n = u.map(|v| v / length);
+            let q = [0.25, 1.0, 4.0];
+            for i in 0..3 {
+                for j in 0..3 {
+                    let expected = ((if i == j { 1.0 } else { 0.0 }) - n[i] * n[j]) * q[j] / length;
+                    assert!((result.derivative_per_m[i][j] - expected).abs() < 2e-14);
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn g4_retained_normal_query_checks_patch_identity_resolution_and_budgets() {
+        with_cx(|cx, gate| {
+            let objects = vec![instance(
+                2,
+                SharedGeometry::mesh(triangle()),
+                RigidTransform::identity(),
+            )];
+            let geometry = BoundaryGeometry::try_new(cx, &objects, 1000).unwrap();
+            let frame = objects[0].frame_identity();
+            let point = Point3::new(0.0, 0.0, 0.0);
+            let result = geometry
+                .normal_differential_with_cx(
+                    cx,
+                    2,
+                    frame,
+                    point,
+                    1e-7,
+                    &mut ProximityBudget::new(1000),
+                )
+                .unwrap();
+            assert_eq!(result.differential.derivative_per_m, [[0.0; 3]; 3]);
+            assert_eq!(
+                geometry.normal_differential_with_cx(
+                    cx,
+                    3,
+                    frame,
+                    point,
+                    1e-7,
+                    &mut ProximityBudget::new(1000)
+                ),
+                Err(ProximityError::InvalidContactIdentity)
+            );
+            assert_eq!(
+                geometry.normal_differential_with_cx(
+                    cx,
+                    2,
+                    ContentHash([3; 32]),
+                    point,
+                    1e-7,
+                    &mut ProximityBudget::new(1000)
+                ),
+                Err(ProximityError::InvalidContactIdentity)
+            );
+            assert_eq!(
+                geometry.normal_differential_with_cx(
+                    cx,
+                    2,
+                    frame,
+                    Point3::new(0.0, 1.0, 0.0),
+                    1e-7,
+                    &mut ProximityBudget::new(1000)
+                ),
+                Err(ProximityError::AmbiguousContact)
+            );
+            assert_eq!(
+                geometry.normal_differential_with_cx(
+                    cx,
+                    2,
+                    frame,
+                    point,
+                    1e-7,
+                    &mut ProximityBudget::new(0)
+                ),
+                Err(ProximityError::WorkBudgetExceeded)
+            );
+            gate.request();
+            assert_eq!(
+                geometry.normal_differential_with_cx(
+                    cx,
+                    2,
+                    frame,
+                    point,
+                    1e-7,
+                    &mut ProximityBudget::new(1000)
+                ),
+                Err(ProximityError::Cancelled)
+            );
+        });
+        with_cx(|cx, _| {
+            let chart = SharedGeometry::chart(fs_geom::fixtures::BoxChart {
+                aabb: Aabb::new(Point3::new(-1.0, -1.0, -1.0), Point3::new(1.0, 1.0, 1.0)),
+            });
+            let objects = vec![instance(2, chart, RigidTransform::identity())];
+            let geometry = BoundaryGeometry::try_new(cx, &objects, 1000).unwrap();
+            assert_eq!(
+                geometry.normal_differential_with_cx(
+                    cx,
+                    2,
+                    objects[0].frame_identity(),
+                    Point3::new(0.0, 0.0, 1.0),
+                    1e-7,
+                    &mut ProximityBudget::new(1000)
+                ),
+                Err(ProximityError::UnsupportedNormalDifferential)
+            );
+            let geometry = SharedGeometry::mesh(triangle());
+            let objects = vec![
+                instance(2, geometry.clone(), RigidTransform::identity()),
+                instance(3, geometry, RigidTransform::identity()),
+            ];
+            let prepared = BoundaryGeometry::try_new(cx, &objects, 1000).unwrap();
+            assert_eq!(
+                prepared.normal_differential_with_cx(
+                    cx,
+                    2,
+                    objects[0].frame_identity(),
+                    Point3::new(0.0, 0.0, 0.0),
+                    1e-7,
+                    &mut ProximityBudget::new(1000)
+                ),
+                Err(ProximityError::AmbiguousContact)
+            );
+        });
+    }
+
+    #[test]
+    #[cfg(feature = "tracer")]
+    fn g4_oracle_normal_query_retains_contact_and_cumulative_work() {
+        use crate::gradient_index::event::BoundaryOracle;
+        with_cx(|cx, _| {
+            let objects = vec![instance(
+                1,
+                SharedGeometry::mesh(triangle()),
+                RigidTransform::identity(),
+            )];
+            let geometry = BoundaryGeometry::try_new(cx, &objects, 1000).unwrap();
+            let mut oracle = geometry.oracle(cx, 1000, 1e-7);
+            let point = Point3::new(0.0, 0.0, 0.0);
+            let witness = oracle.query(point).unwrap().witness.unwrap();
+            let before = oracle.work_used();
+            let result = oracle.normal_differential(witness, point).unwrap();
+            assert_eq!(result.differential.derivative_per_m, [[0.0; 3]; 3]);
+            assert!(oracle.work_used() > before);
+            let mut stale = witness;
+            stale.feature_id += 1;
+            assert_eq!(
+                oracle.normal_differential(stale, point),
+                Err(ProximityError::InvalidContactIdentity)
+            );
+            assert_eq!(
+                oracle.last_error(),
+                Some(ProximityError::InvalidContactIdentity)
+            );
         });
     }
 

@@ -8,7 +8,7 @@
 //! BVH pruning, including at edges and on very thin separated faces.
 
 use super::*;
-use fs_geom::{Aabb, TraceNormalCone};
+use fs_geom::{Aabb, NormalDifferential, TraceNormalCone};
 use fs_ivl::Interval;
 
 /// Native point-to-surface query refusal.
@@ -18,6 +18,8 @@ pub enum ProximityError {
     InvalidGeometry,
     UnsupportedChart,
     UnsupportedDeparture,
+    UnsupportedNormalDifferential,
+    InvalidContactIdentity,
     AmbiguousContact,
     NumericalRange,
     WorkBudgetExceeded,
@@ -556,6 +558,41 @@ pub(crate) fn chart_normal_cone(
         }
     }
     Ok(cone)
+}
+
+pub(crate) fn chart_normal_differential(
+    chart: &dyn Chart,
+    cx: &Cx<'_>,
+    point: Point3,
+    budget: &mut ProximityBudget,
+) -> Result<NormalDifferential, ProximityError> {
+    budget.charge(cx)?;
+    if point_array(point).iter().any(|v| !v.is_finite()) {
+        return Err(ProximityError::InvalidInput);
+    }
+    if chart.trace_step_claim() != TraceStepClaim::ExactDistance {
+        return Err(ProximityError::UnsupportedNormalDifferential);
+    }
+    let differential = chart.trace_normal_differential(point, cx);
+    cx.checkpoint()?;
+    let differential = differential.ok_or(ProximityError::UnsupportedNormalDifferential)?;
+    if [
+        differential.normal.x,
+        differential.normal.y,
+        differential.normal.z,
+    ]
+    .iter()
+    .any(|v| !v.is_finite())
+        || (differential.normal.dot(differential.normal) - 1.0).abs() > 2e-10
+        || differential
+            .derivative_per_m
+            .iter()
+            .flatten()
+            .any(|v| !v.is_finite())
+    {
+        return Err(ProximityError::InvalidGeometry);
+    }
+    Ok(differential)
 }
 
 /// Prepared exactly coplanar, consistently oriented face patches. Interior
@@ -1153,6 +1190,37 @@ mod tests {
             assert_eq!(
                 sphere.trace_normal_neighborhood(Point3::new(0.0, 0.0, 0.0), 0.1, cx),
                 None
+            );
+        });
+    }
+
+    #[test]
+    fn g1_sphere_normal_differential_retains_radial_scale_and_refuses_medial_axis() {
+        with_cx(|cx| {
+            let sphere = fs_geom::fixtures::SphereChart {
+                center: Point3::new(0.0, 0.0, 0.0),
+                radius: 2.0,
+            };
+            let mut budget = ProximityBudget::new(20);
+            for radius in [2.0, 3.0] {
+                let d = chart_normal_differential(
+                    &sphere,
+                    cx,
+                    Point3::new(0.6 * radius, 0.0, 0.8 * radius),
+                    &mut budget,
+                )
+                .unwrap();
+                assert!((d.normal.x - 0.6).abs() < 2e-15 && (d.normal.z - 0.8).abs() < 2e-15);
+                let expected = [[0.64, 0.0, -0.48], [0.0, 1.0, 0.0], [-0.48, 0.0, 0.36]];
+                for i in 0..3 {
+                    for j in 0..3 {
+                        assert!((d.derivative_per_m[i][j] - expected[i][j] / radius).abs() < 2e-15);
+                    }
+                }
+            }
+            assert_eq!(
+                chart_normal_differential(&sphere, cx, sphere.center, &mut budget),
+                Err(ProximityError::UnsupportedNormalDifferential)
             );
         });
     }

@@ -683,6 +683,19 @@ pub struct TraceNormalCone {
     pub max_deviation: f64,
 }
 
+/// Local numerical differential of an oriented unit-normal field.
+///
+/// This is an explicitly supplied derivative of the chart's regular signed
+/// distance, not a finite-difference estimate or a global derivative enclosure.
+/// It does not establish a contact, regular neighborhood or error certificate.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NormalDifferential {
+    /// Finite unit outward normal at the queried position.
+    pub normal: Vec3,
+    /// `derivative_per_m[i][j] = d normal_i / d position_j`, in inverse metres.
+    pub derivative_per_m: [[f64; 3]; 3],
+}
+
 /// The chart contract: a concrete presentation of an abstract region.
 /// Object-safe (see module docs for the `Param` note).
 pub trait Chart: Send + Sync {
@@ -735,6 +748,19 @@ pub trait Chart: Send + Sync {
         _radius_m: f64,
         _cx: &Cx<'_>,
     ) -> Option<TraceNormalCone> {
+        None
+    }
+
+    /// Optionally supply the analytic spatial derivative of the unit normal
+    /// of the regular signed-distance field at `point`. Unsupported charts,
+    /// creases and medial axes return `None`; callers may not replace missing
+    /// derivative authority with a zero matrix. Floating-point evaluation is
+    /// numerical and does not inherit the normal-cone certificate above.
+    fn trace_normal_differential(
+        &self,
+        _point: Point3,
+        _cx: &Cx<'_>,
+    ) -> Option<NormalDifferential> {
         None
     }
 

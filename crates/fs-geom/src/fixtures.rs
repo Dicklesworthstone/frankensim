@@ -6,8 +6,8 @@
 //! own spheres.
 
 use crate::{
-    Aabb, BettiBounds, Chart, ChartSample, Differentiability, Point3, TraceNormalCone,
-    TraceStepClaim, Vec3,
+    Aabb, BettiBounds, Chart, ChartSample, Differentiability, NormalDifferential, Point3,
+    TraceNormalCone, TraceStepClaim, Vec3,
 };
 use fs_evidence::NumericalCertificate;
 use fs_exec::Cx;
@@ -196,6 +196,40 @@ impl Chart for SphereChart {
         (deviation.is_finite() && deviation < 1.0).then_some(TraceNormalCone {
             axis,
             max_deviation: deviation,
+        })
+    }
+
+    fn trace_normal_differential(&self, point: Point3, _cx: &Cx<'_>) -> Option<NormalDifferential> {
+        if !finite_point(point)
+            || !finite_point(self.center)
+            || !self.radius.is_finite()
+            || self.radius <= 0.0
+        {
+            return None;
+        }
+        let delta = point.delta_from(self.center);
+        let scale = delta.x.abs().max(delta.y.abs()).max(delta.z.abs());
+        if !scale.is_finite() || scale <= 0.0 {
+            return None;
+        }
+        let radial = [delta.x / scale, delta.y / scale, delta.z / scale];
+        let length = (radial[0] * radial[0] + radial[1] * radial[1] + radial[2] * radial[2]).sqrt();
+        let n = radial.map(|v| v / length);
+        let inverse_radius = (1.0 / scale) / length;
+        if !inverse_radius.is_finite() {
+            return None;
+        }
+        let derivative_per_m = core::array::from_fn(|i| {
+            core::array::from_fn(|j| {
+                ((if i == j { 1.0 } else { 0.0 }) - n[i] * n[j]) * inverse_radius
+            })
+        });
+        if derivative_per_m.iter().flatten().any(|v| !v.is_finite()) {
+            return None;
+        }
+        Some(NormalDifferential {
+            normal: Vec3::new(n[0], n[1], n[2]),
+            derivative_per_m,
         })
     }
 

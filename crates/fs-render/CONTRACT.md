@@ -551,6 +551,11 @@ differentiable lift). Pure Rust throughout.
   provides this witness with interval rounding and a curvature bound; its
   finite support is outward rounded. A point gradient alone never supplies
   this capability.
+  The separate optional `Chart::trace_normal_differential` supplies the local
+  analytic spatial Jacobian of its geometric unit normal. `SphereChart` uses
+  `(I-nnᵀ)/|p-center|` at the queried point, including numerical contact collars;
+  missing derivatives, creases and medial axes are unsupported. This is a
+  numerical first derivative, not a global derivative-error certificate.
   The queries retain deterministic feature ties, cumulative work limits and
   cancellation. They return separate surface witnesses, never invented ray hits.
 
@@ -587,6 +592,15 @@ differentiable lift). Pure Rust throughout.
   native for `SphereChart`. Unsupported exact-distance charts retain numerical
   arrival proximity and refuse departure. These are separate witnesses, not
   extensions of the certified straight-ray `InstanceHit` authority.
+  `normal_differential_with_cx` resolves a retained object/frame and exact query
+  point through the same accelerated proximity owner, contact resolution,
+  ambiguity checks and cumulative work budget. Planar mesh-patch interiors
+  supply zero curvature. Chart derivatives transform with inverse coordinates,
+  the inverse-transpose normal map and its normalization derivative; stored
+  quaternion coefficients are not assumed to be exact isometries. The result
+  retains its exact endpoint and geometry/frame/feature identities. Stale
+  frames, patch edges, competing contacts and unsupported charts refuse; the
+  path oracle exposes the same query using its admitted contact and budget.
 
 - `tracer` tile execution (bead `frankensim-h7xu5.5.1`):
   `RenderExecutionConfig` makes logical tile shape, worker ceiling, operation
