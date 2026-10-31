@@ -4,14 +4,19 @@
 
 One `unsafe fn`, `collide_cell3_fma`. It is unsafe only because
 `#[target_feature]` requires it. There is one `unsafe { }` call site, in the
-dispatcher `collide_cell3`. All of it is compiled only for x86-64.
+private safe thunk `fma_checked`. All of it is compiled only for x86-64.
 
 ## Invariants
 
-- **Precondition:** `collide_cell3_fma` is called only after
-  `is_x86_feature_detected!("fma")` returned true on the running CPU,
-  immediately before the call. That is the only precondition
+- **Precondition:** `collide_cell3_fma` is called only from `fma_checked`, and
+  the selector `collision_kernel3` is the only code that names `fma_checked`.
+  It does so only after `is_x86_feature_detected!("fma")` returned true on the
+  running CPU. The result is cached for the process, because a CPU's features
+  don't change while a process runs. That is the only precondition
   `target_feature` imposes.
+- **Dispatch runs once, not per cell.** Hot loops call `collision_kernel3`
+  before the loop and hold the returned kernel. `fma_checked` is private, so a
+  caller can't reach it except through that selector.
 - **The body is ordinary safe Rust.** `collide_cell3_with_projection`, and the
   moment helpers it inlines in `d3q19.rs`, use fixed-size array indexing,
   `f64::mul_add` and plain arithmetic. There are no intrinsics, raw pointers,
@@ -57,10 +62,13 @@ at their existing tile and step boundaries, unchanged.
 ## Concurrency behavior
 
 The function is pure and reentrant. Pooled grid steps call it from many worker
-threads at once, and each worker performs its own (cached) feature detection.
-- Test-only: a `PORTABLE_ONLY` atomic flag, read with SeqCst ordering, routes
-  calls to the portable path. It is compiled only under `cfg(test)`, and the
-  pins that set it are serialized by a mutex.
+threads at once, each through the kernel it resolved before its loop. The
+selector keeps that kernel in a `std::sync::OnceLock`, so concurrent first calls
+run one initializer and every reader sees its result.
+- Test-only: a `PORTABLE_ONLY` atomic flag, read with SeqCst ordering by the
+  selector before the `OnceLock`, returns the portable kernel. It is compiled
+  only under `cfg(test)`, and the pins that set it are serialized by a mutex. It
+  takes effect at the next selector call, which a grid makes each step.
 - `Send`/`Sync` of the public types are unchanged.
 
 ## Miri coverage
@@ -70,8 +78,8 @@ and the same body runs under Miri through the portable branch.
 
 ## Model-checking coverage
 
-N/A (single-threaded per call): there are no atomics or locks in production,
-and no shared mutable state.
+N/A (single-threaded per call): the only shared state in production is the
+write-once `OnceLock` holding the selected kernel, and its ordering is std's.
 
 ## Fuzz/property coverage
 
@@ -90,7 +98,8 @@ run through the dispatcher unchanged.
 
 ## Proof obligations discharged by callers
 
-None: `collide_cell3` is safe to call on any CPU.
+None: `collision_kernel3`, the kernel it returns, and `collide_cell3` are safe
+to call on any CPU.
 
 ## Blast radius
 

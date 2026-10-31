@@ -28,6 +28,8 @@ pub mod freesurface3;
 mod simd;
 pub mod sparse;
 
+pub(crate) use fma::collision_kernel3;
+
 pub use boundary::{
     BodyFrameEllipsoid3, BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundaryLink3,
     BoundaryProfileError3, BoundarySgsError3, BoundarySgsReport3, BoundarySpec3,

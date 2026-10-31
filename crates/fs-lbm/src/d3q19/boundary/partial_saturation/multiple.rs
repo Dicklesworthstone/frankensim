@@ -379,6 +379,7 @@ impl BoundaryGrid3 {
                 0.5 * (bodies[a].angular_velocity[i] + proposed[a].angular_velocity[i])
             });
         }
+        let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
@@ -389,7 +390,7 @@ impl BoundaryGrid3 {
                 let index = (cell[2] * self.ny + cell[1]) * self.nx + cell[0];
                 let f = self.f.each_ref().map(|f| f[tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let ordinary = collide_cell3(f, self.collision_model, force)
+                let ordinary = collide(f, self.collision_model, force)
                     .map_err(|source| PartialSaturationError3::Collision { cell, source })?;
                 let mut post = ordinary;
                 let mut total = 0.0;

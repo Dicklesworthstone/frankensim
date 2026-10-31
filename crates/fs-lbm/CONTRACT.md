@@ -1078,8 +1078,9 @@ FMA capsule `src/d3q19/fma/mod.rs`. Each stays below the
 capsule line cap with an adjacent `SAFETY.md`. Safe façades validate tile shapes,
 Rust borrows prove aliasing and lifetimes, and x86 one-shot selectors admit
 private thunks only after their operation-specific feature checks. The FMA
-capsule's per-cell selector calls its thunk only after
-`is_x86_feature_detected!("fma")`, and the thunk runs the safe portable body.
+capsule's one-shot selector admits its thunk only after
+`is_x86_feature_detected!("fma")`, hot loops hold the selected kernel across the
+loop, and the thunk runs the safe portable body.
 Miri selects safe scalar twins.
 
 ## Feature flags

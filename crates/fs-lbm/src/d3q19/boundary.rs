@@ -15,7 +15,7 @@ use std::sync::Mutex;
 use fs_exec::{CancelGate, Cancelled, Cx, KernelRunner, Reduce, TileKernel, TilePlan};
 
 use super::{
-    CollisionError3, CollisionModel3, E3, OPP3, Q3, TILE, TILE_CELLS, Tile, W3, collide_cell3,
+    CollisionError3, CollisionModel3, E3, OPP3, Q3, TILE, TILE_CELLS, Tile, W3, collision_kernel3,
     equilibrium3,
 };
 use crate::CS2;
@@ -1828,6 +1828,7 @@ impl BoundaryGrid3 {
     }
 
     fn try_collide(&mut self) -> Result<(), BoundaryStepError3> {
+        let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             for lane in 0..TILE_CELLS {
                 if self.solid[tile] & (1u64 << lane) != 0 {
@@ -1835,13 +1836,12 @@ impl BoundaryGrid3 {
                 }
                 let populations = core::array::from_fn(|direction| self.f[direction][tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let post =
-                    collide_cell3(populations, self.collision_model, force).map_err(|source| {
-                        BoundaryStepError3::Collision {
-                            cell: self.coords(tile, lane),
-                            source,
-                        }
-                    })?;
+                let post = collide(populations, self.collision_model, force).map_err(|source| {
+                    BoundaryStepError3::Collision {
+                        cell: self.coords(tile, lane),
+                        source,
+                    }
+                })?;
                 for (field, value) in self.post.iter_mut().zip(post) {
                     field[tile].0[lane] = value;
                 }
@@ -2366,6 +2366,7 @@ impl TileKernel for CollidePass<'_> {
             return ControlFlow::Break(cancelled);
         }
         let group = group as usize;
+        let collide = collision_kernel3();
         let mut chunk = self.post[group]
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -2380,7 +2381,7 @@ impl TileKernel for CollidePass<'_> {
                 let model = self
                     .models
                     .map_or(self.model, |field| field[tile * TILE_CELLS + lane]);
-                match collide_cell3(populations, model, force) {
+                match collide(populations, model, force) {
                     Ok(post) => {
                         for (field, value) in chunk.iter_mut().zip(post) {
                             field[local].0[lane] = value;

@@ -14,7 +14,7 @@
 //! fast path: those carry frozen bit-semantics goldens and stay untouched;
 //! this is the correctness-first reference rung, mirroring how the 2-D
 //! extensions run on the plain grid. Collision reuses the shared
-//! [`collide_cell3`] kernel (BGK + Guo forcing), so the collision algebra
+//! [`collide_cell3`](super::collide_cell3) kernel (BGK + Guo forcing), so the collision algebra
 //! is written exactly once.
 //!
 //! Temperature rides a D3Q7 advection-diffusion population (rest + six
@@ -28,7 +28,7 @@
 //! determinism hash stays a replay-checked CANDIDATE until the
 //! GOLDEN_POLICY four-quadrant ceremony, as in the 40p2 precedent).
 
-use super::{CollisionModel3, E3, OPP3, Q3, collide_cell3, equilibrium3};
+use super::{CollisionModel3, E3, OPP3, Q3, collision_kernel3, equilibrium3};
 use crate::rheology::{Rheology, RheologyStats};
 use crate::thermal::{ThermalForcingError, forcing::validate_external_forces};
 
@@ -185,11 +185,12 @@ impl PlatesGrid3 {
     /// single-threaded.
     pub fn step(&mut self) {
         let (nx, ny, nz) = (self.nx, self.ny, self.nz);
+        let collide = collision_kernel3();
         for z in 1..nz - 1 {
             for y in 0..ny {
                 for x in 0..nx {
                     let i = self.idx(x, y, z);
-                    self.post[i] = collide_cell3(
+                    self.post[i] = collide(
                         self.f[i],
                         CollisionModel3::Bgk { tau: self.tau[i] },
                         self.fext[i],

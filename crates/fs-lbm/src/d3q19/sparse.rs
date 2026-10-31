@@ -769,28 +769,20 @@ fn collide_block(
     model: CollisionModel3,
     force: [f64; 3],
 ) -> Result<(), SparseError3> {
+    let collide = super::collision_kernel3();
     for lane in 0..TILE_CELLS {
         let populations: [f64; Q3] = core::array::from_fn(|q| pre.f[q].0[lane]);
-        let collided = collide_or_refuse(populations, model, force).map_err(|source| {
-            SparseError3::Collision {
+        let collided =
+            collide(populations, model, force).map_err(|source| SparseError3::Collision {
                 tile_key,
                 lane,
                 source,
-            }
-        })?;
+            })?;
         for q in 0..Q3 {
             post.f[q].0[lane] = collided[q];
         }
     }
     Ok(())
-}
-
-fn collide_or_refuse(
-    populations: [f64; Q3],
-    model: CollisionModel3,
-    force: [f64; 3],
-) -> Result<[f64; Q3], CollisionError3> {
-    super::collide_cell3(populations, model, force)
 }
 
 /// Same-tile half of one pull-stream group. This loop has no sparse-map

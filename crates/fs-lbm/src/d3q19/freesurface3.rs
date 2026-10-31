@@ -1008,6 +1008,7 @@ impl FreeSurface3 {
         // keep their raw populations (never read back, kept defined).
         let keys: Vec<u64> = self.tiles.keys().copied().collect();
         let mut post: BTreeMap<u64, Vec<[f64; Q3]>> = BTreeMap::new();
+        let collide = super::collision_kernel3();
         for &key in &keys {
             check_cancel(gate)?;
             let slot = self.grid.slot_of(key).expect("active");
@@ -1027,12 +1028,13 @@ impl FreeSurface3 {
                                 )?,
                             },
                         };
-                        super::collide_cell3(populations, cell_model, self.force_at_lane(key, lane))
-                            .map_err(|source| FreeSurfaceError3::Collision {
+                        collide(populations, cell_model, self.force_at_lane(key, lane)).map_err(
+                            |source| FreeSurfaceError3::Collision {
                                 tile_key: key,
                                 lane,
                                 source,
-                            })?
+                            },
+                        )?
                     }
                 };
             }

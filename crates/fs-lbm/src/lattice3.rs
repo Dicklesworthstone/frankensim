@@ -28,6 +28,12 @@ pub trait Lattice3<const Q: usize>: Send + Sync + 'static {
         collision: Self::Collision,
         force: [f64; 3],
     ) -> Result<[f64; Q], Self::Error>;
+    /// The collision for a hot loop to hold. A lattice with CPU dispatch
+    /// overrides this so that it resolves once, before the loop.
+    fn collide_kernel() -> fn([f64; Q], Self::Collision, [f64; 3]) -> Result<[f64; Q], Self::Error>
+    {
+        Self::collide
+    }
 }
 
 /// Compatibility adapter calls the existing D3Q19 kernel, with no new
@@ -45,6 +51,10 @@ impl Lattice3<19> for D3q19 {
     }
     fn collide(f: [f64; 19], c: Self::Collision, g: [f64; 3]) -> Result<[f64; 19], Self::Error> {
         crate::d3q19::collide_cell3(f, c, g)
+    }
+    fn collide_kernel() -> fn([f64; 19], Self::Collision, [f64; 3]) -> Result<[f64; 19], Self::Error>
+    {
+        crate::d3q19::collision_kernel3()
     }
 }
 const fn d19_directions() -> [[i32; 3]; 19] {
@@ -545,6 +555,7 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
         base: usize,
         stream: bool,
     ) -> Result<(), GridError3<L::Error>> {
+        let collide = L::collide_kernel();
         for (offset, output) in dst.iter_mut().enumerate() {
             let cell = base + offset;
             if self.solid[cell] {
@@ -554,7 +565,7 @@ impl<L: Lattice3<Q>, const Q: usize> StepData<'_, L, Q> {
             let force = self.forces.map_or(self.force, |field| field[cell]);
             if !stream {
                 let collision = self.collisions.map_or(self.collision, |field| field[cell]);
-                *output = L::collide(src[cell], collision, force)
+                *output = collide(src[cell], collision, force)
                     .map_err(|source| GridError3::Collision { cell, source })?;
                 macro_cell::<L, Q>(output, force, cell, self.budget.maximum_mach)?;
             } else {

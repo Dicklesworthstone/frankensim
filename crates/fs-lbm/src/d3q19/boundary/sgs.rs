@@ -7,7 +7,7 @@
 
 use super::{
     BoundaryGrid3, BoundaryLink3, BoundaryStepError3, CollisionModel3, E3, Face3, FaceBoundary3,
-    Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force, collide_cell3,
+    Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force, collision_kernel3,
     effective_wall_velocity,
 };
 use crate::lattice3::{D3q19, ViscousLattice3};
@@ -233,6 +233,7 @@ impl BoundaryGrid3 {
         }
         let sgs = self.prepare_sgs(gate, config, workspace)?;
         self.topology_locked = true;
+        let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
@@ -241,7 +242,7 @@ impl BoundaryGrid3 {
                 }
                 let f = core::array::from_fn(|q| self.f[q][tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let post = collide_cell3(f, workspace.collisions[tile * TILE_CELLS + lane], force)
+                let post = collide(f, workspace.collisions[tile * TILE_CELLS + lane], force)
                     .map_err(|source| BoundaryStepError3::Collision {
                         cell: self.coords(tile, lane),
                         source,

@@ -22,44 +22,76 @@ mod tests;
 #[cfg(test)]
 static PORTABLE_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-/// Whether this call runs the FMA-compiled body.
-#[cfg(target_arch = "x86_64")]
-#[inline]
-fn fma_selected() -> bool {
+/// One cell's collision, held by a hot loop for the length of the loop.
+pub(crate) type CollisionKernel3 =
+    fn([f64; Q3], CollisionModel3, [f64; 3]) -> Result<[f64; Q3], CollisionError3>;
+
+/// The collision kernel for this CPU: FMA codegen when the CPU has it,
+/// portable codegen otherwise, bitwise the same. Feature detection runs once
+/// per process. Call this before a hot loop, not inside it.
+pub(crate) fn collision_kernel3() -> CollisionKernel3 {
     #[cfg(test)]
     {
         if PORTABLE_ONLY.load(std::sync::atomic::Ordering::SeqCst) {
-            return false;
+            return portable;
         }
     }
-    std::arch::is_x86_feature_detected!("fma")
+    #[cfg(target_arch = "x86_64")]
+    {
+        static KERNEL: std::sync::OnceLock<CollisionKernel3> = std::sync::OnceLock::new();
+        *KERNEL.get_or_init(|| {
+            if std::arch::is_x86_feature_detected!("fma") {
+                fma_checked
+            } else {
+                portable
+            }
+        })
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        portable
+    }
 }
 
-/// Collide one cell with FMA codegen when the CPU has it, portable codegen
-/// otherwise. Unconditionally safe to call; the result is bitwise the same.
+/// Collide one cell through [`collision_kernel3`], for single calls.
+/// Unconditionally safe to call; the result is bitwise the same on any CPU.
 #[inline]
 pub(super) fn collide_cell3(
     populations: [f64; Q3],
     model: CollisionModel3,
     force: [f64; 3],
 ) -> Result<[f64; Q3], CollisionError3> {
-    #[cfg(target_arch = "x86_64")]
-    {
-        if fma_selected() {
-            // SAFETY: fma verified on this CPU immediately above; the inlined
-            // body is ordinary safe array arithmetic.
-            return unsafe { collide_cell3_fma(populations, model, force) };
-        }
-    }
+    collision_kernel3()(populations, model, force)
+}
+
+fn portable(
+    populations: [f64; Q3],
+    model: CollisionModel3,
+    force: [f64; 3],
+) -> Result<[f64; Q3], CollisionError3> {
     collide_cell3_with_projection(populations, model, force, false)
+}
+
+/// Safe thunk over [`collide_cell3_fma`]. Private, and named only by
+/// [`collision_kernel3`], after detection.
+#[cfg(target_arch = "x86_64")]
+fn fma_checked(
+    populations: [f64; Q3],
+    model: CollisionModel3,
+    force: [f64; 3],
+) -> Result<[f64; Q3], CollisionError3> {
+    // SAFETY: `collision_kernel3` is the only code that names this thunk, and
+    // it does so only after detecting fma on this CPU. The inlined body is
+    // ordinary safe array arithmetic.
+    unsafe { collide_cell3_fma(populations, model, force) }
 }
 
 /// The identical collision body compiled with FMA enabled (its
 /// `inline(always)` makes the code generate HERE, under this feature).
 ///
 /// # Safety
-/// Requires the `fma` feature, verified by the dispatcher immediately before
-/// the call. The body itself is safe code.
+/// Requires the `fma` feature, verified once by [`collision_kernel3`], the
+/// only code that admits [`fma_checked`]. The body itself is safe code.
 #[cfg(target_arch = "x86_64")]
 #[target_feature(enable = "fma")]
 unsafe fn collide_cell3_fma(

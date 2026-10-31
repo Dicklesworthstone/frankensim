@@ -15,7 +15,7 @@
 use super::{
     BoundaryGrid3, BoundaryLink3, CancelGate, CollisionError3, CollisionModel3, E3, Face3,
     FaceBoundary3, OPP3, PullSource, Q3, StreamView, TILE_CELLS, WallMomentumExchange3, cell_force,
-    collide_cell3, equilibrium3, planar_face_cells,
+    collision_kernel3, equilibrium3, planar_face_cells,
 };
 
 mod multiple;
@@ -543,6 +543,7 @@ impl BoundaryGrid3 {
         let mut exchange = PartialSaturationExchange3::default();
         let mut walls = WallMomentumExchange3::default();
         let mut forcing = PartialSaturationForcing3::default();
+        let collide = collision_kernel3();
         for tile in 0..self.f[0].len() {
             checkpoint(gate)?;
             for lane in 0..TILE_CELLS {
@@ -552,7 +553,7 @@ impl BoundaryGrid3 {
                 let cell = self.coords(tile, lane);
                 let f = self.f.each_ref().map(|f| f[tile].0[lane]);
                 let force = cell_force(self.force, self.force_field.as_deref(), tile, lane);
-                let ordinary = collide_cell3(f, self.collision_model, force)
+                let ordinary = collide(f, self.collision_model, force)
                     .map_err(|source| PartialSaturationError3::Collision { cell, source })?;
                 let mut post = ordinary;
                 let epsilon = solid_fractions[(cell[2] * self.ny + cell[1]) * self.nx + cell[0]];
