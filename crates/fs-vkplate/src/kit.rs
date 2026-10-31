@@ -332,7 +332,10 @@ fn build_drum(s: &DrumSpec, hits: &[(f64, f64)], gas: GasState, materials: Optio
             }
         };
         let h = s.grid;
-        let n = (len / h).round() as usize;
+        // an odd node count puts every wire node on a head node; with an even one the nodes sit on
+        // half cells, and rounding them onto the head grid pairs some with one head node and skips
+        // the next
+        let n = 2 * ((len / h - 1.0) / 2.0).round() as usize + 1;
         let x0 = -(n as f64 - 1.0) * h / 2.0;
         let mut count = 0;
         let mut rows: Vec<i64> = vec![];
@@ -1140,5 +1143,47 @@ mod settling_render_tests {
             assert_ne!(decimate(&channel[skip..], p.oversample), continuous[skip_frames..]);
             assert_eq!(output, &continuous[skip_frames..]);
         }
+    }
+}
+
+#[cfg(test)]
+mod wire_alignment_tests {
+    use super::*;
+
+    #[test]
+    fn every_wire_node_presses_the_head_node_under_it_whatever_the_grid() {
+        // The 0.36 m wires span 17.1, 25.7 and 34.3 cells at 6, 4 and 3 times the kit's grid: the
+        // rounded counts 17, 26 and 34 put the two even ones on half cells. The kit's own 3.5 mm
+        // grid rounds to 103 nodes and keeps them.
+        for (scale, nodes) in [(6.0, 17), (4.0, 25), (3.0, 35)] {
+            let mut spec = snare();
+            spec.grid *= scale;
+            let piece = drum(&spec, &[]).unwrap();
+            let bodies = &piece.instrument.bodies;
+            let wires: Vec<usize> = (0..bodies.len()).filter(|&i| bodies[i].name.starts_with("wire ")).collect();
+            assert!(!wires.is_empty());
+            for &w in &wires {
+                let wire = &bodies[w];
+                let mut pressed = vec![];
+                for c in piece.instrument.contacts.iter().filter(|c| c.b.iter().any(|&(b, _, _)| b == w)) {
+                    let ((head, node, _), (_, k, _)) = (c.a[0], c.b[0]);
+                    let (at, under) = (wire.xy[k], bodies[head].xy[node]);
+                    assert!(
+                        (at[0] - under[0]).abs() < 1e-9 * spec.grid && (at[1] - under[1]).abs() < 1e-9 * spec.grid,
+                        "{} node {k} at {at:?} presses the head node at {under:?}",
+                        wire.name
+                    );
+                    pressed.push(node);
+                }
+                let count = pressed.len();
+                pressed.sort_unstable();
+                pressed.dedup();
+                assert_eq!(pressed.len(), count, "two nodes of {} press one head node", wire.name);
+                assert!(2 * count > wire.n, "{} presses the head at {count} of {} nodes", wire.name, wire.n);
+                assert_eq!(wire.n, nodes, "{} at {} mm", wire.name, 1e3 * spec.grid);
+            }
+        }
+        let h = snare().grid;
+        assert_eq!(2 * ((snare().wires.unwrap().length / h - 1.0) / 2.0).round() as usize + 1, 103);
     }
 }
