@@ -22,6 +22,8 @@ use core::f64::consts::PI;
 use core::fmt;
 use fs_material::cavitation::CavitationState;
 
+#[path = "cavitation/cluster.rs"]
+mod cluster;
 /// Original polytropic gas inventory expressed in volume coordinates.
 #[path = "cavitation/gas_volume.rs"]
 pub mod gas_volume;
@@ -32,6 +34,10 @@ mod population;
 #[path = "cavitation/stepper.rs"]
 mod stepper;
 
+pub use cluster::{
+    BubbleCluster, BubbleClusterError, BubbleClusterLimits, BubbleClusterNumerics,
+    BubbleClusterObservation, BubbleClusterStep, ClusterBubble, MAX_INTERACTING_BUBBLES,
+};
 pub use keller_miksis::{BubblePressureSample, KellerMiksisBubble, KellerMiksisLimits};
 pub use population::{
     BubblePopulation, BubblePopulationClass, BubblePopulationError, EvolvingBubblePopulation,

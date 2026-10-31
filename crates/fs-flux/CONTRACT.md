@@ -2245,3 +2245,40 @@ unchanged owners on refusal. Focused numerical execution uses explicit
 constant-heat-capacity gas and material-view doubles with the actual new
 mechanics/owner/driver; full NASA-9 dependency integration remains a separate
 native workspace test requirement.
+
+## Nonlinear interactions among restrained cavitation bubbles
+
+With the `cavitation` feature, `BubbleCluster` advances up to sixteen original
+`RayleighPlessetBubble` owners at fixed centers on one common physical clock.
+The leading incompressible monopole interaction solves for
+`S_i = d(R_i^2 R_i')/dt` through the symmetric, radius-normalized liquid inertia.
+Native `fs-la` factorization and retained workspace avoid a second linear
+algebra owner. Each observation uses the solved joint acceleration and neighbor
+pressure; no gas inventory, equilibrium radius or source property is invented.
+
+The matching liquid kinetic energy includes the pair cross terms. Original
+gas volume work, capillary storage and the reference-minus-vapor pressure term
+complete the mechanical energy. External pressure work and native viscous loss
+are integrated as coordinates of the same trajectory, then checked against
+the endpoint energy change before publication. The original DP54 tableau and
+controller are shared through a private fixed-array kernel; the isolated
+Rayleigh--Plesset and Keller--Miksis entry points retain their two-coordinate
+path and arithmetic. Cluster state, work coordinates and scratch storage are
+bounded independently of the requested duration.
+
+Admission enforces exact shared liquid properties and clocks, separated
+maximum-radius spheres, radius/separation at most 0.1, normalized inertia row
+sum at most 0.5, and pressure imbalance divided by liquid bulk stiffness at
+most 0.01. The caller declares the actual nonlinear volume-source bandwidth;
+its propagation phase across the cluster is limited to 0.1 radian. This is an
+explicit approximation assumption, not a waveform certificate. Native radius,
+wall-Mach, attempt, step and cancellation gates remain active. Failed solves,
+energy checks, domain exits and cancellation leave the accepted owner unchanged.
+
+Eight native regressions cover isolated-bubble bit identity, independent
+two-bubble acceleration and normal-mode frequencies, Lagrangian power,
+nonlinear work/loss balance, member permutation, atomic refusal and domain
+limits. Thirty-seven existing cavitation regressions also pass with the shared
+kernel. This model retains fixed-center radial interaction only: translation,
+jets, near-contact deformation, finite propagation delay, radiation loss and
+cloud shocks require additional physical owners.

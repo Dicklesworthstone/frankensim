@@ -1,7 +1,11 @@
 //! Shared fixed-stack Dormand--Prince integration of physical radial models.
+//!
+//! The two-state RP/Keller--Miksis adapters and interacting clusters use the
+//! same tableau, componentwise error rule, rejection policy and work budget.
 
 use super::{
     BubbleNumerics, BubbleState, BubbleStep, CavitationError, RadialDynamics, finite, poll,
+    positive,
 };
 
 pub(super) fn advance<Model, Pressure, Cancel>(
@@ -17,57 +21,130 @@ where
     Pressure: Fn(f64) -> Model::Pressure,
     Cancel: FnMut() -> bool,
 {
+    let mut rhs = |time_s, values: &[f64; 2]| -> Result<[f64; 2], CavitationError> {
+        let current = BubbleState {
+            time_s,
+            radius_m: values[0],
+            wall_velocity_m_s: values[1],
+        };
+        let (_, acceleration) = model.dynamics(&current, pressure(time_s))?;
+        Ok([values[1], acceleration])
+    };
+    let result = advance_array(
+        state.time_s,
+        [state.radius_m, state.wall_velocity_m_s],
+        end_time_s,
+        numerics,
+        [
+            numerics.radius_absolute_tolerance_m,
+            numerics.velocity_absolute_tolerance_m_s,
+        ],
+        &mut rhs,
+        cancelled,
+        &refinable,
+    )?;
+    let current = BubbleState {
+        time_s: result.time_s,
+        radius_m: result.values[0],
+        wall_velocity_m_s: result.values[1],
+    };
     poll(cancelled)?;
-    numerics.validate()?;
+    let observation = model.observe(&current, pressure(current.time_s))?;
+    poll(cancelled)?;
+    *state = current;
+    Ok(BubbleStep {
+        observation,
+        accepted_steps: result.accepted_steps,
+        rejected_steps: result.rejected_steps,
+        rhs_evaluations: result.rhs_evaluations,
+        maximum_normalized_local_error: result.maximum_normalized_local_error,
+    })
+}
+
+/// Complete candidate only; each physical owner controls final publication.
+pub(super) struct ArrayStep<const N: usize> {
+    pub time_s: f64,
+    pub values: [f64; N],
+    pub accepted_steps: usize,
+    pub rejected_steps: usize,
+    pub rhs_evaluations: usize,
+    pub maximum_normalized_local_error: f64,
+}
+
+/// One fixed-stack numerical owner for individual and jointly coupled states.
+/// Extra coordinates supply their own physical absolute error scales.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn advance_array<const N: usize, Error, Rhs, Cancel, Refine>(
+    initial_time_s: f64,
+    initial: [f64; N],
+    end_time_s: f64,
+    numerics: &BubbleNumerics,
+    absolute: [f64; N],
+    rhs: &mut Rhs,
+    cancelled: &mut Cancel,
+    is_refinable: &Refine,
+) -> Result<ArrayStep<N>, Error>
+where
+    Error: From<CavitationError>,
+    Rhs: FnMut(f64, &[f64; N]) -> Result<[f64; N], Error>,
+    Cancel: FnMut() -> bool,
+    Refine: Fn(&Error) -> bool,
+{
+    poll(cancelled).map_err(Error::from)?;
+    numerics.validate().map_err(Error::from)?;
     if !end_time_s.is_finite()
-        || end_time_s < state.time_s
-        || !(end_time_s - state.time_s).is_finite()
+        || end_time_s < initial_time_s
+        || !(end_time_s - initial_time_s).is_finite()
     {
-        return Err(CavitationError::InvalidInput("forward time interval"));
+        return Err(CavitationError::InvalidInput("forward time interval").into());
     }
-    let mut current = *state;
+    if N == 0 || absolute.into_iter().any(|value| !positive(value)) {
+        return Err(CavitationError::InvalidInput("component integration error scales").into());
+    }
+    let mut current_time = initial_time_s;
+    let mut current = initial;
     let mut rhs_evaluations = 0;
-    let mut derivative = rhs(model, current, pressure, cancelled, &mut rhs_evaluations)?;
+    let mut derivative = evaluate(rhs, current_time, &current, cancelled, &mut rhs_evaluations)?;
     let mut step = numerics.initial_step_s;
     let mut accepted_steps = 0;
     let mut rejected_steps = 0;
     let mut maximum_normalized_local_error: f64 = 0.0;
-    while current.time_s < end_time_s {
+    while current_time < end_time_s {
         if accepted_steps + rejected_steps == numerics.maximum_attempts {
             return Err(CavitationError::StepBudgetExceeded {
                 attempts: numerics.maximum_attempts,
                 accepted_steps,
-            });
+            }
+            .into());
         }
-        poll(cancelled)?;
-        let remaining = end_time_s - current.time_s;
+        poll(cancelled).map_err(Error::from)?;
+        let remaining = end_time_s - current_time;
         step = step.min(remaining);
         let next_time = if step == remaining {
             end_time_s
         } else {
-            current.time_s + step
+            current_time + step
         };
-        if next_time <= current.time_s || next_time > end_time_s {
-            return Err(CavitationError::StepUnderflow);
+        if next_time <= current_time || next_time > end_time_s {
+            return Err(CavitationError::StepUnderflow.into());
         }
-        step = next_time - current.time_s;
-        // Comparing represented endpoint times avoids repeatedly retrying an
-        // already minimum-size step whose subtraction rounded slightly up.
-        let can_refine = next_time > current.time_s + numerics.minimum_step_s;
+        step = next_time - current_time;
+        let can_refine = next_time > current_time + numerics.minimum_step_s;
         let trial = trial(
-            model,
-            current,
+            rhs,
+            current_time,
+            &current,
             derivative,
             next_time,
             step,
-            numerics,
-            pressure,
+            numerics.relative_tolerance,
+            &absolute,
             cancelled,
             &mut rhs_evaluations,
         );
         let (next, endpoint_derivative, error) = match trial {
             Ok(trial) => trial,
-            Err(error) if refinable(&error) && can_refine => {
+            Err(error) if is_refinable(&error) && can_refine => {
                 rejected_steps += 1;
                 step = (0.5 * step).max(numerics.minimum_step_s);
                 continue;
@@ -80,10 +157,12 @@ where
                 return Err(CavitationError::ToleranceNotMet {
                     normalized_error: error,
                     step_s: step,
-                });
+                }
+                .into());
             }
         } else {
             current = next;
+            current_time = next_time;
             derivative = endpoint_derivative;
             accepted_steps += 1;
             maximum_normalized_local_error = maximum_normalized_local_error.max(error);
@@ -95,12 +174,9 @@ where
         };
         step = (step * factor).clamp(numerics.minimum_step_s, numerics.maximum_step_s);
     }
-    poll(cancelled)?;
-    let observation = model.observe(&current, pressure(current.time_s))?;
-    poll(cancelled)?;
-    *state = current;
-    Ok(BubbleStep {
-        observation,
+    Ok(ArrayStep {
+        time_s: current_time,
+        values: current,
         accepted_steps,
         rejected_steps,
         rhs_evaluations,
@@ -108,47 +184,46 @@ where
     })
 }
 
-fn rhs<Model, Pressure, Cancel>(
-    model: &Model,
-    state: BubbleState,
-    pressure: &Pressure,
+fn evaluate<const N: usize, Error, Rhs, Cancel>(
+    rhs: &mut Rhs,
+    time_s: f64,
+    values: &[f64; N],
     cancelled: &mut Cancel,
     evaluations: &mut usize,
-) -> Result<[f64; 2], CavitationError>
+) -> Result<[f64; N], Error>
 where
-    Model: RadialDynamics,
-    Pressure: Fn(f64) -> Model::Pressure,
+    Error: From<CavitationError>,
+    Rhs: FnMut(f64, &[f64; N]) -> Result<[f64; N], Error>,
     Cancel: FnMut() -> bool,
 {
-    poll(cancelled)?;
+    poll(cancelled).map_err(Error::from)?;
     *evaluations += 1;
-    let (_, acceleration) = model.dynamics(&state, pressure(state.time_s))?;
-    Ok([state.wall_velocity_m_s, acceleration])
+    rhs(time_s, values)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn trial<Model, Pressure, Cancel>(
-    model: &Model,
-    state: BubbleState,
-    first_derivative: [f64; 2],
+fn trial<const N: usize, Error, Rhs, Cancel>(
+    rhs: &mut Rhs,
+    time_s: f64,
+    initial: &[f64; N],
+    first_derivative: [f64; N],
     next_time: f64,
     step: f64,
-    numerics: &BubbleNumerics,
-    pressure: &Pressure,
+    relative_tolerance: f64,
+    absolute: &[f64; N],
     cancelled: &mut Cancel,
     evaluations: &mut usize,
-) -> Result<(BubbleState, [f64; 2], f64), CavitationError>
+) -> Result<([f64; N], [f64; N], f64), Error>
 where
-    Model: RadialDynamics,
-    Pressure: Fn(f64) -> Model::Pressure,
+    Error: From<CavitationError>,
+    Rhs: FnMut(f64, &[f64; N]) -> Result<[f64; N], Error>,
     Cancel: FnMut() -> bool,
 {
-    let mut stages = [[0.0; 2]; 7];
+    let mut stages = [[0.0; N]; 7];
     stages[0] = first_derivative;
-    let initial = [state.radius_m, state.wall_velocity_m_s];
-    let mut values = initial;
+    let mut values = *initial;
     for i in 0..6 {
-        for component in 0..2 {
+        for component in 0..N {
             let mut sum = 0.0;
             for (j, stage) in stages.iter().enumerate().take(i + 1) {
                 sum += A[i][j] * stage[component];
@@ -158,50 +233,28 @@ where
         let stage_time = if C[i] == 1.0 {
             next_time
         } else {
-            state.time_s + C[i] * step
+            time_s + C[i] * step
         };
-        stages[i + 1] = rhs(
-            model,
-            BubbleState {
-                time_s: stage_time,
-                radius_m: values[0],
-                wall_velocity_m_s: values[1],
-            },
-            pressure,
-            cancelled,
-            evaluations,
-        )?;
+        stages[i + 1] = evaluate(rhs, stage_time, &values, cancelled, evaluations)?;
     }
-    let absolute = [
-        numerics.radius_absolute_tolerance_m,
-        numerics.velocity_absolute_tolerance_m_s,
-    ];
     let mut error: f64 = 0.0;
-    for component in 0..2 {
+    for component in 0..N {
         let mut difference = 0.0;
         for (stage, weight) in stages.iter().zip(ERROR_WEIGHT) {
             difference += weight * stage[component];
         }
         let scale = finite(
             absolute[component]
-                + numerics.relative_tolerance
-                    * initial[component].abs().max(values[component].abs()),
+                + relative_tolerance * initial[component].abs().max(values[component].abs()),
             "local error scale",
-        )?;
-        error = error.max(finite(
-            (step * difference).abs() / scale,
-            "embedded local error",
-        )?);
+        )
+        .map_err(Error::from)?;
+        error = error.max(
+            finite((step * difference).abs() / scale, "embedded local error")
+                .map_err(Error::from)?,
+        );
     }
-    Ok((
-        BubbleState {
-            time_s: next_time,
-            radius_m: values[0],
-            wall_velocity_m_s: values[1],
-        },
-        stages[6],
-        error,
-    ))
+    Ok((values, stages[6], error))
 }
 
 // Standard Dormand--Prince coefficients. The final A row is the fifth-order
@@ -246,7 +299,7 @@ const ERROR_WEIGHT: [f64; 7] = [
     -1.0 / 40.0,
 ];
 
-fn refinable(error: &CavitationError) -> bool {
+pub(super) fn refinable(error: &CavitationError) -> bool {
     matches!(
         error,
         CavitationError::RadiusOutsideDomain { .. }
