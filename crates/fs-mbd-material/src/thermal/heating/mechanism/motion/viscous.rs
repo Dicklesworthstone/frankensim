@@ -16,6 +16,8 @@
 //! The creeping-flow limit is checked at every native mechanical RK stage.
 //! Viscosity and geometry are frozen only within one explicitly capped thermal
 //! substep, then refreshed from the same accepted material configuration.
+//! The explicit rheological attachment instead freezes its whole original
+//! T/shear source line; actual finite-gap shear and torque evolve at every stage.
 
 use super::{ArticulatedModel, CellId, DepositionSimulation, Error, finite, positive};
 use crate::thermal::{ExpandedArticulated, ExpandedRegion};
@@ -26,14 +28,15 @@ use fs_material::liquid_temperature::LiquidTemperatureLaw;
 use fs_material::state_point::MaterialStatePointError;
 use fs_mbd::articulated::JointKind;
 use fs_qty::Temperature;
+use fs_thermal::enthalpy::DepositionError;
+use fs_tribo::journal::JournalShearResponse;
 
-/// Prescribed concentric journal dimensions, in SI units.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct JournalGeometry {
-    pub inner_radius_m: f64,
-    pub outer_radius_m: f64,
-    pub length_m: f64,
-}
+/// Original-source generalized-Newtonian shear on this same thermal timeline.
+pub mod rheology;
+use rheology::{BoundRheology, JournalRheologyState, RheologicalJournalBearing, RheologyBinding};
+
+/// Shared native concentric-cylinder dimensions, in SI units.
+pub use fs_tribo::journal::JournalGeometry;
 
 /// Explicit physical-domain and numerical-accuracy obligations for one film.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -92,11 +95,18 @@ pub struct JournalBearingState {
     pub heat_cell: CellId,
     /// Actual admitted cylindrical radii and overlapping axial length [m].
     pub geometry: JournalGeometry,
+    /// Original liquid at the finite wall temperature. In rheological mode
+    /// this is the zero-shear reference; actual two-wall sources are below.
     pub liquid: ResolvedLiquidState,
+    /// Torque/angular velocity at this endpoint; the zero-rate value is the
+    /// source's zero-shear Newtonian tangent, not a fitted constant damper.
     pub resistance_nm_s: f64,
     pub resisting_torque_nm: f64,
     pub dissipated_power_w: f64,
+    /// Uses the minimum viscosity over the complete source shear interval in
+    /// rheological mode, giving a conservative creeping-flow bound.
     pub gap_reynolds: f64,
+    pub rheology: Option<JournalRheologyState>,
 }
 
 #[derive(Clone)]
@@ -106,6 +116,7 @@ pub(super) struct BoundBearing<'a> {
     pub state: JournalBearingState,
     geometry_factor_m3: f64,
     expansion: Option<ThermalJournalBinding>,
+    rheology: Option<BoundRheology<'a>>,
 }
 
 impl<'a> BoundBearing<'a> {
@@ -116,7 +127,8 @@ impl<'a> BoundBearing<'a> {
         velocity: &[f64],
     ) -> Result<Self, Error> {
         let geometry = definition.geometry;
-        Self::with_geometry(definition, model, thermal, velocity, geometry, None)
+        Self::with_geometry(definition, model, thermal, velocity, geometry, None, None,
+            &mut || Ok(()))
     }
 
     pub fn new_expanding(
@@ -140,9 +152,31 @@ impl<'a> BoundBearing<'a> {
             velocity,
             geometry,
             Some(definition.expansion),
+            None,
+            &mut || Ok(()),
         )
     }
 
+    pub fn new_rheological(
+        definition: RheologicalJournalBearing<'a>,
+        configuration: &ExpandedArticulated<'_>,
+        thermal: &DepositionSimulation<'_>,
+        velocity: &[f64],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        geometry_factor(definition.bearing.geometry)?;
+        let geometry = match &definition.expansion {
+            Some(binding) => binding.resolve(definition.bearing.link,
+                definition.bearing.geometry, configuration)?,
+            None => definition.bearing.geometry,
+        };
+        let rheology = RheologyBinding { rate_axis: definition.shear_rate_axis,
+            maximum_rate: definition.maximum_shear_rate_per_s, solve: definition.solve };
+        Self::with_geometry(definition.bearing, configuration.model(), thermal,
+            velocity, geometry, definition.expansion, Some(rheology), checkpoint)
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn with_geometry(
         definition: JournalBearing<'a>,
         model: &ArticulatedModel,
@@ -150,6 +184,8 @@ impl<'a> BoundBearing<'a> {
         velocity: &[f64],
         geometry: JournalGeometry,
         expansion: Option<ThermalJournalBinding>,
+        rheology: Option<RheologyBinding<'a>>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, Error> {
         let limits = definition.limits;
         if !positive(limits.maximum_gap_reynolds)
@@ -174,7 +210,9 @@ impl<'a> BoundBearing<'a> {
             .ok_or(Error::Invalid("journal joint has no motion coordinate"))?;
         let factor = geometry_factor(geometry)?;
         let reference = definition.liquid.reference_state();
-        if reference
+        if let Some(binding) = &rheology {
+            binding.admit(&definition.liquid)?;
+        } else if reference
             .material()
             .properties()
             .iter()
@@ -189,6 +227,8 @@ impl<'a> BoundBearing<'a> {
             .liquid
             .at_temperature(Temperature::new(temperature))?;
         support(&definition.liquid, reference, &liquid)?;
+        let rheology = rheology.map(|binding| BoundRheology::compile(binding,
+            &definition.liquid, &liquid, geometry, checkpoint)).transpose()?;
         let state = JournalBearingState {
             link: definition.link,
             heat_cell: definition.heat_cell,
@@ -198,6 +238,7 @@ impl<'a> BoundBearing<'a> {
             resisting_torque_nm: 0.0,
             dissipated_power_w: 0.0,
             gap_reynolds: 0.0,
+            rheology: None,
         };
         if !positive(state.resistance_nm_s) {
             return Err(Error::Invalid(
@@ -210,6 +251,7 @@ impl<'a> BoundBearing<'a> {
             state,
             geometry_factor_m3: factor,
             expansion,
+            rheology,
         };
         result.update_rate(velocity[dof])?;
         Ok(result)
@@ -217,24 +259,46 @@ impl<'a> BoundBearing<'a> {
 
     /// This exact resistance supplies both native torque and heat derivative.
     pub fn response(&self, rate: f64) -> Result<(f64, f64, f64), Error> {
+        let (torque, power, reynolds, _) = self.response_values(rate)?;
+        Ok((torque, power, reynolds))
+    }
+
+    fn response_values(&self, rate: f64)
+        -> Result<(f64, f64, f64, Option<JournalShearResponse>), Error> {
         let g = self.state.geometry;
+        let kinematic_viscosity = self.rheology.as_ref().map_or(
+            self.state.liquid.kinematic_viscosity_m2_s(),
+            |rheology| rheology.native.minimum_viscosity_pa_s()
+                / self.state.liquid.density_kg_m3());
         let reynolds = finite(
             rate.abs() * g.inner_radius_m * (g.outer_radius_m - g.inner_radius_m)
-                / self.state.liquid.kinematic_viscosity_m2_s(),
+                / kinematic_viscosity,
         )?;
         if reynolds > self.definition.limits.maximum_gap_reynolds {
             return Err(Error::Budget("journal creeping-flow Reynolds limit"));
+        }
+        if let Some(rheology) = &self.rheology {
+            let response = rheology.native.response(rate)?;
+            return Ok((response.resisting_torque_nm, response.dissipated_power_w,
+                reynolds, Some(response)));
         }
         let torque = finite(-self.state.resistance_nm_s * rate)?;
         let power = finite(-torque * rate)?;
         if rate != 0.0 && (torque == 0.0 || power == 0.0) {
             return Err(Error::Invalid("nonzero journal work underflow"));
         }
-        Ok((torque, power, reynolds))
+        Ok((torque, power, reynolds, None))
     }
 
     fn update_rate(&mut self, rate: f64) -> Result<(), Error> {
-        let (torque, power, reynolds) = self.response(rate)?;
+        let (torque, power, reynolds, response) = self.response_values(rate)?;
+        if let (Some(rheology), Some(response)) = (&self.rheology, response) {
+            self.state.rheology = Some(rheology.sample(&self.definition.liquid,
+                &self.state.liquid, response)?);
+            self.state.resistance_nm_s = if rate == 0.0 {
+                self.geometry_factor_m3 * self.state.liquid.dynamic_viscosity_pa_s()
+            } else { finite((torque / rate).abs())? };
+        }
         self.state.resisting_torque_nm = torque;
         self.state.dissipated_power_w = power;
         self.state.gap_reynolds = reynolds;
@@ -246,6 +310,7 @@ impl<'a> BoundBearing<'a> {
         thermal: &DepositionSimulation<'_>,
         velocity: &[f64],
         configuration: &ExpandedArticulated<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Error> {
         let temperature = thermal.temperature_k(self.definition.heat_cell)?;
         let liquid = self
@@ -278,6 +343,13 @@ impl<'a> BoundBearing<'a> {
                 ));
             }
         }
+        if let Some(rheology) = &self.rheology {
+            let rates = self.state.rheology.as_ref().expect("admitted rheological endpoint")
+                .shear_rate_per_s;
+            self.rheology = Some(rheology.at_temperature(&self.definition.liquid,
+                &self.state.liquid, &liquid, geometry, rates,
+                self.definition.limits.maximum_relative_viscosity_change, checkpoint)?);
+        }
         let resistance = factor * liquid.dynamic_viscosity_pa_s();
         if !positive(resistance) {
             return Err(Error::Invalid(
@@ -293,28 +365,7 @@ impl<'a> BoundBearing<'a> {
 }
 
 fn geometry_factor(g: JournalGeometry) -> Result<f64, Error> {
-    if ![g.inner_radius_m, g.outer_radius_m, g.length_m]
-        .into_iter()
-        .all(positive)
-        || g.outer_radius_m <= g.inner_radius_m
-    {
-        return Err(Error::Invalid(
-            "journal needs positive dimensions and an open radial gap",
-        ));
-    }
-    // Avoid subtracting squared nearly equal radii in a narrow gap.
-    let factor = 4.0
-        * core::f64::consts::PI
-        * g.length_m
-        * g.inner_radius_m.powi(2)
-        * g.outer_radius_m.powi(2)
-        / ((g.outer_radius_m - g.inner_radius_m) * (g.outer_radius_m + g.inner_radius_m));
-    if !positive(factor) {
-        return Err(Error::Invalid(
-            "journal geometry resistance is unrepresentable",
-        ));
-    }
-    Ok(factor)
+    Ok(g.resistance_factor_m3()?)
 }
 
 impl ThermalJournalBinding {

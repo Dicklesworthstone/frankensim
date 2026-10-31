@@ -370,6 +370,45 @@ continuation, gap closure, coefficient budgets and late rollback. Link inertia
 parameter work remains separate from viscous heat; expanding a film does not
 create a second heat or mechanical-work account.
 
+### Original-source generalized-Newtonian journal feedback
+
+`with_rheological_journal_bearings` consumes the original `LiquidTemperatureLaw`
+with explicit physical shear-rate support and the SAME finite-gap journal
+geometry, native articulated stages, integrated-loss coordinate and finite heat
+receiver. The original piecewise-affine viscosity source line is compiled by
+`fs-tribo::journal::GeneralizedNewtonianJournal` at the accepted wall temperature.
+Every mechanical stage solves the actual radial shear profile and nonlinear
+torque; it does not insert a representative apparent viscosity into a Newtonian
+formula. Stage evaluation neither allocates a radial mesh nor queries material
+data. The shared geometry owner retains the original exact Newtonian factor.
+
+The entire source line includes zero shear, positive viscosity and strictly
+monotone shear stress; missing support, yield surfaces, nonmonotone flow curves
+and shear-dependent density/caloric storage refuse. Dynamic or kinematic
+viscosity sources are admitted using the original density at the same state.
+The reference `JournalBearingState.liquid` is at zero shear; `rheology` retains
+the complete distinct inner/outer source bundles, actual wall shear rates and
+native angular-rate solve defect. The reported resistance is the actual
+endpoint torque/rate, with the zero-shear tangent at rest.
+
+Thermal refresh preserves original claims and validates source lines at held
+old profile breakpoints and wall shear rates, then the complete next-temperature
+shear line. This follows the declared thermal split; it does not infer arbitrary
+two-dimensional coverage from corner queries. The union of both charts' rate
+breakpoints bounds the exact fractional viscosity change over the admitted
+shear interval. A conservative Reynolds gate uses its minimum viscosity.
+Optional cylinder expansion comes from the SAME material regions and free
+strains as the native inertia. Source, thermal, geometry, solve, energy and
+cancellation failures roll back all coupled histories. Film thermal storage,
+pressure support, elastic memory, transient spin-up and Taylor instability remain
+outside the existing massless isothermal creeping-flow domain.
+
+`tests/heated_articulated_rheological_motion.rs` checks source-only material
+substitution, independent finite-gap power-law decay and heat, distinct wall
+receipts, actual temperature feedback, aligned restart and transactional
+refusals. These synthetic source cases are implementation tests, not measured
+lubricant validation; native runtime execution is a separate verification gate.
+
 ### Material dry joint brakes and two-body thermal feedback
 
 `articulated_motion::dry::DryJointBrake` joins the existing ordered dry-interface,

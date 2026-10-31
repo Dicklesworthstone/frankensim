@@ -25,6 +25,7 @@ use std::cell::RefCell;
 /// Material-driven journal loss and its receiving thermal control volume.
 pub mod viscous;
 use viscous::{BoundBearing, ExpandingJournalBearing, JournalBearing, JournalBearingState};
+use viscous::rheology::RheologicalJournalBearing;
 
 /// Source-bound dry sliding, generalized resisting effort and two-body heating.
 pub mod dry;
@@ -310,6 +311,35 @@ impl<'a> HeatedArticulatedMotion<'a> {
                 self.configuration(),
                 &self.thermal,
                 &self.motion.velocity,
+            )?);
+        }
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Attach source-bound, finite-gap generalized-Newtonian journals. The
+    /// original T/shear line drives actual nonlinear torque at every mechanical
+    /// stage, while its conjugate loss uses the SAME native RK coordinate and
+    /// finite receiving cell as Newtonian journals. Source charts and optional
+    /// source-owned geometry refresh together at accepted thermal endpoints.
+    /// The massless isothermal/creeping-flow and 64-interface limits remain.
+    pub fn with_rheological_journal_bearings(
+        &self,
+        bearings: Vec<RheologicalJournalBearing<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.bearings.is_empty() || bearings.is_empty()
+            || bearings.len() + self.motion.brakes.len() + self.motion.squeeze.len() > 64
+        {
+            return Err(Error::Invalid("attach 1..=64 journal films exactly once"));
+        }
+        let mut candidate = self.clone();
+        for bearing in bearings {
+            checkpoint()?;
+            candidate.motion.bearings.push(BoundBearing::new_rheological(
+                bearing, self.configuration(), &self.thermal,
+                &self.motion.velocity, &mut checkpoint,
             )?);
         }
         checkpoint()?;
@@ -836,7 +866,7 @@ impl DepositionObserver for Motion<'_> {
         let parameter = after.change_from(after_motion)?;
         for bearing in &mut self.bearings {
             checkpoint()?;
-            bearing.refresh(thermal, &next_velocity, &self.expansion.configuration)?;
+            bearing.refresh(thermal, &next_velocity, &self.expansion.configuration, checkpoint)?;
         }
         for (brake, loss) in self.brakes.iter_mut().zip(dry_steps) {
             brake.accept(loss, thermal, &next_velocity, checkpoint)?;
