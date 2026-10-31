@@ -17913,6 +17913,31 @@ boundary. Four focused regression sources check new-film heat capacity,
 complete dry-out against an independent coupled caloric solution, the original
 sensible-only limit, and atomic refusal/cancellation.
 
+### Continuing wall-film formation and drying
+
+`WallFilmThermalEnvironment::advance_window` repeats the same original
+wall/film/gas transaction on one bounded physical clock. The supplied body and
+gas heat are totals for the entire requested interval, applied at uniform rates.
+Cumulative time endpoints apportion those sources, including the last partial
+interval. Source-apportionment roundoff is independently charged to the common
+energy account. Rejected phase-step proposals consume work but contribute no
+physical heat, mass, event or elapsed time. Explicit step-limit refusals retry
+from the same accepted state; nonlinear/source refusals propagate unchanged.
+
+One attempt ceiling and whole-window absolute energy/mass allowances apply.
+Accepted shorter intervals resume the original nominal time-grid endpoint.
+Actual final wall storage, total and volatile mass, and carrier inventories are
+checked independently. Compact samples retain physical temperatures, actual
+film mass, onset and within-window dry-out events. The caller publishes wall,
+gas and film together only after the complete window succeeds.
+
+This subdivision satisfies admission limits; it is not a temporal-error
+estimator. The maximum physical step must still be refined. Five regression
+sources cover uniform source totals, donor-driven retries and global budgets,
+a continuous dry/wet/dry/wet lifecycle, a live four-rung full-coupling time ladder,
+and refusal after an already accepted internal interval. Native test execution
+remains necessary before claiming measured convergence or validated physics.
+
 ### Condensate storage in finite gas/body heat exchange
 
 `finite_gas_thermal::condensation` consumes the original source-bound

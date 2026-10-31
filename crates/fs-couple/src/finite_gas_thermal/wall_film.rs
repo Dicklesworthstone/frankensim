@@ -12,6 +12,9 @@
 //! Dry inventory has no temperature or thermal storage. The full requested
 //! interval is retained when frozen-rate evaporation reaches exact dry-out.
 
+/// Bounded shared-clock continuation with explicit whole-window balances.
+pub mod window;
+
 use crate::cavity_phs::piston::thermal::{HeatExchangeSolve, feedback};
 use fs_conduction::{
     ConductionError,

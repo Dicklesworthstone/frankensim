@@ -9,6 +9,8 @@ use fs_thermal::evaporation::{EvaporationError, EvaporationLaw, EvaporationPrope
 mod fixture;
 use fixture::*;
 
+mod window;
+
 #[test]
 fn dry_condensation_warms_finite_wall_and_retains_actual_film_capacity() {
     let source = source();
