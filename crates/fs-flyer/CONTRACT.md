@@ -111,10 +111,61 @@ G0/G2/G3 tests in `addedmass_battery` cover the thin-ellipse pitch coefficient,
 hinge/rigid recoil, finite-span subdivision, reference shifts, oblique frame
 rotation, length-to-the-fifth rotary scaling, PSD, work closure and invalid
 orientation. The intentionally changed joint and extraction goldens distinguish
-the added physical storage. Geometry/control Jacobians remain frozen during
-each assembly; configuration derivatives for finite hinge motion, cross-strip
-fluid interaction, free-surface effects and finite-aspect-ratio corrections are
-outside this approximation.
+the added physical storage. This entry point freezes geometry/control
+Jacobians. Cross-strip fluid interaction, free-surface effects and
+finite-aspect-ratio corrections remain outside the strip approximation.
+
+### Finite moving hinges and configuration inertia
+
+`addedmass::hinged::HingedStrip` prepares a physical body-fixed hinge line and
+zero-angle strip geometry. Finite rotations move its centroid, normal and span
+together; normal and angular control gains derive from that same geometry.
+The reference strip must have inactive control fields, so no authored gain is
+silently replaced. Multiple strips can share one active coordinate. The original
+three positive kinetic modes and deterministic mass accumulator are reused.
+
+`assemble_hinged_strips` returns the complete added bias for
+`T(q,u) = u^T M(q) u/2`: body momentum transport, `-Mdot*u` on all rows, and
+`dT/dq` on each control row. Analytic derivatives act directly on rank modes;
+no derivative matrices, geometry vectors or runtime finite differences are
+constructed. Bias power is `-u^T Mdot u/2`, which balances the changing kinetic
+metric. A released hinge can have nonzero kinetic-gradient torque even when
+its instantaneous rate is zero. The original joint solve consumes these same
+body/control/cross blocks and bias without lagging their accelerations.
+
+Each hinge is fixed in carrier coordinates; serial moving hinge chains, elastic
+strip deformation and density time derivatives are not included. The G0/G1/G3
+`addedmass_hinged` tests check finite-angle geometry and exact centrifugal
+reaction, released-control torque, every bias component against independent
+test-only mass differentiation, joint-solve energy rate, finite-strip
+subdivision and original resource/geometry refusals. Fixed-strip goldens retain
+their previous arithmetic and values.
+
+### Simultaneous body and hinge motion
+
+`partitioned::coupled::step` advances the existing six-DOF body and one active
+hinge as a single seven-coordinate midpoint solve. Its callback receives the
+midpoint pose, hinge state, body velocity and exact half-tick memory state, so
+`assemble_hinged_strips` supplies the actual finite-angle mass and analytic bias
+at each iteration. The original `solve_joint` retains all body/control cross
+blocks. Applied loads have one explicit owner; duplicate nonacceleration loads
+in the fluid assembly refuse, and the step supplies dry-body momentum transport.
+
+Linear hinge stiffness and damping enter the same effective matrix as
+`I_dry + c*dt/2 + k*dt^2/4`, avoiding an iteration restriction from those linear
+terms alone. Nonlinear fluid, gyroscopic and load coupling must converge within
+the declared velocity tolerances and bounded iteration count. Only an accepted
+state receives the full exact memory transition. Refusal returns no partial
+state. Orientation reconstruction uses the existing SO(3) exponential.
+
+The dry model is a constant body tensor plus independent scalar hinge kinetic
+storage. A moving dry linkage that changes the body/control mass matrix requires
+the articulated owner; fluid coupling does not supply that missing dry geometry.
+General nonlinear energy and world-momentum balance are refinement properties,
+not exact finite-step guarantees. `partitioned_coupled` checks an independently
+solved stiff-hinge recoil problem and damping work, second-order inertial-frame
+translation and finite-hinge kinetic-energy convergence, exact memory timing,
+and bounded atomic refusals.
 
 ## Hydrostatic pressure and material atmosphere loads
 

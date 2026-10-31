@@ -36,6 +36,10 @@ use crate::Refusal;
 use crate::spine::{Loads, RigidBody, SixDofState, step};
 use fs_math::det;
 
+/// Simultaneous effective-mass stepping with finite-configuration fluid inertia.
+#[path = "partitioned/coupled.rs"]
+pub mod coupled;
+
 /// dt/τ cap for explicit states (refusals at cap AND cap+1 ulp).
 pub const MAX_EXPLICIT_RATIO: f64 = 0.2;
 /// State-count cap for a certificate.
@@ -163,7 +167,9 @@ impl MemoryState {
 /// Stiff hinge parameters: I_eff·q̈ + c·q̇ + k·q = Q.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HingeParams {
-    /// Effective inertia [kg·m²] (structural + added-mass cc block).
+    /// Inertia [kg·m²]. The standalone hinge step takes effective structural
+    /// plus added inertia; [`coupled::step`] takes DRY structural inertia only,
+    /// because its simultaneous joint solve supplies the fluid mass blocks.
     pub inertia: f64,
     /// Damping [N·m·s/rad].
     pub damping: f64,

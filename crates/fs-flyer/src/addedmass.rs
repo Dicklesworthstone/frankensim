@@ -29,9 +29,10 @@
 //! momentum, −ad*_ν(p): WORKLESS for any p (νᵀ·ad*_ν(p) ≡ 0), which the
 //! battery checks to machine precision — energy consistency without any
 //! runtime finite-differencing. Configuration-independent strips make the
-//! control-block bias identically zero (disclosed below). Geometry and
-//! control Jacobians are frozen at the assembled configuration; finite
-//! control rotations require their configuration derivatives as well.
+//! control-block bias identically zero (disclosed below). The fixed-strip
+//! entry point freezes geometry and control Jacobians. [`hinged`] supplies
+//! finite hinge motion and its analytic configuration-inertia terms through
+//! the same rank modes, mass blocks and joint solve.
 //!
 //! No-claims: cross-surface fluid-inertia interference is OMITTED
 //! (AnalyticStrip's disclosed boundary; PanelExtracted is the additive
@@ -40,6 +41,9 @@
 
 use crate::Refusal;
 use crate::spine::RigidBody;
+
+#[path = "addedmass/hinged.rs"]
+pub mod hinged;
 
 /// Active-dynamic control-coordinate cap (refusals at cap AND cap+1).
 pub const MAX_CONTROL_COORDS: usize = 8;
@@ -110,6 +114,108 @@ fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
     ]
 }
 
+#[derive(Clone, Copy)]
+struct StripMode {
+    inertia: f64,
+    rigid: [f64; 6],
+    control_gain: f64,
+}
+
+struct StripModes {
+    modes: [StripMode; 3],
+    control_coord: Option<usize>,
+    // Each moving strip has one rigid, body-fixed hinge. Its control-mode
+    // gains are constant; only the six body-velocity coefficients vary.
+    derivative: Option<[[f64; 6]; 3]>,
+}
+
+fn admit_strip(s: &Strip, nc: usize) -> Result<(), Refusal> {
+    let finite = s.chord_m.is_finite()
+        && s.span_m.is_finite()
+        && s.position_m.iter().all(|v| v.is_finite())
+        && s.normal.iter().all(|v| v.is_finite())
+        && s.span_axis.iter().all(|v| v.is_finite())
+        && s.control_gain.is_finite()
+        && s.control_angular_gain.iter().all(|v| v.is_finite());
+    let norm2: f64 = s.normal.iter().map(|v| v * v).sum();
+    let span_norm2: f64 = s.span_axis.iter().map(|v| v * v).sum();
+    let perpendicular: f64 = s.normal.iter().zip(s.span_axis).map(|(n, t)| n * t).sum();
+    if !finite
+        || s.chord_m <= 0.0
+        || s.span_m <= 0.0
+        || (norm2 - 1.0).abs() > 1.0e-9
+        || (span_norm2 - 1.0).abs() > 1.0e-9
+        || perpendicular.abs() > 1.0e-9
+    {
+        return Err(refuse(
+            "strip-invalid",
+            format!("strip {}: geometry or control velocity invalid", s.name),
+            "positive chord/span; orthonormal normal and span axes; finite control gains",
+        ));
+    }
+    if let Some(k) = s.control_coord {
+        if k >= nc {
+            return Err(refuse(
+                "strip-invalid",
+                format!("strip {}: control coordinate {k} outside nc = {nc}", s.name),
+                "declare the coordinate in the active-dynamic set",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn strip_modes(rho: f64, s: &Strip, nc: usize) -> Result<StripModes, Refusal> {
+    admit_strip(s, nc)?;
+    let m_a = rho * core::f64::consts::PI * s.chord_m * s.chord_m / 4.0 * s.span_m;
+    let pitch_inertia = m_a * (s.chord_m * s.chord_m / 32.0);
+    let span_inertia = m_a * (s.span_m * s.span_m / 12.0);
+    if ![m_a, pitch_inertia, span_inertia]
+        .iter()
+        .all(|x| x.is_finite() && *x > 0.0)
+    {
+        return Err(refuse(
+            "strip-invalid",
+            format!(
+                "strip {}: unrepresentable fluid mass or rotary inertia",
+                s.name
+            ),
+            "use representable density and strip dimensions",
+        ));
+    }
+    let rxn = cross(s.position_m, s.normal);
+    let translation = StripMode {
+        inertia: m_a,
+        rigid: [
+            s.normal[0],
+            s.normal[1],
+            s.normal[2],
+            rxn[0],
+            rxn[1],
+            rxn[2],
+        ],
+        control_gain: s.control_gain,
+    };
+    let rotary = |inertia, axis: [f64; 3]| StripMode {
+        inertia,
+        rigid: [0.0, 0.0, 0.0, axis[0], axis[1], axis[2]],
+        control_gain: axis
+            .iter()
+            .zip(s.control_angular_gain)
+            .map(|(a, h)| a * h)
+            .sum(),
+    };
+    Ok(StripModes {
+        modes: [
+            translation,
+            rotary(pitch_inertia, s.span_axis),
+            rotary(span_inertia, cross(s.span_axis, s.normal)),
+        ],
+        control_coord: s.control_coord,
+        derivative: None,
+    })
+}
+
 /// Density of the working fluid [kg/m³] enters per assembly call (the
 /// provenance-bound air state supplies it).
 ///
@@ -128,6 +234,24 @@ pub fn assemble_analytic_strip(
     nu: &[f64; 6],
     control_rates: &[f64],
 ) -> Result<AeroGeneralizedLoads, Refusal> {
+    assemble_modes(
+        rho_kg_m3,
+        strips.len(),
+        nc,
+        nu,
+        control_rates,
+        strips.iter().map(|s| strip_modes(rho_kg_m3, s, nc)),
+    )
+}
+
+fn assemble_modes(
+    rho_kg_m3: f64,
+    strip_count: usize,
+    nc: usize,
+    nu: &[f64; 6],
+    control_rates: &[f64],
+    strips: impl Iterator<Item = Result<StripModes, Refusal>>,
+) -> Result<AeroGeneralizedLoads, Refusal> {
     if nc > MAX_CONTROL_COORDS {
         return Err(refuse(
             "control-coords-outside-domain",
@@ -135,10 +259,10 @@ pub fn assemble_analytic_strip(
             "the 1903 Flyer has at most a few active dynamic coordinates",
         ));
     }
-    if strips.len() > MAX_STRIPS {
+    if strip_count > MAX_STRIPS {
         return Err(refuse(
             "strip-count-exceeded",
-            format!("{} strips exceed {MAX_STRIPS}", strips.len()),
+            format!("{strip_count} strips exceed {MAX_STRIPS}"),
             "aggregate panels into strips",
         ));
     }
@@ -157,98 +281,38 @@ pub fn assemble_analytic_strip(
     let mut m_rr = [[0.0f64; 6]; 6];
     let mut m_rc: Vec<[f64; 6]> = vec![[0.0; 6]; nc];
     let mut m_cc: Vec<Vec<f64>> = vec![vec![0.0; nc]; nc];
+    let mut q_added_bias = vec![0.0f64; 6 + nc];
     for s in strips {
-        let finite = s.chord_m.is_finite()
-            && s.span_m.is_finite()
-            && s.position_m.iter().all(|v| v.is_finite())
-            && s.normal.iter().all(|v| v.is_finite())
-            && s.span_axis.iter().all(|v| v.is_finite())
-            && s.control_gain.is_finite()
-            && s.control_angular_gain.iter().all(|v| v.is_finite());
-        let norm2: f64 = s.normal.iter().map(|v| v * v).sum();
-        let span_norm2: f64 = s.span_axis.iter().map(|v| v * v).sum();
-        let perpendicular: f64 = s.normal.iter().zip(s.span_axis).map(|(n, t)| n * t).sum();
-        if !finite
-            || s.chord_m <= 0.0
-            || s.span_m <= 0.0
-            || (norm2 - 1.0).abs() > 1.0e-9
-            || (span_norm2 - 1.0).abs() > 1.0e-9
-            || perpendicular.abs() > 1.0e-9
-        {
-            return Err(refuse(
-                "strip-invalid",
-                format!("strip {}: geometry or control velocity invalid", s.name),
-                "positive chord/span; orthonormal normal and span axes; finite control gains",
-            ));
-        }
-        if let Some(k) = s.control_coord {
-            if k >= nc {
-                return Err(refuse(
-                    "strip-invalid",
-                    format!("strip {}: control coordinate {k} outside nc = {nc}", s.name),
-                    "declare the coordinate in the active-dynamic set",
-                ));
-            }
-        }
-        // 2-D flat-plate added mass per unit span, times strip span.
-        let m_a = rho_kg_m3 * core::f64::consts::PI * s.chord_m * s.chord_m / 4.0 * s.span_m;
-        let pitch_inertia = m_a * (s.chord_m * s.chord_m / 32.0);
-        let span_inertia = m_a * (s.span_m * s.span_m / 12.0);
-        if ![m_a, pitch_inertia, span_inertia]
-            .iter()
-            .all(|x| x.is_finite() && *x > 0.0)
-        {
-            return Err(refuse(
-                "strip-invalid",
-                format!(
-                    "strip {}: unrepresentable fluid mass or rotary inertia",
-                    s.name
-                ),
-                "use representable density and strip dimensions",
-            ));
-        }
-        let rxn = cross(s.position_m, s.normal);
-        let j = [
-            s.normal[0],
-            s.normal[1],
-            s.normal[2],
-            rxn[0],
-            rxn[1],
-            rxn[2],
-        ];
-        for a in 0..6 {
-            for b in 0..6 {
-                m_rr[a][b] += m_a * (j[a] * j[b]);
-            }
-        }
-        if let Some(k) = s.control_coord {
-            for a in 0..6 {
-                m_rc[k][a] += m_a * j[a] * s.control_gain;
-            }
-            m_cc[k][k] += m_a * s.control_gain * s.control_gain;
-        }
-        // The cross-section's pitch potential is independent of heave. The
-        // spanwise first moment vanishes about the strip centroid. These two
-        // positive modes therefore add without any heave/rotation cross term.
-        for (inertia, axis) in [
-            (pitch_inertia, s.span_axis),
-            (span_inertia, cross(s.span_axis, s.normal)),
-        ] {
-            for a in 0..3 {
-                for b in 0..3 {
-                    m_rr[3 + a][3 + b] += inertia * (axis[a] * axis[b]);
+        let s = s?;
+        for (index, mode) in s.modes.iter().enumerate() {
+            // Keep the fixed-strip accumulation order: translation first,
+            // followed by each rotary mode's angular 3x3 block.
+            let first = if index == 0 { 0 } else { 3 };
+            for a in first..6 {
+                for b in first..6 {
+                    m_rr[a][b] += mode.inertia * (mode.rigid[a] * mode.rigid[b]);
                 }
             }
             if let Some(k) = s.control_coord {
-                let gain: f64 = axis
-                    .iter()
-                    .zip(s.control_angular_gain)
-                    .map(|(a, h)| a * h)
-                    .sum();
-                for a in 0..3 {
-                    m_rc[k][3 + a] += inertia * axis[a] * gain;
+                for a in first..6 {
+                    m_rc[k][a] += mode.inertia * mode.rigid[a] * mode.control_gain;
                 }
-                m_cc[k][k] += inertia * gain * gain;
+                m_cc[k][k] += mode.inertia * mode.control_gain * mode.control_gain;
+                if let Some(derivative) = &s.derivative {
+                    // T = a/2 (j(q).nu + g*qdot)^2. A rigid hinge has
+                    // constant g. Apply -Mdot*u plus dT/dq to the control
+                    // row directly, without allocating derivative matrices.
+                    let d = derivative[index];
+                    let body_speed: f64 = mode.rigid.iter().zip(nu).map(|(j, v)| j * v).sum();
+                    let derivative_speed: f64 = d.iter().zip(nu).map(|(j, v)| j * v).sum();
+                    let speed = body_speed + mode.control_gain * control_rates[k];
+                    for a in first..6 {
+                        q_added_bias[a] -= mode.inertia
+                            * control_rates[k]
+                            * (d[a] * speed + mode.rigid[a] * derivative_speed);
+                    }
+                    q_added_bias[6 + k] += mode.inertia * body_speed * derivative_speed;
+                }
             }
         }
     }
@@ -270,13 +334,21 @@ pub fn assemble_analytic_strip(
     let bias_lin = cross(w, p_lin);
     let wxpa = cross(w, p_ang);
     let vxpl = cross(v, p_lin);
-    let mut q_added_bias = vec![0.0f64; 6 + nc];
     for i in 0..3 {
-        q_added_bias[i] = -bias_lin[i];
-        q_added_bias[3 + i] = -(wxpa[i] + vxpl[i]);
+        // Retain the fixed-strip path's signed zeros and determinism digest.
+        q_added_bias[i] = if q_added_bias[i] == 0.0 {
+            -bias_lin[i]
+        } else {
+            q_added_bias[i] - bias_lin[i]
+        };
+        q_added_bias[3 + i] = if q_added_bias[3 + i] == 0.0 {
+            -(wxpa[i] + vxpl[i])
+        } else {
+            q_added_bias[3 + i] - (wxpa[i] + vxpl[i])
+        };
     }
-    // Control-block bias: identically zero for configuration-independent
-    // strips (disclosed in the module no-claims).
+    // For fixed strips there are no configuration terms and control bias is
+    // exactly zero. Moving-strip terms have already been accumulated above.
     if !m_rr
         .iter()
         .flatten()
