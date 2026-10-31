@@ -21,7 +21,16 @@ pub fn network_drive_coherent(
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<NetworkCoherentResponse, DuctError> {
-    drive_coherent_bound(net, gas, None, omega, loss, sources, loads, coupled)
+    Ok(network_drive_sources(
+        net,
+        gas,
+        omega,
+        loss,
+        &flow_sources(sources)?,
+        loads,
+        coupled,
+    )?
+    .fields)
 }
 
 /// [`network_drive_coherent`] with the original regional edge gases and
@@ -35,8 +44,52 @@ pub fn network_drive_coherent_regional(
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<NetworkCoherentResponse, DuctError> {
+    Ok(network_drive_sources_regional(
+        net,
+        media,
+        omega,
+        loss,
+        &flow_sources(sources)?,
+        loads,
+        coupled,
+    )?
+    .fields)
+}
+
+/// Solve coherent pressure generators with finite source impedance and/or
+/// ideal prescribed flow sources. Pressure boundaries use `p + Zs U = p_open`;
+/// every actual source flow therefore responds to the other sources, the graph
+/// and the full exterior load. All phasors are peak amplitudes at this frequency.
+/// A zero pressure drive retains its source impedance as a physical boundary.
+///
+/// Sources and passive loads partition every external port exactly once. Source
+/// impedances must be finite with Re Zs >= 0; zero admits ideal pressure drive.
+/// The loaded scattering solve remains available at an open-circuit pole.
+pub fn network_drive_sources(
+    net: &DuctNetwork,
+    gas: &GasState,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<NetworkSourceResponse, DuctError> {
+    drive_sources_bound(net, gas, None, omega, loss, sources, loads, coupled)
+}
+
+/// [`network_drive_sources`] retaining the original per-edge and exterior gas
+/// records. Every source pressure/flow phase refers to the same physical clock.
+pub fn network_drive_sources_regional(
+    net: &DuctNetwork,
+    media: &NetworkMedia,
+    omega: f64,
+    loss: LossModel,
+    sources: &[PortSource],
+    loads: &[PortTermination],
+    coupled: Option<&CoupledTermination>,
+) -> Result<NetworkSourceResponse, DuctError> {
     media.validate_for(net)?;
-    drive_coherent_bound(
+    drive_sources_bound(
         net,
         media.exterior_gas(),
         Some(media),
@@ -49,28 +102,28 @@ pub fn network_drive_coherent_regional(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn drive_coherent_bound(
+fn drive_sources_bound(
     net: &DuctNetwork,
     exterior: &GasState,
     media: Option<&NetworkMedia>,
     omega: f64,
     loss: LossModel,
-    sources: &[PortFlowSource],
+    sources: &[PortSource],
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
-) -> Result<NetworkCoherentResponse, DuctError> {
+) -> Result<NetworkSourceResponse, DuctError> {
     let ordinary = network_port_impedance_bound(net, exterior, media, omega, loss)
-        .and_then(|response| response.drive_coherent(sources, loads, coupled));
+        .and_then(|response| response.drive_sources(sources, loads, coupled));
     match ordinary {
         Ok(response) => Ok(response),
         Err(DuctError::Singular) => {
             let fields =
                 drive_retained_sources(net, exterior, media, omega, loss, sources, loads, coupled)?;
             let labels: Vec<&str> = fields.labels.iter().map(String::as_str).collect();
-            NetworkCoherentResponse::from_fields(
+            NetworkSourceResponse::from_fields(
                 omega,
                 &labels,
-                &fields.source_flows,
+                &fields.conditions,
                 fields.pressures,
                 fields.inflows,
             )
@@ -191,9 +244,9 @@ fn drive_retained(
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<NetworkDriveResponse, DuctError> {
-    let sources = [PortFlowSource {
+    let sources = [PortSource {
         label: active_label.to_owned(),
-        volume_flow_m3_s: C64::ONE,
+        excitation: PortExcitation::VolumeFlow(C64::ONE),
     }];
     let fields =
         drive_retained_sources(net, exterior, media, omega, loss, &sources, loads, coupled)?;
@@ -211,7 +264,7 @@ fn drive_retained(
 
 struct LoadedFields {
     labels: Vec<String>,
-    source_flows: Vec<Option<C64>>,
+    conditions: Vec<Option<PortExcitation>>,
     pressures: Vec<C64>,
     inflows: Vec<C64>,
 }
@@ -223,7 +276,7 @@ fn drive_retained_sources(
     media: Option<&NetworkMedia>,
     omega: f64,
     loss: LossModel,
-    sources: &[PortFlowSource],
+    sources: &[PortSource],
     loads: &[PortTermination],
     coupled: Option<&CoupledTermination>,
 ) -> Result<LoadedFields, DuctError> {
@@ -244,15 +297,18 @@ fn drive_retained_sources(
             _ => unreachable!("port indices were selected above"),
         })
         .collect();
-    let source_flows = source_currents(&labels, sources)?;
+    let conditions = source_conditions(&labels, sources)?;
     if loads.len() + coupled.map_or(0, |value| value.labels.len()) != labels.len() - sources.len() {
         return Err(bad(
             "every other network port needs an explicit termination",
         ));
     }
-    let mut resolved = vec![None; labels.len()];
+    let mut resolved: Vec<Option<C64>> = conditions
+        .iter()
+        .map(|condition| condition.and_then(PortExcitation::pressure).map(|(_, z)| z))
+        .collect();
     let mut coupled_rows = vec![None; labels.len()];
-    let mut seen: Vec<bool> = source_flows.iter().map(Option::is_some).collect();
+    let mut seen: Vec<bool> = conditions.iter().map(Option::is_some).collect();
     if let Some(value) = coupled {
         admit_coupled(value, omega)?;
         for (row, label) in value.labels.iter().enumerate() {
@@ -388,14 +444,14 @@ fn drive_retained_sources(
         &wave_edges,
         &labels,
         &port_slots,
-        &source_flows,
+        &conditions,
         &resolved,
         &coupled_rows,
         coupled,
     )?;
     Ok(LoadedFields {
         labels: labels.iter().map(|label| (*label).to_owned()).collect(),
-        source_flows,
+        conditions,
         pressures,
         inflows,
     })
@@ -411,27 +467,34 @@ fn loaded_wave_response(
     edges: &[WaveEdge],
     labels: &[&str],
     port_slots: &[usize],
-    source_flows: &[Option<C64>],
+    conditions: &[Option<PortExcitation>],
     resolved: &[Option<C64>],
     coupled_rows: &[Option<usize>],
     coupled: Option<&CoupledTermination>,
 ) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
-    let mut passive: Vec<usize> = (0..labels.len())
+    let source_flows: Vec<Option<C64>> = conditions
+        .iter()
+        .map(|condition| condition.and_then(PortExcitation::flow))
+        .collect();
+    // Pressure-source currents are unknowns just like external-load currents.
+    // Keep their constitutive equations instead of dividing by Zs, including
+    // an ideal pressure source with Zs=0 and rank-deficient passive loads.
+    let mut retained_ports: Vec<usize> = (0..labels.len())
         .filter(|&port| source_flows[port].is_none())
         .collect();
-    passive.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
-    let (mut a, n, reference) = wave_equations(boundary_y, pressures, edges, passive.len())?;
+    retained_ports.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
+    let (mut a, n, reference) = wave_equations(boundary_y, pressures, edges, retained_ports.len())?;
     let mut current_slots = vec![None; labels.len()];
     let first_current = pressures + 2 * edges.len();
-    for (offset, &port) in passive.iter().enumerate() {
+    for (offset, &port) in retained_ports.iter().enumerate() {
         current_slots[port] = Some(first_current + offset);
     }
-    for &port in &passive {
-        let row = current_slots[port].expect("non-active port current is retained");
+    for &port in &retained_ports {
+        let row = current_slots[port].expect("unprescribed port current is retained");
         a[port_slots[port] * n + row] = C64::from_re(-1.0);
         if let (Some(load), Some(load_row)) = (coupled, coupled_rows[port]) {
             a[row * n + port_slots[port]] = C64::ONE;
-            for &other in &passive {
+            for &other in &retained_ports {
                 if let Some(load_col) = coupled_rows[other] {
                     let z = load.z[load_row * load.labels.len() + load_col];
                     let column = current_slots[other].expect("coupled current is retained");
@@ -447,6 +510,7 @@ fn loaded_wave_response(
         }
     }
     let mut row_scales = vec![0.0; n];
+    let mut pressure_scales = vec![0.0; n];
     for (row, values) in a.chunks_exact_mut(n).enumerate() {
         let scale = values.iter().map(|z| z.abs()).fold(0.0, f64::max);
         if !scale.is_finite() || scale == 0.0 || values.iter().any(|&z| !finite(z)) {
@@ -456,10 +520,11 @@ fn loaded_wave_response(
             *value = C64::new(value.re / scale, value.im / scale);
         }
         row_scales[row] = reference / scale;
+        pressure_scales[row] = 1.0 / scale;
     }
     let (inv, _) = inverse(&a, n)?;
     let mut driven: Vec<usize> = (0..labels.len())
-        .filter(|&port| source_flows[port].is_some())
+        .filter(|&port| conditions[port].is_some())
         .collect();
     driven.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
     let unit_source =
@@ -468,11 +533,17 @@ fn loaded_wave_response(
         unit_source.map_or_else(
             || {
                 coherent_sum(driven.iter().map(|&port| {
-                    let slot = port_slots[port];
-                    inv[row * n + slot]
-                        * source_flows[port]
-                            .expect("driven port flow")
-                            .scale(row_scales[slot])
+                    if let Some(flow) = source_flows[port] {
+                        let slot = port_slots[port];
+                        inv[row * n + slot] * flow.scale(row_scales[slot])
+                    } else {
+                        let slot =
+                            current_slots[port].expect("pressure-source current is retained");
+                        let (pressure, _) = conditions[port]
+                            .and_then(PortExcitation::pressure)
+                            .expect("driven pressure boundary");
+                        inv[row * n + slot] * pressure.scale(pressure_scales[slot])
+                    }
                 }))
             },
             |active| {

@@ -1200,7 +1200,9 @@ The loaded KCL rows retain external currents, while boundary rows impose
 `p + Z U = 0`, with `U` into the graph. Closed ports impose `U=0`. The load matrix
 is never inverted, so pressure-release boundaries and singular passive mutual
 loads remain valid. At most 31 external currents add to the retained edge
-currents, capped at 799 total unknowns before the dense allocation. The same
+currents for prescribed-flow driving; finite-impedance pressure sources retain
+their currents too, admitting 32 external currents and a shared cap of 800
+total unknowns before the dense allocation. The same
 row equilibration and full infinity-norm condition ceiling of 1e10 apply; a
 true pole of the fully loaded network still refuses. Labels, active-port
 partition, frequency, passivity, edge gas records and exterior admission remain
@@ -1255,6 +1257,58 @@ cross-frequency coherence, nonlinear excitation, or time-domain beat envelopes.
 The `coherent_network` example takes the relative source phase in degrees and
 prints physical pressure, flow and signed power for two equal duct arms feeding
 an explicit matched scalar load; 0 and 180 degrees exercise addition and cancellation.
+
+### Coherent finite-impedance generators
+
+`network_drive_sources`, `network_drive_sources_regional` and
+`NetworkResponse::drive_sources` admit mixed `PortSource` values. Each
+`PortExcitation` is either an ideal peak volume flow or a pressure generator
+with `p + Zs U = p_open`, all on the existing `exp(-i omega t)` clock. `p_open`
+is complex peak pressure in Pa, `Zs` is finite source impedance in Pa s/m3,
+and `U` points into the network. Re Zs must be nonnegative; zero admits an
+ideal pressure source. These are externally declared linear source laws,
+not inferred transducer models or an active-feedback controller.
+
+The actual source flows are solved together with all other source, graph and
+exterior interactions. An unexcited pressure generator retains its impedance;
+setting `p_open=0` does not open or remove that port. The source resistance can
+therefore dissipate energy even when coherent interference cancels radiation.
+Source ports and explicit scalar/coupled loads must partition every port once.
+Finite source impedances are diagonal at the source boundary; mutual source
+interaction is through the complete network and exterior operator. A separate
+off-diagonal driver-internal impedance matrix is not modeled by this API.
+
+The ordinary closure adds source impedances to the same loaded port equations
+and combines pressure and flow excitation in one right-hand side. The retained
+scattering closure adds `p + Zs U = p_open` directly, without dividing by Zs.
+It therefore keeps ideal pressure sources, rank-deficient exterior loads and
+regularized open-circuit poles. All 32 ports may be finite-impedance sources.
+Each representation uses one factorization, with the existing condition cap,
+canonical port ordering and compensated complex reductions. The prescribed-flow and single-unit
+source APIs use the same boundary assembly, retaining unit-source arithmetic.
+
+`NetworkSourceResponse::fields` contains actual pressure, flow and signed
+interface work. Additional per-port and total generator powers use
+`0.5 Re(p_open conj(U))`; internal source dissipation uses `0.5 Re(Zs) |U|²`.
+Flow generators have no modeled internal impedance, so their generator work
+equals interface work. Passive-load ports have zero generator/internal-source
+entries. Generator work can be negative; internal reactive work is not heat.
+The balance is generator work = source dissipation + source-interface work,
+and source-interface work = exterior-load work + net graph work, to numerical
+solve accuracy. Source loss is never folded into exterior radiation or clipped
+out of an interference null.
+
+The additional `network/tests/coherent.rs` regressions compare matched-line
+pressure dividers (including ideal pressure and half-wave poles), independent
+unequal-line elimination, destructive interference with nonzero source loss,
+negative generator work, mixed pressure/flow drive with full mutual loads,
+regional gases, source-order invariance and 32 simultaneous pressure sources.
+They reject nonfinite excitation and active/nonfinite source impedance. The
+`coherent_network` example optionally accepts a second argument for source
+resistance / Zc, holding `|p_open|=Zc*1e-6 Pa` and reporting actual source flows
+and internal source work. The model remains linear and harmonic: it does not
+synthesize a source's impedance from geometry, supply nonlinear excitation,
+cross-frequency phase statistics, or a time-domain feedback dynamics model.
 
 ### Regional material and exterior binding
 
