@@ -1,5 +1,52 @@
 # fs-material — CONTRACT
 
+## Fatemi–Socie shear-strain life on native tensor cycles
+
+`fatigue::critical_plane::fatemi_socie` evaluates the original
+maximum-shear-strain-plane Fatemi–Socie criterion from paired physical stress
+and total mechanical strain tensors. It selects the greatest engineering shear
+strain amplitude, then the greatest normal stress for exact amplitude ties.
+The normal-stress maximum is taken over the full cycle; it need not occur at
+the shear extremum. Selecting the maximum combined parameter would be a
+different model and is not this plane-selection convention.
+
+Engineering shear is twice the tangential projection of the tensor strain.
+Its two-dimensional path uses the same bounded enclosing-circle kernel as
+Findley, retaining rotation and phase rather than reducing the history to an
+unsigned equivalent strain. The positive calibrated relation is
+`gamma_a * (1 + k * sigma_n,max / sigma_y0)
+= tau_f'/G * (2N)^b_gamma + gamma_f' * (2N)^c_gamma`.
+The source declares initial yield normalization and a named normal-stress
+convention: Signed refuses a nonpositive multiplier; TensionOnly uses the
+tensile part of the maximum normal stress. Neither imports Findley clipping.
+
+The shear calibration has distinct coefficients and a strict finite cycle
+domain. Only the private safeguarded scalar inverse is shared with axial CMB;
+no axial coefficient or Young's modulus is relabeled as shear data.
+`source::resolve_isotropic_fatemi_socie` retains eight original claims:
+E, nu, initial yield, four torsion coefficients and k. It explicitly derives
+G from isotropic E/nu, preserves original claim selections and uncertainties,
+normalizes an explicitly declared N or 2N power basis, and intersects the
+torsional fit's life support with the separate k fit. Original intervals must
+be valid before intersection. Convention-specific k keys prevent an implicit
+signed/tension-only source switch. Every parameter supports the actual typed
+absolute temperature; fitted coefficients require the original reversed
+torsional baseline and declared finite life support.
+
+All six stress and strain components must close within explicit tolerances.
+A closed representative cycle is caller-declared; closure alone does not prove
+cyclic stabilization, resolve internal variable-amplitude cycles or count
+repetitions. Results expose full-cycle life, selected plane, shear amplitude,
+normal extrema, correction, closure defects and numerical work. Sample,
+plane, projection and circle limits and cancellation bound computation.
+The retained history supports inexpensive append rollback. No accumulated
+damage, stiffness loss, crack growth, inferred endurance limit or validation of
+component service life is claimed.
+
+The plane and strain conventions follow the
+[original Fatemi–Socie formulation](https://doi.org/10.1111/j.1460-2695.1988.tb01169.x)
+and [strain-based fatigue model reference](https://doc.comsol.com/6.4/doc/com.comsol.help.fatigue/fatigue_ug_sme.4.23.html).
+
 ## Shear-path Findley fatigue on declared elastic stress windows
 
 `fatigue::critical_plane::findley` evaluates the original Findley parameter

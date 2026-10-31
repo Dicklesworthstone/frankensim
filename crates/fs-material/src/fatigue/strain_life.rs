@@ -22,6 +22,7 @@ use std::sync::Arc;
 /// Source-backed CMB calibration with explicit full-cycle/reversal fit conventions.
 pub mod source;
 
+pub(in crate::fatigue) mod inverse;
 /// Paired stress/strain histories and named mean-stress corrections.
 mod mean_stress;
 pub use mean_stress::{PairedStrainLifeMiner, StrainStressSample};
@@ -192,74 +193,13 @@ impl StrainLifeCurve {
         maximum_amplitude: f64,
         evaluate: impl Fn(f64) -> (f64, f64),
     ) -> Result<Option<f64>, FatigueError> {
-        if !amplitude.is_finite() || amplitude < 0.0 {
-            return Err(FatigueError::Arithmetic);
-        }
-        if amplitude == 0.0 {
-            return Ok(None);
-        }
-        if !minimum_amplitude.is_finite()
-            || minimum_amplitude <= 0.0
-            || !maximum_amplitude.is_finite()
-            || maximum_amplitude <= minimum_amplitude
-        {
-            return Err(FatigueError::Arithmetic);
-        }
-        if amplitude < minimum_amplitude || amplitude > maximum_amplitude {
-            return Err(FatigueError::StrainAmplitudeOutsideCurve {
-                amplitude,
-                minimum: minimum_amplitude,
-                maximum: maximum_amplitude,
-            });
-        }
-        if amplitude == maximum_amplitude {
-            return Ok(Some(self.minimum_cycles));
-        }
-        if amplitude == minimum_amplitude {
-            return Ok(Some(self.maximum_cycles));
-        }
-        let mut lo = self.log_minimum_reversals;
-        let mut hi = self.log_maximum_reversals;
-        let mut x = lo + 0.5 * (hi - lo);
-        for _ in 0..64 {
-            let (value, derivative) = evaluate(x);
-            let residual = value - amplitude;
-            if !value.is_finite() {
-                return Err(FatigueError::Arithmetic);
-            }
-            let next_newton = if derivative.is_finite() && derivative < 0.0 {
-                x - residual / derivative
-            } else {
-                f64::NAN
-            };
-            // The local log-life step measures relative LIFE error; a small
-            // strain residual alone would misjudge very shallow fatigue fits.
-            if residual == 0.0
-                || (next_newton.is_finite()
-                    && (next_newton - x).abs() <= 8.0 * f64::EPSILON * x.abs().max(1.0))
-            {
-                return self.life_from_log_reversals(x);
-            }
-            if residual > 0.0 {
-                lo = x;
-            } else {
-                hi = x;
-            }
-            let midpoint = lo + 0.5 * (hi - lo);
-            if midpoint == lo || midpoint == hi {
-                return self.life_from_log_reversals(midpoint);
-            }
-            // Force geometric bracket shrinkage when Newton lands too near an
-            // endpoint; this retains a bounded convergence guarantee.
-            let margin = 0.05 * (hi - lo);
-            x = if next_newton.is_finite() && next_newton > lo + margin && next_newton < hi - margin
-            {
-                next_newton
-            } else {
-                midpoint
-            };
-        }
-        Err(FatigueError::Arithmetic)
+        inverse::invert_life(
+            amplitude,
+            (minimum_amplitude, maximum_amplitude),
+            (self.minimum_cycles, self.maximum_cycles),
+            (self.log_minimum_reversals, self.log_maximum_reversals),
+            evaluate,
+        )
     }
 
     fn evaluate_log_reversals(&self, log_reversals: f64) -> (f64, f64) {
@@ -272,14 +212,6 @@ impl StrainLifeCurve {
             elastic + plastic,
             p.fatigue_strength_exponent * elastic + p.fatigue_ductility_exponent * plastic,
         )
-    }
-
-    fn life_from_log_reversals(&self, x: f64) -> Result<Option<f64>, FatigueError> {
-        let cycles = det::exp(x - core::f64::consts::LN_2);
-        if !cycles.is_finite() || cycles < self.minimum_cycles || cycles > self.maximum_cycles {
-            return Err(FatigueError::Arithmetic);
-        }
-        Ok(Some(cycles))
     }
 }
 
