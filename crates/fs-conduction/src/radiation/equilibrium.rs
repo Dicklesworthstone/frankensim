@@ -4,7 +4,7 @@ mod state;
 
 use super::{
     ConductionError, ConductionProblem, ConductionSolution, Cx, DofMap,
-    GrayDiffuseEnclosure, PreparedRadiosity, RadiosityReport, ThermalInterfaces,
+    RadiationSurface, RadiosityReport, ThermalInterfaces,
     radiation_error,
 };
 use crate::assemble::{assemble_operator_scaled_with_interfaces, residual};
@@ -36,25 +36,23 @@ fn poll(cx: &Cx<'_>) -> Result<(), ConductionError> {
     })
 }
 
-/// Called only on an actual candidate from this exact immutable enclosure.
-/// Reuse its factorization, but never its previous temperature-dependent RHS.
+/// Called only with fresh radiosity at the actual candidate's temperatures.
+/// The driver reuses its factorization, never a previous temperature RHS.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check<F>(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     interfaces: Option<&ThermalInterfaces>,
-    prepared: &PreparedRadiosity<'_>,
     candidate: &ConductionSolution,
-    surface_temperatures_k: &[f64],
+    nonlinear: RadiosityReport,
     applied: &RadiosityReport,
     apply_boundary: &F,
-    original_convection: Option<&GrayDiffuseEnclosure>,
+    original_convection: Option<&[RadiationSurface]>,
 ) -> Result<EnclosureEquilibriumReport, ConductionError>
 where
     F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
 {
     poll(cx)?;
-    let nonlinear = prepared.solve(cx, surface_temperatures_k)?;
     let mut max_patch_heat_mismatch_w = 0.0f64;
     for (&new, &old) in nonlinear.net_outward_heat_w.iter().zip(&applied.net_outward_heat_w) {
         let mismatch = (new - old).abs();
@@ -86,12 +84,12 @@ where
         problem.element_materials)?;
     poll(cx)?;
     let mut values = residual(&system, &dofs, &candidate.temperature);
-    if let Some(enclosure) = original_convection {
+    if let Some(surfaces) = original_convection {
         // Reassemble the ORIGINAL convection and add actual radiative loads
         // directly. Reconstructing a shifted Robin reference here could hide
         // radiation when q/h rounds away against the reservoir temperature.
         // Uniform outward flux contributes +area*q/3 to every face vertex.
-        for (surface, &flux) in enclosure.surfaces.iter().zip(&nonlinear.net_outward_flux_w_m2) {
+        for (surface, &flux) in surfaces.iter().zip(&nonlinear.net_outward_flux_w_m2) {
             for (ordinal, &slot) in surface.face_slots.iter().enumerate() {
                 if ordinal % crate::assemble::ASSEMBLY_TILE == 0 { poll(cx)?; }
                 let face = &problem.mesh.boundary()[slot];

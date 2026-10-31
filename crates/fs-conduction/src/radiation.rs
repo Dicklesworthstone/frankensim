@@ -47,6 +47,10 @@ mod convection;
 pub(crate) mod enclosure_exchange;
 pub use enclosure_exchange::EnclosureExchangeReport;
 mod prepared;
+/// Diffuse-gray surface exchange through a partially open black environment.
+pub mod open;
+pub use open::{OpenDiffuseEnclosure, OpenEnclosureSolution, OpenRadiationBoundary,
+    OpenRadiosityReport, solve_with_open_gray_diffuse_enclosure};
 mod equilibrium;
 /// Spatially resolved nonlinear T^4 exchange and its exact local tangent.
 pub mod pointwise;
@@ -1100,6 +1104,40 @@ impl GrayDiffuseEnclosure {
                 "supply temperatures in view-factor row order",
             ));
         }
+        for (surface, &temperature) in self.surfaces.iter().zip(surface_temperatures_k) {
+            surface.emissivity.validate_temperature(
+                surface.name(), "gray-diffuse surface temperature", temperature,
+            )?;
+        }
+        solve_radiosity_system(cx, surface_temperatures_k,
+            |i| self.surfaces[i].emissivity.value, |i| self.surfaces[i].area_m2,
+            &self.view_factors,
+            self.surfaces.iter().all(|surface| {
+                !matches!(surface.emissivity.uncertainty, UncertaintyModel::Unstated)
+            }), factors)
+    }
+
+    fn validate_for(&self, mesh: &ConductionMesh) -> Result<(), ConductionError> {
+        for surface in &self.surfaces {
+            surface.validate_for(mesh)?;
+        }
+        Ok(())
+    }
+}
+
+// Both the closed-surface model and an open model completed by an explicitly
+// black bath use the SAME radiosity and stable heat equations. Callers admit
+// physical temperatures and retain the material evidence before this kernel.
+fn solve_radiosity_system(
+    cx: &Cx<'_>,
+    surface_temperatures_k: &[f64],
+    emissivity: impl Fn(usize) -> f64,
+    area_m2: impl Fn(usize) -> f64,
+    view_factors: &ViewFactorMatrix,
+    emissivity_uncertainty_complete: bool,
+    factors: Option<&prepared::DenseRadiosityFactorization>,
+) -> Result<RadiosityReport, ConductionError> {
+        let n = view_factors.len();
         // The large common blackbody background carries no exchange in a
         // closed enclosure. Solve only its departures, preserving even heat
         // driven by adjacent representable temperatures. Row-sum defects stay
@@ -1119,15 +1157,10 @@ impl GrayDiffuseEnclosure {
                 stage: "radiation-radiosity-assemble",
                 at: i,
             })?;
-            self.surfaces[i].emissivity.validate_temperature(
-                self.surfaces[i].name(),
-                "gray-diffuse surface temperature",
-                surface_temperatures_k[i],
-            )?;
-            let emissivity = self.surfaces[i].emissivity.value;
+            let emissivity = emissivity(i);
             for j in 0..n {
                 matrix[i][j] = if i == j { 1.0 } else { 0.0 }
-                    - (1.0 - emissivity) * self.view_factors.factors[i][j];
+                    - (1.0 - emissivity) * view_factors.factors[i][j];
             }
             emission_delta[i] = balance::emission_difference(
                 STEFAN_BOLTZMANN_W_M2_K4,
@@ -1138,7 +1171,7 @@ impl GrayDiffuseEnclosure {
                 emissivity,
                 emission_delta[i],
                 reference_emission,
-                self.view_factors.row_sums[i],
+                view_factors.row_sums[i],
             );
         }
         let radiosity_delta = match factors {
@@ -1160,19 +1193,19 @@ impl GrayDiffuseEnclosure {
             let mut lhs = 0.0;
             for j in 0..n {
                 irradiation =
-                    self.view_factors.factors[i][j].mul_add(radiosity_delta[j], irradiation);
+                    view_factors.factors[i][j].mul_add(radiosity_delta[j], irradiation);
                 lhs = matrix[i][j].mul_add(radiosity_delta[j], lhs);
             }
             irradiation_w_m2[i] =
-                reference_emission.mul_add(self.view_factors.row_sums[i], irradiation);
+                reference_emission.mul_add(view_factors.row_sums[i], irradiation);
             net_outward_flux_w_m2[i] = balance::outward_flux(
-                self.surfaces[i].emissivity.value,
+                emissivity(i),
                 emission_delta[i],
                 irradiation,
                 reference_emission,
-                self.view_factors.row_sums[i],
+                view_factors.row_sums[i],
             );
-            net_outward_heat_w[i] = self.surfaces[i].area_m2 * net_outward_flux_w_m2[i];
+            net_outward_heat_w[i] = area_m2(i) * net_outward_flux_w_m2[i];
             heat_sum += net_outward_heat_w[i];
             heat_scale += net_outward_heat_w[i].abs();
             linear_residual_max = linear_residual_max.max((lhs - rhs[i]).abs());
@@ -1186,32 +1219,11 @@ impl GrayDiffuseEnclosure {
             enclosure_energy_closure_w: heat_sum,
             enclosure_energy_scale_w: heat_scale.max(f64::MIN_POSITIVE),
             linear_residual_max_w_m2: linear_residual_max,
-            view_factor_identity: self.view_factors.identity,
-            view_factor_row_sums: self.view_factors.row_sums.clone(),
-            max_reciprocity_residual: self.view_factors.max_reciprocity_residual,
-            emissivity_uncertainty_complete: self.surfaces.iter().all(|surface| {
-                !matches!(surface.emissivity.uncertainty, UncertaintyModel::Unstated)
-            }),
+            view_factor_identity: view_factors.identity,
+            view_factor_row_sums: view_factors.row_sums.clone(),
+            max_reciprocity_residual: view_factors.max_reciprocity_residual,
+            emissivity_uncertainty_complete,
         })
-    }
-
-    fn surface_temperatures(
-        &self,
-        mesh: &ConductionMesh,
-        temperature: &[f64],
-    ) -> Result<Vec<f64>, ConductionError> {
-        self.surfaces
-            .iter()
-            .map(|surface| surface.mean_temperature(mesh, temperature))
-            .collect()
-    }
-
-    fn validate_for(&self, mesh: &ConductionMesh) -> Result<(), ConductionError> {
-        for surface in &self.surfaces {
-            surface.validate_for(mesh)?;
-        }
-        Ok(())
-    }
 }
 
 /// Evidence from one gray-diffuse radiosity solve.
@@ -1373,13 +1385,40 @@ fn solve_enclosure<F>(
 where
     F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
 {
-    coupling_config.validate()?;
     enclosure.validate_for(problem.mesh)?;
+    let prepared = enclosure.prepare_radiosity(cx)?;
+    solve_radiating_surfaces(cx, problem, interfaces, &enclosure.surfaces,
+        conduction_config, coupling_config, apply_boundary,
+        &|temperatures| prepared.solve(cx, temperatures), convection)
+}
+
+// One physical iteration owner for both closed enclosures and open black-bath
+// exchange. A reservoir row has no solid trace: only supplied surfaces enter
+// the field binding and the original nonlinear conduction residual.
+#[allow(clippy::too_many_arguments)]
+fn solve_radiating_surfaces<F, R>(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    interfaces: Option<&ThermalInterfaces>,
+    surfaces: &[RadiationSurface],
+    conduction_config: SolveConfig,
+    coupling_config: CoupledRadiationConfig,
+    apply_boundary: &F,
+    evaluate: &R,
+    convection: bool,
+) -> Result<(CoupledRadiationSolution, crate::ThermalBoundary), ConductionError>
+where
+    F: Fn(&RadiosityReport) -> Result<crate::ThermalBoundary, ConductionError>,
+    R: Fn(&[f64]) -> Result<RadiosityReport, ConductionError>,
+{
+    coupling_config.validate()?;
+    let surface_temperatures = |temperature: &[f64]| {
+        surfaces.iter().map(|surface| surface.mean_temperature(problem.mesh, temperature))
+            .collect::<Result<Vec<_>, ConductionError>>()
+    };
     let mut conduction = run_conduction(cx, problem, interfaces, conduction_config.clone())?;
     require_enclosure_solid_residual(cx, &conduction)?;
-    let mut driving_temperatures =
-        enclosure.surface_temperatures(problem.mesh, &conduction.temperature)?;
-    let prepared = enclosure.prepare_radiosity(cx)?;
+    let mut driving_temperatures = surface_temperatures(&conduction.temperature)?;
     let mut update_history = Vec::new();
     let mut equilibrium_checks = 0usize;
     let mut last_equilibrium_residual = None;
@@ -1389,7 +1428,7 @@ where
             stage: "radiation-coupling",
             at: iteration,
         })?;
-        let radiosity = prepared.solve(cx, &driving_temperatures)?;
+        let radiosity = evaluate(&driving_temperatures)?;
         let overlaid = apply_boundary(&radiosity)?;
         let dofs = DofMap::new(&overlaid, problem.mesh.vertex_count())?;
         let mut next_config = conduction_config.clone();
@@ -1402,9 +1441,8 @@ where
         };
         let next = run_conduction(cx, next_problem, interfaces, next_config)?;
         require_enclosure_solid_residual(cx, &next)?;
-        let actual_temperatures =
-            enclosure.surface_temperatures(problem.mesh, &next.temperature)?;
-        for (surface, &temperature_k) in enclosure.surfaces.iter().zip(&actual_temperatures) {
+        let actual_temperatures = surface_temperatures(&next.temperature)?;
+        for (surface, &temperature_k) in surfaces.iter().zip(&actual_temperatures) {
             surface.emissivity.validate_temperature(
                 surface.name(),
                 "coupled surface temperature",
@@ -1427,9 +1465,10 @@ where
         update_history.push(update);
         conduction = next;
         if update <= threshold {
+            let nonlinear = evaluate(&actual_temperatures)?;
             let equilibrium = equilibrium::check(cx, problem, interfaces,
-                &prepared, &conduction, &actual_temperatures, &radiosity, apply_boundary,
-                convection.then_some(enclosure))?;
+                &conduction, nonlinear, &radiosity, apply_boundary,
+                convection.then_some(surfaces))?;
             equilibrium_checks += 1;
             last_equilibrium_residual = Some(equilibrium.residual_w);
             if equilibrium.residual_w <= equilibrium.residual_threshold_w {

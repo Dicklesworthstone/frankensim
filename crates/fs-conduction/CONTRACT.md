@@ -382,6 +382,33 @@ temperatures, reflective surfaces, exact isothermal equilibrium, and retained
 imperfect-row leakage. This numerical correction adds no view-factor accuracy,
 material calibration or continuum radiation claim.
 
+`radiation::OpenDiffuseEnclosure` admits reciprocal surface factors with row
+sums below one. Each row deficit sees one explicitly black, isotropic ambient
+reservoir. The completed reciprocal system adds a bath of effective exchange
+area `sum(A_i F_i,bath)`, not a fabricated mesh surface; no escaped view is
+redistributed among solid patches. The existing shifted radiosity kernel and
+factorization evaluate both surface powers and ambient power independently.
+Their signed sum remains a diagnostic, never a forced zero. Source emissivity
+domains constrain solid temperatures, not the ambient temperature. The model
+supports 1..=255 physical surfaces and refuses an absent escape, overfull rows,
+overlapping/foreign traces, unsupported source temperatures and nonphysical or
+unrepresentable arithmetic.
+
+`radiation::solve_with_open_gray_diffuse_enclosure` drives the actual steady
+solid solver on 1..=64 exact named uniform Robin/Neumann traces. It shares the
+closed enclosure's bounded outer iteration and fresh full nonlinear residual
+gate, retaining heterogeneous conductivity and fixed contact. Original
+convection, original prescribed heat, net solid radiation and independently
+computed ambient absorption remain separate. The original conduction problem
+must have a thermal anchor before radiation is applied. Frozen emissivity,
+isothermal patch means and a black diffuse bath are explicit approximations;
+this adds no spatial visibility kernel, directional illumination,
+participating-medium model, radiation-only nullspace solver or coupled
+adjoint. `tests/radiation/open.rs` compares partial views and reflection with
+independent scalar equations, checks equilibrium/near-equilibrium and cold-bath
+limits, and solves an actual conduction/convection/radiation slab against an
+independent heat-balance oracle.
+
 `solve_with_convective_gray_diffuse_enclosure` explicitly composes that same
 closed-enclosure exchange with original convection on each exact same-named
 uniform Robin trace. A frozen radiative flux is represented by the algebraic
@@ -406,8 +433,15 @@ symmetrizes area-weighted exchange, preserves the symmetric sampled zero
 pattern, and uses bounded symmetric scaling to close rows. Excessive factor
 adjustments, infeasible support and exhausted work refuse. Discrete conservation
 does not establish geometric closure or a confidence bound. The current direct
-triangle scan admits 2..=64 patches, 2..=32 replicates, up to one million
+triangle scan admits 1..=64 patches, 2..=32 replicates, up to one million
 triangles, power-of-two samples and an explicit total intersection budget.
+`project_open` instead retains sampled escape as exchange with an explicit
+black surrounding reservoir and runs the same bounded reciprocal projection
+on the augmented system. Its adjustment budget includes the ambient fractions.
+Unassigned opaque and back-facing hits still refuse: they cannot be relabeled
+as escape. The returned physical-surface factors and evidence feed
+`OpenDiffuseEnclosure` directly. Geometry tests exercise an actual open cavity,
+a single exposed patch, preserved blocking, replay and solid-plus-bath closure.
 
 `solve_with_ambient_radiation` adds the nonlinear area-mean patch law
 `epsilon sigma A (T_mean^4 - T_ambient^4)` to existing named uniform Robin
@@ -1127,8 +1161,8 @@ authority.
   README/CONTRACT contradiction, bead f85xj.16.9). No claim beyond those
   staged drivers: no general transient frontend, no adaptive time stepping,
   no k(T) marching.
-- RADIATION IS A SURFACE-ONLY FIRST RUNG. Linearized surface-to-ambient exchange
-  and diffuse-gray closed-enclosure exchange are implemented. This crate
+- RADIATION IS A SURFACE-ONLY FIRST RUNG. Linearized surface-to-ambient exchange,
+  diffuse-gray closed enclosures and explicitly black-bath open enclosures are implemented. This crate
   generates a closed-form concentric-sphere matrix and finite-triangle
   geometry-QMC estimates with explicit opaque first-hit visibility. Sampled
   losses cannot be redistributed into a closed matrix. Neither zero observed

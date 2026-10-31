@@ -83,7 +83,7 @@ pub(super) struct DenseRadiosityFactorization {
 }
 
 impl DenseRadiosityFactorization {
-    fn new(cx: &Cx<'_>, matrix: &[Vec<f64>]) -> Result<Self, ConductionError> {
+    pub(super) fn new(cx: &Cx<'_>, matrix: &[Vec<f64>]) -> Result<Self, ConductionError> {
         let n = matrix.len();
         if !(2..=MAX_ENCLOSURE_SURFACES).contains(&n)
             || matrix.iter().any(|row| row.len() != n || row.iter().any(|v| !v.is_finite()))

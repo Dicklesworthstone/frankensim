@@ -8,7 +8,7 @@ use crate::{
     ScalarField, ThermalBc, ThermalBoundary,
     assemble::ASSEMBLY_TILE,
 };
-use super::{GrayDiffuseEnclosure, PreparedRadiosity, RadiosityReport};
+use super::{GrayDiffuseEnclosure, PreparedRadiosity, RadiationSurface, RadiosityReport};
 
 /// Accepted exchange and actual work over all enclosure trials.
 #[derive(Debug, Clone)]
@@ -61,12 +61,23 @@ pub(crate) fn bind_traces(
     enclosure: &GrayDiffuseEnclosure,
 ) -> Result<Vec<Patch>, ConductionError> {
     enclosure.validate_for(problem.mesh)?;
-    if enclosure.surfaces().is_empty() || enclosure.surfaces().len() > 64 {
-        return Err(invalid("closed enclosure requires 1..=64 patches"));
+    bind_surface_traces(cx, problem, enclosure.surfaces())
+}
+
+// The black bath of an open enclosure has no solid trace. Both callers bind
+// exactly the physical surfaces through the same natural-boundary rules.
+pub(super) fn bind_surface_traces(
+    cx: &Cx<'_>,
+    problem: ConductionProblem<'_>,
+    surfaces: &[RadiationSurface],
+) -> Result<Vec<Patch>, ConductionError> {
+    if surfaces.is_empty() || surfaces.len() > 64 {
+        return Err(invalid("coupled radiation requires 1..=64 patches"));
     }
-    let mut patches = Vec::with_capacity(enclosure.surfaces().len());
-    for surface in enclosure.surfaces() {
+    let mut patches = Vec::with_capacity(surfaces.len());
+    for surface in surfaces {
         poll(cx, patches.len())?;
+        surface.validate_for(problem.mesh)?;
         let region = problem
             .boundary
             .region_names()

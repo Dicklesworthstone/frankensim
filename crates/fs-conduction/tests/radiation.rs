@@ -4,6 +4,8 @@ mod support;
 
 #[path = "radiation/adjoint.rs"]
 mod enclosure_adjoint;
+#[path = "radiation/open.rs"]
+mod open;
 
 use fs_conduction::bc::{ThermalBc, ThermalBoundary, ThermalBoundaryBuilder};
 use fs_conduction::field::ScalarField;

@@ -25,7 +25,10 @@ fn emissivity() -> SurfaceEmissivity {
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS),
-            value: PropertyValue::Scalar { value: 0.8, dims: EMISSIVITY_DIMS },
+            value: PropertyValue::Scalar {
+                value: 0.8,
+                dims: EMISSIVITY_DIMS,
+            },
             validity: ValidityDomain::unconstrained().with("T", 250.0, 500.0),
             uncertainty: UncertaintyModel::Unstated,
             interpolation: InterpolationPolicy::ConstantWithinValidity,
@@ -48,8 +51,13 @@ fn emissivity() -> SurfaceEmissivity {
         Vec::new(),
     )
     .expect("fixture card");
-    SurfaceEmissivity::from_card("wall-finish", &card, 350.0, SelectionPolicy::SingleClaimOnly)
-        .expect("fixture emissivity")
+    SurfaceEmissivity::from_card(
+        "wall-finish",
+        &card,
+        350.0,
+        SelectionPolicy::SingleClaimOnly,
+    )
+    .expect("fixture emissivity")
 }
 
 fn config() -> DiffuseViewFactorConfig {
@@ -73,19 +81,28 @@ fn projection() -> ViewFactorProjection {
 /// Six separate solids surround a 2 m by 1 m by 1 m void. All normals are
 /// extracted from real tetrahedra; the selected outward normals point into it.
 fn cavity(blocked: bool) -> (ConductionMesh, Vec<RadiationSurface>) {
+    cavity_geometry(blocked, false)
+}
+
+fn cavity_geometry(blocked: bool, open: bool) -> (ConductionMesh, Vec<RadiationSurface>) {
     let size = [2.0, 1.0, 1.0];
     let mut positions = Vec::new();
     let mut tets = Vec::new();
     let mut append_box = |origin: [f64; 3], extent: [f64; 3]| {
         let (complex, points) = box_grid([1, 1, 1], extent);
         let offset = u32::try_from(positions.len()).expect("small fixture");
-        positions.extend(points.into_iter().map(|p| {
-            [p[0] + origin[0], p[1] + origin[1], p[2] + origin[2]]
-        }));
+        positions.extend(
+            points
+                .into_iter()
+                .map(|p| [p[0] + origin[0], p[1] + origin[1], p[2] + origin[2]]),
+        );
         tets.extend(complex.tets.into_iter().map(|tet| tet.map(|v| v + offset)));
     };
     for axis in 0..3 {
         for side in 0..2 {
+            if open && axis == 0 && side == 1 {
+                continue;
+            }
             let mut origin = [0.0; 3];
             origin[axis] = if side == 0 { -0.125 } else { size[axis] };
             let mut extent = size;
@@ -102,14 +119,20 @@ fn cavity(blocked: bool) -> (ConductionMesh, Vec<RadiationSurface>) {
     let mut surfaces = Vec::new();
     for (axis, &length) in size.iter().enumerate() {
         for side in 0..2 {
+            if open && axis == 0 && side == 1 {
+                continue;
+            }
             let coordinate = if side == 0 { 0.0 } else { length };
             let normal = if side == 0 { 1.0 } else { -1.0 };
-            surfaces.push(RadiationSurface::new(
-                &mesh,
-                format!("wall-{axis}-{side}"),
-                |face| face.centroid[axis] == coordinate && face.outward_normal[axis] == normal,
-                finish.clone(),
-            ).expect("interior wall"));
+            surfaces.push(
+                RadiationSurface::new(
+                    &mesh,
+                    format!("wall-{axis}-{side}"),
+                    |face| face.centroid[axis] == coordinate && face.outward_normal[axis] == normal,
+                    finish.clone(),
+                )
+                .expect("interior wall"),
+            );
         }
     }
     (mesh, surfaces)
@@ -119,10 +142,16 @@ fn cavity(blocked: bool) -> (ConductionMesh, Vec<RadiationSurface>) {
 fn g1_finite_parallel_square_factor_and_unequal_area_energy_closure() {
     let (mesh, surfaces) = cavity(false);
     with_cx(|cx| {
-        let estimate = estimate_diffuse_view_factors(cx, &mesh, &surfaces, DiffuseViewFactorConfig {
-            samples_per_replicate: 4096,
-            ..config()
-        }).expect("geometry estimate");
+        let estimate = estimate_diffuse_view_factors(
+            cx,
+            &mesh,
+            &surfaces,
+            DiffuseViewFactorConfig {
+                samples_per_replicate: 4096,
+                ..config()
+            },
+        )
+        .expect("geometry estimate");
         assert_eq!(estimate.areas_m2(), &[1.0, 1.0, 2.0, 2.0, 2.0, 2.0]);
         assert_eq!(estimate.samples_per_surface(), 16_384);
         assert!(estimate.ray_triangle_tests() > 0);
@@ -134,31 +163,52 @@ fn g1_finite_parallel_square_factor_and_unequal_area_energy_closure() {
         // - X atan(X) - Y atan(Y)]. Independent of the ray estimator.
         const REFERENCE: f64 = 0.068_589_588_818_552_6;
         for (i, j) in [(0, 1), (1, 0)] {
-            assert!((estimate.factors()[i][j] - REFERENCE).abs() < 0.006,
-                "finite plate estimate {} differs from {REFERENCE}", estimate.factors()[i][j]);
+            assert!(
+                (estimate.factors()[i][j] - REFERENCE).abs() < 0.006,
+                "finite plate estimate {} differs from {REFERENCE}",
+                estimate.factors()[i][j]
+            );
         }
         for i in 0..surfaces.len() {
-            assert_eq!(estimate.hit_counts()[i].iter().sum::<u64>(), estimate.samples_per_surface());
+            assert_eq!(
+                estimate.hit_counts()[i].iter().sum::<u64>(),
+                estimate.samples_per_surface()
+            );
             assert_eq!(estimate.escaped_counts()[i], 0);
             assert_eq!(estimate.unassigned_counts()[i], 0);
             assert_eq!(estimate.backface_counts()[i], 0);
             assert_eq!(estimate.factors()[i][i], 0.0);
             for j in 0..surfaces.len() {
-                assert_eq!(estimate.factors()[i][j],
-                    estimate.hit_counts()[i][j] as f64 / estimate.samples_per_surface() as f64);
+                assert_eq!(
+                    estimate.factors()[i][j],
+                    estimate.hit_counts()[i][j] as f64 / estimate.samples_per_surface() as f64
+                );
                 assert!(estimate.standard_errors()[i][j].is_finite());
                 assert!(estimate.standard_errors()[i][j] >= 0.0);
             }
         }
-        assert!(estimate.project_closed(cx, ViewFactorProjection {
-            max_abs_adjustment: 1.0e-15,
-            ..projection()
-        }).is_err(), "a reciprocal repair cannot silently exceed its adjustment budget");
-        let projected = estimate.project_closed(cx, projection()).expect("closed projection");
+        assert!(
+            estimate
+                .project_closed(
+                    cx,
+                    ViewFactorProjection {
+                        max_abs_adjustment: 1.0e-15,
+                        ..projection()
+                    }
+                )
+                .is_err(),
+            "a reciprocal repair cannot silently exceed its adjustment budget"
+        );
+        let projected = estimate
+            .project_closed(cx, projection())
+            .expect("closed projection");
         assert!(projected.max_abs_adjustment() <= projection().max_abs_adjustment);
         assert!(projected.iterations() <= projection().max_iterations);
         let matrix = projected.matrix();
-        assert!(matches!(matrix.evidence(), ViewFactorEvidence::GeometryQmc { .. }));
+        assert!(matches!(
+            matrix.evidence(),
+            ViewFactorEvidence::GeometryQmc { .. }
+        ));
         for i in 0..surfaces.len() {
             assert!((matrix.row_sums()[i] - 1.0).abs() <= 2.0e-12);
             for j in 0..surfaces.len() {
@@ -168,7 +218,8 @@ fn g1_finite_parallel_square_factor_and_unequal_area_energy_closure() {
             }
         }
         let enclosure = GrayDiffuseEnclosure::new(surfaces, matrix.clone()).expect("enclosure");
-        let report = enclosure.solve(cx, &[450.0, 300.0, 350.0, 325.0, 375.0, 400.0])
+        let report = enclosure
+            .solve(cx, &[450.0, 300.0, 350.0, 325.0, 375.0, 400.0])
             .expect("radiosity from computed geometry");
         assert!(report.net_outward_heat_w[0] > 0.0);
         assert!(report.net_outward_heat_w[1] < 0.0);
@@ -185,8 +236,16 @@ fn g5_replay_and_surface_reorder_preserve_named_random_streams() {
         assert_eq!(first.identity(), replay.identity());
         assert_eq!(first.hit_counts(), replay.hit_counts());
         assert_eq!(first.standard_errors(), replay.standard_errors());
-        let changed_seed = estimate_diffuse_view_factors(cx, &mesh, &surfaces,
-            DiffuseViewFactorConfig { seed: config().seed + 1, ..config() }).unwrap();
+        let changed_seed = estimate_diffuse_view_factors(
+            cx,
+            &mesh,
+            &surfaces,
+            DiffuseViewFactorConfig {
+                seed: config().seed + 1,
+                ..config()
+            },
+        )
+        .unwrap();
         assert_ne!(first.identity(), changed_seed.identity());
         assert_ne!(first.hit_counts(), changed_seed.hit_counts());
         surfaces.reverse();
@@ -195,8 +254,14 @@ fn g5_replay_and_surface_reorder_preserve_named_random_streams() {
         for i in 0..n {
             assert_eq!(first.names()[i], reversed.names()[n - 1 - i]);
             for j in 0..n {
-                assert_eq!(first.hit_counts()[i][j], reversed.hit_counts()[n - 1 - i][n - 1 - j]);
-                assert_eq!(first.standard_errors()[i][j], reversed.standard_errors()[n - 1 - i][n - 1 - j]);
+                assert_eq!(
+                    first.hit_counts()[i][j],
+                    reversed.hit_counts()[n - 1 - i][n - 1 - j]
+                );
+                assert_eq!(
+                    first.standard_errors()[i][j],
+                    reversed.standard_errors()[n - 1 - i][n - 1 - j]
+                );
             }
         }
     });
@@ -211,15 +276,25 @@ fn unassigned_faces_occlude_targets_and_cannot_be_projected_closed() {
         assert!(partial.unassigned_counts()[0] > 0);
         assert_eq!(partial.escaped_counts(), &[0, 0]);
         assert!(partial.project_closed(cx, projection()).is_err());
+        assert!(
+            partial.project_open(cx, projection()).is_err(),
+            "opaque unnamed walls are not a black external reservoir"
+        );
         let (blocked_mesh, blocked_surfaces) = cavity(true);
-        let blocked = estimate_diffuse_view_factors(cx, &blocked_mesh, &blocked_surfaces[..2], config()).unwrap();
+        let blocked =
+            estimate_diffuse_view_factors(cx, &blocked_mesh, &blocked_surfaces[..2], config())
+                .unwrap();
         for i in 0..2 {
             assert_eq!(blocked.hit_counts()[i].iter().sum::<u64>(), 0);
-            assert_eq!(blocked.unassigned_counts()[i], blocked.samples_per_surface());
+            assert_eq!(
+                blocked.unassigned_counts()[i],
+                blocked.samples_per_surface()
+            );
             assert_eq!(blocked.escaped_counts()[i], 0);
             assert_eq!(blocked.backface_counts()[i], 0);
         }
         assert!(blocked.project_closed(cx, projection()).is_err());
+        assert!(blocked.project_open(cx, projection()).is_err());
     });
 }
 
@@ -227,8 +302,15 @@ fn unassigned_faces_occlude_targets_and_cannot_be_projected_closed() {
 fn outward_open_surfaces_report_escape_without_renormalizing() {
     let (complex, points) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
     let mesh = ConductionMesh::new(complex, points).unwrap();
-    let surfaces = [0.0, 1.0].map(|x| RadiationSurface::new(&mesh, format!("outer-{x}"),
-        |face| face.centroid[0] == x, emissivity()).unwrap());
+    let surfaces = [0.0, 1.0].map(|x| {
+        RadiationSurface::new(
+            &mesh,
+            format!("outer-{x}"),
+            |face| face.centroid[0] == x,
+            emissivity(),
+        )
+        .unwrap()
+    });
     with_cx(|cx| {
         let estimate = estimate_diffuse_view_factors(cx, &mesh, &surfaces, config()).unwrap();
         for i in 0..2 {
@@ -239,27 +321,128 @@ fn outward_open_surfaces_report_escape_without_renormalizing() {
             assert_eq!(estimate.backface_counts()[i], 0);
         }
         assert!(estimate.project_closed(cx, projection()).is_err());
+        let open = estimate
+            .project_open(cx, projection())
+            .expect("escaped rays reach the bath");
+        assert_eq!(open.surface_factors(), &[vec![0.0, 0.0], vec![0.0, 0.0]]);
+        assert_eq!(open.ambient_factors(), &[1.0, 1.0]);
+        assert_eq!(open.max_abs_adjustment(), 0.0);
+    });
+}
+
+#[test]
+fn g1_open_cavity_retains_geometry_escape_and_closes_surface_plus_bath_heat() {
+    use fs_conduction::radiation::open::OpenDiffuseEnclosure;
+    let (mesh, surfaces) = cavity_geometry(false, true);
+    with_cx(|cx| {
+        let estimate = estimate_diffuse_view_factors(cx, &mesh, &surfaces, config()).unwrap();
+        assert!(estimate.escaped_counts().iter().all(|&n| n > 0));
+        assert!(estimate.unassigned_counts().iter().all(|&n| n == 0));
+        assert!(estimate.project_closed(cx, projection()).is_err());
+        let open = estimate
+            .project_open(cx, projection())
+            .expect("open geometry projection");
+        for (i, &ambient) in open.ambient_factors().iter().enumerate() {
+            let raw_escape =
+                estimate.escaped_counts()[i] as f64 / estimate.samples_per_surface() as f64;
+            assert!(ambient > 0.0 && ambient < 1.0);
+            assert!((ambient - raw_escape).abs() <= open.max_abs_adjustment());
+            assert!((open.surface_factors()[i].iter().sum::<f64>() + ambient - 1.0).abs() < 2e-15);
+            for j in 0..surfaces.len() {
+                let forward = surfaces[i].area_m2() * open.surface_factors()[i][j];
+                let reverse = surfaces[j].area_m2() * open.surface_factors()[j][i];
+                assert!((forward - reverse).abs() < 1e-12);
+            }
+        }
+        assert!(
+            matches!(open.evidence(), ViewFactorEvidence::GeometryQmc { estimate: hash, .. }
+            if *hash == estimate.identity())
+        );
+        let enclosure = OpenDiffuseEnclosure::new(
+            cx,
+            surfaces.clone(),
+            open.surface_factors().to_vec(),
+            open.evidence().clone(),
+            open.tolerance(),
+        )
+        .unwrap();
+        let report = enclosure
+            .solve(cx, &vec![400.0; surfaces.len()], 300.0)
+            .unwrap();
+        // Uniform gray walls surrounding a cooler opening must all cool.
+        assert!(report.surface_heat_w().iter().all(|&power| power > 0.0));
+        assert!(report.ambient_heat_w() < 0.0);
+        assert!(
+            (report.surface_heat_w().iter().sum::<f64>() + report.ambient_heat_w()).abs() < 1e-9
+        );
+        let repeated = estimate.project_open(cx, projection()).unwrap();
+        assert_eq!(repeated, open);
+        assert!(matches!(
+            with_cancelled_cx(|cancelled| estimate.project_open(cancelled, projection())),
+            Err(ConductionError::Cancelled { .. })
+        ));
+    });
+}
+
+#[test]
+fn g1_single_exposed_patch_samples_the_complete_surrounding_reservoir() {
+    let (complex, points) = box_grid([1, 1, 1], [1.0, 1.0, 1.0]);
+    let mesh = ConductionMesh::new(complex, points).unwrap();
+    let surface = RadiationSurface::new(
+        &mesh,
+        "exposed-face",
+        |face| face.centroid[0] == 0.0,
+        emissivity(),
+    )
+    .unwrap();
+    with_cx(|cx| {
+        let estimate = estimate_diffuse_view_factors(cx, &mesh, &[surface], config()).unwrap();
+        let open = estimate.project_open(cx, projection()).unwrap();
+        assert_eq!(open.surface_factors(), &[vec![0.0]]);
+        assert_eq!(open.ambient_factors(), &[1.0]);
     });
 }
 
 #[test]
 fn g4_cancellation_and_geometry_work_budgets_refuse() {
     let (mesh, surfaces) = cavity(false);
-    let cancelled = with_cancelled_cx(|cx| estimate_diffuse_view_factors(cx, &mesh, &surfaces, config()));
+    let cancelled =
+        with_cancelled_cx(|cx| estimate_diffuse_view_factors(cx, &mesh, &surfaces, config()));
     assert!(matches!(cancelled, Err(ConductionError::Cancelled { .. })));
     with_cx(|cx| {
         for limits in [
-            DiffuseViewFactorConfig { max_triangles: mesh.boundary().len() - 1, ..config() },
-            DiffuseViewFactorConfig { max_ray_triangle_tests: 1, ..config() },
-            DiffuseViewFactorConfig { samples_per_replicate: 3, ..config() },
-            DiffuseViewFactorConfig { replicates: 1, ..config() },
+            DiffuseViewFactorConfig {
+                max_triangles: mesh.boundary().len() - 1,
+                ..config()
+            },
+            DiffuseViewFactorConfig {
+                max_ray_triangle_tests: 1,
+                ..config()
+            },
+            DiffuseViewFactorConfig {
+                samples_per_replicate: 3,
+                ..config()
+            },
+            DiffuseViewFactorConfig {
+                replicates: 1,
+                ..config()
+            },
         ] {
             assert!(estimate_diffuse_view_factors(cx, &mesh, &surfaces, limits).is_err());
         }
         assert!(estimate_diffuse_view_factors(cx, &mesh, &[], config()).is_err());
-        assert!(estimate_diffuse_view_factors(cx, &mesh, &[surfaces[0].clone(), surfaces[0].clone()], config()).is_err());
+        assert!(
+            estimate_diffuse_view_factors(
+                cx,
+                &mesh,
+                &[surfaces[0].clone(), surfaces[0].clone()],
+                config()
+            )
+            .is_err()
+        );
         let estimate = estimate_diffuse_view_factors(cx, &mesh, &surfaces, config()).unwrap();
-        let cancelled = with_cancelled_cx(|cancelled_cx| estimate.project_closed(cancelled_cx, projection()));
+        let cancelled =
+            with_cancelled_cx(|cancelled_cx| estimate.project_closed(cancelled_cx, projection()));
         assert!(matches!(cancelled, Err(ConductionError::Cancelled { .. })));
     });
 }
@@ -267,38 +450,82 @@ fn g4_cancellation_and_geometry_work_budgets_refuse() {
 #[test]
 fn two_patch_full_visibility_projects_within_the_unit_interval() {
     let (mesh, walls) = cavity(false);
-    let remaining_faces: std::collections::BTreeSet<_> = walls.iter().skip(1)
-        .flat_map(|wall| wall.face_slots().iter().map(|&slot| mesh.boundary()[slot].face))
+    let remaining_faces: std::collections::BTreeSet<_> = walls
+        .iter()
+        .skip(1)
+        .flat_map(|wall| {
+            wall.face_slots()
+                .iter()
+                .map(|&slot| mesh.boundary()[slot].face)
+        })
         .collect();
-    let remaining = RadiationSurface::new(&mesh, "remaining-walls",
-        |face| remaining_faces.contains(&face.face), emissivity()).unwrap();
+    let remaining = RadiationSurface::new(
+        &mesh,
+        "remaining-walls",
+        |face| remaining_faces.contains(&face.face),
+        emissivity(),
+    )
+    .unwrap();
     let surfaces = vec![walls[0].clone(), remaining];
     with_cx(|cx| {
         let mut overestimated_reverse_seen = false;
         for seed in 0..16 {
-            let estimate = estimate_diffuse_view_factors(cx, &mesh, &surfaces,
+            let estimate = estimate_diffuse_view_factors(
+                cx,
+                &mesh,
+                &surfaces,
                 DiffuseViewFactorConfig {
                     seed: config().seed + seed,
                     samples_per_replicate: 128,
                     replicates: 2,
                     ..config()
-                }).unwrap();
+                },
+            )
+            .unwrap();
             assert_eq!(estimate.areas_m2(), &[1.0, 9.0]);
             assert_eq!(estimate.factors()[0], [0.0, 1.0]);
             overestimated_reverse_seen |= estimate.factors()[1][0] > 1.0 / 9.0;
-            assert!(estimate.project_closed(cx, ViewFactorProjection {
-                max_abs_adjustment: 0.0, ..projection()
-            }).is_err(), "the non-dyadic 1/9 reciprocal factor requires an actual correction");
-            let projected = estimate.project_closed(cx, ViewFactorProjection {
-                max_abs_adjustment: 0.1, ..projection()
-            }).expect("full visibility must not round above the admissible factor range");
+            assert!(
+                estimate
+                    .project_closed(
+                        cx,
+                        ViewFactorProjection {
+                            max_abs_adjustment: 0.0,
+                            ..projection()
+                        }
+                    )
+                    .is_err(),
+                "the non-dyadic 1/9 reciprocal factor requires an actual correction"
+            );
+            let projected = estimate
+                .project_closed(
+                    cx,
+                    ViewFactorProjection {
+                        max_abs_adjustment: 0.1,
+                        ..projection()
+                    },
+                )
+                .expect("full visibility must not round above the admissible factor range");
             let matrix = projected.matrix();
             assert!((matrix.factors()[0][1] - 1.0).abs() <= 1.0e-12);
-            assert!(matrix.factors().iter().flatten().all(|f| (0.0..=1.0).contains(f)));
-            assert!(matrix.row_sums().iter().all(|sum| (sum - 1.0).abs() <= 1.0e-12));
+            assert!(
+                matrix
+                    .factors()
+                    .iter()
+                    .flatten()
+                    .all(|f| (0.0..=1.0).contains(f))
+            );
+            assert!(
+                matrix
+                    .row_sums()
+                    .iter()
+                    .all(|sum| (sum - 1.0).abs() <= 1.0e-12)
+            );
             assert!(matrix.max_reciprocity_residual() <= 1.0e-12);
         }
-        assert!(overestimated_reverse_seen,
-            "this fixed-seed fixture must exercise the pre-normalization overshoot");
+        assert!(
+            overestimated_reverse_seen,
+            "this fixed-seed fixture must exercise the pre-normalization overshoot"
+        );
     });
 }
