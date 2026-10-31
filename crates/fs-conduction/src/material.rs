@@ -811,7 +811,7 @@ fn check_orthonormal(axes: &[[f64; 3]; 3]) -> Result<(), ConductionError> {
                 axes[i][1].mul_add(axes[j][1], axes[i][2] * axes[j][2]),
             );
             let want = if i == j { 1.0 } else { 0.0 };
-            if (d - want).abs() > ORTHONORMALITY_TOL {
+            if !d.is_finite() || (d - want).abs() > ORTHONORMALITY_TOL {
                 return Err(ConductionError::Conductivity {
                     what: format!(
                         "principal axes are not orthonormal: e{i}·e{j} = {d}, expected {want}"

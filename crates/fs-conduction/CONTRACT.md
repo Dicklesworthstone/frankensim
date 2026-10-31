@@ -34,6 +34,17 @@ isotropy. All three properties must have explicit temperature validity over
 the requested path. Missing-temperature producer scalars therefore cannot
 silently become heating curves.
 
+`from_orthotropic_card` uses that SAME storage/source path with three
+conductivity property keys and a declared finite orthonormal principal frame.
+All directions must have supported source data over the full caloric interval;
+no missing principal value is copied from an unrelated scalar. The existing
+tensor owner rotates both k(T) and dk/dT into the physical mesh frame, so
+material orientation changes the actual nonlinear transient operator. Source
+identities and the fixed physical frame participate in the paired material
+identity; orientation cannot silently reuse an isotropic or differently
+oriented material identity. This stationary model does not evolve the frame
+with strain, phase or microstructure.
+
 The adapter retains the original Cp/density chart, conductivity receipts and
 a separately queried reference-density answer. Reference temperature must lie
 inside the admitted span with identical other conditions, and its selected
@@ -56,9 +67,12 @@ separate reservoir/contact heat rates and step/cumulative energy balances.
 Geometry, mass and source conditions stay fixed; expansion, phase change and
 microstructure evolution remain outside this experiment.
 
-Four focused regressions cover source/reference pairing and refusal, the
+Focused G0/G1/G3 regressions cover source/reference pairing and refusal, the
 independent variable-Cp heating balance, frozen mass, and nonuniform
-equilibration with doubled k(T) without net heat creation.
+equilibration with doubled k(T) without net heat creation. Directional tests
+check the independently rotated tensor and nonlinear tangent, missing and
+nonfinite frame/data refusals, orientation-dependent heat spreading in the
+original PDE, and material/field rotation covariance with conserved energy.
 
 ```sh
 cargo test -p fs-conduction --test material_enthalpy
