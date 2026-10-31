@@ -1,8 +1,8 @@
 //! Shared material data through existing flow, advection and interface kernels.
 //! Raw transport constants are synthetic fixtures, not measured material claims.
 use fs_exec::CancelGate;
-use fs_lbm::conjugate::{EnergyConfig, FvBoundary, SimpleConfig, SolidMaterial,
-    ThermalFace, ThermalSetup, Voxel, VoxelDomain, simple_flow, solve_energy};
+use fs_lbm::conjugate::{EnergyConfig, FvBoundary, FvBuoyancyConfig, SimpleConfig, SolidMaterial,
+    ThermalFace, ThermalSetup, Voxel, VoxelDomain, fv_natural_convection, simple_flow, solve_energy};
 use fs_lbm::material::conjugate::MaterialChtFluid;
 use fs_lbm::material::conjugate::buoyant::{MaterialBuoyancyConfig, MaterialBuoyancyError};
 use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
@@ -197,6 +197,17 @@ fn natural_material_density_and_viscosity_drive_same_existing_porous_momentum() 
             .unwrap();
         let expected = 9.81 * expansion * 10.0 / (2.0 * viscosity_scale);
         near(result.flow.field.flux_x(2, 0, 0), expected, 1e-9);
+        // The frozen-coefficient public entry must admit the SAME signed
+        // density slope as the source-resolved entry. Here every cell is at
+        // 310 K, so the local viscosity and conductivity are exactly uniform.
+        let frozen = FluidTransportState::try_new(1.0, 2.0, 1.1, 2.0 * viscosity_scale).unwrap();
+        let frozen = MaterialChtFluid::try_new(&frozen).unwrap();
+        let frozen_result = fv_natural_convection(&domain, frozen.properties(), &[], &thermal,
+            &FvBuoyancyConfig::new([-9.81, 0.0, 0.0], expansion, 300.0, flow.clone()),
+            &CancelGate::new()).unwrap();
+        near(frozen_result.flow.field.flux_x(2, 0, 0), expected, 1e-9);
+        assert_eq!(frozen_result.energy.temperature, result.energy.temperature);
+        assert!(frozen_result.energy.report.balance.residual_w.abs() < 1e-8);
         assert!(result.energy.report.balance.residual_w.abs() < 1e-8);
         assert_eq!(result.reference, reference);
         assert_eq!(result.energy.temperature, vec![310.0; 4]);

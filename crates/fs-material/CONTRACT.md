@@ -5070,6 +5070,11 @@ G1 tests compare against independent constant-pressure density perturbations;
 G3 checks the dilute ideal limit and source-preserving dense-state substitution.
 The derivative does not establish phase equilibrium, a finite-temperature
 Boussinesq interval or empirical validity of the chosen critical/transport data.
+`ThermochemicalPengRobinsonModel::new` accepts pair interactions in the supplied
+species-binding order and permutes both matrix axes with the bindings. Reordering
+three or more species therefore preserves their original pair laws and every
+derived density, caloric, acoustic and thermal coefficient. G0/G1/G3 regressions
+check malformed matrices, direct EOS agreement and all ternary permutations.
 
 This is one evaluated state, not a temperature-dependent fluid law or evolving
 reservoir. Consumers must keep source/domain and frozen-property assumptions,

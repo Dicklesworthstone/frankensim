@@ -37,9 +37,15 @@ pub struct ThermochemicalPengRobinsonModel {
 }
 
 impl ThermochemicalPengRobinsonModel {
+    /// Bind critical properties and pair interactions to the original species.
+    ///
+    /// A nonempty `binary_interactions` matrix is row-major in the supplied
+    /// `bindings` order, on both axes. Species and both matrix axes are permuted
+    /// together into the source model's canonical order. An empty matrix means
+    /// zero pair interactions, as in the shared Peng--Robinson owner.
     pub fn new(
         source: ThermochemicalGasModel,
-        mut bindings: Vec<PengRobinsonSpeciesBinding>,
+        bindings: Vec<PengRobinsonSpeciesBinding>,
         binary_interactions: Vec<f64>,
     ) -> Result<Self, MaterialError> {
         let components = source.thermodynamics().components();
@@ -48,19 +54,37 @@ impl ThermochemicalPengRobinsonModel {
                 "real-gas binding requires exactly one critical-property record per active species",
             ));
         }
-        bindings.sort_by(|a, b| a.species.cmp(&b.species));
-        if bindings.iter().zip(components).any(
-            |(binding, component)| &binding.species != component.species()
+        let mut order: Vec<usize> = (0..bindings.len()).collect();
+        order.sort_by(|&a, &b| bindings[a].species.cmp(&bindings[b].species));
+        if order.iter().zip(components).any(
+            |(&index, component)| &bindings[index].species != component.species()
         ) {
             return Err(invalid(
                 "real-gas critical properties contain duplicate, missing or foreign species",
             ));
         }
-        let pr_components = bindings.iter().zip(components).map(
-            |(binding, component)| PengRobinsonComponentV1 {
-                critical_temperature: binding.critical_temperature,
-                critical_pressure: binding.critical_pressure,
-                acentric_factor: binding.acentric_factor,
+        let binary_interactions = if binary_interactions.is_empty() {
+            binary_interactions
+        } else {
+            let n = bindings.len();
+            if binary_interactions.len() != n * n {
+                return Err(invalid(
+                    "real-gas binary interactions require a square matrix in the supplied binding order",
+                ));
+            }
+            let mut canonical = Vec::with_capacity(n * n);
+            for &row in &order {
+                for &column in &order {
+                    canonical.push(binary_interactions[row * n + column]);
+                }
+            }
+            canonical
+        };
+        let pr_components = order.iter().zip(components).map(
+            |(&index, component)| PengRobinsonComponentV1 {
+                critical_temperature: bindings[index].critical_temperature,
+                critical_pressure: bindings[index].critical_pressure,
+                acentric_factor: bindings[index].acentric_factor,
                 molar_mass: component.molar_mass(),
             }
         ).collect();
@@ -260,7 +284,9 @@ impl ThermalFluidTransport for ResolvedThermochemicalRealGasState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::thermochemical_gas::tests::{model, point};
+    use crate::thermochemical_gas::tests::{model, point, species, transport};
+    use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+    use fs_thermochem::{Composition, CompositionBasis};
 
     fn bindings() -> Vec<PengRobinsonSpeciesBinding> {
         vec![
@@ -295,6 +321,124 @@ mod tests {
             1.0f64.to_bits()
         );
         assert_eq!(bound.source(), &source);
+    }
+
+    fn ternary_source() -> ThermochemicalGasModel {
+        // Manufactured caloric/transport data; this exercises species binding,
+        // not empirical accuracy of a particular real mixture.
+        ThermochemicalGasModel::new(
+            FrozenIdealGasMixtureModelV1::new(
+                vec![
+                    species("A", 0.016_042_46, 3.5, 0.0),
+                    species("B", 0.039_948, 2.5, 0.0),
+                    species("C", 0.044_009_5, 4.5, 0.0),
+                ],
+                Composition::new(CompositionBasis::MoleFraction, vec![0.25, 0.25, 0.5])
+                    .unwrap(),
+            )
+            .unwrap(),
+            vec![
+                transport("A", 1.1e-5, 0.03),
+                transport("B", 2.2e-5, 0.02),
+                transport("C", 1.5e-5, 0.025),
+            ],
+            None,
+        )
+        .unwrap()
+    }
+
+    fn ternary_bindings() -> Vec<PengRobinsonSpeciesBinding> {
+        let mut values = bindings();
+        values.swap(0, 1);
+        values.push(PengRobinsonSpeciesBinding {
+            species: SpeciesId::new("C").unwrap(),
+            critical_temperature: Temperature::new(304.1282),
+            critical_pressure: Pressure::new(7.3773e6),
+            acentric_factor: 0.22394,
+        });
+        values
+    }
+
+    #[test]
+    fn g3_ternary_pair_interactions_follow_species_through_every_permutation() {
+        let source = ternary_source();
+        let canonical_bindings = ternary_bindings();
+        let interactions = vec![0.0, 0.02, 0.12, 0.02, 0.0, -0.03, 0.12, -0.03, 0.0];
+        let canonical = ThermochemicalPengRobinsonModel::new(
+            source.clone(), canonical_bindings.clone(), interactions.clone(),
+        ).unwrap();
+        for order in [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]] {
+            let supplied = order.iter().map(|&i| canonical_bindings[i].clone()).collect();
+            let mut supplied_interactions = Vec::new();
+            for row in order {
+                for column in order {
+                    supplied_interactions.push(interactions[3 * row + column]);
+                }
+            }
+            let permuted = ThermochemicalPengRobinsonModel::new(
+                source.clone(), supplied, supplied_interactions,
+            ).unwrap();
+            assert_eq!(permuted.mechanics(), canonical.mechanics());
+            for (temperature, pressure) in [(260.0, 1.0e6), (300.0, 5.0e6), (450.0, 8.0e6)] {
+                let query = point(temperature, pressure);
+                // The complete state includes density, calorics, sound speed,
+                // expansion and transport, all of which must remain identical.
+                assert_eq!(
+                    permuted.evaluate_real_gas(&query, PengRobinsonPhaseV1::Vapor).unwrap(),
+                    canonical.evaluate_real_gas(&query, PengRobinsonPhaseV1::Vapor).unwrap(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_ternary_density_matches_original_pair_assignment_in_eos_owner() {
+        let source = ternary_source();
+        let bindings = ternary_bindings();
+        // Input order C,A,B: k_CA=0.12, k_CB=-0.03, k_AB=0.02.
+        let wrapped = ThermochemicalPengRobinsonModel::new(
+            source.clone(),
+            vec![bindings[2].clone(), bindings[0].clone(), bindings[1].clone()],
+            vec![0.0, 0.12, -0.03, 0.12, 0.0, 0.02, -0.03, 0.02, 0.0],
+        ).unwrap();
+        let direct = PengRobinsonMixtureV1::new(
+            bindings.iter().zip(source.thermodynamics().components()).map(|(binding, species)| {
+                PengRobinsonComponentV1 {
+                    critical_temperature: binding.critical_temperature,
+                    critical_pressure: binding.critical_pressure,
+                    acentric_factor: binding.acentric_factor,
+                    molar_mass: species.molar_mass(),
+                }
+            }).collect(),
+            vec![0.25, 0.25, 0.5],
+            vec![0.0, 0.02, 0.12, 0.02, 0.0, -0.03, 0.12, -0.03, 0.0],
+        ).unwrap();
+        let direct_state = direct.evaluate_pt(Temperature::new(300.0), Pressure::new(5.0e6)).unwrap();
+        let wrapped_state = wrapped.evaluate_mechanics(&point(300.0, 5.0e6)).unwrap();
+        assert_eq!(wrapped_state.mechanics(), &direct_state);
+        // Independent scalar PR cubic solved with numpy.roots, then rho=M*p/(Z*R*T).
+        // The old misplaced interactions produce 85.73957547172306 kg/m3.
+        let density = wrapped_state.mechanics().select(PengRobinsonPhaseV1::Vapor)
+            .mass_density_kg_per_m3();
+        assert!((density - 85.102_022_789_600_11).abs() < 2.0e-10);
+    }
+
+    #[test]
+    fn g0_permuted_interactions_refuse_bad_shape_and_invalid_pairs() {
+        let source = ternary_source();
+        let mut bindings = ternary_bindings();
+        bindings.rotate_left(1);
+        for bad in [
+            vec![0.0; 8],
+            vec![0.0; 10],
+            vec![0.0, 0.1, 0.2, 0.3, 0.0, 0.4, 0.2, 0.4, 0.0],
+            vec![0.0, f64::NAN, 0.2, f64::NAN, 0.0, 0.3, 0.2, 0.3, 0.0],
+            vec![0.1, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        ] {
+            assert!(ThermochemicalPengRobinsonModel::new(source.clone(), bindings.clone(), bad).is_err());
+        }
+        let zero = ThermochemicalPengRobinsonModel::new(source, bindings, vec![]).unwrap();
+        assert_eq!(zero.mechanics().binary_interactions(), &[0.0; 9]);
     }
 
     #[test]
