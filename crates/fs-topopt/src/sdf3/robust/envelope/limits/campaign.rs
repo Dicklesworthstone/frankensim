@@ -143,6 +143,10 @@ where B: FnMut(&Octree3, &mut dyn FnMut() -> ControlFlow<()>) -> Result<O, GoalR
     pub fn new(current: ComplianceCapRefit3<O>, tree: Octree3, laws: &'a [ReferenceLoad3<'a>],
         options: ComplianceCapCampaignOptions3, control: &'a mut SolveControl<'callback>, build: B,
     ) -> Result<Self, ComplianceCapCampaignError3> {
+        if current.study.has_material_body_load() {
+            return Err(GoalRefinementError3::Invalid(
+                "material body-load campaigns require loads prepared on candidate geometries").into());
+        }
         if !current.completed_and_rechecked() || current.work != control.work()
             || laws.len() != current.caps.caps().len() || laws.len() > options.enrichment.max_load_cases
             || !options.change_tolerance.is_finite() || options.change_tolerance < 0.0

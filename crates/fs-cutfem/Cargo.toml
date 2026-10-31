@@ -14,19 +14,16 @@ layer = "L3"
 # The ledger-shaped VJP registry is itself a frontier fs-adjoint surface.
 # Keep the core elasticity operator available without pulling in that layer;
 # callers that compose recorded differentiation DAGs opt in explicitly.
-adjoint-vjp = ["dep:fs-adjoint", "dep:fs-blake3"]
+adjoint-vjp = ["dep:fs-adjoint"]
 
 [dependencies]
 fs-adjoint = { path = "../fs-adjoint", features = ["ledger-transpose"], optional = true }
-fs-blake3 = { path = "../fs-blake3", optional = true }
+fs-blake3 = { path = "../fs-blake3" }
 fs-ivl = { path = "../fs-ivl" }
 fs-la = { path = "../fs-la" }
 fs-material = { path = "../fs-material" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
-
-[dev-dependencies]
-fs-blake3 = { path = "../fs-blake3" }
 
 [lints]
 workspace = true

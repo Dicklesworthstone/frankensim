@@ -126,6 +126,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         &self, operator: F, rho: &[f64], params: SimpParams, laws: &[ReferenceLoad3<'_>],
         caps: &ComplianceCaps3, options: ComplianceCapRefitOptions3, control: &mut SolveControl<'_>,
     ) -> Result<ComplianceCapRefit3<F>, ComplianceCapRefitError3> {
+        if self.has_material_body_load() {
+            return Err(invalid("material body-load refits require a load prepared on the candidate geometry"));
+        }
         admit_grid(self.cells(), rho, params, laws, caps, options)?;
         options.design.optimizer.validate::<EvaluationStop>(operator.cells())?;
         control.checkpoint("sdf3-cap-refit-start")?;

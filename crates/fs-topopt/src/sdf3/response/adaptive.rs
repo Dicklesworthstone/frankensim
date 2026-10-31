@@ -183,6 +183,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// SDF and patch callbacks remains a caller obligation. Pipeline parameters
     /// and filter radius are explicit in `candidate`; changing them deliberately
     /// produces a fresh baseline, never a cross-grid descent claim.
+    /// A material body load must be independently prepared on BOTH studies.
+    /// Keeping the acceleration law unchanged is the caller's responsibility;
+    /// source-grid load columns are never transferred to the candidate.
     ///
     /// Only complete raw-design provenance is required from `accepted`; its
     /// loss and displacement caches do NOT enter the fine fit. The same pure
@@ -226,6 +229,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         steps: usize, max_transfer_terms: usize, control: &mut SolveControl<'_>)
         -> Result<ResponseRefit3<F>, FitError> {
         control.checkpoint("response-refit-start").map_err(physics)?;
+        if self.has_material_body_load() != candidate.has_material_body_load() {
+            return Err(ProjectedAlError::Invalid("response refit requires matching material body-load configuration on both studies"));
+        }
         // The legacy entry point must not silently discard a retained force or
         // moment objective. An explicit mixed call owns the new target family.
         if reactions.is_none() && accepted.reaction_responses.iter().any(|row| !row.is_empty()) {

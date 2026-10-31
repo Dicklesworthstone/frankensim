@@ -9,8 +9,9 @@
 //! The reference material in the stress measure is deliberate: multiplying the
 //! already density-softened stress by rho^q can make a force-loaded void appear
 //! stronger. The actual SIMP stress is reported separately. The derivative adds
-//! the direct relaxation term to `-z^T (dK/dscale) u * dscale/drho_bar`, then
-//! follows the same projection and graph-filter transpose as compliance.
+//! the direct relaxation term and configured material-load term `B^T z` to
+//! `-z^T (dK/dscale) u * dscale/drho_bar`, then follows the same projection and
+//! graph-filter transpose as compliance.
 //! With a nonzero ersatz modulus, the algebraic qp measure eventually folds
 //! back as density approaches zero. This evaluator exposes that declared model;
 //! the minimum-volume driver separately admits only densities above its turnover.
@@ -126,7 +127,8 @@ pub struct StressEvaluation3 {
     pub displacements: Vec<Vec<f64>>,
     /// One adjoint of the whole aggregate per independent load case.
     pub adjoints: Vec<Vec<f64>>,
-    /// External force work f^T u only. With prescribed motion this is neither
+    /// Total external force work, including configured material body force.
+    /// With prescribed motion this is neither
     /// total strain energy nor actuator work; the Nitsche lifting is excluded.
     pub case_compliances: Vec<f64>,
     pub point_count: usize,
@@ -327,6 +329,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 || fields.volume_gradient.len() != self.cells()) {
                 return Err(StressError3::Invalid("shared stress field shape mismatch"));
             }
+            let body = self.material_body_force(&design.projected, control)?;
             let weight_scale = loads.iter().map(|l| l.weight).fold(0.0_f64, f64::max);
             let total_weight: f64 = loads.iter().map(|l| l.weight / weight_scale).sum();
             let weights: Vec<f64> = loads
@@ -366,12 +369,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             for (case, load) in loads.iter().enumerate() {
                 control.checkpoint(if shared.is_some() { "sdf3-stress-reuse-primal" }
                     else { "sdf3-stress-primal" })?;
-                let mut rhs: Vec<f64> = load
-                    .force
-                    .iter()
-                    .enumerate()
-                    .map(|(i, &f)| if self.operator.fixed()[i / 3] { 0.0 } else { f })
-                    .collect();
+                let external = self.external_force(load.force, body.as_deref(), control)?;
+                let mut rhs = external.clone();
                 let motion = motions.and_then(|entries| entries[case]);
                 if let Some(g) = motion {
                     control.checkpoint("sdf3-stress-motion-load")?;
@@ -393,13 +392,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     control,
                     )?,
                 };
-                let compliance = if motion.is_some() {
-                    // b_g^T u is not external work or an actuator-energy law.
-                    finite(load.force.iter().zip(&u).enumerate().map(|(i, (f, u))|
-                        if self.operator.fixed()[i/3] { 0.0 } else { f*u }).sum())?
-                } else {
-                    finite(rhs.iter().zip(&u).map(|(f, u)| f * u).sum())?
-                };
+                // b_g^T u is not external work or an actuator-energy law.
+                let compliance = finite(external.iter().zip(&u).map(|(f,u)| f*u).sum())?;
                 let data =
                     self.operator
                         .bulk_stress(&u, options.max_points - point_count, || poll(control))?;
@@ -470,6 +464,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 ));
             }
             let mut local = vec![0.0; self.cells()];
+            let mut scale_gradient = vec![0.0; self.cells()];
             let mut adjoints = Vec::with_capacity(loads.len());
             for (case, data) in points.iter().enumerate() {
                 control.checkpoint("sdf3-stress-adjoint-rhs")?;
@@ -513,28 +508,21 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 let cross = self
                     .operator
                     .scale_bilinear_forms(&z, &displacements[case], || poll(control))?;
-                for ((value, &r), contraction) in local.iter_mut().zip(&design.projected).zip(cross)
-                {
-                    let dsimp = (1.0 - self.params.e_min)
-                        * self.params.penal
-                        * power(r, self.params.penal - 1.0);
-                    *value -= dsimp * contraction;
+                for (value, contraction) in scale_gradient.iter_mut().zip(cross) {
+                    *value = finite(*value-contraction)?;
                 }
                 if let Some(g) = motions.and_then(|entries| entries[case]) {
                     control.checkpoint("sdf3-stress-motion-pullback")?;
                     let lifting = self.operator.prescribed_displacement_scale_work(g, &z, || poll(control))?;
-                    for (i, ((value, &r), b)) in local.iter_mut().zip(&design.projected).zip(lifting).enumerate() {
+                    for (i, (value, b)) in scale_gradient.iter_mut().zip(lifting).enumerate() {
                         if i % 64 == 0 { control.checkpoint("sdf3-stress-motion-pullback")?; }
-                        let dsimp = (1.0-self.params.e_min)*self.params.penal*power(r, self.params.penal-1.0);
-                        *value = finite(*value+dsimp*b)?;
+                        *value = finite(*value+b)?;
                     }
                 }
+                self.add_material_body_gradient(&z, 1.0, &mut local, control)?;
                 adjoints.push(z);
             }
-            for (value, slope) in local.iter_mut().zip(&design.slope) {
-                *value = finite(*value * slope)?;
-            }
-            let gradient = self.pullback(&local, control)?;
+            let gradient = self.physical_gradient(design, &scale_gradient, &local, control)?;
             let volume_gradient = match shared {
                 Some(fields) => fields.volume_gradient.to_vec(),
                 None => {

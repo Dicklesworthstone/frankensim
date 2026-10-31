@@ -11,16 +11,16 @@ pub(super) struct LimitPrimals3 {
 }
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     pub(super) fn response_limit_primals(&self, cases: &[ResponseLimitCase3<'_>],
-        prepared: &impl Precond, control: &mut SolveControl<'_>) -> Result<LimitPrimals3, ResponseError3> {
+        projected: &[f64], prepared: &impl Precond, control: &mut SolveControl<'_>) -> Result<LimitPrimals3, ResponseError3> {
         let op = self.operator.adaptive();
+        let body = self.material_body_force(projected, control)?;
         let mut displacements = Vec::with_capacity(cases.len());
         let mut measurements = Vec::with_capacity(cases.len());
         let mut residuals = Vec::with_capacity(cases.len());
         let mut all = Vec::new();
         for case in cases {
             control.checkpoint("response-limits-case")?;
-            let mut rhs: Vec<f64> = case.force.iter().enumerate()
-                .map(|(i, &f)| if op.fixed()[i/3] { 0.0 } else { f }).collect();
+            let mut rhs = self.external_force(case.force, body.as_deref(), control)?;
             if let Some(g) = case.prescribed {
                 let lifting = op.prescribed_displacement_load(g, || poll(control))?;
                 for (r, b) in rhs.iter_mut().zip(lifting) { *r = finite(*r+b)?; }

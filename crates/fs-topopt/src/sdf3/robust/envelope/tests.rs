@@ -28,6 +28,20 @@ pub(super) fn fixture(beta: f64) -> (CutDensityStudy3, Vec<f64>, Vec<f64>) {
     let z = op.body_load(&|p| [0.0, 0.0, -1.0 - p[0]], || ControlFlow::Continue(())).unwrap();
     (CutDensityStudy3::new(op, 0.15, SimpParams { beta, penal: 2.0, e_min: 1e-3, ..Default::default() }), y, z)
 }
+pub(super) fn native_body_operator() -> CutElasticity3 {
+    use fs_blake3::ContentHash;
+    use fs_cutfem::elastic3::ElasticMaterialField3;
+    use fs_material::elastic::acoustic::ElasticAcousticState;
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut q = QuadratureControl3::new(QuadratureOptions3 { depth: 1, ..Default::default() }, &mut poll).unwrap();
+    let field = |cell: HexCell| {
+        let density = if cell.lo()[0] < 0.5 { 2_u8 } else { 9_u8 };
+        let tensor = std::array::from_fn(|i| std::array::from_fn(|j| if i == j { 1.0 } else { 0.0 }));
+        Ok(ElasticAcousticState::try_new_mandel(tensor, f64::from(density), ContentHash([density; 32]), 1.0).unwrap())
+    };
+    CutElasticity3::build_with_material_field(HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(), [2; 3], &Slab,
+        ElasticMaterialField3::ByCell(&field), &|p| p[0] == 0.0, ElasticityOptions3::default(), &mut q).unwrap()
+}
 fn close(a: f64, b: f64, tol: f64) {
     assert!((a-b).abs() <= tol * a.abs().max(b.abs()).max(1e-10), "{a} != {b}");
 }

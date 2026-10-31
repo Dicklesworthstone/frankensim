@@ -59,6 +59,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn scan_binary_load_space_cap(&mut self, rho: &[f64], basis: &[&[f64]],
         cap: &LoadSpaceCap3, thresholds: &[f64], options: BinaryLoadSpaceScanOptions3,
         control: &mut SolveControl<'_>) -> Result<BinaryLoadSpaceScan3, BinaryComplianceError3> {
+        self.require_homogeneous_load_space().map_err(BinaryComplianceError3::Invalid)?;
         options.validate(self.params(), thresholds)?;
         let cases = basis_caps(cap, basis.len())?;
         admit(self, rho, basis, &cases, options.endpoint(thresholds[0]))?;
@@ -111,6 +112,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn scan_all_binary_load_space_cap(&mut self, rho: &[f64], basis: &[&[f64]],
         cap: &LoadSpaceCap3, options: BinaryLoadSpaceScanOptions3,
         control: &mut SolveControl<'_>) -> Result<BinaryLoadSpaceScan3, BinaryComplianceError3> {
+        self.require_homogeneous_load_space().map_err(BinaryComplianceError3::Invalid)?;
         options.validate(self.params(), &[1.0])?;
         let cases = basis_caps(cap, basis.len())?;
         admit(self, rho, basis, &cases, options.endpoint(1.0))?;

@@ -11,6 +11,7 @@ description = "Density-based topology optimization: SIMP with Helmholtz filterin
 layer = "L4"
 
 [dependencies]
+fs-blake3 = { path = "../fs-blake3" }
 fs-exec = { path = "../fs-exec", optional = true }
 fs-opt = { path = "../fs-opt", optional = true }
 fs-qty = { path = "../fs-qty", optional = true }
@@ -30,7 +31,6 @@ fs-sparse = { path = "../fs-sparse" }
 fs-spectral = { path = "../fs-spectral" }
 
 [dev-dependencies]
-fs-blake3 = { path = "../fs-blake3" }
 fs-rand = { path = "../fs-rand" }
 
 [features]
@@ -58,6 +58,10 @@ required-features = ["cutfem-marquee"]
 
 [[test]]
 name = "material_refinement_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "material_body_sdf3"
 required-features = ["cutfem-marquee"]
 
 [[test]]

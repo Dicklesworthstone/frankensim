@@ -159,6 +159,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: ResponseRefinementOptions3, control: &mut SolveControl<'_>)
         -> Result<ResponseRefinement3, GoalRefinementError3> {
         control.checkpoint("response-goal-start")?;
+        if self.has_material_body_load() {
+            return Err(GoalRefinementError3::Invalid("material body loads are not supported by response goal refinement"));
+        }
         let mut count=0usize;
         if cases.is_empty() || cases.len()>options.response.max_cases
             || cases.len()!=accepted.displacements.len() || cases.len()!=accepted.responses.len()

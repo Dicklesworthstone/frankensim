@@ -131,6 +131,15 @@ pub struct LoadSpaceEvaluation3 {
 }
 
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
+    // A common material force is an affine offset, not another basis column.
+    // The existing Gram eigenproblem solves only a zero-centered load set.
+    fn require_homogeneous_load_space(&self) -> Result<(), &'static str> {
+        if self.has_material_body_load() {
+            return Err("continuous load-space envelopes do not support a material body-load offset");
+        }
+        Ok(())
+    }
+
     /// Solve each basis column once on eroded material and retain ALL cross
     /// compliances. Independent maxima/averages miss adverse combinations.
     /// The exact maximum is reported alongside a differentiable spectral
@@ -144,6 +153,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn evaluate_robust_load_space(&mut self, rho: &[f64], basis: &[&[f64]],
         robustness: RobustOptions3, policy: &LoadSpace3, control: &mut SolveControl<'_>)
         -> Result<LoadSpaceEvaluation3, EvaluationStop> {
+        self.require_homogeneous_load_space().map_err(|_| failure("sdf3-load-space-material-body-load"))?;
         let m = policy.dimension;
         let dofs = self.operator.n();
         if basis.len() != m || basis.iter().any(|f| f.len() != dofs || f.iter().any(|v| !v.is_finite())) {
@@ -214,6 +224,7 @@ pub fn controlled_load_space_gradient_check<O: Sdf3Elasticity>(
     study: &mut CutDensityStudy3<O>, rho: &[f64], basis: &[&[f64]], robustness: RobustOptions3,
     policy: &LoadSpace3, options: GradientCheckOptions, control: &mut SolveControl<'_>,
 ) -> Result<LoadSpaceGradientCheck3, EvaluationStop> {
+    study.require_homogeneous_load_space().map_err(|_| failure("sdf3-load-space-material-body-load"))?;
     options.assert_valid();
     robustness.assert_valid(study.params());
     let mut baseline_compliance = 0.0;

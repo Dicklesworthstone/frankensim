@@ -129,6 +129,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         loads: &[GoalReferenceLoad3<'_>], options: RobustRefitOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<RobustReferenceRefit3<F>, RobustRefitError3> {
+        if self.has_material_body_load() {
+            return Err(invalid("operator-only robust refit cannot transfer a material body load"));
+        }
         admit(self.cells(), rho, loads, &[params], options)?;
         options.continuation.design.optimizer.validate::<EvaluationStop>(operator.cells())?;
         control.checkpoint("sdf3-robust-refit-start")?;

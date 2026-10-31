@@ -1,9 +1,12 @@
 //! Displacement-response objectives with density-dependent prescribed motion.
 //!
-//! K(s) u = f + b_g(s), J = alpha V + sum w/2 ((q^T u-target)/scale)^2.
+//! K(s) u = f + B rho_bar + b_g(s),
+//! J = alpha V + sum w/2 ((q^T u-target)/scale)^2.
 //! One adjoint per load case solves K z = dJ/du. Its cell-scale derivative is
 //! z^T db_g/ds - z^T dK/ds u, followed by the ORIGINAL SIMP/projection/filter
-//! pullback. Neither differentiating CG nor treating b_g as fixed is correct.
+//! pullback. An optional material body load adds B^T z to the physical-occupancy
+//! derivative, separately from SIMP. Neither differentiating CG nor treating
+//! the material load or b_g as fixed is correct.
 //! Optional embedded reaction observations also add their DIRECT material
 //! derivative before the same adjoint/filter pullback. Their numerical traction
 //! is not continuum-certified force, actuator energy or a shape derivative.
@@ -38,7 +41,8 @@ pub struct ResponseTarget3<'a> {
 /// Independent experiment on one fixed reference geometry and support patch.
 #[derive(Clone, Copy)]
 pub struct ResponseCase3<'a> {
-    /// Fixed external body/traction load, NOT a prescribed-motion lifting.
+    /// Additional fixed external force. The study's configured material body
+    /// load and this case's prescribed-motion lifting are added separately.
     pub force: &'a [f64],
     /// Pure reference displacement law on the operator's embedded support.
     /// None requests homogeneous supports and works with legacy box clamps.
@@ -94,7 +98,8 @@ pub struct ResponseEvaluation3 {
     pub reaction_responses: Vec<Vec<f64>>,
     pub displacements: Vec<Vec<f64>>,
     pub adjoints: Vec<Vec<f64>>,
-    /// f^T u, separate from both the fitting objective and (f+b_g)^T u.
+    /// Work of total external force f + B rho_bar, excluding Nitsche lifting.
+    /// Separate from both the fitting objective and augmented-RHS work.
     pub external_work: Vec<f64>,
     /// Includes variational lifting work; NOT physical actuator work.
     pub augmented_rhs_work: Vec<f64>,
@@ -167,8 +172,10 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// accepted evaluation; a caller cannot mistake the last rejected trial for
     /// the study's material state. Callback panics are not caught here.
     ///
-    /// q and f must be density-independent. g may vary between cases but not
-    /// with density. Geometry/support/load rebuilding across grids is explicit.
+    /// q and each case's declared f must be density-independent. A configured
+    /// material body load is added separately and differentiated through physical
+    /// occupancy. g may vary between cases but not with density.
+    /// Geometry/support/load rebuilding across grids is explicit.
     pub fn evaluate_responses(&mut self, rho: &[f64], cases: &[ResponseCase3<'_>], options: ResponseOptions3,
         control: &mut SolveControl<'_>) -> Result<ResponseEvaluation3, ResponseError3> {
         self.evaluate_response_family(rho, cases, None, options, control)
@@ -200,9 +207,11 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         self.operator.set_scales(&design.scales)?;
         let result = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
+            let body = self.material_body_force(&design.projected, control)?;
             let op = self.operator.adaptive();
             let mut objective = 0.0;
             let mut local = vec![0.0; self.cells()];
+            let mut occupancy_gradient = vec![0.0; self.cells()];
             let mut responses = Vec::with_capacity(cases.len());
             let mut reaction_responses = Vec::with_capacity(cases.len());
             let mut displacements = Vec::with_capacity(cases.len());
@@ -211,7 +220,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let mut augmented_rhs_work = Vec::with_capacity(cases.len());
             for (index, case) in cases.iter().enumerate() {
                 control.checkpoint("sdf3-response-case")?;
-                let external: Vec<_> = case.force.iter().enumerate().map(|(i,&v)| if op.fixed()[i/3] { 0.0 } else { v }).collect();
+                let external = self.external_force(case.force, body.as_deref(), control)?;
                 let mut rhs = external.clone();
                 if let Some(g) = case.prescribed {
                     let lifting = op.prescribed_displacement_load(g, || poll(control))?;
@@ -257,16 +266,12 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     None => vec![0.0; self.cells()],
                 };
                 for ((s, k), b) in local.iter_mut().zip(stiffness).zip(lifting) { *s = finite(*s+b-k)?; }
+                self.add_material_body_gradient(&z, 1.0, &mut occupancy_gradient, control)?;
                 external_work.push(finite(dot(&external, &u))?);
                 augmented_rhs_work.push(finite(dot(&rhs, &u))?);
                 displacements.push(u); adjoints.push(z); responses.push(observed);
             }
-            let p = self.params;
-            for ((value, &r), &slope) in local.iter_mut().zip(&design.projected).zip(&design.slope) {
-                let power = if p.penal == 1.0 { 1.0 } else if r == 0.0 { 0.0 } else { fs_math::det::pow(r,p.penal-1.0) };
-                *value = finite(*value*(1.0-p.e_min)*p.penal*power*slope)?;
-            }
-            let mut gradient = self.pullback(&local, control)?;
+            let mut gradient = self.physical_gradient(&design, &local, &occupancy_gradient, control)?;
             let dv: Vec<_> = self.mass.iter().zip(&design.slope).map(|(m,s)| m*s).collect();
             let volume_gradient = self.pullback(&dv, control)?;
             objective = finite(objective+options.volume_weight*design.volume)?;

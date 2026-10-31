@@ -89,6 +89,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         rho: &[f64], params: SimpParams, robustness: RobustOptions3, caps: &ComplianceCaps3,
         options: GoalRefinementOptions3, control: &mut SolveControl<'_>,
     ) -> Result<ComplianceCapRefinement3, GoalRefinementError3> {
+        if self.has_material_body_load() {
+            return Err(invalid("material body-load enrichment requires a load prepared on the finer geometry"));
+        }
         if laws.len() != caps.caps().len() || laws.len() > options.max_load_cases {
             return Err(invalid("one reference load per compliance cap is required"));
         }

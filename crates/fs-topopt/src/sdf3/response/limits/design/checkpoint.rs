@@ -86,6 +86,8 @@ impl MinimumMaterialEndpoint3 {
 #[derive(Debug, Clone)]
 pub struct MinimumMaterialCheckpoint3 {
     pub optimizer: ProjectedAlCheckpoint,
+    /// Complete prepared body map and native source attribution, when attached.
+    pub material_body_load_fingerprint: Option<fs_blake3::ContentHash>,
     pub options: MinimumMaterialOptions3,
     pub limits: Vec<Vec<MinimumMaterialLimit3>>,
     pub prescribed: Vec<bool>,
@@ -128,6 +130,7 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
     pub fn checkpoint(&self) -> MinimumMaterialCheckpoint3 {
         MinimumMaterialCheckpoint3 {
             optimizer: self.state.checkpoint(), options: self.options,
+            material_body_load_fingerprint: self.study.material_body_load_fingerprint(),
             limits: signatures(self.cases), prescribed: self.cases.iter().map(|c| c.prescribed.is_some()).collect(),
             reference_cell_masses_kg: match self.options.objective {
                 MinimumMaterialObjective3::VolumeFraction => None,
@@ -159,6 +162,9 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
     pub fn restore(study: &'a mut CutDensityStudy3<O>, cases: &'a [ResponseLimitCase3<'a>],
         checkpoint: &mut MinimumMaterialCheckpoint3, options: MinimumMaterialOptions3,
         control: &'a mut SolveControl<'callback>) -> Result<Self, Error> {
+        if checkpoint.material_body_load_fingerprint != study.material_body_load_fingerprint() {
+            return Err(invalid("minimum-material restart changed its material body load"));
+        }
         control.checkpoint("minimum-material-restore-start").map_err(physical)?;
         let n = study.cells();
         options.optimizer.validate(n)?;

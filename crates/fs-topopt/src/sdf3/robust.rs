@@ -1,16 +1,20 @@
 //! Three-field erosion/dilation robustness on real 3-D implicit-cut elasticity.
 //!
 //! One graph-filtered raw design produces thresholds eta+delta (eroded), eta
-//! (nominal) and eta-delta (dilated). Independent dead loads are solved on the
-//! ERODED material; a material budget applies to the DILATED volume. Both
+//! (nominal) and eta-delta (dilated). Independent external loads are solved on
+//! the ERODED material; a configured material body force follows that same
+//! eroded occupancy. A material budget applies to the DILATED volume. Both
 //! derivatives include the exact projection and filter transpose. Prescribed
 //! solid/void regions are unchanged in all realizations.
 //!
 //! This is a discrete manufacturing-tolerance surrogate, not a geometric
 //! offset, guaranteed minimum feature size, continuum certificate, or safety
-//! proof. Density-independent loads, homogeneous supports, geometry and the
+//! proof. Authored dead loads, homogeneous supports, geometry and the
 //! SIMP/filter/projection model stay fixed. Neither evaluations nor numerical
 //! gradient checks change the caller's nominal model or incoming scales.
+//! With occupancy-dependent loading, eroded compliance need not be the largest
+//! across manufacturing realizations; this owner evaluates the declared eroded
+//! functional and does not assert that extra worst-case ordering.
 
 pub mod continuation;
 pub mod goal;

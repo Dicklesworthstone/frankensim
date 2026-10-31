@@ -237,6 +237,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: GoalRefinementOptions3, retained: Option<&mut EnrichedLoadFields3>, control: &mut SolveControl<'_>)
         -> Result<ComplianceRefinement3, GoalRefinementError3> {
         control.checkpoint("sdf3-goal-start")?;
+        if self.has_material_body_load() {
+            return Err(GoalRefinementError3::Invalid("material body loads are not supported by reference-load goal refinement"));
+        }
         if loads.is_empty() || loads.len() > options.max_load_cases || loads.len() != coarse_displacements.len()
             || !loads.iter().any(|l| l.weight() > 0.0) || loads.iter().any(|l| !l.weight().is_finite() || l.weight() < 0.0)
             || ![options.numerical.residual_tolerance, options.numerical.identity_tolerance].iter().all(|v| v.is_finite() && *v > 0.0 && *v < 1.0)

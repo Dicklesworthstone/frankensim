@@ -115,11 +115,17 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// Candidate filter/radius/SIMP choices are explicit. Geometry, reference
     /// material/support laws and response limits must be held consistent by the
     /// caller. Source fields provide raw-design provenance, never a fine result.
+    /// A material body load must be independently prepared on BOTH studies
+    /// using the same acceleration law, whose identity remains the caller's
+    /// responsibility. Its source-grid columns are never transferred.
     #[allow(clippy::too_many_arguments)]
     pub fn refit_reference_minimum_material<F: AdaptiveSdf3Elasticity>(&self, mut candidate: CutDensityStudy3<F>,
         source: &ResponseLimitEvaluation3, cases: &[ReferenceResponseLimitCase3<'_>], options: MinimumMaterialOptions3,
         steps: usize, max_transfer_terms: usize, control: &mut SolveControl<'_>) -> Result<MinimumMaterialRefit3<F>, FitError> {
         control.checkpoint("minimum-material-refit-start").map_err(physics)?;
+        if self.has_material_body_load() != candidate.has_material_body_load() {
+            return Err(ProjectedAlError::Invalid("minimum-material refit requires matching material body-load configuration on both studies"));
+        }
         if matches!(options.objective, super::super::design::MinimumMaterialObjective3::MassKg { .. })
             != source.mass_kg.is_some() {
             return Err(ProjectedAlError::Invalid("refit objective disagrees with the source material inventory"));

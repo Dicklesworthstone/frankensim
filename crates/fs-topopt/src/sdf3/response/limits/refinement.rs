@@ -208,6 +208,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         control: &mut SolveControl<'_>)
         -> Result<(ResponseLimitRefinement3, F), GoalRefinementError3> {
         control.checkpoint("response-limit-goal-start")?;
+        if self.has_material_body_load() {
+            return Err(invalid("material body loads are not supported by response-limit goal refinement"));
+        }
         admit_reference_limits(self, cases, options.limits).map_err(|_| invalid("invalid reference response-limit family"))?;
         inventory::admit(&self.operator, &enriched, accepted, options)?;
         if options.max_transfer_terms == 0 || cases.len() != accepted.displacements.len()

@@ -125,7 +125,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     /// it adds NO preparation, primal solve or geometry integration. Both phases
     /// restore incoming scales on every returned result. Sampling failures retain
     /// consumed solve work but do not publish a partial joint endpoint. All original
-    /// loads and support patches remain, including on weak cells. Pure callback
+    /// dead loads and support patches remain, including on weak cells; material
+    /// body force follows the binary physical mask. Pure callback
     /// panics are not caught. The cap covers retained samples, not the continuum.
     pub fn evaluate_binary_response_stress_limits(&mut self, rho: &[f64],
         cases: &[ResponseLimitCase3<'_>], options: BinaryResponseStressOptions3,

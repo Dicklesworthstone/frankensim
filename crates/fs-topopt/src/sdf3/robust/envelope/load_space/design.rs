@@ -49,6 +49,7 @@ fn sample<O: Sdf3Elasticity>(study: &mut CutDensityStudy3<O>, rho: &[f64], basis
 
 fn admit<O: Sdf3Elasticity>(study: &CutDensityStudy3<O>, basis: &[&[f64]], rho: &[f64],
     policy: &LoadSpace3, options: EnvelopeDesignOptions3) -> Result<(), ProjectedAlError<EvaluationStop>> {
+    study.require_homogeneous_load_space().map_err(ProjectedAlError::Invalid)?;
     options.optimizer.validate::<EvaluationStop>(study.cells())?;
     if basis.len() != policy.dimension() || !options.robustness.valid(study.params())
         || basis.iter().any(|f| f.len() != study.operator().n() || f.iter().any(|v| !v.is_finite()))

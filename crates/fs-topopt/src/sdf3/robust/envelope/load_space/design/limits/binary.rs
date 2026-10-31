@@ -69,6 +69,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     pub fn evaluate_binary_load_space_cap(&mut self, rho: &[f64], basis: &[&[f64]],
         cap: &LoadSpaceCap3, options: BinaryComplianceOptions3, control: &mut SolveControl<'_>)
         -> Result<BinaryLoadSpaceEvaluation3, BinaryComplianceError3> {
+        self.require_homogeneous_load_space().map_err(BinaryComplianceError3::Invalid)?;
         let cases = basis_caps(cap, basis.len())?;
         // These original per-column caps let the existing owner perform the
         // actual binary solves. Their finite-case feasibility is never promoted
@@ -82,6 +83,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     fn binary_load_space_from_physical(&self, physical: BinaryComplianceEvaluation3,
         basis: &[&[f64]], cap: &LoadSpaceCap3, control: &mut SolveControl<'_>)
         -> Result<BinaryLoadSpaceEvaluation3, BinaryComplianceError3> {
+        self.require_homogeneous_load_space().map_err(BinaryComplianceError3::Invalid)?;
         let policy = cap.policy();
         let n = policy.dimension();
         let states = &physical.displacements;

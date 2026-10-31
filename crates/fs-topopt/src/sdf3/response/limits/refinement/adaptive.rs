@@ -200,6 +200,9 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
     pub fn new(study: &'a mut CutDensityStudy3<O>, tree: Octree3,
         cases: &'a [ReferenceResponseLimitCase3<'a>], rho: &[f64], options: AdaptiveMinimumMaterialOptions3,
         control: &mut SolveControl<'_>) -> Result<Self, FitError> {
+        if study.has_material_body_load() {
+            return Err(ProjectedAlError::Invalid("automatic minimum-material refinement cannot transfer a material body load"));
+        }
         options.validate()?;
         if !on_tree(&tree, &study.operator) { return Err(ProjectedAlError::Invalid("initial minimum-material background mismatch")); }
         let fit = study.fit_reference_minimum_material(cases, rho, options.fit, options.steps_per_grid, control)?;

@@ -99,8 +99,10 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// or one state solve per design coordinate. Reuses eroded displacements to
     /// combine self-adjoint stiffness contractions before ONE filter pullback.
     ///
-    /// Forces are density-independent, with homogeneous supports. References,
-    /// case order and temperature must stay fixed throughout an optimization.
+    /// Authored force vectors are density-independent, with homogeneous supports.
+    /// An attached material body load uses each eroded occupancy and contributes
+    /// its exact force derivative. References, case order and temperature must
+    /// stay fixed throughout an optimization.
     /// Every solve shares control; incoming nominal scales remain unchanged on
     /// success and every returned stop. No partial family is published.
     pub fn evaluate_robust_envelope(&mut self, rho: &[f64], forces: &[&[f64]],
@@ -119,21 +121,18 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         let filtered = self.filter_apply(rho, control)?;
         let design = self.design_from_filtered(&filtered, self.params.eta + robustness.threshold_offset, control)?;
         let mut local = vec![0.0; self.cells()];
+        let mut occupancy = vec![0.0; self.cells()];
         for (u, &w) in physical.eroded.objective.displacements.iter().zip(&envelope.compliance_weights) {
             control.checkpoint("sdf3-envelope-adjoint")?;
             // Sealed backends implement dK/dscale, independent of the incoming
             // nominal scales, including Nitsche/ghost and hanging-node terms.
             let energies = self.operator.scale_quadratic_forms(u).map_err(|_| failure("sdf3-envelope-energy"))?;
             for (g, e) in local.iter_mut().zip(energies) { *g -= w * e; }
+            // Compliance differentiates both the equilibrium load and the
+            // external-work functional: d(f^T u) = 2 u^T df - u^T dK u.
+            self.add_material_body_gradient(u, 2.0 * w, &mut occupancy, control)?;
         }
-        let p = self.params;
-        for ((g, &r), &slope) in local.iter_mut().zip(&design.projected).zip(&design.slope) {
-            let power = if p.penal == 1.0 { 1.0 } else if r == 0.0 { 0.0 }
-                else { fs_math::det::pow(r, p.penal - 1.0) };
-            *g *= (1.0 - p.e_min) * p.penal * power * slope;
-        }
-        if local.iter().any(|v| !v.is_finite()) { return Err(failure("sdf3-envelope-gradient")); }
-        let gradient = self.pullback(&local, control)?;
+        let gradient = self.physical_gradient(&design, &local, &occupancy, control)?;
         control.checkpoint("sdf3-envelope-publish")?;
         Ok(EnvelopeEvaluation3 { policy: policy.clone(), physical, envelope, gradient, work: control.work() })
     }

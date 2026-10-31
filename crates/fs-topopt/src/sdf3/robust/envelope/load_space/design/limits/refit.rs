@@ -94,6 +94,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         &self, operator: F, rho: &[f64], params: SimpParams, laws: &[ReferenceLoad3<'_>],
         cap: &LoadSpaceCap3, options: LoadSpaceCapRefitOptions3, control: &mut SolveControl<'_>,
     ) -> Result<LoadSpaceCapRefit3<F>, LoadSpaceCapRefitError3> {
+        self.require_homogeneous_load_space().map_err(invalid)?;
         admit(self.cells(), rho, params, laws, cap, options)?;
         options.design.optimizer.validate::<EvaluationStop>(operator.cells())?;
         control.checkpoint("sdf3-load-space-refit-start")?;
@@ -127,6 +128,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         self, incoming: &[f64], laws: &[ReferenceLoad3<'_>], cap: &LoadSpaceCap3,
         options: LoadSpaceCapRefitOptions3, control: &mut SolveControl<'_>,
     ) -> Result<LoadSpaceCapRefit3<O>, LoadSpaceCapRefitError3> {
+        self.require_homogeneous_load_space().map_err(invalid)?;
         let params = self.params();
         admit(self.cells(), incoming, params, laws, cap, options)?;
         let mut study = self;

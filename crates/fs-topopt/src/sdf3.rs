@@ -2,6 +2,9 @@
 //!
 //! Uniform Cartesian and Q1-conforming octree backgrounds share the SAME
 //! filter/projection/SIMP chain, independent-load evaluator and OC driver.
+//! A prepared native material body load adds source-density acceleration to
+//! each experiment at its physical projected occupancy. Its force derivative
+//! joins the stiffness derivative before the same projection/filter pullback.
 //! Geometry and quadrature stay fixed inside each optimization call. Refined
 //! studies reassemble geometry between calls, inherit only raw densities, and
 //! must restore volume feasibility and re-solve their new baseline.
@@ -16,6 +19,7 @@
 //! graph Helmholtz filter is not the tetrahedral FEEC filter.
 
 mod operator;
+mod body;
 mod refine;
 pub mod regions;
 pub mod continuation;
@@ -27,7 +31,7 @@ pub mod robust;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub use refine::inherit_raw_densities3;
 pub use regions::PhysicalRegion3;
-use fs_cutfem::elastic3::CutElasticity3;
+use fs_cutfem::elastic3::{CutElasticity3, MaterialBodyLoad3};
 use fs_solver::op::{CsrOp, LinearOp};
 use fs_sparse::precond::{IdentityPrecond, Precond};
 use crate::control::{EvaluationStop, SolveControl};
@@ -68,6 +72,9 @@ pub struct CutDensityStudy3<O: Sdf3Elasticity = CutElasticity3> {
     /// Fixed PHYSICAL densities, after filtering/projection. Raw filter
     /// controls remain variables and may still influence adjacent free cells.
     physical_regions: Option<Vec<PhysicalRegion3>>,
+    /// Optional common environmental acceleration, prepared on this exact
+    /// operator. The native density columns multiply PHYSICAL occupancy.
+    material_body_load: Option<MaterialBodyLoad3>,
 }
 
 struct Design3 { projected: Vec<f64>, slope: Vec<f64>, scales: Vec<f64>, volume: f64 }
@@ -112,7 +119,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             coo.push(i,j,-weight); coo.push(j,i,-weight);
         }
         Self { operator, filter: CsrOp::symmetric(coo.assemble()), mass, params, filter_radius: radius,
-            physical_regions: None }
+            physical_regions: None, material_body_load: None }
     }
 
     /// Read-only access to the geometry, accepted scales, and field ordering.
@@ -243,27 +250,27 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             // Prepared once at this exact density, then shared by all loads.
             // Its immutable borrow ends before any rollback or next trial.
             let prepared = self.operator.prepare_elasticity(control)?;
+            let body = self.material_body_force(&design.projected, control)?;
             let mut compliance = 0.0;
             let mut local = vec![0.0;self.cells()];
+            let mut occupancy_gradient = vec![0.0;self.cells()];
             let mut displacements = Vec::with_capacity(loads.len());
             let mut case_compliances = Vec::with_capacity(loads.len());
             for load in loads {
                 control.checkpoint("sdf3-elasticity")?;
-                let rhs: Vec<f64> = load.force.iter().enumerate().map(|(i,&f)|if self.operator.fixed()[i/3] {0.0}else{f}).collect();
+                let rhs = self.external_force(load.force, body.as_deref(), control)?;
                 let u = checked_solve_preconditioned(&self.operator,&prepared,&rhs,1e-11,"sdf3-elasticity",control)?;
                 let c: f64 = rhs.iter().zip(&u).map(|(f,u)|f*u).sum();
                 compliance += load.weight*c;
                 let energies = self.operator.scale_quadratic_forms(&u).map_err(|_|failure("sdf3-energy"))?;
                 for (value,energy) in local.iter_mut().zip(energies) { *value -= load.weight*energy; }
+                // Compliance is the work of the TOTAL physical force. Both
+                // its explicit load and the equilibrium depend on occupancy.
+                self.add_material_body_gradient(&u, 2.0*load.weight, &mut occupancy_gradient, control)?;
                 case_compliances.push(c); displacements.push(u);
             }
-            let p = self.params;
-            for ((value,&r),&slope) in local.iter_mut().zip(&design.projected).zip(&design.slope) {
-                let power = if p.penal == 1.0 {1.0} else if r == 0.0 {0.0} else {fs_math::det::pow(r,p.penal-1.0)};
-                *value *= (1.0-p.e_min)*p.penal*power*slope;
-            }
             if !compliance.is_finite() || !local.iter().all(|v|v.is_finite()) {return Err(failure("sdf3-compliance"));}
-            let gradient = self.pullback(&local,control)?;
+            let gradient = self.physical_gradient(&design, &local, &occupancy_gradient, control)?;
             let local_volume: Vec<f64> = self.mass.iter().zip(&design.slope).map(|(m,s)|m*s).collect();
             let volume_gradient = self.pullback(&local_volume,control)?;
             control.checkpoint("sdf3-evaluation-publish")?;
@@ -319,6 +326,9 @@ fn trial(rho:&[f64],ratios:&[Option<f64>],lambda:f64,step:f64)->Vec<f64> {
 /// independently solved accepted designs replace the current operator and fields.
 /// Bisection and rejected solves count against the shared control. No reintegration
 /// or remeshing is performed. Parameters are fixed throughout this call.
+/// The OC update requires nonpositive objective sensitivities; material body
+/// forces can violate that condition. Such an evaluation is refused by the
+/// existing gradient gate. General response/AL drivers do not assume that sign.
 pub fn controlled_sdf3_optimality_criteria<O:Sdf3Elasticity>(study:&mut CutDensityStudy3<O>,loads:&[LoadCase<'_>],rho0:&[f64],
     options:MultiLoadOcOptions,control:&mut SolveControl<'_>)->MultiLoadOcReport {
     assert_oc_inputs(study, loads, rho0, options);

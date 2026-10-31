@@ -1,7 +1,7 @@
 //! Geometry-backed operator interface shared by uniform and adaptive studies.
 use std::collections::BTreeMap;
 use std::ops::ControlFlow;
-use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3};
+use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3,MaterialBodyLoad3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::stress::BulkStressPoint3;
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
@@ -28,6 +28,9 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// Full-material kg inventory in the SAME active-cell order. None means
     /// the operator was constructed without a native material density.
     fn reference_cell_masses_kg(&self) -> Option<&[f64]>;
+    /// Bind a prepared native density load to this exact geometry, material
+    /// assignment, strong-clamp map and displacement space.
+    fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3>;
     /// Current reference-material multipliers.
     fn scales(&self)->&[f64];
     /// Transactional reference-material update.
@@ -62,6 +65,9 @@ impl Sdf3Elasticity for CutElasticity3 {
     fn cells(&self)->usize {CutElasticity3::cells(self)}
     fn volumes(&self)->Vec<f64> {CutElasticity3::volumes(self)}
     fn reference_cell_masses_kg(&self) -> Option<&[f64]> { CutElasticity3::reference_cell_masses_kg(self) }
+    fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3> {
+        CutElasticity3::validate_material_body_load(self, load)
+    }
     fn scales(&self)->&[f64] {CutElasticity3::scales(self)}
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {CutElasticity3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {CutElasticity3::fixed(self)}
@@ -97,6 +103,9 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
     fn cells(&self)->usize {AdaptiveElasticity3::cells(self)}
     fn volumes(&self)->Vec<f64> {AdaptiveElasticity3::volumes(self)}
     fn reference_cell_masses_kg(&self) -> Option<&[f64]> { AdaptiveElasticity3::reference_cell_masses_kg(self) }
+    fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3> {
+        AdaptiveElasticity3::validate_material_body_load(self, load)
+    }
     fn scales(&self)->&[f64] {AdaptiveElasticity3::scales(self)}
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {AdaptiveElasticity3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {AdaptiveElasticity3::fixed(self)}
@@ -149,6 +158,9 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     fn cells(&self)->usize {self.elasticity().cells()}
     fn volumes(&self)->Vec<f64> {self.elasticity().volumes()}
     fn reference_cell_masses_kg(&self) -> Option<&[f64]> { self.elasticity().reference_cell_masses_kg() }
+    fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3> {
+        self.elasticity().validate_material_body_load(load)
+    }
     fn scales(&self)->&[f64] {self.elasticity().scales()}
     fn set_scales(&mut self,v:&[f64])->Result<(),ElasticityError3> {AdaptiveSolveSpace3::set_scales(self,v)}
     fn fixed(&self)->&[bool] {self.elasticity().fixed()}

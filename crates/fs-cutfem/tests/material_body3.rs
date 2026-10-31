@@ -317,3 +317,62 @@ fn native_load_preparation_and_actions_refuse_unavailable_or_partial_results() {
     assert_eq!(moved.scales(), scales);
     assert_eq!(stencil.load(&fractions, poll).unwrap(), baseline);
 }
+
+#[test]
+fn body_fingerprint_binds_the_discrete_map_and_sources_across_rebuilds() {
+    let first = cartesian(true);
+    let rebuilt = cartesian(true);
+    let load = first
+        .prepare_material_body_load(&acceleration, 10_000, poll)
+        .unwrap();
+    let same = rebuilt
+        .prepare_material_body_load(&acceleration, 10_000, poll)
+        .unwrap();
+    assert_eq!(load.fingerprint(), same.fingerprint());
+    assert!(
+        rebuilt.validate_material_body_load(&load).is_err(),
+        "content equality must not weaken the native owner binding"
+    );
+    let changed = rebuilt
+        .prepare_material_body_load(&|p| acceleration(p).map(|a| 2.0 * a), 10_000, poll)
+        .unwrap();
+    assert_ne!(load.fingerprint(), changed.fingerprint());
+
+    // With zero acceleration the complete sparse maps agree, so only source
+    // attribution can distinguish these otherwise identical prepared values.
+    let relabelled_field = |cell| {
+        let source = field(cell)?;
+        Ok(ElasticAcousticState::try_new_mandel(
+            *source.stiffness_mandel_pa(),
+            source.density_kg_m3(),
+            ContentHash([99; 32]),
+            source.maximum_absolute_mandel_strain(),
+        )
+        .unwrap())
+    };
+    let mut callback = |_| poll();
+    let mut control = QuadratureControl3::new(quadrature(), &mut callback).unwrap();
+    let relabelled = CutElasticity3::build_with_material_field(
+        domain(),
+        [2; 3],
+        &Top,
+        ElasticMaterialField3::ByCell(&relabelled_field),
+        &|p| p[0] == 0.0,
+        Default::default(),
+        &mut control,
+    )
+    .unwrap();
+    let zero = first
+        .prepare_material_body_load(&|_| [0.0; 3], 0, poll)
+        .unwrap();
+    let other_zero = relabelled
+        .prepare_material_body_load(&|_| [0.0; 3], 0, poll)
+        .unwrap();
+    assert_eq!(
+        zero.load(&vec![1.0; first.cells()], poll).unwrap(),
+        other_zero
+            .load(&vec![1.0; relabelled.cells()], poll)
+            .unwrap()
+    );
+    assert_ne!(zero.fingerprint(), other_zero.fingerprint());
+}

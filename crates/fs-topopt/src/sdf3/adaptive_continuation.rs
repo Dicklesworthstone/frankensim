@@ -247,6 +247,9 @@ pub fn controlled_adaptive_sdf3_continuation_with_coarse_levels_observed<O: Adap
     for (stage, &params) in schedule.iter().enumerate() {
         let result = (|| -> Result<MultiLoadContinuationReport, AdaptiveContinuationError3> {
             control.checkpoint("sdf3-adaptive-stage")?;
+            if study.has_material_body_load() {
+                return Err(GoalRefinementError3::Invalid("automatic continuation refinement cannot transfer a material body load").into());
+            }
             check_tree(study.operator(), tree)?;
             if stage == 0 {
                 return Ok(reference_stage(study, loads, &rho, params, options, control)?);

@@ -81,6 +81,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         thresholds: &[f64], options: BinaryRefinedScanOptions3, control: &mut SolveControl<'_>,
         mut build: impl FnMut(&mut dyn FnMut() -> ControlFlow<()>) -> Result<AdaptiveElasticity3, GoalRefinementError3>,
     ) -> Result<BinaryRefinedScan3, GoalRefinementError3> {
+        self.require_homogeneous_load_space().map_err(invalid)?;
         options.selection.validate(params, thresholds).map_err(binary_error)?;
         options.selection.robustness.assert_valid(params);
         let goal = options.enrichment;
@@ -154,6 +155,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: BinaryRefinedScanOptions3, control: &mut SolveControl<'_>,
         build: impl FnMut(&mut dyn FnMut() -> ControlFlow<()>) -> Result<AdaptiveElasticity3, GoalRefinementError3>,
     ) -> Result<BinaryRefinedScan3, GoalRefinementError3> {
+        self.require_homogeneous_load_space().map_err(invalid)?;
         options.selection.validate(params, &[1.0]).map_err(binary_error)?;
         options.selection.robustness.assert_valid(params);
         let goal = options.enrichment;

@@ -436,3 +436,90 @@ fn positive_material_mass_cannot_normalize_to_a_zero_objective() {
     ));
     assert_eq!(study.operator().scales(), scales);
 }
+
+#[test]
+fn checkpoint_body_map_binding_refuses_changed_acceleration_before_reservations() {
+    use fs_ascent::projected_al::ProjectedAlError;
+    use fs_topopt::sdf3::response::limits::design::MinimumMaterialCheckpoint3;
+
+    fn configured(acceleration: f64) -> CutDensityStudy3<AdaptiveSolveSpace3> {
+        let study = adaptive(false, [2.0, 8.0]);
+        let load = study
+            .operator()
+            .elasticity()
+            .prepare_material_body_load(&|_| [0.0, 0.0, acceleration], 100_000, poll)
+            .unwrap();
+        study.with_material_body_load(load).unwrap()
+    }
+    let mut study = configured(1e-4);
+    let zero = vec![0.0; study.operator().n()];
+    // This inactive observation and its derivative cannot distinguish changed
+    // acceleration at the saved endpoint; the complete prepared map must bind it.
+    let rows = [ResponseLimit3 {
+        response: BoundedResponse3::Displacement(&zero),
+        sense: ResponseLimitSense3::AtMost,
+        bound: 1.0,
+        scale: 1.0,
+    }];
+    let cases = [ResponseLimitCase3 {
+        force: &zero,
+        prescribed: None,
+        limits: &rows,
+    }];
+    let rho = vec![0.7; study.cells()];
+    let options = MinimumMaterialOptions3::default();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let session =
+        MinimumMaterialStudy3::new(&mut study, &cases, &rho, options, &mut control).unwrap();
+    let saved = session.checkpoint();
+    drop(session);
+    assert_eq!(
+        saved.material_body_load_fingerprint,
+        study.material_body_load_fingerprint()
+    );
+    assert!(saved.material_body_load_fingerprint.is_some());
+    let bytes = saved.to_bytes(Default::default()).unwrap();
+    assert_eq!(&bytes[..8], b"FSMMLCP\x03");
+    let mut decoded = MinimumMaterialCheckpoint3::from_bytes(&bytes, Default::default()).unwrap();
+    assert_eq!(
+        decoded.material_body_load_fingerprint,
+        saved.material_body_load_fingerprint
+    );
+    let mut older = bytes.clone();
+    older[7] = 2;
+    assert!(MinimumMaterialCheckpoint3::from_bytes(&older, Default::default()).is_err());
+
+    let mut rebuilt = configured(1e-4);
+    let resumed =
+        MinimumMaterialStudy3::restore(&mut rebuilt, &cases, &mut decoded, options, &mut control)
+            .unwrap();
+    assert_eq!(
+        resumed.checkpoint().material_body_load_fingerprint,
+        saved.material_body_load_fingerprint
+    );
+    drop(resumed);
+    for mut different in [configured(2e-4), adaptive(false, [2.0, 8.0])] {
+        let mut attempt = saved.clone();
+        let before = attempt.optimizer.clone();
+        let work = control.work();
+        let scales = different.operator().scales().to_vec();
+        assert!(matches!(
+            MinimumMaterialStudy3::restore(
+                &mut different,
+                &cases,
+                &mut attempt,
+                options,
+                &mut control
+            ),
+            Err(ProjectedAlError::Invalid(_))
+        ));
+        assert_eq!(control.work(), work);
+        assert_eq!(attempt.optimizer, before);
+        assert_eq!(
+            attempt.restoration_evaluations,
+            saved.restoration_evaluations
+        );
+        assert_eq!(different.operator().scales(), scales);
+    }
+}

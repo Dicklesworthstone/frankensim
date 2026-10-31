@@ -47,6 +47,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         rho: &[f64], params: SimpParams, robustness: RobustOptions3,
         options: GoalRefinementOptions3, control: &mut SolveControl<'_>,
     ) -> Result<RobustComplianceRefinement3, GoalRefinementError3> {
+        if self.has_material_body_load() {
+            return Err(GoalRefinementError3::Invalid("material body loads are not supported by robust goal refinement"));
+        }
         robustness.assert_valid(params);
         if rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
             || loads.is_empty() || loads.len() > options.max_load_cases

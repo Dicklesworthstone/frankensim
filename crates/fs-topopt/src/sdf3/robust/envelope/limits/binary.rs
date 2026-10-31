@@ -2,7 +2,8 @@
 //!
 //! Compliance caps apply to the actual binary ERODED stiffness, not the gray
 //! solution. DILATED cut volume is the material objective. This is a fixed-grid
-//! ersatz-material model: loads, supports and cut quadrature remain in voids.
+//! ersatz-material model: authored dead loads, supports and cut quadrature
+//! remain in voids; an attached material body load follows the binary occupancy.
 //! It is not geometry extraction, a zero-void solve or a manufacturing proof.
 use super::ComplianceCaps3;
 use crate::sdf3::{CutDensityStudy3, Design3, Sdf3Elasticity, checked_solve_preconditioned, failure};
@@ -128,8 +129,10 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// existing prepared solver and true-residual gate perform all state solves.
     /// There is no adjoint or derivative claim for this discontinuous mapping.
     ///
-    /// Homogeneous supports and density-independent loads only. Supports and
-    /// loads on void cells are not silently removed. The source nominal scales
+    /// Homogeneous supports and fixed authored force vectors are required.
+    /// An attached material body load follows the exact binary eroded mask;
+    /// void stiffness contributes no body force. Authored dead loads and
+    /// supports on void cells remain in place. The source nominal scales
     /// and parameters are preserved on success and every returned error. All
     /// filtering, preparation and load solves share the supplied control.
     pub fn evaluate_binary_compliance_caps(&mut self, rho: &[f64], forces: &[&[f64]],
@@ -167,6 +170,14 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             if i % 256 == 0 { control.checkpoint("sdf3-binary-cap-scales")?; }
             scales.push(if s { 1.0 } else { options.void_stiffness });
         }
+        let body = if self.has_material_body_load() {
+            let mut occupancy = Vec::with_capacity(self.cells());
+            for (i, &solid) in eroded.solid.iter().enumerate() {
+                if i % 256 == 0 { control.checkpoint("sdf3-binary-cap-body-load")?; }
+                occupancy.push(if solid { 1.0 } else { 0.0 });
+            }
+            self.material_body_force(&occupancy, control)?
+        } else { None };
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&scales).map_err(|_| failure("sdf3-binary-cap-scales"))?;
         let result = (|| {
@@ -175,8 +186,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let mut displacements = Vec::with_capacity(forces.len());
             for force in forces {
                 control.checkpoint("sdf3-binary-cap-elasticity")?;
-                let rhs: Vec<_> = force.iter().enumerate().map(|(i, &f)|
-                    if self.operator.fixed()[i / 3] { 0.0 } else { f }).collect();
+                let rhs = self.external_force(force, body.as_deref(), control)?;
                 let u = checked_solve_preconditioned(&self.operator, &prepared, &rhs,
                     1e-11, "sdf3-binary-cap-elasticity", control)?;
                 let c: f64 = rhs.iter().zip(&u).map(|(f, u)| f * u).sum();

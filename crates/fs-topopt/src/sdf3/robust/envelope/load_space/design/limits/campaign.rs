@@ -115,6 +115,7 @@ where B: FnMut(&Octree3, &mut dyn FnMut() -> ControlFlow<()>) -> Result<O, GoalR
     pub fn new(current: LoadSpaceCapRefit3<O>, tree: Octree3, laws: &'a [ReferenceLoad3<'a>],
         options: LoadSpaceCapCampaignOptions3, control: &'a mut SolveControl<'callback>, build: B,
     ) -> Result<Self, LoadSpaceCapCampaignError3> {
+        current.study.require_homogeneous_load_space().map_err(GoalRefinementError3::Invalid)?;
         if !current.completed_and_rechecked() || current.work != control.work()
             || laws.len() != current.cap.policy().dimension() || laws.len() > options.enrichment.max_load_cases
             || !options.change_tolerance.is_finite() || options.change_tolerance < 0.0

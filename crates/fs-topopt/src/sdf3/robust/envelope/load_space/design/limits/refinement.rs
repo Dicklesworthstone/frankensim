@@ -129,6 +129,7 @@ fn admit_enrichment<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, enri
     laws: &[ReferenceLoad3<'_>], rho: &[f64], params: SimpParams, robustness: RobustOptions3,
     cap: &LoadSpaceCap3, options: GoalRefinementOptions3, control: &mut SolveControl<'_>)
     -> Result<(), GoalRefinementError3> {
+    study.require_homogeneous_load_space().map_err(invalid)?;
     robustness.assert_valid(params);
     if laws.len() != cap.policy().dimension() || laws.len() > options.max_load_cases
         || options.max_transfer_terms == 0

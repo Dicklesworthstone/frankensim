@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, btree_map::Entry};
 use std::ops::ControlFlow;
 use std::sync::Arc;
 
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::elastic::acoustic::ElasticAcousticState;
 
 use super::material::ReferenceMaterial3;
@@ -36,6 +37,7 @@ pub(super) enum BodyLoadSpace3 {
 /// ownership identity is not a content digest or scientific provenance claim.
 pub struct MaterialBodyLoad3 {
     binding: Arc<()>,
+    fingerprint: ContentHash,
     space: BodyLoadSpace3,
     n: usize,
     materials: Vec<ReferenceMaterial3>,
@@ -67,6 +69,19 @@ fn allocation() -> ElasticityError3 {
 }
 
 impl MaterialBodyLoad3 {
+    /// Cached identity of the complete discrete body-load map and source states.
+    ///
+    /// Uses domain-separated BLAKE3 with little-endian u64 sizes/indices and
+    /// exact IEEE force/density bits, including signed zeros as stored. It binds
+    /// the displacement-space tag, sparse cell columns, source identities and
+    /// reference densities. This supports restart comparison after rebuilding
+    /// the original operator; it does not replace owner validation or establish
+    /// geometry, stiffness, callback or executable provenance by itself.
+    #[must_use]
+    pub const fn fingerprint(&self) -> ContentHash {
+        self.fingerprint
+    }
+
     /// Number of displacement entries in the original independent ordering.
     #[must_use]
     pub const fn n(&self) -> usize {
@@ -202,6 +217,50 @@ impl MaterialBodyLoad3 {
         Ok(())
     }
 
+    fn compute_fingerprint(
+        &self,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<ContentHash, ElasticityError3> {
+        fn index(hasher: &mut DomainHasher, value: usize) -> Result<(), ElasticityError3> {
+            let value = u64::try_from(value).map_err(|_| {
+                ElasticityError3::Invalid("material body-load fingerprint index exceeds u64")
+            })?;
+            hasher.update(&value.to_le_bytes());
+            Ok(())
+        }
+        let mut hash = DomainHasher::new("frankensim.fs-cutfem.material-body-load3.v1");
+        hash.update(&[match self.space {
+            BodyLoadSpace3::Cartesian => 0,
+            BodyLoadSpace3::Adaptive => 1,
+        }]);
+        for count in [self.n, self.cells(), self.offsets.len(), self.nodes.len()] {
+            index(&mut hash, count)?;
+        }
+        for material in &self.materials {
+            poll(checkpoint)?;
+            let state = material.source_state().expect("native density admitted");
+            hash.update(state.material_state_identity().as_bytes());
+            hash.update(&state.density_kg_m3().to_bits().to_le_bytes());
+        }
+        for (i, &offset) in self.offsets.iter().enumerate() {
+            if i % 64 == 0 {
+                poll(checkpoint)?;
+            }
+            index(&mut hash, offset)?;
+        }
+        for (i, (&node, force)) in self.nodes.iter().zip(&self.forces).enumerate() {
+            if i % 64 == 0 {
+                poll(checkpoint)?;
+            }
+            index(&mut hash, node)?;
+            for component in force {
+                hash.update(&component.to_bits().to_le_bytes());
+            }
+        }
+        poll(checkpoint)?;
+        Ok(hash.finalize())
+    }
+
     // One geometry/material integrator and one sparse transpose construction.
     // None means identity raw-node rows; adaptive callers pass their exact T.
     #[allow(clippy::too_many_arguments)]
@@ -243,6 +302,7 @@ impl MaterialBodyLoad3 {
             ))?;
         let mut result = Self {
             binding: Arc::clone(&raw.material_body_binding),
+            fingerprint: ContentHash([0; 32]),
             space,
             n,
             materials: Vec::new(),
@@ -359,6 +419,7 @@ impl MaterialBodyLoad3 {
             result.materials.push(cell.material.clone());
             result.offsets.push(result.nodes.len());
         }
+        result.fingerprint = result.compute_fingerprint(&mut checkpoint)?;
         poll(&mut checkpoint)?;
         Ok(result)
     }

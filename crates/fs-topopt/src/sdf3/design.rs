@@ -61,6 +61,8 @@ pub struct StressDesignIteration3 {
 #[derive(Debug, Clone)]
 pub struct StressDesignCheckpoint3 {
     pub optimizer: ProjectedAlCheckpoint,
+    /// Complete prepared body map and native source attribution, when attached.
+    pub material_body_load_fingerprint: Option<fs_blake3::ContentHash>,
     pub best_feasible_density: Option<Vec<f64>>,
     pub history: Vec<StressDesignIteration3>,
     /// Physical endpoint re-evaluations already included in optimizer work.
@@ -349,6 +351,9 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
         motions: Option<&'a StressMotions3<'a>>, checkpoint: StressDesignCheckpoint3,
         options: StressDesignOptions3, measure: StressMeasure3,
         control: &'a mut SolveControl<'callback>) -> Result<Self, ProjectedAlError<StressError3>> {
+        if checkpoint.material_body_load_fingerprint != study.material_body_load_fingerprint() {
+            return Err(ProjectedAlError::Invalid("stress restart changed its material body load"));
+        }
         let n = study.cells();
         let cost = checkpoint.restoration_cost();
         let restoration_evaluations = checkpoint.restoration_evaluations.checked_add(cost)
@@ -428,6 +433,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> StressDesignStudy3<'a, 'callback, O> {
     pub fn checkpoint(&self) -> StressDesignCheckpoint3 {
         StressDesignCheckpoint3 {
             optimizer: self.state.checkpoint(),
+            material_body_load_fingerprint: self.study.material_body_load_fingerprint(),
             best_feasible_density: self.best_feasible.as_ref().map(|e| e.rho.clone()),
             history: self.history.clone(),
             restoration_evaluations: self.restoration_evaluations,

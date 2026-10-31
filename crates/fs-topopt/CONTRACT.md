@@ -170,10 +170,25 @@ is refused. Material tensors and densities stay fixed during a design session.
 Refits preserve the objective and require native mass availability. Restart
 binds the objective kind/scale and the ordered reference-cell mass vector, then
 re-solves retained endpoints before installing them. The minimum-material byte
-codec is version 2; older bytes are refused explicitly. Source/executable and
+codec is version 3; older bytes are refused explicitly. Source/executable and
 callback identity retain the existing external binding requirement. Adaptive
-stopping continues to measure response and geometric-volume changes; it does
-not certify mass convergence.
+minimum-material refinement carries the selected objective and normalization
+into every probe and refit. Mass mode measures actual coarse/fine kg inventory
+on the inherited physical density field and adds each original parent's
+absolute kg correction, divided by `scale_kg`, to Dörfler marking. Its
+`mass_tolerance` checks that normalized mass change in addition to the existing
+response and geometric-volume tolerances. Separate kg, volume and objective
+reports remain visible. These are numerical checks on one enriched grid, not
+continuum bounds; inventory adds no filter, equilibrium or adjoint solve.
+
+Stress, response, joint response/stress and minimum-material optimizer
+checkpoints bind the optional prepared material body load by its cached native
+fingerprint. Restoration rejects a changed presence, sparse occupancy-to-force
+map, source-state identity or density before reserving endpoint evaluations or
+running physics. The fingerprint uses the existing domain-separated hash owner
+over fixed-width layout and exact coefficient bits. It does not replace the
+external binding of geometry, stiffness, other callbacks or executable identity;
+fresh endpoint and derivative checks still precede resumed optimization.
 
 `material_sdf3` covers heterogeneous inventory and finite differences, protected
 regions, cancellation, density-independent geometric filtering, adaptive
@@ -181,6 +196,59 @@ inventory and real response-constrained mass minimization. The
 `material_mass_sdf3` example exposes the path with independently tunable density
 and stiffness in two explicitly synthetic material regions. These additions do
 not claim a continuum certificate or completion of the full marquee milestone.
+
+## Native material body loads on raw-SDF designs
+
+Prepare an acceleration load with the native Cartesian or adaptive operator's
+`prepare_material_body_load`, then attach it to that same operator's study using
+`CutDensityStudy3::with_material_body_load`. Each sparse cell column is
+`B_c = integral(rho_material,c * N^T * acceleration) dV`; it uses the same native
+material state, cut quadrature, clamps and hanging-node map as the mechanics.
+Geometry is in metres, acceleration in m/s², and assembled force in newtons.
+The stencil is bound to the exact immutable operator owner, not just matching
+dimensions. Preparation is bounded and cancellable; subsequent actions reuse
+the columns without recalling the acceleration law or rebuilding quadrature.
+
+Every independent experiment receives its declared dead load plus
+`B * projected_occupancy`. Physical solid/void overrides and eroded or binary
+occupancy apply to both material inventory and body force. SIMP stiffness and
+its ersatz floor never create body-force mass. Acceleration remains fixed in
+the reference configuration; deformation-dependent follower loads are outside
+this model.
+
+Fixed-grid compliance, displacement/reaction fitting, response-constrained
+mass design, sampled stress and finite-case compliance envelopes use this
+force in their actual equilibria. Compliance includes the load derivative
+`2 B^T u`; other solved responses include `B^T adjoint`, composed with their
+existing direct terms and the shared projection/filter pullback. Binary
+response and finite-case compliance checks apply the actual binary occupancy
+to the stencil. Actual external work remains separate from numerical support
+lifting and is not relabeled as actuator work.
+
+Explicit response and minimum-material refits accept a candidate study with
+its own freshly prepared body load. Both studies must have matching body-load
+presence, and the caller must keep the reference acceleration law unchanged.
+Existing DWR and automatic refinement factories refuse attached material body
+loads because they cannot reconstruct the fine-grid load and its transfer
+identity. Continuous zero-centered spectral load-space envelopes likewise
+refuse a material body-load offset; finite lists of independent load cases are
+supported. An unsupported route returns its typed refusal before invoking
+reference-load callbacks or publishing a replacement study.
+
+Run:
+
+```bash
+cargo run -p fs-topopt --features cutfem-marquee --release \
+  --example material_mass_sdf3 -- 24 250000 4 1.5 250 1 0.0002
+```
+
+The example minimizes kg under an axial reaction floor and a reference-volume-average downward
+displacement ceiling. Its synthetic two-region material field supplies both
+stiffness and mass; downward acceleration defaults to **1 m/s²**, not standard
+Earth gravity. Output distinguishes actual kg, geometric volume, each original
+response limit, body-force external work in joules, and the optimizer's actual
+stop. A completed update allowance does not establish convergence, a local
+strain bound, experimental validity or continuum accuracy.
 
 ## 3-D cut-cell continuation
 

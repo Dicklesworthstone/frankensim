@@ -218,6 +218,9 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveResponseStudy3<'a, O> {
         cases: &'a [ReferenceResponseCase3<'a>], reactions: Option<&'a [&'a [ReactionTarget3<'a>]]>,
         rho: &[f64], options: AdaptiveResponseOptions3, control: &mut SolveControl<'_>)
         -> Result<Self, FitError> {
+        if study.has_material_body_load() {
+            return Err(ProjectedAlError::Invalid("automatic response refinement cannot transfer a material body load"));
+        }
         options.validate()?;
         if !tree_matches(&tree, &study.operator) {
             return Err(ProjectedAlError::Invalid("source operator does not match adaptive background"));

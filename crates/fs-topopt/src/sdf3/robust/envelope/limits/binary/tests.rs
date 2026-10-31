@@ -9,6 +9,83 @@ fn caps() -> ComplianceCaps3 { ComplianceCaps3::new(vec![1e6, 2e6], 0.02, 2).unw
 fn close(a: f64, b: f64) { assert!((a-b).abs() <= 1e-8 * a.abs().max(b.abs()).max(1.0), "{a} != {b}"); }
 
 #[test]
+fn binary_material_body_force_matches_native_density_and_exact_occupancy() {
+    use crate::sdf3::robust::envelope::tests::native_body_operator;
+    let op = native_body_operator();
+    let acceleration = [0.1, -0.2, 0.3];
+    let prepared = op.prepare_material_body_load(&|_| acceleration, 100_000,
+        || ControlFlow::Continue(())).unwrap();
+    let dead = op.body_load(&|_| [0.0, 0.0, -0.05], || ControlFlow::Continue(())).unwrap();
+    let opposite: Vec<_> = dead.iter().map(|f| -f).collect();
+    let regions = op.cell_keys().iter().map(|key|
+        if key[0] == 0 { PhysicalRegion3::Solid } else { PhysicalRegion3::Void }).collect();
+    let params = SimpParams { beta: 2.0, penal: 3.0, e_min: 0.02, ..Default::default() };
+    let mut study = CutDensityStudy3::new(op, 0.15, params)
+        .with_physical_regions(regions).unwrap().with_material_body_load(prepared).unwrap();
+    let incoming = study.operator().scales().to_vec();
+    let raw = vec![0.6; study.cells()];
+    let options = BinaryComplianceOptions3 { void_stiffness: 0.07, ..Default::default() };
+    let mut poll = |_| ControlFlow::Continue(());
+    let mut control = SolveControl::new(SolveBudget::default(), &mut poll);
+    let binary = study.evaluate_binary_compliance_caps(&raw, &[&dead, &opposite],
+        &caps(), options, &mut control).unwrap();
+    assert!(binary.eroded.solid.iter().any(|s| *s) && binary.eroded.solid.iter().any(|s| !s));
+    assert_eq!(study.operator().scales(), incoming);
+    // Independent native integration uses full rho0 only where the binary
+    // material is present. The heavy void half contributes no body force.
+    let mut reference = native_body_operator();
+    reference.set_scales(&binary.eroded_stiffness_scales()).unwrap();
+    let body = reference.body_load(&|p| {
+        let density = if p[0] < 0.5 { 2.0 } else { 0.0 };
+        acceleration.map(|a| density * a)
+    }, || ControlFlow::Continue(())).unwrap();
+    for (case, external) in [&dead, &opposite].into_iter().enumerate() {
+        let rhs: Vec<_> = external.iter().zip(&body).map(|(f, b)| f + b).collect();
+        let solution = reference.solve_controlled(&rhs, 1e-11, 10_000, 16,
+            |_| ControlFlow::Continue(())).unwrap();
+        close(binary.case_compliances[case], solution.compliance());
+        for (&a, &b) in binary.displacements[case].iter().zip(solution.coefficients()) { close(a, b); }
+    }
+    assert!((binary.case_compliances[0] - binary.case_compliances[1]).abs() > 1e-6,
+        "a common body force must not be negated with each authored dead load");
+}
+
+#[test]
+fn affine_body_force_refuses_continuous_spectral_endpoints_and_scans_before_work() {
+    use crate::sdf3::robust::envelope::tests::native_body_operator;
+    use crate::sdf3::robust::envelope::load_space::LoadSpace3;
+    use crate::sdf3::robust::envelope::load_space::design::limits::{
+        LoadSpaceCap3, binary::BinaryLoadSpaceScanOptions3,
+    };
+    let op = native_body_operator();
+    let load = op.prepare_material_body_load(&|_| [0.0, 0.0, -1.0], 100_000,
+        || ControlFlow::Continue(())).unwrap();
+    let force = op.body_load(&|_| [0.0, -1.0, 0.0], || ControlFlow::Continue(())).unwrap();
+    let mut study = CutDensityStudy3::new(op, 0.15, SimpParams::default())
+        .with_material_body_load(load).unwrap();
+    let raw = vec![0.6; study.cells()];
+    let basis = [&force[..], &force[..]];
+    let scales = study.operator().scales().to_vec();
+    let polls = std::cell::Cell::new(0);
+    let mut callback = |_| { polls.set(polls.get() + 1); ControlFlow::Continue(()) };
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let work = control.work();
+    let policy = LoadSpace3::new(2, 1e6, 0.02).unwrap();
+    assert!(matches!(study.evaluate_robust_load_space(&raw, &basis,
+        RobustOptions3::default(), &policy, &mut control), Err(EvaluationStop::Breakdown { .. })));
+    let cap = LoadSpaceCap3::new(2, 1e6, 0.02).unwrap();
+    assert!(matches!(study.evaluate_binary_load_space_cap(&raw, &basis, &cap,
+        BinaryComplianceOptions3::default(), &mut control), Err(BinaryComplianceError3::Invalid(_))));
+    assert!(matches!(study.scan_binary_load_space_cap(&raw, &basis, &cap, &[0.4, 0.6],
+        BinaryLoadSpaceScanOptions3::default(), &mut control), Err(BinaryComplianceError3::Invalid(_))));
+    assert!(matches!(study.scan_all_binary_load_space_cap(&raw, &basis, &cap,
+        BinaryLoadSpaceScanOptions3::default(), &mut control), Err(BinaryComplianceError3::Invalid(_))));
+    assert_eq!(control.work(), work);
+    assert_eq!(study.operator().scales(), scales);
+    assert_eq!(polls.get(), 0);
+}
+
+#[test]
 fn binary_eroded_solves_match_an_independently_prescribed_material_image() {
     let (mut study, y, z) = fixture(2.0);
     let raw: Vec<_> = (0..study.cells()).map(|i| 0.35 + 0.045 * i as f64).collect();

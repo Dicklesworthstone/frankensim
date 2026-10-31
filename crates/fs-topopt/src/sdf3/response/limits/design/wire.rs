@@ -4,7 +4,7 @@
 use super::*;
 use fs_ascent::projected_al::ProjectedAlCheckpoint;
 
-const MAGIC: &[u8; 8] = b"FSMMLCP\x02";
+const MAGIC: &[u8; 8] = b"FSMMLCP\x03";
 
 /// Caps apply to the entire payload and cumulative vector entries, including
 /// nested lists. They bound decoded storage, not process-wide peak memory.
@@ -52,6 +52,11 @@ trait Wire: Sized {
     const MIN: usize;
     fn write(&self, w: &mut Writer) -> Result<()>;
     fn read(r: &mut Reader<'_>) -> Result<Self>;
+}
+impl Wire for fs_blake3::ContentHash {
+    const MIN: usize = 32;
+    fn write(&self, w: &mut Writer) -> Result<()> { w.put(self.as_bytes()) }
+    fn read(r: &mut Reader<'_>) -> Result<Self> { Ok(fs_blake3::ContentHash(r.take()?)) }
 }
 impl Wire for usize {
     const MIN: usize = 8;
@@ -154,6 +159,7 @@ fields!(MinimumMaterialEndpoint3 { rho: Vec<f64>, projected_rho: Vec<f64>, scale
 fields!(MinimumMaterialIteration3 { iteration: usize, volume_fraction: f64, mass_kg: Option<f64>,
     objective: f64, constraint: f64, worst_residual: f64 });
 fields!(MinimumMaterialCheckpoint3 { optimizer: ProjectedAlCheckpoint, options: MinimumMaterialOptions3,
+    material_body_load_fingerprint: Option<fs_blake3::ContentHash>,
     limits: Vec<Vec<MinimumMaterialLimit3>>, prescribed: Vec<bool>, reference_cell_masses_kg: Option<Vec<f64>>,
     accepted: MinimumMaterialEndpoint3,
     best_feasible: Option<MinimumMaterialEndpoint3>, history: Vec<MinimumMaterialIteration3>, restoration_evaluations: usize });

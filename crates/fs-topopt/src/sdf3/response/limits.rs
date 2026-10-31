@@ -48,6 +48,8 @@ pub struct ResponseLimit3<'a> {
 /// One independent fixed-load/prescribed-motion experiment and its inequalities.
 #[derive(Clone, Copy)]
 pub struct ResponseLimitCase3<'a> {
+    /// Additional fixed force; a configured native material body load is
+    /// common to every experiment and follows its physical occupancy.
     pub force: &'a [f64],
     pub prescribed: Option<&'a PrescribedMotion3<'a>>,
     pub limits: &'a [ResponseLimit3<'a>],
@@ -211,10 +213,11 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         -> Result<ResponseLimitEvaluation3, ResponseError3> {
             let op = self.operator.adaptive();
             let physical::LimitPrimals3 { displacements, measurements, residuals, all } =
-                self.response_limit_primals(cases, prepared, control)?;
+                self.response_limit_primals(cases, &design.projected, prepared, control)?;
             control.checkpoint("response-limits-aggregate")?;
             let (constraint, worst_residual, weights) = aggregate(&all, options.sharpness)?;
             let mut local = vec![0.0; self.cells()];
+            let mut occupancy_gradient = vec![0.0; self.cells()];
             let mut adjoints = Vec::with_capacity(cases.len());
             let mut offset = 0;
             for (case, u) in cases.iter().zip(&displacements) {
@@ -249,15 +252,10 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     None => vec![0.0; self.cells()],
                 };
                 for ((l, k), b) in local.iter_mut().zip(stiffness).zip(lifting) { *l = finite(*l+b-k)?; }
+                self.add_material_body_gradient(&z, 1.0, &mut occupancy_gradient, control)?;
                 adjoints.push(z);
             }
-            let p = self.params;
-            for ((l, r), slope) in local.iter_mut().zip(&design.projected).zip(&design.slope) {
-                let power = if p.penal == 1.0 { 1.0 } else if *r == 0.0 { 0.0 }
-                    else { fs_math::det::pow(*r, p.penal-1.0) };
-                *l = finite(*l*(1.0-p.e_min)*p.penal*power*slope)?;
-            }
-            let constraint_gradient = self.pullback(&local, control)?;
+            let constraint_gradient = self.physical_gradient(design, &local, &occupancy_gradient, control)?;
             let dv: Vec<_> = self.mass.iter().zip(&design.slope).map(|(m,s)| m*s).collect();
             let volume_gradient = self.pullback(&dv, control)?;
             control.checkpoint("response-limits-publish")?;

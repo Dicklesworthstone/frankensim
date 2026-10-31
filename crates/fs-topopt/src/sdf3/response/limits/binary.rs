@@ -2,7 +2,8 @@
 //!
 //! This is a fixed-grid binary MATERIAL check, not a body-fitted geometry export.
 //! A false cell retains the declared positive ersatz stiffness; quadrature,
-//! reference loads, support patches and observation laws are NOT removed with it.
+//! authored dead loads, support patches and observation laws remain. Configured
+//! native material body force follows binary occupancy and vanishes in void.
 //! Feasibility depends on that stiffness floor and is not a continuum, zero-void,
 //! connectedness, minimum-feature-size or manufacturing certificate.
 use super::*;
@@ -89,8 +90,9 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     ///
     /// Prescribed-motion liftings and reaction functionals are recomputed at the
     /// endpoint stiffness through the SAME primal/load owner as the differentiable
-    /// evaluator. All original forces and support laws stay in place, including
-    /// on weak cells. No load-removal rule or stiffness floor is guessed.
+    /// evaluator. Authored dead forces and support laws stay in place, including
+    /// on weak cells; configured material body forces follow binary occupancy.
+    /// No load-removal rule or stiffness floor is guessed.
     /// Protected physical solid/void cells are retained. Both success and returned
     /// errors restore incoming material. The report never installs a binary mask
     /// as raw optimizer controls or claims a valid manufactured/continuum shape.
@@ -129,8 +131,11 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         self.operator.set_scales(&scales)?;
         let result = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
+            // Binary physical occupancy has no mass in ersatz void, even
+            // though its stiffness is deliberately positive.
+            let occupancy: Vec<f64> = solid.iter().map(|&present| if present { 1.0 } else { 0.0 }).collect();
             let physical::LimitPrimals3 { displacements, measurements, residuals, all } =
-                self.response_limit_primals(cases, &prepared, control)?;
+                self.response_limit_primals(cases, &occupancy, &prepared, control)?;
             let (constraint, worst_residual, _) = aggregate(&all, options.limits.sharpness)?;
             control.checkpoint("response-binary-publish")?;
             Ok(BinaryLimitEvaluation3 { threshold: options.threshold, void_stiffness: options.void_stiffness,
