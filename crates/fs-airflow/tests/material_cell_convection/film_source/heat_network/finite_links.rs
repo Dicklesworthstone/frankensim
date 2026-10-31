@@ -13,6 +13,8 @@ mod piezoelectric_thermal;
 mod thermoelectric;
 #[path = "finite_links/graph.rs"]
 mod graph;
+#[path = "finite_links/hysteretic.rs"]
+mod hysteretic;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
     SourceConvectiveLink, evaluate_source_link_convection,
 };

@@ -20,7 +20,7 @@ use super::{
 use crate::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
     DrivenCoefficients, DriverAccount, ThermalDriver, cell_driver_candidate,
-    contacts::heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance},
+    contacts::heat::{HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance},
     material::{
         MaterialCell, MaterialNetwork, MaterialNetworkError, MaterialNetworkSample,
         PreparedMaterialNetwork,
@@ -32,22 +32,22 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
 #[derive(Debug)]
-pub enum HystereticThermalError {
+pub enum HystereticThermalError<E = HeatNetworkError> {
     Material(MaterialNetworkError),
     Magnetic(HystereticCircuitError),
-    Heat(HeatNetworkError),
+    Heat(E),
 }
-impl core::fmt::Display for HystereticThermalError {
+impl<E: core::fmt::Debug> core::fmt::Display for HystereticThermalError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "hysteretic circuit/enthalpy: {self:?}")
     }
 }
-impl std::error::Error for HystereticThermalError {}
-type Error = CircuitEnthalpyError<HystereticThermalError>;
-fn invalid(s: &'static str) -> Error {
+impl<E: core::fmt::Debug> std::error::Error for HystereticThermalError<E> {}
+type Error<E = HeatNetworkError> = CircuitEnthalpyError<HystereticThermalError<E>>;
+fn invalid<E>(s: &'static str) -> Error<E> {
     CircuitEnthalpyError::Invalid(s)
 }
-fn material(e: MaterialNetworkError) -> Error {
+fn material<E>(e: MaterialNetworkError) -> Error<E> {
     match e {
         MaterialNetworkError::Thermal(DepositionError::Cancelled) => {
             CircuitEnthalpyError::Cancelled
@@ -55,17 +55,17 @@ fn material(e: MaterialNetworkError) -> Error {
         other => CircuitEnthalpyError::Source(HystereticThermalError::Material(other)),
     }
 }
-fn magnetic(e: HystereticCircuitError) -> Error {
+fn magnetic<E>(e: HystereticCircuitError) -> Error<E> {
     match e {
         HystereticCircuitError::Cancelled => CircuitEnthalpyError::Cancelled,
         HystereticCircuitError::TrialBudget => CircuitEnthalpyError::CircuitBudget,
         other => CircuitEnthalpyError::Source(HystereticThermalError::Magnetic(other)),
     }
 }
-fn heat(e: HeatNetworkError) -> Error {
+fn heat<E: From<HeatNetworkError>>(e: HeatNetworkError) -> Error<E> {
     match e {
         HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled,
-        other => CircuitEnthalpyError::Source(HystereticThermalError::Heat(other)),
+        other => CircuitEnthalpyError::Source(HystereticThermalError::Heat(other.into())),
     }
 }
 impl ThermalDriver for HystereticCircuitCandidate {
@@ -116,6 +116,44 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         electrical_bases: &[(usize, ElectricalPropertyBasis)],
         core_cell: CellId,
         core_temperature_interval_k: [f64; 2],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::bind_with_link_conductances(
+            circuit,
+            thermal,
+            network,
+            electrical_bases,
+            core_cell,
+            core_temperature_interval_k,
+            &BTreeMap::new(),
+            cancelled,
+        )
+    }
+
+    /// Bind the same core, winding and finite thermal inventory while another
+    /// physical owner supplies the remaining native link conductances.
+    ///
+    /// The original material network and this initial map must partition every
+    /// native thermal link exactly. Values are used only for initial admission;
+    /// they are not cached as future cooling. Continue through
+    /// `step_candidate_with_heat_assembly` with a provider that re-resolves all
+    /// finite links at every actual trial temperature. Ordinary `step_candidate`
+    /// still refuses unowned links rather than silently freezing their values.
+    ///
+    /// Core source identity, whole solid volume, temperature coverage, accepted
+    /// magnetic memory and original winding source checks are identical to
+    /// `bind`. The fitted magnetic coefficients remain constant over their
+    /// admitted interval; cooling can change R(T), current and the resulting
+    /// hysteresis trajectory, but supplies no unmeasured thermal magnetic law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn bind_with_link_conductances(
+        circuit: HystereticCircuit,
+        thermal: &DepositionSimulation<'_>,
+        network: &'n MaterialNetwork<'a>,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        core_cell: CellId,
+        core_temperature_interval_k: [f64; 2],
+        initial_link_conductances_w_k: &BTreeMap<u64, f64>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         if cancelled() {
@@ -137,7 +175,12 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             ));
         }
         let prepared = network
-            .prepare_with_bases(thermal, electrical_bases, &mut cancelled)
+            .prepare_with_link_conductances(
+                thermal,
+                electrical_bases,
+                initial_link_conductances_w_k,
+                &mut cancelled,
+            )
             .map_err(material)?;
         let binding = network
             .cells
@@ -162,7 +205,11 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             ));
         }
         let mut initial = prepared
-            .resolve(thermal, &mut cancelled)
+            .resolve_with_link_conductances(
+                thermal,
+                initial_link_conductances_w_k,
+                &mut cancelled,
+            )
             .map_err(material)?;
         initial.resistors.sort_by_key(|r| r.branch);
         if initial.resistors != circuit.native_circuit().resistors() {
@@ -235,10 +282,10 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         self.core_temperature_interval_k
     }
 
-    fn admit_core(
+    fn admit_core<E>(
         &self,
         thermal: &DepositionSimulation<'_>,
-    ) -> Result<Option<fs_material::field_storage::hysteresis::UniformHystereticCore>, Error> {
+    ) -> Result<Option<fs_material::field_storage::hysteresis::UniformHystereticCore>, Error<E>> {
         let cell = thermal
             .cells()
             .get(&self.core_cell)
@@ -345,8 +392,54 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         magnetic_controls: HystereticCircuitSolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, HeatNetworkSample>, Error> {
+        self.step_candidate_with_heat_assembly(
+            cx,
+            prepared,
+            thermal,
+            target_s,
+            external_inputs,
+            controls,
+            magnetic_controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    /// Advance original hysteresis memory, winding current and finite heat with
+    /// any complete material heat assembly, including finite source-resolved
+    /// coolant and prescribed material reservoirs.
+    ///
+    /// The provider must retain the exact bulk network supplied at binding.
+    /// Every trial resolves the SAME proposed thermal state and starts the
+    /// magnetic/circuit solve from the same accepted memory. Native winding
+    /// Joule loss and core pinning loss are deposited once in their original
+    /// distinct caloric receivers; finite coolant exchange is internal. The
+    /// complete accepted provider sample remains in `report().source`.
+    ///
+    /// The original physical energy gate excludes closed-radiation roundoff
+    /// from external supply. Typed provider failures remain under
+    /// `HystereticThermalError::Heat`; native cancellation and work-budget
+    /// failures keep their classifications. No partially advanced memory is
+    /// published on refusal.
+    ///
+    /// Use `bind_with_link_conductances` when the thermal inventory has
+    /// additional finite links. Existing constant magnetic-fit coefficients,
+    /// admitted core temperature interval, monotone-linkage cuts, fixed solid
+    /// geometry and first-order thermal coupling remain authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate_with_heat_assembly<'t, A: HeatAssembly + ?Sized>(
+        &self,
+        cx: &Cx<'_>,
+        assembly: &A,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        external_inputs: &[f64],
+        controls: CircuitEnthalpySolve,
+        magnetic_controls: HystereticCircuitSolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, A::Sample>, Error<A::Error>> {
         cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
-        let network = prepared.field_material_network().map_err(heat)?;
+        let prepared = assembly.prepared_heat_network();
+        let network = prepared.field_material_network().map_err(heat::<A::Error>)?;
         if !std::ptr::eq(network, self.network) {
             return Err(invalid(
                 "hysteretic heat assembly must retain the original bulk material network",
@@ -354,7 +447,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         }
         prepared
             .admit_field_independent_boundaries(cx, &[])
-            .map_err(heat)?;
+            .map_err(heat::<A::Error>)?;
         let candidate = self.step_resolved_candidate(
             thermal,
             target_s,
@@ -363,7 +456,9 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
             magnetic_controls,
             initial_energy_increments_j,
             |state| {
-                let coefficients = prepared.resolve(cx, state).map_err(heat)?;
+                let coefficients = assembly
+                    .resolve_heat(cx, state)
+                    .map_err(|error| error.map_source(HystereticThermalError::Heat))?;
                 if !coefficients.contacts.is_empty() {
                     return Err(invalid(
                         "hysteretic circuit cannot discard electrical contact work or heat",
@@ -376,10 +471,10 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         closed_balance(
             target_s - thermal.time_s(),
             candidate.report.total_energy_residual_j,
-            &candidate.report.source,
+            candidate.report.source.as_ref(),
             controls.total_energy_tolerance_j,
         )
-        .map_err(heat)?;
+        .map_err(heat::<A::Error>)?;
         cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
         Ok(candidate)
     }
@@ -387,7 +482,7 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
     // One original magnetic driver, heat partition and enthalpy residual serve
     // both source assemblies. Every trial starts from the same accepted memory.
     #[allow(clippy::too_many_arguments)]
-    fn step_resolved_candidate<'t, S>(
+    fn step_resolved_candidate<'t, S, E>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
@@ -395,9 +490,9 @@ impl<'n, 'a> ThermalHystereticCircuit<'n, 'a> {
         controls: CircuitEnthalpySolve,
         magnetic_controls: HystereticCircuitSolve,
         initial_energy_increments_j: &[f64],
-        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error<E>>,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, S>, Error> {
+    ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, S>, Error<E>> {
         let cancel = RefCell::new(cancelled);
         let check = || {
             if (*cancel.borrow_mut())() {

@@ -1,9 +1,10 @@
 //! Source-paired sensible-enthalpy storage and temperature-dependent transport.
 //!
-//! One immutable card supplies Cp(T), rho(T) and k(T) at the same fixed external
-//! conditions. The existing caloric owner integrates Cp; the existing conduction
-//! table evaluates k. Reference density is resolved ONCE at an explicit reference
-//! state and never replaced by the chart's changing equilibrium density.
+//! One immutable card supplies Cp(T), rho(T) and scalar or principal k(T) at
+//! the same fixed external conditions. The existing caloric owner integrates
+//! Cp; the existing conduction owner evaluates the physical conductivity tensor.
+//! Reference density is resolved ONCE at an explicit reference state and never
+//! replaced by the chart's changing equilibrium density.
 //! This is stationary single-phase transport, without expansion or pressure work.
 
 use fs_blake3::{ContentHash, DomainHasher};
@@ -18,13 +19,18 @@ use crate::{ConductionError, ConductionMesh, ConductivityModel, ConductivityTabl
 use fs_exec::Cx;
 
 /// Explicit source selection and caloric datum for one stationary material.
+///
+/// The default conductivity selection is one scalar property. Orthotropic
+/// construction uses `[&PropertyKey; 3]`, in declared principal-axis order;
+/// caloric storage and the reference-density convention remain identical.
 #[derive(Clone, Copy, Debug)]
-pub struct MaterialEnthalpySource<'a> {
+pub struct MaterialEnthalpySource<'a, Conductivity = &'a PropertyKey> {
     /// Density/Cp keys and complete lower/upper queries; all external axes stay fixed.
     pub caloric: HeatCapacitySourceQuery<'a>,
-    /// Scalar conductivity in W/(m K), from the SAME material card.
-    /// The constructor explicitly selects an isotropic conduction model.
-    pub conductivity: &'a PropertyKey,
+    /// Conductivity source(s) in W/(m K), from the SAME material card.
+    /// A scalar key explicitly selects isotropy; three keys select the three
+    /// principal directions supplied to the orthotropic constructor.
+    pub conductivity: Conductivity,
     /// Density is frozen at this point; only its temperature may differ from the endpoints.
     pub reference: &'a QueryPoint,
     /// Explicit single phase. Mixed-phase behavior is not inferred from Cp data.
@@ -89,6 +95,63 @@ impl MaterialEnthalpyTransport {
         card: &MaterialCard,
         source: MaterialEnthalpySource<'_>,
     ) -> Result<Self, MaterialEnthalpyError> {
+        let table = Self::conductivity_table(card, source.caloric, source.conductivity)?;
+        Self::from_conductivity(card, source, ConductivityModel::isotropic(table), None)
+    }
+
+    /// Resolve three principal conductivity sources with the SAME caloric
+    /// chart, reference mass and external conditions as the isotropic path.
+    ///
+    /// Each row of `principal_axes` is a material principal direction in the
+    /// physical mesh frame. Its corresponding property key is at the same
+    /// index in `source.conductivity`. The frame must be finite and orthonormal;
+    /// no material name, scalar dimension or missing direction implies a tensor.
+    /// The original conductivity owner supplies both k(T) and dk/dT to the
+    /// existing nonlinear spatial operator. All three source intervals must
+    /// cover the complete requested caloric path; source knots are retained.
+    ///
+    /// The frame is fixed during this stationary-domain solve and participates
+    /// in material identity. Temperature-dependent reorientation, deformation
+    /// and evolving microstructure require their separate state owners.
+    pub fn from_orthotropic_card(
+        card: &MaterialCard,
+        source: MaterialEnthalpySource<'_, [&PropertyKey; 3]>,
+        principal_axes: [[f64; 3]; 3],
+    ) -> Result<Self, MaterialEnthalpyError> {
+        let table = |key| Self::conductivity_table(card, source.caloric, key);
+        let conductivity = ConductivityModel::orthotropic(
+            principal_axes,
+            [
+                table(source.conductivity[0])?,
+                table(source.conductivity[1])?,
+                table(source.conductivity[2])?,
+            ],
+        )
+        .map_err(MaterialEnthalpyError::Conductivity)?;
+        Self::from_conductivity(card, source, conductivity, Some(principal_axes))
+    }
+
+    fn conductivity_table(
+        card: &MaterialCard,
+        caloric: HeatCapacitySourceQuery<'_>,
+        property: &PropertyKey,
+    ) -> Result<ConductivityTable, MaterialEnthalpyError> {
+        ConductivityTable::from_claims_at_query_points(
+            card.claims(),
+            property,
+            caloric.temperature_axis,
+            &[caloric.lower.clone(), caloric.upper.clone()],
+            caloric.selection,
+        )
+        .map_err(MaterialEnthalpyError::Conductivity)
+    }
+
+    fn from_conductivity<K>(
+        card: &MaterialCard,
+        source: MaterialEnthalpySource<'_, K>,
+        conductivity: ConductivityModel,
+        principal_axes: Option<[[f64; 3]; 3]>,
+    ) -> Result<Self, MaterialEnthalpyError> {
         let axis = source.caloric.temperature_axis;
         let reference_k =
             source
@@ -130,15 +193,7 @@ impl MaterialEnthalpyTransport {
             source.maximum_interpolation_error_j_kg,
         )
         .map_err(MaterialEnthalpyError::Caloric)?;
-        let table = ConductivityTable::from_claims_at_query_points(
-            card.claims(),
-            source.conductivity,
-            axis,
-            &[source.caloric.lower.clone(), source.caloric.upper.clone()],
-            source.caloric.selection,
-        )
-        .map_err(MaterialEnthalpyError::Conductivity)?;
-        for receipt in caloric.receipts().iter().chain(table.receipts()) {
+        for receipt in caloric.receipts().iter().chain(conductivity.receipts()) {
             if !card
                 .claims()
                 .claim(receipt.selected)
@@ -172,17 +227,26 @@ impl MaterialEnthalpyTransport {
                 "reference density must be positive and use the caloric chart's exact density claim",
             ));
         }
-        let mut hash = DomainHasher::new("org.frankensim.fs-conduction.material-enthalpy.v1");
+        let mut hash = DomainHasher::new(if principal_axes.is_some() {
+            "org.frankensim.fs-conduction.orthotropic-material-enthalpy.v1"
+        } else {
+            "org.frankensim.fs-conduction.material-enthalpy.v1"
+        });
         hash.update(card.content_hash().as_bytes());
         hash.update(caloric.curve().identity().as_bytes());
         hash.update(reference_density.receipt.content_hash().as_bytes());
-        for receipt in table.receipts() {
+        if let Some(axes) = principal_axes {
+            for component in axes.into_iter().flatten() {
+                hash.update(&component.to_le_bytes());
+            }
+        }
+        for receipt in conductivity.receipts() {
             hash.update(receipt.content_hash().as_bytes());
         }
         Ok(Self {
             card_identity: card.content_hash(),
             caloric,
-            conductivity: ConductivityModel::isotropic(table),
+            conductivity,
             reference_query: source.reference.clone(),
             reference_density,
             identity: hash.finalize(),
