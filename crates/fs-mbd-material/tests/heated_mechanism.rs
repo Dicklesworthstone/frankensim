@@ -2,14 +2,15 @@
 #[path = "heating/common.rs"]
 mod common;
 use common::*;
-use fs_ga::{Se3, Vec3, Wrench};
+use fs_ga::{Se3, So3, Vec3, Wrench};
 use fs_matdb::MaterialCard;
 use fs_material::phase::{ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_mbd::articulated::{BaseState, JointModel, forward_dynamics, forward_kinematics};
-use fs_mbd_material::{RegionBinding, VolumeMoments};
 use fs_mbd_material::articulated::{MaterialLink, ResolvedArticulated, resolve_articulated};
+use fs_mbd_material::thermal::JointMaterialAttachment;
 use fs_mbd_material::thermal::heating::{HeatedArticulated, HeatingError, LinkHeating};
+use fs_mbd_material::{RegionBinding, VolumeMoments};
 use fs_thermal::enthalpy::*;
 use fs_thermal::observers::ObserverCouplingError;
 use std::collections::BTreeMap;
@@ -235,4 +236,222 @@ fn global_admission_and_aligned_restarts_preserve_the_complete_mechanism() {
     let small = build(input, DepositionBudget { max_substeps: 1, ..budget() }).unwrap();
     assert!(matches!(small.advance_to(3., config(), || Ok(())), Err(HeatingError::Thermal(DepositionError::Budget(_)))));
     assert_eq!(small.thermal().time_s(), 0.);
+}
+
+#[test]
+fn sourced_parent_expansion_moves_joint_geometry_and_native_lever_response() {
+    for expansion_per_k in [1e-3, 2e-3] {
+        let a = card(10., expansion_per_k, 500.);
+        let b = card(20., 0., 500.);
+        let ca = caloric(&a, 1e5, SolidLiquidPhase::Solid);
+        let cb = caloric(&b, 1e5, SolidLiquidPhase::Solid);
+        let p = point(300., 1e5);
+        let geometry = VolumeMoments::cuboid(Vec3::new(1., 1., 1.)).unwrap();
+        let parent = [RegionBinding {
+            key: "a",
+            material: &a,
+            point: &p,
+            geometry,
+            selection: MaterialPropertySelection::SingleClaimOnly,
+        }];
+        let child = [RegionBinding {
+            key: "a",
+            material: &b,
+            point: &p,
+            geometry,
+            selection: MaterialPropertySelection::SingleClaimOnly,
+        }];
+        let hinge = JointModel::revolute(Vec3::new(0., 0., 1.), None).unwrap();
+        let reference = resolve_articulated(
+            &[
+                MaterialLink {
+                    name: "mount",
+                    parent: None,
+                    parent_from_child_zero: Se3::identity(),
+                    joint: JointModel::FIXED,
+                    regions: &parent,
+                },
+                MaterialLink {
+                    name: "lever",
+                    parent: Some(0),
+                    parent_from_child_zero: Se3::identity(),
+                    joint: hinge,
+                    regions: &parent,
+                },
+                MaterialLink {
+                    name: "tip",
+                    parent: Some(1),
+                    parent_from_child_zero: Se3::from_parts(
+                        So3::identity(),
+                        Vec3::new(0.5, 0., 0.),
+                    )
+                    .unwrap(),
+                    joint: hinge,
+                    regions: &child,
+                },
+            ],
+            3,
+            || false,
+        )
+        .unwrap();
+        let original = HeatedArticulated::new(
+            &reference,
+            vec![
+                LinkHeating {
+                    link: "mount",
+                    regions: vec![region(&a, &ca, "a", 0, 0.)],
+                },
+                LinkHeating {
+                    link: "lever",
+                    regions: vec![region(&a, &ca, "a", 1, 40.)],
+                },
+                LinkHeating {
+                    link: "tip",
+                    regions: vec![region(&b, &cb, "a", 2, 0.)],
+                },
+            ],
+            vec![],
+            budget(),
+            config(),
+            || Ok(()),
+        )
+        .unwrap();
+        let attachments = ["lever", "tip"].map(|name| JointMaterialAttachment {
+            link: name.into(),
+            parent_region: "a".into(),
+            child_region: "a".into(),
+        });
+        let old = original
+            .with_joint_attachments(&attachments, || Ok(()))
+            .unwrap();
+        assert_eq!(old.configuration().model(), reference.model());
+        let reverse = [attachments[1].clone(), attachments[0].clone()];
+        assert_eq!(
+            old.configuration(),
+            original
+                .with_joint_attachments(&reverse, || Ok(()))
+                .unwrap()
+                .configuration()
+        );
+        let (next, audit) = old.advance_to(2., config(), || Ok(())).unwrap();
+        // Only the parent's source alpha changes between these two material cases.
+        // rho=2, V=1, Cp=10: 80 J heats the parent by 4 K.
+        let stretch = 1. + 4. * expansion_per_k;
+        close(audit.external_heat_j, 80.);
+        let native = next.configuration().model();
+        close(
+            native.links()[2].parent_from_child_zero().translation().x,
+            0.5 * stretch,
+        );
+        let kinematics = forward_kinematics(
+            native,
+            BaseState::stationary(Se3::identity()),
+            &[0., 0.],
+            &[0., 0.],
+        )
+        .unwrap();
+        close(kinematics.world_from_link[2].translation().x, 0.5 * stretch);
+        // H11-H12 = I_parent + m_child L^2 = (1/3 + 1/2) s^2.
+        let response = forward_dynamics(
+            native,
+            BaseState::stationary(Se3::identity()),
+            &[0., 0.],
+            &[0., 0.],
+            &[1., 0.],
+            Vec3::default(),
+            &[Wrench::default(); 3],
+        )
+        .unwrap();
+        close(
+            response.generalized_acceleration[0],
+            6. / (5. * stretch * stretch),
+        );
+        close(
+            response.generalized_acceleration[1],
+            -response.generalized_acceleration[0],
+        );
+        for (body, reference) in next.configuration().bodies().iter().zip(reference.bodies()) {
+            assert_eq!(
+                body.inertia().mass().to_bits(),
+                reference.inertia().mass().to_bits()
+            );
+        }
+        let (first, _) = old.advance_to(1., config(), || Ok(())).unwrap();
+        let (rest, _) = first.advance_to(2., config(), || Ok(())).unwrap();
+        assert_eq!(next.configuration(), rest.configuration());
+        // Rebinding an already hot model still starts at ORIGINAL material geometry.
+        assert_eq!(
+            next.configuration(),
+            next.with_joint_attachments(&attachments, || Ok(()))
+                .unwrap()
+                .configuration()
+        );
+        assert_eq!(original.configuration().model(), reference.model());
+    }
+}
+
+#[test]
+fn material_joint_assignments_refuse_unknown_roles_and_unsupported_child_motion_atomically() {
+    let a = card(10., 1e-3, 500.);
+    let c = caloric(&a, 1e5, SolidLiquidPhase::Solid);
+    let reference = mechanism(&a, &a, [300.; 2]);
+    let body = HeatedArticulated::new(
+        &reference,
+        bindings(&a, &a, &c, &c, [40., 0.]),
+        vec![],
+        budget(),
+        config(),
+        || Ok(()),
+    )
+    .unwrap();
+    let valid = JointMaterialAttachment {
+        link: "rotor".into(),
+        parent_region: "a".into(),
+        child_region: "a".into(),
+    };
+    for which in 0..4 {
+        let mut bad = valid.clone();
+        match which {
+            0 => bad.link = "mount".into(),
+            1 => bad.link = "unknown".into(),
+            2 => bad.parent_region = "unknown".into(),
+            _ => bad.child_region = "unknown".into(),
+        }
+        assert!(body.with_joint_attachments(&[bad], || Ok(())).is_err());
+    }
+    assert!(
+        body.with_joint_attachments(&[valid.clone(), valid.clone()], || Ok(()))
+            .is_err()
+    );
+    let mut input = bindings(&a, &a, &c, &c, [40., 0.]);
+    input[1].regions[0].fixed_point_m = Vec3::new(0.1, 0., 0.);
+    let moving_origin =
+        HeatedArticulated::new(&reference, input, vec![], budget(), config(), || Ok(())).unwrap();
+    assert!(
+        moving_origin
+            .with_joint_attachments(&[valid.clone()], || Ok(()))
+            .is_err()
+    );
+    let mut count = 0;
+    body.with_joint_attachments(&[valid.clone()], || {
+        count += 1;
+        Ok(())
+    })
+    .unwrap();
+    let mut calls = 0;
+    let refused = body.with_joint_attachments(&[valid], || {
+        calls += 1;
+        if calls == count {
+            Err(DepositionError::Cancelled)
+        } else {
+            Ok(())
+        }
+    });
+    assert!(matches!(
+        refused,
+        Err(HeatingError::Thermal(DepositionError::Cancelled))
+    ));
+    assert!(body.configuration().joint_attachments().is_empty());
+    assert_eq!(body.configuration().model(), reference.model());
+    assert_eq!(body.thermal().time_s(), 0.);
 }

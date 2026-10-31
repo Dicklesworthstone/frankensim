@@ -1,7 +1,7 @@
 //! Heat-connected articulated links on one source-bound enthalpy timeline.
 use super::*;
 use crate::articulated::ResolvedArticulated;
-use crate::thermal::ExpandedArticulated;
+use crate::thermal::{ExpandedArticulated, JointMaterialAttachment};
 
 /// Continuing joint motion with source-resolved inertia on the thermal clock.
 pub mod motion;
@@ -25,9 +25,10 @@ pub struct LinkHeating<'a> {
 /// globally named cells. Mechanical joints do NOT imply thermal contact, nor
 /// does a thermal link create a mechanical constraint. Both graphs are explicit.
 /// Every link uses its own material, temperature and fixed mass inventory.
-/// This inherits the single-body adapter's solid free-expansion approximation:
-/// joint placements and thermal geometry remain prescribed, not deformable
-/// constraints. Forward dynamics consumes the resulting model; q/qdot and their
+/// This inherits the single-body adapter's solid free-expansion approximation.
+/// Joint placements may follow explicit material attachments; other placements
+/// and thermal geometry stay prescribed. Forward dynamics consumes the model;
+/// q/qdot and their
 /// time integration, expansion work and mechanical back-reaction are not owned
 /// by this adapter. The energy audit covers the thermal timeline only.
 #[derive(Clone)]
@@ -86,7 +87,8 @@ impl<'a> HeatedArticulated<'a> {
         let inventories: Vec<_> = reference.bodies().iter()
             .zip(regions.iter().map(Vec::as_slice)).collect();
         let thermal = initialize(&inventories, events, budget, config, &mut checkpoint)?;
-        let configuration = configure_mechanism(reference, &regions, &thermal, &mut checkpoint)?;
+        let configuration =
+            configure_mechanism(reference, &regions, &thermal, &[], &mut checkpoint)?;
         checkpoint()?;
         Ok(Self { thermal, mechanics: MechanismExpansion { reference, regions, configuration } })
     }
@@ -99,6 +101,37 @@ impl<'a> HeatedArticulated<'a> {
     pub const fn configuration(&self) -> &ExpandedArticulated<'a> { &self.mechanics.configuration }
     /// Original thermal descriptions in link order, then canonical region order.
     pub fn regions(&self) -> &[Vec<ThermalRegion<'a>>] { &self.mechanics.regions }
+
+    /// Attach selected joint origins to their actual source-expanded material.
+    /// Each subsequent thermal substep rebuilds those placements from the same
+    /// original reference geometry as inertia. The thermal history is unchanged.
+    /// Configure attachments before constructing a continuing motion owner; this
+    /// does not remap a live mechanical state or supply its parameter work.
+    pub fn with_joint_attachments(
+        &self,
+        attachments: &[JointMaterialAttachment],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, HeatingError> {
+        checkpoint()?;
+        let mut error = None;
+        let configuration = self
+            .configuration()
+            .with_joint_attachments(attachments, || match checkpoint() {
+                Ok(()) => false,
+                Err(e) => {
+                    error = Some(e);
+                    true
+                }
+            });
+        if let Some(e) = error {
+            return Err(e.into());
+        }
+        let configuration = configuration?;
+        let mut next = self.clone();
+        next.mechanics.configuration = configuration;
+        checkpoint()?;
+        Ok(next)
+    }
 
     /// Evolve shared contact/boundary heat and reconfigure EVERY actual substep.
     /// A late material refusal rolls back all links and the thermal timeline,
@@ -144,11 +177,21 @@ impl DepositionObserver for MechanismExpansion<'_> {
         }
         Ok(())
     }
-    fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>,
+    fn step(
+        &mut self,
+        _: f64,
+        _: f64,
+        _: &BTreeMap<CellId, f64>,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
-        self.configuration = configure_mechanism(self.reference, &self.regions, thermal, checkpoint)?;
+        self.configuration = configure_mechanism(
+            self.reference,
+            &self.regions,
+            thermal,
+            self.configuration.joint_attachments(),
+            checkpoint,
+        )?;
         Ok(())
     }
 }
@@ -157,6 +200,7 @@ fn configure_mechanism<'a>(
     reference: &'a ResolvedArticulated,
     regions: &[Vec<ThermalRegion<'_>>],
     thermal: &DepositionSimulation<'_>,
+    attachments: &[JointMaterialAttachment],
     checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<ExpandedArticulated<'a>, HeatingError> {
     checkpoint()?;
@@ -167,9 +211,14 @@ fn configure_mechanism<'a>(
         bodies.push(configure(original, regions, thermal, checkpoint)?);
     }
     let mut error = None;
-    let configuration = ExpandedArticulated::from_bodies(reference, bodies, || {
+    let configuration = ExpandedArticulated::from_bodies_with_joint_attachments(
+        reference,
+        bodies,
+        attachments,
+        || {
         match checkpoint() { Ok(()) => false, Err(e) => { error = Some(e); true } }
-    });
+    },
+    );
     if let Some(e) = error { return Err(e.into()); }
     Ok(configuration?)
 }

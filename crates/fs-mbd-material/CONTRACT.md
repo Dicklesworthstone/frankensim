@@ -238,8 +238,9 @@ global region/link cap; cancellation is checked at every RK stage and thermal
 substep. Clone retains the full restart state.
 
 Scope is the existing free-expansion rigid-link approximation with prescribed
-joint placements and transport geometry. The thermal/mechanical split is first
-order and requires step refinement. No moving-base or closed-loop mechanism,
+or explicitly material-bound joint placements and fixed transport geometry.
+The thermal/mechanical split is first order and requires step refinement.
+No moving-base or closed-loop mechanism,
 contact/impact, shape-change kinetic energy, reciprocal thermoelastic heat or
 experimental qualification is claimed.
 
@@ -249,6 +250,39 @@ coaxial two-joint cases independently specify the full coupled inertia law,
 heat-capacity-only swaps, applied work, cooling/restart and transactional
 source/cancellation/work-budget refusal. Full workspace qualification remains
 a separate gate.
+
+### Material attachment geometry on the same thermal timeline
+
+`JointMaterialAttachment` binds an existing non-root joint to named regions in
+its immediate parent and child. `ExpandedRegion::transport_reference_point`
+applies the exact source-integrated free-expansion map used for the region's
+centroid. The original zero-placement translation follows the parent region;
+the selected child region must expand about its body-frame origin. Native joint
+type, local axis, rotation, limits and reference mass stay unchanged. Missing,
+duplicate, foreign or unsupported origin assignments refuse. Geometric point
+membership and compatibility remain explicit caller obligations.
+
+`with_joint_attachments` on `ExpandedArticulated` or `HeatedArticulated` replaces
+the complete optional attachment set transactionally. Unlisted joints remain
+prescribed. Every thermal substep reconstructs placements from the ORIGINAL
+geometry, so repeated heating/restart never compounds expanded offsets. Native
+kinematics and articulated dynamics consume those updated transforms directly.
+Material-coordinate rigid-body impulses use this same point transport owner.
+
+Continuing articulated motion retains its existing frozen-configuration split.
+Its native generalized-momentum transfer includes the changed lever arms in
+the complete mass matrix, and its parameter-work account includes the changed
+gravitational potential. That signed work is bounded separately from caloric
+heat and numerical integration error. Continuously resolved expansion velocities,
+their additional inertial forces, constrained joint deformation and reciprocal
+thermoelastic heat are not supplied by this approximation.
+
+Focused G1/G3/G4 tests in `heated_mechanism` and `heated_articulated_motion`
+exercise source-only expansion substitutions, analytic two-link lever response,
+joint displacement, bit-preserved masses, restart, full momentum transfer,
+gravitational work and transactional source/cancellation/work-budget refusal.
+These synthetic analytical cases establish implementation behavior, not measured
+material validity or an accuracy claim for rapid thermal actuation.
 
 ## Material-driven journal loss in continuing articulated motion (MR20)
 

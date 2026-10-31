@@ -18,7 +18,9 @@ pub mod temperature;
 pub mod heating;
 
 mod articulated;
-pub use articulated::{ExpandedArticulated, LinkThermalExpansion, expand_articulated};
+pub use articulated::{
+    ExpandedArticulated, JointMaterialAttachment, LinkThermalExpansion, expand_articulated,
+};
 
 use fs_ga::Vec3;
 use fs_material::state_point::{IntegratedIsotropicThermalExpansion, ResolvedMaterialStatePoint};
@@ -62,6 +64,16 @@ impl ExpandedRegion {
     /// Density derived by conserving the reference mass on the expanded volume.
     /// This is NOT a newly queried density measurement or a confidence bound.
     pub fn density_kg_m3(&self) -> f64 { self.inertia.mass() / self.geometry.volume_m3() }
+    /// Carry an authored reference point with this region's actual free expansion.
+    /// The point and result are in the unchanged body frame. Geometric membership
+    /// in this region is an explicit caller assignment, not inferred from moments.
+    pub fn transport_reference_point(&self, point_m: Vec3) -> Result<Vec3, MaterialInertiaError> {
+        transport_point(
+            point_m,
+            self.fixed_point_m,
+            1.0 + self.expansion.free_linear_strain(),
+        )
+    }
 }
 
 /// Immutable configuration of a retained reference mass inventory.
@@ -133,12 +145,7 @@ pub fn expand_body<'a>(
         }
         let old_geometry = original.geometry();
         // Avoid subtracting nearly equal large global coordinates when s~1.
-        let center = if stretch == 1.0 {
-            old_geometry.centroid_m()
-        } else {
-            old_geometry.centroid_m()
-                + (old_geometry.centroid_m() - fixed).scale(stretch - 1.0)
-        };
+        let center = transport_point(old_geometry.centroid_m(), fixed, stretch)?;
         let mut volume_tensor = old_geometry.inertia_m5();
         for entry in &mut volume_tensor.m { *entry *= moment_scale; }
         let geometry = VolumeMoments::new(old_geometry.volume_m3() * volume_scale, center, volume_tensor)?;
@@ -163,6 +170,30 @@ pub fn expand_body<'a>(
     inertia.matrix()?;
     poll(&mut cancelled)?;
     Ok(ExpandedBody { reference, regions, inertia })
+}
+
+fn transport_point(point: Vec3, fixed: Vec3, stretch: f64) -> Result<Vec3, MaterialInertiaError> {
+    if ![point.x, point.y, point.z].into_iter().all(f64::is_finite) {
+        return Err(MaterialInertiaError::Invalid(
+            "reference material point must be finite",
+        ));
+    }
+    // Preserve exact reference geometry at zero strain and avoid subtracting
+    // large fixed-point coordinates merely to reconstruct the original point.
+    let result = if stretch == 1.0 {
+        point
+    } else {
+        point + (point - fixed).scale(stretch - 1.0)
+    };
+    if ![result.x, result.y, result.z]
+        .into_iter()
+        .all(f64::is_finite)
+    {
+        return Err(MaterialInertiaError::Invalid(
+            "expanded material point is unrepresentable",
+        ));
+    }
+    Ok(result)
 }
 
 fn same_reference(mass: &ResolvedMaterialStatePoint, expansion: &ResolvedMaterialStatePoint) -> bool {

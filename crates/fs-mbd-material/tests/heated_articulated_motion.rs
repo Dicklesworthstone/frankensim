@@ -2,12 +2,13 @@
 #[path = "heating/common.rs"]
 mod common;
 use common::*;
-use fs_ga::{Se3, Vec3};
+use fs_ga::{Se3, So3, Vec3};
 use fs_matdb::MaterialCard;
 use fs_material::phase::{ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::MaterialPropertySelection;
 use fs_mbd::articulated::JointModel;
 use fs_mbd_material::articulated::{MaterialLink, ResolvedArticulated, resolve_articulated};
+use fs_mbd_material::thermal::JointMaterialAttachment;
 use fs_mbd_material::thermal::heating::articulated_motion::{
     Controls, Error, HeatedArticulatedMotion,
 };
@@ -18,6 +19,9 @@ use fs_thermal::observers::ObserverCouplingError;
 use std::collections::BTreeMap;
 
 fn mechanism(a: &MaterialCard, b: &MaterialCard) -> ResolvedArticulated {
+    mechanism_at(a, b, Vec3::default())
+}
+fn mechanism_at(a: &MaterialCard, b: &MaterialCard, second_origin: Vec3) -> ResolvedArticulated {
     let p = point(300., 1e5);
     let bind = |material| {
         [RegionBinding {
@@ -51,7 +55,7 @@ fn mechanism(a: &MaterialCard, b: &MaterialCard) -> ResolvedArticulated {
             MaterialLink {
                 name: "second",
                 parent: Some(1),
-                parent_from_child_zero: Se3::identity(),
+                parent_from_child_zero: Se3::from_parts(So3::identity(), second_origin).unwrap(),
                 joint: hinge,
                 regions: &second,
             },
@@ -60,6 +64,110 @@ fn mechanism(a: &MaterialCard, b: &MaterialCard) -> ResolvedArticulated {
         || false,
     )
     .unwrap()
+}
+
+#[test]
+fn expanding_joint_lever_uses_full_momentum_transfer_and_parameter_work() {
+    let a = card(10., 1e-3, 500.);
+    let b = card(10., 0., 500.);
+    let ca = caloric(&a, 1e5, SolidLiquidPhase::Solid);
+    let cb = caloric(&b, 1e5, SolidLiquidPhase::Solid);
+    // The horizontal spinning case changes the full joint mass matrix. The
+    // vertical resting case isolates the gravitational work of moving anchors.
+    for (offset, velocity, gravity) in [
+        (Vec3::new(0.5, 0., 0.), vec![3., -1.], Vec3::default()),
+        (
+            Vec3::new(0., 0.5, 0.),
+            vec![0.; 2],
+            Vec3::new(0., -9.81, 0.),
+        ),
+    ] {
+        let reference = mechanism_at(&a, &b, offset);
+        let thermal = HeatedArticulated::new(
+            &reference,
+            vec![
+                LinkHeating {
+                    link: "mount",
+                    regions: vec![region(&a, &ca, "a", 0, 0.)],
+                },
+                LinkHeating {
+                    link: "first",
+                    regions: vec![region(&a, &ca, "a", 1, 40.)],
+                },
+                LinkHeating {
+                    link: "second",
+                    regions: vec![region(&b, &cb, "a", 2, 0.)],
+                },
+            ],
+            vec![],
+            budget(),
+            config(),
+            || Ok(()),
+        )
+        .unwrap()
+        .with_joint_attachments(
+            &[JointMaterialAttachment {
+                link: "second".into(),
+                parent_region: "a".into(),
+                child_region: "a".into(),
+            }],
+            || Ok(()),
+        )
+        .unwrap();
+        let make = |controls| {
+            HeatedArticulatedMotion::new(
+                thermal.clone(),
+                Se3::identity(),
+                vec![0.; 2],
+                velocity.clone(),
+                vec![0.; 2],
+                gravity,
+                controls,
+                || Ok(()),
+            )
+            .unwrap()
+        };
+        let old = make(controls());
+        let momentum = old.joint_momentum().unwrap();
+        let (next, audit) = old.advance_to(2., config(), || Ok(())).unwrap();
+        let stretch = 1.004;
+        let point = next.configuration().model().links()[2]
+            .parent_from_child_zero()
+            .translation();
+        close(point.x, offset.x * stretch);
+        close(point.y, offset.y * stretch);
+        for (actual, expected) in next.joint_momentum().unwrap().iter().zip(&momentum) {
+            close(*actual, *expected);
+        }
+        if offset.x > 0. {
+            // I_parent+m_child*L^2=(1/3+1/2)*s^2; absolute child spin is 2 rad/s.
+            close(next.joint_velocity()[0], 3. / stretch.powi(2));
+            close(next.joint_velocity()[1], 2. - 3. / stretch.powi(2));
+            close(audit.parameter_work_j, 3.75 * (1. / stretch.powi(2) - 1.));
+        } else {
+            close(next.joint_velocity()[0], 0.);
+            close(next.joint_velocity()[1], 0.);
+            close(audit.parameter_work_j, 2. * 9.81 * 0.5 * (stretch - 1.));
+        }
+        close(audit.thermal.external_heat_j, 80.);
+        close(audit.applied_joint_work_j, 0.);
+        close(audit.combined_residual_j, 0.);
+        let (middle, _) = old.advance_to(1., config(), || Ok(())).unwrap();
+        let (restarted, _) = middle.advance_to(2., config(), || Ok(())).unwrap();
+        assert_eq!(next.configuration(), restarted.configuration());
+        assert_eq!(next.joint_position(), restarted.joint_position());
+        assert_eq!(next.joint_velocity(), restarted.joint_velocity());
+        let constrained = make(Controls {
+            maximum_parameter_work_j: 0.,
+            ..controls()
+        });
+        assert!(matches!(
+            constrained.advance_to(2., config(), || Ok(())),
+            Err(Error::Budget("absolute thermal-configuration work"))
+        ));
+        assert_eq!(constrained.thermal().time_s(), 0.);
+        assert_eq!(constrained.joint_velocity(), velocity.as_slice());
+    }
 }
 fn controls() -> Controls {
     Controls {

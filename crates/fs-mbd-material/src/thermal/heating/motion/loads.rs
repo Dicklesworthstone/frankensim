@@ -188,8 +188,8 @@ pub(super) fn attachment_arm(
             "missing original attachment region",
         ))?;
     let region = &body.configuration().regions()[index];
-    let point = region.fixed_point_m()
-        + (attachment.reference_point_m - region.fixed_point_m())
-            .scale(1.0 + region.expansion().free_linear_strain());
+    let point = region
+        .transport_reference_point(attachment.reference_point_m)
+        .map_err(HeatingError::from)?;
     Ok(body.principal_frame().arm_for_body_point(point)?)
 }

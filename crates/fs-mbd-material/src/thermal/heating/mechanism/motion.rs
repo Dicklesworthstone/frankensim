@@ -2,7 +2,8 @@
 //!
 //! Each thermal substep advances native ABA dynamics through fs-time RK45 at
 //! its starting material configuration. The endpoint's source-resolved inertias
-//! then receive the same conjugate joint momenta at unchanged joint positions.
+//! and material-bound joint placements then receive the same conjugate joint
+//! momenta at unchanged joint positions.
 //! This is a first-order split with a stationary prescribed base. Parameter
 //! work is reported separately and never deposited as caloric heat.
 //! Optional source-backed journal films apply resisting torques in the SAME
@@ -143,10 +144,13 @@ pub struct Audit {
 /// One material mechanism, heat history, joint state and physical clock.
 ///
 /// Constant declared joint efforts and uniform gravity act on a stationary
-/// base. Joints, reference placements and thermal transport geometry remain
-/// prescribed. Free thermal expansion changes each link's retained inertia;
-/// deformation velocities, moving joint anchors, general contacts, closed kinematic
-/// loops and reciprocal thermoelastic heat require other owners. The original
+/// base. Joint types, axes and thermal transport geometry remain prescribed.
+/// Free expansion changes each link's retained inertia and explicitly bound
+/// material attachment positions. The original momentum transfer accounts for
+/// the full changed mass matrix and gravitational potential as parameter work.
+/// This is a sequence of frozen configurations: continuous expansion velocities,
+/// their inertial forces, general contacts, closed kinematic loops and reciprocal
+/// thermoelastic heat require other owners. The original
 /// material mass is retained; this is not a material replacement event.
 #[derive(Clone)]
 pub struct HeatedArticulatedMotion<'a> {
