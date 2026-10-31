@@ -1072,6 +1072,45 @@ not passing claims. Existing panel-bits goldens are unchanged; there is no
 schema migration, new dependency, instrument qualification or render claim.
 
 
+## Finite-source diffraction by closed bodies
+
+`helmholtz::bc::incident` illuminates the original closed-boundary operator
+with a plane wave or a coherent array of at most 64 ideal monopoles. A
+monopole is specified by its physical position and outward complex volume
+flow [m³/s]; the declared `exp(-i omega t)` convention gives
+`p=-i*omega*rho*Q*exp(ikr)/(4*pi*r)` and retains the reactive `1/r²` particle
+velocity. The scattered drive is `-v_incident-Y*p_incident`, applied to both
+original Robin/Burton–Miller rows. Multiple disconnected closed obstacles
+share one solve and therefore retain mutual scattering and diffraction.
+
+The source positions pass the existing retained-triangle clearance and
+component-wise winding admission. Interior sources, boundary collisions,
+empty/over-cap source arrays and unresolved source/receiver coincidences
+refuse; point sources are not silently moved. `ScatteredField` borrows the
+immutable source array and body. Its finite receiver result adds the analytic
+incident field to the original adaptive scattered-field representation. Its
+total far field exists only for monopole illumination; a plane wave is not
+misrepresented as an outgoing `1/r` amplitude.
+
+`solve_scattering_batch` and `solve_radiation_bc_batch` assemble and factor
+once for all admitted right-hand sides, including local and nonlocal Robin
+laws. The rigid branch delegates to the existing rigid batch. The original
+dense panel/resolution ceilings and 256-field batch cap apply; the dense
+assembly/LU cancellation limitation remains. Near-field discrepancy estimates
+exclude BEM discretization, ideal-source approximation and material error.
+This is homogeneous, lossless, stationary scalar acoustics, not an interior
+source, transmission, deformable obstacle, atmospheric-refraction or measured
+HRTF model.
+
+Inline tests in `helmholtz_incident.rs` cover G0 Euler-gradient consistency
+(2e-9 relative) and outward low-frequency volume flux, exterior/singularity
+refusals, G5 bitwise batch/individual and historical plane-wave equivalence,
+G1/G2 finite-source total-pressure refinement against the independent rigid
+sphere series (20/80/320 panels, 2% finest complex-field band), and G3 source
+and receiver reciprocity (1e-3 relative). The sphere oracle uses the spherical
+addition theorem (NIST DLMF §10.60.1–2) and the rigid condition
+`a_l=-j_l'(ka)/h_l^(1)'(ka)`; it does not fit BEM output.
+
 ## Reciprocal complete source loads and matched receiver transfers
 
 `modal_loading::modal_radiation_loading_reciprocal` exposes the existing

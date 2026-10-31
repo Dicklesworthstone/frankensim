@@ -6,6 +6,10 @@
 use super::*;
 use fs_exec::CancelGate;
 
+/// Finite-source diffraction and source-bound total receiver fields.
+#[path = "helmholtz_incident.rs"]
+pub mod incident;
+
 /// Hook for a qualified nonlocal BL operator, e.g. a tangential surface
 /// Laplacian. It maps pressure [Pa] to rho*c*v_absorbed [Pa]. Its weighted
 /// quadratic form must be passive unless explicitly declared active. The
@@ -419,19 +423,62 @@ pub fn solve_radiation_bc(
     bc: SurfaceBc<'_>,
     formulation: Formulation,
 ) -> Result<BoundarySolution, HelmholtzError> {
-    let ppw = admit_bc(surface, k, medium, bc)?;
-    validate_closed(surface)?;
-    if bc.admittance.is_zero() {
-        return finish_boundary(
+    Ok(solve_radiation_bc_batch(
+        surface,
+        k,
+        medium,
+        &[bc.drive_velocity],
+        bc.admittance,
+        formulation,
+    )?
+    .remove(0))
+}
+
+/// Several prescribed drives through one Robin assembly and factorization.
+/// Each result retains its own physical velocity, wall work and driving work.
+/// The zero-admittance route uses the original rigid batch without changing
+/// its arithmetic. The existing dense panel, resolution and batch caps apply.
+pub fn solve_radiation_bc_batch(
+    surface: &SpherePanels,
+    k: f64,
+    medium: Medium,
+    drive_velocities: &[&[C64]],
+    admittance: Admittance<'_>,
+    formulation: Formulation,
+) -> Result<Vec<BoundarySolution>, HelmholtzError> {
+    let ppw = admit_operator(surface, k, medium, drive_velocities)?;
+    for &drive_velocity in drive_velocities {
+        admit_bc(
             surface,
-            solve_radiation(surface, k, medium, bc.drive_velocity, formulation)?,
-            bc,
-        );
+            k,
+            medium,
+            SurfaceBc {
+                drive_velocity,
+                admittance,
+            },
+        )?;
+    }
+    validate_closed(surface)?;
+    if admittance.is_zero() {
+        return solve_radiation_batch(surface, k, medium, drive_velocities, formulation)?
+            .into_iter()
+            .zip(drive_velocities)
+            .map(|(solution, &drive_velocity)| {
+                finish_boundary(
+                    surface,
+                    solution,
+                    SurfaceBc {
+                        drive_velocity,
+                        admittance,
+                    },
+                )
+            })
+            .collect();
     }
     let n = surface.areas().len();
     let (mut a, b) = assemble_dense_with_static(surface, k, alpha_for(formulation, k), None);
     let ik = C64::new(0.0, k);
-    match bc.admittance {
+    match admittance {
         Admittance::Local { beta, .. } => {
             for i in 0..n {
                 for j in 0..n {
@@ -443,7 +490,7 @@ pub fn solve_radiation_bc(
             for j in 0..n {
                 let mut e = vec![C64::ZERO; n];
                 e[j] = C64::ONE;
-                let col = bc.admittance.image(&e)?;
+                let col = admittance.image(&e)?;
                 for i in 0..n {
                     for q in 0..n {
                         a[i * n + j] = a[i * n + j] + ik * b[i * n + q] * col[q];
@@ -452,49 +499,55 @@ pub fn solve_radiation_bc(
             }
         }
     }
-    let q: Vec<_> = bc
-        .drive_velocity
-        .iter()
-        .map(|&v| C64::new(0.0, k * medium.sound_speed * medium.density) * v)
-        .collect();
-    let mut pressure = vec![C64::ZERO; n];
-    for i in 0..n {
-        for j in 0..n {
-            pressure[i] = pressure[i] + b[i * n + j] * q[j];
-        }
-    }
     let lu = lu_complex(&a, n).map_err(|_| HelmholtzError::Singular)?;
-    lu.solve(&mut pressure);
-    if pressure.iter().any(|v| !finite(*v)) {
-        return Err(bad("nonfinite Robin pressure"));
-    }
-    let absorbed = bc.admittance.image(&pressure)?;
-    let velocity: Vec<_> = bc
-        .drive_velocity
-        .iter()
-        .zip(absorbed)
-        .map(|(&v, y)| v - y.scale(1.0 / (medium.density * medium.sound_speed)))
-        .collect();
-    let (radiated_power, radiated_power_roundoff_interval, power_diagnostics) =
-        evaluate_radiated_power(&pressure, &velocity, surface.areas(), medium);
     let condition_lower_bound = condition_lower_bound(&a, n, &lu);
-    finish_boundary(
-        surface,
-        RadiationSolution {
-            pressure,
-            velocity,
-            k,
-            medium,
-            surface_fingerprint: surface_fingerprint(surface),
-            panels_per_wavelength: ppw,
-            radiated_power,
-            radiated_power_roundoff_interval,
-            power_diagnostics,
-            condition_lower_bound,
-            dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
-        },
-        bc,
-    )
+    drive_velocities
+        .iter()
+        .map(|&drive_velocity| {
+            let q: Vec<_> = drive_velocity
+                .iter()
+                .map(|&v| C64::new(0.0, k * medium.sound_speed * medium.density) * v)
+                .collect();
+            let mut pressure = vec![C64::ZERO; n];
+            for i in 0..n {
+                for j in 0..n {
+                    pressure[i] = pressure[i] + b[i * n + j] * q[j];
+                }
+            }
+            lu.solve(&mut pressure);
+            if pressure.iter().any(|v| !finite(*v)) {
+                return Err(bad("nonfinite Robin pressure"));
+            }
+            let absorbed = admittance.image(&pressure)?;
+            let velocity: Vec<_> = drive_velocity
+                .iter()
+                .zip(absorbed)
+                .map(|(&v, y)| v - y.scale(1.0 / (medium.density * medium.sound_speed)))
+                .collect();
+            let (radiated_power, radiated_power_roundoff_interval, power_diagnostics) =
+                evaluate_radiated_power(&pressure, &velocity, surface.areas(), medium);
+            finish_boundary(
+                surface,
+                RadiationSolution {
+                    pressure,
+                    velocity,
+                    k,
+                    medium,
+                    surface_fingerprint: surface_fingerprint(surface),
+                    panels_per_wavelength: ppw,
+                    radiated_power,
+                    radiated_power_roundoff_interval,
+                    power_diagnostics,
+                    condition_lower_bound,
+                    dense_cap_utilization: n as f64 / MAX_DENSE_PANELS as f64,
+                },
+                SurfaceBc {
+                    drive_velocity,
+                    admittance,
+                },
+            )
+        })
+        .collect()
 }
 
 /// The .109 operator/GMRES path with exactly the same Robin substitution.
