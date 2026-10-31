@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 /// Source-backed S-N calibration admission with original material receipts.
 pub mod source;
+pub mod critical_plane;
 /// Bounded Coffin-Manson-Basquin total mechanical strain-life estimates.
 pub mod strain_life;
 

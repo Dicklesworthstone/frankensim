@@ -321,6 +321,40 @@ no hardening, relaxation, sequence, heat or constitutive degradation law is adde
 Seven focused analytical and history tests cover both equations, cycle/strain
 conventions, real stress pairing, nested histories, chunking and rollback.
 
+## Closed-cycle tensor SWT critical-plane fatigue
+
+`fatigue::critical_plane::SwtCycle` evaluates one resolved representative
+stress/total-mechanical-strain cycle on an explicitly declared set of material
+planes. The tensor convention is `[xx, yy, zz, xy, yz, zx]` with tensor shear
+in one fixed frame. Thermal eigenstrain must already have been removed by its
+physical owner. Every observation contributes independently to normal-strain
+and normal-stress extrema on every plane; stress peaks need not coincide with
+strain turning points.
+
+The selection convention is maximum normal strain range, followed by maximum
+normal stress for exactly equal ranges, then stable input order. The selected
+plane alone enters the existing source-bound CMB/SWT life inverse. This is not
+a search for the maximum SWT product, a shear-failure model or a multiaxial
+rainflow rule. The existing finite life interval and compression-only refusal
+remain binding. Zero strain variation produces no fatigue contribution, not
+a validated infinite-life statement.
+
+Finalization requires the first and last full tensors to agree within explicit
+closure tolerances and every nonconstant projected strain trace to contain one
+cyclic excursion. Open paths and nested/repeated strain subcycles refuse.
+Closing a sampled stress/strain loop does not prove constitutive stabilization,
+unsampled extrema or applicability to a particular material population.
+The caller must justify the representative cycle and fixed-temperature CMB
+calibration. No evolving hardening is replaced by a repeated native state.
+
+Storage is proportional to the declared plane count, independently of the
+number of observations. Sample, plane and projection-work budgets are explicit;
+samples, blocks and finalization publish atomically under cancellation/refusal.
+The deterministic hemisphere helper supplies a finite angular search whose
+resolution can be refined. Results report the selected sampled plane and
+observed closure defects; no continuous-sphere optimality or certified search
+error is claimed. Scalar rainflow and the existing paired counter are unchanged.
+
 ## Purpose and layer
 
 ### Shared stress-life and total mechanical strain-life fatigue
