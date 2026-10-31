@@ -2,7 +2,8 @@
 
 use fs_convection::{
     CorrelationError, CorrelationId, CorrelationInputs, DiscrepancyBasis, EvaluationSourceRegion,
-    HeatTransferCoefficient, ThermalConductivity, ThermalDirection, correlation_catalog, evaluate,
+    HeatTransferCoefficient, HorizontalPlateFacing, NaturalConvectionGeometry, ThermalConductivity,
+    ThermalDirection, correlation_catalog, evaluate,
 };
 use fs_evidence::{CertifyError, NumericalKind};
 use fs_math::det;
@@ -91,9 +92,9 @@ fn assert_level_a_convection_limit(case_id: &str, observed: f64) {
 }
 
 #[test]
-fn catalog_has_twelve_sourced_cards_and_no_unlabeled_discrepancy() {
+fn catalog_has_sixteen_sourced_cards_and_no_unlabeled_discrepancy() {
     let catalog = correlation_catalog();
-    assert_eq!(catalog.len(), 12);
+    assert_eq!(catalog.len(), 16);
     assert_eq!(catalog.len(), CorrelationId::ALL.len());
 
     let mut names = std::collections::BTreeSet::new();
@@ -153,6 +154,158 @@ fn flat_plate_cards_retain_distinct_formula_authorities() {
             .iter()
             .any(|failure| failure.contains("transition Reynolds number"))
     );
+}
+
+#[test]
+fn horizontal_plate_cards_follow_handbook_powers_and_refuse_extrapolation() {
+    // ASHRAE 2025 Fundamentals, Ch. 4 Table 9, T9.7--T9.9.
+    // Exact fourth/cube powers make these independent arithmetic checks.
+    for (id, ra, expected, range) in [
+        (
+            CorrelationId::HorizontalPlateUnstableLaminar,
+            1_048_576.0,
+            17.28,
+            [2.2e4, 8e6],
+        ),
+        (
+            CorrelationId::HorizontalPlateStable,
+            1_048_576.0,
+            8.64,
+            [1e5, 1e10],
+        ),
+        (
+            CorrelationId::HorizontalPlateUnstableTurbulent,
+            1e9,
+            150.0,
+            [8e6, 1.5e9],
+        ),
+    ] {
+        let result = evaluate(id, CorrelationInputs::natural(ra, 0.7)).unwrap();
+        close(result.evidence().value, expected, 3e-13);
+        assert_eq!(
+            result.card().model.validity.bounds()["Ra"],
+            (range[0], range[1])
+        );
+        assert!(result.card().source.citation.contains("ASHRAE"));
+        assert_eq!(
+            result.card().discrepancy_basis,
+            DiscrepancyBasis::EngineeringAllowance
+        );
+        assert!(!result.card().model.validity.bounds().contains_key("Pr"));
+        for edge in range {
+            assert!(evaluate(id, CorrelationInputs::natural(edge, 0.7)).is_ok());
+        }
+        for outside in [range[0] * 0.99, range[1] * 1.01, 0.0, f64::NAN] {
+            assert!(evaluate(id, CorrelationInputs::natural(outside, 0.7)).is_err());
+        }
+    }
+}
+
+#[test]
+fn horizontal_geometry_selects_density_stability_and_exposes_the_source_transition() {
+    let up = NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Up);
+    let down = NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Down);
+    let hot_up = up.evaluate(1e6, 0.7).unwrap();
+    let hot_down = down.evaluate(1e6, 0.7).unwrap();
+    close(
+        hot_up.evidence().value,
+        2.0 * hot_down.evidence().value,
+        2e-14,
+    );
+    assert_eq!(
+        hot_up.card().id,
+        CorrelationId::HorizontalPlateUnstableLaminar
+    );
+    assert_eq!(hot_down.card().id, CorrelationId::HorizontalPlateStable);
+    // Reversing both orientation and signed density departure preserves h.
+    assert_eq!(hot_up, down.evaluate(-1e6, 0.7).unwrap());
+    assert_eq!(hot_down, up.evaluate(-1e6, 0.7).unwrap());
+    assert_eq!(
+        up.evaluate(8e6, 0.7).unwrap().card().id,
+        CorrelationId::HorizontalPlateUnstableLaminar
+    );
+    let next = up.evaluate(8e6_f64.next_up(), 0.7).unwrap();
+    assert_eq!(
+        next.card().id,
+        CorrelationId::HorizontalPlateUnstableTurbulent
+    );
+    let ratio = next.evidence().value / up.evaluate(8e6, 0.7).unwrap().evidence().value;
+    assert!(ratio > 1.04 && ratio < 1.05);
+    // Do not silently borrow an unstable or cylinder fit for a low-Ra stable face.
+    assert!(down.evaluate(5e4, 0.7).is_err());
+    assert!(up.evaluate(0.0, 0.7).is_err());
+}
+
+#[test]
+fn horizontal_cylinder_uses_diameter_and_matches_handbook_heater_example() {
+    // ASHRAE Ch. 4 Example 11: the 10 mm x 400 mm heater is rated 733 W;
+    // the handbook accepts the first 64 C surface guess in 20 C water.
+    // With its rounded properties the formula gives heat within 3% of that
+    // rating. This is a handbook calculation check, not experimental validation.
+    let ra = 9.81 * 0.4004e-3 * 44.0 * 0.01_f64.powi(3) / (6.25e-7 * 1.53e-7);
+    let geometry = NaturalConvectionGeometry::HorizontalCylinder;
+    let result = geometry.evaluate(ra, 4.08).unwrap();
+    assert_eq!(
+        result.card().id,
+        CorrelationId::ChurchillChuHorizontalCylinder
+    );
+    assert_eq!(
+        result.card().source.identifier,
+        "doi:10.1016/0017-9310(75)90222-7"
+    );
+    let h = result
+        .heat_transfer_coefficient(ThermalConductivity::new(0.634), Length::new(0.01))
+        .unwrap();
+    let power = h.value.value() * core::f64::consts::PI * 0.01 * 0.4 * 44.0;
+    close(power, 733.0, 0.03);
+    assert_eq!(result, geometry.evaluate(-ra, 4.08).unwrap());
+    assert!(geometry.evaluate(1e-7, 4.08).is_err());
+    assert!(geometry.evaluate(1e14, 4.08).is_err());
+}
+
+#[test]
+fn new_natural_card_partials_match_independent_input_perturbations() {
+    for (id, ra) in [
+        (CorrelationId::ChurchillChuHorizontalCylinder, 1e6),
+        (CorrelationId::HorizontalPlateUnstableLaminar, 1e6),
+        (CorrelationId::HorizontalPlateUnstableTurbulent, 1e8),
+        (CorrelationId::HorizontalPlateStable, 1e6),
+    ] {
+        let pr = 0.7;
+        let evaluated = CorrelationInputs::natural(ra, pr)
+            .evaluate_with_sensitivities(id)
+            .unwrap();
+        let step = 1e-5;
+        let value = |r, p| {
+            evaluate(id, CorrelationInputs::natural(r, p))
+                .unwrap()
+                .evidence()
+                .value
+        };
+        for (axis, expected, scale) in [
+            (
+                "Ra",
+                (value(ra * (1.0 + step), pr) - value(ra * (1.0 - step), pr)) / (2.0 * step),
+                ra,
+            ),
+            (
+                "Pr",
+                (value(ra, pr * (1.0 + step)) - value(ra, pr * (1.0 - step))) / (2.0 * step),
+                pr,
+            ),
+        ] {
+            close(
+                evaluated.evidence().sensitivity.d_qoi[axis] * scale,
+                expected,
+                2e-8,
+            );
+        }
+        let low = evaluated.card().model.validity.bounds()["Ra"].0;
+        let boundary = CorrelationInputs::natural(low, pr)
+            .evaluate_with_sensitivities(id)
+            .unwrap();
+        assert!(!boundary.evidence().sensitivity.d_qoi.contains_key("Ra"));
+    }
 }
 
 #[test]

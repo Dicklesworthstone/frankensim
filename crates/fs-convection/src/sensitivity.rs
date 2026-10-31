@@ -176,16 +176,27 @@ fn input_elasticity(
                 0.0
             }
         }
-        CorrelationId::ChurchillChuVerticalPlate => {
-            let b = det::pow(0.492 / group("Pr"), 9.0 / 16.0);
+        CorrelationId::ChurchillChuVerticalPlate | CorrelationId::ChurchillChuHorizontalCylinder => {
+            let (offset, pr_scale) = if evaluation.card().id == CorrelationId::ChurchillChuVerticalPlate {
+                (0.825, 0.492)
+            } else {
+                (0.60, 0.559)
+            };
+            let b = det::pow(pr_scale / group("Pr"), 9.0 / 16.0);
             let term = 0.387 * det::pow(group("Ra"), 1.0 / 6.0)
                 / det::pow(1.0 + b, 8.0 / 27.0);
-            let ra_elasticity = term / (3.0 * (0.825 + term));
+            let ra_elasticity = term / (3.0 * (offset + term));
             match axis {
                 "Ra" => ra_elasticity,
                 "Pr" => ra_elasticity * b / (1.0 + b),
                 _ => 0.0,
             }
+        }
+        CorrelationId::HorizontalPlateUnstableLaminar | CorrelationId::HorizontalPlateStable => {
+            if axis == "Ra" { 0.25 } else { 0.0 }
+        }
+        CorrelationId::HorizontalPlateUnstableTurbulent => {
+            if axis == "Ra" { 1.0 / 3.0 } else { 0.0 }
         }
     };
     finite_derivative(value, "Nusselt input elasticity").map(Some)

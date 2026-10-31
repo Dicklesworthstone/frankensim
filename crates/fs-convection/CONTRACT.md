@@ -21,14 +21,16 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names twelve implemented relations: circular-duct 3.66 and
+- `CorrelationId` names sixteen implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
   `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; laminar and
   leading-edge-corrected mixed average flat-plate relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
-  natural convection.
+  natural convection; Churchill-Chu horizontal-cylinder natural convection;
+  and the stable, unstable-laminar and unstable-turbulent horizontal-plate
+  rows of ASHRAE 2025 Fundamentals, Chapter 4, Table 9 (T9.7--T9.9).
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, and the
@@ -166,6 +168,24 @@ None.
 
 ## No-claim boundaries
 
+- `NaturalConvectionGeometry` selects vertical plates, horizontal cylinders,
+  or the stable/unstable horizontal face from signed `g beta (Tw-Ta)`.
+  Characteristic lengths are height, diameter, and full planform area/perimeter,
+  respectively. The horizontal plate uses film properties and retains the
+  handbook's Rayleigh ranges. Its source does not specify a universal Prandtl
+  interval; omission of that axis is not all-fluid experimental validation.
+  The cylinder's Prandtl box is explicitly an implementation policy. Numeric
+  range endpoints are admitted inclusively. The unstable plate selects the
+  laminar card at Ra=8e6 and turbulent above, retaining the approximately 4.46%
+  empirical jump. Each fixed card has local input partials; no derivative or
+  continuity is claimed across selection. Signed-expansion orientation follows
+  the Boussinesq force direction, not experimental validation of anomalous
+  liquids. No low-Rayleigh extrapolation, enclosure, mixed-convection blend,
+  or confidence interval is invented. The new tests check exact power-law
+  values, orientation/sign metamorphisms, source domains and derivatives, and
+  the cylinder against the handbook's approximate 733 W heater calculation
+  within a declared 3% calculation tolerance; this is not measured validation.
+
 - Source citations identify formula authority; the repository does not retain
   a licensed copy of Shah-London or a cross-code validation dataset. The
   developing rectangular card manually encodes only its declared Table 52
@@ -197,7 +217,8 @@ None.
   confidence interval and not L4 experimental validation.
 - The formula arithmetic is an `Estimate`, not an outward-rounded numerical
   enclosure.
-- The library does not select among competing valid correlations, blend
+- Apart from the explicit geometry/stability selector above, the library does
+  not select among competing valid correlations, blend
   transition regimes, solve a boundary layer, compute pressure drop, or model
   fan operating points.
 - Plate-fin behavior is represented only by smooth rectangular-channel

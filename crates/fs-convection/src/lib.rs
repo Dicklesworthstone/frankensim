@@ -16,7 +16,10 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
+mod natural;
 mod sensitivity;
+
+pub use natural::{HorizontalPlateFacing, NaturalConvectionGeometry};
 
 /// Source-bearing compartment-fire correlations and public-data comparisons.
 pub mod fire;
@@ -63,12 +66,20 @@ pub enum CorrelationId {
     ChurchillBernsteinCylinder,
     /// Isothermal vertical plate in natural convection, Churchill-Chu relation.
     ChurchillChuVerticalPlate,
+    /// Isothermal horizontal cylinder in natural convection; length is diameter.
+    ChurchillChuHorizontalCylinder,
+    /// Buoyantly unstable horizontal plate, laminar range; length is area/perimeter.
+    HorizontalPlateUnstableLaminar,
+    /// Buoyantly unstable horizontal plate, turbulent range; length is area/perimeter.
+    HorizontalPlateUnstableTurbulent,
+    /// Buoyantly stable horizontal plate; length is area/perimeter.
+    HorizontalPlateStable,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 12] = [
+    pub const ALL: [CorrelationId; 16] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -81,6 +92,10 @@ impl CorrelationId {
         Self::ChurchillBernsteinCylinder,
         Self::ChurchillChuVerticalPlate,
         Self::RectangularDuctLaminarCwtDevelopingPr072,
+        Self::ChurchillChuHorizontalCylinder,
+        Self::HorizontalPlateUnstableLaminar,
+        Self::HorizontalPlateUnstableTurbulent,
+        Self::HorizontalPlateStable,
     ];
 
     /// Stable model-card identifier.
@@ -101,6 +116,12 @@ impl CorrelationId {
             Self::FlatPlateTurbulentAverage => "convection.flat-plate-turbulent-average",
             Self::ChurchillBernsteinCylinder => "convection.churchill-bernstein-cylinder",
             Self::ChurchillChuVerticalPlate => "convection.churchill-chu-vertical-plate",
+            Self::ChurchillChuHorizontalCylinder => "convection.churchill-chu-horizontal-cylinder",
+            Self::HorizontalPlateUnstableLaminar => "convection.horizontal-plate-unstable-laminar",
+            Self::HorizontalPlateUnstableTurbulent => {
+                "convection.horizontal-plate-unstable-turbulent"
+            }
+            Self::HorizontalPlateStable => "convection.horizontal-plate-stable",
         }
     }
 
@@ -134,6 +155,12 @@ impl CorrelationId {
             Self::ChurchillChuVerticalPlate => {
                 "Nu_L = (0.825 + 0.387 Ra^(1/6)/(1+(0.492/Pr)^(9/16))^(8/27))^2"
             }
+            Self::ChurchillChuHorizontalCylinder => {
+                "Nu_D = (0.60 + 0.387 Ra_D^(1/6)/(1+(0.559/Pr)^(9/16))^(8/27))^2"
+            }
+            Self::HorizontalPlateUnstableLaminar => "Nu_L = 0.54 Ra_L^(1/4); L = A/P",
+            Self::HorizontalPlateUnstableTurbulent => "Nu_L = 0.15 Ra_L^(1/3); L = A/P",
+            Self::HorizontalPlateStable => "Nu_L = 0.27 Ra_L^(1/4); L = A/P",
         }
     }
 }
@@ -725,6 +752,14 @@ fn evaluate_formula(
             let term = 0.825 + 0.387 * det::pow(ra, 1.0 / 6.0) / denominator;
             term * term
         }
+        CorrelationId::ChurchillChuHorizontalCylinder => {
+            let denominator = det::pow(1.0 + det::pow(0.559 / group("Pr"), 9.0 / 16.0), 8.0 / 27.0);
+            let term = 0.60 + 0.387 * det::pow(group("Ra"), 1.0 / 6.0) / denominator;
+            term * term
+        }
+        CorrelationId::HorizontalPlateUnstableLaminar => 0.54 * det::pow(group("Ra"), 0.25),
+        CorrelationId::HorizontalPlateUnstableTurbulent => 0.15 * det::pow(group("Ra"), 1.0 / 3.0),
+        CorrelationId::HorizontalPlateStable => 0.27 * det::pow(group("Ra"), 0.25),
     }
 }
 
@@ -816,6 +851,14 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     const CHURCHILL_CHU: SourceProvenance = SourceProvenance {
         citation: "S. W. Churchill and H. H. S. Chu, Correlating Equations for Laminar and Turbulent Free Convection from a Vertical Plate, International Journal of Heat and Mass Transfer 18, 1975, 1323-1329",
         identifier: "doi:10.1016/0017-9310(75)90243-4",
+    };
+    const CHURCHILL_CHU_CYLINDER: SourceProvenance = SourceProvenance {
+        citation: "S. W. Churchill and H. H. S. Chu, Correlating Equations for Laminar and Turbulent Free Convection from a Horizontal Cylinder, International Journal of Heat and Mass Transfer 18, 1975, 1049-1053; ASHRAE Handbook Fundamentals 2025, Ch. 4, Table 9 (T9.10)",
+        identifier: "doi:10.1016/0017-9310(75)90222-7",
+    };
+    const HORIZONTAL_PLATE: SourceProvenance = SourceProvenance {
+        citation: "ASHRAE Handbook Fundamentals 2025, SI, Ch. 4, Table 9, Eqs. (T9.7)-(T9.9); handbook heat-transfer use of Lloyd-Moran and Goldstein-Sparrow-Jones correlations",
+        identifier: "https://handbook.ashrae.org/Handbooks/F25/SI/f25_ch04/f25_ch04_si.aspx#Table9",
     };
 
     let fully_developed = || {
@@ -1060,6 +1103,64 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
             0.20,
             DiscrepancyBasis::EngineeringAllowance,
         ),
+        CorrelationId::ChurchillChuHorizontalCylinder => (
+            CHURCHILL_CHU_CYLINDER,
+            ValidityDomain::unconstrained()
+                .with("Pr", 0.01, 1.0e5)
+                .with("Ra", 1.0e-6, 1.0e13),
+            vec![
+                "isolated long isothermal horizontal circular cylinder; characteristic length is diameter",
+                "quiescent single-phase fluid with consistently evaluated film properties",
+                "Pr interval is an implementation admission policy, not a source-published validation range",
+            ],
+            vec![
+                "forced or mixed convection",
+                "confinement or cylinder arrays",
+                "axial end effects",
+            ],
+            0.20,
+            DiscrepancyBasis::EngineeringAllowance,
+        ),
+        CorrelationId::HorizontalPlateUnstableLaminar
+        | CorrelationId::HorizontalPlateUnstableTurbulent
+        | CorrelationId::HorizontalPlateStable => {
+            let (low, high, stability) = match id {
+                CorrelationId::HorizontalPlateUnstableLaminar => (
+                    2.2e4,
+                    8.0e6,
+                    "buoyantly unstable face: heated upward or cooled downward for positive expansion",
+                ),
+                CorrelationId::HorizontalPlateUnstableTurbulent => (
+                    8.0e6,
+                    1.5e9,
+                    "buoyantly unstable face: heated upward or cooled downward for positive expansion",
+                ),
+                _ => (
+                    1.0e5,
+                    1.0e10,
+                    "buoyantly stable face: heated downward or cooled upward for positive expansion",
+                ),
+            };
+            (
+                HORIZONTAL_PLATE,
+                ValidityDomain::unconstrained().with("Ra", low, high),
+                vec![
+                    "isolated isothermal horizontal plate; characteristic length is plate area divided by perimeter",
+                    "single-phase quiescent fluid; properties at mean wall/ambient temperature",
+                    stability,
+                    "handbook empirical fit has no independent Prandtl dependence or published universal Pr range",
+                    "inclusive Rayleigh endpoints are the implementation's boundary convention",
+                ],
+                vec![
+                    "forced or mixed convection",
+                    "enclosure confinement",
+                    "inclined surface",
+                    "unvalidated fluid or non-Boussinesq property variation",
+                ],
+                0.25,
+                DiscrepancyBasis::EngineeringAllowance,
+            )
+        }
     };
     let model_version = match id {
         CorrelationId::RectangularDuctLaminarCwtDevelopingPr072 => "1.1.0",
