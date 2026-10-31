@@ -246,3 +246,5 @@ fn dry_limit_preserves_material_damping_and_refusals_preserve_all_input_state() 
     assert!(MaterialFluidFrame::new(&raw,1,bindings(),resolution(),frame_budget(),budget(),
         &CancelGate::new_clock_free()).is_err());
 }
+
+mod update;

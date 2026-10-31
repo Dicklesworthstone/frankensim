@@ -163,8 +163,14 @@ impl<F: FluidTransport> CylinderFlow<F> {
             // d log(lambda) = 2 d log(x).
             let resistance = (16.0 / core::f64::consts::PI) * viscosity
                 * step / denominator;
-            let rate = diffusion_rate * x * x;
-            let mass = resistance / rate;
+            // This is a physical fluid inertia at a fixed dimensionless
+            // spatial spectral point, not a viscosity-dependent fit. Derive
+            // it from geometry and density so changing ONLY viscosity cannot
+            // change stored energy through rounding in c/lambda. Derive the
+            // pole from that same mass used by the native time-domain owner.
+            let mass = (16.0 / core::f64::consts::PI)
+                * (added_mass / core::f64::consts::PI) * step / denominator / (x * x);
+            let rate = resistance / mass;
             if [x, denominator, resistance, rate, mass].iter()
                 .any(|v| !v.is_finite() || *v <= 0.0) {
                 return Err(invalid("cylinder fluid memory branch is not finite and passive"));

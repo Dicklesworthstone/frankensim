@@ -8,8 +8,10 @@
 //! Each fluid branch retains its own momentum, with resistance
 //! w*c*(b^T*v-v_fluid)^2. Original material viscosity keeps all cross terms.
 //!
-//! This is frozen, small, planar vibration at fixed supports in a stationary
-//! Newtonian exterior. Circular prismatic members, local 2-D Stokes flow and
+//! This is small planar vibration about frozen geometry at fixed supports in a
+//! stationary Newtonian exterior. [`update`] preserves canonical motion through
+//! prescribed material changes with explicit external parameter work; finite
+//! background gas/thermal evolution is not inferred. Circular prismatic members, local 2-D Stokes flow and
 //! explicit modal/spectral truncation apply. No axial/rotary fluid drag,
 //! inter-member or inter-region hydrodynamic interactions, thermal evolution,
 //! moving supports, cavitation, nonlinear wake or acoustic radiation is inferred.
@@ -31,6 +33,7 @@ mod mechanics;
 mod regions;
 mod plane;
 pub use regions::FrameFluidRegion;
+pub mod update;
 
 /// Original member index and original exterior material source; never a radius,
 /// mass or stiffness override. Different members may have different fluids.
@@ -63,6 +66,7 @@ pub enum FrameFluidError {
     Factor(FactorError),
     Native(PhsError),
     Balance { residual_j: f64, tolerance_j: f64 },
+    ParameterWork { parameter_work_j: f64, maximum_absolute_parameter_work_j: f64 },
     Cancelled,
 }
 impl core::fmt::Display for FrameFluidError {
@@ -127,7 +131,7 @@ struct MaterialPort {
     resistance: f64,
 }
 
-/// Frozen complete physical component, retaining the original frame and fluids.
+/// Complete physical component, retaining the original frame and fluid sources.
 /// State order: [dry modal q, LOADED modal momentum p=M*qdot, fluid momenta].
 /// Fluid coordinates follow region declaration, then Gauss-point, then original
 /// spectral-branch order. They never reset when an interval is accepted.
@@ -140,6 +144,7 @@ pub struct MaterialFluidFrame<'a, F> {
     modal_mass: Vec<f64>,
     memory_masses: Vec<f64>,
     inverse_residual: f64,
+    mass_inverse_tolerance: f64,
     system: PortHamiltonian,
 }
 

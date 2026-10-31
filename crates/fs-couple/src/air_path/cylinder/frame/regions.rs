@@ -78,9 +78,6 @@ impl<'a, F: FluidTransport> MaterialFluidFrame<'a, F> {
         }
         let mut members = Vec::with_capacity(bindings.len());
         let mut stations = Vec::with_capacity(bindings.len()*4);
-        let mut memory_masses = Vec::with_capacity(memory_count);
-        let mut modal_mass = vec![0.0; m*m];
-        for i in 0..m { modal_mass[i*m+i] = 1.0; }
         for (binding, length_m) in bindings.into_iter().zip(lengths) {
             poll(gate)?;
             let section = frame.material_section(binding.element)
@@ -96,14 +93,7 @@ impl<'a, F: FluidTransport> MaterialFluidFrame<'a, F> {
                 let (dofs, weights, _) = frame.reference_transverse_trace(binding.element, xi)?;
                 let projection = project(&basis, &dofs, &weights)?;
                 let weight_m = positive(weight*length_m)?;
-                add_outer(&mut modal_mass, m, 0, &projection,
-                    positive(weight_m*flow.added_mass_per_length_kg_m())?)?;
-                let first_memory = memory_masses.len();
-                for branch in flow.branches() {
-                    let mass = positive(weight_m*branch.mass_per_length_kg_m)?;
-                    positive(1.0/mass)?;
-                    memory_masses.push(mass);
-                }
+                let first_memory = stations.len()*resolution.intervals;
                 stations.push(Station { member, weight_m, projection, first_memory });
             }
             members.push(LoadedFrameMember { element: binding.element, span: binding.span, length_m, flow });
@@ -119,51 +109,89 @@ impl<'a, F: FluidTransport> MaterialFluidFrame<'a, F> {
                 });
             }
         }
-        poll(gate)?;
-        let (inverse, inverse_residual) = inverse_mass(&modal_mass, m,
-            budget.mass_inverse_tolerance, gate)?;
-        let mut q = vec![0.0; square];
-        let mut j = vec![0.0; square];
-        let mut r = vec![0.0; square];
-        let mut g = vec![0.0; n*m];
-        for i in 0..m {
-            q[i*n+i] = basis.modes()[i].eigenvalue_per_s2;
-            j[i*n+m+i] = 1.0;
-            j[(m+i)*n+i] = -1.0;
-            g[(m+i)*m+i] = 1.0;
-            for k in 0..m { q[(m+i)*n+m+k] = inverse[i*m+k]; }
-        }
-        for port in &material_ports {
-            poll(gate)?;
-            add_outer(&mut r, n, m, &port.projection, port.resistance)?;
-        }
-        for station in &stations {
-            poll(gate)?;
-            let flow = &members[station.member].flow;
-            add_outer(&mut r, n, m, &station.projection,
-                positive(station.weight_m*flow.low_tail_resistance_per_length_n_s_m2())?)?;
-            for (k, branch) in flow.branches().iter().enumerate() {
-                poll(gate)?;
-                let memory = station.first_memory+k;
-                let index = 2*m+memory;
-                let c = positive(station.weight_m*branch.resistance_per_length_n_s_m2)?;
-                q[index*n+index] = 1.0/memory_masses[memory];
-                r[index*n+index] = c;
-                add_outer(&mut r, n, m, &station.projection, c)?;
-                for i in 0..m {
-                    let cross = finite(-c*station.projection[i])?;
-                    r[(m+i)*n+index] = cross;
-                    r[index*n+m+i] = cross;
-                }
-            }
-        }
-        let storage = QuadraticStorage::new(q, n)?;
-        poll(gate)?;
-        let system = PortHamiltonian::new(n, m, j, r, g, Box::new(storage))?;
+        let FrameFluidOperators { modal_mass, memory_masses, inverse_residual, system } =
+            assemble(&basis, &members, &stations, &material_ports, budget.mass_inverse_tolerance, gate)?;
         poll(gate)?;
         Ok(Self { frame, basis, members, stations, material_ports, modal_mass,
-            memory_masses, inverse_residual, system })
+            memory_masses, inverse_residual, mass_inverse_tolerance: budget.mass_inverse_tolerance, system })
     }
+}
+
+/// The SAME original physical assembly serves preparation and a prescribed
+/// material intervention. The retained basis, station traces and coordinate
+/// topology are inputs; this does not compute replacement modes or poles.
+pub(super) struct FrameFluidOperators {
+    pub modal_mass: Vec<f64>,
+    pub memory_masses: Vec<f64>,
+    pub inverse_residual: f64,
+    pub system: PortHamiltonian,
+}
+
+pub(super) fn assemble<F>(basis: &FrameVibrationBasis, members: &[LoadedFrameMember<F>],
+    stations: &[Station], material_ports: &[MaterialPort], mass_inverse_tolerance: f64,
+    gate: &CancelGate) -> Result<FrameFluidOperators> {
+    poll(gate)?;
+    let m = basis.modes().len();
+    let mut modal_mass = vec![0.0; m*m];
+    for i in 0..m { modal_mass[i*m+i] = 1.0; }
+    let mut memory_masses = Vec::new();
+    for station in stations {
+        poll(gate)?;
+        let flow = &members[station.member].flow;
+        if station.first_memory != memory_masses.len() {
+            return Err(invalid("original fluid spectral coordinate ordering changed"));
+        }
+        add_outer(&mut modal_mass, m, 0, &station.projection,
+            positive(station.weight_m*flow.added_mass_per_length_kg_m())?)?;
+        for branch in flow.branches() {
+            let mass = positive(station.weight_m*branch.mass_per_length_kg_m)?;
+            positive(1.0/mass)?;
+            memory_masses.push(mass);
+        }
+    }
+    let n = 2*m+memory_masses.len();
+    let square = n.checked_mul(n).ok_or_else(|| invalid("frame/fluid matrix size overflow"))?;
+    let (inverse, inverse_residual) = inverse_mass(&modal_mass, m, mass_inverse_tolerance, gate)?;
+    let mut q = vec![0.0; square];
+    let mut j = vec![0.0; square];
+    let mut r = vec![0.0; square];
+    let mut g = vec![0.0; n*m];
+    for i in 0..m {
+        q[i*n+i] = basis.modes()[i].eigenvalue_per_s2;
+        j[i*n+m+i] = 1.0;
+        j[(m+i)*n+i] = -1.0;
+        g[(m+i)*m+i] = 1.0;
+        for k in 0..m { q[(m+i)*n+m+k] = inverse[i*m+k]; }
+    }
+    for port in material_ports {
+        poll(gate)?;
+        add_outer(&mut r, n, m, &port.projection, port.resistance)?;
+    }
+    for station in stations {
+        poll(gate)?;
+        let flow = &members[station.member].flow;
+        add_outer(&mut r, n, m, &station.projection,
+            positive(station.weight_m*flow.low_tail_resistance_per_length_n_s_m2())?)?;
+        for (k, branch) in flow.branches().iter().enumerate() {
+            poll(gate)?;
+            let memory = station.first_memory+k;
+            let index = 2*m+memory;
+            let c = positive(station.weight_m*branch.resistance_per_length_n_s_m2)?;
+            q[index*n+index] = 1.0/memory_masses[memory];
+            r[index*n+index] = c;
+            add_outer(&mut r, n, m, &station.projection, c)?;
+            for i in 0..m {
+                let cross = finite(-c*station.projection[i])?;
+                r[(m+i)*n+index] = cross;
+                r[index*n+m+i] = cross;
+            }
+        }
+    }
+    let storage = QuadraticStorage::new(q, n)?;
+    poll(gate)?;
+    let system = PortHamiltonian::new(n, m, j, r, g, Box::new(storage))?;
+    poll(gate)?;
+    Ok(FrameFluidOperators { modal_mass, memory_masses, inverse_residual, system })
 }
 
 /// Map the quadrature inside the original coordinate, NOT a shorter new beam.
