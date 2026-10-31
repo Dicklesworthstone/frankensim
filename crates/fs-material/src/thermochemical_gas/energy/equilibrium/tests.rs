@@ -89,6 +89,30 @@ fn feed() -> Vec<(SpeciesId, Amount)> {
 }
 
 #[test]
+fn charged_chemistry_cannot_enter_neutral_material_transport() {
+    let (bank, neutral) = isomers();
+    // Complete, identical source models and a charge-neutral feed ensure the
+    // refusal is specifically the absent charged-particle transport closure.
+    let charged = IdealGasEquilibriumV1::new(
+        neutral.elemental_matrix().clone(),
+        ChargeVector::new(neutral.elemental_matrix().species().to_vec(), vec![1, -1]).unwrap(),
+        neutral.models().to_vec(),
+    ).unwrap();
+    let initial = bank.clone();
+    assert_eq!(
+        bank.equilibrium_chamber_hp(
+            &charged, &point(300.0, 1e5),
+            &[(id("A"), Amount::new(1.0)), (id("B"), Amount::new(1.0))],
+            Temperature::new(300.0), controls(), || false,
+        ),
+        Err(GasEquilibriumChamberError::Invalid(
+            "charged chemistry requires ionized-gas transport; neutral Wilke/WMS closure is unsupported",
+        ))
+    );
+    assert_eq!(bank, initial);
+}
+
+#[test]
 fn exothermic_chamber_preserves_sources_and_drives_the_existing_frozen_nozzle() {
     let (bank, chemistry) = isomers();
     let old = bank.clone();

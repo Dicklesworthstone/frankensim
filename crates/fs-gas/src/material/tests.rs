@@ -203,6 +203,7 @@ fn fixture(
 fn controls() -> MaterialKineticsSolve {
     MaterialKineticsSolve {
         chemistry: IsochoricKineticsSolve {
+            method: crate::chemistry::IsochoricKineticsMethod::BackwardEuler,
             minimum_temperature_k: 200.0,
             maximum_temperature_k: 1900.0,
             energy_tolerance_j: 1e-8,
@@ -227,6 +228,33 @@ fn controls() -> MaterialKineticsSolve {
         mass_tolerance_kg: 1e-13,
         relative_state_tolerance: 1e-9,
     }
+}
+
+#[test]
+fn charged_mechanism_cannot_reuse_neutral_parcel_transport() {
+    let (bank, neutral, mut parcel) = fixture(0.0, 2000.0);
+    let original = parcel.clone();
+    let source = neutral.thermodynamics();
+    // A+ <-> B+ conserves charge exactly. Identical species/source data must
+    // not make neutral transport admissible for this charged mechanism.
+    let charged_source = IdealGasEquilibriumV1::new(
+        source.elemental_matrix().clone(),
+        ChargeVector::new(source.elemental_matrix().species().to_vec(), vec![1, 1]).unwrap(),
+        source.models().to_vec(),
+    ).unwrap();
+    let charged = IdealGasKineticsV1::new(
+        charged_source, "manufactured-charged-transport-refusal", 1,
+        neutral.reactions().to_vec(), 0.0,
+    ).unwrap();
+    assert_eq!(
+        advance_closed_parcel_adiabatic(
+            &mut parcel, &bank, &charged, Time::new(0.1), controls(), || false,
+        ),
+        Err(MaterialKineticsError::Invalid(
+            "charged chemistry requires ionized-gas transport; neutral Wilke/WMS closure is unsupported",
+        ))
+    );
+    assert_eq!(parcel, original);
 }
 
 #[test]

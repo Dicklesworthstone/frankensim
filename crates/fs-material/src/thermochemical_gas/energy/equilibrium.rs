@@ -266,6 +266,14 @@ impl ThermochemicalGasModel {
                 "positive finite chamber mass tolerance required",
             ));
         }
+        // The Gibbs owner also supports ionized species, but this adapter
+        // freezes products into neutral dilute-gas Wilke/WMS transport. Its
+        // coefficients cannot be reused as an electron/ion transport closure.
+        if (0..chemistry.models().len()).any(|i| chemistry.charge_vector().get(i) != Some(0)) {
+            return Err(GasEquilibriumChamberError::Invalid(
+                "charged chemistry requires ionized-gas transport; neutral Wilke/WMS closure is unsupported",
+            ));
+        }
         let source = self.thermodynamics().components();
         let models = chemistry.models();
         if source.len() != models.len() {

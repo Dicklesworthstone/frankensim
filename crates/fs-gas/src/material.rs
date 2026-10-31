@@ -292,6 +292,14 @@ fn admit_sources(
     bank: &ThermochemicalGasModel,
     mechanism: &IdealGasKineticsV1,
 ) -> Result<(), MaterialKineticsError> {
+    // The homogeneous reactor can conserve charged elementary reactions, but
+    // this material adapter still resolves neutral Wilke/WMS transport.
+    let chemistry = mechanism.thermodynamics();
+    if (0..chemistry.models().len()).any(|i| chemistry.charge_vector().get(i) != Some(0)) {
+        return Err(MaterialKineticsError::Invalid(
+            "charged chemistry requires ionized-gas transport; neutral Wilke/WMS closure is unsupported",
+        ));
+    }
     let models = bank.thermodynamics().components();
     let chemical = mechanism.thermodynamics().models();
     if models.len() != chemical.len() {
