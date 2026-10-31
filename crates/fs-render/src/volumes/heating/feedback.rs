@@ -89,6 +89,26 @@ impl TemperatureAbsorptionTable {
     pub fn source_identity(&self) -> ContentHash {
         self.source_identity
     }
+
+    pub(super) fn knot_count(&self) -> usize {
+        self.rows.len()
+    }
+
+    pub(super) fn compile<const N: usize>(
+        &self,
+        wavelengths_nm: &[f64; N],
+        hash: &mut DomainHasher,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<CompiledTable<N>, OpticalFeedbackError> {
+        CompiledTable::compile(
+            self.source_identity,
+            self.wavelength_bounds_nm,
+            &self.rows,
+            wavelengths_nm,
+            hash,
+            checkpoint,
+        )
+    }
 }
 
 /// A finite collimated segment with already quadrature-weighted lane watts.
@@ -161,13 +181,67 @@ impl core::fmt::Display for OpticalFeedbackError {
 }
 impl std::error::Error for OpticalFeedbackError {}
 
+// Both coefficient kinds retain their original spectral owner. The compiled
+// temperature interpolation is shared; absorption is never relabelled scattering.
+pub(super) trait TemperatureSpectrum {
+    fn source_identity(&self) -> Option<ContentHash>;
+    fn at(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError>;
+}
+
+impl TemperatureSpectrum for MassAbsorptionSpectrum {
+    fn source_identity(&self) -> Option<ContentHash> {
+        MassAbsorptionSpectrum::source_identity(self)
+    }
+    fn at(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError> {
+        MassAbsorptionSpectrum::at(self, wavelength_nm)
+    }
+}
+
 #[derive(Debug)]
-struct CompiledTable<const N: usize> {
+pub(super) struct CompiledTable<const N: usize> {
     rows: Vec<(f64, [f64; N])>,
 }
 
 impl<const N: usize> CompiledTable<N> {
-    fn check_temperature(
+    pub(super) fn compile<S: TemperatureSpectrum>(
+        source_identity: ContentHash,
+        bounds: (f64, f64),
+        source_rows: &[(f64, S)],
+        wavelengths_nm: &[f64; N],
+        hash: &mut DomainHasher,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalFeedbackError> {
+        hash.update(source_identity.as_bytes());
+        hash.update(&bounds.0.to_bits().to_le_bytes());
+        hash.update(&bounds.1.to_bits().to_le_bytes());
+        hash.update(&(source_rows.len() as u64).to_le_bytes());
+        let mut rows = Vec::new();
+        rows.try_reserve_exact(source_rows.len())
+            .map_err(|_| OpticalFeedbackError::Budget)?;
+        for (temperature, spectrum) in source_rows {
+            checkpoint()?;
+            hash.update(&temperature.to_bits().to_le_bytes());
+            hash.update(&[u8::from(spectrum.source_identity().is_some())]);
+            if let Some(source) = spectrum.source_identity() {
+                hash.update(source.as_bytes());
+            }
+            let mut values = [0.0; N];
+            for lane in 0..N {
+                values[lane] = spectrum.at(wavelengths_nm[lane])?;
+                hash.update(&values[lane].to_bits().to_le_bytes());
+            }
+            rows.push((*temperature, values));
+        }
+        Ok(Self { rows })
+    }
+
+    pub(super) fn has_nonzero_coefficient(&self) -> bool {
+        self.rows
+            .iter()
+            .any(|(_, values)| values.iter().any(|v| *v > 0.0))
+    }
+
+    pub(super) fn check_temperature(
         &self,
         id: CellId,
         temperature_k: f64,
@@ -185,7 +259,11 @@ impl<const N: usize> CompiledTable<N> {
         Ok(())
     }
 
-    fn at(&self, id: CellId, temperature_k: f64) -> Result<[f64; N], OpticalFeedbackError> {
+    pub(super) fn at(
+        &self,
+        id: CellId,
+        temperature_k: f64,
+    ) -> Result<[f64; N], OpticalFeedbackError> {
         self.check_temperature(id, temperature_k)?;
         let upper = self
             .rows
@@ -202,7 +280,7 @@ impl<const N: usize> CompiledTable<N> {
             }
         });
         if !values.into_iter().all(nonnegative) {
-            return Err(invalid("unrepresentable interpolated absorption"));
+            return Err(invalid("unrepresentable interpolated optical coefficient"));
         }
         Ok(values)
     }
@@ -327,28 +405,7 @@ impl<const N: usize> TemperatureOpticalHeating<N> {
             }
             bounds.0 = bounds.0.max(table.wavelength_bounds_nm.0);
             bounds.1 = bounds.1.min(table.wavelength_bounds_nm.1);
-            hash.update(table.source_identity.as_bytes());
-            hash.update(&table.wavelength_bounds_nm.0.to_bits().to_le_bytes());
-            hash.update(&table.wavelength_bounds_nm.1.to_bits().to_le_bytes());
-            hash.update(&(table.rows.len() as u64).to_le_bytes());
-            let mut rows = Vec::new();
-            rows.try_reserve_exact(table.rows.len())
-                .map_err(|_| OpticalFeedbackError::Budget)?;
-            for &(temperature, spectrum) in &table.rows {
-                checkpoint()?;
-                hash.update(&temperature.to_bits().to_le_bytes());
-                hash.update(&[u8::from(spectrum.source_identity().is_some())]);
-                if let Some(source) = spectrum.source_identity() {
-                    hash.update(source.as_bytes());
-                }
-                let mut values = [0.0; N];
-                for lane in 0..N {
-                    values[lane] = spectrum.at(beam.wavelengths_nm[lane])?;
-                    hash.update(&values[lane].to_bits().to_le_bytes());
-                }
-                rows.push((temperature, values));
-            }
-            compiled.push(CompiledTable { rows });
+            compiled.push(table.compile(&beam.wavelengths_nm, &mut hash, &mut checkpoint)?);
         }
         hash.update(&bounds.0.to_bits().to_le_bytes());
         hash.update(&bounds.1.to_bits().to_le_bytes());

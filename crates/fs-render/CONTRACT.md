@@ -1779,6 +1779,54 @@ an independent analog two-layer calculation with distinct anisotropic phases.
 The prepared packet is fixed for one call; temperature/state evolution belongs
 to the hosting constitutive and thermal owners.
 
+### Temperature-dependent multiple-scattering heating
+
+Under `optical-heating`,
+`volumes::heating::scattering_feedback::TemperatureScatteringHeating` couples
+local temperature-dependent absorption **and** scattering to the original
+`DepositionSimulation` clock. It owns one immutable original geometry/density
+snapshot, shared compiled source spectra, a phase palette, and complete
+original-grid/material/thermal mappings. Every positive-density cell requires
+a binding, including initially transparent cells and cells outside the incident
+beam. `TemperatureScatteringTable` retains actual mass-scattering spectra;
+it shares the existing bounded temperature interpolation with
+`TemperatureAbsorptionTable` without relabelling absorption as scattering.
+Spectral laws are sampled once at the fixed source wavelengths, while the
+native caloric laws supply actual kelvin values at every thermal substep.
+
+The original cell transport kernel follows all scattering continuations through
+that prepared local field. True absorption supplies the original thermal cells,
+including off-beam receivers; ballistic escape, diffuse escape and unresolved
+radiation stay separate. The existing `ScatteringHeating` owner admits each
+sampled report with explicit conservation, global and receiving-cell empirical
+sampling-error allowances, and an unresolved-power allowance. Native conduction,
+authored sources, latent enthalpy and events retain their owners. Accepted
+physical durations integrate the actual changing radiation/heat with compensated
+sums, and the native external-heat audit receives that heat once. Absorption-only
+fields take the exact deterministic Beer path. Source-domain, native cancellation,
+conservation and whole-advance source-evaluation/segment-budget refusals publish
+neither thermal state nor partial optical energy.
+
+Within a trajectory each accepted physical start time selects a fresh deterministic
+counter stream from the original source seed/identity and replica seed. The key
+excludes changing temperature/coefficient state, history count and worker identity.
+Split advances with matching physical steps replay the same photons; paired
+studies retain matching physical-time streams and photon-history prefixes.
+This avoids recycling one set of packet draws throughout a thermally changing
+trajectory. The most recent report and maximum conditional source standard
+errors remain diagnostics in watts. They are **not** propagated final thermal
+uncertainty, and changing-field energies do not claim the fixed-field linear
+standard-error scaling of `ScatteringHeating`.
+
+Geometry, density, phase laws, incident power and spectral quadrature remain
+prescribed. The incident-heating model does not infer missing material spectra,
+reflecting/refracting interfaces, moving geometry, temperature-dependent phase
+functions, fluorescence, chemistry or net thermal-radiation exchange. Native
+integration tests cover off-beam heat, thermal activation of scattering, changing
+upstream absorption and downstream heat, exact absorption-only reduction,
+latent/event/split clocks, stream pairing, source-domain refusal and aggregate
+work/cancellation rollback.
+
 ## No-claim boundaries (volumes)
 
 - FrankenVDB tile-maxima majorants: no fvdb crate exists in-workspace;

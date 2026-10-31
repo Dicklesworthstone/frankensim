@@ -6,6 +6,9 @@ mod scattering;
 #[path = "optical_heating/feedback.rs"]
 mod feedback;
 
+#[path = "optical_heating/scattering_feedback.rs"]
+mod scattering_feedback;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;
