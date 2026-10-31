@@ -8,6 +8,8 @@ mod expansion;
 mod pressure;
 #[path = "finite_solid/impulse.rs"]
 mod impulse;
+#[path = "finite_solid/contact.rs"]
+mod contact;
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_couple::finite_solid::*;
 use fs_evidence::ValidityDomain;

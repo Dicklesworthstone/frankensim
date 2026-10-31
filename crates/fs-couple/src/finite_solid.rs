@@ -18,7 +18,8 @@
 //! never converted into physical heat. The optional source-expansion paths
 //! prepare isotropic or oriented principal thermal references at a held
 //! temperature per element.
-//! No evolving heat equation, plasticity, contact, moving supports,
+//! The contact child composes frozen-configuration rigid/solid impact events.
+//! No evolving heat equation, plasticity, moving supports,
 //! fluid feedback, mixed incompressible formulation or continuous-in-time
 //! nonintersection claim is made.
 
@@ -27,6 +28,9 @@ pub mod thermal;
 
 /// Power-conjugate point impulses on the original consistent reference mass.
 pub mod impulse;
+
+/// Simultaneous rigid/solid contact through the original Coulomb solver.
+pub mod contact;
 
 use std::cell::RefCell;
 use std::sync::Arc;

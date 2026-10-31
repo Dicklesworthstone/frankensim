@@ -16996,3 +16996,35 @@ open-circuit absorption with charge conservation, second-order refinement,
 current-driven frequency/time agreement and loss, the zero-memory native RLC
 limit, separate load heat, small polarization and inductor work under a large
 held bias, and atomic refusal. All materials are synthetic.
+
+## Simultaneous rigid and finite-solid frictional impacts
+
+`finite_solid::contact` connects the original solid impulse/mobility interface
+to native rigid-body states and `fs-contact::frictional_multicontact`. One solid
+can interact with multiple rigid bodies in a single globally admitted event.
+The full contact matrix retains solid cross-point coupling and rigid full-tensor
+translation/rotation response, including normal/tangent cross terms. All normal
+and Coulomb impulses are solved together by the existing contact owner, with its
+original determinacy and passivity refusals. A velocity-only result retains
+representative, non-authoritative individual impulses and unpartitioned loss.
+
+`FiniteSolidBody::rigid_contact_candidate` applies equal/opposite impulses at the
+original body arms and current barycentric solid points. The solid receives the
+complete batch in one native mass solve. Actual endpoint velocities, stable
+kinetic increments, world spin/orbital momentum, stationary-support reactions
+and joint work are checked before either candidate is returned. An orthonormal
+normal-first frame is explicitly admitted. Inputs remain unchanged on source,
+geometry, solver, physical-balance or cancellation failure; poses and time do
+not advance. Callers provide event geometry and interface coefficients. No
+collision detection, penetration repair, continuous contact trajectory or loss
+to heat conversion is inferred. A finite activated gap is retained in the angular
+balance and can reject a tangential couple; witnesses are never relocated.
+
+Controls bound rigid bodies, contacts (through the original 21-contact owner),
+each consistent-mass solve and independent physical acceptance tolerances.
+Tests exercise source-mass stick/slide/restitution, two rigid bodies coupled
+through negative solid cross mobility, off-center full-inertia impact, fixed
+support reactions, canonical contact ordering and late rejection of a real
+gap-induced angular couple. They use independent tetrahedral mass and impulse
+oracles; native execution remains unverified in the current resource-blocked
+environment.
