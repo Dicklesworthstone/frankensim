@@ -1585,8 +1585,8 @@ Camera validation, shutter admission, evaluation, and ray generation poll
 `Cx`; failures leave a progressive film transactionally unchanged.
 
 Determinism is same-ISA/toolchain bit replay under the existing tracer policy.
-The camera model makes no claim for lens distortion, chromatic aberration,
-diffraction, rolling shutter, vignetting, autofocus, sensor irradiance, or
+The geometric camera model makes no claim for lens distortion, chromatic aberration,
+rolling shutter, vignetting, autofocus, sensor irradiance, or
 photometrically calibrated exposure. `ExposureMetadata` is retained but is not
 applied by the current radiance-averaging integrator. `FilmTimeMode` binds the
 render-path kind, shutter, stream seed, and cinematic shot ID, so progressive
@@ -1594,6 +1594,55 @@ appends cannot cross a cut or switch between legacy-motion and cinematic rays.
 Like the pre-existing progressive tracer, it does not yet content-bind the
 scene or full camera content; composition-level artifact identity owns that
 broader provenance closure.
+
+### Focused circular-pupil diffraction
+
+`PhysicalCamera::with_in_focus_diffraction(FocusedDiffraction)` opts the
+cinematic spectral tracer into scalar, paraxial, incoherent Airy imaging.
+It requires a nonzero circular aperture, `lambda/D <= 0.01`, and an explicit
+maximum pupil-rim defocus phase between zero and 0.1 radians. A physical
+focal-length declaration requires focus beyond that focal length, admitting
+only a positive conjugate image distance. First-hit surfaces must have an
+opaque diffuse BSDF (including diffuse thermal emission); specular, conductor
+and dielectric first hits refuse even when they also emit, because their
+virtual-image depth cannot be inferred from the surface position. Paths after
+an admitted diffuse first hit retain ordinary radiance transport.
+At each primary visible surface the tracer checks
+`pi*a^2/lambda_min * abs(1/z - 1/focus) <= maximum_phase`, using axial depth.
+An emitting environment uses `1/z = 0`; an empty black background needs no
+depth claim. Refusals preserve the film transactionally. Camera animation
+retains the policy and render-continuity hashes distinguish it from geometric
+imaging. Existing geometric render bits and random streams are unchanged.
+
+The in-focus image-plane PSF is
+`[pi*D/(lambda*q)]^2/(4*pi) * [2*J1(v)/v]^2`,
+`v = pi*D*r/(lambda*q)`, where `q` is the actual image distance. Its integral
+is one, not its peak. Since this camera's raster is angular (`r=q*theta`),
+the angular Airy scale is `lambda/(pi*D)` at finite conjugates as well.
+The existing `fs-math` Bessel implementation supplies the rings. A shared
+two-variate Cauchy proposal has the same inverse-cubic radial-density tail,
+with no rejection loop, image-space convolution buffer, or ring cutoff.
+Each wavelength receives its own PSF/proposal weight before spectral XYZ
+integration; no wavelength is treated as a representative achromatic blur.
+
+The focused mode traces the optical-centre image and does not additionally
+sample geometric pupil blur. Its phase budget is a model admission condition,
+not a certified image-error bound. It does not solve defocused wavefronts,
+coherence between scene points, pupil-dependent occlusion, aberrations,
+vector/polarization diffraction, high numerical apertures, or arbitrary
+edge diffraction in scene transport. Primary volumes and calibrated
+photometric fixture paths refuse this mode; bidirectional rendering retains
+its existing pinhole-only admission. Wavelength-unaware camera-ray callers
+receive `DiffractionRequiresSpectralPath`, rather than silently losing the
+selected optical model.
+
+G2/G3 regressions in `tests/camera.rs` check the first Airy zero, wavelength
+and pupil scaling, separate packet ring positions, unit total power (0.2%
+quadrature band), the 0.837784869 central-disk energy (1e-7 absolute), phase
+admission and animation. `tests/tracer_battery.rs` checks actual image
+contributions outside geometrical support, flat-environment conservation
+(4% finite Monte Carlo band), exact progressive replay, and atomic defocus
+refusal. These are numerical model checks, not measured lens validation.
 
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a

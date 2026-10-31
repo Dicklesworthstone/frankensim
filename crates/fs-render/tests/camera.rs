@@ -7,7 +7,7 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::camera::{
     AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraProjection, CameraShot, CutSide,
-    LensSample, PhysicalCamera,
+    FocusedDiffraction, LensSample, PhysicalCamera,
 };
 use fs_render::instances::RigidTransform;
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
@@ -919,5 +919,260 @@ fn camera_ray_and_timeline_evaluation_observe_cancellation() {
             animated.admit_shutter(cx, shutter(0.25, 0.75), CutSide::After),
             Err(CameraError::Cancelled)
         ));
+    });
+}
+
+fn diffraction_camera(radius_m: f64, focus_m: f64) -> PhysicalCamera {
+    axial_camera(Aperture::try_circular(radius_m).unwrap(), focus_m)
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+        .unwrap()
+}
+
+/// G2: the first circular-pupil null is at 1.21966989 lambda/D, and packet
+/// wavelengths retain different ring positions even though they share a ray.
+#[test]
+fn diffraction_airy_zero_scale_and_packet_chromaticity() {
+    let zero = 3.831_705_970_207_512_5_f64;
+    let u = 1.0 - 1.0 / (1.0 + (zero / 2.0).powi(2)).sqrt();
+    let sample = LensSample::try_new(u, 0.0).unwrap();
+    let radius = 1.0e-3;
+    with_cx(|_, cx| {
+        let ray = diffraction_camera(radius, 2.0)
+            .generate_spectral_ray_from_tangent_offsets(
+                cx,
+                0.0,
+                0.0,
+                LensSample::CENTER,
+                sample,
+                &[400.0, 550.0, 700.0],
+            )
+            .unwrap();
+        let tangent = ray.ray.dir.x / -ray.ray.dir.z;
+        assert_close(
+            tangent,
+            zero * 550.0e-9 / (2.0 * core::f64::consts::PI * radius),
+            1.0e-16,
+            "Airy null angular radius",
+        );
+        assert!(
+            ray.weights[1] < 1.0e-25,
+            "central wavelength misses Airy null: {:?}",
+            ray.weights
+        );
+        assert!(ray.weights[0] > 0.01 && ray.weights[2] > 0.01);
+        assert_eq!(ray.ray.origin, Point3::new(0.0, 0.0, 0.0));
+        let wider = diffraction_camera(2.0 * radius, 2.0)
+            .generate_spectral_ray_from_tangent_offsets(
+                cx,
+                0.0,
+                0.0,
+                LensSample::CENTER,
+                sample,
+                &[400.0, 550.0, 700.0],
+            )
+            .unwrap();
+        assert_close(
+            wider.ray.dir.x / -wider.ray.dir.z,
+            0.5 * tangent,
+            1.0e-16,
+            "inverse pupil scale",
+        );
+        assert_eq!(wider.weights, ray.weights);
+        let red = diffraction_camera(radius, 2.0)
+            .generate_spectral_ray_from_tangent_offsets(
+                cx,
+                0.0,
+                0.0,
+                LensSample::CENTER,
+                sample,
+                &[800.0, 1100.0, 1400.0],
+            )
+            .unwrap();
+        assert_close(
+            red.ray.dir.x / -red.ray.dir.z,
+            2.0 * tangent,
+            1.0e-16,
+            "wavelength scale",
+        );
+        assert_eq!(red.weights, ray.weights);
+    });
+}
+
+/// G2: integrate the actual wavelength-weighted sampling map. The Airy disk
+/// contains 0.837784869... of the power; the rings retain the rest, so a
+/// constant radiance field is preserved rather than clipped or peak-normalized.
+#[test]
+fn diffraction_packet_conserves_radiance_and_encircled_power() {
+    let camera = diffraction_camera(1.0e-3, 2.0);
+    let wavelengths = [400.0, 550.0, 700.0];
+    let n = 8_192;
+    with_cx(|_, cx| {
+        let mut total = [0.0; 3];
+        let mut inner = [0.0; 3];
+        for i in 0..n {
+            let u = (f64::from(i) + 0.5) / f64::from(n);
+            let ray = camera
+                .generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::CENTER,
+                    LensSample::try_new(u, 0.0).unwrap(),
+                    &wavelengths,
+                )
+                .unwrap();
+            let theta = ray.ray.dir.x / -ray.ray.dir.z;
+            for lane in 0..3 {
+                total[lane] += ray.weights[lane] / f64::from(n);
+                let v = 2.0 * core::f64::consts::PI * 1.0e-3 * theta / (wavelengths[lane] * 1.0e-9);
+                if v < 3.831_705_970_207_512_5 {
+                    inner[lane] += ray.weights[lane] / f64::from(n);
+                }
+            }
+        }
+        for lane in 0..3 {
+            assert_close(total[lane], 1.0, 2.0e-3, "flat radiance conservation");
+            assert_close(
+                inner[lane],
+                0.837_784_869_173_314_3,
+                1.0e-7,
+                "Airy disk power",
+            );
+        }
+    });
+}
+
+#[test]
+fn diffraction_refuses_defocus_invalid_pupils_and_nonspectral_paths() {
+    for value in [-1.0, 0.11, f64::NAN, f64::INFINITY] {
+        assert!(FocusedDiffraction::try_new(value).is_err());
+    }
+    let policy = FocusedDiffraction::try_new(0.05).unwrap();
+    let virtual_image = PhysicalCamera::try_look_at(
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(0.0, 0.0, -1.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        CameraProjection::try_focal_sensor(0.05, 0.024).unwrap(),
+        0.025,
+        Aperture::try_circular(0.001).unwrap(),
+    )
+    .unwrap();
+    assert!(virtual_image.with_in_focus_diffraction(policy).is_err());
+    assert!(
+        axial_camera(pinhole(), 2.0)
+            .with_in_focus_diffraction(policy)
+            .is_err()
+    );
+    assert!(
+        axial_camera(Aperture::try_regular_polygon(0.01, 6, 0.0).unwrap(), 2.0)
+            .with_in_focus_diffraction(policy)
+            .is_err()
+    );
+    let camera = diffraction_camera(1.0e-3, 2.0);
+    assert!(
+        camera
+            .admit_diffraction_depth(Some(Point3::new(0.1, 0.0, -2.0)), &[400.0, 700.0])
+            .is_ok()
+    );
+    assert_eq!(
+        camera.admit_diffraction_depth(Some(Point3::new(0.0, 0.0, -1.0)), &[400.0]),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    assert_eq!(
+        camera.admit_diffraction_depth(None, &[400.0]),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    assert!(
+        diffraction_camera(1.0e-3, 1.0e8)
+            .admit_diffraction_depth(None, &[400.0])
+            .is_ok()
+    );
+    let depth = 1.0 / (0.5 - 0.04 * 700.0e-9 / (core::f64::consts::PI * 1.0e-6));
+    let point = Some(Point3::new(0.0, 0.0, -depth));
+    assert!(camera.admit_diffraction_depth(point, &[700.0]).is_ok());
+    assert_eq!(
+        camera.admit_diffraction_depth(point, &[700.0, 400.0]),
+        Err(CameraError::DefocusOutsideDiffractionModel)
+    );
+    with_cx(|_, cx| {
+        assert_eq!(
+            camera.generate_ray_from_tangent_offsets(cx, 0.0, 0.0, LensSample::CENTER),
+            Err(CameraError::DiffractionRequiresSpectralPath)
+        );
+        for wavelength in [0.0, -500.0, f64::NAN, f64::INFINITY, 1.0e9] {
+            assert!(
+                camera
+                    .generate_spectral_ray_from_tangent_offsets(
+                        cx,
+                        0.0,
+                        0.0,
+                        LensSample::CENTER,
+                        LensSample::CENTER,
+                        &[wavelength],
+                    )
+                    .is_err()
+            );
+        }
+        let geometric = axial_camera(Aperture::try_circular(0.01).unwrap(), 2.0);
+        let old = geometric
+            .generate_ray_from_tangent_offsets(cx, 0.1, -0.2, LensSample::CENTER)
+            .unwrap();
+        let spectral = geometric
+            .generate_spectral_ray_from_tangent_offsets(
+                cx,
+                0.1,
+                -0.2,
+                LensSample::CENTER,
+                LensSample::CENTER,
+                &[400.0, 700.0],
+            )
+            .unwrap();
+        assert_eq!(spectral.ray, old);
+        assert_eq!(spectral.weights, [1.0; 2]);
+    });
+    with_cx(|gate, cx| {
+        gate.request();
+        assert!(matches!(
+            camera.generate_spectral_ray_from_tangent_offsets(
+                cx,
+                0.0,
+                0.0,
+                LensSample::CENTER,
+                LensSample::CENTER,
+                &[550.0],
+            ),
+            Err(CameraError::Cancelled)
+        ));
+    });
+}
+
+#[test]
+fn diffraction_policy_survives_camera_animation() {
+    let first = diffraction_camera(1.0e-3, 2.0);
+    let last = diffraction_camera(1.0e-3, 3.0);
+    let animated = AnimatedCamera::try_new(vec![
+        CameraShot::try_new(
+            74,
+            0.0,
+            1.0,
+            vec![
+                CameraKeyframe::try_new(0.0, first).unwrap(),
+                CameraKeyframe::try_new(1.0, last).unwrap(),
+            ],
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    with_cx(|_, cx| {
+        let camera = animated.evaluate(cx, 0.5, CutSide::After).unwrap();
+        assert_eq!(
+            camera.in_focus_diffraction(),
+            Some(FocusedDiffraction::try_new(0.05).unwrap())
+        );
+        assert!(
+            camera
+                .admit_diffraction_depth(Some(Point3::new(0.0, 0.0, -2.5)), &[550.0])
+                .is_ok()
+        );
     });
 }

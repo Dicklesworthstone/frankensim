@@ -21,7 +21,8 @@ use fs_render::animated_instances::{
     AnimatedGeometryInstance, RigidTransformTrajectory, TransformKeyframe,
 };
 use fs_render::camera::{
-    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide, PhysicalCamera,
+    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide, FocusedDiffraction,
+    PhysicalCamera,
 };
 use fs_render::charts::TriMesh;
 use fs_render::instances::{GeometryInstance, RigidTransform, SharedGeometry};
@@ -1800,6 +1801,179 @@ fn full_path_owen_vs_pixel_owen_equal_spp_logged() {
         "{{\"suite\":\"fs-render/tracer\",\"case\":\"full-path-owen-vs-pixel-owen-16spp\",\"verdict\":\"info\",\"detail\":\"var pixel {v_pixel:.3e} full_path {v_full_path:.3e} ratio {:.3}\"}}",
         v_full_path / v_pixel
     );
+}
+
+/// G2/G3: a focused emitter outside the geometrical centre ray contributes
+/// through the Airy pattern; absolute sample chunks still replay bitwise.
+#[test]
+fn diffraction_render_resolves_light_outside_geometric_image_and_replays() {
+    let mut scene = focus_probe_scene(0.0, 1.0e-3);
+    scene.primitives[0].shape = Shape::Mesh(quad(
+        [1.0e-4, -1.0e-3, 0.0],
+        [1.0e-3, -1.0e-3, 0.0],
+        [1.0e-3, 1.0e-3, 0.0],
+        [1.0e-4, 1.0e-3, 0.0],
+    ));
+    let geometric = static_cinematic_camera(physical_from_legacy(
+        &scene.camera,
+        2.0,
+        Aperture::try_circular(1.0e-3).unwrap(),
+    ));
+    let diffraction = static_cinematic_camera(
+        physical_from_legacy(&scene.camera, 2.0, Aperture::try_circular(1.0e-3).unwrap())
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+            .unwrap(),
+    );
+    let settings = motion_settings(1_024);
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        let ray_image =
+            render_cinematic(&scene, &geometric, CutSide::After, cx, &settings, shutter).unwrap();
+        assert_eq!(ray_image.xyz[0], [0.0; 3]);
+        let wave_image =
+            render_cinematic(&scene, &diffraction, CutSide::After, cx, &settings, shutter).unwrap();
+        assert!(
+            wave_image.xyz[0]
+                .iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+        );
+        let mut progressive = Film::try_new(1, 1).unwrap();
+        render_cinematic_range(
+            &scene,
+            &diffraction,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            0,
+            512,
+            shutter,
+        )
+        .unwrap();
+        render_cinematic_range(
+            &scene,
+            &diffraction,
+            CutSide::After,
+            cx,
+            &settings,
+            &mut progressive,
+            512,
+            1024,
+            shutter,
+        )
+        .unwrap();
+        assert_film_bits_eq(&wave_image, &progressive, "diffraction progressive replay");
+    });
+}
+
+/// A constant distant environment is an independent flat-radiance integration
+/// control; a near surface outside the focus phase budget must fail atomically.
+#[test]
+fn diffraction_render_preserves_uniform_environment_and_refuses_defocus() {
+    let environment = fs_render::lighting::EnvironmentMap::try_from_linear_srgb(
+        2,
+        1,
+        vec![[0.4, 0.5, 0.6]; 2],
+        0.0,
+    )
+    .unwrap();
+    let scene = Scene {
+        primitives: Vec::new(),
+        lights: Vec::new(),
+        environment: Some(environment),
+        camera: Camera {
+            eye: Point3::new(0.0, 0.0, 0.0),
+            forward: Vec3::new(0.0, 0.0, -1.0),
+            up: Vec3::new(0.0, 1.0, 0.0),
+            half_tan: 0.0,
+        },
+    };
+    let geometric = static_cinematic_camera(physical_from_legacy(
+        &scene.camera,
+        1.0e8,
+        Aperture::try_circular(0.0).unwrap(),
+    ));
+    let diffraction = static_cinematic_camera(
+        physical_from_legacy(
+            &scene.camera,
+            1.0e8,
+            Aperture::try_circular(1.0e-3).unwrap(),
+        )
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+        .unwrap(),
+    );
+    let settings = motion_settings(8_192);
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        let reference =
+            render_cinematic(&scene, &geometric, CutSide::After, cx, &settings, shutter).unwrap();
+        let actual =
+            render_cinematic(&scene, &diffraction, CutSide::After, cx, &settings, shutter).unwrap();
+        for lane in 0..3 {
+            let relative = (actual.xyz[0][lane] / reference.xyz[0][lane] - 1.0).abs();
+            assert!(
+                relative < 0.04,
+                "flat environment channel {lane}: {relative}"
+            );
+        }
+        let near = focus_probe_scene(1.0, 10.0);
+        let wrong_focus = static_cinematic_camera(
+            physical_from_legacy(&near.camera, 2.0, Aperture::try_circular(1.0e-3).unwrap())
+                .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+                .unwrap(),
+        );
+        let mut film = Film::try_new(1, 1).unwrap();
+        let previous = film.clone();
+        assert!(matches!(
+            render_cinematic_range(
+                &near,
+                &wrong_focus,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut film,
+                0,
+                1,
+                shutter,
+            ),
+            Err(TracerError::Camera(
+                CameraError::DefocusOutsideDiffractionModel
+            ))
+        ));
+        assert_film_state_bits_eq(&film, &previous, "refused diffraction film");
+
+        // A glossy surface at the declared focus can reflect an arbitrarily
+        // distant virtual object. Emission on that surface cannot opt it out
+        // of the first-hit BSDF admission rule.
+        let white = lift_rgb([1.0, 1.0, 1.0]);
+        let mut glossy = focus_probe_scene(0.0, 10.0);
+        glossy.primitives[0].material = Material::Ggx {
+            reflectance: white,
+            alpha: 0.2,
+        };
+        for emission in [None, Some((white, 1.0))] {
+            glossy.primitives[0].emission = emission;
+            assert!(matches!(
+                render_cinematic_range(
+                    &glossy,
+                    &wrong_focus,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    &mut film,
+                    0,
+                    1,
+                    shutter,
+                ),
+                Err(TracerError::Camera(CameraError::InvalidDiffraction))
+            ));
+            assert_film_state_bits_eq(
+                &film,
+                &previous,
+                "refused specular diffraction film",
+            );
+        }
+    });
 }
 
 /// The bead's 64-spp Sobol claim, release lane:

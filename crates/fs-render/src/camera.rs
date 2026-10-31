@@ -2,8 +2,9 @@
 //!
 //! The optical model is an ideal thin lens. Focus distance is the positive
 //! axial distance from the lens plane, not distance along each raster ray.
-//! Lens distortion, chromatic aberration, diffraction, rolling shutter, and
-//! autofocus heuristics are deliberately outside this v1 contract.
+//! An opt-in circular-pupil diffraction model covers incoherent, paraxial,
+//! in-focus imaging. Lens distortion, chromatic aberration, rolling shutter,
+//! and autofocus heuristics are outside this contract.
 
 use core::fmt;
 
@@ -13,6 +14,9 @@ use fs_math::det;
 
 use crate::charts::Ray;
 use crate::motion::ShutterInterval;
+
+mod diffraction;
+pub use diffraction::{FocusedDiffraction, SpectralCameraRay};
 
 const PI: f64 = core::f64::consts::PI;
 const LOOK_AT_SINE_MIN: f64 = 1.0e-10;
@@ -53,6 +57,13 @@ pub enum CameraError {
     InvalidExposureMetadata,
     /// A lens coordinate was outside the half-open unit square.
     InvalidLensSample,
+    /// Diffraction needs a circular pupil, a valid phase budget, and a
+    /// supported opaque diffuse primary surface or distant environment.
+    InvalidDiffraction,
+    /// A diffraction camera requires wavelength-aware ray generation.
+    DiffractionRequiresSpectralPath,
+    /// The visible depth exceeds the declared in-focus pupil phase budget.
+    DefocusOutsideDiffractionModel,
     /// A shot contains no keyframes.
     EmptyShot,
     /// Shot bounds or shot identity are invalid.
@@ -158,6 +169,11 @@ impl CameraError {
             code: "unit_lens_sample",
             message: "supply both lens coordinates in the half-open interval [0,1)",
         }];
+        const DIFFRACTION: &[CameraFix] = &[CameraFix {
+            rank: 1,
+            code: "focused_circular_diffraction",
+            message: "use a nonzero circular pupil, spectral rays, and opaque diffuse primary surfaces within the declared focus phase budget",
+        }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {
                 rank: 1,
@@ -227,6 +243,9 @@ impl CameraError {
             Self::InvalidAperture => APERTURE,
             Self::InvalidExposureMetadata => EXPOSURE_METADATA,
             Self::InvalidLensSample => LENS,
+            Self::InvalidDiffraction
+            | Self::DiffractionRequiresSpectralPath
+            | Self::DefocusOutsideDiffractionModel => DIFFRACTION,
             Self::EmptyShot => EMPTY_SHOT,
             Self::InvalidShot => INVALID_SHOT,
             Self::InvalidKeyframes | Self::IncompatibleKeyframes | Self::InvalidInterpolation => {
@@ -251,6 +270,15 @@ impl fmt::Display for CameraError {
             Self::InvalidAperture => "camera aperture is invalid",
             Self::InvalidExposureMetadata => "camera exposure metadata is invalid",
             Self::InvalidLensSample => "lens sample is outside [0,1)^2",
+            Self::InvalidDiffraction => {
+                "focused diffraction inputs or primary surface are unsupported"
+            }
+            Self::DiffractionRequiresSpectralPath => {
+                "diffraction camera requires a wavelength-aware path"
+            }
+            Self::DefocusOutsideDiffractionModel => {
+                "visible depth exceeds the in-focus diffraction phase budget"
+            }
             Self::EmptyShot => "camera shot has no keyframes",
             Self::InvalidShot => "camera shot bounds or identity are invalid",
             Self::InvalidKeyframes => "camera keyframes are invalid",
@@ -632,6 +660,7 @@ pub struct PhysicalCamera {
     focus_distance_m: f64,
     aperture: Aperture,
     exposure: ExposureMetadata,
+    diffraction: Option<FocusedDiffraction>,
 }
 
 /// Projection of a world point through the deterministic optical centre.
@@ -795,6 +824,7 @@ impl PhysicalCamera {
             focus_distance_m,
             aperture,
             exposure,
+            diffraction: None,
         })
     }
 
@@ -992,6 +1022,9 @@ impl PhysicalCamera {
         lens_sample: LensSample,
     ) -> Result<Ray, CameraError> {
         cx.checkpoint()?;
+        if self.diffraction.is_some() {
+            return Err(CameraError::DiffractionRequiresSpectralPath);
+        }
         if !x_tan.is_finite() || !y_tan.is_finite() {
             return Err(CameraError::NonFiniteInput);
         }
@@ -1030,20 +1063,23 @@ impl PhysicalCamera {
         focus_distance_m: f64,
     ) -> Result<Self, CameraError> {
         let (right, up, forward) = basis_from_quaternion(orientation_xyzw)?;
-        Self::from_basis(
+        let mut camera = Self::from_basis(
             eye,
             CameraBasis { forward, up, right },
             self.projection,
             focus_distance_m,
             self.aperture.clone(),
             self.exposure,
-        )
+        )?;
+        camera.diffraction = self.diffraction;
+        Ok(camera)
     }
 
     fn optical_state_matches(&self, other: &Self) -> bool {
         self.projection == other.projection
             && self.aperture == other.aperture
             && self.exposure == other.exposure
+            && self.diffraction == other.diffraction
     }
 }
 

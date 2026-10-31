@@ -207,6 +207,9 @@ pub const LIGHTING_TRACER_BIT_SEMANTICS_VERSION: u32 = 6;
 /// Dedicated Philox counter domain for the two lens coordinates. Lens draws
 /// never advance [`PathRng`] and therefore cannot perturb light or BSDF draws.
 const CAMERA_LENS_SAMPLE_DOMAIN_V1: u32 = 0x6c65_6e73;
+/// Independent circular-pupil diffraction coordinates; no existing stream is
+/// advanced, including the geometric lens and hero-wavelength streams.
+const CAMERA_DIFFRACTION_SAMPLE_DOMAIN_V1: u32 = 0x6469_6672;
 /// Moving thermal proposals have disjoint support from the static mixture and
 /// a separate counter domain, preserving its light/BSDF/lens/flight streams.
 const MOVING_THERMAL_SAMPLE_DOMAIN_V1: u32 = 0x6d74_6872;
@@ -9790,6 +9793,12 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
     let exposure = camera.exposure_metadata();
     update_continuity_f64(hasher, exposure.sensitivity_iso());
     update_continuity_f64(hasher, exposure.compensation_ev());
+    if let Some(diffraction) = camera.in_focus_diffraction() {
+        // Leave geometric-camera continuity bytes unchanged. An opt-in wave
+        // model must never share a render binding with its geometric camera.
+        hasher.update(b"focused-circular-diffraction-v1");
+        update_continuity_f64(hasher, diffraction.maximum_defocus_phase_rad());
+    }
 }
 
 fn update_continuity_point(hasher: &mut DomainHasher, point: Point3) {
@@ -13404,6 +13413,7 @@ fn trace_path_with_regions(
     };
     #[cfg(not(feature = "photometry"))]
     let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
+    let mut focused_camera = None;
     let state = if let Some(state) = resume {
         state
     } else {
@@ -13413,13 +13423,16 @@ fn trace_path_with_regions(
         let px = pixel % s.width;
         let py = pixel / s.width;
         let (w, h) = (f64::from(s.width), f64::from(s.height));
-        let ray = match camera_path {
+        let (ray, camera_weights) = match camera_path {
             CameraPath::Legacy => {
                 let ndc_x = (2.0 * (f64::from(px) + jx) / w - 1.0)
                     * s.camera_aspect()
                     * scene.camera.half_tan;
                 let ndc_y = (1.0 - 2.0 * (f64::from(py) + jy) / h) * scene.camera.half_tan;
-                legacy_camera_ray(&scene.camera, ndc_x, ndc_y)
+                (
+                    legacy_camera_ray(&scene.camera, ndc_x, ndc_y),
+                    [1.0; PACKET],
+                )
             }
             CameraPath::Cinematic { camera, exposure } => {
                 let time = ray_time.ok_or(TracerError::MissingRayTime)?;
@@ -13431,17 +13444,40 @@ fn trace_path_with_regions(
                 let half_tan = physical.projection().vertical_half_tan();
                 let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
                 let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
-                physical.generate_ray_from_tangent_offsets(
+                #[cfg(feature = "volumes")]
+                if physical.in_focus_diffraction().is_some()
+                    && (medium.is_some() || scene_media.is_some())
+                {
+                    // A single primary depth cannot certify distributed
+                    // volume emission or scattering against the phase budget.
+                    return Err(CameraError::InvalidDiffraction.into());
+                }
+                #[cfg(feature = "photometry")]
+                if physical.in_focus_diffraction().is_some() && fixtures.is_some() {
+                    return Err(CameraError::InvalidDiffraction.into());
+                }
+                let diffraction_sample = if physical.in_focus_diffraction().is_some() {
+                    camera_diffraction_sample(key, pixel, sample)?
+                } else {
+                    LensSample::CENTER
+                };
+                let spectral_ray = physical.generate_spectral_ray_from_tangent_offsets(
                     cx,
                     x_tan,
                     y_tan,
                     camera_lens_sample(key, pixel, sample)?,
-                )?
+                    diffraction_sample,
+                    &lambdas,
+                )?;
+                if physical.in_focus_diffraction().is_some() {
+                    focused_camera = Some(physical);
+                }
+                (spectral_ray.ray, spectral_ray.weights)
             }
         };
         SpectralPathState {
             ray,
-            throughput: [1.0; PACKET],
+            throughput: camera_weights,
             previous_bsdf: None,
             prev_origin: ray.origin,
             segment_origin: ray.origin,
@@ -13486,6 +13522,26 @@ fn trace_path_with_regions(
         };
         #[cfg(not(feature = "photometry"))]
         let intersection = intersect(scene, cx, &ray, ray_time)?;
+        if depth == 0
+            && let Some(camera) = &focused_camera
+            && (intersection.is_some() || scene.environment.is_some())
+        {
+            camera.admit_diffraction_depth(intersection.map(|hit| hit.hit.point), &lambdas)?;
+            if let Some(hit) = intersection
+                && !matches!(
+                    scene.primitives[hit.primitive_index].material,
+                    Material::Lambertian { .. }
+                        | Material::SpectralDiffuse { .. }
+                        | Material::GrayDiffuseThermal { .. }
+                        | Material::SpectralDiffuseThermal { .. }
+                )
+            {
+                // A specular first hit images a reflected/refracted virtual
+                // object. Its surface depth cannot bound that object's pupil
+                // phase, even if the same primitive also carries emission.
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+        }
         #[cfg(feature = "photometry")]
         let fixture_segment_length = fixtures
             .map(|fixtures| {
@@ -15408,6 +15464,18 @@ fn camera_lens_sample(key: [u32; 2], pixel: u32, sample: u32) -> Result<LensSamp
     let u = philox4x32_10([pixel, sample, CAMERA_LENS_SAMPLE_DOMAIN_V1, 1], key);
     let v = philox4x32_10([pixel, sample, CAMERA_LENS_SAMPLE_DOMAIN_V1, 2], key);
     Ok(LensSample::try_new(u32_unit(u[0]), u32_unit(v[0]))?)
+}
+
+fn camera_diffraction_sample(
+    key: [u32; 2],
+    pixel: u32,
+    sample: u32,
+) -> Result<LensSample, TracerError> {
+    let values = philox4x32_10([pixel, sample, CAMERA_DIFFRACTION_SAMPLE_DOMAIN_V1, 1], key);
+    Ok(LensSample::try_new(
+        u32_unit(values[0]),
+        u32_unit(values[1]),
+    )?)
 }
 
 fn surface_frame(hit: &Hit, ray: &Ray) -> Result<SurfaceFrame, TracerError> {
