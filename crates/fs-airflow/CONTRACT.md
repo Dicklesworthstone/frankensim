@@ -532,8 +532,9 @@ with no pump pressure when gravity supplies a positive drive. Film temperatures
 remain the convection property convention; they never replace bulk density in
 the hydrostatic integral. This overload admits authored hydraulic losses, not
 the separate pressure-dependent porous-face model. The positive mass bracket
-selects one orientation; it is not a uniqueness or stability proof. Reversing
-the thermal flow requires reversing the authored path and its inlet reservoir.
+selects one orientation; it is not a uniqueness or stability proof. The
+directional circulation entry point below constructs the reverse traversal
+without replacing the original material source or closing inlet reservoir.
 
 Results retain local heads and signed conservative gravitational work
 `mdot*g.dot(last-first)` separately from hydraulic dissipation. Net gravity
@@ -565,9 +566,27 @@ hydraulic watt allowance and the reservoir step-joule allowance. Source failures
 missing positive roots, exhausted budgets and cancellation leave both inventory
 state and time unchanged. Only the reservoir stores heat; prescribed walls are
 external thermal sources, the loop remains quasi-steady, and no pipe residence
-time, inertia, automatic reversal or zero-flow conduction is supplied. Tests
-compare repeated inventory steps against independent analytic heat/pressure
+time, inertia, continuous passage through zero flow or zero-flow conduction is
+supplied. Tests compare repeated inventory steps against independent analytic heat/pressure
 balances and exercise work accounting, closed geometry and atomic refusal.
+
+`LiquidHeatPath::solve_gravity_circulation` supports explicit forward/reverse
+selection and `LiquidFlowSelection::OnlyBracketed`. Reverse traversal rebuilds
+the original region, wall, resistance and vertex order together and negates
+the imposed pressure; it recomputes the complete source-resolved thermal path.
+`DirectedLiquidSolution` retains receipts in actual traversal order and exposes
+mass flow, pressure drop, head and residual with signs in the authored direction.
+Heat and dissipation retain their physical signs. `OnlyBracketed` evaluates both
+declared orientation brackets under one actual flow-evaluation allowance and
+accepts exactly one bracketed candidate. Two candidates are an explicit
+ambiguity, no candidates refuse, and source/correlation failures never become
+evidence of an absent root. This is not global root uniqueness or stability.
+`advance_reservoir_circulation` uses the SAME inventory integrator and atomic
+commit for either direction, with work counted across both orientations and all
+inlet trials. Accepted steps can switch orientation as imposed conditions change;
+the crossing through zero and pipe momentum/storage remain unmodelled. G1/G3/G4
+tests cover independent directional heat/pressure balances, branch ambiguity,
+unsupported-source refusal, shared work and energy-preserving inventory reversal.
 
 `FrozenFlowMedium::ThermochemicalRealGas` retains the original nonideal source
 and uses its PR density and complete Cp through the same hydraulic losses,

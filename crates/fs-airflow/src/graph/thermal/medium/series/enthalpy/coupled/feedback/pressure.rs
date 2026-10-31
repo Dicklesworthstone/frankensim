@@ -25,6 +25,8 @@ pub mod heating;
 pub mod parallel;
 /// Source-bound continuum permeability in the same native liquid solve.
 pub mod porous;
+/// Source-resolved circulation in either orientation of a closed thermal path.
+pub mod direction;
 use porous::{LiquidResistanceModel, PorousLiquidReceipt};
 
 use fs_exec::Cx;
@@ -100,6 +102,12 @@ pub enum PressureDrivenError {
     /// Both endpoint residuals have the same sign. Multiple roots are not ruled
     /// out, but this explicitly supplied bracket cannot select one by bisection.
     NotBracketed { lower_residual_pa: f64, upper_residual_pa: f64 },
+    /// Neither declared orientation bracket enclosed a pressure operating point.
+    NoCirculationBracket { forward_residuals_pa: [f64; 2], reverse_residuals_pa: [f64; 2] },
+    /// Both orientation brackets closed; selecting a physical branch needs more input.
+    AmbiguousCirculationBrackets { forward_mass_flow_kg_per_s: f64, reverse_mass_flow_kg_per_s: f64 },
+    /// Insufficient shared work to evaluate both declared orientation brackets.
+    CirculationWorkBudget { performed: usize, maximum: usize },
     /// No pressure-closed state before the evaluation budget/float resolution.
     NotConverged { evaluations: usize, last_residual_pa: f64 },
     /// Shared solid-callback limit exhausted across all flow trials.
@@ -190,8 +198,8 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
     /// before balancing imposed pressure PLUS the connected path's gravity head.
     /// Zero imposed drive is supported; a signed imposed drive can oppose gravity.
     ///
-    /// The positive-flow bracket selects one orientation; reverse circulation
-    /// requires reversing the authored thermal path and its inlet. This is a
+    /// The positive-flow bracket selects one orientation. For a closed path,
+    /// `solve_gravity_circulation` also supports its reverse traversal. This is a
     /// quasi-steady single-phase loop with a prescribed inlet thermal reservoir,
     /// not a closed-inventory transient or a stability/uniqueness proof. Regional
     /// bulk density is an approximation; refine the thermal regions to resolve
