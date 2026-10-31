@@ -779,6 +779,43 @@ fn workers_option(raw:&[std::ffi::OsString])->Result<(usize,Vec<std::ffi::OsStri
     }
     Ok((workers.unwrap_or(1),rest))
 }
+/// One skin-loaded coordinate's first-order receipt, in the one-way receipt's terms
+/// on a unit modal mass: zeta = Re Z/(2 w), shift = Im Z/(2 w), Z the load's own
+/// diagonal at w.
+struct LoadReceipt { port: usize, coordinate: usize, omega_rad_s: f64, zeta: f64, shift: f64,
+    isolated_helmholtz: bool }
+/// Each loaded coordinate is read at its own frequency. The neck's coordinate is a free
+/// unit-mass translation whose spring lives in the cavity's connections, so its own mode
+/// says 0. Its own frequency is the isolated Helmholtz one, sqrt(k/m) on rigid walls with
+/// the neck's internal mass, the reference the cavity's exterior owner also holds; the
+/// load's added mass is what the shift then reports. Any other zero frequency still refuses
+/// at the load's impedance, as before.
+fn two_way_load_receipt(ready:&Ready)->Result<Vec<LoadReceipt>> {
+    let bank=ready.performance.bank().source().bank();
+    let Some(binding)=bank.body_radiation()
+        .filter(|binding|binding.material_shell_bem().is_some_and(|r|r.skin_identity.is_some()))
+        else { return Ok(Vec::new()) };
+    let components=ready.performance.bank().system().components();
+    let body=ready.spec.strings.len();
+    let structural=components[body].modes().len();
+    let ports=binding.model().ports;
+    let mut receipts=Vec::with_capacity(ports);
+    for (port,&coordinate) in binding.source_body_coordinates().iter().enumerate() {
+        let (omega_rad_s,isolated_helmholtz)=if coordinate<structural {
+            (components[body].modes()[coordinate].angular_frequency_rad_s,false)
+        } else {
+            let own=components[body+1].modes()[coordinate-structural].angular_frequency_rad_s;
+            match bank.material_cavity() {
+                Some(neck) if own==0.0 => (neck.cavity.isolated_omega_rad_s(),true),
+                _ => (own,false),
+            }
+        };
+        let z=binding.model().impedance(omega_rad_s)?[port*ports+port];
+        receipts.push(LoadReceipt { port, coordinate, omega_rad_s, zeta: z.re/(2.0*omega_rad_s),
+            shift: 0.5*z.im/omega_rad_s, isolated_helmholtz });
+    }
+    Ok(receipts)
+}
 fn run(raw:&[std::ffi::OsString])->Result<()> {
     if raw.get(1).is_some_and(|a| a=="assemble-shell") { return assemble_shell(&raw[2..]); }
     let (args, gas_options)=thermochemical::Options::extract_os(raw)?;
@@ -990,21 +1027,11 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         }
     }
     if let Some(report)=&ready.body_radiation { eprintln!("computed_body_radiation={report}"); }
-    // A skin load's first-order receipt at each loaded coordinate's own frequency,
-    // in the one-way receipt's terms: zeta = Re Z/(2 w), shift = Im Z/(2 w).
-    if let Some(binding)=ready.performance.bank().source().bank().body_radiation()
-        .filter(|binding|binding.material_shell_bem().is_some_and(|r|r.skin_identity.is_some())) {
-        let components=ready.performance.bank().system().components();
-        let body=ready.spec.strings.len();
-        let structural=components[body].modes().len();
-        let ports=binding.model().ports;
-        for (port,&coordinate) in binding.source_body_coordinates().iter().enumerate() {
-            let w=if coordinate<structural { components[body].modes()[coordinate].angular_frequency_rad_s }
-                else { components[body+1].modes()[coordinate-structural].angular_frequency_rad_s };
-            let z=binding.model().impedance(w)?[port*ports+port];
-            eprintln!("two_way_load_port={port}; coordinate={coordinate}; f_Hz={}; radiation_zeta={}; added_mass_shift={}",
-                w/core::f64::consts::TAU,z.re/(2.0*w),0.5*z.im/w);
-        }
+    for receipt in two_way_load_receipt(&ready)? {
+        eprintln!("two_way_load_port={}; coordinate={}; f_Hz={}; radiation_zeta={}; added_mass_shift={}{}",
+            receipt.port,receipt.coordinate,receipt.omega_rad_s/core::f64::consts::TAU,
+            receipt.zeta,receipt.shift,
+            if receipt.isolated_helmholtz { "; reference=isolated_helmholtz" } else { "" });
     }
     if let Some(report)=ready.performance.material_plate_observer() {
         eprintln!("plate_observer={:?}; specimen={}; basis={}; body_modes={}; surface_cells={}; maximum_Hz={}; minimum_disc_ppw={}; delay_support_samples={:?}; numerical_delay_samples={}; replay_terms={}; gas_law={:?}; distinct_paths={}; gas_kernel_terms={}; same signed loaded plate surface; finite-distance pressure replaces compact pressure; infinite baffle, no room or closed-shell claim",

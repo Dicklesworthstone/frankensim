@@ -509,6 +509,48 @@ fn the_skin_s_own_two_way_load_reacts_on_the_mechanics_its_observer_hears() {
     });
 }
 
+// The exterior-owned neck is a free translation, so its own mode says 0 Hz and the load's
+// impedance refuses there. Its receipt reads the load at the isolated Helmholtz frequency,
+// where the open end radiates, and every other loaded coordinate still reads at its own mode.
+#[test]
+fn the_neck_s_receipt_reads_the_skin_load_at_its_isolated_helmholtz_frequency() {
+    scoped(|cx, gate| {
+        let mouth = at48(source(SKIN_LOAD)).replace("cavity none", EXTERIOR_NECK);
+        let ready = compiled(&mouth, &capped_skin(), cx, gate);
+        let bank = ready.performance.bank().source().bank();
+        let helmholtz = bank.material_cavity().unwrap().cavity.isolated_omega_rad_s();
+        let loaded = bank.body_radiation().unwrap().source_body_coordinates().len();
+        let components = ready.performance.bank().system().components();
+        let body = ready.spec.strings.len();
+        let structural = components[body].modes().len();
+        let receipts = two_way_load_receipt(&ready).unwrap();
+        assert_eq!(receipts.len(), loaded);
+        let neck: Vec<_> = receipts.iter().filter(|r| r.isolated_helmholtz).collect();
+        assert_eq!(neck.len(), 1);
+        assert!(neck[0].coordinate >= structural);
+        let own = &components[body + 1].modes()[neck[0].coordinate - structural];
+        assert_eq!(own.angular_frequency_rad_s, 0.0);
+        assert_eq!(neck[0].omega_rad_s, helmholtz);
+        eprintln!(
+            "neck port {}: f {:.3} Hz isolated Helmholtz, zeta {:.4e}, shift {:.4e}; {} loaded",
+            neck[0].port,
+            helmholtz / core::f64::consts::TAU,
+            neck[0].zeta,
+            neck[0].shift,
+            loaded
+        );
+        assert!(neck[0].zeta > 0.0 && neck[0].shift.is_finite());
+        for receipt in receipts.iter().filter(|r| !r.isolated_helmholtz) {
+            assert!(receipt.coordinate < structural);
+            assert_eq!(
+                receipt.omega_rad_s,
+                components[body].modes()[receipt.coordinate].angular_frequency_rad_s
+            );
+            assert!(receipt.zeta.is_finite() && receipt.shift.is_finite());
+        }
+    });
+}
+
 // A prepared owner keeps the skin load's poles as its air bank beside the transition, charged to its own byte and work
 // budget as the library splits them; the exact owner holds them in its state. So the shared pole ceiling, declared
 // under `prepared-linear`, reaches material I/O, and the same cap on the exact owner still refuses before it.
