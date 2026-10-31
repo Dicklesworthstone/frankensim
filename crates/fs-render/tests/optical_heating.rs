@@ -1,5 +1,8 @@
 //! Incident optical absorption reaches the original conservative enthalpy cells.
 
+#[path = "optical_heating/feedback.rs"]
+mod feedback;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;

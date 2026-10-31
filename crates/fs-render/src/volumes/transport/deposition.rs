@@ -58,7 +58,59 @@ pub struct BeamPowerDeposition<const N: usize> {
     pub cells: Vec<CellBeamPower<N>>,
 }
 
+/// Geometry/density retained by temperature-dependent incident-beam owners.
+/// The shared DDA remains the only authority for physical cell crossings.
+#[derive(Clone, Copy, Debug)]
+#[cfg(feature = "optical-heating")]
+pub(crate) struct BeamCellSegment {
+    pub cell_index: usize,
+    pub density_kg_m3: f64,
+    pub length_m: f64,
+}
+
 impl AbsorbingGrid<'_> {
+    #[cfg(feature = "optical-heating")]
+    pub(crate) fn beam_cell_path(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        max_distance_m: f64,
+        max_cells: usize,
+    ) -> Result<Vec<BeamCellSegment>, VolumeTransportError> {
+        checkpoint(cx)?;
+        validate_ray(origin, unit_direction, max_distance_m)?;
+        let mut path = Vec::new();
+        if let Some(mut cells) = CellRay::clip(
+            &self.grid,
+            origin,
+            unit_direction,
+            max_distance_m,
+            self.max_steps,
+        )? {
+            while let Some(cell) = cells.next(cx)? {
+                let density = self.grid.data[cell.cell];
+                if density == 0.0 || cell.length_m == 0.0 {
+                    continue;
+                }
+                if path.len() == max_cells {
+                    return Err(VolumeTransportError::Budget);
+                }
+                if path.len() == path.capacity() {
+                    path.try_reserve_exact(path.capacity().max(16).min(max_cells - path.len()))
+                        .map_err(|_| VolumeTransportError::Budget)?;
+                }
+                path.push(BeamCellSegment {
+                    cell_index: cell.cell,
+                    density_kg_m3: density,
+                    length_m: cell.length_m,
+                });
+            }
+        }
+        checkpoint(cx)?;
+        Ok(path)
+    }
+
     /// Integrate spatial heat input from an incident beam by exact cell
     /// crossings and Beer–Lambert attenuation.
     ///
@@ -92,6 +144,31 @@ impl AbsorbingGrid<'_> {
             None,
         )
     }
+}
+
+/// The same stable Beer-law power partition used by cell deposition, with a
+/// coefficient supplied by the temperature-dependent constitutive owner.
+#[cfg(feature = "optical-heating")]
+pub(crate) fn absorb_beam(power: f64, density: f64, length: f64, coefficient: f64) -> (f64, f64) {
+    if power == 0.0 || coefficient == 0.0 {
+        return (0.0, power);
+    }
+    let tau = positive_product(density, coefficient, length);
+    let absorbed = removed_power(
+        power,
+        -det::expm1(-tau),
+        density,
+        length,
+        coefficient,
+        coefficient,
+    );
+    let transmission = det::exp(-tau);
+    let transmitted = if transmission >= f64::MIN_POSITIVE {
+        power * transmission
+    } else {
+        det::exp(det::ln(power) - tau)
+    };
+    (absorbed, transmitted)
 }
 
 pub(super) fn deposit<const N: usize>(
@@ -214,7 +291,7 @@ pub(super) fn deposit<const N: usize>(
 /// Absorption or scattering share of removed power. The ordinary path is
 /// short; the log fallback preserves a representable heat input when either
 /// the opacity or the coefficient ratio underflows before power is applied.
-fn removed_power(
+pub(crate) fn removed_power(
     power: f64,
     opacity: f64,
     density: f64,

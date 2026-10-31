@@ -1589,9 +1589,45 @@ substep durations; cancellation or domain refusal discards both histories.
 Prepared heat rates require no optical traversal during thermal substeps.
 The caller must start from active receiver cells and recompute deposition at
 accepted endpoints when beam powers, optics or geometry change. This fixed
-visible-band incident-beam model does not infer net radiative cooling,
-infrared properties, multiple-scattered reabsorption or material-temperature
-feedback. Scattered power remains radiation and is never converted to heat.
+declared-band incident-beam observer does not infer net radiative cooling,
+unsupported infrared properties, multiple-scattered reabsorption or
+material-temperature feedback. Scattered power remains radiation and is never
+converted to heat.
+
+### Temperature-dependent optical heating
+
+`volumes::heating::feedback::TemperatureOpticalHeating` retains source-bound
+mass-absorption tables versus kelvin and explicit original-grid/thermal-cell
+bindings. It caches the existing DDA's physical cell lengths/densities and
+samples each original spectral law at the beam wavelengths once. Each native
+thermal substep then obtains actual temperatures from the registered caloric
+laws and recomputes serial Beer attenuation, including changing upstream
+shielding. Every non-vacuum path cell needs a binding even when initially
+transparent. Unsupported temperature/wavelength states refuse without
+extrapolation; spectral rows and their source identities remain explicit.
+
+The shared thermal owner continues to integrate all conduction, latent storage,
+authored sources and scheduled events. Optical energies integrate the actual
+changing watts with compensated sums over those exact accepted durations.
+`advance_refined` compares complete native coarse/fine/finer trajectories and
+returns only the finest original state after decreasing discrepancies satisfy
+declared enthalpy, temperature and optical-energy tolerances. Two comparisons
+at the documented binary64 roundoff floor may also pass those same tolerances
+without a measured-order claim, so exact constant-source solutions do not
+refuse merely because their final rounding is nonmonotone. Relative scales
+use changes, and optical comparisons retain compensated energy differences;
+large formation-energy datums or historic fluence cannot hide discrepancies.
+All trials share a whole-call thermal work ceiling. Domain, cancellation,
+conservation, budget or convergence refusal publishes no state or partial heat.
+
+This is first-order explicit incident heating with measured time discrepancies,
+not a certified global error bound or an implicit nonlinear solve. Geometry,
+density, beam powers and spectral quadrature remain fixed; data validity,
+spatial/spectral accuracy, scattering, thermal emission and thermochemical
+changes require their respective physical owners. Tests compare an independent
+closed-form nonlinear Beer-heating trajectory and its refinement order, dynamic
+two-cell shielding, native latent/event/split behavior, infrared source support,
+initially transparent cells and transactional refusal.
 
 ## No-claim boundaries (volumes)
 

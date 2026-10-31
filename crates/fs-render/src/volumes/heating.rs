@@ -19,6 +19,9 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeMap;
 
+/// Temperature-dependent absorption on the original conservative thermal cells.
+pub mod feedback;
+
 /// Retained SI power accounting for the original wavelength packet.
 /// Each lane is already a quadrature-weighted power in W, not spectral radiance.
 #[derive(Clone, Copy, Debug, PartialEq)]
