@@ -7,7 +7,6 @@ use super::{
     FreeFlightSample, PhaseFunction, ScatteringEvent, ScatteringGrid, VolumeTransportError,
     collision_weights, divide_product,
 };
-use crate::thermal_surface::planck_radiance_w_m2_sr_nm;
 use fs_blake3::ContentHash;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
@@ -338,18 +337,17 @@ pub(super) fn integrate_source_cell<const N: usize>(
 ) -> Result<(), VolumeTransportError> {
     for lane in 0..N {
         if absorption[lane] > 0.0
-            && let Some(temperatures) = geometry.temperature_k
+            && (geometry.temperature_k.is_some() || geometry.thermal_sources.is_some())
         {
             let opacity = -det::expm1(-tau[lane]);
-            if opacity > 0.0 && depth[lane].is_finite() {
-                if source_cache[lane].0 != temperatures[cell] {
-                    source_cache[lane] = (
-                        temperatures[cell],
-                        planck_radiance_w_m2_sr_nm(temperatures[cell], wavelengths_nm[lane])
-                            .map_err(|_| VolumeTransportError::Unrepresentable)?,
-                    );
-                }
-                let source = source_cache[lane].1;
+            if opacity > 0.0
+                && depth[lane].is_finite()
+                && let Some(source) = geometry.source_radiance_at_cell(
+                    cell,
+                    wavelengths_nm[lane],
+                    &mut source_cache[lane],
+                )?
+            {
                 let fraction = absorption[lane] / extinction[lane];
                 let mut contribution = det::exp(-depth[lane]) * opacity * fraction * source;
                 if contribution == 0.0 && source > 0.0 {

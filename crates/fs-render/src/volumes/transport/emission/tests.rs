@@ -1,8 +1,12 @@
 //! Independent geometric densities, support and bounded refusal checks.
 
 use super::*;
-use crate::volumes::transport::{AbsorbingGridBudget, MassAbsorptionSpectrum};
+use crate::volumes::transport::{
+    AbsorbingGridBudget, CellPaletteBudget, MassAbsorptionSpectrum, OpticalMixtureBudget,
+    ThermalEmissionComponent,
+};
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+use std::sync::Arc;
 
 fn with_cx<R>(operation: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -51,6 +55,38 @@ fn near(actual: f64, expected: f64, relative: f64) {
         (actual / expected - 1.0).abs() <= relative,
         "{actual:.17e} != {expected:.17e}"
     );
+}
+
+fn thermal_model(cx: &Cx<'_>, terms: &[(f64, f64, Option<f64>)]) -> ThermalEmissionModel {
+    let components: Vec<_> = terms
+        .iter()
+        .map(
+            |&(mass_weight, absorption, temperature_k)| ThermalEmissionComponent {
+                mass_weight,
+                absorption: MassAbsorptionSpectrum::constant(absorption).unwrap(),
+                temperature_k,
+            },
+        )
+        .collect();
+    ThermalEmissionModel::try_new(cx, &components, OpticalMixtureBudget { max_components: 4 })
+        .unwrap()
+}
+
+fn source_palette(
+    cx: &Cx<'_>,
+    models: Vec<ThermalEmissionModel>,
+    indices: &[u32],
+) -> CellPalette<ThermalEmissionModel> {
+    CellPalette::try_new(
+        cx,
+        models,
+        Arc::from(indices),
+        CellPaletteBudget {
+            max_models: 8,
+            max_cells: 8,
+        },
+    )
+    .unwrap()
 }
 
 #[test]
@@ -297,5 +333,101 @@ fn g4_empty_proposals_invalid_samples_traversal_budgets_and_cancel_are_explicit(
             medium.emission_direction_pdf(cx, origin, direction),
             Err(VolumeTransportError::Cancelled)
         );
+    });
+}
+
+#[test]
+fn g1_constituent_proposal_uses_absorption_and_preserves_the_complete_direction_pdf() {
+    with_cx(|cx, _| {
+        let density = [1.0, 1.0, 0.0, 1.0];
+        let sources = source_palette(
+            cx,
+            vec![
+                thermal_model(cx, &[(0.5, 1.0, Some(1000.0)), (0.5, 3.0, Some(2000.0))]),
+                thermal_model(cx, &[(1.0, 4.0, Some(2000.0))]),
+                thermal_model(cx, &[(1.0, 0.0, None)]),
+                thermal_model(cx, &[(1.0, 100.0, Some(10_000.0))]),
+            ],
+            &[0, 1, 3, 2],
+        );
+        let field = || VolumeGrid::new([1, 1, 4], &density, [-0.5, -0.5, 0.0], [1.0; 3]);
+        let distribution = EmissionDistribution::try_new_sources(cx, &field(), &sources).unwrap();
+        // The two emitting cells have the same maximum temperature and total
+        // absorption 2 and 4. Thus the exact proposal is 15/16*(1/3,2/3)+1/32.
+        near(distribution.probability(0), 11.0 / 32.0, 2e-13);
+        near(distribution.probability(1), 21.0 / 32.0, 2e-13);
+        assert_eq!(distribution.probability(2), 0.0);
+        assert_eq!(distribution.probability(3), 0.0);
+        let medium = AbsorbingGrid::try_new_thermal_sources(
+            cx,
+            field(),
+            sources,
+            AbsorbingGridBudget {
+                max_grid_cells: 8,
+                max_steps_per_segment: 8,
+            },
+        )
+        .unwrap();
+        assert!(medium.has_emission_proposal());
+        near(
+            medium
+                .emission_direction_pdf(cx, Point3::new(0.0, 0.0, -1.0), Vec3::new(0.0, 0.0, 1.0))
+                .unwrap(),
+            119.0 / 24.0,
+            2e-13,
+        );
+        let mut count = [0_usize; 2];
+        for index in 0..4096 {
+            let direction = medium
+                .sample_emission_direction(
+                    cx,
+                    Point3::new(-2.0, 0.0, 0.0),
+                    [(f64::from(index) + 0.5) / 4096.0, 0.5, 0.5, 0.5],
+                )
+                .unwrap()
+                .unwrap();
+            count[usize::from(direction.z / direction.x > 0.5)] += 1;
+        }
+        assert_eq!(count, [1408, 2688]);
+    });
+}
+
+#[test]
+fn g3_constituent_proposal_keeps_cold_support_and_excludes_unoccupied_sources() {
+    with_cx(|cx, gate| {
+        let models = vec![
+            thermal_model(cx, &[(1.0, 1e-300, Some(50.0))]),
+            thermal_model(cx, &[(1.0, 1e300, Some(10_000.0))]),
+        ];
+        let sources = source_palette(cx, models, &[0, 1]);
+        let density = [1e-300, 1e300];
+        let field = VolumeGrid::new([1, 1, 2], &density, [0.0; 3], [1.0; 3]);
+        let distribution = EmissionDistribution::try_new_sources(cx, &field, &sources).unwrap();
+        assert_eq!(distribution.probability(0), 1.0 / 32.0);
+        assert_eq!(distribution.probability(1), 31.0 / 32.0);
+        let zero = [0.0; 2];
+        let empty = EmissionDistribution::try_new_sources(
+            cx,
+            &VolumeGrid::new([1, 1, 2], &zero, [0.0; 3], [1.0; 3]),
+            &sources,
+        )
+        .unwrap();
+        assert!(empty.cdf.is_empty());
+        let cold = source_palette(
+            cx,
+            vec![thermal_model(cx, &[(1.0, 1.0, Some(1e-6))])],
+            &[0, 0],
+        );
+        assert!(
+            EmissionDistribution::try_new_sources(cx, &field, &cold)
+                .unwrap()
+                .cdf
+                .is_empty()
+        );
+        gate.request();
+        assert!(matches!(
+            EmissionDistribution::try_new_sources(cx, &field, &sources),
+            Err(VolumeTransportError::Cancelled)
+        ));
     });
 }

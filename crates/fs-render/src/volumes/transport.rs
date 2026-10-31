@@ -1,8 +1,10 @@
-//! Absorption and local-equilibrium emission in borrowed simulation cells.
+//! Absorption and constituent thermal emission in borrowed simulation cells.
 //!
 //! Density is kg/m³, mass absorption is m²/kg, lengths are metres and the
 //! source radiance is W/(m² sr nm). Each cell solves dL/ds = -rho*kappa*L +
-//! rho*kappa*B_lambda(T) analytically. DDA visits only intersected cells;
+//! rho*kappa*S_lambda analytically, where S is Planck's law at one accepted
+//! temperature or the absorption-weighted source of independent constituents.
+//! DDA visits only intersected cells;
 //! there is no stochastic transmittance noise or fixed marching step size.
 //! This is a piecewise-constant, non-scattering, index-one medium model.
 //! An LBM lattice density requires an explicit physical scaling before entry.
@@ -24,6 +26,8 @@ mod mixture;
 pub use mixture::{MAX_OPTICAL_MIXTURE_COMPONENTS, OpticalMixtureBudget};
 mod palette;
 pub use palette::{CellPalette, CellPaletteBudget};
+mod thermal;
+pub use thermal::{ThermalEmissionComponent, ThermalEmissionModel};
 /// Spectral free flights and phase functions for physical participating media.
 pub mod scattering;
 /// Immutable accepted medium snapshots on one physical observation clock.
@@ -158,6 +162,9 @@ pub enum VolumeTransportError {
     },
     /// Temperature length or a finite, strictly positive kelvin value is invalid.
     Temperature,
+    /// Prepared absorption or wavelength support differs from its bound
+    /// constituent thermal sources; Kirchhoff emission would be inconsistent.
+    ThermalSource,
     /// Invalid spectral knots or negative/non-finite mass absorption.
     AbsorptionSpectrum,
     /// Invalid spectral knots or negative/non-finite mass scattering.
@@ -211,6 +218,7 @@ pub struct AbsorbingGrid<'a> {
     absorption: MassAbsorptionSpectrum,
     absorption_palette: Option<CellPalette<MassAbsorptionSpectrum>>,
     temperature_k: Option<&'a [f64]>,
+    thermal_sources: Option<CellPalette<ThermalEmissionModel>>,
     max_steps: u32,
     identity: ContentHash,
     vacuum: bool,
@@ -279,6 +287,60 @@ impl<'a> AbsorbingGrid<'a> {
             temperature_k,
             budget,
         )
+    }
+
+    /// Bind independently thermalized constituents to the original cell map.
+    ///
+    /// Each model supplies BOTH its absorption and its per-constituent emission
+    /// state, so an unrelated opacity cannot silently generate a different
+    /// Kirchhoff source. The density buffer remains borrowed; model palettes
+    /// share their immutable cell indices, and no averaged temperature field is
+    /// constructed. A model's coefficients are per kg of the declared density
+    /// reference, as specified by its original component mass weights.
+    pub fn try_new_thermal_sources(
+        cx: &Cx<'_>,
+        grid: VolumeGrid<'a>,
+        sources: CellPalette<ThermalEmissionModel>,
+        budget: AbsorbingGridBudget,
+    ) -> Result<Self, VolumeTransportError> {
+        checkpoint(cx)?;
+        if grid.data.len() > budget.max_grid_cells || budget.max_steps_per_segment == 0 {
+            return Err(VolumeTransportError::Budget);
+        }
+        if sources.cell_indices().len() != grid.data.len() {
+            return Err(VolumeTransportError::Palette);
+        }
+        let mut spectra = Vec::with_capacity(sources.values().len());
+        for chunk in sources.values().chunks(1024) {
+            checkpoint(cx)?;
+            spectra.extend(chunk.iter().map(ThermalEmissionModel::absorption_spectrum));
+        }
+        let absorption = sources.with_values(
+            cx,
+            spectra,
+            CellPaletteBudget {
+                max_models: sources.values().len(),
+                max_cells: budget.max_grid_cells,
+            },
+        )?;
+        let mut medium = Self::try_new_indexed(cx, grid, absorption, None, budget)?;
+        let mut hash = DomainHasher::new("org.frankensim.render.constituent-thermal-grid.v1");
+        hash.update(medium.identity.as_bytes());
+        hash.update(&(sources.values().len() as u64).to_le_bytes());
+        for chunk in sources.values().chunks(1024) {
+            checkpoint(cx)?;
+            for source in chunk {
+                hash.update(source.content_identity().as_bytes());
+            }
+        }
+        if !medium.vacuum {
+            medium.emission =
+                emission::EmissionDistribution::try_new_sources(cx, &medium.grid, &sources)?;
+        }
+        checkpoint(cx)?;
+        medium.identity = hash.finalize();
+        medium.thermal_sources = Some(sources);
+        Ok(medium)
     }
 
     fn admit(
@@ -397,6 +459,7 @@ impl<'a> AbsorbingGrid<'a> {
             absorption,
             absorption_palette,
             temperature_k,
+            thermal_sources: None,
             max_steps: budget.max_steps_per_segment,
             identity: hash.finalize(),
             vacuum,
@@ -421,6 +484,13 @@ impl<'a> AbsorbingGrid<'a> {
     #[must_use]
     pub const fn absorption_palette(&self) -> Option<&CellPalette<MassAbsorptionSpectrum>> {
         self.absorption_palette.as_ref()
+    }
+
+    /// Original per-model constituent temperatures and absorption laws, when
+    /// admitted together. The cell map is shared with the absorption palette.
+    #[must_use]
+    pub const fn thermal_sources(&self) -> Option<&CellPalette<ThermalEmissionModel>> {
+        self.thermal_sources.as_ref()
     }
 
     /// Original mass-absorption law for one native x-major cell index.
@@ -466,11 +536,43 @@ impl<'a> AbsorbingGrid<'a> {
         self.vacuum
     }
 
-    /// A non-vacuum snapshot declares a positive-temperature LTE source.
+    /// A non-vacuum snapshot declares positive-temperature thermal absorbers.
     /// Very cold visible spectra may still underflow to zero.
     #[must_use]
     pub fn has_thermal_emission(&self) -> bool {
-        !self.vacuum && self.temperature_k.is_some()
+        !self.vacuum && (self.temperature_k.is_some() || self.thermal_sources.is_some())
+    }
+
+    /// Share one source owner between deterministic and free-flight transport.
+    /// A lane's last source is cached by original temperature or palette index;
+    /// indices fit exactly in f64 and a snapshot never mixes these two modes.
+    fn source_radiance_at_cell(
+        &self,
+        cell: usize,
+        wavelength_nm: f64,
+        cache: &mut (f64, f64),
+    ) -> Result<Option<f64>, VolumeTransportError> {
+        if let Some(sources) = &self.thermal_sources {
+            let index = sources.cell_indices()[cell];
+            if cache.0 != f64::from(index) {
+                *cache = (
+                    f64::from(index),
+                    sources.values()[index as usize].source_radiance_at(wavelength_nm)?,
+                );
+            }
+            Ok(Some(cache.1))
+        } else if let Some(temperatures) = self.temperature_k {
+            if cache.0 != temperatures[cell] {
+                *cache = (
+                    temperatures[cell],
+                    planck_radiance_w_m2_sr_nm(temperatures[cell], wavelength_nm)
+                        .map_err(|_| VolumeTransportError::Unrepresentable)?,
+                );
+            }
+            Ok(Some(cache.1))
+        } else {
+            Ok(None)
+        }
     }
 
     /// Integrate a unit-direction segment, clipped to the finite grid bounds.
@@ -529,6 +631,7 @@ impl<'a> AbsorbingGrid<'a> {
         };
         let mut optical_depth = [0.0; N];
         let mut source_cache = [(f64::NAN, 0.0); N];
+        let emit = EMIT && self.has_thermal_emission();
         let mut previous_model = None;
         while let Some(segment) = ray.next(cx)? {
             let length = segment.length_m;
@@ -550,22 +653,16 @@ impl<'a> AbsorbingGrid<'a> {
                         continue;
                     }
                     let tau = positive_product(density, kappa[lane], length);
-                    if EMIT && let Some(temperatures) = self.temperature_k {
+                    if emit {
                         let weight = det::exp(-optical_depth[lane]) * -det::expm1(-tau);
-                        if weight > 0.0 {
-                            // Uniform-temperature runs share the expensive
-                            // spectral source evaluation without a field copy.
-                            if source_cache[lane].0 != temperatures[cell] {
-                                source_cache[lane] = (
-                                    temperatures[cell],
-                                    planck_radiance_w_m2_sr_nm(
-                                        temperatures[cell],
-                                        wavelengths[lane],
-                                    )
-                                    .map_err(|_| VolumeTransportError::Unrepresentable)?,
-                                );
-                            }
-                            result.emission_w_m2_sr_nm[lane] += weight * source_cache[lane].1;
+                        if weight > 0.0
+                            && let Some(source) = self.source_radiance_at_cell(
+                                cell,
+                                wavelengths[lane],
+                                &mut source_cache[lane],
+                            )?
+                        {
+                            result.emission_w_m2_sr_nm[lane] += weight * source;
                             if !result.emission_w_m2_sr_nm[lane].is_finite() {
                                 return Err(VolumeTransportError::Unrepresentable);
                             }

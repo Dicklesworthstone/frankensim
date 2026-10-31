@@ -116,6 +116,9 @@ impl<'g, 'a, const N: usize> CellScatteringGrid<'g, 'a, N> {
     /// Validate borrowed SI coefficients once, with no allocation or spectra
     /// copied into cells. `geometry` supplies density, metre geometry, optional
     /// kelvin temperatures and DDA work limits; its uniform spectrum is replaced.
+    /// When constituent thermal sources are bound, their shared support and
+    /// absorption packet must match exactly: replacing those absorbers would
+    /// violate the admitted Kirchhoff source. Scattering remains independent.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         cx: &Cx<'_>,
@@ -174,6 +177,10 @@ impl<'g, 'a, const N: usize> CellScatteringGrid<'g, 'a, N> {
         if absorption_m2_kg.len() != cells || scattering_m2_kg.len() != cells {
             return Err(VolumeTransportError::Grid);
         }
+        let constituent_sources = geometry.thermal_sources().is_some();
+        if constituent_sources && wavelength_bounds_nm != geometry.wavelength_bounds_nm() {
+            return Err(VolumeTransportError::ThermalSource);
+        }
         let mut hash = DomainHasher::new("org.frankensim.render.cell-optical-packet.v1");
         hash.update(geometry.content_identity().as_bytes());
         hash.update(source_identity.as_bytes());
@@ -188,6 +195,11 @@ impl<'g, 'a, const N: usize> CellScatteringGrid<'g, 'a, N> {
         for cell in 0..cells {
             check()?;
             let dense = geometry.grid.data[cell] > 0.0;
+            if constituent_sources
+                && absorption_m2_kg[cell] != geometry.coefficients_at_cell(cell, &wavelengths_nm)?
+            {
+                return Err(VolumeTransportError::ThermalSource);
+            }
             for lane in 0..N {
                 let a = absorption_m2_kg[cell][lane];
                 let s = scattering_m2_kg[cell][lane];
@@ -219,7 +231,8 @@ impl<'g, 'a, const N: usize> CellScatteringGrid<'g, 'a, N> {
             identity: hash.finalize(),
             scattering_lanes,
             extinction_lanes,
-            has_emission: has_absorption && geometry.temperature_k.is_some(),
+            has_emission: has_absorption
+                && (geometry.temperature_k.is_some() || constituent_sources),
         })
     }
 

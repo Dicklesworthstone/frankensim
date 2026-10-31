@@ -2951,6 +2951,38 @@ Independent optical-depth, angular-moment, LTE, beam-power and volume/mass
 regressions exercise the existing native owners; they are not experimental
 material qualification or a performance benchmark.
 
+### Constituent thermal radiation
+
+`ThermalEmissionModel` binds original component mass weights, absorption
+spectra and accepted kelvin temperatures. Each absorber is internally in thermal
+equilibrium; different constituents need not share a temperature. Its emission
+coefficient is `j_lambda = rho * sum(w_i*kappa_ai(lambda)*B_lambda(T_i))`.
+`AbsorbingGrid::try_new_thermal_sources` derives absorption from those same
+sources and shares their immutable cell-index map. The deterministic DDA and
+prepared/free-flight scattering kernels use the absorption-weighted source
+`sum(w_i*kappa_ai*B_i)/sum(w_i*kappa_ai)`, multiplied by the existing absorption
+fraction and exact cell attenuation. No average temperature or extra emissivity
+is introduced. Equal-temperature absorbers reduce to the original Planck
+evaluation; a transparent wavelength emits exactly zero. Missing temperature
+is permitted only for zero-weight or identically nonabsorbing components.
+
+Source evaluation retains original spectra and fixed-order compensated sums,
+with no per-ray allocation. Consecutive cells sharing a source model reuse the
+last source radiance per spectral lane. The existing emission direction/PDF
+owner caches importance weights from density, maximum combined absorption and
+the hottest active absorber, in log space with a uniform support floor. The
+hottest temperature affects only the proposal, never physical emission.
+Unused models and zero-density cells cannot create a proposal. Shadows and
+incident-power deposition never evaluate thermal sources.
+
+A `CellScatteringGrid` over constituent sources must retain exactly their
+wavelength support and absorption coefficients at its packet wavelengths;
+incompatible replacements refuse with `ThermalSource`. Its scattering remains
+independently supplied. Existing uniform-temperature and nonemitting
+constructors retain their source semantics and identities. These finite-band
+sources describe observed radiation, not a thermal-state debit, net radiation
+exchange, fluorescence, or an inferred spectrum beyond admitted support.
+
 ### Calibrated spectral fixture paths
 
 `PathLuminanceJob` connects the same `PhotometricSource` states to the original

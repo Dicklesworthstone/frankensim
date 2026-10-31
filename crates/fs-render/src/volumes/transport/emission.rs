@@ -1,4 +1,4 @@
-//! Direction proposals for physical, piecewise-constant LTE volume sources.
+//! Direction proposals for physical, piecewise-constant thermal volume sources.
 //!
 //! A source point proposes only a direction. Its radial coordinate is then
 //! marginalized: `q(omega) = integral p_volume(x + r*omega) r² dr`. Evaluating
@@ -7,7 +7,8 @@
 //! Occluders clip radiance, never this proposal density.
 
 use super::{
-    AbsorbingGrid, VolumeGrid, VolumeTransportError, cells, checkpoint, planck_radiance_w_m2_sr_nm,
+    AbsorbingGrid, CellPalette, ThermalEmissionModel, VolumeGrid, VolumeTransportError, cells,
+    checkpoint, planck_radiance_w_m2_sr_nm,
 };
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -125,6 +126,145 @@ impl EmissionDistribution {
         })
     }
 
+    /// Prepare the same directional proposal for constituent-temperature
+    /// sources, without copying a temperature field into physical cells.
+    /// The largest active temperature bounds Planck radiance at every admitted
+    /// wavelength; it affects importance weights only, never source evaluation.
+    pub(super) fn try_new_sources(
+        cx: &Cx<'_>,
+        grid: &VolumeGrid<'_>,
+        sources: &CellPalette<ThermalEmissionModel>,
+    ) -> Result<Self, VolumeTransportError> {
+        checkpoint(cx)?;
+        if sources.cell_indices().len() != grid.data.len() {
+            return Err(VolumeTransportError::Palette);
+        }
+        let bounds = sources.values()[0].wavelength_bounds_nm();
+        let mut cache = SourceCache::default();
+        let mut models = Vec::new();
+        models
+            .try_reserve_exact(sources.values().len())
+            .map_err(|_| VolumeTransportError::Budget)?;
+        for model in sources.values() {
+            checkpoint(cx)?;
+            if model.wavelength_bounds_nm() != bounds {
+                return Err(VolumeTransportError::Wavelength);
+            }
+            models.push(None);
+        }
+        let mut count = 0usize;
+        let mut maximum = f64::NEG_INFINITY;
+        for (cell, &density) in grid.data.iter().enumerate() {
+            if cell % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            if density == 0.0 {
+                continue;
+            }
+            let index = sources.cell_indices()[cell] as usize;
+            // Planck maxima are evaluated once per OCCUPIED optical model.
+            // Unreferenced models and zero-density cells cannot create a source.
+            // Retain an activity bit even when a cold importance weight vanishes.
+            let (active, log_weight) = if let Some(weight) = models[index] {
+                weight
+            } else {
+                let model = &sources.values()[index];
+                let absorption = model.maximum_absorption_m2_kg();
+                let weight = if let Some(temperature) = model.maximum_temperature_k()
+                    && absorption > 0.0
+                {
+                    (
+                        true,
+                        det::ln(absorption) + cache.log_source(temperature, bounds)?,
+                    )
+                } else {
+                    (false, f64::NEG_INFINITY)
+                };
+                models[index] = Some(weight);
+                weight
+            };
+            if active {
+                count += 1;
+                maximum = maximum.max(det::ln(density) + log_weight);
+            }
+        }
+        checkpoint(cx)?;
+        if maximum == f64::NEG_INFINITY {
+            return Ok(Self::default());
+        }
+        let active = |cell: usize, density: f64| {
+            density > 0.0
+                && models[sources.cell_indices()[cell] as usize].is_some_and(|weight| weight.0)
+        };
+        let length = grid
+            .data
+            .len()
+            .checked_add(1)
+            .ok_or(VolumeTransportError::Budget)?;
+        let mut cdf = Vec::new();
+        cdf.try_reserve_exact(length)
+            .map_err(|_| VolumeTransportError::Budget)?;
+        cdf.push(0.0);
+        let mut total = 0.0;
+        for (cell, &density) in grid.data.iter().enumerate() {
+            if cell % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            let weight = if active(cell, density) {
+                det::exp(
+                    det::ln(density)
+                        + models[sources.cell_indices()[cell] as usize]
+                            .expect("occupied source model")
+                            .1
+                        - maximum,
+                )
+            } else {
+                0.0
+            };
+            total += weight;
+            cdf.push(weight);
+        }
+        let uniform = UNIFORM_FRACTION / count as f64;
+        let mut sum = 0.0;
+        for (cell, &density) in grid.data.iter().enumerate() {
+            if cell % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            let probability = if active(cell, density) {
+                uniform + (1.0 - UNIFORM_FRACTION) * (cdf[cell + 1] / total)
+            } else {
+                0.0
+            };
+            let next = sum + probability;
+            if active(cell, density) && next <= sum {
+                return Err(VolumeTransportError::Unrepresentable);
+            }
+            sum = next;
+            cdf[cell + 1] = sum;
+        }
+        for (cell, &density) in grid.data.iter().enumerate() {
+            if cell % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            cdf[cell + 1] /= sum;
+            if active(cell, density) && cdf[cell + 1] <= cdf[cell] {
+                return Err(VolumeTransportError::Unrepresentable);
+            }
+        }
+        let volume = grid.cell[0] * grid.cell[1] * grid.cell[2];
+        let inverse = 1.0 / volume;
+        checkpoint(cx)?;
+        Ok(Self {
+            cdf,
+            inverse_cell_volume: if inverse.is_finite() && inverse > 0.0 {
+                inverse
+            } else {
+                0.0
+            },
+            log_cell_volume: grid.cell.iter().map(|&length| det::ln(length)).sum(),
+        })
+    }
+
     fn probability(&self, cell: usize) -> f64 {
         self.cdf[cell + 1] - self.cdf[cell]
     }
@@ -202,8 +342,8 @@ impl SourceCache {
 }
 
 impl AbsorbingGrid<'_> {
-    /// A cached, support-complete proposal exists for source-domain LTE emission.
-    /// Vacuum, absent temperature, or complete source-band underflow retains
+    /// A cached, support-complete proposal exists for source-domain thermal emission.
+    /// Vacuum, absent sources, or complete source-band underflow retains
     /// the ordinary transport path without proposal storage.
     #[must_use]
     pub fn has_emission_proposal(&self) -> bool {
