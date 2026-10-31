@@ -340,6 +340,51 @@ substeps do not refine mechanical loading; physical intervals need independent
 refinement. These entries do not add moving thermal geometry, phase-volume
 change, capillary energy or a new constitutive law.
 
+## Material-law feedback through the same heat assembly
+
+`constitutive_graph::enthalpy::heat_assembly_candidate` connects the public
+material-graph residual to the same complete `HeatAssembly`. Each proposed
+thermal endpoint drives both the graph's temperature inputs and the assembly's
+source-resolved transport. Original graph equations, exact material tangents,
+nested Newton work bounds and native backward-Euler thermal storage retain
+their existing owners.
+
+```rust,ignore
+let proposal =
+    fs_couple::constitutive_graph::enthalpy::heat_assembly_candidate(
+        &provider, &cx, &thermal, target_s, graph_input,
+        graph_thermal_controls, &energy_guess_j,
+    )?;
+let accepted_heat_and_fluid = &proposal.report().source;
+let (next_thermal, next_material_graph, report) = proposal.into_parts();
+```
+
+Finite coolant is reciprocal internal conduction. Prescribed reservoirs,
+thermal contacts, integrated conductivity and radiation retain their own
+source samples. Only explicitly bound graph outputs in watts become graph
+heat; neither graph dissipation metadata nor a second circuit is silently
+converted to a thermal source. Both prepared electrical bindings and nonempty
+resolved resistor/contact work refuse. This preserves one owner for each
+electrical equation and physical heat contribution.
+
+The complete accepted provider sample remains in the graph thermal report.
+Source failures and cancellation keep their original classes; other native
+provider refusals retain their typed values in `GraphThermalError::Transport`.
+The original closed-radiation correction excludes its numerical net from
+external supply. Rejected trials publish neither thermal nor graph history.
+The concrete `PreparedHeatNetwork::graph_step_candidate` delegates to this
+same path.
+
+A finite-coolant regression uses the original source-bound Ohmic graph node
+under a solved voltage constraint. Independent current, two-body heat and
+flat-plate convection equations check two continuing intervals under
+viscosity, coolant heat-capacity and conductor-resistivity substitutions.
+The graph law in that fixture is memoryless; the common driver retains its
+existing general committed-history semantics. Fixed mass/geometry, admitted
+source domains and first-order thermal coupling remain. Arbitrary graph
+outputs still need their own complete work/storage account; this adapter
+does not certify arbitrary material laws or add a chemistry model.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

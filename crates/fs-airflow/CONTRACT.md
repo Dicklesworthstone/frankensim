@@ -252,6 +252,27 @@ entropy, continued state and source-only viscosity/Cp substitutions. Existing
 leg trace/contact restrictions, fixed heat geometry and first-order coupling
 remain; the moving field/support materials keep their declared native scope.
 
+### Material graph feedback with complete source-resolved heat
+
+`fs_couple::constitutive_graph::enthalpy::heat_assembly_candidate` consumes
+the same complete provider for public material-law feedback. Actual trial
+temperatures drive both original graph inputs and coolant/material transport;
+the existing graph and thermal residuals remain the sole state owners. Finite
+coolant exchange is internal, graph watts are routed once, prescribed heat is
+external and closed-radiation roundoff retains its separate account. The full
+accepted fluid/heat sample remains in `report().source`. Prepared circuit
+bindings and resolved resistor/contact work refuse so graph heat cannot omit
+or duplicate another electrical owner. Typed source/cancellation failures
+remain native; other provider refusals retain their type under `Transport`.
+
+The finite-links graph regression checks a source-bound Ohmic law under a
+solved voltage constraint against independent current and two-body heat
+equations. Continued thermal states and viscosity, coolant Cp and conductor
+resistivity substitutions use the same original solver; late source, budget,
+cancellation and retry preserve accepted state. Original graph work/storage
+obligations, source ranges, fixed geometry and first-order time accuracy
+remain authoritative.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared

@@ -17,6 +17,10 @@ use super::{
     MaterialEquation, MaterialGraphCandidate, MaterialGraphError, MaterialGraphResidual,
     MaterialGraphSolve, MaterialUnknown, PortKey,
 };
+use crate::circuit_enthalpy::CircuitEnthalpyError;
+use crate::circuit_enthalpy::contacts::heat::{
+    HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork,
+};
 use fs_exec::Cx;
 use fs_material::graph::ConstitutiveGraph;
 use fs_qty::Dims;
@@ -120,6 +124,10 @@ pub enum GraphThermalError<E> {
     Graph(MaterialGraphError),
     /// Original material heat/contact/radiation callback refusal.
     Source(E),
+    /// Native non-source refusal from the complete heat assembly, retaining its
+    /// original numerical/work class. Source failures use Source; cancellation
+    /// uses Cancelled. No circuit is advanced by this graph/thermal owner.
+    Transport(CircuitEnthalpyError<E>),
     /// Original caloric, topology, event or energy admission failure.
     Thermal(DepositionError),
     /// Native outer nonlinear construction/arithmetic failure.
@@ -236,6 +244,25 @@ pub fn step_candidate<'m, S, E>(
     controls: GraphThermalSolve,
     initial_energy_increments_j: &[f64],
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<StepCoefficients<S>, E>,
+) -> Result<GraphThermalCandidate<'m, S>, GraphThermalError<E>> {
+    resolved_candidate(
+        cx, thermal, target_s, input, controls, initial_energy_increments_j,
+        |endpoint| resolve(endpoint).map_err(GraphThermalError::Source),
+    )
+}
+
+// Original graph/history and thermal residual owner, shared by raw callbacks
+// and complete material heat assemblies. Only source-error adaptation differs.
+#[allow(clippy::too_many_arguments)]
+fn resolved_candidate<'m, S, E>(
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: GraphThermalInput<'_>,
+    controls: GraphThermalSolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>)
+        -> Result<StepCoefficients<S>, GraphThermalError<E>>,
 ) -> Result<GraphThermalCandidate<'m, S>, GraphThermalError<E>> {
     let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
     checkpoint()?;
@@ -358,7 +385,7 @@ pub fn step_candidate<'m, S, E>(
                 graph_evaluations.set(graph_evaluations.get() + problem.evaluations());
                 let graph = graph?;
                 checkpoint()?;
-                let mut coefficients = resolve(endpoint).map_err(GraphThermalError::Source)?;
+                let mut coefficients = resolve(endpoint)?;
                 // The independent supply account belongs to fresh final admission,
                 // not every discarded Newton stencil. All trials still use the
                 // original thermal rate owner in BackwardEulerStep below.
@@ -463,7 +490,99 @@ pub fn step_candidate<'m, S, E>(
     })
 }
 
-impl crate::circuit_enthalpy::contacts::heat::PreparedHeatNetwork<'_, '_> {
+fn transport_error<E>(error: CircuitEnthalpyError<E>) -> GraphThermalError<E> {
+    match error {
+        CircuitEnthalpyError::Source(error) => GraphThermalError::Source(error),
+        CircuitEnthalpyError::Cancelled => GraphThermalError::Cancelled,
+        other => GraphThermalError::Transport(other),
+    }
+}
+
+/// Close public material-law feedback with one complete material heat assembly.
+///
+/// The same trial temperatures feed graph inputs and the original material
+/// transport resolver. Finite coolant uses native reciprocal links in that
+/// thermal candidate; prescribed reservoirs, contacts, source-integrated
+/// conduction and radiation retain their original heat/source ownership.
+/// The accepted full assembly sample remains in `report().source`, while the
+/// original graph candidate retains solved inputs, outputs and proposed history.
+///
+/// Only explicitly bound graph watt outputs become graph heat. This assembly
+/// supplies additional transport and must not duplicate those heat ports.
+/// Prepared circuit bindings and resolved resistor/contact work refuse:
+/// the graph owns its own electrical equations, so no separate circuit losses
+/// may be discarded or implicitly deposited. The exact prepared network still
+/// admits original cell/material identities, source pins and finite-link owners.
+///
+/// Typed provider source failures stay in `GraphThermalError::Source`;
+/// cancellation stays `Cancelled`, and other native provider refusals remain
+/// intact under `Transport`. All discarded thermal/material trials start from
+/// the same committed histories. Closed-radiation net is retained separately
+/// and excluded from external heat under the original thermal energy gate.
+///
+/// This is the existing fixed-geometry, backward-Euler thermal and nested
+/// material residual. It adds no graph-law storage certificate, chemistry
+/// model, second time integrator or history owner. Caller-authored graph heat
+/// still requires its own complete work/storage accounting and valid source
+/// support, including the original numerical derivative stencils.
+#[allow(clippy::too_many_arguments)]
+pub fn heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
+    assembly: &A,
+    cx: &Cx<'_>,
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: GraphThermalInput<'_>,
+    controls: GraphThermalSolve,
+    initial_energy_increments_j: &[f64],
+) -> Result<GraphThermalCandidate<'m, A::Sample>, GraphThermalError<A::Error>> {
+    cx.checkpoint().map_err(|_| GraphThermalError::Cancelled)?;
+    assembly.prepared_heat_network().thermal_material_network()
+        .map_err(|error| match error {
+            HeatNetworkError::Cancelled => GraphThermalError::Cancelled,
+            other => GraphThermalError::Source(other.into()),
+        })?;
+    let mut candidate = resolved_candidate(
+        cx,
+        thermal,
+        target_s,
+        input,
+        controls,
+        initial_energy_increments_j,
+        |endpoint| {
+            let resolved = assembly.resolve_heat(cx, endpoint).map_err(transport_error)?;
+            if !resolved.bulk.resistors.is_empty() || !resolved.contacts.is_empty() {
+                return Err(GraphThermalError::Invalid(
+                    "material graph heat cannot discard circuit resistor or electrical contact work",
+                ));
+            }
+            let source = resolved.bulk;
+            Ok(StepCoefficients {
+                sources_w: source.sources_w,
+                conductances_w_k: source.conductances_w_k,
+                payload: source.source,
+            })
+        },
+    )?;
+    let net = (target_s - thermal.time_s())
+        * candidate.report.source.as_ref().radiation_net_power_w();
+    let residual = candidate.report.thermal.residual_j + net;
+    let external = candidate.report.other_external_heat_j - net;
+    if !net.is_finite()
+        || !residual.is_finite()
+        || !external.is_finite()
+        || residual.abs() > controls.total_tolerance_j
+    {
+        return Err(GraphThermalError::Invalid(
+            "closed radiative roundoff cannot supply material graph heat",
+        ));
+    }
+    candidate.report.other_external_heat_j = external;
+    candidate.report.closed_radiation_net_j = net;
+    cx.checkpoint().map_err(|_| GraphThermalError::Cancelled)?;
+    Ok(candidate)
+}
+
+impl PreparedHeatNetwork<'_, '_> {
     /// Compose original material conduction, interfaces and radiation with
     /// public constitutive-graph feedback on one finite thermal timeline.
     ///
@@ -472,6 +591,7 @@ impl crate::circuit_enthalpy::contacts::heat::PreparedHeatNetwork<'_, '_> {
     /// dropped or duplicated. Source-integrated conductivity attachments remain
     /// active. The same local/total energy tolerance also checks the thermal
     /// residual after removing closed-enclosure radiative roundoff from supply.
+    /// This delegates to the shared [`heat_assembly_candidate`] entry.
     #[allow(clippy::too_many_arguments)]
     pub fn graph_step_candidate<'m>(
         &self,
@@ -481,50 +601,10 @@ impl crate::circuit_enthalpy::contacts::heat::PreparedHeatNetwork<'_, '_> {
         input: GraphThermalInput<'_>,
         controls: GraphThermalSolve,
         initial_energy_increments_j: &[f64],
-    ) -> Result<
-        GraphThermalCandidate<'m, crate::circuit_enthalpy::contacts::heat::HeatNetworkSample>,
-        GraphThermalError<crate::circuit_enthalpy::contacts::heat::HeatNetworkError>,
-    > {
-        self.thermal_material_network()
-            .map_err(GraphThermalError::Source)?;
-        let mut candidate = step_candidate(
-            cx,
-            thermal,
-            target_s,
-            input,
-            controls,
-            initial_energy_increments_j,
-            |endpoint| {
-                let source = self.resolve(cx, endpoint)?.bulk;
-                Ok(StepCoefficients {
-                    sources_w: source.sources_w,
-                    conductances_w_k: source.conductances_w_k,
-                    payload: source.source,
-                })
-            },
+    ) -> Result<GraphThermalCandidate<'m, HeatNetworkSample>, GraphThermalError<HeatNetworkError>> {
+        heat_assembly_candidate(
+            self, cx, thermal, target_s, input, controls, initial_energy_increments_j,
         )
-        .map_err(|error| match error {
-            GraphThermalError::Source(
-                crate::circuit_enthalpy::contacts::heat::HeatNetworkError::Cancelled,
-            ) => GraphThermalError::Cancelled,
-            other => other,
-        })?;
-        let net = (target_s - thermal.time_s()) * candidate.report.source.radiation_net_power_w();
-        let residual = candidate.report.thermal.residual_j + net;
-        let external = candidate.report.other_external_heat_j - net;
-        if !net.is_finite()
-            || !residual.is_finite()
-            || !external.is_finite()
-            || residual.abs() > controls.total_tolerance_j
-        {
-            return Err(GraphThermalError::Invalid(
-                "closed radiative roundoff cannot supply material graph heat",
-            ));
-        }
-        candidate.report.other_external_heat_j = external;
-        candidate.report.closed_radiation_net_j = net;
-        cx.checkpoint().map_err(|_| GraphThermalError::Cancelled)?;
-        Ok(candidate)
     }
 }
 
