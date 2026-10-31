@@ -9,6 +9,7 @@ use fs_tribo::InputAuthority;
 use crate::interface_binding::{InterfaceBindingError,NormalContactModelSelection,
     ADHESION_ENERGY_PROPERTY,ADHESION_ENERGY_DIMS,bind_dry_interface_system_card,
     bind_normal_interface_state,bind_normal_contact_model,
+    bind_isotropic_elastic_interface_at_fixed_environments,
     temperature::bind_isotropic_elastic_interface_at_temperatures};
 use super::{SourcePointContact,PointContactGeometry,PointContactEnvelope,NormalPatchError};
 
@@ -16,6 +17,8 @@ use super::{SourcePointContact,PointContactGeometry,PointContactEnvelope,NormalP
 /// `resolve` uses one common point. `resolve_at_temperatures` retains independent
 /// bulk temperatures and a separately supplied interface-law temperature. Neither
 /// averages bodies or infers missing pressure, frequency or history coordinates.
+/// `resolve_at_fixed_environments` additionally admits independently held,
+/// source-qualified bulk and interface conditions without copying their states.
 pub struct PointContactMaterialCards<'a> {
     pub surface_a:&'a MaterialCard,
     pub surface_b:&'a MaterialCard,
@@ -60,15 +63,41 @@ impl PointContactMaterialCards<'_> {
     pub fn resolve_at_temperatures(&self,bulk_points:[&QueryPoint;2],interface_point:&QueryPoint,
         geometry:PointContactGeometry,envelope:PointContactEnvelope)
         ->Result<SourcePointContact,ContactMaterialResolveError> {
+        self.resolve_points(bulk_points,interface_point,geometry,envelope,false)
+    }
+
+    /// Resolve original bulk and interface properties at their independently
+    /// held environments. Only source-qualified fixed external coordinates are
+    /// admitted, with one common optional angular-frequency applicability point.
+    /// Geometry, original model domains and normal-contact limits are unchanged.
+    pub fn resolve_at_fixed_environments(&self,bulk_points:[&QueryPoint;2],interface_point:&QueryPoint,
+        geometry:PointContactGeometry,envelope:PointContactEnvelope)
+        ->Result<SourcePointContact,ContactMaterialResolveError> {
+        self.resolve_points(bulk_points,interface_point,geometry,envelope,true)
+    }
+
+    fn resolve_points(&self,bulk_points:[&QueryPoint;2],interface_point:&QueryPoint,
+        geometry:PointContactGeometry,envelope:PointContactEnvelope,independent_environment:bool)
+        ->Result<SourcePointContact,ContactMaterialResolveError> {
         use ContactMaterialResolveError::{Material,Interface,Contact};
         let a=resolve_isotropic_solid_state_point(self.surface_a,bulk_points[0],self.bulk_selection[0].clone()).map_err(Material)?;
         let b=resolve_isotropic_solid_state_point(self.surface_b,bulk_points[1],self.bulk_selection[1].clone()).map_err(Material)?;
         let dry=bind_dry_interface_system_card(self.interface,self.authority).map_err(Interface)?;
-        let elastic=bind_isotropic_elastic_interface_at_temperatures(&dry,&a,&b,interface_point).map_err(Interface)?;
+        let elastic=if independent_environment {
+            bind_isotropic_elastic_interface_at_fixed_environments(&dry,&a,&b,interface_point)
+        } else {
+            bind_isotropic_elastic_interface_at_temperatures(&dry,&a,&b,interface_point)
+        }.map_err(Interface)?;
         let requirement=ScalarPropertyRequirement::try_new(ADHESION_ENERGY_PROPERTY,
             ADHESION_ENERGY_DIMS,ScalarAdmissibility::NonNegative).map_err(Material)?;
         let interface=resolve_interface_state_point(self.interface,interface_point,&[requirement],
             self.interface_selection.clone()).map_err(Material)?;
+        if independent_environment && interface.properties().iter().any(|property|
+            !property.is_constant_at_fixed_environment()) {
+            return Err(Interface(InterfaceBindingError::InvalidDerived {
+                quantity: "fixed_environment_interface",
+            }));
+        }
         let normal=bind_normal_interface_state(&elastic,&interface).map_err(Interface)?;
         let model=bind_normal_contact_model(&normal,self.model_selection).map_err(Interface)?;
         SourcePointContact::new(model,geometry,envelope).map_err(Contact)

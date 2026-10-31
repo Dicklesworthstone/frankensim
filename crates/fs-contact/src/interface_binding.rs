@@ -20,11 +20,13 @@ use core::fmt;
 use std::collections::BTreeMap;
 
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, InterfaceSystemCard, MaterialStateId};
+use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, InterfaceSystemCard, MaterialStateId, QueryPoint};
 use fs_material::state_point::{
     IsotropicSolidStatePoint, MaterialStatePointError, ResolvedInterfaceStatePoint,
+    is_fixed_external_coordinate,
 };
-use fs_qty::Dims;
+use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_qty::semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm};
 use fs_tribo::{
     InputAuthority, InterfaceMedium, InterfaceSystemRef, surface_excitation::UniformSurfaceTrace,
 };
@@ -73,6 +75,7 @@ pub struct BoundDryInterfaceSystem {
 pub struct BoundIsotropicElasticInterface {
     interface: BoundDryInterfaceSystem,
     state_point: Vec<(String, f64)>,
+    state_axis_quantities: BTreeMap<String, QuantitySpec>,
     surface_a_state: IsotropicSolidStatePoint,
     surface_b_state: IsotropicSolidStatePoint,
     reduced_modulus_pa: f64,
@@ -200,6 +203,12 @@ impl BoundIsotropicElasticInterface {
     #[must_use]
     pub fn state_point(&self) -> &[(String, f64)] {
         &self.state_point
+    }
+
+    /// Original quantity schema of the interface-law point.
+    #[must_use]
+    pub fn state_axis_quantities(&self) -> &BTreeMap<String, QuantitySpec> {
+        &self.state_axis_quantities
     }
 
     /// Look up one state coordinate by exact axis name.
@@ -373,10 +382,95 @@ pub fn bind_isotropic_elastic_interface(
     if !state_points_exact_eq(
         surface_a.resolved().query_point(),
         surface_b.resolved().query_point(),
-    ) {
+    ) || surface_a.resolved().axis_quantities() != surface_b.resolved().axis_quantities() {
         return Err(InterfaceBindingError::StatePointMismatch);
     }
     bind_elastic_properties(interface, surface_a, surface_b)
+}
+
+/// Bind independent frozen environmental states of the original materials.
+///
+/// Each bulk and the ordered interface retains its own qualified coordinates.
+/// Only fixed external conditions are admitted; frequency can describe common
+/// applicability, but sampled frequency-dependent coefficients cannot be frozen
+/// into Hertz elasticity. Existing material combinations and normal-model
+/// applicability checks remain the authoritative physical owners.
+pub fn bind_isotropic_elastic_interface_at_fixed_environments(
+    interface: &BoundDryInterfaceSystem,
+    surface_a: &IsotropicSolidStatePoint,
+    surface_b: &IsotropicSolidStatePoint,
+    interface_point: &QueryPoint,
+) -> Result<BoundIsotropicElasticInterface, InterfaceBindingError> {
+    check_surface_roles(interface, surface_a, surface_b)?;
+    let a = surface_a.resolved().query();
+    let b = surface_b.resolved().query();
+    if [&a, &b, interface_point].iter().any(|point| !fixed_environment_point(point))
+        || a.axes().get("omega").map(|v| v.to_bits())
+            != interface_point.axes().get("omega").map(|v| v.to_bits())
+        || b.axes().get("omega").map(|v| v.to_bits())
+            != interface_point.axes().get("omega").map(|v| v.to_bits())
+    {
+        return Err(InterfaceBindingError::StatePointMismatch);
+    }
+    for bulk in [surface_a, surface_b] {
+        if bulk.resolved().properties().iter().any(|property|
+            !property.is_constant_at_fixed_environment())
+        {
+            return Err(InterfaceBindingError::InvalidDerived {
+                quantity: "fixed_environment_elasticity",
+            });
+        }
+    }
+    // Keep the admitted common-state/temperature-only identity exactly.
+    match temperature::bind_isotropic_elastic_interface_at_temperatures(
+        interface, surface_a, surface_b, interface_point,
+    ) {
+        Ok(bound) => return Ok(bound),
+        Err(InterfaceBindingError::StatePointMismatch) => {},
+        Err(error) => return Err(error),
+    }
+    let mut bound = bind_elastic_properties(interface, surface_a, surface_b)?;
+    let mut identity = DomainHasher::new("org.frankensim.fs-contact.environment-interface.v1");
+    identity.update(bound.identity.as_bytes());
+    identity.update(&(interface_point.axes().len() as u64).to_le_bytes());
+    for (axis, value) in interface_point.axes() {
+        identity.update(&(axis.len() as u64).to_le_bytes());
+        identity.update(axis.as_bytes());
+        identity.update(&value.to_bits().to_le_bytes());
+        match interface_point.axis_quantities().get(axis) {
+            Some(quantity) => {
+                identity.update(&[1]);
+                identity.update(&quantity.canonical_bytes());
+            },
+            None => { identity.update(&[0]); },
+        }
+    }
+    bound.state_point = interface_point.axes().iter().map(|(k,v)| (k.clone(),*v)).collect();
+    bound.state_axis_quantities = interface_point.axis_quantities().clone();
+    bound.identity = identity.finalize();
+    Ok(bound)
+}
+
+fn fixed_environment_point(point: &QueryPoint) -> bool {
+    if !point.axes().get("T").is_some_and(|value| value.is_finite() && *value > 0.0) {
+        return false;
+    }
+    let angular = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Frequency(FrequencyConvention::Angular), ValueForm::Static));
+    point.axes().iter().all(|(axis, value)| {
+        let quantity = point.axis_quantities().get(axis).copied();
+        if axis == "omega" {
+            return value.is_finite() && *value >= 0.0
+                && quantity.is_none_or(|q| q == angular
+                    || q == QuantitySpec::dimensional(fs_qty::Frequency::DIMS));
+        }
+        is_fixed_external_coordinate(axis, quantity, Some(*value))
+            && if axis == "T" {
+                quantity.is_none_or(|q| q.dims() == Temperature::DIMS)
+            } else {
+                quantity.is_some_and(|q| q.dims() != Temperature::DIMS)
+            }
+    })
 }
 
 fn check_surface_roles(
@@ -431,6 +525,7 @@ fn bind_elastic_properties(
     Ok(BoundIsotropicElasticInterface {
         interface: interface.clone(),
         state_point: surface_a.resolved().query_point().to_vec(),
+        state_axis_quantities: surface_a.resolved().axis_quantities().clone(),
         surface_a_state: surface_a.clone(),
         surface_b_state: surface_b.clone(),
         reduced_modulus_pa: reduced.value_pa,
@@ -461,8 +556,7 @@ pub fn bind_normal_interface_state(
         return Err(InterfaceBindingError::InterfaceStateSurfaceMismatch);
     }
     if !state_points_exact_eq(interface_state.query_point(), elastic.state_point())
-        || interface_state.axis_quantities() != elastic.surface_a_state.resolved().axis_quantities()
-        || interface_state.axis_quantities() != elastic.surface_b_state.resolved().axis_quantities()
+        || interface_state.axis_quantities() != elastic.state_axis_quantities()
     {
         return Err(InterfaceBindingError::StatePointMismatch);
     }

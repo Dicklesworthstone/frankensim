@@ -133,6 +133,9 @@ mod held_environment {
         let base = interface(30e6, 1000.0, "wire.fsmatpk", "body.fsmatpk", 200_000.0);
         let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
         let mut claims = ClaimSet::new();
+        for id in base.claims_pack().claims().observation_ids() {
+            claims.register_observation(base.claims_pack().claims().observation(id).unwrap().clone()).unwrap();
+        }
         for (_, original) in base.claims_pack().claims().claims_ordered() {
             let mut claim = original.clone();
             let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };

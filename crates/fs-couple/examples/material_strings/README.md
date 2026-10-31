@@ -43,16 +43,17 @@ silently changing those conventions. Missing state coordinates and material
 properties still refuse. Associated models are retained as source evidence;
 this ingress does not make arbitrary constitutive laws executable or extend
 the existing solver's physical domain.
-The existing source-derived normal-contact owner also requires matching axis
-schemas across both bulk materials and the interface: mixing a bare legacy
-axis with a typed axis refuses. Canonical loading preserves that distinction;
-it does not rewrite source cards to make their schemas appear equal.
+Source-derived normal contacts retain the strict common-state path when only
+the original T/omega state is supplied. With explicit `material-states`,
+each original bulk material and ordered normal interface instead retains its
+own qualified held environment and source quantity schema. Those values are
+never copied between materials or relabelled to make the schemas appear equal.
 
 ### Held material environment
 
 An optional block immediately after `state` supplies additional source
-coordinates for individual material packs and ordered bow, bridge or axial
-bearing interface packs:
+coordinates for individual material packs and ordered bow, bridge, axial
+bearing or material-stop interface packs:
 
 ```text
 state 293.15 1000
@@ -93,6 +94,21 @@ contact temperature and held moisture still requires the finite-cell contact
 heat owner; every temperature and motion re-query retains that same moisture
 and its original selected claims. Changing declared held state after loading an
 interface requires resolving it again.
+
+A `material-stop` also consumes the held state of its actual outer string
+material, its explicit fixed receiver material (or the body's already resolved
+receiver state), and its ordered normal-interface pack. These may declare
+different source coordinates and moisture bases. Each original modulus and
+yield limit enters the existing Hertz/Hunt--Crossley contact law; changing a
+finger or fingerboard material state therefore changes normal reaction and the
+same coupled string/body pressure. Interface state controls the original
+interface properties and model admission, without replacing either bulk state.
+The global angular-frequency point remains common. Both bulk states and the
+interface must remain inside the selected normal model's domain; unowned
+dynamic dependencies and frequency-dependent coefficient samples refuse.
+Contact geometry, current gaps and the original indentation/rate limits remain
+explicit inputs. This is a frozen-state contact construction, without inferred
+moisture equilibrium, swelling, or material evolution during an accepted step.
 
 The existing support prescription remains authoritative: maintained force stays
 fixed, while fixed extension changes its resulting force with the resolved

@@ -157,6 +157,31 @@ those consume adapters; reusable contact protocols live here.
 
 ## Public types and semantics
 
+### Independently held material environments in normal contact
+
+`interface_binding::bind_isotropic_elastic_interface_at_fixed_environments`
+and `PointContactMaterialCards::resolve_at_fixed_environments` retain separate
+original query points and quantity schemas for each bulk material and the
+ordered interface. Source-qualified moisture, composition, pressure and
+concentration may differ; no coordinate is copied between materials or averaged.
+Every participant retains its own explicit positive absolute temperature.
+Optional `omega` values share one angular-frequency applicability point.
+
+The original material owner computes the reduced modulus and limiting yield
+stress. Selected bulk and interface coefficients must be constant at the held
+conditions; rate, strain, stress and frequency-response samples cannot become
+frozen Hertz coefficients. Interface-law coordinates and their quantity schema
+remain bound to its own identity. Existing common-state and temperature-only
+entry points retain their stricter schema rules and the admitted common-state
+identity. The normal model continues to validate all three complete states.
+
+The same immutable `SourcePointContact` supplies force, pressure, elastic
+storage and Hunt--Crossley loss at the original geometry and operating limits.
+This does not infer moisture transport, swelling, prestress changes, or
+environmental work during loaded evolution. The existing source-point tests
+exercise independent material/interface states, analytical Hertz pressure and
+force, loss, source identity, model temperature limits and frequency refusal.
+
 - `normal_patch::NormalLawSource` presents `(U,F,dF)` from an immutable
   `SourcePointContact` or a `FiniteGapResponseCurve`. Point stiffness remains
   derived from the bound bulk/interface model and geometry; finite-gap values

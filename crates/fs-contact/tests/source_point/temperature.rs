@@ -47,6 +47,7 @@ fn common_temperature_limit_preserves_original_source_and_strict_entry_point() {
     let c=cards(&a,&b,&i);let p=query();
     assert_eq!(c.resolve_at_temperatures([&p,&p],&p,geometry(),envelope()).unwrap(),expected);
     assert_eq!(c.resolve(&p,geometry(),envelope()).unwrap(),expected);
+    assert_eq!(c.resolve_at_fixed_environments([&p,&p],&p,geometry(),envelope()).unwrap(),expected);
     let sa=resolve_isotropic_solid_state_point(&a,&point(290.0),MaterialPropertySelection::SingleClaimOnly).unwrap();
     let sb=resolve_isotropic_solid_state_point(&b,&point(310.0),MaterialPropertySelection::SingleClaimOnly).unwrap();
     let dry=bind_dry_interface_system_card(&i,InputAuthority::SyntheticFixture).unwrap();
@@ -106,6 +107,8 @@ fn valid_interface_temperature_cannot_hide_a_bulk_outside_the_model_domain() {
     for (ta,tb) in [(330.0,300.0),(300.0,330.0)] {
         assert!(matches!(c.resolve_at_temperatures([&point(ta),&point(tb)],&point(300.0),geometry(),envelope()),
             Err(ContactMaterialResolveError::Interface(InterfaceBindingError::NormalContactModelOutsideValidity {..}))));
+        assert!(matches!(c.resolve_at_fixed_environments([&point(ta),&point(tb)],&point(300.0),geometry(),envelope()),
+            Err(ContactMaterialResolveError::Interface(InterfaceBindingError::NormalContactModelOutsideValidity {..}))));
     }
     assert!(c.resolve_at_temperatures([&point(350.0),&point(300.0)],&point(300.0),geometry(),envelope()).is_err());
     assert!(c.resolve_at_temperatures([&point(290.0),&point(310.0)],&point(330.0),geometry(),envelope()).is_err());
@@ -120,4 +123,102 @@ fn role_and_nonthermal_context_mismatch_remain_errors() {
     assert!(cards(&b,&a,&i).resolve_at_temperatures([&p,&p],&p,geometry(),envelope()).is_err());
     assert!(c.resolve_at_temperatures([&p,&p],&QueryPoint::new(),geometry(),envelope()).is_err());
     assert!(c.resolve_at_temperatures([&p,&p],&point(0.0),geometry(),envelope()).is_err());
+}
+
+
+mod environment {
+    use super::*;
+    use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+
+    fn moisture(basis: MoistureBasis) -> QuantitySpec {
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Moisture(basis), ValueForm::Static))
+    }
+    fn material(name: &str, axis: &str, quantity: QuantitySpec, e0: f64, e1: f64) -> MaterialCard {
+        let base = thermal_card(name, e0, e0);
+        let mut claims = ClaimSet::new();
+        for id in base.claims().observation_ids() {
+            claims.register_observation(base.claims().observation(id).unwrap().clone()).unwrap();
+        }
+        for (_, original) in base.claims().claims_ordered() {
+            let mut claim = original.clone();
+            claim.validity = claim.validity.with_quantity(axis, quantity, 0.0, 0.2);
+            if claim.key.name() == "young_modulus" {
+                claim.value = PropertyValue::Curve { abscissa: axis.into(), abscissa_dims: quantity.dims(),
+                    knots: vec![(0.0, e0), (0.2, e1)], dims: Pressure::DIMS };
+                claim.interpolation = InterpolationPolicy::LinearInside;
+            }
+            claims.insert_claim(claim).unwrap();
+        }
+        MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+    }
+    fn ordered() -> InterfaceSystemCard {
+        let base = interface(&thermal_card("A",4e7,4e7), &thermal_card("B",2e7,2e7));
+        let mut claims = ClaimSet::new();
+        for id in base.claims().observation_ids() {
+            claims.register_observation(base.claims().observation(id).unwrap().clone()).unwrap();
+        }
+        for (_, original) in base.claims().claims_ordered() {
+            let mut claim = original.clone();
+            claim.validity = claim.validity.with_quantity("humidity",
+                moisture(MoistureBasis::RelativeHumidity), 0.0, 1.0);
+            claims.insert_claim(claim).unwrap();
+        }
+        InterfaceSystemCard::assemble(base.surface_a().clone(), base.surface_b().clone(),
+            base.context().clone(), claims, base.models().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn independent_material_and_interface_states_reach_original_force_pressure_and_loss() {
+        let qa = moisture(MoistureBasis::DryMass);
+        let qb = moisture(MoistureBasis::WetMass);
+        let a = material("A", "water_a", qa, 4e7, 2e7);
+        let b = material("B", "water_b", qb, 2e7, 1e7);
+        let i = ordered();
+        let c = cards(&a,&b,&i);
+        let pa = point(290.0).with_quantity("water_a",qa,0.2).unwrap();
+        let pb = point(310.0).with_quantity("water_b",qb,0.1).unwrap();
+        let pi = point(300.0).with_quantity("humidity",moisture(MoistureBasis::RelativeHumidity),0.4).unwrap();
+        assert!(c.resolve_at_temperatures([&pa,&pb],&pi,geometry(),envelope()).is_err());
+        let law = c.resolve_at_fixed_environments([&pa,&pb],&pi,geometry(),envelope()).unwrap();
+        let elastic = law.model().normal_state().elastic();
+        close(elastic.surface_a_state().young_modulus_pa(),2e7);
+        close(elastic.surface_b_state().young_modulus_pa(),1.5e7);
+        assert_eq!(elastic.surface_a_state().resolved().query(),pa);
+        assert_eq!(elastic.surface_b_state().resolved().query(),pb);
+        assert_eq!(law.model().normal_state().interface_state().query(),pi);
+        let reduced = 1.0/(0.9375/2e7+0.9375/1.5e7);
+        close(elastic.reduced_modulus_pa(),reduced);
+        let k = (4.0/3.0)*0.1_f64.sqrt()*reduced;
+        let d = 2e-5_f64;
+        let response = law.evaluate("separate-environments",d,0.05,1e-4).unwrap();
+        close(response.normal_force_n,k*d.powf(1.5)*(1.0+0.4*0.05));
+        close(response.dissipated_power_w,0.4*k*d.powf(1.5)*0.05*0.05);
+        let elastic_response = law.evaluate("elastic-patch",d,0.0,1e-4).unwrap();
+        close(elastic_response.pressure.peak_pressure_pa,
+            1.5*k*d.powf(1.5)/(core::f64::consts::PI*elastic_response.patch_radius_m.powi(2)));
+        let changed = c.resolve_at_fixed_environments([&pa.clone().with("water_a",0.0).unwrap(),&pb],
+            &pi,geometry(),envelope()).unwrap();
+        assert_ne!(law.stiffness_n_per_m_3_2(),changed.stiffness_n_per_m_3_2());
+        let interface_changed = c.resolve_at_fixed_environments([&pa,&pb],
+            &pi.clone().with("humidity",0.6).unwrap(),geometry(),envelope()).unwrap();
+        assert_eq!(law.stiffness_n_per_m_3_2(),interface_changed.stiffness_n_per_m_3_2());
+        assert_ne!(law.model().identity(),interface_changed.model().identity());
+        assert!(c.resolve_at_fixed_environments([&pa.clone().with("water_a",0.3).unwrap(),&pb],
+            &pi,geometry(),envelope()).is_err());
+        assert!(c.resolve_at_fixed_environments([&pa.clone().with("slip",0.1).unwrap(),&pb],
+            &pi,geometry(),envelope()).is_err());
+        assert!(cards(&b,&a,&i).resolve_at_fixed_environments([&pb,&pa],&pi,geometry(),envelope()).is_err());
+    }
+
+    #[test]
+    fn a_frequency_sample_cannot_become_frozen_contact_elasticity() {
+        let q = QuantitySpec::dimensional(fs_qty::Frequency::DIMS);
+        let a = material("A","omega",q,4e7,2e7);
+        let b = thermal_card("B",2e7,2e7);
+        let i = interface(&thermal_card("A",4e7,4e7),&b);
+        let pa = point(300.0).with_quantity("omega",q,0.1).unwrap();
+        let p = point(300.0).with("omega",0.1).unwrap();
+        assert!(matches!(cards(&a,&b,&i).resolve_at_fixed_environments([&pa,&p],&p,geometry(),envelope()),
+            Err(ContactMaterialResolveError::Interface(InterfaceBindingError::InvalidDerived {..}))));
+    }
 }

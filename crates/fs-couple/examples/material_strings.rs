@@ -522,6 +522,7 @@ impl input::Spec {
         } else { bank };
         poll(gate)?;
         if self.material_states.keys().any(|name| !catalog.contains_key(name)
+            && !stop_profile.as_ref().is_some_and(|stops| stops.has_material_interface(name))
             && !self.friction.has_source(name) && !self.bridge_interfaces.has_source(name)
             && !self.axial_bearings.has_source(name)
             && !profile.as_ref().is_some_and(|body| body.has_interface_source(name))) {

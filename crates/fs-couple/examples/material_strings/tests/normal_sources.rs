@@ -205,7 +205,7 @@ fn canonical_material_stop_sources_preserve_ordered_identity_and_physics() {
             Some(sourced), |name| Ok(if name == "receiver.fsmatpk" {
                 receiver.clone()
             } else { card(name, 2e7) })).err().unwrap();
-        assert!(error.to_string().contains("AxisQuantityMismatch"), "{error}");
+        assert!(error.to_string().contains("StatePointMismatch"), "{error}");
     });
 }
 
@@ -254,4 +254,124 @@ fn source_record_parser_and_decoder_refuse_unsupported_inputs_without_fallback()
     let bytes = p.source_pack_bytes().unwrap();
     assert!(p.load_sources(&gate, |_| Ok(vec![0; 16])).is_err());
     assert_eq!(p.source_pack_bytes().unwrap(), bytes, "failed loading replaced retained source packs");
+}
+
+
+mod environment {
+    use super::*;
+    use fs_qty::{QuantitySpec, semantic::{MoistureBasis, QuantityKind, SemanticType, ValueForm}};
+
+    fn quantity(basis: MoistureBasis) -> QuantitySpec {
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Moisture(basis), ValueForm::Static))
+    }
+    fn bulk_source(name: &str) -> NormalizedPack {
+        let base = bulk(name,2e7);
+        let (axis, basis) = match name {
+            "wire.fsmatpk" => ("wire_water",MoistureBasis::DryMass),
+            "receiver.fsmatpk" => ("finger_water",MoistureBasis::WetMass),
+            _ => return base,
+        };
+        let mut claims = ClaimSet::new();
+        for id in base.claims().observation_ids() {
+            claims.register_observation(base.claims().observation(id).unwrap().clone()).unwrap();
+        }
+        for (_, original) in base.claims().claims_ordered() {
+            let mut claim = original.clone();
+            claim.validity = claim.validity.with_quantity(axis,quantity(basis),0.0,0.2);
+            if claim.key.name() == "young_modulus" {
+                let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+                claim.value = PropertyValue::Curve { abscissa: axis.into(), abscissa_dims: Dims::NONE,
+                    knots: vec![(0.0,value),(0.2,0.5*value)], dims };
+                claim.interpolation = InterpolationPolicy::LinearInside;
+            }
+            claims.insert_claim(claim).unwrap();
+        }
+        pack_claims(name,claims)
+    }
+    fn contact_source() -> NormalizedInterfacePack {
+        let base = interface("wire.fsmatpk","receiver.fsmatpk");
+        let mut claims = ClaimSet::new();
+        for id in base.claims_pack().claims().observation_ids() {
+            claims.register_observation(base.claims_pack().claims().observation(id).unwrap().clone()).unwrap();
+        }
+        for (_, original) in base.claims_pack().claims().claims_ordered() {
+            let mut claim = original.clone();
+            claim.validity = claim.validity.with_quantity("interface_humidity",
+                quantity(MoistureBasis::RelativeHumidity),0.0,1.0);
+            claims.insert_claim(claim).unwrap();
+        }
+        NormalizedInterfacePack::new(base.card().surface_a().clone(),base.card().surface_b().clone(),
+            base.card().context().clone(),pack_claims("normal-interface",claims)).unwrap()
+    }
+    fn input(wire: f64, finger: f64, humidity: f64) -> input::Spec {
+        let text = String::from_utf8(resting_spec().bytes).unwrap().replace("state 293.15 1000",
+            &format!("state 293.15 1000\nmaterial-states 3\nmaterial-state wire.fsmatpk 1 wire_water {wire}\nmaterial-state receiver.fsmatpk 1 finger_water {finger}\nmaterial-state normal.fsintpk 1 interface_humidity {humidity}"));
+        let mut s = input::Spec::parse(text.as_bytes()).unwrap();
+        s.forces = None;
+        s
+    }
+    fn profile(gate: &CancelGate) -> stops::Profile {
+        let mut p = stops::Profile::parse(PROFILE.as_bytes()).unwrap();
+        p.load_sources(gate, |path| Ok(match path {
+            "normal.fsintpk" => contact_source().to_bytes(),
+            "normal.fsmodelpk" => models().to_bytes(),
+            _ => panic!("unexpected source {path}"),
+        })).unwrap();
+        p
+    }
+
+    #[test]
+    fn independent_string_finger_and_interface_conditions_reach_the_same_contact_and_sound() {
+        scoped(|cx,gate| {
+            let build = |wire,finger,humidity| input(wire,finger,humidity).compile_with_profiles(
+                cx,gate,None,Some(profile(gate)),|name| Ok(bulk_source(name))).unwrap();
+            let mut dry = build(0.0,0.0,0.4);
+            let mut moist_finger = build(0.0,0.2,0.4);
+            let changed_string = build(0.2,0.0,0.4);
+            let changed_interface = build(0.0,0.0,0.6);
+            let original = dry.performance.bank().system().obstacle_source(0).unwrap();
+            let changed = moist_finger.performance.bank().system().obstacle_source(0).unwrap();
+            let elastic = changed.model().normal_state().elastic();
+            assert_eq!(elastic.surface_a_state().young_modulus_pa(),200e9);
+            assert_eq!(elastic.surface_b_state().young_modulus_pa(),1e7);
+            assert_eq!(elastic.surface_a_state().resolved().query().axes()["wire_water"],0.0);
+            assert_eq!(elastic.surface_b_state().resolved().query().axes()["finger_water"],0.2);
+            assert_eq!(changed.model().normal_state().interface_state().query().axes()["interface_humidity"],0.4);
+            let expected_reduced = 1.0/(0.91/200e9+0.91/1e7);
+            assert!((elastic.reduced_modulus_pa()/expected_reduced-1.0).abs() < 1e-12);
+            assert!(changed.stiffness_n_per_m_3_2() < original.stiffness_n_per_m_3_2());
+            assert_eq!(changed_string.performance.bank().system().obstacle_source(0).unwrap()
+                .model().normal_state().elastic().surface_a_state().young_modulus_pa(),100e9);
+            assert_ne!(dry.performance.bank().system().components()[0].modes(),
+                changed_string.performance.bank().system().components()[0].modes());
+            let interface_only = changed_interface.performance.bank().system().obstacle_source(0).unwrap();
+            assert_eq!(original.stiffness_n_per_m_3_2(),interface_only.stiffness_n_per_m_3_2());
+            assert_ne!(original.model().identity(),interface_only.model().identity());
+            for name in ["wire.fsmatpk","body.fsmatpk","receiver.fsmatpk"] {
+                assert_eq!(dry.catalog[name].pack.content_hash(),moist_finger.catalog[name].pack.content_hash());
+            }
+            for (a,b) in dry.performance.bank().system().components().iter()
+                .zip(moist_finger.performance.bank().system().components()) {
+                assert_eq!(a.modes(),b.modes());
+            }
+            let reference = pressure(&mut dry,37);
+            let response = pressure(&mut moist_finger,128);
+            assert_ne!(reference,response);
+            assert_eq!(response,pressure(&mut build(0.0,0.2,0.4),1));
+            let frame = moist_finger.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        });
+    }
+
+    #[test]
+    fn missing_and_out_of_domain_contact_conditions_refuse_without_copying_another_material_state() {
+        scoped(|cx,gate| {
+            let mut missing = input(0.0,0.1,0.4);
+            missing.material_states.remove("receiver.fsmatpk");
+            assert!(missing.compile_with_profiles(cx,gate,None,Some(profile(gate)),
+                |name| Ok(bulk_source(name))).is_err());
+            assert!(input(0.0,0.3,0.4).compile_with_profiles(cx,gate,None,Some(profile(gate)),
+                |name| Ok(bulk_source(name))).is_err());
+        });
+    }
 }
