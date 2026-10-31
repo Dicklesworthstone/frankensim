@@ -18,6 +18,8 @@ pub mod equilibrium;
 pub mod increment;
 /// Closed gas storage with heating and reversible adiabatic boundary work.
 pub mod parcel;
+/// Shared fixed-volume thermal storage for ideal and nonideal source-backed gases.
+pub mod storage;
 pub(in crate::thermochemical_gas) mod root;
 
 use super::{ResolvedThermochemicalGasState, ThermochemicalGasModel, coordinates, positive, typed};

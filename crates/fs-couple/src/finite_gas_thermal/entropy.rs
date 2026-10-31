@@ -3,7 +3,7 @@
 use super::{Error, FiniteGasThermalEnvironment, gas_error};
 use fs_material::{
     phase::{EquilibriumPhaseState, UniformEnthalpyStepInput},
-    thermochemical_gas::energy::{GasEnergyError, IsochoricGasParcel},
+    thermochemical_gas::energy::{GasEnergyError, storage::IsochoricGasStorage},
 };
 
 /// Entropy of one accepted implicit thermal proposal, in J/K.
@@ -49,17 +49,17 @@ pub struct FiniteGasEntropyReport {
     pub balance_residual_j_k: f64,
 }
 
-pub(super) fn evaluate(
-    environment: &FiniteGasThermalEnvironment<'_>,
+pub(super) fn evaluate<G: IsochoricGasStorage>(
+    environment: &FiniteGasThermalEnvironment<'_, G>,
     input: UniformEnthalpyStepInput<'_>,
-    next_gas: &IsochoricGasParcel,
+    next_gas: &G,
     body: EquilibriumPhaseState,
     [body_storage, gas_storage]: [f64; 2],
     [heat_j, radiation_heat_j]: [f64; 2],
     [source_residual_j, solid_residual_j]: [f64; 2],
 ) -> Result<FiniteGasEntropyReport, Error> {
     let body_k = body.temperature_k();
-    let gas_k = next_gas.state().state().temperature;
+    let gas_k = next_gas.temperature_k();
     let enclosure_k = environment.body.radiation_temperature_k;
     let storage_change_j_k = [
         input.mass_kg
@@ -70,8 +70,7 @@ pub(super) fn evaluate(
         environment.gas.mass_kg()
             * environment
                 .gas
-                .model()
-                .specific_entropy_change_j_kg_k(environment.gas.point(), next_gas.point())
+                .specific_entropy_change_to_temperature_j_kg_k(gas_k)
                 .map_err(GasEnergyError::from)
                 .map_err(gas_error)?,
     ];

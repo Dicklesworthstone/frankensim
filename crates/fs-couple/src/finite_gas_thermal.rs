@@ -27,9 +27,9 @@ use fs_conduction::{
 use fs_exec::Cx;
 use fs_material::{
     phase::{UniformEnthalpyStep, UniformEnthalpyStepInput},
-    thermochemical_gas::ResolvedThermochemicalGasState,
     thermochemical_gas::energy::{
         GasEnergyError, GasEnergySolve, GasHeatStep, IsochoricGasParcel,
+        storage::IsochoricGasStorage,
     },
 };
 
@@ -70,9 +70,11 @@ pub struct ConvectionCoefficient<S> {
 /// The declared film coefficient is not inferred from a gas name: its physical
 /// applicability, mixing and flow regime remain the caller's responsibility.
 /// `advance_with_convection` instead resolves h from the same candidate gas.
+/// Both ideal and nonideal parcels use their original caloric/EOS owners;
+/// the default type preserves the ideal-gas call sites.
 #[derive(Clone, Debug)]
-pub struct FiniteGasThermalEnvironment<'a> {
-    pub gas: &'a IsochoricGasParcel,
+pub struct FiniteGasThermalEnvironment<'a, G = IsochoricGasParcel> {
+    pub gas: &'a G,
     pub body: &'a LumpedThermalEnvironment,
     /// Prescribed heat into the gas over this interval [J], excluding Q.
     pub gas_heat_j: f64,
@@ -85,9 +87,9 @@ pub struct FiniteGasThermalEnvironment<'a> {
 
 /// Both original owner reports and the candidate finite gas at one endpoint.
 #[derive(Clone, Debug, PartialEq)]
-pub struct FiniteGasThermalReport<S = ()> {
+pub struct FiniteGasThermalReport<S = (), G = IsochoricGasParcel> {
     /// Publish only after the enclosing mechanical/thermal proposal accepts.
-    pub next_gas: IsochoricGasParcel,
+    pub next_gas: G,
     /// Original gas storage and inversion report.
     pub gas: GasHeatStep,
     /// Original body trajectory, including actual endpoint boundary powers.
@@ -114,8 +116,8 @@ pub struct FiniteGasThermalReport<S = ()> {
     pub trials: usize,
 }
 
-struct Candidate<S> {
-    next_gas: IsochoricGasParcel,
+struct Candidate<S, G> {
+    next_gas: G,
     gas: GasHeatStep,
     body: UniformEnthalpyStep<LumpedEnthalpyMarch>,
     convection: ConvectionCoefficient<S>,
@@ -143,7 +145,7 @@ fn feedback_error<E>(error: feedback::ScalarError<ConvectionError<E>>) -> Convec
     thermal.into()
 }
 
-impl FiniteGasThermalEnvironment<'_> {
+impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
     /// Propose reciprocal convection while retaining the shared thermal API.
     ///
     /// Each trial starts from the SAME accepted gas and body state. The gas
@@ -169,7 +171,7 @@ impl FiniteGasThermalEnvironment<'_> {
         &self,
         cx: &Cx<'_>,
         input: UniformEnthalpyStepInput<'_>,
-    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport>, Error> {
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<(), G>>, Error> {
         self.advance_with_convection(cx, input, |_| {
             Ok::<_, core::convert::Infallible>(ConvectionCoefficient {
                 coefficient_w_per_m2_k: self.body.convection_w_per_m2_k,
@@ -197,8 +199,8 @@ impl FiniteGasThermalEnvironment<'_> {
         &self,
         cx: &Cx<'_>,
         input: UniformEnthalpyStepInput<'_>,
-        mut resolve: impl FnMut(&ResolvedThermochemicalGasState) -> Result<ConvectionCoefficient<S>, E>,
-    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S>>, ConvectionError<E>> {
+        mut resolve: impl FnMut(&G::State) -> Result<ConvectionCoefficient<S>, E>,
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S, G>>, ConvectionError<E>> {
         self.advance_with_convection_feedback(cx, input, |gas, _| resolve(gas))
     }
 
@@ -218,9 +220,9 @@ impl FiniteGasThermalEnvironment<'_> {
         &self,
         cx: &Cx<'_>,
         input: UniformEnthalpyStepInput<'_>,
-        mut resolve: impl FnMut(&ResolvedThermochemicalGasState, f64)
+        mut resolve: impl FnMut(&G::State, f64)
             -> Result<ConvectionCoefficient<S>, E>,
-    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S>>, ConvectionError<E>> {
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<S, G>>, ConvectionError<E>> {
         cx.checkpoint().map_err(|_| Error::Cancelled)?;
         self.gas_solve.validate().map_err(gas_error)?;
         feedback::admit::<ConductionError>(self.exchange)?;
@@ -246,12 +248,12 @@ impl FiniteGasThermalEnvironment<'_> {
                         "gas source or exchange heat overflows or disappears when combined",
                     ).into());
                 }
-                let mut next_gas = self.gas.clone();
+                let mut next_gas = G::clone(self.gas);
                 let gas = next_gas
                     .add_heat(gas_heat, self.gas_solve, &mut *cancelled)
                     .map_err(gas_error)?;
                 let mut environment = self.body.clone();
-                environment.temperature_k = next_gas.state().state().temperature;
+                environment.temperature_k = next_gas.temperature_k();
                 let convection = resolve(next_gas.state(), q).map_err(ConvectionError::Convection)?;
                 if !convection.coefficient_w_per_m2_k.is_finite()
                     || convection.coefficient_w_per_m2_k < 0.0
@@ -297,10 +299,10 @@ impl FiniteGasThermalEnvironment<'_> {
             trials,
         } = solved;
         let temperature_difference =
-            body.state.temperature_k() - next_gas.state().state().temperature;
+            body.state.temperature_k() - next_gas.temperature_k();
         if (q > 0.0 && temperature_difference < 0.0)
             || (q < 0.0 && temperature_difference > 0.0)
-            || (next_gas.state().state().temperature - self.gas.state().state().temperature).abs()
+            || (next_gas.temperature_k() - self.gas.temperature_k()).abs()
                 > self.maximum_gas_temperature_increment_k
         {
             return Err(Error::Invalid(
@@ -315,9 +317,12 @@ impl FiniteGasThermalEnvironment<'_> {
         let body_storage = input.mass_kg
             * (body.state.specific_enthalpy_j_kg()
                 - input.initial.specific_enthalpy_j_kg());
+        // Replay the original fixed-density caloric increment. Subtracting
+        // absolute state energies can erase small heat beside formation energy.
         let gas_storage = self.gas.mass_kg()
-            * (next_gas.state().specific_internal_energy_j_kg()
-                - self.gas.state().specific_internal_energy_j_kg());
+            * self.gas.specific_internal_energy_change_to_temperature_j_kg(
+                next_gas.temperature_k(),
+            ).map_err(gas_error)?;
         let solid_energy_residual_j =
             body_storage - input.internal_heat_j - external_heat_j;
         let combined_energy_residual_j =

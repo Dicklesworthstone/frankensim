@@ -5,6 +5,8 @@ mod film;
 mod source;
 #[path = "finite_gas_convection/uniform.rs"]
 mod uniform;
+#[path = "finite_gas_convection/real_gas.rs"]
+mod real_gas;
 #[path = "finite_gas_convection/natural.rs"]
 mod natural;
 #[path = "finite_gas_convection/natural_network.rs"]

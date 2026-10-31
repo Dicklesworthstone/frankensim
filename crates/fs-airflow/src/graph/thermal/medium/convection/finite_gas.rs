@@ -30,6 +30,7 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::FluidTransportState;
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_material::thermochemical_gas::energy::storage::IsochoricGasStorage;
 use fs_qty::Length;
 
 /// Explicit flow/geometry for a single exposed patch, not a stored coefficient.
@@ -155,6 +156,8 @@ impl ForcedGasSurface {
     /// The SAME candidate gas endpoint supplies storage, transport, h and the
     /// returned acoustic state. A data-only gas swap therefore changes the heat
     /// transfer law as well as thermodynamic storage; no piston is required.
+    /// Ideal and Peng--Robinson parcels share this residual; nonideal density,
+    /// heat capacity and pressure remain those of the real-gas endpoint.
     ///
     /// A positive patch must cover the whole exposed body boundary. Smearing a
     /// partial-patch h over that boundary would understate the local Biot number.
@@ -168,12 +171,12 @@ impl ForcedGasSurface {
     /// Biot refusal before the physical transfer is known. Every nonzero trial
     /// uses its actual branch. Constant-heat-flux duct correlations remain
     /// incompatible with this isothermal-body model.
-    pub fn isochoric_body_candidate(
+    pub fn isochoric_body_candidate<G: IsochoricGasStorage>(
         self,
         cx: &Cx<'_>,
-        environment: &FiniteGasThermalEnvironment<'_>,
+        environment: &FiniteGasThermalEnvironment<'_, G>,
         body: UniformEnthalpyStepInput<'_>,
-    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<Option<GasConvectionEvaluation>>>,
+    ) -> Result<UniformEnthalpyStep<FiniteGasThermalReport<Option<GasConvectionEvaluation>, G>>,
         ConvectionError<MaterialConvectionError>>
     {
         cx.checkpoint().map_err(|_| ConvectionError::Thermal(ThermalPistonError::Cancelled))?;

@@ -1,6 +1,7 @@
 //! Wall-dependent convection on the original reciprocal body/gas transaction.
 
 use super::*;
+use fs_material::fluid_transport::ThermalFluidTransport;
 
 /// Independent wall-temperature solve inside each proposed gas/heat state.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,7 +59,7 @@ impl<E: core::fmt::Debug> core::fmt::Display for WallConvectionError<E> {
 }
 impl<E: std::error::Error + 'static> std::error::Error for WallConvectionError<E> {}
 
-impl FiniteGasThermalEnvironment<'_> {
+impl<G: IsochoricGasStorage> FiniteGasThermalEnvironment<'_, G> {
     /// Resolve convection from the SAME gas and wall endpoint, including laws
     /// needing film temperature or the actual wall-to-gas temperature drop.
     ///
@@ -83,15 +84,18 @@ impl FiniteGasThermalEnvironment<'_> {
         input: UniformEnthalpyStepInput<'_>,
         wall: WallConvectionSolve,
         mut resolve: impl FnMut(
-            &ResolvedThermochemicalGasState,
+            &G::State,
             f64,
         ) -> Result<ConvectionCoefficient<S>, E>,
     ) -> Result<
-        UniformEnthalpyStep<FiniteGasThermalReport<WallConvectionSample<S>>>,
+        UniformEnthalpyStep<FiniteGasThermalReport<WallConvectionSample<S>, G>>,
         ConvectionError<WallConvectionError<E>>,
     > {
         let mut total_wall_trials = 0;
         let result = self.advance_with_convection_feedback(cx, input, |gas, _| {
+            let gas_temperature_k = gas.thermal_transport_state()
+                .map_err(|error| WallConvectionError::Thermal(gas_error(error.into())))?
+                .temperature_k();
             feedback::solve_scalar(
                 wall.temperature_increment_bracket_k,
                 1.0,
@@ -114,7 +118,7 @@ impl FiniteGasThermalEnvironment<'_> {
                     let coefficient =
                         resolve(gas, temperature_k).map_err(WallConvectionError::Source)?;
                     let mut environment = self.body.clone();
-                    environment.temperature_k = gas.state().temperature;
+                    environment.temperature_k = gas_temperature_k;
                     environment.convection_w_per_m2_k = coefficient.coefficient_w_per_m2_k;
                     let body = environment.advance(cx, input).map_err(|error| {
                         if cx.checkpoint().is_err() {
@@ -137,7 +141,7 @@ impl FiniteGasThermalEnvironment<'_> {
                     let boundary_residual_j = input.duration_s
                         * input.surface_area_m2
                         * (coefficient.coefficient_w_per_m2_k - endpoint.coefficient_w_per_m2_k)
-                        * (endpoint_temperature_k - gas.state().temperature);
+                        * (endpoint_temperature_k - gas_temperature_k);
                     let scaled = (temperature_residual_k.abs() / wall.temperature_tolerance_k)
                         .max(boundary_residual_j.abs() / self.exchange.source_tolerance_j);
                     if !boundary_residual_j.is_finite()

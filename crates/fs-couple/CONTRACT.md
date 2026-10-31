@@ -7313,12 +7313,22 @@ subsequent heating, and exact binding/work/cancellation rollback.
 ### Finite source gas on uniform thermal feedback
 
 `finite_gas_thermal::FiniteGasThermalEnvironment` adapts the original
-`LumpedThermalEnvironment` to an `IsochoricGasParcel` through the existing
+`LumpedThermalEnvironment` to an `IsochoricGasStorage` through the existing
 `UniformEnthalpyStep` callback. Each proposal retains the accepted body, gas and
 hereditary history. The original gas energy inversion receives prescribed gas
 heat + Q; the original lumped body solves against that trial gas endpoint. The
 shared bounded feedback owner enforces Q + dt*convection_into_body_w = 0. No
 heat-capacity, EOS, Biot or enthalpy solver is replaced.
+
+The default remains `IsochoricGasParcel`; `IsochoricRealGasParcel` uses the same
+feedback, endpoint-convection and wall-convection methods with its conserved
+real density, source-bound Peng--Robinson pressure and residual calorics.
+Each report retains that concrete parcel and its complete material endpoint.
+Gas storage and entropy audits evaluate original-law increments at conserved
+density, canceling common reference offsets before rounding. Small physical
+heat therefore survives large formation-energy references. The nonideal path
+is homogeneous and frozen-composition; phase equilibrium and condensation
+remain separate owners, and the specialized condensation adapter is unchanged.
 
 Accepted body boundary heat is separately integrated enclosure radiation - Q.
 The same Q enters the gas, while the original body's endpoint powers and the

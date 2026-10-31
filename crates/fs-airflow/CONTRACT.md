@@ -659,6 +659,14 @@ the actual candidate gas endpoint; accepted transport and correlation sources
 remain beside the same gas state used for energy and acoustic observations.
 The original body solver retains conductivity, radiation, Biot admission and
 enthalpy, and the single exchanged heat cancels in the combined energy balance.
+The same isochoric adapter admits both ideal and Peng--Robinson parcels through
+the shared material storage interface. Real EOS density and Cp supply Reynolds,
+Prandtl and the live coefficient; the accepted parcel retains its real pressure,
+caloric storage, entropy and acoustic state. No ideal-reference density enters
+that transfer. `tests/finite_gas_convection/real_gas.rs` covers dense-gas heating
+and cooling, reciprocal energy/entropy accounting, wall feedback, formation
+reference invariance and transactional source/cancellation refusals. Film,
+natural-convection and piston adapters retain their existing source assumptions.
 A positive patch must cover the whole body surface; zero area explicitly
 insulates it. Bulk-gas property evaluation and prescribed relative flow retain
 their correlation limits. Dittus-Boelter selects its heating/cooling branch
