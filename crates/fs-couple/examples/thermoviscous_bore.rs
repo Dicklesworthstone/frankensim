@@ -1,4 +1,4 @@
-//! Original resolved thermal/molecular fields, DG bore and computed microphone.
+//! Resolved thermal/molecular fields between two finite DG ducts and a microphone.
 //!
 //! Run with a fresh destination:
 //! cargo run --release -p fs-couple --example thermoviscous_bore -- output.wav
@@ -53,7 +53,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let gate = Arc::new(CancelGate::new_clock_free());
     // Original explicit named-species source; the same composition supplies the
-    // existing composition-limited terrestrial-air molecular law in BOTH regions.
+    // existing composition-limited terrestrial-air molecular law in the field
+    // and BOTH original ducts.
     let record = read_gas_record(
         &mut "mixture 293.15 101325 mole 4 N2 0.78084 O2 0.209476 Ar 0.009365 CO2 0.000319"
             .split_ascii_whitespace(),
@@ -83,8 +84,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
     let inlet = end(0.0);
     let outlet = end(LENGTH_M);
+    let drive: Vec<_> = faces.iter().copied().filter(|face| {
+        face.iter().all(|&v| (points[v as usize][1] - HEIGHT_M).abs() < 1e-14)
+    }).collect();
     let walls: Vec<_> = faces.iter().copied()
-        .filter(|face| !inlet.contains(face) && !outlet.contains(face)).collect();
+        .filter(|face| !inlet.contains(face) && !outlet.contains(face) && !drive.contains(face)).collect();
     let field = ThermoviscousFe::new(
         &mesh,
         &points,
@@ -92,7 +96,10 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         &ThermoviscousBoundary {
             no_slip_faces: walls.clone(),
             isothermal_faces: walls,
-            ports: vec![BoundaryMode::uniform(&inlet), BoundaryMode::uniform(&outlet)],
+            ports: vec![
+                BoundaryMode::uniform(&inlet), BoundaryMode::uniform(&outlet),
+                BoundaryMode::uniform(&drive),
+            ],
         },
         ThermoviscousLimits::default(),
         &mut || gate.is_requested(),
@@ -116,7 +123,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         DgBoundary::Port(PortId(1)),
     )?
     .with_viscothermal(12, BAND_HZ, 0.01)?
-    .with_molecular_relaxation(molecular)?;
+    .with_molecular_relaxation(molecular.clone())?;
     let load = DgPortLoad::new_with_computed_baffled(
         duct,
         RATE,
@@ -127,6 +134,21 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257",
         )?,
         &gate,
+    )?;
+    // A second original finite duct provides a closed cork-side return. Its
+    // propagation, molecular reservoirs and wall memory continue independently;
+    // the full FE cross-port map transmits its reaction to the radiating bore.
+    let cork_duct = DgDuct::new(
+        &Duct { segments: vec![Segment::Cylinder { radius, length: 0.02 }] },
+        &gas,
+        DgMesh { elements: 2, order: 2 },
+        DgBoundary::Port(PortId(0)),
+        DgBoundary::Closed,
+    )?
+    .with_viscothermal(12, BAND_HZ, 0.01)?
+    .with_molecular_relaxation(molecular)?;
+    let cork_load = DgPortLoad::new(
+        cork_duct, 1.0 / f64::from(RATE), 1e-11, MAX_DG_PROPAGATOR_DOFS,
     )?;
     let system = ThermoviscousDg::new(
         &source,
@@ -140,16 +162,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ..ThermoviscousDgLimits::default()
         },
         &gate,
-    )?;
-    // An authored 2 ms, one-pascal triangular pressure pulse, then zero applied
-    // pressure. Its broad spectrum and this coarse mesh require refinement;
+    )?.with_additional_duct(0, cork_load, &gate)?;
+    // An independent top opening supplies an authored 2 ms, one-pascal
+    // triangular pressure pulse. Both internal duct slots stay zero in the
+    // controls: their reactions are solved together, including returning waves.
+    // The pulse's broad spectrum and this coarse mesh require refinement;
     // BAND_HZ is an admission range, not an assertion that input is band-limited.
     let controls = (0..SAMPLES).map(|sample| {
         let pressure = if sample < 96 {
             1.0 - ((sample as f64 + 0.5) / 48.0 - 1.0).abs()
         } else { 0.0 };
         ThermoviscousDgControl {
-            traction_pa: vec![pressure, 0.0],
+            traction_pa: vec![0.0, 0.0, pressure],
             wall_forces_n_per_sqrt_kg: Vec::new(),
         }
     }).collect();
@@ -165,7 +189,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         ThermoviscousDgPerformanceConfig {
             sample_rate_hz: RATE,
             maximum_block: BLOCK,
-            maximum_control_values: 2 * SAMPLES,
+            maximum_control_values: 3 * SAMPLES,
         },
         gate.clone(),
     )?;
@@ -182,5 +206,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         summary.samples, summary.clipped_samples, summary.full_scale_pa);
     println!("last physical interval: stored={} J, balance={} J, interface={} J",
         frame.stored_energy_j, frame.balance_residual_j, frame.interface_work_residual_j);
+    for cork in &frame.additional_ducts {
+        println!("finite cork passage at FE port {}: pressure={} Pa, flow={} m^3/s, interface={} J",
+            cork.port, cork.mean_pressure_pa, cork.mean_flow_m3_s, cork.interface_work_residual_j);
+    }
     Ok(())
 }

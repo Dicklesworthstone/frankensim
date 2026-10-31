@@ -2,10 +2,10 @@
 
 `fs_couple::cavity_modal::interior::thermoviscous::dg::ThermoviscousDg`
 connects the original three-dimensional thermoviscous finite-element time
-trajectory to a continuing `DgPortLoad`. It retains pressure, Cartesian
+trajectory to one or more continuing `DgPortLoad` owners. It retains pressure, Cartesian
 velocity, translational temperature, every original molecular temperature,
 finite conductive-wall temperatures and structural displacement/velocity.
-The bore keeps its own fields, branches, material walls, finite passages and
+Every bore keeps its own fields, branches, material walls, finite passages and
 terminal radiation histories.
 
 This supplies a causal composition path for spatial acoustic regions such as
@@ -17,10 +17,11 @@ connections.
 
 ## Physical connection
 
-The field and bore have one original gas state and one exact physical clock.
-The selected FE port must have unit pressure shape on an exclusive planar
-surface, with the same area as the bore inlet. The mode's conjugate is actual
-inward volume flow. Other modes keep their original authored tractions.
+The field and all attached ducts have one original gas state and one exact
+physical clock. Each selected FE port must have unit pressure shape on an
+exclusive planar surface, with the same area as its duct inlet. The mode's
+conjugate is actual inward volume flow. Unconnected modes keep their original
+authored tractions.
 An additional area discontinuity, chimney or end correction is not inferred.
 Matching area does not prove shape equivalence or justify neglecting higher
 interface modes; interface placement and spatial refinement remain necessary.
@@ -33,14 +34,30 @@ Q_DG = -Q_FE
 p = (h - Z*Q_free) / (1 + Z*beta)
 ```
 
+For several ducts, the same complete field supplies the matrix relation
+`Q_FE = Q_free + B*p`. With one original inlet impedance per duct, the
+simultaneous closure is:
+
+```text
+(I + diag(Z)*B) * p = h - diag(Z)*Q_free
+Q_DG = -(Q_free + B*p)
+```
+
+Every off-diagonal entry of `B` is retained. A finite cork passage or airway
+therefore reacts on the main bore through the shared spatial field. The small
+constant interface matrix is factored once during cold attachment using the
+existing dense LU owner; each interval solves only its changing right-hand side.
+No symmetry of the matrix or independence of its ports is assumed.
+
 The original prepared pHS trajectory supplies the complete affine mean map.
 There are no auxiliary probe trajectories, fitted response, added integrator,
-or per-step matrix exponential. Pressure is held on the field; its actual
-interval-mean flow is held on the bore. This partition requires coupling-clock
+per-step factorization or per-step matrix exponential. Pressure is held on the
+field; its actual interval-mean flows are held on the original ducts. This partition requires coupling-clock
 refinement independently of either spatial mesh or material model.
 
-Both original candidates must agree on pressure and swept volume. Their
-interface work cancels inside the combined account; authored external pressure
+Every original candidate must agree on pressure and swept volume at its
+interface. Each interface's work cancellation is checked independently before
+the combined account is admitted; authored external pressure
 and structural force remain external supply. Each frame retains original FE
 heat channels, the DG loss receipt, terminal work, complete storage and balance
 residuals. An inferred DG loss remains an inferred receipt; it is not relabeled
@@ -48,7 +65,8 @@ as independently measured material heating. Rational terminal radiation retains
 its original signed-work accounting.
 
 No participant publishes until all physical and numerical checks and the final
-cancellation poll succeed. Rejected steps preserve both accepted histories.
+cancellation poll succeed. Rejected steps preserve the field and every duct's
+accepted history, including when a later duct or the combined work check refuses.
 
 ## Original material preparation
 
@@ -67,10 +85,19 @@ declared molecular reservoirs is refused. `with_initial_state` admits complete
 nonzero field/wall states before the first step, including original molecular
 and solid temperature perturbations.
 
+Before the first step, `with_additional_duct(port, load, gate)` attaches another
+unadvanced original duct at a distinct eligible FE port. This does not change
+the primary `port()` or `load()`. `coupled_ports()` returns all connected FE
+identities, primary first; `load_at_port()` and `additional_loads()` expose the
+other accepted owners without mutable access. A frame's `additional_ducts`
+contains each original output, common pressure, mean flow and interface work
+residual. The frame's storage, loss, terminal-work and balance totals include
+the complete field and all attached ducts.
+
 Each direct `step` takes complete held pressure and structural-force vectors.
-The connected pressure slot must be zero in the authored vector: its reaction
-is solved by the coupler. Callers inspect `state`, `load` and `last_frame`
-without receiving mutable access to either accepted owner.
+Every connected pressure slot must be zero in the authored vector: its reaction
+is solved by the coupler. External excitation belongs in unconnected pressure
+slots or original structural forces.
 
 ## Pressure, microphone and WAV output
 
@@ -87,6 +114,12 @@ shared exterior-material propagation law, including its phase and causal delay.
 It neither adds a second reaction nor replaces the interior molecular dynamics
 with an output filter.
 
+`ThermoviscousDgPerformance::new` observes the primary duct.
+`new_at_port(system, port, ...)` selects another attached FE-to-duct connection
+for inlet pressure or that duct's own computed-baffle microphone. All ducts
+continue advancing in either case; selecting an observation does not disconnect
+the others or sum unrelated terminal signals.
+
 The shared pressure decimator, ensemble and PCM streaming functions can consume
 this renderer without retiming the physical system. A failed callback poisons
 playback, preserving completed samples and the last accepted physical state.
@@ -101,22 +134,33 @@ cargo run --release -p fs-couple --example thermoviscous_bore -- output.wav
 ```
 
 The example uses explicit named terrestrial-air composition and the existing
-composition-limited molecular law in both the resolved region and the DG bore.
-A 15 × 2 × 4 mm manufactured region with no-slip, isothermal walls receives
-an authored 2 ms, one-pascal pressure pulse. A 50 mm circular bore of equal
-interface area has its original viscothermal and molecular memory, computed
-baffled radiation, and a microphone 0.1 m from the outlet. The shared writer
+composition-limited molecular law in the resolved region and both DG ducts.
+A 15 × 2 × 4 mm manufactured region connects a 20 mm closed cork-side passage
+at its left face (FE port 0) and a 50 mm radiating bore at its right face
+(FE port 1). Each circular duct has the same interface area as its rectangular
+FE face, its own 12-pole viscothermal memory and its original molecular
+reservoirs, on the same 48 kHz clock.
+
+An independent opening on the region's top face receives an authored 2 ms,
+one-pascal triangular pressure pulse at FE port 2. Controls are `[0, 0, pulse]`;
+the two internal reactions come from the coupled solve. The remaining faces
+are no-slip and isothermal. The existing computed baffled radiation and
+microphone 0.1 m from the main outlet remain attached to the primary bore;
+the closed passage's returning wave influences that microphone through the
+original field and bore dynamics. The shared writer
 exports 20 ms at 48 kHz with a fixed one-pascal PCM scale and refuses to replace
-an existing output file.
+an existing output file. Console output includes the aggregate balance and
+the closed passage's actual final interface pressure, flow and work residual.
 
 This small example exercises the public composition. It is not a real mouth,
 jet, flute, tone-hole model or listening reference. Its coarse spatial mesh,
 uniform interface projection, time partition and declared source/observer bands
 require refinement. The input pulse is not asserted to be band-limited.
 
-Five new native regression groups cover original-owner replay, molecular and
-finite-wall evolution, actual downstream feedback, energy and rollback,
-binding admission and callback-independent playback. Rust syntax was parsed
+Native regression coverage includes original-owner replay, molecular and
+finite-wall evolution, downstream and finite cork-side feedback, the full
+cross-port solve, aggregate energy and all-owner rollback, binding admission
+and callback-independent playback at selected ports. Rust syntax was parsed
 with the pinned formatter during implementation. Compilation, native numerical
 tests and example execution were not run because this executor lacks the full
 pinned dependency checkout and remote build runners. No audible improvement or
