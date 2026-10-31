@@ -9,7 +9,10 @@
 //! sensible energy of the new electron. Recombination reverses that transfer.
 //!
 //! With extent xi [mol], the exact electron budget is
-//! `3R/2 * (ne0+xi) * Te = 3R/2 * ne0 * Te0 + Pe*t - chi*xi`.
+//! `3R/2 * (ne0+xi) * Te = 3R/2 * ne0 * Te0 + Pe*t - chi*xi - Q`.
+//! The optional shared collision sources supply the equal-and-opposite
+//! electron-to-heavy transfer Q. Reaction and heat transfer are solved
+//! simultaneously, retaining the changing electron heat capacity.
 //! Heavy sensible heating uses the same source-difference caloric owner as
 //! frozen electron/heavy exchange. Separate, constant externally calculated
 //! powers may act on either pool. A power sampled from an electrical solve is
@@ -18,11 +21,14 @@
 //! Adaptive backward Euler with step doubling solves only ONE scalar extent.
 //! Analytic constrained derivatives, positivity and source-domain brackets,
 //! actual two-pool entropy, and source energy balances gate publication. No
-//! nonlinear trial allocates. Elastic/Coulomb exchange, radiative recombination,
-//! excited states, secondary-electron spectra and spatial transport are outside
-//! this channel; use their own operators and account for each energy transfer
-//! once. Estimated local errors are not empirical or global error certificates.
+//! nonlinear trial allocates. Collision coefficients are refreshed at each
+//! substep's actual populations and temperatures, then held in its implicit
+//! solve; step doubling controls this first-order approximation. Radiative
+//! recombination, excited states, secondary-electron spectra and spatial
+//! transport remain outside this channel. Estimated local errors are not
+//! empirical or global error certificates.
 
+use super::energy::{ElectronHeavyCollisionSources, ExchangeConductance, PreparedExchange};
 use fs_qty::{Amount, Energy, Power, Temperature, Time};
 use fs_thermochem::equilibrium::composition::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
@@ -173,9 +179,15 @@ pub struct AtomicIonizationBalance {
     pub heavy_deposited_energy_j: f64,
     /// Original reaction formation energy stored, chi*xi [J].
     pub chemical_storage_change_j: f64,
-    /// Actual electron sensible change + chemical storage - electron work [J].
+    /// Signed cumulative electron-to-heavy thermal transfer [J].
+    pub electron_to_heavy_energy_j: f64,
+    /// Coulomb part of the cumulative electron-to-heavy transfer [J].
+    pub electron_to_heavy_coulomb_energy_j: f64,
+    /// Neutral-collision part of the cumulative electron-to-heavy transfer [J].
+    pub electron_to_heavy_neutral_energy_j: f64,
+    /// Electron sensible + chemical storage + transfer - electron work [J].
     pub electron_sensible_energy_residual_j: f64,
-    /// Actual heavy sensible change - heavy work [J].
+    /// Heavy sensible change - transfer - heavy work [J].
     pub heavy_sensible_energy_residual_j: f64,
     /// Original-source total energy increment - all external work [J].
     pub energy_residual_j: f64,
@@ -197,6 +209,7 @@ pub struct AtomicIonizationResult {
     initial: FrozenIonizedGasStateV1,
     state: FrozenIonizedGasStateV1,
     channel: AtomicIonizationV1,
+    collisions: Option<ElectronHeavyCollisionSources>,
     controls: AtomicIonizationSolve,
     elapsed: Time,
     extent: Amount,
@@ -214,6 +227,11 @@ impl AtomicIonizationResult {
     /// Original atomic channel, cross section, and statistical weights.
     pub const fn channel(&self) -> &AtomicIonizationV1 {
         &self.channel
+    }
+    /// Original collision laws and initial Coulomb population receipt. Changed
+    /// endpoint populations require explicit rebinding for material transport.
+    pub const fn collision_sources(&self) -> Option<&ElectronHeavyCollisionSources> {
+        self.collisions.as_ref()
     }
     /// Numerical controls and source intervals used.
     pub const fn controls(&self) -> AtomicIonizationSolve {
@@ -250,6 +268,58 @@ pub fn advance_atomic_ionization(
     heavy_power: Power,
     duration: Time,
     controls: AtomicIonizationSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<AtomicIonizationResult, AtomicIonizationError> {
+    advance(
+        initial,
+        channel,
+        None,
+        electron_power,
+        heavy_power,
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+/// Evolve atomic chemistry and electron/heavy thermal relaxation in one
+/// conservative implicit solve. Sources for neutrals created by recombination
+/// are required even when their initial abundance is zero. The original
+/// Coulomb receipt must match the initial population; subsequent moments are
+/// explicitly refreshed at actual populations, density and temperatures.
+///
+/// Held powers may already include field-derived friction and signed drift
+/// corrections. Do not add total E.J or zero-drift exchange to them again.
+pub fn advance_atomic_ionization_with_collisions(
+    initial: &FrozenIonizedGasStateV1,
+    channel: &AtomicIonizationV1,
+    collisions: &ElectronHeavyCollisionSources,
+    electron_power: Power,
+    heavy_power: Power,
+    duration: Time,
+    controls: AtomicIonizationSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<AtomicIonizationResult, AtomicIonizationError> {
+    advance(
+        initial,
+        channel,
+        Some(collisions),
+        electron_power,
+        heavy_power,
+        duration,
+        controls,
+        cancelled,
+    )
+}
+
+fn advance(
+    initial: &FrozenIonizedGasStateV1,
+    channel: &AtomicIonizationV1,
+    collisions: Option<&ElectronHeavyCollisionSources>,
+    electron_power: Power,
+    heavy_power: Power,
+    duration: Time,
+    controls: AtomicIonizationSolve,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<AtomicIonizationResult, AtomicIonizationError> {
     controls.validate()?;
@@ -266,6 +336,7 @@ pub fn advance_atomic_ionization(
     let problem = Problem::new(
         initial,
         channel,
+        collisions,
         [heavy_power.value(), electron_power.value()],
         controls,
         &mut cancelled,
@@ -275,10 +346,17 @@ pub fn advance_atomic_ionization(
         extent: 0.0,
         heavy_temperature: initial.heavy_temperature().value(),
         electron_temperature: initial.electron_temperature().value(),
+        exchange: 0.0,
+        coulomb_exchange: 0.0,
+        electron_temperature_extent_derivative: 0.0,
     };
     let start = point;
     let mut balance = AtomicIonizationBalance::default();
     let mut step = controls.initial_step_s;
+    // The accepted endpoint's source evaluation is exactly the next step's
+    // starting coefficient. Reuse it across accepted steps and rejected
+    // retries instead of repeating Maxwellian quadrature and Coulomb refresh.
+    let mut coupling = problem.coupling(&point, &mut cancelled)?;
     while point.time < duration.value() {
         poll(&mut cancelled)?;
         if balance.accepted_steps + balance.rejected_steps >= controls.maximum_steps {
@@ -296,9 +374,13 @@ pub fn advance_atomic_ionization(
             return Err(AtomicIonizationError::StepBudget);
         }
         let attempt = (|| {
-            let full = problem.step(&point, end, &mut cancelled)?;
-            let half = problem.step(&point, middle, &mut cancelled)?;
-            let final_point = problem.step(&half, end, &mut cancelled)?;
+            let full = problem.step(&point, end, coupling, &mut cancelled)?;
+            let half = problem.step(&point, middle, coupling, &mut cancelled)?;
+            let middle_coupling = problem.coupling(&half, &mut cancelled)?;
+            let final_point = problem.step(&half, end, middle_coupling, &mut cancelled)?;
+            // Admission uses the endpoint's real abundances, not the lagged
+            // state that supplied this first-order substep's conductance.
+            let endpoint_coupling = problem.coupling(&final_point, &mut cancelled)?;
             let error = problem.error(&full, &final_point);
             let entropy = problem.entropy_change(&point, &final_point, &mut cancelled)?;
             // For backward Euler, concavity gives Delta S >= sum(h*P/T_end)
@@ -324,10 +406,11 @@ pub fn advance_atomic_ionization(
                 final_point,
                 error,
                 (entropy - supplied).min(first_excess).min(second_excess),
+                endpoint_coupling,
             ))
         })();
         match attempt {
-            Ok((next, error, excess)) if error <= 1.0 => {
+            Ok((next, error, excess, next_coupling)) if error <= 1.0 => {
                 balance.maximum_normalized_local_error =
                     balance.maximum_normalized_local_error.max(error);
                 balance.minimum_step_entropy_excess_j_k = if balance.accepted_steps == 0 {
@@ -337,6 +420,7 @@ pub fn advance_atomic_ionization(
                 };
                 balance.accepted_steps += 1;
                 point = next;
+                coupling = next_coupling;
                 let factor = if error == 0.0 {
                     2.0
                 } else {
@@ -346,7 +430,7 @@ pub fn advance_atomic_ionization(
                     .min(controls.maximum_step_s)
                     .max(controls.minimum_step_s);
             }
-            Ok((_, error, _)) => {
+            Ok((_, error, _, _)) => {
                 balance.rejected_steps += 1;
                 step = dt * (0.8 / fs_math::det::sqrt(error)).clamp(0.1, 0.5);
                 if step < controls.minimum_step_s {
@@ -382,6 +466,7 @@ pub fn advance_atomic_ionization(
         initial: initial.clone(),
         state,
         channel: channel.clone(),
+        collisions: collisions.cloned(),
         controls,
         elapsed: duration,
         extent: Amount::new(point.extent),

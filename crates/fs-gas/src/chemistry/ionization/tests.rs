@@ -1,5 +1,6 @@
 use super::*;
 mod background;
+mod collisions;
 mod transient;
 use fs_evidence::ValidityDomain;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};

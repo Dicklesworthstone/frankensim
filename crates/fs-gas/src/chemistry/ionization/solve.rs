@@ -1,4 +1,6 @@
 use super::*;
+mod collisions;
+use collisions::collision_error;
 
 const CV: f64 = 1.5 * R;
 
@@ -8,6 +10,9 @@ pub(super) struct Point {
     pub extent: f64,
     pub heavy_temperature: f64,
     pub electron_temperature: f64,
+    pub exchange: f64,
+    pub coulomb_exchange: f64,
+    pub electron_temperature_extent_derivative: f64,
 }
 
 pub(super) struct Problem<'a> {
@@ -19,11 +24,13 @@ pub(super) struct Problem<'a> {
     indices: [usize; 3],
     electron_sensible: f64,
     heavy_limits: [f64; 2],
+    exchange: Option<PreparedExchange<'a>>,
 }
 impl<'a> Problem<'a> {
     pub fn new(
         initial: &'a FrozenIonizedGasStateV1,
         channel: &'a AtomicIonizationV1,
+        collisions: Option<&'a ElectronHeavyCollisionSources>,
         powers: [f64; 2],
         controls: AtomicIonizationSolve,
         cancelled: &mut impl FnMut() -> bool,
@@ -85,6 +92,10 @@ impl<'a> Problem<'a> {
             indices,
             electron_sensible: CV * amounts[2] * initial.electron_temperature().value(),
             heavy_limits: [0.0; 2],
+            exchange: collisions
+                .map(|sources| PreparedExchange::new(initial, sources, indices[0], cancelled))
+                .transpose()
+                .map_err(collision_error)?,
         };
         result.heavy_limits = [
             result
@@ -197,6 +208,13 @@ impl<'a> Problem<'a> {
             extent,
             heavy_temperature: heavy,
             electron_temperature: te,
+            exchange: 0.0,
+            coulomb_exchange: 0.0,
+            electron_temperature_extent_derivative: if amounts[2] == 0.0 {
+                0.0
+            } else {
+                -(self.channel.ionization_energy_j_mol() + CV * te) / (CV * amounts[2])
+            },
         })
     }
 
@@ -328,9 +346,7 @@ impl<'a> Problem<'a> {
         let residual =
             point.extent - start.extent - dt * (volume * evaluated.progress_rate_mol_m3_s);
         let dc = evaluated.concentration_derivatives_per_s;
-        let temperature_derivative = -(self.channel.ionization_energy_j_mol()
-            + CV * point.electron_temperature)
-            / (CV * amounts[2]);
+        let temperature_derivative = point.electron_temperature_extent_derivative;
         let derivative = 1.0
             - dt * (-dc[0]
                 + dc[1]
@@ -350,8 +366,12 @@ impl<'a> Problem<'a> {
         &self,
         start: &Point,
         end: f64,
+        coupling: ExchangeConductance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Point, AtomicIonizationError> {
+        if self.exchange.is_some() && self.amounts[2] > 0.0 {
+            return self.step_with_exchange(start, end, coupling, cancelled);
+        }
         let th = self.heavy_temperature(end, start.heavy_temperature, cancelled)?;
         if self.amounts[2] == 0.0 {
             // Electron impact and its three-body reverse both require electrons.
@@ -466,7 +486,7 @@ impl<'a> Problem<'a> {
                         + self.controls.relative_tolerance * a.abs().max(b.abs())),
             );
         }
-        error.max(
+        error = error.max(
             (full.electron_temperature - half.electron_temperature).abs()
                 / (self.controls.temperature_tolerance_k
                     + self.controls.relative_tolerance
@@ -474,7 +494,31 @@ impl<'a> Problem<'a> {
                             .electron_temperature
                             .abs()
                             .max(half.electron_temperature.abs())),
-        )
+        );
+        error = error.max(
+            (full.heavy_temperature - half.heavy_temperature).abs()
+                / (self.controls.temperature_tolerance_k
+                    + self.controls.relative_tolerance
+                        * full
+                            .heavy_temperature
+                            .abs()
+                            .max(half.heavy_temperature.abs())),
+        );
+        for (a, b) in [
+            (full.exchange, half.exchange),
+            (full.coulomb_exchange, half.coulomb_exchange),
+            (
+                full.exchange - full.coulomb_exchange,
+                half.exchange - half.coulomb_exchange,
+            ),
+        ] {
+            error = error.max(
+                (a - b).abs()
+                    / (self.controls.energy_tolerance_j
+                        + self.controls.relative_tolerance * a.abs().max(b.abs())),
+            );
+        }
+        error
     }
 
     pub fn entropy_supply(&self, dt: f64, point: &Point) -> f64 {
@@ -563,23 +607,7 @@ impl<'a> Problem<'a> {
         balance: &mut AtomicIonizationBalance,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FrozenIonizedGasStateV1, AtomicIonizationError> {
-        let mut amounts = self.initial.amounts().to_vec();
-        for (i, n) in self.indices.into_iter().zip(self.amounts_at(point.extent)) {
-            amounts[i] = Amount::new(n);
-        }
-        let state = FrozenIonizedGasStateV1::new(
-            self.initial.thermodynamics(),
-            &amounts,
-            self.initial.volume(),
-            Temperature::new(point.heavy_temperature),
-            Temperature::new(point.electron_temperature),
-            self.controls.relative_charge_tolerance,
-            &mut *cancelled,
-        )
-        .map_err(|error| match error {
-            FrozenIonizedGasStateErrorV1::Cancelled => AtomicIonizationError::Cancelled,
-            error => AtomicIonizationError::State(error),
-        })?;
+        let state = self.state_at(point, cancelled)?;
         let heavy_change = self.heavy_calorics(point.heavy_temperature, cancelled)?.0;
         let electron = &self.initial.thermodynamics().models()[self.indices[2]];
         let delta_u = electron
@@ -597,10 +625,14 @@ impl<'a> Problem<'a> {
         balance.electron_deposited_energy_j = self.powers[1] * point.time;
         balance.heavy_deposited_energy_j = self.powers[0] * point.time;
         balance.chemical_storage_change_j = self.channel.ionization_energy_j_mol() * point.extent;
-        balance.electron_sensible_energy_residual_j = electron_change
-            + balance.chemical_storage_change_j
-            - balance.electron_deposited_energy_j;
-        balance.heavy_sensible_energy_residual_j = heavy_change - balance.heavy_deposited_energy_j;
+        balance.electron_to_heavy_energy_j = point.exchange;
+        balance.electron_to_heavy_coulomb_energy_j = point.coulomb_exchange;
+        balance.electron_to_heavy_neutral_energy_j = point.exchange - point.coulomb_exchange;
+        balance.electron_sensible_energy_residual_j =
+            electron_change + balance.chemical_storage_change_j + point.exchange
+                - balance.electron_deposited_energy_j;
+        balance.heavy_sensible_energy_residual_j =
+            heavy_change - point.exchange - balance.heavy_deposited_energy_j;
         // Reference-invariant original-source increment, not subtraction of
         // two large absolute parcel energies containing arbitrary formation zeros.
         balance.energy_residual_j =

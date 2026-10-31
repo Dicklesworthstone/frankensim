@@ -35,6 +35,9 @@ use fs_thermochem::equilibrium::composition::{
 use fs_thermochem::kinetics::{KineticsErrorV1, admit_caloric_interval};
 use fs_thermochem::{SpeciesId, ThermochemErrorV1, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 
+mod exchange;
+pub use exchange::ElectronHeavyCollisionSources;
+pub(in crate::chemistry) use exchange::{ExchangeConductance, PreparedExchange};
 mod solve;
 pub(super) use solve::source_pool_calorics;
 use solve::{Point, Problem};

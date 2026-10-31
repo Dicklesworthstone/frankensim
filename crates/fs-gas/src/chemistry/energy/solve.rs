@@ -290,67 +290,15 @@ impl<'a> Problem<'a> {
                 "Coulomb thermal conductance",
             ));
         }
-        if !self.has_electrons {
-            return Ok(Coupling {
-                neutral: 0.0,
-                coulomb,
-            });
-        }
-        let mut frequency = Sum::default();
-        for (i, source) in self
-            .sources
-            .iter()
-            .enumerate()
-            .filter_map(|(i, s)| s.map(|s| (i, s)))
-        {
-            poll(cancelled)?;
-            let mass = self.initial.thermodynamics().models()[i]
-                .molar_mass()
-                .value()
-                / AVOGADRO_PER_MOL;
-            if fs_math::det::sqrt(ELECTRON_MASS_KG / mass)
-                > self.controls.maximum_target_thermal_speed_ratio
-            {
-                return Err(ElectronHeavyEnergyError::OutsideDomain);
-            }
-            let ratio_squared = (th / te) * (ELECTRON_MASS_KG / mass);
-            if !ratio_squared.is_finite()
-                || ratio_squared > self.controls.maximum_target_thermal_speed_ratio.powi(2)
-            {
-                return Err(ElectronHeavyEnergyError::OutsideDomain);
-            }
-            let evaluation = source
-                .evaluate_properties(
-                    Temperature::new(te),
-                    MaxwellianRateWeightingV1::WeakDriftMomentum,
-                    self.controls.rate_controls,
-                    &mut *cancelled,
-                )
-                .map_err(|error| match error {
-                    ElectronCollisionErrorV1::Cancelled => ElectronHeavyEnergyError::Cancelled,
-                    error => ElectronHeavyEnergyError::Collision {
-                        species: source.target_species().clone(),
-                        source: error,
-                    },
-                })?;
-            let coefficient =
-                evaluation
-                    .coefficient_m3_s()
-                    .ok_or(ElectronHeavyEnergyError::Arithmetic(
-                        "unrepresentable elastic momentum coefficient",
-                    ))?;
-            let density = self
-                .initial
-                .number_density_per_m3(i)
-                .expect("canonical target index");
-            frequency.add((density * coefficient) * (ELECTRON_MASS_KG / mass));
-        }
-        let electron_amount = self.initial.amounts()
-            [self.initial.electron_index().expect("present electron")]
-        .value();
-        // R=kB*NA is exact in the shared SI convention. Keeping the molar
-        // amount avoids overflowing an unnecessary total particle count.
-        let g = (3.0 * R * electron_amount) * frequency.value;
+        let g = super::exchange::neutral_conductance(
+            self.initial,
+            &self.sources,
+            th,
+            te,
+            self.controls.maximum_target_thermal_speed_ratio,
+            self.controls.rate_controls,
+            cancelled,
+        )?;
         if !g.is_finite() || g < 0.0 || !(g + coulomb).is_finite() {
             return Err(ElectronHeavyEnergyError::Arithmetic(
                 "elastic electron-heavy coupling",

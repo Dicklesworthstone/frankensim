@@ -2245,3 +2245,45 @@ elevations. Original constant-area/constant-acceleration frozen-ideal-mixture
 assumptions remain. This adds neither arbitrary entropy stratification, gravity
 for reacting or diffusive networks, moving nodes, self-gravity, nor an
 entropy/positivity certificate.
+
+## Coupled atomic ionization and collisional thermal evolution
+
+`chemistry::ionization::advance_atomic_ionization_with_collisions` evolves the
+original ground-state `e + A <=> A+ + 2e` channel and electron/heavy thermal
+exchange simultaneously in the existing rigid-parcel owner. It consumes
+`energy::ElectronHeavyCollisionSources`: original neutral momentum cross
+sections, optional Coulomb model, and explicit charged-fraction, massive-target
+and Maxwellian quadrature controls. The original Coulomb receipt must match
+the initial population. Later evaluations explicitly refresh the same source
+law at the current amounts, density, and separate temperatures. Recombination
+requires the neutral source even when that neutral is initially absent.
+
+For reaction extent xi and cumulative electron-to-heavy transfer Q, the
+electron budget is `Cv_e*(ne0+xi)*Te=Cv_e*ne0*Te0+Pe*t-chi*xi-Q`, with
+`Cv_e=3R/2`. The heavy source-difference caloric budget is `H(Th)=Ph*t+Q`.
+Thus chemical storage, changing electron heat capacity, external work and
+internal heat transfer enter once. Inert species retain their original heavy
+calorics. Exactly absent electrons remain absent and cannot receive power.
+
+Each backward-Euler substep refreshes actual neutral and Coulomb conductances
+at its start, then solves a scalar reaction residual with an inner monotone
+thermal solve. The analytic constrained derivative includes both changing
+electron population and heavy-pool thermal response. Safeguarded brackets
+admit supported interior states without clipping temperatures or abundances.
+Full/two-half-step estimates control this first-order coefficient lag and the
+combined reaction/thermal evolution. Both temperatures, all reaction amounts,
+and separate neutral/Coulomb transfers enter the error norm. Source admission,
+physical mixture entropy and independent pool-energy balances gate publication.
+Nonlinear trials allocate no state or species workspace; source snapshots are
+refreshed between substeps. Cancellation leaves caller-owned input unchanged.
+
+G1/G3/G4 regressions compare three refinement levels with an independent
+NIST-BEB/Landau/analytic-neutral ODE calculation, exercise signed exchange and
+held powers under formation-energy gauge changes, create an initially absent
+neutral through recombination, and refuse stale source bindings or cancellation.
+The native EM integration carries cell-volume heating through this same joint
+update and refreshes transport from actual changed populations and temperatures.
+These are numerical checks of the declared classical Maxwellian ground-state
+model. They do not establish experimental discharge validation, radiation or
+photoionization, excited-state kinetics, a continuously fixed-voltage transient,
+spatial charged transport, or a general multireaction plasma network.

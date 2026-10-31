@@ -1668,3 +1668,25 @@ derivatives and the Clapeyron slope. The material owner adds its ideal molar Cv
 once. This is not a frozen-quality average; at either saturated endpoint the
 tangent is one-sided from inside the dome. Interior fixed-volume finite
 differences independently check the derivative at several qualities.
+
+## Maxwellian Coulomb momentum and thermal moments
+
+`coulomb::CoulombModelV1` retains original species thermodynamics, masses,
+charges, populations, volume, caller-selected Debye screening and explicit
+classical weak-coupling limits. One reciprocal coefficient supplies each
+electron-ion or ion-ion pair's momentum transfer and its matching thermal
+moment. Original source support, screening occupation, Coulomb logarithm,
+coupling, phase-space density, quantum length, relativistic temperature and
+actual relative drift are checked without a logarithm floor or a quantum fit.
+Pair drift heating separates positive friction shares from the signed
+unequal-temperature correction; their sum is relative-velocity dissipation.
+
+`evaluate_at_state` explicitly refreshes the same law at a new source-bound
+state with the exact original thermodynamic bank. Newly populated and vanished
+charged species, density, volume and separate temperatures enter the same
+admission and pair evaluator. Bounded stack carrier metadata makes successful
+refresh allocation-free. This does not relax `is_bound_to_populations`:
+material transport still needs a new receipt for changed populations or volume.
+L1 returns local moments and does not own time evolution or a plasma solver.
+Focused tests compare refreshed summaries with separately constructed models,
+including both screening choices, source-domain rejection and cancellation.
