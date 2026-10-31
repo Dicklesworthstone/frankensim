@@ -298,6 +298,7 @@ impl ImplicitConductionChain<'_> {
                 }
                 Err(
                     error @ (ImplicitConductionError::NotConverged { .. }
+                    | ImplicitConductionError::KrylovNotConverged { .. }
                     | ImplicitConductionError::Linear(TridiagonalError::Singular { .. })),
                 ) => (error.into(), 0.5),
                 Err(error) => return Err(error.into()),

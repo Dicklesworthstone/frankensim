@@ -1,4 +1,4 @@
-//! Structured backward-Euler conduction on an existing thermal chain.
+//! Backward-Euler conduction on the existing thermal network.
 //!
 //! The unknown is each cell's energy increment in joules. Residuals, reservoir
 //! heat, source heat, entropy and final acceptance remain owned by the original
@@ -11,9 +11,11 @@
 //! Failed complete intervals may be halved, without publishing their states or
 //! heat. This is nonlinear globalization, not automatic time-error control.
 //! Backward Euler remains first order and requires independent time refinement.
-//! Only fixed-mass nearest-neighbor chains in increasing CellId order, with all
-//! links and reservoirs supplied by the geometric conduction observer, are
-//! admitted. Scheduled boundary changes are applied at their exact times.
+//! The direct fast path admits fixed-mass nearest-neighbor chains in increasing
+//! CellId order, with all links and reservoirs supplied by the geometric
+//! conduction observer. Scheduled boundary changes occur at their exact times.
+//! `ImplicitConductionGraph` admits branched, cyclic and disconnected networks
+//! through the same nonlinear/time owner with a bounded sparse Krylov solve.
 
 use super::*;
 use crate::enthalpy::backward_euler::{BackwardEulerStep, BackwardEulerTrial, StepCoefficients};
@@ -23,6 +25,11 @@ use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 /// Accuracy-controlled comparisons of the same original implicit intervals.
 #[path = "implicit/adaptive.rs"]
 pub mod adaptive;
+
+#[path = "implicit/graph.rs"]
+mod graph;
+use graph::LinearTopology;
+pub use graph::{ImplicitConductionGraph, ImplicitConductionLinearControls};
 
 /// One fused constitutive query, with derivatives on the same enthalpy chart.
 /// At a genuine corner the material owner explicitly selects its one-sided
@@ -110,6 +117,9 @@ pub struct ImplicitConductionReport {
     pub energy: EnergyAudit,
     pub entropy: EntropyAudit,
     pub nonlinear_iterations: usize,
+    /// Krylov iterations, including work on rejected nonlinear/time candidates.
+    /// Zero on the direct tridiagonal chain path.
+    pub linear_iterations: usize,
     pub residual_evaluations: usize,
     pub rejected_intervals: usize,
     pub maximum_cell_residual_j: f64,
@@ -120,7 +130,14 @@ pub enum ImplicitConductionError {
     Thermal(DepositionError),
     Linear(TridiagonalError),
     Invalid(&'static str),
-    NotConverged { maximum_residual_j: f64 },
+    NotConverged {
+        maximum_residual_j: f64,
+    },
+    /// A graph Newton direction exhausted its restart cycles or broke down.
+    KrylovNotConverged {
+        /// Last completed cycle's true relative Euclidean linear residual.
+        relative_residual: f64,
+    },
 }
 impl From<DepositionError> for ImplicitConductionError {
     fn from(error: DepositionError) -> Self {
@@ -134,13 +151,14 @@ impl From<TridiagonalError> for ImplicitConductionError {
 }
 impl core::fmt::Display for ImplicitConductionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "implicit thermal chain: {self:?}")
+        write!(f, "implicit conduction: {self:?}")
     }
 }
 impl std::error::Error for ImplicitConductionError {}
 
-/// Reusable O(n) Newton and pivoted tridiagonal storage. Physical state is never
-/// retained here; failed calls may change scratch but not the accepted timeline.
+/// Reusable Newton storage: O(cells) for the direct chain and O(cells + links)
+/// for graph coefficients. The graph's Krylov owner also uses bounded temporary
+/// Arnoldi storage. Failed calls may change scratch but not the accepted timeline.
 #[derive(Debug)]
 pub struct ImplicitConductionWorkspace {
     linear: TridiagonalWorkspace,
@@ -151,6 +169,9 @@ pub struct ImplicitConductionWorkspace {
     diagonal: Vec<f64>,
     upper: Vec<f64>,
     rhs: Vec<f64>,
+    // Graph off-diagonals only. Reused across Newton evaluations; chains retain
+    // their three-diagonal storage and direct solve without Krylov allocation.
+    graph_entries: Option<Vec<(usize, usize, f64)>>,
 }
 impl ImplicitConductionWorkspace {
     pub fn new(cells: usize) -> Result<Self, ImplicitConductionError> {
@@ -170,6 +191,7 @@ impl ImplicitConductionWorkspace {
             lower: allocate(cells.saturating_sub(1))?,
             upper: allocate(cells.saturating_sub(1))?,
             rhs: allocate(cells)?,
+            graph_entries: None,
         })
     }
     pub fn cells(&self) -> usize {
@@ -186,6 +208,7 @@ pub struct ImplicitConductionChain<'a> {
     cells: BTreeMap<CellId, BoundCell>,
     ids: Vec<CellId>,
     index: BTreeMap<CellId, usize>,
+    topology: LinearTopology,
 }
 
 struct Endpoint {
@@ -199,13 +222,23 @@ impl<'a> ImplicitConductionChain<'a> {
         thermal: &DepositionSimulation<'_>,
         conduction: &ConductionObserver<'a>,
         laws: &[(MaterialId, &'a dyn ImplicitConductionLaw)],
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, ImplicitConductionError> {
+        Self::prepare(thermal, conduction, laws, LinearTopology::Chain, checkpoint)
+    }
+
+    fn prepare(
+        thermal: &DepositionSimulation<'_>,
+        conduction: &ConductionObserver<'a>,
+        laws: &[(MaterialId, &'a dyn ImplicitConductionLaw)],
+        topology: LinearTopology,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, ImplicitConductionError> {
         checkpoint()?;
         let ids: Vec<_> = thermal.cells.keys().copied().collect();
         if ids.is_empty() || laws.len() != thermal.materials.len() {
             return Err(ImplicitConductionError::Invalid(
-                "active chain and one tangent law per caloric material required",
+                "active thermal cells and one tangent law per caloric material required",
             ));
         }
         let mut bindings = BTreeMap::new();
@@ -238,6 +271,7 @@ impl<'a> ImplicitConductionChain<'a> {
                 .collect(),
             index: ids.iter().enumerate().map(|(i, &id)| (id, i)).collect(),
             ids,
+            topology,
         };
         result.admit(thermal, &mut checkpoint)?;
         result.endpoint(thermal, &mut checkpoint)?;
@@ -256,12 +290,12 @@ impl<'a> ImplicitConductionChain<'a> {
     ) -> Result<(), ImplicitConductionError> {
         checkpoint()?;
         if thermal.cells.len() != self.ids.len()
-            || thermal.links.len() != self.ids.len() - 1
             || self.conduction.links.len() != thermal.links.len()
-            || !thermal.covered_areas.is_empty()
+            || (matches!(self.topology, LinearTopology::Chain)
+                && (thermal.links.len() != self.ids.len() - 1 || !thermal.covered_areas.is_empty()))
         {
             return Err(ImplicitConductionError::Invalid(
-                "implicit chain requires all nearest-neighbor links and symmetric coverage",
+                "thermal graph bindings changed or direct-chain topology is invalid",
             ));
         }
         let mut neighbors = vec![false; self.ids.len().saturating_sub(1)];
@@ -284,6 +318,9 @@ impl<'a> ImplicitConductionChain<'a> {
                 .index
                 .get(&link.b)
                 .ok_or(ImplicitConductionError::Invalid("unknown chain endpoint"))?;
+            if matches!(self.topology, LinearTopology::Graph(_)) {
+                continue;
+            }
             if a.abs_diff(b) != 1 {
                 return Err(ImplicitConductionError::Invalid(
                     "chain links must join consecutive CellIds",
@@ -296,7 +333,9 @@ impl<'a> ImplicitConductionChain<'a> {
             }
             neighbors[a.min(b)] = true;
         }
-        if neighbors.iter().any(|&present| !present) {
+        if matches!(self.topology, LinearTopology::Chain)
+            && neighbors.iter().any(|&present| !present)
+        {
             return Err(ImplicitConductionError::Invalid(
                 "each neighboring cell pair needs exactly one link",
             ));
@@ -481,6 +520,22 @@ impl<'a> ImplicitConductionChain<'a> {
         workspace.diagonal.fill(1.0);
         workspace.lower.fill(0.0);
         workspace.upper.fill(0.0);
+        match self.topology {
+            LinearTopology::Chain => workspace.graph_entries = None,
+            LinearTopology::Graph(_) => {
+                let entries = workspace.graph_entries.get_or_insert_with(Vec::new);
+                entries.clear();
+                entries
+                    .try_reserve(
+                        self.conduction
+                            .links
+                            .len()
+                            .checked_mul(2)
+                            .ok_or(TridiagonalError::Capacity)?,
+                    )
+                    .map_err(|_| TridiagonalError::Capacity)?;
+            }
+        }
         let mut covered: Vec<f64> = self
             .ids
             .iter()
@@ -511,8 +566,9 @@ impl<'a> ImplicitConductionChain<'a> {
             add_entry(workspace, ia, ib, -dt * qb)?;
             add_entry(workspace, ib, ia, dt * qa)?;
             add_entry(workspace, ib, ib, dt * qb)?;
-            covered[ia] = finite(covered[ia] + link.area_m2)?;
-            covered[ib] = finite(covered[ib] + link.area_m2)?;
+            let coverage = thermal.contact_areas(&thermal.links[&id]);
+            covered[ia] = finite(covered[ia] + coverage[0])?;
+            covered[ib] = finite(covered[ib] + coverage[1])?;
         }
         for (i, &id) in self.ids.iter().enumerate() {
             checkpoint()?;
@@ -599,25 +655,32 @@ impl<'a> ImplicitConductionChain<'a> {
             for (rhs, &residual) in workspace.rhs.iter_mut().zip(trial.residual_j()) {
                 *rhs = -residual;
             }
-            let mut cancellation_error = None;
-            let solved = workspace.linear.solve_into(
-                &workspace.lower,
-                &workspace.diagonal,
-                &workspace.upper,
-                &workspace.rhs,
-                &mut workspace.direction,
-                || match checkpoint() {
-                    Ok(()) => false,
-                    Err(e) => {
-                        cancellation_error = Some(e);
-                        true
+            match self.topology {
+                LinearTopology::Chain => {
+                    let mut cancellation_error = None;
+                    let solved = workspace.linear.solve_into(
+                        &workspace.lower,
+                        &workspace.diagonal,
+                        &workspace.upper,
+                        &workspace.rhs,
+                        &mut workspace.direction,
+                        || match checkpoint() {
+                            Ok(()) => false,
+                            Err(e) => {
+                                cancellation_error = Some(e);
+                                true
+                            }
+                        },
+                    );
+                    if let Some(error) = cancellation_error {
+                        return Err(error.into());
                     }
-                },
-            );
-            if let Some(error) = cancellation_error {
-                return Err(error.into());
+                    solved?;
+                }
+                LinearTopology::Graph(linear) => {
+                    graph::solve(workspace, linear, report, checkpoint)?;
+                }
             }
-            solved?;
             report.nonlinear_iterations += 1;
             let mut accepted = None;
             let mut fraction = 1.0;
@@ -763,6 +826,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     }
                     Err(
                         error @ (ImplicitConductionError::NotConverged { .. }
+                        | ImplicitConductionError::KrylovNotConverged { .. }
                         | ImplicitConductionError::Linear(TridiagonalError::Singular {
                             ..
                         })),
@@ -852,6 +916,9 @@ fn add_entry(
 ) -> Result<(), DepositionError> {
     let target = if row == col {
         &mut w.diagonal[row]
+    } else if let Some(entries) = &mut w.graph_entries {
+        entries.push((row, col, finite(value)?));
+        return Ok(());
     } else if row == col + 1 {
         &mut w.lower[col]
     } else if col == row + 1 {
@@ -877,6 +944,7 @@ fn empty_report() -> ImplicitConductionReport {
         },
         entropy: EntropyAudit::default(),
         nonlinear_iterations: 0,
+        linear_iterations: 0,
         residual_evaluations: 0,
         rejected_intervals: 0,
         maximum_cell_residual_j: 0.0,

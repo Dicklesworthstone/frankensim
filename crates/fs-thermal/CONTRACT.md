@@ -1,7 +1,7 @@
 # fs-thermal contract
 
 Layer L3. Shared conservative thermal transport and solid/vapor exchange.
-Runtime dependencies: std, fs-la, fs-math. Spatial discretizations and material
+Runtime dependencies: std, fs-la, fs-math, fs-solver. Spatial discretizations and material
 constitutive data remain owned by their existing crates.
 
 ## Existing thermal timeline
@@ -667,6 +667,41 @@ events and fine-only heat/entropy; and atomic refusal for missing observables,
 minimum-step limits, trial/residual budgets and late cancellation. A local
 step-doubling indicator is not a certified global time error or spatial error
 bound. The existing fixed-chain geometry and material-domain restrictions remain.
+
+## Implicit conduction on branched thermal graphs
+
+`enthalpy::conduction::implicit::ImplicitConductionGraph` extends the same
+fixed-mass enthalpy solve to branched, cyclic and disconnected graphs, including
+parallel interfaces and asymmetric covered contact areas. It delegates to the
+original backward-Euler residual, nonlinear line search, reservoir/event owner,
+local and global energy gates, entropy audit and adaptive step-doubling logic.
+Cells, caloric laws, conductivity laws and geometric bindings remain original.
+
+The graph Jacobian retains the analytic derivatives of both T(h) and k(h),
+including zero dT/dh on latent plateaus and energy-coordinate mass factors.
+It stores one diagonal and two off-diagonal contributions per physical link.
+The existing `fs-solver` FGMRES owner applies this generally nonsymmetric
+operator with diagonal preconditioning; no dense global matrix is assembled.
+Each operator action is O(cells + links), and bounded restart storage is
+O(cells * restart + links). Original map-based physical bookkeeping remains.
+The direct `ImplicitConductionChain` path retains its O(cells) tridiagonal solve.
+
+`ImplicitConductionLinearControls` bounds restart dimension, restart cycles
+per nonlinear direction and total Krylov iterations for the whole advance.
+Coarse, fine, rejected nonlinear and rejected adaptive trials share that
+iteration ceiling; `linear_iterations` reports completed work. Linear
+nonconvergence may use the same interval-halving path as nonlinear refusal.
+Cancellation and exhausted budgets publish no physical candidate. Linear
+residual convergence never replaces the original joule acceptance gates.
+
+Regression coverage includes stiff star equilibration with unequal capacities,
+independent endpoint elimination, energy and entropy accounts, latent branches,
+active cycles and parallel links, an isolated cell, asymmetric covered areas,
+the original-residual Jacobian and transpose, adaptive analytical diffusion,
+shared work budgets and cancellation. Geometry and reference masses remain
+fixed; backward Euler remains first order. No unconditional nonlinear
+convergence, spatial accuracy, hardware throughput or experimental validation
+beyond the supplied material laws is claimed.
 
 ## Evaporation on the original thermal timeline
 

@@ -5,7 +5,7 @@ edition.workspace = true
 license-file.workspace = true
 repository.workspace = true
 authors.workspace = true
-description = "Shared conservative enthalpy timelines, material birth and thermal contact transport without a FEM or constitutive-model dependency."
+description = "Shared conservative enthalpy timelines, material birth, thermal contact transport and implicit conduction networks."
 
 [package.metadata.frankensim]
 layer = "L3"
@@ -13,6 +13,7 @@ layer = "L3"
 [dependencies]
 fs-la = { path = "../fs-la" }
 fs-math = { path = "../fs-math" }
+fs-solver = { path = "../fs-solver" }
 
 [lints]
 workspace = true
