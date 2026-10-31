@@ -5,7 +5,7 @@ use crate::volumes::VolumeGrid;
 use crate::volumes::transport::AbsorbingGridBudget;
 use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
 
-fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
+pub(super) fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
@@ -27,14 +27,14 @@ fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     })
 }
 
-fn budget(steps: u32) -> AbsorbingGridBudget {
+pub(super) fn budget(steps: u32) -> AbsorbingGridBudget {
     AbsorbingGridBudget {
         max_grid_cells: 4096,
         max_steps_per_segment: steps,
     }
 }
 
-fn close(actual: f64, expected: f64, relative: f64) {
+pub(super) fn close(actual: f64, expected: f64, relative: f64) {
     assert!(
         (actual - expected).abs() <= relative * expected.abs().max(1e-100),
         "{actual:e} != {expected:e} (relative tolerance {relative:e})"

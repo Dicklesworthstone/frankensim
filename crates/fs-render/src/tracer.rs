@@ -13685,7 +13685,7 @@ fn trace_path_with_regions<'scene>(
                 // A volume collision replaces the surface vertex at this
                 // depth. Its phase function uses the same direct-light and
                 // continuation MIS as an ordinary surface, without a cosine.
-                let phase = medium.phase().ok_or(TracerError::InvalidInput)?;
+                let phase = medium.phase_at_cell(event.cell_index)?;
                 if throughput.iter().all(|value| *value == 0.0) {
                     break;
                 }

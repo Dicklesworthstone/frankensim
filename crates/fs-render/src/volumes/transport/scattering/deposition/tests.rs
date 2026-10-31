@@ -2,9 +2,14 @@
 
 use super::*;
 use crate::volumes::VolumeGrid;
-use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
-use crate::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget, MassAbsorptionSpectrum};
+use crate::volumes::transport::scattering::{
+    MassScatteringSpectrum, PhaseFunction, ScatteringOptics,
+};
+use crate::volumes::transport::{
+    AbsorbingGrid, AbsorbingGridBudget, CellPalette, CellPaletteBudget, MassAbsorptionSpectrum,
+};
 use fs_exec::{Budget, CancelGate, ExecMode};
+use std::sync::Arc;
 
 fn with_cx<R>(f: impl FnOnce(&Cx<'_>, &CancelGate) -> R) -> R {
     let gate = CancelGate::new_clock_free();
@@ -53,6 +58,34 @@ fn medium<'a>(
         phase,
     )
     .unwrap()
+}
+
+fn palette<T>(cx: &Cx<'_>, values: Vec<T>, cells: &[u32]) -> CellPalette<T> {
+    let budget = CellPaletteBudget {
+        max_models: values.len(),
+        max_cells: cells.len(),
+    };
+    CellPalette::try_new(cx, values, Arc::from(cells), budget).unwrap()
+}
+
+fn indexed_medium<'a>(
+    cx: &Cx<'_>,
+    density: &'a [f64],
+    absorption: CellPalette<MassAbsorptionSpectrum>,
+    scattering: CellPalette<ScatteringOptics>,
+) -> ScatteringGrid<'a> {
+    let absorption = AbsorbingGrid::try_new_indexed(
+        cx,
+        VolumeGrid::new([density.len(), 1, 1], density, [0.0; 3], [1.0; 3]),
+        absorption,
+        None,
+        AbsorbingGridBudget {
+            max_grid_cells: density.len(),
+            max_steps_per_segment: 64,
+        },
+    )
+    .unwrap();
+    ScatteringGrid::try_new_indexed(cx, absorption, scattering).unwrap()
 }
 
 fn config(samples: u32, depth: u32) -> ScatteringDepositionConfig {
@@ -128,6 +161,177 @@ fn g1_absorption_only_is_exact_spatial_beer_transport_without_sample_noise() {
             assert_eq!(sampled.absorbed.mean_w, deterministic.absorbed_power_w);
         }
         balance(&report);
+    });
+}
+
+#[test]
+fn indexed_beam_partitions_power_using_both_independent_cell_maps() {
+    with_cx(|cx, _| {
+        let density = [1.0; 4];
+        let m = indexed_medium(
+            cx,
+            &density,
+            palette(
+                cx,
+                [0.2, 0.8]
+                    .map(|a| MassAbsorptionSpectrum::constant(a).unwrap())
+                    .to_vec(),
+                &[0, 0, 1, 1],
+            ),
+            palette(
+                cx,
+                [0.3, 1.2]
+                    .map(|s| ScatteringOptics {
+                        scattering: MassScatteringSpectrum::constant(s).unwrap(),
+                        phase: PhaseFunction::Isotropic,
+                    })
+                    .to_vec(),
+                &[0, 1, 1, 0],
+            ),
+        );
+        let report = m
+            .deposit_beam_power(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                f64::INFINITY,
+                &[550.0],
+                &[7.0],
+                4,
+            )
+            .unwrap();
+        let mut before = 7.0;
+        assert_eq!(report.cells.len(), 4);
+        for (cell, (a, s)) in
+            report
+                .cells
+                .iter()
+                .zip([(0.2_f64, 0.3), (0.2, 1.2), (0.8, 1.2), (0.8, 0.3)])
+        {
+            let removed = before * -(-(a + s)).exp_m1();
+            assert!((cell.absorbed_power_w[0] - removed * a / (a + s)).abs() < 2e-12);
+            assert!((cell.scattered_power_w[0] - removed * s / (a + s)).abs() < 2e-12);
+            before *= (-(a + s)).exp();
+        }
+        assert!((report.transmitted_power_w[0] - before).abs() < 2e-12);
+        assert!(
+            (report.transmitted_power_w[0]
+                + report.absorbed_power_w[0]
+                + report.scattered_power_w[0]
+                - 7.0)
+                .abs()
+                < 2e-12
+        );
+    });
+}
+
+#[test]
+fn indexed_first_collision_and_absorption_only_lanes_match_layered_analytic_heat() {
+    with_cx(|cx, _| {
+        let density = [1.0; 4];
+        let m = indexed_medium(
+            cx,
+            &density,
+            palette(
+                cx,
+                [0.2, 0.8]
+                    .map(|a| MassAbsorptionSpectrum::constant(a).unwrap())
+                    .to_vec(),
+                &[0, 0, 1, 1],
+            ),
+            palette(
+                cx,
+                vec![
+                    ScatteringOptics {
+                        scattering: MassScatteringSpectrum::constant(0.0).unwrap(),
+                        phase: PhaseFunction::Isotropic,
+                    },
+                    ScatteringOptics {
+                        scattering: MassScatteringSpectrum::table(&[(380.0, 0.0), (780.0, 1.2)])
+                            .unwrap(),
+                        phase: PhaseFunction::Rayleigh,
+                    },
+                ],
+                &[0, 1, 1, 0],
+            ),
+        );
+        let power = [3.0, 7.0];
+        let report = trace(cx, &m, &[380.0, 780.0], &power, config(40_000, 1));
+        assert_eq!(report.sampled_histories, [0, 40_000]);
+        assert_eq!(report.absorbed.standard_error_w[0], 0.0);
+        assert_eq!(report.cells.len(), 4);
+        for lane in 0..2 {
+            let mut before = power[lane];
+            let mut expected_tail = 0.0;
+            for (cell, &a) in [0.2_f64, 0.2, 0.8, 0.8].iter().enumerate() {
+                let s = if lane == 1 && (cell == 1 || cell == 2) {
+                    1.2
+                } else {
+                    0.0
+                };
+                let removed = before * -(-(a + s)).exp_m1();
+                let expected = removed * a / (a + s);
+                expected_tail += removed * s / (a + s);
+                let observed = &report.cells[cell];
+                assert_eq!(observed.cell_index, cell);
+                assert!(
+                    (observed.absorbed.mean_w[lane] - expected).abs()
+                        < 6.0 * observed.absorbed.standard_error_w[lane] + 2e-12
+                );
+                before *= (-(a + s)).exp();
+            }
+            assert!(
+                (report.ballistic_escape.mean_w[lane] - before).abs()
+                    < 6.0 * report.ballistic_escape.standard_error_w[lane] + 2e-12
+            );
+            assert!(
+                (report.unresolved.mean_w[lane] - expected_tail).abs()
+                    < 6.0 * report.unresolved.standard_error_w[lane] + 2e-12
+            );
+            assert_eq!(report.diffuse_escape.mean_w[lane], 0.0);
+        }
+        balance(&report);
+    });
+}
+
+#[test]
+fn indexed_collision_phase_matches_the_active_material_with_bitwise_replay() {
+    with_cx(|cx, _| {
+        let density = [0.0, 1.0];
+        let phase = PhaseFunction::henyey_greenstein(-0.6).unwrap();
+        let reference = medium(cx, &density, 0.4, 3.0, phase.clone());
+        let indexed = indexed_medium(
+            cx,
+            &density,
+            palette(
+                cx,
+                [0.0, 0.4]
+                    .map(|a| MassAbsorptionSpectrum::constant(a).unwrap())
+                    .to_vec(),
+                &[0, 1],
+            ),
+            palette(
+                cx,
+                vec![
+                    ScatteringOptics {
+                        scattering: MassScatteringSpectrum::constant(100.0).unwrap(),
+                        phase: PhaseFunction::henyey_greenstein(0.8).unwrap(),
+                    },
+                    ScatteringOptics {
+                        scattering: MassScatteringSpectrum::constant(3.0).unwrap(),
+                        phase,
+                    },
+                ],
+                &[0, 1],
+            ),
+        );
+        let mut expected = trace(cx, &reference, &[550.0], &[5.0], config(2048, 32));
+        let actual = trace(cx, &indexed, &[550.0], &[5.0], config(2048, 32));
+        expected.medium_identity = indexed.content_identity();
+        assert_eq!(actual, expected);
+        assert!(actual.diffuse_escape.mean_w[0] > 0.0);
+        assert!(actual.absorbed.mean_w[0] > 0.0);
+        balance(&actual);
     });
 }
 

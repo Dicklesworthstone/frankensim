@@ -17,8 +17,8 @@
 
 use super::cells::{CellRay, validate_ray};
 use super::{
-    AbsorbingGrid, MassAbsorptionSpectrum, SegmentTransport, VolumeTransportError, checkpoint,
-    positive_product,
+    AbsorbingGrid, CellPalette, MassAbsorptionSpectrum, SegmentTransport, VolumeTransportError,
+    checkpoint, positive_product,
 };
 use crate::thermal_surface::planck_radiance_w_m2_sr_nm;
 use fs_blake3::{ContentHash, DomainHasher};
@@ -28,7 +28,9 @@ use fs_math::det;
 
 #[cfg(feature = "photometry")]
 mod contraction;
+mod indexed;
 mod phase;
+pub use indexed::ScatteringOptics;
 pub use phase::{
     MAX_PHASE_KNOTS, MAX_PHASE_WAVELENGTHS, PhaseFunction, PhasePacketEvaluation,
     PhasePacketSample, PhaseSample, SpectralPhaseTable, TabulatedPhase,
@@ -174,12 +176,13 @@ pub struct FreeFlightSample<const N: usize> {
 }
 
 /// An immutable, index-one participating medium. Density and temperature are
-/// borrowed from the accepted absorption snapshot; this wrapper adds a global
-/// scattering spectrum and phase law without copying simulation fields.
+/// borrowed from the accepted absorption snapshot. Scattering and angular
+/// response may be global or selected by a compact immutable cell palette.
 pub struct ScatteringGrid<'a> {
     absorption: AbsorbingGrid<'a>,
     scattering: MassScatteringSpectrum,
     phase: PhaseFunction,
+    scattering_palette: Option<CellPalette<ScatteringOptics>>,
     identity: ContentHash,
     has_scattering: bool,
 }
@@ -196,59 +199,7 @@ impl<'a> ScatteringGrid<'a> {
         scattering: MassScatteringSpectrum,
         phase: PhaseFunction,
     ) -> Result<Self, VolumeTransportError> {
-        checkpoint(cx)?;
-        phase.validate()?;
-        let bounds = absorption.wavelength_bounds_nm();
-        if scattering.wavelength_bounds_nm() != bounds {
-            return Err(VolumeTransportError::Wavelength);
-        }
-        phase.validate_wavelength(bounds.0)?;
-        phase.validate_wavelength(bounds.1)?;
-        // A sum of affine absorption and either affine scattering or positive
-        // lambda^-4 scattering is convex on every combined interval. Its
-        // maximum is at an endpoint: validate extinction once at those knots.
-        for &(wavelength, _) in absorption.absorption.knots[..absorption.absorption.count]
-            .iter()
-            .chain(scattering.knots().iter())
-        {
-            if !(absorption.absorption.at(wavelength)? + scattering.at(wavelength)?).is_finite() {
-                return Err(VolumeTransportError::Unrepresentable);
-            }
-        }
-        let mut has_scattering = false;
-        if scattering.knots().iter().any(|(_, k)| *k > 0.0) {
-            for chunk in absorption.grid.data.chunks(1024) {
-                checkpoint(cx)?;
-                if chunk.iter().any(|density| *density > 0.0) {
-                    has_scattering = true;
-                    break;
-                }
-            }
-        }
-        let mut hash = DomainHasher::new("org.frankensim.render.scattering-grid.v1");
-        hash.update(absorption.content_identity().as_bytes());
-        hash.update(&(scattering.spectrum.count as u64).to_le_bytes());
-        for &(wavelength, coefficient) in scattering.knots() {
-            hash.update(&wavelength.to_bits().to_le_bytes());
-            hash.update(&coefficient.to_bits().to_le_bytes());
-        }
-        if let Some(source) = scattering.source_identity() {
-            hash.update(b"source-table");
-            hash.update(source.as_bytes());
-        }
-        if let Some(reference) = scattering.rayleigh_reference_nm {
-            hash.update(b"rayleigh-power-four");
-            hash.update(&reference.to_bits().to_le_bytes());
-        }
-        phase.hash_into(&mut hash);
-        checkpoint(cx)?;
-        Ok(Self {
-            absorption,
-            scattering,
-            phase,
-            identity: hash.finalize(),
-            has_scattering,
-        })
+        Self::prepare(cx, absorption, scattering, phase, None)
     }
 
     /// Borrow the original absorption owner for the exact zero-scattering path.
@@ -287,16 +238,22 @@ impl<'a> ScatteringGrid<'a> {
         self.absorption.has_thermal_emission()
     }
 
-    /// The reciprocal angular scattering law, including any wavelength knots.
+    /// The global angular law, if one was declared. Indexed snapshots return
+    /// `None`; their physical response must be queried with `phase_at_cell`.
     #[must_use]
-    pub fn phase(&self) -> PhaseFunction {
-        self.phase.clone()
+    pub fn phase(&self) -> Option<PhaseFunction> {
+        self.phase_ref().cloned()
     }
 
-    /// Borrow the phase law without cloning shared angular tables per vertex.
+    /// Borrow a declared global phase without cloning its angular tables.
+    /// An indexed medium has no implicit representative angular law.
     #[must_use]
-    pub const fn phase_ref(&self) -> &PhaseFunction {
-        &self.phase
+    pub const fn phase_ref(&self) -> Option<&PhaseFunction> {
+        if self.scattering_palette.is_some() {
+            None
+        } else {
+            Some(&self.phase)
+        }
     }
 
     /// Resolve a collimated beam's attenuation into spatial absorption and
@@ -328,7 +285,7 @@ impl<'a> ScatteringGrid<'a> {
             wavelengths_nm,
             incident_power_w,
             max_deposition_cells,
-            Some((&self.scattering, self.identity)),
+            Some(self),
         )
     }
 
@@ -336,21 +293,7 @@ impl<'a> ScatteringGrid<'a> {
         &self,
         wavelengths: &[f64; N],
     ) -> Result<([f64; N], [f64; N], [f64; N]), VolumeTransportError> {
-        if N == 0 {
-            return Err(VolumeTransportError::Sample);
-        }
-        let mut absorption = [0.0; N];
-        let mut scattering = [0.0; N];
-        let mut extinction = [0.0; N];
-        for lane in 0..N {
-            absorption[lane] = self.absorption.absorption.at(wavelengths[lane])?;
-            scattering[lane] = self.scattering.at(wavelengths[lane])?;
-            extinction[lane] = absorption[lane] + scattering[lane];
-            if !extinction[lane].is_finite() {
-                return Err(VolumeTransportError::Unrepresentable);
-            }
-        }
-        Ok((absorption, scattering, extinction))
+        self.coefficients_at_cell(0, wavelengths)
     }
 
     /// Exact extinction on a physical shadow ray, without emission or random
@@ -365,7 +308,8 @@ impl<'a> ScatteringGrid<'a> {
     ) -> Result<[f64; N], VolumeTransportError> {
         checkpoint(cx)?;
         validate_ray(origin, direction, max_distance_m)?;
-        let (_, _, extinction) = self.coefficients(wavelengths_nm)?;
+        let (_, _, mut extinction) = self.coefficients(wavelengths_nm)?;
+        let mut coefficient_key = self.coefficient_key(0)?;
         if !self.has_scattering {
             return self.absorption.transmittance(
                 cx,
@@ -389,6 +333,11 @@ impl<'a> ScatteringGrid<'a> {
         while let Some(segment) = ray.next(cx)? {
             let rho = self.absorption.grid.data[segment.cell];
             if rho > 0.0 && segment.length_m > 0.0 {
+                let key = self.coefficient_key(segment.cell)?;
+                if key != coefficient_key {
+                    extinction = self.coefficients_at_cell(segment.cell, wavelengths_nm)?.2;
+                    coefficient_key = key;
+                }
                 for lane in 0..N {
                     if extinction[lane] > 0.0 {
                         depth[lane] += positive_product(rho, extinction[lane], segment.length_m);
@@ -415,7 +364,8 @@ impl<'a> ScatteringGrid<'a> {
     ) -> Result<SegmentTransport<N>, VolumeTransportError> {
         checkpoint(cx)?;
         validate_ray(origin, direction, max_distance_m)?;
-        let (absorption, _, extinction) = self.coefficients(wavelengths_nm)?;
+        let (mut absorption, _, mut extinction) = self.coefficients(wavelengths_nm)?;
+        let mut coefficient_key = self.coefficient_key(0)?;
         if !self.has_scattering {
             return self.absorption.transport(
                 cx,
@@ -445,6 +395,12 @@ impl<'a> ScatteringGrid<'a> {
             let rho = self.absorption.grid.data[segment.cell];
             if rho == 0.0 || segment.length_m == 0.0 {
                 continue;
+            }
+            let key = self.coefficient_key(segment.cell)?;
+            if key != coefficient_key {
+                (absorption, _, extinction) =
+                    self.coefficients_at_cell(segment.cell, wavelengths_nm)?;
+                coefficient_key = key;
             }
             let tau = extinction.map(|k| {
                 if k == 0.0 {
@@ -523,11 +479,25 @@ impl<'a> ScatteringGrid<'a> {
         include_emission: bool,
     ) -> Result<FreeFlightSample<N>, VolumeTransportError> {
         checkpoint(cx)?;
-        let (absorption, scattering, extinction) = coefficients;
+        let (mut absorption, mut scattering, mut extinction) =
+            (*coefficients.0, *coefficients.1, *coefficients.2);
+        let mut coefficient_key = self.coefficient_key(0)?;
         if !self.has_scattering {
-            let result =
+            let result = if include_emission {
                 self.absorption
-                    .transport(cx, origin, direction, max_distance_m, wavelengths_nm)?;
+                    .transport(cx, origin, direction, max_distance_m, wavelengths_nm)?
+            } else {
+                SegmentTransport {
+                    transmittance: self.absorption.transmittance(
+                        cx,
+                        origin,
+                        direction,
+                        max_distance_m,
+                        wavelengths_nm,
+                    )?,
+                    emission_w_m2_sr_nm: [0.0; N],
+                }
+            };
             return Ok(FreeFlightSample {
                 event: None,
                 weight: result.transmittance,
@@ -559,6 +529,12 @@ impl<'a> ScatteringGrid<'a> {
             let rho = self.absorption.grid.data[segment.cell];
             if rho == 0.0 || segment.length_m == 0.0 {
                 continue;
+            }
+            let key = self.coefficient_key(segment.cell)?;
+            if key != coefficient_key {
+                (absorption, scattering, extinction) =
+                    self.coefficients_at_cell(segment.cell, wavelengths_nm)?;
+                coefficient_key = key;
             }
             let tau = extinction.map(|k| {
                 if k == 0.0 {
@@ -609,8 +585,8 @@ impl<'a> ScatteringGrid<'a> {
                 self.integrate_source_cell(
                     segment.cell,
                     &tau,
-                    absorption,
-                    extinction,
+                    &absorption,
+                    &extinction,
                     wavelengths_nm,
                     &mut depth,
                     &mut source_cache,

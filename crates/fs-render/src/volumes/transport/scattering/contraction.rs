@@ -9,6 +9,7 @@ use super::{
 };
 use fs_exec::Cx;
 use fs_ivl::Interval;
+use std::collections::{HashMap, HashSet};
 
 impl ScatteringGrid<'_> {
     /// Maximum ideal scattering gain over the complete retained spectral laws.
@@ -31,16 +32,72 @@ impl ScatteringGrid<'_> {
         if !self.has_scattering() {
             return Ok(Some(0.0));
         }
-        let albedo = max_albedo_upper(&self.absorption.absorption, &self.scattering);
-        if albedo >= 1.0 {
-            return Ok(None);
+        if self.absorption.absorption_palette().is_none() && self.scattering_palette().is_none() {
+            let albedo = max_albedo_upper(&self.absorption.absorption, &self.scattering);
+            if albedo >= 1.0 {
+                return Ok(None);
+            }
+            let Some(phase_mass) = phase_integral_upper(&self.phase, cx)? else {
+                return Ok(None);
+            };
+            let gain = (Interval::point(albedo) * Interval::point(phase_mass)).hi();
+            checkpoint(cx)?;
+            return Ok((gain.is_finite() && gain > 0.0 && gain < 1.0).then_some(gain));
         }
-        let Some(phase_mass) = phase_integral_upper(self.phase_ref(), cx)? else {
-            return Ok(None);
-        };
-        let gain = (Interval::point(albedo) * Interval::point(phase_mass)).hi();
+
+        // Independent absorption/scattering maps define physical PAIRS, not
+        // every Cartesian combination of their palette entries. Empty cells
+        // and unreferenced materials cannot contribute ideal transport gain.
+        // Cache each occupied pair and each retained angular integral once;
+        // insertion/iteration order never participates in the maximum.
+        let mut pairs = HashSet::new();
+        let mut phase_masses = HashMap::new();
+        let mut maximum = 0.0_f64;
+        for (cell, &density) in self.absorption.grid.data.iter().enumerate() {
+            if cell % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            if density == 0.0 {
+                continue;
+            }
+            let key = self.coefficient_key(cell)?;
+            if pairs.contains(&key) {
+                continue;
+            }
+            pairs
+                .try_reserve(1)
+                .map_err(|_| VolumeTransportError::Budget)?;
+            pairs.insert(key);
+            let albedo = max_albedo_upper(
+                self.absorption.absorption_at_cell(cell)?,
+                self.scattering_at_cell(cell)?,
+            );
+            if albedo == 0.0 {
+                continue;
+            }
+            if albedo >= 1.0 {
+                return Ok(None);
+            }
+            let phase_mass = if let Some(&mass) = phase_masses.get(&key.1) {
+                mass
+            } else {
+                let Some(mass) = phase_integral_upper(self.phase_at_cell(cell)?, cx)? else {
+                    return Ok(None);
+                };
+                phase_masses
+                    .try_reserve(1)
+                    .map_err(|_| VolumeTransportError::Budget)?;
+                phase_masses.insert(key.1, mass);
+                mass
+            };
+            let gain = (Interval::point(albedo) * Interval::point(phase_mass)).hi();
+            if !gain.is_finite() || gain >= 1.0 {
+                return Ok(None);
+            }
+            maximum = maximum.max(gain);
+        }
         checkpoint(cx)?;
-        Ok((gain.is_finite() && gain > 0.0 && gain < 1.0).then_some(gain))
+        Ok(Some(maximum))
     }
 }
 
@@ -197,9 +254,12 @@ fn tabulated_phase_integral_upper(
 mod tests {
     use super::*;
     use crate::volumes::VolumeGrid;
-    use crate::volumes::transport::scattering::MassScatteringSpectrum;
-    use crate::volumes::transport::{AbsorbingGrid, AbsorbingGridBudget};
+    use crate::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringOptics};
+    use crate::volumes::transport::{
+        AbsorbingGrid, AbsorbingGridBudget, CellPalette, CellPaletteBudget,
+    };
     use fs_exec::{Budget, CancelGate, ExecMode, StreamKey};
+    use std::sync::Arc;
 
     fn with_cx(f: impl FnOnce(&Cx<'_>)) {
         let gate = CancelGate::new_clock_free();
@@ -349,6 +409,64 @@ mod tests {
                         positive_density_gain = gain;
                     }
                     None => assert_eq!(gain, None),
+                }
+            }
+        });
+    }
+
+    #[test]
+    fn indexed_gain_uses_occupied_pairs_and_ignores_conservative_vacuum_cells() {
+        with_cx(|cx| {
+            for density in [[1.0, 1.0, 0.0, 1.0, 1.0], [1.0; 5]] {
+                let budget = CellPaletteBudget {
+                    max_models: 3,
+                    max_cells: 5,
+                };
+                let absorption = CellPalette::try_new(
+                    cx,
+                    [1.0, 100.0, 0.0]
+                        .map(|a| MassAbsorptionSpectrum::constant(a).unwrap())
+                        .to_vec(),
+                    Arc::from([0, 1, 2, 0, 1]),
+                    budget,
+                )
+                .unwrap();
+                let scattering = CellPalette::try_new(
+                    cx,
+                    [100.0, 1.0, 10.0]
+                        .map(|s| ScatteringOptics {
+                            scattering: MassScatteringSpectrum::constant(s).unwrap(),
+                            phase: PhaseFunction::Rayleigh,
+                        })
+                        .to_vec(),
+                    Arc::from([1, 0, 2, 1, 0]),
+                    budget,
+                )
+                .unwrap();
+                let m = ScatteringGrid::try_new_indexed(
+                    cx,
+                    AbsorbingGrid::try_new_indexed(
+                        cx,
+                        VolumeGrid::new([5, 1, 1], &density, [0.0; 3], [1.0; 3]),
+                        absorption,
+                        None,
+                        AbsorbingGridBudget {
+                            max_grid_cells: 5,
+                            max_steps_per_segment: 16,
+                        },
+                    )
+                    .unwrap(),
+                    scattering,
+                )
+                .unwrap();
+                let gain = m.photometric_scattering_gain_upper(cx).unwrap();
+                if density[2] == 0.0 {
+                    // Occupied (a,s) pairs are (1,1) and (100,100). Mixing
+                    // unrelated extrema would incorrectly produce 100/101;
+                    // counting the conservative vacuum cell would refuse.
+                    encloses_tightly(gain.unwrap(), 0.5);
+                } else {
+                    assert_eq!(gain, None);
                 }
             }
         });

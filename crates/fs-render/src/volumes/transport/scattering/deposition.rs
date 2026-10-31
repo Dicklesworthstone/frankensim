@@ -122,6 +122,8 @@ impl ScatteringGrid<'_> {
         checkpoint(cx)?;
         validate_ray(origin, unit_direction, f64::INFINITY)?;
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
+        let indexed =
+            self.absorption.absorption_palette().is_some() || self.scattering_palette().is_some();
         if config.histories_per_lane < 2 || config.max_collisions_per_history == 0 {
             return Err(VolumeTransportError::Budget);
         }
@@ -130,11 +132,46 @@ impl ScatteringGrid<'_> {
                 return Err(VolumeTransportError::BeamPower { lane });
             }
             // Validate spectral angular support even if no collision is drawn.
-            self.phase.eval_packet(&[wavelengths_nm[lane]], 0.0)?;
+            self.phase_at_cell(0)?
+                .eval_packet(&[wavelengths_nm[lane]], 0.0)?;
+        }
+        // Only physically occupied cell models determine whether a lane can
+        // scatter. A transparent first cell or an unused palette entry must
+        // not select the wrong deterministic absorption-only transport path.
+        let mut scattering_lanes = scattering.map(|coefficient| coefficient > 0.0);
+        if let Some(palette) = self.scattering_palette()
+            && self.has_scattering
+        {
+            scattering_lanes = [false; N];
+            let mut last_index = None;
+            let mut local_scattering = [0.0; N];
+            for (cell, &density) in self.absorption.grid.data.iter().enumerate() {
+                if cell % 1024 == 0 {
+                    checkpoint(cx)?;
+                }
+                if density == 0.0 {
+                    continue;
+                }
+                let index = palette.cell_indices()[cell];
+                if last_index != Some(index) {
+                    for lane in 0..N {
+                        local_scattering[lane] = palette.values()[index as usize]
+                            .scattering
+                            .at(wavelengths_nm[lane])?;
+                    }
+                    last_index = Some(index);
+                }
+                for lane in 0..N {
+                    scattering_lanes[lane] |= local_scattering[lane] > 0.0;
+                }
+                if scattering_lanes.iter().all(|active| *active) {
+                    break;
+                }
+            }
         }
         let mut result = ScatteringPowerDeposition {
             medium_identity: self.identity,
-            wavelength_bounds_nm: self.absorption.absorption.wavelength_bounds_nm(),
+            wavelength_bounds_nm: self.wavelength_bounds_nm(),
             wavelengths_nm: *wavelengths_nm,
             incident_power_w: *incident_power_w,
             ballistic_escape: PowerEstimate::zero(),
@@ -155,7 +192,7 @@ impl ScatteringGrid<'_> {
                 continue;
             }
             let wavelength = [wavelengths_nm[lane]];
-            if scattering[lane] == 0.0 || !self.has_scattering {
+            if !scattering_lanes[lane] || !self.has_scattering {
                 count_segment(&mut result.traced_segments, config.max_total_segments)?;
                 let exact = self.absorption.deposit_beam_power(
                     cx,
@@ -179,6 +216,8 @@ impl ScatteringGrid<'_> {
             let a = [absorption[lane]];
             let s = [scattering[lane]];
             let t = [extinction[lane]];
+            let mut collision_key = self.coefficient_key(0)?;
+            let mut local_coefficients = (a, s, t);
             let seed = lane_seed(config.seed, config.source_id, lane);
             let mut totals = [Moments::default(); 4];
             for history in 0..config.histories_per_lane {
@@ -215,8 +254,18 @@ impl ScatteringGrid<'_> {
                         outcome[usize::from(collision != 0)] = power;
                         break;
                     };
-                    let heat = split_power(power, a[0], t[0])?;
-                    let continuation = split_power(power, s[0], t[0])?;
+                    if indexed {
+                        let key = self.coefficient_key(event.cell_index)?;
+                        if key != collision_key {
+                            local_coefficients =
+                                self.coefficients_at_cell(event.cell_index, &wavelength)?;
+                            collision_key = key;
+                        }
+                    }
+                    let heat =
+                        split_power(power, local_coefficients.0[0], local_coefficients.2[0])?;
+                    let continuation =
+                        split_power(power, local_coefficients.1[0], local_coefficients.2[0])?;
                     let (Some(heat), Some(continuation)) = (heat, continuation) else {
                         // Retain the entire representable packet before any
                         // partial capture, including the below-resolution tail.
@@ -244,7 +293,7 @@ impl ScatteringGrid<'_> {
                     // A monochromatic matched phase sample has physical/PDF
                     // weight one, including interpolated spectral phase tables.
                     direction = self
-                        .phase
+                        .phase_at_cell(event.cell_index)?
                         .sample_packet(
                             &wavelength,
                             direction,

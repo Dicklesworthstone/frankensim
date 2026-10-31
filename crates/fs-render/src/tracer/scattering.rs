@@ -16,9 +16,9 @@ pub use execution::{
 };
 
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
-// v6 carries wavelength-dependent phase responses through the full packet
-// proposal and every direct-light technique. Achromatic streams are unchanged.
-pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 6;
+// v7 selects every angular response from the original collision cell. Global
+// optical models retain their previous arithmetic and random streams.
+pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 7;
 
 /// Progressive film bound to one immutable participating-medium snapshot.
 ///
@@ -82,7 +82,7 @@ impl ScatteringFilm {
 /// Render coupled surface and multiple-scattering transport through a physical grid.
 ///
 /// Density is kg/m³, mass absorption/scattering are m²/kg and world distances
-/// are metres. The medium has index one and one reciprocal spectral phase law. Camera,
+/// are metres. The medium has index one and reciprocal spectral phase laws. Camera,
 /// reflected, scattered and shadow rays all read the same borrowed field.
 /// The grid is the ambient index-one medium: closed dielectric interiors
 /// displace it and retain their own homogeneous spectral absorption. Refraction
@@ -234,10 +234,13 @@ impl<'view, 'field> PathMedium<'view, 'field> {
         }
     }
 
-    pub(super) fn phase(self) -> Option<&'view PhaseFunction> {
+    pub(super) fn phase_at_cell(
+        self,
+        cell: usize,
+    ) -> Result<&'view PhaseFunction, VolumeTransportError> {
         match self {
-            Self::Absorbing(_) => None,
-            Self::Scattering(medium) => Some(medium.phase_ref()),
+            Self::Absorbing(_) => Err(VolumeTransportError::Phase),
+            Self::Scattering(medium) => medium.phase_at_cell(cell),
         }
     }
 

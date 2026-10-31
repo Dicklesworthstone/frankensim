@@ -20,6 +20,8 @@ mod cells;
 pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.
 pub mod emission;
+mod palette;
+pub use palette::{CellPalette, CellPaletteBudget};
 /// Spectral free flights and phase functions for physical participating media.
 pub mod scattering;
 /// Immutable accepted medium snapshots on one physical observation clock.
@@ -158,6 +160,8 @@ pub enum VolumeTransportError {
     AbsorptionSpectrum,
     /// Invalid spectral knots or negative/non-finite mass scattering.
     ScatteringSpectrum,
+    /// Empty optical palette, invalid model index, or cell-map length mismatch.
+    Palette,
     /// An explicitly sourced optical table requires a nonzero source identity.
     SourceIdentity,
     /// Invalid phase asymmetry, direction, or scattering angle.
@@ -201,6 +205,7 @@ pub struct SegmentTransport<const N: usize> {
 pub struct AbsorbingGrid<'a> {
     grid: VolumeGrid<'a>,
     absorption: MassAbsorptionSpectrum,
+    absorption_palette: Option<CellPalette<MassAbsorptionSpectrum>>,
     temperature_k: Option<&'a [f64]>,
     max_steps: u32,
     identity: ContentHash,
@@ -215,6 +220,56 @@ impl<'a> AbsorbingGrid<'a> {
         cx: &Cx<'_>,
         grid: VolumeGrid<'a>,
         absorption: MassAbsorptionSpectrum,
+        temperature_k: Option<&'a [f64]>,
+        budget: AbsorbingGridBudget,
+    ) -> Result<Self, VolumeTransportError> {
+        Self::admit(cx, grid, absorption, None, temperature_k, budget)
+    }
+
+    /// Bind cell-resolved absorption to the original borrowed density and
+    /// optional temperature buffers. The map must contain exactly one model
+    /// index per native cell, and EVERY supplied model must have identical
+    /// wavelength endpoints. Unreferenced palette entries never create haze
+    /// or thermal emission, but remain part of the declaration's identity.
+    pub fn try_new_indexed(
+        cx: &Cx<'_>,
+        grid: VolumeGrid<'a>,
+        absorption: CellPalette<MassAbsorptionSpectrum>,
+        temperature_k: Option<&'a [f64]>,
+        budget: AbsorbingGridBudget,
+    ) -> Result<Self, VolumeTransportError> {
+        checkpoint(cx)?;
+        if grid.data.len() > budget.max_grid_cells || budget.max_steps_per_segment == 0 {
+            return Err(VolumeTransportError::Budget);
+        }
+        if absorption.cell_indices().len() != grid.data.len() {
+            return Err(VolumeTransportError::Palette);
+        }
+        let representative = absorption.values()[0];
+        for chunk in absorption.values().chunks(1024) {
+            checkpoint(cx)?;
+            if chunk
+                .iter()
+                .any(|value| value.wavelength_bounds_nm() != representative.wavelength_bounds_nm())
+            {
+                return Err(VolumeTransportError::AbsorptionSpectrum);
+            }
+        }
+        Self::admit(
+            cx,
+            grid,
+            representative,
+            Some(absorption),
+            temperature_k,
+            budget,
+        )
+    }
+
+    fn admit(
+        cx: &Cx<'_>,
+        grid: VolumeGrid<'a>,
+        absorption: MassAbsorptionSpectrum,
+        absorption_palette: Option<CellPalette<MassAbsorptionSpectrum>>,
         temperature_k: Option<&'a [f64]>,
         budget: AbsorbingGridBudget,
     ) -> Result<Self, VolumeTransportError> {
@@ -246,17 +301,31 @@ impl<'a> AbsorbingGrid<'a> {
             hash.update(&grid.origin[axis].to_bits().to_le_bytes());
             hash.update(&grid.cell[axis].to_bits().to_le_bytes());
         }
-        hash.update(&(absorption.count as u64).to_le_bytes());
-        for &(l, k) in &absorption.knots[..absorption.count] {
-            hash.update(&l.to_bits().to_le_bytes());
-            hash.update(&k.to_bits().to_le_bytes());
-        }
-        if let Some(source) = absorption.source_identity() {
-            hash.update(b"source-table");
-            hash.update(source.as_bytes());
+        if let Some(palette) = &absorption_palette {
+            hash.update(b"indexed-absorption-v1");
+            hash.update(&(palette.values().len() as u64).to_le_bytes());
+            for chunk in palette.values().chunks(1024) {
+                checkpoint(cx)?;
+                for value in chunk {
+                    update_absorption_identity(&mut hash, value);
+                }
+            }
+            hash.update(&(palette.cell_indices().len() as u64).to_le_bytes());
+            for chunk in palette.cell_indices().chunks(1024) {
+                checkpoint(cx)?;
+                for index in chunk {
+                    hash.update(&index.to_le_bytes());
+                }
+            }
+        } else {
+            // Preserve the original uniform optical identity exactly.
+            update_absorption_identity(&mut hash, &absorption);
         }
         hash.update(&[u8::from(temperature_k.is_some())]);
         let mut positive_density = false;
+        let mut mapped_absorption = false;
+        let mut previous_model = None;
+        let mut model_absorbs = false;
         for (index, &density) in grid.data.iter().enumerate() {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
@@ -265,6 +334,20 @@ impl<'a> AbsorbingGrid<'a> {
                 return Err(VolumeTransportError::Density { index });
             }
             positive_density |= density > 0.0;
+            if !mapped_absorption
+                && density > 0.0
+                && let Some(palette) = &absorption_palette
+            {
+                let model = palette.cell_indices()[index];
+                if previous_model != Some(model) {
+                    let spectrum = &palette.values()[model as usize];
+                    model_absorbs = spectrum.knots[..spectrum.count]
+                        .iter()
+                        .any(|(_, k)| *k > 0.0);
+                    previous_model = Some(model);
+                }
+                mapped_absorption = model_absorbs;
+            }
             hash.update(&density.to_bits().to_le_bytes());
             if let Some(temperatures) = temperature_k {
                 let t = temperatures[index];
@@ -275,10 +358,14 @@ impl<'a> AbsorbingGrid<'a> {
             }
         }
         checkpoint(cx)?;
-        let vacuum = !positive_density
-            || absorption.knots[..absorption.count]
-                .iter()
-                .all(|(_, k)| *k == 0.0);
+        let vacuum = if absorption_palette.is_some() {
+            !mapped_absorption
+        } else {
+            !positive_density
+                || absorption.knots[..absorption.count]
+                    .iter()
+                    .all(|(_, k)| *k == 0.0)
+        };
         let emission = if !vacuum && let Some(temperatures) = temperature_k {
             emission::EmissionDistribution::try_new(
                 cx,
@@ -292,6 +379,7 @@ impl<'a> AbsorbingGrid<'a> {
         Ok(Self {
             grid,
             absorption,
+            absorption_palette,
             temperature_k,
             max_steps: budget.max_steps_per_segment,
             identity: hash.finalize(),
@@ -310,6 +398,44 @@ impl<'a> AbsorbingGrid<'a> {
     #[must_use]
     pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
         self.absorption.wavelength_bounds_nm()
+    }
+
+    /// Cell-resolved optical metadata, when present. Density and temperature
+    /// remain the original borrowed fields regardless of palette ownership.
+    #[must_use]
+    pub const fn absorption_palette(&self) -> Option<&CellPalette<MassAbsorptionSpectrum>> {
+        self.absorption_palette.as_ref()
+    }
+
+    /// Original mass-absorption law for one native x-major cell index.
+    pub fn absorption_at_cell(
+        &self,
+        cell: usize,
+    ) -> Result<&MassAbsorptionSpectrum, VolumeTransportError> {
+        if cell >= self.grid.data.len() {
+            return Err(VolumeTransportError::Palette);
+        }
+        Ok(self
+            .absorption_palette
+            .as_ref()
+            .map_or(&self.absorption, |palette| {
+                // Palette length and every index were admitted before publication.
+                &palette.values()[palette.cell_indices()[cell] as usize]
+            }))
+    }
+
+    /// Evaluate the cell's mass absorption in m²/kg without ray allocation.
+    pub fn coefficients_at_cell<const N: usize>(
+        &self,
+        cell: usize,
+        wavelengths_nm: &[f64; N],
+    ) -> Result<[f64; N], VolumeTransportError> {
+        let spectrum = self.absorption_at_cell(cell)?;
+        let mut result = [0.0; N];
+        for (value, &wavelength) in result.iter_mut().zip(wavelengths_nm) {
+            *value = spectrum.at(wavelength)?;
+        }
+        Ok(result)
     }
 
     /// World-space bounds of the borrowed physical cell support, in metres.
@@ -387,11 +513,22 @@ impl<'a> AbsorbingGrid<'a> {
         };
         let mut optical_depth = [0.0; N];
         let mut source_cache = [(f64::NAN, 0.0); N];
+        let mut previous_model = None;
         while let Some(segment) = ray.next(cx)? {
             let length = segment.length_m;
             let cell = segment.cell;
             let density = self.grid.data[cell];
             if length > 0.0 && density > 0.0 {
+                if let Some(palette) = &self.absorption_palette {
+                    let model = palette.cell_indices()[cell];
+                    if previous_model != Some(model) {
+                        let spectrum = &palette.values()[model as usize];
+                        for lane in 0..N {
+                            kappa[lane] = spectrum.at(wavelengths[lane])?;
+                        }
+                        previous_model = Some(model);
+                    }
+                }
                 for lane in 0..N {
                     if kappa[lane] == 0.0 {
                         continue;
@@ -429,6 +566,18 @@ impl<'a> AbsorbingGrid<'a> {
     }
 }
 
+fn update_absorption_identity(hash: &mut DomainHasher, spectrum: &MassAbsorptionSpectrum) {
+    hash.update(&(spectrum.count as u64).to_le_bytes());
+    for &(wavelength, coefficient) in &spectrum.knots[..spectrum.count] {
+        hash.update(&wavelength.to_bits().to_le_bytes());
+        hash.update(&coefficient.to_bits().to_le_bytes());
+    }
+    if let Some(source) = spectrum.source_identity() {
+        hash.update(b"source-table");
+        hash.update(source.as_bytes());
+    }
+}
+
 fn checkpoint(cx: &Cx<'_>) -> Result<(), VolumeTransportError> {
     cx.checkpoint().map_err(|_| VolumeTransportError::Cancelled)
 }
@@ -443,5 +592,7 @@ fn positive_product(a: f64, b: f64, c: f64) -> f64 {
     }
 }
 
+#[cfg(test)]
+mod indexed;
 #[cfg(test)]
 mod tests;

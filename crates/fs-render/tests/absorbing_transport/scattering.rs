@@ -3,8 +3,10 @@
 use super::*;
 use fs_render::tracer::{ScatteringFilm, render_scattering, render_scattering_range};
 use fs_render::volumes::transport::scattering::{
-    MassScatteringSpectrum, PhaseFunction, ScatteringGrid,
+    MassScatteringSpectrum, PhaseFunction, ScatteringGrid, ScatteringOptics,
 };
+use fs_render::volumes::transport::{CellPalette, CellPaletteBudget};
+use std::sync::Arc;
 
 #[path = "scattering/execution.rs"]
 mod execution;
@@ -119,6 +121,98 @@ fn g1_single_scattering_matches_independent_source_integral_and_terminal_mis() {
                     "a terminal volume vertex has no competing continuation"
                 );
             }
+        }
+    });
+}
+
+#[test]
+fn g1_layered_material_phases_reach_native_direct_light_and_shadow_paths() {
+    with_cx(|cx, _| {
+        let density = [1.0, 1.0];
+        let a = [0.2, 0.6];
+        let s = [0.8, 0.3];
+        let g = [0.65, -0.5];
+        let limits = CellPaletteBudget {
+            max_models: 2,
+            max_cells: 2,
+        };
+        let absorption = CellPalette::try_new(
+            cx,
+            a.map(|value| MassAbsorptionSpectrum::constant(value).unwrap())
+                .to_vec(),
+            Arc::from([0_u32, 1]),
+            limits,
+        )
+        .unwrap();
+        let scattering = absorption
+            .with_values(
+                cx,
+                (0..2)
+                    .map(|i| ScatteringOptics {
+                        scattering: MassScatteringSpectrum::constant(s[i]).unwrap(),
+                        phase: PhaseFunction::henyey_greenstein(g[i]).unwrap(),
+                    })
+                    .collect(),
+                limits,
+            )
+            .unwrap();
+        let medium = ScatteringGrid::try_new_indexed(
+            cx,
+            AbsorbingGrid::try_new_indexed(
+                cx,
+                VolumeGrid::new([1, 1, 2], &density, [-2.0, -2.0, 0.0], [4.0, 4.0, 0.5]),
+                absorption,
+                None,
+                budget(),
+            )
+            .unwrap(),
+            scattering,
+        )
+        .unwrap();
+        let (scene, (emission, scale)) = backlit_slab();
+        // Independent volume/source-area quadrature. The incoming camera and
+        // outgoing shadow segment cross the same z layers at different angles.
+        let n = 64;
+        let h = 1.0 / f64::from(n);
+        let mut integral = 0.0;
+        for iz in 0..n {
+            let z = (f64::from(iz) + 0.5) * h;
+            let layer = usize::from(z > 0.5);
+            let camera_tau = (a[0] + s[0]) * z.min(0.5) + (a[1] + s[1]) * (z - 0.5).max(0.0);
+            for ix in 0..n {
+                let x = (f64::from(ix) + 0.5) * h - 0.5;
+                for iy in 0..n {
+                    let y = (f64::from(iy) + 0.5) * h - 0.5;
+                    let distance = (x * x + y * y + (1.0 + z).powi(2)).sqrt();
+                    let mu = -(1.0 + z) / distance;
+                    let phase = (1.0 - g[layer] * g[layer])
+                        / (4.0
+                            * core::f64::consts::PI
+                            * (1.0 + g[layer] * g[layer] - 2.0 * g[layer] * mu).powf(1.5));
+                    let shadow_tau = camera_tau * distance / (1.0 + z);
+                    integral += (-(camera_tau + shadow_tau)).exp() * s[layer] * phase * (1.0 + z)
+                        / distance.powi(3)
+                        * h
+                        * h
+                        * h;
+                }
+            }
+        }
+        let mut settings = settings(DirectStrategy::NeeOnly);
+        settings.max_depth = 1;
+        settings.spp = 16_384;
+        let film = render_scattering(&scene, &medium, cx, &settings).unwrap();
+        assert_mean(
+            &film,
+            xyz_of_spectrum(|lambda| emission.eval(lambda) * scale * integral),
+            0.025,
+        );
+        for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+            settings.strategy = strategy;
+            assert_eq!(
+                render_scattering(&scene, &medium, cx, &settings).unwrap(),
+                film
+            );
         }
     });
 }

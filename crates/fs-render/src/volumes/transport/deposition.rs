@@ -13,7 +13,7 @@
 //! not the material's net radiative heating.
 
 use super::cells::{CellRay, validate_ray};
-use super::scattering::MassScatteringSpectrum;
+use super::scattering::ScatteringGrid;
 use super::{AbsorbingGrid, VolumeTransportError, checkpoint, positive_product};
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -178,31 +178,44 @@ pub(super) fn deposit<const N: usize>(
     wavelengths_nm: &[f64; N],
     incident_power_w: &[f64; N],
     max_deposition_cells: usize,
-    scattering: Option<(&MassScatteringSpectrum, ContentHash)>,
+    scattering: Option<&ScatteringGrid<'_>>,
 ) -> Result<BeamPowerDeposition<N>, VolumeTransportError> {
     checkpoint(cx)?;
     validate_ray(ray.0, ray.1, ray.2)?;
     if N == 0 {
         return Err(VolumeTransportError::Sample);
     }
-    let mut absorption = [0.0; N];
-    let mut scatter = [0.0; N];
-    let mut extinction = [0.0; N];
+    let indexed = medium.absorption_palette().is_some()
+        || scattering.is_some_and(|grid| grid.scattering_palette().is_some());
+    let key_at_cell = |cell| {
+        if let Some(grid) = scattering {
+            grid.coefficient_key(cell)
+        } else {
+            Ok((
+                medium
+                    .absorption_palette()
+                    .map_or(0, |palette| palette.cell_indices()[cell]),
+                0,
+            ))
+        }
+    };
+    let coefficients_at_cell = |cell| {
+        if let Some(grid) = scattering {
+            grid.coefficients_at_cell(cell, wavelengths_nm)
+        } else {
+            let absorption = medium.coefficients_at_cell(cell, wavelengths_nm)?;
+            Ok((absorption, [0.0; N], absorption))
+        }
+    };
+    let mut coefficient_key = key_at_cell(0)?;
+    let (mut absorption, mut scatter, mut extinction) = coefficients_at_cell(0)?;
     for lane in 0..N {
-        absorption[lane] = medium.absorption.at(wavelengths_nm[lane])?;
-        if let Some((spectrum, _)) = scattering {
-            scatter[lane] = spectrum.at(wavelengths_nm[lane])?;
-        }
-        extinction[lane] = absorption[lane] + scatter[lane];
-        if !extinction[lane].is_finite() {
-            return Err(VolumeTransportError::Unrepresentable);
-        }
         if !incident_power_w[lane].is_finite() || incident_power_w[lane] < 0.0 {
             return Err(VolumeTransportError::BeamPower { lane });
         }
     }
     let mut result = BeamPowerDeposition {
-        medium_identity: scattering.map_or(medium.identity, |(_, identity)| identity),
+        medium_identity: scattering.map_or(medium.identity, ScatteringGrid::content_identity),
         wavelength_bounds_nm: medium.wavelength_bounds_nm(),
         wavelengths_nm: *wavelengths_nm,
         incident_power_w: *incident_power_w,
@@ -211,7 +224,10 @@ pub(super) fn deposit<const N: usize>(
         scattered_power_w: [0.0; N],
         cells: Vec::new(),
     };
-    if incident_power_w.iter().all(|p| *p == 0.0) || extinction.iter().all(|k| *k == 0.0) {
+    if incident_power_w.iter().all(|p| *p == 0.0)
+        || (!indexed && extinction.iter().all(|k| *k == 0.0))
+        || scattering.map_or(medium.is_vacuum(), ScatteringGrid::is_vacuum)
+    {
         return Ok(result);
     }
     let Some(mut cells) = CellRay::clip(&medium.grid, ray.0, ray.1, ray.2, medium.max_steps)?
@@ -224,6 +240,13 @@ pub(super) fn deposit<const N: usize>(
         let rho = medium.grid.data[cell.cell];
         if rho == 0.0 || cell.length_m == 0.0 {
             continue;
+        }
+        if indexed {
+            let key = key_at_cell(cell.cell)?;
+            if key != coefficient_key {
+                (absorption, scatter, extinction) = coefficients_at_cell(cell.cell)?;
+                coefficient_key = key;
+            }
         }
         let mut deposit = CellBeamPower {
             cell_index: cell.cell,
