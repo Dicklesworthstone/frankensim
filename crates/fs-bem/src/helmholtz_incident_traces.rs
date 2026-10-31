@@ -14,7 +14,7 @@ pub struct IncidentTraces {
 }
 
 impl IncidentTraces {
-    /// Sample coherent plane-wave and monopole sources on the original mesh.
+    /// Sample coherent plane-wave, volume and force sources on the original mesh.
     /// Clearance prevents singular placement; it is not a discretization error
     /// bound. Nearby source variations still require a spatial mesh ladder.
     pub fn from_sources(
@@ -43,6 +43,20 @@ impl IncidentTraces {
         field: IncidentField<'_>,
         minimum_source_clearance_m: f64,
     ) -> Result<Self, HelmholtzError> {
+        Self::from_field_controlled(surface, k, medium, field, minimum_source_clearance_m, None)
+    }
+
+    pub(super) fn from_field_controlled(
+        surface: &SpherePanels,
+        k: f64,
+        medium: Medium,
+        field: IncidentField<'_>,
+        minimum_source_clearance_m: f64,
+        gate: Option<&fs_exec::CancelGate>,
+    ) -> Result<Self, HelmholtzError> {
+        if gate.is_some_and(fs_exec::CancelGate::is_requested) {
+            return Err(HelmholtzError::Cancelled);
+        }
         validate_frequency(k, medium)?;
         field.validate()?;
         if !minimum_source_clearance_m.is_finite() || minimum_source_clearance_m <= 0.0 {
@@ -52,23 +66,34 @@ impl IncidentTraces {
         let positions: Vec<_> = match field {
             IncidentField::PlaneWave(_) => Vec::new(),
             IncidentField::Monopoles(sources) => sources.iter().map(|s| s.position_m).collect(),
+            IncidentField::ForceDipoles(sources) => sources.iter().map(|s| s.position_m).collect(),
             IncidentField::Sources(sources) => sources
                 .iter()
                 .filter_map(|s| match s {
                     IncidentSource::Monopole(s) => Some(s.position_m),
+                    IncidentSource::ForceDipole(s) => Some(s.position_m),
                     IncidentSource::PlaneWave(_) => None,
                 })
                 .collect(),
         };
         if !positions.is_empty() {
-            near_field::admit_exterior_points(
-                surface,
-                &positions,
-                minimum_source_clearance_m,
-                crate::panel3d::MAX_SURFACE_PANELS,
-            )?;
+            if let Some(gate) = gate {
+                near_field::Geometry::new_iterative(
+                    surface,
+                    &positions,
+                    minimum_source_clearance_m,
+                    gate,
+                )?;
+            } else {
+                near_field::admit_exterior_points(
+                    surface,
+                    &positions,
+                    minimum_source_clearance_m,
+                    crate::panel3d::MAX_SURFACE_PANELS,
+                )?;
+            }
         }
-        Self::from_admitted_field(surface, k, medium, field, None)
+        Self::from_admitted_field(surface, k, medium, field, gate)
     }
 
     /// The immutable source/surface geometry must already have passed the

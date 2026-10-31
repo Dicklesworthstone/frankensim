@@ -2,12 +2,12 @@
 //!
 //! Finite radiator solutions already contain the complete outgoing field.
 //! Point-source solutions contain scattered traces, so their analytic outgoing
-//! monopole is added exactly once. Complex source drives are summed before
+//! volume monopole or force dipole is added exactly once. Complex source drives are summed before
 //! angular projection; summing individual source powers would lose interference.
 
 use super::IterativeBoundaryResponse;
 use crate::helmholtz::{
-    self, DirectivityProjectionOptions, DirectivityTable, HelmholtzError, bc::Monopole,
+    self, DirectivityProjectionOptions, DirectivityTable, HelmholtzError, bc::IncidentSource,
 };
 use crate::observation_transfers::{IterativeObservationError, SourceId, TransferError, cap};
 use fs_blake3::ContentHash;
@@ -17,7 +17,8 @@ use fs_vfit::observation::MAX_OBSERVATION_ENTRIES;
 
 /// Source-major outgoing amplitudes with `p ~ F exp(ikr)/r`.
 /// Each column retains its source-coordinate units: multiply by that source's
-/// complex rate before combining fields. These are not finite-distance pressures.
+/// complex drive (including flow [m³/s] or force [N]) before combining fields.
+/// These are not finite-distance pressures.
 #[derive(Clone, Debug)]
 pub struct IterativeFarFieldSample {
     pub omega_rad_s: f64,
@@ -25,7 +26,7 @@ pub struct IterativeFarFieldSample {
     pub sources: Vec<SourceId>,
     pub directions: Vec<[f64; 3]>,
     pub amplitudes: Vec<C64>,
-    /// Triangle/centroid phase evaluations plus direct monopole phases.
+    /// Triangle/centroid phase evaluations plus direct compact-source phases.
     pub kernel_evaluations: usize,
 }
 
@@ -45,7 +46,7 @@ pub struct IterativeDirectivityOptions {
 pub struct IterativeCoherentDirectivity {
     pub omega_rad_s: f64,
     pub operator_hash: ContentHash,
-    /// Complex rates in the response's original source order and units.
+    /// Complex drives in the response's original source order and SI units.
     pub drives: Vec<C64>,
     /// `captured_fraction` measures omitted SH power against independently
     /// refined angular power. BEM/FMM and panel quadrature errors remain separate.
@@ -85,7 +86,7 @@ impl IterativeBoundaryResponse<'_, '_> {
         let mut work = KernelWork::new(maximum_kernel_evaluations);
         for index in 0..self.sources().len() {
             work.charge(panel_work)?;
-            if self.source_monopole(index)?.is_some() {
+            if self.source_incident(index)?.is_some() {
                 work.charge(directions.len())?;
             }
         }
@@ -100,8 +101,8 @@ impl IterativeBoundaryResponse<'_, '_> {
                 panel_work,
                 || gate.is_requested(),
             )?;
-            if let Some(source) = self.source_monopole(index)? {
-                add_monopoles(
+            if let Some(source) = self.source_incident(index)? {
+                add_compact_sources(
                     &mut field,
                     directions,
                     &[source],
@@ -193,11 +194,23 @@ impl IterativeBoundaryResponse<'_, '_> {
                 "coherent boundary trace exceeds finite numerical range",
             ));
         }
-        let mut monopoles = Vec::new();
+        let mut direct_sources = Vec::new();
         for (index, &drive) in drives.iter().enumerate() {
-            if let Some(mut source) = self.source_monopole(index)? {
-                source.volume_velocity_m3_s = source.volume_velocity_m3_s * drive;
-                monopoles.push(source);
+            if let Some(mut source) = self.source_incident(index)? {
+                match &mut source {
+                    IncidentSource::Monopole(source) => {
+                        source.volume_velocity_m3_s = source.volume_velocity_m3_s * drive;
+                    }
+                    IncidentSource::ForceDipole(source) => {
+                        for component in &mut source.force_on_fluid_n {
+                            *component = *component * drive;
+                        }
+                    }
+                    IncidentSource::PlaneWave(_) => {
+                        return Err(invalid("a plane wave has no outgoing total far field"));
+                    }
+                }
+                direct_sources.push(source);
             }
         }
         let mut work = KernelWork::new(options.maximum_kernel_evaluations);
@@ -209,7 +222,7 @@ impl IterativeBoundaryResponse<'_, '_> {
                 let boundary_work = panel_work(self, directions.len())?;
                 let direct_work = directions
                     .len()
-                    .checked_mul(monopoles.len())
+                    .checked_mul(direct_sources.len())
                     .ok_or_else(|| budget_overflow(work.maximum))?;
                 work.charge(boundary_work)?;
                 work.charge(direct_work)?;
@@ -221,10 +234,10 @@ impl IterativeBoundaryResponse<'_, '_> {
                     boundary_work,
                     || gate.is_requested(),
                 )?;
-                add_monopoles(
+                add_compact_sources(
                     &mut field,
                     directions,
-                    &monopoles,
+                    &direct_sources,
                     combined.k,
                     self.omega_rad_s() * self.medium().density,
                     gate,
@@ -259,27 +272,43 @@ fn panel_work(
         .ok_or_else(|| budget_overflow(usize::MAX))
 }
 
-fn add_monopoles(
+fn add_compact_sources(
     field: &mut [C64],
     directions: &[[f64; 3]],
-    sources: &[Monopole],
+    sources: &[IncidentSource],
     k: f64,
     omega_rho: f64,
     gate: &CancelGate,
 ) -> Result<(), HelmholtzError> {
-    let factor = C64::new(0.0, -omega_rho / (4.0 * core::f64::consts::PI));
+    let flow_factor = C64::new(0.0, -omega_rho / (4.0 * core::f64::consts::PI));
+    let force_factor = C64::new(0.0, -k / (4.0 * core::f64::consts::PI));
     for (value, direction) in field.iter_mut().zip(directions) {
         poll(gate)?;
         let direction = helmholtz::far_field_unit_direction(*direction);
         for source in sources {
+            let (position, amplitude) = match source {
+                IncidentSource::Monopole(source) => {
+                    (source.position_m, flow_factor * source.volume_velocity_m3_s)
+                }
+                IncidentSource::ForceDipole(source) => {
+                    let axial = (0..3).fold(C64::ZERO, |sum, axis| {
+                        sum + source.force_on_fluid_n[axis].scale(direction[axis])
+                    });
+                    (source.position_m, force_factor * axial)
+                }
+                IncidentSource::PlaneWave(_) => {
+                    return Err(HelmholtzError::BadParameter {
+                        what: "a plane wave has no outgoing total far field",
+                    });
+                }
+            };
             let phase = -k
                 * direction
                     .iter()
-                    .zip(source.position_m)
+                    .zip(position)
                     .map(|(a, b)| a * b)
                     .sum::<f64>();
-            *value = *value
-                + factor * source.volume_velocity_m3_s * C64::new(det::cos(phase), det::sin(phase));
+            *value = *value + amplitude * C64::new(det::cos(phase), det::sin(phase));
         }
         if !finite(*value) {
             return Err(HelmholtzError::BadParameter {

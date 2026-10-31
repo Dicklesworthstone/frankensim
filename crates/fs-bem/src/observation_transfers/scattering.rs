@@ -13,8 +13,8 @@
 
 use super::*;
 use crate::helmholtz::bc::{
-    Admittance,
-    incident::{self, IncidentField, Monopole},
+    Admittance, PreparedBoundary,
+    incident::{self, ForceDipole, IncidentField, IncidentSource, IncidentTraces, Monopole},
 };
 use crate::near_field::{MAX_RECEIVERS, Options};
 use std::cell::RefCell;
@@ -29,13 +29,68 @@ pub struct PointSourceSpec {
     pub position_m: [f64; 3],
 }
 
+/// One scalar force coordinate [N] acting ON the fluid along a fixed unit
+/// direction. Three independently driven directions can span a Cartesian force;
+/// co-located coordinates retain their individual phases and cross terms.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ForceDipoleSpec {
+    /// Caller-owned identity, distinct within the complete input basis.
+    pub id: String,
+    /// Force application position [m] in the obstacle/receiver frame.
+    pub position_m: [f64; 3],
+    /// Finite unit direction in the shared physical coordinate frame.
+    pub direction: [f64; 3],
+}
+
+/// Physical input coordinates to one coherent diffraction operator.
+/// A volume coordinate is [m³/s]; a force coordinate is [N]. Their numerical
+/// signals are never converted into one another or normalized by source power.
+#[derive(Clone, Debug, PartialEq)]
+pub enum CompactSourceSpec {
+    VolumeFlow(PointSourceSpec),
+    ForceDipole(ForceDipoleSpec),
+}
+
+impl CompactSourceSpec {
+    fn name(&self) -> &str {
+        match self {
+            Self::VolumeFlow(source) => &source.id,
+            Self::ForceDipole(source) => &source.id,
+        }
+    }
+    fn position_m(&self) -> [f64; 3] {
+        match self {
+            Self::VolumeFlow(source) => source.position_m,
+            Self::ForceDipole(source) => source.position_m,
+        }
+    }
+    fn source_id(&self) -> SourceId {
+        match self {
+            Self::VolumeFlow(source) => SourceId::PointVolumeFlow(source.id.clone()),
+            Self::ForceDipole(source) => SourceId::PointForce(source.id.clone()),
+        }
+    }
+    pub(super) fn unit_incident(&self) -> IncidentSource {
+        match self {
+            Self::VolumeFlow(source) => IncidentSource::Monopole(Monopole {
+                position_m: source.position_m,
+                volume_velocity_m3_s: C64::ONE,
+            }),
+            Self::ForceDipole(source) => IncidentSource::ForceDipole(ForceDipole {
+                position_m: source.position_m,
+                force_on_fluid_n: source.direction.map(C64::from_re),
+            }),
+        }
+    }
+}
+
 /// A complete source-to-receiver pressure/gradient observation of diffraction
 /// around fixed, closed rigid bodies. No in-loop impedance is inferred.
 pub struct ScatteringObservation<'a> {
     pub(super) surface: &'a SpherePanels,
     pub(super) receiver_geometry: Geometry<'a>,
     pub(super) medium: Medium,
-    pub(super) point_sources: Vec<PointSourceSpec>,
+    pub(super) compact_sources: Vec<CompactSourceSpec>,
     sources: Vec<SourceId>,
     pub(super) receivers: Vec<ReceiverSpec>,
     pub(super) highest_omega: f64,
@@ -63,6 +118,41 @@ impl<'a> ScatteringObservation<'a> {
         quadrature: Options,
         cancelled: impl FnMut() -> bool,
     ) -> Result<Self, TransferError> {
+        cap(sources.len(), MAX_RECEIVERS)?;
+        let mixed: Vec<_> = sources
+            .iter()
+            .cloned()
+            .map(CompactSourceSpec::VolumeFlow)
+            .collect();
+        Self::new_mixed(
+            surface,
+            medium,
+            &mixed,
+            receivers,
+            highest_omega,
+            minimum_clearance_m,
+            quadrature,
+            cancelled,
+        )
+    }
+
+    /// Bind a coherent mixture of physical volume-flow and force coordinates.
+    /// Every force direction must be unit length; it is not silently normalized.
+    /// Positive-frequency harmonic observation uses the physical field. Force
+    /// FIR realization requires the existing explicit [`LowerBandWindow`] on
+    /// [`LocalBoundaryObservation`], because this wave solver has no DC force
+    /// solution and a force's static pressure must not be manufactured as zero.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_mixed(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[CompactSourceSpec],
+        receivers: &[ReceiverSpec],
+        highest_omega: f64,
+        minimum_clearance_m: f64,
+        quadrature: Options,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, TransferError> {
         Self::new_admitted(
             surface,
             medium,
@@ -80,7 +170,7 @@ impl<'a> ScatteringObservation<'a> {
     pub(super) fn new_admitted(
         surface: &'a SpherePanels,
         medium: Medium,
-        sources: &[PointSourceSpec],
+        sources: &[CompactSourceSpec],
         receivers: &[ReceiverSpec],
         highest_omega: f64,
         minimum_clearance_m: f64,
@@ -107,11 +197,23 @@ impl<'a> ScatteringObservation<'a> {
             || !(highest_omega / medium.sound_speed).is_finite()
             || !minimum_clearance_m.is_finite()
             || minimum_clearance_m <= 0.0
-            || sources.iter().any(|s| s.id.is_empty() || s.id.len() > 1024)
+            || sources
+                .iter()
+                .any(|s| s.name().is_empty() || s.name().len() > 1024)
+            || sources.iter().any(|s| {
+                matches!(s, CompactSourceSpec::ForceDipole(f)
+                if f.direction.iter().any(|v| !v.is_finite())
+                    || (f.direction.iter().map(|v| v * v).sum::<f64>() - 1.0).abs() > 1e-10)
+            })
             || receivers
                 .iter()
                 .any(|r| r.id.is_empty() || r.id.len() > 1024)
-            || sources.iter().map(|s| &s.id).collect::<BTreeSet<_>>().len() != sources.len()
+            || sources
+                .iter()
+                .map(CompactSourceSpec::name)
+                .collect::<BTreeSet<_>>()
+                .len()
+                != sources.len()
             || receivers
                 .iter()
                 .map(|r| &r.id)
@@ -130,7 +232,7 @@ impl<'a> ScatteringObservation<'a> {
         } else {
             helmholtz::admit_resolution(surface, highest_omega / medium.sound_speed)?;
         }
-        let source_points: Vec<_> = sources.iter().map(|s| s.position_m).collect();
+        let source_points: Vec<_> = sources.iter().map(CompactSourceSpec::position_m).collect();
         let admit_geometry = |points: &[[f64; 3]]| match iterative {
             Some(gate) => Geometry::new_iterative(surface, points, minimum_clearance_m, gate),
             None => Geometry::new(surface, points, minimum_clearance_m),
@@ -144,9 +246,9 @@ impl<'a> ScatteringObservation<'a> {
         let mut delays_s = Vec::with_capacity(sources.len() * receivers.len());
         for source in sources {
             for receiver in receivers {
+                let position = source.position_m();
                 let distance = det::sqrt(
-                    source
-                        .position_m
+                    position
                         .iter()
                         .zip(receiver.position_m)
                         .map(|(s, r)| (s - r).powi(2))
@@ -170,11 +272,8 @@ impl<'a> ScatteringObservation<'a> {
             surface,
             receiver_geometry,
             medium,
-            point_sources: sources.to_vec(),
-            sources: sources
-                .iter()
-                .map(|s| SourceId::PointVolumeFlow(s.id.clone()))
-                .collect(),
+            compact_sources: sources.to_vec(),
+            sources: sources.iter().map(CompactSourceSpec::source_id).collect(),
             receivers: receivers.to_vec(),
             highest_omega,
             minimum_clearance_m,
@@ -183,9 +282,15 @@ impl<'a> ScatteringObservation<'a> {
         })
     }
 
-    /// Complete input basis; each signal supplied to the runtime is in m³/s.
+    /// Complete input basis: volume-flow signals are [m³/s], forces are [N].
     pub fn sources(&self) -> &[SourceId] {
         &self.sources
+    }
+
+    pub(super) fn has_force_sources(&self) -> bool {
+        self.sources
+            .iter()
+            .any(|s| matches!(s, SourceId::PointForce(_)))
     }
 
     /// Source-major, receiver-minor conservative earliest arrivals [s].
@@ -197,10 +302,10 @@ impl<'a> ScatteringObservation<'a> {
     /// The common transfer declaration additionally binds its FIR resolution,
     /// uncertainty, source/receiver identities and reconstruction latency.
     pub fn operator_hash(&self) -> ContentHash {
-        let mut h = DomainHasher::new("fs-bem:point-source-rigid-diffraction:v1");
+        let mut h = DomainHasher::new("fs-bem:compact-source-rigid-diffraction:v2");
         for count in [
             self.surface.areas().len(),
-            self.point_sources.len(),
+            self.compact_sources.len(),
             self.receivers.len(),
             self.quadrature.maximum_depth,
             self.quadrature.maximum_kernel_evaluations,
@@ -218,7 +323,11 @@ impl<'a> ScatteringObservation<'a> {
         .chain(self.surface.centroids().iter().flatten().copied())
         .chain(self.surface.normals().iter().flatten().copied())
         .chain(self.surface.areas().iter().copied())
-        .chain(self.point_sources.iter().flat_map(|s| s.position_m))
+        .chain(
+            self.compact_sources
+                .iter()
+                .flat_map(CompactSourceSpec::position_m),
+        )
         .chain(self.receivers.iter().flat_map(|r| r.position_m))
         {
             h.update(&value.to_bits().to_le_bytes());
@@ -228,11 +337,22 @@ impl<'a> ScatteringObservation<'a> {
                 h.update(&value.to_bits().to_le_bytes());
             }
         }
+        for source in &self.compact_sources {
+            match source {
+                CompactSourceSpec::VolumeFlow(_) => h.update(&[0]),
+                CompactSourceSpec::ForceDipole(source) => {
+                    h.update(&[1]);
+                    for component in source.direction {
+                        h.update(&component.to_bits().to_le_bytes());
+                    }
+                }
+            }
+        }
         h.finalize()
     }
 
     /// Source-major, receiver-major `(p, dp/dx, dp/dy, dp/dz)` in the original
-    /// exp(-iωt) convention, per unit prescribed source volume flow.
+    /// exp(-iωt) convention, per declared SI source coordinate [m³/s] or [N].
     ///
     /// One boundary assembly/LU serves the entire source basis, and one set of
     /// adaptive Green rows serves every receiver/source pair. Cancellation is
@@ -255,7 +375,12 @@ impl<'a> ScatteringObservation<'a> {
         harmonic::admit_frequency(omega, self.medium)?;
         let samples = self.frequency_sample(omega, cancelled)?;
         PreparedHarmonicObservation::from_samples(
-            omega, self.medium, &self.sources, &self.receivers, self.operator_hash(), samples,
+            omega,
+            self.medium,
+            &self.sources,
+            &self.receivers,
+            self.operator_hash(),
+            samples,
         )
     }
 
@@ -273,34 +398,46 @@ impl<'a> ScatteringObservation<'a> {
                 what: "diffraction observation frequency outside its band",
             });
         }
-        let channels = 4 * self.point_sources.len() * self.receivers.len();
+        let channels = 4 * self.compact_sources.len() * self.receivers.len();
         if omega == 0.0 {
+            if self.has_force_sources() {
+                return Err(HelmholtzError::BadParameter {
+                    what: "force-dipole observation has no admitted DC solution; declare a lower reconstruction window",
+                });
+            }
             return Ok(vec![C64::ZERO; channels]);
         }
         let k = omega / self.medium.sound_speed;
-        let monopoles: Vec<_> = self
-            .point_sources
+        let sources: Vec<_> = self
+            .compact_sources
             .iter()
-            .map(|s| {
-                [Monopole {
-                    position_m: s.position_m,
-                    volume_velocity_m3_s: C64::ONE,
-                }]
-            })
+            .map(|s| [s.unit_incident()])
             .collect();
-        let fields: Vec<_> = monopoles
-            .iter()
-            .map(|s| IncidentField::Monopoles(s))
-            .collect();
-        let solutions = incident::solve_scattering_batch(
+        let fields: Vec<_> = sources.iter().map(|s| IncidentField::Sources(s)).collect();
+        // Source/body clearance was admitted with this immutable geometry.
+        // Reuse it over the frequency grid; every source still receives the
+        // original analytic traces and the same prepared boundary solve.
+        let mut traces = Vec::with_capacity(fields.len());
+        for &field in &fields {
+            if cancelled() {
+                return Err(HelmholtzError::Cancelled);
+            }
+            traces.push(IncidentTraces::from_admitted_field(
+                self.surface,
+                k,
+                self.medium,
+                field,
+                None,
+            )?);
+        }
+        let prepared = PreparedBoundary::new(
             self.surface,
             k,
             self.medium,
             admittance,
-            &fields,
-            self.minimum_clearance_m,
             helmholtz::Formulation::BurtonMiller,
         )?;
+        let solutions = prepared.scatter_many(&traces)?;
         if cancelled() {
             return Err(HelmholtzError::Cancelled);
         }
@@ -313,7 +450,7 @@ impl<'a> ScatteringObservation<'a> {
             if cancelled() {
                 return Err(HelmholtzError::Cancelled);
             }
-            let scattered = rows.evaluate_velocity(&solution.solution().scattered)?;
+            let scattered = rows.evaluate_velocity(&solution.scattered)?;
             for ((&pressure, velocity), receiver) in scattered
                 .scalar
                 .pressure
@@ -347,6 +484,13 @@ impl<'a> ScatteringObservation<'a> {
         declaration: &TransferDeclaration,
         cancelled: impl FnMut() -> bool,
     ) -> Result<ObservationTransferBake, TransferError> {
+        // The common FIR owner fixes bin zero without querying the producer.
+        // Refuse here too; raw DC refusal alone cannot protect a force bake.
+        if self.has_force_sources() {
+            return Err(TransferError::Invalid(
+                "force-dipole FIR requires LocalBoundaryObservation with an explicit lower band window",
+            ));
+        }
         if declaration.sources != self.sources
             || declaration.receivers != self.receivers
             || declaration.geometric_delays_s != self.delays_s

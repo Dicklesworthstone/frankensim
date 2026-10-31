@@ -10,8 +10,8 @@ use fs_exec::CancelGate;
 #[path = "helmholtz_incident.rs"]
 pub mod incident;
 pub use incident::{
-    IncidentField, IncidentSample, IncidentSource, IncidentTraces, MAX_INCIDENT_SOURCES, Monopole,
-    sample_incident_sources,
+    ForceDipole, IncidentField, IncidentSample, IncidentSource, IncidentTraces, MAX_INCIDENT_SOURCES,
+    Monopole, sample_incident_sources,
 };
 
 #[path = "helmholtz_bc_prepared_iterative.rs"]

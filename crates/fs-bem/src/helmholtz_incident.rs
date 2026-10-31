@@ -4,6 +4,9 @@
 //! `p=-i*omega*rho*Q*exp(ikr)/(4*pi*r)` and
 //! `v=Q*exp(ikr)/(4*pi*r)*(1/r-i*k)*r_hat`. The reactive 1/r² velocity
 //! is retained: a nearby emitter is not a plane wave aimed at a centroid.
+//! A compact force ON the fluid F [N] has `p=-F.grad(G)` and
+//! `u=-Hessian(G)F/(i*omega*rho)`. Its pressure contains no extra density;
+//! its angular derivative retains velocity even at a pressure-directivity null.
 //! On a stationary wall, `v_total=-Y*p_total`, hence the scattered solve's
 //! drive is `-v_incident-Y*p_incident`. Both original BM rows receive it.
 //!
@@ -23,7 +26,7 @@ pub use traces::IncidentTraces;
 /// Maximum number of coherent point sources in one incident field.
 pub const MAX_MONOPOLES: usize = near_field::MAX_RECEIVERS;
 
-/// Maximum total number of coherent plane-wave and monopole source terms.
+/// Maximum total number of coherent plane-wave, volume and force source terms.
 pub const MAX_INCIDENT_SOURCES: usize = MAX_MONOPOLES;
 
 /// Ideal point emitter in the same stationary medium as the scatterer.
@@ -35,22 +38,36 @@ pub struct Monopole {
     pub volume_velocity_m3_s: C64,
 }
 
+/// Ideal compact force source in the same stationary fluid as the scatterer.
+/// Compactness and the physical origin of the force remain caller obligations.
+#[derive(Clone, Copy, Debug)]
+pub struct ForceDipole {
+    /// Physical source position [m].
+    pub position_m: [f64; 3],
+    /// Cartesian complex peak force ON the fluid [N], exp(-i omega t).
+    /// This is neither force per span nor its time derivative.
+    pub force_on_fluid_n: [C64; 3],
+}
+
 /// One analytic source term at the common incident frequency. Combining
 /// plane waves and nearby emitters retains their complex interference.
 #[derive(Clone, Copy, Debug)]
 pub enum IncidentSource {
     PlaneWave(PlaneWave),
     Monopole(Monopole),
+    ForceDipole(ForceDipole),
 }
 
 /// Coherent incident field. Sources are summed before scattering; their
-/// phases and volume flows are not replaced by incoherent source power.
+/// phases and physical source coordinates are not replaced by source power.
 #[derive(Clone, Copy)]
 pub enum IncidentField<'a> {
     /// Unbounded incident plane wave with pressure amplitude [Pa].
     PlaneWave(PlaneWave),
     /// Coherent finite emitters with individually specified volume flows.
     Monopoles(&'a [Monopole]),
+    /// Coherent compact sources with physical Cartesian forces on the fluid.
+    ForceDipoles(&'a [ForceDipole]),
     /// A coherent mixture of plane waves and finite-distance emitters.
     Sources(&'a [IncidentSource]),
 }
@@ -111,6 +128,19 @@ impl IncidentField<'_> {
                     ));
                 }
             }
+            Self::ForceDipoles(sources) => {
+                if sources.is_empty()
+                    || sources.len() > MAX_INCIDENT_SOURCES
+                    || sources.iter().any(|s| {
+                        s.position_m.iter().any(|v| !v.is_finite() || v.abs() > 1e9)
+                            || s.force_on_fluid_n.iter().any(|&v| !finite(v))
+                    })
+                {
+                    return Err(bad(
+                        "incident force dipoles require a nonempty bounded finite source array",
+                    ));
+                }
+            }
             Self::Sources(sources) => {
                 if sources.is_empty() || sources.len() > MAX_INCIDENT_SOURCES {
                     return Err(bad("coherent source array must be nonempty and bounded"));
@@ -120,6 +150,9 @@ impl IncidentField<'_> {
                         IncidentSource::PlaneWave(plane) => Self::PlaneWave(*plane).validate()?,
                         IncidentSource::Monopole(source) => {
                             Self::Monopoles(std::slice::from_ref(source)).validate()?;
+                        }
+                        IncidentSource::ForceDipole(source) => {
+                            Self::ForceDipoles(std::slice::from_ref(source)).validate()?;
                         }
                     }
                 }
@@ -196,6 +229,41 @@ impl IncidentField<'_> {
                     }
                 }
             }
+            Self::ForceDipoles(sources) => {
+                let inverse_momentum =
+                    C64::new(0.0, -1.0 / (k * medium.sound_speed * medium.density));
+                for source in sources {
+                    let delta = sub(point, source.position_m);
+                    let radius = norm(delta);
+                    let coordinate_scale = point
+                        .into_iter()
+                        .chain(source.position_m)
+                        .fold(0.0_f64, |m, v| m.max(v.abs()));
+                    if !radius.is_finite()
+                        || radius <= 128.0 * f64::EPSILON * coordinate_scale
+                        || radius <= 0.0
+                        || !(k * radius).is_finite()
+                    {
+                        return Err(bad(
+                            "force-dipole receiver coincides with its source or is unresolved",
+                        ));
+                    }
+                    let (_, gp, gpp) = green_radial_derivatives(k, radius);
+                    let direction = delta.map(|d| d / radius);
+                    let radial_force = (0..3).fold(C64::ZERO, |sum, axis| {
+                        sum + source.force_on_fluid_n[axis].scale(direction[axis])
+                    });
+                    out.pressure_pa = out.pressure_pa - gp * radial_force;
+                    // -H(G)F = -G'' n(n.F) - G'/r [F - n(n.F)].
+                    // The second term is essential at a dipole pressure null.
+                    for (axis, velocity) in out.velocity_m_s.iter_mut().enumerate() {
+                        let axial = radial_force.scale(direction[axis]);
+                        let gradient = -gpp * axial
+                            - gp.scale(1.0 / radius) * (source.force_on_fluid_n[axis] - axial);
+                        *velocity = *velocity + gradient * inverse_momentum;
+                    }
+                }
+            }
             Self::Sources(sources) => {
                 for source in sources {
                     let sample = match source {
@@ -204,6 +272,10 @@ impl IncidentField<'_> {
                         }
                         IncidentSource::Monopole(source) => {
                             Self::Monopoles(std::slice::from_ref(source))
+                                .sample(k, medium, point)?
+                        }
+                        IncidentSource::ForceDipole(source) => {
+                            Self::ForceDipoles(std::slice::from_ref(source))
                                 .sample(k, medium, point)?
                         }
                     };
@@ -423,25 +495,42 @@ impl ScatteredField<'_, '_> {
         if direction.iter().any(|v| !v.is_finite()) || (norm(direction) - 1.0).abs() > 1e-10 {
             return Err(bad("total far field requires a unit direction"));
         }
+        // Use the same canonical direction for direct and boundary phases.
+        let direction = crate::helmholtz::far_field_unit_direction(direction);
         let trace = &self.solution.scattered;
         let mut value = far_field_integrated(self.surface, trace, trace.medium, &[direction])[0];
         let factor = C64::new(
             0.0,
             -trace.k * trace.medium.sound_speed * trace.medium.density / (4.0 * PI),
         );
-        let mut add_source = |source: &Monopole| {
-            value = value
-                + factor
-                    * source.volume_velocity_m3_s
-                    * expik(-trace.k * dot(direction, source.position_m));
+        let mut add_source = |source: IncidentSource| {
+            let (position, amplitude) = match source {
+                IncidentSource::Monopole(source) => {
+                    (source.position_m, factor * source.volume_velocity_m3_s)
+                }
+                IncidentSource::ForceDipole(source) => {
+                    let axial = (0..3).fold(C64::ZERO, |sum, axis| {
+                        sum + source.force_on_fluid_n[axis].scale(direction[axis])
+                    });
+                    (
+                        source.position_m,
+                        C64::new(0.0, -trace.k / (4.0 * PI)) * axial,
+                    )
+                }
+                IncidentSource::PlaneWave(_) => unreachable!("plane waves refused above"),
+            };
+            value = value + amplitude * expik(-trace.k * dot(direction, position));
         };
         match self.incident {
-            IncidentField::Monopoles(sources) => sources.iter().for_each(&mut add_source),
+            IncidentField::Monopoles(sources) => sources
+                .iter()
+                .for_each(|&source| add_source(IncidentSource::Monopole(source))),
+            IncidentField::ForceDipoles(sources) => sources
+                .iter()
+                .for_each(|&source| add_source(IncidentSource::ForceDipole(source))),
             IncidentField::Sources(sources) => {
-                for source in sources {
-                    if let IncidentSource::Monopole(source) = source {
-                        add_source(source);
-                    }
+                for &source in sources {
+                    add_source(source);
                 }
             }
             IncidentField::PlaneWave(_) => unreachable!("plane waves refused above"),
@@ -528,8 +617,14 @@ pub fn solve_scattering_iterative<'s, 'i>(
         return Err(IterativeError::Cancelled { matvecs: 0 });
     }
     law.validate(surface.areas().len())?;
-    let traces =
-        IncidentTraces::from_field(surface, k, medium, incident, minimum_source_clearance_m)?;
+    let traces = IncidentTraces::from_field_controlled(
+        surface,
+        k,
+        medium,
+        incident,
+        minimum_source_clearance_m,
+        Some(gate),
+    )?;
     let (solution, report, receipt) =
         solve_incident_bc_iterative(surface, k, medium, law, &traces, formulation, options, gate)?;
     if gate.is_requested() {

@@ -2,7 +2,7 @@
 //! FMM error, GMRES residual, receiver quadrature and FIR convergence remain
 //! distinct. A failed source solve cannot produce a partial frequency or bake.
 use super::*;
-use crate::helmholtz::bc::{IncidentField, IncidentTraces, Monopole, PreparedIterativeBoundary};
+use crate::helmholtz::bc::{IncidentField, IncidentTraces, PreparedIterativeBoundary};
 use crate::helmholtz::{IterativeError, IterativeOptions, Preconditioner, ResourceReceipt};
 use fs_exec::CancelGate;
 use fs_solver::krylov::SolveReport;
@@ -111,6 +111,27 @@ impl<'a> IterativeBoundaryObservation<'a> {
         surface: &'a SpherePanels,
         medium: Medium,
         sources: &[PointSourceSpec],
+        receivers: &[ReceiverSpec],
+        boundary: LocalBoundary,
+        options: IterativeObservationOptions,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeObservationError> {
+        cap(sources.len(), crate::near_field::MAX_RECEIVERS)?;
+        let mixed: Vec<_> = sources
+            .iter()
+            .cloned()
+            .map(CompactSourceSpec::VolumeFlow)
+            .collect();
+        Self::for_mixed_scattering(surface, medium, &mixed, receivers, boundary, options, gate)
+    }
+
+    /// Prescribed volume-flow [m³/s] and force [N] coordinates through the
+    /// same FMM boundary and adaptive receiver. Force FIR realization needs
+    /// an explicit lower window; harmonic sampling remains unwindowed.
+    pub fn for_mixed_scattering(
+        surface: &'a SpherePanels,
+        medium: Medium,
+        sources: &[CompactSourceSpec],
         receivers: &[ReceiverSpec],
         boundary: LocalBoundary,
         options: IterativeObservationOptions,
@@ -339,6 +360,12 @@ impl<'a> IterativeBoundaryObservation<'a> {
         poll(gate)?;
         self.observation.admit_frequency(omega)?;
         if omega == 0.0 {
+            if self.observation.has_force_sources() {
+                return Err(TransferError::Invalid(
+                    "force-dipole observation has no admitted DC solution",
+                )
+                .into());
+            }
             if self.observation.boundary.supported_band_hz().0 > 0.0 {
                 return Err(
                     TransferError::Invalid("DC is outside local-wall source support").into(),
@@ -440,15 +467,12 @@ impl<'a> IterativeBoundaryObservation<'a> {
             let (radiation, solve, resources, absorbed_power_w) = match &self.observation.excitation
             {
                 Excitation::Point(owner) => {
-                    let monopoles = [Monopole {
-                        position_m: owner.point_sources[index].position_m,
-                        volume_velocity_m3_s: C64::ONE,
-                    }];
+                    let sources = [owner.compact_sources[index].unit_incident()];
                     let incident = IncidentTraces::from_admitted_field(
                         surface,
                         k,
                         medium,
-                        IncidentField::Monopoles(&monopoles),
+                        IncidentField::Sources(&sources),
                         Some(gate),
                     )?;
                     let (response, solve, resources) = prepared.scatter(&incident, gate)?;
@@ -507,11 +531,8 @@ impl<'a> IterativeBoundaryObservation<'a> {
         ) {
             let (pressure, velocity) = match &self.observation.excitation {
                 Excitation::Point(owner) => {
-                    let monopoles = [Monopole {
-                        position_m: owner.point_sources[index].position_m,
-                        volume_velocity_m3_s: C64::ONE,
-                    }];
-                    let direct = IncidentField::Monopoles(&monopoles).pressure_velocity_at(
+                    let sources = [owner.compact_sources[index].unit_incident()];
+                    let direct = IncidentField::Sources(&sources).pressure_velocity_at(
                         k,
                         medium,
                         receiver.position_m,

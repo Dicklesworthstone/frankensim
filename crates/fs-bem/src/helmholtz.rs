@@ -426,9 +426,13 @@ pub(crate) fn green<K: WaveNumber>(k: K, r: f64) -> C64 {
     k.outgoing(r).scale(1.0 / (4.0 * core::f64::consts::PI * r))
 }
 
-/// `G'(r) = (ik - 1/r) G`.
-fn green_dr<K: WaveNumber>(k: K, r: f64) -> C64 {
-    green(k, r) * k.radial_factor(r)
+/// The original radial Green derivatives, shared by boundary kernels and
+/// physical force-source illumination. No far-field reduction is made.
+fn green_radial_derivatives<K: WaveNumber>(k: K, r: f64) -> (C64, C64, C64) {
+    let g = green(k, r);
+    let gp = g * k.radial_factor(r);
+    let gpp = gp * k.radial_factor(r) + g.scale(1.0 / (r * r));
+    (g, gp, gpp)
 }
 
 // Real-frequency solves retain their original operation graph. The damped
@@ -524,9 +528,7 @@ fn kernels<K: WaveNumber>(
 ) -> (C64, C64, C64, C64) {
     let d = sub(x, y);
     let r = norm(d);
-    let g = green(k, r);
-    let gp = green_dr(k, r);
-    let gpp = gp * k.radial_factor(r) + g.scale(1.0 / (r * r));
+    let (g, gp, gpp) = green_radial_derivatives(k, r);
     let nyd = dot(ny, d);
     let nxd = dot(nx, d);
     let dgdny = gp.scale(-nyd / r);
@@ -1406,9 +1408,10 @@ fn exterior_pressure_at_points_impl(
                 };
                 value = value + (double * solution.pressure[j] - single * q);
             } else {
-                let dgdny = green_dr(k, r).scale(-normal_projection / r);
+                let (g, gp, _) = green_radial_derivatives(k, r);
+                let dgdny = gp.scale(-normal_projection / r);
                 value = value
-                    + (dgdny * solution.pressure[j] - green(k, r) * q).scale(surface.areas()[j]);
+                    + (dgdny * solution.pressure[j] - g * q).scale(surface.areas()[j]);
             }
         }
         if !solid_angle.is_finite()

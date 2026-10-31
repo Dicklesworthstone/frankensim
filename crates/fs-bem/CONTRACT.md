@@ -1085,7 +1085,7 @@ not an independent far-field accuracy certificate. The inherited dense solve
 has no mid-factorization cancellation guarantee.
 
 `helmholtz::bc::incident::IncidentField::Sources` extends the finite-source
-owner above to coherent mixtures of plane waves and monopoles, using the same
+owner above to coherent mixtures of plane waves, volume monopoles and force dipoles, using the same
 analytic kernels and velocity convention. `IncidentTraces` samples that field
 or accepts pressure/normal-velocity traces from a caller-owned Helmholtz field.
 `ScatteringSolution` retains incident pressure and normal velocity separately
@@ -1094,7 +1094,7 @@ Absorption uses total wall pressure, including interference; its passivity
 tolerance scales with apparent wall power. A field containing a plane wave
 has no outgoing total `1/r` far field and the existing observer refuses it.
 
-The analytic source list is bounded at 64. Monopole positions share finite
+The analytic source list is bounded at 64. Volume and force positions share finite
 receivers' component-wise winding and point-to-triangle clearance admission,
 including the original iterative surface range; interior, touching and
 unresolved source positions refuse. A positive source clearance is required,
@@ -1229,7 +1229,7 @@ schema migration, new dependency, instrument qualification or render claim.
 ## Finite-source diffraction by closed bodies
 
 `helmholtz::bc::incident` illuminates the original closed-boundary operator
-with a plane wave or a coherent array of at most 64 ideal monopoles. A
+with a plane wave or a coherent array of at most 64 ideal volume/force sources. A
 monopole is specified by its physical position and outward complex volume
 flow [m³/s]; the declared `exp(-i omega t)` convention gives
 `p=-i*omega*rho*Q*exp(ikr)/(4*pi*r)` and retains the reactive `1/r²` particle
@@ -1237,13 +1237,22 @@ velocity. The scattered drive is `-v_incident-Y*p_incident`, applied to both
 original Robin/Burton–Miller rows. Multiple disconnected closed obstacles
 share one solve and therefore retain mutual scattering and diffraction.
 
+`ForceDipole` supplies Cartesian peak force ON the fluid [N], not N/m or N/s.
+It uses `p=-F.grad(G)` and `u=-Hessian(G)F/(i*omega*rho)`, with the same
+radial Green derivatives as the original boundary kernels. Pressure has no
+extra density multiplier. The full angular derivative retains tangential
+velocity at a pressure-directivity null. `IncidentField::ForceDipoles` and
+mixed `IncidentSource::ForceDipole` feed the original trace, dense/batch and
+FMM/GMRES scattering owners; no source-pair approximation is used in production.
+Iterative source clearance/winding and boundary sampling poll the existing gate.
+
 The source positions pass the existing retained-triangle clearance and
 component-wise winding admission. Interior sources, boundary collisions,
 empty/over-cap source arrays and unresolved source/receiver coincidences
 refuse; point sources are not silently moved. `ScatteredField` borrows the
 immutable source array and body. Its finite receiver result adds the analytic
 incident field to the original adaptive scattered-field representation. Its
-total far field exists only for monopole illumination; a plane wave is not
+total far field exists for volume/force illumination; a plane wave is not
 misrepresented as an outgoing `1/r` amplitude.
 
 `solve_scattering_batch` and `solve_radiation_bc_batch` assemble and factor
@@ -1289,17 +1298,23 @@ addition theorem (NIST DLMF §10.60.1–2) and the rigid condition
 ### Finite-source diffraction in the audio observation pipeline
 
 `observation_transfers::ScatteringObservation` binds prescribed point-volume-
-flow sources, fixed closed rigid obstacles and physical receivers to the
+flow and directed force sources, fixed closed rigid obstacles and physical receivers to the
 existing causal `ObservationTransferBake` / `ObservationFir` pipeline.
-`PointSourceSpec` retains the source position and identity; the distinct
-`SourceId::PointVolumeFlow` coordinate cannot be used as a surface-velocity
-trace by either existing panel observer. Existing source-kind hash tags remain
-unchanged, and point flow receives its own tag.
+`PointSourceSpec` and the original volume-only constructor remain available.
+`new_mixed` accepts `CompactSourceSpec::VolumeFlow` and `ForceDipole`; the latter
+has an explicit finite unit direction and a scalar force signal [N]. Separate
+co-located directions can represent a full Cartesian force with coherent phases.
+`SourceId::PointVolumeFlow` [m³/s] and `SourceId::PointForce` [N] cannot be used
+as surface-velocity traces. Existing source-kind tags remain unchanged; force
+has a distinct tag. The operator identity includes source kinds and directions.
 
 Each frequency shares one boundary assembly/factorization across sources and
-one adaptive pressure/velocity Green-row preparation across receivers. The
+one adaptive pressure/velocity Green-row preparation across receivers. Admitted
+immutable source geometry is reused across frequencies through the original
+prepared-boundary and incident-trace owners. The
 analytic direct field and the solved scattered field are added coherently.
-The source-major, receiver-major output is `(p, dp/dx, dp/dy, dp/dz)` per m³/s;
+The source-major, receiver-major output is `(p, dp/dx, dp/dy, dp/dz)` per
+declared source coordinate (m³/s or N);
 the gradient uses the original Euler relation `grad(p)=i*omega*rho*v`.
 The transfer preserves phase cancellation in acoustic shadows, without a
 binary visibility mask or an empirical shadow gain.
@@ -1313,6 +1328,22 @@ explicit reconstruction delay and unresolved or supplied producer uncertainty.
 An exact-analytic producer claim is refused. Cancellation is checked between
 bounded stages and propagates as `TransferError::Cancelled`; dense LU and
 adaptive receiver preparation retain their existing interruption limits.
+
+A force source has nonzero static pressure and singular zero-frequency Euler
+velocity; this positive-frequency wave owner has no admitted static solution.
+Unwindowed force DC and FIR bakes explicitly refuse, including the generic
+bake entry that otherwise supplies its own zero bin. Force FIR use requires
+the existing explicit `LowerBandWindow` through `LocalBoundaryObservation` or
+its iterative owner. The band-limited artifact preserves that window; its
+zero DC is a declared observation filter, not a physical static-field claim.
+Positive-frequency harmonic/coherence observations remain unwindowed and retain
+mixed force/volume cross terms, SI pressure, velocity and complex intensity.
+
+`tests/force_dipole.rs` defines independent monopole-pair limit and Euler-gradient
+checks, pressure-null angular velocity, actual mixed-source diffraction and
+density scaling, dense/iterative parity, source clearance and kind/direction
+binding, DC/FIR refusal, and an actual lower-windowed force/flow FIR replay.
+These test definitions require native execution before numerical pass claims.
 
 Inline G0/G1/G3/G4 tests cover displaced-receiver pressure-gradient agreement
 within 2e-5 relative, distinct source semantics, invalid geometry/band and
@@ -1385,7 +1416,8 @@ fingerprint refuses reuse. Resource receipts include the shared setup time,
 so summing receipts does not measure disjoint preparation costs.
 
 `observation_transfers::IterativeBoundaryObservation` uses that prepared owner
-for point-flow sources and finite prescribed structural/aperture traces. One
+for point-flow/force sources and finite prescribed structural/aperture traces.
+`for_mixed_scattering` retains the distinct SI source coordinates. One
 frequency shares both the FMM/preconditioner and adaptive pressure/velocity
 receiver rows across all source columns. Point-source topology/clearance is
 admitted against immutable geometry once; frequency sampling reuses the
@@ -1437,9 +1469,11 @@ observer declares a lower FIR reconstruction window.
 
 `IterativeBoundaryResponse::observe_receivers` applies the original adaptive
 vector observation owner without another boundary solve. Finite radiator
-fields are the total outgoing field. Point-source traces are the scattered
-field; the exact original unit-flow monopole is added once at receivers and
-exposed separately for angular consumers. Immutable geometry, medium, source
+fields are the total outgoing field. Compact-source traces are the scattered
+field; the exact original unit-flow monopole or unit-force dipole is added once
+at receivers and exposed through typed `source_incident` for angular consumers.
+The original `source_monopole` adapter remains volume-only and explicitly
+refuses a force column. Immutable geometry, medium, source
 coordinates, materials and numerical settings remain bound by the borrowed
 observer and its operator identity. Individual original GMRES and resource
 reports remain available; sharing field arrays does not upgrade their error
@@ -1454,7 +1488,7 @@ each source coordinate's actual velocity unchanged. The matrix is row-major
 (effort, rate), with no symmetrization, diagonal replacement or positivity
 repair. Structural velocity coordinates retain force as their work-dual effort;
 unit-volume-flow apertures retain work-equivalent pressure. Only an all-aperture
-basis exposes `acoustic_impedance` in Pa s/m^3. Point monopoles have no finite
+basis exposes `acoustic_impedance` in Pa s/m^3. Compact point sources have no finite
 surface self-work port and refuse loading extraction.
 
 `resisting_efforts` returns `Z * rates`; the fluid's reaction on the driven
@@ -1473,7 +1507,11 @@ coordinate-dependent diagnostics are not an in-loop reciprocal/passive rational
 realization or an error bound for the continuum problem.
 
 `far_field` returns total outgoing amplitudes under `p ~ F exp(ikr)/r` using
-the original integrated triangle phase owner and exact direct monopoles.
+the original integrated triangle phase owner and exact direct volume monopoles
+and force dipoles. Force amplitudes are `-i k (direction dot F)/(4 pi)` times
+the source-position phase, with no density factor. Both direct and boundary
+terms use the same canonical unit direction. Original source-coordinate units
+remain attached to every column and drive.
 `coherent_directivity` first combines complex-driven pressure and velocity
 traces, then applies the original refined SH projection; all source phases and
 interference remain present without another boundary solve. Explicit angular,

@@ -5,6 +5,7 @@ use super::*;
 use crate::helmholtz::aperture::{
     project_real_velocity_rows, reciprocity_and_passivity, reciprocity_defect,
 };
+use crate::helmholtz::bc::{IncidentSource, Monopole};
 
 pub mod directivity;
 pub use directivity::{
@@ -101,22 +102,37 @@ impl<'o, 's> IterativeBoundaryResponse<'o, 's> {
         self.observer.operator_hash()
     }
 
-    /// Exact direct unit-volume-flow source, if this column is a point source.
-    /// Its field must be added to the retained outgoing scattered trace.
-    pub fn source_monopole(
+    /// Exact direct unit source for a compact-source column. Volume flow is
+    /// one m³/s; force is one N along the source's declared direction. Its
+    /// field must be added to the retained outgoing scattered trace.
+    pub fn source_incident(
         &self,
         index: usize,
-    ) -> Result<Option<Monopole>, IterativeObservationError> {
+    ) -> Result<Option<IncidentSource>, IterativeObservationError> {
         if index >= self.solutions.len() {
             return Err(TransferError::Invalid("retained source index is out of range").into());
         }
         Ok(match &self.observer.observation.excitation {
-            Excitation::Point(owner) => Some(Monopole {
-                position_m: owner.point_sources[index].position_m,
-                volume_velocity_m3_s: C64::ONE,
-            }),
+            Excitation::Point(owner) => Some(owner.compact_sources[index].unit_incident()),
             Excitation::Surface { .. } => None,
         })
+    }
+
+    /// Volume-only adapter for the original point-source API. Force columns
+    /// explicitly refuse instead of silently losing their direct field; use
+    /// `source_incident` for a mixed compact-source response.
+    pub fn source_monopole(
+        &self,
+        index: usize,
+    ) -> Result<Option<Monopole>, IterativeObservationError> {
+        match self.source_incident(index)? {
+            Some(IncidentSource::Monopole(source)) => Ok(Some(source)),
+            None => Ok(None),
+            Some(_) => Err(TransferError::Invalid(
+                "retained force source requires the typed source_incident accessor",
+            )
+            .into()),
+        }
     }
 
     /// Observe the original bound receivers without another source solve.

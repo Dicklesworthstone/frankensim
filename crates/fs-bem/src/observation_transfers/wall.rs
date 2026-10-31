@@ -212,6 +212,9 @@ impl<'a> LocalBoundaryObservation<'a> {
             Excitation::Surface { owner, .. } => &owner.sources,
         }
     }
+    fn has_force_sources(&self) -> bool {
+        matches!(&self.excitation, Excitation::Point(owner) if owner.has_force_sources())
+    }
     pub fn receivers(&self) -> &[ReceiverSpec] {
         match &self.excitation {
             Excitation::Point(owner) => &owner.receivers,
@@ -270,6 +273,11 @@ impl<'a> LocalBoundaryObservation<'a> {
         }
         self.admit_frequency(omega)?;
         if omega == 0.0 {
+            if self.has_force_sources() {
+                return Err(TransferError::Invalid(
+                    "force-dipole observation has no admitted DC solution",
+                ));
+            }
             if self.boundary.supported_band_hz().0 > 0.0 {
                 return Err(TransferError::Invalid(
                     "DC is outside local-wall source support",
@@ -410,6 +418,13 @@ impl<'a> LocalBoundaryObservation<'a> {
         declaration: &TransferDeclaration,
         producer_hash: ContentHash,
     ) -> Result<(), TransferError> {
+        // The common FIR owner sets bin zero without querying this producer.
+        // Only a caller-declared lower window can remove force-source DC.
+        if self.has_force_sources() && self.lower_window.is_none() {
+            return Err(TransferError::Invalid(
+                "force-dipole FIR requires an explicit lower band window",
+            ));
+        }
         declaration.admit_work()?;
         if declaration.sources != self.sources()
             || declaration.receivers != self.receivers()

@@ -1,4 +1,5 @@
 use super::*;
+use crate::helmholtz::bc::{ForceDipole, Monopole};
 use crate::helmholtz::{IterativeOptions, Medium};
 use crate::near_field::Options;
 use crate::observation_transfers::{
@@ -200,21 +201,37 @@ fn total_far_field_matches_receiver_limit_and_preserves_coherent_interference() 
 #[test]
 fn direct_incident_phase_uses_the_boundary_direction_normalization() {
     let gate = CancelGate::new_clock_free();
-    let sources = [Monopole {
-        position_m: [1e9, 0.0, 0.0],
-        volume_velocity_m3_s: C64::new(0.3, -0.8),
-    }];
-    let mut exact = [C64::ZERO];
-    let mut rounded = [C64::ZERO];
-    add_monopoles(&mut exact, &[[1.0, 0.0, 0.0]], &sources, 6.0, 2500.0, &gate).unwrap();
-    add_monopoles(
-        &mut rounded,
-        &[[1.0 + 5e-11, 0.0, 0.0]],
-        &sources,
-        6.0,
-        2500.0,
-        &gate,
-    )
-    .unwrap();
-    assert_eq!(exact, rounded);
+    let sources = [
+        IncidentSource::Monopole(Monopole {
+            position_m: [1e9, 0.0, 0.0],
+            volume_velocity_m3_s: C64::new(0.3, -0.8),
+        }),
+        IncidentSource::ForceDipole(ForceDipole {
+            position_m: [1e9, 0.0, 0.0],
+            force_on_fluid_n: [C64::new(0.3, -0.8), C64::ONE, C64::ZERO],
+        }),
+    ];
+    for source in sources {
+        let mut exact = [C64::ZERO];
+        let mut rounded = [C64::ZERO];
+        add_compact_sources(
+            &mut exact,
+            &[[1.0, 0.0, 0.0]],
+            &[source],
+            6.0,
+            2500.0,
+            &gate,
+        )
+        .unwrap();
+        add_compact_sources(
+            &mut rounded,
+            &[[1.0 + 5e-11, 0.0, 0.0]],
+            &[source],
+            6.0,
+            2500.0,
+            &gate,
+        )
+        .unwrap();
+        assert_eq!(exact, rounded);
+    }
 }

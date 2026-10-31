@@ -25,7 +25,7 @@ use std::collections::BTreeMap;
 mod reciprocal;
 pub use reciprocal::ReciprocalBemObservation;
 mod scattering;
-pub use scattering::{PointSourceSpec, ScatteringObservation};
+pub use scattering::{CompactSourceSpec, ForceDipoleSpec, PointSourceSpec, ScatteringObservation};
 mod harmonic;
 pub use harmonic::{
     HarmonicField, HarmonicFieldStatistics, HarmonicWorkBudget, PreparedHarmonicObservation,
@@ -48,19 +48,25 @@ pub const MAX_OBSERVATION_RUNGS: usize = 8;
 /// Physical source coordinate. Velocity traces are supplied separately, in
 /// m/s per unit coordinate rate. Aperture traces integrate to exactly one m³/s
 /// per unit flow, checked against the physical panel areas.
-/// Point-volume-flow coordinates instead belong to [`ScatteringObservation`]
-/// and are never admitted as panel traces.
+/// Point-volume-flow and point-force coordinates instead belong to
+/// [`ScatteringObservation`] and are never admitted as panel traces.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceId {
     StructuralMode(String),
     ApertureVolumeFlow(String),
     /// Prescribed point-source outward volume flow [m³/s], not a panel trace.
     PointVolumeFlow(String),
+    /// Prescribed force ON the fluid [N] along its declared unit direction.
+    /// This coordinate is neither a volume flow nor a force derivative.
+    PointForce(String),
 }
 impl SourceId {
     fn name(&self) -> &str {
         match self {
-            Self::StructuralMode(s) | Self::ApertureVolumeFlow(s) | Self::PointVolumeFlow(s) => s,
+            Self::StructuralMode(s)
+            | Self::ApertureVolumeFlow(s)
+            | Self::PointVolumeFlow(s)
+            | Self::PointForce(s) => s,
         }
     }
 }
@@ -322,6 +328,7 @@ impl TransferDeclaration {
                 SourceId::StructuralMode(_) => 0,
                 SourceId::ApertureVolumeFlow(_) => 1,
                 SourceId::PointVolumeFlow(_) => 2,
+                SourceId::PointForce(_) => 3,
             }]);
             h.update(&(s.name().len() as u64).to_le_bytes());
             h.update(s.name().as_bytes());
@@ -484,6 +491,14 @@ fn bake_observation_transfers_with_errors<E: From<TransferError>>(
     lower_pass_hz: f64,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ObservationTransferBake, E> {
+    if lower_pass_hz <= 0.0
+        && decl.sources.iter().any(|s| matches!(s, SourceId::PointForce(_)))
+    {
+        return Err(TransferError::Invalid(
+            "force-source FIR requires the declared lower-window observation owner",
+        )
+        .into());
+    }
     let channels = decl.admit_work()?;
     let finest = *decl
         .fft_lengths
@@ -508,8 +523,9 @@ fn bake_observation_transfers_with_errors<E: From<TransferError>>(
             }
             let key = bin * (finest / n);
             if let std::collections::btree_map::Entry::Vacant(entry) = cache.entry(key) {
-                // Static velocity produces no exterior acoustic pressure or
-                // pressure gradient: q=-rho*s*v vanishes at s=0, p(infty)=0.
+                // Static velocity produces no acoustic p/grad: q=-rho*s*v
+                // vanishes. Force coordinates reach this zero bin only through
+                // an admitted explicit lower window, never as a static solution.
                 let row = if bin == 0 {
                     vec![C64::ZERO; channels]
                 } else {
@@ -732,7 +748,7 @@ impl<'a> BemObservation<'a> {
             if iterative.is_some_and(fs_exec::CancelGate::is_requested) {
                 return Err(TransferError::Cancelled);
             }
-            if matches!(source, SourceId::PointVolumeFlow(_))
+            if matches!(source, SourceId::PointVolumeFlow(_) | SourceId::PointForce(_))
                 || source.name().is_empty()
                 || trace.len() != surface.areas().len()
                 || trace.iter().any(|v| !v.is_finite())
