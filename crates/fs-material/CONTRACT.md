@@ -8236,6 +8236,38 @@ infer competitive sorption, cross-diffusion, swelling or sorbed calorics.
 Original gas enthalpy streams and exact isothermal thermostat flow-work offsets
 are separate reports, without a whole-membrane energy certificate.
 
+`IsothermalGasMembraneMixture::advance_candidate` completes one requested window
+with the original native implicit steps and separate full/half-step factor
+caches. One full step estimates the temporal error of two accepted half steps;
+every sorbed-cell Henry pressure, gas species partial pressure and actual gas
+species amount receives its own comparison. The relative allowance scales the
+change from the last accepted state, so large equilibrium inventories or
+opposing species streams cannot hide separation error. This local first-order
+estimate is not a global temporal error certificate. The original complete
+catalog also admits pure gas through the same one-species API.
+
+Accepted half steps alone contribute signed and gross directional species
+streams, original gas enthalpy streams and explicit thermostat heat. Rejected
+probes spend the explicit work budget and contribute no physical account.
+Actual original-to-final gas inventories and cellwise sorbed changes must obey
+fixed per-species boundary, film and closed-system amount budgets, plus both
+direct-total and stable-increment mass budgets, independent of substep count.
+Whole-window gas energy compares original-source sensible storage with the
+accepted source-relative input, cancelling partial-enthalpy reference transport
+before arithmetic; the separately bounded inventory residual is not multiplied
+by an arbitrary formation datum. Reported absolute enthalpies retain that datum.
+No sorbed caloric store or heat of sorption is inferred from D and S.
+
+Total retained profile cells and all original complete-mixture probes are
+bounded. Representable shared clocks, explicit step limits and cancellation
+remain admission gates. Source, caloric, linear and gas reconstruction refusals
+are hard failures rather than guessed timestep-retry signals. Any late failure
+returns no partial gas, film or clock candidate. Original material selection
+and actual cell/face/bath source-domain checks remain native at every probe;
+the final candidate retains current source support and the final native step
+receipt. Source queries and immutable native candidates still allocate; the
+prepared numerical factor caches do not imply an allocation-free advance.
+
 ### Original-material liquid retention calibration
 
 `WetPoreLiquidLaw::from_material` selects residual liquid/gas pore-volume

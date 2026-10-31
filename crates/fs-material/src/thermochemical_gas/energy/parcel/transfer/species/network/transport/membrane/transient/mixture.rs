@@ -22,6 +22,9 @@
 //! is externally held. Energy reports cover the two original gases and their
 //! explicit thermostats, not an unknown sorbed-phase internal-energy store.
 
+/// Complete-duration accuracy and accepted-only finite-mixture accounts.
+pub mod adaptive;
+
 use std::sync::Arc;
 use super::{Bindings,ResolvedMembraneDiffusion,MembraneDiffusionLayerSource,
     MembraneInterfaceMaterial,MembraneDiffusionSourceSupport};
