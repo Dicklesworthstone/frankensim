@@ -7312,9 +7312,45 @@ cancellation refusal; they do not establish measured instrument accuracy.
 
 For each field, the source law supplies psi=z²/(2K), s=-partial_T psi and U=psi+Ts. The frozen-initial-coordinate coefficient change supplies explicit parameter work to the native electrical step. Its negative, together with minus delta(Ts), becomes signed reversible transfer into the same material's caloric store; Joule dissipation is routed separately, exactly once. The final independent enclosing balance uses actual U at both endpoints plus caloric storage, against only authored electrical work and external heat. Original native reports retain their isothermal free-energy convention and expose the separate physical account explicitly.
 
-The bounded reduction requires fixed geometry, complete storage mapping, one field branch per thermal material cell, fully solid constant-density caloric charts for mapped fields, positive affine coefficients and positive total caloric plus field heat capacity across each declared temperature/coordinate envelope. Both endpoint charges/fluxes must satisfy that envelope. Other thermal cells keep their original phase and boundary behavior. Source constraints, material-domain errors, unresolved thermal events, failed residuals, budget exhaustion and cancellation return no live-state mutation. Ideal-source constraint incompatibilities during frozen-coordinate rebinding refuse; no impulsive source exchange is inferred. Hysteresis, dielectric relaxation, moving geometry, field-dependent constitutive response, spatial field reassembly and phase transitions of mapped fields are separate owners. This first-order endpoint-temperature split does not claim unconditional passivity or temporal accuracy.
+The bounded reduction requires fixed geometry, complete storage mapping, fully solid constant-density caloric charts for mapped fields, positive affine coefficients and positive total caloric plus field heat capacity across each declared temperature/coordinate envelope. Both endpoint charges/fluxes must satisfy that envelope. Other thermal cells keep their original phase and boundary behavior. Source constraints, material-domain errors, unresolved thermal events, failed residuals, budget exhaustion and cancellation return no live-state mutation. Ideal-source constraint incompatibilities during frozen-coordinate rebinding refuse; no impulsive source exchange is inferred. Hysteresis, dielectric relaxation, moving geometry, field-dependent constitutive response, spatial field reassembly and phase transitions of mapped fields are separate owners. This first-order endpoint-temperature split does not claim unconditional passivity or temporal accuracy.
 
 Focused authored RC/RL fixtures cover both thermal coefficient signs, exact constant-coefficient recovery, independent total-U scalar roots, repeated accepted history, Joule versus reversible versus external heat, positive closed-system entropy, source/volume mismatch, capacity envelope, budget and late cancellation. These are numerical regressions, not measured material validation. Native Cargo/DSR execution was unavailable for this increment.
+
+### Shared-temperature mutual magnetic storage
+
+The same prepared field/enthalpy owner admits signed mutual inductance when
+every connected winding group occupies one whole caloric cell and shares one
+temperature envelope. Self inductances retain their original source-derived
+affine L_i(T); authored mutual entries remain constant. The native scaled SPD
+inductance owner supplies Q=L^-1. For A=dL/dT and i=Q lambda, the shared field
+uses psi=lambda.i/2, s=i.A.i/2, U=psi+Ts and
+C_lambda=-T (Ai).Q.(Ai). Native electrical effort remains the gradient of psi.
+
+Each reported branch is a signed partition of that shared field: with z=QAi
+and w=QAz, psi_i=lambda_i i_i/2, s_i=lambda_i z_i/2 and
+C_i=-T lambda_i w_i. These retain their temperature-derivative meanings but
+need not have the signs of independent scalar stores. Their sums, not each
+partition, own physical magnetic energy and capacity. The full frozen-linkage
+parameter work is checked against the native circuit. Minus that work and
+minus delta(Ts) enter the original common cell once as reversible transfer;
+Joule/contact losses and the cell's caloric inventory remain separate.
+
+Endpoint SPD admission covers the complete affine matrix interval. An
+endpoint inverse spectral-norm bound supplies a conservative joint capacity
+floor under every declared flux-linkage bound; all groups and independent
+fields share the cell's caloric floor once. The original direct/contact/heat
+and composed thermal adapters use this same admission and account. Different
+temperatures within a mutual group, temperature-varying mutual entries,
+non-affine magnetic laws, hysteresis and moving magnetic geometry still need
+their own shared constitutive model. This is an analytic model bound with
+numerical padding, not a validated interval certificate.
+
+G1 authored two-winding common/differential-mode oracles cover both mutual
+signs, both thermal slopes, constant-law recovery, signed branch energy,
+finite-temperature decay, Joule/reversible heat, closed total internal energy,
+entropy increase and binding-order invariance. Envelope loss of SPD, insufficient
+combined capacity and separate thermal ownership refuse without mutation.
+Native execution remains unverified on the resource-saturated shared host.
 
 ### Implicit conservative homogeneous reaction extent
 

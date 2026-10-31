@@ -278,18 +278,13 @@ fn near(a: f64, b: f64) {
     assert!((a - b).abs() < 3e-7, "{a} != {b}");
 }
 
-#[test]
-fn shared_magnetic_storage_cannot_use_independent_branch_field_entropy() {
-    use fs_couple::circuit_enthalpy::field_storage::FieldThermalError;
+fn coupled_initial(
+    material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>, card: &MaterialCard,
+    mutual: f64,
+) -> (MaterialCircuit, Vec<FieldThermalBinding>) {
     use fs_phs::circuit::MutualInductance;
-    let card = card(true, 0.001, 2.0);
-    let caloric = caloric(&card);
-    let thermal = thermal(&caloric, 0.0);
-    let context = point(300.0);
-    let cells = [cell(&card, &caloric, &context)];
-    let resistors = [resistor()];
-    let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
-    let (base, first) = initial(&material, &thermal, &card, true);
+    let (base, mut first) = initial(material, thermal, card, true);
+    first.maximum_abs_coordinate = 4.5;
     let mut graph = base.graph().clone();
     graph.branches.push((1, 0, Branch::Inductor { henries: f64::NAN }));
     let mut storage = base.storage().to_vec();
@@ -297,23 +292,125 @@ fn shared_magnetic_storage_cannot_use_independent_branch_field_entropy() {
     second.branch = 2;
     let MaterialStorageElement::Inductor(ref coil) = second.element else { unreachable!() };
     let second_binding = FieldThermalBinding { branch: 2, cell: CELL,
-        law: ThermalFieldStorage::inductor(&card, coil, "T", [250.0, 500.0]).unwrap(),
-        maximum_abs_coordinate: 10.0 };
+        law: ThermalFieldStorage::inductor(card, coil, "T", [250.0, 500.0]).unwrap(),
+        maximum_abs_coordinate: 4.5 };
     storage.push(second);
     let circuit = MaterialCircuit::new_with_storage_and_mutual_inductance(graph,
         base.resistors().to_vec(), storage,
-        vec![MutualInductance { branches: (0, 2), henries: 0.5 }],
-        vec![1.0, 1.0], vec![], &[]).unwrap();
-    let saved = circuit.clone();
-    let thermal_before = thermal.cells().clone();
-    let result = field_storage::step_candidate(&material, &thermal, 0.2, &circuit,
-        &[], &[first, second_binding], &[(1, ElectricalPropertyBasis::Resistivity)],
-        controls(), &[0.0], || false);
-    assert!(matches!(result, Err(CircuitEnthalpyError::Source(FieldThermalError::Invalid(
-        "mutual magnetic thermal feedback requires a shared inductance entropy and capacity law"
-    )))));
-    assert_eq!(circuit, saved);
-    assert_eq!(thermal.cells(), &thermal_before);
+        vec![MutualInductance { branches: (0, 2), henries: mutual }],
+        vec![4.0, 0.2], vec![], &[]).unwrap();
+    (circuit, vec![first, second_binding])
+}
+
+// Independent common/differential modes of two equal-self-L parallel windings.
+// This uses neither production matrix inversion nor field thermal callbacks.
+fn mutual_potentials(alpha: f64, mutual: f64, t: f64, flux: [f64; 2]) -> [f64; 3] {
+    let l = 1.0 + alpha * (t - 300.0);
+    let sum = flux[0] + flux[1];
+    let difference = flux[0] - flux[1];
+    let psi = 0.25 * (sum * sum / (l + mutual) + difference * difference / (l - mutual));
+    let entropy = 0.25 * alpha * (sum * sum / (l + mutual).powi(2)
+        + difference * difference / (l - mutual).powi(2));
+    let capacity = -0.5 * t * alpha * alpha * (sum * sum / (l + mutual).powi(3)
+        + difference * difference / (l - mutual).powi(3));
+    [psi, entropy, capacity]
+}
+
+#[test]
+fn mutual_windings_use_joint_entropy_and_finite_caloric_energy() {
+    for alpha in [-0.001, 0.0, 0.001] {
+        for mutual in [-0.4, 0.4] {
+            let card = card(true, alpha, 4.0);
+            let caloric = caloric(&card);
+            let thermal = thermal(&caloric, 0.0);
+            let context = point(300.0);
+            let cells = [cell(&card, &caloric, &context)];
+            let resistors = [resistor()];
+            let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+            let (circuit, fields) = coupled_initial(&material, &thermal, &card, mutual);
+            let dt = 0.2;
+            let endpoint = |t: f64| {
+                let common_l = 1.0 + alpha * (t - 300.0) + mutual;
+                let sum = 4.2 * (common_l - dt) / (common_l + dt);
+                [(sum + 3.8) * 0.5, (sum - 3.8) * 0.5]
+            };
+            let before = mutual_potentials(alpha, mutual, 300.0, [4.0, 0.2]);
+            let energy = |t: f64| {
+                let after = mutual_potentials(alpha, mutual, t, endpoint(t));
+                4.0 * (t - 300.0) + after[0] + t * after[1] - before[0] - 300.0 * before[1]
+            };
+            let (mut low, mut high) = (290.0, 340.0);
+            assert!(energy(low) < 0.0 && energy(high) > 0.0);
+            for _ in 0..80 {
+                let middle = f64::midpoint(low, high);
+                if energy(middle) > 0.0 { high = middle; } else { low = middle; }
+            }
+            let expected_t = f64::midpoint(low, high);
+            let expected_flux = endpoint(expected_t);
+            let expected = mutual_potentials(alpha, mutual, expected_t, expected_flux);
+            let next = field_storage::step_candidate(&material, &thermal, dt, &circuit,
+                &[], &fields, &[(1, ElectricalPropertyBasis::Resistivity)],
+                controls(), &[0.0], || false).unwrap();
+            near(next.thermal().temperature_k(CELL).unwrap(), expected_t);
+            for (&actual, expected) in next.circuit().fluxes_wb().iter().zip(expected_flux) { near(actual, expected); }
+            assert_eq!(next.circuit().mutual_inductance(), circuit.mutual_inductance());
+            let source = &next.report().coupled.source;
+            near(source.fields.iter().map(|field| field.state[1].free_energy_j).sum(), expected[0]);
+            near(source.fields.iter().map(|field| field.state[1].entropy_j_k).sum(), expected[1]);
+            near(source.fields.iter().map(|field| field.state[1].heat_capacity_j_k).sum(), expected[2]);
+            near(source.field_internal_energy_j[1], expected[0] + expected_t * expected[1]);
+            near(next.report().total_energy_residual_j, 0.0);
+            near(next.report().external_heat_j, 0.0);
+            near(next.thermal().energy_j() + source.field_internal_energy_j[1],
+                thermal.energy_j() + source.field_internal_energy_j[0]);
+            let voltage = -(4.2 + expected_flux[0] + expected_flux[1])
+                / (2.0 * (1.0 + alpha * (expected_t - 300.0) + mutual));
+            near(next.report().coupled.deposited_joule_j, dt * voltage * voltage);
+            if alpha == 0.0 { assert_eq!(source.reversible_heat_j, 0.0); }
+            else { assert!(source.reversible_heat_j.abs() > 1e-4); }
+            if mutual > 0.0 { assert!(source.fields[1].state[0].free_energy_j < 0.0); }
+            let ds = 4.0 * (expected_t / 300.0).ln() + expected[1] - before[1];
+            assert!(ds > 0.0);
+            // Reporting order cannot change the underlying magnetic model.
+            let mut reversed = fields;
+            reversed.reverse();
+            let replay = field_storage::step_candidate(&material, &thermal, dt, &circuit,
+                &[], &reversed, &[(1, ElectricalPropertyBasis::Resistivity)],
+                controls(), &[0.0], || false).unwrap();
+            near(replay.thermal().temperature_k(CELL).unwrap(), expected_t);
+            for (&a, &b) in replay.circuit().fluxes_wb().iter().zip(next.circuit().fluxes_wb()) { near(a, b); }
+            assert_eq!(circuit.fluxes_wb(), &[4.0, 0.2]);
+            assert_eq!(thermal.time_s(), 0.0);
+        }
+    }
+}
+
+#[test]
+fn mutual_thermal_envelope_capacity_and_shared_owner_refuse_without_mutation() {
+    use fs_couple::circuit_enthalpy::field_storage::FieldThermalError;
+    for (cp, mutual) in [(0.001, 0.4), (4.0, 0.97), (4.0, 0.4)] {
+        let card = card(true, 0.001, cp);
+        let caloric = caloric(&card);
+        let thermal = thermal(&caloric, 0.0);
+        let context = point(300.0);
+        let cells = [cell(&card, &caloric, &context)];
+        let resistors = [resistor()];
+        let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+        let (circuit, mut fields) = coupled_initial(&material, &thermal, &card, mutual);
+        let saved = circuit.clone();
+        let thermal_before = thermal.cells().clone();
+        if cp == 4.0 && mutual == 0.4 { fields[1].cell = CellId(99); }
+        let result = field_storage::step_candidate(&material, &thermal, 0.2, &circuit,
+            &[], &fields, &[(1, ElectricalPropertyBasis::Resistivity)],
+            controls(), &[0.0], || false);
+        if cp == 4.0 && mutual == 0.4 {
+            assert!(matches!(result, Err(CircuitEnthalpyError::Source(FieldThermalError::Invalid(
+                "coupled magnetic fields require one shared caloric cell and temperature envelope"
+            )))));
+        } else { assert!(result.is_err()); }
+        assert_eq!(circuit, saved);
+        assert_eq!(thermal.cells(), &thermal_before);
+    }
 }
 
 // Independent closed-form native RC/RL midpoint decay and total-U equation.

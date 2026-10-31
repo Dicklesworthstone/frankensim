@@ -9,11 +9,16 @@
 //!
 //! This is a first-order endpoint-temperature coupling with fixed geometry,
 //! globally affine source coefficients and fixed-density solid caloric charts.
+//! Signed mutual inductance is retained when each connected winding group has
+//! one shared material temperature. Its full inverse-L energy supplies entropy
+//! and capacity; the mutual coefficients themselves remain fixed.
 //! It does not model hysteresis, dielectric relaxation, changing field geometry,
 //! phase transitions or spatially resolved magnetic-field reassembly.
 
 /// Complete thermal-contact and radiative transport on the same field/circuit step.
 pub mod heat;
+mod mutual;
+use mutual::MutualThermal;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyInput, CircuitEnthalpyReport, CircuitEnthalpySolve,
@@ -39,9 +44,10 @@ use std::{cell::RefCell, collections::BTreeMap};
 
 /// One original field branch and its whole, thermally uniform material volume.
 /// Every capacitor and inductor requires a binding, including constant laws.
-/// Several independent field branches may occupy the same whole material cell;
-/// their field energy, entropy and heat-capacity contributions add while the
-/// cell's caloric inventory is counted exactly once.
+/// Several field branches may occupy the same whole material cell; its caloric
+/// inventory is counted exactly once. Every mutually coupled winding component
+/// must share that cell and one temperature envelope. Constant signed M and
+/// source-derived affine self L(T) then define one joint magnetic free energy.
 pub struct FieldThermalBinding {
     pub branch: usize,
     pub cell: CellId,
@@ -76,6 +82,10 @@ pub struct FieldThermalSample {
     pub temperature_k: [f64; 2],
     /// Charge or flux linkage, in the original branch's coordinate convention.
     pub coordinate: [f64; 2],
+    /// For mutually coupled windings these are signed branch partitions of the
+    /// GROUP's potentials and heat capacity. Sum the group before interpreting
+    /// energy or capacity; a branch partition need not be positive. Each branch
+    /// retains s_i=-dpsi_i/dT and C_i=dU_i/dT at fixed total flux linkage.
     pub state: [FieldThermalState; 2],
     /// Actual source-resolved field element at the accepted thermal endpoint.
     pub material: ThermalFieldElement,
@@ -268,18 +278,18 @@ struct InitialField {
     state: FieldThermalState,
 }
 
+fn empty_field_state() -> FieldThermalState {
+    FieldThermalState { free_energy_j: 0.0, entropy_j_k: 0.0,
+        internal_energy_j: 0.0, heat_capacity_j_k: 0.0 }
+}
+
 fn admit(
     material: &MaterialNetwork<'_>,
     thermal: &DepositionSimulation<'_>,
     circuit: &FieldCircuitView<'_>,
     bindings: &[FieldThermalBinding],
     cancel: &RefCell<impl FnMut() -> bool>,
-) -> Result<Vec<InitialField>, Error> {
-    if circuit.mutual.iter().any(|link| link.henries != 0.0) {
-        return Err(invalid(
-            "mutual magnetic thermal feedback requires a shared inductance entropy and capacity law",
-        ));
-    }
+) -> Result<(Vec<InitialField>, MutualThermal), Error> {
     let initial = coordinates(circuit)?;
     if bindings.is_empty()
         || bindings.len() != initial.len()
@@ -290,6 +300,7 @@ fn admit(
             "complete bounded thermal binding for all native field storage required",
         ));
     }
+    let mutual = MutualThermal::new(circuit, bindings, cancel)?;
     let mut branches = BTreeMap::new();
     // One caloric cell may own several independent field coordinates. Accumulate
     // their conservative capacity floors first; checking prefixes would make
@@ -297,7 +308,7 @@ fn admit(
     // once per branch.
     let mut cell_capacity = BTreeMap::<CellId, (f64, f64)>::new();
     let mut result = Vec::with_capacity(bindings.len());
-    for binding in bindings {
+    for (slot, binding) in bindings.iter().enumerate() {
         check(cancel)?;
         let bound = binding.maximum_abs_coordinate;
         if !bound.is_finite()
@@ -386,10 +397,9 @@ fn admit(
                 minimum_caloric_capacity = minimum_caloric_capacity.min(capacity);
             }
         }
-        let minimum_field_capacity = binding
-            .law
-            .minimum_heat_capacity_j_k(bound)
-            .map_err(field)?;
+        let minimum_field_capacity = if mutual.contains(slot) { 0.0 } else {
+            binding.law.minimum_heat_capacity_j_k(bound).map_err(field)?
+        };
         if !minimum_caloric_capacity.is_finite() {
             return Err(invalid(
                 "field caloric capacity is absent over the declared temperature envelope",
@@ -414,8 +424,14 @@ fn admit(
         result.push(InitialField {
             temperature_k: phase.temperature_k(),
             coordinate,
-            state: current.state(coordinate).map_err(field)?,
+            state: if mutual.contains(slot) { empty_field_state() }
+                else { current.state(coordinate).map_err(field)? },
         });
+    }
+    for (cell, floor) in mutual.capacity_floors(circuit.graph, bindings, cancel)? {
+        let capacity = cell_capacity.get_mut(&cell)
+            .ok_or_else(|| invalid("shared magnetic group lost its caloric capacity"))?;
+        capacity.1 = finite(capacity.1 + floor)?;
     }
     for (_, (caloric, fields)) in cell_capacity {
         check(cancel)?;
@@ -425,8 +441,13 @@ fn admit(
             ));
         }
     }
+    let inverse = mutual.inverse(circuit.graph, cancel)?;
+    let temperatures: Vec<_> = result.iter().map(|value| value.temperature_k).collect();
+    let mut states: Vec<_> = result.iter().map(|value| value.state).collect();
+    mutual.apply(circuit.graph, bindings, &inverse, &initial, &temperatures, &mut states, cancel)?;
+    for (value, state) in result.iter_mut().zip(states) { value.state = state; }
     check(cancel)?;
-    Ok(result)
+    Ok((result, mutual))
 }
 
 /// Shared source admission and reversible transfer for original circuit owners.
@@ -434,6 +455,7 @@ fn admit(
 pub(crate) struct PreparedFieldThermal<'a> {
     bindings: &'a [FieldThermalBinding],
     initial: Vec<InitialField>,
+    mutual: MutualThermal,
 }
 impl<'a> PreparedFieldThermal<'a> {
     pub fn new(
@@ -443,10 +465,8 @@ impl<'a> PreparedFieldThermal<'a> {
         bindings: &'a [FieldThermalBinding],
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Self, Error> {
-        Ok(Self {
-            bindings,
-            initial: admit(material, thermal, &circuit, bindings, cancel)?,
-        })
+        let (initial, mutual) = admit(material, thermal, &circuit, bindings, cancel)?;
+        Ok(Self { bindings, initial, mutual })
     }
 
     pub fn refresh(
@@ -489,11 +509,38 @@ impl<'a> PreparedFieldThermal<'a> {
             ));
         }
         let endpoints = coordinates(&endpoint)?;
+        self.mutual.check_links(endpoint.mutual)?;
+        let initial_coordinates: BTreeMap<_, _> = self.bindings.iter().zip(&self.initial)
+            .map(|(binding, initial)| (binding.branch, initial.coordinate)).collect();
+        let temperatures: Vec<_> = samples.iter().map(|sample| sample.temperature_k()).collect();
+        let mut frozen_states = Vec::with_capacity(samples.len());
+        let mut endpoint_states = Vec::with_capacity(samples.len());
+        for (slot, ((binding, before), sample)) in self.bindings.iter().zip(&self.initial).zip(&samples).enumerate() {
+            check(cancel)?;
+            let coordinate = *endpoints.get(&binding.branch)
+                .ok_or_else(|| invalid("native endpoint lost an original field coordinate"))?;
+            if coordinate.abs() > binding.maximum_abs_coordinate {
+                return Err(invalid("proposed field coordinate exceeds the thermal capacity envelope"));
+            }
+            if self.mutual.contains(slot) {
+                frozen_states.push(empty_field_state());
+                endpoint_states.push(empty_field_state());
+            } else {
+                frozen_states.push(sample.state(before.coordinate).map_err(field)?);
+                endpoint_states.push(sample.state(coordinate).map_err(field)?);
+            }
+        }
+        let inverse = self.mutual.inverse(endpoint.graph, cancel)?;
+        self.mutual.apply(endpoint.graph, self.bindings, &inverse, &initial_coordinates,
+            &temperatures, &mut frozen_states, cancel)?;
+        self.mutual.apply(endpoint.graph, self.bindings, &inverse, &endpoints,
+            &temperatures, &mut endpoint_states, cancel)?;
         let mut fields = Vec::with_capacity(self.bindings.len());
         let mut internal = [0.0; 2];
         let mut parameter_work = 0.0;
         let mut reversible_heat_j = 0.0;
-        for ((binding, before), sample) in self.bindings.iter().zip(&self.initial).zip(samples) {
+        for ((((binding, before), sample), frozen), after) in self.bindings.iter()
+            .zip(&self.initial).zip(samples).zip(frozen_states).zip(endpoint_states) {
             check(cancel)?;
             let coordinate = *endpoints
                 .get(&binding.branch)
@@ -503,8 +550,6 @@ impl<'a> PreparedFieldThermal<'a> {
                     "proposed field coordinate exceeds the thermal capacity envelope",
                 ));
             }
-            let frozen = sample.state(before.coordinate).map_err(field)?;
-            let after = sample.state(coordinate).map_err(field)?;
             let work = finite(frozen.free_energy_j - before.state.free_energy_j)?;
             let delta_ts = finite(
                 sample.temperature_k() * after.entropy_j_k

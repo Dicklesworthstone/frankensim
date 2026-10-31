@@ -111,18 +111,22 @@ pub struct ResolvedThermalFieldStorage {
     coefficient_slope_per_k: f64,
 }
 
-/// Thermal potentials of ONE field element at one electrical coordinate.
+/// Thermal potentials of one scalar field element, or a documented signed
+/// branch partition supplied by a coupled owner at fixed total coordinates.
 /// The signed entropy and internal-energy contributions are relative to the
 /// zero-field material caloric chart; they are not separately positive stores.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FieldThermalState {
-    /// Electrical Helmholtz contribution z^2/(2 K) [J].
+    /// Electrical Helmholtz contribution [J]: z^2/(2 K) for a scalar element;
+    /// coupled branch partitions can be signed and must be summed by group.
     pub free_energy_j: f64,
     /// Field entropy contribution -dpsi/dT at fixed z [J/K].
     pub entropy_j_k: f64,
     /// Field internal-energy contribution psi + T s [J].
     pub internal_energy_j: f64,
-    /// Fixed-z field heat-capacity contribution dU/dT [J/K], nonpositive here.
+    /// Fixed-z field heat-capacity contribution dU/dT [J/K], nonpositive for
+    /// this scalar affine law. Coupled consumers may report signed branch
+    /// partitions; only their complete group's sum has that interpretation.
     pub heat_capacity_j_k: f64,
 }
 
