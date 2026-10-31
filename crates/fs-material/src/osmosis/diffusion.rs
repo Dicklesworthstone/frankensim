@@ -15,7 +15,8 @@
 //! trace supplies an absent species. All binary Maxwell–Stefan coefficients,
 //! including solute/solute pairs, are explicit fixed numerical data in m²/s.
 //! Their measurement, temperature/composition applicability and material source
-//! authority belong to the caller. They are not inferred from the free energy.
+//! authority belong to the caller. [`source`] binds state-dependent pairs to
+//! original material claims without inferring kinetics from the free energy.
 
 use super::{
     AqueousSolution, MAX_OSMOTIC_SOLUTES, OsmosisError, Sum, nonideal::VirialSolutionModel,
@@ -27,6 +28,8 @@ use fs_thermochem::transport::maxwell_stefan::{
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
 use std::sync::Arc;
 
+pub mod source;
+
 /// The original shared friction workspace, exposed through its material owner.
 pub use fs_thermochem::transport::maxwell_stefan::MaxwellStefanWorkspaceV1 as SolutionDiffusionWorkspace;
 
@@ -36,6 +39,7 @@ pub enum SolutionDiffusionError {
     Invalid(&'static str),
     Thermodynamics(OsmosisError),
     Friction(MaxwellStefanErrorV1),
+    Material(crate::state_point::MaterialStatePointError),
     FrameResidual {
         maximum_gradient_residual_per_m: f64,
     },
@@ -63,6 +67,11 @@ impl From<MaxwellStefanErrorV1> for SolutionDiffusionError {
         } else {
             Self::Friction(value)
         }
+    }
+}
+impl From<crate::state_point::MaterialStatePointError> for SolutionDiffusionError {
+    fn from(value: crate::state_point::MaterialStatePointError) -> Self {
+        Self::Material(value)
     }
 }
 type Result<T> = core::result::Result<T, SolutionDiffusionError>;
@@ -240,6 +249,30 @@ impl SolutionMaxwellStefan {
         controls: SolutionDiffusionSolve,
         workspace: &mut MaxwellStefanWorkspaceV1,
         output: &mut [f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SolutionDiffusionReport> {
+        self.flux_with_binary_into(
+            left,
+            right,
+            distance_m,
+            controls,
+            &self.binary_diffusivities_m2_s,
+            workspace,
+            output,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn flux_with_binary_into(
+        &self,
+        left: &AqueousSolution,
+        right: &AqueousSolution,
+        distance_m: f64,
+        controls: SolutionDiffusionSolve,
+        binary_diffusivities_m2_s: &[f64],
+        workspace: &mut MaxwellStefanWorkspaceV1,
+        output: &mut [f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SolutionDiffusionReport> {
         poll(&mut cancelled)?;
@@ -296,7 +329,7 @@ impl SolutionMaxwellStefan {
             &x[..n],
             &drive[..n],
             AmountConcentration::new(concentration),
-            &self.binary_diffusivities_m2_s,
+            binary_diffusivities_m2_s,
             controls.friction,
             workspace,
             &mut cancelled,
@@ -327,7 +360,7 @@ impl SolutionMaxwellStefan {
                 }
                 let term = finite(
                     ((x[j] * converted[i] - x[i] * converted[j])
-                        / self.binary_diffusivities_m2_s[i * n + j])
+                        / binary_diffusivities_m2_s[i * n + j])
                         / concentration,
                 )?;
                 row.add(term);

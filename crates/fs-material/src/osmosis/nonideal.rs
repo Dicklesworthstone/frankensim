@@ -481,9 +481,11 @@ fn log_ratio(numerator: f64, denominator: f64) -> f64 {
     if numerator == denominator {
         return 0.0;
     }
-    if numerator >= 0.5 * denominator && denominator >= 0.5 * numerator {
-        let mean = 0.5 * numerator + 0.5 * denominator;
-        let s = 0.5 * ((numerator - denominator) / mean);
+    let relative = (numerator - denominator) / denominator;
+    if (-0.5..=1.0).contains(&relative) {
+        // Form the dimensionless relative change before any half scaling:
+        // averaging subnormal concentrations would round away their ratio.
+        let s = relative / (2.0 + relative);
         let square = s * s;
         let mut term = s;
         let mut result = s;

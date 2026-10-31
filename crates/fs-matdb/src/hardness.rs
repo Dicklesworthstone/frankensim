@@ -58,6 +58,13 @@ pub struct HardnessTestContext {
 }
 
 impl HardnessTestContext {
+    pub(crate) fn estimated_retained_payload_bytes(&self) -> usize {
+        core::mem::size_of::<Self>()
+            + self.indenter.capacity()
+            + self.protocol.capacity()
+            + self.loading.capacity() * core::mem::size_of::<HardnessLoadStep>()
+    }
+
     /// Bound loading history, including preliminary and final holds when the
     /// source provides them. Indenter must identify its geometry/material;
     /// protocol must identify the procedure and revision being requested.

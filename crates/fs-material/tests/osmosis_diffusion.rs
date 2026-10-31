@@ -226,6 +226,22 @@ fn g1_reference_cancelled_changes_follow_original_free_energy_and_resolve_adjace
 }
 
 #[test]
+fn g1_positive_dilute_chemical_forces_do_not_lose_subnormal_concentration_ratios() {
+    let source = model(1.0, vec![0.0]);
+    let left = f64::from_bits(2);
+    let right = f64::from_bits(3);
+    let mut difference = [0.0];
+    source
+        .chemical_potential_differences_into(&[left], &[right], &mut difference)
+        .unwrap();
+    close(difference[0], R * T * 1.5_f64.ln(), 1e-12);
+    source
+        .chemical_potential_differences_into(&[right], &[left], &mut difference)
+        .unwrap();
+    close(difference[0], -R * T * 1.5_f64.ln(), 1e-12);
+}
+
+#[test]
 fn g0_missing_pair_source_mismatch_zero_log_and_cancellation_refuse_atomically() {
     let source = model(1.0, vec![0.0]);
     for pairs in [vec![], vec![0.0, 1e-9, 2e-9, 0.0], vec![0.0, 0.0, 0.0, 0.0]] {

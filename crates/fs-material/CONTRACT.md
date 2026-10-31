@@ -8052,6 +8052,44 @@ two-body thermal decay, tighter error convergence, independent gas/bound/thermal
 accuracy controls, coupled porous transport, exact replay, and atomic work,
 source, entropy and cancellation refusals.
 
+### Material-sourced, composition-dependent liquid diffusion
+
+`osmosis::diffusion::source::MaterialSolutionMaxwellStefan` binds every original
+solvent/solute and solute/solute Maxwell–Stefan pair to an explicit immutable
+material card and exact property key. Claims are selected once at an admitted
+reference solution and remain pinned. Each evaluation resolves actual left,
+arithmetic-concentration face and right states against those same claims;
+endpoint support cannot be inferred from an admissible midpoint. Curves and
+joint sampled surfaces retain the native resolver's interpolation support,
+units, evidence and refusal behavior. The face matrix enters the existing
+solvent-frame solver through one shared internal path.
+
+The source adapter owns only the original thermodynamic model's absolute
+temperature and explicit amount-concentration coordinates, including solvent
+concentration from its molar volume. Unowned pressure, missing pairs, ambiguous
+or incompatible quantity declarations and unsupported physical states refuse.
+Binary kinetics are never inferred from virial free energy or substituted with
+tracer coefficients. Original thermodynamic species order and canonical solver
+order are mapped explicitly. This remains the original isothermal, positive-
+concentration, incompressible-solvent description, without pressure evolution.
+
+Successful face evaluations return complete left/face/right source receipts
+and the current symmetric binary matrix. Source queries allocate transient
+material evidence; the constant-coefficient API retains its allocation-free
+advancement. Prepared source storage retains original cards and claim IDs,
+without a dynamic receipt cache. Its estimated payload charge includes all
+retained claims, observations, models, source geometry and indexes, including
+unselected data, and may conservatively count a shared card per pair. It is
+not an allocator-overhead, transient-memory or resident-memory bound.
+
+Six public source regressions check an independent concentration-dependent
+binary flux, complete original receipts, canonical permutations, pinned
+endpoint and joint-surface refusals, required kinetics/coordinates and retained
+unselected source data. The existing liquid-core regressions also cover
+subnormal positive concentration ratios: the chemical log ratio forms its
+dimensionless relative change before the atanh argument, preserving dilute
+forces without concentration floors or invented species.
+
 ### Finite multicomponent membrane separation
 
 `transient::mixture::IsothermalGasMembraneMixture` couples two original finite

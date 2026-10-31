@@ -462,6 +462,33 @@ pub struct MaterialCard {
 }
 
 impl MaterialCard {
+    /// Estimated full retained card payload, including unselected claims,
+    /// observations and models. Uses string/vector capacities and map entry
+    /// payloads; excludes allocator-specific overhead and tree-node slack.
+    /// Sharing owners may conservatively charge this entire payload per binding.
+    /// This is not a resident-memory or exact allocation bound.
+    #[must_use]
+    pub fn estimated_retained_payload_bytes(&self) -> usize {
+        let mut bytes = core::mem::size_of::<Self>()
+            + self.id.chemistry.capacity()
+            + self.id.phase.capacity()
+            + self.id.process.capacity()
+            + self.claims.estimated_retained_payload_bytes()
+            - core::mem::size_of::<ClaimSet>()
+            + self.models.capacity() * core::mem::size_of::<ConstitutiveModelCard>();
+        for model in &self.models {
+            bytes += model.law.0.capacity()
+                + model.sources.capacity() * core::mem::size_of::<ContentHash>()
+                + crate::validity_payload_bytes(&model.validity)
+                + crate::provenance_payload_bytes(&model.provenance);
+            for (key, value) in &model.parameters {
+                bytes +=
+                    core::mem::size_of_val(key) + core::mem::size_of_val(value) + key.capacity();
+            }
+        }
+        bytes
+    }
+
     /// Derive a research card with explicitly authored, constant SI scalars.
     ///
     /// Each complete context-free key must already exist. All competing claims

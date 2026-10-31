@@ -1192,6 +1192,62 @@ pub struct ClaimSet {
 }
 
 impl ClaimSet {
+    /// Estimated retained payload, including this owner, ALL claims and
+    /// observations, indexes, string/vector capacities and map entry payloads.
+    /// Excludes allocator bookkeeping, tree-node slack and alignment overhead;
+    /// this is a reproducible payload charge, not an RSS or allocation bound.
+    #[must_use]
+    pub fn estimated_retained_payload_bytes(&self) -> usize {
+        let mut bytes = core::mem::size_of::<Self>();
+        for (id, observation) in &self.observations {
+            bytes += core::mem::size_of_val(id)
+                + core::mem::size_of_val(observation)
+                + observation.specimen.capacity()
+                + observation.method.capacity()
+                + observation.caveats.capacity()
+                + provenance_payload_bytes(&observation.provenance);
+        }
+        for (id, claim) in &self.claims {
+            bytes += core::mem::size_of_val(id)
+                + core::mem::size_of_val(claim)
+                + claim.key.name.capacity()
+                + validity_payload_bytes(&claim.validity)
+                + claim.observations.capacity() * core::mem::size_of::<ObservationId>()
+                + provenance_payload_bytes(&claim.provenance);
+            if let Some(context) = &claim.key.hardness_test {
+                bytes += context.estimated_retained_payload_bytes();
+            }
+            bytes += match &claim.value {
+                PropertyValue::Scalar { .. } => 0,
+                PropertyValue::Curve {
+                    abscissa, knots, ..
+                } => abscissa.capacity() + knots.capacity() * core::mem::size_of::<(f64, f64)>(),
+                PropertyValue::Surface2D {
+                    axes,
+                    samples,
+                    triangles,
+                    ..
+                } => {
+                    axes[0].capacity()
+                        + axes[1].capacity()
+                        + samples.capacity() * core::mem::size_of::<([f64; 2], f64)>()
+                        + triangles.capacity() * core::mem::size_of::<[u32; 3]>()
+                }
+            };
+        }
+        for (key, quantity) in &self.key_specs {
+            bytes +=
+                core::mem::size_of_val(key) + core::mem::size_of_val(quantity) + key.capacity();
+        }
+        for (key, claims) in &self.by_key {
+            bytes += core::mem::size_of_val(key)
+                + core::mem::size_of_val(claims)
+                + key.capacity()
+                + claims.capacity() * core::mem::size_of::<ClaimId>();
+        }
+        bytes
+    }
+
     /// An empty set.
     #[must_use]
     pub fn new() -> ClaimSet {
@@ -1398,4 +1454,25 @@ impl ClaimSet {
     pub fn observation_ids(&self) -> impl Iterator<Item = ObservationId> + '_ {
         self.observations.keys().copied()
     }
+}
+
+pub(crate) fn provenance_payload_bytes(provenance: &Provenance) -> usize {
+    provenance.source.capacity() + provenance.license.capacity()
+}
+
+pub(crate) fn validity_payload_bytes(validity: &ValidityDomain) -> usize {
+    validity
+        .bounds()
+        .iter()
+        .map(|(key, value)| {
+            core::mem::size_of_val(key) + core::mem::size_of_val(value) + key.capacity()
+        })
+        .sum::<usize>()
+        + validity
+            .axis_quantities()
+            .iter()
+            .map(|(key, value)| {
+                core::mem::size_of_val(key) + core::mem::size_of_val(value) + key.capacity()
+            })
+            .sum::<usize>()
 }
