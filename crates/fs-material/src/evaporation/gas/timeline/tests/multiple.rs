@@ -1,4 +1,6 @@
 //! Shared-vapor films use one original heat clock and preserve actual inventories.
+mod heat;
+
 use super::super::multiple::advance_deposition_with_gas as advance_multiple;
 use super::*;
 use crate::evaporation::gas::chamber::GasLiquidChamberSolve;

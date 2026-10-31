@@ -6978,6 +6978,18 @@ Regression sources cover cold/warm counterflow, original heat and birth energy,
 covering events, finite-gas retries, cancellation, singleton compatibility and
 refinement of the complete shared clock.
 
+`timeline::multiple::advance_deposition_with_gas_and_heat` inserts that same
+joint sensible-heat owner between original wall transport and joint phase
+exchange. Every enabled film retains exactly its original thermal enthalpy
+branch and explicit coefficient, including admission before birth. All three
+stages share each event-clipped interval and discard together on a retry; only
+accepted sensible heat enters per-cell and whole-window physical accounts.
+The existing window-wide absolute energy budget includes wall, joint heat and
+phase defects once. All-zero coefficients preserve the phase-only endpoints
+and audit exactly. Five regression sources cover an independent nonlinear
+thermal-network solution, opposing phase transfers, birth/covering timing,
+retry/cancellation/zero-heat behavior, and complete-clock time refinement.
+
 ### Reciprocal sensible heat through the gas film
 
 `evaporation::gas::advance_surface_with_gas_and_heat` adds a caller-supplied
