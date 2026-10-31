@@ -472,12 +472,14 @@ mod tests {
                 )
                 .unwrap(),
             );
-        // Captured by executing the pre-Sellmeier production coating/hash owner.
+        // Fresnel semantics v2 intentionally invalidates cached v1 responses
+        // after correcting weak-absorption square-root cancellation. The
+        // established table/coating identity payload order is unchanged.
         assert_eq!(
             *optics.content_identity().as_bytes(),
             [
-                249, 199, 58, 11, 211, 199, 239, 151, 74, 39, 38, 39, 85, 123, 191, 224, 131, 116,
-                98, 82, 67, 86, 162, 56, 163, 172, 212, 1, 234, 59, 237, 23
+                145, 239, 174, 33, 139, 22, 138, 103, 69, 194, 245, 136, 121, 201, 215, 120, 68, 71,
+                183, 178, 34, 224, 136, 252, 142, 19, 79, 128, 60, 125, 134, 142
             ],
         );
     }

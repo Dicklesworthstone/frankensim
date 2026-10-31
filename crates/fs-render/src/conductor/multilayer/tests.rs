@@ -404,7 +404,7 @@ fn g1_opaque_front_layer_screens_arbitrary_deep_layers_without_overflow() {
             )
             .unwrap(),
             layer(1.0, 0.0, 80.0),
-            layer(4.0, 0.0, 31.0),
+            layer(3.0, 0.0, 31.0),
             layer(1.5, 100.0, 99_999.0),
         ],
         16,

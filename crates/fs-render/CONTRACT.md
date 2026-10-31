@@ -157,13 +157,19 @@ differentiable lift). Pure Rust throughout.
   incident medium, and validated isotropic-GGX roughness. Built-in tungsten and
   stainless-steel tables are explicitly representative look-development data;
   table/source/material identities prove replay binding, not specimen fidelity.
+  Scalar complex square roots compute the larger component first and recover
+  the smaller from `2uv=y`, retaining weak absorption on the total-reflection
+  side. Optical semantics version 2 changes evaluation identities to distinguish
+  this numerical correction; authored tables, coatings and source metadata
+  retain their original values. Independent high-precision Fresnel references
+  cover both sides of the weakly absorbing substrate's critical angle.
   `ConductorOptics::with_coating(CoherentDielectricCoating)` additionally admits
   one explicitly source-bound transparent isotropic film: the shared visible
   Cauchy, Sellmeier or tabulated phase-index law and a uniform thickness in metres, from
   zero through 100 micrometres. At each wavelength the same phase index sets
   both the interface admittance and the coherent optical thickness; group
-  index is never substituted. Existing Cauchy coating identities retain their
-  original bytes; Sellmeier binds a separate law tag and all six coefficients,
+  index is never substituted. Cauchy coatings retain their existing identity
+  encoding; Sellmeier binds a separate law tag and all six coefficients,
   while tabulated laws bind each wavelength/index pair. Separate complex s/p amplitudes retain substrate reflection
   phase and sum every internal reflection before unpolarized power averaging.
   A fixed-size characteristic-matrix evaluation handles the film's critical
@@ -172,7 +178,7 @@ differentiable lift). Pure Rust throughout.
   Both isotropic and brushed conductor BSDFs, including their existing direct,
   camera, photometric and bidirectional consumers, use this same Fresnel owner.
   The film follows the local microfacet normal; geometric proposals remain
-  unchanged. Bare presets and bare optical identities remain unchanged. A
+  unchanged. Bare presets retain their authored optical coefficients. A
   coating is never inferred from a metal name or material-state binding.
   `ConductorOptics::with_absorbing_coating(CoherentAbsorbingCoating)` admits an
   explicitly sourced passive film with nine absolute `eta + i k` knots over
@@ -202,8 +208,8 @@ differentiable lift). Pure Rust throughout.
   once per wavelength/angle and reused across repeats. Storage fits inside the
   existing absorbing-film payload, preserving Copy material size and avoiding
   per-hit allocation. Identity binds physical ordering, repetition count, every
-  coefficient, thickness and source; existing bare and single-film identities
-  retain their original bytes.
+  coefficient, thickness and source; adding multilayer support preserves
+  existing bare and single-film identity encodings.
   `CoherentCoatingStack` separately borrows up to 64 arbitrary ordered transparent
   or absorbing layers, retaining each full Sellmeier/Cauchy/tabulated law or
   nine-knot eta/k spectrum and source. It evaluates scalar reflectance and the

@@ -25,7 +25,7 @@ pub use multilayer::{
 };
 
 /// Bit semantics of table validation, interpolation, and Fresnel evaluation.
-pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 1;
+pub const CONDUCTOR_OPTICS_SEMANTICS_VERSION: u32 = 2;
 /// Bit semantics of the single-scattering isotropic-GGX conductor BSDF.
 pub const CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 1;
 /// Fixed number of knots in a conductor optical table.
@@ -566,15 +566,22 @@ impl core::ops::Div for Complex {
 }
 
 fn complex_sqrt(value: Complex) -> Complex {
-    let magnitude = det::sqrt(value.norm_squared());
-    let real = det::sqrt(((magnitude + value.re) * 0.5).max(0.0));
-    let imaginary_magnitude = det::sqrt(((magnitude - value.re) * 0.5).max(0.0));
-    let imaginary = if value.im < 0.0 {
-        -imaginary_magnitude
+    // Compute the large component first, then recover the small one through
+    // 2*re*im = value.im. Subtracting |value| and |value.re| loses the weak
+    // absorption of an evanescent wave, even for otherwise ordinary indices.
+    // Kahan, Math. 185, problem 2: cancellation-free principal square root.
+    // https://people.eecs.berkeley.edu/~wkahan/Math185/30Aug06S.pdf
+    let magnitude = det::hypot(value.re, value.im);
+    if magnitude == 0.0 {
+        return Complex::new(0.0, value.im);
+    }
+    let large = det::sqrt(magnitude) * det::sqrt(0.5 * (1.0 + value.re.abs() / magnitude));
+    let small = value.im / (2.0 * large);
+    if value.re >= 0.0 {
+        Complex::new(large, small)
     } else {
-        imaginary_magnitude
-    };
-    Complex::new(real, imaginary)
+        Complex::new(small.abs(), large.copysign(value.im))
+    }
 }
 
 fn canonical_zero(value: f64) -> f64 {
@@ -787,6 +794,30 @@ mod tests {
                     assert_close(actual, expected, 5.0e-14, "independent real-form Fresnel");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn weak_absorption_near_total_reflection_matches_high_precision_fresnel() {
+        // Independent 90-decimal-digit complex Fresnel evaluation at the exact
+        // binary64 inputs, using q=sqrt(n^2-n0^2*(1-c^2)) and the longitudinal
+        // s/p boundary amplitudes. These straddle the weakly absorbing
+        // substrate's critical angle; scalar square-root cancellation formerly
+        // distorted the small loss on the total-reflection side by more than 1e-10.
+        for (cosine, expected) in [
+            (0.02, 0.999_999_999_428_394),
+            (0.1, 0.999_999_997_116_613_2),
+            (0.5, 0.999_999_980_748_247_1),
+            (0.78, 0.999_999_242_034_843_1),
+            (0.8, 0.245_233_399_079_551_6),
+            (0.99, 0.053_305_943_735_198_54),
+        ] {
+            assert_close(
+                fresnel_conductor(2.4, 1.5, 1.0e-8, cosine).unwrap(),
+                expected,
+                2.0e-14,
+                "weakly absorbing interface high-precision reference",
+            );
         }
     }
 
