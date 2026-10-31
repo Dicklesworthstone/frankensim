@@ -284,6 +284,55 @@ gravitational work and transactional source/cancellation/work-budget refusal.
 These synthetic analytical cases establish implementation behavior, not measured
 material validity or an accuracy claim for rapid thermal actuation.
 
+## Source-bound axial compliance on heated articulated motion (MR21)
+
+`articulated_motion::elastic::AxialJointMember` connects an original
+`ConcentricThermoelasticLaw` to one actual parent-child prismatic coordinate.
+`with_axial_joint_members` attaches up to 64 members once. Ordered layers bind
+distinct complete finite cells of that child or its direct parent; no cell may
+fund two members. Original card, full reference query, density and expansion
+claim, registered caloric object, cell identity, reference volume `A_i L` and
+mass `rho_i A_i L` must agree with the existing mechanism inventory. Member
+attachment adds no mass. An explicitly supplied reference q defines zero total
+strain; positive q extends the member with unit displacement Jacobian.
+
+At every original RK stage, `epsilon=(q-q_ref)/L` enters the native section's
+allocation-free `axial_force_and_energy_at_strain`. Its force `-N` enters the
+same ABA effort vector as external efforts and existing dry/journal/film loads.
+Its potential is `U=L sum(E_i A_i (epsilon-epsilon_th_i)^2/2)`. Layer self-stress
+energy is retained even when the net axial force vanishes. `MechanicalEnergy`
+includes `elastic_j`, so actual kinetic-plus-elastic exchange and dissipation
+share the original numerical-energy admission. Existing brake/film heat is
+still deposited once on the finite thermal timeline, never from an elastic
+energy difference fitted after the solve.
+
+Each thermal endpoint refreshes the original source-pinned section before
+acceptance. RK stages perform no material queries or coefficient fitting.
+The existing section owner admits scalar reference density and alpha, explicit
+zero/negative expansion, scalar or globally affine E(T), and its original
+continuous source support. Native layer limits apply to total, thermal and
+elastic strain. Endpoint diagnostics expose current phases, source section,
+force and stored potential; source/strain/inventory/cancellation failures roll
+back the complete thermal and articulated candidate together.
+
+This is lumped-mass axial compliance on the existing joint, with fixed reference
+section and the member inventory already carried by rigid bodies. It does not
+resolve distributed rod deformation/inertia, longitudinal rod modes, buckling,
+interlayer slip, plasticity or remeshing. Positive elastic stiffness is not a
+claim of compression stability. Thermal coefficients freeze over each capped
+mechanical interval. At unchanged q, their potential change joins the existing
+explicit `parameter_work_j` account and its absolute-work budget. That work is
+external to the stress-free caloric model: reciprocal thermoelastic heat and
+full thermoelastic internal energy `psi+T*s` are not closed by this split.
+Initial attached potential belongs to the supplied initial configuration.
+
+`tests/heated_articulated_elastic_motion.rs` checks independent oscillator and
+damped-oscillator solutions, data-only modulus changes, thermal softening and
+extension over two actual native steps, retained two-layer self-stress,
+mechanical loss deposited into both finite bodies, and source/strain/cancel
+refusal with clean retry. Source/parser checks are separate from native test
+execution and empirical material qualification.
+
 ## Source-bound squeeze pressure on articulated motion (MR20)
 
 `HeatedArticulatedMotion::with_squeeze_films` binds original

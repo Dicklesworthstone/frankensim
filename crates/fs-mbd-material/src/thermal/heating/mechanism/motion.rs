@@ -11,6 +11,8 @@
 //! Ordered material dry brakes use that same work/heat path for both bodies.
 //! Source-backed squeeze films share those stages through their full native
 //! generalized pressure-force map, rather than an independent damping fit.
+//! Source-backed axial members add conservative effort and elastic storage on
+//! the same coordinates; thermal changes retain explicit parameter-work funding.
 use super::*;
 use fs_ga::{Se3, Vec3, Wrench};
 use fs_mbd::articulated::{
@@ -21,6 +23,7 @@ use fs_time::{
     AdaptiveError, AdaptiveState, AdaptiveStatus, PiController, rk45_adaptive_controlled,
 };
 use std::cell::RefCell;
+use std::collections::BTreeSet;
 
 /// Material-driven journal loss and its receiving thermal control volume.
 pub mod viscous;
@@ -35,6 +38,10 @@ use fs_tribo::DissipationStep;
 /// Material Reynolds pressure, generalized resistance and finite-wall heating.
 pub mod squeeze;
 use squeeze::{BoundSqueeze, SqueezeFilm, SqueezeFilmState};
+
+/// Source-resolved axial compliance and storage on prismatic coordinates.
+pub mod elastic;
+use elastic::{AxialJointMember, AxialMemberState, BoundAxial};
 
 /// Component tolerances follow the actual generalized-coordinate ordering.
 #[derive(Clone, Debug, PartialEq)]
@@ -124,10 +131,14 @@ pub struct MechanicalEnergy {
     pub kinetic_j: f64,
     /// Datum is zero at world height g dot x = 0.
     pub gravitational_j: f64,
+    /// Frozen-temperature axial potential, including interlayer self-stress.
+    /// Its source refresh is explicit parameter work, not reciprocal heat.
+    pub elastic_j: f64,
 }
 impl MechanicalEnergy {
     fn change_from(self, old: Self) -> Result<f64, Error> {
-        finite((self.kinetic_j - old.kinetic_j) + (self.gravitational_j - old.gravitational_j))
+        finite((self.kinetic_j - old.kinetic_j) + (self.gravitational_j - old.gravitational_j)
+            + (self.elastic_j - old.elastic_j))
     }
 }
 /// Accounts cover the same interval. Numerical error and thermal parameter
@@ -203,6 +214,7 @@ impl<'a> HeatedArticulatedMotion<'a> {
             bearings: Vec::new(),
             brakes: Vec::new(),
             squeeze: Vec::new(),
+            axial: Vec::new(),
             pending: None,
         };
         forward_dynamics(
@@ -245,6 +257,49 @@ impl<'a> HeatedArticulatedMotion<'a> {
     }
     pub fn mechanical_energy(&self) -> Result<MechanicalEnergy, Error> {
         self.motion.energy()
+    }
+
+    /// Attach 1..=64 source-bound axial members once, without adding mass.
+    /// Their original finite material cells must be disjoint across members.
+    /// The native section owns force AND potential at every actual RK stage;
+    /// material queries occur only at thermal endpoints. Initial elastic energy
+    /// belongs to the supplied configuration, not a hidden thermal source.
+    ///
+    /// Temperature changes alter the real restoring effort. Their storage jump
+    /// at unchanged q joins the existing parameter-work budget. This retains
+    /// the one-way thermal split; it does not debit reciprocal thermoelastic
+    /// heat from the stress-free caloric law. Refine maximum_step_s as needed.
+    pub fn with_axial_joint_members(
+        &self,
+        members: Vec<AxialJointMember<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.axial.is_empty() || members.is_empty() || members.len() > 64 {
+            return Err(Error::Invalid("attach 1..=64 axial members exactly once"));
+        }
+        let mut candidate = self.clone();
+        let mut inventory = BTreeSet::new();
+        for member in members {
+            checkpoint()?;
+            if member.cells.len() != member.law.reference().layers().len() {
+                return Err(Error::Invalid("axial member needs one finite cell per original layer"));
+            }
+            if member.cells.iter().any(|cell| !inventory.insert(*cell)) {
+                return Err(Error::Invalid("one finite material inventory cannot supply two axial members"));
+            }
+            candidate.motion.axial.push(BoundAxial::new(member,
+                self.configuration(), &self.motion.expansion.regions, &self.thermal,
+                &self.motion.position, &mut checkpoint)?);
+        }
+        candidate.motion.energy()?;
+        checkpoint()?;
+        Ok(candidate)
+    }
+
+    /// Actual endpoint forces, elastic storage and original ordered layer sources.
+    pub fn axial_joint_members(&self) -> impl ExactSizeIterator<Item = &AxialMemberState> {
+        self.motion.axial.iter().map(|member| &member.state)
     }
 
     /// Attach up to 64 massless, isothermal journal films to this mechanism.
@@ -575,6 +630,7 @@ struct Motion<'a> {
     bearings: Vec<BoundBearing<'a>>,
     brakes: Vec<BoundBrake<'a>>,
     squeeze: Vec<BoundSqueeze<'a>>,
+    axial: Vec<BoundAxial<'a>>,
     pending: Option<IntegratedMotion>,
 }
 #[derive(Clone)]
@@ -600,6 +656,7 @@ impl Motion<'_> {
             &self.position,
             &self.velocity,
             self.gravity,
+            &self.axial,
         )
     }
     fn integrate(
@@ -651,6 +708,10 @@ impl Motion<'_> {
             let result = (|| -> Result<(), Error> {
                 let physical: Vec<_> = u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
                 let mut effort = self.effort.clone();
+                for member in &self.axial {
+                    let (force, _) = member.response(physical[member.dof])?;
+                    effort[member.dof] = finite(effort[member.dof] + force)?;
+                }
                 for (j, bearing) in self.bearings.iter().enumerate() {
                     let (torque, power, _) = bearing.response(physical[n + bearing.dof])?;
                     effort[bearing.dof] = finite(effort[bearing.dof] + torque)?;
@@ -720,7 +781,7 @@ impl Motion<'_> {
         let physical: Vec<_> = state.u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
         let position = physical[..n].to_vec();
         let velocity = physical[n..2 * n].to_vec();
-        let after_motion = energy(model, self.base, &position, &velocity, self.gravity)?;
+        let after_motion = energy(model, self.base, &position, &velocity, self.gravity, &self.axial)?;
         let applied = finite(
             self.effort
                 .iter()
@@ -895,7 +956,11 @@ impl DepositionObserver for Motion<'_> {
         if residual > 1.0 {
             return Err(Error::Budget("conjugate momentum transfer residual"));
         }
-        let after = energy(model, self.base, &position, &next_velocity, self.gravity)?;
+        for member in &mut self.axial {
+            checkpoint()?;
+            member.refresh(thermal, &self.expansion.configuration, &position, checkpoint)?;
+        }
+        let after = energy(model, self.base, &position, &next_velocity, self.gravity, &self.axial)?;
         let parameter = after.change_from(after_motion)?;
         for bearing in &mut self.bearings {
             checkpoint()?;
@@ -941,6 +1006,7 @@ fn energy(
     q: &[f64],
     velocity: &[f64],
     gravity: Vec3,
+    axial: &[BoundAxial<'_>],
 ) -> Result<MechanicalEnergy, Error> {
     let kinematics = forward_kinematics(model, base, q, velocity)?;
     let mut kinetic = 0.0;
@@ -958,9 +1024,14 @@ fn energy(
             .map_err(ArticulatedError::from)?;
         potential = finite(potential - inertia.mass() * gravity.dot(center))?;
     }
+    let mut elastic = 0.0;
+    for member in axial {
+        elastic = finite(elastic + member.response(q[member.dof])?.1)?;
+    }
     Ok(MechanicalEnergy {
         kinetic_j: kinetic,
         gravitational_j: potential,
+        elastic_j: elastic,
     })
 }
 fn finite(x: f64) -> Result<f64, Error> {
