@@ -26,6 +26,7 @@ use crate::instances::RigidTransform;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, QUAD_BINS};
 
 mod ray_partition;
+pub mod validation;
 
 /// Spectral bins shared with the existing spectral renderer.
 pub const SPECTRAL_BINS: usize = QUAD_BINS;
