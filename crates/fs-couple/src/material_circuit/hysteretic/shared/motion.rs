@@ -13,6 +13,9 @@
 //! unresolved oscillations. No fringing, contact impact, changing leakage,
 //! vector core rotation or thermal evolution is inferred by this owner.
 
+/// Original finite core/winding heat on the same accepted mechanical history.
+pub mod thermal;
+
 use super::{
     HystereticCircuitError, HystereticCircuitSolve, NativeWindingPorts, Result,
     SharedHystereticCircuit, SharedHystereticStep, finite, instantaneous_voltages, invalid,

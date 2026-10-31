@@ -7,7 +7,8 @@
 //! Caloric storage and winding resistivity/conductivity come from one prepared
 //! MaterialNetwork with pinned sources. Its complete heat assembly can add
 //! source-bound thermal contacts, integrated layers and enclosure radiation.
-//! Every thermal trial restarts the same accepted circuit and magnetic memory.
+//! Every thermal trial restarts the same accepted circuit and magnetic memory,
+//! including the original gap and momentum when native motion is represented.
 //! Core heat enters its whole fixed solid volume; graph resistor heat enters
 //! its original receiving cells. No core-loss map, eddy fit, numerical defect
 //! or duplicate thermal source is added. Endpoint transport plus thermal BE
@@ -43,10 +44,20 @@ pub(super) mod sealed {
 
 /// Sealed native magnetic histories using the SAME finite core/coil heat owner.
 /// The source fit, retained memory and original native electrical account stay
-/// with the single-core or shared-core implementation; no thermal trial may
-/// commit or advance that accepted history more than once.
+/// with the single-core, shared-core or moving shared-core implementation; no
+/// thermal trial may commit or advance that accepted history more than once.
 pub trait HystereticThermalHistory: sealed::History + Clone {
     type Step: HystereticThermalStep;
+    /// Original native step policy and any additional held physical drive.
+    /// Stationary histories use HystereticCircuitSolve unchanged.
+    type Input: Copy;
+    fn electrical_controls(input: Self::Input) -> HystereticCircuitSolve;
+    /// Clip native electrical work without replacing a mechanical drive or
+    /// the original model's independent physical acceptance tolerances.
+    fn with_electrical_controls(
+        input: Self::Input,
+        controls: HystereticCircuitSolve,
+    ) -> Self::Input;
     fn uniform_core(&self) -> &UniformHystereticCore;
     fn native_circuit(&self) -> &crate::material_circuit::MaterialCircuit;
     fn time_s(&self) -> f64;
@@ -56,12 +67,12 @@ pub trait HystereticThermalHistory: sealed::History + Clone {
         target_s: f64,
         resistors: Vec<crate::material_circuit::MaterialResistor>,
         external_inputs: &[f64],
-        controls: HystereticCircuitSolve,
+        input: Self::Input,
         cancelled: impl FnMut() -> bool,
     ) -> Result<(Self, Self::Step), HystereticCircuitError>;
 }
 
-/// Original native electrical, magnetic storage and ONE core-loss receipt.
+/// Original native electrical, magnetic/mechanical storage and ONE core-loss receipt.
 /// Sealed implementations prevent arbitrary loss maps entering this account.
 pub trait HystereticThermalStep: sealed::Step {
     fn electrical(&self) -> &crate::material_circuit::MaterialCircuitStep;
@@ -76,6 +87,16 @@ pub trait HystereticThermalStep: sealed::Step {
 impl sealed::History for HystereticCircuit {}
 impl HystereticThermalHistory for HystereticCircuit {
     type Step = HystereticCircuitStep;
+    type Input = HystereticCircuitSolve;
+    fn electrical_controls(input: Self::Input) -> HystereticCircuitSolve {
+        input
+    }
+    fn with_electrical_controls(
+        _input: Self::Input,
+        controls: HystereticCircuitSolve,
+    ) -> Self::Input {
+        controls
+    }
     fn uniform_core(&self) -> &UniformHystereticCore {
         self.core()
     }
@@ -440,7 +461,8 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
     /// deposited in the returned thermal state, once each.
     ///
     /// controls.circuit supplies the native electrical work/power tolerances;
-    /// magnetic_controls supplies interface Newton work and magnetic acceptance.
+    /// driver_input supplies the original model's interface work policy and
+    /// magnetic acceptance, plus held force and mechanical policy for motion.
     /// Both work budgets count every native evaluation, including discarded
     /// stencils and final reversal probes. Actual magnetic reversals and thermal
     /// events require interval cuts. Endpoint core/coil temperatures and all
@@ -452,7 +474,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
         target_s: f64,
         external_inputs: &[f64],
         controls: CircuitEnthalpySolve,
-        magnetic_controls: HystereticCircuitSolve,
+        driver_input: H::Input,
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, MaterialNetworkSample, H>, Error> {
@@ -462,7 +484,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
             target_s,
             external_inputs,
             controls,
-            magnetic_controls,
+            driver_input,
             initial_energy_increments_j,
             |state| {
                 self.prepared
@@ -500,7 +522,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
         target_s: f64,
         external_inputs: &[f64],
         controls: CircuitEnthalpySolve,
-        magnetic_controls: HystereticCircuitSolve,
+        driver_input: H::Input,
         initial_energy_increments_j: &[f64],
     ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, HeatNetworkSample, H>, Error> {
         self.step_candidate_with_heat_assembly(
@@ -510,7 +532,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
             target_s,
             external_inputs,
             controls,
-            magnetic_controls,
+            driver_input,
             initial_energy_increments_j,
         )
     }
@@ -545,7 +567,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
         target_s: f64,
         external_inputs: &[f64],
         controls: CircuitEnthalpySolve,
-        magnetic_controls: HystereticCircuitSolve,
+        driver_input: H::Input,
         initial_energy_increments_j: &[f64],
     ) -> Result<HystereticEnthalpyCandidate<'t, 'n, 'a, A::Sample, H>, Error<A::Error>> {
         cx.checkpoint()
@@ -567,7 +589,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
             target_s,
             external_inputs,
             controls,
-            magnetic_controls,
+            driver_input,
             initial_energy_increments_j,
             |state| {
                 let coefficients = assembly
@@ -603,7 +625,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
         target_s: f64,
         external_inputs: &[f64],
         controls: CircuitEnthalpySolve,
-        magnetic_controls: HystereticCircuitSolve,
+        driver_input: H::Input,
         initial_energy_increments_j: &[f64],
         resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error<E>>,
         cancelled: impl FnMut() -> bool,
@@ -651,7 +673,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                 check()?;
                 let query = self.core_query(state)?;
                 let coefficients = resolve(state)?;
-                let mut inner = magnetic_controls;
+                let mut inner = H::electrical_controls(driver_input);
                 inner.circuit = controls.circuit;
                 inner.maximum_circuit_trials = inner.maximum_circuit_trials.min(remaining);
                 if inner.maximum_circuit_trials < 4 {
@@ -671,7 +693,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                         target_s,
                         coefficients.resistors,
                         external_inputs,
-                        inner,
+                        H::with_electrical_controls(driver_input, inner),
                         || (*cancel.borrow_mut())(),
                     )
                     .map_err(magnetic)?;

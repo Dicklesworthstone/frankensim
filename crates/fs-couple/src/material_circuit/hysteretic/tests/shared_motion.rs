@@ -1,5 +1,7 @@
 //! One sourced core memory drives all winding ports and the original body.
 //! Scaled authored materials exercise causality/work, not measured alloy fidelity.
+mod thermal;
+
 use super::*;
 use crate::material_circuit::hysteretic::shared::{
     SharedHystereticCircuit, SharedHystereticCircuitInitial,

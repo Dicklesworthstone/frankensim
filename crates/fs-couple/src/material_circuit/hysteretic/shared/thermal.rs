@@ -47,6 +47,17 @@ pub type SharedHystereticEnthalpyCandidate<'t, 'n, 'a, S = MaterialNetworkSample
 impl sealed::History for SharedHystereticCircuit {}
 impl HystereticThermalHistory for SharedHystereticCircuit {
     type Step = SharedHystereticCircuitStep;
+    type Input = HystereticCircuitSolve;
+
+    fn electrical_controls(input: Self::Input) -> HystereticCircuitSolve {
+        input
+    }
+    fn with_electrical_controls(
+        _input: Self::Input,
+        controls: HystereticCircuitSolve,
+    ) -> Self::Input {
+        controls
+    }
 
     fn uniform_core(&self) -> &UniformHystereticCore {
         self.core().core()

@@ -1,5 +1,41 @@
 # CONTRACT: fs-couple
 
+## Finite heat on the shared hysteretic gap trajectory
+
+`shared::motion::thermal::ThermalSharedHystereticGapMotion` uses the existing
+sealed hysteretic thermal transaction for the complete moving native model.
+`SharedHystereticGapHeatInput` retains the held external force and original
+mechanical acceptance policy while the common owner clips the actual native
+electrical trial allowance. Single/shared stationary callers keep their
+original input type. No second thermal or mechanical integrator is introduced.
+
+Each proposed finite temperature refreshes the same original core source query
+and winding-resistance sources, then restarts accepted linkages, polarizations,
+gap and momentum. One original core pinning heat and the distinct resistor
+losses enter their finite caloric receivers exactly once. Complete native
+magnetic, gap, leakage, circuit, kinetic and support energy stays in the motion
+receipt. Magnetic force work is internal; external electrical work and held
+external-force work supply the combined thermal/mechanical/electrical account.
+
+The original `MaterialNetwork` and full `HeatAssembly` retain material heat
+conduction, cooling, contacts, radiation and finite-coolant ownership. Source
+refusal, trial exhaustion and cancellation preserve every accepted history.
+Core fit coefficients stay constant over their explicitly source-admitted
+temperature interval. The separately retained gap medium, body inertia and
+frozen support sources do not silently follow the core temperature; live
+thermoelastic support and unmeasured magnetic thermal fits remain outside this
+owner. Native common-flux reversal cuts and first-order thermal refinement
+remain required.
+
+G0/G1/G3 fixtures in `hysteretic/tests/shared_motion/thermal.rs` independently
+reconstruct complete magnetic/body/support storage, original pinning heat,
+per-receiver temperature and R(T) feedback across accepted intervals. Full
+heat-assembly conduction/cooling, source-domain refusal, bounded actual trial
+work and late cancellation share the same production path. Native execution
+remains a separate requirement where workspace dependencies are available.
+
+
+
 ## Native motion of a shared hysteretic series gap
 
 `material_circuit::hysteretic::shared::motion::SharedHystereticGapMotion` binds
