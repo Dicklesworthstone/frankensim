@@ -1,12 +1,16 @@
-//! Isothermal hydrostatic reconstruction for a frozen, thermally perfect gas.
+//! Hydrostatic reconstruction for a frozen, thermally perfect gas.
 //!
 //! This is a reference-state well-balanced finite-volume method: reconstruct
-//! perturbations about an analytically integrated atmosphere, pair its pressure
+//! perturbations about a source-integrated atmosphere, pair its pressure
 //! traction with gravity, and transport gravitational work with the mass flux.
 //! The evolving gas remains adiabatic and uses the original NASA calorics.
 //! See Käppeli and Mishra, JCP 259 (2014), doi:10.1016/j.jcp.2013.11.028,
 //! for hydrostatic reconstruction; this bounded implementation preserves only
-//! the declared isothermal, constant-acceleration, constant-area reference.
+//! the declared isothermal or isentropic, constant-acceleration, constant-area
+//! reference. Isentropes retain the original variable heat capacity.
+
+mod isentropic;
+pub use isentropic::{AtmosphereQuadrature, IsentropicAtmosphere};
 
 use super::{
     Boundaries, Conserved, Error, Euler1d, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated, poll,
@@ -32,17 +36,40 @@ pub struct IsothermalAtmosphere {
     pub reference_position: Length,
 }
 
+/// Thermodynamic family of the retained hydrostatic reference.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum HydrostaticReference {
+    /// Uniform temperature, with exponential pressure and density.
+    Isothermal(IsothermalAtmosphere),
+    /// Uniform specific entropy, with source-dependent temperature lapse.
+    Isentropic(IsentropicAtmosphere),
+}
+
+impl HydrostaticReference {
+    fn acceleration(self) -> f64 {
+        match self {
+            Self::Isothermal(reference) => reference.acceleration.value(),
+            Self::Isentropic(reference) => reference.acceleration.value(),
+        }
+    }
+
+    fn reference_position(self) -> f64 {
+        match self {
+            Self::Isothermal(reference) => reference.reference_position.value(),
+            Self::Isentropic(reference) => reference.reference_position.value(),
+        }
+    }
+}
+
 pub(super) struct HydrostaticBalance {
-    pub(super) reference: IsothermalAtmosphere,
+    pub(super) reference: HydrostaticReference,
     pub(super) cells: Vec<(Conserved, Primitive)>,
     pub(super) faces: Vec<(Conserved, Primitive)>,
 }
 
 impl HydrostaticBalance {
     pub(super) fn perturbation_force(&self, i: usize, q: Conserved, mesh: &Mesh1d) -> f64 {
-        self.reference.acceleration.value()
-            * (q.density - self.cells[i].0.density)
-            * mesh.volumes()[i]
+        self.reference.acceleration() * (q.density - self.cells[i].0.density) * mesh.volumes()[i]
     }
 
     pub(super) fn force(&self, i: usize, q: Conserved, mesh: &Mesh1d) -> f64 {
@@ -55,13 +82,13 @@ impl HydrostaticBalance {
         // Therefore sum_i V_i (E_i + phi_i*rho_i) changes only by boundary
         // transport, for both RK stages and their convex combination.
         let center = mesh.center(i);
-        self.reference.acceleration.value()
+        self.reference.acceleration()
             * (mesh.face_areas()[i] * (center - mesh.positions()[i]) * faces[i].mass
                 + mesh.face_areas()[i + 1] * (mesh.positions()[i + 1] - center) * faces[i + 1].mass)
     }
 
     fn potential(&self, x: f64) -> f64 {
-        -self.reference.acceleration.value() * (x - self.reference.reference_position.value())
+        -self.reference.acceleration() * (x - self.reference.reference_position())
     }
 }
 
@@ -106,9 +133,7 @@ impl Euler1d {
                 "hydrostatic reference or physical boundaries",
             ));
         }
-        let area = mesh.uniform_cross_section().ok_or(Error::Invalid(
-            "isothermal atmosphere requires a constant-area passage",
-        ))?;
+        admit_geometry(&mesh, &mut cancelled)?;
         let n = mesh.cell_count();
         let mut states = allocated(n, Conserved::default())?;
         let empty = (Conserved::default(), Primitive::default());
@@ -129,15 +154,6 @@ impl Euler1d {
         }
         for i in 0..n {
             poll(&mut cancelled)?;
-            let volume = area * mesh.width(i);
-            if !positive(volume)
-                || (volume - mesh.volumes()[i]).abs()
-                    > 64.0 * f64::EPSILON * volume.max(mesh.volumes()[i])
-            {
-                return Err(Error::Invalid(
-                    "atmosphere volume disagrees with constant-area geometry",
-                ));
-            }
             // The average of exp(beta*x) is evaluated without subtracting
             // nearly equal face pressures. The series is even and regular at g=0.
             let z = 0.5 * beta * mesh.width(i);
@@ -160,15 +176,24 @@ impl Euler1d {
         }
         poll(&mut cancelled)?;
         flow.hydrostatic = Some(HydrostaticBalance {
-            reference,
+            reference: HydrostaticReference::Isothermal(reference),
             cells,
             faces,
         });
         Ok(flow)
     }
 
-    /// Retained physical hydrostatic reference, when gravity is enabled.
+    /// Retained isothermal reference, if this is an isothermal atmosphere.
+    /// Use [`Self::hydrostatic_reference`] to inspect either supported family.
     pub fn atmosphere(&self) -> Option<IsothermalAtmosphere> {
+        match self.hydrostatic_reference() {
+            Some(HydrostaticReference::Isothermal(reference)) => Some(reference),
+            _ => None,
+        }
+    }
+
+    /// Retained physical reference whenever hydrostatic gravity is enabled.
+    pub fn hydrostatic_reference(&self) -> Option<HydrostaticReference> {
         self.hydrostatic.as_ref().map(|balance| balance.reference)
     }
 
@@ -193,6 +218,25 @@ impl Euler1d {
         }
         sum
     }
+}
+
+fn admit_geometry(mesh: &Mesh1d, cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+    let area = mesh.uniform_cross_section().ok_or(Error::Invalid(
+        "hydrostatic atmosphere requires a constant-area passage",
+    ))?;
+    for i in 0..mesh.cell_count() {
+        poll(cancelled)?;
+        let volume = area * mesh.width(i);
+        if !positive(volume)
+            || (volume - mesh.volumes()[i]).abs()
+                > 64.0 * f64::EPSILON * volume.max(mesh.volumes()[i])
+        {
+            return Err(Error::Invalid(
+                "atmosphere volume disagrees with constant-area geometry",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]

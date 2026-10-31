@@ -28,7 +28,9 @@ pub use flux::{
     SpatialPrimitive,
 };
 pub use geometry::Mesh1d;
-pub use hydrostatic::IsothermalAtmosphere;
+pub use hydrostatic::{
+    AtmosphereQuadrature, HydrostaticReference, IsentropicAtmosphere, IsothermalAtmosphere,
+};
 
 use fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1;
 

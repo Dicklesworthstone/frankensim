@@ -303,6 +303,40 @@ an entropy/positivity theorem. Large disturbances may still refuse source
 admission. Coupling into a network or caller-owned end port refuses until that
 interface declares a common gravitational-potential and energy convention.
 
+## Isentropic hydrostatic atmospheres
+
+`Euler1d::new_isentropic_atmosphere` extends the same gravity-balanced owner to
+uniform-entropy references with nonuniform temperature. It solves
+`h(T)-h(T_ref) = g*(x-x_ref)` using the original positive-Cp NASA source and
+recovers pressure from its source entropy difference. The lapse is `g/Cp(T)`;
+neither a constant gamma nor a prescribed linear temperature fit replaces the
+source. Internal-energy and entropy differences cancel their original reference
+constants before arithmetic. `hydrostatic_reference()` distinguishes both
+families; the existing `atmosphere()` accessor remains specific to isothermal
+references.
+
+Source-evaluated face states are retained once. Conserved density and referenced
+energy are integrated with a cancellable composite four-point Gauss rule, using
+`AtmosphereQuadrature`'s relative convergence tolerance and explicit panel cap.
+Successive-rule differences are estimates, not certified integration bounds.
+Caloric inversion retains the source owner's work cap and tolerance, tightening
+the reference solve toward floating-point accuracy where the requested tolerance
+allows. Source-domain escape or exhausted quadrature/inversion budgets refuses
+before returning an owner. This avoids confusing spatially averaged primitive
+fields with the decoded state of conserved cell averages.
+
+The same prepared reference, perturbation reconstruction and shared-flux gravity
+work preserve the discrete atmosphere and evolve real disturbances. There is
+no added thermodynamic solve, integration or allocation in time stepping. Physical
+gravity-force consistency converges with the reference quadrature and caloric
+solve. G1/G3/G4 cases check analytic constant-Cp polytropes, independent 70-digit
+variable-Cp conserved integrals, force balance, gas-plus-potential energy, formation
+reference invariance and cancellation/restart. The existing constant-area,
+constant-acceleration, frozen ideal-mixture, physical-boundary and network/port
+restrictions apply. This is a convectively neutral source isentrope, not arbitrary
+entropy stratification, an evolving chemistry/phase equilibrium, or a global
+entropy/positivity theorem.
+
 ## Physical reflecting-wall Riemann boundary
 
 Reflecting ends now solve a one-sided thermally perfect Riemann problem

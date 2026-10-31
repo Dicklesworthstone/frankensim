@@ -215,7 +215,7 @@ impl GasNetwork1d {
         let mut cells = plenums.len();
         for branch in &branches {
             poll(&mut cancelled)?;
-            if branch.atmosphere().is_some() {
+            if branch.hydrostatic_reference().is_some() {
                 return Err(Error::Invalid(
                     "network gravity needs a shared potential datum",
                 ));
