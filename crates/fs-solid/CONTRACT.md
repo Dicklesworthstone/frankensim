@@ -3197,3 +3197,8 @@ including reciprocal exchange; numerical loss and hardening storage remain separ
 The complete native source chain and the original/joint frame and tetrahedral
 integration targets typechecked successfully. Those four native integration targets
 were not numerically executed in this validation; the material behavior suite was.
+
+
+## Native tetrahedra with thermally transported Chaboche history
+
+The existing generic SmallStrainTetProblem directly consumes ThermalChaboche with its complete ChabocheState and nonsymmetric tangent. Each resolved old-to-new temperature law represents one physical solve_from increment; all Newton trials retain old state. A new-to-new law recovers accepted endpoint tractions without repeating thermal transport. tests/plastic_thermal_chaboche.rs verifies a six-tetrahedron held member through heating, cooling and compressive reversal, retained separate branch histories, free-row equilibrium and native per-element thermal energy. A nonproportional traction case independently checks the full nonsymmetric assembled tangent. Prescribed temperature changes reaction and loaded lateral displacement through actual constitutive flow. These tests establish a bounded small-strain prescribed-temperature capability, not an automatically heat-coupled Chaboche solid, finite-deformation or experimental qualification.

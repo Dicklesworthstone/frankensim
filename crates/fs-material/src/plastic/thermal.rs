@@ -30,6 +30,8 @@ mod expansion;
 pub use expansion::{ThermalJ2, ThermoplasticIncrement};
 mod voce;
 use voce::VoceSelection;
+/// Source-bound backstress transport and thermal energy for cyclic hardening.
+pub mod chaboche;
 
 use super::J2State;
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
