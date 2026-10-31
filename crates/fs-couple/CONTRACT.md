@@ -17512,8 +17512,10 @@ values; the ordinary `MaterialCircuit` conductor-only resistor binding is not
 relabelled to accept polarization friction. Nonphysical parameters, bounded
 graph/state overflows, inconsistent ideal-source impulses and cancellation
 refuse before publication. Time accuracy needs relaxation-scale resolution and
-step refinement independently of algebraic energy checks. No switching impulse,
-dielectric heating feedback, variable geometry, saturation or breakdown follows.
+step refinement independently of algebraic energy checks. This base isothermal
+API supplies no switching impulse, finite-temperature feedback, variable
+geometry, saturation or breakdown; finite thermal feedback is provided by the
+separate `circuit_enthalpy::dielectric` owner described below.
 G1/G3/G4 `tests/dielectric_circuit.rs` checks voltage-clamped multipole relaxation,
 open-circuit absorption with charge conservation, second-order refinement,
 current-driven frequency/time agreement and loss, the zero-memory native RLC
@@ -17861,3 +17863,54 @@ and penetration/interior/budget/cancellation refusals. The internal current-tet
 fixture checks inversion and collapse. These are authored numerical oracles,
 not experimental material validation.
 
+## Native dielectric polarization and finite thermal feedback
+
+`DebyeCircuit::rebind_source_candidate` refreshes the complete original dielectric
+source at fixed individual instantaneous/polarization charges and original flux
+linkages. It admits the same material claims, pole roles, nonthermal context and
+fixed geometry. Stable fixed-charge free-energy change is returned as signed
+parameter work. The optional complete conductor binding retains original branch
+indices, conductor source identity and geometry across subsequent R(T) updates.
+Internal polarization friction remains a dielectric process. Incompatible ideal
+voltage clamps refuse instead of projecting charge or inventing impulse work.
+
+`circuit_enthalpy::dielectric::step_candidate` couples that native history to the
+existing finite caloric, conduction and Newton--Krylov owners. Every trial starts
+from the same accepted charge and thermal histories, resolves all original
+material resistors at the trial endpoint, and evaluates the original Debye source
+at the dielectric cell's actual temperature. It uses the existing native circuit
+midpoint step; there is no separate dielectric integrator. Per-branch native
+resistor heat goes to each original conductor's receiver, while the sum of native
+polarization losses goes once to the dielectric's own finite caloric cell.
+
+The material law supplies Helmholtz free energy psi, entropy S, internal energy
+U=psi+T*S and a conservative fixed-charge heat-capacity bound. The distinct signed
+reversible transfer is Q_rev=-delta(psi_parameter)-delta(T*S). It enters the
+original caloric residual separately from irreversible polarization/resistor
+heat. The final physical account removes this internal transfer from external
+heat and checks the complete electrical internal-energy plus caloric increment
+against electrical supply and actual external heat. Parameter work and delta(T*S)
+use their stable material increments; ordinary endpoint differences do not own
+the field transfer. Source receipts and both candidate histories publish together.
+
+One complete uniform dielectric volume must coincide with one fully solid,
+constant-density caloric cell from the same original material card and context.
+The admitted temperature interval needs full caloric support. Explicit bounds
+on every charge admit strictly positive combined caloric-plus-field capacity
+throughout that interval, and are rechecked after each electrical trial.
+Temperature-dependent relaxation times may vary along supported positive source
+paths; capacitance paths use the material thermal law's affine interval. Other
+original capacitor/inductor coefficients remain fixed. Multiple receivers and
+native thermal links are supported, but this owner represents one dielectric
+branch and one uniform dielectric temperature. Phase changes, geometry motion,
+ideal-source impulses, nonlinear polarization saturation and breakdown are not
+supplied. Endpoint material coefficients make the general coupled scheme first
+order; energy closure is not an unconditional entropy or temporal-error proof.
+
+`tests/dielectric_thermal.rs` independently checks midpoint polarization and total
+internal energy for both signs of C(T), absorption self-heating, the zero-pole
+external-heat limit, tau(T) temporal refinement against a scalar reference,
+distinct finite dielectric/conductor receivers with R(T), and atomic capacity,
+work-budget and cancellation refusal. `tests/dielectric_rebind.rs` exercises
+conserved native histories, signed parameter work and source/ideal-clamp refusal.
+All property data in these tests are explicitly authored numerical fixtures.

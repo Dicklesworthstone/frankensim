@@ -15,6 +15,9 @@ use fs_phs::{
 
 use super::{MaterialCircuitError, MaterialCircuitSolve, admit_graph, extended, poll, positive};
 
+/// Conservative material refresh without erasing polarization history.
+pub mod rebind;
+
 struct Prepared {
     source: ResolvedDebyeCapacitor,
     graph: CircuitGraph,
@@ -23,6 +26,7 @@ struct Prepared {
     instantaneous_charge_index: usize,
     polarization_charge_indices: Vec<usize>,
     loss_branches: Vec<usize>,
+    material_resistors: Vec<super::MaterialResistor>,
 }
 
 /// Fixed source/geometry and an accepted native circuit state. The compiled
@@ -49,6 +53,15 @@ pub struct PolarizationHeat {
     pub heat_j: f64,
 }
 
+/// Actual native loss in one original, non-polarization resistor.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DebyeResistorHeat {
+    pub branch: usize,
+    pub voltage_drop_v: f64,
+    pub current_a: f64,
+    pub heat_j: f64,
+}
+
 /// Physical accounts from one native step. Polarization heat is already part
 /// of `native.dissipated`, not an additional debit to circuit energy.
 pub struct DebyeCircuitStep {
@@ -67,6 +80,8 @@ pub struct DebyeCircuitStep {
     pub polarization_heat_j: f64,
     /// Separate loss in the other original authored circuit resistors [J].
     pub other_resistor_heat_j: f64,
+    /// Original branch identities for explicit thermal destinations.
+    pub other_resistors: Vec<DebyeResistorHeat>,
     /// Dielectric storage change plus polarization heat minus terminal work [J].
     pub dielectric_energy_residual_j: f64,
     /// Whole-circuit storage change plus all heat minus external supply [J].
@@ -251,6 +266,7 @@ impl DebyeCircuit {
                 instantaneous_charge_index,
                 polarization_charge_indices,
                 loss_branches,
+                material_resistors: Vec::new(),
             }),
             state,
         })
@@ -421,6 +437,7 @@ impl DebyeCircuit {
         let mut polarization = Vec::with_capacity(self.source().poles().len());
         let mut polarization_heat_j = 0.0;
         let mut other_resistor_heat_j = 0.0;
+        let mut other_resistors = Vec::new();
         for (branch, &(a, b, element)) in self.graph().branches.iter().enumerate() {
             poll(&mut cancelled)?;
             let Branch::Resistor { ohms } = element else {
@@ -461,6 +478,9 @@ impl DebyeCircuit {
                 });
             } else {
                 other_resistor_heat_j = finite(other_resistor_heat_j + heat)?;
+                other_resistors.push(DebyeResistorHeat {
+                    branch, voltage_drop_v: drop, current_a: current, heat_j: heat,
+                });
             }
         }
         let (a, b, _) = self.graph().branches[self.prepared.branch];
@@ -507,6 +527,7 @@ impl DebyeCircuit {
                 polarization,
                 polarization_heat_j,
                 other_resistor_heat_j,
+                other_resistors,
                 dielectric_energy_residual_j,
                 circuit_energy_residual_j,
             },

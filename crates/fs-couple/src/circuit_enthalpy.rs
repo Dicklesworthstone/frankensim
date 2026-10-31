@@ -26,6 +26,8 @@ pub mod motion;
 pub mod winding;
 /// Reversible sourced C(T)/L(T) feedback on the same finite caloric stores.
 pub mod field_storage;
+/// Source-backed dielectric memory, polarization heat and finite caloric feedback.
+pub mod dielectric;
 /// Shared original material/volume correspondence for magnetic heat consumers.
 pub mod magnetic;
 /// Retained spatial induction and Joule heat on the original enthalpy timeline.
