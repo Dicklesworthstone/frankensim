@@ -341,11 +341,12 @@ impl ClosedTetCavity {
             volume_step.stored_energy_change_j
                 + exterior_pressure_pa * finite(geometry.volume_m3 - self.reference_volume_m3)?,
         )?;
+        let net_pressure_pa = load.net_pressure_pa();
         checkpoint(cx)?;
         Ok(TetCavityGasLoad {
             gas: endpoint,
             volume_m3: geometry.volume_m3,
-            net_pressure_pa: load.net_pressure_pa(),
+            net_pressure_pa,
             force_n,
             force_tangent: tangent.assemble(),
             potential_change_j,

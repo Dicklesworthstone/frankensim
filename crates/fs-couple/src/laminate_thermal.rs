@@ -112,6 +112,16 @@ pub struct LaminateShellSnapshot {
     thermal_load_6n: Vec<f64>,
     strain_bound: f64,
 }
+
+// Current source fields and the immutable reference discretization, before a
+// mechanical state is chosen. Static and inertial owners share this admission;
+// neither is allowed to substitute an averaged temperature or a new mass.
+struct PreparedLaminateSnapshot {
+    temperatures_k: Vec<f64>,
+    material: ResolvedLaminateThermal,
+    model: Arc<MitcShellModel>,
+    fields: Vec<LaminateThermalField>,
+}
 impl LaminateShellSnapshot {
     pub const fn time_s(&self) -> f64 {
         self.time_s
@@ -325,6 +335,63 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
         solver: Option<&PreparedMitcStatic>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<LaminateShellSnapshot, LaminateShellError> {
+        let prepared = self.prepare_snapshot(
+            thermal,
+            solver.map(PreparedMitcStatic::shared_model),
+            &mut cancelled,
+        )?;
+        let loading = prepared
+            .model
+            .prepare_laminate_thermal(&prepared.fields, &mut cancelled)
+            .map_err(LaminateShellError::Shell)?;
+        let response = if let Some(solver) = solver {
+            prepared
+                .model
+                .project_load(external_load_6n)
+                .map_err(LaminateShellError::Shell)?;
+            let total: Vec<_> = external_load_6n
+                .iter()
+                .zip(loading.load_6n())
+                .map(|(external, thermal)| external + thermal)
+                .collect();
+            let displacement = solver
+                .solve(&total, &mut cancelled)
+                .map_err(LaminateShellError::Shell)?;
+            loading
+                .recover(&displacement, &mut cancelled)
+                .map_err(LaminateShellError::Shell)?
+        } else {
+            loading
+                .solve_static(external_load_6n, &mut cancelled)
+                .map_err(LaminateShellError::Shell)?
+        };
+        let mut strain_fields = Vec::with_capacity(self.discretization.mesh.tris.len());
+        for (element, tri) in self.discretization.mesh.tris.iter().enumerate() {
+            poll(&mut cancelled)?;
+            let nodal = core::array::from_fn(|i| response.displacement_6n[6 * tri[i / 6] + i % 6]);
+            strain_fields.push(
+                loading
+                    .strain_field(element, &nodal, &mut cancelled)
+                    .map_err(LaminateShellError::Shell)?,
+            );
+        }
+        let thermal_load_6n = loading.load_6n().to_vec();
+        self.admit_snapshot(
+            thermal.time_s(),
+            prepared,
+            response,
+            strain_fields,
+            thermal_load_6n,
+            &mut cancelled,
+        )
+    }
+
+    fn prepare_snapshot(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        fixed_model: Option<Arc<MitcShellModel>>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedLaminateSnapshot, LaminateShellError> {
         poll(&mut cancelled)?;
         let temperatures = self
             .thermal
@@ -345,8 +412,8 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
             fields.push(field);
         }
         let d = &self.discretization;
-        let model = if let Some(solver) = solver {
-            solver.shared_model()
+        let model = if let Some(model) = fixed_model {
+            model
         } else {
             Arc::new(
                 assemble_mitc3p(
@@ -362,29 +429,31 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
                 .map_err(LaminateShellError::Shell)?,
             )
         };
-        let loading = model
-            .prepare_laminate_thermal(&fields, &mut cancelled)
-            .map_err(LaminateShellError::Shell)?;
-        let response = if let Some(solver) = solver {
-            model
-                .project_load(external_load_6n)
-                .map_err(LaminateShellError::Shell)?;
-            let total: Vec<_> = external_load_6n
-                .iter()
-                .zip(loading.load_6n())
-                .map(|(external, thermal)| external + thermal)
-                .collect();
-            let displacement = solver
-                .solve(&total, &mut cancelled)
-                .map_err(LaminateShellError::Shell)?;
-            loading
-                .recover(&displacement, &mut cancelled)
-                .map_err(LaminateShellError::Shell)?
-        } else {
-            loading
-                .solve_static(external_load_6n, &mut cancelled)
-                .map_err(LaminateShellError::Shell)?
-        };
+        poll(&mut cancelled)?;
+        Ok(PreparedLaminateSnapshot {
+            temperatures_k: temperatures,
+            material,
+            model,
+            fields,
+        })
+    }
+
+    fn admit_snapshot(
+        &self,
+        time_s: f64,
+        prepared: PreparedLaminateSnapshot,
+        response: ThermalShellResponse,
+        strain_fields: Vec<RealElementStrain>,
+        thermal_load_6n: Vec<f64>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateShellSnapshot, LaminateShellError> {
+        poll(&mut cancelled)?;
+        let d = &self.discretization;
+        if strain_fields.len() != d.mesh.tris.len() {
+            return Err(LaminateShellError::Invalid(
+                "one accepted native strain field per facet required",
+            ));
+        }
         for nodal in response.displacement_6n.chunks_exact(6) {
             poll(&mut cancelled)?;
             envelope(
@@ -399,16 +468,11 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
             )?;
         }
         let mut strain_bound = 0.0_f64;
-        let mut strain_fields = Vec::with_capacity(d.mesh.tris.len());
-        for (element, tri) in d.mesh.tris.iter().enumerate() {
+        for (element, strain) in strain_fields.iter().enumerate() {
             poll(&mut cancelled)?;
-            let nodal = core::array::from_fn(|i| response.displacement_6n[6 * tri[i / 6] + i % 6]);
-            let strain = loading
-                .strain_field(element, &nodal, &mut cancelled)
-                .map_err(LaminateShellError::Shell)?;
             for layer in 0..self.source.layers().len() {
-                let bound = fields[element]
-                    .elastic_strain_bound(layer, &strain, &mut cancelled)
+                let bound = prepared.fields[element]
+                    .elastic_strain_bound(layer, strain, &mut cancelled)
                     .map_err(LaminateShellError::Shell)?;
                 envelope(
                     "reduced elastic strain",
@@ -417,17 +481,15 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
                 )?;
                 strain_bound = strain_bound.max(bound);
             }
-            strain_fields.push(strain);
         }
         poll(&mut cancelled)?;
-        let thermal_load_6n = loading.load_6n().to_vec();
         Ok(LaminateShellSnapshot {
-            time_s: thermal.time_s(),
-            temperatures_k: temperatures,
-            material,
-            model,
+            time_s,
+            temperatures_k: prepared.temperatures_k,
+            material: prepared.material,
+            model: prepared.model,
             response,
-            thermal_fields: fields,
+            thermal_fields: prepared.fields,
             strain_fields,
             thermal_load_6n,
             strain_bound,

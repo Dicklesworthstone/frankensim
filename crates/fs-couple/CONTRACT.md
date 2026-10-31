@@ -305,6 +305,44 @@ The existing one-way fixtures share source/mesh helpers without changing their
 CLT oracles. Targeted compiler metadata checks cover these entries; numerical
 execution and experimental material validation remain separate requirements.
 
+### Reciprocal finite heat with retained shell inertia
+
+`ReciprocalLayeredThermalShell::begin_transient` transfers the same admitted
+equilibrium, original source intervals and caloric history into
+`laminate_thermal::reciprocal::dynamic::DynamicLayeredThermalShell`. Explicit
+nodal and residual-director velocities initialize the full native consistent
+mass. Both internal director coordinates per facet then evolve independently
+in the invertible native `y=Tq+Br` basis. Observation uses their actual strain
+polynomials and stress; no later heat trial resets them to a static thermal
+lift. Fixed elasticity, mass, reference geometry and stationary supports remain
+required, while original cells keep unequal temperatures and integrated CTE.
+
+Every outer trial restarts heat and motion from the same accepted histories.
+One midpoint effective sparse factor serves all trials at the chosen dt and
+is cached across accepted intervals while that exact dt remains unchanged. The
+shared source-potential quadrature computes actual nodal AND internal strain
+work; explicit internal-coordinate forces independently check that work.
+Reversible cell heat stays `W_stress-delta(Psi+T*S)`. The combined gate includes
+native kinetic storage, physical corrected shear and separately named numerical
+drilling storage, without adding any of them twice or depositing gauge work as
+heat. The current consistent mass contains physical translation/director
+inertia; the numerical drilling coordinate has no invented kinetic storage.
+Compatible initial gauge displacement/velocity and absence of effort on free
+massless director-axis directions are required by the native dynamic owner.
+
+Physical strain, complete director motion, source support, exact accepted
+time/temperature pairing, native mechanical balance and local/global heat
+defects all pass before the final atomic publication. Failure or cancellation
+leaves accepted motion and caloric history unchanged. The report retains the
+original heat audit, per-cell exchange, native midpoint identity, kinetic
+change and internal-director work. No finite-rotation, prestressed dynamics,
+moving transport, varying elastic-modulus reciprocity, material damping or
+exact discrete-isentropy claim is made. Time/space refinement remains required.
+`tests/laminate_thermal_dynamic.rs` supplies independent scalar-oscillator,
+adiabatic inertial-cooling and analytic internal-inertia oracles, nonuniform
+heating and transactional refusal checks. These synthetic implementation
+fixtures are not experimental material validation.
+
 ## One shared hysteretic core in a native multiwinding circuit
 
 `material_circuit::hysteretic::shared::SharedHystereticCircuit` connects the

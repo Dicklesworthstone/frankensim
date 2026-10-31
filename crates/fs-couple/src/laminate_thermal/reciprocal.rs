@@ -25,6 +25,9 @@
 //! its source preparation's compatibility of population and work constraints
 //! remains required. A common card does not by itself establish that fact.
 
+/// Reciprocal heat on the retained native shell and internal-director trajectory.
+pub mod dynamic;
+
 use super::*;
 use fs_material::elastic::thermal::ThermoelasticError;
 use fs_material::laminate::thermal::thermoelastic::{
@@ -138,7 +141,8 @@ pub struct LaminateThermoelasticReport {
     pub drilling_gauge_work_j: f64,
     pub mechanical_work_residual_j: f64,
     /// Caloric + elastic internal + shear + numerical gauge changes, minus
-    /// external heat and external mechanical work. Gauge is explicitly named.
+    /// external heat and external mechanical work. A dynamic wrapper also
+    /// includes and separately reports its complete native kinetic change.
     pub combined_energy_residual_j: f64,
     pub maximum_heat_defect_j: f64,
     pub total_absolute_heat_defect_j: f64,
@@ -344,6 +348,7 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
                 heat,
                 iteration + 1,
                 controls.energy_tolerance_j,
+                None,
                 &mut cancelled,
             )?;
             last = (
@@ -588,6 +593,7 @@ fn account(
     heat: LayeredThermalSolveReport,
     iterations: usize,
     tolerance: f64,
+    inertia: Option<InertialWork>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<LaminateThermoelasticReport, LaminateThermoelasticError> {
     let next = &proposal.state;
@@ -635,7 +641,7 @@ fn account(
             .map(|i| 0.5 * (old.loads[i] + next.loads[i]) * (u1[i] - u0[i]))
             .sum(),
     )?;
-    let material_work = finite(
+    let nodal_material_work = finite(
         (0..u0.len())
             .map(|i| {
                 0.5 * (old.shell.response.material_nodal_force_6n[i]
@@ -644,11 +650,13 @@ fn account(
             })
             .sum(),
     )?;
+    let inertia = inertia.unwrap_or_default();
+    let material_work = finite(nodal_material_work + inertia.bubble_material_work_j)?;
     let membrane_work = proposal.mechanical_work.iter().sum::<f64>();
     gate(
         material_work - membrane_work - proposal.shear_work,
         tolerance,
-        "native nodal material work and integrated layer/shear work disagree",
+        "native generalized material work and integrated layer/shear work disagree",
     )?;
     let q0 = old
         .shell
@@ -677,12 +685,14 @@ fn account(
         tolerance,
         "fixed numerical gauge work/storage mismatch",
     )?;
-    let mechanical_residual =
-        finite(membrane_work + proposal.shear_work + gauge_work - external_work)?;
+    let mechanical_residual = finite(
+        inertia.kinetic_energy_change_j + membrane_work + proposal.shear_work + gauge_work
+            - external_work,
+    )?;
     gate(
         mechanical_residual,
         tolerance,
-        "native equilibrium does not close the external work port",
+        "native mechanical storage and stress work do not close the external work port",
     )?;
     // Use the original compensated caloric residual, avoiding subtraction of
     // large enthalpy datums. Desired heat is not substituted for applied heat.
@@ -709,6 +719,15 @@ fn account(
         maximum_heat_defect_j: maximum,
         total_absolute_heat_defect_j: heat_defect_abs,
     })
+}
+
+// The static owner supplies zero. The full native transient owner supplies
+// independent internal-director work and actual consistent kinetic storage;
+// neither quantity is deposited as heat or inferred from an energy residual.
+#[derive(Clone, Copy, Default)]
+struct InertialWork {
+    kinetic_energy_change_j: f64,
+    bubble_material_work_j: f64,
 }
 
 fn principal(point: ShellStrainPoint, z: f64, [c, s]: [f64; 2]) -> [f64; 3] {
