@@ -36,7 +36,7 @@ pub use phase::{
 /// Physical homogeneous-sphere cross sections and resolved angular scattering.
 pub mod mie;
 
-/// Visible-band mass scattering coefficient in m²/kg, independently specified
+/// Mass scattering coefficient in m²/kg, independently specified
 /// from absorption. The interpolation and admitted wavelength band are the
 /// same as [`MassAbsorptionSpectrum`].
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -67,6 +67,38 @@ impl MassScatteringSpectrum {
                 rayleigh_reference_nm: None,
             })
             .map_err(|_| VolumeTransportError::ScatteringSpectrum)
+    }
+
+    /// Retain a source table over its exact positive vacuum-wavelength support.
+    /// Coefficients are in m²/kg; no UV/IR continuation is inferred. Source and
+    /// interpolation semantics are those of [`MassAbsorptionSpectrum::source_table`].
+    pub fn source_table(
+        knots: &[(f64, f64)],
+        source_identity: ContentHash,
+    ) -> Result<Self, VolumeTransportError> {
+        MassAbsorptionSpectrum::source_table(knots, source_identity)
+            .map(|spectrum| Self {
+                spectrum,
+                rayleigh_reference_nm: None,
+            })
+            .map_err(|error| match error {
+                VolumeTransportError::AbsorptionSpectrum => {
+                    VolumeTransportError::ScatteringSpectrum
+                }
+                other => other,
+            })
+    }
+
+    /// Exact inclusive source/model support, in vacuum nm.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.spectrum.wavelength_bounds_nm()
+    }
+
+    /// Original explicitly supplied source identity, when present.
+    #[must_use]
+    pub const fn source_identity(&self) -> Option<ContentHash> {
+        self.spectrum.source_identity()
     }
 
     /// Evaluate the admitted coefficient without wavelength extrapolation.
@@ -152,6 +184,8 @@ impl<'a> ScatteringGrid<'a> {
     /// Extend an already validated physical snapshot. Spatial density multiplies
     /// both spectra; temperature controls only the absorption-linked LTE source.
     /// The absorption snapshot's cell and traversal budgets remain binding.
+    /// Coefficient domains must match; a spectral phase table must cover that
+    /// entire domain. Missing wavelengths are never treated as transparent.
     pub fn try_new(
         cx: &Cx<'_>,
         absorption: AbsorbingGrid<'a>,
@@ -160,6 +194,12 @@ impl<'a> ScatteringGrid<'a> {
     ) -> Result<Self, VolumeTransportError> {
         checkpoint(cx)?;
         phase.validate()?;
+        let bounds = absorption.wavelength_bounds_nm();
+        if scattering.wavelength_bounds_nm() != bounds {
+            return Err(VolumeTransportError::Wavelength);
+        }
+        phase.validate_wavelength(bounds.0)?;
+        phase.validate_wavelength(bounds.1)?;
         // A sum of affine absorption and either affine scattering or positive
         // lambda^-4 scattering is convex on every combined interval. Its
         // maximum is at an endpoint: validate extinction once at those knots.
@@ -188,6 +228,10 @@ impl<'a> ScatteringGrid<'a> {
             hash.update(&wavelength.to_bits().to_le_bytes());
             hash.update(&coefficient.to_bits().to_le_bytes());
         }
+        if let Some(source) = scattering.source_identity() {
+            hash.update(b"source-table");
+            hash.update(source.as_bytes());
+        }
         if let Some(reference) = scattering.rayleigh_reference_nm {
             hash.update(b"rayleigh-power-four");
             hash.update(&reference.to_bits().to_le_bytes());
@@ -213,6 +257,12 @@ impl<'a> ScatteringGrid<'a> {
     #[must_use]
     pub const fn content_identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Shared inclusive support of absorption, scattering and the phase law.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.absorption.wavelength_bounds_nm()
     }
 
     /// Whether at least one wavelength and cell can scatter.

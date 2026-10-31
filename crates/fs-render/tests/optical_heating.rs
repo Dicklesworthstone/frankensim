@@ -163,6 +163,51 @@ fn close(actual: f64, expected: f64) {
 }
 
 #[test]
+fn sourced_uv_and_infrared_power_heat_native_cells_without_visible_extrapolation() {
+    with_cx(|cx| {
+        let wavelengths = [250.0, 1064.0, 10_000.0];
+        let powers = [7.0, 3.0, 11.0];
+        let coefficients: [f64; 3] = [0.5, 0.25, 1.0];
+        let spectrum = MassAbsorptionSpectrum::source_table(
+            &[(250.0, 0.5), (1064.0, 0.25), (10_000.0, 1.0)],
+            fs_blake3::ContentHash([29; 32]),
+        )
+        .unwrap();
+        let deposition = report(cx, &[1.0], spectrum, wavelengths, powers);
+        let original = thermal(vec![cell(11, 1.0, 1.0, 0.0)], &SENSIBLE, vec![]);
+        let heating = OpticalHeating::try_new(
+            deposition.clone(),
+            &[(0, CellId(11))],
+            &original,
+            1e-12,
+            || Ok(()),
+        )
+        .unwrap();
+        let (heated, accepted, audit) = original
+            .advance_observed(&heating, 2.0, config(0.1), || Ok(()))
+            .unwrap();
+        let absorbed_w: f64 = (0..3)
+            .map(|lane| powers[lane] * -(-coefficients[lane]).exp_m1())
+            .sum();
+        close(
+            heated.temperature_k(CellId(11)).unwrap(),
+            300.0 + absorbed_w / 2.0,
+        );
+        close(audit.external_heat_j, 2.0 * absorbed_w);
+        close(accepted.energy().thermal_input_j, audit.external_heat_j);
+        assert_eq!(accepted.power().wavelength_bounds_nm, (250.0, 10_000.0));
+        for bounds in [(380.0, 780.0), (0.0, 10_000.0), (10_000.0, 250.0)] {
+            let mut invalid = deposition.clone();
+            invalid.wavelength_bounds_nm = bounds;
+            assert!(
+                OpticalHeating::try_new(invalid, &[(0, CellId(11))], &original, 1e-12, || Ok(()),)
+                    .is_err()
+            );
+        }
+    });
+}
+
+#[test]
 fn spectral_beam_heats_original_cells_by_their_exact_absorbed_watts() {
     with_cx(|cx| {
         let incident = [7.0, 3.0];

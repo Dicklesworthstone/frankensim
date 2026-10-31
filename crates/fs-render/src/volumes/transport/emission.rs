@@ -7,15 +7,16 @@
 //! Occluders clip radiance, never this proposal density.
 
 use super::{
-    AbsorbingGrid, LAMBDA_MAX, LAMBDA_MIN, VolumeGrid, VolumeTransportError, cells, checkpoint,
-    planck_radiance_w_m2_sr_nm,
+    AbsorbingGrid, VolumeGrid, VolumeTransportError, cells, checkpoint, planck_radiance_w_m2_sr_nm,
 };
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
-/// Frozen visible-source weighting, support mixture and point-to-direction map.
-pub const EMISSION_PROPOSAL_SEMANTICS_VERSION: u32 = 1;
+/// Source-domain weighting, support mixture and point-to-direction map.
+/// Version 2 retains the declared wavelength bounds; visible models keep their
+/// original proposal arithmetic and sampling distribution.
+pub const EMISSION_PROPOSAL_SEMANTICS_VERSION: u32 = 2;
 
 const UNIFORM_FRACTION: f64 = 1.0 / 16.0;
 // The wavelength maximum of spectral radiance per wavelength, in nm K.
@@ -35,6 +36,7 @@ impl EmissionDistribution {
         cx: &Cx<'_>,
         grid: &VolumeGrid<'_>,
         temperatures: &[f64],
+        wavelength_bounds_nm: (f64, f64),
     ) -> Result<Self, VolumeTransportError> {
         let mut cache = SourceCache::default();
         let mut count = 0usize;
@@ -45,12 +47,13 @@ impl EmissionDistribution {
             }
             if density > 0.0 {
                 count += 1;
-                maximum = maximum.max(det::ln(density) + cache.log_source(temperature)?);
+                maximum = maximum
+                    .max(det::ln(density) + cache.log_source(temperature, wavelength_bounds_nm)?);
             }
         }
         checkpoint(cx)?;
-        // The clamped Wien maximum covers the COMPLETE visible band. An empty
-        // proposal therefore cannot discard a representable visible source.
+        // The clamped Wien maximum covers the COMPLETE admitted source band.
+        // An empty proposal cannot discard a representable source in that band.
         if maximum == f64::NEG_INFINITY {
             return Ok(Self::default());
         }
@@ -69,7 +72,10 @@ impl EmissionDistribution {
                 checkpoint(cx)?;
             }
             let weight = if density > 0.0 {
-                det::exp(det::ln(density) + cache.log_source(temperature)? - maximum)
+                det::exp(
+                    det::ln(density) + cache.log_source(temperature, wavelength_bounds_nm)?
+                        - maximum,
+                )
             } else {
                 0.0
             };
@@ -172,11 +178,16 @@ impl Default for SourceCache {
 }
 
 impl SourceCache {
-    fn log_source(&mut self, temperature: f64) -> Result<f64, VolumeTransportError> {
+    fn log_source(
+        &mut self,
+        temperature: f64,
+        wavelength_bounds_nm: (f64, f64),
+    ) -> Result<f64, VolumeTransportError> {
         if let Some((_, value)) = self.values.iter().find(|(t, _)| *t == temperature) {
             return Ok(*value);
         }
-        let wavelength = (WIEN_NM_K / temperature).clamp(LAMBDA_MIN, LAMBDA_MAX);
+        let wavelength =
+            (WIEN_NM_K / temperature).clamp(wavelength_bounds_nm.0, wavelength_bounds_nm.1);
         let source = planck_radiance_w_m2_sr_nm(temperature, wavelength)
             .map_err(|_| VolumeTransportError::Unrepresentable)?;
         let value = if source > 0.0 {
@@ -191,8 +202,8 @@ impl SourceCache {
 }
 
 impl AbsorbingGrid<'_> {
-    /// A cached, support-complete proposal exists for visible LTE emission.
-    /// Vacuum, absent temperature, or complete visible-source underflow retains
+    /// A cached, support-complete proposal exists for source-domain LTE emission.
+    /// Vacuum, absent temperature, or complete source-band underflow retains
     /// the ordinary transport path without proposal storage.
     #[must_use]
     pub fn has_emission_proposal(&self) -> bool {

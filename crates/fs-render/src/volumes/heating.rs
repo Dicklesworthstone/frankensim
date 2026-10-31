@@ -8,12 +8,11 @@
 //!
 //! Optics, ray geometry and incident spectral powers are frozen for this
 //! observer's lifetime. Recompute deposition and construct a new observer at an
-//! accepted thermal endpoint when those inputs change. Visible-band beam
-//! heating does not infer infrared emission/cooling, thermal equilibrium,
+//! accepted thermal endpoint when those inputs change. Source-domain beam
+//! heating does not infer unprovided emission/cooling, thermal equilibrium,
 //! multiple scattering, fluorescence or a temperature-independent material law.
 
 use super::transport::deposition::BeamPowerDeposition;
-use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_blake3::ContentHash;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionObserver, DepositionSimulation, Event,
@@ -26,6 +25,8 @@ use std::collections::BTreeMap;
 pub struct OpticalPowerBudget<const N: usize> {
     /// Immutable source medium identity supplied by the transport owner.
     pub medium_identity: ContentHash,
+    /// Inclusive source-model wavelength support, in vacuum nm.
+    pub wavelength_bounds_nm: (f64, f64),
     /// Original vacuum wavelengths, in nm.
     pub wavelengths_nm: [f64; N],
     /// Power supplied to the original directed segment, W.
@@ -148,6 +149,13 @@ impl<const N: usize> OpticalHeating<N> {
                 "bindings must refer only to cells in the deposition report",
             ));
         }
+        let (lower_nm, upper_nm) = deposition.wavelength_bounds_nm;
+        if !lower_nm.is_finite() || !upper_nm.is_finite() || lower_nm <= 0.0 || lower_nm >= upper_nm
+        {
+            return Err(invalid(
+                "finite positive ordered source wavelength bounds required",
+            ));
+        }
         let mut bindings = BTreeMap::new();
         for &(index, cell) in cell_bindings {
             checkpoint()?;
@@ -162,7 +170,7 @@ impl<const N: usize> OpticalHeating<N> {
         for lane in 0..N {
             checkpoint()?;
             if !deposition.wavelengths_nm[lane].is_finite()
-                || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&deposition.wavelengths_nm[lane])
+                || !(lower_nm..=upper_nm).contains(&deposition.wavelengths_nm[lane])
                 || ![
                     deposition.incident_power_w[lane],
                     deposition.transmitted_power_w[lane],
@@ -173,7 +181,7 @@ impl<const N: usize> OpticalHeating<N> {
                 .all(nonnegative)
             {
                 return Err(invalid(
-                    "finite visible wavelengths and nonnegative finite beam powers required",
+                    "source-supported wavelengths and nonnegative finite beam powers required",
                 ));
             }
             let mut balance = CheckedSum::default();
@@ -248,6 +256,7 @@ impl<const N: usize> OpticalHeating<N> {
         }
         let power = OpticalPowerBudget {
             medium_identity: deposition.medium_identity,
+            wavelength_bounds_nm: deposition.wavelength_bounds_nm,
             wavelengths_nm: deposition.wavelengths_nm,
             incident_w: deposition.incident_power_w,
             transmitted_w: deposition.transmitted_power_w,

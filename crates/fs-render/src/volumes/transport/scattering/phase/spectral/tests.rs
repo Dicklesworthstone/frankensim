@@ -10,6 +10,55 @@ fn dispersive() -> PhaseFunction {
 }
 
 #[test]
+fn g0_broadband_phase_uses_source_support_and_the_same_matched_packet_law() {
+    let source = ContentHash([13; 32]);
+    let phase = PhaseFunction::source_spectral_table(
+        &[
+            (250.0, PhaseFunction::Isotropic),
+            (10_000.0, PhaseFunction::Rayleigh),
+        ],
+        source,
+    )
+    .unwrap();
+    let PhaseFunction::SpectralTable(table) = &phase else {
+        unreachable!()
+    };
+    assert_eq!(table.wavelength_bounds_nm(), (250.0, 10_000.0));
+    assert_eq!(table.source_identity(), Some(source));
+    let expected = 0.5
+        * (PhaseFunction::Isotropic.eval_cos(0.3).unwrap()
+            + PhaseFunction::Rayleigh.eval_cos(0.3).unwrap());
+    assert_eq!(phase.eval_at(5125.0, 0.3).unwrap(), expected);
+    for invalid in [0.0, 249.0, 10_001.0, f64::NAN] {
+        assert_eq!(
+            phase.eval_at(invalid, 0.0),
+            Err(VolumeTransportError::Wavelength)
+        );
+    }
+    let wavelengths = [250.0, 5125.0, 10_000.0];
+    let incoming = Vec3::new(0.0, 0.0, 1.0);
+    for u in [0.01, 0.2, 0.4, 0.6, 0.8, 0.99] {
+        let sample = phase
+            .sample_packet(&wavelengths, incoming, u, 0.25)
+            .unwrap();
+        let evaluated = phase.eval_packet(&wavelengths, sample.direction.z).unwrap();
+        assert_eq!(sample.pdf, evaluated.pdf);
+        for lane in 0..3 {
+            assert_eq!(sample.weight[lane], evaluated.value[lane] / evaluated.pdf);
+        }
+    }
+    assert!(PhaseFunction::Rayleigh.eval_at(150_000.0, 0.3).is_ok());
+    assert_eq!(
+        PhaseFunction::Rayleigh.eval_at(0.0, 0.3),
+        Err(VolumeTransportError::Wavelength)
+    );
+    assert_eq!(
+        dispersive().eval_at(1064.0, 0.3),
+        Err(VolumeTransportError::Wavelength)
+    );
+}
+
+#[test]
 fn g0_spectral_interpolation_is_normalized_and_retains_endpoint_laws() {
     let phase = dispersive();
     let PhaseFunction::SpectralTable(table) = &phase else {

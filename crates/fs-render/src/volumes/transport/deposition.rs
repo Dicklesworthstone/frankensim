@@ -41,6 +41,9 @@ pub struct CellBeamPower<const N: usize> {
 pub struct BeamPowerDeposition<const N: usize> {
     /// Identity of the exact accepted medium and its optical model.
     pub medium_identity: ContentHash,
+    /// Inclusive vacuum-wavelength support of the source model, in nm.
+    /// This remains the admitted source domain, not the packet's extrema.
+    pub wavelength_bounds_nm: (f64, f64),
     /// Vacuum wavelength of each already weighted spectral power lane.
     pub wavelengths_nm: [f64; N],
     /// Power entering the requested segment, watts per spectral lane.
@@ -123,6 +126,7 @@ pub(super) fn deposit<const N: usize>(
     }
     let mut result = BeamPowerDeposition {
         medium_identity: scattering.map_or(medium.identity, |(_, identity)| identity),
+        wavelength_bounds_nm: medium.wavelength_bounds_nm(),
         wavelengths_nm: *wavelengths_nm,
         incident_power_w: *incident_power_w,
         transmitted_power_w: *incident_power_w,

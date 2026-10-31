@@ -360,3 +360,206 @@ fn g0_g4_admission_identity_budgets_and_cancellation() {
         assert_eq!(trace(), Err(VolumeTransportError::Cancelled));
     });
 }
+
+#[test]
+fn g0_broadband_sources_retain_exact_support_and_source_identity() {
+    let knots = [(250.0, 2.0), (1064.0, 0.2), (10_000.0, 1.0)];
+    let source = ContentHash([7; 32]);
+    let spectrum = MassAbsorptionSpectrum::source_table(&knots, source).unwrap();
+    assert_eq!(spectrum.wavelength_bounds_nm(), (250.0, 10_000.0));
+    assert_eq!(spectrum.source_identity(), Some(source));
+    assert_eq!(spectrum.at(1064.0), Ok(0.2));
+    close(spectrum.at(5532.0).unwrap(), 0.6);
+    for wavelength in [0.0, -1.0, 249.0, 10_001.0, f64::NAN, f64::INFINITY] {
+        assert_eq!(
+            spectrum.at(wavelength),
+            Err(VolumeTransportError::Wavelength)
+        );
+    }
+    assert_eq!(
+        MassAbsorptionSpectrum::source_table(&knots, ContentHash([0; 32])),
+        Err(VolumeTransportError::SourceIdentity)
+    );
+    for invalid in [
+        [(0.0, 1.0), (1000.0, 1.0)],
+        [(1000.0, 1.0), (250.0, 1.0)],
+        [(250.0, -1.0), (1000.0, 1.0)],
+    ] {
+        assert_eq!(
+            MassAbsorptionSpectrum::source_table(&invalid, source),
+            Err(VolumeTransportError::AbsorptionSpectrum)
+        );
+    }
+    assert_eq!(
+        MassAbsorptionSpectrum::table(&knots),
+        Err(VolumeTransportError::AbsorptionSpectrum)
+    );
+    assert_eq!(
+        MassAbsorptionSpectrum::constant(1.0).unwrap().at(1064.0),
+        Err(VolumeTransportError::Wavelength)
+    );
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let make = |identity| {
+            AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &density, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::source_table(&knots, identity).unwrap(),
+                None,
+                budget(),
+            )
+            .unwrap()
+        };
+        assert_ne!(
+            make(source).content_identity(),
+            make(ContentHash([8; 32])).content_identity()
+        );
+        let medium = make(source);
+        // Even a zero-power beam cannot manufacture support outside its source.
+        assert_eq!(
+            medium.deposit_beam_power(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                3.0,
+                &[10_001.0],
+                &[0.0],
+                0,
+            ),
+            Err(VolumeTransportError::Wavelength)
+        );
+    });
+}
+
+#[test]
+fn g1_broadband_absorption_and_cold_infrared_emission_follow_si_laws() {
+    with_cx(|cx, _| {
+        let density = [2.0];
+        let temperature = [20.0];
+        let wavelengths = [250.0, 1064.0, 150_000.0];
+        let coefficients: [f64; 3] = [1.0, 0.1, 0.5];
+        let medium = AbsorbingGrid::try_new(
+            cx,
+            VolumeGrid::new([1; 3], &density, [0.0; 3], [0.5; 3]),
+            MassAbsorptionSpectrum::source_table(
+                &[(250.0, 1.0), (1064.0, 0.1), (150_000.0, 0.5)],
+                ContentHash([5; 32]),
+            )
+            .unwrap(),
+            Some(&temperature),
+            budget(),
+        )
+        .unwrap();
+        // A 20 K body's visible Planck source underflows; its admitted far-IR
+        // source still has a direction proposal and physical spectral power.
+        assert!(medium.has_emission_proposal());
+        let transport = medium
+            .transport(
+                cx,
+                Point3::new(-1.0, 0.25, 0.25),
+                Vec3::new(1.0, 0.0, 0.0),
+                2.0,
+                &wavelengths,
+            )
+            .unwrap();
+        for lane in 0..3 {
+            let transmitted = (-coefficients[lane]).exp();
+            close(transport.transmittance[lane], transmitted);
+            let lambda_m = wavelengths[lane] * 1e-9;
+            // Independent direct SI Planck law, converted from per metre to per nm.
+            let h = 6.626_070_15e-34;
+            let c = 299_792_458.0;
+            let k = 1.380_649e-23;
+            let b = 2.0 * h * c * c * 1e-9
+                / (lambda_m.powi(5) * (h * c / (lambda_m * k * temperature[0])).exp_m1());
+            close(transport.emission_w_m2_sr_nm[lane], b * (1.0 - transmitted));
+        }
+        assert!(transport.emission_w_m2_sr_nm[2] > 0.0);
+        let deposition = medium
+            .deposit_beam_power(
+                cx,
+                Point3::new(-1.0, 0.25, 0.25),
+                Vec3::new(1.0, 0.0, 0.0),
+                2.0,
+                &wavelengths,
+                &[10.0; 3],
+                1,
+            )
+            .unwrap();
+        assert_eq!(deposition.wavelength_bounds_nm, (250.0, 150_000.0));
+        for lane in 0..3 {
+            close(
+                deposition.absorbed_power_w[lane],
+                10.0 * (1.0 - (-coefficients[lane]).exp()),
+            );
+            close(
+                deposition.transmitted_power_w[lane] + deposition.absorbed_power_w[lane],
+                10.0,
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_broadband_scattering_separates_heat_and_refuses_missing_optical_support() {
+    use super::scattering::{MassScatteringSpectrum, PhaseFunction, ScatteringGrid};
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let source = ContentHash([9; 32]);
+        let make = || {
+            AbsorbingGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &density, [0.0; 3], [1.0; 3]),
+                MassAbsorptionSpectrum::source_table(&[(250.0, 1.0), (10_000.0, 1.0)], source)
+                    .unwrap(),
+                None,
+                budget(),
+            )
+            .unwrap()
+        };
+        let scattering =
+            MassScatteringSpectrum::source_table(&[(250.0, 3.0), (10_000.0, 3.0)], source).unwrap();
+        assert!(matches!(
+            ScatteringGrid::try_new(
+                cx,
+                make(),
+                MassScatteringSpectrum::constant(0.0).unwrap(),
+                PhaseFunction::Isotropic
+            ),
+            Err(VolumeTransportError::Wavelength)
+        ));
+        let visible_phase = PhaseFunction::spectral_table(&[
+            (380.0, PhaseFunction::Isotropic),
+            (780.0, PhaseFunction::Rayleigh),
+        ])
+        .unwrap();
+        assert!(matches!(
+            ScatteringGrid::try_new(cx, make(), scattering, visible_phase),
+            Err(VolumeTransportError::Wavelength)
+        ));
+        let medium =
+            ScatteringGrid::try_new(cx, make(), scattering, PhaseFunction::Isotropic).unwrap();
+        let deposition = medium
+            .deposit_beam_power(
+                cx,
+                Point3::new(-1.0, 0.5, 0.5),
+                Vec3::new(1.0, 0.0, 0.0),
+                3.0,
+                &[250.0, 10_000.0],
+                &[8.0; 2],
+                1,
+            )
+            .unwrap();
+        for lane in 0..2 {
+            close(
+                deposition.absorbed_power_w[lane],
+                2.0 * (1.0 - (-4.0_f64).exp()),
+            );
+            close(
+                deposition.scattered_power_w[lane],
+                6.0 * (1.0 - (-4.0_f64).exp()),
+            );
+            close(deposition.transmitted_power_w[lane], 8.0 * (-4.0_f64).exp());
+        }
+    });
+}

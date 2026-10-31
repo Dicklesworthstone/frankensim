@@ -2,7 +2,7 @@
 
 use super::{PhaseFunction, PhaseSample, Vec3, VolumeTransportError, unit_variate};
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
-use fs_blake3::DomainHasher;
+use fs_blake3::{ContentHash, DomainHasher};
 use std::sync::Arc;
 
 /// Maximum retained wavelength samples in one angular law.
@@ -17,6 +17,7 @@ pub const MAX_PHASE_WAVELENGTHS: usize = 16;
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpectralPhaseTable {
     knots: Arc<[(f64, PhaseFunction)]>,
+    source_identity: Option<ContentHash>,
 }
 
 /// Wavelength-specific physical response and the complete sampling density.
@@ -45,8 +46,34 @@ impl SpectralPhaseTable {
         if !(2..=MAX_PHASE_WAVELENGTHS).contains(&knots.len())
             || knots[0].0 != LAMBDA_MIN
             || knots[knots.len() - 1].0 != LAMBDA_MAX
+        {
+            return Err(VolumeTransportError::Phase);
+        }
+        Self::admit(knots, None)
+    }
+
+    /// Admit an identified source's 2–16 angular laws over its exact positive
+    /// wavelength domain. No phase response is extrapolated beyond the knots;
+    /// the source identity does not assert experimental qualification.
+    pub fn source_table(
+        knots: &[(f64, PhaseFunction)],
+        source_identity: ContentHash,
+    ) -> Result<Self, VolumeTransportError> {
+        if source_identity == ContentHash([0; 32]) {
+            return Err(VolumeTransportError::SourceIdentity);
+        }
+        Self::admit(knots, Some(source_identity))
+    }
+
+    fn admit(
+        knots: &[(f64, PhaseFunction)],
+        source_identity: Option<ContentHash>,
+    ) -> Result<Self, VolumeTransportError> {
+        if !(2..=MAX_PHASE_WAVELENGTHS).contains(&knots.len())
             || knots.iter().any(|(wavelength, phase)| {
-                !wavelength.is_finite() || matches!(phase, PhaseFunction::SpectralTable(_))
+                !wavelength.is_finite()
+                    || *wavelength <= 0.0
+                    || matches!(phase, PhaseFunction::SpectralTable(_))
             })
             || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
         {
@@ -57,6 +84,7 @@ impl SpectralPhaseTable {
         }
         Ok(Self {
             knots: Arc::from(knots),
+            source_identity,
         })
     }
 
@@ -64,6 +92,18 @@ impl SpectralPhaseTable {
     #[must_use]
     pub fn knots(&self) -> &[(f64, PhaseFunction)] {
         &self.knots
+    }
+
+    /// Inclusive vacuum-wavelength support, in nm.
+    #[must_use]
+    pub fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.knots[0].0, self.knots[self.knots.len() - 1].0)
+    }
+
+    /// Original source identity, when this law was explicitly source-bound.
+    #[must_use]
+    pub const fn source_identity(&self) -> Option<ContentHash> {
+        self.source_identity
     }
 
     fn interval(&self, wavelength: f64) -> (&PhaseFunction, &PhaseFunction, f64) {
@@ -82,6 +122,10 @@ impl SpectralPhaseTable {
             hash.update(&wavelength.to_bits().to_le_bytes());
             phase.hash_into(hash);
         }
+        if let Some(source) = self.source_identity {
+            hash.update(b"source-table");
+            hash.update(source.as_bytes());
+        }
     }
 }
 
@@ -91,9 +135,34 @@ impl PhaseFunction {
         SpectralPhaseTable::try_new(knots).map(Self::SpectralTable)
     }
 
-    /// Physical phase response at a vacuum wavelength in the visible band.
+    /// Retain explicitly sourced angular laws over their exact UV/visible/IR
+    /// support, with the same normalized mixture used for response and sampling.
+    pub fn source_spectral_table(
+        knots: &[(f64, Self)],
+        source_identity: ContentHash,
+    ) -> Result<Self, VolumeTransportError> {
+        SpectralPhaseTable::source_table(knots, source_identity).map(Self::SpectralTable)
+    }
+
+    pub(in crate::volumes::transport) fn validate_wavelength(
+        &self,
+        wavelength: f64,
+    ) -> Result<(), VolumeTransportError> {
+        if !wavelength.is_finite() || wavelength <= 0.0 {
+            return Err(VolumeTransportError::Wavelength);
+        }
+        if let Self::SpectralTable(table) = self {
+            let (lower, upper) = table.wavelength_bounds_nm();
+            if !(lower..=upper).contains(&wavelength) {
+                return Err(VolumeTransportError::Wavelength);
+            }
+        }
+        Ok(())
+    }
+
+    /// Physical phase response at an admitted positive vacuum wavelength.
     pub fn eval_at(&self, wavelength_nm: f64, cos_theta: f64) -> Result<f64, VolumeTransportError> {
-        validate_wavelength(wavelength_nm)?;
+        self.validate_wavelength(wavelength_nm)?;
         match self {
             Self::SpectralTable(table) => {
                 let (a, b, t) = table.interval(wavelength_nm);
@@ -117,7 +186,7 @@ impl PhaseFunction {
         wavelengths_nm: &[f64; N],
         cos_theta: f64,
     ) -> Result<PhasePacketEvaluation<N>, VolumeTransportError> {
-        validate_packet(wavelengths_nm)?;
+        validate_packet(self, wavelengths_nm)?;
         if !matches!(self, Self::SpectralTable(_)) {
             let pdf = self.eval_cos(cos_theta)?;
             return Ok(PhasePacketEvaluation {
@@ -149,7 +218,7 @@ impl PhaseFunction {
         u_cos: f64,
         u_azimuth: f64,
     ) -> Result<PhasePacketSample<N>, VolumeTransportError> {
-        validate_packet(wavelengths_nm)?;
+        validate_packet(self, wavelengths_nm)?;
         if !unit_variate(u_cos) || !unit_variate(u_azimuth) {
             return Err(VolumeTransportError::Sample);
         }
@@ -197,19 +266,15 @@ fn unit_below_one(value: f64) -> f64 {
     value.clamp(0.0, fs_math::next_down(1.0))
 }
 
-fn validate_wavelength(wavelength: f64) -> Result<(), VolumeTransportError> {
-    if !wavelength.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength) {
-        return Err(VolumeTransportError::Wavelength);
-    }
-    Ok(())
-}
-
-fn validate_packet<const N: usize>(wavelengths: &[f64; N]) -> Result<(), VolumeTransportError> {
+fn validate_packet<const N: usize>(
+    phase: &PhaseFunction,
+    wavelengths: &[f64; N],
+) -> Result<(), VolumeTransportError> {
     if N == 0 {
         return Err(VolumeTransportError::Sample);
     }
     for &wavelength in wavelengths {
-        validate_wavelength(wavelength)?;
+        phase.validate_wavelength(wavelength)?;
     }
     Ok(())
 }

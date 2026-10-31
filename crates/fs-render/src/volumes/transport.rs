@@ -27,11 +27,14 @@ pub mod timeline;
 
 const MAX_KNOTS: usize = 16;
 
-/// Validated visible-band mass absorption coefficient, in m²/kg.
+/// Validated mass absorption coefficient, in m²/kg, on an explicit wavelength
+/// domain. Legacy visible constructors retain 380–780 nm; broader source tables
+/// retain their own endpoints and never infer missing UV or infrared response.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MassAbsorptionSpectrum {
     knots: [(f64, f64); MAX_KNOTS],
     count: usize,
+    source_identity: Option<ContentHash>,
 }
 
 impl MassAbsorptionSpectrum {
@@ -46,9 +49,37 @@ impl MassAbsorptionSpectrum {
         if !(2..=MAX_KNOTS).contains(&knots.len())
             || knots[0].0 != LAMBDA_MIN
             || knots[knots.len() - 1].0 != LAMBDA_MAX
+        {
+            return Err(VolumeTransportError::AbsorptionSpectrum);
+        }
+        Self::admit(knots, None)
+    }
+
+    /// Admit an explicitly identified source over exactly its supplied support.
+    ///
+    /// The 2–16 knots are `(positive vacuum_nm, nonnegative m²/kg)`, strictly
+    /// increasing in wavelength. Between knots the declared model is linear;
+    /// callers must resolve spectral features adequately. The nonzero identity
+    /// binds source/condition data but does not confer measurement authority.
+    /// No value outside the first and last source knots is extrapolated.
+    pub fn source_table(
+        knots: &[(f64, f64)],
+        source_identity: ContentHash,
+    ) -> Result<Self, VolumeTransportError> {
+        if source_identity == ContentHash([0; 32]) {
+            return Err(VolumeTransportError::SourceIdentity);
+        }
+        Self::admit(knots, Some(source_identity))
+    }
+
+    fn admit(
+        knots: &[(f64, f64)],
+        source_identity: Option<ContentHash>,
+    ) -> Result<Self, VolumeTransportError> {
+        if !(2..=MAX_KNOTS).contains(&knots.len())
             || knots
                 .iter()
-                .any(|(l, k)| !l.is_finite() || !k.is_finite() || *k < 0.0)
+                .any(|(l, k)| !l.is_finite() || *l <= 0.0 || !k.is_finite() || *k < 0.0)
             || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
         {
             return Err(VolumeTransportError::AbsorptionSpectrum);
@@ -56,14 +87,28 @@ impl MassAbsorptionSpectrum {
         let mut result = Self {
             knots: [(0.0, 0.0); MAX_KNOTS],
             count: knots.len(),
+            source_identity,
         };
         result.knots[..knots.len()].copy_from_slice(knots);
         Ok(result)
     }
 
-    /// Evaluate without extrapolating outside the admitted visible band.
+    /// Exact inclusive support of the retained source/model, in vacuum nm.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        (self.knots[0].0, self.knots[self.count - 1].0)
+    }
+
+    /// Original explicitly supplied source identity, when present.
+    #[must_use]
+    pub const fn source_identity(&self) -> Option<ContentHash> {
+        self.source_identity
+    }
+
+    /// Evaluate without extrapolating outside the admitted source domain.
     pub fn at(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError> {
-        if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
+        let (lower, upper) = self.wavelength_bounds_nm();
+        if !wavelength_nm.is_finite() || !(lower..=upper).contains(&wavelength_nm) {
             return Err(VolumeTransportError::Wavelength);
         }
         let knots = &self.knots[..self.count];
@@ -113,6 +158,8 @@ pub enum VolumeTransportError {
     AbsorptionSpectrum,
     /// Invalid spectral knots or negative/non-finite mass scattering.
     ScatteringSpectrum,
+    /// An explicitly sourced optical table requires a nonzero source identity.
+    SourceIdentity,
     /// Invalid phase asymmetry, direction, or scattering angle.
     Phase,
     /// An incident beam-power lane is negative or non-finite.
@@ -122,7 +169,7 @@ pub enum VolumeTransportError {
     },
     /// A spectral packet is empty or a random variate is outside [0, 1).
     Sample,
-    /// Wavelength lies outside 380–780 nm.
+    /// Wavelength is nonfinite, nonpositive or outside an admitted source domain.
     Wavelength,
     /// Ray direction is not finite and unit, or distance is negative/NaN.
     Ray,
@@ -204,6 +251,10 @@ impl<'a> AbsorbingGrid<'a> {
             hash.update(&l.to_bits().to_le_bytes());
             hash.update(&k.to_bits().to_le_bytes());
         }
+        if let Some(source) = absorption.source_identity() {
+            hash.update(b"source-table");
+            hash.update(source.as_bytes());
+        }
         hash.update(&[u8::from(temperature_k.is_some())]);
         let mut positive_density = false;
         for (index, &density) in grid.data.iter().enumerate() {
@@ -229,7 +280,12 @@ impl<'a> AbsorbingGrid<'a> {
                 .iter()
                 .all(|(_, k)| *k == 0.0);
         let emission = if !vacuum && let Some(temperatures) = temperature_k {
-            emission::EmissionDistribution::try_new(cx, &grid, temperatures)?
+            emission::EmissionDistribution::try_new(
+                cx,
+                &grid,
+                temperatures,
+                absorption.wavelength_bounds_nm(),
+            )?
         } else {
             emission::EmissionDistribution::default()
         };
@@ -248,6 +304,12 @@ impl<'a> AbsorbingGrid<'a> {
     #[must_use]
     pub const fn content_identity(&self) -> ContentHash {
         self.identity
+    }
+
+    /// Inclusive wavelength domain supported by the accepted absorption law.
+    #[must_use]
+    pub const fn wavelength_bounds_nm(&self) -> (f64, f64) {
+        self.absorption.wavelength_bounds_nm()
     }
 
     /// World-space bounds of the borrowed physical cell support, in metres.

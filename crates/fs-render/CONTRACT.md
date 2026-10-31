@@ -648,7 +648,7 @@ differentiable lift). Pure Rust throughout.
 
 - `volumes::transport` (features `volumes,tracer`) connects borrowed simulation
   density and temperature snapshots to physical scene transport. `AbsorbingGrid`
-  requires kg/m³ density, metre geometry and an explicit visible-band mass
+  requires kg/m³ density, metre geometry and an explicit source-domain mass
   absorption spectrum in m²/kg; raw lattice density is not silently interpreted
   as a physical optical coefficient. Each crossed constant cell integrates
   Beer--Lambert attenuation and, when a kelvin field is supplied, local-equilibrium
@@ -674,6 +674,25 @@ differentiable lift). Pure Rust throughout.
   authority. G1/G3/G4/G5 tests compare
   slabs, shadow paths and hot-cell emission to independent integrals, exercise
   boundary/refinement/unit changes, and verify replay and refusal rollback.
+- **Source-bounded UV/IR transport (`tracer,volumes`):**
+  `MassAbsorptionSpectrum::source_table` and
+  `MassScatteringSpectrum::source_table` retain 2–16 positive vacuum-nm knots,
+  their exact inclusive support and a nonzero caller-supplied source identity.
+  That identity binds source/condition data, not measurement authority. The
+  retained interpolation is linear; unresolved narrow features and spectral
+  quadrature remain caller responsibilities. Existing `table`/`constant`
+  constructors and camera sampling keep their 380–780 nm domain. Every query,
+  including a zero-power beam lane, refuses outside its actual source support.
+  Scattering requires matching coefficient domains and complete phase support;
+  `PhaseFunction::source_spectral_table` retains normalized source-domain
+  angular laws without extrapolation. Beam deposition preserves source bounds
+  in its report, and `OpticalHeating` admits UV/IR absorbed watts into the same
+  native enthalpy cells with those bounds intact. The shared SI Planck law and
+  emission-direction proposal cover the admitted medium domain, including cold
+  far-IR sources; no second spectral probability is introduced. No material
+  dataset, unprovided infrared continuation, or bolometric heat-loss closure is
+  inferred. Focused G0/G1 tests cover source/domain refusals, UV/IR Beer–Lambert
+  heat, separate scattering, cold far-IR emission, and native thermal energy.
 - **Physical participating cells (`tracer,volumes`):**
   `volumes::transport::scattering::ScatteringGrid` extends the same accepted
   borrowed density/temperature snapshot with independent mass-scattering
@@ -818,10 +837,10 @@ differentiable lift). Pure Rust throughout.
   finite light travel time are outside this entry point's contract.
 - **Physical volume-source lighting (`tracer,volumes`):**
   Absorbing and scattering snapshots cache an emission-direction distribution
-  over their original temperature/density buffers. A visible-band Planck proxy
+  over their original temperature/density buffers. A source-band Planck proxy
   guides cell selection, with an explicit uniform component retaining cold
   spectral-tail support. The bounded CDF stores one f64 per cell plus one;
-  fields with no representable visible source allocate no proposal. Sampling
+  fields with no representable source in that band allocate no proposal. Sampling
   selects a source point only to propose a direction. Exact cell crossings
   marginalize radius into the complete solid-angle PDF, including cells behind
   occluders, while source radiance is integrated only up to the first surface.
