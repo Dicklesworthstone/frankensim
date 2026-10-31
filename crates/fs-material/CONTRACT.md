@@ -8058,3 +8058,31 @@ fixed as composition evolves. This does not promote pure-gas measurements,
 infer competitive sorption, cross-diffusion, swelling or sorbed calorics.
 Original gas enthalpy streams and exact isothermal thermostat flow-work offsets
 are separate reports, without a whole-membrane energy certificate.
+
+### Original-material liquid retention calibration
+
+`WetPoreLiquidLaw::from_material` selects residual liquid/gas pore-volume
+fractions, van Genuchten m, the connectivity exponent and the capillary pressure
+scale from an original `ResolvedMaterialStatePoint`. The first four parameters
+require exact dimensional-one quantities; the pressure scale requires Pa.
+These are validity-wide constants. Sampled curves, missing parameters, pressure
+head and inverse-length/pressure alpha coefficients cannot silently supply this
+calibration. The complete original claims, observations, uncertainty, selection
+and query context remain accessible with the selected property names.
+
+Source applicability intersects the declared saturation, temperature, absolute
+LIQUID pressure and superficial-speed support. The explicit `liquid_saturation`
+coordinate denotes pore-volume fraction; relative humidity and dry/wet mass
+moisture bases are not convertible substitutes. Superficial speed uses m/s and
+a domain beginning at zero. Unsupported evolving axes and pressure-dimensional
+aliases such as capillary pressure refuse. The constitutive output Pc=pg-pl
+remains separate from absolute liquid-pressure applicability.
+
+A source-backed liquid law can attach only to intrinsic permeability retained
+from the same immutable material card, complete original query and quantity
+metadata. Separate property selections may share that context. New prescribed
+saturation samples retain their original calibration context while obeying its
+supported interval. Authored calibrations remain available as explicitly
+authored inputs, with no measured authority inferred from their provenance.
+The shared continuum and native pressure/heat receipts retain this source
+through the exact liquid states used to compile mobility.

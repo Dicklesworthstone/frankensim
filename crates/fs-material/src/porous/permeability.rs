@@ -294,11 +294,11 @@ fn source_value(source: &ResolvedMaterialStatePoint, name: &str, dims: Dims) -> 
 }
 
 #[derive(Clone, Copy)]
-enum SourceAxis { Temperature, Pressure }
+pub(crate) enum SourceAxis { Temperature, Pressure }
 // Only named total-state coordinates belong to this constitutive owner.
 // A pressure-dimensional specimen stress, partial pressure or reference value
 // cannot silently become the actual absolute pore-gas pressure.
-fn source_axis(axis: &str, quantity: Option<QuantitySpec>) -> Result<Option<SourceAxis>, MaterialError> {
+pub(crate) fn source_axis(axis: &str, quantity: Option<QuantitySpec>) -> Result<Option<SourceAxis>, MaterialError> {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
     let thermal = quantity.is_none_or(|q| q == QuantitySpec::dimensional(fs_qty::Temperature::DIMS)
         || q == QuantitySpec::semantic(SemanticType::new(QuantityKind::AbsoluteTemperature, ValueForm::Static)));

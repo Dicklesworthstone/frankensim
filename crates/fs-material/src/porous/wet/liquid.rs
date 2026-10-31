@@ -18,6 +18,9 @@ use crate::{MaterialError, porous::permeability::PorousGasSupport};
 use fs_math::det;
 use std::sync::Arc;
 
+mod source;
+pub use source::WetPoreLiquidProperties;
+
 /// Inclusive applicability of this liquid calibration. Pressure means the
 /// actual absolute LIQUID pressure, independently of the capillary difference.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -76,10 +79,10 @@ struct LiquidCalibration {
     provenance: String,
 }
 
-/// Immutable explicitly authored calibration, distinct from the gas wet-pore
-/// law. A literature citation alone supplies no measured material authority.
+/// Immutable authored or source-bound calibration, distinct from the gas
+/// wet-pore law. A literature citation alone supplies no measured authority.
 #[derive(Clone, Debug, PartialEq)]
-pub struct WetPoreLiquidLaw(Arc<LiquidCalibration>);
+pub struct WetPoreLiquidLaw(Arc<LiquidCalibration>, Option<Arc<source::LiquidSource>>);
 impl WetPoreLiquidLaw {
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -110,17 +113,20 @@ impl WetPoreLiquidLaw {
                 "liquid retention needs residual saturations with sum <1, m in (0,1), explicit nonnegative connectivity exponent, positive pressure scale and bounded provenance",
             ));
         }
-        Ok(Self(Arc::new(LiquidCalibration {
-            residual_liquid_saturation,
-            residual_gas_saturation,
-            maximum_liquid_saturation,
-            mobile_saturation_span,
-            van_genuchten_m,
-            connectivity_exponent,
-            pressure_scale_pa,
-            support,
-            provenance,
-        })))
+        Ok(Self(
+            Arc::new(LiquidCalibration {
+                residual_liquid_saturation,
+                residual_gas_saturation,
+                maximum_liquid_saturation,
+                mobile_saturation_span,
+                van_genuchten_m,
+                connectivity_exponent,
+                pressure_scale_pa,
+                support,
+                provenance,
+            }),
+            None,
+        ))
     }
     pub fn residual_liquid_saturation(&self) -> f64 {
         self.0.residual_liquid_saturation

@@ -76,7 +76,8 @@ impl<'a> ContinuumDarcyGeometry<'a> {
         }
         let mut support = self.barrier.support;
         let mut sealed = self.barrier.geometric_resistance_per_m.is_none();
-        for state in states {
+        for (layer, state) in self.barrier.layers.iter().zip(states) {
+            state.law().admit_layer_source(layer)?;
             let active = state.support().flow_support();
             support.temperature_k = (
                 support.temperature_k.0.max(active.temperature_k.0),
