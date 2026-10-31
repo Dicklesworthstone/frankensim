@@ -24,6 +24,7 @@ use super::super::super::LiquidSolidResponse;
 #[derive(Debug)]
 pub struct PressureSolidControls {
     /// Outer pressure closure and explicit neglected-dissipation allowance.
+    /// The opt-in dissipative solve requires this allowance to be zero.
     pub pressure: PressureDrivenBudget,
     /// Existing wall/reference and per-region watt gates, per flow trial.
     pub coupling: ConjugateConfig,
@@ -60,7 +61,48 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
     /// malformed assignment/configuration; or exhausted shared solid work.
     pub fn solve_pressure_coupled_iqn<R, F>(
         &self, cx: &Cx<'_>, initial_walls_k: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
-        drive: Pressure, controls: &PressureSolidControls, mut solid: F,
+        drive: Pressure, controls: &PressureSolidControls, solid: F,
+    ) -> Result<CoupledPressureSolution<'a, R>, PressureDrivenError>
+    where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<LiquidSolidResponse<R>, AirflowError>,
+    {
+        self.solve_pressure_coupled_iqn_inner(
+            cx, initial_walls_k, resistances, drive, controls, false, solid,
+        )
+    }
+
+    /// Close pressure, hydraulic heating and the actual solid temperature together.
+    ///
+    /// Every wall iterate uses `march_with_dissipation`: the same source-bound
+    /// pressure loss heats the coolant, changes its viscosity and convection,
+    /// and changes the wall-only Robin rows seen by the original solid solver.
+    /// The accepted hydraulic state comes from the independent re-evaluation
+    /// at that solid's returned walls, never a loss-free or stale trajectory.
+    /// The original IQN iteration, regional wall-power gates and pressure root
+    /// remain the sole numerical owners, with one shared solid-callback budget.
+    ///
+    /// Requires zero omitted-power allowance, constant source density, equal
+    /// flow areas and the original dissipative march's equal-elevation, unchanged
+    /// kinetic-energy and complete fluid-deposition assumptions. Pump inefficiency
+    /// and heat retained by a porous skeleton are outside this model. Callbacks
+    /// must start every trial from the same accepted solid history.
+    ///
+    /// # Errors
+    /// Preserves all original source, geometry, thermal, pressure, cancellation
+    /// and work refusals; a nonzero omitted-power allowance is invalid.
+    pub fn solve_pressure_coupled_iqn_with_dissipation<R, F>(
+        &self, cx: &Cx<'_>, initial_walls_k: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
+        drive: Pressure, controls: &PressureSolidControls, solid: F,
+    ) -> Result<CoupledPressureSolution<'a, R>, PressureDrivenError>
+    where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<LiquidSolidResponse<R>, AirflowError>,
+    {
+        self.solve_pressure_coupled_iqn_inner(
+            cx, initial_walls_k, resistances, drive, controls, true, solid,
+        )
+    }
+
+    fn solve_pressure_coupled_iqn_inner<R, F>(
+        &self, cx: &Cx<'_>, initial_walls_k: &[f64], resistances: &[LiquidResistanceSection<'_, impl LiquidResistanceModel>],
+        drive: Pressure, controls: &PressureSolidControls, deposit_hydraulic_heat: bool, mut solid: F,
     ) -> Result<CoupledPressureSolution<'a, R>, PressureDrivenError>
     where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<LiquidSolidResponse<R>, AirflowError>,
     {
@@ -68,6 +110,11 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         controls.pressure.admit(drive)?;
         controls.local.admit()?;
         self.admit_resistances(resistances)?;
+        if deposit_hydraulic_heat && controls.pressure.maximum_neglected_hydraulic_power_w != 0.0 {
+            return Err(PressureDrivenError::Invalid(
+                "fully dissipative heat path requires zero omitted-power allowance",
+            ));
+        }
         if controls.max_total_solid_solves == 0 {
             return Err(PressureDrivenError::Invalid("total solid-solve budget must be positive"));
         }
@@ -75,7 +122,7 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
         let operating_point = solve_pressure_root(cx, drive, controls.pressure, |mass| {
             let path = self.at_pressure_trial_mass(cx, mass)?;
             let mut exhausted = false;
-            let thermal = path.solve_coupled_iqn(cx, initial_walls_k, &controls.coupling,
+            let thermal = path.solve_coupled_iqn_march(cx, initial_walls_k, &controls.coupling,
                 controls.local, controls.acceleration, |cx, rows| {
                     if total_solid_solves == controls.max_total_solid_solves {
                         exhausted = true;
@@ -85,14 +132,24 @@ impl<'a, 'card> LiquidHeatPath<'a, 'card> {
                     }
                     total_solid_solves += 1;
                     solid(cx, rows)
+                }, |cx, walls| {
+                    if deposit_hydraulic_heat {
+                        let march = path.march_with_dissipation(cx, walls, resistances, controls.local)?;
+                        Ok::<_, PressureDrivenError>((march.thermal, Some(march.hydraulics)))
+                    } else {
+                        Ok((path.march(cx, walls, controls.local)?, None))
+                    }
                 });
             if exhausted {
                 return Err(PressureDrivenError::SolidSolveBudget {
                     performed: total_solid_solves, maximum: controls.max_total_solid_solves,
                 });
             }
-            let thermal = thermal?;
-            let pressure = self.pressure_state(cx, resistances, &thermal.fluid, controls.pressure)?;
+            let (thermal, _, hydraulics) = thermal?;
+            let pressure = match hydraulics {
+                Some(hydraulics) => hydraulics,
+                None => path.pressure_state(cx, resistances, &thermal.fluid, controls.pressure)?,
+            };
             Ok((thermal, pressure))
         })?;
         checkpoint(cx)?;

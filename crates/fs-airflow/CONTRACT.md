@@ -36,7 +36,17 @@ report advected energy. `solve_pressure_driven_with_dissipation` composes this
 trajectory with the existing bounded pressure root and requires zero omitted
 hydraulic-power allowance. Analytic affine-viscosity, pressure-selected flow,
 narrow-source and minimum-iteration regressions exercise the complete path.
-Existing solid IQN, parallel-pump and recirculation entry points retain their
+`solve_pressure_coupled_iqn_with_dissipation` feeds that same heated trajectory
+through the original solid IQN wall iteration and pressure root. Every sent
+Robin row and every re-evaluation at the actual returned solid walls includes
+hydraulic deposition, while regional solid balance compares wall heat alone.
+The pressure root retains the hydraulic state from the accepted re-evaluation,
+with one shared callback limit across all pressure trials. Source-density,
+geometry, cancellation, regional power and zero-omission gates remain intact.
+`tests/liquid_pressure/dissipative_solid.rs` covers the native conduction FEM
+with separate source/hydraulic heat, temperature-dependent bulk/film properties,
+and global-work, local-balance, density and omission refusals.
+Ordinary solid IQN, parallel-pump and recirculation entry points retain their
 original explicit omission budgets; they do not silently acquire this model.
 
 > Status: ACTIVE for beads `frankensim-extreal-program-f85xj.5.5` and
