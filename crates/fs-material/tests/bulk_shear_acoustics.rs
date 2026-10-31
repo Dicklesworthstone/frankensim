@@ -108,7 +108,10 @@ fn original_curves_refresh_pressure_and_all_wave_modes_together() {
     )
     .unwrap();
     let warm = cold.at_query_point(&card, &point(350.0)).unwrap();
-    for (state, rho, bulk, shear) in [(&cold, 2000.0, 30e9, 12e9), (&warm, 1900.0, 25e9, 9e9)] {
+    for (state, rho, bulk, shear) in [
+        (&cold, 2000.0_f64, 30e9, 12e9_f64),
+        (&warm, 1900.0, 25e9, 9e9),
+    ] {
         assert_eq!(state.material().card_identity(), card.content_hash());
         assert_eq!(state.material().properties().len(), 3);
         assert_eq!(state.requirements(), &requirements());
