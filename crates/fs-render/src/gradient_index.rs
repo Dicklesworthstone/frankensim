@@ -27,6 +27,8 @@ use crate::charts::Ray;
 use crate::dielectric::{DielectricError, DielectricGlass, DielectricIor};
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
+pub mod event;
+
 /// Version of the deterministic gradient-index propagation arithmetic.
 pub const GRADIENT_INDEX_SEMANTICS_VERSION: u32 = 1;
 /// Hard ceiling on attempted adaptive steps, including rejected steps.
@@ -57,6 +59,18 @@ pub enum GradientIndexError {
     StepBudgetExceeded,
     /// The caller's bounded-work control requested cancellation.
     Cancelled,
+    /// A geometric clearance/proximity query was malformed or contradictory.
+    InvalidBoundaryQuery,
+    /// A nearby surface lacked a resolvable transverse contact or safe progress.
+    BoundaryResolutionLimit,
+    /// The previous contact has no admitted local planar departure neighborhood.
+    UnsupportedBoundaryDeparture,
+    /// The explicit per-path geometry-query budget was exhausted.
+    BoundaryQueryBudgetExceeded,
+    /// A trial stage left its geometric free ball or admitted departure side.
+    /// Event propagation retries with a shorter step; public fixed-distance
+    /// propagation does not produce this refusal.
+    BoundaryClearanceExceeded,
 }
 
 impl From<DielectricError> for GradientIndexError {
@@ -629,6 +643,31 @@ fn trial_step<F: GradientIndexField + ?Sized>(
     step: f64,
     track_group: bool,
 ) -> Result<Trial, GradientIndexError> {
+    trial_step_guarded(
+        field,
+        origin,
+        wavelength_nm,
+        state,
+        first_derivative,
+        step,
+        track_group,
+        |_, _| true,
+        &mut 0,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trial_step_guarded<F: GradientIndexField + ?Sized>(
+    field: &F,
+    origin: Point3,
+    wavelength_nm: f64,
+    state: &State,
+    first_derivative: State,
+    step: f64,
+    track_group: bool,
+    mut admits_stage: impl FnMut(Point3, Vec3) -> bool,
+    field_evaluations: &mut u32,
+) -> Result<Trial, GradientIndexError> {
     let mut k = [[0.0; 12]; 7];
     k[0] = first_derivative;
     let mut stage = *state;
@@ -648,6 +687,10 @@ fn trial_step<F: GradientIndexField + ?Sized>(
         if !finite_point(point) {
             return Err(GradientIndexError::NumericalRange);
         }
+        if !admits_stage(point, get_vec(&stage, 3)) {
+            return Err(GradientIndexError::BoundaryClearanceExceeded);
+        }
+        *field_evaluations += 1;
         let sample = field.sample(point, wavelength_nm)?;
         k[i + 1] = rhs(&stage, sample, track_group)?;
         last_sample = Some(sample);

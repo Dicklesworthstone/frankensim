@@ -104,8 +104,20 @@ differentiable lift). Pure Rust throughout.
   `BeamMedium` distinguishes homogeneous laws from position/wavelength-bound
   field samples, refusing straight advancement of a gradient medium and
   mismatched local state. Calibrated fixtures can emit into either medium.
-  The caller owns curved boundary/event location and the same accepted field
-  snapshot. No scalar camera/BDPT curved visibility, ray-bundle Jacobians,
+  `gradient_index::event` connects the same adaptive state to a bounded
+  clearance/proximity oracle. A true free-ball radius bounds traveled arc
+  length; every internal Runge--Kutta stage must remain inside it before the
+  field is sampled. Upper surface proximity and a transverse approach are
+  separate contact requirements. Numerical contacts retain their resolution
+  and integrated endpoint; they are not certified global crossing enclosures.
+  An admitted local planar patch permits positive-length departure, including
+  its optical lengths and attenuation, without ignoring a whole object or
+  skipping its opposite wall. The selected field must support the explicit
+  numerical contact collar. Unsupported patches, grazing ambiguity and
+  exhausted step/query budgets refuse. Spatially uniform fields reuse one
+  optical sample and take analytic steps limited by geometry. The caller
+  retains the same accepted field and geometry snapshots.
+  No scalar camera/BDPT curved visibility, ray-bundle Jacobians,
   scattering, diffraction, birefringence or full-wave accuracy is claimed.
   G1 checks include analytic affine-index trajectories, Snell invariants,
   phase/group separation, absorption and tolerance refinement; G3 checks
