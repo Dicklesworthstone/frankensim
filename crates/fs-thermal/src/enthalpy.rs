@@ -48,6 +48,10 @@ pub mod conduction;
 #[path = "enthalpy/sublimation.rs"]
 pub mod sublimation;
 
+/// Conservative liquid evaporation/condensation on this same thermal timeline.
+#[path = "enthalpy/evaporation.rs"]
+pub mod evaporation;
+
 /// Heat-driven virgin/char decomposition on these same cells and heat links.
 #[path = "enthalpy/pyrolysis.rs"]
 pub mod pyrolysis;

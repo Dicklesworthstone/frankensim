@@ -647,3 +647,42 @@ events and fine-only heat/entropy; and atomic refusal for missing observables,
 minimum-step limits, trial/residual budgets and late cancellation. A local
 step-doubling indicator is not a certified global time error or spatial error
 bound. The existing fixed-chain geometry and material-domain restrictions remain.
+
+## Evaporation on the original thermal timeline
+
+`enthalpy::evaporation` connects the continuum liquid/gas-film owner to the
+actual `DepositionSimulation` cell mass and original caloric enthalpy.
+`evaporate_cell` changes these two coordinates atomically and leaves the clock,
+identities, reference geometry, contacts and authored sources intact.
+`advance_evaporating_to` composes original heat transport followed by implicit
+phase transfer on event-clipped intervals. The interval's initial exposed area
+survives endpoint covering, and no phase exchange occurs before cell birth.
+The whole request shares the original thermal work limit.
+
+`LiquidCellExchange` and `apply_liquid_exchanges` admit externally solved
+finite-atmosphere endpoints on those same cells. Full expected-cell equality,
+unique identities, original caloric/storage and cell constraints, admitted
+pure-liquid enthalpy range, positive remaining inventory and interval area are
+checked for the complete batch before its final cancellation gate and writes.
+The external physical owner remains responsible for joint liquid/gas balances.
+
+The caller admits the solver's specific-enthalpy bracket as a pure-liquid
+branch. Original births and every thermal substep are checked against that
+branch; an internal-energy law refuses open-mass evaporation. The original
+caloric law supplies all temperatures, including during the phase solve.
+Signed transfer permits condensation without clamping humidity. Actual mass
+change, full carried vapor enthalpy and thermal storage close one whole-window
+account. Latent energy is separately visible only as a subaccount of vapor
+enthalpy; it is never added as a second thermal source. Numerical balances use
+the unchanged absolute whole-window joule allowance.
+
+G0 unit regressions cover latent cooling and condensation warming, actual mass
+and energy conservation with conduction and heat sources, event exposure,
+birth timing, original branch/storage refusal, cumulative work limits and late
+cancellation. A G1 regression refines the complete heat/phase split, which is
+first order. These checks do not establish experimental model accuracy.
+The atmosphere is prescribed: its temperature, pressure and vapor fraction do
+not evolve here. Finite atmosphere energy/species evolution requires its own
+owner accepting the complete transfer. Geometry is fixed reference geometry;
+recession is reported, with no inferred VOF, liquid-flow, dryout, boiling,
+freezing or contact/topology transition.
