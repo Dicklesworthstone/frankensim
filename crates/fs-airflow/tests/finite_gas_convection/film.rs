@@ -8,6 +8,9 @@ use fs_material::fluid_transport::FluidTransport;
 use fs_qty::Temperature;
 use fs_qty::semantic::{Composition, CompositionBasis};
 
+#[path = "film/mixed.rs"]
+mod mixed;
+
 fn natural_surface() -> NaturalGasSurface {
     NaturalGasSurface {
         geometry: NaturalConvectionGeometry::VerticalPlate,

@@ -34,8 +34,8 @@ pub struct ConvectiveCell<'a> {
 }
 
 /// A boundary law evaluated from the same material and current thermal cell.
-/// Each exposed cell has exactly one law; forced and natural coefficients are
-/// not summed into an unsupported mixed-convection correlation.
+/// Each exposed cell has exactly one admitted law. Mixed convection uses its
+/// own sourced relation, with explicit aiding alignment and approximation bounds.
 #[derive(Clone, Copy, Debug)]
 pub enum CellConvectionLaw {
     /// Prescribed relative flow through an existing forced-convection card.
@@ -59,6 +59,12 @@ pub enum CellConvectionLaw {
     Natural {
         geometry: NaturalConvectionGeometry,
         gravity_m_s2: f64,
+        expansion_per_k: f64,
+    },
+    /// Manning-Qureshi laminar aiding vertical plate, including either pure
+    /// limit. Opposing flow and excessive density departure refuse.
+    AidingVerticalPlate {
+        settings: AidingVerticalPlateSettings,
         expansion_per_k: f64,
     },
 }
@@ -106,8 +112,8 @@ pub struct CellConvectionSample {
     pub reference_temperature_k: f64,
     pub exposed_area_m2: f64,
     pub transport: FluidTransportState,
-    /// Absent only at exact natural-convection thermal equilibrium: the power
-    /// is zero, but a correlation at unsupported Ra=0 has not been evaluated.
+    /// Absent at exact natural-convection or resting mixed-convection thermal
+    /// equilibrium: power is zero without evaluating an unsupported zero driver.
     pub evaluation: Option<CellConvectionEvaluation>,
     /// Signed external power into the finite body. Cooling is negative.
     pub heat_into_cell_w: f64,
@@ -211,7 +217,8 @@ pub fn evaluate_cell_convection(
 /// Exposed-area/contact accounting, independent source addition, stable ordering,
 /// work limits and transactional refusals are identical to
 /// `evaluate_cell_convection`. A repeated cell across different laws also
-/// refuses: this API does not compose a mixed-convection law on one surface.
+/// refuses: one surface owns one selected law, including the sourced aiding
+/// mixed-convection law, rather than independent overlapping coefficients.
 pub fn evaluate_material_cell_convection(
     thermal: &DepositionSimulation<'_>, bindings: &[MaterialConvectiveCell<'_>],
     maximum_cells: usize, cancelled: impl FnMut() -> bool,
@@ -314,6 +321,15 @@ fn evaluate_convection_state(
         }
         CellConvectionLaw::Natural { geometry, gravity_m_s2, expansion_per_k } => {
             natural(geometry, gravity_m_s2, expansion_per_k)
+        }
+        CellConvectionLaw::AidingVerticalPlate { settings, expansion_per_k } => {
+            if wall == reference.value() && settings.speed_up_m_s == 0.0 {
+                mixed::inputs(*transport, settings, expansion_per_k,
+                    Temperature::new(wall), reference, length).map(|_| None)
+            } else {
+                evaluate_aiding_vertical_plate_from_material(transport, settings,
+                    expansion_per_k, Temperature::new(wall), reference, length).map(Some)
+            }
         }
     }?;
     Ok(result.map(|value| {

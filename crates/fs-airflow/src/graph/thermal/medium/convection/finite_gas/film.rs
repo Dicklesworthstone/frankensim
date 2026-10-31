@@ -1,7 +1,11 @@
 //! Film-temperature properties on the original finite gas/body heat residual.
 //! Film evaluation has no independent energy or mass; bulk gas keeps both.
-use super::super::evaluate_natural_from_material;
+use super::super::{
+    AidingVerticalPlateSettings, evaluate_aiding_vertical_plate_from_material,
+    evaluate_natural_from_material, mixed,
+};
 use super::*;
+use fs_material::fluid_transport::FluidTransport;
 use fs_material::thermochemical_gas::ThermochemicalGasModel;
 use fs_qty::Temperature;
 
@@ -10,6 +14,33 @@ use fs_qty::Temperature;
 pub enum FilmGasHeatLaw {
     Forced(ForcedGasSurface),
     Natural(NaturalGasSurface),
+    /// Laminar aiding mixed convection with explicitly bounded density departure.
+    AidingVerticalPlate(AidingVerticalPlateGasSurface),
+}
+
+/// One isothermal vertical plate patch in a prescribed aiding free stream.
+/// Its mean-film gas is a property query only; the bulk gas/body keep all storage.
+/// The complete heat-solve bracket must remain in the aiding and density-valid
+/// domain, including trial endpoints that the existing solver evaluates first.
+#[derive(Clone, Copy, Debug)]
+pub struct AidingVerticalPlateGasSurface {
+    pub area_m2: f64,
+    /// Plate height along the vertical free stream [m].
+    pub characteristic_length: Length,
+    pub settings: AidingVerticalPlateSettings,
+}
+
+impl AidingVerticalPlateGasSurface {
+    fn validate(self) -> Result<(), MaterialConvectionError> {
+        self.settings.validate()?;
+        if !self.area_m2.is_finite() || self.area_m2 < 0.0
+            || !self.characteristic_length.value().is_finite()
+            || self.characteristic_length.value() <= 0.0
+        {
+            return Err(invalid("aiding mixed gas convection needs nonnegative area and positive plate height"));
+        }
+        Ok(())
+    }
 }
 
 /// Source bank and constitutive boundary law for one finite gas/body patch.
@@ -39,6 +70,10 @@ impl FilmGasHeatLaw {
                 Ok(surface.area_m2)
             }
             Self::Natural(surface) => {
+                surface.validate()?;
+                Ok(surface.area_m2)
+            }
+            Self::AidingVerticalPlate(surface) => {
                 surface.validate()?;
                 Ok(surface.area_m2)
             }
@@ -112,6 +147,20 @@ impl FilmGasSurface<'_> {
                         1.0 / film.state().temperature,
                         Temperature::new(wall),
                         Temperature::new(bulk),
+                        surface.characteristic_length,
+                    )?)
+                }
+            }
+            FilmGasHeatLaw::AidingVerticalPlate(surface) => {
+                if wall == bulk && surface.settings.speed_up_m_s == 0.0 {
+                    mixed::inputs(film.transport_state()?, surface.settings,
+                        1.0 / film.state().temperature, Temperature::new(wall),
+                        Temperature::new(bulk), surface.characteristic_length)?;
+                    None
+                } else {
+                    Some(evaluate_aiding_vertical_plate_from_material(
+                        &film, surface.settings, 1.0 / film.state().temperature,
+                        Temperature::new(wall), Temperature::new(bulk),
                         surface.characteristic_length,
                     )?)
                 }

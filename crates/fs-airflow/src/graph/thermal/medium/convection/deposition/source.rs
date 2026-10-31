@@ -41,6 +41,11 @@ pub enum SourceCellConvectionLaw {
         geometry: NaturalConvectionGeometry,
         gravity_m_s2: f64,
     },
+    /// Laminar aiding vertical plate; expansion and transport share the same
+    /// source. This adapter declares a mean-film frozen-property approximation.
+    AidingVerticalPlate {
+        settings: AidingVerticalPlateSettings,
+    },
 }
 
 impl SourceCellConvectionLaw {
@@ -55,10 +60,11 @@ impl SourceCellConvectionLaw {
                     | NaturalConvectionGeometry::HorizontalPlate(_),
                 ..
             }
+                | Self::AidingVerticalPlate { .. }
         ) && convention != ConvectionPropertyTemperature::FilmMean
         {
             return Err(ConvectionSourceError::Invalid(
-                "horizontal natural convection requires mean wall/bulk film properties",
+                "horizontal natural and aiding mixed convection require mean wall/bulk film properties",
             ));
         }
         Ok(())
@@ -97,6 +103,10 @@ impl SourceCellConvectionLaw {
             } => CellConvectionLaw::Natural {
                 geometry,
                 gravity_m_s2,
+                expansion_per_k: expansion()?,
+            },
+            Self::AidingVerticalPlate { settings } => CellConvectionLaw::AidingVerticalPlate {
+                settings,
                 expansion_per_k: expansion()?,
             },
         })

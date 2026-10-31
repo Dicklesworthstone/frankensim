@@ -100,6 +100,21 @@ mixed-law ownership and thermal-energy balance.
 
 ### Source-resolved film convection on the same finite-cell residual
 
+The shared `AidingVerticalPlate` law supplies Manning-Qureshi average laminar
+mixed convection on an unconfined isothermal vertical plate. Its source-backed
+cell/link and `FilmGasHeatLaw` adapters use one mean-film property query and the
+full wall/bulk contrast. Film averaging is a declared frozen-property adapter
+approximation; it is not attributed to the paper's constant-property theory.
+Signed vertical speed must aid the actual signed expansion response. The caller
+also supplies an explicit maximum `|beta delta(T)|` below one. Opposing flow,
+excessive density departure and unsupported laminar/Prandtl groups refuse; no
+cube-difference, invented conduction floor or turbulent extension is supplied.
+The same card reaches its natural limit continuously as fan speed tends to zero.
+Plate height, masked exchange area, original source receipts and native thermal
+owners remain separate. No mass/energy store or thermal solver is added.
+Focused `mixed_convection` and finite-gas film tests cover actual signed heat,
+source state/context, stopped/running flow and reciprocal energy accounting.
+
 `medium::convection::deposition::source::evaluate_source_cell_convection`
 re-evaluates the original fluid owner at an explicitly selected reservoir or
 mean film temperature for every proposed thermal endpoint. The property

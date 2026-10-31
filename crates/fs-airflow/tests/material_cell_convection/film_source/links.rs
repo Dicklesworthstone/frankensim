@@ -5,6 +5,8 @@ use super::*;
 mod observer;
 #[path = "links/natural_geometry.rs"]
 mod natural_geometry;
+#[path = "links/mixed_convection.rs"]
+mod mixed_convection;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::*;
 use fs_matdb::SelectionPolicy;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
