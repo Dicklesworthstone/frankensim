@@ -1582,6 +1582,91 @@ impl RigidBodyIntegrator {
         })
     }
 
+    /// Advance pose-dependent loads with symmetric endpoint kicks and the
+    /// original full-inertia free-rotation map.
+    ///
+    /// `wrench_before` must be evaluated at `state`. After its half-kick and a
+    /// full translation/rotation drift, `endpoint_load` receives the candidate
+    /// endpoint pose with the half-kicked momenta. Its wrench supplies the
+    /// final half-kick. Both wrenches exclude the gravity owned by this
+    /// integrator; torques use the body coordinates of their own endpoint.
+    /// The callback's auxiliary value is returned only with a complete step,
+    /// letting a geometry/material owner retain its original load receipt.
+    ///
+    /// For smooth configuration-dependent loads this is a second-order
+    /// velocity-Verlet splitting. The native free map preserves momentum;
+    /// energy is not exact and phase still requires timestep refinement.
+    /// Velocity-dependent loads,
+    /// discontinuous force switches and adaptive timesteps require their own
+    /// order/stability analysis. The callback must not commit mutable external
+    /// histories before the whole composing operation accepts its candidate.
+    ///
+    /// Free drift preserves spin plus orbital angular momentum. Applied world
+    /// angular impulse is the sum of the two endpoint force moments and rotated
+    /// body-torque half-impulses, not one old body torque held while the body
+    /// turns. No momentum projection, new pose owner or allocation is used.
+    pub fn step_verlet_with<T, E>(
+        self,
+        state: RigidBodyState,
+        properties: MassProperties,
+        wrench_before: Wrench,
+        duration_seconds: f64,
+        endpoint_load: impl FnOnce(RigidBodyState) -> Result<(Wrench, T), E>,
+    ) -> Result<(StepReceipt, T), E>
+    where
+        E: From<DynamicsError>,
+    {
+        if !duration_seconds.is_finite() || duration_seconds <= 0.0 {
+            return Err(DynamicsError::InvalidStepDuration.into());
+        }
+        self.gravity.validate()?;
+        state.validate()?;
+        properties.validate()?;
+        wrench_before.validate()?;
+        let diagnostics_before = self.diagnostics(state, properties)?;
+        let half = 0.5 * duration_seconds;
+        let weight_world = self.gravity.acceleration_world().scale(properties.mass);
+        let linear_mid = state
+            .linear_momentum_world
+            .add(wrench_before.force_world.add(weight_world).scale(half));
+        let angular_kicked = state
+            .angular_momentum_body
+            .add(wrench_before.torque_body.scale(half));
+        let (orientation_after, angular_drifted) = free_rotation_step(
+            state.pose.orientation,
+            angular_kicked,
+            properties,
+            duration_seconds,
+        )?;
+        let position_after = state
+            .pose
+            .position_world
+            .add(linear_mid.scale(duration_seconds / properties.mass));
+        let drifted = RigidBodyState::new(
+            Pose::new(position_after, orientation_after)?,
+            linear_mid,
+            angular_drifted,
+        )?;
+        let (wrench_after, endpoint) = endpoint_load(drifted)?;
+        wrench_after.validate()?;
+        let state_after = RigidBodyState::new(
+            drifted.pose,
+            linear_mid.add(wrench_after.force_world.add(weight_world).scale(half)),
+            angular_drifted.add(wrench_after.torque_body.scale(half)),
+        )?;
+        let diagnostics_after = self.diagnostics(state_after, properties)?;
+        Ok((
+            StepReceipt {
+                duration_seconds,
+                state_before: state,
+                state_after,
+                diagnostics_before,
+                diagnostics_after,
+            },
+            endpoint,
+        ))
+    }
+
     /// Performs one deterministic kick-drift Lie-group step.
     ///
     /// The supplied wrench is evaluated before this method is called. Linear

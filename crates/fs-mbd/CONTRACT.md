@@ -1,5 +1,29 @@
 # CONTRACT: fs-mbd
 
+## Configuration-dependent loads on the original rigid integrator
+
+`RigidBodyIntegrator::step_verlet_with` composes two endpoint force/torque
+half-kicks around the original momentum-preserving full-inertia free map.
+The first load belongs to the supplied state; the callback evaluates the
+actual drifted endpoint and returns its original load receipt with its
+wrench. Gravity acts once through the native owner. Each body torque uses
+its own endpoint axes, so its world impulse is rotated at that endpoint.
+
+For smooth configuration-only loads this is a symmetric second-order
+splitting. Spin plus orbital momentum changes only through the
+two physical endpoint impulses, up to floating-point error. The free map
+retains its existing exact spherical/axisymmetric cases and second-order
+asymmetric-body energy defect. No energy projection or angular-velocity
+rescaling is introduced. Timestep refinement remains required; this does
+not establish second order for velocity-dependent loads, discontinuous
+events or arbitrary adaptive steps. Callbacks stage external histories
+until the composing owner accepts the complete result.
+
+Native full-tensor tests check inertial force/torque impulse balance,
+time reversal under configuration-dependent conservative loads, and late
+source/wrench refusal without publication. The hydrostatic material owner
+uses this same API for finite-rotation righting motion.
+
 ## Directional friction in configuration-admitted rigid steps
 
 `frictional_impact::step::elliptic` applies the simultaneous directional

@@ -44,6 +44,149 @@ fn world_l(s: RigidBodyState) -> Vec3 {
 }
 
 #[test]
+fn endpoint_world_loads_close_spin_and_orbital_impulse_with_full_inertia() {
+    let p = properties();
+    let gravity = Gravity::new(Vec3::new(0.0, 0.0, -0.3)).unwrap();
+    let integrator = RigidBodyIntegrator::new(gravity);
+    let force = Vec3::new(0.7, -0.2, 0.3);
+    let torque = Vec3::new(-0.1, 0.3, 0.2);
+    let mut current = state(basis(), Vec3::new(0.8, -0.6, 1.1));
+    let dt = 0.04;
+    for _ in 0..100 {
+        let wrench = |s: RigidBodyState| Wrench {
+            force_world: force,
+            torque_body: s.pose().orientation().rotate_world_to_body(torque),
+        };
+        let mut calls = 0;
+        let (result, endpoint_pose) = integrator
+            .step_verlet_with(current, p, wrench(current), dt, |drifted| {
+                calls += 1;
+                Ok::<_, DynamicsError>((wrench(drifted), drifted.pose()))
+            })
+            .unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(endpoint_pose, result.state_after.pose());
+        let total_force = force.add(gravity.acceleration_world().scale(p.mass()));
+        vector(
+            result
+                .state_after
+                .linear_momentum_world()
+                .sub(current.linear_momentum_world()),
+            total_force.scale(dt),
+            4e-14,
+        );
+        let midpoint_position = current
+            .pose()
+            .position_world()
+            .scale(0.5)
+            .add(result.state_after.pose().position_world().scale(0.5));
+        let expected = midpoint_position.cross(total_force).add(torque).scale(dt);
+        vector(
+            result
+                .diagnostics_after
+                .angular_momentum_world
+                .sub(result.diagnostics_before.angular_momentum_world),
+            expected,
+            2e-13,
+        );
+        current = result.state_after;
+    }
+}
+
+#[test]
+fn configuration_loaded_verlet_reverses_full_inertia_motion_without_projection() {
+    let p = properties();
+    let before = state(basis(), Vec3::new(0.8, -0.6, 1.1));
+    // Translation spring and body-fixed dipole in a constant world field:
+    // V = |x|²/2 - (R a).b. Their exact kicks depend only on configuration.
+    let load = |s: RigidBodyState| Wrench {
+        force_world: s.pose().position_world().scale(-1.0),
+        torque_body: Vec3::new(0.4, -0.2, 0.7).cross(
+            s.pose()
+                .orientation()
+                .rotate_world_to_body(Vec3::new(-0.3, 0.8, 0.5)),
+        ),
+    };
+    let advance = |s| {
+        integrator()
+            .step_verlet_with(s, p, load(s), 0.1, |end| {
+                Ok::<_, DynamicsError>((load(end), ()))
+            })
+            .unwrap()
+            .0
+            .state_after
+    };
+    let after = advance(before);
+    let reversed = RigidBodyState::new(
+        after.pose(),
+        after.linear_momentum_world().scale(-1.0),
+        after.angular_momentum_body().scale(-1.0),
+    )
+    .unwrap();
+    let recovered = advance(reversed);
+    vector(
+        recovered.pose().position_world(),
+        before.pose().position_world(),
+        3e-14,
+    );
+    vector(
+        recovered.linear_momentum_world(),
+        before.linear_momentum_world().scale(-1.0),
+        3e-14,
+    );
+    vector(
+        recovered.angular_momentum_body(),
+        before.angular_momentum_body().scale(-1.0),
+        3e-14,
+    );
+    for axis in [Vec3::new(1.0, 0.0, 0.0), Vec3::new(0.0, 1.0, 0.0)] {
+        vector(
+            recovered.pose().orientation().rotate_body_to_world(axis),
+            before.pose().orientation().rotate_body_to_world(axis),
+            3e-14,
+        );
+    }
+}
+
+#[test]
+fn endpoint_load_refusal_and_invalid_wrench_publish_no_candidate() {
+    let before = state(basis(), Vec3::new(0.3, 0.2, -0.7));
+    let saved = before;
+    let failed = integrator().step_verlet_with::<(), DynamicsError>(
+        before,
+        properties(),
+        Wrench::ZERO,
+        0.1,
+        |_| Err(DynamicsError::NonFinite("endpoint source")),
+    );
+    assert_eq!(failed, Err(DynamicsError::NonFinite("endpoint source")));
+    assert!(
+        integrator()
+            .step_verlet_with(before, properties(), Wrench::ZERO, 0.1, |_| {
+                Ok::<_, DynamicsError>((
+                    Wrench {
+                        force_world: Vec3::ZERO,
+                        torque_body: Vec3::new(f64::NAN, 0.0, 0.0),
+                    },
+                    (),
+                ))
+            })
+            .is_err()
+    );
+    let mut called = false;
+    assert!(
+        integrator()
+            .step_verlet_with(before, properties(), Wrench::ZERO, 0.0, |_| {
+                called = true;
+                Ok::<_, DynamicsError>((Wrench::ZERO, ()))
+            })
+            .is_err()
+    );
+    assert!(!called);
+    assert_eq!(before, saved);
+}
+
+#[test]
 fn full_tensor_admission_retains_products_of_inertia_and_physical_triangle_law() {
     let p = properties();
     let matrix = p.inertia_tensor_body();
