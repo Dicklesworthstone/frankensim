@@ -82,12 +82,12 @@ impl SeriesPressureFlow<ResolvedLiquidState> {
         let Trial { flow, inlet: _ } = state;
         let SeriesPressureFlow { sections: borrowed, evaluations, driving_pressure_pa,
             mass_flow_kg_s, pressure_residual_pa: series_residual, dissipated_power_w,
-            dpressure_dmass_flow, gravity, hydrostatic } = flow;
+            dpressure_dmass_flow, gravity, hydrostatic, boussinesq } = flow;
         drop(borrowed);
         checkpoint()?;
         let state = Self { sections, evaluations, driving_pressure_pa, mass_flow_kg_s,
             pressure_residual_pa: series_residual, dissipated_power_w,
-            dpressure_dmass_flow, gravity, hydrostatic };
+            dpressure_dmass_flow, gravity, hydrostatic, boussinesq };
         Ok(PumpOperatingPoint { curve, state, supply, network_pressure_pa,
             pressure_residual_pa, network_evaluations, total_flow_evaluations,
             total_solid_solves })

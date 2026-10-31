@@ -6,14 +6,21 @@ use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
 use std::collections::BTreeMap;
 const COOLANT:CellId=CellId(7);
 const PATCHES:[f64;2]=[0.01,0.04];
-#[derive(Clone,Copy)] struct Spec {powered:bool,k:f64,cp:f64,mass:f64,reversed:bool,reservoir:bool,circulating:bool,viscosity:f64}
-fn spec()->Spec {Spec {powered:true,k:1.0,cp:100.0,mass:0.5,reversed:false,reservoir:false,circulating:false,viscosity:1.0}}
+#[derive(Clone,Copy)] struct Spec {powered:bool,k:f64,cp:f64,mass:f64,reversed:bool,reservoir:bool,circulating:bool,
+    viscosity:f64,density_slope:f64,coolant_initial_k:[f64;2],adiabatic:bool}
+fn spec()->Spec {Spec {powered:true,k:1.0,cp:100.0,mass:0.5,reversed:false,reservoir:false,circulating:false,
+    viscosity:1.0,density_slope:0.0,coolant_initial_k:[310.0,295.0],adiabatic:false}}
 fn finite_source(s:Spec)->(MaterialCard,ResolvedHeatCapacityCurve) {
     let mut claims=ClaimSet::new();
     for (name,dims,value) in [("density",Density::DIMS,1000.0),("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS,s.cp)] {
-        claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),value:PropertyValue::Scalar {value,dims},
+        let varying=name=="density" && s.density_slope!=0.0;
+        claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),value:if varying {
+            PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
+                knots:vec![(280.0,value-20.0*s.density_slope),(340.0,value+40.0*s.density_slope)],dims}
+            }else{PropertyValue::Scalar {value,dims}},
             validity:ValidityDomain::unconstrained().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),280.0,340.0).with("p",100000.0,100000.0),
-            interpolation:InterpolationPolicy::ConstantWithinValidity,uncertainty:UncertaintyModel::Unstated,observations:vec![],
+            interpolation:if varying {InterpolationPolicy::LinearInside}else{InterpolationPolicy::ConstantWithinValidity},
+            uncertainty:UncertaintyModel::Unstated,observations:vec![],
             provenance:Provenance {source:"manufactured finite coolant".into(),license:"test-only".into(),artifact:None}}).unwrap();
     }
     for (name,dims,value,slope) in [("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS,s.k*0.5,s.k*0.002),
@@ -62,19 +69,20 @@ fn fixture<R>(s:Spec,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransportState>
         geometry:CellGeometry {start_m:[0.0;3],end_m:[1.0,0.0,0.0],volume_m3:area(i),surface_area_m2:exposed_area(i)},
         boundary:Boundary {ambient_k:300.0,htc_w_m2_k:0.0,reservoir:None,source_w:0.0}})}).collect();
     events.push(TimedEvent {time_s:0.0,event:Event::Birth(DepositedCell {id:COOLANT,segment_id:0,body_id:1,material_id:MaterialId(7),
-        mass_kg:s.mass,specific_h_j_kg:30.0*s.cp,geometry:CellGeometry {start_m:[0.0;3],end_m:[1.0,0.0,0.0],
+        mass_kg:s.mass,specific_h_j_kg:(s.coolant_initial_k[0]-280.0)*s.cp,geometry:CellGeometry {start_m:[0.0;3],end_m:[1.0,0.0,0.0],
             volume_m3:s.mass/1000.0,surface_area_m2:PATCHES.iter().sum()},boundary:Boundary {ambient_k:310.0,htc_w_m2_k:0.0,reservoir:None,source_w:0.0}})});
     if s.circulating {events.push(TimedEvent {time_s:0.0,event:Event::Birth(DepositedCell {id:CellId(8),segment_id:0,body_id:1,material_id:MaterialId(7),
-        mass_kg:s.mass,specific_h_j_kg:15.0*s.cp,geometry:CellGeometry {start_m:[1.0,0.0,0.0],end_m:[2.0,0.0,0.0],
+        mass_kg:s.mass,specific_h_j_kg:(s.coolant_initial_k[1]-280.0)*s.cp,geometry:CellGeometry {start_m:[1.0,0.0,0.0],end_m:[2.0,0.0,0.0],
             volume_m3:s.mass/1000.0,surface_area_m2:0.05},boundary:Boundary {ambient_k:295.0,htc_w_m2_k:0.0,reservoir:None,source_w:0.0}})});}
-    for i in 0..2 {events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {id:20+i as u64,
+    for i in 0..if s.adiabatic {0}else{2} {events.push(TimedEvent {time_s:0.0,event:Event::Contact(ThermalLink {id:20+i as u64,
         a:if s.reversed {COOLANT}else{CellId(i as u64)},b:if s.reversed {CellId(i as u64)}else{COOLANT},
         area_m2:PATCHES[i],conductance_w_k:0.0})});}
     let heat=DepositionSimulation::new(events,&[(MaterialId(0),curves[0].curve() as &dyn ThermalLaw),
         (MaterialId(1),curves[1].curve() as &dyn ThermalLaw),(MaterialId(7),fc.curve() as &dyn ThermalLaw)],
         DepositionBudget {max_cells:4,max_links:2,max_events:6,max_substeps:128}).unwrap()
         .advance_to(0.0,StepConfig {max_dt_s:DT,energy_tolerance_j:1e-10},||Ok(())).unwrap().0;
-    let initial=evaluate_source_link_convection(&heat,&links(),2,|_,_,t|law.at_temperature(t),||false).unwrap();
+    let bindings=if s.adiabatic {Vec::new()}else{links().to_vec()};
+    let initial=evaluate_source_link_convection(&heat,&bindings,2,|_,_,t|law.at_temperature(t),||false).unwrap();
     let resistors:[_;2]=core::array::from_fn(|i|CellResistor {destination:ResistorCell {branch:i+1,cell:CellId(i as u64)},
         selection:MaterialPropertySelection::SingleClaimOnly,length_m:1.0,area_m2:area(i)});
     let plain=MaterialNetwork {cells:&cells,resistors:&[],links:&[]};

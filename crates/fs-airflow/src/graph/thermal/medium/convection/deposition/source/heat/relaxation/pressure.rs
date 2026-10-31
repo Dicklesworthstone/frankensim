@@ -1,6 +1,9 @@
 //! Quasi-steady pressure, coolant enthalpy and wall heat at ONE trial endpoint.
 //! The original series resistance, convection and advection owners supply all
 //! physical equations. There is no lagged flow or second temperature timeline.
+/// Evolving buoyancy on the same finite inventories, with explicit omitted-work bounds.
+pub mod gravity;
+
 use super::*;
 use crate::graph::thermal::medium::series::hydraulic::{MaterialFlowResistance,
     pressure::{PressureSection, SeriesPressureBudget, SeriesPressureError, SeriesPressureFlow}};
@@ -178,7 +181,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         }
         self.step_driven_relaxation(cx, owner, thermal, external, electrical, controls,
             energy_guess_j, gate, path.sections, path.links, path.pressure_budget.maximum_sections,
-            path.maximum_links, resolve_coolant,
+            path.maximum_links, true, resolve_coolant,
             |sections| Ok((SeriesPressureFlow::solve(sections, path.driving_pressure_pa,
                 path.pressure_budget, gate).map_err(PressureCoolantError::Hydraulic)?, ())),
             |hydraulics, convection, hydraulic_heat_w, ()|
@@ -220,7 +223,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         let sample_period_s = owner.mechanical().sample_period_s();
         self.step_driven_relaxation(cx, owner, thermal, external, electrical, controls,
             energy_guess_j, gate, path.sections, path.links, path.pressure_budget.maximum_sections,
-            path.maximum_links, resolve_coolant, |sections| {
+            path.maximum_links, true, resolve_coolant, |sections| {
                 let PumpOperatingPoint { curve, state, supply, network_pressure_pa,
                     pressure_residual_pa, network_evaluations, total_flow_evaluations, .. } =
                     SeriesPressureFlow::solve_with_pump(sections, path.pump, path.pressure_budget,
@@ -250,6 +253,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         electrical: Option<RelaxationElectricalInput<'_>>, controls: FrameThermalSolve,
         energy_guess_j: &[f64], gate: &CancelGate, sections_geometry: &[PressureCoolantSection],
         links_geometry: &[PressureConvectiveLink], maximum_sections: usize, maximum_links: usize,
+        deposit_hydraulic_heat: bool,
         resolve_coolant: impl Fn(&PressureCoolantSection, &DepositionSimulation<'_>, Temperature) -> Result<L, E>,
         resolve_drive: impl Fn(Vec<PressureSection<L>>) -> Result<(SeriesPressureFlow<L>, D), PressureCoolantError<E>>,
         payload: impl Fn(SeriesPressureFlow<L>, FiniteRelaxationConvection<F, L>, BTreeMap<CellId, f64>, D) -> S,
@@ -298,7 +302,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
                     sections.push(PressureSection { resistance: section.resistance, medium });
                 }
                 let (pressure, drive) = resolve_drive(sections)?;
-                let density = pressure.evaluations()[0].transport.density_kg_m3();
+                let density = pressure.evaluations()[0].momentum_density_kg_m3;
                 let mut hydraulic_heat_w = BTreeMap::new();
                 for ((section, state), loss) in sections_geometry.iter().zip(&thermal_states)
                     .zip(pressure.evaluations()) {
@@ -306,7 +310,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
                     let cell = trial.cells().get(&section.cell)
                         .ok_or(PressureCoolantError::Invalid("hydraulic coolant cell is inactive"))?;
                     if state.transport() != loss.transport
-                        || !same_density(density, loss.transport.density_kg_m3())
+                        || !same_density(density, loss.momentum_density_kg_m3)
                         || !same_density(density, cell.mass_kg/cell.geometry.volume_m3) {
                         return Err(PressureCoolantError::Invalid("fixed inventory pressure loop requires coherent common density and cell mass/volume"));
                     }
@@ -332,14 +336,16 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
                     }).map_err(PressureCoolantError::Convection)?;
                 let ConvectionHeatSample { heat, convection, finite_convection } = bulk.source;
                 let finite_links = finite_convection.ok_or(PressureCoolantError::Invalid("missing pressure-resolved wall transfer"))?;
-                for (&cell, &power) in &hydraulic_heat_w {
-                    checkpoint(cx, gate)?;
-                    let previous = bulk.sources_w.get(&cell).copied().unwrap_or(0.0);
-                    let next = finite(previous + power)?;
-                    if power != 0.0 && next == previous {
-                        return Err(PressureCoolantError::Invalid("hydraulic heat disappears beside existing heat"));
+                if deposit_hydraulic_heat {
+                    for (&cell, &power) in &hydraulic_heat_w {
+                        checkpoint(cx, gate)?;
+                        let previous = bulk.sources_w.get(&cell).copied().unwrap_or(0.0);
+                        let next = finite(previous + power)?;
+                        if power != 0.0 && next == previous {
+                            return Err(PressureCoolantError::Invalid("hydraulic heat disappears beside existing heat"));
+                        }
+                        if power != 0.0 { bulk.sources_w.insert(cell, next); }
                     }
-                    if power != 0.0 { bulk.sources_w.insert(cell, next); }
                 }
                 let mass = pressure.mass_flow_kg_s();
                 let mut flows = Vec::with_capacity(sections_geometry.len());

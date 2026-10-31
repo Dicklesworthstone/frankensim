@@ -251,3 +251,40 @@ fn gravity_geometry_and_source_mismatch_refuse_before_publication() {
     assert!(matches!(path.evaluate(&[fluid(1000.0,0.001)],MassFlowRate::new(0.0),&gate),
         Err(SeriesPressureError::Cancelled)));
 }
+
+#[test]
+fn boussinesq_keeps_original_density_for_head_and_one_reference_volume_for_all_losses() {
+    let gate = CancelGate::new_clock_free();
+    let density = BoussinesqDensity::try_new(1000.0, 0.021).unwrap();
+    let path = |g| SeriesGravity::try_new([0.0,0.0,g],
+        vec![[0.0;3],[0.0,0.0,2.0],[0.0;3]]).unwrap();
+    let sections = |rho| vec![
+        PressureSection { resistance: law(1e10,0.0), medium: fluid(rho,0.001) },
+        PressureSection { resistance: law(1e10,0.0), medium: fluid(1000.0,0.001) },
+    ];
+    for g in [-9.81, 9.81, 0.0] {
+        let solution = SeriesPressureFlow::solve_with_boussinesq_gravity(
+            sections(980.0),0.0,path(g),density,budget(),&gate).unwrap();
+        let head = -40.0*g;
+        let mass = head/20000.0;
+        near(solution.mass_flow_kg_s(),mass);
+        assert_eq!(solution.boussinesq_density(),Some(density));
+        assert_eq!(solution.hydrostatic().unwrap().gravitational_power_w(),0.0);
+        near(solution.dissipated_power_w(),head*mass/1000.0);
+        for (i, evaluation) in solution.evaluations().iter().enumerate() {
+            assert_eq!(evaluation.transport,solution.sections()[i].medium);
+            assert_eq!(evaluation.momentum_density_kg_m3,1000.0);
+            near(evaluation.volume_flow_m3_s,mass/1000.0);
+            near(evaluation.reynolds,mass.abs()*0.01/(1e-4*0.001));
+        }
+    }
+    let rest = SeriesPressureFlow::solve_with_boussinesq_gravity(
+        sections(1000.0),0.0,path(-9.81),density,budget(),&gate).unwrap();
+    assert_eq!(rest.mass_flow_kg_s(),0.0);
+    assert_eq!(rest.dissipated_power_w(),0.0);
+    assert!(SeriesPressureFlow::solve_with_boussinesq_gravity(
+        sections(970.0),0.0,path(-9.81),density,budget(),&gate).is_err());
+    for (rho, bound) in [(0.0,0.1),(f64::NAN,0.1),(1000.0,-0.1),(1000.0,1.0)] {
+        assert!(BoussinesqDensity::try_new(rho,bound).is_err());
+    }
+}

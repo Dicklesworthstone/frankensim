@@ -35,6 +35,31 @@ pub struct SeriesPressureBudget {
     pub relative_pressure_tolerance: f64,
 }
 
+/// Explicit fixed-inventory density approximation. The reference density owns
+/// volume/mass conversion and inertia; actual source density supplies gravity.
+/// Material viscosity and thermal properties still follow their source state.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BoussinesqDensity {
+    reference_kg_m3: f64,
+    maximum_relative_departure: f64,
+}
+
+impl BoussinesqDensity {
+    /// Require positive reference rho and a caller-selected departure in `[0,1)`.
+    pub fn try_new(reference_kg_m3: f64, maximum_relative_departure: f64) -> Result<Self> {
+        if !reference_kg_m3.is_finite() || reference_kg_m3 <= 0.0
+            || !maximum_relative_departure.is_finite()
+            || !(0.0..1.0).contains(&maximum_relative_departure) {
+            return Err(invalid("positive reference density and Boussinesq bound in [0,1) required"));
+        }
+        Ok(Self { reference_kg_m3, maximum_relative_departure })
+    }
+    /// Fixed density shared by all stored masses and control-volume geometries.
+    pub const fn reference_kg_m3(self) -> f64 { self.reference_kg_m3 }
+    /// Admitted `abs(rho_source-rho_reference)/rho_reference` at every trial.
+    pub const fn maximum_relative_departure(self) -> f64 { self.maximum_relative_departure }
+}
+
 /// Connected section geometry in a uniform gravitational acceleration field.
 /// Vertices have SI metre coordinates and follow the declared positive-flow
 /// direction. A closed loop repeats its first vertex. Absolute position does
@@ -162,6 +187,7 @@ pub struct SeriesPressureFlow<F> {
     dpressure_dmass_flow: f64,
     gravity: Option<SeriesGravity>,
     hydrostatic: Option<HydrostaticPressure>,
+    boussinesq: Option<BoussinesqDensity>,
 }
 
 impl<F: FluidTransport> SeriesPressureFlow<F> {
@@ -190,7 +216,7 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
         budget: SeriesPressureBudget,
         gate: &CancelGate,
     ) -> Result<Self> {
-        Self::solve_inner(sections, driving_pressure_pa, None, budget, gate)
+        Self::solve_inner(sections, driving_pressure_pa, None, None, budget, gate)
     }
 
     /// Solve the original losses with hydrostatic head from the SAME source
@@ -205,12 +231,27 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
         sections: Vec<PressureSection<F>>, driving_pressure_pa: f64, gravity: SeriesGravity,
         budget: SeriesPressureBudget, gate: &CancelGate,
     ) -> Result<Self> {
-        Self::solve_inner(sections, driving_pressure_pa, Some(gravity), budget, gate)
+        Self::solve_inner(sections, driving_pressure_pa, Some(gravity), None, budget, gate)
+    }
+
+    /// Solve bounded buoyancy with ONE conserved reference volume and mass.
+    /// Original source density remains in hydrostatic head; the original loss
+    /// law uses reference rho and source viscosity. Each evaluation retains both
+    /// the actual source tuple and its explicit momentum density. No source is
+    /// replaced, re-queried or evolved by this fixed-state solve.
+    ///
+    /// This does not close pressure/expansion work or deposit viscous heat.
+    /// A thermal consumer must account for those terms or bound their omission.
+    pub fn solve_with_boussinesq_gravity(
+        sections: Vec<PressureSection<F>>, driving_pressure_pa: f64, gravity: SeriesGravity,
+        density: BoussinesqDensity, budget: SeriesPressureBudget, gate: &CancelGate,
+    ) -> Result<Self> {
+        Self::solve_inner(sections, driving_pressure_pa, Some(gravity), Some(density), budget, gate)
     }
 
     fn solve_inner(
         sections: Vec<PressureSection<F>>, driving_pressure_pa: f64, gravity: Option<SeriesGravity>,
-        budget: SeriesPressureBudget, gate: &CancelGate,
+        boussinesq: Option<BoussinesqDensity>, budget: SeriesPressureBudget, gate: &CancelGate,
     ) -> Result<Self> {
         poll(gate)?;
         if sections.is_empty() || sections.len() > budget.maximum_sections
@@ -227,9 +268,17 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
             poll(gate)?;
             let state = section.medium.transport_state().map_err(|source|
                 SeriesPressureError::Section { index, source: ResistanceError::Material(source) })?;
+            let rho = if let Some(reference) = boussinesq {
+                let departure = finite((state.density_kg_m3() - reference.reference_kg_m3)
+                    / reference.reference_kg_m3)?;
+                if departure.abs() > reference.maximum_relative_departure {
+                    return Err(invalid("source density exceeds the declared Boussinesq bound"));
+                }
+                reference.reference_kg_m3
+            } else { state.density_kg_m3() };
             let a = finite((section.resistance.viscous_geometry * state.dynamic_viscosity_pa_s())
-                / state.density_kg_m3())?;
-            let b = finite(section.resistance.inertial_geometry / state.density_kg_m3())?;
+                / rho)?;
+            let b = finite(section.resistance.inertial_geometry / rho)?;
             if (section.resistance.viscous_geometry > 0.0 && a == 0.0)
                 || (section.resistance.inertial_geometry > 0.0 && b == 0.0) {
                 return Err(invalid("active series pressure mechanism underflows"));
@@ -250,7 +299,8 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
             poll(gate)?;
             // Evaluate the ORIGINAL law, not another copy of its pressure,
             // Reynolds or dissipation formula. No second material query.
-            let evaluation = section.resistance.evaluate(&snapshot, MassFlowRate::new(mass_flow_kg_s))
+            let rho = boussinesq.map_or(snapshot.density_kg_m3(), BoussinesqDensity::reference_kg_m3);
+            let evaluation = section.resistance.evaluate_snapshot(snapshot, MassFlowRate::new(mass_flow_kg_s), rho)
                 .map_err(|source| SeriesPressureError::Section { index, source })?;
             pressure.add(evaluation.pressure_drop_pa)?;
             heat.add(evaluation.dissipated_power_w)?;
@@ -266,7 +316,7 @@ impl<F: FluidTransport> SeriesPressureFlow<F> {
         }
         let result = Self { sections, evaluations, driving_pressure_pa, mass_flow_kg_s,
             pressure_residual_pa, dissipated_power_w: heat.total()?, dpressure_dmass_flow: tangent.total()?,
-            gravity, hydrostatic };
+            gravity, hydrostatic, boussinesq };
         poll(gate)?;
         Ok(result)
     }
@@ -282,6 +332,8 @@ impl<F> SeriesPressureFlow<F> {
     pub const fn gravity(&self) -> Option<&SeriesGravity> { self.gravity.as_ref() }
     /// Source-density hydrostatic gain and signed conservative gravity work.
     pub const fn hydrostatic(&self) -> Option<&HydrostaticPressure> { self.hydrostatic.as_ref() }
+    /// Explicit reference density, absent for ordinary source-density hydraulics.
+    pub const fn boussinesq_density(&self) -> Option<BoussinesqDensity> { self.boussinesq }
     /// Partial derivative at the FROZEN materials, not a thermal-feedback tangent.
     pub const fn dpressure_dmass_flow(&self) -> f64 { self.dpressure_dmass_flow }
 }

@@ -235,6 +235,48 @@ source trials. Uniform cells, fixed geometry/mass, prescribed relative flow
 and native first-order endpoint coupling remain the model limits; advection,
 fluid momentum, pressure work and moving phase fronts need their own owners.
 
+### Evolving gravity circulation in native finite coolant inventories
+
+`source::heat::relaxation::pressure::gravity` connects the existing material
+series-pressure solver to the original frame/circuit/enthalpy transaction.
+`step_gravity_driven_relaxation_with_links` resolves actual bulk source density
+and viscosity at every proposed endpoint, selects signed circulation from
+imposed pressure plus gravity, derives the section velocities, and supplies
+that same mass rate to the native conservative upwind enthalpy graph. Reciprocal
+wall heat uses the original source convection and original finite-cell links.
+The accepted payload retains the exact source states used by that endpoint;
+there is no second coolant state, heat integrator or post-acceptance update.
+
+`SeriesPressureFlow::solve_with_boussinesq_gravity` uses explicit
+`BoussinesqDensity`: one reference density for continuity, volume conversion,
+inertia and hydraulic Reynolds, with source density retained separately for
+buoyancy. Each original resistance evaluation exposes both densities; viscosity
+and thermal properties remain source-resolved. The loop requires common
+reference mass/volume, distinct inventories and exactly closed connected
+geometry. Every bulk density must satisfy the caller's relative-departure
+bound. Uniform-density rest cancels exactly, and reversal uses the same signed
+flow and native donor-enthalpy convention. Film properties remain an explicitly
+separate convection evaluation, never the bulk hydrostatic density.
+
+This is a quasi-steady low-Eckert model. Imposed-pressure power, buoyancy power,
+local hydraulic loss and their independent mechanical residual are reported
+separately. None is disguised as an external heater. The sum of their absolute
+power magnitudes and its interval integral must satisfy caller-provided W and J
+omission bounds, including during nonlinear trials; opposing drives cannot
+hide omitted conversion through cancellation. These bounds cover the reported
+hydraulic terms, not every error in the Boussinesq approximation. The original
+thermal and circuit accounts close under that explicitly admitted omission.
+This is not an exact total thermodynamic-energy, compressible pressure-work,
+fluid-inertia or changing-volume solver.
+
+Unsupported material/correlation states, density departures, work budgets and
+either cancellation authority reject the complete mechanical/electrical/caloric
+candidate. A stagnant forced-convection correlation still refuses if outside
+its domain; no artificial minimum speed or heat-transfer floor is supplied.
+Adiabatic loops admit exact rest. Focused G1/G3/G4 tests cover analytic reference
+density hydraulics, temperature-driven circulation, reversal, unchanged stored
+mass/geometry, native sensible-energy balance and whole-history rollback.
+
 ### Shared heat assemblies with material field storage
 
 The `source::heat::assembly` module implements the fs-couple `HeatAssembly`

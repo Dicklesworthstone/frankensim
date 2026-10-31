@@ -58,9 +58,12 @@ pub struct ResistanceEvaluation {
     pub law: MaterialFlowResistance,
     /// Exactly one checked material snapshot.
     pub transport: FluidTransportState,
+    /// Density used for continuity and inertia. Normally the source density;
+    /// an explicitly bounded Boussinesq solve uses its conserved reference rho.
+    pub momentum_density_kg_m3: f64,
     /// Signed mass flow [kg/s].
     pub mass_flow_kg_per_s: f64,
-    /// Signed local volume flow [m^3/s], using this snapshot's density.
+    /// Signed local volume flow [m^3/s], using `momentum_density_kg_m3`.
     pub volume_flow_m3_s: f64,
     /// Nonnegative Reynolds number based on speed magnitude.
     pub reynolds: f64,
@@ -114,17 +117,33 @@ impl MaterialFlowResistance {
     pub fn evaluate<M: FluidTransport + ?Sized>(
         &self, medium: &M, mass_flow: MassFlowRate,
     ) -> Result<ResistanceEvaluation, ResistanceError> {
-        let mass = mass_flow.value();
-        if !mass.is_finite() { return Err(ResistanceError::Invalid("nonfinite mass flow")); }
+        if !mass_flow.value().is_finite() {
+            return Err(ResistanceError::Invalid("nonfinite mass flow"));
+        }
         let transport = medium.transport_state()?;
-        let rho = transport.density_kg_m3();
+        self.evaluate_snapshot(transport, mass_flow, transport.density_kg_m3())
+    }
+
+    // One loss law for ordinary and Boussinesq hydraulics. The original source
+    // snapshot stays visible; reference rho is only a declared momentum model.
+    fn evaluate_snapshot(
+        &self, transport: FluidTransportState, mass_flow: MassFlowRate, rho: f64,
+    ) -> Result<ResistanceEvaluation, ResistanceError> {
+        let mass = mass_flow.value();
+        if !mass.is_finite() || !positive(rho) {
+            return Err(ResistanceError::Invalid("finite mass flow and positive momentum density required"));
+        }
         let mu = transport.dynamic_viscosity_pa_s();
         let q = mass / rho;
         let speed = q.abs() / self.flow_area.value();
         if !q.is_finite() || !speed.is_finite() || (mass != 0.0 && (q == 0.0 || speed == 0.0)) {
             return Err(ResistanceError::Invalid("volume flow or velocity is unrepresentable"));
         }
-        let reynolds = transport.reynolds(speed, self.reynolds_length.value())?;
+        let momentum = if rho == transport.density_kg_m3() { transport } else {
+            FluidTransportState::try_new(rho, transport.specific_heat_j_kg_k(),
+                transport.thermal_conductivity_w_m_k(), mu)?
+        };
+        let reynolds = momentum.reynolds(speed, self.reynolds_length.value())?;
         if reynolds < self.reynolds_range.0 || reynolds > self.reynolds_range.1 {
             return Err(ResistanceError::Reynolds { value: reynolds, admitted: self.reynolds_range });
         }
@@ -143,7 +162,8 @@ impl MaterialFlowResistance {
         {
             return Err(ResistanceError::Invalid("pressure loss, tangent or power is unrepresentable"));
         }
-        Ok(ResistanceEvaluation { law: *self, transport, mass_flow_kg_per_s: mass,
+        Ok(ResistanceEvaluation { law: *self, transport, momentum_density_kg_m3: rho,
+            mass_flow_kg_per_s: mass,
             volume_flow_m3_s: q, reynolds, pressure_drop_pa: dp,
             dpressure_dmass_flow: derivative, dissipated_power_w: power })
     }
