@@ -2348,6 +2348,15 @@ The refractive field has zero true absorption: Rayleigh scattering remains a
 separate owner and is not converted to heating. Combining curved propagation
 with scene scattering/visibility is not claimed by this adapter.
 
+`MaterialGasScatteringBinding::bind_cell_grid` borrows accepted gas states and
+their exact density buffer in the native `VolumeGrid` cell order. Temperature
+and pressure may vary by cell while composition and molecular optical sources
+remain fixed. Each original state identity survives even when two states have
+equal density. The same exact inverse-fourth spectrum and depolarized phase
+feed native traversal without per-cell optical tables or a replacement gas law.
+This elastic scattering adapter creates no absorption or thermal emission.
+Thermochemical gas-field samples can supply the same `RayleighGasState` view.
+
 `volumes::transport::scattering::mie::MieSphere` computes passive homogeneous,
 nonmagnetic sphere cross sections, particle-mass coefficients, asymmetry and
 the retained unpolarized Mie angular law. Its admitted domain is
@@ -2366,8 +2375,48 @@ error bounds; insufficient angular resolution refuses. Grid density means
 dispersed particle mass per mixture volume. A nonunit host requires independently
 matching dielectric-interior ray ownership. The model does not claim polarized
 transport, particle interactions, nonspherical particles, measured material
-dispersion, or a general aerosol distribution. A constant-index visible spectrum
+dispersion, or an inferred aerosol distribution. A constant-index visible spectrum
 does not acquire material dispersion from wavelength sampling alone.
+
+`MiePopulation` admits up to 256 explicitly number-weighted sphere bins in one
+real host. Cross sections add by number fraction; mass coefficients divide by
+the number-mean particle mass; phase and asymmetry add by scattered power.
+Different radii, material densities and complex indices therefore retain their
+distinct physical weights. Zero-scattering particles still contribute mass.
+Compensated reductions, positive-contribution underflow refusal and per-sphere,
+total-multipole and bin budgets bound preparation. The monodisperse case retains
+the original sphere coefficients and angular arithmetic. Shared phase/spectral
+preparation reduces populations to the existing native tables, so transport
+vertices do not loop over radius bins or solve Mie recurrences.
+
+`ParticleSizeDistribution` accepts explicit radius/count bins or a lognormal
+number distribution on a caller-declared finite radius interval. Lognormal
+weights integrate each log-radius bin's probability; number and volume tail
+fractions remain separate from angular and spectral diagnostics. They do not
+bound omitted optical scattering. Radius quadrature needs independent refinement;
+the constructor never clips particles to the Mie domain. Population regressions
+cover monodisperse reduction, mixed density/composition, scattered-power phase
+weights, index-matched mass dilution and truncated Rayleigh-moment refinement.
+
+`material_state::particle_scattering::MaterialParticleScattering` binds an
+accepted material's explicit scalar bulk-density property, its matching optical
+state and current radius/number distribution. Surface and particle consumers
+share one conversion of conductor n/k, tabulated dielectric, Cauchy and Sellmeier
+sources. Dielectric bulk intensity absorption becomes `k = alpha*lambda/(4*pi)`
+with vacuum wavelength in metres; RGB-derived absorption refuses. Every spectral
+knot and independent midpoint uses the source's wavelength-dependent index.
+Temperature-dependent source values enter when the material is resolved and
+bound; a changed state or particle geometry requires rebinding.
+
+`MaterialParticleSpectrum::bind_ambient_grid` supplies native absorption,
+scattering and optional LTE emission from the prepared spectrum and borrowed
+dispersed-particle density. It admits only an index-one ambient host, enforces a
+caller-declared particle volume-fraction ceiling, and requires LTE temperatures
+to equal the accepted material temperature. These checks do not certify dilution,
+independent-particle accuracy, unmeasured material data or continuous spectral
+error. No material, radius or Mie solve runs at a path vertex. Regressions cover
+all four optical source families, temperature-dependent source changes and
+two-cell Beer--Lambert transport through the original native grid.
 
 Tests include published complex Mie coefficients and efficiencies, Rayleigh
 size/wavelength limits, passive energy balance, index matching, angular

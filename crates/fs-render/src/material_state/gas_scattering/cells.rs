@@ -22,7 +22,8 @@ impl MaterialGasScatteringBinding {
     /// Dimensions, cell counts and physical bounds are validated before return.
     ///
     /// Supply states from `MolecularRayleighMixture::evaluate` or
-    /// `MolecularRayleighMixture::bind_gas_state`. Those material operations
+    /// `MolecularRayleighMixture::bind_gas_state`, or the `rayleigh()` view of a
+    /// `ThermochemicalRayleighState`. Those material operations
     /// retain the original gas evaluation and coherence checks. This adapter
     /// neither reevaluates a gas law nor infers composition from its density.
     /// Changing composition, species order, gas specs or optical source refuses,

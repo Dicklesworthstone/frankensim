@@ -24,6 +24,7 @@ fs-matdb = { path = "../fs-matdb", optional = true }
 fs-material = { path = "../fs-material", optional = true }
 fs-math = { path = "../fs-math" }
 fs-mbd-material = { path = "../fs-mbd-material", optional = true, features = ["thermoelastic-coupling"] }
+fs-qty = { path = "../fs-qty", optional = true }
 fs-rand = { path = "../fs-rand", optional = true }
 fs-rep-nurbs = { path = "../fs-rep-nurbs", optional = true }
 fs-solid = { path = "../fs-solid", optional = true }
@@ -61,7 +62,7 @@ tracer = ["chart-backends", "dep:fs-alloc", "dep:fs-rand", "dep:fs-img", "dep:fs
 # Explicitly opt-in while the observer/model error remains unbounded.
 photometry = ["tracer", "volumes", "dep:fs-ivl"]
 # Resolve optical/thermal appearance from the same material state as mechanics.
-material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conduction"]
+material-state = ["tracer", "dep:fs-matdb", "dep:fs-material", "dep:fs-conduction", "dep:fs-qty"]
 # Fixed SI incident-beam absorption coupled to the original enthalpy timeline.
 optical-heating = ["tracer", "volumes", "dep:fs-thermal"]
 # Actual accepted material-body vertices through the original solid boundary and BVH.

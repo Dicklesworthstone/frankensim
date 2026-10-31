@@ -12,6 +12,11 @@
 #[cfg(feature = "volumes")]
 pub mod gas_scattering;
 
+mod bulk_optics;
+/// Source-bound dispersive particle populations in native volume transport.
+#[cfg(feature = "volumes")]
+pub mod particle_scattering;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_conduction::radiation::SurfaceEmissivity;
 use fs_matdb::MaterialCard;
@@ -241,20 +246,13 @@ impl MaterialOpticalBinding {
         surface_state_identity: ContentHash,
     ) -> Result<Self, MaterialOpticalError> {
         Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
-        let mut samples = [ConductorIorSample::try_new(380.0, 1.0, 1.0)?; 9];
-        for (slot, sample) in samples.iter_mut().zip(optical.samples()) {
-            *slot = ConductorIorSample::try_new(sample.wavelength_nm, sample.eta, sample.k)?;
-        }
-        let source = ConductorSource::try_new(
-            optical.resolved().identity(),
-            ConductorDataStatus::MaterialStateClaims,
-        )?;
+        let optics = bulk_optics::conductor(optical)?;
         Ok(Self::new(
             mechanical,
             optical.resolved(),
             surface_state_identity,
             OpticalAppearance::Conductor {
-                optics: ConductorOptics::try_new(samples, source)?,
+                optics,
                 surface: ConductorSurface::try_rough(roughness_alpha)?,
             },
         ))
@@ -272,13 +270,7 @@ impl MaterialOpticalBinding {
         surface_state_identity: ContentHash,
     ) -> Result<Self, MaterialOpticalError> {
         Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
-        let [a, b_m2, c_m4] = optical.cauchy_coefficients_si();
-        let absorption = Self::dielectric_absorption(optical.absorption())?;
-        let glass = DielectricGlass::new(
-            CauchyIor::try_new(a, b_m2 * 1.0e12, c_m4 * 1.0e24)?,
-            absorption,
-            GlassProvenance::Custom,
-        );
+        let glass = bulk_optics::cauchy(optical)?;
         let surface = match roughness_alpha {
             Some(alpha) => DielectricSurface::try_rough(alpha)?,
             None => DielectricSurface::SMOOTH,
@@ -302,21 +294,7 @@ impl MaterialOpticalBinding {
         surface_state_identity: ContentHash,
     ) -> Result<Self, MaterialOpticalError> {
         Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
-        let mut indices = [DielectricIorSample::try_new(380.0, 1.0)?; 9];
-        let mut absorption = [(380.0, 0.0); 9];
-        for ((index, coefficient), sample) in indices
-            .iter_mut()
-            .zip(absorption.iter_mut())
-            .zip(optical.samples())
-        {
-            *index = DielectricIorSample::try_new(sample.wavelength_nm, sample.phase_index)?;
-            *coefficient = (sample.wavelength_nm, sample.absorption_per_m);
-        }
-        let glass = DielectricGlass::with_ior(
-            DielectricIor::Tabulated(TabulatedIor::try_new(indices)?),
-            BeerLambertAbsorption::try_from_spectral_extinction(&absorption)?,
-            GlassProvenance::Custom,
-        );
+        let glass = bulk_optics::tabulated(optical)?;
         let surface = match roughness_alpha {
             Some(alpha) => DielectricSurface::try_rough(alpha)?,
             None => DielectricSurface::SMOOTH,
@@ -408,12 +386,7 @@ impl MaterialOpticalBinding {
         surface_state_identity: ContentHash,
     ) -> Result<Self, MaterialOpticalError> {
         Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
-        let (strengths, resonances_m2) = optical.sellmeier_coefficients_si();
-        let glass = DielectricGlass::new(
-            SellmeierIor::try_new(strengths, resonances_m2.map(|value| value * 1.0e12))?,
-            Self::dielectric_absorption(optical.absorption())?,
-            GlassProvenance::Custom,
-        );
+        let glass = bulk_optics::sellmeier(optical)?;
         let surface = match roughness_alpha {
             Some(alpha) => DielectricSurface::try_rough(alpha)?,
             None => DielectricSurface::SMOOTH,
@@ -454,15 +427,23 @@ impl MaterialOpticalBinding {
         optical: &ResolvedMaterialStatePoint,
         surface: ContentHash,
     ) -> Result<(), MaterialOpticalError> {
+        Self::validate_bulk_state(mechanical, optical)?;
+        if surface == ContentHash([0; 32]) {
+            return Err(MaterialOpticalError::MissingSurfaceIdentity);
+        }
+        Ok(())
+    }
+
+    fn validate_bulk_state(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &ResolvedMaterialStatePoint,
+    ) -> Result<(), MaterialOpticalError> {
         if mechanical.material() != optical.material()
             || mechanical.card_identity() != optical.card_identity()
             || mechanical.query_point() != optical.query_point()
             || mechanical.axis_quantities() != optical.axis_quantities()
         {
             return Err(MaterialOpticalError::StateMismatch);
-        }
-        if surface == ContentHash([0; 32]) {
-            return Err(MaterialOpticalError::MissingSurfaceIdentity);
         }
         Ok(())
     }

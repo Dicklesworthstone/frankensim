@@ -6286,6 +6286,26 @@ King correction, exact wavelength law, molecular addition, phase normalization,
 mass/mole conversion, pressure/temperature scaling, original-state binding and
 invalid-source/domain refusal. `fs-render::material_state::gas_scattering`
 consumes the same coefficients and phase without a sampled spectral fit.
+
+`gas_scattering::thermochemical::ThermochemicalRayleighState` attaches one
+explicit optical source to each active canonical species of an original
+`ResolvedThermochemicalGasState`, including direct `AxialGasField` samples.
+The complete accepted owner is retained. Molecular cross sections and
+Lorentz--Lorenz polarizabilities use its original mole fractions and evaluated
+molar mass without replaying a calorically perfect `GasSpec` or another gas law.
+Missing, duplicate and foreign optical rows refuse; input ordering is immaterial.
+The shared molecular reduction supplies both scattering and refractivity.
+
+`RayleighGasState::model_identity` separates the frozen composition and optical
+model from its local thermodynamic state. Thermochemical source packs and
+transport cards belong to that model; selected NASA regions and evaluated
+caloric/EOS/transport receipts remain in the complete state identity. A field
+can therefore cross a NASA temperature-region boundary while retaining the
+same declared optics. Native cell-grid binding borrows these accepted states,
+checks exact density coherence and rejects composition/source changes.
+The declared constant-polarizability approximation and optical omissions above
+remain. Focused tests cover original-state retention, source-order matching,
+NASA region transitions, independent molecular sums and gas-field attachment.
 Refractivity regressions cover reference recovery, the independent density
 derivative, coherent mixture weighting, pressure/temperature dependence,
 dilute precision, vacuum and domain/pole refusal. The renderer's explicit
