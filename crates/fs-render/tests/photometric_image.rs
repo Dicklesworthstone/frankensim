@@ -13,6 +13,9 @@ mod optical_depth_reference;
 #[path = "photometric_image/near_source_reference.rs"]
 mod near_source_reference;
 
+#[path = "photometric_image/smooth_beam_reference.rs"]
+mod smooth_beam_reference;
+
 #[path = "photometric_image/phase_reference.rs"]
 mod phase_reference;
 

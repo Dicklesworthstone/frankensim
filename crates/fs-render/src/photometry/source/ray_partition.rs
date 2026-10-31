@@ -33,6 +33,49 @@ pub(crate) enum KnotError {
     Allocation,
 }
 
+/// Cosines of a smooth power profile's natural intensity contours. If the
+/// first cosine represents exp(-1/exponent), successive squares represent
+/// relative intensities exp(-1), exp(-2), exp(-4), ... . The actual angular
+/// cutoff remains separate; no arbitrary tail intensity is discarded.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct CosinePowerLevels {
+    cosine: f64,
+    cutoff: f64,
+}
+
+/// The caller computes the first cosine with its source math kernel. Zero
+/// represents a constant/very broad profile needing no interior contour.
+/// A first level rounded to one refuses instead of losing the narrow peak.
+pub(crate) fn cosine_power_levels(first_cosine: f64, cutoff: f64) -> Option<CosinePowerLevels> {
+    if !first_cosine.is_finite()
+        || !(0.0..1.0).contains(&first_cosine)
+        || !cutoff.is_finite()
+        || !(0.0..1.0).contains(&cutoff)
+    {
+        return None;
+    }
+    Some(CosinePowerLevels {
+        cosine: first_cosine,
+        cutoff,
+    })
+}
+
+impl Iterator for CosinePowerLevels {
+    type Item = f64;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cosine <= self.cutoff {
+            return None;
+        }
+        let cosine = self.cosine;
+        self.cosine *= self.cosine;
+        // Every finite f64 strictly between zero and one decreases under
+        // squaring. Even next_down(1) reaches zero within 64 iterations.
+        debug_assert!(self.cosine < cosine);
+        Some(cosine)
+    }
+}
+
 /// Distance-based camera parameters: the closest segment point, followed by
 /// offsets of one, two, four, ... closest-source distances along the ray.
 /// The caller merges these with angular knots under one shared work budget.
@@ -287,6 +330,114 @@ mod tests {
             insert_knot(&mut knots, root, 256).unwrap();
         }
         knots
+    }
+
+    #[test]
+    fn g0_power_contours_are_finite_decreasing_bounded_and_retain_the_cutoff() {
+        let first = f64::from_bits(1.0_f64.to_bits() - 1);
+        let levels: Vec<_> = cosine_power_levels(first, 0.0).unwrap().take(65).collect();
+        assert!(levels.len() < 64);
+        assert!(levels.windows(2).all(|pair| pair[1] < pair[0]));
+        assert_eq!(levels.last().unwrap().powi(2), 0.0);
+        let limited: Vec<_> = cosine_power_levels(0.99, 0.9).unwrap().collect();
+        assert_eq!(limited.len(), 4);
+        assert!(limited.iter().all(|cosine| *cosine > 0.9));
+        assert!(limited.last().unwrap().powi(2) <= 0.9);
+        for (first, cutoff) in [(0.0, 0.0), (0.9, 0.9), (0.5, 0.9)] {
+            assert!(cosine_power_levels(first, cutoff).unwrap().next().is_none());
+        }
+        for invalid in [-1.0, 1.0, f64::NAN, f64::INFINITY] {
+            assert!(cosine_power_levels(invalid, 0.0).is_none());
+            assert!(cosine_power_levels(0.9, invalid).is_none());
+        }
+    }
+
+    #[test]
+    fn g1_power_contours_resolve_a_smooth_beam_missed_by_distance_refinement() {
+        let (exponent, sigma, length) = (20_000.0_f64, 0.15_f64, 10.0_f64);
+        let distance = distance_knots([-1.0, 0.0, 5.0], [0.0, 0.0, 1.0], length);
+        assert_eq!(distance.len(), 7);
+        let mut resolved = distance.clone();
+        for cosine in cosine_power_levels((-1.0 / exponent).exp(), 0.0).unwrap() {
+            for root in cone_crossings([0.5, 0.0, 0.1], [-1.0, 0.0, 0.0], cosine)
+                .into_iter()
+                .flatten()
+            {
+                insert_knot(&mut resolved, root, 4095).unwrap();
+            }
+        }
+        assert_eq!(resolved.len(), 37);
+        // The actual production roots feed the thin-medium midpoint/Beer
+        // mathematics. Four/eight panels in each old distance interval are
+        // the scene's default 32/64 first two grids, not a uniform ray grid.
+        let integrate = |knots: &[f64], count: u32| {
+            let (mut start, mut sum) = (0.0, 0.0);
+            for boundary in knots.iter().copied().chain([1.0]) {
+                let end = length * boundary;
+                let width = (end - start) / f64::from(count);
+                let weight = 0.1 / sigma * -(-sigma * width).exp_m1();
+                for index in 0..count {
+                    let t = start + (f64::from(index) + 0.5) * width;
+                    let r = 1.0_f64.hypot(t - 5.0);
+                    let incident = 10_000.0 * (-exponent * r.ln() - sigma * r).exp()
+                        / (4.0 * core::f64::consts::PI * r * r);
+                    sum += incident * weight * (-sigma * (start + f64::from(index) * width)).exp();
+                }
+                start = end;
+            }
+            sum
+        };
+        // Independent angle substitution dt/r²=dtheta; no production source
+        // evaluation, contour calculation, or panel mathematics in this oracle.
+        let (lo, hi) = ((-5.0_f64).atan(), 5.0_f64.atan());
+        let count = 65_536;
+        let step = (hi - lo) / f64::from(count);
+        let mut reference = 0.0;
+        for index in 0..=count {
+            let theta = lo + f64::from(index) * step;
+            let value = (exponent * theta.cos().ln()
+                - sigma * (5.0 + theta.tan() + 1.0 / theta.cos()))
+            .exp();
+            let weight = if index == 0 || index == count {
+                1.0
+            } else if index % 2 == 0 {
+                2.0
+            } else {
+                4.0
+            };
+            reference += weight * value;
+        }
+        reference *= step / 3.0 * 1000.0 / (4.0 * core::f64::consts::PI);
+        assert!((reference - 0.573_446_921_506_254_4).abs() < 1e-11);
+        let coarse = integrate(&distance, 4);
+        let refined = integrate(&distance, 8);
+        assert!((refined - coarse).abs() < 1e-6);
+        assert!(refined < reference * 1e-12);
+        let actual = integrate(&resolved, 32);
+        assert!((actual / reference - 1.0).abs() < 3e-5);
+        assert!((integrate(&resolved, 64) - reference).abs() < (actual - reference).abs());
+    }
+
+    #[test]
+    fn g3_power_contours_cross_a_tilted_axis_at_independent_angles() {
+        let beta = 0.35_f64;
+        let (sine, cosine) = beta.sin_cos();
+        let origin = [0.1 * sine + 0.5 * cosine, 0.0, 0.1 * cosine - 0.5 * sine];
+        let delta = [-cosine, 0.0, sine];
+        for level in cosine_power_levels((-1.0_f64 / 20_000.0).exp(), 0.0)
+            .unwrap()
+            .take(8)
+        {
+            let roots = sorted(cone_crossings(origin, delta, level));
+            assert_eq!(roots.len(), 2);
+            for (actual, theta) in roots
+                .into_iter()
+                .zip([beta - level.acos(), beta + level.acos()])
+            {
+                let expected = (5.0 + theta.tan()) / 10.0;
+                assert!((actual - expected).abs() < 2e-14);
+            }
+        }
     }
 
     #[test]

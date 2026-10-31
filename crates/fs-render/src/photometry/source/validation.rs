@@ -220,7 +220,7 @@ fn prepare(scene: &PhotometricScene<'_>, cx: &Cx<'_>) -> Result<Prepared, Photom
             AngularLaw::Cone { cosine_cutoff } => {
                 hash.update(&[1]); hash_float(&mut hash, *cosine_cutoff);
             }
-            AngularLaw::CosinePower { exponent, cosine_cutoff } if *exponent <= 64.0 && exponent.fract() == 0.0 => {
+            AngularLaw::CosinePower { exponent, cosine_cutoff, .. } if *exponent <= 64.0 && exponent.fract() == 0.0 => {
                 hash.update(&[2]); hash_float(&mut hash, *exponent); hash_float(&mut hash, *cosine_cutoff);
             }
             AngularLaw::Table(table) if table.phi.len() == 2 && table.cosine.len() <= 64 => {
@@ -336,7 +336,7 @@ fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3]) -> Optio
     let angular = match &source.distribution.law {
         AngularLaw::Isotropic => peak,
         AngularLaw::Cone { cosine_cutoff } => cutoff(peak, mu, *cosine_cutoff),
-        AngularLaw::CosinePower { exponent, cosine_cutoff } => {
+        AngularLaw::CosinePower { exponent, cosine_cutoff, .. } => {
             let mut power = Interval::point(1.0);
             let positive_mu = nonnegative(mu);
             for _ in 0..(*exponent as u32) { power = nonnegative(power * positive_mu); }

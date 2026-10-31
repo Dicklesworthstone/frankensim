@@ -2104,6 +2104,16 @@ distance cuts. These intervals capture inverse-square variation even when a
 fixture's angular law adds no boundaries; they do not validate the near-field
 point-source approximation or fixture calibration.
 
+Since photometry semantics version 9, smooth cosine-power beams also contribute
+their natural intensity contours: `exp(-1)`, `exp(-2)`, `exp(-4)`, and so on
+relative to the on-axis intensity. The source caches the first contour cosine;
+successive squaring reaches the actual cutoff or floating-point zero without
+discarding a chosen tail fraction. These contours reuse the native cone-crossing
+geometry, exact deduplication and shared panel cap. A positive exponent whose
+first contour rounds to cosine one is refused as `SourceError::NumericalRange`.
+An exponent of zero introduces no smooth-profile contours. This sampling
+resolution rule is not an integration enclosure or a measured-fixture claim.
+
 The intervals share `ScatterSettings::max_panels`, with at least one panel per
 interval and equal shares of the remaining capacity. Exceeding that capacity
 returns `ScatteringPartitionBudgetExceeded`; no required distance or angular
@@ -2284,6 +2294,13 @@ progressive replay tests remain in the photometry batteries.
   also check SI/rigid transforms, exact interval budgets and typed refusal.
   Results retain `NumericalKind::NoClaim` and unknown total error: resolving these
   source scales supplies neither a numerical enclosure nor a calibration claim.
+- `photometric_image::smooth_beam_reference` checks an approximately 0.954-degree
+  full-width-at-half-maximum cosine-power beam against an independent angle-space
+  airlight integral. The reference is approximately 0.5734469215 cd/m² while the
+  former distance-only grids miss almost the entire beam. The regression also
+  checks rigid/SI transformations, tilted optical axes, shared work caps and
+  unchanged unknown physical-error fields. The native partition regression uses
+  the actual production roots with a separately evaluated radiometric integrand.
 - `photometric_path::penumbra_reference` defines independent clipped-emitter
   polygon references across five receiver positions and four direct-light
   strategies. Its comparisons cover probe lux and reflected camera `rho*E/pi`,

@@ -90,8 +90,14 @@ pub struct AngularDistribution {
 #[derive(Debug, Clone)]
 enum AngularLaw {
     Isotropic,
-    Cone { cosine_cutoff: f64 },
-    CosinePower { exponent: f64, cosine_cutoff: f64 },
+    Cone {
+        cosine_cutoff: f64,
+    },
+    CosinePower {
+        exponent: f64,
+        cosine_cutoff: f64,
+        e_fold_cosine: f64,
+    },
     Table(Arc<AngularTable>),
 }
 
@@ -143,6 +149,8 @@ impl AngularDistribution {
     /// `cos(theta)^exponent` within a forward cone, normalized to unit flux.
     /// The exponent is nonnegative and half-angle is in `(0, pi/2]`.
     /// Exponent one over a hemisphere is a Lambertian angular source.
+    /// A positive exponent whose natural e-fold cosine rounds to one returns
+    /// `NumericalRange`: its angular width is not representable for quadrature.
     pub fn cosine_power(exponent: f64, half_angle_rad: f64) -> Result<Self, SourceError> {
         if !exponent.is_finite()
             || exponent < 0.0
@@ -159,6 +167,14 @@ impl AngularDistribution {
         if cosine_cutoff >= 1.0 {
             return Err(SourceError::NumericalRange);
         }
+        let e_fold_cosine = if exponent == 0.0 {
+            0.0
+        } else {
+            det::exp(-1.0 / exponent)
+        };
+        if !e_fold_cosine.is_finite() || e_fold_cosine >= 1.0 {
+            return Err(SourceError::NumericalRange);
+        }
         let exponent_plus_one = exponent + 1.0;
         let numerator = if cosine_cutoff == 0.0 {
             1.0
@@ -173,6 +189,7 @@ impl AngularDistribution {
             law: AngularLaw::CosinePower {
                 exponent,
                 cosine_cutoff,
+                e_fold_cosine,
             },
             peak_per_sr,
         })
@@ -336,6 +353,7 @@ impl AngularDistribution {
             AngularLaw::CosinePower {
                 exponent,
                 cosine_cutoff,
+                ..
             } => {
                 if mu < *cosine_cutoff {
                     0.0
@@ -546,7 +564,7 @@ impl PhotometricSource {
     }
 
     /// Split a camera segment at source-distance scales and represented
-    /// source-profile/phase boundaries.
+    /// source-profile/phase boundaries and smooth power-profile scales.
     /// Knots are sorted, exactly deduplicated fractions in `(0,1)`, shared
     /// across fixtures. They guide quadrature but do not certify geometry,
     /// resolve shadow boundaries, or bound phase/smooth-profile variation.
@@ -561,8 +579,8 @@ impl PhotometricSource {
     ) -> Result<(), super::PhotometryError> {
         use super::{PhotometryError, medium::PhaseFunction};
         use ray_partition::{
-            KnotError, azimuth_crossing, cone_crossings, distance_breakpoints, insert_knot,
-            phase_crossing,
+            KnotError, azimuth_crossing, cone_crossings, cosine_power_levels, distance_breakpoints,
+            insert_knot, phase_crossing,
         };
 
         cx.checkpoint()?;
@@ -625,12 +643,26 @@ impl PhotometricSource {
         match &self.distribution.law {
             AngularLaw::Isotropic => {}
             AngularLaw::Cone { cosine_cutoff } if *cosine_cutoff == -1.0 => {}
-            AngularLaw::Cone { cosine_cutoff } | AngularLaw::CosinePower { cosine_cutoff, .. } => {
+            AngularLaw::Cone { cosine_cutoff } => {
                 for root in cone_crossings(origin, delta, *cosine_cutoff)
                     .into_iter()
                     .flatten()
                 {
                     insert(root)?;
+                }
+            }
+            AngularLaw::CosinePower {
+                cosine_cutoff,
+                e_fold_cosine,
+                ..
+            } => {
+                let levels = cosine_power_levels(*e_fold_cosine, *cosine_cutoff)
+                    .ok_or(PhotometryError::NonFiniteResult)?;
+                for cosine in std::iter::once(*cosine_cutoff).chain(levels) {
+                    cx.checkpoint()?;
+                    for root in cone_crossings(origin, delta, cosine).into_iter().flatten() {
+                        insert(root)?;
+                    }
                 }
             }
             AngularLaw::Table(table) => {
@@ -765,6 +797,17 @@ mod tests {
                 .unwrap(),
             0.0
         );
+    }
+
+    #[test]
+    fn cosine_power_refuses_an_unrepresentable_natural_width() {
+        assert!(matches!(
+            AngularDistribution::cosine_power(1e20, FRAC_PI_2),
+            Err(SourceError::NumericalRange)
+        ));
+        for exponent in [0.0, f64::MIN_POSITIVE, 1.0, 20_000.0] {
+            assert!(AngularDistribution::cosine_power(exponent, FRAC_PI_2).is_ok());
+        }
     }
 
     #[test]

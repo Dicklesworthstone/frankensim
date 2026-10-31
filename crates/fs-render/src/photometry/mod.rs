@@ -40,6 +40,8 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
+/// Version 9 resolves smooth cosine-power beams at natural intensity contours
+/// and refuses source widths that cannot be represented in cosine space.
 /// Version 8 resolves near-source inverse-square variation with mandatory
 /// distance intervals sharing the existing angular-partition panel budget.
 /// Version 7 resolves optically thick foregrounds with geometric optical-depth
@@ -49,7 +51,7 @@ use transport::{PhotometricMedium, photopic_transmittance};
 /// reflectance. Version 4's
 /// shared tabulated haze phase laws, version 3's fixture
 /// angular partitions and version 2's published CIE observer remain in use.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 8;
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 9;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]
