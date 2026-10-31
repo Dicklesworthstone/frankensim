@@ -15,10 +15,12 @@ use crate::PlateError;
 use fs_material::laminate::LaminateSection;
 use fs_material::sheet::SheetMatrix;
 use fs_math::det;
-use fs_sparse::{Coo, DirectOrdering, LdltOptions, NdOptions, SymbolicLdlt};
+use fs_sparse::Coo;
 use std::collections::BTreeMap;
 
 mod element;
+mod static_solver;
+pub use static_solver::PreparedMitcStatic;
 /// Reusable observation of the original condensed MITC strain field.
 pub mod strain;
 /// Integrated thermal membrane strain, thickness gradients and compatible response.
@@ -1615,94 +1617,7 @@ pub fn assemble_mitc3p(
 /// Positive-definite static solve with physical world loads and output. A
 /// free body, an unstable stiffness or a nonfinite/large true residual refuses.
 pub fn solve_static(model: &MitcShellModel, full_load_6n: &[f64]) -> Result<Vec<f64>, PlateError> {
-    let rhs = model.project_load(full_load_6n)?;
-    let n = model.pencil.free;
-    let mut scale = vec![0.0; n];
-    for (row, s) in scale.iter_mut().enumerate() {
-        let (cols, vals) = model.pencil.k.row(row);
-        let mut diag = 0.0;
-        for (&col, &val) in cols.iter().zip(vals) {
-            if col == row {
-                diag = val;
-                break;
-            }
-        }
-        if !diag.is_finite() || diag <= 0.0 {
-            return Err(PlateError::StaticSolve {
-                what: "static shell stiffness is not positive definite",
-            });
-        }
-        *s = 1.0 / det::sqrt(diag);
-    }
-    let mut k_eq = Coo::new(n, n);
-    let mut rhs_eq = vec![0.0; n];
-    for row in 0..n {
-        let sr = scale[row];
-        rhs_eq[row] = sr * rhs[row];
-        let (cols, vals) = model.pencil.k.row(row);
-        for (&col, &val) in cols.iter().zip(vals) {
-            k_eq.push(row, col, sr * val * scale[col]);
-        }
-    }
-    let k_eq = k_eq.assemble();
-    let ordering = if n >= 4_096 {
-        DirectOrdering::NestedDissection(NdOptions {
-            leaf_size: 256,
-            refinement_passes: 2,
-        })
-    } else {
-        DirectOrdering::Amd
-    };
-    let symbolic = SymbolicLdlt::analyze(&k_eq, ordering).map_err(PlateError::StaticFactor)?;
-    let factor = symbolic
-        .factor(&k_eq, &LdltOptions::default())
-        .map_err(PlateError::StaticFactor)?;
-    if factor.inertia().negative != 0 || factor.inertia().positive != n {
-        return Err(PlateError::StaticSolve {
-            what: "static shell stiffness is not positive definite",
-        });
-    }
-    let y0 = factor.solve(&rhs_eq);
-    let mut x_hi = vec![0.0; n];
-    let mut x_lo = vec![0.0; n];
-    for i in 0..n {
-        let (hi, lo) = two_prod(scale[i], y0[i]);
-        x_hi[i] = hi;
-        x_lo[i] = lo;
-    }
-    let mut r = vec![0.0; n];
-    let mut r_eq = vec![0.0; n];
-    let load = rhs.iter().fold(0.0_f64, |acc, v| acc.hypot(*v));
-    let mut residual = f64::INFINITY;
-    for step in 0..5 {
-        for (row, &b_i) in rhs.iter().enumerate() {
-            let (cols, vals) = model.pencil.k.row(row);
-            let mut sum = (b_i, 0.0_f64);
-            for (&col, &val) in cols.iter().zip(vals) {
-                let (p_hi, p_lo) = two_prod(-val, x_hi[col]);
-                sum = dd_add(sum, (p_hi, p_lo - val * x_lo[col]));
-            }
-            r[row] = sum.0 + sum.1;
-            r_eq[row] = scale[row] * r[row];
-        }
-        residual = r.iter().fold(0.0_f64, |acc, v| acc.hypot(*v));
-        if !residual.is_finite() || residual <= 1e-11 * load.max(f64::MIN_POSITIVE) || step == 4 {
-            break;
-        }
-        let delta_eq = factor.solve(&r_eq);
-        for i in 0..n {
-            let (d_hi, d_lo) = two_prod(scale[i], delta_eq[i]);
-            let (hi, lo) = dd_add((x_hi[i], x_lo[i]), (d_hi, d_lo));
-            x_hi[i] = hi;
-            x_lo[i] = lo;
-        }
-    }
-    if !residual.is_finite() || residual > 1e-8 * load.max(f64::MIN_POSITIVE) {
-        return Err(PlateError::StaticSolve {
-            what: "static shell true residual exceeds 1e-8 relative",
-        });
-    }
-    model.expand(&x_hi)
+    static_solver::solve_static(model, full_load_6n)
 }
 
 #[cfg(test)]

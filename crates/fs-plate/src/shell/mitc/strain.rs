@@ -287,8 +287,66 @@ pub struct RealElementStrain {
     controls: Controls,
 }
 
+/// Engineering strains in the original facet frame. At signed thickness z,
+/// in-plane total strain is `membrane + z * gradient_per_m`; transverse shear
+/// is the native assumed field, constant through thickness. No thermal strain
+/// is subtracted here.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShellStrainPoint {
+    pub membrane: [f64; 3],
+    pub gradient_per_m: [f64; 3],
+    pub transverse_shear: [f64; 2],
+}
+
+impl ShellStrainPoint {
+    fn from_coefficients(c: [f64; 8]) -> Self {
+        Self {
+            membrane: [c[0], c[1], c[2]],
+            gradient_per_m: [c[3], c[4], c[5]],
+            transverse_shear: [c[6], c[7]],
+        }
+    }
+}
+
+/// The SAME positive degree-five triangle rule used by native elastic and
+/// thermal recovery. Barycentric points accompany area-normalized weights.
+/// A consumer integrating material work should multiply by the original facet
+/// area and retain its own thickness integration. Preparing this seven-entry
+/// rule once avoids duplicating quadrature constants in coupled owners.
+pub fn integration_rule() -> Vec<([f64; 3], f64)> {
+    element::stiffness_rule()
+}
+
 impl RealElementStrain {
     pub const RETAINED_BYTES: usize = core::mem::size_of::<Self>();
+
+    /// Evaluate the complete native strain polynomial at one point in the
+    /// original triangle. This also retains an affine thermal bubble whenever
+    /// this field came from `PreparedThermalShell::strain_field`.
+    pub fn at_barycentric(&self, lambda: [f64; 3]) -> Result<ShellStrainPoint, PlateError> {
+        if lambda.iter().any(|v| !v.is_finite() || *v < 0.0 || *v > 1.0)
+            || (lambda.iter().sum::<f64>() - 1.0).abs() > 32.0 * f64::EPSILON
+        {
+            return Err(invalid("finite barycentric point inside the original facet required"));
+        }
+        let [a, b, c] = lambda;
+        let weights = [a * a, b * b, c * c, 2.0 * a * b, 2.0 * b * c, 2.0 * c * a];
+        let values = core::array::from_fn(|component| {
+            (0..6).map(|i| weights[i] * self.controls[i][component]).sum()
+        });
+        if values.iter().any(|v: &f64| !v.is_finite()) {
+            return Err(invalid("unrepresentable native point strain"));
+        }
+        Ok(ShellStrainPoint::from_coefficients(values))
+    }
+
+    /// Six Bernstein coefficients, not six physical samples. Their convex
+    /// hull encloses the complete represented field. Constitutive consumers
+    /// can use the hull and both physical layer faces to admit a rectangular
+    /// total/elastic strain domain before evaluating integration points.
+    pub fn bernstein_controls(&self) -> [ShellStrainPoint; 6] {
+        self.controls.map(ShellStrainPoint::from_coefficients)
+    }
 
     /// Bound the represented elastic strain over a whole facet and layer.
     /// `free_at_faces` is an affine engineering eigenstrain in this facet's

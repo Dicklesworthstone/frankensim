@@ -40,6 +40,40 @@ fn resultants(
 }
 
 impl PreparedThermalFacet {
+    pub(in crate::shell::mitc) fn director_motion_bound(
+        &self,
+        nodal: &[f64; 18],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
+        let mut q = self.field.expand(nodal);
+        for i in 0..2 { q[18 + i] += self.bubble_offset[i]; }
+        let mut motion = [[0.0; 3]; 4];
+        for (point, (r, s)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0/3.0, 1.0/3.0)]
+            .into_iter().enumerate() {
+            if cancelled() { return Err(PlateError::Cancelled); }
+            for (column, &value) in q.iter().enumerate() {
+                let basis = self.field.kin.director_inertia_basis(r, s, column).1;
+                for j in 0..3 { motion[point][j] += value*basis[j]; }
+            }
+        }
+        // The original director field is P1 + 27 lambda0 lambda1 lambda2
+        // times this centroid excess. The bubble lies in [0,1], so this
+        // triangle bound also admits an internal thermal rotation at zero nodes.
+        let excess: [f64; 3] = core::array::from_fn(|j|
+            motion[3][j] - (motion[0][j]+motion[1][j]+motion[2][j])/3.0);
+        let norm = |v: [f64; 3]| {
+            let scale = v.iter().fold(0.0_f64, |m, x| m.max(x.abs()));
+            if scale == 0.0 { 0.0 } else {
+                scale*fs_math::det::sqrt(v.iter().map(|x| (x/scale).powi(2)).sum())
+            }
+        };
+        let bound = motion[..3].iter().map(|v| norm(*v)).fold(0.0_f64, f64::max) + norm(excess);
+        if motion.iter().flatten().chain(&excess).any(|v| !v.is_finite()) || !bound.is_finite() {
+            return Err(PlateError::BadSection { what: "nonfinite thermal director bound" });
+        }
+        Ok(bound)
+    }
+
     pub(in crate::shell::mitc) fn strain_field(
         &self,
         nodal: &[f64; 18],

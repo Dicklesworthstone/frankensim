@@ -885,6 +885,40 @@ lets temperature-refresh consumers reuse the exact already oriented section.
 The spatial-gradient regression observes a nonzero interior thermal strain
 field even with every physical nodal displacement held at zero.
 
+### Thermal prestress and repeated equilibrium solves
+
+`thermal::prestress` adds the signed P1 transverse membrane initial-stress
+form `integral Nxx*w_x^2 + 2*Nxy*w_x*w_y + Nyy*w_y^2 dA` on planar panels with
+constant aligned directors. N comes from the actual native thermal recovery,
+including its affine bubble. This geometric form has no internal/director
+coordinates, so adding it preserves the original elastic Schur complement,
+support-frame maps and condensed mass for this stated approximation. Complete
+internal director motion, physical rotations, displacement gradients and
+support compatibility are admitted before publication. Tension stiffens and
+compression may make the returned pencil indefinite; negative eigenvalues are
+not repaired or converted to real frequencies. The existing spectral owner
+interprets stability. Geometric bending/shear-stress terms, nonlinear base
+geometry, follower loads and post-buckling remain outside this extension.
+
+`PreparedMitcStatic` retains an immutable shared native model and its scaled
+sparse LDLT factors. Repeated physical loads reuse the factors while preserving
+the original ordering, inertia admission, compensated refinement and true
+residual gate. The legacy static entry delegates to these same kernels without
+copying its model. Shared ownership prevents a different operator from being
+paired with the factor. Bounded checkpoints surround the existing sparse kernels.
+
+`RealElementStrain::at_barycentric`, its Bernstein controls and the shared native
+integration rule let thermal/work consumers integrate the same complete strain
+polynomial without duplicating kinematics or quadrature. This includes the
+accepted thermal bubble; controls bound the field and are not physical samples.
+
+`tests/thermal_shell_prestress.rs` checks independent frequency-squared shifts,
+compression past a signed stability threshold, free expansion, energy Hessians,
+world/support-frame covariance, hidden bubble motion and atomic refusals.
+`tests/prepared_mitc_static.rs` checks repeated independent manufactured motions,
+legacy equivalence, shared ownership and refusal recovery. Targeted metadata
+checks pass; these are not claims of executed numerical or measured validation.
+
 ## Equilibrium of tied shell assemblies before modal reduction
 
 `shell::preload::assembly::equilibrate_shell_assembly` solves the full CST/DKT

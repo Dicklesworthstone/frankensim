@@ -161,7 +161,7 @@ impl Kinematics {
     }
 }
 
-fn stiffness_rule() -> Vec<([f64; 3], f64)> {
+pub(super) fn stiffness_rule() -> Vec<([f64; 3], f64)> {
     // Positive degree-five symmetric triangle rule; weights sum to one.
     let mut q = vec![([1.0 / 3.0; 3], 0.225)];
     for (a, b, w) in [

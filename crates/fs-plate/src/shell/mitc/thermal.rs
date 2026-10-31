@@ -20,11 +20,15 @@
 //! inferred. Layer-dependent free strains use the original laminate owner's
 //! thickness integration through [`LaminateThermalField`]. Each layer may have
 //! its own affine profile; a nonlinear profile needs thickness refinement.
-//! No heat equation, buckling tangent, physical
-//! drilling stress, interlaminar stress or thermoelastic heating is implied.
+//! No heat equation, physical drilling stress, interlaminar stress or
+//! thermoelastic heating is implied. The separate [`prestress`] adapter adds
+//! a bounded planar membrane initial-stress term, not a nonlinear shell tangent.
 
 mod laminate;
 pub use laminate::LaminateThermalField;
+
+/// Signed transverse initial-stress stiffness on admitted planar panels.
+pub mod prestress;
 
 use super::{MitcShellModel, PlateError, element, solve_static};
 use element::thermal::{PreparedThermalFacet, ThermalLoading};
