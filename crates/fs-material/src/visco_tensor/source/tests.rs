@@ -246,16 +246,17 @@ fn independent_equilibrium_pairs_preserve_complete_tensor_histories_and_source_r
             material.claims().verify_receipt(&after.answer().receipt).unwrap();
         }
         assert_eq!(source.state(), &original);
-        // Constant stored tensors remain valid for the existing kinetics-only
-        // thermal model. Independent temperature-varying stiffness is not
-        // silently admitted by the fixed-nu affine thermodynamic owner.
+        // Constant stored tensors retain the kinetics-only model and are
+        // the zero-derivative limit of the same affine thermodynamic owner.
         source.admit_thermal_relaxation(&material, "T", [280.0, 320.0]).unwrap();
-        if elasticity != TensorElasticity::Isotropic {
-            let error = thermal::AffineTensorThermal::try_new(
-                &source, &material, "T", [280.0, 320.0],
-            ).unwrap_err().to_string();
-            assert!(error.contains("explicit tensor temperature-derivative law"), "{error}");
-        }
+        let thermal = thermal::AffineTensorThermal::try_new(
+            &source, &material, "T", [280.0, 320.0],
+        ).unwrap();
+        let derivative = thermal.in_frame(
+            [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        ).unwrap();
+        assert!(derivative.equilibrium_pa_k.iter().flatten().all(|v| *v == 0.0));
+        assert!(derivative.branches_pa_k.iter().flatten().flatten().all(|v| *v == 0.0));
     }
 }
 
@@ -520,4 +521,137 @@ fn held_source_moisture_reaches_inertia_equilibrium_and_complete_tensor_memory()
     assert_eq!(dry.state().card_identity(), wet.state().card_identity());
     assert_ne!(dry.state().identity(), wet.state().identity());
     assert!(dry.at_query_point(&source, &at(0.3)).is_err());
+}
+
+fn affine_equilibrium_pair_fixture(
+    elasticity: TensorElasticity,
+    coefficients: [(&str, f64, f64); 2],
+) -> (MaterialCard, ResolvedTensorMaterial) {
+    let (mut properties, mut claims) = fixture();
+    properties.elasticity = elasticity;
+    claims.retain(|claim| !matches!(claim.key.name(), "young_modulus" | "poisson_ratio"));
+    claims.push(scalar("density", Density::DIMS, 850.0));
+    for (name, reference, slope) in coefficients {
+        let mut claim = scalar(name, Pressure::DIMS, reference);
+        claim.value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: fs_qty::Temperature::DIMS,
+            knots: [273.0, 373.0]
+                .into_iter()
+                .map(|t| (t, slope.mul_add(t - 300.0, reference)))
+                .collect(),
+            dims: Pressure::DIMS,
+        };
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claims.push(claim);
+    }
+    let card = card(claims);
+    let query = QueryPoint::new()
+        .with("T", 300.0)
+        .unwrap()
+        .with("omega", 100.0)
+        .unwrap();
+    let material = ResolvedTensorMaterial::resolve(
+        &card,
+        &query,
+        properties,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    (card, material)
+}
+
+#[test]
+fn independent_affine_bulk_shear_reaches_native_tensor_entropy_and_internal_energy() {
+    use crate::visco_tensor::TensorProjectionBudget;
+    let (card, material) = affine_equilibrium_pair_fixture(
+        TensorElasticity::IsotropicBulkShear,
+        [("bulk_modulus", 8e9, -10e6), ("shear_modulus", 4.8e9, 6e6)],
+    );
+    let before = material.clone();
+    let thermal =
+        thermal::AffineTensorThermal::try_new(&material, &card, "T", [280.0, 360.0]).unwrap();
+    let derivative = thermal
+        .in_frame([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        .unwrap();
+    let column: [f64; 6] = [1.0, -0.5, 0.25, 0.3, -0.1, 0.2];
+    let displacement = 0.001;
+    let strain = column.map(|v| v * displacement);
+    let volume = 0.01;
+    let trace = strain[0] + strain[1] + strain[2];
+    let dev_norm = strain[..3]
+        .iter()
+        .map(|v| (v - trace / 3.0).powi(2))
+        .sum::<f64>()
+        + 2.0 * strain[3..].iter().map(|v| v * v).sum::<f64>();
+    // Independent isotropic continuum potential, including tensor-shear weights.
+    let expected_entropy = -volume * (0.5 * -10e6 * trace * trace + 6e6 * dev_norm);
+    let close = |actual: f64, expected: f64| {
+        assert!(
+            (actual - expected).abs() < 2e-11 * expected.abs().max(1.0),
+            "{actual} != {expected}"
+        );
+    };
+    for temperature in [280.0, 300.0, 360.0] {
+        let endpoint = material
+            .at_query_point(
+                &card,
+                &material.state().query().with("T", temperature).unwrap(),
+            )
+            .unwrap();
+        let projection = endpoint
+            .law()
+            .project_strain(
+                &[column],
+                volume,
+                TensorProjectionBudget {
+                    max_coordinates: 1,
+                    max_scalar_terms: 256,
+                },
+                || false,
+            )
+            .unwrap();
+        let state = projection
+            .thermal_state(
+                &derivative,
+                &[displacement],
+                &[0.0; 6],
+                temperature,
+                1e-10,
+                || false,
+            )
+            .unwrap();
+        let bulk = (-10e6_f64).mul_add(temperature - 300.0, 8e9);
+        let shear = 6e6_f64.mul_add(temperature - 300.0, 4.8e9);
+        let expected_free_energy = volume * (0.5 * bulk * trace * trace + shear * dev_norm);
+        close(state.free_energy_j, expected_free_energy);
+        close(state.entropy_j_k, expected_entropy);
+        close(
+            state.internal_energy_j,
+            expected_free_energy + temperature * expected_entropy,
+        );
+        assert!(endpoint.state().property("young_modulus").is_none());
+        assert!(endpoint.state().property("poisson_ratio").is_none());
+        assert_eq!(endpoint.law().branches()[0].c_pa, BRANCH);
+    }
+    assert_eq!(material, before);
+}
+
+#[test]
+fn affine_young_shear_accepts_common_scale_and_refuses_changing_ratio() {
+    for (shear_slope, admitted) in [(-4.8e6, true), (6e6, false)] {
+        let (card, material) = affine_equilibrium_pair_fixture(
+            TensorElasticity::IsotropicYoungShear,
+            [
+                ("young_modulus", 12e9, -12e6),
+                ("shear_modulus", 4.8e9, shear_slope),
+            ],
+        );
+        let before = material.clone();
+        assert_eq!(
+            thermal::AffineTensorThermal::try_new(&material, &card, "T", [280.0, 360.0]).is_ok(),
+            admitted
+        );
+        assert_eq!(material, before);
+    }
 }

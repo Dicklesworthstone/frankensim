@@ -3481,11 +3481,13 @@ the new physical laws.
 The solid material parser and full-tensor plate/string consumers carry these
 choices into the existing history evolution, stress, stored energy and physical
 loss. Scalar Young-based spectra retain their original source assumptions.
-The separate affine thermal tensor adapter still refuses the new equilibrium
-representations until their complete thermal constitutive derivatives are
-admitted. Added native regressions cover source retention, stress/work/heat and
-actual plate/string pressure equivalence; native workspace execution remains
-separate from source and syntax checks.
+The affine thermal tensor adapter admits independent affine bulk/shear sources
+through exact stiffness derivatives, including a changing derived Poisson ratio.
+Young/shear sources require one common affine scale; nonproportional paths need
+a different thermodynamic law. Added native regressions cover source retention,
+stress/work/heat, actual plate/string pressure equivalence, and the existing
+projected thermal owner's free energy, entropy and internal energy. Native
+workspace execution remains separate from source and syntax checks.
 
 ### Source-derived two-surface thermal Hertz compliance
 
@@ -5849,9 +5851,12 @@ and memory-preserving temperature continuation.
 
 `visco_tensor::source::thermal::AffineTensorThermal` admits source-derived
 affine stored tensors over every original selected temperature knot.
-Isotropic E(T) requires fixed Poisson ratio; orthotropic Young and shear
-moduli share a common affine scale with fixed Poisson ratios. Each of the
-21 coefficients of every symmetric Maxwell branch may have an independent
+Isotropic E(T) requires fixed Poisson ratio. Independent affine bulk and shear
+sources use the exact Mandel stiffness derivatives: normal diagonal K'+4G'/3,
+normal cross terms K'-2G'/3, and shear diagonal 2G'. Their derived Young modulus
+and Poisson ratio need not be affine. Young/shear sources and orthotropic Young
+and shear moduli require one common affine scale with fixed Poisson ratios.
+Each of the 21 coefficients of every symmetric Maxwell branch may have an independent
 affine slope, including signed cross terms. Positive piecewise-linear
 relaxation times remain supported. Reference density and strain validity
 remain fixed.

@@ -2,8 +2,10 @@
 //!
 //! At fixed total and viscous strain, psi = (e:Ceq(T):e + sum q:Cj(T):q)/2.
 //! Affine tensors give S = -psi_T and U = psi + T*S, with zero fixed-strain
-//! mechanical heat-capacity contribution. Density, geometry, eigenstrain and
-//! Poisson ratios remain fixed. Source interpolation is admitted over every
+//! mechanical heat-capacity contribution. Density, geometry and eigenstrain
+//! remain fixed. Independent affine K/G can change the derived Poisson ratio;
+//! other equilibrium representations require a constant Poisson ratio.
+//! Source interpolation is admitted over every
 //! original knot; merely querying two endpoints does not establish this model.
 
 use super::*;
@@ -32,8 +34,9 @@ pub struct AffineTensorThermal {
     derivative: TensorTemperatureDerivative,
 }
 impl AffineTensorThermal {
-    /// Admit E(T) with fixed isotropic nu, or a common affine scale of all
-    /// orthotropic E/G with fixed Poisson ratios. Each of the 21 coefficients
+    /// Admit independent affine K(T)/G(T), E(T) with fixed isotropic nu,
+    /// or a common affine scale of isotropic E/G or all orthotropic E/G with
+    /// fixed Poisson ratios. Each of the 21 coefficients
     /// of every Maxwell branch may have its OWN affine slope, including signed
     /// cross terms. Relaxation times retain positive piecewise-linear support.
     ///
@@ -146,51 +149,75 @@ impl AffineTensorThermal {
                 "affine tensor heat feedback requires fixed reference density and strain validity",
             ));
         }
-        let moduli: Vec<&str> = match source.properties.elasticity {
-            TensorElasticity::Isotropic => {
-                if !fixed("poisson_ratio") {
-                    return Err(invalid(
-                        "temperature-dependent Poisson ratio requires a different non-affine thermodynamic law",
-                    ));
-                }
-                vec!["young_modulus"]
+        let equilibrium_pa_k = match source.properties.elasticity {
+            TensorElasticity::IsotropicBulkShear => {
+                // The isotropic tensor is affine in K and G independently:
+                // normal diagonal K+4G/3, off-diagonal K-2G/3, Mandel shear 2G.
+                // The derived E and nu need not be affine or proportional.
+                let bulk_slope = slopes["bulk_modulus"];
+                let shear_slope = slopes["shear_modulus"];
+                let diagonal = (4.0 / 3.0_f64).mul_add(shear_slope, bulk_slope);
+                let cross = (-2.0 / 3.0_f64).mul_add(shear_slope, bulk_slope);
+                core::array::from_fn(|i| {
+                    core::array::from_fn(|j| {
+                        if i < 3 && j < 3 {
+                            if i == j { diagonal } else { cross }
+                        } else if i == j {
+                            2.0 * shear_slope
+                        } else {
+                            0.0
+                        }
+                    })
+                })
             }
-            TensorElasticity::IsotropicYoungShear | TensorElasticity::IsotropicBulkShear => {
-                return Err(invalid(
-                    "independent isotropic source pairs require an explicit tensor temperature-derivative law",
-                ));
-            }
-            TensorElasticity::Orthotropic => {
-                if ORTHOTROPIC_POISSON_RATIO_PROPERTIES
-                    .iter()
-                    .any(|key| !fixed(key))
-                {
-                    return Err(invalid(
-                        "orthotropic Poisson ratios must stay constant over the complete thermal interval",
-                    ));
+            _ => {
+                let moduli: Vec<&str> = match source.properties.elasticity {
+                    TensorElasticity::Isotropic => {
+                        if !fixed("poisson_ratio") {
+                            return Err(invalid(
+                                "temperature-dependent Poisson ratio requires a different non-affine thermodynamic law",
+                            ));
+                        }
+                        vec!["young_modulus"]
+                    }
+                    TensorElasticity::IsotropicYoungShear => vec!["young_modulus", "shear_modulus"],
+                    TensorElasticity::IsotropicBulkShear => {
+                        unreachable!("bulk/shear handled directly")
+                    }
+                    TensorElasticity::Orthotropic => {
+                        if ORTHOTROPIC_POISSON_RATIO_PROPERTIES
+                            .iter()
+                            .any(|key| !fixed(key))
+                        {
+                            return Err(invalid(
+                                "orthotropic Poisson ratios must stay constant over the complete thermal interval",
+                            ));
+                        }
+                        ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
+                            .into_iter()
+                            .chain(ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES)
+                            .collect()
+                    }
+                };
+                let ratio =
+                    slopes[moduli[0]] / source.state.property(moduli[0]).unwrap().value_si();
+                for name in moduli {
+                    let this = slopes[name] / source.state.property(name).unwrap().value_si();
+                    if !this.is_finite()
+                        || !ratio.is_finite()
+                        || (this - ratio).abs() > 128.0 * f64::EPSILON * this.abs().max(ratio.abs())
+                    {
+                        return Err(invalid(
+                            "selected equilibrium moduli require one common affine scale so the stiffness tensor itself is affine",
+                        ));
+                    }
                 }
-                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
-                    .into_iter()
-                    .chain(ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES)
-                    .collect()
+                source
+                    .law
+                    .equilibrium_mandel()
+                    .map(|row| row.map(|v| v * ratio))
             }
         };
-        let ratio = slopes[moduli[0]] / source.state.property(moduli[0]).unwrap().value_si();
-        for name in moduli {
-            let this = slopes[name] / source.state.property(name).unwrap().value_si();
-            if !this.is_finite()
-                || !ratio.is_finite()
-                || (this - ratio).abs() > 128.0 * f64::EPSILON * this.abs().max(ratio.abs())
-            {
-                return Err(invalid(
-                    "orthotropic equilibrium moduli require one common affine scale so the stiffness tensor itself is affine",
-                ));
-            }
-        }
-        let equilibrium_pa_k = source
-            .law
-            .equilibrium_mandel()
-            .map(|row| row.map(|v| v * ratio));
         let mut branches_pa_k = Vec::with_capacity(source.properties.branches.len());
         for branch in &source.properties.branches {
             let mut matrix = [[0.0; 6]; 6];

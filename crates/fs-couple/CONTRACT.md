@@ -16702,7 +16702,10 @@ original `AffineTensorThermal` potential over the entire receiving caloric
 interval. The original material orientation, fixed contact geometry and
 `sym(tangent tensor normal)/thickness` strain columns project both stored
 stiffness and its complete temperature derivative through the same physical
-volume. Equilibrium common-scale affine moduli and independent affine Maxwell
+volume. Equilibrium laws admit fixed-Poisson affine Young modulus, independent
+affine bulk/shear moduli, and common-scale affine Young/shear or orthotropic
+moduli. The same source-derived stiffness derivative reaches the retained
+contact storage, entropy and finite-heat residual. Independent affine Maxwell
 cross terms retain their source identities and original branch order.
 
 The scalar and tensor adapters share the existing `step_heated_impl` force and
