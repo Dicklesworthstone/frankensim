@@ -23,6 +23,7 @@
 
 mod boundary;
 mod coupled;
+mod fma;
 pub mod freesurface3;
 mod simd;
 pub mod sparse;
@@ -417,6 +418,9 @@ impl core::error::Error for CollisionError3 {}
 /// A test-only axial cell oracle locks the tile scalar/SIMD twins to that
 /// expression without silently refreezing either golden surface.
 ///
+/// On x86-64 CPUs with FMA the same body runs compiled with native fused
+/// multiply-add (the `fma` capsule), bit-identical to the portable codegen.
+///
 /// # Errors
 /// [`CollisionError3`] for inadmissible model parameters, force, incoming
 /// state, macroscopic state, or outgoing populations.
@@ -425,7 +429,7 @@ pub fn collide_cell3(
     model: CollisionModel3,
     force: [f64; 3],
 ) -> Result<[f64; Q3], CollisionError3> {
-    collide_cell3_with_projection(populations, model, force, false)
+    fma::collide_cell3(populations, model, force)
 }
 
 // Raw Guo source projection, before its weight and collision prefactor. The
@@ -448,6 +452,11 @@ fn collide_axial_z_cell3(
     collide_cell3_with_projection(populations, model, [0.0, 0.0, gz], true)
 }
 
+// This body and every moment-space helper below that uses `mul_add` MUST stay
+// `inline(always)`: the `fma` capsule recompiles them by inlining, and a
+// non-inlined call keeps baseline codegen (one libm `fma` call per mul_add).
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn collide_cell3_with_projection(
     populations: [f64; Q3],
     model: CollisionModel3,
@@ -521,32 +530,9 @@ fn collide_cell3_with_projection(
             }
             Ok(post)
         }
-        CollisionModel3::CentralMoment {
-            second_order_rate,
-            higher_order_rate,
-        } => collide_moment_with_force3(populations, velocity, force, |physical| {
-            collide_central_moments3(
-                physical,
-                equilibrium,
-                velocity,
-                second_order_rate,
-                higher_order_rate,
-            )
-        }),
-        CollisionModel3::ReducedCumulant {
-            second_order_rate,
-            third_order_rate,
-            fourth_order_rate,
-        } => collide_moment_with_force3(populations, velocity, force, |physical| {
-            collide_reduced_cumulants3(
-                physical,
-                equilibrium,
-                velocity,
-                second_order_rate,
-                third_order_rate,
-                fourth_order_rate,
-            )
-        }),
+        CollisionModel3::CentralMoment { .. } | CollisionModel3::ReducedCumulant { .. } => {
+            collide_moment_with_force3(populations, equilibrium, velocity, force, model)
+        }
     }
 }
 
@@ -557,15 +543,18 @@ fn collide_cell3_with_projection(
 /// projection acts on physical populations, whose first central moments
 /// vanish; applying it to the stored `-F/2` momentum would violate that
 /// projection's assumptions. No collision rate or source is fitted here.
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn collide_moment_with_force3(
     populations: [f64; Q3],
+    equilibrium: [f64; Q3],
     velocity: [f64; 3],
     force: [f64; 3],
-    collision: impl FnOnce([f64; Q3]) -> Result<[f64; Q3], CollisionError3>,
+    model: CollisionModel3,
 ) -> Result<[f64; Q3], CollisionError3> {
     if force.iter().all(|&component| component == 0.0) {
         // Avoid source arithmetic in unforced cells.
-        return collision(populations);
+        return collide_moments3(populations, equilibrium, velocity, model);
     }
     let half_source: [f64; Q3] = core::array::from_fn(|q| {
         let e = [f64::from(E3[q].0), f64::from(E3[q].1), f64::from(E3[q].2)];
@@ -573,7 +562,7 @@ fn collide_moment_with_force3(
         0.5 * W3[q] * guo_projection3(e, velocity, eu, force)
     });
     let physical = core::array::from_fn(|q| populations[q] + half_source[q]);
-    let mut post = collision(physical)?;
+    let mut post = collide_moments3(physical, equilibrium, velocity, model)?;
     for q in 0..Q3 {
         post[q] += half_source[q];
         if !post[q].is_finite() {
@@ -584,6 +573,45 @@ fn collide_moment_with_force3(
         }
     }
     Ok(post)
+}
+
+/// The moment-space collision of physical populations for a moment model.
+/// A function rather than a closure, so it inlines into the `fma` capsule.
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
+fn collide_moments3(
+    physical: [f64; Q3],
+    equilibrium: [f64; Q3],
+    velocity: [f64; 3],
+    model: CollisionModel3,
+) -> Result<[f64; Q3], CollisionError3> {
+    match model {
+        CollisionModel3::CentralMoment {
+            second_order_rate,
+            higher_order_rate,
+        } => collide_central_moments3(
+            physical,
+            equilibrium,
+            velocity,
+            second_order_rate,
+            higher_order_rate,
+        ),
+        CollisionModel3::ReducedCumulant {
+            second_order_rate,
+            third_order_rate,
+            fourth_order_rate,
+        } => collide_reduced_cumulants3(
+            physical,
+            equilibrium,
+            velocity,
+            second_order_rate,
+            third_order_rate,
+            fourth_order_rate,
+        ),
+        CollisionModel3::Bgk { .. } => {
+            unreachable!("BGK relaxes populations directly, never through moments")
+        }
+    }
 }
 
 fn centered_power3(value: f64, exponent: u8) -> f64 {
@@ -611,16 +639,24 @@ fn central_moment_matrix3(velocity: [f64; 3]) -> [[f64; Q3]; Q3] {
     })
 }
 
+// Plain loops, not an `array::from_fn` closure, so the whole transform
+// inlines into the `fma` capsule; each moment accumulates in direction order.
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn apply_moment_matrix3(matrix: &[[f64; Q3]; Q3], populations: [f64; Q3]) -> [f64; Q3] {
-    core::array::from_fn(|moment| {
+    let mut moments = [0.0; Q3];
+    for (moment, row) in moments.iter_mut().zip(matrix) {
         let mut value = 0.0;
-        for (direction, population) in populations.into_iter().enumerate() {
-            value = matrix[moment][direction].mul_add(population, value);
+        for (coefficient, population) in row.iter().zip(populations) {
+            value = coefficient.mul_add(population, value);
         }
-        value
-    })
+        *moment = value;
+    }
+    moments
 }
 
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn collide_central_moments3(
     populations: [f64; Q3],
     equilibrium: [f64; Q3],
@@ -652,6 +688,8 @@ fn collide_central_moments3(
     Ok(post)
 }
 
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn fourth_order_pair_product3(first: f64, second: f64, cross: f64) -> f64 {
     first.mul_add(second, 2.0 * cross * cross)
 }
@@ -660,6 +698,8 @@ fn fourth_order_pair_product3(first: f64, second: f64, cross: f64) -> f64 {
 // On this reduced D3Q19 basis the only independent order-four instances are
 // C220, C202, and C022; each subtracts its paired normal stresses and twice
 // the squared cross stress divided by density.
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn reduced_cumulants_from_moments3(moments: [f64; Q3]) -> [f64; Q3] {
     let inverse_density = 1.0 / moments[0];
     let mut cumulants = moments;
@@ -672,6 +712,8 @@ fn reduced_cumulants_from_moments3(moments: [f64; Q3]) -> [f64; Q3] {
     cumulants
 }
 
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn reduced_moments_from_cumulants3(cumulants: [f64; Q3]) -> [f64; Q3] {
     let inverse_density = 1.0 / cumulants[0];
     let mut moments = cumulants;
@@ -684,6 +726,8 @@ fn reduced_moments_from_cumulants3(cumulants: [f64; Q3]) -> [f64; Q3] {
     moments
 }
 
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn collide_reduced_cumulants3(
     populations: [f64; Q3],
     equilibrium: [f64; Q3],
@@ -759,6 +803,8 @@ const LOWER_MOMENT3: [[usize; 3]; Q3] = {
 /// The raw D3Q19 inverse then follows from the three four-velocity coordinate
 /// planes, six axial velocities and rest population; its coefficients are
 /// exactly 1, 1/2 and 1/4. No velocity-dependent linear solve is needed.
+#[allow(clippy::inline_always)] // required to inherit the target-feature FMA capsule
+#[inline(always)]
 fn populations_from_central_moments3(mut raw: [f64; Q3], velocity: [f64; 3]) -> [f64; Q3] {
     for (axis, shift) in velocity.into_iter().enumerate() {
         let twice = 2.0 * shift;

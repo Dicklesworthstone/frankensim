@@ -623,7 +623,11 @@ rollback. Their addition does not establish executed native validation.
   original Guo source `S` and force-corrected velocity. Central moments thus
   receive `(I - Lambda/2) S` with each mode's own rate; reduced cumulants
   are evaluated in the physical frame with zero first central moments.
-  All paths reject invalid parameters or state before publication.
+  All paths reject invalid parameters or state before publication. On an
+  x86-64 CPU with FMA, every cell runs the same body compiled under
+  `target_feature(enable = "fma")` (the `d3q19/fma` capsule) instead of one
+  `fma()` call per `mul_add`. `mul_add` rounds once on both paths, so the
+  results and refusals are bitwise those of the portable path.
 - `D3Q19_MOMENT_COLLISION_SEMANTICS_VERSION` — independent version for the
   optional moment-space basis, rate grouping, `mul_add` chains, cumulant
   projection, and deterministic back-transform. Version 3 uses binomial
@@ -1000,13 +1004,16 @@ uncancelled one.
 
 ## Unsafe boundary
 
-Four registered leaf capsules opt out of the workspace default at module scope:
-the collision pair under `src/d3q19/simd/{neon,x86}/mod.rs` and the pull-stream
-pair under `src/d3q19/simd/stream/{neon,x86}/mod.rs`. Each stays below the
+Five registered leaf capsules opt out of the workspace default at module scope:
+the collision pair under `src/d3q19/simd/{neon,x86}/mod.rs`, the pull-stream
+pair under `src/d3q19/simd/stream/{neon,x86}/mod.rs`, and the cell-collision
+FMA capsule `src/d3q19/fma/mod.rs`. Each stays below the
 capsule line cap with an adjacent `SAFETY.md`. Safe façades validate tile shapes,
 Rust borrows prove aliasing and lifetimes, and x86 one-shot selectors admit
-private thunks only after their operation-specific feature checks. Miri selects
-safe scalar twins.
+private thunks only after their operation-specific feature checks. The FMA
+capsule's per-cell selector calls its thunk only after
+`is_x86_feature_detected!("fma")`, and the thunk runs the safe portable body.
+Miri selects safe scalar twins.
 
 ## Feature flags
 

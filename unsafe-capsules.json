@@ -30,6 +30,7 @@
 {"crate": "fs-exec", "module": "crates/fs-exec/src/crew.rs", "safety_md": "crates/fs-exec/src/SAFETY.md"},
 {"crate": "fs-cheb", "module": "crates/fs-cheb/src/fma/mod.rs", "safety_md": "crates/fs-cheb/src/fma/SAFETY.md"},
 {"crate": "fs-la", "module": "crates/fs-la/src/eigen_complex/cancellable/fma/mod.rs", "safety_md": "crates/fs-la/src/eigen_complex/cancellable/fma/SAFETY.md"},
-{"crate": "fs-fmm", "module": "crates/fs-fmm/src/complex/avx2/mod.rs", "safety_md": "crates/fs-fmm/src/complex/avx2/SAFETY.md"}
+{"crate": "fs-fmm", "module": "crates/fs-fmm/src/complex/avx2/mod.rs", "safety_md": "crates/fs-fmm/src/complex/avx2/SAFETY.md"},
+{"crate": "fs-lbm", "module": "crates/fs-lbm/src/d3q19/fma/mod.rs", "safety_md": "crates/fs-lbm/src/d3q19/fma/SAFETY.md"}
 ]
 }
