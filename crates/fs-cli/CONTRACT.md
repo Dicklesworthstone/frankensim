@@ -5,6 +5,21 @@ The stable command-line membrane for the Cooling 0.1 product workflow (bead
 the package is `fs-cli` so the workspace retains its flat `fs-*` crate
 convention.
 
+## Pressure-driven cooling openings
+
+`cooling-cht` face rules of type `opening` accept optional `pressure_pa`, a
+finite signed static gauge pressure in Pa, defaulting to the existing zero
+outlet. The same SIMPLEC pressure boundary drives steady, transient and material
+flow paths; the CLI does not infer a velocity from the pressure. All openings
+share one reference, relative to the removed reference hydrostatic pressure for
+Boussinesq scenes. These loads do not change thermodynamic gas pressure or
+density. `ambient_k` remains the existing source for inflowing/backflow thermal
+transport and exterior radiation. Negative gauge pressure is admitted;
+malformed and nonfinite fields refuse instead of falling back to zero.
+The real-binary `pressure_opening` tests exercise pressure-driven Poiseuille
+flow, reversal, a negative gauge offset, omitted-zero compatibility, the
+existing thermal reservoirs, and malformed pressure refusal.
+
 ## Exploratory SGS cooling scenes
 
 The file-driven `cooling-cht` command accepts an explicit `solver.sgs` object:

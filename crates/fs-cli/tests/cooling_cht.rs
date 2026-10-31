@@ -73,6 +73,76 @@ const DUCT: &str = r#"{
 }"#;
 
 #[test]
+fn pressure_opening_scene_drives_the_native_flow_and_thermal_reservoirs() {
+    // Pressure alone drives this planar channel: H=1, L=2, depth=1/4,
+    // mu=1/4. Missing y faces remain no-slip adiabatic walls.
+    let scene = r#"{
+      "schema":"frankensim.cooling-cht.v1", "size_m":[2,1,0.25], "voxel_m":0.25,
+      "fluid":{"density_kg_m3":1,"specific_heat_j_kg_k":2,
+        "conductivity_w_m_k":0.01,"kinematic_viscosity_m2_s":0.25},
+      "faces":{
+        "x-":{"type":"opening","ambient_k":320,"pressure_pa":0.5},
+        "x+":{"type":"opening","ambient_k":280,"pressure_pa":0.0},
+        "z-":{"type":"symmetry"},"z+":{"type":"symmetry"}
+      },
+      "probes":[{"name":"fluid","at_m":[1,0.5,0.125]}],
+      "solver":{"tolerance":1e-9}
+    }"#;
+    let variants = [
+        ("pressure-forward.json", scene.to_string(), 1.0, 320.0),
+        (
+            "pressure-reverse.json",
+            scene.replace("\"pressure_pa\":0.5", "\"pressure_pa\":-0.5"),
+            -1.0,
+            280.0,
+        ),
+        (
+            "pressure-negative-gauge.json",
+            scene
+                .replace("\"pressure_pa\":0.5", "\"pressure_pa\":-0.5")
+                .replace("\"pressure_pa\":0.0", "\"pressure_pa\":-1.0"),
+            1.0,
+            320.0,
+        ),
+        (
+            "pressure-default-outlet.json",
+            scene.replace(",\"pressure_pa\":0.0", ""),
+            1.0,
+            320.0,
+        ),
+    ];
+    for (name, input, direction, temperature) in variants {
+        let (code, result, stderr) = run(&scratch(name, &input));
+        assert_eq!(code, 0, "{name}: {stderr}");
+        let q = f(&result, &["flow", "outflow_m3_s"]);
+        let exact_discrete = 0.5 * 0.25 / (12.0 * 0.25 * 2.0) * (1.0 + 2.0 / 16.0);
+        assert!((q / exact_discrete - 1.0).abs() < 1e-7, "{name}: Q={q}");
+        assert!((f(&result, &["flow", "inflow_m3_s"]) - q).abs() < 1e-12);
+        let probe = &result.get("probes").and_then(J::as_array).unwrap()[0];
+        let velocity = probe.get("velocity_m_s").and_then(J::as_array).unwrap()[0]
+            .as_f64()
+            .unwrap();
+        assert!(velocity * direction > 0.0);
+        assert!((f(probe, &["temperature_k"]) - temperature).abs() < 1e-6);
+        assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-8);
+    }
+}
+
+#[test]
+fn pressure_opening_scene_rejects_malformed_pressure_instead_of_using_zero() {
+    for (index, pressure) in ["null", "\"high\"", "1e999"].iter().enumerate() {
+        let scene = DUCT.replace(
+            "\"ambient_k\": 300.0}",
+            &format!("\"ambient_k\":300.0,\"pressure_pa\":{pressure}}}"),
+        );
+        let (code, diagnostic, _) =
+            run(&scratch(&format!("pressure-refusal-{index}.json"), &scene));
+        assert_ne!(code, 0, "{pressure} must not become a zero-pressure outlet");
+        assert_eq!(diagnostic.str_field("code"), Some("cooling-cht-input"));
+    }
+}
+
+#[test]
 fn atmosphere_data_drives_the_shared_flow_and_thermal_coefficients() {
     let solve = |name: &str, gas: &str| {
         let scene = DUCT.replacen(
