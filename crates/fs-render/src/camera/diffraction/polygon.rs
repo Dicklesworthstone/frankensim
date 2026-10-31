@@ -125,6 +125,28 @@ impl<'a> PolygonPupil<'a> {
         )
     }
 
+    /// Depth-independent narrow/broad mixture for source-depth imaging.
+    /// Every sampled source uses this same complete proposal, regardless of
+    /// which declared depth its ray eventually intersects.
+    pub(super) fn sample_phase_range(
+        &self,
+        sample: [f64; 2],
+        maximum_phase: f64,
+    ) -> ([f64; 2], f64) {
+        let widening = maximum_phase.abs().max(1.0);
+        let (local_u, selected_scale) = if sample[0] < 0.5 {
+            (2.0 * sample[0], 1.0)
+        } else {
+            (2.0 * sample[0] - 1.0, widening)
+        };
+        let (q, _) = self.sample([local_u, sample[1]]);
+        let q = q.map(|value| value * selected_scale);
+        let density = 0.5
+            * (self.proposal_density(q)
+                + self.proposal_density(q.map(|value| value / widening)) / widening / widening);
+        (q, density)
+    }
+
     fn proposal_density(&self, q: [f64; 2]) -> f64 {
         let mut density = 0.0;
         for index in 0..self.frames {
@@ -285,6 +307,45 @@ mod tests {
                     (power - 1.0).abs() < 0.004,
                     "{count}-blade integrated power {power}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn common_depth_proposal_conserves_distinct_source_psfs() {
+        const SAMPLES: u32 = 32_768;
+        let points = vertices(4, 0.234, 1.0);
+        let pupil = PolygonPupil::new(1.0, &points);
+        let mut totals = [[0.0; 3]; 3];
+        for i in 0..SAMPLES {
+            let u = (f64::from(i) + 0.5) / f64::from(SAMPLES);
+            let v = f64::from(i.reverse_bits()) / 4_294_967_296.0 + 0.5 / f64::from(SAMPLES);
+            let (q, proposal) = pupil.sample_phase_range([u, v], 10.0);
+            for (row, phase) in totals.iter_mut().zip([0.0, 6.0, -6.0]) {
+                for (sum, ratio) in row.iter_mut().zip([550.0 / 400.0, 1.0, 550.0 / 700.0]) {
+                    *sum += ratio
+                        * ratio
+                        * pupil
+                            .defocused_density(q.map(|value| ratio * value), ratio * phase)
+                            .unwrap()
+                        / proposal;
+                }
+            }
+        }
+        for row in totals {
+            for total in row {
+                let power = total / f64::from(SAMPLES);
+                assert!(
+                    (power - 1.0).abs() < 0.01,
+                    "common depth proposal power {power}"
+                );
+            }
+        }
+        for sample in [[0.0; 2], [0.5; 2], [1.0_f64.next_down(); 2]] {
+            let (q, proposal) = pupil.sample_phase_range(sample, 16.0);
+            for phase in [-16.0, 0.0, 16.0] {
+                let weight = pupil.defocused_density(q, phase).unwrap() / proposal;
+                assert!(weight.is_finite() && weight >= 0.0);
             }
         }
     }

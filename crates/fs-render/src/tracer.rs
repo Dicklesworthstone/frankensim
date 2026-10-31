@@ -46,8 +46,8 @@ use crate::aov::{
     adaptive_render_binding, render_binding, validate_binding, validate_reference_times,
 };
 use crate::camera::{
-    AnimatedCamera, CameraError, CameraExposure, CutSide, KeyframeFocus, LensSample,
-    OpticalCenterProjection, PhysicalCamera,
+    AnimatedCamera, CameraError, CameraExposure, CutSide, KeyframeFocus, LayeredDiffraction,
+    LensSample, OpticalCenterProjection, PhysicalCamera, ProjectedPupilFootprint,
 };
 use crate::charts::{Hit, Ray, TraceTermination, TriMesh, sphere_trace};
 use crate::conductor::{
@@ -4052,7 +4052,7 @@ pub fn render_cinematic_range(
     )
 }
 
-#[allow(clippy::too_many_arguments)] // private seam keeps legacy public APIs unchanged
+#[allow(clippy::too_many_arguments)]// private seam keeps legacy public APIs unchanged
 fn render_range_impl(
     scene: &Scene,
     cx: &Cx<'_>,
@@ -9881,6 +9881,14 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         }
         update_continuity_f64(hasher, diffraction.maximum_depth_phase_error_rad());
     }
+    if let Some(diffraction) = camera.layered_diffraction() {
+        hasher.update(b"source-depth-layered-diffraction-v1");
+        hasher.update(&(diffraction.object_distances_m().len() as u64).to_le_bytes());
+        for &depth in diffraction.object_distances_m() {
+            update_continuity_f64(hasher, depth);
+        }
+        update_continuity_f64(hasher, diffraction.maximum_depth_phase_error_rad());
+    }
 }
 
 fn update_continuity_point(hasher: &mut DomainHasher, point: Point3) {
@@ -13344,7 +13352,7 @@ fn competing_dielectric_event_probability(
         .ok_or(TracerError::InvalidInput)
 }
 
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one integrator, one story
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]// one integrator, one story
 fn trace_path<'scene>(
     scene: &'scene Scene,
     lighting: &SceneLighting<'_>,
@@ -13534,6 +13542,10 @@ fn trace_path_with_regions<'scene>(
     #[cfg(not(feature = "photometry"))]
     let lambdas = hero_wavelength_packet::<PACKET>(hero, LAMBDA_MIN, LAMBDA_MAX);
     let mut diffraction_camera = None;
+    // A layered camera must know the sampled source before weighting it.
+    // Cache this one traversal, including an explicit miss, for the ordinary
+    // first-vertex shading/AOV path below; do not trace the primary ray twice.
+    let mut initial_intersection: Option<Option<SceneIntersection>> = None;
     let state = if let Some(state) = resume {
         state
     } else {
@@ -13581,14 +13593,23 @@ fn trace_path_with_regions<'scene>(
                 } else {
                     LensSample::CENTER
                 };
-                let spectral_ray = physical.generate_spectral_ray_from_tangent_offsets(
-                    cx,
-                    x_tan,
-                    y_tan,
-                    camera_lens_sample(key, pixel, sample)?,
-                    diffraction_sample,
-                    &lambdas,
-                )?;
+                let spectral_ray = if physical.layered_diffraction().is_some() {
+                    let pending = physical.sample_layered_diffraction_ray(
+                        cx, x_tan, y_tan, diffraction_sample, &lambdas,
+                    )?;
+                    let hit = intersect(scene, cx, &pending.ray(), ray_time)?;
+                    initial_intersection = Some(hit);
+                    pending.resolve_source(cx, hit.map(|value| value.hit.point))?
+                } else {
+                    physical.generate_spectral_ray_from_tangent_offsets(
+                        cx,
+                        x_tan,
+                        y_tan,
+                        camera_lens_sample(key, pixel, sample)?,
+                        diffraction_sample,
+                        &lambdas,
+                    )?
+                };
                 if physical.has_diffraction() {
                     diffraction_camera = Some(physical);
                 }
@@ -13631,7 +13652,9 @@ fn trace_path_with_regions<'scene>(
         #[cfg(feature = "volumes")]
         let has_volume_source_nee = active_region.has_source_proposal(s.strategy);
         #[cfg(feature = "photometry")]
-        let intersection = if let Some(fixtures) = fixtures {
+        let intersection = if let Some(hit) = initial_intersection.take() {
+            hit
+        } else if let Some(fixtures) = fixtures {
             // Calibrated mesh instances must not inherit the legacy 10 km
             // traversal ceiling. Find the actual first surface, then enforce
             // the caller's physical range in admit_segment below. Instances
@@ -13643,7 +13666,10 @@ fn trace_path_with_regions<'scene>(
             intersect(scene, cx, &ray, ray_time)?
         };
         #[cfg(not(feature = "photometry"))]
-        let intersection = intersect(scene, cx, &ray, ray_time)?;
+        let intersection = match initial_intersection.take() {
+            Some(hit) => hit,
+            None => intersect(scene, cx, &ray, ray_time)?,
+        };
         if depth == 0
             && let Some(camera) = &diffraction_camera
             && (intersection.is_some() || scene.environment.is_some())
@@ -16348,7 +16374,10 @@ fn defocused_exposure_camera<'a>(
         .first()
         .ok_or(CameraError::InvalidKeyframes)?
         .camera();
-    Ok(physical.defocused_diffraction().map(|_| physical))
+    Ok(
+        (physical.defocused_diffraction().is_some() || physical.layered_diffraction().is_some())
+            .then_some(physical),
+    )
 }
 
 /// A single depth check on a sampled centre ray cannot detect a partially
@@ -16364,6 +16393,9 @@ fn admit_defocused_scene(
     let Some(physical) = defocused_exposure_camera(camera_path)? else {
         return Ok(());
     };
+    if physical.layered_diffraction().is_some() {
+        return admit_layered_diffraction_scene(scene, cx, camera_path, physical);
+    }
     let policy = physical
         .defocused_diffraction()
         .ok_or(CameraError::InvalidDiffraction)?;
@@ -16464,6 +16496,174 @@ fn admit_defocused_scene(
         }
     }
     cx.checkpoint()?;
+    Ok(())
+}
+
+/// Establish pupil-independent visibility across explicitly declared depths.
+/// For every near/far pair, the entire far footprint expanded by the complete
+/// pupil and lateral camera trajectory must miss the near layer. The bounded
+/// rectangle proof can refuse safe scenes; it never replaces partial pupil
+/// occlusion with an unchanged, merely depth-conditioned PSF.
+fn admit_layered_diffraction_scene(
+    scene: &Scene,
+    cx: &Cx<'_>,
+    camera_path: CameraPath<'_>,
+    physical: &PhysicalCamera,
+) -> Result<(), TracerError> {
+    let policy = physical
+        .layered_diffraction()
+        .ok_or(CameraError::InvalidDiffraction)?;
+    let CameraPath::Cinematic { camera, exposure } = camera_path else {
+        return Err(CameraError::InvalidDiffraction.into());
+    };
+    if scene.environment.is_some() {
+        return Err(CameraError::InvalidDiffraction.into());
+    }
+    let shot = camera
+        .shots()
+        .iter()
+        .find(|shot| shot.shot_id() == exposure.shot_id())
+        .ok_or(CameraError::InvalidShot)?;
+    let eye = physical.eye();
+    let forward = physical.forward();
+    let radius = physical.aperture().radius_m();
+    let mut pupil_lower = [-radius; 2];
+    let mut pupil_upper = [radius; 2];
+    let mut axial_roundoff_excursion = 0.0_f64;
+    for keyframe in shot.keyframes() {
+        cx.checkpoint()?;
+        let state = keyframe.camera();
+        let other_eye = state.eye();
+        let displacement = other_eye.delta_from(eye);
+        let axial_translation = displacement.dot(forward);
+        let scale = [eye.x, eye.y, eye.z, other_eye.x, other_eye.y, other_eye.z]
+            .into_iter()
+            .map(f64::abs)
+            .fold(1.0_f64, f64::max);
+        let roundoff = 128.0 * f64::EPSILON * scale;
+        if !axial_translation.is_finite()
+            || axial_translation.abs() > roundoff
+            || state.forward() != forward
+            || state.up() != physical.up()
+            || state.right() != physical.right()
+        {
+            return Err(CameraError::InvalidDiffraction.into());
+        }
+        axial_roundoff_excursion = axial_roundoff_excursion.max(axial_translation.abs());
+        let lateral = [
+            displacement.dot(physical.right()),
+            displacement.dot(physical.up()),
+        ];
+        for axis in 0..2 {
+            let lo = ((lateral[axis] - radius) - roundoff).next_down();
+            let hi = ((lateral[axis] + radius) + roundoff).next_up();
+            if !lo.is_finite() || !hi.is_finite() {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            pupil_lower[axis] = pupil_lower[axis].min(lo);
+            pupil_upper[axis] = pupil_upper[axis].max(hi);
+        }
+    }
+    let mut planes: [Option<ProjectedPupilFootprint>; LayeredDiffraction::MAX_PLANES] =
+        [None; LayeredDiffraction::MAX_PLANES];
+    for primitive in &scene.primitives {
+        cx.checkpoint()?;
+        let (mesh, transform): (&TriMesh, Option<RigidTransform>) = match &primitive.shape {
+            Shape::Mesh(mesh) => (mesh, None),
+            Shape::Instance(instance) => match instance.geometry() {
+                SharedGeometry::Mesh(mesh) => (mesh.as_ref(), Some(instance.transform())),
+                SharedGeometry::Chart(_) => return Err(CameraError::InvalidDiffraction.into()),
+            },
+            Shape::Chart(_) | Shape::AnimatedInstance(_) => {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+        };
+        let mut behind_pupil = None;
+        let mut primitive_plane = None;
+        for (index, &vertex) in mesh.vertices.iter().enumerate() {
+            if index % 256 == 0 {
+                cx.checkpoint()?;
+            }
+            let point = Point3::new(vertex[0], vertex[1], vertex[2]);
+            let point = transform.map_or(point, |transform| transform.transform_point(point));
+            let displacement = point.delta_from(eye);
+            let depth = displacement.dot(forward);
+            let scale = [point.x, point.y, point.z, eye.x, eye.y, eye.z]
+                .into_iter()
+                .map(f64::abs)
+                .fold(1.0_f64, f64::max);
+            let roundoff_m = 128.0 * f64::EPSILON * scale;
+            if !depth.is_finite() || depth.abs() <= roundoff_m + axial_roundoff_excursion {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            let behind = depth < 0.0;
+            if behind_pupil.is_some_and(|previous| previous != behind) {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            behind_pupil = Some(behind);
+            if behind {
+                continue;
+            }
+            if !matches!(
+                primitive.material,
+                Material::Lambertian { .. }
+                    | Material::SpectralDiffuse { .. }
+                    | Material::GrayDiffuseThermal { .. }
+                    | Material::SpectralDiffuseThermal { .. }
+            ) {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            let mut matched = None;
+            for (layer, &declared) in policy.object_distances_m().iter().enumerate() {
+                let tolerance = roundoff_m + 128.0 * f64::EPSILON * declared.max(1.0);
+                if (depth - declared).abs() <= tolerance {
+                    if matched.is_some() {
+                        return Err(CameraError::InvalidDiffraction.into());
+                    }
+                    matched = Some(layer);
+                }
+            }
+            let layer = matched.ok_or(CameraError::InvalidDiffraction)?;
+            if primitive_plane.is_some_and(|previous| previous != layer) {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+            primitive_plane = Some(layer);
+            physical.admit_diffraction_depth(Some(point), &[LAMBDA_MIN])?;
+            let footprint = ProjectedPupilFootprint::point(
+                [
+                    displacement.dot(physical.right()),
+                    displacement.dot(physical.up()),
+                    depth,
+                ],
+                // A numerically lateral keyframe may have a bounded axial
+                // roundoff residual. Enclose source coordinates relative to
+                // every such pupil plane before the perspective proof.
+                roundoff_m + axial_roundoff_excursion,
+            )
+            .ok_or(CameraError::InvalidDiffraction)?;
+            if let Some(existing) = &mut planes[layer] {
+                existing.include(footprint);
+            } else {
+                planes[layer] = Some(footprint);
+            }
+        }
+    }
+    for near in 0..policy.object_distances_m().len() {
+        cx.checkpoint()?;
+        let Some(front) = planes[near] else {
+            continue;
+        };
+        for back in planes
+            .iter()
+            .take(policy.object_distances_m().len())
+            .skip(near + 1)
+            .flatten()
+        {
+            if !front.clears(*back, pupil_lower, pupil_upper) {
+                return Err(CameraError::InvalidDiffraction.into());
+            }
+        }
+    }
     Ok(())
 }
 

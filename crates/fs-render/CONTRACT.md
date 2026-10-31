@@ -2457,6 +2457,101 @@ wide-angle, lens-aberration or measured-lens error. General multi-depth
 occlusion, virtual images, coherent scene transport
 and vector diffraction remain outside this mode.
 
+### Source-depth-resolved diffraction across separated planes
+
+`PhysicalCamera::with_layered_diffraction(LayeredDiffraction)` admits one to
+sixteen explicitly declared positive axial source depths, strictly ordered
+nearest to farthest, with the same `[0,0.1]` residual pupil-rim phase budget.
+It replaces the focused or single-plane policy. Circular, annular and regular
+bladed pupils reuse their existing propagated complex-pupil PSFs, physical
+area normalization, scalar feature-width gates and 16-radian outer phase cap.
+Depth varies between visible sources, rather than forcing the complete image
+to share one declared object plane.
+
+`sample_layered_diffraction_ray` returns a `LayeredCameraRay` that borrows the
+exact camera and retains its wavelength packet and complete proposal. It
+exposes a source ray, with no provisional spectral weights. The caller traces
+that ray and consumes `resolve_source` with its actual first-hit point, or
+`None` for a black miss. The latter returns zero weights. The older one-stage
+spectral API refuses this policy with `DiffractionRequiresSourceDepth`.
+The spectral tracer caches that one primary intersection and supplies it to
+the normal first-vertex material, radiance and AOV paths; it does not perform
+a duplicate visibility traversal or bypass volume/fixture refusals.
+
+The source direction is sampled independently of its unknown depth. For
+reference coordinates `q` and wavelength ratio `r=lambda_ref/lambda`, each
+lane receives `r²*p(r*q,phi(z_actual,lambda))/proposal(q)`. Its signed phase
+uses the sampled source's actual axial depth, after admitting that depth
+against the declared set. It never chooses a kernel from the unshifted
+destination pixel's hit. Each source PSF has unit integrated power, so the
+image is the incoherent sum of its independently blurred source contributions.
+`layered_diffraction_density` exposes the same physical angular-raster density
+for an admitted source depth and wavelength. There is no image postprocessor,
+intermediate layer image, PSF crop or wavelength-independent blur.
+
+The proposal is a full-support equal mixture of narrow and broad components.
+The broad component covers the largest declared phase magnitude at the current
+focus and reference wavelength. That maximum occurs at one of the ordered
+depth endpoints because phase is affine in inverse depth; choosing it takes
+two phase evaluations regardless of the number of layers. Circular and annular
+pupils retain the radial Cauchy mixture, including annular ring spreading;
+polygons retain the blade-aligned product-Cauchy mixture at narrow and broad
+scales. Every draw evaluates the full mixture PDF and every source depth uses
+that same PDF. The numerical kernels retain complete tails and bounded work.
+
+The renderer preflights a conservative full-pupil geometric visibility proof.
+Every forward primitive must be a static triangle mesh or fixed rigid mesh
+instance, entirely in one declared frontoparallel plane to coordinate
+roundoff, with an opaque diffuse material. All its vertices must belong to
+the same layer; a mesh connecting layers is refused. Other geometry must be
+wholly behind the pupil plane. Finite layers require a black background;
+environments, unknown charts, animated geometry, prepared scene histories,
+primary media and calibrated fixture paths refuse. The residual optical phase
+budget does not replace the independent geometric coplanarity requirement.
+
+For every occupied nearer/farther layer pair, `zf<zb`, a farther source with
+reference-eye angular coordinate `theta_b` crosses the nearer plane at
+`theta_b + a*(1/zf-1/zb)`, where `a` includes the complete pupil and the
+lateral camera displacement. Each layer's projected vertex rectangle is
+bounded with outward-rounded coordinate/depth intervals. The farther rectangle
+is expanded over the entire signed pupil/trajectory rectangle and must be
+disjoint from the nearer rectangle along at least one axis. Thus a centre ray
+that misses the foreground does not hide clipping of an outer pupil segment.
+The enclosing outer radius is conservative for annular and bladed openings.
+Overlapping or numerically unresolved footprints refuse; the method can reject
+safe arrangements whose bounding rectangles overlap.
+
+This proof applies to the whole owning camera shot, including every linear
+lateral eye segment between keyframes. Fixed orientation and axial eye
+coordinate are required, up to the existing coordinate-roundoff gate; the
+admitted axial-roundoff excursion is also included in source-footprint bounds.
+Lateral pans and focus racks remain supported when the entire swept pupil
+passes clearance. The renderer rebuilds admission for each render call and
+does not reuse it across changed scene geometry or prepared histories. Its
+work is one bounded scene scan and at most 120 layer-pair checks, with no
+per-ray layer-visibility scan. Camera-only consumers must establish equivalent
+pupil-independent visibility and source radiance themselves.
+
+The native numerical checks retain the existing three pupil kernels and add
+unit-power integration of distinct source phases under one shared polygon
+proposal (32,768 Hammersley samples; 1% numerical integration band), plus
+full-pupil footprint cases that distinguish clear centre rays from clipped
+outer rays and include both signs of lateral camera motion. Camera regressions
+check actual-source chromatic nulls, common proposals, black misses, phase
+admission and focus interpolation. Renderer regressions check incoherent
+addition of separated emitters, progressive replay during a lateral focus
+rack, and transactional refusal of partial pupil clipping or axial motion.
+
+This extends the clear-pupil scalar imaging model to separated source depths.
+It does not simulate arbitrary 3D occlusion, clipped-pupil wavefronts, hidden
+background reconstruction, inter-object edge-wave propagation, coherent
+interference between scene points, polarization or high numerical aperture.
+The distinction between depth-dependent PSFs and occlusion modeling is also
+discussed by Ikoma et al., *ICCP* (2021), section 3.2,
+<https://www.computationalimaging.org/wp-content/uploads/2021/04/DeepDfD_ICCP2021.pdf>;
+the explicit clearance proof above restricts this mode to a class that does
+not require their approximate layer-occlusion composition.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim

@@ -3,7 +3,7 @@
 //! The optical model is an ideal thin lens. Focus distance is the positive
 //! axial distance from the lens plane, not distance along each raster ray.
 //! Opt-in circular, annular and bladed pupil diffraction covers incoherent, paraxial,
-//! focused and declared-plane defocused imaging. Lens distortion, chromatic
+//! focused, declared-plane and separated multi-plane defocused imaging. Lens distortion, chromatic
 //! aberration, rolling shutter, and autofocus heuristics are outside this contract.
 
 use core::fmt;
@@ -16,7 +16,12 @@ use crate::charts::Ray;
 use crate::motion::ShutterInterval;
 
 mod diffraction;
-pub use diffraction::{DefocusedDiffraction, FocusedDiffraction, SpectralCameraRay};
+#[cfg(feature = "tracer")]
+pub(crate) use diffraction::ProjectedPupilFootprint;
+pub use diffraction::{
+    DefocusedDiffraction, FocusedDiffraction, LayeredCameraRay, LayeredDiffraction,
+    SpectralCameraRay,
+};
 
 const PI: f64 = core::f64::consts::PI;
 const LOOK_AT_SINE_MIN: f64 = 1.0e-10;
@@ -62,6 +67,8 @@ pub enum CameraError {
     InvalidDiffraction,
     /// A diffraction camera requires wavelength-aware ray generation.
     DiffractionRequiresSpectralPath,
+    /// A layered diffraction ray must be resolved at its actual first source.
+    DiffractionRequiresSourceDepth,
     /// The modeled defocus or residual visible-depth phase exceeds its budget.
     DefocusOutsideDiffractionModel,
     /// A shot contains no keyframes.
@@ -245,6 +252,7 @@ impl CameraError {
             Self::InvalidLensSample => LENS,
             Self::InvalidDiffraction
             | Self::DiffractionRequiresSpectralPath
+            | Self::DiffractionRequiresSourceDepth
             | Self::DefocusOutsideDiffractionModel => DIFFRACTION,
             Self::EmptyShot => EMPTY_SHOT,
             Self::InvalidShot => INVALID_SHOT,
@@ -275,6 +283,9 @@ impl fmt::Display for CameraError {
             }
             Self::DiffractionRequiresSpectralPath => {
                 "diffraction camera requires a wavelength-aware path"
+            }
+            Self::DiffractionRequiresSourceDepth => {
+                "layered diffraction requires the sampled ray's actual first source depth"
             }
             Self::DefocusOutsideDiffractionModel => {
                 "visible depth exceeds the declared diffraction phase budget"
@@ -771,6 +782,7 @@ pub struct PhysicalCamera {
     exposure: ExposureMetadata,
     diffraction: Option<FocusedDiffraction>,
     defocused_diffraction: Option<DefocusedDiffraction>,
+    layered_diffraction: Option<LayeredDiffraction>,
 }
 
 /// Projection of a world point through the deterministic optical centre.
@@ -936,6 +948,7 @@ impl PhysicalCamera {
             exposure,
             diffraction: None,
             defocused_diffraction: None,
+            layered_diffraction: None,
         })
     }
 
@@ -1184,6 +1197,7 @@ impl PhysicalCamera {
         )?;
         camera.diffraction = self.diffraction;
         camera.defocused_diffraction = self.defocused_diffraction;
+        camera.layered_diffraction = self.layered_diffraction;
         Ok(camera)
     }
 
@@ -1193,6 +1207,7 @@ impl PhysicalCamera {
             && self.exposure == other.exposure
             && self.diffraction == other.diffraction
             && self.defocused_diffraction == other.defocused_diffraction
+            && self.layered_diffraction == other.layered_diffraction
     }
 }
 

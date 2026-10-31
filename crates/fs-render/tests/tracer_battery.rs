@@ -21,8 +21,8 @@ use fs_render::animated_instances::{
     AnimatedGeometryInstance, RigidTransformTrajectory, TransformKeyframe,
 };
 use fs_render::camera::{
-    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide, DefocusedDiffraction,
-    FocusedDiffraction, PhysicalCamera,
+    AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraShot, CutSide,
+    DefocusedDiffraction, FocusedDiffraction, LayeredDiffraction, PhysicalCamera,
 };
 use fs_render::charts::TriMesh;
 use fs_render::instances::{GeometryInstance, RigidTransform, SharedGeometry};
@@ -2274,6 +2274,158 @@ fn defocused_infinite_plane_preserves_uniform_radiance() {
                     "{name} defocused flat radiance channel {lane}: {relative}"
                 );
             }
+        }
+    });
+}
+
+fn separated_diffraction_planes() -> Scene {
+    let mut scene = depth_varying_emissive_scene();
+    scene.primitives.truncate(2);
+    scene.lights.clear();
+    scene.camera.half_tan = 0.0;
+    scene.primitives[0].shape = Shape::Mesh(quad(
+        [-6.0e-4, -0.003, 1.0],
+        [-4.0e-4, -0.003, 1.0],
+        [-4.0e-4, 0.003, 1.0],
+        [-6.0e-4, 0.003, 1.0],
+    ));
+    scene.primitives[1].shape = Shape::Mesh(quad(
+        [8.0e-4, -0.006, 0.0],
+        [1.2e-3, -0.006, 0.0],
+        [1.2e-3, 0.006, 0.0],
+        [8.0e-4, 0.006, 0.0],
+    ));
+    for primitive in &mut scene.primitives {
+        primitive.material = Material::Lambertian {
+            reflectance: lift_rgb([0.0; 3]),
+        };
+    }
+    scene
+}
+
+fn layered_patch_camera(scene: &Scene, aperture: Aperture, pan: f64, axial: f64) -> AnimatedCamera {
+    let mut frames = Vec::new();
+    for (time, x, z, focus) in [(0.0, 0.0, 2.0, 0.9), (1.0, pan, 2.0 + axial, 1.1)] {
+        let legacy = Camera {
+            eye: Point3::new(x, 0.0, z),
+            ..scene.camera
+        };
+        let physical = physical_from_legacy(&legacy, focus, aperture.clone())
+            .with_layered_diffraction(LayeredDiffraction::try_new(&[1.0, 2.0], 0.01).unwrap())
+            .unwrap();
+        frames.push(CameraKeyframe::try_new(time, physical).unwrap());
+    }
+    AnimatedCamera::try_new(vec![CameraShot::try_new(723, 0.0, 1.0, frames).unwrap()]).unwrap()
+}
+
+/// Multiple source depths are imaged by their own PSFs in the real tracer.
+/// Removing one source's emission leaves the other source unchanged; accepted
+/// lateral motion and a focus rack replay over the same absolute sample stream.
+#[test]
+fn layered_diffraction_adds_separated_sources_and_replays_lateral_focus_racks() {
+    let scene = separated_diffraction_planes();
+    let mut settings = motion_settings(2_048);
+    settings.strategy = DirectStrategy::BsdfOnly;
+    let shutter = motion_shutter(0.0, 1.0);
+    with_cx(|cx| {
+        for aperture in [
+            Aperture::try_circular(1.0e-3).unwrap(),
+            Aperture::try_annular(1.0e-3, 6.0e-4).unwrap(),
+            Aperture::try_regular_polygon(1.0e-3, 5, 0.31).unwrap(),
+        ] {
+            let camera = layered_patch_camera(&scene, aperture, 1.0e-4, 0.0);
+            let combined =
+                render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+            let mut near = scene.clone();
+            near.primitives[1].emission = None;
+            let mut far = scene.clone();
+            far.primitives[0].emission = None;
+            let near_image =
+                render_cinematic(&near, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+            let far_image =
+                render_cinematic(&far, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+            assert!(
+                near_image.xyz[0][1] > 0.0 && far_image.xyz[0][1] > 0.0,
+                "both source depths contribute outside their pinhole silhouettes"
+            );
+            for lane in 0..3 {
+                let sum = near_image.xyz[0][lane] + far_image.xyz[0][lane];
+                assert!(
+                    (combined.xyz[0][lane] - sum).abs() < 1.0e-11 * sum.max(1.0),
+                    "source-depth imaging is incoherent linear superposition over admitted visible sources"
+                );
+            }
+            let mut progressive = Film::try_new(1, 1).unwrap();
+            for (from, to) in [(0, 1_024), (1_024, 2_048)] {
+                render_cinematic_range(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    &mut progressive,
+                    from,
+                    to,
+                    shutter,
+                )
+                .unwrap();
+            }
+            assert_film_bits_eq(
+                &combined,
+                &progressive,
+                "layered diffraction lateral focus-rack replay",
+            );
+        }
+    });
+}
+
+#[test]
+fn layered_diffraction_refuses_partial_pupil_clipping_and_invalid_motion_atomically() {
+    let scene = separated_diffraction_planes();
+    let mut hidden_edge = scene.clone();
+    hidden_edge.primitives[0].shape = Shape::Mesh(quad(
+        [2.0e-4, -0.003, 1.0],
+        [3.5e-4, -0.003, 1.0],
+        [3.5e-4, 0.003, 1.0],
+        [2.0e-4, 0.003, 1.0],
+    ));
+    let safe = layered_patch_camera(&scene, Aperture::try_circular(1.0e-3).unwrap(), 0.0, 0.0);
+    let sweeping =
+        layered_patch_camera(&scene, Aperture::try_circular(1.0e-3).unwrap(), -0.001, 0.0);
+    let axial = layered_patch_camera(&scene, Aperture::try_circular(1.0e-3).unwrap(), 0.0, 0.001);
+    let mut settings = motion_settings(1);
+    settings.strategy = DirectStrategy::BsdfOnly;
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        for (model, camera, reason) in [
+            (&hidden_edge, &safe, "off-axis pupil clipping"),
+            (
+                &scene,
+                &sweeping,
+                "clipping elsewhere in the owning lateral shot",
+            ),
+            (&scene, &axial, "axial camera motion"),
+        ] {
+            let mut film = Film::try_new(1, 1).unwrap();
+            let previous = film.clone();
+            assert!(
+                matches!(
+                    render_cinematic_range(
+                        model,
+                        camera,
+                        CutSide::After,
+                        cx,
+                        &settings,
+                        &mut film,
+                        0,
+                        1,
+                        shutter
+                    ),
+                    Err(TracerError::Camera(CameraError::InvalidDiffraction))
+                ),
+                "{reason}"
+            );
+            assert_film_state_bits_eq(&film, &previous, reason);
         }
     });
 }

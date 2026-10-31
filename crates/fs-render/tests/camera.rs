@@ -7,7 +7,7 @@ use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::camera::{
     AnimatedCamera, Aperture, CameraError, CameraKeyframe, CameraProjection, CameraShot, CutSide,
-    DefocusedDiffraction, FocusedDiffraction, LensSample, PhysicalCamera,
+    DefocusedDiffraction, FocusedDiffraction, LayeredDiffraction, LensSample, PhysicalCamera,
 };
 use fs_render::instances::RigidTransform;
 use fs_render::motion::{ShotTimeBounds, ShutterConvention, ShutterDistribution, ShutterInterval};
@@ -1904,4 +1904,192 @@ fn bladed_finite_defocus_keeps_aperture_phase_orientation_and_packet_weights() {
             );
         }
     });
+}
+
+#[test]
+fn layered_camera_resolves_the_sampled_source_before_spectral_weighting() {
+    let radius = 1.0e-3;
+    let focus = 0.25;
+    let near = 1.0 / (1.0 / focus + 2.0 * 550.0e-9 / (radius * radius));
+    let policy = LayeredDiffraction::try_new(&[near, focus], 0.01).unwrap();
+    for aperture in [
+        Aperture::try_circular(radius).unwrap(),
+        Aperture::try_annular(radius, 0.6 * radius).unwrap(),
+        Aperture::try_regular_polygon(radius, 5, 0.31).unwrap(),
+    ] {
+        let camera = axial_camera(aperture.clone(), focus)
+            .with_layered_diffraction(policy)
+            .unwrap();
+        assert_eq!(camera.layered_diffraction(), Some(policy));
+        assert!(camera.has_diffraction());
+        with_cx(|_, cx| {
+            assert!(matches!(
+                camera.generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::CENTER,
+                    LensSample::CENTER,
+                    &[550.0]
+                ),
+                Err(CameraError::DiffractionRequiresSourceDepth)
+            ));
+            let sample = LensSample::try_new(0.17, 0.23).unwrap();
+            let pending = || {
+                camera
+                    .sample_layered_diffraction_ray(cx, 0.0, 0.0, sample, &[400.0, 550.0, 700.0])
+                    .unwrap()
+            };
+            let ray = pending().ray();
+            assert_eq!(ray.origin, camera.eye());
+            let forward = ray.dir.dot(camera.forward());
+            let offset = [
+                ray.dir.dot(camera.right()) / forward,
+                ray.dir.dot(camera.up()) / forward,
+            ];
+            let at = |depth| ray.at(depth / forward);
+            let close = pending().resolve_source(cx, Some(at(near))).unwrap();
+            let far = pending().resolve_source(cx, Some(at(focus))).unwrap();
+            assert_eq!(
+                close.ray.dir, far.ray.dir,
+                "source depth cannot change the proposal draw"
+            );
+            assert_eq!(
+                pending().resolve_source(cx, None).unwrap().weights,
+                [0.0; 3]
+            );
+            for (lane, wavelength) in [400.0, 550.0, 700.0].into_iter().enumerate() {
+                let single = |depth| {
+                    axial_camera(aperture.clone(), focus)
+                        .with_defocused_diffraction(
+                            DefocusedDiffraction::try_new(Some(depth), 0.01).unwrap(),
+                        )
+                        .unwrap()
+                        .defocused_diffraction_density(offset, wavelength)
+                        .unwrap()
+                };
+                let near_density = single(near);
+                let far_density = single(focus);
+                assert_close(
+                    camera
+                        .layered_diffraction_density(offset, near, wavelength)
+                        .unwrap(),
+                    near_density,
+                    1.0e-11 * near_density.max(1.0),
+                    "same physical pupil at the actual source depth",
+                );
+                assert_close(
+                    close.weights[lane] * far_density,
+                    far.weights[lane] * near_density,
+                    2.0e-10 * (close.weights[lane] * far_density).max(1.0),
+                    "common proposal retains each source's PSF",
+                );
+            }
+            assert!(pending().resolve_source(cx, Some(at(0.1))).is_err());
+            let tail = camera
+                .sample_layered_diffraction_ray(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::try_new(1.0_f64.next_down(), 0.23).unwrap(),
+                    &[400.0, 550.0, 700.0],
+                )
+                .unwrap();
+            let tail_ray = tail.ray();
+            let point = tail_ray.at(focus / tail_ray.dir.dot(camera.forward()));
+            assert!(
+                tail.resolve_source(cx, Some(point))
+                    .unwrap()
+                    .weights
+                    .iter()
+                    .all(|weight| weight.is_finite() && *weight >= 0.0)
+            );
+        });
+    }
+    // The same axis ray has a chromatic null at the near source, and a bright
+    // focused peak at the farther source. A destination-depth kernel fails it.
+    let camera = axial_camera(Aperture::try_circular(radius).unwrap(), focus)
+        .with_layered_diffraction(policy)
+        .unwrap();
+    with_cx(|_, cx| {
+        let sample = || {
+            camera
+                .sample_layered_diffraction_ray(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::try_new(0.0, 0.0).unwrap(),
+                    &[400.0, 550.0, 700.0],
+                )
+                .unwrap()
+        };
+        let close = sample()
+            .resolve_source(cx, Some(Point3::new(0.0, 0.0, -near)))
+            .unwrap();
+        let far = sample()
+            .resolve_source(cx, Some(Point3::new(0.0, 0.0, -focus)))
+            .unwrap();
+        assert!(close.weights[1] < 1.0e-25 && far.weights[1] > 1.0);
+        assert!(close.weights[0] > 0.001 && close.weights[2] > 0.001);
+    });
+}
+
+#[test]
+fn layered_policy_is_bounded_and_survives_focus_interpolation() {
+    for depths in [
+        vec![],
+        vec![1.0, 1.0],
+        vec![2.0, 1.0],
+        vec![0.0],
+        vec![f64::NAN],
+        vec![f64::INFINITY],
+        (1..=17).map(f64::from).collect(),
+    ] {
+        assert!(LayeredDiffraction::try_new(&depths, 0.01).is_err());
+    }
+    let policy = LayeredDiffraction::try_new(&[0.2, 0.3], 0.01).unwrap();
+    assert_eq!(policy.object_distances_m(), &[0.2, 0.3]);
+    assert!(LayeredDiffraction::try_new(&[1.0], 0.11).is_err());
+    assert!(
+        axial_camera(pinhole(), 1.0)
+            .with_layered_diffraction(policy)
+            .is_err()
+    );
+    let camera = |focus| {
+        axial_camera(Aperture::try_circular(1.0e-3).unwrap(), focus)
+            .with_layered_diffraction(policy)
+            .unwrap()
+    };
+    let shot = CameraShot::try_new(
+        331,
+        0.0,
+        1.0,
+        vec![
+            CameraKeyframe::try_new(0.0, camera(0.2)).unwrap(),
+            CameraKeyframe::try_new(1.0, camera(0.3)).unwrap(),
+        ],
+    )
+    .unwrap();
+    let animation = AnimatedCamera::try_new(vec![shot]).unwrap();
+    with_cx(|_, cx| {
+        let middle = animation.evaluate(cx, 0.5, CutSide::After).unwrap();
+        assert_eq!(middle.layered_diffraction(), Some(policy));
+        assert!(
+            middle
+                .layered_diffraction_density([0.0; 2], 0.2, 400.0)
+                .is_ok()
+        );
+        assert_eq!(
+            middle
+                .with_in_focus_diffraction(FocusedDiffraction::try_new(0.01).unwrap())
+                .unwrap()
+                .layered_diffraction(),
+            None
+        );
+    });
+    assert!(
+        camera(0.01)
+            .layered_diffraction_density([0.0; 2], 0.2, 400.0)
+            .is_err()
+    );
 }

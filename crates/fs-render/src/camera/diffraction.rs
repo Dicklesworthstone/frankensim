@@ -16,6 +16,8 @@
 //! The focused policy bounds omitted quadratic phase. The finite-defocus
 //! policy propagates the declared pupil at an explicit object plane, with
 //! phase `pi*a^2/lambda * (1/z - 1/s)`, and gates residual depth error.
+//! The layered policy selects that phase from the actual sampled source,
+//! after a depth-independent proposal and all-pupil scene visibility admission.
 //! Geometric pupil blur is not added to either wave PSF. Coherence between
 //! scene points, polarization, aberrations and pupil-dependent occlusion are
 //! outside this scalar, paraxial, isoplanatic model.
@@ -28,9 +30,13 @@ use fs_math::det;
 
 mod annular;
 mod circular;
+mod layered;
 mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
+#[cfg(feature = "tracer")]
+pub(crate) use layered::ProjectedPupilFootprint;
+pub use layered::{LayeredCameraRay, LayeredDiffraction};
 use polygon::PolygonPupil;
 
 const PI: f64 = core::f64::consts::PI;
@@ -151,6 +157,7 @@ impl PhysicalCamera {
         self.admit_diffraction_projection()?;
         self.diffraction = Some(policy);
         self.defocused_diffraction = None;
+        self.layered_diffraction = None;
         Ok(self)
     }
 
@@ -176,6 +183,7 @@ impl PhysicalCamera {
         self.admit_diffraction_projection()?;
         self.defocused_diffraction = Some(policy);
         self.diffraction = None;
+        self.layered_diffraction = None;
         Ok(self)
     }
 
@@ -188,7 +196,9 @@ impl PhysicalCamera {
     /// Whether either wavelength-dependent pupil imaging policy is selected.
     #[must_use]
     pub const fn has_diffraction(&self) -> bool {
-        self.diffraction.is_some() || self.defocused_diffraction.is_some()
+        self.diffraction.is_some()
+            || self.defocused_diffraction.is_some()
+            || self.layered_diffraction.is_some()
     }
 
     /// Trace one sample of the wavelength-dependent, normalized pupil PSF.
@@ -225,6 +235,9 @@ impl PhysicalCamera {
         diffraction_sample: LensSample,
         wavelengths_nm: &[f64; N],
     ) -> Result<SpectralCameraRay<N>, CameraError> {
+        if self.layered_diffraction.is_some() {
+            return Err(CameraError::DiffractionRequiresSourceDepth);
+        }
         if !self.has_diffraction() {
             return Ok(SpectralCameraRay {
                 ray: self.generate_ray_from_tangent_offsets(cx, x_tan, y_tan, lens_sample)?,
@@ -458,7 +471,8 @@ impl PhysicalCamera {
     /// `None` denotes an infinitely distant environment. The smallest packet
     /// wavelength supplies the strongest test. The distance is axial, matching
     /// the camera's focus definition. The focused policy compares against
-    /// focus; finite defocus compares against its declared object plane, and
+    /// focus; single-plane defocus compares against its declared object plane;
+    /// layered defocus admits an actual source against its declared depth set,
     /// separately admits the modeled rim phase. Geometric cameras accept
     /// immediately. This pointwise check alone cannot establish a clear pupil.
     pub fn admit_diffraction_depth(
@@ -470,6 +484,10 @@ impl PhysicalCamera {
             return Ok(());
         }
         let (minimum, _) = self.diffraction_wavelength_range(wavelengths_nm)?;
+        if self.layered_diffraction.is_some() {
+            let point = point.ok_or(CameraError::DefocusOutsideDiffractionModel)?;
+            return self.admit_layered_depth(point.delta_from(self.eye).dot(self.forward), minimum);
+        }
         let inverse_depth = match point {
             Some(point) => {
                 let depth = point.delta_from(self.eye).dot(self.forward);
@@ -535,6 +553,9 @@ impl PhysicalCamera {
             if let Some(policy) = self.defocused_diffraction {
                 self.defocus_phase(policy, wavelength)?;
             }
+            if self.layered_diffraction.is_some() {
+                self.layered_maximum_phase(wavelength)?;
+            }
         }
         if !minimum.is_finite() {
             return Err(CameraError::InvalidDiffraction);
@@ -547,10 +568,18 @@ impl PhysicalCamera {
         policy: DefocusedDiffraction,
         wavelength_nm: f64,
     ) -> Result<f64, CameraError> {
+        self.pupil_defocus_phase(policy.inverse_object_distance(), wavelength_nm)
+    }
+
+    fn pupil_defocus_phase(
+        &self,
+        inverse_object_distance: f64,
+        wavelength_nm: f64,
+    ) -> Result<f64, CameraError> {
         let phase = PI
             * (self.aperture.radius_m() / (wavelength_nm * 1.0e-9))
             * self.aperture.radius_m()
-            * (policy.inverse_object_distance() - 1.0 / self.focus_distance_m);
+            * (inverse_object_distance - 1.0 / self.focus_distance_m);
         if !phase.is_finite() || phase.abs() > DefocusedDiffraction::MAXIMUM_DEFOCUS_PHASE_RAD {
             return Err(CameraError::DefocusOutsideDiffractionModel);
         }
