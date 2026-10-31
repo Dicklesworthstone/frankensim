@@ -26,6 +26,7 @@ use fs_material::fatigue::critical_plane::SwtCycleResult;
 use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieCycleResult,
 };
+use fs_material::fatigue::critical_plane::miner::CriticalPlaneMinerResult;
 use fs_material::fatigue::strain_life::{StrainLifeCurve, StrainLifeSummary};
 use fs_material::plastic::J2State;
 use fs_material::plastic::source::ResolvedJ2Plasticity;
@@ -35,7 +36,7 @@ use fs_qty::{Density, QuantitySpec};
 use super::InertialEnergy;
 use crate::plastic3::fatigue::{
     J2CriticalPlaneGauge, J2FatemiSocieGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge,
-    J2FatigueObserver, J2FatigueSample, poll, with_path,
+    J2FatigueObserver, J2FatigueSample, J2VariableAmplitudeGauge, poll, with_path,
 };
 use crate::plastic3::{SmallStrainTetProblem, SmallStrainTetSolution};
 
@@ -156,6 +157,35 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
         initial_velocity_mps: Vec<[f64; 3]>,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
+        Self::new_with_variable_amplitude(
+            problem,
+            mesh_frame,
+            gauges,
+            critical,
+            fatemi_socie,
+            Vec::new(),
+            config,
+            initial_time_s,
+            initial_velocity_mps,
+            cx,
+        )
+    }
+
+    /// Attach variable-amplitude critical-plane Miner gauges to the same
+    /// accepted native inertial J2 trajectory as the existing fatigue banks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_variable_amplitude(
+        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        mesh_frame: ContentHash,
+        gauges: Vec<J2FatigueGauge>,
+        critical: Vec<J2CriticalPlaneGauge>,
+        fatemi_socie: Vec<J2FatemiSocieGauge>,
+        variable_amplitude: Vec<J2VariableAmplitudeGauge>,
+        config: J2DynamicFatigueConfig,
+        initial_time_s: f64,
+        initial_velocity_mps: Vec<[f64; 3]>,
+        cx: &Cx<'_>,
+    ) -> Result<Self, J2FatigueError> {
         poll(cx)?;
         if problem.load_path != [1.0]
             || !initial_time_s.is_finite()
@@ -184,6 +214,7 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
             gauges,
             critical,
             fatemi_socie,
+            variable_amplitude,
             config.fatigue,
             cx,
         )?;
@@ -267,6 +298,9 @@ impl<'p, 'm> J2DynamicFatigueRun<'p, 'm> {
     }
     pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
         self.observer.fatemi_socie_calibration(gauge)
+    }
+    pub fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
+        self.observer.variable_amplitude_results()
     }
     /// Discard only the critical window/result and begin at the current accepted
     /// native state. Physical time, velocity, plastic history and all fixed-gauge

@@ -1,5 +1,36 @@
 # fs-solid CONTRACT
 
+## Variable-amplitude critical-plane Miner damage on native J2 histories
+
+The quasistatic and backward-Euler J2 fatigue owners now admit
+`J2VariableAmplitudeGauge` alongside fixed-plane CMB, representative-cycle SWT,
+and Fatemi-Socie gauges. Every accepted native endpoint contributes its actual
+stress and total mechanical-strain tensor to the material-level
+`CriticalPlaneMiner`; no external tensor history or reconstructed equivalent
+stress is accepted.
+
+Each gauge retains its original strain-life calibration/source binding and
+declared finite plane set. Uncorrected, Morrow and Smith-Watson-Topper policies
+reuse the existing bounded rainflow/Palmgren-Miner owner. Paired policies keep
+their existing refusal for phase-lag, relaxation, or nested reductions that
+would hide unmatched stress extrema. Sample and samples-times-planes work
+budgets remain explicit.
+
+Native mechanical advancement and every fatigue bank are one transaction.
+Quasistatic block failure, inertial-step failure, cancellation, source mismatch,
+or a late variable-amplitude gauge refusal restores the previously accepted J2
+state and every fatigue history. Finalization is likewise atomic across all
+banks. The variable-amplitude bank does not require or manufacture representative
+cycle closure and is not reset when a separate SWT/Fatemi-Socie cycle window is
+restarted.
+
+This is a finite-plane multiaxial variable-amplitude life estimate under linear
+Miner summation. It does not establish cyclic stabilization, optimize the
+continuum plane sphere, infer unsampled extrema, model load-sequence interaction,
+or evolve fatigue damage into stiffness, heat, fracture topology, or crack
+growth. The existing fixed-temperature small-strain J2 and source-validity
+limits remain authoritative.
+
 ## Shear-strain Fatemi–Socie life from native J2 cycles
 
 The shared quasistatic and inertial J2 fatigue observer now admits

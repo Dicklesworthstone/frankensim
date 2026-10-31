@@ -17,7 +17,12 @@ use fs_material::fatigue::critical_plane::fatemi_socie::source::{
 use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieError, FatemiSocieLimits, FatemiSocieNormalStress,
 };
-use fs_material::fatigue::critical_plane::{CriticalPlaneLimits, CycleClosureTolerance};
+use fs_material::fatigue::critical_plane::miner::{
+    CriticalPlaneMiner, CriticalPlaneMinerLimits,
+};
+use fs_material::fatigue::critical_plane::{
+    CriticalPlaneLimits, CycleClosureTolerance, TensorFatigueSample,
+};
 use fs_material::fatigue::strain_life::{CmbParameters, StrainLifeCurve, StrainLifeMeanStress};
 use fs_material::fatigue::{FatigueScope, RainflowLimits};
 use fs_material::plastic::source::{HardeningPropertyBasis, ResolvedJ2Plasticity, j2_requirements};
@@ -32,7 +37,7 @@ use fs_solid::plastic3::dynamics::fatigue::{
 };
 use fs_solid::plastic3::fatigue::{
     J2CriticalPlaneGauge, J2FatemiSocieGauge, J2FatigueConfig, J2FatigueError, J2FatigueGauge,
-    J2FatiguePath,
+    J2FatiguePath, J2VariableAmplitudeGauge,
 };
 use fs_solid::{IncrementSettings, SmallStrainLawField, SmallStrainTetProblem, TetAssemblyBudget};
 
@@ -261,6 +266,23 @@ fn swt_gauge(law: &ResolvedJ2Plasticity) -> J2CriticalPlaneGauge {
         closure: closure(),
     }
 }
+fn variable_gauge(law: &ResolvedJ2Plasticity) -> J2VariableAmplitudeGauge {
+    J2VariableAmplitudeGauge {
+        element: 0,
+        material_state_identity: law.material().identity(),
+        curve: axial_curve(law),
+        mean_stress: StrainLifeMeanStress::Uncorrected,
+        normals_in_mesh_frame: vec![[1.0, 0.0, 0.0], [1.0, 1.0, 0.0], [0.0, 1.0, 0.0]],
+        limits: CriticalPlaneMinerLimits {
+            rainflow: RainflowLimits {
+                maximum_samples: 128,
+                maximum_residue: 64,
+            },
+            maximum_planes: 32,
+            maximum_projection_work: 4096,
+        },
+    }
+}
 fn config(steps: usize) -> J2DynamicFatigueConfig {
     J2DynamicFatigueConfig {
         fatigue: J2FatigueConfig {
@@ -327,6 +349,7 @@ fn same(a: &J2DynamicFatigueRun<'_, '_>, b: &J2DynamicFatigueRun<'_, '_>) {
     assert_eq!(a.summaries(), b.summaries());
     assert_eq!(a.critical_plane_results(), b.critical_plane_results());
     assert_eq!(a.fatemi_socie_results(), b.fatemi_socie_results());
+    assert_eq!(a.variable_amplitude_results(), b.variable_amplitude_results());
 }
 
 #[test]
@@ -655,5 +678,167 @@ fn decaying_unforced_native_shear_is_observed_but_cannot_be_fabricated_as_a_clos
         run.advance_to(0.01, 0.0, cx).unwrap();
         assert_eq!(run.accepted_steps(), 2);
         assert_eq!(run.fatemi_socie_results(), vec![None]);
+    });
+}
+
+
+#[test]
+fn variable_amplitude_critical_plane_matches_the_actual_native_j2_tensor_history() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let f = fixture(true, 0);
+        let supports = supports();
+        let targets = [1.0, -0.5, 1.5, -1.0, 0.5, -0.75];
+        let p = problem(&f.law, &supports, &targets);
+        let gauge = variable_gauge(&f.law);
+        let mut run = J2FatiguePath::new_with_variable_amplitude(
+            &p,
+            FRAME,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![gauge.clone()],
+            config(targets.len()).fatigue,
+            cx,
+        )
+        .unwrap();
+
+        let mut independent = CriticalPlaneMiner::new(
+            gauge.curve,
+            gauge.mean_stress,
+            gauge.normals_in_mesh_frame,
+            gauge.limits,
+        )
+        .unwrap();
+        let initial = problem(&f.law, &supports, &[0.0]).solve(cx).unwrap();
+        independent
+            .push(TensorFatigueSample {
+                stress_pa: initial.element_stress[0],
+                total_mechanical_strain: initial.element_strain[0],
+            })
+            .unwrap();
+        let mut native = initial;
+        for factor in targets {
+            native = problem(&f.law, &supports, &[factor])
+                .solve_from(
+                    native.displacement_m.as_flattened(),
+                    &native.element_states,
+                    cx,
+                )
+                .unwrap();
+            independent
+                .push(TensorFatigueSample {
+                    stress_pa: native.element_stress[0],
+                    total_mechanical_strain: native.element_strain[0],
+                })
+                .unwrap();
+            run.advance(1, cx).unwrap();
+            assert_eq!(run.solution(), &native);
+            assert_eq!(run.variable_amplitude_results(), vec![None]);
+        }
+
+        let expected = independent.finish().unwrap();
+        assert!(run.finish(cx).unwrap().is_empty());
+        let actual = run.variable_amplitude_results()[0].clone().unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.samples, targets.len() as u64 + 1);
+        assert!(actual.summary.miner_damage > 0.0);
+        assert!(actual.summary.full_cycles + actual.summary.half_cycles > 0);
+    });
+}
+
+
+#[test]
+fn inertial_variable_amplitude_damage_matches_independent_native_endpoint_sampling() {
+    with_cx(&CancelGate::new_clock_free(), |cx| {
+        let f = fixture(true, 0);
+        let supports = supports();
+        let p = problem(&f.law, &supports, &[1.0]);
+        let gauge = variable_gauge(&f.law);
+        let targets = [
+            J2DynamicFatigueTarget {
+                time_s: 0.05,
+                load_factor: 1.0,
+            },
+            J2DynamicFatigueTarget {
+                time_s: 0.10,
+                load_factor: -0.5,
+            },
+            J2DynamicFatigueTarget {
+                time_s: 0.15,
+                load_factor: 1.5,
+            },
+            J2DynamicFatigueTarget {
+                time_s: 0.20,
+                load_factor: -1.0,
+            },
+        ];
+        let mut run = J2DynamicFatigueRun::new_with_variable_amplitude(
+            &p,
+            FRAME,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            vec![gauge.clone()],
+            config(targets.len()),
+            0.0,
+            ZERO.to_vec(),
+            cx,
+        )
+        .unwrap();
+
+        let mut independent = CriticalPlaneMiner::new(
+            gauge.curve,
+            gauge.mean_stress,
+            gauge.normals_in_mesh_frame,
+            gauge.limits,
+        )
+        .unwrap();
+        let mut native = problem(&f.law, &supports, &[0.0]).solve(cx).unwrap();
+        let mut velocity = ZERO.to_vec();
+        independent
+            .push(TensorFatigueSample {
+                stress_pa: native.element_stress[0],
+                total_mechanical_strain: native.element_strain[0],
+            })
+            .unwrap();
+        let mut previous_time = 0.0;
+        for target in targets {
+            let prescribed: Vec<_> = supports
+                .iter()
+                .map(|&(dof, value)| (dof, value * target.load_factor))
+                .collect();
+            let endpoint = problem(&f.law, &prescribed, &[1.0]);
+            let motion = endpoint
+                .advance_backward_euler(
+                    native.displacement_m.as_flattened(),
+                    &velocity,
+                    &native.element_states,
+                    &[6.0],
+                    target.time_s - previous_time,
+                    cx,
+                )
+                .unwrap();
+            independent
+                .push(TensorFatigueSample {
+                    stress_pa: motion.solution.element_stress[0],
+                    total_mechanical_strain: motion.solution.element_strain[0],
+                })
+                .unwrap();
+            run.advance(&[target], cx).unwrap();
+            assert_eq!(run.solution(), &motion.solution);
+            assert_eq!(run.velocity_mps(), motion.velocity_mps);
+            assert_eq!(run.variable_amplitude_results(), vec![None]);
+            native = motion.solution;
+            velocity = motion.velocity_mps;
+            previous_time = target.time_s;
+        }
+
+        let expected = independent.finish().unwrap();
+        assert!(run.finish(cx).unwrap().is_empty());
+        assert_eq!(
+            run.variable_amplitude_results(),
+            vec![Some(expected.clone())]
+        );
+        assert!(expected.summary.miner_damage > 0.0);
     });
 }

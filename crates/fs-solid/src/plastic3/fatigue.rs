@@ -31,6 +31,9 @@ use fs_material::fatigue::critical_plane::fatemi_socie::{
     FatemiSocieCalibration, FatemiSocieCycle, FatemiSocieCycleResult, FatemiSocieError,
     FatemiSocieLimits,
 };
+use fs_material::fatigue::critical_plane::miner::{
+    CriticalPlaneMiner, CriticalPlaneMinerError, CriticalPlaneMinerLimits, CriticalPlaneMinerResult,
+};
 use fs_material::fatigue::critical_plane::{
     CriticalPlaneError, CriticalPlaneLimits, CycleClosureTolerance, SwtCycle, SwtCycleResult,
     TensorFatigueSample,
@@ -87,15 +90,29 @@ pub struct J2FatemiSocieGauge {
     pub closure: CycleClosureTolerance,
 }
 
+/// Variable-amplitude finite-plane Miner accumulation on one native element.
+/// Every accepted J2 endpoint enters every declared plane; no representative
+/// cycle closure or stabilization is fabricated.
+#[derive(Debug, Clone)]
+pub struct J2VariableAmplitudeGauge {
+    pub element: usize,
+    pub material_state_identity: ContentHash,
+    pub curve: Arc<StrainLifeCurve>,
+    pub mean_stress: StrainLifeMeanStress,
+    pub normals_in_mesh_frame: Vec<[f64; 3]>,
+    pub limits: CriticalPlaneMinerLimits,
+}
+
 /// Logical storage/work limits. Native proposals copy the mechanical state
 /// and bounded fixed/SWT state; shear histories use accepted-prefix rollback.
 #[derive(Debug, Clone, Copy)]
 pub struct J2FatigueConfig {
     pub history: RainflowLimits,
-    /// Combined fixed-plane, SWT and Fatemi-Socie gauge count.
+    /// Combined fixed-plane, SWT, Fatemi-Socie and variable-amplitude gauge count.
     pub maximum_gauges: usize,
-    /// Fixed-plane rainflow storage. Each critical gauge has separate explicit
-    /// plane, sample and work limits in its declared gauge.
+    /// Total bounded rainflow residue slots across fixed-plane gauges and every
+    /// plane of every variable-amplitude gauge. Representative-cycle banks have
+    /// their own explicit plane/sample/work limits.
     pub maximum_total_residue: usize,
 }
 
@@ -118,6 +135,10 @@ pub enum J2FatigueError {
     FatemiSocie {
         gauge: usize,
         error: FatemiSocieError,
+    },
+    VariableAmplitude {
+        gauge: usize,
+        error: CriticalPlaneMinerError,
     },
     Mechanics(SmallStrainTetError),
     Cancelled,
@@ -165,6 +186,12 @@ struct CriticalGaugeState {
 struct FatemiSocieGaugeState {
     element: usize,
     counter: FatemiSocieCycle,
+}
+
+#[derive(Debug, Clone)]
+struct VariableAmplitudeGaugeState {
+    element: usize,
+    counter: CriticalPlaneMiner,
 }
 
 #[derive(Debug, Clone)]
@@ -233,6 +260,7 @@ pub(super) struct J2FatigueObserver {
     gauges: Vec<GaugeState>,
     critical: Vec<CriticalGaugeState>,
     fatemi_socie: Vec<FatemiSocieGaugeState>,
+    variable_amplitude: Vec<VariableAmplitudeGaugeState>,
     samples: u64,
     maximum_samples: u64,
     finished: bool,
@@ -244,6 +272,7 @@ pub(super) struct J2FatigueCheckpoint {
     gauges: Vec<GaugeState>,
     critical: Vec<CriticalGaugeState>,
     shear_prefixes: Vec<(u64, bool)>,
+    variable_amplitude: Vec<VariableAmplitudeGaugeState>,
     samples: u64,
     finished: bool,
 }
@@ -311,6 +340,31 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
         config: J2FatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
+        Self::new_with_variable_amplitude(
+            problem,
+            mesh_frame,
+            gauges,
+            critical,
+            fatemi_socie,
+            Vec::new(),
+            config,
+            cx,
+        )
+    }
+
+    /// Observe variable-amplitude finite-plane Miner damage alongside all
+    /// existing fixed-plane and representative-cycle fatigue banks.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_variable_amplitude(
+        problem: &'p SmallStrainTetProblem<'m, ResolvedJ2Plasticity>,
+        mesh_frame: ContentHash,
+        gauges: Vec<J2FatigueGauge>,
+        critical: Vec<J2CriticalPlaneGauge>,
+        fatemi_socie: Vec<J2FatemiSocieGauge>,
+        variable_amplitude: Vec<J2VariableAmplitudeGauge>,
+        config: J2FatigueConfig,
+        cx: &Cx<'_>,
+    ) -> Result<Self, J2FatigueError> {
         poll(cx)?;
         if mesh_frame == ContentHash([0; 32]) || problem.load_path.is_empty() {
             return Err(J2FatigueError::Invalid(
@@ -335,6 +389,7 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
             gauges,
             critical,
             fatemi_socie,
+            variable_amplitude,
             config,
             cx,
         )?;
@@ -389,6 +444,12 @@ impl<'p, 'm> J2FatiguePath<'p, 'm> {
     }
     pub fn fatemi_socie_calibration(&self, gauge: usize) -> Option<&FatemiSocieCalibration> {
         self.observer.fatemi_socie_calibration(gauge)
+    }
+    pub fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
+        self.observer.variable_amplitude_results()
+    }
+    pub fn variable_amplitude_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
+        self.observer.variable_amplitude_curve(gauge)
     }
 
     /// Discard only the previous critical cycle window/result and begin at the
@@ -479,6 +540,7 @@ impl J2FatigueObserver {
         gauges: Vec<J2FatigueGauge>,
         critical: Vec<J2CriticalPlaneGauge>,
         fatemi_socie: Vec<J2FatemiSocieGauge>,
+        variable_amplitude: Vec<J2VariableAmplitudeGauge>,
         config: J2FatigueConfig,
         cx: &Cx<'_>,
     ) -> Result<Self, J2FatigueError> {
@@ -486,14 +548,26 @@ impl J2FatigueObserver {
         if mesh_frame == ContentHash([0; 32]) {
             return Err(J2FatigueError::Invalid("declare a nonzero mesh frame"));
         }
+        let fixed_residue = gauges
+            .len()
+            .checked_mul(config.history.maximum_residue)
+            .ok_or(J2FatigueError::Budget)?;
+        let variable_residue = variable_amplitude.iter().try_fold(0usize, |total, gauge| {
+            gauge
+                .normals_in_mesh_frame
+                .len()
+                .checked_mul(gauge.limits.rainflow.maximum_residue)
+                .and_then(|n| total.checked_add(n))
+                .ok_or(J2FatigueError::Budget)
+        })?;
         if gauges
             .len()
             .checked_add(critical.len())
             .and_then(|n| n.checked_add(fatemi_socie.len()))
+            .and_then(|n| n.checked_add(variable_amplitude.len()))
             .is_none_or(|count| count == 0 || count > config.maximum_gauges)
-            || gauges
-                .len()
-                .checked_mul(config.history.maximum_residue)
+            || fixed_residue
+                .checked_add(variable_residue)
                 .is_none_or(|n| n > config.maximum_total_residue)
         {
             return Err(J2FatigueError::Budget);
@@ -583,12 +657,39 @@ impl J2FatigueObserver {
                 counter,
             });
         }
+        let variable_offset = shear_offset + shear_searches.len();
+        let mut variable_searches = Vec::with_capacity(variable_amplitude.len());
+        for (index, gauge) in variable_amplitude.into_iter().enumerate() {
+            poll(cx)?;
+            bind_curve(
+                problem,
+                variable_offset + index,
+                gauge.element,
+                gauge.material_state_identity,
+                &gauge.curve,
+            )?;
+            let counter = CriticalPlaneMiner::new(
+                gauge.curve,
+                gauge.mean_stress,
+                gauge.normals_in_mesh_frame,
+                gauge.limits,
+            )
+            .map_err(|error| J2FatigueError::VariableAmplitude {
+                gauge: index,
+                error,
+            })?;
+            variable_searches.push(VariableAmplitudeGaugeState {
+                element: gauge.element,
+                counter,
+            });
+        }
         poll(cx)?;
         Ok(Self {
             mesh_frame,
             gauges: prepared,
             critical: searches,
             fatemi_socie: shear_searches,
+            variable_amplitude: variable_searches,
             samples: 0,
             maximum_samples: config.history.maximum_samples,
             finished: false,
@@ -633,6 +734,15 @@ impl J2FatigueObserver {
             .get(gauge)
             .map(|g| g.counter.calibration())
     }
+    pub(super) fn variable_amplitude_results(&self) -> Vec<Option<CriticalPlaneMinerResult>> {
+        self.variable_amplitude
+            .iter()
+            .map(|g| g.counter.result().cloned())
+            .collect()
+    }
+    pub(super) fn variable_amplitude_curve(&self, gauge: usize) -> Option<&StrainLifeCurve> {
+        self.variable_amplitude.get(gauge).map(|g| g.counter.curve())
+    }
     pub(super) fn checkpoint(&self) -> J2FatigueCheckpoint {
         J2FatigueCheckpoint {
             gauges: self.gauges.clone(),
@@ -642,6 +752,7 @@ impl J2FatigueObserver {
                 .iter()
                 .map(|g| (g.counter.sample_count(), g.counter.result().is_none()))
                 .collect(),
+            variable_amplitude: self.variable_amplitude.clone(),
             samples: self.samples,
             finished: self.finished,
         }
@@ -651,6 +762,7 @@ impl J2FatigueObserver {
     pub(super) fn restore(&mut self, checkpoint: J2FatigueCheckpoint) {
         self.gauges = checkpoint.gauges;
         self.critical = checkpoint.critical;
+        self.variable_amplitude = checkpoint.variable_amplitude;
         self.samples = checkpoint.samples;
         self.finished = checkpoint.finished;
         for (gauge, (prefix, was_open)) in
@@ -790,6 +902,9 @@ impl J2FatigueObserver {
         for (index, gauge) in self.fatemi_socie.iter_mut().enumerate() {
             push_fatemi_socie(gauge, index, solution, cx)?;
         }
+        for (index, gauge) in self.variable_amplitude.iter_mut().enumerate() {
+            push_variable_amplitude(gauge, index, solution, cx)?;
+        }
         poll(cx)?;
         self.samples += 1;
         Ok(())
@@ -812,6 +927,15 @@ impl J2FatigueObserver {
             }
             if !self.critical.is_empty() || !self.fatemi_socie.is_empty() {
                 self.close_critical_plane_cycle(cx)?;
+            }
+            for (index, gauge) in self.variable_amplitude.iter_mut().enumerate() {
+                gauge
+                    .counter
+                    .finish_with_cancel(&mut || cx.checkpoint().is_err())
+                    .map_err(|error| J2FatigueError::VariableAmplitude {
+                        gauge: index,
+                        error,
+                    })?;
             }
             poll(cx)
         })();
@@ -845,6 +969,27 @@ fn push_critical(
         })
 }
 
+fn push_variable_amplitude(
+    gauge: &mut VariableAmplitudeGaugeState,
+    index: usize,
+    solution: &SmallStrainTetSolution<J2State>,
+    cx: &Cx<'_>,
+) -> Result<(), J2FatigueError> {
+    gauge
+        .counter
+        .push_with_cancel(
+            TensorFatigueSample {
+                stress_pa: solution.element_stress[gauge.element],
+                total_mechanical_strain: solution.element_strain[gauge.element],
+            },
+            &mut || cx.checkpoint().is_err(),
+        )
+        .map_err(|error| J2FatigueError::VariableAmplitude {
+            gauge: index,
+            error,
+        })
+}
+
 fn push_fatemi_socie(
     gauge: &mut FatemiSocieGaugeState,
     index: usize,
@@ -866,7 +1011,7 @@ fn push_fatemi_socie(
         })
 }
 
-// SourceMismatch uses fixed-first, SWT-second, Fatemi-Socie-third indexing.
+// SourceMismatch uses fixed, SWT, Fatemi-Socie, then variable-amplitude indexing.
 
 fn bind_curve(
     problem: &SmallStrainTetProblem<'_, ResolvedJ2Plasticity>,
