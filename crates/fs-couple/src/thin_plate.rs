@@ -13,9 +13,11 @@ use crate::string_specimen::KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_material::gas::GasState;
 use fs_material::state_point::{
-    DENSITY_PROPERTY, IsotropicThermoelasticStatePoint, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
+    BULK_MODULUS_PROPERTY, DENSITY_PROPERTY, IsotropicElasticParameters,
+    IsotropicThermoelasticStatePoint, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
     ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
-    POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint, YOUNG_MODULUS_PROPERTY,
+    POISSON_RATIO_PROPERTY, ResolvedIsotropicElasticModuli, ResolvedMaterialStatePoint,
+    SHEAR_MODULUS_PROPERTY, ScalarAdmissibility, ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
 };
 use fs_material::visco::{RayleighDamping, ThermoelasticZener};
 use fs_math::c64::C64;
@@ -1231,6 +1233,74 @@ pub enum PlateMaterialModel {
     Orthotropic12,
     /// Exchange card axes 1,2 in the section; apply Poisson reciprocity.
     Orthotropic21,
+    /// Isotropic density, Young's modulus and shear modulus; derive Poisson ratio.
+    IsotropicYoungShear,
+    /// Isotropic density, bulk modulus and shear modulus; derive Young/Poisson.
+    IsotropicBulkShear,
+}
+
+impl PlateMaterialModel {
+    /// Whether the selected constitutive law is isotropic, independently of
+    /// which source parameter pair specifies that law.
+    #[must_use]
+    pub const fn is_isotropic(self) -> bool {
+        matches!(self, Self::Isotropic | Self::IsotropicYoungShear | Self::IsotropicBulkShear)
+    }
+
+    /// Original density/elastic source fields, before any parameter conversion.
+    pub(crate) const fn elastic_properties(self) -> &'static [(&'static str, Dims)] {
+        match self {
+            Self::Isotropic => &[(DENSITY_PROPERTY, Density::DIMS),
+                (YOUNG_MODULUS_PROPERTY, Pressure::DIMS), (POISSON_RATIO_PROPERTY, Dims::NONE)],
+            Self::IsotropicYoungShear => &[(DENSITY_PROPERTY, Density::DIMS),
+                (YOUNG_MODULUS_PROPERTY, Pressure::DIMS), (SHEAR_MODULUS_PROPERTY, Pressure::DIMS)],
+            Self::IsotropicBulkShear => &[(DENSITY_PROPERTY, Density::DIMS),
+                (BULK_MODULUS_PROPERTY, Pressure::DIMS), (SHEAR_MODULUS_PROPERTY, Pressure::DIMS)],
+            Self::Orthotropic12 | Self::Orthotropic21 => &[(DENSITY_PROPERTY, Density::DIMS),
+                (ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[0], Pressure::DIMS),
+                (ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[1], Pressure::DIMS),
+                (ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES[0], Pressure::DIMS),
+                (ORTHOTROPIC_POISSON_RATIO_PROPERTIES[0], Dims::NONE)],
+        }
+    }
+
+    /// Source requirements for this section's density and elastic constants.
+    ///
+    /// The selected isotropic pair is requested directly; equivalent Young,
+    /// Poisson, bulk or shear values are derived only after source resolution.
+    /// Callers can append loss or other coupled-physics requirements to resolve
+    /// one complete material bundle without substituting its source fields.
+    pub fn elastic_requirements(self)
+        -> Result<Vec<ScalarPropertyRequirement>, fs_material::state_point::MaterialStatePointError>
+    {
+        self.elastic_properties().iter().map(|&(key, dims)| {
+            let domain = if key == POISSON_RATIO_PROPERTY {
+                ScalarAdmissibility::OpenInterval { lower: -1.0, upper: 0.5 }
+            } else if dims == Dims::NONE { ScalarAdmissibility::Finite }
+            else { ScalarAdmissibility::StrictlyPositive };
+            ScalarPropertyRequirement::try_new(key, dims, domain)
+        }).collect()
+    }
+
+    // A Young-modulus Maxwell spectrum is a different source model from
+    // independently relaxing bulk/shear constants. Do not infer that history.
+    pub(crate) fn require_canonical_relaxation(self) -> Result<(), AcousticRealizeError> {
+        if matches!(self, Self::IsotropicYoungShear | Self::IsotropicBulkShear) {
+            Err(AcousticRealizeError::InvalidDescription {
+                what: "plate hereditary relaxation requires its original Young/Poisson source model; independently selected isotropic pairs need an explicit relaxation law",
+            })
+        } else { Ok(()) }
+    }
+
+    const fn identity_tag(self) -> u8 {
+        match self {
+            Self::Isotropic => 0,
+            Self::Orthotropic12 => 1,
+            Self::Orthotropic21 => 2,
+            Self::IsotropicYoungShear => 3,
+            Self::IsotropicBulkShear => 4,
+        }
+    }
 }
 
 /// Independent thickness prescription for material comparison at fixed x,y size.
@@ -1507,11 +1577,7 @@ pub fn compile_plate_material_chart(
         }
         let region = &regions[r];
         identity.update(region.input.material.identity().as_bytes());
-        identity.update(&[match region.input.model {
-            PlateMaterialModel::Isotropic => 0,
-            PlateMaterialModel::Orthotropic12 => 1,
-            PlateMaterialModel::Orthotropic21 => 2,
-        }]);
+        identity.update(&[region.input.model.identity_tag()]);
         identity.update(&region.section.thickness.to_bits().to_le_bytes());
         identity.update(&region.input.material_angle_rad.to_bits().to_le_bytes());
     }
@@ -1569,12 +1635,12 @@ impl ResolvedPlateSpecimen {
     /// modal frequencies are checked by realization, including zero viscosity.
     pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
         let refuse = |what| AcousticRealizeError::InvalidDescription { what };
-        if self.model != PlateMaterialModel::Isotropic {
+        if !self.model.is_isotropic() {
             return Err(refuse(
                 "material plate bending viscosity requires isotropic elasticity",
             ));
         }
-        self.plate.kelvin_voigt_bending = Some(material_loss::resolve_viscosity(&self.material)?);
+        self.plate.kelvin_voigt_bending = Some(material_loss::resolve_viscosity(&self.material, self.model)?);
         PlateBendingLaw::new(&self.plate)?;
         Ok(self)
     }
@@ -1630,7 +1696,9 @@ impl ResolvedPlateSpecimen {
 
 /// Bind uniform plate geometry to the shared requirement-driven material API.
 ///
-/// Isotropic binding needs `density`, `young_modulus`, `poisson_ratio`.
+/// Isotropic binding explicitly selects `density` and either Young/Poisson,
+/// Young/shear, or bulk/shear source properties. Derived moduli are never
+/// inserted into the retained material bundle as independent source claims.
 /// Orthotropic binding needs `density`, `young_modulus_{1,2}`,
 /// `poisson_ratio_12`, `shear_modulus_12`, in the material's principal frame.
 /// No out-of-plane or unrelated optical/thermal properties are required.
@@ -1659,7 +1727,7 @@ pub fn with_uniform_plate_material_state(
             "elastic plate rebind requires a fresh thermal-loss binding",
         ));
     }
-    if plate.geometric_nonlinearity && model != PlateMaterialModel::Isotropic {
+    if plate.geometric_nonlinearity && !model.is_isotropic() {
         return Err(refuse(
             "material-bound nonlinear orthotropic membrane response is unavailable",
         ));
@@ -1691,11 +1759,7 @@ pub fn with_uniform_plate_material_state(
     }
     let mut identity = DomainHasher::new("org.frankensim.fs-couple.uniform-plate-specimen.v2");
     identity.update(state.identity().as_bytes());
-    identity.update(&[match model {
-        PlateMaterialModel::Isotropic => 0,
-        PlateMaterialModel::Orthotropic12 => 1,
-        PlateMaterialModel::Orthotropic21 => 2,
-    }]);
+    identity.update(&[model.identity_tag()]);
     for value in [
         plate.length_m,
         plate.width_m,
@@ -1771,15 +1835,36 @@ pub(crate) fn plate_elasticity(
     model: PlateMaterialModel,
 ) -> Result<(f64, f64, f64, f64), AcousticRealizeError> {
     let (e1, e2, nu12, g12) = match model {
-        PlateMaterialModel::Isotropic => {
-            let e = plate_property(state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
-            let nu = plate_property(state, POISSON_RATIO_PROPERTY, Dims::NONE)?;
-            if !(nu > -1.0 && nu < 0.5) {
-                return Err(AcousticRealizeError::InvalidDescription {
-                    what: "isotropic plate Poisson ratio must be in (-1, 0.5)",
-                });
-            }
-            (e, e, nu, e / (2.0 * (1.0 + nu)))
+        PlateMaterialModel::Isotropic | PlateMaterialModel::IsotropicYoungShear
+        | PlateMaterialModel::IsotropicBulkShear => {
+            let requirement = |key| ScalarPropertyRequirement::try_new(
+                key, Pressure::DIMS, ScalarAdmissibility::StrictlyPositive);
+            let parameters = (|| {
+                Ok::<_, fs_material::state_point::MaterialStatePointError>(match model {
+                    PlateMaterialModel::Isotropic => IsotropicElasticParameters::YoungPoisson {
+                        young_modulus: requirement(YOUNG_MODULUS_PROPERTY)?,
+                        poisson_ratio: ScalarPropertyRequirement::try_new(POISSON_RATIO_PROPERTY,
+                            Dims::NONE, ScalarAdmissibility::OpenInterval { lower: -1.0, upper: 0.5 })?,
+                    },
+                    PlateMaterialModel::IsotropicYoungShear => IsotropicElasticParameters::YoungShear {
+                        young_modulus: requirement(YOUNG_MODULUS_PROPERTY)?,
+                        shear_modulus: requirement(SHEAR_MODULUS_PROPERTY)?,
+                    },
+                    _ => IsotropicElasticParameters::BulkShear {
+                        bulk_modulus: requirement(BULK_MODULUS_PROPERTY)?,
+                        shear_modulus: requirement(SHEAR_MODULUS_PROPERTY)?,
+                    },
+                })
+            })().map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+            let response = ResolvedIsotropicElasticModuli::try_from_resolved(state.clone(), &parameters)
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+            let (young, poisson) = (response.young_modulus_pa(), response.poisson_ratio());
+            // Preserve the original canonical arithmetic after the shared
+            // material owner has admitted the complete constitutive law.
+            let shear = if model == PlateMaterialModel::Isotropic {
+                young / (2.0 * (1.0 + poisson))
+            } else { response.shear_modulus_pa() };
+            (young, young, poisson, shear)
         }
         PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 => {
             let e1 = plate_property(

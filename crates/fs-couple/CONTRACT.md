@@ -7218,6 +7218,31 @@ source kinetics, formation-energy pressure/sound response, material piston
 motion, absent reagents, source/work limits and cancellation rollback. Native
 workspace execution and experimental mechanism qualification remain separate.
 
+## Explicit isotropic elastic sources across plate consumers
+
+The shared `thin_plate::PlateMaterialModel` admits explicitly selected
+`IsotropicYoungShear` and `IsotropicBulkShear` source pairs alongside the original
+Young/Poisson and orthotropic models. Uniform and regional plate assembly,
+material section ingress, shell shear response and moisture-driven stiffness
+refresh use the same declared source requirements. Derived isotropic constants
+come from `fs-material::state_point::ResolvedIsotropicElasticModuli`; original
+claims, coordinate conventions, source domains and auxiliary loss properties
+remain in the complete material bundle. The chosen parameter roles enter the
+specimen identity. No parameter pair is inferred from available fields or a
+material name, and no derived value is fabricated as an independent claim.
+
+Kelvin-Voigt plate loss checks the actual source pair's fixed-environment and
+frequency support, and uses its derived Young's modulus in the existing modal
+loss projection. Material records select these alternatives with
+`isotropic-young-shear` or `isotropic-bulk-shear`. The bounded G3 tests in
+`material_plate_tests` compare native uniform/regional modes, loss and acoustic
+response against equivalent Young/Poisson data, and exercise complete-source
+temperature refresh and support refusal. This is frozen-state source lowering,
+not a new thermal/history integrator or experimental validation. Zener loss and
+Young-based Prony/tensor histories still require their original source
+parameterization and explicitly refuse the new alternatives; independent
+bulk/shear relaxation is not inferred from static elastic data.
+
 ## Finite moisture transport into native plate mechanics
 
 The material-reality MR46 slice in `moisture` keeps local water inventory

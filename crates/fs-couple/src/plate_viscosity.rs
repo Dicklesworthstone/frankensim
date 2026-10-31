@@ -22,14 +22,12 @@
 
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::thin_plate::{CompactBody, ModalBendingLoss, PlateBendingLaw, PlateMaterialModel,
-    RegionalBendingViscosity, ResolvedPlateChart, ResolvedPlateRegion, plate_property, viscous_time};
+    RegionalBendingViscosity, ResolvedPlateChart, ResolvedPlateRegion, plate_elasticity, viscous_time};
 use crate::render::schedule::force::coupled::{ModalAttachment, ModalConnection};
 use fs_exec::CancelGate;
 use fs_material::plane_stress_viscosity::{MaterialPlane, PlaneStressViscosity};
-use fs_material::state_point::YOUNG_MODULUS_PROPERTY;
 use fs_blake3::ContentHash;
 use fs_plate::PlateModel;
-use fs_qty::Pressure;
 
 /// Source-bound hereditary bending on the same original plate basis.
 pub mod relaxation;
@@ -59,11 +57,7 @@ pub(crate) fn resolve_region_viscosity(region: &ResolvedPlateRegion, properties:
     } else { (MaterialPlane::Axes12, properties) };
     let law = PlaneStressViscosity::from_material(region.input.material.clone(),plane,names).map_err(owner)?;
     let mut band = law.omega_band_rad_s();
-    let elastic: &[&str] = match region.input.model {
-        PlateMaterialModel::Isotropic => &["density","young_modulus","poisson_ratio"],
-        _ => &["density","young_modulus_1","young_modulus_2","poisson_ratio_12","shear_modulus_12"],
-    };
-    for key in elastic {
+    for &(key, _) in region.input.model.elastic_properties() {
         let p = region.input.material.property(key).ok_or_else(|| invalid("viscous plate is missing its original elastic coefficient"))?;
         if !p.is_constant_at_fixed_environment() {
             return Err(invalid("viscous plate needs fixed-state elastic and inertial coefficients"));
@@ -139,7 +133,7 @@ impl DiagonalPlateViscosity {
             match law {
                 RegionalBendingViscosity::Isotropic(viscous) => {
                     let viscous = *viscous;
-                    let young = plate_property(&region.input.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+                    let (young, _, _, _) = plate_elasticity(&region.input.material, region.input.model)?;
                     laws.push(DiagonalLaw::Isotropic(PlateBendingLaw { thermal: None, viscous: Some(viscous),
                         viscous_time_s: viscous_time(viscous, young)?, thickness: region.section.thickness }));
                 }

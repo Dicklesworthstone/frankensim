@@ -557,12 +557,14 @@ impl Parsed {
                 "material"=>{
                     let model=match row.word()? {
                         "isotropic"=>PlateMaterialModel::Isotropic,
+                        "isotropic-young-shear"=>PlateMaterialModel::IsotropicYoungShear,
+                        "isotropic-bulk-shear"=>PlateMaterialModel::IsotropicBulkShear,
                         "orthotropic12"=>PlateMaterialModel::Orthotropic12,
                         "orthotropic21"=>PlateMaterialModel::Orthotropic21,
-                        _=>return Err(bad(line,"a material section needs isotropic, orthotropic12 or orthotropic21")),
+                        _=>return Err(bad(line,"a material section needs isotropic, isotropic-young-shear, isotropic-bulk-shear, orthotropic12 or orthotropic21")),
                     };
                     let thickness=row.scalar()?;
-                    let angle=if model==PlateMaterialModel::Isotropic {0.0} else {row.scalar()?};
+                    let angle=if model.is_isotropic() {0.0} else {row.scalar()?};
                     let record=MaterialRecord::parse(&row.rest()).map_err(ingress)?;
                     let pack=wall::load_pack(&mut packs,&record.pack,line,load_material,gate)?;
                     let card=record.card(&pack).map_err(ingress)?;

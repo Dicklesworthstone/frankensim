@@ -13,7 +13,7 @@ use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility as
     ScalarPropertyRequirement as Requirement, resolve_material_state_point};
 use fs_material::visco_tensor::source::{TensorBranchProperties, TensorElasticity, TensorPronyProperties};
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
-use fs_qty::{Density, Dims, DynViscosity, Pressure};
+use fs_qty::{Dims, DynViscosity, Pressure};
 use std::{collections::BTreeMap, sync::Arc};
 
 /// Maximum encoded normalized artifact; the CLI bounds bytes before decoding.
@@ -240,6 +240,8 @@ pub(super) fn read(
         relative_path(&path, row.line)?;
         let model = match row.word()? {
             "isotropic" => PlateMaterialModel::Isotropic,
+            "isotropic-young-shear" => PlateMaterialModel::IsotropicYoungShear,
+            "isotropic-bulk-shear" => PlateMaterialModel::IsotropicBulkShear,
             "orthotropic12" => PlateMaterialModel::Orthotropic12,
             "orthotropic21" => PlateMaterialModel::Orthotropic21,
             _ => return Err(bad(row.line, "material section needs an explicit isotropic or ordered orthotropic plane")),
@@ -248,6 +250,9 @@ pub(super) fn read(
         let omega = row.scalar()?;
         let thickness = row.scalar()?;
         let angle = row.scalar()?;
+        if matches!(loss, LossSelection::Maxwell { .. } | LossSelection::TensorMaxwell { .. }) {
+            model.require_canonical_relaxation().map_err(PlateValveInputError::Physics)?;
+        }
         let line = row.line;
         let environment = crate::material_source::read_fixed_environment(&mut row.fields)
             .map_err(|source| PlateValveInputError::MaterialSource { line, source: source.to_string() })?;
@@ -264,20 +269,7 @@ pub(super) fn read(
                 line, source: error.to_string(),
             })?;
         let material = (|| {
-            let mut required = vec![Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?];
-            match model {
-                PlateMaterialModel::Isotropic => {
-                    required.push(Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?);
-                    required.push(Requirement::try_new("poisson_ratio", Dims::NONE,
-                        Admit::OpenInterval { lower: -1.0, upper: 0.5 })?);
-                }
-                _ => {
-                    for key in ["young_modulus_1", "young_modulus_2", "shear_modulus_12"] {
-                        required.push(Requirement::try_new(key, Pressure::DIMS, Admit::StrictlyPositive)?);
-                    }
-                    required.push(Requirement::try_new("poisson_ratio_12", Dims::NONE, Admit::Finite)?);
-                }
-            }
+            let mut required = model.elastic_requirements()?;
             if let LossSelection::Tensor { properties, .. } = loss {
                 for key in properties {
                     required.push(Requirement::try_new(key, DynViscosity::DIMS, Admit::Finite)?);

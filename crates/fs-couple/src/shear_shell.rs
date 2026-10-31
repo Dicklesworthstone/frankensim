@@ -257,7 +257,7 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
         let r=&input.region; let state=&r.material;
         let rho=plate_property(state,"density",Density::DIMS)?;
         let (e1,e2,nu,g12)=plate_elasticity(state,r.model)?;
-        let (g13,g23)=if r.model==PlateMaterialModel::Isotropic { (g12,g12) } else {
+        let (g13,g23)=if r.model.is_isotropic() { (g12,g12) } else {
             let a=plate_property(state,"shear_modulus_13",Pressure::DIMS)?;
             let b=plate_property(state,"shear_modulus_23",Pressure::DIMS)?;
             if r.model==PlateMaterialModel::Orthotropic21 { (b,a) } else { (a,b) }
@@ -274,13 +274,12 @@ pub fn compile_material_shear_shell(mesh: ShellMesh, inputs: Vec<ShellRegionMate
         } else { (MaterialPlane::Axes12,keys) };
         let plane_viscosity=PlaneStressViscosity::from_material(state.clone(),plane,keys).map_err(owner)?;
         let mut band=plane_viscosity.omega_band_rad_s();
-        let elastic: &[&str]=if r.model==PlateMaterialModel::Isotropic {
-            &["density","young_modulus","poisson_ratio"]
-        } else {
-            &["density","young_modulus_1","young_modulus_2","poisson_ratio_12",
-                "shear_modulus_12","shear_modulus_13","shear_modulus_23"]
-        };
-        for key in elastic { restrict_band(state,key,&mut band,false)?; }
+        for &(key,_) in r.model.elastic_properties() { restrict_band(state,key,&mut band,false)?; }
+        if !r.model.is_isotropic() {
+            for key in ["shear_modulus_13","shear_modulus_23"] {
+                restrict_band(state,key,&mut band,false)?;
+            }
+        }
         let mut shear=[0.0;3];
         for (i,key) in TRANSVERSE_SHEAR_VISCOSITY_PROPERTIES.iter().enumerate() {
             shear[i]=plate_property(state,key,DynViscosity::DIMS)?;

@@ -140,6 +140,45 @@ fn profile_rejects_unbounded_mesh_silent_fields_and_fixed_boundary_bridge() {
     assert!(Profile::parse(format!("{text}extra\n").as_bytes()).is_err());
 }
 
+#[test]
+fn explicit_isotropic_pairs_decode_for_plate_and_shell_with_original_source_requirements() {
+    for (token, selected_model, keys) in [
+        ("isotropic-young-shear",PlateMaterialModel::IsotropicYoungShear,
+            ["density","young_modulus","shear_modulus"]),
+        ("isotropic-bulk-shear",PlateMaterialModel::IsotropicBulkShear,
+            ["density","bulk_modulus","shear_modulus"]),
+    ] {
+        let text=include_str!("../orthotropic.body").replace("orthotropic12",token);
+        let parsed=Profile::parse(text.as_bytes()).unwrap();
+        let BodyModel::Plate(plate)=parsed.model else {panic!("expected plate profile");};
+        let Layout::Uniform {model,..}=plate.layout else {panic!("expected uniform plate");};
+        assert_eq!(model,selected_model);
+        let elastic=elastic_requirements(model).unwrap();
+        assert_eq!(elastic.iter().map(Requirement::name).collect::<Vec<_>>(),keys);
+        assert!(elastic.iter().all(|r|r.admissibility()==Admit::StrictlyPositive));
+        let requested=plate.loss.requirements(model).unwrap();
+        assert_eq!(&requested[..3],elastic.as_slice());
+        assert_eq!(requested[3..].iter().map(Requirement::name).collect::<Vec<_>>(),VISCOSITY);
+        let shell=include_str!("../arched.body").replace("orthotropic12",token);
+        assert!(matches!(Profile::parse(shell.as_bytes()).unwrap().model,BodyModel::Shell(_)));
+    }
+}
+
+#[test]
+fn independently_selected_isotropic_pairs_refuse_legacy_hereditary_source_laws() {
+    let regional=format!("{}loss regional-maxwell relaxed 32 1000000 1 excess time\n",
+        include_str!("../orthotropic.body"));
+    for text in [regional.as_str(),include_str!("../tensor-body.body")] {
+        let BodyModel::Plate(plate)=Profile::parse(text.as_bytes()).unwrap().model else {
+            panic!("expected plate profile");
+        };
+        for model in [PlateMaterialModel::IsotropicYoungShear,PlateMaterialModel::IsotropicBulkShear] {
+            let error=plate.loss.requirements(model).unwrap_err().to_string();
+            assert!(error.contains("original Young/Poisson source model"),"{error}");
+        }
+    }
+}
+
 const ROTATIONAL_BRIDGE_ROW: &str = "rotational-bridge 0 0.8 0 1 0.001 1e-7 0";
 const ROTATIONAL_BRIDGE_BLOCK: &str = "rotational-bridges 1\nrotational-bridge 0 0.8 0 1 0.001 1e-7 0\n";
 fn rotational_input() -> String {

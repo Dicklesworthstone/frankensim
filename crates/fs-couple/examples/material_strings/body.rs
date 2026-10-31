@@ -509,21 +509,16 @@ fn requirements(model:PlateMaterialModel) -> Result<Vec<Requirement>> {
     Ok(r)
 }
 fn elastic_requirements(model:PlateMaterialModel) -> Result<Vec<Requirement>> {
-    let mut r = vec![Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?];
-    let elastic: &[(&str,Dims)] = match model {
-        PlateMaterialModel::Isotropic => &[("young_modulus",Pressure::DIMS),("poisson_ratio",Dims::NONE)],
-        _ => &[("young_modulus_1",Pressure::DIMS),("young_modulus_2",Pressure::DIMS),
-            ("poisson_ratio_12",Dims::NONE),("shear_modulus_12",Pressure::DIMS)],
-    };
-    for &(key,dims) in elastic { r.push(Requirement::try_new(key,dims,Admit::Finite)?); }
-    Ok(r)
+    Ok(model.elastic_requirements()?)
 }
 fn model(value:&str) -> Result<PlateMaterialModel> {
     match value {
         "isotropic" => Ok(PlateMaterialModel::Isotropic),
+        "isotropic-young-shear" => Ok(PlateMaterialModel::IsotropicYoungShear),
+        "isotropic-bulk-shear" => Ok(PlateMaterialModel::IsotropicBulkShear),
         "orthotropic12" => Ok(PlateMaterialModel::Orthotropic12),
         "orthotropic21" => Ok(PlateMaterialModel::Orthotropic21),
-        _ => Err("body elastic model must be isotropic, orthotropic12 or orthotropic21".into()),
+        _ => Err("body elastic model must be isotropic, isotropic-young-shear, isotropic-bulk-shear, orthotropic12 or orthotropic21".into()),
     }
 }
 fn scalar(value:&str) -> Result<f64> {

@@ -352,7 +352,7 @@ impl Spec {
             poll(gate)?;
             let pack = if region.pack == "@body" { &spec.body.pack } else { &region.pack };
             let mut requested = requirements(region.model)?;
-            if !matches!(region.model, PlateMaterialModel::Isotropic) {
+            if !region.model.is_isotropic() {
                 for key in ["shear_modulus_13", "shear_modulus_23"] {
                     requested.push(Requirement::try_new(key, Pressure::DIMS, Admit::StrictlyPositive)?);
                 }

@@ -76,7 +76,7 @@ impl ResolvedPlateChart {
     pub fn with_kelvin_voigt_bending_loss(mut self) -> Result<Self, AcousticRealizeError> {
         let mut viscosities = Vec::with_capacity(self.regions.len());
         for region in &self.regions {
-            if region.input.model != PlateMaterialModel::Isotropic {
+            if !region.input.model.is_isotropic() {
                 let (_, band, bending) = resolve_region_viscosity(region, PLANE_STRESS_VISCOSITY_PROPERTIES)?;
                 viscosities.push(RegionalBendingViscosity::Orthotropic(OrthotropicPlateBendingViscosity {
                     bending_n_m_s: bending, omega_band_rad_s: band,
@@ -84,8 +84,8 @@ impl ResolvedPlateChart {
                 }));
                 continue;
             }
-            let law = resolve_viscosity(&region.input.material)?;
-            let young = plate_property(&region.input.material, YOUNG_MODULUS_PROPERTY, Pressure::DIMS)?;
+            let law = resolve_viscosity(&region.input.material, region.input.model)?;
+            let (young, _, _, _) = plate_elasticity(&region.input.material, region.input.model)?;
             viscous_time(law, young)?;
             viscosities.push(RegionalBendingViscosity::Isotropic(law));
         }
@@ -142,7 +142,7 @@ fn refuse(what: &'static str) -> AcousticRealizeError {
 }
 
 // One material-property admission path for uniform and regional plates.
-pub(super) fn resolve_viscosity(material: &ResolvedMaterialStatePoint)
+pub(super) fn resolve_viscosity(material: &ResolvedMaterialStatePoint, model: PlateMaterialModel)
     -> Result<IsotropicPlateBendingViscosity, AcousticRealizeError>
 {
     let property = material
@@ -159,15 +159,11 @@ pub(super) fn resolve_viscosity(material: &ResolvedMaterialStatePoint)
         .ok_or_else(|| {
             refuse("material plate viscosity needs an explicit omega band in rad/s or a typed frequency band")
         })?;
-    for key in [
-        DENSITY_PROPERTY,
-        YOUNG_MODULUS_PROPERTY,
-        POISSON_RATIO_PROPERTY,
-        KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
-    ] {
+    for key in model.elastic_properties().iter().map(|(key, _)| *key)
+        .chain(core::iter::once(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)) {
         let coefficient = material
             .property(key)
-            .ok_or_else(|| refuse("material plate loss needs density, E, nu and viscosity"))?;
+            .ok_or_else(|| refuse("material plate loss needs its original density, elastic pair and viscosity"))?;
         if !coefficient.is_constant_at_fixed_environment() {
             return Err(refuse(
                 "Kelvin-Voigt plate coefficients must be constant at the held typed environment, with no frequency-valued or unowned response law",

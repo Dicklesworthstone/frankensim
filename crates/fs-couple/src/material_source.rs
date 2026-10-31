@@ -17,13 +17,11 @@
 
 use fs_matdb::{MaterialCard, NormalizedMaterialCardPack, QueryPoint};
 use fs_material::state_point::{
-    DENSITY_PROPERTY, MaterialPropertySelection, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
-    ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
-    POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint, ScalarAdmissibility,
-    ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY, resolve_material_state_point,
+    DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
+    resolve_material_state_point,
 };
 use fs_plate::PlateSection;
-use fs_qty::{Density, Dims, Pressure};
+use fs_qty::Density;
 
 use crate::thin_plate::{PlateMaterialModel, plate_elasticity, plate_property};
 
@@ -232,7 +230,8 @@ pub fn fixture_label<'a>(tokens: &[&'a str]) -> Result<&'a str, MaterialIngressE
 
 /// A plate section from a record's card at `point`, through the same
 /// requirement-driven resolution the plate material models use: isotropic
-/// `density`, `young_modulus`, `poisson_ratio`; orthotropic `density`,
+/// `density` and the explicitly chosen Young/Poisson, Young/shear or bulk/shear
+/// pair; orthotropic `density`,
 /// `young_modulus_1`, `young_modulus_2`, `shear_modulus_12`,
 /// `poisson_ratio_12` (`Orthotropic21` exchanges the card's axes 1 and 2 with
 /// Poisson reciprocity). An isotropic section is built exactly as bare
@@ -248,54 +247,7 @@ pub fn plate_section(
     thickness_m: f64,
     angle_rad: f64,
 ) -> Result<(PlateSection, ResolvedMaterialStatePoint), MaterialIngressError> {
-    let requirement = |name: &str, dims, admissibility| {
-        ScalarPropertyRequirement::try_new(name, dims, admissibility)
-            .map_err(|e| refuse(format!("{e:?}")))
-    };
-    let mut required = vec![requirement(
-        DENSITY_PROPERTY,
-        Density::DIMS,
-        ScalarAdmissibility::StrictlyPositive,
-    )?];
-    match model {
-        PlateMaterialModel::Isotropic => {
-            required.push(requirement(
-                YOUNG_MODULUS_PROPERTY,
-                Pressure::DIMS,
-                ScalarAdmissibility::StrictlyPositive,
-            )?);
-            required.push(requirement(
-                POISSON_RATIO_PROPERTY,
-                Dims::NONE,
-                ScalarAdmissibility::OpenInterval {
-                    lower: -1.0,
-                    upper: 0.5,
-                },
-            )?);
-        }
-        PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 => {
-            for name in [
-                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[0],
-                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[1],
-            ] {
-                required.push(requirement(
-                    name,
-                    Pressure::DIMS,
-                    ScalarAdmissibility::StrictlyPositive,
-                )?);
-            }
-            required.push(requirement(
-                ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES[0],
-                Pressure::DIMS,
-                ScalarAdmissibility::StrictlyPositive,
-            )?);
-            required.push(requirement(
-                ORTHOTROPIC_POISSON_RATIO_PROPERTIES[0],
-                Dims::NONE,
-                ScalarAdmissibility::Finite,
-            )?);
-        }
-    }
+    let required = model.elastic_requirements().map_err(|e| refuse(format!("{e:?}")))?;
     let state = resolve_material_state_point(
         card,
         point,
@@ -306,16 +258,13 @@ pub fn plate_section(
     let owner = |e: crate::acoustic_realize::AcousticRealizeError| refuse(e.to_string());
     let density = plate_property(&state, DENSITY_PROPERTY, Density::DIMS).map_err(owner)?;
     let section = match model {
-        PlateMaterialModel::Isotropic => {
+        PlateMaterialModel::Isotropic | PlateMaterialModel::IsotropicYoungShear
+        | PlateMaterialModel::IsotropicBulkShear => {
             if angle_rad != 0.0 {
                 return Err(refuse("an isotropic section takes no material angle"));
             }
-            PlateSection::isotropic(
-                plate_property(&state, YOUNG_MODULUS_PROPERTY, Pressure::DIMS).map_err(owner)?,
-                plate_property(&state, POISSON_RATIO_PROPERTY, Dims::NONE).map_err(owner)?,
-                thickness_m,
-                density,
-            )
+            let (young, _, poisson, _) = plate_elasticity(&state, model).map_err(owner)?;
+            PlateSection::isotropic(young, poisson, thickness_m, density)
         }
         PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 => {
             let (e1, e2, nu12, g12) = plate_elasticity(&state, model).map_err(owner)?;

@@ -18,15 +18,13 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::gas::GasState;
 use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES;
 use fs_material::state_point::{
-    DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError,
-    ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
-    ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES, POISSON_RATIO_PROPERTY, ResolvedMaterialStatePoint,
+    DENSITY_PROPERTY, MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, YOUNG_MODULUS_PROPERTY,
     integrate_isotropic_thermal_expansion,
     resolve_isotropic_thermoelastic_state_point_with_requirements, resolve_material_state_point,
 };
 use fs_plate::{PlateMesh, PlateRegion};
-use fs_qty::{Density, Dims, DynViscosity, Pressure, Time};
+use fs_qty::{Density, DynViscosity, Pressure, Time};
 use fs_scenario::{AcousticAssembly, PrestressedString};
 
 use crate::acoustic_realize::{
@@ -394,7 +392,7 @@ fn compile_plate(
                 if *model != PlateMaterialModel::Isotropic {
                     return Err(missing(
                         "plate",
-                        "sourced thermal plate loss requires the isotropic material model",
+                        "sourced thermal plate loss requires the original isotropic Young/Poisson material bundle",
                     ));
                 }
                 let additional = if input.kelvin_voigt_bending.is_some() {
@@ -539,59 +537,24 @@ fn resolve_plate(
     bending_viscosity: bool,
     component: &str,
 ) -> Result<ResolvedMaterialStatePoint, MaterialAssemblyError> {
-    use ScalarAdmissibility::{Finite, OpenInterval, StrictlyPositive};
-    let mut fields = vec![(DENSITY_PROPERTY, Density::DIMS, StrictlyPositive)];
-    match model {
-        PlateMaterialModel::Isotropic => fields.extend([
-            (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, StrictlyPositive),
-            (
-                POISSON_RATIO_PROPERTY,
-                Dims::NONE,
-                OpenInterval {
-                    lower: -1.0,
-                    upper: 0.5,
-                },
-            ),
-        ]),
-        PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 => fields.extend([
-            (
-                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[0],
-                Pressure::DIMS,
-                StrictlyPositive,
-            ),
-            (
-                ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES[1],
-                Pressure::DIMS,
-                StrictlyPositive,
-            ),
-            (ORTHOTROPIC_POISSON_RATIO_PROPERTIES[0], Dims::NONE, Finite),
-            (
-                ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES[0],
-                Pressure::DIMS,
-                StrictlyPositive,
-            ),
-        ]),
-    }
+    let mut requirements = model.elastic_requirements()
+        .map_err(|source| resolution(component, source))?;
     if bending_viscosity {
-        if model == PlateMaterialModel::Isotropic {
-            fields.push((
+        if model.is_isotropic() {
+            requirements.push(ScalarPropertyRequirement::try_new(
                 KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY,
                 DynViscosity::DIMS,
                 ScalarAdmissibility::NonNegative,
-            ));
+            ).map_err(|source| resolution(component, source))?);
         } else {
             // Couplings may be signed. The shared plane-stress owner admits
             // the complete tensor, including explicit zero coefficients.
-            fields.extend(
-                PLANE_STRESS_VISCOSITY_PROPERTIES.map(|key| (key, DynViscosity::DIMS, Finite)),
-            );
+            for key in PLANE_STRESS_VISCOSITY_PROPERTIES {
+                requirements.push(ScalarPropertyRequirement::try_new(key, DynViscosity::DIMS,
+                    ScalarAdmissibility::Finite).map_err(|source| resolution(component, source))?);
+            }
         }
     }
-    let requirements = fields
-        .into_iter()
-        .map(|(key, dims, domain)| ScalarPropertyRequirement::try_new(key, dims, domain))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|source| resolution(component, source))?;
     resolve(source, &requirements, component)
 }
 

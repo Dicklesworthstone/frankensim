@@ -1893,6 +1893,132 @@ mod material_plate_tests {
         )
     }
 
+    fn elastic_pair_card(model: Model) -> MaterialCard {
+        let pair = match model {
+            Model::Isotropic => [("young_modulus", Pressure::DIMS, 6e9, 3e9),
+                ("poisson_ratio", Dims::NONE, 0.25, 0.25)],
+            Model::IsotropicYoungShear => [("young_modulus", Pressure::DIMS, 6e9, 3e9),
+                ("shear_modulus", Pressure::DIMS, 2.4e9, 1.2e9)],
+            Model::IsotropicBulkShear => [("bulk_modulus", Pressure::DIMS, 4e9, 2e9),
+                ("shear_modulus", Pressure::DIMS, 2.4e9, 1.2e9)],
+            _ => panic!("fixture chooses an isotropic independent pair"),
+        };
+        let domain = ValidityDomain::unconstrained().with("T", 300.0, 450.0)
+            .with("omega", 1.0, 10_000.0);
+        let base = material_card(&[], domain.clone());
+        let mut claims = ClaimSet::new();
+        for (key, dims, cold, hot) in [("density", Density::DIMS, 450.0, 450.0),
+            ("kelvin_voigt_bending_viscosity", DynViscosity::DIMS, 1e6, 2e6)]
+            .into_iter().chain(pair) {
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::new(key, dims),
+                value: PropertyValue::Curve { abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(300.0, cold), (450.0, hot)], dims },
+                validity: domain.clone(), interpolation: InterpolationPolicy::LinearInside,
+                uncertainty: UncertaintyModel::Unstated, observations: vec![],
+                provenance: Provenance { source: "synthetic isotropic parameter equivalence".into(),
+                    license: "CC0-1.0".into(), artifact: None },
+            }).unwrap();
+        }
+        MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+    }
+
+    #[test]
+    fn g3_isotropic_source_pairs_drive_the_same_plate_loss_and_acoustic_response() {
+        let mut input = plucked(20.0, 0.006, 1e-5);
+        input.duration_s = 0.015;
+        input.plate = Some(ThinPlate { damping_ratio: 0.0,
+            kelvin_voigt_bending: Some(IsotropicPlateBendingViscosity {
+                viscosity_pa_s: 9e9, omega_band_rad_s: (1.0, 10_000.0),
+                material_state_identity: None,
+            }), ..template() });
+        for temperature in [300.0, 375.0] {
+            let point = QueryPoint::new().with("T", temperature).unwrap()
+                .with("omega", 100.0).unwrap();
+            let mut responses = Vec::new();
+            let mut frequencies = Vec::new();
+            for model in [Model::Isotropic, Model::IsotropicYoungShear, Model::IsotropicBulkShear] {
+                let card = elastic_pair_card(model);
+                let compiled = compile_material_assembly(&input, &AcousticMaterialBindings {
+                    string: None,
+                    plate: Some(PlateMaterialBinding::Uniform { source: source(&card, &point),
+                        model, thickness: Thickness::FixedMass(0.3) }),
+                }).unwrap();
+                let Some(CompiledMaterialPlate::Uniform(specimen)) = compiled.plate() else {
+                    panic!("uniform source-bound specimen");
+                };
+                assert_eq!(specimen.material().properties().len(), 4);
+                assert_eq!(specimen.material().query(), point);
+                if model == Model::IsotropicBulkShear {
+                    assert!(specimen.material().property("young_modulus").is_none());
+                    assert!(specimen.material().property("poisson_ratio").is_none());
+                }
+                assert!((specimen.mass_kg() - 0.3).abs() < 1e-15);
+                let expected_eta = 1e6 + (temperature - 300.0) / 150.0 * 1e6;
+                let viscosity = specimen.plate().kelvin_voigt_bending.unwrap();
+                assert_eq!(viscosity.viscosity_pa_s, expected_eta);
+                assert_eq!(viscosity.material_state_identity, Some(specimen.material().identity()));
+                let (ingress, selected) = fs_couple::material_source::plate_section(
+                    &card, &point, model, specimen.plate().thickness_m, 0.0).unwrap();
+                assert_eq!(selected.card_identity(), specimen.material().card_identity());
+                for (actual, expected) in ingress.d.iter().zip(specimen.section().unwrap().d) {
+                    assert!((actual - expected).abs() <= 1e-13 * expected.abs().max(1.0));
+                }
+                frequencies.push(certified_radiators(specimen.plate()).unwrap()[0].omega);
+                responses.push(compiled.realize().unwrap().pressure_pa);
+
+                // Refresh retains the independent pair and viscosity source,
+                // then recompiles every derived coefficient and physical mass.
+                let hot = specimen.material().at_query_point(&card,
+                    &point.clone().with("T", 450.0).unwrap()).unwrap();
+                let rebound = bind(specimen.plate(), &hot, model, Thickness::FixedMass(0.3)).unwrap();
+                assert_eq!(rebound.material(), &hot);
+                assert!((rebound.plate().e1_pa / 3e9 - 1.0).abs() < 1e-14);
+                assert_eq!(rebound.plate().kelvin_voigt_bending.unwrap().viscosity_pa_s, 2e6);
+                assert_ne!(rebound.specimen_identity(), specimen.specimen_identity());
+                assert!(specimen.material().at_query_point(&card,
+                    &point.clone().with("T", 451.0).unwrap()).is_err());
+            }
+            for index in 1..responses.len() {
+                assert!((frequencies[index] / frequencies[0] - 1.0).abs() < 2e-12);
+                let scale = responses[0].iter().fold(0.0_f64, |a, b| a.max(b.abs()));
+                assert!(scale > 0.0);
+                for (actual, expected) in responses[index].iter().zip(&responses[0]) {
+                    assert!((actual - expected).abs() < 1e-8 * scale);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn g3_bulk_shear_regional_plate_reuses_native_sections_and_loss_projection() {
+        let point = QueryPoint::new().with("T", 300.0).unwrap().with("omega", 100.0).unwrap();
+        let mut frequencies = Vec::new();
+        for model in [Model::Isotropic, Model::IsotropicBulkShear] {
+            let card = elastic_pair_card(model);
+            let requirements: Vec<_> = card.claims().claims_ordered().map(|(_, claim)|
+                ScalarPropertyRequirement::try_with_key(&claim.key, ScalarAdmissibility::Finite).unwrap())
+                .collect();
+            let state = resolve_material_state_point(&card, &point, &requirements,
+                MaterialPropertySelection::SingleClaimOnly).unwrap();
+            let specimen = bind(ThinPlate { damping_ratio: 0.0, ..template() }, &state, model,
+                Thickness::FixedThickness(0.002)).unwrap().with_kelvin_voigt_bending_loss().unwrap();
+            let (chart, mut radiation) = chart_input(&specimen);
+            radiation.damping_ratio = 0.0;
+            let regions = vec![PlateRegionMaterial { region: PlateRegion { name: "body".into(),
+                triangle_indices: (0..chart.mesh.tris.len()).collect() }, material: state,
+                model, thickness_constraint: Thickness::FixedThickness(0.002), material_angle_rad: 0.0 }];
+            let resolved = compile_plate_material_chart(chart.mesh, chart.boundary_nodes, regions)
+                .unwrap().with_kelvin_voigt_bending_loss().unwrap();
+            let body = certified_material_chart_radiators(&resolved, &radiation).unwrap().remove(0);
+            assert!(body.zeta > 0.0);
+            frequencies.push((body.omega, body.zeta));
+        }
+        assert!((frequencies[0].0 / frequencies[1].0 - 1.0).abs() < 2e-10);
+        assert!((frequencies[0].1 / frequencies[1].1 - 1.0).abs() < 2e-10);
+    }
+
     #[test]
     fn g3_material_plate_viscosity_rebind_changes_pressure_without_changing_elastic_modes() {
         let point = QueryPoint::new()

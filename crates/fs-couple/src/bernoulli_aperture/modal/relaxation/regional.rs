@@ -81,6 +81,7 @@ impl ModalAperture {
             let mut regional = Vec::with_capacity(plate.source().regions().len());
             for region in plate.source().regions() {
                 poll(gate)?;
+                region.input.model.require_canonical_relaxation()?;
                 let material = &region.input.material;
                 let key = match region.input.model {
                     PlateMaterialModel::Isotropic => "young_modulus",

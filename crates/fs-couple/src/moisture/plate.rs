@@ -11,7 +11,6 @@ use crate::thin_plate::{PlateMaterialModel, plate_elasticity};
 use fs_plate::{
     AssemblyOptions, PlateMesh, PlateModel, PlateSection, PlateSectionField, assemble_with_sections,
 };
-use fs_qty::Pressure;
 
 /// Bounds checked before native mesh or DKT assembly allocation.
 #[derive(Clone, Copy, Debug)]
@@ -126,38 +125,10 @@ impl MoisturePlate {
         if !positive(width) {
             return Err(MoistureError::Invalid("plate width is unrepresentable"));
         }
-        let mut requirements = Vec::new();
-        match model {
-            PlateMaterialModel::Isotropic => {
-                requirements.push(ScalarPropertyRequirement::try_new(
-                    "young_modulus",
-                    Pressure::DIMS,
-                    ScalarAdmissibility::StrictlyPositive,
-                )?);
-                requirements.push(ScalarPropertyRequirement::try_new(
-                    "poisson_ratio",
-                    Dims::NONE,
-                    ScalarAdmissibility::OpenInterval {
-                        lower: -1.0,
-                        upper: 0.5,
-                    },
-                )?);
-            }
-            PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 => {
-                for key in ["young_modulus_1", "young_modulus_2", "shear_modulus_12"] {
-                    requirements.push(ScalarPropertyRequirement::try_new(
-                        key,
-                        Pressure::DIMS,
-                        ScalarAdmissibility::StrictlyPositive,
-                    )?);
-                }
-                requirements.push(ScalarPropertyRequirement::try_new(
-                    "poisson_ratio_12",
-                    Dims::NONE,
-                    ScalarAdmissibility::Finite,
-                )?);
-            }
-        }
+        // The moisture owner retains reference inventory; only the selected
+        // elastic pair is refreshed here, never current density on fixed volume.
+        let requirements: Vec<_> = model.elastic_requirements()?.into_iter()
+            .filter(|requirement| requirement.name() != "density").collect();
         let elastic = resolve_material_state_point(
             slab.card(),
             &slab.reference.query(),

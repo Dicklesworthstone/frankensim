@@ -134,10 +134,7 @@ impl MaterialStringBankSource {
                 .any(|&element| mesh.tris[element].contains(&geometry.node))
             {
                 thickness_m = thickness_m.min(region.thickness_m());
-                isotropic_elasticity &= matches!(
-                    region.input().region.model,
-                    crate::thin_plate::PlateMaterialModel::Isotropic
-                );
+                isotropic_elasticity &= region.input().region.model.is_isotropic();
             }
         }
         if !thickness_m.is_finite() || thickness_m <= 0.0 {

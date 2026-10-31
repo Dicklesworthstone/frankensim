@@ -416,7 +416,7 @@ pub(super) fn apply_coatings(
             .0
             .coefficients()
             .map(|v| v / h);
-        let mut gs = if model == PlateMaterialModel::Isotropic {
+        let mut gs = if model.is_isotropic() {
             [raw[8]; 2]
         } else {
             [

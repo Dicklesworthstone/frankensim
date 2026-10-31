@@ -102,6 +102,10 @@ impl PlateLoss {
         Ok(())
     }
     pub(super) fn requirements(&self, model: PlateMaterialModel) -> Result<Vec<Requirement>> {
+        if !self.is_tensor() && matches!(model,
+            PlateMaterialModel::IsotropicYoungShear | PlateMaterialModel::IsotropicBulkShear) {
+            return Err("body hereditary relaxation requires its original Young/Poisson source model; independently selected isotropic pairs need an explicit relaxation law".into());
+        }
         match self {
             Self::Tensor => super::requirements(model),
             Self::TensorMaxwell {..} => {

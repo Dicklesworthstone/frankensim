@@ -71,6 +71,7 @@ impl PlateBendingRelaxation {
         let mut bands = Vec::with_capacity(chart.regions().len());
         for region in chart.regions() {
             poll(gate)?;
+            region.input.model.require_canonical_relaxation()?;
             let source = &region.input.material;
             let mut band = (0.0, f64::MAX);
             let elastic: &[(&str, Dims)] = match region.input.model {
