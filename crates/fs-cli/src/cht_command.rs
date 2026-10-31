@@ -1384,7 +1384,18 @@ impl Scene {
                     "temperature-dependent CHT does not support compact components",
                 ));
             }
-            if solid_sources.len() != materials.len()
+            if root.get("transient").is_some() {
+                if solid_sources.iter().any(material::SolidSource::temperature_dependent) {
+                    return Err(bad(
+                        "unsteady material CHT requires fixed solid storage and authored or explicitly frozen solid sources; evolving solid storage needs its own enthalpy owner",
+                    ));
+                }
+                if materials.iter().any(|solid| !solid.conductivity_table.is_empty()) {
+                    return Err(bad(
+                        "unsteady material CHT requires fixed solid conductivity; conductivity_table is unsupported",
+                    ));
+                }
+            } else if solid_sources.len() != materials.len()
                 || solid_sources
                     .iter()
                     .enumerate()
@@ -1394,16 +1405,13 @@ impl Scene {
                     "temperature-dependent CHT requires every solid material in temperature-dependent source mode; frozen or authored solid coefficients cannot be mixed",
                 ));
             }
-            if root.get("transient").is_some() {
-                return Err(bad(
-                    "temperature-dependent CHT is steady; transient storage needs its own enthalpy owner",
-                ));
-            }
             if turbulence != Turbulence::Laminar {
                 return Err(bad("temperature-dependent CHT requires laminar flow"));
             }
-            if root.get("radiation").is_some() || emissivities.iter().any(|e| *e > 0.0) {
-                return Err(bad("temperature-dependent CHT does not support radiation"));
+            if root.get("transient").is_none()
+                && (root.get("radiation").is_some() || emissivities.iter().any(|e| *e > 0.0))
+            {
+                return Err(bad("steady temperature-dependent CHT does not support radiation"));
             }
             if expansion.is_some() {
                 return Err(bad(
@@ -1446,6 +1454,13 @@ impl Scene {
             ));
         }
         let transient = root.get("transient").map(Transient::parse).transpose()?;
+        if evolving && let Some(transient) = &transient {
+            if transient.unsteady.as_ref().is_none_or(|options| options.mean_flow_energy) {
+                return Err(bad(
+                    "temperature-dependent transient CHT requires flow \"unsteady\" and coupled energy; frozen or mean-flow energy cannot follow evolving buoyancy",
+                ));
+            }
+        }
         let sgs = sgs::parse(
             solver.and_then(|s| s.get("sgs")),
             turbulence,
@@ -1681,8 +1696,12 @@ fn execute_unsteady(
     let initial = transient
         .initial_temperature_k
         .or(ambient)
+        .or_else(|| scene.fluid_source.as_ref()
+            .and_then(material::FluidSource::evolving_reference_temperature))
         .ok_or_else(|| bad("transient.initial_temperature_k is required here"))?;
-    let buoyancy = match scene.gravity.filter(|g| g.iter().any(|v| *v != 0.0)) {
+    let buoyancy = match scene.gravity
+        .filter(|g| !scene.temperature_dependent() && g.iter().any(|v| *v != 0.0))
+    {
         Some(gravity) => {
             let reference = scene.reference.or(ambient).ok_or_else(|| {
                 bad("a buoyant scene needs reference_temperature_k, an inlet, or an opening")
@@ -1701,7 +1720,15 @@ fn execute_unsteady(
     unsteady.inner_tolerance = options.inner_tolerance;
     let started = Instant::now();
     let initial_temperature = vec![initial; domain.cell_count()];
-    let run = match scene.sgs {
+    let (run, material_feedback) = if scene.temperature_dependent() {
+        let (run, feedback) = material::march(
+            scene, domain, flow_config, setup, &initial_temperature, &unsteady,
+            |t| interpolate(&options.inlet_schedule, t), |t| transient.scale(t),
+            radiation, gate,
+        )?;
+        (run, Some(feedback))
+    } else {
+        let run = match scene.sgs {
         Some(sgs) => march_conjugate_with_sgs(
             domain,
             &scene.fluid,
@@ -1734,7 +1761,9 @@ fn execute_unsteady(
             gate,
         ),
     }
-    .map_err(|e| solver_failure(&e))?;
+        .map_err(|e| solver_failure(&e))?;
+        (run, None)
+    };
     let wall_s = started.elapsed().as_secs_f64();
     let records = &run.energy_records;
     let steps = &run.flow.records;
@@ -1800,7 +1829,9 @@ fn execute_unsteady(
             )
         })
         .collect();
-    let solver_name = if scene.sgs.is_some() && buoyancy.is_some() {
+    let solver_name = if material_feedback.is_some() {
+        "fv-simplec-unsteady-material"
+    } else if scene.sgs.is_some() && buoyancy.is_some() {
         "fv-simplec-unsteady-sgs-boussinesq"
     } else if scene.sgs.is_some() {
         "fv-simplec-unsteady-sgs"
@@ -1813,6 +1844,11 @@ fn execute_unsteady(
         TimeScheme::Bdf2 => "bdf2",
         TimeScheme::BackwardEuler => "backward-euler",
     };
+    let no_claim = if material_feedback.is_some() {
+        material::UNSTEADY_NO_CLAIM
+    } else {
+        NO_CLAIM
+    };
     if json_mode {
         let mut out = format!(
             "{{\"schema\":{},\"status\":\"completed\",\"solver\":{},\"cells\":{},\"fluid_cells\":{},\"voxel_m\":{},\"graded\":{}",
@@ -1824,6 +1860,9 @@ fn execute_unsteady(
             scene.grid.uniform.is_none()
         );
         scene.append_material_inputs(&mut out);
+        if let Some(feedback) = &material_feedback {
+            let _ = write!(out, ",\"material_feedback\":{feedback}");
+        }
         let _ = write!(
             out,
             ",\"flow\":{{\"steps\":{},\"sweeps\":{sweeps},\"max_step_sweeps\":{max_step_sweeps},\"final_mass_residual\":{},\"final_momentum_residual\":{},\"inflow_m3_s\":{},\"outflow_m3_s\":{},\"final_kinetic_energy_j\":{}",
@@ -1893,7 +1932,7 @@ fn execute_unsteady(
             ",\"max_solid_temperature_k\":{},\"wall_s\":{},\"evidence\":\"Estimated\",\"no_claim\":{}}}",
             num_or_null(solids_max(&run.temperature)),
             num(wall_s)?,
-            quote(NO_CLAIM)
+            quote(no_claim)
         );
         Ok(out)
     } else {
@@ -1906,6 +1945,9 @@ fn execute_unsteady(
         );
         if let Some(sgs) = &sgs {
             sgs.text(&mut out);
+        }
+        if let Some(feedback) = &material_feedback {
+            let _ = writeln!(out, "material_feedback={feedback}");
         }
         for (name, power, last_max, mean_max) in &source_rows {
             let _ = writeln!(
@@ -1925,7 +1967,7 @@ fn execute_unsteady(
         }
         let _ = writeln!(
             out,
-            "wall_s={wall_s:.3}\nevidence=Estimated\nno_claim={NO_CLAIM}"
+            "wall_s={wall_s:.3}\nevidence=Estimated\nno_claim={no_claim}"
         );
         Ok(out)
     }
@@ -2601,7 +2643,7 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let mut help = format!(
-            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. Liquids and solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid and fixed solid storage; material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
         help.push_str(sgs::HELP);
         return CommandOutput {

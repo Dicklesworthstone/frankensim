@@ -529,13 +529,39 @@ mod evolving_materials {
     }
 
     #[test]
+    fn unsteady_sourced_liquid_exchanges_heat_with_frozen_solid_storage() {
+        let (_, scene) = prepare("unsteady-liquid-storage", 0.0, 350.0);
+        let input = scene.replace(
+            "\"source\":{\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
+            "\"source\":{\"mode\":\"frozen\"",
+        ).replacen('{', r#"{"transient":{"flow":"unsteady","time_step_s":0.02,
+            "steps":4,"initial_temperature_k":300,
+            "inner_iterations":2000,"inner_tolerance":1e-9},"#, 1);
+        let path = scratch("unsteady-liquid-storage.json", &input);
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(result.str_field("solver"), Some("fv-simplec-unsteady-material"));
+        assert!(f(&result, &["transient", "final_max_solid_temperature_k"]) > 300.0);
+        assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-7);
+        assert!(f(&result, &["flow", "final_kinetic_energy_j"]) > 0.0);
+        let feedback = result.get("material_feedback").unwrap();
+        assert_eq!(f(feedback, &["fluid_endpoint", "cells"]), 30.0);
+        assert!(f(feedback, &["fluid_endpoint", "maximum_temperature_k"]) > 300.0);
+        let solid = &result.path(&["material_inputs", "solids"]).unwrap()
+            .as_array().unwrap()[0];
+        assert_eq!(solid.str_field("mode"), Some("frozen"));
+        assert_eq!(f(solid, &["density_kg_m3"]) * f(solid, &["specific_heat_j_kg_k"]), 4.0);
+        assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+    }
+
+    #[test]
     fn temperature_dependent_mode_refuses_conflicting_physics_and_unsupported_endpoints() {
         let (_, scene) = prepare("evolving-refusals", 1.0, 350.0);
         let insert = |field: &str| scene.replacen('{', &format!("{{{field},"), 1);
         for (index, (input, reason)) in [
             (insert("\"expansion_per_k\":0.001"), "density owns buoyancy"),
             (insert("\"reference_temperature_k\":301"), "conflicts with the original fluid"),
-            (insert("\"transient\":{}"), "is steady"),
+            (insert("\"transient\":{}"), "fixed solid storage"),
             (insert("\"radiation\":{}"), "does not support radiation"),
             (scene.replace("\"tolerance\":1e-10", "\"tolerance\":1e-10,\"turbulence\":\"lvel\""), "requires laminar"),
             (scene.replacen("\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",
@@ -628,6 +654,108 @@ fn temperature_dependent_atmosphere_drives_real_buoyant_flow_and_local_transport
         "{error}"
     );
     assert!(result.get("material_feedback").is_none());
+}
+
+
+fn unsteady_material_atmosphere(gas: &str, gravity: f64) -> String {
+    format!(r#"{{
+      "schema":"frankensim.cooling-cht.v1",
+      "size_m":[0.01,0.01,0.0016666666666666668],
+      "voxel_m":0.0016666666666666668,
+      "fluid":{{"mode":"temperature-dependent","gas":"{gas}"}},
+      "faces":{{
+        "x-":{{"type":"wall","temperature_k":307}},
+        "x+":{{"type":"wall","temperature_k":300}},
+        "z-":{{"type":"symmetry"}},"z+":{{"type":"symmetry"}}
+      }},
+      "gravity_m_s2":[0,{gravity},0],
+      "transient":{{"time_step_s":0.025,"steps":4,"flow":"unsteady",
+        "scheme":"bdf2","initial_temperature_k":300,
+        "inner_iterations":2000,"inner_tolerance":1e-9}},
+      "solver":{{"tolerance":1e-9}}
+    }}"#)
+}
+
+#[test]
+fn evolving_atmosphere_advances_native_buoyancy_and_retains_both_source_epochs() {
+    let mut kinetic = Vec::new();
+    for (index, gas, gravity) in [
+        (0, "300 100000 0.5", -9.81),
+        (1, "mixture 300 100000 mole 1 He 1", -9.81),
+        (2, "300 100000 0.5", 0.0),
+    ] {
+        let input = unsteady_material_atmosphere(gas, gravity);
+        let path = scratch(&format!("unsteady-material-atmosphere-{index}.json"), &input);
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        assert_eq!(result.str_field("solver"), Some("fv-simplec-unsteady-material"));
+        assert_eq!(f(&result, &["transient", "steps"]), 4.0);
+        assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-7);
+        let feedback = result.get("material_feedback").unwrap();
+        assert_eq!(feedback.str_field("coupling"), Some("explicit-first-order"));
+        assert!((f(feedback, &["applied_time_s"]) - 0.075).abs() < 1e-14);
+        assert!((f(feedback, &["endpoint_time_s"]) - 0.1).abs() < 1e-14);
+        let applied = feedback.get("fluid_applied").unwrap();
+        let endpoint = feedback.get("fluid_endpoint").unwrap();
+        assert_eq!(f(endpoint, &["cells"]), 36.0);
+        assert_ne!(applied.get("samples_identity"), endpoint.get("samples_identity"));
+        let rho0 = f(&result, &["material_inputs", "fluid", "density_kg_m3"]);
+        let hot = f(endpoint, &["maximum_temperature_k"]);
+        assert!(hot > 300.0 && hot < 307.0);
+        assert!((f(endpoint, &["minimum_density_kg_m3"]) / rho0 - 300.0 / hot).abs() < 1e-12);
+        assert!(f(endpoint, &["maximum_conductivity_w_m_k"])
+            > f(endpoint, &["minimum_conductivity_w_m_k"]));
+        kinetic.push(f(&result, &["flow", "final_kinetic_energy_j"]));
+        assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+    }
+    assert!(kinetic[0] > 0.0 && kinetic[1] > 0.0);
+    assert_ne!(kinetic[0], kinetic[1]);
+    assert_eq!(kinetic[2], 0.0);
+}
+
+#[test]
+fn unsteady_material_boundaries_refuse_without_publishing_a_partial_march() {
+    let scene = unsteady_material_atmosphere("300 100000 0", -9.81);
+    for (index, (input, reason)) in [
+        (
+            scene.replace("\"temperature_k\":307", "\"temperature_k\":360")
+                .replace("\"time_step_s\":0.025", "\"time_step_s\":0.5"),
+            "Boussinesq density relative departure",
+        ),
+        (
+            scene.replace("\"initial_temperature_k\":300", "\"initial_temperature_k\":330"),
+            "Boussinesq density relative departure",
+        ),
+        (
+            scene.replace(",\"flow\":\"unsteady\"", ""),
+            "requires flow",
+        ),
+        (
+            scene.replace("\"flow\":\"unsteady\"", "\"flow\":\"unsteady\",\"energy\":\"steady-on-mean-flow\""),
+            "requires flow",
+        ),
+        (
+            scene.replacen('{', "{\"expansion_per_k\":0.001,", 1),
+            "density owns buoyancy",
+        ),
+        (
+            scene.replacen('{', r#"{
+                "materials":[{"name":"plate","conductivity_w_m_k":1,
+                    "volumetric_heat_capacity_j_m3_k":1000,
+                    "conductivity_table":[[300,1],[307,2]]}],
+                "solids":[{"material":"plate","min_m":[0,0,0],
+                    "max_m":[0.01,0.0016666666666666668,0.0016666666666666668]}],"#, 1),
+            "fixed solid conductivity",
+        ),
+    ].into_iter().enumerate() {
+        let path = scratch(&format!("unsteady-material-refusal-{index}.json"), &input);
+        let (code, result, error) = run(&path);
+        assert_ne!(code, 0, "{index}");
+        assert!(error.contains(reason), "{index}: {error}");
+        assert!(result.get("material_feedback").is_none());
+        assert!(result.get("transient").is_none());
+        assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+    }
 }
 
 const CORNER_PLATE: &str = r#"{

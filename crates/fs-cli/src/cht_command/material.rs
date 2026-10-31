@@ -585,34 +585,7 @@ pub(super) fn solve(
         },
         _ => bad(error.to_string()),
     })?;
-    let fluid = match &fluid {
-        FluidLaw::Liquid(_) => endpoint_json(
-            run.endpoint.iter().map(|sample| {
-                let FluidState::Liquid(state) = sample.material.material() else {
-                    unreachable!()
-                };
-                (
-                    sample.cell,
-                    sample.temperature_k,
-                    sample
-                        .material
-                        .resolved_transport()
-                        .thermal_conductivity_w_m_k(),
-                    state.material(),
-                )
-            }),
-            gate,
-        )?,
-        FluidLaw::Gas(_) => gas_endpoint_json(
-            run.endpoint.iter().map(|sample| {
-                let FluidState::Gas(state) = sample.material.material() else {
-                    unreachable!()
-                };
-                (sample.cell, state)
-            }),
-            gate,
-        )?,
-    };
+    let fluid = fluid_endpoint_json(&run.endpoint, gate)?;
     let solid = endpoint_json(run.solid_endpoint.iter().map(|sample| (
         sample.cell, sample.temperature_k, sample.conductivity_w_m_k[0], &sample.material,
     )), gate)?;
@@ -737,4 +710,88 @@ fn gas_endpoint_json<'a>(
     }
     fields.push('}');
     Ok(fields)
+}
+
+
+/// Advance the original unsteady momentum and storage owners with actual
+/// fluid coefficients, retaining the same source law as the steady adapter.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn march(
+    scene: &super::Scene,
+    domain: &fs_lbm::conjugate::VoxelDomain,
+    flow: &fs_lbm::conjugate::SimpleConfig,
+    thermal: &fs_lbm::conjugate::ThermalSetup,
+    initial_temperature: &[f64],
+    unsteady: &fs_lbm::conjugate::UnsteadyConfig,
+    inlet_schedule: impl Fn(f64) -> f64,
+    power_schedule: impl Fn(f64) -> f64,
+    radiation: Option<&fs_lbm::conjugate::RadiationConfig>,
+    gate: &fs_exec::CancelGate,
+) -> Result<(fs_lbm::conjugate::ConjugateMarch, String)> {
+    use fs_lbm::material::conjugate::buoyant::MaterialBuoyancyError;
+    use fs_lbm::material::transport::boussinesq::BoussinesqConfig;
+
+    let source = scene.fluid_source.as_ref()
+        .ok_or_else(|| bad("unsteady material CHT requires a fluid source"))?;
+    let fluid = source.law()?;
+    let bound = MaterialChtFluid::try_new(fluid.reference())
+        .map_err(|error| bad(error.to_string()))?;
+    let run = bound.march_natural_convection(
+        domain, &scene.materials, flow, thermal,
+        &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
+        BoussinesqConfig {
+            gravity_m_s2: scene.gravity.unwrap_or([0.0; 3]),
+            max_relative_density_departure: 0.05,
+            max_relative_specific_heat_departure: 0.05,
+        },
+        unsteady, inlet_schedule, power_schedule, radiation, gate,
+        |_, temperature, _| fluid.at_temperature(temperature),
+    ).map_err(|error| match &error {
+        MaterialBuoyancyError::Solver(source) => super::solver_failure(source),
+        _ => bad(error.to_string()),
+    })?;
+    let applied = fluid_endpoint_json(&run.applied, gate)?;
+    let endpoint = fluid_endpoint_json(&run.endpoint, gate)?;
+    let feedback = format!(concat!(
+        "{{\"mode\":\"temperature-dependent\",\"coupling\":\"explicit-first-order\",",
+        "\"max_relative_density_departure\":0.05,\"max_relative_specific_heat_departure\":0.05,",
+        "\"applied_time_s\":{},\"endpoint_time_s\":{},",
+        "\"fluid_applied\":{},\"fluid_endpoint\":{}}}"),
+        super::num(run.applied_time_s)?, super::num(run.endpoint_time_s)?,
+        applied, endpoint);
+    Ok((run.march, feedback))
+}
+
+/// Reference rho/Cp storage is deliberately kept distinct from local transport.
+pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady laminar fixed-geometry Boussinesq flow and conservative conjugate heat storage; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density and heat capacity retained in inertia, continuity, storage and advection with at most 5 percent departures; explicit first-order material and heat coupling even with BDF2 momentum; solid storage and conductivity are fixed from authored or explicitly frozen data; original optional surface-radiation model; no compressibility, latent phase change, deformation, turbulence closure or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
+
+fn fluid_endpoint_json(
+    samples: &[fs_lbm::material::conjugate::buoyant::MaterialBuoyancySample<FluidState>],
+    gate: &fs_exec::CancelGate,
+) -> Result<String> {
+    match samples.first().map(|sample| sample.material.material()) {
+        Some(FluidState::Liquid(_)) => endpoint_json(
+            samples.iter().map(|sample| {
+                let FluidState::Liquid(state) = sample.material.material() else {
+                    unreachable!("one fluid source owns every cell")
+                };
+                (
+                    sample.cell, sample.temperature_k,
+                    sample.material.resolved_transport().thermal_conductivity_w_m_k(),
+                    state.material(),
+                )
+            }),
+            gate,
+        ),
+        Some(FluidState::Gas(_)) => gas_endpoint_json(
+            samples.iter().map(|sample| {
+                let FluidState::Gas(state) = sample.material.material() else {
+                    unreachable!("one fluid source owns every cell")
+                };
+                (sample.cell, state)
+            }),
+            gate,
+        ),
+        None => Ok("{\"cells\":0}".into()),
+    }
 }

@@ -10,6 +10,8 @@ the full source is evaluated at its declared reference state and its coefficient
 are held fixed during the run. Gases, liquids and solid thermal sources can instead use
 `"mode": "temperature-dependent"` to reevaluate their original source laws at
 local solved temperatures in the steady coupled flow/heat solve described below.
+An evolving fluid can also drive the native unsteady flow/heat march with fixed
+solid storage, as described in the transient section.
 Neither mode introduces compressibility, models melting, or establishes phase
 stability. Source errors, missing properties and out-of-domain reference states
 refuse before solving; the evolving mode also checks every trial and endpoint.
@@ -40,7 +42,7 @@ expansion coefficient are used; conflicting scene overrides refuse.
 
 Use `"mode": "temperature-dependent"` on the same gas declaration to evaluate
 the actual local density, viscosity, conductivity and heat capacity throughout
-the steady buoyancy/heat solve. Gas temperature is already part of the shared
+the steady or unsteady buoyancy/heat solve. Gas temperature is already part of the shared
 grammar, so **do not add `temperature_axis`** to a gas declaration. For example:
 
 ```json
@@ -205,12 +207,12 @@ The next temperature trial is relaxed by one half; this does not relax the
 acceptance checks. `solver.max_iterations` bounds the coupled passes and each
 momentum solve, and the existing wall-time cancellation budget remains active.
 
-This mode supports steady laminar gas or liquid flow and isotropic sourced solids.
-Mixed frozen/authored/evolving material assignments, transient
-storage, radiation, LVEL turbulence and compact components refuse explicitly.
-Existing frozen scenes retain their original supported features. Solid storage,
-phase change, deformation and arbitrary anisotropic conductivity are outside
-this evolving CLI path.
+This steady mode supports laminar gas or liquid flow and isotropic sourced solids.
+Mixed frozen/authored/evolving material assignments, radiation, LVEL turbulence
+and compact components refuse explicitly in the steady source-feedback solve.
+The distinct unsteady fluid path below retains fixed solid storage. Phase change,
+deformation and arbitrary anisotropic source conductivity remain outside these
+CLI paths.
 
 Results identify `solver: "fv-simplec-material"`. `material_feedback` reports
 the accepted defects and tolerances, the solid-to-fluid heat transfer, and
@@ -229,3 +231,69 @@ and material-card/state identities for source-backed liquids and solids. These
 identify reference inputs; evolving endpoint evidence is reported separately in
 `material_feedback`. Neither promotes estimated numerical results to
 experimental validation.
+
+
+## Unsteady flow with temperature-dependent fluid properties
+
+An evolving gas or liquid can now use the existing native transient momentum
+and heat-storage calculation. Add this block to the scene:
+
+```json
+{
+  "transient": {
+    "flow": "unsteady",
+    "time_step_s": 0.025,
+    "steps": 40,
+    "scheme": "bdf2",
+    "initial_temperature_k": 300,
+    "inner_iterations": 200,
+    "inner_tolerance": 1e-8
+  }
+}
+```
+
+Select `mode: "temperature-dependent"` on the fluid. Solid thermal coefficients
+and storage must be authored or explicitly `mode: "frozen"` source data. Frozen
+solid packs retain the original density-times-specific-heat storage already
+used by the native transient solver. A temperature-dependent solid source
+refuses here: its conductivity law alone does not define evolving solid
+enthalpy, phase inventory or storage. Authored `conductivity_table` entries also
+refuse in this path, so a dynamic solid law cannot silently become constant.
+The steady all-evolving solid path above is unchanged.
+
+At each accepted temperature, the original fluid source resolves local density,
+viscosity, heat capacity and conductivity together. The next native momentum
+step uses `(rho(T) - rho_reference) * gravity` and local viscosity; the heat
+step uses the same projected volume fluxes, local conductivity and reference
+`rho * Cp` storage/advection. Both source density and Cp must remain within
+5% of their original reference at the initial state and every endpoint.
+Pressure, composition, source choices and source domains retain the same rules
+as in the steady path.
+
+This is **first-order explicit material/thermal coupling**, even when the
+momentum scheme is BDF2. The viscosity update preserves native velocity,
+pressure and BDF history. This coupling order is reported separately from the
+requested momentum scheme; time refinement is still required to assess error.
+The original inlet and power schedules, material contacts, internal fans,
+hydraulic resistances and optional surface-radiation owner remain available.
+The existing transient face-fan and compact-component restrictions still apply.
+
+The fluid law requires `transient.flow: "unsteady"` and marched energy.
+Frozen-flow transient energy, `energy: "steady-on-mean-flow"`, LVEL and SGS
+cannot represent this evolving material path and refuse. An authored
+`expansion_per_k` also refuses, because actual source density owns buoyancy.
+For an enclosed scene without another initial temperature, the declared fluid
+reference temperature supplies the initial condition.
+
+Results identify `solver: "fv-simplec-unsteady-material"` and retain the native
+flow-step records, thermal storage closure, probes, time averages and VTK
+output. `material_feedback` reports `coupling: "explicit-first-order"`,
+`applied_time_s` and `endpoint_time_s`. `fluid_applied` describes the source
+samples used during the final step; `fluid_endpoint` describes the checked
+sources at its accepted final temperature. They are deliberately distinct
+epochs. Source, departure-bound, convergence or cancellation failure returns
+no partial march.
+
+These additions retain the existing laminar, fixed-geometry Boussinesq
+approximation. They do not supply compressible gas dynamics, evolving mass,
+latent heat or experimental validation.
