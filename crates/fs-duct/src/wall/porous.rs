@@ -20,6 +20,7 @@ use crate::fluid::{self, FluidDuctError};
 use crate::{ConeSlices, Duct, DuctError};
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid;
+use fs_material::porous::layers::RigidBackedLayers;
 use fs_material::porous::{PorousFluidLaw, PorousFluidResponse};
 use fs_math::c64::C64;
 
@@ -130,6 +131,114 @@ impl WallLaw for PorousLining<'_> {
             });
         }
         Ok(self.impedance)
+    }
+}
+
+/// Distributed local reaction from the original porous/fluid-gap stack.
+/// The stack retains all sources and ONE fluid/frequency sample. Its normal
+/// admittance is cached and conjugated once, with no repeated material solve.
+///
+/// This is the same planar local-wall approximation as PorousLining. Duct
+/// geometry describes the remaining fluid core; cavity depth is not subtracted
+/// from the radius. It does not resolve tangential or cylindrical-layer waves.
+#[derive(Clone, Copy)]
+pub struct PorousLayersLining<'stack, 'source> {
+    layers: &'stack RigidBackedLayers<'source>,
+    admittance: C64,
+}
+
+impl<'stack, 'source> PorousLayersLining<'stack, 'source> {
+    /// Select NORMAL-incidence local reaction explicitly. A pressure node with
+    /// unrepresentable infinite admittance refuses; an exact rigid stack is
+    /// admitted with zero admittance, without manufacturing a large impedance.
+    pub fn try_new(layers: &'stack RigidBackedLayers<'source>) -> Result<Self, MaterialError> {
+        let beta = layers
+            .reflection(1.0)?
+            .normalized_surface_admittance()?
+            .conj();
+        let z0 = layers.fluid().acoustic().characteristic_impedance_pa_s_m();
+        let admittance = C64::new(beta.re / z0, beta.im / z0);
+        if !admittance.re.is_finite()
+            || !admittance.im.is_finite()
+            || admittance.re < 0.0
+            || (beta != C64::ZERO && admittance == C64::ZERO)
+        {
+            return Err(MaterialError::State {
+                what: "layered lining admittance must be finite, passive and representable".into(),
+            });
+        }
+        Ok(Self { layers, admittance })
+    }
+
+    /// Original layer laws, their shared fluid, and their admitted frequency.
+    pub const fn layers(&self) -> &'stack RigidBackedLayers<'source> {
+        self.layers
+    }
+
+    /// Specific surface admittance [m/(Pa s)], in exp(-i omega t).
+    /// The duct owner applies actual perimeter and surface slope exactly once.
+    pub const fn surface_admittance_m_pa_s(&self) -> C64 {
+        self.admittance
+    }
+
+    /// Use the same fluid in the original plane-wave chain with an inviscid
+    /// core. No rigid-wall no-slip/isothermal loss is also imposed on this
+    /// permeable boundary. Geometry budgets and cancellation remain original.
+    pub fn duct_chain(
+        &self,
+        duct: &Duct,
+        cone_slices: ConeSlices,
+        options: ComposeOptions,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedChain, FluidDuctError> {
+        // Preserve the original analytic rigid cone/profile dispatch as well
+        // as its local wave when this prepared stack has exactly zero admittance.
+        let wall = if self.admittance == C64::ZERO {
+            WallModel::Rigid
+        } else {
+            WallModel::Law(self)
+        };
+        fluid::duct_chain(
+            duct,
+            self.layers.fluid(),
+            self.layers.angular_frequency_rad_s(),
+            wall,
+            cone_slices,
+            options,
+            cancelled,
+        )
+    }
+}
+
+impl WallLaw for PorousLayersLining<'_, '_> {
+    fn specific_impedance(&self, radius_m: f64, omega: f64) -> Result<C64, DuctError> {
+        let y = self.specific_admittance(radius_m, omega)?;
+        if y == C64::ZERO {
+            return Err(DuctError::BadParameter {
+                what: "rigid layered lining has no finite surface impedance",
+            });
+        }
+        let z = y.recip();
+        if !z.re.is_finite() || !z.im.is_finite() || z.re < 0.0 || z == C64::ZERO {
+            return Err(DuctError::BadParameter {
+                what: "layered lining surface impedance is unrepresentable",
+            });
+        }
+        Ok(z)
+    }
+
+    fn specific_admittance(&self, radius_m: f64, omega: f64) -> Result<C64, DuctError> {
+        if !radius_m.is_finite() || radius_m <= 0.0 {
+            return Err(DuctError::BadParameter {
+                what: "layered lining needs a positive finite fluid-core radius",
+            });
+        }
+        if omega != self.layers.angular_frequency_rad_s() {
+            return Err(DuctError::BadParameter {
+                what: "layered lining was prepared at a different frequency",
+            });
+        }
+        Ok(self.admittance)
     }
 }
 

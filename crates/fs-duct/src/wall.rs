@@ -1,6 +1,6 @@
 //! One local wall-frequency law shared by every plane-wave geometry.
 //!
-//! Constitutive owners return specific impedance under exp(-i omega t).
+//! Constitutive owners return specific impedance or admittance under exp(-i omega t).
 //! Duct geometry supplies circumference and surface slope. A material law may
 //! depend on the actual radius and frequency; it must retain its own source
 //! and applicability admission. This seam does not introduce a shell solver.
@@ -11,7 +11,7 @@ use fs_phs::WallPin;
 
 /// Material-owned, rigid-backed porous absorption on a distributed wall.
 mod porous;
-pub use porous::PorousLining;
+pub use porous::{PorousLayersLining, PorousLining};
 
 /// Passive locally reacting surface impedance [Pa s/m].
 ///
@@ -21,6 +21,25 @@ pub use porous::PorousLining;
 pub trait WallLaw {
     /// Complete impedance, including inertia and every retained material arm.
     fn specific_impedance(&self, radius_m: f64, omega: f64) -> Result<C64, DuctError>;
+
+    /// Complete specific admittance [m/(Pa s)]. Existing impedance owners keep
+    /// their original evaluation and reciprocal arithmetic. A law with an
+    /// exact rigid limit may override this method and return zero explicitly.
+    fn specific_admittance(&self, radius_m: f64, omega: f64) -> Result<C64, DuctError> {
+        let z = self.specific_impedance(radius_m, omega)?;
+        if !z.re.is_finite() || !z.im.is_finite() || z.re < 0.0 || z == C64::ZERO {
+            return Err(DuctError::BadParameter {
+                what: "wall law impedance must be passive, finite and nonzero",
+            });
+        }
+        let y = z.recip();
+        if !y.re.is_finite() || !y.im.is_finite() || y.re < 0.0 || y == C64::ZERO {
+            return Err(DuctError::BadParameter {
+                what: "finite wall impedance reciprocal is unrepresentable",
+            });
+        }
+        Ok(y)
+    }
 }
 
 /// Explicit wall binding without changing the historical constant-pin API.
@@ -38,31 +57,57 @@ impl<'a> WallModel<'a> {
     /// Preserve the original meaning of an optional constant pin.
     #[must_use]
     pub const fn from_pin(pin: Option<&'a WallPin>) -> Self {
-        match pin { Some(pin) => Self::Pin(pin), None => Self::Rigid }
+        match pin {
+            Some(pin) => Self::Pin(pin),
+            None => Self::Rigid,
+        }
     }
 
     #[must_use]
-    pub const fn is_rigid(self) -> bool { matches!(self, Self::Rigid) }
+    pub const fn is_rigid(self) -> bool {
+        matches!(self, Self::Rigid)
+    }
 
     /// An outer None denotes a general law, not a rigid wall.
     pub(crate) const fn legacy_pin(self) -> Option<Option<&'a WallPin>> {
-        match self { Self::Rigid => Some(None), Self::Pin(pin) => Some(Some(pin)), Self::Law(_) => None }
+        match self {
+            Self::Rigid => Some(None),
+            Self::Pin(pin) => Some(Some(pin)),
+            Self::Law(_) => None,
+        }
     }
 
-    pub(crate) fn apply(self, wave: SegmentWave, radius: f64, omega: f64, slant: f64)
-        -> Result<SegmentWave, DuctError> {
+    pub(crate) fn apply(
+        self,
+        wave: SegmentWave,
+        radius: f64,
+        omega: f64,
+        slant: f64,
+    ) -> Result<SegmentWave, DuctError> {
         match self {
             Self::Rigid => Ok(wave),
             Self::Pin(pin) => crate::apply_wall_to_wave(wave, radius, omega, pin, slant),
             Self::Law(law) => {
                 if !radius.is_finite() || radius <= 0.0 || !omega.is_finite() || omega <= 0.0 {
-                    return Err(DuctError::BadParameter { what: "wall law needs positive finite radius and frequency" });
+                    return Err(DuctError::BadParameter {
+                        what: "wall law needs positive finite radius and frequency",
+                    });
                 }
-                let z = law.specific_impedance(radius, omega)?;
-                if !z.re.is_finite() || !z.im.is_finite() || z.re < 0.0 || z == C64::ZERO {
-                    return Err(DuctError::BadParameter { what: "wall law impedance must be passive, finite and nonzero" });
+                let specific = law.specific_admittance(radius, omega)?;
+                if !specific.re.is_finite() || !specific.im.is_finite() || specific.re < 0.0 {
+                    return Err(DuctError::BadParameter {
+                        what: "wall law admittance must be passive and finite",
+                    });
                 }
-                let y = z.recip().scale(core::f64::consts::TAU * radius);
+                if specific == C64::ZERO {
+                    if !slant.is_finite() || slant <= 0.0 {
+                        return Err(DuctError::BadParameter {
+                            what: "wall admittance and surface slope must be finite",
+                        });
+                    }
+                    return Ok(wave);
+                }
+                let y = specific.scale(core::f64::consts::TAU * radius);
                 crate::apply_wall_admittance_to_wave(wave, radius, y, slant)
             }
         }

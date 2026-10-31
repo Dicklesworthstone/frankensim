@@ -2350,3 +2350,26 @@ admitted owners. `porous/tests.rs` independently solves interface continuity,
 checks coherent absorbed power against the original viscous/thermal volume-loss
 integral, composes split layers and an actual fluid air gap, recovers the existing
 rigid-backed material impedance, and exercises thin/opaque limits and refusal.
+
+## Multilayer local wall reflection
+
+`wall::PorousLayersLining` borrows the original `RigidBackedLayers` preparation
+and caches its normal-incidence surface admittance. It retains every layer law,
+source frequency and the one coherent saturating-fluid state. Normalized
+material admittance is divided by the actual rho*c and conjugated once into
+the duct phasor; the wall owner alone supplies perimeter and surface slope.
+
+`WallLaw::specific_admittance` defaults to the existing checked impedance
+reciprocal. Admittance-owning laws can expose an exact zero without inventing
+a large finite impedance. `WallModel::Law` admits finite passive admittance
+and preserves the exact rigid wave when it is zero. The legacy constant
+`Pin` operation graph is unchanged; a requested infinite surface impedance
+or unrepresentable pressure-node admittance refuses explicitly.
+
+The layered helper uses the original inviscid fluid-chain owner, geometry
+budgets and cancellation, with radii describing the remaining fluid core.
+The same planar local-reaction approximation as `PorousLining` applies;
+extended reaction, cylindrical layer curvature and duplicate rigid-wall
+viscothermal losses are not supplied. Focused regressions cover original
+single-layer equivalence, cavity-backed line propagation, exact rigid limits,
+single fluid sampling, frequency/cancellation and legacy-law admission.
