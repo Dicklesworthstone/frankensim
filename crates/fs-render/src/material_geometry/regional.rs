@@ -20,6 +20,11 @@ pub use appearance::{
     MaterialRegionAppearance, MaterialRegionBinding, MaterialRegionBindingError,
     thermal_body_primitives,
 };
+#[cfg(feature = "material-state")]
+pub use appearance::continuation::{
+    MaterialRegionContinuation, MaterialRegionContinuationError, MaterialRegionSource,
+    continue_thermal_body_primitives,
+};
 
 /// A nonempty exterior patch belonging to one original material cell.
 pub struct MaterialRegionMesh {

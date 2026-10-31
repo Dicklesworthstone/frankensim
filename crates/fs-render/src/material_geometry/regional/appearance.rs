@@ -5,9 +5,11 @@ use fs_mbd_material::deformation::thermoelastic::ThermalBody;
 use fs_solid::linear3::TetAssemblyBudget;
 
 use super::super::{MaterialGeometryError, poll};
-use super::deformed_body_regions;
+use super::{MaterialRegionMesh, deformed_body_regions};
 use crate::material_state::{MaterialOpticalBinding, MaterialThermalBinding, OpticalAppearance};
 use crate::tracer::{Primitive, Shape};
+
+pub(super) mod continuation;
 
 /// A supported physical appearance already bound to one accepted material state.
 /// Surface finish and gray/diffuse assumptions stay explicit in these bindings.
@@ -108,10 +110,26 @@ pub fn thermal_body_primitives(
             "exactly one appearance per exterior region is required",
         ));
     }
-    let mut ordered: Vec<_> = bindings.iter().collect();
+    let mut ordered = bindings.to_vec();
     ordered.sort_by_key(|binding| binding.key);
+    bind_ordered_regions(body, regions, &ordered, cx)
+}
+
+// Both fresh and continuing observations consume the same extracted exterior.
+// In particular a continuation must not rebuild every region's BVH twice.
+fn bind_ordered_regions(
+    body: &ThermalBody<'_>,
+    regions: Vec<MaterialRegionMesh>,
+    bindings: &[MaterialRegionBinding<'_>],
+    cx: &Cx<'_>,
+) -> Result<Vec<Primitive>, MaterialRegionBindingError> {
+    if bindings.len() != regions.len() {
+        return Err(MaterialRegionBindingError::Bindings(
+            "exactly one appearance per exterior region is required",
+        ));
+    }
     let mut primitives = Vec::with_capacity(regions.len());
-    for (region, binding) in regions.into_iter().zip(ordered) {
+    for (region, binding) in regions.into_iter().zip(bindings) {
         poll(cx)?;
         let key = body.body().reference().regions()[region.region_index].key();
         if binding.key != key {

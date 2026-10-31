@@ -39,6 +39,7 @@ use crate::tracer::Material;
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialThermalBinding {
     accepted_state_identity: ContentHash,
+    surface_state_identity: ContentHash,
     emissivity: SurfaceEmissivity,
     surface: GrayDiffuseThermalSurface,
 }
@@ -75,6 +76,7 @@ impl MaterialThermalBinding {
         h.update(surface_state_identity.as_bytes());
         Ok(Self {
             accepted_state_identity: accepted.identity(),
+            surface_state_identity,
             emissivity: emissivity.clone(),
             surface: GrayDiffuseThermalSurface::try_new(
                 emissivity.temperature_k(),
@@ -98,6 +100,12 @@ impl MaterialThermalBinding {
     #[must_use]
     pub const fn accepted_state_identity(&self) -> ContentHash {
         self.accepted_state_identity
+    }
+
+    /// Independent physical surface state retained across material endpoints.
+    #[must_use]
+    pub const fn surface_state_identity(&self) -> ContentHash {
+        self.surface_state_identity
     }
 
     /// Original emissivity source, uncertainty and selected query receipt.

@@ -1925,6 +1925,20 @@ thermal debit or state update. Dielectric bindings refuse: an exterior-only
 regional partition does not supply the internal optical interfaces and shared
 medium-boundary tracking required for transparent multi-material bodies.
 
+`continue_thermal_body_primitives` connects later accepted local solid states to
+the same native regional geometry/appearance owner. It reevaluates each exterior
+region's original optical or total-emissivity claims once at that cell's complete
+accepted query and quantity schema, preserving its optical family, claim pins,
+independent surface identity and finish. Competing later claims cannot replace
+the originals. Geometry extraction and regional BVH construction occur once;
+the shared primitive builder validates the complete candidate. Successor sources
+and primitives return together for atomic caller publication and the next
+endpoint. Unsupported source domains, stale/foreign pairs and cancellation expose
+no partial replacement. This remains a fixed-topology opaque endpoint observer,
+with no extra heat debit or inferred surface history. The regional continuation
+regression drives real thermoelastic deformation, conductor reflection and
+gray/diffuse thermal pixels, including later overlapping claims and late refusal.
+
 ## Calibrated point-fixture photometry
 
 The opt-in `photometry` feature composes `tracer` and `volumes` for a headless

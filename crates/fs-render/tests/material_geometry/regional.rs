@@ -7,6 +7,9 @@ use fs_render::material_geometry::regional::{
 use fs_render::tracer::Material;
 use std::collections::BTreeSet;
 
+#[path = "regional/continuation.rs"]
+mod continuation;
+
 fn appearance(
     body: &ThermalBody<'_>,
     cards: &[MaterialCard],
