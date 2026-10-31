@@ -44,7 +44,9 @@ mod species_pack;
 mod surface;
 mod tensor;
 
-pub use surface::{MAX_SURFACE_SAMPLES, MAX_SURFACE_TRIANGLES};
+pub use surface::{
+    MAX_SURFACE_SAMPLES, MAX_SURFACE_TRIANGLES, PreparedSurfaceResponse, SurfaceDifferential,
+};
 
 pub use tensor::{
     ElasticTensorBasis, ElasticTensorComponent, ElasticTensorNotation, ElasticTensorOrder,

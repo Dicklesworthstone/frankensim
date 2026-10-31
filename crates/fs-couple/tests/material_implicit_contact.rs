@@ -241,7 +241,6 @@ fn source(
     slope: f64,
     minimum_tb: f64,
 ) -> InterfaceSystemCard {
-    let mut claims = ClaimSet::new();
     let value = if let Some(axis) = axis {
         let fraction = axis == "fa" || axis == "fb";
         let (lo, hi) = if fraction { (0.0, 1.0) } else { (300.0, 800.0) };
@@ -261,6 +260,15 @@ fn source(
             dims: RD,
         }
     };
+    source_value(cards, value, axis.is_some(), minimum_tb)
+}
+fn source_value(
+    cards: &[MaterialCard; 2],
+    value: PropertyValue,
+    linear: bool,
+    minimum_tb: f64,
+) -> InterfaceSystemCard {
+    let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
             key: PropertyKey::new(RP, RD),
@@ -286,7 +294,7 @@ fn source(
                 )
                 .with_quantity("fa", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0)
                 .with_quantity("fb", QuantitySpec::dimensional(Dims::NONE), 0.0, 1.0),
-            interpolation: if axis.is_some() {
+            interpolation: if linear {
                 InterpolationPolicy::LinearInside
             } else {
                 InterpolationPolicy::ConstantWithinValidity
@@ -426,7 +434,10 @@ fn phase_contact_source_changes_actual_branched_heat_with_both_latent_and_sensib
         );
         assert_eq!(response.resistance_enthalpy_derivatives_m2_kg_k_w_j[1], 0.0);
         assert_eq!(
-            contacts[0].source_line().knots[0].1.receipt.selected,
+            contacts[0].source_line().unwrap().knots[0]
+                .1
+                .receipt
+                .selected,
             contacts[0].reference().interface.receipt().selected
         );
         assert_eq!(old.cells()[&C].specific_h_j_kg, 25.0);
@@ -626,4 +637,229 @@ fn final_contact_domain_exit_and_late_cancellation_preserve_both_original_histor
     for contact in &contacts {
         assert_eq!(contact.reference().phases[0].specific_enthalpy_j_kg(), 25.0);
     }
+}
+
+fn phase_temperature_surface(
+    cards: &[MaterialCard; 2],
+    phase_slope: f64,
+    temperature_slope: f64,
+    complete: bool,
+) -> InterfaceSystemCard {
+    source_value(
+        cards,
+        PropertyValue::Surface2D {
+            axes: ["fa".into(), "TB".into()],
+            axis_dims: [Dims::NONE, Temperature::DIMS],
+            samples: [[0.0, 400.0], [1.0, 400.0], [0.0, 600.0], [1.0, 600.0]]
+                .into_iter()
+                .map(|at| {
+                    (
+                        at,
+                        0.25 + phase_slope * at[0] + temperature_slope * (at[1] - 400.0),
+                    )
+                })
+                .collect(),
+            triangles: if complete {
+                vec![[0, 1, 2], [1, 3, 2]]
+            } else {
+                vec![[0, 1, 2]]
+            },
+            dims: RD,
+        },
+        true,
+        300.0,
+    )
+}
+
+#[test]
+fn two_coordinate_contact_changes_the_native_latent_heat_solution() {
+    let cards = [card("melting", false), card("hot", false)];
+    let curves = cards.each_ref().map(chart);
+    let point = context();
+    let laws = bulk_laws(&curves, &cards, &point);
+    let old = initial(&curves, 1);
+    let mut transferred = Vec::new();
+    for temperature_slope in [0.001, 0.003] {
+        let phase_slope = 0.6;
+        let source = phase_temperature_surface(&cards, phase_slope, temperature_slope, true);
+        let contact = PreparedMaterialContact::new(
+            &old,
+            binding(&curves, &cards, &source, &point, 0),
+            [[-100.0, 500.0]; 2],
+            || Ok(()),
+        )
+        .unwrap();
+        assert!(contact.source_line().is_none());
+        assert_eq!(contact.source_surface().unwrap().triangles().len(), 2);
+        let chain = ImplicitConductionChain::new(
+            &old,
+            &conduction(&old, &laws, 0.0),
+            &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+            || Ok(()),
+        )
+        .unwrap()
+        .with_contacts(&old, &[(100, &contact)], || Ok(()))
+        .unwrap();
+        let dt = 0.2;
+        let (next, audit) = chain
+            .advance_to(
+                &old,
+                dt,
+                controls(dt),
+                &mut ImplicitConductionWorkspace::new(2).unwrap(),
+                || Ok(()),
+            )
+            .unwrap();
+        let q = 2.0 * (next.cells()[&C].specific_h_j_kg - 25.0);
+        // Independent elimination of the two unequal energy stores:
+        // f_A=.25+Q/200, T_B=500-Q/3 and Q=dt*(T_B-400)/D.
+        let a = 0.5 + 0.25 + 0.25 * phase_slope + 100.0 * temperature_slope + dt / 3.0;
+        let b = phase_slope / 200.0 - temperature_slope / 3.0;
+        let exact = 200.0 * dt / (a + (a * a + 400.0 * dt * b).sqrt());
+        near(q, exact, 2e-8);
+        near(next.cells()[&HOT[0]].specific_h_j_kg, 200.0 - q / 3.0, 2e-8);
+        near(next.energy_j(), old.energy_j(), 2e-8);
+        near(audit.energy.external_heat_j, 0.0, 0.0);
+        let response = contact
+            .state_at_specific_enthalpies([25.0 + q / 2.0, 200.0 - q / 3.0])
+            .unwrap();
+        near(
+            response.resistance_enthalpy_derivatives_m2_kg_k_w_j[0],
+            phase_slope / 100.0,
+            1e-14,
+        );
+        near(
+            response.resistance_enthalpy_derivatives_m2_kg_k_w_j[1],
+            temperature_slope,
+            1e-14,
+        );
+        transferred.push(q);
+    }
+    assert!(transferred[0] > transferred[1]);
+    assert_eq!(old.cells()[&C].specific_h_j_kg, 25.0);
+}
+
+#[test]
+fn surface_mean_and_phase_coordinates_sum_the_same_body_chain_rule() {
+    let cards = [card("melting", false), card("hot", false)];
+    let curves = cards.each_ref().map(chart);
+    let point = context();
+    let old = initial(&curves, 1);
+    for reverse in [false, true] {
+        let source = source_value(
+            &cards,
+            PropertyValue::Surface2D {
+                axes: if reverse {
+                    ["fa".into(), "TM".into()]
+                } else {
+                    ["TM".into(), "fa".into()]
+                },
+                axis_dims: if reverse {
+                    [Dims::NONE, Temperature::DIMS]
+                } else {
+                    [Temperature::DIMS, Dims::NONE]
+                },
+                samples: [[300.0, 0.0], [800.0, 0.0], [300.0, 1.0], [800.0, 1.0]]
+                    .into_iter()
+                    .map(|at| {
+                        let value = 0.25 + 0.002 * (at[0] - 300.0) + 0.5 * at[1];
+                        (if reverse { [at[1], at[0]] } else { at }, value)
+                    })
+                    .collect(),
+                triangles: vec![[0, 1, 2], [1, 3, 2]],
+                dims: RD,
+            },
+            true,
+            300.0,
+        );
+        let contact = PreparedMaterialContact::new(
+            &old,
+            binding(&curves, &cards, &source, &point, 0),
+            [[-100.0, 500.0]; 2],
+            || Ok(()),
+        )
+        .unwrap();
+        for (h, value, derivatives) in [
+            ([25.0, 200.0], 0.675, [0.005, 0.001]),
+            ([150.0, 220.0], 1.12, [0.001, 0.001]),
+        ] {
+            let actual = contact.state_at_specific_enthalpies(h).unwrap();
+            near(actual.resistance_m2_k_w, value, 1e-13);
+            for side in 0..2 {
+                near(
+                    actual.resistance_enthalpy_derivatives_m2_kg_k_w_j[side],
+                    derivatives[side],
+                    1e-14,
+                );
+                let mut plus = h;
+                let mut minus = h;
+                plus[side] += 0.125;
+                minus[side] -= 0.125;
+                let difference = (contact
+                    .state_at_specific_enthalpies(plus)
+                    .unwrap()
+                    .resistance_m2_k_w
+                    - contact
+                        .state_at_specific_enthalpies(minus)
+                        .unwrap()
+                        .resistance_m2_k_w)
+                    / 0.25;
+                near(difference, derivatives[side], 2e-14);
+            }
+        }
+    }
+}
+
+#[test]
+fn source_surface_holes_remain_active_inside_admitted_enthalpy_bounds() {
+    let cards = [card("melting", false), card("hot", false)];
+    let curves = cards.each_ref().map(chart);
+    let point = context();
+    let old = initial(&curves, 1);
+    let laws = bulk_laws(&curves, &cards, &point);
+    let source = phase_temperature_surface(&cards, 0.6, 0.001, false);
+    let contact = PreparedMaterialContact::new(
+        &old,
+        binding(&curves, &cards, &source, &point, 0),
+        [[-100.0, 500.0]; 2],
+        || Ok(()),
+    )
+    .unwrap();
+    // These caloric states and validity-box coordinates are valid, but their
+    // simultaneous (f_A,T_B) point lies in the missing source triangle.
+    assert!(matches!(
+        contact.state_at_specific_enthalpies([75.0, 175.0]),
+        Err(PreparedContactError::Surface(_))
+    ));
+    let graph = ImplicitConductionGraph::new(
+        &old,
+        &conduction(&old, &laws, 0.0),
+        &[(MaterialId(0), &laws[0]), (MaterialId(1), &laws[1])],
+        ImplicitConductionLinearControls::default(),
+        || Ok(()),
+    )
+    .unwrap()
+    .with_contacts(&old, &[(100, &contact)], || Ok(()))
+    .unwrap();
+    let mut workspace = ImplicitConductionWorkspace::new(2).unwrap();
+    let (short, _) = graph
+        .advance_to(&old, 0.01, controls(0.01), &mut workspace, || Ok(()))
+        .unwrap();
+    let limited = ImplicitConductionControls {
+        minimum_dt_s: 1e-4,
+        maximum_halvings: 8,
+        maximum_steps: 64,
+        ..controls(2.0)
+    };
+    assert!(
+        graph
+            .advance_to(&old, 2.0, limited, &mut workspace, || Ok(()))
+            .is_err()
+    );
+    let (retry, _) = graph
+        .advance_to(&old, 0.01, controls(0.01), &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(short.cells(), retry.cells());
+    assert_eq!(old.cells()[&C].specific_h_j_kg, 25.0);
+    assert_eq!(contact.reference().phases[0].specific_enthalpy_j_kg(), 25.0);
 }

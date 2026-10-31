@@ -20,6 +20,28 @@ properties or names, in its `JointUsageReceipt`, exactly why the correlation
 is unknown — assuming independence silently is not an output the API can
 produce.
 
+## Analytical derivatives on original source surfaces
+
+`PropertyValue::prepare_surface_response` prepares analytical cell gradients
+for the original `Surface2D` coordinates, ordinates and declared triangles.
+`PreparedSurfaceResponse::evaluate` obtains its value and evaluation decision
+from the SAME canonical surface evaluator; it does not infer a grid, add cells,
+fill source holes or replace an exact sample value. Gradients follow the source
+axis order. Shared edges select the original first containing cell; an exact
+sample uses its first incident source cell. An isolated sample has no tangent.
+These are explicit one-sided derivatives at corners, not global smoothness or
+a numerical enclosure. Unrepresentable tangent scales refuse during preparation.
+
+The preparation owns an immutable numeric snapshot and cached gradients. Source
+selection, `LinearInside` policy, quantity checks, applicability and receipts
+remain with the original consumer. No point query or identity hash occurs in
+numeric evaluation; the canonical robust predicate/expansion fallback retains
+its existing allocation behavior. This does not differentiate uncertainty or
+certify independent-box coverage. Focused G0/G1/G3 fixtures check analytical
+affine planes, original value parity, cell orientation, edge/sample selection
+and unsupported source regions. Implicit material contact consumes both axis
+derivatives through the original caloric chain rule and thermal residual.
+
 ## Purpose and layer
 
 "Real material properties" are NAMED CONDITIONS with uncertainty, not

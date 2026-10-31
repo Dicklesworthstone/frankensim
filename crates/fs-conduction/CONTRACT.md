@@ -4,20 +4,25 @@
 
 `transient::deposition::contact::implicit::PreparedMaterialContact` binds the
 original ordered material-contact source and caloric objects to the native
-implicit chain/graph. It pins the initial physical interface claim and compiles
-its canonical source line once, retaining every source knot and usage receipt.
-Constant scalars and linear curves in either side's temperature or liquid mass
-fraction, the declared mean temperature, or a fixed external coordinate are
-admitted. A source surface requires its own canonical gradient support and is
-explicitly refused by this entry point; no finite-difference source law or
-temperature/fraction mixing rule is inferred.
+implicit chain/graph. It pins the initial physical interface claim and prepares
+its original source line or triangulated response once, retaining source
+coordinates, ordinates and the original physical query receipt.
+Constant scalars, linear curves and declared triangulated linear surfaces in
+either side's temperature or liquid mass fraction, the declared mean temperature,
+or a fixed external coordinate are admitted. Surfaces use the original material
+evaluator and its cached analytical cell gradients; each response coordinate
+contributes to both enthalpy derivatives as required by the caloric chain rule.
+Source holes remain active inside declared enthalpy bounds. No finite-difference
+source law, filled support box or temperature/fraction mixing rule is inferred.
+`source_line()` and `source_surface()` expose the applicable prepared response.
 
 Every trial uses original numeric caloric values and the complete analytic
 enthalpy chain rule. Mean-temperature response includes both half-weighted
 temperature derivatives; phase response remains active on a latent plateau.
 All original applicability bounds follow their actual two-sided coordinates,
-including coordinates absent from the value formula. Successful and refused
-runtime evaluations allocate nothing and perform no source query or hashing.
+including coordinates absent from the value formula. Scalar/curve runtime
+evaluations allocate nothing; surfaces retain the canonical robust predicate
+and expansion allocation behavior. Neither path performs source queries or hashing.
 Typed preparation/source failures remain available; the native trait preserves
 its `MaterialDomain` contract. Original reference receipts remain labelled as
 reference queries, while trial values are compiled numerical responses.
@@ -26,7 +31,8 @@ The native thermal owner applies resistance once in series with actual bulk
 conductivity and owns the residual, Jacobian, energy, entropy and time history.
 Focused cross-owner regressions cover unequal-mass latent/sensible exchange,
 material-only resistance changes, simultaneous nonlinear bulk conductivity,
-constant-source compatibility, both-side temperature/phase tangents, source
+constant-source compatibility, simultaneous phase/temperature surface response,
+both-side and mean-temperature/phase chain rules, missing source cells, source
 domain refusal, cancellation and clean retry. No pressure/gap/area evolution or
 interfacial heat storage is added by this stationary-contact reduction.
 

@@ -4,12 +4,13 @@
 //! through the canonical source-line owner. Their response coordinate may be
 //! either side's temperature/fraction, the declared mean temperature, or a fixed
 //! external coordinate. Actual two-sided applicability is checked at every trial.
-//! A sampled surface needs a canonical source-cell gradient owner and is refused;
-//! this module does not infer gradients from endpoint values or source differences.
+//! Sampled surfaces use the canonical source-cell gradient owner, preserving both
+//! response coordinates and source support holes in the SAME implicit residual.
 //!
 //! The original caloric owners provide numeric states and exact local tangents.
-//! Successful runtime queries allocate nothing and perform no source query,
-//! identity hash, source selection, thermal solve or physical-state mutation.
+//! Runtime queries perform no source query, identity hash, source selection,
+//! thermal solve or physical-state mutation. Scalar/curve trials allocate nothing;
+//! surfaces retain the canonical robust predicate/expansion allocation behavior.
 
 use super::{ContactInterfaceState, MaterialContactLink, resolve_contact};
 use crate::{
@@ -17,8 +18,8 @@ use crate::{
     ConductionError,
 };
 use fs_matdb::{
-    ClaimSelection, InterpolationPolicy, PropertyKey, PropertyLineSlice, PropertySupportError,
-    PropertyValue, QueryPoint,
+    ClaimSelection, InterpolationPolicy, MatDbError, PreparedSurfaceResponse, PropertyKey,
+    PropertyLineSlice, PropertySupportError, PropertyValue, QueryPoint,
 };
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, PhaseStateError};
 use fs_material::state_point::MaterialPropertySelection;
@@ -37,6 +38,7 @@ pub enum PreparedContactError {
     Material(ThermalMaterialError),
     Phase(PhaseStateError),
     Source(PropertySupportError),
+    Surface(MatDbError),
     Thermal(DepositionError),
     OutsideEnthalpyDomain {
         side: usize,
@@ -75,6 +77,11 @@ impl From<PhaseStateError> for PreparedContactError {
 impl From<PropertySupportError> for PreparedContactError {
     fn from(error: PropertySupportError) -> Self {
         Self::Source(error)
+    }
+}
+impl From<MatDbError> for PreparedContactError {
+    fn from(error: MatDbError) -> Self {
+        Self::Surface(error)
     }
 }
 impl From<DepositionError> for PreparedContactError {
@@ -158,16 +165,27 @@ struct Constraint {
     bounds: [f64; 2],
 }
 
+#[derive(Clone, Debug)]
+enum Response {
+    Line {
+        coordinate: Coordinate,
+        source: PropertyLineSlice,
+        slopes: Vec<f64>,
+    },
+    Surface {
+        coordinates: [Coordinate; 2],
+        source: PreparedSurfaceResponse,
+    },
+}
+
 /// An original ordered interface claim on explicit, borrowed caloric domains.
-/// The complete source line and initial physical source result retain authority.
+/// The complete source response and initial physical source result retain authority.
 /// Numerical trial samples are compiled responses, not fresh query receipts.
 #[derive(Clone, Debug)]
 pub struct PreparedMaterialContact<'a> {
     curves: [&'a EquilibriumEnthalpyPhaseCurve; 2],
     bounds: [[f64; 2]; 2],
-    coordinate: Coordinate,
-    source: PropertyLineSlice,
-    slopes: Vec<f64>,
+    response: Response,
     constraints: Vec<Constraint>,
     reference: ContactInterfaceState,
 }
@@ -179,7 +197,8 @@ impl<'a> PreparedMaterialContact<'a> {
     ///
     /// The canonical line's knot/work bound remains authoritative. Original
     /// source knots are retained; no empirical mixing rule or numerical source
-    /// derivative is inferred. Unsupported nonlinear/multiaxis payloads refuse.
+    /// derivative is inferred. Surfaces retain their original cells and analytic
+    /// gradients; declared enthalpy bounds do not assert coverage across holes.
     /// Evolving phase requires its explicitly declared fraction coordinate.
     pub fn new(
         thermal: &DepositionSimulation<'_>,
@@ -224,63 +243,95 @@ impl<'a> PreparedMaterialContact<'a> {
         let claim = binding.point.interface.claims().claim(selected).ok_or(
             PreparedContactError::Invalid("selected contact source is absent"),
         )?;
-        let axis = match (&claim.value, claim.interpolation) {
-            (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => {
-                binding.point.temperature_axes[0]
+        let response = if let (
+            PropertyValue::Surface2D { axes, samples, .. },
+            InterpolationPolicy::LinearInside,
+        ) = (&claim.value, claim.interpolation)
+        {
+            let coordinates = [
+                Coordinate::from_axis(binding.point, &query, &axes[0])?,
+                Coordinate::from_axis(binding.point, &query, &axes[1])?,
+            ];
+            for (index, (_, value)) in samples.iter().enumerate() {
+                if index % 256 == 0 {
+                    checkpoint()?;
+                }
+                if !value.is_finite() || *value <= 0.0 {
+                    return Err(PreparedContactError::Invalid(
+                        "contact resistance must stay positive on every source cell",
+                    ));
+                }
             }
-            (PropertyValue::Curve { abscissa, .. }, InterpolationPolicy::LinearInside) => {
-                abscissa.as_str()
+            let source = claim.value.prepare_surface_response()?;
+            checkpoint()?;
+            Response::Surface {
+                coordinates,
+                source,
             }
-            _ => {
-                return Err(PreparedContactError::Invalid(
-                    "implicit contact requires a constant scalar or continuously supported linear source curve",
-                ));
+        } else {
+            let axis = match (&claim.value, claim.interpolation) {
+                (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => {
+                    binding.point.temperature_axes[0]
+                }
+                (PropertyValue::Curve { abscissa, .. }, InterpolationPolicy::LinearInside) => {
+                    abscissa.as_str()
+                }
+                _ => {
+                    return Err(PreparedContactError::Invalid(
+                        "implicit contact requires a constant scalar, linear curve or linear source surface",
+                    ));
+                }
+            };
+            let coordinate = Coordinate::from_axis(binding.point, &query, axis)?;
+            let endpoints = [coordinate.value(lower), coordinate.value(upper)];
+            let line_lower = query
+                .clone()
+                .with(axis, endpoints[0])
+                .map_err(|_| PreparedContactError::Invalid("invalid contact source coordinate"))?;
+            let line_upper = query
+                .clone()
+                .with(axis, endpoints[1])
+                .map_err(|_| PreparedContactError::Invalid("invalid contact source coordinate"))?;
+            let source = binding.point.interface.claims().query_line_typed(
+                &PropertyKey::new(RP, RD),
+                axis,
+                &line_lower,
+                &line_upper,
+                ClaimSelection::Pinned(selected),
+            )?;
+            checkpoint()?;
+            let mut slopes = Vec::with_capacity(source.knots.len().saturating_sub(1));
+            for (index, (_, answer)) in source.knots.iter().enumerate() {
+                if index % 256 == 0 {
+                    checkpoint()?;
+                }
+                let value = answer.evidence.value.value;
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(PreparedContactError::Invalid(
+                        "contact resistance must stay positive on every source interval",
+                    ));
+                }
+                if index > 0 {
+                    let (x0, old) = &source.knots[index - 1];
+                    let difference = value - old.evidence.value.value;
+                    let width = source.knots[index].0 - x0;
+                    let slope = difference / width;
+                    if !width.is_finite()
+                        || width <= 0.0
+                        || !slope.is_finite()
+                        || difference != 0.0 && slope == 0.0
+                    {
+                        return Err(PreparedContactError::Unrepresentable);
+                    }
+                    slopes.push(slope);
+                }
+            }
+            Response::Line {
+                coordinate,
+                source,
+                slopes,
             }
         };
-        let coordinate = Coordinate::from_axis(binding.point, &query, axis)?;
-        let endpoints = [coordinate.value(lower), coordinate.value(upper)];
-        let line_lower = query
-            .clone()
-            .with(axis, endpoints[0])
-            .map_err(|_| PreparedContactError::Invalid("invalid contact source coordinate"))?;
-        let line_upper = query
-            .clone()
-            .with(axis, endpoints[1])
-            .map_err(|_| PreparedContactError::Invalid("invalid contact source coordinate"))?;
-        let source = binding.point.interface.claims().query_line_typed(
-            &PropertyKey::new(RP, RD),
-            axis,
-            &line_lower,
-            &line_upper,
-            ClaimSelection::Pinned(selected),
-        )?;
-        checkpoint()?;
-        let mut slopes = Vec::with_capacity(source.knots.len().saturating_sub(1));
-        for (index, (_, answer)) in source.knots.iter().enumerate() {
-            if index % 256 == 0 {
-                checkpoint()?;
-            }
-            let value = answer.evidence.value.value;
-            if !value.is_finite() || value <= 0.0 {
-                return Err(PreparedContactError::Invalid(
-                    "contact resistance must stay positive on every source interval",
-                ));
-            }
-            if index > 0 {
-                let (x0, old) = &source.knots[index - 1];
-                let difference = value - old.evidence.value.value;
-                let width = source.knots[index].0 - x0;
-                let slope = difference / width;
-                if !width.is_finite()
-                    || width <= 0.0
-                    || !slope.is_finite()
-                    || difference != 0.0 && slope == 0.0
-                {
-                    return Err(PreparedContactError::Unrepresentable);
-                }
-                slopes.push(slope);
-            }
-        }
         let mut constraints = Vec::with_capacity(claim.validity.bounds().len());
         for (axis, &(lo, hi)) in claim.validity.bounds() {
             checkpoint()?;
@@ -293,9 +344,7 @@ impl<'a> PreparedMaterialContact<'a> {
         let prepared = Self {
             curves,
             bounds: enthalpy_bounds_j_kg,
-            coordinate,
-            source,
-            slopes,
+            response,
             constraints,
             reference,
         };
@@ -315,8 +364,17 @@ impl<'a> PreparedMaterialContact<'a> {
     pub const fn enthalpy_bounds_j_kg(&self) -> [[f64; 2]; 2] {
         self.bounds
     }
-    pub fn source_line(&self) -> &PropertyLineSlice {
-        &self.source
+    pub fn source_line(&self) -> Option<&PropertyLineSlice> {
+        match &self.response {
+            Response::Line { source, .. } => Some(source),
+            Response::Surface { .. } => None,
+        }
+    }
+    pub fn source_surface(&self) -> Option<&PreparedSurfaceResponse> {
+        match &self.response {
+            Response::Surface { source, .. } => Some(source),
+            Response::Line { .. } => None,
+        }
     }
     /// Original physical reference query, including its exact interface pin.
     pub fn reference(&self) -> &ContactInterfaceState {
@@ -331,7 +389,8 @@ impl<'a> PreparedMaterialContact<'a> {
 
     /// Exact source response and analytic chain-rule derivatives at these h values.
     /// Source corners select right slope; the compiled upper coordinate selects
-    /// left. Caloric tangents likewise select left at each admitted upper h.
+    /// left. Surface edges/samples use the canonical first-cell tangent.
+    /// Caloric tangents likewise select left at each admitted upper h.
     pub fn state_at_specific_enthalpies(
         &self,
         h: [f64; 2],
@@ -362,36 +421,62 @@ impl<'a> PreparedMaterialContact<'a> {
                 });
             }
         }
-        let x = self.coordinate.value(values);
-        let knots = &self.source.knots;
-        let first = knots
-            .first()
-            .ok_or(PreparedContactError::Invalid("empty compiled source line"))?;
-        let last = &knots[knots.len() - 1];
-        if !x.is_finite() || !(first.0..=last.0).contains(&x) {
-            return Err(PreparedContactError::Invalid(
-                "contact left its compiled source interval",
-            ));
-        }
-        let (resistance, slope) = if knots.len() == 1 {
-            (first.1.evidence.value.value, 0.0)
-        } else {
-            let index = knots.partition_point(|k| k.0 <= x).min(knots.len() - 1) - 1;
-            let (a, ka) = &knots[index];
-            let (b, kb) = &knots[index + 1];
-            let ra = ka.evidence.value.value;
-            let rb = kb.evidence.value.value;
-            let fraction = (x - a) / (b - a);
-            let value = if x == *a {
-                ra
-            } else if x == *b {
-                rb
-            } else if fraction <= 0.5 {
-                (rb - ra).mul_add(fraction, ra)
-            } else {
-                (ra - rb).mul_add(1.0 - fraction, rb)
-            };
-            (value, self.slopes[index])
+        let (resistance, terms) = match &self.response {
+            Response::Surface {
+                coordinates,
+                source,
+            } => {
+                let state =
+                    source.evaluate(coordinates.map(|coordinate| coordinate.value(values)))?;
+                (
+                    state.value,
+                    [
+                        (coordinates[0], state.gradient[0]),
+                        (coordinates[1], state.gradient[1]),
+                    ],
+                )
+            }
+            Response::Line {
+                coordinate,
+                source,
+                slopes,
+            } => {
+                let x = coordinate.value(values);
+                let knots = &source.knots;
+                let first = knots
+                    .first()
+                    .ok_or(PreparedContactError::Invalid("empty compiled source line"))?;
+                let last = &knots[knots.len() - 1];
+                if !x.is_finite() || !(first.0..=last.0).contains(&x) {
+                    return Err(PreparedContactError::Invalid(
+                        "contact left its compiled source interval",
+                    ));
+                }
+                let (resistance, slope) = if knots.len() == 1 {
+                    (first.1.evidence.value.value, 0.0)
+                } else {
+                    let index = knots.partition_point(|k| k.0 <= x).min(knots.len() - 1) - 1;
+                    let (a, ka) = &knots[index];
+                    let (b, kb) = &knots[index + 1];
+                    let ra = ka.evidence.value.value;
+                    let rb = kb.evidence.value.value;
+                    let fraction = (x - a) / (b - a);
+                    let value = if x == *a {
+                        ra
+                    } else if x == *b {
+                        rb
+                    } else if fraction <= 0.5 {
+                        (rb - ra).mul_add(fraction, ra)
+                    } else {
+                        (ra - rb).mul_add(1.0 - fraction, rb)
+                    };
+                    (value, slopes[index])
+                };
+                (
+                    resistance,
+                    [(*coordinate, slope), (Coordinate::Fixed(0.0), 0.0)],
+                )
+            }
         };
         let mut at = h;
         for side in 0..2 {
@@ -401,19 +486,23 @@ impl<'a> PreparedMaterialContact<'a> {
                 h[side]
             };
         }
-        let coordinate_derivatives = if slope == 0.0 {
-            [0.0; 2]
-        } else {
-            self.coordinate.derivatives(self.curves, at)?
-        };
-        let derivatives = coordinate_derivatives.map(|value| value * slope);
+        let mut derivatives = [0.0; 2];
+        for (coordinate, slope) in terms {
+            if slope == 0.0 {
+                continue;
+            }
+            let coordinate_derivatives = coordinate.derivatives(self.curves, at)?;
+            for side in 0..2 {
+                let term = coordinate_derivatives[side] * slope;
+                if !term.is_finite() || term == 0.0 && coordinate_derivatives[side] != 0.0 {
+                    return Err(PreparedContactError::Unrepresentable);
+                }
+                derivatives[side] += term;
+            }
+        }
         if !resistance.is_finite()
             || resistance <= 0.0
             || derivatives.iter().any(|slope| !slope.is_finite())
-            || derivatives
-                .iter()
-                .zip(coordinate_derivatives)
-                .any(|(&value, coordinate)| value == 0.0 && coordinate != 0.0 && slope != 0.0)
         {
             return Err(PreparedContactError::Unrepresentable);
         }

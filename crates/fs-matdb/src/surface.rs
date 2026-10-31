@@ -11,6 +11,9 @@ use fs_ivl::{Sign, orient2d};
 
 use crate::{EvaluationDecision, InterpolationPolicy, MatDbError};
 
+mod differential;
+pub use differential::{PreparedSurfaceResponse, SurfaceDifferential};
+
 /// Maximum samples in one two-coordinate material response.
 pub const MAX_SURFACE_SAMPLES: usize = 4_096;
 /// Maximum source-declared triangles. Pairwise admission is bounded by this cap.
