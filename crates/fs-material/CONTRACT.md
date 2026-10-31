@@ -3130,9 +3130,10 @@ properties survive adoption and `at_query_point`; elastic constants are never
 re-resolved through a different pair. Its physical `identity()` binds elastic
 and yield roles, and the ordered Hertz reduced-modulus identity carries both
 solid identities into contact and specimen consumers. Canonical solid identities
-remain unchanged. The separate reciprocal `ThermalHertzPair` still requires its
-original affine-Young/fixed-Poisson source model and refuses an independent-pair
-projection rather than changing sources to derive temperature responses.
+remain unchanged. The reciprocal `ThermalHertzPair` differentiates the explicitly selected
+Young/Poisson, Young/shear or bulk/shear source laws. It preserves the complete
+solid projection, including named density and yield roles and auxiliary
+properties, when querying each surface at its own temperature.
 `ResolvedMaterialStatePoint::with_additional_requirements` adds disjoint source
 properties at the same immutable card and typed query without re-querying any
 existing property. Contact can therefore append yield while preserving every
@@ -3488,11 +3489,11 @@ separate from source and syntax checks.
 
 ### Source-derived two-surface thermal Hertz compliance
 
-`elastic::thermal::contact::ThermalHertzPair` keeps both original isotropic solid cards, complete query contexts and exact source selections. Each body has its own actual temperature. Continuous source lines admit positive affine Young's moduli and fixed Poisson ratios/yield limits; unsupported derivative jumps, hidden evolving axes and extrapolation refuse. The original `IsotropicSolidStatePoint::reduced_modulus_against` computes the harmonic compliance. Its full two-temperature gradient and Hessian are analytical; the effective modulus is not approximated as affine. Immutable source data are shared between candidate checkpoints.
+`elastic::thermal::contact::ThermalHertzPair` keeps both original isotropic solid cards, complete query contexts and exact source selections. Each body has its own actual temperature. The selected Young/Poisson, Young/shear or bulk/shear coefficients must follow continuously supported affine source paths; moduli remain positive, Poisson ratios remain admissible, and yield limits remain fixed. Unsupported derivative jumps, hidden evolving axes and extrapolation refuse. Semantic absolute-temperature paths reuse the shared material admission helper, while existing dimensional-kelvin sources retain their compatibility path. Refresh preserves every original requirement and selected claim, including auxiliary properties. The original `IsotropicSolidStatePoint::reduced_modulus_against` computes harmonic compliance; its full two-temperature gradient and Hessian are analytical even when the derived Young modulus and Poisson ratio are nonlinear. The original fixed-Poisson calculation and identity remain unchanged for the canonical source model.
 
 For a fixed-geometry native Hertz potential `psi=G(delta)*E*`, the derivatives support surface entropy `s_i=-G*dE*/dT_i`, internal energy `U=psi+sum(T_i*s_i)` and reciprocal thermal capacity. Returned source states retain their original identities and receipts. This is a constitutive capability, not a contact or thermal integrator; coupled owners must retain physical heat/work, total heat capacity, source domains and mechanical state. No geometry expansion, changing reference mass, phase change, plasticity, measured calibration or full Euler thermal closure is inferred.
 
-Focused native G1/G3 tests compare the modulus and all first/second derivatives with independent rational compliance and finite differences, check thermodynamic internal-energy derivatives, ordered surface exchange, the constant-modulus limit, and original-card/domain/non-affine-source refusal. Synthetic source fixtures establish implementation behavior only.
+Focused native G1/G3 tests compare the modulus and all first/second derivatives with independent rational compliance and finite differences, check thermodynamic internal-energy derivatives, ordered surface exchange, the constant-modulus limit, and original-card/domain/non-affine-source refusal. Additional regression sources exercise explicit independent elastic pairs, changing Poisson ratio, preserved auxiliary selections, source-domain refusal, and derivative cancellation. The general compliance Hessian need not be negative semidefinite; the coupled owner must admit the complete caloric plus contact capacity. Synthetic source fixtures establish implementation behavior only.
 
 ### Physical cohesive viscosity
 

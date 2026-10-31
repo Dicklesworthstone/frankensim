@@ -5,9 +5,11 @@
 
 use super::{NormalModulus, NormalModulusState, NormalThermalError, modulus_and_damping};
 use fs_contact::normal_patch::NormalPatchRequest;
+use fs_matdb::PropertyKey;
 use fs_material::elastic::thermal::contact::{ThermalHertzError, ThermalHertzPair};
 use fs_material::phase::{EquilibriumEnthalpyPhaseCurve, ResolvedHeatCapacityCurve};
 use fs_material::state_point::DENSITY_PROPERTY;
+use fs_qty::Density;
 
 /// Source-backed fixed-geometry Hertz/Hunt--Crossley free energy. The source
 /// pair computes the nonlinear reduced modulus and its reciprocal derivatives.
@@ -50,11 +52,21 @@ impl<'a> MaterialNormalModulus<'a> {
                     "normal source domain or ordered caloric material mismatch",
                 ));
             }
-            let original = native.surfaces[i].resolved();
+            let solid = &native.surfaces[i];
+            let original = solid.resolved();
+            let density_name = solid
+                .elastic_state()
+                .derivation()
+                .map_or(DENSITY_PROPERTY, |derivation| {
+                    derivation.density_requirement().name()
+                });
             let density = original
-                .property(DENSITY_PROPERTY)
+                .property_by_key(&PropertyKey::new(density_name, Density::DIMS))
                 .ok_or(invalid("original solid density source is missing"))?;
-            for receipt in caloric[i].receipts() {
+            // The caloric owner retains Cp then density at every source knot.
+            // Match the selected density role even when its source name differs
+            // from the canonical vocabulary; equal values do not replace a claim.
+            for (receipt_index, receipt) in caloric[i].receipts().iter().enumerate() {
                 if receipt.axis_quantities != *original.axis_quantities()
                     || receipt
                         .query_point
@@ -64,8 +76,9 @@ impl<'a> MaterialNormalModulus<'a> {
                             .query_point()
                             .iter()
                             .filter(|(axis, _)| axis != "T"))
-                    || (receipt.property == DENSITY_PROPERTY
-                        && receipt.selected != density.answer().receipt.selected)
+                    || (receipt_index % 2 == 1
+                        && (receipt.property != density_name
+                            || receipt.selected != density.answer().receipt.selected))
                 {
                     return Err(invalid(
                         "caloric and elastic sources must share complete external conditions and original density claim",

@@ -421,3 +421,252 @@ fn source_caloric_mismatch_and_late_domain_failure_preserve_normal_state() {
     assert_eq!(contact.time_s(), 0.0);
     assert_eq!(contact.temperature_k(), INITIAL);
 }
+
+// Independent K/G sources with deliberately noncanonical density names.
+// No Young/Poisson source exists on these cards.
+fn independent_pair_card(index: usize) -> MaterialCard {
+    let base = card(index, &[(200.0, 600.0, 1.0)]);
+    let mut claims = ClaimSet::new();
+    for (_, original) in base.claims().claims_ordered() {
+        if ![
+            DENSITY_PROPERTY,
+            YOUNG_MODULUS_PROPERTY,
+            POISSON_RATIO_PROPERTY,
+        ]
+        .contains(&original.key.name.as_str())
+        {
+            claims.insert_claim(original.clone()).unwrap();
+        }
+    }
+    let (bulk, shear) = if index == 0 {
+        ([1.6e6, 1.2e6], [0.85e6, 0.65e6])
+    } else {
+        ([2e6; 2], [1.2e6; 2])
+    };
+    for (name, dims, values) in [
+        ("rho-source", Density::DIMS, [1.0; 2]),
+        ("other-rho-source", Density::DIMS, [1.0; 2]),
+        ("contact-bulk", Pressure::DIMS, bulk),
+        ("contact-shear", Pressure::DIMS, shear),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
+                value: PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: Temperature::DIMS,
+                    knots: vec![(200.0, values[0]), (600.0, values[1])],
+                    dims,
+                },
+                validity: ValidityDomain::unconstrained()
+                    .with_quantity(
+                        "T",
+                        QuantitySpec::dimensional(Temperature::DIMS),
+                        200.0,
+                        600.0,
+                    )
+                    .with_quantity("p", point(300.0, 1e5).axis_quantities()["p"], 1e5, 2e5),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::LinearInside,
+                observations: vec![],
+                provenance: Provenance {
+                    source: "authored independent contact parameters".into(),
+                    license: "CC0-1.0".into(),
+                    artifact: None,
+                },
+            })
+            .unwrap();
+    }
+    MaterialCard::assemble(base.id().clone(), claims, vec![]).unwrap()
+}
+
+fn independent_pair_caloric(card: &MaterialCard, density: &str) -> ResolvedHeatCapacityCurve {
+    ResolvedHeatCapacityCurve::try_new(
+        card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &PropertyKey::new("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+            density: &PropertyKey::new(density, Density::DIMS),
+            temperature_axis: "T",
+            lower: &point(200.0, 1e5),
+            upper: &point(600.0, 1e5),
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        0.0,
+        1e-8,
+    )
+    .unwrap()
+}
+
+fn independent_pair_source(cards: &[MaterialCard; 2]) -> ThermalHertzPair {
+    use fs_material::state_point::{
+        IsotropicElasticParameters, IsotropicSolidStatePoint, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_material_state_point,
+    };
+    let requirement = |name, dims| {
+        ScalarPropertyRequirement::try_new(name, dims, ScalarAdmissibility::StrictlyPositive)
+            .unwrap()
+    };
+    let density = requirement("rho-source", Density::DIMS);
+    let yield_requirement = requirement(YIELD_STRESS_PROPERTY, Pressure::DIMS);
+    let parameters = IsotropicElasticParameters::BulkShear {
+        bulk_modulus: requirement("contact-bulk", Pressure::DIMS),
+        shear_modulus: requirement("contact-shear", Pressure::DIMS),
+    };
+    let mut requirements = vec![
+        density.clone(),
+        yield_requirement.clone(),
+        requirement("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS),
+    ];
+    requirements.extend(parameters.requirements().into_iter().cloned());
+    let states: Vec<_> = cards
+        .iter()
+        .enumerate()
+        .map(|(i, card)| {
+            let resolved = resolve_material_state_point(
+                card,
+                &point(INITIAL[i], 1e5),
+                &requirements,
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+            IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+                resolved,
+                &density,
+                &parameters,
+                &yield_requirement,
+            )
+            .unwrap()
+        })
+        .collect();
+    ThermalHertzPair::new(
+        [&cards[0], &cards[1]],
+        [&states[0], &states[1]],
+        [[200.0, 600.0]; 2],
+    )
+    .unwrap()
+}
+
+// Independent reference through E(K,G), nu(K,G) and their quotient derivatives,
+// rather than the production compliance decomposition or derivative owner.
+fn independent_pair_reference(t: f64) -> (f64, f64) {
+    let k = 1.5e6 - 1000.0 * (t - 300.0);
+    let g = 0.8e6 - 500.0 * (t - 300.0);
+    let q = 3.0 * k + g;
+    let q_prime = -3500.0;
+    let e = 9.0 * k * g / q;
+    let e_prime = 9.0 * ((-1000.0 * g - 500.0 * k) * q - k * g * q_prime) / (q * q);
+    let n = 3.0 * k - 2.0 * g;
+    let nu = n / (2.0 * q);
+    let nu_prime = (-2000.0 * q - n * q_prime) / (2.0 * q * q);
+    let compliance = (1.0 - nu * nu) / e + (1.0 - 0.25 * 0.25) / 3e6;
+    let compliance_prime = -2.0 * nu * nu_prime / e - (1.0 - nu * nu) * e_prime / (e * e);
+    let modulus = 1.0 / compliance;
+    (modulus, -modulus * modulus * compliance_prime)
+}
+
+#[test]
+fn independent_bulk_shear_heating_uses_original_caloric_owner_and_conserves_energy() {
+    let cards = [independent_pair_card(0), independent_pair_card(1)];
+    let curves = [
+        independent_pair_caloric(&cards[0], "rho-source"),
+        independent_pair_caloric(&cards[1], "rho-source"),
+    ];
+    let thermal = initial(&curves);
+    let source = independent_pair_source(&cards);
+    let model = MaterialNormalModulus::new(
+        normal_request(&source, 0.01),
+        source,
+        [&curves[0], &curves[1]],
+    )
+    .unwrap();
+    let contact = CaloricNormalContact::new(
+        &thermal,
+        model,
+        [curves[0].curve(), curves[1].curve()],
+        CELLS,
+        HeatPartition::new(0.4, 0.6, 0.0).unwrap(),
+    )
+    .unwrap();
+    let heat = 3.0;
+    let candidate = contact
+        .step_candidate(
+            &thermal,
+            1.0,
+            0.01,
+            controls(),
+            &guess(&thermal),
+            |_| {
+                Ok::<_, Infallible>(StepCoefficients {
+                    sources_w: BTreeMap::from([(CELLS[0], heat)]),
+                    conductances_w_k: BTreeMap::new(),
+                    payload: (),
+                })
+            },
+            || false,
+        )
+        .unwrap();
+    let (m0, d0) = independent_pair_reference(300.0);
+    let initial_u = basis(0.01) * (m0 - 300.0 * d0);
+    let expected_t = bisect(300.0, 400.0, |t| {
+        let (m, d) = independent_pair_reference(t);
+        CP[0] * (t - 300.0) + basis(0.01) * (m - t * d) - initial_u - heat
+    });
+    let (modulus, derivative) = independent_pair_reference(expected_t);
+    let expected_u = basis(0.01) * (modulus - expected_t * derivative);
+    near(candidate.contact().temperature_k()[0], expected_t);
+    near(candidate.contact().temperature_k()[1], INITIAL[1]);
+    near(
+        candidate.report().endpoint.normal_force_n,
+        (4.0 / 3.0) * modulus * 0.01_f64.powf(1.5),
+    );
+    near(
+        candidate.report().thermodynamics.internal_energy_j,
+        expected_u,
+    );
+    near(CP[0] * (expected_t - 300.0) + expected_u - initial_u, heat);
+    near(candidate.report().work.work_into_contact_j, 0.0);
+    near(candidate.report().total_energy_residual_j, 0.0);
+    assert_eq!(candidate.report().work.physical_dissipation_j, 0.0);
+    let refreshed = candidate
+        .contact()
+        .model()
+        .source()
+        .at_temperatures(candidate.contact().temperature_k())
+        .unwrap();
+    for solid in &refreshed.surfaces {
+        assert!(solid.resolved().property(YOUNG_MODULUS_PROPERTY).is_none());
+        assert!(solid.resolved().property(POISSON_RATIO_PROPERTY).is_none());
+        assert!(
+            solid
+                .resolved()
+                .property("specific_heat_capacity")
+                .is_some()
+        );
+        assert_eq!(
+            solid
+                .elastic_state()
+                .derivation()
+                .unwrap()
+                .density_requirement()
+                .name(),
+            "rho-source"
+        );
+    }
+    assert_eq!(thermal.time_s(), 0.0);
+    assert_eq!(contact.temperature_k(), INITIAL);
+}
+
+#[test]
+fn independent_pair_caloric_binding_rejects_equal_density_from_a_different_source_role() {
+    let cards = [independent_pair_card(0), independent_pair_card(1)];
+    let source = independent_pair_source(&cards);
+    let right = independent_pair_caloric(&cards[1], "rho-source");
+    let wrong = independent_pair_caloric(&cards[0], "other-rho-source");
+    assert!(matches!(
+        MaterialNormalModulus::new(normal_request(&source, 0.01), source, [&wrong, &right]),
+        Err(NormalThermalError::Invalid(
+            "caloric and elastic sources must share complete external conditions and original density claim"
+        ))
+    ));
+}
