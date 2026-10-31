@@ -121,6 +121,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
         self.admit_finite_reservoir_drive(control)?;
+        if self.reservoir_radiations.is_some() {
+            return self.step_with_multiple_reservoir_drive(control, gate);
+        }
         if self.reservoir_radiation.is_some() {
             return self.step_with_reservoir_drive(control, gate);
         }
@@ -327,6 +330,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             reservoir_flows,
             reservoir_exchanges,
             reservoir_radiation: None,
+            reservoir_radiations: Vec::new(),
             finite_reservoir,
             flow,
             flow_mass_change_kg: mass_change,

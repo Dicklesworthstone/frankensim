@@ -194,9 +194,10 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 NsfDgDrive::UpstreamPressureRise(_) => system.upstream_load().is_none(),
                 NsfDgDrive::Reservoir { pressure_pa, temperature_k } =>
                     system.reservoir_radiation().is_some()
+                        || !system.reservoir_radiations().is_empty()
                         || system.zone().reservoir_aperture_state_at(*pressure_pa, *temperature_k).is_err(),
                 NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
-                    system.reservoir_radiation_aperture() == Some(*aperture)
+                    system.reservoir_radiation_at(*aperture).is_some()
                         || system.zone().reservoir_aperture_state_for(*aperture, *pressure_pa, *temperature_k).is_err(),
                 NsfDgDrive::FiniteReservoir { .. }
                 | NsfDgDrive::FiniteReservoirActuation { .. } => false,

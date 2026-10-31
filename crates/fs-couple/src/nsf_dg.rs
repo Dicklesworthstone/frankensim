@@ -31,7 +31,7 @@ pub mod performance;
 mod upstream;
 pub use upstream::NsfDgUpstreamFrame;
 mod reservoir;
-pub use reservoir::{NsfDgReservoirFrame, NsfDgReservoirRadiation};
+pub use reservoir::{NsfDgRadiationSolve, NsfDgReservoirFrame, NsfDgReservoirRadiation};
 mod finite_reservoir;
 pub use finite_reservoir::{NsfFiniteReservoirActuationFrame, NsfFiniteReservoirFrame,
     NsfFiniteReservoirInventory, NsfFiniteReservoirLimits, NsfFiniteReservoirSource};
@@ -97,6 +97,13 @@ pub enum NsfDgError {
     Acoustic(AcousticRealizeError),
     /// Original finite chamber source law or caloric inversion refusal.
     FiniteReservoir(fs_material::thermochemical_gas::energy::GasEnergyError),
+    /// Original generic nonlinear solver refused its configuration or initial residual.
+    Nonlinear(fs_solver::NewtonError),
+    /// Original simultaneous pressure solver stopped without meeting its declared target.
+    NonlinearConvergence {
+        evaluations: usize,
+        report: fs_solver::NewtonReport,
+    },
     /// Cancellation publishes neither candidate.
     Cancelled,
     /// Caller-supplied incoming-characteristic bracket contains no sign change.
@@ -234,6 +241,9 @@ pub struct NsfDgFrame {
     pub reservoir_exchanges: Vec<fs_lbm::nsf3::NsfReservoirExchange>,
     /// Live self/mutual exterior reaction at the independent escape opening.
     pub reservoir_radiation: Option<NsfDgReservoirFrame>,
+    /// Ordered escape receipts for the simultaneous multiple-opening owner.
+    /// Empty on the original singleton path; the two reaction views never coexist.
+    pub reservoir_radiations: Vec<NsfDgReservoirFrame>,
     /// Finite source storage, accepting the original conservative exchange once.
     pub finite_reservoir: Option<NsfFiniteReservoirFrame>,
     /// Original NSF energy accounts, including reservoir energy in `open_energy_j`.
@@ -279,6 +289,7 @@ pub struct NsfDg<L: Lattice3<27>> {
     upstream: Option<upstream::UpstreamLoad>,
     patch_background: [Option<NsfBoundaryDrive>; 2],
     reservoir_radiation: Option<reservoir::ReservoirRadiation>,
+    reservoir_radiations: Option<reservoir::multiple::ReservoirRadiations>,
     finite_reservoir: Option<finite_reservoir::FiniteReservoir>,
 }
 
@@ -393,7 +404,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             return Err(NsfDgError::Input("NSF/DG requires cold matching gas, area and clock, zero reference flow and finite complete work/projection budgets"));
         }
         Ok(Self { zone, load, limits, high, reference, area_m2: area, steps: 0,
-            upstream: None, patch_background, reservoir_radiation: None,
+            upstream: None, patch_background, reservoir_radiation: None, reservoir_radiations: None,
             finite_reservoir: None })
     }
     /// Original resolved fluid state and thermochemical source.
@@ -523,6 +534,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
     ) -> Result<NsfDgFrame, NsfDgError> {
         poll(gate)?;
         self.admit_finite_reservoir_drive(control)?;
+        if self.reservoir_radiations.is_some() {
+            return self.step_with_multiple_reservoir_drive(control, gate);
+        }
         if self.reservoir_radiation.is_some() {
             return self.step_with_reservoir_drive(control, gate);
         }
@@ -700,7 +714,7 @@ fn accept_candidate<L: Lattice3<27>>(
         step, evaluations, incoming_characteristic_m_s: incoming,
         drive: control, upstream: None, faces, coupled_patch, source_patch,
         reservoir_mass_out_kg, reservoir_flows, reservoir_exchanges, reservoir_radiation: None,
-        finite_reservoir, flow,
+        reservoir_radiations: Vec::new(), finite_reservoir, flow,
         flow_mass_change_kg: mass_change, flow_energy_change_j: energy_change, duct, terminals,
         inlet_flow_m3_s: q, inlet_pressure_pa: p, pressure_residual_pa: pressure_residual,
         projection_covariance_j: covariance, acoustic_work_residual_j: work_residual,

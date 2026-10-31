@@ -758,3 +758,6 @@ fn multiple_escape_selection_refuses_duplicates_overlap_and_ambiguous_feedback()
     assert_eq!(renderer.last_frame().unwrap().reservoir_exchanges.len(), 2);
     assert!(renderer.last_frame().unwrap().reservoir_radiation.is_some());
 }
+
+#[path = "nsf_reservoir_observation/multiple_feedback.rs"]
+mod multiple_feedback;

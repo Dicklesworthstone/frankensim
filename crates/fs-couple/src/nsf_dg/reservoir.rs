@@ -4,6 +4,8 @@
 //! streamed mass and conservative total energy are never reclassified.
 
 use super::*;
+pub(super) mod multiple;
+pub use multiple::NsfDgRadiationSolve;
 use crate::bernoulli_aperture::radiation::environment::multiport::bake::mixed::DrivenMouthSurface;
 
 /// Explicit placement, radiation quadrature and pressure-control search domain.
@@ -73,8 +75,22 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub fn with_reservoir_radiation_at(
         mut self, aperture: usize, input: NsfDgReservoirRadiation, gate: &CancelGate,
     ) -> Result<Self, NsfDgError> {
+        let (surface, temperature_k, rate) = self.reservoir_radiation_surface(aperture, input, gate)?;
+        self.load = self.load.with_independent_mouth(surface, rate, gate)
+            .map_err(|error| if gate.is_requested() { NsfDgError::Cancelled }
+                else { NsfDgError::Acoustic(AcousticRealizeError::Nonlinear(error.to_string())) })?;
         poll(gate)?;
-        if self.steps != 0 || self.reservoir_radiation.is_some()
+        self.reservoir_radiation = Some(ReservoirRadiation { aperture, input, temperature_k });
+        Ok(self)
+    }
+
+    /// Shared original geometry, material, clock and pressure-domain admission.
+    /// Both singleton and plural paths build their surfaces through this owner.
+    fn reservoir_radiation_surface(
+        &self, aperture: usize, input: NsfDgReservoirRadiation, gate: &CancelGate,
+    ) -> Result<(DrivenMouthSurface, f64, u32), NsfDgError> {
+        poll(gate)?;
+        if self.steps != 0 || self.reservoir_radiation.is_some() || self.reservoir_radiations.is_some()
             || self.finite_reservoir_aperture() == Some(aperture)
             || !input.origin_m.iter().chain(input.pressure_bracket_pa.iter()).all(|x| x.is_finite())
             || input.pressure_bracket_pa[0] >= input.pressure_bracket_pa[1]
@@ -137,12 +153,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         if !rate.is_finite() || rate.fract() != 0.0 || !(1.0..=f64::from(u32::MAX)).contains(&rate) {
             return Err(NsfDgError::Input("joint radiation lost its original source bake clock"));
         }
-        self.load = self.load.with_independent_mouth(surface, rate as u32, gate)
-            .map_err(|error| if gate.is_requested() { NsfDgError::Cancelled }
-                else { NsfDgError::Acoustic(AcousticRealizeError::Nonlinear(error.to_string())) })?;
-        poll(gate)?;
-        self.reservoir_radiation = Some(ReservoirRadiation { aperture, input, temperature_k });
-        Ok(self)
+        Ok((surface, temperature_k, rate as u32))
     }
 
     pub fn reservoir_radiation(&self) -> Option<&NsfDgReservoirRadiation> {
@@ -348,7 +359,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         Ok(NsfDgFrame {
             step: self.steps, evaluations, incoming_characteristic_m_s: downstream, drive,
             upstream, faces, coupled_patch, source_patch, reservoir_mass_out_kg, reservoir_flows,
-            reservoir_exchanges, finite_reservoir,
+            reservoir_exchanges, finite_reservoir, reservoir_radiations: Vec::new(),
             reservoir_radiation: Some(NsfDgReservoirFrame {
                 resolved_exchange,
                 ghost_pressure_offset_pa: pressure_offset,

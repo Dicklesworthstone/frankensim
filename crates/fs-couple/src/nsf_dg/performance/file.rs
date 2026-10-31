@@ -14,7 +14,7 @@ use super::{NsfDgPerformance, ReservoirObservation, source_intervals_for};
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::dg_port::input::{DgSourceError, DgSourceInput};
 use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallLayoutInput};
-use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgReservoirRadiation, NsfFiniteReservoirLimits, same_clock};
+use crate::nsf_dg::{NsfDg, NsfDgDrive, NsfDgError, NsfDgLimits, NsfDgRadiationSolve, NsfDgReservoirRadiation, NsfFiniteReservoirLimits, same_clock};
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::render::RenderError;
@@ -525,7 +525,8 @@ impl ResolvedDgFilePerformance {
             row.end()?;
             reservoir_observations.push((aperture, input));
         }
-        let reservoir_feedback = if rows.next_is("reservoir_feedback") {
+        let mut reservoir_feedback = Vec::new();
+        while rows.next_is("reservoir_feedback") {
             let mut row = rows.row("reservoir_feedback")?;
             let (aperture, placement) = if row.fields.clone().next() == Some("aperture") {
                 row.word()?;
@@ -540,6 +541,12 @@ impl ResolvedDgFilePerformance {
                 };
                 (*aperture, *placement)
             };
+            if reservoir_feedback.len() >= MAX_NSF_RESERVOIR_APERTURES
+                || reservoir_feedback.iter().any(|(selected, _)| *selected == aperture)
+            {
+                return Err(bad(row.line,
+                    "each original reservoir may enter the shared exterior reaction only once"));
+            }
             let ApertureObservation::TubeBaffled(receiver) = observation else {
                 return Err(bad(row.line, "reservoir_feedback requires the common baffled exterior"));
             };
@@ -554,8 +561,40 @@ impl ResolvedDgFilePerformance {
                 terminal_angular_points: receiver.angular_points,
             };
             row.end()?;
-            Some((aperture, input))
-        } else { None };
+            reservoir_feedback.push((aperture, input));
+        }
+        let reservoir_feedback_solve = if reservoir_feedback.len() > 1 {
+            let mut row = rows.row("reservoir_feedback_solve")?;
+            let solve = NsfDgRadiationSolve {
+                maximum_iterations: row.number()?,
+                difference_step: row.scalar()?,
+                newton: fs_solver::NewtonKrylovConfig {
+                    absolute_tolerance: row.scalar()?,
+                    relative_tolerance: row.scalar()?,
+                    linear_restart: row.number()?,
+                    max_linear_cycles: row.number()?,
+                    forcing_minimum: row.scalar()?,
+                    forcing_maximum: row.scalar()?,
+                    forcing_gamma: row.scalar()?,
+                    forcing_exponent: row.scalar()?,
+                    globalization: fs_solver::Globalization::LineSearch(
+                        fs_solver::LineSearchConfig {
+                            armijo: row.scalar()?,
+                            contraction: row.scalar()?,
+                            minimum_step: row.scalar()?,
+                        }),
+                },
+            };
+            row.end()?;
+            solve.validate().map_err(ResolvedDgInputError::Coupling)?;
+            Some(solve)
+        } else {
+            if rows.next_is("reservoir_feedback_solve") {
+                return Err(bad(rows.line + 1,
+                    "reservoir_feedback_solve requires at least two distinct passive apertures"));
+            }
+            None
+        };
         let observer_gas = if rows.next_is("observer_gas") {
             let mut row = rows.row("observer_gas")?;
             let exterior = source.exterior_gas_record()
@@ -602,7 +641,7 @@ impl ResolvedDgFilePerformance {
                 "finite-reservoir controls must exclusively name the declared finite chamber aperture")),
         }
         if driven_aperture.is_some_and(|source|
-            reservoir_feedback.is_some_and(|(escape, _)| escape == source))
+            reservoir_feedback.iter().any(|(escape, _)| *escape == source))
         {
             return Err(bad(row.line,
                 "the same opening cannot prescribe breath pressure and passive radiation pressure"));
@@ -727,7 +766,10 @@ impl ResolvedDgFilePerformance {
             system = system.with_upstream_load(load, &gate).map_err(ResolvedDgInputError::Coupling)?;
             Some(wall)
         } else { None };
-        if let Some((aperture, input)) = reservoir_feedback {
+        if let Some(solve) = reservoir_feedback_solve {
+            system = system.with_reservoir_radiations(reservoir_feedback, solve, &gate)
+                .map_err(ResolvedDgInputError::Coupling)?;
+        } else if let Some((aperture, input)) = reservoir_feedback.pop() {
             system = system.with_reservoir_radiation_at(aperture, input, &gate)
                 .map_err(ResolvedDgInputError::Coupling)?;
         }

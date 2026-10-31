@@ -172,7 +172,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
         limits.validate()?;
         if self.steps != 0 || self.finite_reservoir.is_some()
             || !volume_m3.is_finite() || volume_m3 <= 0.0
-            || self.reservoir_radiation_aperture() == Some(aperture)
+            || self.reservoir_radiation_at(aperture).is_some()
         {
             return Err(NsfDgError::Input(
                 "finite reservoir requires one cold positive volume and a source distinct from passive radiation",

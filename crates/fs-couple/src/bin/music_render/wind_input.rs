@@ -493,7 +493,7 @@ pub(super) fn resolved_provenance(
             Some(format!("{{\"aperture\":{aperture},\"kind\":\"original-tile-continuum-flow-Rayleigh\",\"origin_m\":[{:e},{:e}],\"angle_rad\":{:e},\"grid_cells\":[{tiles}],\"tile_area_m2\":{:e},\"flow_account\":\"per-tile outward continuum volume flow; fluid/ghost face midpoint and original time trapezoid, distinct from streamed mass\",\"placement\":\"cyclic tangential axes, second reversed on low faces, rotated into common baffle\",\"kernel_support_observation_samples\":[{},{}],\"filter_delay_observation_samples\":{:e},\"observer_gas\":{material},\"radiation_feedback_added\":{}}}",
                 input.origin_m[0], input.origin_m[1], input.angle_rad, law.dx_m.powi(2),
                 microphone.delay_samples.0, microphone.delay_samples.1, microphone.filter_delay_samples(),
-                system.reservoir_radiation_aperture() == Some(aperture)))
+                system.reservoir_radiation_at(aperture).is_some()))
 
         }).collect::<Vec<_>>();
         let surfaces = if records.len() == 1 {
@@ -503,12 +503,38 @@ pub(super) fn resolved_provenance(
         };
         format!(",\"observation_scope\":\"signed pressure sum of original DG outlets and individual resolved reservoir tiles in one explicit rigid baffle and material exterior; observation adds no reaction or flow/noise source; no free-field body or room scattering\"{surfaces}")
     };
-    let reservoir_feedback = system.reservoir_radiation().map_or_else(String::new, |input| {
+    let mut reservoir_feedback = system.reservoir_radiation().map_or_else(String::new, |input| {
         let aperture = system.reservoir_radiation_aperture().expect("bound reaction aperture");
         format!(",\"reservoir_feedback\":{{\"aperture\":{aperture},\"kind\":\"same-interval-original-joint-DG-mouth-radiation\",\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}],\"flow_coordinates\":[\"into bore\",\"outward through resolved reservoir\"],\"scope\":\"independent original flows; full computed self and mutual exterior response; pressure and acoustic work use the original cached conservative FV predictors over the complete physical interval; endpoint tile traces remain observation-only; pressure and work checked before fluid, bore and radiation publish; uniform pressure projection on the original reservoir ghost boundary; no transparent-boundary or free-field qualification\"}}",
             input.origin_m[0], input.origin_m[1], input.cells[0], input.cells[1],
             input.pressure_bracket_pa[0], input.pressure_bracket_pa[1])
     });
+    if let Some(solve) = system.radiation_solve() {
+        let openings = system.reservoir_radiations().iter().enumerate()
+            .map(|(index, (aperture, input))| format!(
+                "{{\"aperture\":{aperture},\"joint_flow_coordinate\":{},\"origin_m\":[{:e},{:e}],\"mouth_quadrature\":[{},{}],\"ghost_pressure_bracket_pa\":[{:e},{:e}]}}",
+                index + 1, input.origin_m[0], input.origin_m[1],
+                input.cells[0], input.cells[1],
+                input.pressure_bracket_pa[0], input.pressure_bracket_pa[1]))
+            .collect::<Vec<_>>().join(",");
+        let config = solve.newton;
+        let globalization = match config.globalization {
+            fs_solver::Globalization::LineSearch(policy) => format!(
+                "{{\"kind\":\"line-search\",\"armijo\":{:e},\"contraction\":{:e},\"minimum_step\":{:e}}}",
+                policy.armijo, policy.contraction, policy.minimum_step),
+            fs_solver::Globalization::TrustRegion(policy) => format!(
+                "{{\"kind\":\"trust-region\",\"initial_radius\":{:e},\"minimum_radius\":{:e},\"maximum_radius\":{:e},\"acceptance_ratio\":{:e},\"expansion_ratio\":{:e},\"shrink\":{:e},\"expansion\":{:e}}}",
+                policy.initial_radius, policy.minimum_radius, policy.maximum_radius,
+                policy.acceptance_ratio, policy.expansion_ratio, policy.shrink, policy.expansion),
+        };
+        reservoir_feedback = format!(
+            ",\"reservoir_feedbacks\":[{openings}],\"reservoir_feedback_solve\":{{\"kind\":\"original-Newton-Krylov-shared-exterior\",\"maximum_iterations\":{},\"normalized_difference_step\":{:e},\"absolute_tolerance_pa\":{:e},\"relative_tolerance\":{:e},\"linear_restart\":{},\"maximum_linear_cycles\":{},\"forcing_minimum\":{:e},\"forcing_maximum\":{:e},\"forcing_gamma\":{:e},\"forcing_exponent\":{:e},\"globalization\":{globalization},\"flow_coordinates\":\"bore first, then outward through each listed original reservoir aperture\",\"scope\":\"one original joint self/mutual radiation owner; every resolved preview charged to the shared evaluation and cell-step bounds; out-of-bracket proposals refuse without clipping; each original pressure and work balance checked before fluid, both ducts, finite source and radiation publish; uniform pressure projection, not transparent or free-field qualification\"}}",
+            solve.maximum_iterations, solve.difference_step,
+            config.absolute_tolerance, config.relative_tolerance,
+            config.linear_restart, config.max_linear_cycles,
+            config.forcing_minimum, config.forcing_maximum,
+            config.forcing_gamma, config.forcing_exponent);
+    }
     let boundary = match renderer.drive_history().first().expect("finite native drive history") {
         fs_couple::nsf_dg::NsfDgDrive::Boundary(fs_lbm::nsf3::NsfBoundaryDrive::PressureTemperature { .. }) =>
             ",\"external_boundary\":{\"kind\":\"prescribed-pressure-and-inflow-temperature\",\"pressure_units\":\"Pa offset from source reference\",\"inflow_temperature_units\":\"K\",\"flow\":\"determined by the live outgoing characteristic at every original face reconstruction\",\"temperature\":\"held physical source temperature for inward flow; outgoing fluid entropy is retained\",\"material\":\"original source equation of state, caloric and transport laws; fixed composition\"}",

@@ -211,12 +211,14 @@ every explicitly observed aperture. Each original aperture may occur once;
 its independently placed tiles must be disjoint from other observed surfaces
 and the bore outlets. Unselected breath openings do not acquire a receiver.
 
-With several observations, `reservoir_feedback aperture INDEX ...` selects
-exactly one observed opening for the existing live exterior reaction. The
-unindexed feedback form remains valid when only one opening is observed.
-The source and passive reaction indices must differ. All held breath and trial escape states enter the same original
-NSF transaction with both acoustic loads. No participant publishes before the
-existing pressure/work gates pass.
+With several observations, each `reservoir_feedback aperture INDEX ...` row
+selects one observed opening for live exterior reaction. Repeated rows attach
+those openings to one shared self/mutual radiation owner; two or more require
+the explicit `reservoir_feedback_solve` controls described below. The unindexed
+feedback form remains valid when only one opening is observed.
+The source must differ from every passive reaction index. All held breath and
+trial escape states enter the same original NSF transaction with both acoustic
+loads. No participant publishes before the pressure/work gates pass.
 
 Typed callers use `step_with_reservoir_aperture`,
 `with_reservoir_radiation_at` and `with_reservoir_observation_at`. Singular
@@ -863,9 +865,10 @@ When more than one opening is observed, name the original reaction owner:
 reservoir_feedback aperture INDEX PRESSURE_LO_PA PRESSURE_HI_PA QUAD_NX QUAD_NY
 ```
 
-This remains one original joint mouth/bore reaction. Other selected escapes
-contribute their prescribed-boundary flows to observation without acquiring a
-second reaction law or mutual coupling between all reservoirs.
+One feedback row retains the original joint mouth/bore solve. Additional
+observed escapes remain observation-only unless explicitly selected by another
+feedback row. Repeated feedback rows use the shared multi-opening reaction
+described below; they do not create independent exterior loads.
 
 The pressure bounds are ghost-pressure offsets relative to the original source
 reference, in Pa. The two positive quadrature counts refine the existing
@@ -1160,9 +1163,10 @@ and heat power for a thermochemical chamber. Existing pressure/temperature/
 characteristic holds and ramps retain their original grammar for sources
 without a finite chamber.
 
-A separate opening can retain `reservoir_feedback` and its material microphone.
-The source also composes with the original downstream duct, optional finite
-upstream/cork duct, and independently selected axial patches. The finite source
+Distinct openings can retain `reservoir_feedback` and their material microphones,
+including one shared multi-opening reaction. The source also composes with the
+original downstream duct, optional finite upstream/cork duct, and independently
+selected axial patches. The finite source
 and passive radiation cannot own the same opening, in either attachment order.
 Chamber reconstruction and conservation checks occur before publication at all
 three fluid/acoustic acceptance sites. Failed inversion, insufficient inventory,
@@ -1446,3 +1450,91 @@ unequal solver/output clocks and rollback after a refused named-source gesture.
 Those runtime tests remain unexecuted in the direct GitHub implementation
 session because its pinned dependency checkout is incomplete; the example is
 not evidence of converged or realistic instrument sound.
+
+## Reciprocal reaction of several resolved openings
+
+Two or more selected reservoir apertures can now share the same original
+computed exterior as all circular DG outlets. Each retains its own signed
+outward flow and acoustic pressure. The original rectangular Rayleigh source
+includes every rectangle-to-rectangle, rectangle-to-circle and circle-to-circle
+term before the same rational multiport fit and terminal elimination.
+There is one radiation history, not a sum of independent loads.
+
+At the original DG level, `with_independent_mouths` attaches the ordered
+rectangles; `independent_mouths_response` returns the bore-first pressure
+relation, followed by one coordinate for each declared mouth.
+`step_with_mouth_flows` consumes one bore flow and the complete mouth-flow
+slice. The computed-source record retains the distinct radiation coordinate
+order: all mouths first, then the original circular terminals. Metadata reports
+both orders explicitly. Scalar stepping cannot silently stand in for a
+multi-mouth source.
+
+At the resolved-fluid level, `with_reservoir_radiations` takes the ordered
+`(aperture, NsfDgReservoirRadiation)` declarations and an explicit
+`NsfDgRadiationSolve`. The attachment requires at least two distinct passive
+openings. The existing singleton attachment and solve retain their original
+path. A finite or prescribed source cannot occupy any selected passive opening,
+and every observation of a bound opening must retain its original placement.
+
+The native format repeats the existing indexed feedback row after the
+observation declarations:
+
+```text
+reservoir_feedback aperture FIRST_INDEX LO_PA HI_PA QUAD_NX QUAD_NY
+reservoir_feedback aperture SECOND_INDEX LO_PA HI_PA QUAD_NX QUAD_NY
+reservoir_feedback_solve MAX_ITERATIONS DIFFERENCE_STEP ABS_TOL REL_TOL LINEAR_RESTART MAX_LINEAR_CYCLES FORCING_MIN FORCING_MAX FORCING_GAMMA FORCING_EXPONENT ARMIJO CONTRACTION MINIMUM_STEP
+```
+
+The solve row is required for multiple feedback openings and refuses when
+fewer than two are selected. It constructs the existing
+`fs_solver::NewtonKrylovConfig` with the original line-search policy.
+All numerical controls are explicit. The absolute Newton residual tolerance
+is in Pa; the relative tolerance scales the initial residual norm.
+`DIFFERENCE_STEP` is dimensionless in the normalized authored bracket
+coordinates. The physical characteristic and reservoir-pressure brackets remain
+the admitted domain.
+
+The original fallible finite-difference adapter evaluates the same full NSF
+interval for the bore, optional upstream duct and every selected escape. Every
+real preview, including Jacobian actions and final restaging, consumes the
+existing shared evaluation and cell-step allowance. A material refusal,
+cancellation or out-of-bracket proposal stops the attempt and leaves the
+accepted owners unchanged. The adapter does not clip proposals or widen
+brackets; a stalled or refused solve needs explicitly revised numerical controls,
+a better-admitted domain or interval refinement.
+
+Newton convergence alone does not accept a physical step. The final original
+candidates must pass each port's existing pressure tolerance and projection-work
+budget, the shared exterior's work check, and any retained finite chamber's
+mass/energy and actuation checks. Fluid, bore, upstream duct, finite source and
+radiation history publish only after those gates.
+
+Plural attachment exposes `reservoir_radiations()`,
+`reservoir_radiation_at(aperture)` and `radiation_solve()`.
+Accepted plural receipts are in `NsfDgFrame::reservoir_radiations`, one for each
+declared passive opening. The legacy optional `reservoir_radiation` receipt
+remains specific to the singleton path; the two receipt views are not populated
+together. Each receipt uses that opening's original cached conservative FV
+exchange. The complete NSF mass and energy totals already include these
+exchanges and must not be charged again.
+
+### Coupled-openings starter
+
+`crates/fs-couple/examples/resolved-dg-coupled-escapes.performance` composes
+the finite actuated nitrogen source at aperture 0 with passive apertures 1 and 2,
+the original downstream bore, closed cork duct and material microphone.
+The two escape rectangles lie on the same declared grid face and use its same
+baffle placement. Both contribute observation and reciprocal reaction.
+Instrument Lab imports the file as **Resolved flow — mutually coupled openings**.
+
+Use the nitrogen packs and render command from the chamber examples above,
+substituting this input filename and a fresh output path. Its 384 output samples
+at 48 kHz retain the 8 ms authored source program. The physical fluid timestep,
+source heat/volume work, stationary voxel walls and uniform acoustic projection
+retain their existing scope.
+
+This is an authored numerical integration fixture. Native execution, stability,
+spatial/temporal and interface refinement, real anatomy/geometry and instrument
+qualification remain outstanding. Several reacting openings do not supply
+mean mass/enthalpy transport through the acoustic ducts, transparent exterior
+boundaries or free-field body scattering.
