@@ -240,7 +240,7 @@ fn g0_material_node_kick_matches_independent_six_by_six_spatial_mass_solve_and_w
         expected.push((std::array::from_fn(|c|old_w[node][c]+h*change[c]),
             std::array::from_fn(|c|body_v[c]+h*change[c+3])));
     }
-    let mut accounts=KickAccounts::new(2);motion.kick(h,&loads,[0.0;3],&mut accounts,&gate).unwrap();
+    let mut accounts=KickAccounts::new(2);motion.kick(h,StageLoads::World(&loads),[0.0;3],&mut accounts,&gate).unwrap();
     for (node,(w,bv)) in expected.into_iter().enumerate() {
         vector_near(motion.angular_velocities_body_rad_s().unwrap()[node],w,2e-12);
         vector_near(rotate(rotation.inverse(),motion.velocities_m_s().unwrap()[node]).unwrap(),bv,2e-12);
@@ -258,7 +258,7 @@ fn g0_fixed_frame_translation_has_the_required_eccentric_reaction_couple() {
     let c=motion.model().inertia()[1].center_of_mass_body_m();let mass=motion.model().inertia()[1].mass_kg();
     let load=RodNodalWrench {force_n:[0.2,-0.1,0.3],torque_nm:[0.01,0.02,-0.01]};
     let h=0.002;let mut accounts=KickAccounts::new(2);
-    motion.kick(h,&[RodNodalWrench::default(),load],[0.0;3],&mut accounts,&gate).unwrap();
+    motion.kick(h,StageLoads::World(&[RodNodalWrench::default(),load]),[0.0;3],&mut accounts,&gate).unwrap();
     vector_near(accounts.supports[1].angular_nm_s,add(load.torque_nm.map(|x|-h*x),cross(c,load.force_n.map(|x|h*x))),1e-13);
     assert_eq!(motion.body_spins_kg_m2_s()[1],[0.0;3]);
     near(accounts.work,0.5*h*h*load.force_n.iter().map(|f|f*f).sum::<f64>()/mass,1e-13);
@@ -361,6 +361,11 @@ pub use thermal::RodThermalRefresh;
 /// Reciprocal source-bound section thermodynamics on the finite heat timeline.
 pub mod enthalpy;
 
+/// Held spatial forces and material-following couples at rotating rod nodes.
+pub mod loads;
+pub use loads::{PreparedRodLoads, RodPointForce};
+use loads::StageLoads;
+
 /// Instantaneous terminal and attachment impulses on the same trajectory.
 pub mod impulse;
 
@@ -388,6 +393,7 @@ pub enum RodMotionError {
     Rotation(LieStepError),
     SpatialInertia(fs_mbd::articulated::ArticulatedError),
     PrincipalFrame(fs_mbd_material::principal::PrincipalFrameError),
+    SpatialLoads(fs_mbd::spatial_loads::SpatialLoadError),
     /// A noncentral pin/slider would couple the constrained translational drift
     /// to rotation. It cannot be implemented by independent momentum projection.
     EccentricPositionSupport { node: usize },
@@ -403,6 +409,7 @@ impl core::fmt::Display for RodMotionError {
             Self::Rotation(e)=>write!(f,"rod motion: {e}"),
             Self::SpatialInertia(e)=>write!(f,"rod reference inertia: {e}"),
             Self::PrincipalFrame(e)=>write!(f,"rod principal inertia: {e}"),
+            Self::SpatialLoads(e)=>write!(f,"rod applied load: {e}"),
             Self::EccentricPositionSupport {node}=>write!(f,
                 "rod node {node}: eccentric free rotation with a position support requires coupled constraint dynamics"),
             Self::Invalid(s)=>write!(f,"rod motion: {s}"),
@@ -570,6 +577,21 @@ impl<I:RodMotionInertia> RodMotion<I> {
     /// tangent or new eigendecomposition in the step. Sources remain immutable.
     pub fn step_candidate(&self,dt:f64,loads:&[RodNodalWrench],controls:RodMotionControls,
         gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
+        self.step_with_loads(dt,StageLoads::World(loads),controls,gate)
+    }
+    /// Advance under world-held material-point forces and body/world free
+    /// couples. Each kick evaluates the actual material frame, including the
+    /// endpoint after free rotation. Reference points remain material nodes;
+    /// the existing kick transports their moments to eccentric mass centroids.
+    ///
+    /// The loads are constant in their named frames over this interval. Native
+    /// work remains a symmetric kick quadrature, not an exact path integral.
+    pub fn step_spatial_candidate(&self,dt:f64,loads:&PreparedRodLoads,controls:RodMotionControls,
+        gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
+        self.step_with_loads(dt,StageLoads::Spatial(loads),controls,gate)
+    }
+    fn step_with_loads(&self,dt:f64,loads:StageLoads<'_>,controls:RodMotionControls,
+        gate:&CancelGate)->Result<(Self,RodMotionStep),RodMotionError> {
         checkpoint(gate)?;
         if !dt.is_finite() || dt<=0.0 || 0.5*dt==0.0
             || !controls.maximum_step_s.is_finite() || controls.maximum_step_s<=0.0 || dt>controls.maximum_step_s
@@ -579,7 +601,7 @@ impl<I:RodMotionInertia> RodMotion<I> {
             || self.steps>=controls.maximum_steps || loads.len()!=self.kinetics.len() {
             return Err(RodMotionError::Invalid("invalid rod interval, work gate or step/rotation budget"));
         }
-        for load in loads {finite(&load.force_n)?;finite(&load.torque_nm)?;}
+        loads.validate()?;
         let next_time=self.time_s+dt;
         if !next_time.is_finite() || next_time<=self.time_s {
             return Err(RodMotionError::Invalid("rod clock cannot represent the requested advance"));
@@ -637,14 +659,14 @@ impl<I:RodMotionInertia> RodMotion<I> {
             external_angular_impulse_nm_s:accounts.angular,linear_balance_residual_n_s:linear_residual,
             angular_balance_residual_nm_s:angular_residual,support_impulses:accounts.supports}))
     }
-    fn kick(&mut self,h:f64,loads:&[RodNodalWrench],origin:[f64;3],accounts:&mut KickAccounts,
+    fn kick(&mut self,h:f64,loads:StageLoads<'_>,origin:[f64;3],accounts:&mut KickAccounts,
         gate:&CancelGate)->Result<(),RodMotionError> {
         let body_loads=self.model.body_loads(&self.pose,gate)?;
-        for (node,load) in loads.iter().enumerate() {
+        for node in 0..loads.len() {
             checkpoint(gate)?;
             let frame=self.pose.frames[node];let k=self.kinetics[node];
+            let (load,applied_body)=loads.stage_at(node,frame)?;
             let total=add(self.response.force_n[node],load.force_n);
-            let applied_body=rotate(frame.inverse(),load.torque_nm)?;
             let total_torque=add(self.response.torque_body_nm[node],applied_body);
             let central_torque=if k.eccentric() {sub(total_torque,cross(k.center,rotate(frame.inverse(),total)?))}
                 else {total_torque};

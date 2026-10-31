@@ -25,6 +25,9 @@ mod thermal;
 #[path = "rod_motion/enthalpy.rs"]
 mod enthalpy;
 
+#[path = "rod_motion/loads.rs"]
+mod loads;
+
 #[path = "rod_motion/impulse.rs"]
 mod impulse;
 
