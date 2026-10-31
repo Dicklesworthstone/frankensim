@@ -20,6 +20,8 @@
 //! saturation cycles, displacement current and a causal time-domain reduction
 //! of the frequency-dependent terminal matrix remain outside this owner.
 
+/// Native circuit-network composition of the field-derived terminal matrix.
+pub mod circuit;
 mod response;
 /// Resolved solid winding currents, skin/proximity redistribution and heat.
 pub mod solid;

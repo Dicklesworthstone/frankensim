@@ -92,6 +92,43 @@ MQS tests, not empirical winding validation. Axial end redistribution, individua
 insulated strands inside an authored homogeneous region, full 3-D end turns,
 and displacement-current regimes are not inferred.
 
+
+### Native circuits drive and load the resolved winding fields
+
+`HarmonicWindingFrequency::circuit_response` connects the same full terminal
+impedance to original native R/L/C, mutual-inductance, ideal-transformer and
+voltage/current-source constraints. Each field-owned inductor branch is replaced
+temporarily by a positive reference resistor and a compensating native current
+port. One `HarmonicModel` factorization supplies the open-source and unit-port
+responses; a bounded terminal Schur solve and final native replay cancel the
+reference resistance exactly. Its value is numerical conditioning, not physical
+damping, storage or heat. Existing sparse unit field solutions are reused.
+
+The result retains original branch/node/transformer identities, individual
+source outputs, authored control-index gaps and complex phases. Repeated controls
+expand to private native ports so their individual currents are not lost; one
+control cannot mix voltage and current units. Original external mutual links
+must not touch field-owned windings, whose complete magnetic coupling already
+belongs to the field terminal matrix. Actual source constraints, transformer
+work, Kirchhoff currents, native residuals and winding terminal consistency
+are checked independently of the small interface solve.
+
+Spatial solid, stranded and floating-conductor losses are recovered once through
+the same field response. Original circuit resistor heat and unrelated native
+storage remain separate. Supplied complex power closes against their complete
+real and reactive account, using the distinct conjugation conventions for
+voltage-driven and current-driven native ports. Reference resistors and private
+compensating sources never appear as physical losses or external supplies.
+Input graph, native dense payload, interface storage, solve work and cancellation
+are bounded before publication; true poles and inadmissible constraints refuse.
+
+Five authored-source regression groups cover loaded coupled windings and
+reference-resistance invariance, mixed ideal current/voltage clamps, repeated
+source controls, ideal transformers with external mutual RLC at series resonance,
+and binding/budget/cancellation/true-pole refusal. The same fixed-bias planar MQS
+and source-domain limits apply; native test execution is a separate requirement
+where the workspace dependency repositories are available.
+
 ## Ionized-gas current and Joule heating
 
 `PlanarConduction` accepts the sealed `PlanarOhmicResponse` material response,
