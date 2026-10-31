@@ -33,6 +33,7 @@ pub mod interval;
 pub mod multi_taylor;
 pub mod newton;
 pub mod predicates;
+pub mod power;
 pub mod taylor;
 
 /// Exponential attenuation without a libm error assumption.
