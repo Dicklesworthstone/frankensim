@@ -2160,3 +2160,30 @@ check actual pressure/flow, material and pore substitutions, acoustic power,
 separate wall diffusion, single-snapshot evaluation, source support and
 cancellation. These regressions are authored; native Cargo execution remains
 unverified in the resource-exhausted authoring environment.
+
+## Distributed locally reacting porous lining
+
+`wall::PorousLining` prepares the original `fs-material::porous::PorousFluidLaw`
+once per frequency with an explicit coherent saturating-fluid state and physical
+layer thickness. The source law retains its original support and characterization
+viscosity. The original JCA(L) rigid-backed surface impedance is conjugated once
+from `exp(+i omega t)` to the duct's `exp(-i omega t)` convention; the existing
+wall operator alone applies actual perimeter and surface slope. A prepared value
+refuses a different frequency. Local wall queries allocate nothing and do not
+repeat a material solve.
+
+`PorousLining::duct_chain` uses that same fluid in the original cylindrical,
+conical and smooth-profile propagation owners, including their declared
+resolution, composition budgets and cancellation. The core is inviscid; the
+rigid-wall no-slip/isothermal diffusion law is not simultaneously imposed on the
+permeable surface. Core radii are supplied after lining installation. This is
+explicitly a planar, locally reacting, rigid-frame approximation, not an
+extended-reacting porous domain, curved-layer solution, Biot-frame solver,
+mean-flow model or angular-response qualification of a measured normal-incidence
+spectrum. Applications must justify that reduction.
+
+Focused tests in `wall/porous/tests.rs` verify source/fluid and phasor preservation
+(G0), an independent cylindrical line equation and integrated wall-power balance
+(G1), segmentation/constant-profile equivalence (G3), and original support and
+cancellation refusals. These tests establish the stated local model, not material
+qualification outside the source's domain.

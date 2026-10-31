@@ -9,6 +9,10 @@ use crate::{DuctError, SegmentWave};
 use fs_math::c64::C64;
 use fs_phs::WallPin;
 
+/// Material-owned, rigid-backed porous absorption on a distributed wall.
+mod porous;
+pub use porous::PorousLining;
+
 /// Passive locally reacting surface impedance [Pa s/m].
 ///
 /// Radius is the actual local inner radius, including chimney and quadrature
