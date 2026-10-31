@@ -1845,6 +1845,25 @@ errors remain diagnostics in watts. They are **not** propagated final thermal
 uncertainty, and changing-field energies do not claim the fixed-field linear
 standard-error scaling of `ScatteringHeating`.
 
+`advance_ensemble_refined` evaluates independent complete native trajectories,
+with paired coarse/fine/finer time comparisons and separate final ensemble
+sampling and H/2H photon-sensitivity gates. Both consecutive time comparisons
+must actually increase native thermal substep counts; unchanged CFL/event-clipped
+time grids cannot establish refinement. Paired temperature/enthalpy requests
+below native coordinate resolution refuse without enlarging user tolerances.
+Every thermal-cell enthalpy and actual caloric temperature, and every
+radiation/heat energy channel, is assessed.
+Energy comparisons use interval increments and compensated differences so old
+fluence or arbitrary enthalpy datums cannot hide current discrepancies. The
+result retains actual finest native trajectories and separate statistical
+summaries; it does not manufacture a thermal state by averaging temperature or
+enthalpy. All discarded trials share explicit total thermal-step, source-query,
+traced-segment and retained-state ceilings. These empirical fixed-replica
+assessments are sensitivity/standard-error diagnostics, not confidence sequences,
+certified nonlinear bias bounds, rare-path guarantees or validation of supplied
+material data. Selecting a resolution after looking at them confers no
+optional-stopping guarantee.
+
 Geometry, density, phase laws, incident power and spectral quadrature remain
 prescribed. The incident-heating model does not infer missing material spectra,
 reflecting/refracting interfaces, moving geometry, temperature-dependent phase
@@ -1852,7 +1871,8 @@ functions, fluorescence, chemistry or net thermal-radiation exchange. Native
 integration tests cover off-beam heat, thermal activation of scattering, changing
 upstream absorption and downstream heat, exact absorption-only reduction,
 latent/event/split clocks, stream pairing, source-domain refusal and aggregate
-work/cancellation rollback.
+work/cancellation rollback. Ensemble tests separately exercise deterministic
+reduction, nonlinear stochastic trajectories and statistical/work refusal.
 
 ## No-claim boundaries (volumes)
 

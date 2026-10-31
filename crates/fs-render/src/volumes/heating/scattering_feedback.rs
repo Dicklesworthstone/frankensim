@@ -32,6 +32,14 @@ use fs_thermal::enthalpy::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod refinement;
+pub use refinement::{
+    ScatteringCellEstimate, ScatteringEnsembleAssessment, ScatteringEnsembleEnergy,
+    ScatteringEnsembleTolerance, ScatteringEnsembleWork, ScatteringFeedbackEnsemble,
+    ScatteringFeedbackRefinement, ScatteringFeedbackTrajectory, ScatteringRefinementDiagnostics,
+    ScatteringRefinementError, ScatteringScalarEstimate,
+};
+
 /// Source-bound mass scattering in m²/kg versus kelvin. The retained rows are
 /// actual scattering spectra, including their original source support and any
 /// analytic wavelength law. Interpolation in kelvin reuses the absorption
