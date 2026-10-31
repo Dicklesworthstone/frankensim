@@ -24,6 +24,8 @@ use fs_thermochem::{Nasa9EvaluationReceiptV1, SpeciesId};
 
 mod prepared;
 mod solve;
+/// Source-bound frozen-population electron/heavy energy evolution.
+pub mod energy;
 
 pub use prepared::{IsochoricKineticsView, IsochoricReactor};
 

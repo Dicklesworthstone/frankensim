@@ -494,6 +494,47 @@ total internal energy remain conserved. This proves that the retained physical
 rate reaches the existing evolution path; it is not empirical validation of
 ionization time or an electrical discharge.
 
+## Frozen electron/heavy energy evolution
+
+`chemistry::energy::advance_frozen_energy` evolves the actual source-bound
+`FrozenIonizedGasStateV1` at fixed species amounts and volume, with independent
+constant electron and heavy-particle powers over the requested interval.
+Positive power deposits energy and negative power removes it. An absent
+electron population cannot accept electron power or acquire a seed. Electrical
+consumers supply their actual, separately resolved carrier work; this owner
+does not invent a field or add total Joule work a second time.
+
+Elastic energy exchange uses the same source-retained electron-neutral
+momentum cross sections as material drag:
+`G = 3 R n_e sum_target[N_target (m_e/m_target) k_m(Te)]`, with electron amount
+`n_e` in mol, neutral number density `N_target` in m^-3 and
+`Q_e_to_h = G (Te-Th)`. Every present neutral requires exactly one original
+momentum source. The declared target/electron speed limit also bounds
+`sqrt(m_e/m_target)`, so cold but unrealistically light targets cannot pass a
+massive-target approximation. Charged fraction, source temperature intervals,
+cross-section coverage and numerical work remain explicit. These limits do
+not establish that neglected Coulomb or inelastic processes are insignificant
+for an arbitrary experiment. The model is Banks (1966), Eqs. 16–20,
+https://ntrs.nasa.gov/api/citations/19660020172/downloads/19660020172.pdf.
+
+Each first-order substep freezes G at its starting state and solves a monotone
+implicit scalar exchange. The same signed exchange enters the two pool energy
+targets with opposite signs. Full/two-half comparison controls an estimated
+local error, including the changing collision rate; it is not a global error
+certificate. Every caloric inversion uses original-source internal-energy
+increments relative to the original temperatures, canceling formation offsets
+before rounding. Energy and temperature residuals both gate convergence, so
+a trace electron pool cannot hide a large Te error under a parcel-wide energy
+tolerance. Nonlinear trials allocate no heap storage. Source gaps, invalid
+domains, exhausted work and cancellation publish no partial endpoint.
+
+The result retains the initial and final source-bound states, original
+collision sources, original controls, separately deposited energies, signed
+exchange and actual per-pool energy residuals. This is a frozen-composition
+thermal step. It does not supply two-temperature molecular detailed balance,
+ionization population evolution, photon absorption, field energy or charged
+spatial transport; those owners must exchange their own conservative sources.
+
 ## Common material gas integration
 
 Optional feature `material` exposes
