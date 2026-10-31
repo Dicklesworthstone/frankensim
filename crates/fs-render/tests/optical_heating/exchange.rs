@@ -1,6 +1,9 @@
 #[path = "exchange/refinement.rs"]
 mod refinement;
 
+#[path = "exchange/feedback.rs"]
+mod feedback;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_render::volumes::heating::exchange::{

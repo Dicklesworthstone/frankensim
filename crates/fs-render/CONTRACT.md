@@ -4069,6 +4069,41 @@ and `ThermalScatteringCell` remain available at their original public paths.
 The field owns neither a second temperature evolution nor a second caloric law;
 immutable inputs are shared and mutable candidate packets roll back with the
 native observer transaction.
+### Temperature feedback in reciprocal volume radiation
+
+`volumes::heating::exchange::feedback::TemperatureRadiativeExchange<N>` accepts
+the shared `Arc<TemperatureOpticalField>` and evaluates local absorption and
+scattering at each actual native source-start temperature. Emission capacities,
+self absorption, escape and reciprocal cell exchange therefore respond to the
+evolving material state. Fixed geometry, density and reciprocal phase laws stay
+prescribed; coefficient source domains remain explicit. Construction validates
+the field and sampling controls without launching photon histories.
+
+Each replica retains common photon stream keys across temperature/time updates;
+the history count is absent from those keys, so H/2H studies share prefixes.
+Changed coefficient bits or a changed replica/history policy rebuild the
+original reciprocal optical operator. An unchanged packet reuses its cached
+transport while the original fixed-exchange owner still evaluates new Planck
+rates. Every source query consumes a source evaluation, including cache hits;
+actual optical rebuilds and photon segments have separate whole-advance counts.
+An exact cached continuation can use a zero remaining photon allowance.
+
+The fixed exchange owner remains the only Planck/rate/CFL/energy implementation.
+Replacement snapshots inherit its compensated accepted energy history, while
+their current powers come from the current native state. Domains are checked
+at starts, events and endpoints, including transparent/pure-scattering cells.
+The original thermal transaction owns conservation, latent storage, cancellation
+and rollback. The coefficient-frozen secant limiter is not a bound on dκ/dT or
+nonlinear feedback accuracy; time and photon refinement must assess that error.
+
+`examples/temperature_radiative_balance.rs` composes incident scattering heat,
+temperature-dependent emission/reabsorption, an external black bath and native
+conduction through the existing `CoupledObservers`. Both radiative observers
+share one compiled material field and one accepted native timeline. It exports
+cumulative physical energy and temperature CSV with an explicit balance check.
+Its stated synthetic source tables and three 8–16 micrometre bins demonstrate
+integration, not measured material behavior or bolometric cooling. Run with
+`cargo run -p fs-render --example temperature_radiative_balance --no-default-features --features optical-heating`.
 
 ### Coherent transparent coatings on dielectric ray boundaries
 

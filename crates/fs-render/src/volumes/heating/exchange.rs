@@ -10,6 +10,7 @@
 //! operator's uncertainty is correlated throughout its entire trajectory;
 //! conditional watt diagnostics are not final thermal-state error bars.
 
+pub mod feedback;
 pub mod refinement;
 
 use super::{CheckedSum, OpticalHeatingError};
