@@ -55,6 +55,14 @@ impl<'a> ContinuumDarcyGeometry<'a> {
         self.barrier.geometric_resistance_per_m
     }
 
+    /// Original calibrated sum(beta_i*L_i), dimensionless, in
+    /// dp = mu*sum(L/k)*Q/area + rho*sum(beta*L)*Q*|Q|/area².
+    /// The original fluid owner supplies its actual density, viscosity and Q.
+    /// A consumer must retain this term; zero is the exact Darcy limit.
+    pub const fn inertial_geometric_resistance(&self) -> f64 {
+        self.barrier.inertial_geometric_resistance()
+    }
+
     /// Original model limits intersected with all retained source T/p limits.
     pub const fn support(&self) -> PorousGasSupport {
         self.barrier.support

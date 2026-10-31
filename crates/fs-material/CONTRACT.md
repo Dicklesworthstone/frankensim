@@ -6486,3 +6486,34 @@ water flux at large hydraulic permeance. These are prescribed, negligible-
 storage film models, not resolved crossflow turbulence, evolving fouling,
 finite film storage, electrochemical polarization or calibrated membrane data.
 
+
+
+### Calibrated inertial resistance of porous layers
+
+`ForchheimerCalibration` retains explicit per-layer beta [1/m], specimen normal,
+transverse constraint, provenance and absolute T/p/superficial-speed support.
+The convention is `-dp/dx = mu*q/k + rho*beta*|q|q`, without an implicit factor
+of one half. Original intrinsic tensors and material sources remain unchanged;
+compiled support intersects every calibration. Confined flow uses the original
+harmonic tensor reduction. A prescribed normal gradient requires a permeability
+eigen-direction for each inertial layer, so unresolved transverse velocity is
+not silently discarded. No beta is inferred from k, porosity or an Ergun preset.
+
+Isothermal no-slip ideal-gas transport solves
+`mu*sum(L/k)*j + sum(beta*L)*|j|j = (p_left-p_right)*p_mean/(R*T)` analytically.
+Scaled dominant-term branches avoid squaring dimensional coefficients and
+subtracting nearly equal roots. The original profile owner reconstructs each
+layer's own viscous and inertial pressure-squared loss. Both face volume rates
+use their actual densities while one mass rate is conserved. The original drag
+work diagnostic remains a diagnostic, never a second heat source. Exact zero
+beta retains the existing Darcy/Klinkenberg arithmetic.
+
+The borrowed continuum geometry and frozen-gas coefficient pair expose both
+viscous and inertial resistance. Linear-only consumers and the molecular/
+Knudsen dusty-gas closure explicitly refuse positive inertia. Slip plus inertia,
+wet-pore inertia, momentum acceleration/choking, turbulence and extrapolation
+beyond the supplied directional/fluid calibration are not supplied by this rung.
+Focused kernel tests cover independent quadratic balances, extreme numerical
+scales and tensor-direction admission. Original-owner regression sources cover
+layer pressures, mass/drag work, zero-beta behavior, actual speed admission,
+source support, confinement, seals and unsupported combined-law refusal.

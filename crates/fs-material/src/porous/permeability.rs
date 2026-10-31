@@ -26,9 +26,10 @@
 //!
 //! Intrinsic permeability [m2], hydraulic conductivity, membrane permeability
 //! and permeance are distinct quantities. This is a rigid, dry, gas-filled
-//! skeleton, not a selective membrane, Darcy-Forchheimer inertia, pore-storage
-//! model or Knudsen flow. Explicit source support and speed limits bound the
-//! linear/slip regime. No universal gas slip coefficient is supplied.
+//! skeleton, not a selective membrane, pore-storage model or Knudsen flow.
+//! Explicit per-layer [`ForchheimerCalibration`] adds inertial pressure loss
+//! within its supplied directional and T/p/speed support. No slip or inertial
+//! coefficient is inferred from intrinsic permeability.
 
 use crate::{MaterialError, gas::GasState, state_point::ResolvedMaterialStatePoint,
     thermochemical_gas::ThermochemicalGasModel};
@@ -36,6 +37,8 @@ use fs_qty::{Dims, QuantitySpec};
 
 mod continuum;
 pub use continuum::ContinuumDarcyGeometry;
+mod forchheimer;
+pub use forchheimer::ForchheimerCalibration;
 /// Pinned intrinsic-permeability sources at an evolving local temperature.
 pub mod temperature;
 
@@ -166,7 +169,7 @@ impl DarcyFlowConstraint {
 }
 
 /// Explicit source/model domain. Speed is superficial (Darcy) velocity, not
-/// pore velocity, and must follow the supplied linear-regime evidence.
+/// pore velocity, and must follow the supplied constitutive-regime evidence.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PorousGasSupport {
     pub temperature_k: (f64, f64),
@@ -199,6 +202,7 @@ pub struct PorousGasLayer {
     provenance: String,
     source: Option<ResolvedMaterialStatePoint>,
     wet_state: Option<super::wet::WetPoreGasState>,
+    forchheimer: Option<ForchheimerCalibration>,
 }
 impl PorousGasLayer {
     /// Explicit data/model-input constructor. The caller separately supplies
@@ -211,7 +215,7 @@ impl PorousGasLayer {
             return Err(invalid("porous layer needs positive thickness, nonnegative slip and bounded explicit provenance"));
         }
         Ok(Self { permeability, thickness_m, klinkenberg_slip_pa, provenance,
-            source: None, wet_state: None })
+            source: None, wet_state: None, forchheimer: None })
     }
     /// Bind source-resolved intrinsic permeability [m2], and optionally an
     /// explicitly selected Klinkenberg factor [Pa]. Only validity-wide scalar
@@ -257,6 +261,9 @@ impl PorousGasLayer {
     pub fn with_wet_state(&self, state: super::wet::WetPoreGasState) -> Result<Self, MaterialError> {
         if self.klinkenberg_slip_pa != 0.0 {
             return Err(invalid("wet-pore mobility requires no-slip intrinsic permeability; dry slip calibration does not qualify wet pores"));
+        }
+        if self.forchheimer.as_ref().is_some_and(|law| law.beta_per_m() > 0.0) {
+            return Err(invalid("wet mobility does not qualify the original dry Forchheimer calibration"));
         }
         let mut layer = self.clone();
         layer.wet_state = Some(state);
@@ -323,6 +330,7 @@ pub struct DarcyGasBarrier {
     /// None is exactly sealed, not an artificially enormous finite resistance.
     geometric_resistance_per_m: Option<f64>,
     resistance_fractions: [f64; MAX_POROUS_LAYERS],
+    inertial_geometry: forchheimer::InertialGeometry,
     common_slip_pa: Option<f64>,
     minimum_slip_pa: f64,
     maximum_slip_pa: f64,
@@ -422,6 +430,11 @@ impl DarcyGasBarrier {
         if maximum_slip > 0.0 && model.is_none() {
             return Err(invalid("nonzero Klinkenberg slip requires its explicit calibrated gas model"));
         }
+        let inertial_geometry = forchheimer::compile(&layers, normal, flow_constraint, &mut support)?;
+        if inertial_geometry.resistance > 0.0 && (maximum_slip > 0.0
+            || layers.iter().any(|layer| layer.wet_state.is_some())) {
+            return Err(invalid("Forchheimer inertia with gas slip or wet-pore mobility is not qualified"));
+        }
         let mut permeabilities = [0.0; MAX_POROUS_LAYERS];
         let mut sealed = false;
         for (i, layer) in layers.iter().enumerate() {
@@ -469,7 +482,7 @@ impl DarcyGasBarrier {
         support.validate()?;
         Ok(Self { layers, normal, flow_constraint, support,
             geometric_resistance_per_m: if sealed { None } else { Some(resistance) },
-            resistance_fractions, common_slip_pa: common_slip,
+            resistance_fractions, inertial_geometry, common_slip_pa: common_slip,
             minimum_slip_pa: minimum_slip, maximum_slip_pa: maximum_slip, slip_gas_model: model })
     }
     pub fn layers(&self) -> &[PorousGasLayer] { &self.layers }
@@ -504,12 +517,14 @@ impl DarcyGasBarrier {
 
     /// Frozen, low-pressure-drop resistance [Pa s/m3]. None means sealed.
     /// The consumer owns its low-drop bound and must enforce the solved
-    /// superficial-speed support. Slip refuses, rather than being frozen.
+    /// superficial-speed support. Slip and inertia refuse rather than being
+    /// discarded; use `volume_resistance_coefficients` for a quadratic owner.
     pub fn linear_volume_resistance(&self, gas: &GasState, area_m2: f64)
         -> Result<Option<f64>, MaterialError> {
         self.support.admit(gas, gas.pressure, gas.pressure)?;
-        if !nonnegative(area_m2) || self.maximum_slip_pa != 0.0 {
-            return Err(invalid("linear Darcy resistance needs nonnegative area and continuum no-slip permeability"));
+        if !nonnegative(area_m2) || self.maximum_slip_pa != 0.0
+            || self.inertial_geometry.resistance != 0.0 {
+            return Err(invalid("linear Darcy resistance needs nonnegative area and no slip or inertial loss"));
         }
         let Some(geometry) = self.geometric_resistance_per_m.filter(|_| area_m2 > 0.0) else { return Ok(None); };
         let resistance = gas.dynamic_viscosity * geometry / area_m2;
@@ -543,7 +558,7 @@ impl DarcyGasBarrier {
             return Err(invalid("gas-specific Klinkenberg profile requires mass_flow_profile_for_model"));
         }
         let evaluated = self.evaluate(gas, left, right, area)?;
-        self.profile(left, right, area, evaluated)
+        self.profile(gas, left, right, area, evaluated)
     }
 
     /// Gas-calibrated flow and interface pressures, using the same accepted
@@ -554,10 +569,10 @@ impl DarcyGasBarrier {
             return Err(invalid("Klinkenberg calibration does not cover this gas model/composition"));
         }
         let evaluated = self.evaluate(gas, left, right, area)?;
-        self.profile(left, right, area, evaluated)
+        self.profile(gas, left, right, area, evaluated)
     }
 
-    fn profile(&self, left: f64, right: f64, area: f64,
+    fn profile(&self, gas: &GasState, left: f64, right: f64, area: f64,
         (flow, root): (DarcyGasFlow, Option<LayeredRoot>)) -> Result<DarcyGasFlowProfile, MaterialError> {
         let mut result = DarcyGasFlowProfile { flow, interface_pressures_pa: None,
             iterations: root.map_or(0, |root| root.iterations), normalized_pressure_residual: 0.0 };
@@ -569,7 +584,18 @@ impl DarcyGasBarrier {
                 (0.5*left/query.scale + 0.5*right/query.scale)
                     + self.common_slip_pa.ok_or_else(|| invalid("missing laminate flux solve"))?/query.scale
             };
-            let marched = self.march(query, scaled_flux, false, Some(&mut pressures))?
+            let mut fractions = self.resistance_fractions;
+            if self.inertial_geometry.resistance > 0.0 {
+                let geometry = self.geometric_resistance_per_m.ok_or_else(|| invalid("missing open pore geometry"))?;
+                let (viscous, inertial) = forchheimer::loss_fractions(
+                    gas.dynamic_viscosity*geometry, self.inertial_geometry.resistance,
+                    flow.mass_flux_left_to_right_kg_m2_s.abs())?;
+                for (i, fraction) in fractions[..self.layers.len()].iter_mut().enumerate() {
+                    *fraction = viscous*self.resistance_fractions[i]
+                        + inertial*self.inertial_geometry.fractions[i];
+                }
+            }
+            let marched = self.march_with_fractions(query, scaled_flux, false, Some(&mut pressures), &fractions)?
                 .ok_or_else(|| invalid("laminate pressure reconstruction failed"))?;
             result.normalized_pressure_residual = marched.fraction-1.0;
             if result.normalized_pressure_residual.abs() > self.pressure_residual_tolerance() {
@@ -640,13 +666,19 @@ impl DarcyGasBarrier {
     // or a negative radicand. Trial overshoots stop before leaving the physical
     // pressure interval; only an accepted flux is reconstructed in full.
     fn march(&self, query: LayeredQuery, scaled_flux: f64, stop_at_high: bool,
-        mut interfaces: Option<&mut [f64]>) -> Result<Option<PressureMarch>, MaterialError> {
+        interfaces: Option<&mut [f64]>) -> Result<Option<PressureMarch>, MaterialError> {
+        self.march_with_fractions(query, scaled_flux, stop_at_high, interfaces, &self.resistance_fractions)
+    }
+
+    fn march_with_fractions(&self, query: LayeredQuery, scaled_flux: f64, stop_at_high: bool,
+        mut interfaces: Option<&mut [f64]>, fractions: &[f64; MAX_POROUS_LAYERS])
+        -> Result<Option<PressureMarch>, MaterialError> {
         let mut fraction = 0.0;
         let mut correction = 0.0;
         let mut derivative = 0.0;
         for ordinal in 0..self.layers.len() {
             let i = if query.reverse_layers { self.layers.len()-1-ordinal } else { ordinal };
-            let weight = self.resistance_fractions[i];
+            let weight = fractions[i];
             let c = scaled_flux*weight;
             let a = query.low_scaled+self.layers[i].klinkenberg_slip_pa/query.scale
                 + query.drop_scaled*fraction;
@@ -696,10 +728,15 @@ impl DarcyGasBarrier {
         let rt = gas.specific_gas_constant*gas.temperature;
         let hydraulic = gas.dynamic_viscosity*geometry;
         let conductance = 1.0/hydraulic;
-        if ![rt, hydraulic, conductance].into_iter().all(positive) {
+        if ![rt, hydraulic].into_iter().all(positive)
+            || self.inertial_geometry.resistance == 0.0 && !positive(conductance) {
             return Err(invalid("gas permeation coefficients are unrepresentable"));
         }
         let difference = left-right;
+        let inertial_flow = if self.inertial_geometry.resistance > 0.0 && difference != 0.0 {
+            Some(forchheimer::positive_quadratic_flow(hydraulic, self.inertial_geometry.resistance,
+                difference.abs()*(mean/rt))?)
+        } else { None };
         let mut solved = None;
         let (enhancement, pressure_over_rt) = if let Some(slip) = self.common_slip_pa {
             (1.0+slip/mean, (mean+slip)/rt)
@@ -720,15 +757,19 @@ impl DarcyGasBarrier {
         if !positive(enhancement) || difference != 0.0 && !positive(pressure_over_rt) {
             return Err(invalid("gas permeation slip coefficients are unrepresentable"));
         }
-        flow.mean_volume_conductance_m3_pa_s = area*conductance*enhancement;
+        flow.mean_volume_conductance_m3_pa_s = if let Some(inertial) = inertial_flow {
+            forchheimer::secant_volume_conductance(hydraulic, self.inertial_geometry.resistance,
+                inertial.flow, area)?
+        } else { area*conductance*enhancement };
         if difference != 0.0 {
-            let flux = (difference*conductance)*pressure_over_rt;
+            let flux = inertial_flow.map_or_else(|| (difference*conductance)*pressure_over_rt,
+                |inertial| inertial.flow.copysign(difference));
             let left_speed = flux*rt/left;
             let right_speed = flux*rt/right;
             if !flux.is_finite() || flux == 0.0
                 || !left_speed.is_finite() || !right_speed.is_finite()
                 || left_speed.abs().max(right_speed.abs()) > self.support.maximum_superficial_speed_m_s {
-                return Err(invalid("gas permeation exceeds its linear-speed support or numerical range"));
+                return Err(invalid("gas permeation exceeds its superficial-speed support or numerical range"));
             }
             flow.mass_flux_left_to_right_kg_m2_s = flux;
             flow.mass_rate_left_to_right_kg_s = area*flux;

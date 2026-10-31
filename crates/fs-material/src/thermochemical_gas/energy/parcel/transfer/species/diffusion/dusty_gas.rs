@@ -80,6 +80,9 @@ impl DustyGasMedium {
     pub fn try_new(barrier: DarcyGasBarrier, pores: DustyGasPores)
         -> Result<Self, GasEnergyError>
     {
+        if barrier.inertial_geometric_resistance() != 0.0 {
+            return Err(invalid("dusty-gas molecular/Knudsen transport does not qualify an added Forchheimer inertial law"));
+        }
         if barrier.layers().len() != 1 || barrier.layers().iter()
             .any(|layer| layer.klinkenberg_slip_pa() != 0.0) {
             return Err(invalid("dusty gas needs one homogeneous no-slip layer; layered pore compositions and added Klinkenberg slip are unsupported"));
