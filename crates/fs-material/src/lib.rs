@@ -168,6 +168,32 @@ pub trait SmallStrainLaw {
     fn card(&self) -> ModelCard;
 }
 
+/// Borrowed constitutive laws retain their original history and source owner.
+/// Reductions and element assembly can reuse an immutable law without cloning
+/// its coefficient tables or source receipts at every integration point.
+impl<L: SmallStrainLaw + ?Sized> SmallStrainLaw for &L {
+    type State = L::State;
+
+    fn initial_state(&self) -> Self::State {
+        (**self).initial_state()
+    }
+    fn stress(&self, strain: &Voigt, state: &Self::State) -> Voigt {
+        (**self).stress(strain, state)
+    }
+    fn tangent(&self, strain: &Voigt, state: &Self::State) -> Tangent6 {
+        (**self).tangent(strain, state)
+    }
+    fn update_state(&self, strain: &Voigt, state: &Self::State) -> Self::State {
+        (**self).update_state(strain, state)
+    }
+    fn admissibility(&self) -> MaterialAdmissibility {
+        (**self).admissibility()
+    }
+    fn card(&self) -> ModelCard {
+        (**self).card()
+    }
+}
+
 /// Evaluate a law and wrap the stress in `Evidence`: exact numerics (the
 /// update is deterministic arithmetic), the law's model card attached,
 /// and `in_domain` reflecting whether the strain sits inside the card's

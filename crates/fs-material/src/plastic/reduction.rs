@@ -8,6 +8,7 @@
 //! condenses the original algorithmic tangent after convergence.
 
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
+use super::voce::VoceJ2;
 use super::{J2Plasticity, J2State};
 use crate::fiber::Uniaxial;
 use crate::{MaterialAdmissibility, MaterialError, SmallStrainLaw, Voigt};
@@ -144,6 +145,122 @@ impl UniaxialJ2 {
 }
 
 impl Uniaxial for UniaxialJ2 {
+    type State = UniaxialJ2State;
+    fn initial_state(&self) -> Self::State {
+        UniaxialJ2State {
+            plastic_strain: 0.0,
+            equivalent_plastic_strain: 0.0,
+        }
+    }
+    fn stress(&self, strain: f64, state: &Self::State) -> f64 {
+        self.response(strain, state).stress_pa
+    }
+    fn tangent(&self, strain: f64, state: &Self::State) -> f64 {
+        self.response(strain, state).tangent_pa
+    }
+    fn update_state(&self, strain: f64, state: &Self::State) -> Self::State {
+        self.response(strain, state).state
+    }
+    fn admissibility(&self) -> MaterialAdmissibility {
+        self.backbone.admissibility()
+    }
+    fn card(&self) -> ModelCard {
+        self.backbone.card()
+    }
+}
+
+/// Exact free-sided axial reduction of the native Voce saturation law. The
+/// three-dimensional owner supplies the nonlinear plastic increment; the
+/// axial reduction changes its elastic correction from `3 mu` to `E`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UniaxialVoce {
+    backbone: VoceJ2,
+}
+
+impl UniaxialVoce {
+    /// Admit the same coefficients as the native Voce and axial J2 owners.
+    pub fn new(backbone: VoceJ2) -> Result<Self, MaterialError> {
+        UniaxialJ2::new(backbone.backbone().clone())?;
+        let stiffness = backbone.backbone().elastic.youngs
+            + backbone.backbone().kinematic_hardening
+            + backbone.isotropic_hardening_derivative_pa(0.0);
+        if !stiffness.is_finite() || stiffness <= 0.0 {
+            return Err(MaterialError::Parameters {
+                what: "axial Voce return stiffness must be finite and positive".into(),
+            });
+        }
+        Ok(Self { backbone })
+    }
+
+    /// Original native law, with independent linear and saturating coefficients.
+    pub const fn backbone(&self) -> &VoceJ2 {
+        &self.backbone
+    }
+
+    /// Pure candidate at fixed accepted history. The returned tensor includes
+    /// both Poisson contraction and incompressible lateral plastic flow.
+    /// This raw kernel follows `Uniaxial` admission; checked structural or
+    /// energetic entry points reject nonfinite results and domain exits.
+    pub fn response(&self, strain: f64, state: &UniaxialJ2State) -> UniaxialJ2Response {
+        let linear = self.backbone.backbone();
+        if self.backbone.saturation_pa() == 0.0 {
+            return UniaxialJ2 {
+                backbone: linear.clone(),
+            }
+            .response(strain, state);
+        }
+        let e = linear.elastic.youngs;
+        let trial =
+            e * (strain - state.plastic_strain) - linear.kinematic_hardening * state.plastic_strain;
+        let delta =
+            self.backbone
+                .plastic_increment(trial.abs(), state.equivalent_plastic_strain, e);
+        let mut next = state.clone();
+        next.plastic_strain += trial.signum() * delta;
+        next.equivalent_plastic_strain += delta;
+        let tangent_pa = if delta == 0.0 {
+            e
+        } else {
+            let hardening = linear.kinematic_hardening
+                + self
+                    .backbone
+                    .isotropic_hardening_derivative_pa(next.equivalent_plastic_strain);
+            e * (hardening / (e + hardening))
+        };
+        let elastic_strain = strain - next.plastic_strain;
+        let transverse = -linear.elastic.poisson * elastic_strain - 0.5 * next.plastic_strain;
+        UniaxialJ2Response {
+            strain: [strain, transverse, transverse, 0.0, 0.0, 0.0],
+            stress_pa: e * elastic_strain,
+            tangent_pa,
+            state: next,
+        }
+    }
+
+    /// Preserve the native energetic interpretation of saturation. Recoverable
+    /// hardening and discrete integration loss are accounted separately from heat.
+    pub fn advance_with_energy(
+        &self,
+        old_strain: f64,
+        old_state: &UniaxialJ2State,
+        strain: f64,
+        tolerances: EnergyTolerances,
+    ) -> Result<EnergyIncrement, EnergyError> {
+        let transverse = -self.backbone.backbone().elastic.poisson
+            * (old_strain - old_state.plastic_strain)
+            - 0.5 * old_state.plastic_strain;
+        let old_tensor = [old_strain, transverse, transverse, 0.0, 0.0, 0.0];
+        let next = self.response(strain, old_state);
+        self.backbone.advance_with_energy(
+            &old_tensor,
+            &old_state.tensor_history(),
+            &next.strain,
+            tolerances,
+        )
+    }
+}
+
+impl Uniaxial for UniaxialVoce {
     type State = UniaxialJ2State;
     fn initial_state(&self) -> Self::State {
         UniaxialJ2State {

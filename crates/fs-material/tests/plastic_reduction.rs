@@ -7,7 +7,9 @@ use fs_material::plastic::energy::EnergyTolerances;
 use fs_material::plastic::rate::PowerLawOverstressJ2;
 use fs_material::plastic::reduction::{
     PlaneStressReduction, PlaneStressWorkspace, ReducedState, ReductionConfig, UniaxialJ2,
+    UniaxialVoce,
 };
+use fs_material::plastic::voce::VoceJ2;
 
 fn backbone() -> J2Plasticity {
     J2Plasticity::new_mixed(
@@ -87,6 +89,82 @@ fn g1_axial_reversal_preserves_bauschinger_shift_and_consistent_tangent() {
         for &stress in &tensor[1..] {
             near(stress, 0.0, 1e-13);
         }
+    }
+}
+
+#[test]
+fn g1_axial_voce_matches_prescribed_plastic_strain_curve_and_tensor_return() {
+    let law = UniaxialVoce::new(VoceJ2::new(backbone(), 5.0, 180.0).unwrap()).unwrap();
+    let virgin = law.initial_state();
+    let mut last_tangent = f64::INFINITY;
+    for p in [0.0008, 0.004, 0.015] {
+        // Independent monotone tension curve parametrized by plastic strain;
+        // no root solve is used to construct the reference.
+        let stress = 3.0 + 200.0 * p + 5.0 * (1.0 - (-180.0_f64 * p).exp());
+        let strain = p + stress / 1200.0;
+        let response = law.response(strain, &virgin);
+        near(response.state.plastic_strain(), p, 2e-14);
+        near(response.state.equivalent_plastic_strain(), p, 2e-14);
+        near(response.stress_pa, stress, 3e-11);
+        assert!(response.tangent_pa < last_tangent);
+        last_tangent = response.tangent_pa;
+        let tensor = law
+            .backbone()
+            .stress(&response.strain, &virgin.tensor_history());
+        near(tensor[0], stress, 3e-11);
+        for &transverse in &tensor[1..] {
+            near(transverse, 0.0, 3e-11);
+        }
+        let h = 1e-7;
+        let difference =
+            (law.stress(strain + h, &virgin) - law.stress(strain - h, &virgin)) / (2.0 * h);
+        near(response.tangent_pa, difference, 2e-6);
+    }
+}
+
+#[test]
+fn g1_axial_voce_cycles_preserve_energy_and_zero_saturation_is_bitwise_linear() {
+    let native = VoceJ2::new(backbone(), 5.0, 180.0).unwrap();
+    let law = UniaxialVoce::new(native).unwrap();
+    let linear = UniaxialJ2::new(backbone()).unwrap();
+    let zero = UniaxialVoce::new(VoceJ2::new(backbone(), 0.0, 180.0).unwrap()).unwrap();
+    let mut history = law.initial_state();
+    let mut linear_history = linear.initial_state();
+    let mut old_strain = 0.0;
+    for strain in [0.014, 0.011, -0.018, 0.02, 0.006] {
+        let response = law.response(strain, &history);
+        let increment = law
+            .advance_with_energy(
+                old_strain,
+                &history,
+                strain,
+                EnergyTolerances {
+                    energy_j_m3: 1e-9,
+                    yield_pa: 1e-9,
+                },
+            )
+            .unwrap();
+        let alpha = response.state.equivalent_plastic_strain();
+        let stored = 20.0 * alpha * alpha + 5.0 * (alpha + (-180.0 * alpha).exp_m1() / 180.0);
+        near(increment.energy.final_state.hardening_j_m3, stored, 1e-11);
+        near(
+            increment.energy.physical_dissipation_j_m3,
+            3.0 * (alpha - history.equivalent_plastic_strain()),
+            1e-11,
+        );
+        near(
+            increment.energy.mechanical_work_j_m3,
+            response.stress_pa * (strain - old_strain),
+            1e-11,
+        );
+        assert!(increment.energy.physical_dissipation_j_m3 >= 0.0);
+        assert!(increment.energy.numerical_dissipation_j_m3 >= -1e-12);
+        near(increment.energy.residual_j_m3, 0.0, 1e-9);
+        let expected = linear.response(strain, &linear_history);
+        assert_eq!(zero.response(strain, &linear_history), expected);
+        linear_history = expected.state;
+        history = response.state;
+        old_strain = strain;
     }
 }
 

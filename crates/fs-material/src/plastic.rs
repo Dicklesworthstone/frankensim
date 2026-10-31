@@ -13,6 +13,8 @@ pub mod thermal;
 pub mod rate;
 /// Exact axial and checked plane-stress reductions with retained native history.
 pub mod reduction;
+/// Saturating isotropic hardening on the original native J2 history and flow.
+pub mod voce;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
