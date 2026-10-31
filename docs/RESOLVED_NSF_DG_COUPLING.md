@@ -1107,7 +1107,7 @@ lip anatomy, full bore heat/species transport or qualified flute sound.
 
 A selected transverse opening can now exchange mass and complete total energy
 with a finite well-mixed chamber. Its volume is fixed unless an explicit
-thermochemical actuation drive supplies volume rate and heat power. Attach it with
+material actuation drive supplies volume rate and heat power. Attach it with
 `NsfDg::with_finite_reservoir(aperture, volume_m3, limits, gate)`, then advance
 with `NsfDgDrive::FiniteReservoir { aperture }`. The initial inventory comes
 from that opening's original density and temperature and the **same frozen
@@ -1298,9 +1298,11 @@ compresses it. Positive heat power supplies energy to the gas. These commands
 are physical boundary inputs: the original gas law determines pressure and
 temperature, and the original resolved opening determines mass flow.
 
-This attachment requires the retained NASA9 thermochemical parcel. Passive
-finite sources retain both the named-mixture and thermochemical paths. The
-named source is not converted to an invented NASA model to enable motion.
+Both retained source families support this attachment. NASA9 retains its
+original thermochemical parcel and nonlinear calorics. Named mixtures retain
+their actual species/composition, constant heat capacities and declared
+temperature/pressure/phase domain. No fitted NASA model or effective gas is
+introduced to enable named-source motion.
 
 The native boundary header and rows are:
 
@@ -1326,7 +1328,7 @@ as in the other native drive histories. Its within-interval hold approximation
 needs physical-timestep refinement.
 
 The source transaction first reconstructs the original fluid exchange at fixed
-volume. Before publication, the resulting parcel calls its existing
+volume. Before publication, a thermochemical parcel calls its existing
 `ClosedGasParcel::midpoint_heat_volume` with the requested final volume and
 whole-interval heat. That owner solves the coupled heat/volume update in
 conservative coordinates, retains the original caloric and transport sources,
@@ -1336,6 +1338,33 @@ and supplies one common midpoint pressure for the work:
 work_by_gas = midpoint_pressure * delta_volume
 source_energy_change = original_NSF_energy_out + supplied_heat - work_by_gas
 ```
+
+For a named mixture, the same conservative internal-energy/volume midpoint has
+an analytic inverse using the original `Cv = cp - R`. With post-flow mass `m`,
+temperature `T0`, `Vm = (V0 + V1)/2`, and `a = R*(V1 - V0)/(2*Vm)`:
+
+```text
+delta_T_mid = (Q/(2*m) - a*T0) / (Cv + a)
+T_mid = T0 + delta_T_mid
+T1 = T0 + 2*delta_T_mid
+p_mid = m*R*T_mid/Vm
+```
+
+Actual midpoint and endpoint states still pass through the original named
+mixture owner, including transport and water-saturation admission. The complete
+conservative path is bounded by its temperature/pressure envelope, and the
+actual midpoint also passes the original NSF source-ghost checks. Motion
+retains the post-flow mass exactly; midpoint and endpoint `rho*V` are checked
+independently against it. The original flow reconstruction retains its existing
+arithmetic and conservation audit.
+
+Named receipts report actual storage, work and the conservative midpoint
+residual, plus the original constant-capacity ideal-gas entropy increment and
+analytic derivatives of this discrete midpoint pressure with respect to final
+volume and supplied heat. They require no caloric iterations. These quantities
+describe the named source's declared law; they do not turn it into a
+variable-capacity or reacting gas model. Zero heat and zero motion preserve the
+passive physical state exactly for both source families.
 
 The chamber update checks this complete balance using original-law energy
 increments and the actual final mass. The original NSF total energy already

@@ -3,7 +3,7 @@
 //! The accepted chamber pressure and temperature are held through one complete
 //! fluid/acoustic interval. Its actual streamed mass and conservative total
 //! energy then update the same source-owned gas inventory. Optional prescribed
-//! volume motion and heat use the original thermochemical midpoint owner AFTER
+//! volume motion and heat use the original material midpoint law AFTER
 //! that exchange, before the same atomic acceptance. This source partition is
 //! first order: interval refinement remains necessary. No nozzle law, mean
 //! transport into the acoustic bore, or separate acoustic work is added.
@@ -159,8 +159,8 @@ impl<L: Lattice3<27>> NsfDg<L> {
     ///
     /// Incoming resolved kinetic energy thermalizes in this well-mixed chamber.
     /// There is no stored chamber momentum or extra acoustic p*Q debit. Explicit
-    /// actuation uses the retained thermochemical parcel's original heat/volume
-    /// work; a passive source retains its volume.
+    /// actuation uses the retained source's original calorics and simultaneous
+    /// heat/volume work; a passive source retains its volume.
     pub fn with_finite_reservoir(
         mut self,
         aperture: usize,
@@ -246,10 +246,9 @@ impl<L: Lattice3<27>> NsfDg<L> {
                 if !drive.is_finite()
                     || !(0.0 < maximum_relative_volume_change
                         && maximum_relative_volume_change < 1.0)
-                    || owner.gas.thermochemical().is_none()
                 {
                     return Err(NsfDgError::Input(
-                        "finite source actuation requires its original thermochemical parcel, finite rates and a relative volume bound in (0,1)",
+                        "finite source actuation requires finite rates and a relative volume bound in (0,1)",
                     ));
                 }
                 Ok(())
@@ -492,7 +491,19 @@ pub(super) fn prepare<L: Lattice3<27>>(
         // The original simultaneous update supplies BOTH the endpoint and its
         // work-conjugate midpoint pressure. Do not apply isentropic motion and
         // heat sequentially or debit NSF/acoustic pressure work a second time.
-        let (next, receipt) = gas.midpoint_heat_volume(final_volume, heat, gate)?;
+        let (next, receipt, midpoint) = gas.midpoint_heat_volume(
+            final_volume, heat, &owner.limits, gate,
+        )?;
+        // Work uses this actual conservative midpoint, so it must be a valid
+        // original NSF source stage as well as a supported material state.
+        fluid.grid().reservoir_aperture_state_for(
+            owner.aperture, midpoint.pressure, midpoint.temperature,
+        ).map_err(NsfDgError::Flow)?;
+        if next.mass_kg().to_bits() != gas.mass_kg().to_bits() {
+            return Err(NsfDgError::Input(
+                "finite reservoir closed heat/volume work changed retained mass",
+            ));
+        }
         let energy_movement = exchange.energy_exchange_variation_j
             + receipt.step.supplied_heat_j.abs() + receipt.step.work_by_gas_j.abs();
         if !energy_movement.is_finite()

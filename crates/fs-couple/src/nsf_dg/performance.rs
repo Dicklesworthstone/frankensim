@@ -186,14 +186,8 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
             || boundary.len() as u64 > system.limits().maximum_steps
             || !boundary.iter().all(|x| x.is_finite())
             || boundary.iter().any(|drive| {
-                if let Some(aperture) = system.finite_reservoir_aperture() {
-                    if !matches!(drive,
-                        NsfDgDrive::FiniteReservoir { aperture: driven }
-                        | NsfDgDrive::FiniteReservoirActuation { aperture: driven, .. }
-                        if *driven == aperture)
-                    {
-                        return true;
-                    }
+                if system.admit_finite_reservoir_drive(*drive).is_err() {
+                    return true;
                 }
                 match drive {
                 NsfDgDrive::Boundary(_) => system.upstream_load().is_some(),
@@ -204,13 +198,8 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 NsfDgDrive::ReservoirAperture { aperture, pressure_pa, temperature_k } =>
                     system.reservoir_radiation_aperture() == Some(*aperture)
                         || system.zone().reservoir_aperture_state_for(*aperture, *pressure_pa, *temperature_k).is_err(),
-                NsfDgDrive::FiniteReservoir { aperture } =>
-                    system.finite_reservoir_aperture() != Some(*aperture),
-                NsfDgDrive::FiniteReservoirActuation { aperture, maximum_relative_volume_change, .. } =>
-                    system.finite_reservoir_aperture() != Some(*aperture)
-                        || system.finite_reservoir().is_none()
-                        || *maximum_relative_volume_change <= 0.0
-                        || *maximum_relative_volume_change >= 1.0,
+                NsfDgDrive::FiniteReservoir { .. }
+                | NsfDgDrive::FiniteReservoirActuation { .. } => false,
                 }
             })
             || output_samples == 0

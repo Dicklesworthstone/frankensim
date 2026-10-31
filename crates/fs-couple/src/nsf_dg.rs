@@ -56,7 +56,7 @@ pub enum NsfDgDrive {
     /// Original mass and total-energy exchange update its inventory on acceptance.
     FiniteReservoir { aperture: usize },
     /// Hold the accepted finite source p/T during the fluid interval, then apply
-    /// volume motion and heat to the same original thermochemical parcel before
+    /// volume motion and heat to the same original material inventory before
     /// accepting all participants. Positive volume rate expands the chamber;
     /// positive heat power heats it. Both are held over the physical interval.
     /// This flow-first source partition remains first order in interval size.

@@ -3,12 +3,15 @@
 //! model owns a constant Cv, so its inverse is analytic; no transport/EOS fit or
 //! thermochemical source pack is synthesized from a numerical gas snapshot.
 
-use super::{NsfDgError, NsfFiniteReservoirActuationFrame, NsfFiniteReservoirSource, material, poll};
+use super::{NsfDgError, NsfFiniteReservoirActuationFrame, NsfFiniteReservoirLimits,
+    NsfFiniteReservoirSource, material, poll};
 use fs_exec::CancelGate;
 use fs_lbm::nsf3::{NamedMixtureNsfGas, NsfGasMedium, NsfOpenState};
 use fs_material::gas::GasState;
 use fs_material::thermochemical_gas::energy::{GasEnergySolve, parcel::ClosedGasParcel};
 use fs_qty::Temperature;
+
+mod actuation;
 
 #[derive(Clone)]
 pub(super) enum Inventory {
@@ -21,6 +24,9 @@ pub(super) enum Inventory {
         source: NamedMixtureNsfGas,
         gas: GasState,
         volume_m3: f64,
+        // Flow reconstruction retains its original rho*V arithmetic. Closed
+        // heat/volume motion then preserves this mass exactly, as NASA does.
+        mass_kg: f64,
         temperature_window_k: [f64; 2],
     },
 }
@@ -61,6 +67,7 @@ impl Inventory {
                 }
                 Ok(Self::NamedMixture {
                     source: source.clone(), gas, volume_m3, temperature_window_k,
+                    mass_kg: gas.density * volume_m3,
                 })
             }
             NsfGasMedium::CaloricallyPerfect(_) => Err(NsfDgError::Input(
@@ -97,7 +104,7 @@ impl Inventory {
     pub(super) fn mass_kg(&self) -> f64 {
         match self {
             Self::Thermochemical { gas, .. } => gas.mass_kg(),
-            Self::NamedMixture { gas, volume_m3, .. } => gas.density * volume_m3,
+            Self::NamedMixture { mass_kg, .. } => *mass_kg,
         }
     }
 
@@ -175,7 +182,7 @@ impl Inventory {
                     energy_reference_j_kg: *energy_reference_j_kg,
                 }, solved.iterations()))
             }
-            Self::NamedMixture { source, gas, volume_m3, temperature_window_k } => {
+            Self::NamedMixture { source, gas, volume_m3, temperature_window_k, .. } => {
                 poll(gate)?;
                 let reference = source.reference_state();
                 let cv = reference.specific_heat_cp - reference.specific_gas_constant;
@@ -190,32 +197,22 @@ impl Inventory {
                 poll(gate)?;
                 Ok((Self::NamedMixture {
                     source: source.clone(), gas: next, volume_m3: *volume_m3,
+                    mass_kg: next.density * volume_m3,
                     temperature_window_k: *temperature_window_k,
                 }, 0))
             }
         }
     }
 
-    /// Preserve the original parcel's simultaneous heat/volume update, source
-    /// laws, fixed mass and midpoint work. Named mixtures remain usable for
-    /// passive finite storage; they do not have this original mechanical owner.
+    /// Preserve the original parcel's simultaneous heat/volume update and
+    /// receipt. Named mixtures solve the same conservative midpoint with their
+    /// original constant Cv. Return its actual material midpoint for NSF
+    /// admission, without changing the published receipt shape.
     pub(super) fn midpoint_heat_volume(
-        &self, volume_m3: f64, heat_j: f64, gate: &CancelGate,
-    ) -> Result<(Self, NsfFiniteReservoirActuationFrame), NsfDgError> {
-        let Self::Thermochemical { gas, energy_solve, energy_reference_j_kg } = self else {
-            return Err(NsfDgError::Input(
-                "finite reservoir actuation requires its original thermochemical parcel",
-            ));
-        };
-        let candidate = gas.midpoint_heat_volume(
-            volume_m3, heat_j, *energy_solve, || gate.is_requested(),
-        ).map_err(material)?;
-        let midpoint_pressure_pa = candidate.midpoint().state().pressure;
-        let (gas, step) = candidate.into_parts();
-        Ok((Self::Thermochemical {
-            gas, energy_solve: *energy_solve,
-            energy_reference_j_kg: *energy_reference_j_kg,
-        }, NsfFiniteReservoirActuationFrame { midpoint_pressure_pa, step }))
+        &self, volume_m3: f64, heat_j: f64,
+        limits: &NsfFiniteReservoirLimits, gate: &CancelGate,
+    ) -> Result<(Self, NsfFiniteReservoirActuationFrame, GasState), NsfDgError> {
+        actuation::candidate(self, volume_m3, heat_j, limits, gate)
     }
 
     /// Named Cv and R are constant and positive: T = E/(m Cv), p = E R/(V Cv).
@@ -253,6 +250,10 @@ impl Inventory {
 }
 
 #[cfg(test)]
+#[path = "../../../../fs-lbm/tests/nsf3_thermochemical/source.rs"]
+mod source;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use fs_material::gas_species::GasSpecies;
@@ -273,6 +274,145 @@ mod tests {
         Inventory::new(&source.into(), NsfOpenState {
             density_kg_m3: density, velocity_m_s: [0.0; 3], temperature_k: 300.0,
         }, 1e-5, [290.0, 320.0], &CancelGate::new_clock_free()).unwrap()
+    }
+
+
+    fn actuation_limits() -> NsfFiniteReservoirLimits {
+        NsfFiniteReservoirLimits {
+            maximum_relative_mass_exchange: 0.1,
+            maximum_relative_energy_exchange: 0.1,
+            mass_absolute_tolerance_kg: 1e-16,
+            energy_absolute_tolerance_j: 1e-10,
+            relative_tolerance: 1e-8,
+        }
+    }
+
+    #[test]
+    fn named_heat_and_motion_preserve_mass_and_original_source_energy() {
+        let old = named(0.005, 100000.0);
+        let gate = CancelGate::new_clock_free();
+        for (volume_ratio, heat) in [(0.98, 0.001), (1.02, -0.001), (1.0, 0.001), (1.0, -0.001)] {
+            let volume = old.volume_m3() * volume_ratio;
+            let (next, frame, midpoint) = old.midpoint_heat_volume(volume, heat, &actuation_limits(), &gate).unwrap();
+            let step = frame.step;
+            assert_eq!(next.mass_kg().to_bits(), old.mass_kg().to_bits());
+            assert_eq!(next.volume_m3(), volume);
+            assert_eq!(step.supplied_heat_j, heat);
+            assert_eq!(step.iterations, 0);
+            assert!(step.energy_residual_j.abs() < 1e-10);
+            assert!((next.state().density * volume - old.mass_kg()).abs() < 1e-16);
+            assert!((midpoint.density * (0.5 * volume + 0.5 * old.volume_m3()) - old.mass_kg()).abs() < 1e-16);
+            assert!((step.stored_energy_change_j + step.work_by_gas_j - heat).abs() < 1e-10);
+            assert_eq!(step.work_by_gas_j, frame.midpoint_pressure_pa * (volume - old.volume_m3()));
+            assert_eq!(midpoint.pressure, frame.midpoint_pressure_pa);
+            assert!(step.entropy_change_j_k.is_finite());
+            if volume_ratio < 1.0 {
+                assert!(step.work_by_gas_j < 0.0);
+                assert!(next.state().pressure > old.state().pressure);
+            } else if volume_ratio > 1.0 {
+                assert!(step.work_by_gas_j > 0.0);
+                assert!(next.state().pressure < old.state().pressure);
+            } else {
+                assert_eq!(step.work_by_gas_j, 0.0);
+                let cv = old.state().specific_heat_cp - old.state().specific_gas_constant;
+                let expected = old.state().temperature + heat / (old.mass_kg() * cv);
+                assert!((next.state().temperature - expected).abs() < 1e-12);
+                assert_eq!(step.entropy_change_j_k.signum(), heat.signum());
+            }
+            let Inventory::NamedMixture { source, .. } = &next else { panic!("lost named source") };
+            assert_eq!(*next.state(), source.at(next.state().temperature, next.state().pressure).unwrap());
+            assert_eq!(midpoint, source.at(midpoint.temperature, midpoint.pressure).unwrap());
+            let Inventory::NamedMixture { source: before, .. } = &old else { unreachable!() };
+            assert_eq!(source.species(), before.species());
+            assert_eq!(source.composition(), before.composition());
+            assert_eq!(source.reference_state(), before.reference_state());
+        }
+    }
+
+    #[test]
+    fn named_receipt_derivatives_follow_the_actual_midpoint_response() {
+        let old = named(0.005, 100000.0);
+        let gate = CancelGate::new_clock_free();
+        let volume = old.volume_m3() * 0.98;
+        let heat = 0.001;
+        let response = |v, q| old.midpoint_heat_volume(v, q, &actuation_limits(), &gate).unwrap().1;
+        let receipt = response(volume, heat);
+        let dv = old.volume_m3() * 1e-5;
+        let dq = 1e-6;
+        let volume_derivative = (response(volume + dv, heat).midpoint_pressure_pa
+            - response(volume - dv, heat).midpoint_pressure_pa) / (2.0 * dv);
+        let heat_derivative = (response(volume, heat + dq).midpoint_pressure_pa
+            - response(volume, heat - dq).midpoint_pressure_pa) / (2.0 * dq);
+        for (actual, expected) in [
+            (volume_derivative, receipt.step.pressure_final_volume_derivative_pa_m3),
+            (heat_derivative, receipt.step.pressure_heat_derivative_pa_j),
+        ] {
+            assert!((actual - expected).abs() <= 2e-8 * expected.abs());
+        }
+    }
+
+    #[test]
+    fn unchanged_actuation_keeps_passive_storage_and_source_bits() {
+        let old = named(0.005, 100000.0);
+        let (next, frame, midpoint) = old.midpoint_heat_volume(old.volume_m3(), 0.0, &actuation_limits(),
+            &CancelGate::new_clock_free()).unwrap();
+        assert_eq!(next.state(), old.state());
+        assert_eq!(next.mass_kg().to_bits(), old.mass_kg().to_bits());
+        assert_eq!(next.volume_m3().to_bits(), old.volume_m3().to_bits());
+        assert_eq!(next.sensible_specific_energy_j_kg().to_bits(), old.sensible_specific_energy_j_kg().to_bits());
+        assert_eq!(frame.midpoint_pressure_pa, old.state().pressure);
+        assert_eq!(midpoint, *old.state());
+        assert_eq!(frame.step.stored_energy_change_j, 0.0);
+        assert_eq!(frame.step.work_by_gas_j, 0.0);
+        assert_eq!(frame.step.energy_residual_j, 0.0);
+        assert_eq!(frame.step.entropy_change_j_k, 0.0);
+    }
+
+    #[test]
+    fn named_motion_refuses_original_phase_pressure_window_and_cancellation() {
+        let gate = CancelGate::new_clock_free();
+        for (water, pressure, ratio) in [(0.018, 190000.0, 1.02), (0.0, 199000.0, 0.98)] {
+            let old = named(water, pressure);
+            let before = (*old.state(), old.mass_kg(), old.volume_m3());
+            assert!(matches!(old.midpoint_heat_volume(old.volume_m3() * ratio, 0.0, &actuation_limits(), &gate),
+                Err(NsfDgError::Flow(_))));
+            assert_eq!((*old.state(), old.mass_kg(), old.volume_m3()), before);
+        }
+        let old = named(0.0, 100000.0);
+        assert!(old.midpoint_heat_volume(old.volume_m3(), 1.0, &actuation_limits(), &gate).is_err());
+        gate.request();
+        assert!(matches!(old.midpoint_heat_volume(old.volume_m3() * 0.99, 0.0, &actuation_limits(), &gate),
+            Err(NsfDgError::Cancelled)));
+    }
+
+    #[test]
+    fn nasa_actuation_reuses_original_midpoint_and_complete_receipt() {
+        use fs_lbm::nsf3::ThermochemicalNsfGas;
+        let gate = CancelGate::new_clock_free();
+        let controls = GasEnergySolve { minimum_temperature_k: 290.0, maximum_temperature_k: 320.0,
+            energy_tolerance_j_kg: 1e-6, maximum_iterations: 64 };
+        for offset in [0.0, -8e8] {
+            let model = source::model(offset, 250000.0, 1.0);
+            let point = source::point(300.0, 100000.0);
+            let reference = *model.evaluate(&point).unwrap().state();
+            let source = ThermochemicalNsfGas::new(model, point, controls).unwrap();
+            let old = Inventory::new(&source.into(), NsfOpenState {
+                density_kg_m3: reference.density, velocity_m_s: [0.0; 3], temperature_k: reference.temperature,
+            }, 1e-5, [290.0, 320.0], &gate).unwrap();
+            for (ratio, heat) in [(0.98, 0.001), (1.0, 0.0)] {
+                let volume = old.volume_m3() * ratio;
+                let expected = old.thermochemical().unwrap()
+                    .midpoint_heat_volume(volume, heat, controls, || false).unwrap();
+                let (next, frame, midpoint) = old.midpoint_heat_volume(volume, heat, &actuation_limits(), &gate).unwrap();
+                assert_eq!(next.thermochemical().unwrap(), expected.endpoint());
+                assert_eq!(next.energy_reference_j_kg().to_bits(), old.energy_reference_j_kg().to_bits());
+                assert_eq!(next.mass_kg().to_bits(), old.mass_kg().to_bits());
+                assert_eq!(frame.midpoint_pressure_pa, expected.midpoint().state().pressure);
+                assert_eq!(midpoint, *expected.midpoint().state());
+                assert_eq!(frame.step, *expected.step());
+                assert!(frame.step.energy_residual_j.abs() < 1e-10);
+            }
+        }
     }
 
     #[test]

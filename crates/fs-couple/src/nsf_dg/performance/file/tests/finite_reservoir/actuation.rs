@@ -83,7 +83,7 @@ fn native_actuation_keeps_passive_escape_both_ducts_and_original_physical_rate_u
 }
 
 #[test]
-fn native_actuation_requires_valid_owned_thermochemical_inventory_even_at_zero_rates() {
+fn native_actuation_requires_valid_owned_inventory_even_at_zero_rates() {
     for (from, to) in [
         ("0 0.05 2", "0 0 2"),
         ("0 0.05 2", "0 1 2"),
@@ -105,8 +105,18 @@ fn native_actuation_requires_valid_owned_thermochemical_inventory_even_at_zero_r
     passive.validate_sample_rate(RATE).unwrap();
     passive.block(&mut [0.0]).unwrap();
     assert!(passive.last_frame().unwrap().finite_reservoir.as_ref().unwrap().actuation.is_none());
-    assert!(build(false, 4, |text| named(text).replace(
+    let mut zero = build(false, 4, |text| named(text).replace(
         "boundary finite-reservoir 0 1\nhold 32",
         "boundary finite-reservoir-actuation 0 0.05 1\nhold 32 0 0",
-    )).is_err());
+    )).unwrap().into_renderer();
+    zero.validate_sample_rate(RATE).unwrap();
+    zero.block(&mut [0.0]).unwrap();
+    assert_eq!(zero.system().zone().state_hash(), passive.system().zone().state_hash());
+    assert_eq!(zero.system().load().state(), passive.system().load().state());
+    assert_eq!(zero.system().finite_reservoir_inventory(), passive.system().finite_reservoir_inventory());
+    let receipt = zero.last_frame().unwrap().finite_reservoir.as_ref().unwrap()
+        .actuation.as_ref().unwrap();
+    assert_eq!(receipt.step.supplied_heat_j, 0.0);
+    assert_eq!(receipt.step.work_by_gas_j, 0.0);
+    assert_eq!(receipt.step.stored_energy_change_j, 0.0);
 }
