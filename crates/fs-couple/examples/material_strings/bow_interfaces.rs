@@ -53,6 +53,9 @@ struct Bound {
     state: ResolvedInterfaceStatePoint,
     binding: DryFrictionBinding,
 }
+// Layer contacts use this only while their original mechanical ports are built.
+// Their source layer must bind before scheduling; it is never a fallback law.
+const LAYER_TOPOLOGY_LAW: FrictionLaw = FrictionLaw::Coulomb { static_mu: 0.0, kinetic_mu: 0.0 };
 #[derive(Clone)]
 pub struct Inputs {
     research: Option<FrictionLaw>,
@@ -99,9 +102,20 @@ impl Inputs {
     /// The zero dry law constructs port topology only. Every layer declaration
     /// must resolve and bind before scheduling; no fallback renderer is exposed.
     pub fn layers(declarations: Vec<shear_layers::Declaration>) -> Result<Self> {
-        let layers = shear_layers::Inputs::new(declarations)?;
-        let mut inputs = Self::research(FrictionLaw::Coulomb { static_mu: 0.0, kinetic_mu: 0.0 })?;
-        inputs.layers = Some(layers);
+        if declarations.is_empty() { return Err("material shear layers require a source declaration".into()); }
+        Self::contacts(declarations, Vec::new())
+    }
+    /// Each authored track selects its own physical interface or retained film.
+    /// All declarations still bind to the same original multi-contact owner.
+    pub fn contacts(layers: Vec<shear_layers::Declaration>, dry: Vec<Declaration>) -> Result<Self> {
+        if layers.len() + dry.len() == 0 || layers.len() + dry.len() > 16 {
+            return Err("source contacts require 1..=16 explicit track declarations".into());
+        }
+        if layers.iter().any(|layer| dry.iter().any(|interface| layer.track == interface.track)) {
+            return Err("a bow track cannot own both a dry interface and a material shear layer".into());
+        }
+        let mut inputs = Self::interfaces(dry)?;
+        if !layers.is_empty() { inputs.layers = Some(shear_layers::Inputs::new(layers)?); }
         Ok(inputs)
     }
     pub fn shear_layers(&self) -> Option<&shear_layers::Inputs> {
@@ -140,18 +154,18 @@ impl Inputs {
         })
     }
     pub fn validate_tracks(&self, schedule: &GestureSchedule) -> Result<()> {
-        if let Some(layers) = &self.layers { return layers.validate_tracks(schedule); }
         if self.research.is_some() {
             return Ok(());
         }
-        if self.declarations.len() != schedule.tracks().len()
+        if self.declarations.len() + self.layers.as_ref().map_or(0, |layers| layers.track_count()) != schedule.tracks().len()
             || schedule
                 .tracks()
                 .iter()
-                .any(|t| !self.declarations.iter().any(|d| d.track == t.id))
+                .any(|t| !self.declarations.iter().any(|d| d.track == t.id)
+                    && !self.layers.as_ref().is_some_and(|layers| layers.contains_track(&t.id)))
         {
             return Err(
-                "source-bound friction requires exactly one named interface for every bow track"
+                "source-bound friction requires exactly one named interface or material layer for every bow track"
                     .into(),
             );
         }
@@ -226,7 +240,7 @@ impl Inputs {
         })
     }
     pub fn binding(&self, track: &str) -> Result<Option<&DryFrictionBinding>> {
-        if self.research.is_some() {
+        if self.research.is_some() || self.layers.as_ref().is_some_and(|layers| layers.contains_track(track)) {
             return Ok(None);
         }
         Ok(Some(
@@ -240,6 +254,9 @@ impl Inputs {
     pub fn law(&self, track: &str) -> Result<&FrictionLaw> {
         if let Some(law) = &self.research {
             return Ok(law);
+        }
+        if self.layers.as_ref().is_some_and(|layers| layers.contains_track(track)) {
+            return Ok(&LAYER_TOPOLOGY_LAW);
         }
         Ok(self
             .binding(track)?
@@ -258,6 +275,9 @@ impl Inputs {
             return Ok(());
         }
         for track in spec.schedule.tracks() {
+            if self.layers.as_ref().is_some_and(|layers| layers.contains_track(&track.id)) {
+                continue;
+            }
             let member = fs_scenario::gesture::path::legacy_member(&track.target, "bow")
                 .ok_or("interface binding requires a material-string bow track")?;
             let wire = spec

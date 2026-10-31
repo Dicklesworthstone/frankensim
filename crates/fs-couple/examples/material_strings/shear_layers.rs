@@ -28,7 +28,7 @@ impl Inputs {
     pub fn new(declarations: Vec<Declaration>) -> Result<Self> {
         if declarations.is_empty() || declarations.len() > 16 {
             return Err(
-                "material shear layers require one declaration per bow track, at most 16".into(),
+                "material shear layers require 1..=16 explicit track declarations".into(),
             );
         }
         for (i, d) in declarations.iter().enumerate() {
@@ -62,20 +62,22 @@ impl Inputs {
         }
         Ok(Self { declarations })
     }
+    pub fn track_count(&self) -> usize { self.declarations.len() }
+    pub fn contains_track(&self, track: &str) -> bool {
+        self.declarations.iter().any(|declaration| declaration.track == track)
+    }
     pub fn validate_tracks(&self, schedule: &GestureSchedule) -> Result<()> {
-        if self.declarations.len() != schedule.tracks().len()
-            || schedule
-                .tracks()
-                .iter()
-                .any(|track| !self.declarations.iter().any(|d| d.track == track.id))
+        if self.declarations.iter().any(|declaration|
+            !schedule.tracks().iter().any(|track| track.id == declaration.track))
         {
             return Err(
-                "material shear layers require exactly one named layer for every bow track".into(),
+                "each material shear layer must name an original bow track".into(),
             );
         }
         Ok(())
     }
     pub fn preflight(&self, spec: &input::Spec) -> Result<()> {
+        spec.friction.validate_tracks(&spec.schedule)?;
         self.validate_tracks(&spec.schedule)
     }
     /// Reuse the original bulk-pack catalog and shared byte budget. Resolve all
@@ -114,11 +116,11 @@ impl Inputs {
         let mut bindings = Vec::with_capacity(spec.bow_contact_count());
         for (port, track) in spec.schedule.tracks().iter().enumerate() {
             poll(gate)?;
-            let declaration = self
+            let Some(declaration) = self
                 .declarations
                 .iter()
                 .find(|d| d.track == track.id)
-                .ok_or("missing material shear-layer declaration")?;
+                else { continue; };
             let mut complete = requirements.clone();
             for (modulus, time) in &declaration.relaxation {
                 for (name, dims) in [(modulus, Pressure::DIMS), (time, fs_qty::Time::DIMS)] {

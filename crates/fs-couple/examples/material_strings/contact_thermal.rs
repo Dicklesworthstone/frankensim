@@ -245,8 +245,8 @@ impl Profile {
         let material_heat = if format >= 4 {
             Some(material_heat::parse(&mut rows, &cells, &films)?)
         } else { None };
-        if !dry.is_empty() && !films.is_empty() {
-            return Err("moving dry routes and retained shear-film histories require separate supported thermal owners".into());
+        if dry.iter().any(|route| films.iter().any(|&(port, _)| route.port() == port)) {
+            return Err("a physical contact cannot own both dry-interface and material-film heat".into());
         }
         if dry.is_empty() && films.is_empty() && series.is_empty()
             && material_heat.as_ref().is_none_or(|routes| routes.fibers.is_empty()) {
@@ -657,18 +657,10 @@ impl Prepared {
             .collect();
         let dry = self.dry_routes(ready)?;
         let resolve = |endpoint: &DepositionSimulation<'_>| self.resolve(endpoint);
-        let mut performance = if dry.is_empty() {
-            ready.performance.with_material_contact_thermal_network(
-                network, bindings, self.profile.series.clone(), material_heat,
-                self.profile.controls, gate, resolve,
-            )?
-        } else {
-            let performance = ready.performance.with_dry_contact_thermal_network(
-                network, dry, self.profile.series.clone(), self.profile.controls, gate, resolve,
-            )?;
-            if material_heat.is_empty() { performance }
-            else { performance.with_material_relaxation_heat(material_heat)? }
-        };
+        let mut performance = ready.performance.with_combined_contact_thermal_network(
+            network, bindings, self.profile.series.clone(), dry, material_heat,
+            self.profile.controls, gate, resolve,
+        )?;
         if !film_routes.is_empty() {
             performance = performance.with_trial_heat_source(|endpoint, ports|
                 self.resolve_with_films(endpoint, ports, &film_routes))?;

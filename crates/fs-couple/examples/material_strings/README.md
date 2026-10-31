@@ -1270,6 +1270,25 @@ requires characteristic speed [m/s] and a viscous coefficient per speed [s/m].
 Each bow track needs exactly one declaration, in any order. Different contacts
 may use different packs and laws; repeated pack paths are decoded once.
 
+Use `friction contacts N` when different tracks need different kinds of contact
+material. It accepts both existing row types in the same source declaration:
+
+```text
+friction contacts 2
+bow-interface dry string-b-bow.fsintpk 293.15 0.0001 2 0 coulomb mu_static mu_kinetic
+shear-layer film layer.fsmatpk 0.000001 0.0001 0.05
+```
+
+The schedule must contain exactly the named `dry` and `film` tracks; their
+schedule order determines the physical ports, independently of declaration
+order. Every track selects exactly one source. Optional `shear-memory` still
+follows its layer row. All contacts share the original string/body mechanics,
+pressure observer and clock. A [contact thermal profile](CONTACT_THERMAL.md)
+can bind their distinct dry and film ports to one finite enthalpy network,
+including trial-dependent film/counterface conduction. The legacy `interfaces`
+and `layers` forms retain their existing behavior. A uniform `bow_ribbon`
+continues to expand one authored track and its selected material over its cells.
+
 The original `NormalizedInterfacePack` must declare `medium = dry`. Its ordered
 surface A must be the selected string's **actual outer material state**, including
 the outermost sleeve for a bonded string. Surface B identifies the prescribed

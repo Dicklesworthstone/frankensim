@@ -253,3 +253,182 @@ fn native_moving_film_requires_complete_patch_ownership_and_actual_fiber_materia
         assert_eq!(ready.performance.samples_rendered(), 0);
     });
 }
+
+// Two different source laws act on the SAME string/body/pressure trajectory.
+// Surface cells use distinct physical volumes; the explicit link carries heat
+// between the film and the dry string patch in the same nonlinear candidate.
+fn mixed_profile(narrow_surface: bool) -> String {
+    let film = film_profile(narrow_surface);
+    let (cells, routes) = film.split_once("dry-contacts 0\n").unwrap();
+    let mut text = cells.replace("cells 5", "cells 13");
+    for (side, pack) in ["wire.fsmatpk", "body.fsmatpk"].into_iter().enumerate() {
+        for i in 0..4 {
+            text.push_str(&format!(
+                "cell {} {pack} 280 293.15 320 {} 1 {side} {} 1 {side} 4e-10 4.048e-5\n",
+                30 + side * 10 + i, i as f64 * 0.002, (i + 1) as f64 * 0.002));
+        }
+    }
+    text.push_str("dry-contacts 1\ndry-contact 1 -0.148 fixed\n\
+        footprint 0.001 0.003 0.01 0.001 0.003 0.01\n");
+    for side in 0..2 {
+        text.push_str("surface 4\n");
+        for i in 0..4 {
+            text.push_str(&format!("strip {} {} {} 0.01 0.00001\n", 30 + side * 10 + i,
+                i as f64 * 0.002, (i + 1) as f64 * 0.002));
+        }
+    }
+    text.push_str(&routes.replace("links 0", "links 1\nlink 9 10 30 5e-8 0.00005 0.00001"));
+    text
+}
+
+fn mixed_spec_text(block: usize) -> String {
+    let mut text = include_str!("../shear-layer-bow.material-strings")
+        .split_once("\nschedule\n").unwrap().0
+        .replace("audio 48000 4096 0.01 128", &format!("audio 48000 128 0.01 {block}"))
+        .replace("bow_ribbon 0.01 3\n", "")
+        .replace("friction layers 1\nshear-layer bow", "friction contacts 2\n\
+            bow-interface dry dry.fsintpk 293.15 0.00002 50 0 coulomb mu_static mu_kinetic\n\
+            shear-layer film");
+    // Deliberately reverse declaration order relative to physical contact order.
+    let schedule = GestureSchedule::try_new(48_000, vec![
+        GestureTrack { id: "film".into(), target: GestureTarget::BowStroke { string: 0 },
+            initial: GestureValue::Bow { velocity_m_per_s: 0.1, normal_force_n: 0.01, station: 0.2 },
+            events: vec![] },
+        GestureTrack { id: "dry".into(), target: GestureTarget::BowStroke { string: 0 },
+            initial: GestureValue::Bow { velocity_m_per_s: 0.03, normal_force_n: 0.001, station: 0.3 },
+            events: vec![] },
+    ]).unwrap();
+    text.push_str("\nschedule\n");
+    text.push_str(std::str::from_utf8(&schedule.to_canonical_bytes()).unwrap());
+    text
+}
+
+fn mixed_ready(cx: &Cx<'_>, gate: &CancelGate, profile: &Profile, cp: f64, block: usize) -> Ready {
+    let mut spec = input::Spec::parse(mixed_spec_text(block).as_bytes()).unwrap();
+    profile.configure(&mut spec);
+    spec.friction.load(gate, |_| Ok(temperature_interface(0.005))).unwrap();
+    spec.compile(cx, gate, |name| Ok(film_material(name, cp))).unwrap()
+}
+
+#[test]
+fn mixed_contacts_require_complete_disjoint_track_and_heat_ownership() {
+    let text = mixed_spec_text(37);
+    input::Spec::parse(text.as_bytes()).unwrap();
+    for (from, to) in [
+        ("bow-interface dry ", "bow-interface film "),
+        ("bow-interface dry ", "bow-interface absent "),
+        ("friction contacts 2", "friction interfaces 2"),
+        ("friction contacts 2", "friction layers 2"),
+    ] {
+        assert!(input::Spec::parse(text.replace(from, to).as_bytes()).is_err(), "accepted {to}");
+    }
+    let heat = mixed_profile(false);
+    Profile::parse(heat.as_bytes()).unwrap();
+    assert!(Profile::parse(heat.replace("dry-contact 1", "dry-contact 0").as_bytes()).is_err());
+}
+
+#[test]
+fn native_mixed_sources_share_heat_history_and_replay_the_same_pressure() {
+    scoped(|cx, gate| {
+        let profile = Profile::parse(mixed_profile(false).as_bytes()).unwrap();
+        let mut responses = Vec::new();
+        for cp in [20.0, 2000.0] {
+            let mut ready = mixed_ready(cx, gate, &profile, cp, 37);
+            assert!(ready.performance.bank().bow_shear_layer(0).is_some());
+            assert!(ready.performance.bank().bow_interface(0).is_none());
+            assert!(ready.performance.bank().bow_shear_layer(1).is_none());
+            assert!(ready.performance.bank().bow_interface(1).unwrap().temperature_source().is_some());
+            let prepared = profile.prepare(&ready, gate).unwrap();
+            let network = prepared.network(gate).unwrap();
+            let routes = prepared.film_routes(&ready, &network).unwrap();
+            let dry = prepared.dry_routes(&ready).unwrap();
+            let mut renderer = ready.performance.with_combined_contact_thermal_network(network,
+                film_bindings(&prepared), vec![], dry, vec![], profile.controls, gate,
+                |endpoint| prepared.resolve(endpoint)).unwrap()
+                .with_trial_heat_source(|endpoint, ports| prepared.resolve_with_films(endpoint, ports, &routes)).unwrap();
+            let initial_heat = renderer.thermal().energy_j();
+            let mut deposited = 0.0;
+            let mut dry_heat = 0.0;
+            let mut film_heat = 0.0;
+            let mut pressure = vec![0.0; 128];
+            for sample in pressure.chunks_mut(1) {
+                renderer.block(sample).unwrap();
+                let frame = renderer.last_frame().unwrap();
+                assert!(frame.mechanics.ports[0].shear_layer.is_some());
+                assert!(frame.mechanics.ports[1].shear_layer.is_none());
+                assert_eq!(frame.dry_contacts.len(), 1);
+                let dry = &frame.dry_contacts[0];
+                assert_eq!(dry.port, 1);
+                assert!(dry.interface_temperature_k.is_some());
+                assert!((dry.cell_heat_j.iter().map(|(_, q)| q).sum::<f64>() - dry.friction_heat_j).abs()
+                    <= profile.controls.total_energy_tolerance_j);
+                assert!(frame.total_energy_residual_j.abs() <= profile.controls.total_energy_tolerance_j);
+                deposited += frame.deposited_heat_j;
+                dry_heat += frame.routed_dry_heat_j;
+                film_heat += frame.routed_plastic_heat_j + frame.routed_relaxation_heat_j;
+            }
+            assert!(dry_heat > 0.0 && film_heat > 0.0);
+            assert!((renderer.thermal().energy_j() - initial_heat - deposited).abs() < 2e-9);
+            assert!(renderer.thermal().temperature_k(CellId(30)).unwrap() > 293.15);
+            assert!(renderer.thermal().temperature_k(CellId(40)).unwrap() > 293.15);
+            assert!(renderer.thermal().temperature_k(FILM).unwrap() > 293.15);
+            assert!(pressure.iter().any(|p| p.abs() > 1e-12));
+            let temperature = renderer.thermal().temperature_k(FILM).unwrap();
+            let final_frame = renderer.last_frame().unwrap().mechanics.clone();
+            drop(renderer);
+
+            let mut streamed = mixed_ready(cx, gate, &profile, cp, 128);
+            let stream = profile.prepare(&streamed, gate).unwrap();
+            let (wav, summary) = stream.write(&mut streamed, Cursor::new(Vec::new()), None, gate).unwrap();
+            assert_eq!(summary.samples, 128);
+            assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(&pressure, 48_000, 0.01).unwrap().0);
+            assert_eq!(streamed.performance.bank().system().last_frame(), Some(&final_frame));
+            responses.push((temperature, pressure));
+        }
+        assert!(responses[0].0 > responses[1].0);
+        assert!(responses[0].1.iter().zip(&responses[1].1).any(|(a, b)| a.to_bits() != b.to_bits()));
+    });
+}
+
+#[test]
+fn native_mixed_sources_cancel_inside_trial_without_publishing_either_history() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    scoped(|cx, gate| {
+        let profile = Profile::parse(mixed_profile(false).as_bytes()).unwrap();
+        let mut ready = mixed_ready(cx, gate, &profile, 20.0, 37);
+        let prepared = profile.prepare(&ready, gate).unwrap();
+        let network = prepared.network(gate).unwrap();
+        let routes = prepared.film_routes(&ready, &network).unwrap();
+        let dry = prepared.dry_routes(&ready).unwrap();
+        let cancel_trial = AtomicBool::new(false);
+        let mut renderer = ready.performance.with_combined_contact_thermal_network(network,
+            film_bindings(&prepared), vec![], dry, vec![], profile.controls, gate,
+            |endpoint| prepared.resolve(endpoint)).unwrap()
+            .with_trial_heat_source(|endpoint, ports| {
+                // Both mechanical source candidates and dry fluxes have already
+                // been evaluated when the same trial's film conduction is read.
+                if cancel_trial.load(Ordering::SeqCst) { gate.request(); }
+                prepared.resolve_with_films(endpoint, ports, &routes)
+            }).unwrap();
+        renderer.block(&mut [0.0; 32]).unwrap();
+        let count = renderer.samples_rendered();
+        let cells = renderer.thermal().cells().clone();
+        let frame = renderer.last_frame().unwrap().mechanics.clone();
+        let system = renderer.performance().bank().system();
+        let history = system.material_shear_state(0).cloned();
+        let states = system.components().iter().map(|body| body.states().to_vec()).collect::<Vec<_>>();
+        let dry_temperature = renderer.performance().bank().bow_interface(1).unwrap().temperature_kelvin();
+        cancel_trial.store(true, Ordering::SeqCst);
+        let mut output = [12345.0];
+        assert!(renderer.block(&mut output).is_err());
+        assert!(gate.is_requested());
+        assert_eq!(output, [12345.0]);
+        assert_eq!(renderer.samples_rendered(), count);
+        assert_eq!(renderer.thermal().cells(), &cells);
+        assert_eq!(renderer.last_frame().unwrap().mechanics, frame);
+        let system = renderer.performance().bank().system();
+        assert_eq!(system.material_shear_state(0), history.as_ref());
+        assert_eq!(system.components().iter().map(|body| body.states().to_vec()).collect::<Vec<_>>(), states);
+        assert_eq!(renderer.performance().bank().bow_interface(1).unwrap().temperature_kelvin(), dry_temperature);
+    });
+}

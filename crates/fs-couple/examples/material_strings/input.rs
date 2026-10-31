@@ -892,53 +892,58 @@ impl Spec {
                     characteristic_speed:row.positive()? };
                 row.end()?; bow_interfaces::Inputs::research(law)?
             },
-            "layers" => {
+            kind @ ("layers" | "interfaces" | "contacts") => {
                 let count=row.count(16)?; row.end()?;
-                let mut declarations=Vec::with_capacity(count);
+                if count == 0 { return Err("source-bound friction requires explicit contact declarations".into()); }
+                let mut layers=Vec::with_capacity(count);
+                let mut interfaces=Vec::with_capacity(count);
                 for _ in 0..count {
-                    let mut row=r.row("shear-layer")?;
-                    let mut declaration=shear_layers::Declaration {
-                        track:row.word()?.to_string(), pack:row.path()?,
-                        area_m2:row.positive()?, thickness_m:row.positive()?,
-                        maximum_elastic_shear_strain:row.positive()?,
-                        relaxation: Vec::new(),
-                    };
-                    row.end()?;
-                    if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
-                        == Some("shear-memory") {
-                        let mut row = r.row("shear-memory")?;
-                        let arms = row.count(fs_material::state_point::MAX_SHEAR_RELAXATION_ARMS)?;
-                        if arms == 0 { return Err("shear-memory requires at least one source arm".into()); }
-                        for _ in 0..arms {
-                            declaration.relaxation.push((row.word()?.to_string(), row.word()?.to_string()));
+                    match r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next()) {
+                        Some("shear-layer") if kind != "interfaces" => {
+                            let mut row=r.row("shear-layer")?;
+                            let mut declaration=shear_layers::Declaration {
+                                track:row.word()?.to_string(), pack:row.path()?,
+                                area_m2:row.positive()?, thickness_m:row.positive()?,
+                                maximum_elastic_shear_strain:row.positive()?,
+                                relaxation: Vec::new(),
+                            };
+                            row.end()?;
+                            if r.lines.clone().next().and_then(|line| line.split_ascii_whitespace().next())
+                                == Some("shear-memory") {
+                                let mut row = r.row("shear-memory")?;
+                                let arms = row.count(fs_material::state_point::MAX_SHEAR_RELAXATION_ARMS)?;
+                                if arms == 0 { return Err("shear-memory requires at least one source arm".into()); }
+                                for _ in 0..arms {
+                                    declaration.relaxation.push((row.word()?.to_string(), row.word()?.to_string()));
+                                }
+                                row.end()?;
+                            }
+                            layers.push(declaration);
                         }
-                        row.end()?;
+                        Some("bow-interface") if kind != "layers" => {
+                            let mut row=r.row("bow-interface")?;
+                            let track=row.word()?.to_string(); let pack=row.path()?;
+                            let temperature=row.positive()?; let area=row.positive()?;
+                            let pressure=row.positive()?; let speed=row.scalar()?;
+                            let model=match row.word()? {
+                                "coulomb"=>bow_interfaces::Model::Coulomb,
+                                "stribeck"=>bow_interfaces::Model::Stribeck,
+                                "hyperbolic"=>bow_interfaces::Model::Hyperbolic,
+                                _=>return Err("bow interface model must be coulomb, stribeck or hyperbolic".into()),
+                            };
+                            let names=(0..model.property_count()).map(|_|row.word().map(str::to_string))
+                                .collect::<Result<Vec<_>>>()?;
+                            row.end()?;
+                            interfaces.push(bow_interfaces::Declaration {track,pack,temperature,area,pressure,speed,model,names});
+                        }
+                        _ => return Err("source friction records must match their declared layer, interface or contacts mode".into()),
                     }
-                    declarations.push(declaration);
                 }
-                bow_interfaces::Inputs::layers(declarations)?
-            },
-            "interfaces" => {
-                let count=row.count(16)?; row.end()?;
-                if count==0 { return Err("source-bound friction requires one interface per bow track".into()); }
-                let mut inputs=Vec::with_capacity(count);
-                for _ in 0..count {
-                    let mut row=r.row("bow-interface")?;
-                    let track=row.word()?.to_string(); let pack=row.path()?;
-                    let temperature=row.positive()?; let area=row.positive()?;
-                    let pressure=row.positive()?; let speed=row.scalar()?;
-                    let model=match row.word()? {
-                        "coulomb"=>bow_interfaces::Model::Coulomb,
-                        "stribeck"=>bow_interfaces::Model::Stribeck,
-                        "hyperbolic"=>bow_interfaces::Model::Hyperbolic,
-                        _=>return Err("bow interface model must be coulomb, stribeck or hyperbolic".into()),
-                    };
-                    let names=(0..model.property_count()).map(|_|row.word().map(str::to_string))
-                        .collect::<Result<Vec<_>>>()?;
-                    row.end()?;
-                    inputs.push(bow_interfaces::Declaration {track,pack,temperature,area,pressure,speed,model,names});
+                match kind {
+                    "layers" => bow_interfaces::Inputs::layers(layers)?,
+                    "interfaces" => bow_interfaces::Inputs::interfaces(interfaces)?,
+                    _ => bow_interfaces::Inputs::contacts(layers, interfaces)?,
                 }
-                bow_interfaces::Inputs::interfaces(inputs)?
             },
             _ => return Err("unsupported physical friction law".into()),
         };

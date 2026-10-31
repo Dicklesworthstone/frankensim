@@ -157,11 +157,15 @@ finite `k*A/d` fluxes. Signed heat can cool a hotter body even without slip.
 Cross-surface links refuse duplicated contact conduction. Geometry, source
 identity, caloric mass and coverage are admitted before output and at every step.
 
-Dry routes may share the network with explicit series-drive heat. Retained
-shear-film bindings and moving dry routes cannot be combined by this profile;
-set `films 0` for a dry profile. V1 film/series profiles keep their fixed-bow
-restriction. Missing hair thermal properties are not supplied from rosin or
-another material. Constant dry laws retain their original analytic interface
+Dry routes may share the network with retained shear films on distinct contact
+ports, explicit series-drive heat and version 4 material-body heat. Select each
+track's original interface or film with `friction contacts N` in the instrument
+input. A physical contact cannot have both dry and film heat routes. All sources
+use one simultaneous mechanical/enthalpy trial and publish their histories
+together; no sequential contact substep or second thermal store is introduced.
+Retained film patches keep their fixed bow stations. Missing hair thermal
+properties are not supplied from rosin or another material.
+Constant dry laws retain their original analytic interface
 temperature path. A `coulomb` bow declaration may instead select source
 coefficients that depend on `T`. Those original claims are pinned and evaluated
 at the interface temperature solved jointly with traction and finite-cell heat.
@@ -218,8 +222,9 @@ All named cells must already exist. The film footprint fields are its initial
 counterface-coordinate endpoints, width and film centre-to-interface distance
 in metres. Its area and full thickness must match the original mechanical film.
 Each receiver strip uses the same finite-volume geometry and sourced transport
-requirements as a dry thermal strip. This route uses `dry-contacts 0` and the
-original retained-film mechanical map.
+requirements as a dry thermal strip. Dry contacts on other physical ports may
+share this profile; film conduction uses the same candidate slip and temperature
+as their friction/heat solve. A film-only profile uses `dry-contacts 0`.
 
 With `bow_fibers`, a complete `film-surfaces` binding (one for every film)
 explicitly attaches those films to their original string material patches.
