@@ -601,6 +601,7 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             ),
         };
         let mut increments = Vec::with_capacity(self.load_path.len());
+        let mut element_stress = Vec::with_capacity(elements.len());
         for (increment, &load) in self.load_path.iter().enumerate() {
             let mut f_ext = vec![0.0f64; dofs];
             for &(dof, value) in self.nodal_forces_n {
@@ -697,10 +698,15 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             }
             let mut evolving = 0usize;
             for (index, element) in elements.iter().enumerate() {
-                let next = self
-                    .laws
-                    .at(index)
-                    .update_state(&Self::strain(element, &u), &states[index]);
+                let strain = Self::strain(element, &u);
+                let law = self.laws.at(index);
+                if increment + 1 == self.load_path.len() {
+                    // Stress is the converged update from the PREVIOUS history.
+                    // Evaluating it from the newly committed history would
+                    // apply another physical interval for an overstress law.
+                    element_stress.push(law.stress(&strain, &states[index]));
+                }
+                let next = law.update_state(&strain, &states[index]);
                 evolving += usize::from(next != states[index]);
                 states[index] = next;
             }
@@ -717,12 +723,6 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
             });
         }
         let element_strain: Vec<Voigt> = elements.iter().map(|e| Self::strain(e, &u)).collect();
-        let element_stress = element_strain
-            .iter()
-            .zip(&states)
-            .enumerate()
-            .map(|(index, (eps, state))| self.laws.at(index).stress(eps, state))
-            .collect();
         checkpoint(cx)?;
         Ok(SmallStrainTetSolution {
             displacement_m: u.as_chunks::<3>().0.to_vec(),

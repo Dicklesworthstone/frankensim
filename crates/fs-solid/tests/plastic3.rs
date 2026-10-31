@@ -645,3 +645,47 @@ fn continuation_refusal_does_not_consume_the_accepted_history() {
     );
     assert_eq!(loaded, accepted);
 }
+
+#[test]
+fn overstress_solution_publishes_one_physical_update_per_increment() {
+    use fs_material::plastic::rate::LinearOverstressJ2;
+
+    let nodes = [[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let tets = [[0, 1, 2, 3]];
+    let dt = 0.1;
+    let viscosity = 100.0;
+    let law = LinearOverstressJ2::new(j2(), viscosity, dt).unwrap();
+    let strain = [0.006, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let displacement: Vec<_> = nodes.iter().flat_map(|x| [strain[0] * x[0], 0.0, 0.0]).collect();
+    let prescribed: Vec<_> = displacement.iter().copied().enumerate().collect();
+    let problem = SmallStrainTetProblem {
+        prescribed_m: &prescribed,
+        ..problem_for(&nodes, &tets, &law)
+    };
+    let mut state = law.initial_state();
+    let mut old_u = vec![0.0; 12];
+    let shear = E / (2.0 * (1.0 + NU));
+    for step in 0..3 {
+        let old_alpha = state.alpha;
+        let old_plastic = state.plastic_strain;
+        let result = with_cx(|cx| problem.solve_from(&old_u, &[state.clone()], cx)).unwrap();
+        let next = &result.element_states[0];
+        // Independently reconstruct the actual endpoint C:(eps-eps_p),
+        // which must agree with both reported stress and support reactions.
+        let elastic_strain = std::array::from_fn(|i| strain[i] - next.plastic_strain[i]);
+        let expected = law.backbone().elastic.stress(&elastic_strain, &());
+        for (actual, expected) in result.element_stress[0].iter().zip(expected) {
+            assert!((actual - expected).abs() < 2e-12, "step {step}: {actual} != {expected}");
+        }
+        assert!((result.increments[0].reactions_n[3] - expected[0] / 6.0).abs() < 2e-12);
+        // Scalar backward-Euler Perzyna equation, including further stress
+        // relaxation at fixed displacement on the second and third intervals.
+        let trial_q = 2.0 * shear * (strain[0] - 1.5 * old_plastic[0]);
+        let delta = (trial_q - SIGMA_Y - H * old_alpha).max(0.0)
+            / (3.0 * shear + H + viscosity / dt);
+        assert!((next.alpha - old_alpha - delta).abs() < 2e-15);
+        assert!(delta > 0.0);
+        state = next.clone();
+        old_u = result.displacement_m.as_flattened().to_vec();
+    }
+}

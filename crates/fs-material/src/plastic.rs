@@ -129,7 +129,14 @@ impl J2Plasticity {
         for (i, (out, e)) in stress_trial.iter_mut().zip(&elastic_strain).enumerate() {
             *out = 2.0 * mu * e + if i < 3 { lambda * tr } else { 0.0 };
         }
-        let mut s_trial = deviator(&stress_trial);
+        // Compute the pressure-independent predictor before adding the bulk
+        // stress. Subtracting two large hydrostatic stresses loses the small
+        // deviatoric part near incompressibility and can create traceful plastic
+        // flow under a purely hydrostatic shift of the same loading path.
+        let mut s_trial = deviator(&elastic_strain);
+        for stress in &mut s_trial {
+            *stress *= 2.0 * mu;
+        }
         if self.kinematic_hardening != 0.0 {
             let backstress = self.backstress_pa(state);
             for (stress, shift) in s_trial.iter_mut().zip(backstress) { *stress -= shift; }

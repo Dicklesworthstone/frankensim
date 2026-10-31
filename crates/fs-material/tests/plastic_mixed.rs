@@ -206,3 +206,18 @@ fn g0_zero_kinematic_limit_preserves_original_updates_and_invalid_data_refuse() 
     }
     assert!(J2Plasticity::new_mixed(original.elastic.clone(), 3.0, f64::MAX, f64::MAX).is_err());
 }
+
+#[test]
+fn g3_nearly_incompressible_hydrostatic_shift_does_not_change_plastic_flow() {
+    let elastic = IsotropicElastic::new(1200.0, 0.5 - f64::EPSILON, 0.04).unwrap();
+    let material = J2Plasticity::new_mixed(elastic, 3.0, 40.0, 160.0).unwrap();
+    let deviatoric = [0.004, -0.002, -0.002, 0.0, 0.0, 0.0];
+    let shifted = [0.006, 0.0, 0.0, 0.0, 0.0, 0.0];
+    let virgin = material.initial_state();
+    let reference = material.update_state(&deviatoric, &virgin);
+    let pressured = material.update_state(&shifted, &virgin);
+    near(pressured.alpha, reference.alpha, 2e-18);
+    for i in 0..6 {
+        near(pressured.plastic_strain[i], reference.plastic_strain[i], 2e-18);
+    }
+}

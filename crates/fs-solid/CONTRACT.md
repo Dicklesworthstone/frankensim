@@ -1440,6 +1440,11 @@ stress, consistent tangent, converged history update, and final stress.
 A wrong field cardinality returns `LawCountMismatch` before assembly.
 No effective-property averaging or separate heterogeneous solver is introduced.
 Constitutive coefficients remain fixed throughout the load path.
+Reported endpoint stress is evaluated from the same previous committed history
+as the converged force and tangent, before publishing the next internal state.
+An explicit-duration overstress law therefore advances exactly once per load
+increment; reading the result does not perform an extra relaxation interval.
+The same publication rule serves the backward-Euler inertial adapter.
 `ResolvedJ2Plasticity` implements the native `SmallStrainLaw` interface directly,
 so fields can borrow complete resolved material inputs and retain all source
 receipts without extracting bare coefficients. This field alone does not add
