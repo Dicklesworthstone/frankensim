@@ -136,23 +136,42 @@ fn dense_solve(m: &[f64], b: &[f64], n: usize) -> Option<Vec<f64>> {
     Some(x)
 }
 
-/// The signed kinetic traction a sliding port carries at relative slip `slip`:
-/// magnitude `mu_k(|slip|/dt) * normal`, sign equal to the slip direction so the
-/// friction force is dissipative.
-fn kinetic_traction(law: &FrictionLaw, normal: f64, slip: f64, dt: f64) -> Result<f64, ModalFrictionError> {
+/// The kinetic traction a sliding port carries at relative slip `slip`: magnitude
+/// `mu_k(|slip|/dt) * normal`, signed by `sign`, the direction the PARTITION
+/// assigns the port (+1 positive slip, -1 negative), so the friction force is
+/// dissipative when the assignment is consistent.
+///
+/// The sign is the assignment, not the sign of the current iterate's slip. The
+/// traction jumps by `2 * mu * normal` across `slip = 0`, and a consistent
+/// partition can sit within ~1e-10 m of it (a bow cell barely sliding): signing
+/// by the iterate made the full Newton step cycle between the two sides of the
+/// jump forever, and the one consistent partition was refused.
+fn kinetic_traction(law: &FrictionLaw, normal: f64, sign: f64, slip: f64, dt: f64) -> Result<f64, ModalFrictionError> {
     let speed = (slip / dt).abs();
     let mu = if speed == 0.0 {
         law.zero_speed_kinetic_coefficient()?
     } else {
         law.kinetic_coefficient(speed)?
     };
-    let sign = if slip < 0.0 { -1.0 } else { 1.0 };
     Ok(sign * mu * normal)
 }
 
+/// The direction a partition assigns a sliding port: +1 for positive slip, -1 for negative.
+fn branch_sign(b: Branch) -> f64 {
+    if b == Branch::SlideNeg { -1.0 } else { 1.0 }
+}
+
 /// Joint-Newton the tractions for a FIXED partition `cells`. Stuck ports pin
-/// `slip_i = 0`; sliding ports pin `t_i = kinetic_traction(sign, |slip_i|)`.
+/// `slip_i = 0`; sliding ports pin `t_i = kinetic_traction(branch sign, |slip_i|)`.
 /// Returns the tractions, or None if the Newton does not resolve.
+///
+/// A stuck row `slip_i = f_i - sum_j a_ij t_j` is linear in `t`, so its Jacobian
+/// row is exactly `-a_i`. It is not differenced: with step `h`, the forward
+/// difference of a row of magnitude `f_i` carries an absolute error of about
+/// `eps * f_i / h`, which for a near-rank-deficient `a` (many rigid-ribbon cells
+/// on few string modes) reached 0.7 of the smallest eigenvalue of `a`, and Newton
+/// stalled above the 1e-12 m gate. Sliding rows keep the difference: their law
+/// derivative would otherwise be needed for every `FrictionLaw` variant.
 fn solve_partition(
     a: &[f64],
     f: &[f64],
@@ -171,7 +190,8 @@ fn solve_partition(
             r[i] = match cells[i] {
                 Branch::Stuck => slip[i],
                 Branch::SlidePos | Branch::SlideNeg => {
-                    let kt = kinetic_traction(law[i], normal[i], slip[i], dt).ok()?;
+                    let sign = branch_sign(cells[i]);
+                    let kt = kinetic_traction(law[i], normal[i], sign, slip[i], dt).ok()?;
                     t[i] - kt
                 }
             };
@@ -192,6 +212,13 @@ fn solve_partition(
             let rp = residual(&tp)?;
             for i in 0..p {
                 jac[i * p + j] = (rp[i] - r[i]) / h;
+            }
+        }
+        for i in 0..p {
+            if cells[i] == Branch::Stuck {
+                for j in 0..p {
+                    jac[i * p + j] = -a[i * p + j];
+                }
             }
         }
         let neg: Vec<f64> = r.iter().map(|x| -x).collect();
@@ -510,5 +537,205 @@ mod tests {
             ),
             "the default budget must resolve the partition"
         );
+    }
+
+    // Captured refusal states of the finite-width violin bow on the A4 card, with 3
+    // and 5 rigid-ribbon cells on 25 bending modes (material_strings at 91048d5c8,
+    // 2026-10-30): the compliance matrix, free slip and normal force at the step where
+    // the Gauss-Seidel sweep stalled (at 5 cells its iteration matrix has spectral
+    // radius 1 - 1.5e-7, and the matrix has condition number 6e7) and this rescue
+    // then refused. Each state has exactly ONE consistent partition. The reference
+    // tractions are that solution, found over all 3^p partitions at 50 digits with an
+    // analytic-Jacobian Newton. These states belong to a ribbon that is under-resolved
+    // (25 modes against 2 mm cells); they pin the per-partition solve, not the sound.
+    const A4_3_COMPLIANCE: [f64; 9] = [
+        3.242189682783081e-6, 3.0060271872024254e-6, 3.071974318659879e-6,
+        3.0060271872024258e-6, 3.1408969890100562e-6, 2.536988762713617e-6,
+        3.0719743186598804e-6, 2.536988762713616e-6, 3.2461790651167124e-6,
+    ];
+    const A4_3_FREE_SLIP: [f64; 3] = [7.718593353040716e-8, 6.022912021836881e-8, 8.809302586191596e-8];
+    const A4_3_NORMAL: [f64; 3] = [8.88e-2, 8.88e-2, 8.88e-2];
+    const A4_3_REFERENCE: [f64; 3] = [-7.1039995226896366e-2, 2.9784357894763439e-2, 7.1039998232043456e-2];
+    const A4_5_COMPLIANCE: [f64; 25] = [
+        3.242189682783081e-6, 2.9144763779873244e-6, 3.147149255586746e-6, 3.1885709159069045e-6, 2.9911340259655605e-6,
+        2.914476377987324e-6, 3.121797588234734e-6, 3.082077947364439e-6, 2.6346157436085015e-6, 2.2690673081597915e-6,
+        3.147149255586745e-6, 3.082077947364439e-6, 3.1845775820084684e-6, 2.972113669697493e-6, 2.6760888082238244e-6,
+        3.1885709159069045e-6, 2.6346157436085015e-6, 2.972113669697493e-6, 3.2611797107557466e-6, 3.1825532487603138e-6,
+        2.9911340259655605e-6, 2.269067308159791e-6, 2.6760888082238235e-6, 3.1825532487603138e-6, 3.23169229485642e-6,
+    ];
+    const A4_5_FREE_SLIP: [f64; 5] = [1.8601190476190475e-8; 5];
+    const A4_5_NORMAL: [f64; 5] = [5.328000000000001e-2; 5];
+    const A4_5_REFERENCE: [f64; 5] = [
+        -1.0664531455004529e-2,
+        4.1891461592371590e-2,
+        -4.2623999997376573e-2,
+        3.6760181756948487e-3,
+        1.7889132963283344e-2,
+    ];
+    const A4_DT: f64 = 1.0 / 144_000.0;
+    const A4_TOL_N: f64 = 1e-12;
+
+    fn a4_law() -> FrictionLaw {
+        FrictionLaw::Stribeck {
+            static_mu: 0.8,
+            kinetic_mu: 0.4,
+            characteristic_speed: 0.1,
+            viscous_per_speed: 0.0,
+        }
+    }
+
+    /// Every partition that solves AND is consistent, with its tractions.
+    fn consistent_partitions(a: &[f64], f: &[f64], normal: &[f64]) -> Vec<(Vec<Branch>, Vec<f64>)> {
+        let p = f.len();
+        let l = a4_law();
+        let laws: Vec<&FrictionLaw> = (0..p).map(|_| &l).collect();
+        let bs = all_branches();
+        let mut found = Vec::new();
+        for code in 0..3usize.pow(p as u32) {
+            let cells: Vec<Branch> = (0..p)
+                .map(|i| bs[code / 3usize.pow(i as u32) % 3])
+                .collect();
+            if let Some(t) = solve_partition(a, f, normal, &laws, A4_DT, &cells, 100) {
+                if is_consistent(a, f, normal, &laws, A4_DT, &cells, &t).unwrap() {
+                    found.push((cells, t));
+                }
+            }
+        }
+        found
+    }
+
+    fn assert_matches_reference(t: &[f64], reference: &[f64]) {
+        for (i, (&got, &want)) in t.iter().zip(reference).enumerate() {
+            assert!(
+                (got - want).abs() <= A4_TOL_N,
+                "port {i}: traction {got} differs from the 50-digit reference {want} by more than {A4_TOL_N}"
+            );
+        }
+    }
+
+    fn walk(a: &[f64], f: &[f64], normal: &[f64], budget: usize) -> Resolution {
+        let l = a4_law();
+        let laws: Vec<&FrictionLaw> = (0..f.len()).map(|_| &l).collect();
+        let seed = vec![ModalFrictionRegime::Sticking; f.len()];
+        solve_active_set(a, f, normal, &laws, A4_DT, &seed, budget).unwrap()
+    }
+
+    #[test]
+    fn a_sliding_traction_takes_the_partitions_direction_not_the_iterates_slip() {
+        let l = a4_law();
+        // 1e-10 m of slip is 7e-5 m/s, far below the Stribeck speed, so mu is static
+        // to 1e-6 and the traction jump across slip = 0 is ~2 mu N = 0.14 N.
+        let positive = kinetic_traction(&l, 0.0888, 1.0, -1e-10, A4_DT).unwrap();
+        let negative = kinetic_traction(&l, 0.0888, -1.0, 1e-10, A4_DT).unwrap();
+        assert!(
+            positive > 0.07 && negative < -0.07,
+            "the assigned sign must win: {positive}, {negative}"
+        );
+        assert_eq!(positive, -negative, "the magnitude depends on |slip| only");
+    }
+
+    #[test]
+    fn a4_three_cell_step_has_one_consistent_partition_and_it_solves() {
+        // The sliding partition sits ~2.5e-10 m from slip = 0: a Newton signed by the
+        // iterate's slip cycled across the jump and never solved it.
+        let found = consistent_partitions(&A4_3_COMPLIANCE, &A4_3_FREE_SLIP, &A4_3_NORMAL);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected a unique consistent partition, got {:?}",
+            found.iter().map(|(c, _)| c).collect::<Vec<_>>()
+        );
+        let (cells, t) = &found[0];
+        assert_eq!(*cells, [Branch::SlideNeg, Branch::Stuck, Branch::SlidePos]);
+        assert_matches_reference(t, &A4_3_REFERENCE);
+    }
+
+    #[test]
+    fn a4_five_cell_step_has_one_consistent_partition_and_the_all_stuck_start_solves() {
+        let l = a4_law();
+        let laws: Vec<&FrictionLaw> = (0..5).map(|_| &l).collect();
+        // The all-stuck partition is the walk's first try. The matrix's smallest
+        // eigenvalue is 2.4e-13 m/N, and a difference-quotient Jacobian (h = 1e-11 N)
+        // is wrong by about 0.7 of that: Newton stalled near 5e-12 m against the
+        // 1e-12 m gate, so the solve reported failure instead of the true answer,
+        // that port 0 would need ~10.8 N against a 0.043 N cone.
+        let stuck = [Branch::Stuck; 5];
+        let (a, f, n) = (&A4_5_COMPLIANCE, &A4_5_FREE_SLIP, &A4_5_NORMAL);
+        let t = solve_partition(a, f, n, &laws, A4_DT, &stuck, 100)
+            .expect("the all-stuck partition is linear and must solve");
+        let cap = l.static_coefficient().unwrap() * n[0];
+        let reach = t[0].abs();
+        assert!(reach > 100.0 * cap, "all-stuck needs far more than the cone holds: {reach} vs {cap}");
+        let consistent = is_consistent(a, f, n, &laws, A4_DT, &stuck, &t).unwrap();
+        assert!(!consistent, "the all-stuck partition is not consistent here");
+        let found = consistent_partitions(&A4_5_COMPLIANCE, &A4_5_FREE_SLIP, &A4_5_NORMAL);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected a unique consistent partition, got {:?}",
+            found.iter().map(|(c, _)| c).collect::<Vec<_>>()
+        );
+        let (cells, t) = &found[0];
+        assert_eq!(
+            *cells,
+            [Branch::Stuck, Branch::Stuck, Branch::SlideNeg, Branch::Stuck, Branch::Stuck]
+        );
+        assert_matches_reference(t, &A4_5_REFERENCE);
+    }
+
+    #[test]
+    fn the_walk_lands_each_a4_partition_in_its_pivot_count_and_refuses_one_pivot_short() {
+        let cases: [(&[f64], &[f64], &[f64], &[f64], usize, &[ModalFrictionRegime]); 2] = [
+            (
+                &A4_3_COMPLIANCE, &A4_3_FREE_SLIP, &A4_3_NORMAL, &A4_3_REFERENCE, 3,
+                &[ModalFrictionRegime::Sliding, ModalFrictionRegime::Sticking, ModalFrictionRegime::Sliding],
+            ),
+            (
+                &A4_5_COMPLIANCE, &A4_5_FREE_SLIP, &A4_5_NORMAL, &A4_5_REFERENCE, 4,
+                &[
+                    ModalFrictionRegime::Sticking,
+                    ModalFrictionRegime::Sticking,
+                    ModalFrictionRegime::Sliding,
+                    ModalFrictionRegime::Sticking,
+                    ModalFrictionRegime::Sticking,
+                ],
+            ),
+        ];
+        for (a, f, normal, reference, pivots, regimes) in cases {
+            match walk(a, f, normal, pivots - 1) {
+                Resolution::Exhausted { pivots: spent, last_set, worst } => {
+                    assert!(spent < pivots, "a budget of {} must stop short of the {pivots} pivots needed", pivots - 1);
+                    assert!(!last_set.is_empty() && worst.condition != "none");
+                }
+                Resolution::Solved(..) => panic!("{} pivots cannot reach a partition that needs {pivots}", pivots - 1),
+            }
+            for budget in [pivots, 4 * f.len() + 16] {
+                match walk(a, f, normal, budget) {
+                    Resolution::Solved(t, got) => {
+                        assert_eq!(got, regimes, "budget {budget}");
+                        assert_matches_reference(&t, reference);
+                    }
+                    Resolution::Exhausted { pivots: spent, last_set, worst } => panic!(
+                        "budget {budget} must resolve the step: {spent} pivots, last set {last_set}, worst {worst:?}"
+                    ),
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_state_with_no_consistent_partition_is_refused_not_invented() {
+        // A port with zero normal load: stuck needs a nonzero traction inside a zero
+        // cone, and sliding needs a strictly positive traction from a zero load. No
+        // partition is consistent, so the rescue must exhaust, not return one.
+        let l = a4_law();
+        let laws = [&l];
+        let seed = vec![ModalFrictionRegime::Sticking];
+        match solve_active_set(&[3.0e-6], &[1.0e-7], &[0.0], &laws, A4_DT, &seed, 8).unwrap() {
+            Resolution::Exhausted { last_set, worst, .. } => {
+                assert!(!last_set.is_empty() && worst.condition != "none");
+            }
+            Resolution::Solved(t, _) => panic!("a zero-load port has no consistent partition, got tractions {t:?}"),
+        }
     }
 }
