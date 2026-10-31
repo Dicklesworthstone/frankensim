@@ -155,6 +155,11 @@ impl AffineTensorThermal {
                 }
                 vec!["young_modulus"]
             }
+            TensorElasticity::IsotropicYoungShear | TensorElasticity::IsotropicBulkShear => {
+                return Err(invalid(
+                    "independent isotropic source pairs require an explicit tensor temperature-derivative law",
+                ));
+            }
             TensorElasticity::Orthotropic => {
                 if ORTHOTROPIC_POISSON_RATIO_PROPERTIES
                     .iter()

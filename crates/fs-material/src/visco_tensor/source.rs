@@ -1,6 +1,6 @@
 //! Source-bound anisotropic Maxwell branches in the material's original axes.
 //!
-//! Equilibrium elasticity uses the canonical elastic properties. Each branch
+//! Equilibrium elasticity uses an explicit original elastic source family. Each branch
 //! explicitly names all 21 entries of a symmetric Mandel matrix, including
 //! zeros; no direction, shear convention, rate or missing coefficient is
 //! inferred from a material name. Plane-stress elimination belongs to the
@@ -8,8 +8,9 @@
 
 use super::{TensorProny, TensorPronyBranch};
 use crate::state_point::{
-    MaterialPropertySelection, MaterialStatePointError, ORTHOTROPIC_POISSON_RATIO_PROPERTIES,
-    ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES, ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES,
+    IsotropicElasticParameters, MaterialPropertySelection, MaterialStatePointError,
+    ORTHOTROPIC_POISSON_RATIO_PROPERTIES, ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES,
+    ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES, ResolvedIsotropicElasticModuli,
     ResolvedMaterialStatePoint, ScalarAdmissibility as Admit,
     ScalarPropertyRequirement as Requirement, resolve_material_state_point,
 };
@@ -22,13 +23,44 @@ pub mod thermal;
 mod kelvin;
 pub use kelvin::{ResolvedKelvinViscosity, TensorKelvinViscosityProperties};
 
-/// Canonical equilibrium elastic data, before any spatial rotation.
+/// Explicit equilibrium elastic source data, before any spatial rotation.
+/// Independent isotropic pairs affect the equilibrium tensor only; every
+/// Maxwell branch still requires its complete original tensor and time.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TensorElasticity {
     /// `young_modulus` and `poisson_ratio`.
     Isotropic,
     /// The complete three Young moduli, three Poisson ratios and three shears.
     Orthotropic,
+    /// Independent `young_modulus` and `shear_modulus`.
+    IsotropicYoungShear,
+    /// Independent `bulk_modulus` and `shear_modulus`.
+    IsotropicBulkShear,
+}
+
+impl TensorElasticity {
+    fn isotropic_parameters(self) -> Result<Option<IsotropicElasticParameters>> {
+        let modulus = |name| Requirement::try_new(name, Pressure::DIMS, Admit::StrictlyPositive);
+        Ok(Some(match self {
+            Self::Isotropic => IsotropicElasticParameters::YoungPoisson {
+                young_modulus: modulus("young_modulus")?,
+                poisson_ratio: Requirement::try_new(
+                    "poisson_ratio",
+                    Dims::NONE,
+                    Admit::OpenInterval { lower: -1.0, upper: 0.5 },
+                )?,
+            },
+            Self::IsotropicYoungShear => IsotropicElasticParameters::YoungShear {
+                young_modulus: modulus("young_modulus")?,
+                shear_modulus: modulus("shear_modulus")?,
+            },
+            Self::IsotropicBulkShear => IsotropicElasticParameters::BulkShear {
+                bulk_modulus: modulus("bulk_modulus")?,
+                shear_modulus: modulus("shear_modulus")?,
+            },
+            Self::Orthotropic => return Ok(None),
+        }))
+    }
 }
 
 /// One source branch in Mandel order (11,22,33,sqrt(2)12,sqrt(2)23,sqrt(2)31).
@@ -331,28 +363,19 @@ impl TensorPronyProperties {
             }
             Ok(())
         };
-        match self.elasticity {
-            TensorElasticity::Isotropic => {
-                add("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?;
-                add(
-                    "poisson_ratio",
-                    Dims::NONE,
-                    Admit::OpenInterval {
-                        lower: -1.0,
-                        upper: 0.5,
-                    },
-                )?;
+        if let Some(parameters) = self.elasticity.isotropic_parameters()? {
+            for requirement in parameters.requirements() {
+                add(requirement.name(), requirement.dims(), requirement.admissibility())?;
             }
-            TensorElasticity::Orthotropic => {
-                for key in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES {
-                    add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
-                }
-                for key in ORTHOTROPIC_POISSON_RATIO_PROPERTIES {
-                    add(key, Dims::NONE, Admit::Finite)?;
-                }
-                for key in ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES {
-                    add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
-                }
+        } else {
+            for key in ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES {
+                add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
+            }
+            for key in ORTHOTROPIC_POISSON_RATIO_PROPERTIES {
+                add(key, Dims::NONE, Admit::Finite)?;
+            }
+            for key in ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES {
+                add(key, Pressure::DIMS, Admit::StrictlyPositive)?;
             }
         }
         add(&self.strain_limit, Dims::NONE, Admit::StrictlyPositive)?;
@@ -408,20 +431,24 @@ impl TensorPronyProperties {
                 "small-strain source bound must be positive".into(),
             ));
         }
-        let equilibrium = match self.elasticity {
-            TensorElasticity::Isotropic => {
-                IsotropicElastic::new(value("young_modulus"), value("poisson_ratio"), strain_limit)
-                    .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
-                    .stiffness()
-            }
-            TensorElasticity::Orthotropic => OrthotropicElastic::new(
+        let equilibrium = if let Some(parameters) = self.elasticity.isotropic_parameters()? {
+            // Project from the complete original bundle. E/nu are constitutive
+            // consequences, never synthetic claims or replacement receipts.
+            let moduli = ResolvedIsotropicElasticModuli::try_from_resolved(
+                state.clone(), &parameters,
+            )?;
+            IsotropicElastic::new(moduli.young_modulus_pa(), moduli.poisson_ratio(), strain_limit)
+                .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
+                .stiffness()
+        } else {
+            OrthotropicElastic::new(
                 ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES.map(value),
                 ORTHOTROPIC_POISSON_RATIO_PROPERTIES.map(value),
                 ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES.map(value),
                 strain_limit,
             )
             .map_err(|e| TensorSourceError::Invalid(e.to_string()))?
-            .stiffness(),
+            .stiffness()
         };
         let mut branches = Vec::with_capacity(self.branches.len());
         for source in &self.branches {

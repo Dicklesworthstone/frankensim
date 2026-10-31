@@ -125,7 +125,10 @@ impl LossSelection {
         Some(TensorPronyProperties {
             elasticity: match model {
                 PlateMaterialModel::Isotropic => TensorElasticity::Isotropic,
-                _ => TensorElasticity::Orthotropic,
+                PlateMaterialModel::IsotropicYoungShear => TensorElasticity::IsotropicYoungShear,
+                PlateMaterialModel::IsotropicBulkShear => TensorElasticity::IsotropicBulkShear,
+                PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 =>
+                    TensorElasticity::Orthotropic,
             },
             strain_limit: strain_limit.clone(), branches: branches.clone(),
         })
@@ -250,7 +253,7 @@ pub(super) fn read(
         let omega = row.scalar()?;
         let thickness = row.scalar()?;
         let angle = row.scalar()?;
-        if matches!(loss, LossSelection::Maxwell { .. } | LossSelection::TensorMaxwell { .. }) {
+        if matches!(loss, LossSelection::Maxwell { .. }) {
             model.require_canonical_relaxation().map_err(PlateValveInputError::Physics)?;
         }
         let line = row.line;

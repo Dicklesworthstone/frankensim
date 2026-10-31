@@ -152,6 +152,146 @@ fn full_source_mandel_matrix_preserves_shear_cross_terms_and_relaxation() {
     assert!(history.advance([0.03; 6], 0.01, || false).is_err());
 }
 
+fn isotropic_pair_fixture(elasticity: TensorElasticity) -> (TensorPronyProperties, Vec<PropertyClaim>) {
+    let (mut properties, mut claims) = fixture();
+    properties.elasticity = elasticity;
+    match elasticity {
+        TensorElasticity::Isotropic => {}
+        TensorElasticity::IsotropicYoungShear => {
+            claims.retain(|c| c.key.name() != "poisson_ratio");
+            claims.push(scalar("shear_modulus", Pressure::DIMS, 4.8e9));
+        }
+        TensorElasticity::IsotropicBulkShear => {
+            claims.retain(|c| c.key.name() != "young_modulus" && c.key.name() != "poisson_ratio");
+            claims.push(scalar("bulk_modulus", Pressure::DIMS, 8e9));
+            claims.push(scalar("shear_modulus", Pressure::DIMS, 4.8e9));
+        }
+        TensorElasticity::Orthotropic => unreachable!("isotropic fixture"),
+    }
+    (properties, claims)
+}
+
+#[test]
+fn independent_equilibrium_pairs_preserve_complete_tensor_histories_and_source_receipts() {
+    let close = |a: f64, b: f64| {
+        assert!((a - b).abs() <= 2e-12 * a.abs().max(b.abs()).max(1.0), "{a} != {b}");
+    };
+    let (reference_properties, reference_claims) = fixture();
+    let reference = reference_properties
+        .bind(&resolve(&reference_properties, reference_claims, false).unwrap())
+        .unwrap();
+    for elasticity in [
+        TensorElasticity::Isotropic,
+        TensorElasticity::IsotropicYoungShear,
+        TensorElasticity::IsotropicBulkShear,
+    ] {
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        claims.push(scalar("density", Density::DIMS, 900.0));
+        let restricted = if elasticity == TensorElasticity::Isotropic {
+            "poisson_ratio"
+        } else {
+            "shear_modulus"
+        };
+        claims.iter_mut().find(|c| c.key.name() == restricted).unwrap().validity =
+            ValidityDomain::unconstrained().with("T", 273.0, 373.0).with("omega", 20.0, 600.0);
+        let material = card(claims);
+        let point = QueryPoint::new().with("T", 300.0).unwrap().with("omega", 100.0).unwrap();
+        let source = ResolvedTensorMaterial::resolve(
+            &material, &point, properties.clone(), MaterialPropertySelection::SingleClaimOnly,
+        ).unwrap();
+        let original = source.state().clone();
+        assert_eq!(source.properties(), &properties);
+        assert_eq!(source.density_kg_m3(), 900.0);
+        assert_eq!(source.law().band_rad_s(), (20.0, 600.0));
+        assert_eq!(source.law().branches()[0].c_pa, BRANCH);
+        assert_eq!(source.law().branches()[0].tau_s, 0.01);
+        if elasticity != TensorElasticity::Isotropic {
+            assert!(source.state().property("poisson_ratio").is_none());
+        }
+        if elasticity == TensorElasticity::IsotropicBulkShear {
+            assert!(source.state().property("young_modulus").is_none());
+        }
+        for (a, b) in source.law().c_eq().iter().flatten().zip(reference.c_eq().iter().flatten()) {
+            close(*a, *b);
+        }
+        let mut history = source.law().history();
+        let mut expected = reference.history();
+        for (strain, dt) in [
+            ([0.001, -0.002, 0.001, 0.001, 0.0, -0.001], 0.02),
+            ([0.001, -0.002, 0.001, 0.001, 0.0, -0.001], 0.04),
+            ([0.0002, 0.0001, -0.0003, 0.0, -0.0005, 0.0001], 0.03),
+        ] {
+            let actual = history.advance(strain, dt, || false).unwrap();
+            let expected = expected.advance(strain, dt, || false).unwrap();
+            for (a, b) in actual.stress.into_iter().zip(expected.stress) {
+                close(a, b);
+            }
+            close(actual.stored_energy, expected.stored_energy);
+            close(actual.work, expected.work);
+            close(actual.dissipated, expected.dissipated);
+            assert!(actual.dissipated > 0.0);
+            assert!(actual.balance_residual.abs() < 1e-10 * actual.work.abs().max(1.0));
+        }
+        let before_cancel = history.clone();
+        assert!(history.advance([0.0; 6], 0.01, || true).is_err());
+        assert_eq!(history, before_cancel);
+        let refreshed = source.at_query_point(
+            &material, &point.clone().with("T", 310.0).unwrap(),
+        ).unwrap();
+        assert_eq!(refreshed.law(), source.law());
+        assert_eq!(refreshed.properties(), source.properties());
+        for (before, after) in original.properties().iter().zip(refreshed.state().properties()) {
+            assert_eq!(before.requirement(), after.requirement());
+            assert_eq!(before.answer().receipt.selected, after.answer().receipt.selected);
+            material.claims().verify_receipt(&after.answer().receipt).unwrap();
+        }
+        assert_eq!(source.state(), &original);
+        // Constant stored tensors remain valid for the existing kinetics-only
+        // thermal model. Independent temperature-varying stiffness is not
+        // silently admitted by the fixed-nu affine thermodynamic owner.
+        source.admit_thermal_relaxation(&material, "T", [280.0, 320.0]).unwrap();
+        if elasticity != TensorElasticity::Isotropic {
+            let error = thermal::AffineTensorThermal::try_new(
+                &source, &material, "T", [280.0, 320.0],
+            ).unwrap_err().to_string();
+            assert!(error.contains("explicit tensor temperature-derivative law"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn independent_tensor_equilibrium_rechecks_pair_stability_and_requires_original_shear() {
+    for (elasticity, name, value) in [
+        (TensorElasticity::IsotropicYoungShear, "young_modulus", 14.4e9),
+        (TensorElasticity::IsotropicYoungShear, "shear_modulus", 0.0),
+        (TensorElasticity::IsotropicBulkShear, "bulk_modulus", -1.0),
+        (TensorElasticity::IsotropicBulkShear, "shear_modulus", 0.0),
+    ] {
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        let claim = claims.iter_mut().find(|c| c.key.name() == name).unwrap();
+        claim.value = PropertyValue::Scalar { value, dims: Pressure::DIMS };
+        // Even a caller's finite-only bundle cannot bypass constitutive stability.
+        let state = resolve(&properties, claims, true).unwrap();
+        assert!(properties.bind(&state).is_err(), "accepted {elasticity:?}: {name}={value}");
+    }
+    for elasticity in [TensorElasticity::IsotropicYoungShear, TensorElasticity::IsotropicBulkShear] {
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        claims.retain(|c| c.key.name() != "shear_modulus");
+        assert!(resolve(&properties, claims, false).is_err());
+        let (properties, mut claims) = isotropic_pair_fixture(elasticity);
+        let shear = claims.iter_mut().find(|c| c.key.name() == "shear_modulus").unwrap();
+        shear.value = PropertyValue::Curve {
+            abscissa: "omega".into(),
+            abscissa_dims: Dims([0, 0, -1, 0, 0, 0]),
+            knots: vec![(0.0, 4.8e9), (1000.0, 6e9)],
+            dims: Pressure::DIMS,
+        };
+        shear.interpolation = InterpolationPolicy::LinearInside;
+        let state = resolve(&properties, claims, false).unwrap();
+        assert!(properties.bind(&state).is_err(), "a sampled shear spectrum is not equilibrium");
+    }
+}
+
 #[test]
 fn orthotropic_source_retains_all_three_elastic_directions() {
     let (mut properties, mut claims) = fixture();

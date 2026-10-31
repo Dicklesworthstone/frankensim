@@ -7473,9 +7473,11 @@ loss projection. Material records select these alternatives with
 response against equivalent Young/Poisson data, and exercise complete-source
 temperature refresh and support refusal. This is frozen-state source lowering,
 not a new thermal/history integrator or experimental validation. Zener loss and
-Young-based Prony/tensor histories still require their original source
-parameterization and explicitly refuse the new alternatives; independent
-bulk/shear relaxation is not inferred from static elastic data.
+scalar Young-based Prony histories still require their original source
+parameterization. Full-tensor Maxwell histories accept the selected equilibrium
+pair when every excess branch matrix and relaxation time is explicitly supplied;
+the same native tensor memory owner computes stress, storage and physical loss.
+Independent bulk/shear relaxation is not inferred from static elastic data.
 
 Material shell point receivers also retain the agreed incident elastic model,
 separately from their general nodal force projection. Source contact requires

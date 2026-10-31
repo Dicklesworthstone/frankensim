@@ -175,10 +175,11 @@ selection replaces the tensor-viscosity requirements; unselected viscosity data
 are not applied in parallel. A zero excess modulus is explicit lossless material
 data. A missing property, incompatible units, unresolved relaxation time,
 insufficient budget or unsupported source band refuses construction.
-The current regional and tensor Maxwell laws require their original elastic
-source model; `isotropic-young-shear` and `isotropic-bulk-shear` refuse these
-history declarations. A static elastic pair does not establish how its two
-moduli relax independently. Both alternatives support the default tensor loss.
+The scalar `regional-maxwell` law requires its original elastic source
+model; `isotropic-young-shear` and `isotropic-bulk-shear` refuse that declaration.
+Both alternatives support the default tensor loss and the explicit full-tensor
+`tensor-maxwell` law below. Its complete branch matrices and times establish the
+memory response; a static elastic pair alone does not supply that response.
 
 The actual region bending forms, including cross-mode terms, use the same DKT
 eigenbasis as all bridge and pressure maps. Within each region each excess
@@ -230,7 +231,8 @@ histories are silently removed to meet a budget.
 
 The original chart owns equilibrium stiffness and mass. Tensor memory adds
 only the source's declared excess stiffness; selected or authored viscosity
-cannot also be counted. Isotropic equilibrium uses E and Poisson ratio;
+cannot also be counted. Isotropic equilibrium uses the selected Young/Poisson,
+Young/shear or bulk/shear source pair through the shared material projection;
 orthotropic equilibrium requires all three Young moduli, all three Poisson
 ratios and all three shear moduli. A two-axis plate source cannot invent the
 missing third direction. Each original region's axes and grain angle rotate

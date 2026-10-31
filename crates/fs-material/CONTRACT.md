@@ -3451,6 +3451,26 @@ timestep convergence and atomic refusal. The six existing species-boundary
 regressions also passed in the same actual-source native executable.
 
 
+### Explicit equilibrium sources for tensor material memory
+
+`visco_tensor::source::TensorElasticity` admits explicitly selected
+Young/Poisson, Young/shear and bulk/shear equilibrium elasticity through the
+shared isotropic material projection. Original source properties remain in the
+complete resolved bundle; the native tensor Prony owner still requires every
+declared branch coefficient and relaxation time. Alternative equilibrium pairs
+therefore do not invent a bulk/shear relaxation spectrum. Original model tags
+and canonical identities are retained, and selected source roles distinguish
+the new physical laws.
+
+The solid material parser and full-tensor plate/string consumers carry these
+choices into the existing history evolution, stress, stored energy and physical
+loss. Scalar Young-based spectra retain their original source assumptions.
+The separate affine thermal tensor adapter still refuses the new equilibrium
+representations until their complete thermal constitutive derivatives are
+admitted. Added native regressions cover source retention, stress/work/heat and
+actual plate/string pressure equivalence; native workspace execution remains
+separate from source and syntax checks.
+
 ### Source-derived two-surface thermal Hertz compliance
 
 `elastic::thermal::contact::ThermalHertzPair` keeps both original isotropic solid cards, complete query contexts and exact source selections. Each body has its own actual temperature. Continuous source lines admit positive affine Young's moduli and fixed Poisson ratios/yield limits; unsupported derivative jumps, hidden evolving axes and extrapolation refuse. The original `IsotropicSolidStatePoint::reduced_modulus_against` computes the harmonic compliance. Its full two-temperature gradient and Hessian are analytical; the effective modulus is not approximated as affine. Immutable source data are shared between candidate checkpoints.

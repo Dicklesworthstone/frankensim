@@ -1,8 +1,15 @@
 //! Full source tensors change physical bridge reactions and emitted pressure.
 use super::*;
+use fs_material::visco_tensor::source::TensorElasticity;
 
 fn tensor_pack(c33: f64, time: f64, limit: f64, missing: &str, upper: f64) -> NormalizedPack {
-    let values = [
+    tensor_pack_with_elasticity(c33, time, limit, missing, upper, TensorElasticity::Isotropic)
+}
+
+fn tensor_pack_with_elasticity(
+    c33: f64, time: f64, limit: f64, missing: &str, upper: f64, elasticity: TensorElasticity,
+) -> NormalizedPack {
+    let mut values = vec![
         ("density", 900.0, Density::DIMS),
         ("young_modulus", 4e9, Pressure::DIMS),
         ("poisson_ratio", 0.3, Dims::NONE),
@@ -19,6 +26,18 @@ fn tensor_pack(c33: f64, time: f64, limit: f64, missing: &str, upper: f64) -> No
         ("branch_15", -1e7, Pressure::DIMS),
         ("zero_modulus", 0.0, Pressure::DIMS),
     ];
+    match elasticity {
+        TensorElasticity::Isotropic => {}
+        TensorElasticity::IsotropicYoungShear | TensorElasticity::IsotropicBulkShear => {
+            values.retain(|(name, _, _)| *name != "poisson_ratio"
+                && (elasticity != TensorElasticity::IsotropicBulkShear || *name != "young_modulus"));
+            values.push(("shear_modulus", 4e9 / (2.0 * 1.3), Pressure::DIMS));
+            if elasticity == TensorElasticity::IsotropicBulkShear {
+                values.push(("bulk_modulus", 4e9 / (3.0 * (1.0 - 2.0 * 0.3)), Pressure::DIMS));
+            }
+        }
+        TensorElasticity::Orthotropic => unreachable!("isotropic body fixture"),
+    }
     let raw = format!(
         "manufactured tensor-body fixture; T=[280,320] K; omega=[0,{upper:.17e}] rad/s\n{}",
         values.iter().filter(|(name, _, _)| *name != missing)
@@ -89,6 +108,61 @@ fn build_profile(cx:&Cx<'_>,gate:&CancelGate,c33:f64,time:f64,profile:Profile)->
             })
         })
         .unwrap()
+}
+
+#[test]
+fn g1_independent_equilibrium_pairs_reach_native_tensor_body_feedback_and_pressure() {
+    scoped(|cx, gate| {
+        let mut reference = build(cx, gate, 3e8, 0.001);
+        let expected = pressure(&mut reference, 37);
+        let scale = expected.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+        assert!(scale > 1e-15);
+        for (token, elasticity, model) in [
+            ("isotropic-young-shear", TensorElasticity::IsotropicYoungShear,
+                PlateMaterialModel::IsotropicYoungShear),
+            ("isotropic-bulk-shear", TensorElasticity::IsotropicBulkShear,
+                PlateMaterialModel::IsotropicBulkShear),
+        ] {
+            let profile = include_str!("../tensor-body.body")
+                .replace("elastic isotropic", &format!("elastic {token}"));
+            let mut ready = tensor_spec().compile_with_body(
+                cx, gate, Some(Profile::parse(profile.as_bytes()).unwrap()), |name| {
+                    Ok(if name == "tensor-blade.fsmatpk" {
+                        tensor_pack_with_elasticity(3e8, 0.001, 0.02, "", 100000.0, elasticity)
+                    } else {
+                        pack(name, 1.0, None)
+                    })
+                },
+            ).unwrap();
+            let source = ready.performance.bank().source().bank();
+            let chart = source.material_chart().unwrap();
+            for region in chart.specimen.regions() {
+                assert_eq!(region.input.model, model);
+                assert!(region.input.material.property("poisson_ratio").is_none());
+                assert!(region.input.material.property("shear_modulus").is_some());
+                if elasticity == TensorElasticity::IsotropicBulkShear {
+                    assert!(region.input.material.property("young_modulus").is_none());
+                    assert!(region.input.material.property("bulk_modulus").is_some());
+                }
+            }
+            let history = source.material_chart_tensor_relaxation().unwrap();
+            assert_eq!(history.mode_count(), 2);
+            assert_eq!(history.material_points().len(), 6);
+            assert_eq!(history.coupling_rows_per_s().len(), 36);
+            assert_eq!(ready.performance.bank().system().material_memory().len(), 36);
+            let actual = pressure(&mut ready, 128);
+            assert!(expected.iter().zip(&actual).all(|(a, b)| (a - b).abs() <= 1e-8 * scale));
+            let before = reference.performance.bank().system().last_frame().unwrap();
+            let after = ready.performance.bank().system().last_frame().unwrap();
+            for (a, b) in [
+                (before.network_energy_j, after.network_energy_j),
+                (before.network_dissipation_j, after.network_dissipation_j),
+            ] {
+                assert!((a - b).abs() <= 1e-8 * a.abs().max(b.abs()).max(1e-12));
+            }
+            assert!(after.energy_residual_j.abs() <= after.energy_tolerance_j);
+        }
+    });
 }
 
 #[test]

@@ -102,7 +102,7 @@ impl PlateLoss {
         Ok(())
     }
     pub(super) fn requirements(&self, model: PlateMaterialModel) -> Result<Vec<Requirement>> {
-        if !self.is_tensor() && matches!(model,
+        if matches!(self, Self::RegionalMaxwell { .. }) && matches!(model,
             PlateMaterialModel::IsotropicYoungShear | PlateMaterialModel::IsotropicBulkShear) {
             return Err("body hereditary relaxation requires its original Young/Poisson source model; independently selected isotropic pairs need an explicit relaxation law".into());
         }
@@ -168,9 +168,17 @@ impl PlateLoss {
 
     fn tensor_properties(&self,model:PlateMaterialModel)->Option<TensorPronyProperties> {
         let Self::TensorMaxwell {strain_limit,branches,..}=self else {return None;};
-        Some(TensorPronyProperties {elasticity:if model==PlateMaterialModel::Isotropic {
-            TensorElasticity::Isotropic
-        } else {TensorElasticity::Orthotropic},strain_limit:strain_limit.clone(),branches:branches.clone()})
+        Some(TensorPronyProperties {
+            elasticity: match model {
+                PlateMaterialModel::Isotropic => TensorElasticity::Isotropic,
+                PlateMaterialModel::IsotropicYoungShear => TensorElasticity::IsotropicYoungShear,
+                PlateMaterialModel::IsotropicBulkShear => TensorElasticity::IsotropicBulkShear,
+                PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 =>
+                    TensorElasticity::Orthotropic,
+            },
+            strain_limit: strain_limit.clone(),
+            branches: branches.clone(),
+        })
     }
 }
 

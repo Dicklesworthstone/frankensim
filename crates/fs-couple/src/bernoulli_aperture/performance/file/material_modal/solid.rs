@@ -319,11 +319,13 @@ pub(super) fn read(
         relative_path(&path, row.line)?;
         let elasticity = match row.word()? {
             "isotropic" => TensorElasticity::Isotropic,
+            "isotropic-young-shear" => TensorElasticity::IsotropicYoungShear,
+            "isotropic-bulk-shear" => TensorElasticity::IsotropicBulkShear,
             "orthotropic" => TensorElasticity::Orthotropic,
             _ => {
                 return Err(bad(
                     row.line,
-                    "solid material needs isotropic or full orthotropic elasticity",
+                    "solid material needs explicit isotropic, isotropic-young-shear, isotropic-bulk-shear or full orthotropic elasticity",
                 ));
             }
         };

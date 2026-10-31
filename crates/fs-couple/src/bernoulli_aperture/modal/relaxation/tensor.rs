@@ -143,7 +143,8 @@ impl ModalAperture {
                 .checked_add(3 * plate.source().chart().mesh.tris.len())
                 .ok_or_else(|| invalid("tensor point extent overflow"))?;
             for (region, law) in plate.source().regions().iter().zip(laws) {
-                region.input.model.require_canonical_relaxation()?;
+                // Full branch tensors already supply the independent hereditary
+                // response; the equilibrium section is checked below.
                 memory_count = law
                     .branches()
                     .len()

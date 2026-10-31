@@ -165,16 +165,33 @@ fn explicit_isotropic_pairs_decode_for_plate_and_shell_with_original_source_requ
 }
 
 #[test]
-fn independently_selected_isotropic_pairs_refuse_legacy_hereditary_source_laws() {
+fn independently_selected_isotropic_pairs_require_complete_tensor_hereditary_source_laws() {
     let regional=format!("{}loss regional-maxwell relaxed 32 1000000 1 excess time\n",
         include_str!("../orthotropic.body"));
-    for text in [regional.as_str(),include_str!("../tensor-body.body")] {
-        let BodyModel::Plate(plate)=Profile::parse(text.as_bytes()).unwrap().model else {
-            panic!("expected plate profile");
-        };
-        for model in [PlateMaterialModel::IsotropicYoungShear,PlateMaterialModel::IsotropicBulkShear] {
-            let error=plate.loss.requirements(model).unwrap_err().to_string();
-            assert!(error.contains("original Young/Poisson source model"),"{error}");
+    let BodyModel::Plate(scalar)=Profile::parse(regional.as_bytes()).unwrap().model else {
+        panic!("expected scalar plate profile");
+    };
+    let BodyModel::Plate(tensor)=Profile::parse(include_bytes!("../tensor-body.body")).unwrap().model else {
+        panic!("expected full tensor plate profile");
+    };
+    let PlateLoss::TensorMaxwell {strain_limit,branches,..}=&tensor.loss else {
+        panic!("expected explicit tensor branches");
+    };
+    for model in [PlateMaterialModel::IsotropicYoungShear,PlateMaterialModel::IsotropicBulkShear] {
+        let error=scalar.loss.requirements(model).unwrap_err().to_string();
+        assert!(error.contains("original Young/Poisson source model"),"{error}");
+        let selected=tensor.loss.requirements(model).unwrap();
+        assert_eq!(&selected[..3],elastic_requirements(model).unwrap().as_slice());
+        assert!(!selected.iter().any(|r|r.name()=="poisson_ratio"));
+        if model==PlateMaterialModel::IsotropicBulkShear {
+            assert!(!selected.iter().any(|r|r.name()=="young_modulus"));
+        }
+        assert!(selected.iter().any(|r|r.name()==strain_limit));
+        for branch in branches {
+            assert!(selected.iter().any(|r|r.name()==branch.relaxation_time));
+            for key in &branch.stiffness_upper {
+                assert!(selected.iter().any(|r|r.name()==key && r.dims()==Pressure::DIMS));
+            }
         }
     }
 }

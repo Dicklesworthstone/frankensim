@@ -153,11 +153,12 @@ impl TensorPlateRelaxation {
             .ok_or_else(|| invalid("tensor plate quadrature count overflow"))?;
         let mut states = 0_usize;
         for (region, selection) in chart.regions().iter().zip(properties) {
-            region.input.model.require_canonical_relaxation()?;
-            let expected = if region.input.model == PlateMaterialModel::Isotropic {
-                TensorElasticity::Isotropic
-            } else {
-                TensorElasticity::Orthotropic
+            let expected = match region.input.model {
+                PlateMaterialModel::Isotropic => TensorElasticity::Isotropic,
+                PlateMaterialModel::IsotropicYoungShear => TensorElasticity::IsotropicYoungShear,
+                PlateMaterialModel::IsotropicBulkShear => TensorElasticity::IsotropicBulkShear,
+                PlateMaterialModel::Orthotropic12 | PlateMaterialModel::Orthotropic21 =>
+                    TensorElasticity::Orthotropic,
             };
             if selection.elasticity != expected {
                 return Err(invalid(
