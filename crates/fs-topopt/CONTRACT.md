@@ -255,9 +255,10 @@ adds regressions for actual fine-grid force balance, reaction/displacement DWR,
 protected regions, kg inventory and selective adaptive promotion.
 
 Continuous zero-centered spectral load-space envelopes still refuse a material
-body-load offset; that requires an affine uncertainty formulation. Finite lists
-of independent load cases are supported. No follower-load, continuum-error or
-globally optimal design claim is added by adaptive body-load support.
+body-load offset. The affine uncertainty owner below includes that offset in
+its actual equilibria. Finite lists of independent load cases are also
+supported. No follower-load, continuum-error or globally optimal design claim
+is added by adaptive body-load support.
 
 Run:
 
@@ -273,6 +274,56 @@ Earth gravity. Output distinguishes actual kg, geometric volume, each original
 response limit, body-force external work in joules, and the optimizer's actual
 stop. A completed update allowance does not establish convergence, a local
 strain bound, experimental validity or continuum accuracy.
+
+## 3-D affine load uncertainty and constrained material design
+
+`sdf3::robust::envelope::affine_load_space` evaluates the continuous physical
+load set `f = b_dead + B*rho_eroded + F*a`, `||a||_2 <= 1`, for one to sixteen
+fixed uncertainty directions. Columns of `F` encode physical amplitudes and
+correlations. One positive compliance reference normalizes the complete set.
+The shared forward filter prepares eroded, nominal and dilated realizations
+once. Eroded occupancy controls both stiffness and native material self-weight;
+dilated occupancy controls the reported volume and optional kg inventory.
+Erosion is the prescribed manufacturing realization, not an assertion that it
+maximizes compliance over manufacturing thresholds when self-weight is present.
+
+One native stiffness preparation serves a direct baseline solve and each
+direct basis solve. Reciprocity checks precede construction of
+`G = F^T K^-1 F / reference`, `h = F^T K^-1 b / reference` and
+`c = b^T K^-1 b / reference`. The shared
+`fs_ascent::quadratic_ball::maximize_quadratic_ball` then solves the small
+quadratic maximization without additional elasticity solves. The returned
+coefficients reconstruct actual physical force, displacement and work; one
+operator application checks the combined equilibrium residual. The report
+retains the branch, numerical primal/dual gap, reciprocity and reconstruction
+evidence. Incoming scales are restored on success and failure.
+
+A numerically separated regular maximizer supplies the discrete derivative
+`(-u^T K' u + 2 B^T u) / reference`, composed with the existing physical-region,
+SIMP, projection and filter-transpose operations. Hard, flat and unresolved
+near-hard cases retain their worst-load witness but expose no smooth gradient.
+All normalization and finite-range failures are explicit refusals.
+
+`affine_load_space::design::AffineLoadSpaceDesign3` connects this evaluation to
+the existing projected augmented-Lagrangian state. It can minimize worst
+compliance under a dilated-volume cap, or minimize dilated volume/physical kg
+under a worst-compliance cap. The latter uses the policy reference as the
+physical cap; kg uses the native material inventory and an explicit kg scale.
+Initialization checks both full-chain derivatives with the shared directional
+audit. Nondifferentiable baseline designs refuse; such line-search trials are
+rejected by the existing bounded optimizer. Accepted state, history, work and
+the best physically feasible point are retained across run segments. Physical
+feasibility uses the actual cap, independently of AL stopping tolerances, and
+`recheck_best` recomputes the complete envelope without advancing the optimizer.
+No monotonic feasibility restoration is assumed for design-dependent gravity.
+
+`material_affine_load_space_sdf3` exercises native force balance and load-space
+sampling, full-chain compliance/volume derivatives, hard-case refusal and an
+actual minimum-kg constrained run with fresh feasible-point reassessment.
+These APIs cover fixed geometry, homogeneous supports, fixed dead loads and
+reference acceleration. Numerical load optimality evidence is not an interval
+enclosure, a continuum guarantee, a global design optimum, or an adaptive
+refinement/restart contract for this new design owner.
 
 ## 3-D cut-cell continuation
 

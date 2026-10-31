@@ -1,6 +1,7 @@
-//! Smooth worst-load compliance on the real three-field CutFEM design map.
-//! References are performance scales, NOT probabilities. Every declared load
-//! is solved independently. The existing weighted-sum APIs remain unchanged.
+//! Finite and continuous worst-load compliance on the three-field CutFEM map.
+//! Each load family declares its performance normalization and shares the
+//! native elasticity operators and physical density transformations.
+pub mod affine_load_space;
 pub mod optimize;
 pub mod limits;
 pub mod load_space;
