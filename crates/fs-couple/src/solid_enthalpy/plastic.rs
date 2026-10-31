@@ -221,6 +221,46 @@ impl<'a> ThermoplasticSolid<'a> {
         &self.materials
     }
 
+    /// Select independently sourced Voce saturation per tetrahedron before
+    /// loading. Each Q(T)/b pair is pinned on the original mechanical/caloric
+    /// card. Q may be globally affine and nonnegative; b stays fixed and
+    /// positive over the complete caloric interval. `None` leaves that element's
+    /// existing hardening selection unchanged.
+    ///
+    /// Equilibrium, retained J2 history, reversible coefficient work and physical
+    /// heat all use the same material owner and accepted thermal endpoint.
+    /// Combining this law with either overstress model is explicitly refused.
+    pub fn with_voce_hardening(
+        mut self,
+        selections: &[Option<fs_material::state_point::MaterialPropertySelection>],
+        cx: &Cx<'_>,
+    ) -> Result<Self, ThermoplasticError> {
+        poll(cx)?;
+        if selections.len() != self.cells.len()
+            || !self.solution.increments.is_empty()
+            || self.solution.element_states.iter().any(|state| {
+                state.alpha != 0.0 || state.plastic_strain != [0.0; 6]
+            })
+        {
+            return Err(ThermoplasticError::Invalid(
+                "select one optional Voce source per element before mechanical evolution",
+            ));
+        }
+        for (i, (cell, selection)) in self.cells.iter_mut().zip(selections).enumerate() {
+            poll(cx)?;
+            if let Some(selection) = selection {
+                cell.source = cell.source.clone()
+                    .with_voce_hardening(selection.clone())
+                    .map_err(ThermoplasticError::Material)?;
+                self.materials[i] = cell.source
+                    .resolve_enthalpy(cell.accepted.specific_h_j_kg)
+                    .map_err(ThermoplasticError::Material)?.1;
+            }
+        }
+        poll(cx)?;
+        Ok(self)
+    }
+
     /// Select source-defined linear overstress in connectivity order before
     /// loading. `None` explicitly retains rate independence for that element.
     /// Each selected viscosity is pinned on the SAME mechanical/caloric card.

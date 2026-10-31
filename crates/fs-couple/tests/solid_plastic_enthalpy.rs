@@ -14,6 +14,8 @@ mod gas;
 mod dynamics;
 #[path = "solid_plastic_enthalpy/overstress.rs"]
 mod overstress;
+#[path = "solid_plastic_enthalpy/voce.rs"]
+mod voce;
 
 use std::collections::BTreeMap;
 
