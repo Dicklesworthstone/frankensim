@@ -9,7 +9,9 @@
 //! Only the reservoir stores energy here. Pipes/manifolds have zero residence
 //! time/storage; volume may change at fixed pressure. This is not a rigid sealed
 //! vessel, boiling model or full mechanical-energy balance. Branch hydraulic
-//! dissipation remains omitted and is bounded in both watts and step joules.
+//! dissipation follows the network's explicit deposited/omitted model. Omitted
+//! losses remain bounded in both watts and step joules; deposited loss enters
+//! the actual returning enthalpy, never a second pump-heat source.
 
 /// Closed-loop buoyant circulation through the same finite-inventory balance.
 pub mod gravity;
@@ -58,6 +60,7 @@ pub struct ReservoirStepControls {
     pub max_inlet_evaluations: usize,
     /// Maximum ignored hydraulic dissipation over this step, J. Together with
     /// the network's watt cap this also limits every nested pressure trial.
+    /// Must be zero when hydraulic dissipation is deposited in the coolant.
     pub maximum_neglected_hydraulic_energy_j: f64,
 }
 
@@ -116,6 +119,8 @@ pub struct RecirculatingLiquidStep<T> {
     pub energy_residual_j: f64,
     /// Reported hydraulic energy omitted from the caloric balance, J.
     pub neglected_hydraulic_energy_j: f64,
+    /// Hydraulic energy already included in the actual net returning heat, J.
+    pub deposited_hydraulic_energy_j: f64,
     pub inlet_evaluations: usize,
     pub total_flow_evaluations: usize,
     pub total_solid_solves: usize,
@@ -197,6 +202,7 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         pump_controls: PumpOperatingControls, step: ReservoirStepControls,
     ) -> Result<RecirculatingLiquidStep<PumpOperatingPoint<'s, ParallelLiquidSolution<'a>>>, RecirculationError> {
         let duration = self.admit_reservoir_step(cx, reservoir, end_time_s, external_heat_j, step)?;
+        self.admit_reservoir_heating(work, step)?;
         let mut work = work;
         work.maximum_neglected_hydraulic_power_w = limited_power(work.maximum_neglected_hydraulic_power_w, step, duration)?;
         let result = integrate(cx, reservoir, end_time_s, external_heat_j, step, |temperature, flows, _| {
@@ -220,6 +226,19 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         self.branches()[0].path.admit_reservoir_step(cx, reservoir, end, external, controls)
     }
 
+    fn admit_reservoir_heating(
+        &self, work: ParallelPressureBudget, step: ReservoirStepControls,
+    ) -> Result<(), RecirculationError> {
+        if self.deposits_hydraulic_dissipation()
+            && (work.maximum_neglected_hydraulic_power_w != 0.0
+                || step.maximum_neglected_hydraulic_energy_j != 0.0)
+        {
+            return Err(RecirculationError::Invalid(
+                "deposited hydraulic heat requires zero network and reservoir omission allowances"));
+        }
+        Ok(())
+    }
+
     // The original laws, chart, region descriptions, and resistance assignments
     // survive inlet rebinding. Local paths are only descriptions, not new sources.
     fn with_reservoir_inlet<T>(
@@ -234,7 +253,10 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         let branches: Vec<_> = self.branches().iter().zip(&paths).map(|(old, path)| ParallelLiquidBranch {
             name: old.name, path, resistances: old.resistances, pressure_budget: old.pressure_budget,
         }).collect();
-        let network = ParallelLiquidNetwork::try_new(cx, &branches)?;
+        let mut network = ParallelLiquidNetwork::try_new(cx, &branches)?;
+        if self.deposits_hydraulic_dissipation() {
+            network = network.with_hydraulic_dissipation();
+        }
         Ok(evaluate(&network)?)
     }
 }
@@ -250,7 +272,8 @@ fn limited_power(watts: f64, controls: ReservoirStepControls, duration: f64) -> 
 // work counters. The common-solid adapter uses the same time/balance algorithm.
 struct ReservoirExchange {
     net_heat_rate_w: f64,
-    dissipated_power_w: f64,
+    neglected_hydraulic_power_w: f64,
+    deposited_hydraulic_power_w: f64,
     inlet_matches: bool,
 }
 trait ReservoirCircuit {
@@ -260,8 +283,9 @@ trait ReservoirCircuit {
 }
 fn parallel_exchange(fluid: &ParallelLiquidSolution<'_>, inlet: EquilibriumPhaseState) -> ReservoirExchange {
     ReservoirExchange {
-        net_heat_rate_w: fluid.total_heat_rate_w,
-        dissipated_power_w: fluid.total_dissipated_power_w,
+        net_heat_rate_w: fluid.total_enthalpy_gain_w,
+        neglected_hydraulic_power_w: fluid.total_dissipated_power_w - fluid.deposited_hydraulic_power_w,
+        deposited_hydraulic_power_w: fluid.deposited_hydraulic_power_w,
         inlet_matches: fluid.branches.iter().all(|b| b.solution.thermal.regions.first()
             .is_some_and(|r| r.inlet == inlet)),
     }
@@ -289,9 +313,10 @@ fn integrate<T: ReservoirCircuit>(
         // full returning mdot*h here would heat the tank merely by circulating it.
         let stored = reservoir.mass_kg * (final_state.specific_enthalpy_j_kg() - reservoir.state.specific_enthalpy_j_kg());
         let returned = duration * exchange.net_heat_rate_w;
-        let neglected = duration * exchange.dissipated_power_w;
+        let neglected = duration * exchange.neglected_hydraulic_power_w;
+        let deposited = duration * exchange.deposited_hydraulic_power_w;
         let residual = (stored - returned) - external;
-        if [stored, returned, neglected, residual].iter().any(|v| !v.is_finite())
+        if [stored, returned, neglected, deposited, residual].iter().any(|v| !v.is_finite())
             || neglected > controls.maximum_neglected_hydraulic_energy_j
             || !exchange.inlet_matches
         { return Err(RecirculationError::Invalid("inconsistent inlet or unrepresentable/excessive step energy")); }
@@ -304,6 +329,7 @@ fn integrate<T: ReservoirCircuit>(
             start_time_s: reservoir.time_s, end_time_s: end,
             stored_enthalpy_change_j: stored, returned_heat_j: returned, external_heat_j: external,
             energy_residual_j: residual, neglected_hydraulic_energy_j: neglected,
+            deposited_hydraulic_energy_j: deposited,
             inlet_evaluations: calls, total_flow_evaluations: total_flow, total_solid_solves: total_solid })
     };
     let closed = |s: &RecirculatingLiquidStep<T>| s.energy_residual_j.abs() <= controls.energy_absolute_tolerance_j;
@@ -371,7 +397,8 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
     /// solid callback must itself implement the same backward-Euler interval;
     /// this adapter does not invent or certify its storage discretization.
     /// Flow work and actual solid calls are capped across ALL inlet trials, not
-    /// reset for each pressure solve. Pump heat remains explicitly omitted.
+    /// reset for each pressure solve. Hydraulic heat follows the network model;
+    /// no additional pump-inefficiency heat is inferred.
     pub fn advance_reservoir_with_pump_coupled_iqn<'s, R, F>(
         &self, cx: &Cx<'_>, reservoir: &mut LiquidReservoir<'a>, end_time_s: f64,
         external_heat_j: f64, initial_walls_k: &[f64], pump: &'s PumpHeadCurve,
@@ -380,6 +407,7 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
     where F: FnMut(&Cx<'_>, &[CorrelationRobinBoundary]) -> Result<LiquidSolidResponse<R>, AirflowError>,
     {
         let duration = self.admit_reservoir_step(cx, reservoir, end_time_s, external_heat_j, step)?;
+        self.admit_reservoir_heating(controls.network.work, step)?;
         if controls.max_total_solid_solves == 0 {
             return Err(RecirculationError::Invalid("reservoir solid callback budget must be positive"));
         }

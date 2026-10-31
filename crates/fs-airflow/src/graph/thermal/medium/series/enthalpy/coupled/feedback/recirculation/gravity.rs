@@ -123,7 +123,8 @@ impl ReservoirCircuit for PressureDrivenSolution<LiquidHeatMarch<'_>> {
     fn exchange(&self, inlet: EquilibriumPhaseState) -> ReservoirExchange {
         ReservoirExchange {
             net_heat_rate_w: self.thermal.total_heat_rate_w,
-            dissipated_power_w: self.hydraulics.total_dissipated_power_w,
+            neglected_hydraulic_power_w: self.hydraulics.total_dissipated_power_w,
+            deposited_hydraulic_power_w: 0.0,
             inlet_matches: self.thermal.regions.first().is_some_and(|r| r.inlet == inlet),
         }
     }

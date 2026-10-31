@@ -46,8 +46,21 @@ geometry, cancellation, regional power and zero-omission gates remain intact.
 `tests/liquid_pressure/dissipative_solid.rs` covers the native conduction FEM
 with separate source/hydraulic heat, temperature-dependent bulk/film properties,
 and global-work, local-balance, density and omission refusals.
-Ordinary solid IQN, parallel-pump and recirculation entry points retain their
-original explicit omission budgets; they do not silently acquire this model.
+`ParallelLiquidNetwork::with_hydraulic_dissipation` selects this same branch
+marcher once for pressure redistribution, common-solid IQN, pump matching and
+finite-reservoir continuation. Original material/chart identities and the
+selection survive every inlet rebind. Mixing and reservoir return use actual
+mass-weighted endpoint enthalpy changes; wall heat and deposited hydraulic power
+remain separate. The native stored-solid transaction counts that hydraulic heat
+once as a combined-system input, while its internal solid/coolant gate compares
+wall exchange alone. Its existing contact/radiation variants share this account.
+Branch, network and reservoir omission allowances must all be zero in the
+selected model; original local, global-work, source and atomic-publication gates
+still apply. No extra pump-efficiency heat is inferred. Analytic parallel mixing,
+variable-material feedback and two-step native solid/reservoir regressions live
+in `tests/liquid_parallel/hydraulic_heat.rs` and
+`tests/stored_cooling/hydraulic_heat.rs`. Ordinary networks retain their explicit
+omission budgets and original omitted-heating behavior.
 
 > Status: ACTIVE for beads `frankensim-extreal-program-f85xj.5.5` and
 > `frankensim-extreal-program-f85xj.5.7` (conjugate coupling).

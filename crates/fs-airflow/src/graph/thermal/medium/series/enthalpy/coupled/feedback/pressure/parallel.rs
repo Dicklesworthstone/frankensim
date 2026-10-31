@@ -49,7 +49,8 @@ pub struct ParallelPressureBudget {
     /// Total full branch thermal evaluations across every pressure trial.
     pub max_flow_evaluations: usize,
     /// Total omitted hydraulic dissipation, W, over all branches together.
-    /// Branch-local omission allowances remain active as well.
+    /// Branch-local omission allowances remain active as well. All allowances
+    /// must be zero when the network deposits hydraulic loss as heat.
     pub maximum_neglected_hydraulic_power_w: f64,
 }
 impl ParallelPressureBudget {
@@ -120,10 +121,15 @@ pub struct ParallelLiquidSolution<'a> {
     pub inlet_volume_flow_m3_per_s: f64,
     /// Source-chart state from enthalpy mixing, not temperature averaging.
     pub mixed_outlet: EquilibriumPhaseState,
-    /// Sum of signed coolant enthalpy transfers, W.
+    /// Sum of signed solid-to-coolant wall transfers, W.
     pub total_heat_rate_w: f64,
-    /// Sum of all local hydraulic power omissions, W.
+    /// Sum of the original hydraulic loss evaluations, W.
     pub total_dissipated_power_w: f64,
+    /// Hydraulic loss deposited in the coolant, W; zero for the omission model.
+    pub deposited_hydraulic_power_w: f64,
+    /// Actual sum of `mdot * (h_out - h_in)` from original branch endpoints, W.
+    /// Includes deposited hydraulic heat but never counts pump power twice.
+    pub total_enthalpy_gain_w: f64,
     /// Full branch thermal evaluations consumed by this network march.
     pub flow_evaluations: usize,
 }
@@ -133,6 +139,7 @@ pub struct ParallelLiquidSolution<'a> {
 pub struct ParallelLiquidNetwork<'p, 'a, 'card, H = MaterialFlowResistance> {
     branches: Vec<ParallelLiquidBranch<'p, 'a, 'card, H>>,
     region_count: usize,
+    deposit_hydraulic_heat: bool,
 }
 impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'card, H> {
     /// Admit material/topology ownership before running a hydraulic or solid solve.
@@ -186,7 +193,26 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         }
         let region_count = regions.len();
         checkpoint(cx)?;
-        Ok(Self { branches: branches.to_vec(), region_count })
+        Ok(Self { branches: branches.to_vec(), region_count, deposit_hydraulic_heat: false })
+    }
+
+    /// Deposit every branch's declared hydraulic loss through the original
+    /// dissipative liquid marcher. The selection follows this network through
+    /// fixed walls, common-solid feedback, pump matching and reservoir steps.
+    ///
+    /// Each path must satisfy the original constant-density, equal-area/elevation
+    /// and complete fluid-deposition model. All branch/network/step omission
+    /// allowances must be zero. Pump inefficiency and shaft heat are not inferred.
+    #[must_use]
+    pub fn with_hydraulic_dissipation(mut self) -> Self {
+        self.deposit_hydraulic_heat = true;
+        self
+    }
+
+    /// Whether the shared network marcher deposits hydraulic losses as heat.
+    #[must_use]
+    pub const fn deposits_hydraulic_dissipation(&self) -> bool {
+        self.deposit_hydraulic_heat
     }
 
     /// Number of wall rows in the complete branch-major interface.
@@ -200,8 +226,9 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
     /// Solve branch flow redistribution at common pressure and supplied walls.
     /// Every branch reuses the existing pressure/material/enthalpy solver; there
     /// is no frozen hydraulic scaling. Outlet mixing assumes an ideal adiabatic
-    /// zero-storage manifold at the common source pressure. Viscous heating,
-    /// kinetic-energy recovery, junction geometry and recirculation are excluded.
+    /// zero-storage manifold at the common source pressure. Hydraulic heating
+    /// follows this network's explicit selection. Kinetic-energy recovery and
+    /// junction geometry are not inferred.
     pub fn solve_pressure_driven(
         &self, cx: &Cx<'_>, walls: &[f64], drive: Pressure,
         local: LiquidFeedbackBudget, budget: ParallelPressureBudget,
@@ -218,6 +245,12 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         checkpoint(cx)?;
         budget.admit()?;
         local.admit()?;
+        if self.deposit_hydraulic_heat && (budget.maximum_neglected_hydraulic_power_w != 0.0
+            || self.branches.iter().any(|b| b.pressure_budget.maximum_neglected_hydraulic_power_w != 0.0))
+        {
+            return Err(ParallelPressureError::Invalid(
+                "deposited hydraulic heat requires zero branch and network omission allowances"));
+        }
         if walls.len() != self.region_count {
             return Err(ParallelPressureError::Invalid("one wall temperature per branch-major region is required"));
         }
@@ -233,6 +266,7 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         let mut mass = 0.0;
         let mut heat = 0.0;
         let mut power = 0.0;
+        let mut enthalpy_gain = 0.0;
         for branch in &self.branches {
             checkpoint(cx)?;
             let remaining = budget.max_flow_evaluations.saturating_sub(*performed);
@@ -244,18 +278,27 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
                 max_flow_evaluations: branch.pressure_budget.max_flow_evaluations.min(remaining),
                 ..branch.pressure_budget
             };
-            let solution = branch.path.solve_pressure_driven(cx, &walls[offset..offset+count],
-                branch.resistances, drive, local, branch_budget)
+            let solution = if self.deposit_hydraulic_heat {
+                branch.path.solve_pressure_driven_with_dissipation(cx, &walls[offset..offset+count],
+                    branch.resistances, drive, local, branch_budget)
+            } else {
+                branch.path.solve_pressure_driven(cx, &walls[offset..offset+count],
+                    branch.resistances, drive, local, branch_budget)
+            }
                 .map_err(|source| ParallelPressureError::Branch { branch: branch.name.to_owned(), source })?;
             *performed += solution.flow_evaluations;
             offset += count;
             mass += solution.mass_flow_kg_per_s;
             heat += solution.thermal.total_heat_rate_w;
             power += solution.hydraulics.total_dissipated_power_w;
-            if !positive(mass) || !heat.is_finite() || !power.is_finite() {
+            let outlet = solution.thermal.regions.last()
+                .ok_or(ParallelPressureError::Invalid("a solved branch lost its outlet state"))?.outlet;
+            enthalpy_gain += solution.mass_flow_kg_per_s
+                * (outlet.specific_enthalpy_j_kg() - first.inlet.specific_enthalpy_j_kg());
+            if !positive(mass) || !heat.is_finite() || !power.is_finite() || !enthalpy_gain.is_finite() {
                 return Err(ParallelPressureError::Invalid("aggregate parallel mass, heat or hydraulic power is unrepresentable"));
             }
-            if power > budget.maximum_neglected_hydraulic_power_w {
+            if !self.deposit_hydraulic_heat && power > budget.maximum_neglected_hydraulic_power_w {
                 return Err(ParallelPressureError::NeglectedDissipation {
                     power_w: power, allowance_w: budget.maximum_neglected_hydraulic_power_w,
                 });
@@ -264,7 +307,7 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         }
         // Subtract the common enthalpy reference BEFORE weighting. Thus a large
         // arbitrary enthalpy origin cannot overflow individual mdot*h products.
-        let mixed_h = first.inlet.specific_enthalpy_j_kg() + heat/mass;
+        let mixed_h = first.inlet.specific_enthalpy_j_kg() + enthalpy_gain/mass;
         let mixed_outlet = first.source.curve().state_at_specific_enthalpy(mixed_h)
             .map_err(LiquidEnthalpyError::from)?;
         let inlet_volume = mass/inlet_material.density_kg_m3();
@@ -275,6 +318,8 @@ impl<'p, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'p, 'a, 'car
         Ok(ParallelLiquidSolution { branches: results, inlet_material, driving_pressure_pa: drive.value(),
             total_mass_flow_kg_per_s: mass, inlet_volume_flow_m3_per_s: inlet_volume,
             mixed_outlet, total_heat_rate_w: heat, total_dissipated_power_w: power,
+            deposited_hydraulic_power_w: if self.deposit_hydraulic_heat { power } else { 0.0 },
+            total_enthalpy_gain_w: enthalpy_gain,
             flow_evaluations: *performed-start })
     }
 }

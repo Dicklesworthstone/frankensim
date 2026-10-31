@@ -4,7 +4,9 @@
 //! starts from the immutable accepted solid enthalpy, never a previous trial.
 //! The actual FEM Robin flux enters the existing coolant/reservoir calculation;
 //! body heat is not also injected into the tank. Only a fully closed step
-//! publishes either history. Pump/pipe heat omissions keep their original gates.
+//! publishes either history. The selected hydraulic heat is an external input
+//! to the combined storage, distinct from the internal solid/coolant exchange.
+//! Pump/pipe heat omissions keep their original gates.
 //!
 //! Solid reference mass/geometry is fixed; reservoir pressure is fixed and its
 //! volume may vary. This is not moving-material transport, pipe residence time,
@@ -160,9 +162,9 @@ pub struct StoredCoolingStep<'p, 'a, R = EnthalpyStepSolution> {
     /// Body input minus prescribed Neumann and enabled external boundary heat, J.
     /// Coolant Robin transfer and internal contacts are NOT external sources.
     pub solid_external_heat_j: f64,
-    /// dt * coolant-only solid outflow minus actual net coolant return energy, J.
+    /// dt * coolant-only solid outflow minus the wall part of net return heat, J.
     pub interface_energy_residual_j: f64,
-    /// Sum of actual solid and reservoir storage minus both external inputs, J.
+    /// Actual solid/reservoir storage minus solid, reservoir and hydraulic inputs, J.
     pub combined_energy_residual_j: f64,
 }
 
@@ -270,11 +272,13 @@ impl<'n, 'a, 'card, H: LiquidResistanceModel> ParallelLiquidNetwork<'n, 'a, 'car
         let solid = response.conduction();
         let solid_external_heat_j = dt * ((solid.source_w - solid.neumann_out_w)
             - response.external_boundary_out_w());
-        let interface_energy_residual_j = dt * response.coolant_out_w() - liquid.returned_heat_j;
+        let interface_energy_residual_j = dt * response.coolant_out_w()
+            - (liquid.returned_heat_j - liquid.deposited_hydraulic_energy_j);
         // Difference coordinates avoid dependence on either chart's arbitrary
         // absolute enthalpy origin. Do not add interface transfer twice.
         let combined_energy_residual_j = (solid.stored_energy_change_j - solid_external_heat_j)
-            + (liquid.stored_enthalpy_change_j - liquid.external_heat_j);
+            + (liquid.stored_enthalpy_change_j - liquid.external_heat_j)
+            - liquid.deposited_hydraulic_energy_j;
         for (account, residual) in [
             ("solid/coolant interface", interface_energy_residual_j),
             ("combined solid/reservoir storage", combined_energy_residual_j),

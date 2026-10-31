@@ -362,3 +362,4 @@ fn malformed_common_solid_response_and_controls_refuse_before_publication() {
 }
 
 mod porous;
+mod hydraulic_heat;

@@ -42,6 +42,8 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 mod source;
 #[path = "stored_cooling/heterogeneous.rs"]
 mod heterogeneous;
+#[path = "stored_cooling/hydraulic_heat.rs"]
+mod hydraulic_heat;
 
 fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with("T", t).unwrap().with("pressure", 100000.0).unwrap()
