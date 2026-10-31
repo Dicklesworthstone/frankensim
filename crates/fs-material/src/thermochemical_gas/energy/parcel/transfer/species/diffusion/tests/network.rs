@@ -1,5 +1,7 @@
 //! Multiple material diffusion faces on one unchanged physical snapshot.
 
+mod adaptive;
+
 #[test]
 fn graph_and_combined_transport_cancel_arbitrary_species_entropy_datums() {
     use crate::thermochemical_gas::energy::parcel::transfer::species::network::transport::{self, GasTransportSolve};

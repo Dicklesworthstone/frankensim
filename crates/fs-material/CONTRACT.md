@@ -3733,6 +3733,43 @@ during scaled assembly/elimination and keeps molar flux primary, independently
 of mass-flux underflow. This does not add Soret/Dufour transport or change the
 parcel frame to barycentric.
 
+`species::diffusion::network::adaptive::advance_candidate` completes a requested
+positive molecular-diffusion duration on branching, cyclic or disconnected
+fixed-volume networks. One original full snapshot step is compared with two
+original half steps; only the two-half-step path can be accepted. Every probe
+resamples actual face T/p/composition, selected pair material data and original
+partial enthalpies. The method remains first order; the full/fine difference
+estimates local temporal error, not a certified whole-window error. It does not
+extrapolate a Richardson state, clip trace species or invent transport data.
+
+Explicit controls bound per-parcel species-inventory error (absolute kg plus
+relative scale), original-source endpoint-temperature error (K), trial-interval
+size and total snapshot evaluations, including rejected coarse/fine probes.
+The minimum interval is a retry floor; an exact shorter final remainder may
+be attempted, and each accepted interval contains two physical half steps.
+Only typed donor-withdrawal refusal, excessive local error and endpoint entropy
+decrease can trigger halving. Missing coefficients, source/domain/caloric errors
+and cancellation fail the whole window immediately. The existing molecular
+isothermal/isobaric, molar-frame and source-support restrictions remain intact.
+
+Every accepted half step retains the existing simultaneous gross-withdrawal,
+species, original-caloric energy and entropy gates. Arrivals can move onward
+only during later physical substeps. Rejected probes contribute to work counts
+but never inventory, integrated mass or transported enthalpy. Canonical physical
+edge/species accounts accumulate accepted gross masses and partial enthalpies;
+only the last half step's detailed source receipts are retained. Compensated
+accepted energy residuals use the original reference-cancelled convention, with
+inventory roundoff checked separately. Final-minus-original actual total/species
+mass, this energy ledger and whole-network source-qualified entropy must fit
+the same absolute physical budgets, without multiplication by step count.
+Late refusal publishes no partial map, including after already accepted probes.
+
+Focused fixtures compare complete-window binary relaxation and a branched mode
+with independent exponentials, tighten time accuracy, permute link order/IDs,
+shift species formation datums, distinguish rejected probes from accepted
+transport, and exercise source/work/accuracy/late-cancellation refusal. Closed
+faces preserve parcel states bit for bit while still completing requested time.
+
 The membrane owner uses source-selected, constant-at-fixed-temperature molar
 permeability and actual species partial pressures, allowing counterpermeation.
 It checks the selected claim at both gas boundaries, retains explicit zero

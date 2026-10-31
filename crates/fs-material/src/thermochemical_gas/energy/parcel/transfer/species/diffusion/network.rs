@@ -1,5 +1,8 @@
 //! One source snapshot for all diffusion faces, one update per finite volume.
 //! Reuse the original Maxwell-Stefan face solver and selective inventory owner.
+/// Error-controlled complete windows over the original conservative snapshots.
+pub mod adaptive;
+
 use std::collections::BTreeMap;
 use super::{BinaryDiffusionMaterial, ClosedGasParcel, GasDiffusionFlux, GasDiffusionGeometry,
     GasDiffusionSolve, GasEnergyError, GasSpeciesExchangeSolve, positive};
@@ -97,11 +100,27 @@ pub fn step_candidate(
     endpoints:&BTreeMap<u64,GasEnergySolve>, controls:DiffusionNetworkSolve,
     mut cancelled:impl FnMut()->bool,
 ) -> Result<DiffusionNetworkCandidate,Error> {
+    let candidate = candidate_before_entropy_gate(parcels, links, duration_s, endpoints,
+        controls, &mut cancelled)?;
+    if candidate.step.entropy_change_j_k < -controls.entropy_tolerance_j_k {
+        return Err(Error::Invalid("diffusion network entropy decreased; refine the physical interval"));
+    }
+    Ok(candidate)
+}
+
+// Keep physical sampling/reconstruction in one owner. The adaptive caller needs
+// the actual entropy value to classify a timestep refusal without parsing an
+// error string. Neither caller publishes a candidate before its entropy gate.
+fn candidate_before_entropy_gate(
+    parcels:&BTreeMap<u64,ClosedGasParcel>, links:&[DiffusionNetworkLink<'_>], duration_s:f64,
+    endpoints:&BTreeMap<u64,GasEnergySolve>, controls:DiffusionNetworkSolve,
+    mut cancelled:impl FnMut()->bool,
+) -> Result<DiffusionNetworkCandidate,Error> {
     let (transfers, reports) = sample_transfers(parcels, links, duration_s, endpoints, controls, &mut cancelled)?;
     let candidate=network::exchange_candidate(parcels,&transfers,endpoints,controls.exchange,&mut cancelled)
         .map_err(|error|if error==SpeciesNetworkError::Cancelled {Error::Cancelled} else {Error::Exchange(error)})?;
-    let entropy_change_j_k = admit_entropy(parcels, candidate.parcels(),
-        controls.entropy_tolerance_j_k, controls.exchange.mass_tolerance_kg, &mut cancelled)?;
+    let entropy_change_j_k = entropy_change(parcels, candidate.parcels(),
+        controls.exchange.mass_tolerance_kg, &mut cancelled)?;
     check(&mut cancelled)?;
     let (parcels,exchange)=candidate.into_parts();
     Ok(DiffusionNetworkCandidate {parcels,step:DiffusionNetworkStep {duration_s,links:reports,
@@ -171,6 +190,17 @@ pub(crate) fn admit_entropy(
     parcels: &BTreeMap<u64, ClosedGasParcel>, next_parcels: &BTreeMap<u64, ClosedGasParcel>,
     tolerance_j_k: f64, mass_tolerance_kg: f64, mut cancelled: impl FnMut() -> bool,
 ) -> Result<f64, Error> {
+    let change = entropy_change(parcels, next_parcels, mass_tolerance_kg, &mut cancelled)?;
+    if change < -tolerance_j_k {
+        return Err(Error::Invalid("diffusion network entropy decreased; refine the physical interval"));
+    }
+    Ok(change)
+}
+
+fn entropy_change(
+    parcels: &BTreeMap<u64, ClosedGasParcel>, next_parcels: &BTreeMap<u64, ClosedGasParcel>,
+    mass_tolerance_kg: f64, mut cancelled: impl FnMut() -> bool,
+) -> Result<f64, Error> {
     use super::super::entropy;
     if !parcels.keys().eq(next_parcels.keys()) {
         return Err(Error::Invalid("closed entropy audit requires the original parcel identities"));
@@ -183,8 +213,5 @@ pub(crate) fn admit_entropy(
         entropy::Error::Parcel { id, error } => Error::Parcel { id, error },
         entropy::Error::Cancelled => Error::Cancelled,
     })?;
-    if change < -tolerance_j_k {
-        return Err(Error::Invalid("diffusion network entropy decreased; refine the physical interval"));
-    }
     Ok(change)
 }
