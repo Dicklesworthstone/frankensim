@@ -1,0 +1,13 @@
+frankensim.material-transient.source.v1
+# Compile the committed NASA manifest to this path as shown in --help / README.
+pack = /tmp/nasa316.fsmatpk
+phase = solid
+temperature-axis = temperature
+density = density
+heat-capacity = specific-heat-capacity
+conductivity = thermal-conductivity
+axis source-generic-316-identity = 1
+axis source-uns-designation-known = 0
+axis source-heat-treatment-known = 0
+axis source-product-form-known = 0
+axis source-pressure-known = 0

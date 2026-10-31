@@ -1013,6 +1013,40 @@ cargo run -p fs-conduction --example material_transient -- nasapeek /tmp/nasapee
 cargo run -p fs-conduction --example material_transient -- aa2024 /tmp/aa2024.fsmatpk 0.01 8 120 120 nasa316 /tmp/nasa316.fsmatpk 0.01 0.0001
 ```
 
+For a material selected entirely through data, use the supplied NASA 316
+descriptor after compiling its pack with the command above:
+
+```sh
+cargo run -p fs-conduction --example material_transient -- source crates/fs-conduction/examples/material_transient/nasa316.source 0.01 8 120 120
+```
+
+Either layer can use `source DESCRIPTOR` in place of a profile/pack pair.
+The descriptor names the normalized pack, explicit single phase, temperature
+axis, density, specific heat capacity, conductivity and external source
+conditions. Pack paths are relative to the descriptor unless absolute. Property
+keys and axis quantity types come from the original pack; coordinate values
+use coherent SI. Copy the supplied descriptor and change these data to select
+another supported material without changing the example or physics code.
+
+One conductivity name explicitly selects isotropy. For a pack with three
+supported principal conductivity sources, use their actual property names and
+declare the principal directions as rows in the physical mesh frame:
+
+```text
+conductivity = thermal-conductivity-longitudinal thermal-conductivity-radial thermal-conductivity-tangential
+principal-axes = 0 1 0 -1 0 0 0 0 1
+```
+
+This example frame places the first material direction along mesh y and the
+second along minus x. The existing spatial operator uses the complete rotated
+tensor and its temperature derivative. A frame is required with three keys and
+is disallowed with one key. All selected directions must have original source
+data covering the complete experiment; a scalar cannot fill an absent source.
+`--help` lists the complete bounded descriptor grammar. Duplicate/unknown
+fields, ambiguous property types, unknown source axes and missing conditions
+refuse before simulation. The included descriptor retains all five original
+NASA source-identity and unknown-condition flags.
+
 Arguments are profile, pack, thickness in metres, cells per layer, duration in
 seconds and time steps, optionally followed by a second profile, pack,
 thickness and area-specific contact resistance in m² K/W. The experiment
@@ -1022,7 +1056,7 @@ prints spatial temperature profiles, reservoir/contact heat rates and a joule
 balance. The final report compares total stored-energy change with accumulated
 external heat.
 
-The constructor explicitly selects isotropic scalar transport. The source
+The built-in profiles explicitly select isotropic scalar transport. Every source
 must support the whole 300–360 K path: the AA2024 profile retains first-heating
 conditions, and PEEK explicitly selects the NASA constant-density model.
 Unknown-temperature scalar packs do not acquire a thermal trajectory through

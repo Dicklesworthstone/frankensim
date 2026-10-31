@@ -5,9 +5,14 @@
 //!   nasa316 steel.fsmp 0.01 8 120 120
 //! cargo run -p fs-conduction --example material_transient -- \
 //!   aa2024 aluminum.fsmp 0.01 8 120 120 nasa316 steel.fsmp 0.01 0.0001
+//! cargo run -p fs-conduction --example material_transient -- \
+//!   source crates/fs-conduction/examples/material_transient/nasa316.source 0.01 8 120 120
 //!
 //! Arguments: profile pack thickness_m cells_per_layer duration_s steps,
 //! optionally followed by profile2 pack2 thickness2_m contact_R_m2_K_per_W.
+//! `source descriptor` replaces either profile/pack pair with explicit material
+//! data, including arbitrary property names, typed source axes, and a scalar or
+//! three-principal conductivity selection. Run `--help` for descriptor syntax.
 //! Profiles select explicit source keys/conditions, not representative properties.
 //! nasapeek selects the separately declared NASA PEEK linearized thermal model,
 //! including its constant-density assumption and unknown density test temperature.
@@ -49,6 +54,9 @@ use fs_qty::{
 };
 use fs_rep_mesh::TetComplex;
 use fs_solver::NewtonKrylovConfig;
+
+#[path = "material_transient/source.rs"]
+mod source;
 
 type Result<T> = std::result::Result<T, Box<dyn Error>>;
 const LOW_K: f64 = 300.0;
@@ -111,15 +119,11 @@ fn load(
     name: &str,
     path: &Path,
 ) -> Result<(NormalizedMaterialCardPack, MaterialEnthalpyTransport)> {
-    let (slug, flags) = profile(name)?;
-    let mut bytes = Vec::new();
-    std::fs::File::open(path)?
-        .take(16 * 1024 * 1024 + 1)
-        .read_to_end(&mut bytes)?;
-    if bytes.len() > 16 * 1024 * 1024 {
-        return Err("normalized source pack exceeds 16 MiB".into());
+    if name == "source" {
+        return source::load(path);
     }
-    let pack = NormalizedPack::from_bytes(&bytes)?;
+    let (slug, flags) = profile(name)?;
+    let pack = read_pack(path)?;
     if pack.pack_id() != slug {
         return Err(format!(
             "profile {name} requires {slug}, received {}",
@@ -168,6 +172,17 @@ fn load(
         },
     )?;
     Ok((pack, source))
+}
+
+fn read_pack(path: &Path) -> Result<NormalizedPack> {
+    let mut bytes = Vec::new();
+    std::fs::File::open(path)?
+        .take(16 * 1024 * 1024 + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > 16 * 1024 * 1024 {
+        return Err("normalized source pack exceeds 16 MiB".into());
+    }
+    Ok(NormalizedPack::from_bytes(&bytes)?)
 }
 
 fn contact(a: &MaterialCard, b: &MaterialCard, resistance: f64) -> Result<InterfaceResistance> {
@@ -264,8 +279,12 @@ fn print_profile(time_s: f64, mesh: &ConductionMesh, layers: &[usize], temperatu
 
 fn main() -> Result<()> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.len() == 1 && args[0] == "--help" {
+        println!("{}", source::USAGE);
+        return Ok(());
+    }
     if args.len() != 6 && args.len() != 10 {
-        return Err("usage: material_transient <nasa316|aa2024|nasapeek> <pack> <thickness_m> <cells> <duration_s> <steps> [<profile2> <pack2> <thickness2_m> <contact_R_m2_K_per_W>]".into());
+        return Err(source::USAGE.into());
     }
     let cells: usize = args[3].parse()?;
     let steps: usize = args[5].parse()?;
