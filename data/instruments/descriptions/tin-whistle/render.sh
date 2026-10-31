@@ -49,7 +49,7 @@
 # length scales, so the status is split, MET under Re_Dh = 2 Re (2/2) and MISSED under Re_Dh = 4 Re (1/3). Reading II misses by 7 to 9 %
 # at x+ 1.6e-3 to 3.3e-3, which is a6c's x+ (1.68e-3); d7c (x+ 1.26e-3) lies below the graded range. Chen's 0.64 + 38/Re and Shah and
 # London's agreement statement behind the x+ floor are secondary, search snippet only; primary not read. The four *-nolle gate files keep
-# `windway slit` and its pressures: the Nolle/Price transfer refuses this windway. The gesture is 50 ms attack, hold, 10.5 ms release.
+# `windway slit` and its pressures: the Nolle/Price transfer refuses this windway. The gesture is 12.5 ms attack, hold, 10.5 ms release.
 # Dry air at 20 C is the measurement's own gas, not an omission: the paper blew the whistle from a regulated, metered air supply in an anechoic
 # room at 20 C (specimen.tsv, environment), not by mouth. Do not change it to breath; breath gas belongs to recipes whose data were played.
 # Jet: `jet_response forced-bickley 0.1 90` (pexfp.135.4) puts the forced Bickley jet in place of the relay's band chain and displacement gain
@@ -58,7 +58,8 @@
 # momentum flux with a parabolic wall layer (H = 2.5), so U0/U 1.43 and b 0.44 h on D5 down to 1.23 and 0.56 h on D7c (the sidecar's
 # jet_response records both). Not claimed: the exit's shape beyond its centre speed and momentum (flatter than Bickley: de la Cuadra's Nolle
 # fits, n 2 to 4) and the exit during attack and release. The binary must contain fs-couple cc6094588 or later.
-# Unknown or authored: labium offset and jet angle (zero, UNKNOWN), onset ramp (50 ms), the jet card (the repository interim slot-jet card,
+# Onset ramp 12.5 ms, cited by analogy: recorder players' median 10 ms mouth-pressure rise (Ernoult and Fabre 2017) / 0.8 (u-attack-*).
+# Unknown or authored: labium offset and jet angle (zero, UNKNOWN), the jet card (the repository interim slot-jet card,
 # chosen BEFORE looking at any render because a windway jet is a slot jet; it is outside its Reynolds band, u-jet-profile).
 #
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 288 kHz because a viscothermal loss

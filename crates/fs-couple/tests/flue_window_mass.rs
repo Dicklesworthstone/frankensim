@@ -43,7 +43,7 @@ fn legacy() -> String {
         .replace(&radiating, "")
         .replace(FORCED, "")
         .replace("output 120000 5", "output 1024 1");
-    let events = "events\t2\nevent\t0e0\t5e-2\tpressure-pa\t9.3447e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
+    let events = "events\t2\nevent\t0e0\t1.25e-2\tpressure-pa\t9.3447e1\nevent\t2.2e0\t1.05e-2\tpressure-pa\t0e0";
     assert!(
         text.contains(events),
         "the D5 gesture changed; update this test"

@@ -70,5 +70,5 @@ tracks	1
 track	blow	blowing-pressure
 initial	pressure-pa	0e0
 events	2
-event	0e0	5e-2	pressure-pa	1.9832e2
+event	0e0	1.25e-2	pressure-pa	1.9832e2
 event	2.2e0	1.05e-2	pressure-pa	0e0
