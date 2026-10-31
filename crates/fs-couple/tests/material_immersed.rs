@@ -1,5 +1,7 @@
 //! G1/G3/G4: complete source substitutions drive real native fluid/body steps.
 //! Synthetic cards exercise the implementation, not measured-material accuracy.
+#[path = "material_immersed/dry.rs"]
+mod dry;
 use fs_couple::material_immersed::{
     AdditionalMaterialSphere, FilmGeometry, ImmersedDomain, MaterialImmersedError,
     RetainedFluidSpheres, SphereStateSi,

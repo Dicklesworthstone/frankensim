@@ -121,6 +121,15 @@ pub(super) struct NativeEllipsoid3 {
     shape_from_body: Mat3,
 }
 
+impl NativeEllipsoid3 {
+    pub(super) fn sphere(radius: f64) -> Result<Self, Error> {
+        Ok(Self {
+            shape: BodyFrameEllipsoid3::sphere(radius)?,
+            shape_from_body: So3::identity().matrix(),
+        })
+    }
+}
+
 impl BodyFrameShape3 for NativeEllipsoid3 {
     fn bounding_radius(&self) -> f64 {
         self.shape.bounding_radius()

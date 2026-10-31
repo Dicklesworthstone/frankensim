@@ -22,6 +22,8 @@ use fs_time::{So3, Vec3};
 mod ellipsoid;
 /// Ordinary heavy solids with source-derived displaced-fluid inertia and gravity.
 pub mod settling;
+/// Ordinary light, neutral or heavy solids with measured interior-fluid correction.
+pub mod dry;
 use ellipsoid::NativeEllipsoid3;
 pub use ellipsoid::{AdditionalMaterialEllipsoid, RetainedFluidEllipsoids};
 
@@ -129,8 +131,9 @@ impl<'a> AdditionalMaterialSphere<'a> {
     }
 }
 
-/// Physical kinematics. Angular momentum belongs to the ADDITIONAL carrier;
-/// resolved interior-fluid momentum remains in the native populations.
+/// Physical kinematics. Angular momentum belongs to the represented body:
+/// the additional/excess carrier in those owners, or the original dry solid in
+/// explicit ordinary-body adapters. Interior-fluid populations remain separate.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BodyStateSi {
     /// World center of mass of the source region [m].
@@ -139,7 +142,7 @@ pub struct BodyStateSi {
     pub orientation: So3,
     /// World center velocity [m/s].
     pub velocity_m_s: [f64; 3],
-    /// Additional carrier's spin momentum in body coordinates [kg m2/s].
+    /// The represented body's spin momentum in body coordinates [kg m2/s].
     pub angular_momentum_body_kg_m2_s: [f64; 3],
 }
 

@@ -18934,3 +18934,22 @@ all six frame/tetrahedral/coupling integration targets, including both
 `solid_creep_enthalpy` and `solid_creep_plastic_enthalpy`. Native integration tests
 were not numerically executed. The separate 56-test material behavior suite ran
 successfully with genuine dependencies; neither check is a full Cargo/DSR gate.
+
+### Original-source immersed solids at light, neutral and heavy density
+
+`material_immersed::dry::ResolvedImmersedBody` binds one original spherical or
+rotated ellipsoidal solid to the native implicit dry-body/interior-fluid owner.
+The existing material/geometry validation, source receipts, SI/lattice scaling,
+complete positive dry inertia and viscosity-rebind path are reused. Analytic
+original volume supplies reduced gravity `(M_s-rho_f V)g` once; sampled occupancy
+is never substituted into that load or renormalized. Initial body momentum is
+retained even at equal density. Source/fluid density changes through rebind remain
+refused because they require conservative transfer.
+
+A successful step returns the unchanged native physical/momentum diagnostics in
+lattice units. Unit conversions and reduced-gravity potential are separate
+observations; no fallible post-publication conversion can report a rollback that
+did not happen. Rejected implicit steps preserve fluid, dry body, original source
+and accepted-step count. One fully immersed body only: stationary/periodic fluid
+boundaries, no contact film, no free surface, and no exact rigidity/GCL or
+unconditional light-body stability claim.
