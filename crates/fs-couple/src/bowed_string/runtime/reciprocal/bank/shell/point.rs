@@ -50,6 +50,31 @@ pub struct MaterialShellPoint<'a> {
 }
 
 impl MaterialStringBankSource {
+    /// The original material component and its physical GLOBAL modal rows.
+    /// Point-force and torque queries share this same source/basis selection.
+    pub(super) fn physical_shell_component(&self, component: usize)
+        -> Result<(&ResolvedShearShell, &NodalDirectors, &[Vec<f64>]), ReciprocalStringError>
+    {
+        if let Some(body) = &self.material_shell_assembly {
+            let part = body.specimen.components.get(component)
+                .ok_or_else(|| invalid("shell port names an absent assembly part"))?;
+            let image = self.material_shell_assembly_image()
+                .ok_or_else(|| invalid("shell port lost the assembled body basis"))?;
+            let modes = image.physical_modes().get(component)
+                .ok_or_else(|| invalid("shell port lost its original part basis"))?;
+            Ok((&part.specimen, &part.directors, modes.as_slice()))
+        } else if let Some(body) = &self.material_shell {
+            if component != 0 {
+                return Err(invalid("single-shell port requires component zero"));
+            }
+            let image = self.material_shell_image()
+                .ok_or_else(|| invalid("shell port lost the original body basis"))?;
+            Ok((&body.specimen, &body.directors, image.physical_modes()))
+        } else {
+            Err(invalid("physical shell port requires a sourced shell or assembled-shell body"))
+        }
+    }
+
     /// Project a force at an actual shell/assembly node into the original common
     /// body basis. Reactions use its transpose in the existing coupled owner.
     /// Different incident material states, absent nodes and non-shell receivers
@@ -61,33 +86,7 @@ impl MaterialStringBankSource {
     ) -> Result<MaterialShellPoint<'_>, ReciprocalStringError> {
         poll(gate)?;
         let row = geometry.nodal_row()?;
-        let (specimen, modes) = if let Some(body) = &self.material_shell_assembly {
-            let part = body
-                .specimen
-                .components
-                .get(geometry.shell_component)
-                .ok_or_else(|| invalid("shell point names an absent assembly part"))?;
-            let image = self
-                .material_shell_assembly_image()
-                .ok_or_else(|| invalid("shell point lost the assembled body basis"))?;
-            let modes = image
-                .physical_modes()
-                .get(geometry.shell_component)
-                .ok_or_else(|| invalid("shell point lost its original part basis"))?;
-            (&part.specimen, modes.as_slice())
-        } else if let Some(body) = &self.material_shell {
-            if geometry.shell_component != 0 {
-                return Err(invalid("single-shell point requires component zero"));
-            }
-            let image = self
-                .material_shell_image()
-                .ok_or_else(|| invalid("shell point lost the original body basis"))?;
-            (&body.specimen, image.physical_modes())
-        } else {
-            return Err(invalid(
-                "physical shell point requires a sourced shell or assembled-shell body",
-            ));
-        };
+        let (specimen, _, modes) = self.physical_shell_component(geometry.shell_component)?;
         let mesh = specimen.mesh();
         if geometry.node >= mesh.nodes.len() {
             return Err(invalid("shell point names an absent physical node"));

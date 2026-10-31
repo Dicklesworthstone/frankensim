@@ -159,11 +159,19 @@ pub struct TranslationalBridge {
     pub shell_component: usize, pub node: usize, pub body_direction: [f64; 3],
     pub stiffness_n_m: f64, pub damping_n_s_m: f64, pub rest_extension_m: f64,
 }
-/// A scalar rotational joint referencing actual body-profile point footprints.
+/// One physical rotation coordinate on the original body.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RotationalBody {
+    /// Legacy small-angle secant between two translational bridge footprints.
+    BridgePair { positive_bridge_string: usize, negative_bridge_string: usize },
+    /// Actual axial shell rotation at an original material triangle.
+    Shell(fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellRotationGeometry),
+}
+/// A scalar reciprocal joint referencing actual body-profile geometry.
 #[derive(Clone, Debug, PartialEq)]
 pub struct RotationalBridge {
     pub string: usize, pub station_fraction: f64,
-    pub positive_bridge_string: usize, pub negative_bridge_string: usize,
+    pub body: RotationalBody,
     pub stiffness_n_m_per_rad: f64, pub damping_n_m_s_per_rad: f64, pub rest_angle_rad: f64,
 }
 #[derive(Clone, Debug)]
@@ -478,20 +486,38 @@ impl Spec {
             let joints = row.count(MAX_ROTATIONAL_BRIDGES)?; row.end()?;
             rotational_bridges.reserve(joints);
             for _ in 0..joints {
-                let mut row = r.row("rotational-bridge")?;
+                let shell = r.lines.clone().next()
+                    .and_then(|line|line.split_ascii_whitespace().next()) == Some("shell-rotational-bridge");
+                let mut row = r.row(if shell { "shell-rotational-bridge" } else { "rotational-bridge" })?;
+                let string = row.count(count - 1)?;
+                let station_fraction = row.scalar()?;
+                let body = if shell {
+                    let geometry = fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellRotationGeometry {
+                        shell_component: row.count(63)?, triangle: row.count(6143)?,
+                        barycentric: [row.scalar()?,row.scalar()?,row.scalar()?],
+                        axis: [row.scalar()?,row.scalar()?,row.scalar()?],
+                    };
+                    geometry.validate()?;
+                    RotationalBody::Shell(geometry)
+                } else {
+                    let positive_bridge_string = row.count(count - 1)?;
+                    let negative_bridge_string = row.count(count - 1)?;
+                    if positive_bridge_string == negative_bridge_string {
+                        return Err("a secant rotational bridge requires distinct body footprints".into());
+                    }
+                    RotationalBody::BridgePair { positive_bridge_string,negative_bridge_string }
+                };
                 let joint = RotationalBridge {
-                    string: row.count(count - 1)?, station_fraction: row.scalar()?,
-                    positive_bridge_string: row.count(count - 1)?, negative_bridge_string: row.count(count - 1)?,
+                    string, station_fraction, body,
                     stiffness_n_m_per_rad: row.scalar()?, damping_n_m_s_per_rad: row.scalar()?,
                     rest_angle_rad: row.scalar()?,
                 };
                 row.end()?;
                 if strings[joint.string].twist_modes == 0
                     || !(0.0 < joint.station_fraction && joint.station_fraction < 1.0)
-                    || joint.positive_bridge_string == joint.negative_bridge_string
                     || joint.stiffness_n_m_per_rad < 0.0 || joint.damping_n_m_s_per_rad < 0.0
                     || (joint.stiffness_n_m_per_rad == 0.0 && joint.damping_n_m_s_per_rad == 0.0) {
-                    return Err("rotational bridge needs sourced twist, an interior station, distinct body footprints and a nonzero passive law".into());
+                    return Err("rotational bridge needs sourced twist, an interior station and a nonzero passive law".into());
                 }
                 rotational_bridges.push(joint);
             }

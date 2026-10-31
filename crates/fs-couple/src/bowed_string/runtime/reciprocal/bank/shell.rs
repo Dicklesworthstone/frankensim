@@ -16,9 +16,11 @@ use crate::shear_shell::assembly::{MaterialShellAssembly, ShellAssemblyForcePort
 use fs_plate::shell::mitc::{MitcBudget, NodalDirectors, ShellConstraint, ShellMass};
 
 mod point;
+mod rotation;
 mod relaxation;
 mod substrate;
 pub use point::{MaterialShellPoint, ShellPointGeometry};
+pub use rotation::ShellRotationGeometry;
 
 /// Complete source-bound curved body and physical connection geometry.
 #[derive(Clone, Debug)]

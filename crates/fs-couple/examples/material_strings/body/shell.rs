@@ -217,6 +217,23 @@ impl Spec {
         self.interfaces.connection_count()
     }
 
+    pub(super) fn preflight_rotation(&self, spec: &input::Spec, triangle: usize, barycentric: [f64;3], axis: [f64;3])
+        -> Result<()>
+    {
+        let nodes = self.triangles.get(triangle).ok_or("shell rotation names an absent triangle")?;
+        let mesh = ShellMesh::new(nodes.map(|node|self.position(node,spec)).to_vec(),vec![[0,1,2]])?;
+        let facet = mesh.facet(0)?;
+        let rows = fs_plate::shell::point::triangle_rotation_rows(barycentric,axis,facet.frame,facet.gradient,
+            nodes.map(|node|self.nodes[node].director))?;
+        if !(0..3).any(|a| {
+            let fixed = self.supports.iter().find(|s|s.node == nodes[a]);
+            (0..6).any(|dof|rows[a][dof] != 0.0 && fixed.is_none_or(|s|!s.mask[dof]))
+        }) {
+            return Err("shell rotation has no unconstrained physical angular direction".into());
+        }
+        Ok(())
+    }
+
     pub(super) fn material_memory_states(&self) -> usize {
         self.coating_memory.as_ref().map_or(0, |memory| memory.options.max_memory_coordinates)
     }

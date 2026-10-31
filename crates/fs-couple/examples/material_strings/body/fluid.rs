@@ -32,7 +32,7 @@ fn regional_body_torque_and_stop_keep_the_same_sources_when_fluid_coordinates_ar
         let mut loaded = ready(cx, gate, true, 1.0);
         let mut plain = ready(cx, gate, false, 1.0);
         assert_eq!(loaded.spec.network_dimensions(true).unwrap(), (45, 43, 45*44*44));
-        assert_eq!(loaded.rotational_bridge_baselines_m, vec![0.2]);
+        assert_eq!(loaded.rotational_bridge_baselines_m, vec![Some(0.2)]);
         assert_eq!(loaded.stop_profile.as_ref().unwrap().bytes, STOP.as_bytes());
         assert_eq!(loaded.performance.bank().system().obstacle_count(), 1);
         let a = loaded.performance.bank().source().bank();

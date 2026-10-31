@@ -198,6 +198,30 @@ fn build(
 }
 
 #[test]
+fn local_component_torque_uses_the_original_mortar_assembled_rotation_basis() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellRotationGeometry;
+    with_cx(|cx,gate| {
+        let bank = build(cx,gate,body(gate));
+        let source = bank.source();
+        let image = source.material_shell_assembly_image().unwrap();
+        for component in 0..2 {
+            let geometry = ShellRotationGeometry { shell_component: component,triangle: 0,
+                barycentric: [0.2,0.3,0.5],axis: [0.6,0.8,0.0] };
+            let rotation = source.shell_rotation(&geometry,gate).unwrap();
+            // Original parts share body zero; component is not a new modal body.
+            assert_eq!(rotation.component,0);
+            let tri = source.material_shell_assembly().unwrap().specimen.components[component]
+                .specimen.mesh().tris[0];
+            for (mode,&angle) in image.physical_modes()[component].iter().zip(&rotation.angular_shapes) {
+                let expected: f64 = (0..3).map(|a|geometry.barycentric[a]*(0..3)
+                    .map(|i|geometry.axis[i]*mode[6*tri[a]+3+i]).sum::<f64>()).sum();
+                assert!((angle-expected).abs() < 1e-12*expected.abs().max(1.0));
+            }
+        }
+    });
+}
+
+#[test]
 fn g3_tied_material_parts_feed_one_string_body_cavity_and_pressure_basis() {
     with_cx(|cx, gate| {
         let mut bank = build(cx, gate, body(gate));

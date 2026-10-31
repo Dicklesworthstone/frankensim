@@ -472,6 +472,77 @@ exercise file admission, version compatibility, geometry refusals before pack
 loading, and actual released-body pressure/PCM from an explicitly preloaded
 rotational spring while retaining the original full material damping.
 
+### Direct physical shell rotation
+
+A v3 shell or v4 assembled body can receive string torque through its original
+physical director motion and membrane spin. In the same `rotational-bridges` block, use:
+
+```text
+shell-rotational-bridge STRING STATION COMPONENT TRIANGLE W0 W1 W2 AX AY AZ K_NM_PER_RAD D_NMS_PER_RAD REST_ANGLE_RAD
+```
+
+`COMPONENT` is zero for a standalone shell, or the original component declaration
+index for an assembly. `TRIANGLE` and nonnegative unit-sum barycentrics identify
+the physical point in that component's original triangle/node order. `AX AY AZ`
+is an explicit signed unit axis in global XYZ. The authored string torque sign
+must use that same axis; the input does not infer a full string pose. A vertex
+or edge can be selected by zero weights. Joint stiffness, resistance and
+stress-free angle retain the same units and explicit constitutive authority as
+the existing rotational bridge record.
+
+For the synthetic `arched.body`, a one-string performance may declare:
+
+```text
+rotational-bridges 1
+shell-rotational-bridge 0 0.8 0 10 0.2 0.3 0.5 0 1 0 0.001 1e-7 0
+```
+
+This couples the material string's twist at station 0.8 to global-y physical
+shell rotation at triangle 10, using its original nodes 6, 7 and 12. The
+receiving row recovers local orientation from those nodes' original director
+motion and the original facet's membrane curl. A unit torque returns nodal
+forces and moments with zero resultant force and the requested total torque.
+Its angular velocity and torque share the same interpolation and modal
+projection, so their power is reciprocal. No second string, displacement
+baseline or synthetic modal angular vector is needed.
+
+The shell's independent drilling rotation is a numerical gauge. This port
+annihilates a rotation parallel to **each original nodal director**, including
+curved facets with differing directors. Tangential orientation comes from the
+interpolated director motion; normal spin comes from `0.5 curl(displacement)`
+on the same original P1 membrane. Numerical drilling inertia or stabilization
+cannot become physical torsion stiffness at this port. For flat aligned
+directors, normal torque is an in-plane force couple, while tangential torque
+acts through bending rotations. The retained basis must consequently include
+the material motions needed to carry the declared torque.
+
+The original shear-shell or mortar-assembled eigenvectors supply these local
+rotations. Changes to source material density, directional stiffness, loss,
+geometry and supports therefore propagate through the same receiving body.
+The existing string/body rotational connection owner supplies opposite torques
+and accounts for the angular spring energy and dashpot loss. Original
+translational bridges, gas memory, cavity, bow scheduling and pressure output
+remain in that common solve. All assembly components share one assembled body
+basis; selecting component 1 does not create a second modal body.
+
+The input checks component, triangle, interpolation and rotational support
+admission before loading material packs. An angular coordinate absent from the
+retained modes also refuses. Purely constrained or zero-participation points
+never receive a replacement rotation inferred from nearby displacement.
+Direct and secant rows may be mixed within the existing limit of 16 total
+rotational joints. Reports distinguish direct shell rotation from a derived
+secant baseline.
+
+The library query is `MaterialStringBankSource::shell_rotation` with
+`ShellRotationGeometry`; it returns the existing `ModalRotationAttachment` for
+`StringBodyRotationConnection`. This is the shared P1 interface orientation
+from directors and membrane spin, with the current small-angle torsion and
+interior string station. It does not reconstruct the condensed enriched
+element interior or add a complete six-DOF rod termination, a joint law
+from unspecified bulk properties, finite-rotation contact or prestressed body
+equilibrium. The geometry and joint numbers above are synthetic integration
+data and carry no measured-instrument claim.
+
 ## Gas memory with a regional body and physical contacts
 
 The performance's optional `cylinder-gas-loading X_MIN X_MAX INTERVALS` record

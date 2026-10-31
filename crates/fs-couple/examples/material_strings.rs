@@ -234,12 +234,12 @@ impl core::fmt::Display for BodyRadiationReport {
     }
 }
 struct Ready { spec: input::Spec, catalog: Catalog, performance: MultiBowPerformance,
-    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
+    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<Option<f64>>,
     stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport> }
 /// The complete physical bank before gesture scheduling and microphone setup.
 /// Both analysis and playback pass through this one source-binding sequence.
 struct ReadyBank { spec: input::Spec, catalog: Catalog, bank: MultiBowStringBank,
-    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<f64>,
+    body_profile: Option<body::Profile>, rotational_bridge_baselines_m: Vec<Option<f64>>,
     stop_profile: Option<stops::Profile>, body_radiation: Option<BodyRadiationReport>,
     bow_station_program: Option<BowStationProgram> }
 impl ReadyBank {
@@ -345,8 +345,15 @@ impl input::Spec {
             additional_body_modes)?;
         let mut baselines = Vec::with_capacity(self.rotational_bridges.len());
         for joint in &self.rotational_bridges {
-            let body = profile.as_ref().ok_or("rotational bridges require --body-profile with distinct physical bridge footprints")?;
-            baselines.push(body.bridge_separation_m(&self, joint.positive_bridge_string, joint.negative_bridge_string)?);
+            let body = profile.as_ref().ok_or("rotational bridges require an original --body-profile")?;
+            baselines.push(match &joint.body {
+                input::RotationalBody::BridgePair { positive_bridge_string,negative_bridge_string } =>
+                    Some(body.bridge_separation_m(&self,*positive_bridge_string,*negative_bridge_string)?),
+                input::RotationalBody::Shell(geometry) => {
+                    body.preflight_shell_rotation(&self,geometry)?;
+                    None
+                }
+            });
         }
         let mut contacts=Vec::with_capacity(self.schedule.tracks().len());
         for track in self.schedule.tracks() {
@@ -454,10 +461,14 @@ impl input::Spec {
             let mut joints = Vec::with_capacity(self.rotational_bridges.len());
             for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {
                 poll(gate)?;
-                let rotation = bank.source().rotation_between_bridges(
-                    StringBridgeLocation { string: joint.positive_bridge_string, connection: 0 },
-                    StringBridgeLocation { string: joint.negative_bridge_string, connection: 0 }, separation_m,
-                )?;
+                let rotation = match (&joint.body,separation_m) {
+                    (input::RotationalBody::BridgePair { positive_bridge_string,negative_bridge_string },Some(separation)) =>
+                        bank.source().rotation_between_bridges(
+                            StringBridgeLocation { string: *positive_bridge_string,connection: 0 },
+                            StringBridgeLocation { string: *negative_bridge_string,connection: 0 },separation)?,
+                    (input::RotationalBody::Shell(geometry),None) => bank.source().shell_rotation(geometry,gate)?,
+                    _ => return Err("rotational bridge lost its original physical geometry selection".into()),
+                };
                 joints.push(StringBodyRotationConnection {
                     string: joint.string, station_fraction: joint.station_fraction, body: rotation,
                     stiffness_n_m_per_rad: joint.stiffness_n_m_per_rad,
@@ -576,7 +587,7 @@ impl input::Spec {
     }
 
     fn schedule_bank(self, bank:MultiBowStringBank, catalog:Catalog, profile:Option<body::Profile>,
-        baselines:Vec<f64>, stop_profile:Option<stops::Profile>, body_radiation:Option<BodyRadiationReport>,
+        baselines:Vec<Option<f64>>, stop_profile:Option<stops::Profile>, body_radiation:Option<BodyRadiationReport>,
         bow_station_program:Option<BowStationProgram>, gate:&CancelGate) -> Result<Ready> {
         let performance_config=MultiBowPerformanceConfig { samples:self.samples,max_block:self.block,
             max_work:input::MAX_WORK,max_events:input::MAX_CONTROLS };
@@ -1030,7 +1041,10 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
     if let Some(profile)=&ready.stop_profile { eprintln!("stop_profile_bytes={}; stops={}",
         profile.bytes.len(),ready.performance.bank().source().stops().len()); }
     for (joint, baseline) in ready.spec.rotational_bridges.iter().zip(&ready.rotational_bridge_baselines_m) {
-        eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}");
+        match baseline {
+            Some(baseline) => eprintln!("rotational_bridge={joint:?}; body_footprint_separation_m={baseline}"),
+            None => eprintln!("rotational_bridge={joint:?}; body_rotation=original_shell_physical_rotation"),
+        }
     }
     for joint in &ready.spec.translational_bridges {
         eprintln!("translational_bridge={joint:?}; body_map=original_shell_global_displacement");

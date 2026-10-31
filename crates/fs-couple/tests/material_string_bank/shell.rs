@@ -188,3 +188,6 @@ mod cavity;
 
 #[path = "shell/coating.rs"]
 mod coating;
+
+#[path = "shell/rotation.rs"]
+mod rotation;

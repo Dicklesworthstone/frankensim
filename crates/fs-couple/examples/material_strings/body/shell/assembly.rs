@@ -228,6 +228,12 @@ impl Spec {
             .sum()
     }
 
+    pub(crate) fn preflight_rotation(&self, spec: &input::Spec, geometry: &ShellRotationGeometry) -> Result<()> {
+        let component = self.components.get(geometry.shell_component)
+            .ok_or("shell rotation names an absent original assembly component")?;
+        component.shell.preflight_rotation(spec,geometry.triangle,geometry.barycentric,geometry.axis)
+    }
+
     pub(crate) fn material_memory_states(&self) -> usize {
         self.coating_memory.as_ref().map_or(0, |memory| memory.options.max_memory_coordinates)
     }

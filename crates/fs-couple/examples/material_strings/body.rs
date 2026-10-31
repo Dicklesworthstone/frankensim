@@ -5,6 +5,7 @@ use super::*;
 use fs_couple::bowed_string::runtime::reciprocal::bank::chart::{SharedMaterialPlateChartBody, PlateBridgeFootprints};
 use fs_couple::plate_viscosity::{PlateViscosity, PlateViscosityLimits};
 use fs_couple::thin_plate::{compile_plate_material_chart, PlateChartRadiation, PlateRegionMaterial};
+use fs_couple::bowed_string::runtime::reciprocal::bank::shell::ShellRotationGeometry;
 use fs_material::plane_stress_viscosity::PLANE_STRESS_VISCOSITY_PROPERTIES as VISCOSITY;
 use fs_plate::{AssemblyOptions, EdgeSupport, PlateMesh, PlateRegion};
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::one_way::{
@@ -64,6 +65,17 @@ impl Profile {
     pub fn has_planar_material_basis(&self) -> bool { matches!(self.model, BodyModel::Plate(_)) }
     pub fn has_shell_material_basis(&self) -> bool {
         matches!(self.model, BodyModel::Shell(_) | BodyModel::Assembly(_))
+    }
+
+    /// Admit original component/triangle/support geometry before material I/O.
+    pub fn preflight_shell_rotation(&self, spec: &input::Spec, geometry: &ShellRotationGeometry) -> Result<()> {
+        match &self.model {
+            BodyModel::Shell(shell) if geometry.shell_component == 0 =>
+                shell.preflight_rotation(spec,geometry.triangle,geometry.barycentric,geometry.axis),
+            BodyModel::Shell(_) => Err("single-shell rotation requires component zero".into()),
+            BodyModel::Assembly(assembly) => assembly.preflight_rotation(spec,geometry),
+            BodyModel::Plate(_) => Err("physical shell rotation requires a v3 or v4 body profile".into()),
+        }
     }
 
     /// Use the same source resolution and eigensolve as playback, without its

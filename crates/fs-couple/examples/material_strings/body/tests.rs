@@ -227,7 +227,7 @@ fn rotational_bridge_file_drives_released_body_with_original_material_loss_and_p
         let mut silent = input::Spec::parse(omitted.as_bytes()).unwrap()
             .compile_with_body(cx, gate, Some(p.clone()), |name| Ok(pack(name, 1.0, None))).unwrap();
         assert_eq!(connected.spec.bytes, active.as_bytes());
-        assert_eq!(connected.rotational_bridge_baselines_m, vec![0.2]);
+        assert_eq!(connected.rotational_bridge_baselines_m, vec![Some(0.2)]);
         let source = connected.performance.bank().source().bank();
         let original = silent.performance.bank().source().bank();
         let joint = &source.rotational_body_connections()[0];

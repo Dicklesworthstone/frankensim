@@ -16,6 +16,75 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, loss: f64, shear: f64) -> Ready {
             else { pack(name, 1.0, None) })).unwrap()
 }
 
+const SHELL_ROTATION: &str = "shell-rotational-bridge 0 0.8 0 10 0.2 0.3 0.5 0 1 0 0.001 1e-7 0";
+fn shell_rotation_text() -> String {
+    let spec = shell_spec();
+    std::str::from_utf8(&spec.bytes).unwrap().replace("cylinder-gas-loading",
+        &format!("rotational-bridges 1\n{SHELL_ROTATION}\ncylinder-gas-loading"))
+}
+
+#[test]
+fn original_shell_rotation_drives_the_existing_torque_string_body_gas_and_pcm_solve() {
+    scoped(|cx,gate| {
+        let text = shell_rotation_text();
+        let make = || input::Spec::parse(text.as_bytes()).unwrap().compile_with_body(cx,gate,
+            Some(shell_profile()),|name|Ok(pack_with_shear(name,1.0,1.0,None))).unwrap();
+        let mut connected = make();
+        assert_eq!(connected.rotational_bridge_baselines_m,vec![None]);
+        let source = connected.performance.bank().source().bank();
+        let input::RotationalBody::Shell(geometry) = &connected.spec.rotational_bridges[0].body
+            else { panic!("physical rotation input lost its original geometry"); };
+        let actual = &source.rotational_body_connections()[0];
+        assert_eq!(actual.body,source.shell_rotation(geometry,gate).unwrap());
+        assert_eq!(actual.stiffness_n_m_per_rad,0.001);
+        assert_eq!(actual.damping_n_m_s_per_rad,1e-7);
+        assert!(source.cylinder_gas_loading().is_some());
+        assert!(source.material_cavity().is_some());
+        let mut unconnected = ready(cx,gate,1.0,1.0);
+        let original = pressure(&mut unconnected,17);
+        let samples = pressure(&mut connected,17);
+        assert!(samples.iter().all(|v|v.is_finite()));
+        assert!(samples.iter().zip(&original).any(|(a,b)|(a-b).abs()>1e-14));
+        let frame = connected.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        let mut partitioned = make();
+        assert_eq!(pressure(&mut partitioned,37),samples);
+    });
+}
+
+#[test]
+fn physical_rotation_records_and_missing_or_fixed_geometry_refuse_before_pack_io() {
+    let text = shell_rotation_text();
+    for bad in [
+        "shell-rotational-bridge 0 0 0 10 0.2 0.3 0.5 0 1 0 0.001 1e-7 0",
+        "shell-rotational-bridge 0 0.8 0 10 -0.2 0.3 0.9 0 1 0 0.001 1e-7 0",
+        "shell-rotational-bridge 0 0.8 0 10 0.2 0.3 0.4 0 1 0 0.001 1e-7 0",
+        "shell-rotational-bridge 0 0.8 0 10 0.2 0.3 0.5 0 2 0 0.001 1e-7 0",
+        "shell-rotational-bridge 0 0.8 0 10 0.2 0.3 0.5 0 1 0 0 0 0",
+    ] {
+        assert!(input::Spec::parse(text.replace(SHELL_ROTATION,bad).as_bytes()).is_err());
+    }
+    let legacy = rotational_input().replace(ROTATIONAL_BRIDGE_BLOCK,
+        &format!("rotational-bridges 2\n{ROTATIONAL_BRIDGE_ROW}\n{SHELL_ROTATION}\n"));
+    assert_eq!(input::Spec::parse(legacy.as_bytes()).unwrap().rotational_bridges.len(),2);
+    scoped(|cx,gate| {
+        for (row,profile) in [
+            (SHELL_ROTATION,None),
+            (SHELL_ROTATION,Some(super::profile())),
+            ("shell-rotational-bridge 0 0.8 1 10 0.2 0.3 0.5 0 1 0 0.001 1e-7 0",Some(shell_profile())),
+            ("shell-rotational-bridge 0 0.8 0 32 0.2 0.3 0.5 0 1 0 0.001 1e-7 0",Some(shell_profile())),
+            ("shell-rotational-bridge 0 0.8 0 0 1 0 0 0 1 0 0.001 1e-7 0",Some(shell_profile())),
+        ] {
+            let spec = input::Spec::parse(text.replace(SHELL_ROTATION,row).as_bytes()).unwrap();
+            let mut loads = 0;
+            assert!(spec.compile_with_body(cx,gate,profile,|name| {
+                loads += 1; Ok(pack(name,1.0,None))
+            }).is_err());
+            assert_eq!(loads,0);
+        }
+    });
+}
+
 #[test]
 fn triangle_bridge_loads_the_same_material_modes_with_its_offset_moment() {
     scoped(|cx, gate| {

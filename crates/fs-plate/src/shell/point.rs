@@ -79,6 +79,68 @@ pub fn triangle_point_rows(barycentric: [f64; 3], direction: [f64; 3],
     Ok(rows)
 }
 
+/// Gauge-free physical angle/torque rows at explicit triangle barycentrics.
+/// `frame` and `gradient` are the ORIGINAL `ShellMesh::facet` outputs; directors
+/// are the original unit nodal directors in the same triangle order.
+///
+/// Let d=sum(w*n), delta_d=sum(w*(theta cross n)). Director motion determines
+/// t=(d cross delta_d)/|d|²; the original P1 membrane determines facet-normal
+/// spin chi=0.5 curl(u).n_f. Physical rotation is
+/// Omega=t+d*(chi-n_f.t)/(n_f.d). These rows observe axis.Omega and return its
+/// conjugate torque. Every independent theta_a parallel to n_a is annihilated:
+/// numerical drilling stabilization never supplies physical torsion stiffness.
+///
+/// In the flat-director limit, tangent rotation comes from director motion and
+/// normal rotation from membrane spin. Nodal forces sum to zero and forces plus
+/// moments carry the requested torque. This is the shared P1 interface motion,
+/// not a reconstruction of the condensed enriched element interior.
+///
+/// # Errors
+/// Refuses invalid interpolation/axis/frame/gradients, incompatible original
+/// directors or unrepresentable orientation recovery. No input is repaired.
+pub fn triangle_rotation_rows(barycentric: [f64; 3], axis: [f64; 3],
+    frame: [[f64;3];3], gradient: [[f64;2];3], directors: [[f64;3];3])
+    -> Result<[[f64;6];3], ShellPointError>
+{
+    triangle_point_rows(barycentric,axis,[[0.0;3];3])?;
+    let dot = |a: [f64;3],b: [f64;3]| a.iter().zip(b).map(|(x,y)|x*y).sum::<f64>();
+    let cross = |a: [f64;3],b: [f64;3]| [a[1]*b[2]-a[2]*b[1],
+        a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]];
+    for v in frame.iter().chain(&directors) { nodal_point_row(*v,[0.0;3])?; }
+    if (0..3).any(|i|(0..i).any(|j|dot(frame[i],frame[j]).abs()>1e-12))
+        || (dot(cross(frame[0],frame[1]),frame[2])-1.0).abs()>1e-12
+        || directors.iter().any(|n|dot(*n,frame[2])<=0.0)
+        || gradient.iter().flatten().any(|v|!v.is_finite())
+    {
+        return Err(ShellPointError("shell rotation needs original orthonormal facet geometry and aligned directors"));
+    }
+    let scale = gradient.iter().flatten().map(|v|v.abs()).fold(0.0_f64,f64::max);
+    if scale == 0.0 || (0..2).any(|i|gradient.iter().map(|g|g[i]/scale).sum::<f64>().abs()>1e-12) {
+        return Err(ShellPointError("shell rotation needs original partition-preserving facet gradients"));
+    }
+    let d: [f64;3] = core::array::from_fn(|i|(0..3).map(|a|barycentric[a]*directors[a][i]).sum());
+    let square = dot(d,d); let alignment = dot(frame[2],d);
+    if !square.is_finite() || square<=0.0 || !alignment.is_finite() || alignment<=0.0 {
+        return Err(ShellPointError("shell rotation director interpolation is singular"));
+    }
+    let alpha = dot(axis,d)/alignment;
+    let b = core::array::from_fn(|i|axis[i]-alpha*frame[2][i]);
+    let c = cross(b,d).map(|v|v/square);
+    let mut rows = [[0.0;6];3];
+    for a in 0..3 {
+        let moment = cross(directors[a],c);
+        for i in 0..3 {
+            // Same facet membrane-spin row as the original MITC owner.
+            rows[a][i] = 0.5*alpha*(gradient[a][0]*frame[1][i]-gradient[a][1]*frame[0][i]);
+            rows[a][3+i] = barycentric[a]*moment[i];
+        }
+    }
+    if rows.iter().flatten().any(|v|!v.is_finite()) {
+        return Err(ShellPointError("shell physical rotation pullback overflows"));
+    }
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -174,5 +236,75 @@ mod tests {
         assert!(nodal_point_row([q,q,0.0],[f64::MAX,-f64::MAX,0.0]).is_err());
         let vertex = triangle_point_rows([0.0,1.0,0.0],[1.0,0.0,0.0],[[0.0;3];3]).unwrap();
         assert_eq!(vertex,[[0.0;6],[1.0,0.0,0.0,0.0,0.0,0.0],[0.0;6]]);
+    }
+
+    #[test]
+    fn physical_rotation_carries_a_pure_couple_with_rigid_work_and_no_drill_gauge() {
+        let frame = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]];
+        let gradient = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+        let nodes = [[0.0,0.0,0.0],[1.0,0.0,0.0],[0.0,1.0,0.0]];
+        let barycentric = [0.2,0.3,0.5]; let rigid = [0.7,-0.2,0.3];
+        for directors in [[[0.0,0.0,1.0];3],
+            [[0.2,0.0,0.96_f64.sqrt()],[0.0,0.3,0.91_f64.sqrt()],[-0.1,-0.15,0.9675_f64.sqrt()]]]
+        {
+            for axis in [[1.0,0.0,0.0],[0.0,0.0,1.0],[0.6,0.0,0.8]] {
+                let rows = triangle_rotation_rows(barycentric,axis,frame,gradient,directors).unwrap();
+                let mut force = [0.0;3]; let mut moment = [0.0;3]; let mut power = 0.0;
+                for a in 0..3 {
+                    let f = [rows[a][0],rows[a][1],rows[a][2]];
+                    let m = cross(nodes[a],f); let v = cross(rigid,nodes[a]);
+                    // Each node has its OWN independent director-axis gauge.
+                    near((0..3).map(|i|rows[a][3+i]*directors[a][i]).sum(),0.0);
+                    for i in 0..3 {
+                        force[i] += f[i]; moment[i] += m[i]+rows[a][3+i];
+                        power += f[i]*(v[i]+0.19) + rows[a][3+i]
+                            *(rigid[i]+(a as f64+1.0)*0.73*directors[a][i]);
+                    }
+                }
+                for i in 0..3 { near(force[i],0.0); near(moment[i],axis[i]); }
+                near(power,dot(axis,rigid));
+            }
+        }
+    }
+
+    #[test]
+    fn physical_rotation_power_matches_deforming_director_and_membrane_motion() {
+        let frame = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]];
+        let gradient = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+        let directors = [[0.2,0.0,0.96_f64.sqrt()],[0.0,0.3,0.91_f64.sqrt()],
+            [-0.1,-0.15,0.9675_f64.sqrt()]];
+        let weights = [0.2,0.3,0.5]; let axis = [0.6,0.0,0.8];
+        let velocity = [[0.2,-0.1,0.3],[0.7,0.4,-0.2],[-0.3,0.5,0.6]];
+        let omega = [[0.1,-0.3,0.4],[0.7,0.2,-0.5],[-0.4,0.9,0.3]];
+        let mut d = [0.0;3]; let mut delta_d = [0.0;3];
+        for a in 0..3 {
+            let motion = cross(omega[a],directors[a]);
+            for i in 0..3 { d[i]+=weights[a]*directors[a][i]; delta_d[i]+=weights[a]*motion[i]; }
+        }
+        let tangent = cross(d,delta_d).map(|v|v/dot(d,d));
+        let spin = 0.5*((velocity[1][1]-velocity[0][1])-(velocity[2][0]-velocity[0][0]));
+        let alpha = (spin-tangent[2])/d[2];
+        let physical = core::array::from_fn(|i|tangent[i]+alpha*d[i]);
+        let rows = triangle_rotation_rows(weights,axis,frame,gradient,directors).unwrap();
+        let torque = 0.031;
+        let power: f64 = (0..3).map(|a|(0..3).map(|i|torque*
+            (rows[a][i]*velocity[a][i]+rows[a][3+i]*omega[a][i])).sum::<f64>()).sum();
+        near(power,torque*dot(axis,physical));
+    }
+
+    #[test]
+    fn torque_ports_refuse_invalid_axes_and_interpolation_without_repair() {
+        let frame = [[1.0,0.0,0.0],[0.0,1.0,0.0],[0.0,0.0,1.0]];
+        let gradient = [[-1.0,-1.0],[1.0,0.0],[0.0,1.0]];
+        let directors = [[0.0,0.0,1.0];3];
+        for axis in [[0.0;3],[0.0,0.0,2.0],[f64::NAN,0.0,1.0]] {
+            assert!(triangle_rotation_rows([0.2,0.3,0.5],axis,frame,gradient,directors).is_err());
+        }
+        for barycentric in [[-0.1,0.5,0.6],[0.2,0.3,0.4],[f64::NAN,0.0,1.0]] {
+            assert!(triangle_rotation_rows(barycentric,[0.0,1.0,0.0],frame,gradient,directors).is_err());
+        }
+        assert!(triangle_rotation_rows([0.2,0.3,0.5],[0.0,1.0,0.0],frame,gradient,
+            [[0.0,0.0,-1.0];3]).is_err());
+        assert!(triangle_rotation_rows([0.2,0.3,0.5],[0.0,1.0,0.0],frame,[[0.0;2];3],directors).is_err());
     }
 }
