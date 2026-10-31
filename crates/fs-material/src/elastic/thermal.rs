@@ -1,4 +1,4 @@
-//! Reversible thermal potential of the original isotropic elastic law.
+//! Reversible thermal potentials of the original source elastic laws.
 //!
 //! At fixed total Mandel strain, e=epsilon-integral(alpha(T) dT)*I and
 //! Psi=V e:C(T):e/2. The selected E(T), nu(T) and instantaneous alpha(T)
@@ -20,6 +20,10 @@ use crate::state_point::{ResolvedMaterialStatePoint, MaterialStatePointError,
 use fs_matdb::MaterialCard;
 use fs_qty::{Dims, Pressure, QuantitySpec};
 
+/// Oriented tensor response with independently affine engineering sources.
+pub mod tensor;
+pub use tensor::{AffineThermoelastic, ThermoelasticSymmetry};
+
 #[derive(Debug)]
 pub enum ThermoelasticError {
     Source(MaterialStatePointError),
@@ -34,7 +38,7 @@ impl From<MaterialError> for ThermoelasticError {
 }
 impl core::fmt::Display for ThermoelasticError {
     fn fmt(&self,f:&mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f,"isotropic thermoelastic source: {self:?}")
+        write!(f,"thermoelastic source: {self:?}")
     }
 }
 impl std::error::Error for ThermoelasticError {}
@@ -83,14 +87,25 @@ pub struct AffineIsotropicThermoelastic {
 pub struct ResolvedThermoelastic {
     pub elastic:ResolvedMaterialStatePoint,
     pub expansion:ResolvedMaterialStatePoint,
-    material:IsotropicElastic,
     temperature_k:f64,
+    maximum_absolute_mandel_strain:f64,
+    response:ResolvedThermoelasticLaw,
+}
+
+#[derive(Clone,Debug,PartialEq)]
+enum ResolvedThermoelasticLaw {
+    Isotropic(IsotropicThermalResponse),
+    Tensor(tensor::TensorThermalResponse),
+}
+
+#[derive(Clone,Debug,PartialEq)]
+struct IsotropicThermalResponse {
+    material:IsotropicElastic,
     youngs_slope_pa_k:f64,
     poisson_slope_per_k:f64,
     expansion_per_k:f64,
     expansion_slope_per_k2:f64,
     free_linear_strain:f64,
-    maximum_absolute_mandel_strain:f64,
 }
 
 /// Integrated elastic-field potentials, separate from the caloric chart.
@@ -190,11 +205,12 @@ impl AffineIsotropicThermoelastic {
             &self.expansion_reference.query(),&point,MaterialPropertySelection::PinnedByProperty(
                 vec![(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY.to_owned(),selected)]))?;
         let material=IsotropicElastic::new(e,poisson,self.maximum_absolute_mandel_strain)?;
-        Ok(ResolvedThermoelastic {elastic,expansion,material,temperature_k:t,
+        Ok(ResolvedThermoelastic {elastic,expansion,temperature_k:t,
+            maximum_absolute_mandel_strain:self.maximum_absolute_mandel_strain,
+            response:ResolvedThermoelasticLaw::Isotropic(IsotropicThermalResponse {material,
             youngs_slope_pa_k:self.youngs_slope_pa_k,poisson_slope_per_k:self.poisson_slope_per_k,
             expansion_per_k:alpha,expansion_slope_per_k2:self.expansion_slope_per_k2,
-            free_linear_strain:integrated.free_linear_strain(),
-            maximum_absolute_mandel_strain:self.maximum_absolute_mandel_strain})
+            free_linear_strain:integrated.free_linear_strain()})})
     }
 
     /// Match the actual native source fields; a different card, selection,
@@ -281,11 +297,49 @@ fn upper_div(a:f64,b:f64)->Result<f64,ThermoelasticError> {
 
 impl ResolvedThermoelastic {
     pub fn temperature_k(&self)->f64 {self.temperature_k}
+    /// Scalar isotropic free strain. A directional tensor must use the complete
+    /// Mandel accessor; it cannot silently lose its expansion or shear axes.
     pub fn free_strain(&self)->Result<f64,ThermoelasticError> {
-        Ok(self.free_linear_strain)
+        match &self.response {
+            ResolvedThermoelasticLaw::Isotropic(response)=>Ok(response.free_linear_strain),
+            ResolvedThermoelasticLaw::Tensor(_)=>Err(ThermoelasticError::Invalid(
+                "tensor thermal expansion requires the complete Mandel free strain")),
+        }
+    }
+    pub fn free_strain_mandel(&self)->[f64;6] {
+        match &self.response {
+            ResolvedThermoelasticLaw::Isotropic(response)=>{
+                let e=response.free_linear_strain;[e,e,e,0.0,0.0,0.0]
+            }
+            ResolvedThermoelasticLaw::Tensor(response)=>response.free_strain_mandel,
+        }
+    }
+    /// The original isothermal material tensor in the response's fixed frame.
+    pub fn stiffness_mandel_pa(&self)->crate::Tangent6 {
+        match &self.response {
+            ResolvedThermoelasticLaw::Isotropic(response)=>response.material.stiffness(),
+            ResolvedThermoelasticLaw::Tensor(response)=>response.stiffness_mandel_pa,
+        }
+    }
+    fn thermal_identity_values(&self)->Vec<f64> {
+        match &self.response {
+            // Preserve the existing isotropic identity's operation/value order.
+            ResolvedThermoelasticLaw::Isotropic(r)=>vec![r.free_linear_strain,
+                r.youngs_slope_pa_k,r.poisson_slope_per_k,r.expansion_per_k,r.expansion_slope_per_k2],
+            ResolvedThermoelasticLaw::Tensor(r)=>r.free_strain_mandel.into_iter()
+                .chain(r.expansion_mandel_per_k).chain(r.expansion_derivative_mandel_per_k2)
+                .chain(r.stiffness_mandel_pa.into_iter().flatten())
+                .chain(r.stiffness_derivative_mandel_pa_k.into_iter().flatten())
+                .chain(r.stiffness_second_derivative_mandel_pa_k2.into_iter().flatten()).collect(),
+        }
     }
     pub fn state(&self,total_strain_mandel:[f64;6],volume_m3:f64)
         -> Result<ThermoelasticState,ThermoelasticError> {
+        let response=match &self.response {
+            ResolvedThermoelasticLaw::Isotropic(response)=>response,
+            ResolvedThermoelasticLaw::Tensor(response)=>return response.state(
+                self.temperature_k,total_strain_mandel,volume_m3,self.maximum_absolute_mandel_strain),
+        };
         if !volume_m3.is_finite() || volume_m3<=0.0
             || total_strain_mandel.iter().any(|v|!v.is_finite()
                 ||v.abs()>self.maximum_absolute_mandel_strain) {
@@ -302,7 +356,7 @@ impl ResolvedThermoelastic {
         let root_two=fs_math::det::sqrt(2.0);
         let mut voigt=elastic_strain_mandel;
         for e in &mut voigt[3..] {*e/=root_two;}
-        let mut stress_mandel_pa=self.material.stress(&voigt,&());
+        let mut stress_mandel_pa=response.material.stress(&voigt,&());
         for s in &mut stress_mandel_pa[3..] {*s*=root_two;}
         let free_energy_j=finite(0.5*volume_m3*elastic_strain_mandel.iter()
             .zip(stress_mandel_pa).map(|(e,s)|e*s).sum::<f64>())?;
@@ -310,19 +364,19 @@ impl ResolvedThermoelastic {
         let mean=trace/3.0;
         let deviator_squared=finite(elastic_strain_mandel.iter().enumerate()
             .map(|(k,e)|if k<3 {(e-mean).powi(2)}else{e*e}).sum())?;
-        let e=self.material.youngs;
-        let nu=self.material.poisson;
+        let e=response.material.youngs;
+        let nu=response.material.poisson;
         let d=1.0-2.0*nu; let q=1.0+nu;
         let bulk=finite(e/(3.0*d))?;
-        let bulk_first=finite((self.youngs_slope_pa_k+2.0*e*self.poisson_slope_per_k/d)/(3.0*d))?;
-        let shear_first=finite((self.youngs_slope_pa_k-e*self.poisson_slope_per_k/q)/(2.0*q))?;
+        let bulk_first=finite((response.youngs_slope_pa_k+2.0*e*response.poisson_slope_per_k/d)/(3.0*d))?;
+        let shear_first=finite((response.youngs_slope_pa_k-e*response.poisson_slope_per_k/q)/(2.0*q))?;
         if bulk_first==0.0 && shear_first==0.0
-            && (self.youngs_slope_pa_k!=0.0 || self.poisson_slope_per_k!=0.0) {
+            && (response.youngs_slope_pa_k!=0.0 || response.poisson_slope_per_k!=0.0) {
             return Err(ThermoelasticError::Invalid("nonconstant thermoelastic stiffness derivatives underflow"));
         }
-        let bulk_second=finite(4.0*self.poisson_slope_per_k*bulk_first/d)?;
-        let shear_second=finite(-2.0*self.poisson_slope_per_k*shear_first/q)?;
-        let alpha=self.expansion_per_k;
+        let bulk_second=finite(4.0*response.poisson_slope_per_k*bulk_first/d)?;
+        let shear_second=finite(-2.0*response.poisson_slope_per_k*shear_first/q)?;
+        let alpha=response.expansion_per_k;
         let stress_temperature_derivative_mandel_pa_k=core::array::from_fn(|k| {
             if k<3 {
                 bulk_first*trace-3.0*bulk*alpha
@@ -333,7 +387,7 @@ impl ResolvedThermoelastic {
             -0.5*bulk_first*trace*trace-shear_first*deviator_squared))?;
         let internal_energy_j=finite(self.temperature_k.mul_add(entropy_j_k,free_energy_j))?;
         let heat_capacity_j_k=finite(self.temperature_k*volume_m3
-            *((6.0*bulk_first*alpha+3.0*bulk*self.expansion_slope_per_k2)*trace
+            *((6.0*bulk_first*alpha+3.0*bulk*response.expansion_slope_per_k2)*trace
                 -9.0*bulk*alpha*alpha-0.5*bulk_second*trace*trace
                 -shear_second*deviator_squared))?;
         if stress_mandel_pa.iter().chain(stress_temperature_derivative_mandel_pa_k.iter())

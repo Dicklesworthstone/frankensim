@@ -9,9 +9,11 @@
 //! Source-derived entropy distinguishes this exchange from simply converting
 //! elastic coefficient work to heat. No solver residual is deposited as heat.
 //!
-//! The bounded initial law is isotropic affine E(T), fixed nu and constant
-//! instantaneous alpha, on a fully solid constant-reference-density interval
-//! of each original caloric chart. Later phase transitions remain in that chart.
+//! Source E/nu or oriented orthotropic engineering constants and independently
+//! oriented instantaneous expansion may vary affinely over the declared interval.
+//! The original compliance inverse supplies exact tensor thermal derivatives;
+//! a full-interval capacity bound admits the same fully solid reference-density
+//! caloric chart. Later phase transitions remain in that chart.
 //! Spatial temperatures, native stress/deformation, source pins, reference mass,
 //! and the original thermal observer are retained atomically. The endpoint
 //! coupling is generally first order; it does not establish exact reversible
@@ -30,7 +32,7 @@ pub mod heat;
 use super::*;
 use std::convert::Infallible;
 use fs_material::elastic::thermal::{
-    AffineIsotropicThermoelastic, ThermoelasticError, ThermoelasticState,
+    AffineThermoelastic, ThermoelasticSymmetry, ThermoelasticError, ThermoelasticState,
 };
 use fs_thermal::enthalpy::HeatTransfer;
 
@@ -102,7 +104,7 @@ fn controls<E>(config:ThermoelasticSolve)->Result<(),ThermoelasticFeedbackError<
 /// Retained native equilibrium and its original finite thermal/material history.
 pub struct ThermoelasticSolid<'s,'m> {
     source:&'s SolidEnthalpy<'m>,
-    laws:Vec<AffineIsotropicThermoelastic>,
+    laws:Vec<AffineThermoelastic>,
     state:SolidEnthalpyState<'m>,
     equilibrium:SolidEquilibrium,
     potentials:Vec<ThermoelasticState>,
@@ -128,13 +130,19 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
         let mut laws=Vec::with_capacity(source.cells.len());
         for (index,(bound,range)) in source.cells.iter().zip(temperature_ranges_k).enumerate() {
             check(cx)?;
-            if !matches!(bound.source.stiffness_model,ThermalStiffnessModel::Isotropic)
-                || !matches!(bound.source.expansion_model,ThermalExpansionModel::Isotropic) {
-                return Err(ThermoelasticFeedbackError::Invalid("reciprocal potential requires the declared isotropic stiffness and expansion models"));
-            }
+            let stiffness=match bound.source.stiffness_model {
+                ThermalStiffnessModel::Isotropic=>ThermoelasticSymmetry::Isotropic,
+                ThermalStiffnessModel::OrientedOrthotropic {principal_to_mesh,..}=>
+                    ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:principal_to_mesh},
+            };
+            let expansion=match bound.source.expansion_model {
+                ThermalExpansionModel::Isotropic=>ThermoelasticSymmetry::Isotropic,
+                ThermalExpansionModel::OrientedOrthotropic {principal_to_mesh,..}=>
+                    ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:principal_to_mesh},
+            };
             let sample=&state.samples[index];
-            let law=AffineIsotropicThermoelastic::new(bound.source.point.material,&sample.elastic,
-                sample.expansion.reference(),*range,source.maximum_absolute_mandel_strain)?;
+            let law=AffineThermoelastic::new(bound.source.point.material,&sample.elastic,
+                sample.expansion.reference(),stiffness,expansion,*range,source.maximum_absolute_mandel_strain)?;
             let knots=bound.source.curve.knots();
             if range[0]<knots[0].temperature_k || range[1]>knots[knots.len()-1].temperature_k {
                 return Err(ThermoelasticFeedbackError::Invalid("caloric chart must cover the whole thermoelastic source interval"));
@@ -320,7 +328,7 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
 }
 
 fn potentials<E>(state:&SolidEnthalpyState<'_>,equilibrium:&SolidEquilibrium,
-    laws:&[AffineIsotropicThermoelastic],config:ThermoelasticSolve,cx:&Cx<'_>)
+    laws:&[AffineThermoelastic],config:ThermoelasticSolve,cx:&Cx<'_>)
     ->Result<Vec<ThermoelasticState>,ThermoelasticFeedbackError<E>> {
     let mut potentials=Vec::with_capacity(laws.len());
     for (i,(law,sample)) in laws.iter().zip(&state.samples).enumerate() {
@@ -328,10 +336,9 @@ fn potentials<E>(state:&SolidEnthalpyState<'_>,equilibrium:&SolidEquilibrium,
         let source=law.at_materials(&sample.elastic,sample.expansion.current())?;
         let native=&equilibrium.solution.stress.elements()[i];
         let free=state.strains[i].free_strain_mandel();
-        let expected=source.free_strain()?;
+        let expected=source.free_strain_mandel();
         for k in 0..6 {
-            let target=if k<3 {expected}else{0.0};
-            if (free[k]-target).abs()>4096.0*f64::EPSILON
+            if (free[k]-expected[k]).abs()>4096.0*f64::EPSILON
                 *law.maximum_absolute_mandel_strain() {
                 return Err(ThermoelasticFeedbackError::Invalid("native integrated expansion differs from the admitted potential"));
             }

@@ -5715,3 +5715,24 @@ viscosity contributes no storage or mechanical entropy; its consumer owns the
 actual strain rate and heat. The rigid retained-layer consumer applies it to
 recoverable shear before series plastic flow, at the same trial temperature as
 the other material kinetics.
+
+## Oriented reciprocal thermoelastic material storage
+
+`elastic::thermal::AffineThermoelastic` carries independently selected
+isotropic or oriented orthotropic stiffness and expansion through the existing
+resolved-response owner. Source-pinned affine Young's moduli, Poisson ratios,
+shear moduli and instantaneous expansion coefficients retain separate fixed
+proper frames. The native compliance inverse supplies stiffness, with exact
+`C'=-C S' C` and `C''=2 C S' C S' C-C S'' C`; affine engineering constants
+are not treated as affine stiffness. Original source integration supplies the
+full free-strain tensor.
+
+The same potential supplies stress, entropy, internal energy, fixed-total-strain
+heat capacity and stress-temperature derivatives to the original spatial solid,
+finite-heat, inertial and adiabatic consumers. Full-interval positive-compliance
+and capacity admission uses outward-rounded cofactor and entrywise matrix
+bounds. Conservative refusal is possible for wide or poorly conditioned source
+intervals; sampled endpoints alone do not establish admission. The original
+isotropic arithmetic is retained. This is smooth affine-source, fixed-frame,
+fully solid small-strain thermomechanics, without phase evolution or plasticity.
+

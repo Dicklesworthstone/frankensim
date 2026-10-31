@@ -22,7 +22,7 @@ use fs_solid::loads3::transient::{
 /// Original source laws plus the actual loaded inertial and caloric history.
 pub struct DynamicThermoelasticSolid<'s, 'm> {
     pub(super) source: &'s SolidEnthalpy<'m>,
-    laws: Vec<AffineIsotropicThermoelastic>,
+    laws: Vec<AffineThermoelastic>,
     state: SolidEnthalpyState<'m>,
     motion: TetTransientCheckpoint3<'s, 'm>,
     response: TransientResponse3,
@@ -268,7 +268,7 @@ impl<'s, 'm> DynamicThermoelasticSolid<'s, 'm> {
 
 fn dynamic_potentials<E>(
     state: &SolidEnthalpyState<'_>, response: &TransientResponse3,
-    laws: &[AffineIsotropicThermoelastic], config: ThermoelasticSolve, cx: &Cx<'_>,
+    laws: &[AffineThermoelastic], config: ThermoelasticSolve, cx: &Cx<'_>,
 ) -> Result<Vec<ThermoelasticState>, ThermoelasticFeedbackError<E>> {
     let mut potentials = Vec::with_capacity(laws.len());
     for (i, (law, sample)) in laws.iter().zip(&state.samples).enumerate() {
@@ -276,10 +276,9 @@ fn dynamic_potentials<E>(
         let source = law.at_materials(&sample.elastic, sample.expansion.current())?;
         let native = &response.stress.elements()[i];
         let free = state.strains[i].free_strain_mandel();
-        let expected = source.free_strain()?;
+        let expected = source.free_strain_mandel();
         for k in 0..6 {
-            let target = if k < 3 { expected } else { 0.0 };
-            if (free[k] - target).abs() > 4096.0 * f64::EPSILON * law.maximum_absolute_mandel_strain() {
+            if (free[k] - expected[k]).abs() > 4096.0 * f64::EPSILON * law.maximum_absolute_mandel_strain() {
                 return Err(ThermoelasticFeedbackError::Invalid("native integrated expansion differs from the dynamic source potential"));
             }
         }

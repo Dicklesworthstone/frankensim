@@ -11091,15 +11091,26 @@ Native compilation, Cargo tests and rustfmt remain unexecuted in this environmen
 `solid_enthalpy::thermoelastic::ThermoelasticSolid` retains the original
 `SolidEnthalpy` binding, native compatible equilibrium/stress, actual assembled
 nodal loads and finite thermal state. One declared source interval per reference
-tetrahedron uses the source-backed affine isotropic thermoelastic potential:
-independently affine E(T), Poisson ratio and instantaneous expansion, with
-source-integrated free strain and both bulk/shear thermal derivatives. The same
-source/card/eigenstrain and delivered reference mass remain pinned. It admits
+tetrahedron uses the source-backed affine thermoelastic potential. Stiffness
+and expansion independently select isotropic or oriented orthotropic source
+models, with independent affine engineering constants and instantaneous
+principal expansion coefficients. The native compliance inverse and original
+source-integrated free strain supply the full tensor thermal derivatives.
+The same source/card/eigenstrain and delivered reference mass remain pinned. It admits
 a fully solid constant-density interval within the original complete caloric
 chart, preserving later latent/liquid segments. Any latent segment intersecting
 the admitted interval, or any actual phase/source-domain exit, refuses. The
 interval's actual caloric capacity plus the conservative fixed-total-strain
 field capacity must stay positive.
+
+The same tensor potential now serves the original static, Newmark inertial,
+finite-heat-network and local adiabatic/prestress consumers. Elastic and
+expansion axes remain fixed and may differ; temperature gradients retain their
+individual physical cells. Whole-interval compliance and capacity bounds use
+outward-rounded coefficient and matrix bounds and may conservatively refuse
+otherwise valid wide intervals. No endpoint-only positivity claim, isotropic
+replacement or new mechanical/thermal integrator is introduced. The original
+isotropic path and endpoint thermal coupling convention remain intact.
 
 Each bounded heat fixed-point trial starts from accepted thermal and observer
 histories, runs the original thermal substeps/events with additional reversible

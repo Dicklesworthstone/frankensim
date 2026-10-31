@@ -155,7 +155,7 @@ impl<'s, 'm> ThermoelasticSolid<'s, 'm> {
 
 pub(super) fn resolve<'m>(
     source: &SolidEnthalpy<'m>,
-    laws: &[AffineIsotropicThermoelastic],
+    laws: &[AffineThermoelastic],
     state: &SolidEnthalpyState<'m>,
     stress: &TetThermalStressReport,
     cx: &Cx<'_>,

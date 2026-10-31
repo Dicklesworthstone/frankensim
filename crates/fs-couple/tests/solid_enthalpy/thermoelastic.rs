@@ -292,3 +292,6 @@ mod acoustic;
 
 #[path = "thermoelastic/heat.rs"]
 mod heat;
+
+#[path = "thermoelastic/orthotropic.rs"]
+mod orthotropic;

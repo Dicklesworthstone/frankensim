@@ -87,7 +87,7 @@ impl ResolvedThermoelastic {
             ));
         }
         let beta = potential.stress_temperature_derivative_mandel_pa_k;
-        let mut tangent = self.material.stiffness();
+        let mut tangent = self.stiffness_mandel_pa();
         let mut temperature_gradient_mandel_k = [0.0; 6];
         if beta.iter().any(|value| *value != 0.0) {
             let scale = finite(self.temperature_k / fixed_strain_heat_capacity_j_m3_k)?;
@@ -124,13 +124,9 @@ impl ResolvedThermoelastic {
                 input.caloric_heat_capacity_j_m3_k,
                 self.maximum_absolute_mandel_strain,
                 self.temperature_k,
-                self.free_linear_strain,
-                self.youngs_slope_pa_k,
-                self.poisson_slope_per_k,
-                self.expansion_per_k,
-                self.expansion_slope_per_k2,
-                fixed_strain_heat_capacity_j_m3_k,
             ])
+            .chain(self.thermal_identity_values())
+            .chain([fixed_strain_heat_capacity_j_m3_k])
             .chain(beta)
             .chain(tangent.into_iter().flatten())
         {
@@ -188,7 +184,7 @@ impl AdiabaticThermoelasticState {
     /// Original fixed-temperature tangent, without adiabatic augmentation [Pa].
     #[must_use]
     pub fn isothermal_stiffness_mandel_pa(&self) -> Tangent6 {
-        self.source.material.stiffness()
+        self.source.stiffness_mandel_pa()
     }
 
     /// Isentropic tangent and reference density for native pressure/wave queries.
