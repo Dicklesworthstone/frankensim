@@ -69,6 +69,13 @@ pub struct LayeredThermalSolveReport {
     pub maximum_cell_residual_j: f64,
 }
 
+/// Effort survives a refused endpoint so the shared adaptive owner can charge it.
+#[derive(Default)]
+pub(super) struct SolveWork {
+    pub(super) residual_evaluations: usize,
+    pub(super) newton_iterations: usize,
+}
+
 /// Reusable O(cells) Newton vectors and adjacent-pivot tridiagonal factors.
 /// The existing material/residual evaluation still allocates O(cells) trials.
 /// No dense matrix, independent thermal state or numerical material fit is kept.
@@ -127,7 +134,13 @@ impl<'m> LayeredThermalStep<'_, 'm, '_> {
         ),
         LayeredThermalSolveError,
     > {
-        self.solve_inner(controls, workspace, false, checkpoint)
+        self.solve_inner(
+            controls,
+            workspace,
+            false,
+            &mut SolveWork::default(),
+            checkpoint,
+        )
     }
 
     /// Same solve, with the original caloric/heat owner's endpoint entropy audit.
@@ -146,14 +159,21 @@ impl<'m> LayeredThermalStep<'_, 'm, '_> {
         ),
         LayeredThermalSolveError,
     > {
-        self.solve_inner(controls, workspace, true, checkpoint)
+        self.solve_inner(
+            controls,
+            workspace,
+            true,
+            &mut SolveWork::default(),
+            checkpoint,
+        )
     }
 
-    fn solve_inner(
+    pub(super) fn solve_inner(
         &self,
         controls: LayeredThermalSolveControls,
         workspace: &mut LayeredThermalWorkspace,
         with_entropy: bool,
+        work: &mut SolveWork,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<
         (
@@ -177,6 +197,7 @@ impl<'m> LayeredThermalStep<'_, 'm, '_> {
             .into());
         }
         let mut evaluations = 0;
+        let residual_evaluations = &mut work.residual_evaluations;
         let mut evaluate =
             |energy: &[f64],
              entropy: bool,
@@ -187,6 +208,7 @@ impl<'m> LayeredThermalStep<'_, 'm, '_> {
                     ));
                 }
                 evaluations += 1;
+                *residual_evaluations = evaluations;
                 if entropy {
                     self.evaluate_with_entropy(energy, checkpoint)
                 } else {
@@ -257,6 +279,7 @@ impl<'m> LayeredThermalStep<'_, 'm, '_> {
                 return Err(error.into());
             }
             solved?;
+            work.newton_iterations += 1;
             let mut fraction = 1.0;
             let mut accepted = None;
             for attempt in 0..=controls.maximum_backtracks {

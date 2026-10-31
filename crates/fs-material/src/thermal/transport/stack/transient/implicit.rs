@@ -28,6 +28,14 @@ pub use solve::{
     LayeredThermalWorkspace,
 };
 
+#[path = "implicit/adaptive.rs"]
+mod adaptive;
+pub use fs_thermal::enthalpy::conduction::implicit::adaptive::{
+    AdaptiveImplicitConductionControls as LayeredThermalAdaptiveControls,
+    AdaptiveImplicitConductionError as LayeredThermalAdaptiveError,
+    AdaptiveImplicitConductionReport as LayeredThermalAdaptiveReport,
+};
+
 /// One frozen original thermal step and its source-qualified material binding.
 /// Residuals and derivatives serve either a caller's nonlinear solver or the
 /// bounded sparse solve below. The original thermal trial owns acceptance.

@@ -102,7 +102,53 @@ impl core::fmt::Display for AdaptiveImplicitConductionError {
 }
 impl std::error::Error for AdaptiveImplicitConductionError {}
 
-impl ImplicitConductionChain<'_> {
+/// Endpoint adapter for the shared conservative step-doubling controller.
+///
+/// An implementation retains the original fixed cell identities, masses and
+/// caloric laws. It supplies complete backward-Euler endpoints, their original
+/// energy/entropy accounts and source-owned observables, never an alternative
+/// temperature evolution. Every residual evaluation and Newton iteration,
+/// including failed trials, must be charged to `work` by `solve_interval`.
+/// Events are applied by the original timeline through the supplied observer;
+/// `admit` must refuse changes outside the adapter's fixed physical binding.
+pub trait AdaptiveConductionStepper: Sized {
+    type Workspace;
+    type Observer: DepositionObserver<Error = DepositionError>;
+
+    fn cell_ids(&self) -> &[CellId];
+    fn workspace_cells(workspace: &Self::Workspace) -> usize;
+    fn observer(&self) -> Self::Observer;
+    fn admit(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), ImplicitConductionError>;
+
+    /// Solve exactly this interval, without internal physical subdivisions.
+    /// The residual ceiling in `controls` is shared through cumulative `work`.
+    fn solve_interval<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut Self::Workspace,
+        work: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>;
+
+    /// Sensible owners need only the original caloric temperature. A phase
+    /// owner must explicitly supply its own phase observable when requested.
+    fn observable(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+    ) -> Result<ImplicitConductionObservables, DepositionError> {
+        Ok(ImplicitConductionObservables {
+            temperature_k: thermal.temperature_k(id)?,
+            phase_mass_fraction: None,
+        })
+    }
+
     /// Advance with local h/T/phase accuracy estimates and original heat/entropy.
     ///
     /// Exact scheduled boundaries cap each comparison before either trajectory
@@ -116,12 +162,12 @@ impl ImplicitConductionChain<'_> {
     /// the floor can be tried once; it is never accepted merely for being small.
     /// The local estimator needs independent temporal and spatial validation,
     /// particularly at constitutive corners. It is not a certified global bound.
-    pub fn advance_adaptive_to<'m>(
+    fn advance_adaptive_to<'m>(
         &self,
         thermal: &DepositionSimulation<'m>,
         target_s: f64,
         controls: AdaptiveImplicitConductionControls,
-        workspace: &mut ImplicitConductionWorkspace,
+        workspace: &mut Self::Workspace,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<
         (DepositionSimulation<'m>, AdaptiveImplicitConductionReport),
@@ -131,9 +177,9 @@ impl ImplicitConductionChain<'_> {
         validate_advance(
             thermal.time_s,
             target_s,
-            self.ids.len(),
+            self.cell_ids().len(),
             controls.step,
-            workspace,
+            Self::workspace_cells(workspace),
         )?;
         if !controls.initial_dt_s.is_finite()
             || controls.initial_dt_s < controls.step.minimum_dt_s
@@ -152,7 +198,7 @@ impl ImplicitConductionChain<'_> {
         }
         self.admit(thermal, &mut checkpoint)?;
         let mut next = thermal.clone();
-        let mut observer = self.conduction.clone();
+        let mut observer = self.observer();
         let mut old_observables = self.time_observables(&next, controls, &mut checkpoint)?;
         let mut span = controls.initial_dt_s.min(controls.step.maximum_dt_s);
         let mut report = AdaptiveImplicitConductionReport {
@@ -210,7 +256,7 @@ impl ImplicitConductionChain<'_> {
             let dt = end - start;
             report.comparisons += 1;
             let candidate = (|| {
-                let (coarse, _, _, _) = self.solve_step(
+                let (coarse, _, _, _) = self.solve_interval(
                     &next,
                     end,
                     controls.step,
@@ -218,7 +264,7 @@ impl ImplicitConductionChain<'_> {
                     &mut report.solve,
                     &mut checkpoint,
                 )?;
-                let (half, e1, s1, r1) = self.solve_step(
+                let (half, e1, s1, r1) = self.solve_interval(
                     &next,
                     middle,
                     controls.step,
@@ -226,7 +272,7 @@ impl ImplicitConductionChain<'_> {
                     &mut report.solve,
                     &mut checkpoint,
                 )?;
-                let (fine, e2, s2, r2) = self.solve_step(
+                let (fine, e2, s2, r2) = self.solve_interval(
                     &half,
                     end,
                     controls.step,
@@ -319,7 +365,7 @@ impl ImplicitConductionChain<'_> {
             reductions += 1;
         }
         let mut storage = Sum::default();
-        for &id in &self.ids {
+        for &id in self.cell_ids() {
             checkpoint()?;
             storage.add(
                 thermal.cells[&id].mass_kg
@@ -344,13 +390,12 @@ impl ImplicitConductionChain<'_> {
         controls: AdaptiveImplicitConductionControls,
         checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<ImplicitConductionObservables>, AdaptiveImplicitConductionError> {
-        let mut values = Vec::with_capacity(self.ids.len());
-        for (i, &id) in self.ids.iter().enumerate() {
+        let mut values = Vec::with_capacity(self.cell_ids().len());
+        for (i, &id) in self.cell_ids().iter().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
             }
-            let cell = &thermal.cells[&id];
-            let value = self.laws[&cell.material_id].time_observables(cell.specific_h_j_kg)?;
+            let value = self.observable(thermal, id)?;
             if !positive(value.temperature_k)
                 || value
                     .phase_mass_fraction
@@ -387,7 +432,7 @@ impl ImplicitConductionChain<'_> {
                 .map(|_| 0.0),
             ..ImplicitConductionTimeError::default()
         };
-        for (i, &id) in self.ids.iter().enumerate() {
+        for (i, &id) in self.cell_ids().iter().enumerate() {
             if i % 256 == 0 {
                 checkpoint()?;
             }
@@ -438,6 +483,71 @@ impl ImplicitConductionChain<'_> {
         }
         checkpoint()?;
         Ok(error)
+    }
+}
+
+impl<'a> AdaptiveConductionStepper for ImplicitConductionChain<'a> {
+    type Workspace = ImplicitConductionWorkspace;
+    type Observer = ConductionObserver<'a>;
+
+    fn cell_ids(&self) -> &[CellId] {
+        &self.ids
+    }
+    fn workspace_cells(workspace: &Self::Workspace) -> usize {
+        workspace.cells()
+    }
+    fn observer(&self) -> Self::Observer {
+        self.conduction.clone()
+    }
+
+    fn admit(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), ImplicitConductionError> {
+        ImplicitConductionChain::admit(self, thermal, checkpoint)
+    }
+
+    fn observable(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+    ) -> Result<ImplicitConductionObservables, DepositionError> {
+        let cell = &thermal.cells[&id];
+        self.laws[&cell.material_id].time_observables(cell.specific_h_j_kg)
+    }
+
+    fn solve_interval<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        controls: ImplicitConductionControls,
+        workspace: &mut Self::Workspace,
+        work: &mut ImplicitConductionReport,
+        checkpoint: &mut impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(DepositionSimulation<'m>, EnergyAudit, EntropyAudit, f64), ImplicitConductionError>
+    {
+        self.solve_step(thermal, target_s, controls, workspace, work, checkpoint)
+    }
+}
+
+impl ImplicitConductionChain<'_> {
+    /// Use the shared original-law step-doubling controller. See
+    /// [`AdaptiveConductionStepper::advance_adaptive_to`] for error/event semantics.
+    pub fn advance_adaptive_to<'m>(
+        &self,
+        thermal: &DepositionSimulation<'m>,
+        target_s: f64,
+        controls: AdaptiveImplicitConductionControls,
+        workspace: &mut ImplicitConductionWorkspace,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<
+        (DepositionSimulation<'m>, AdaptiveImplicitConductionReport),
+        AdaptiveImplicitConductionError,
+    > {
+        AdaptiveConductionStepper::advance_adaptive_to(
+            self, thermal, target_s, controls, workspace, checkpoint,
+        )
     }
 }
 

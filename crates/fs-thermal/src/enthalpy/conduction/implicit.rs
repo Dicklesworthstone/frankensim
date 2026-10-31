@@ -762,7 +762,7 @@ impl<'a> ImplicitConductionChain<'a> {
             target_s,
             self.ids.len(),
             controls,
-            workspace,
+            workspace.cells(),
         )?;
         self.admit(thermal, &mut checkpoint)?;
         let mut next = thermal.clone();
@@ -868,7 +868,7 @@ fn validate_advance(
     target_s: f64,
     cells: usize,
     controls: ImplicitConductionControls,
-    workspace: &ImplicitConductionWorkspace,
+    workspace_cells: usize,
 ) -> Result<(), ImplicitConductionError> {
     if !target_s.is_finite()
         || target_s < start_s
@@ -883,7 +883,7 @@ fn validate_advance(
         || controls.maximum_residual_evaluations == 0
         || !nonnegative(controls.cell_tolerance_j)
         || !nonnegative(controls.total_tolerance_j)
-        || workspace.cells() != cells
+        || workspace_cells != cells
     {
         return Err(ImplicitConductionError::Invalid(
             "invalid implicit interval, work, accuracy or workspace controls",

@@ -5672,8 +5672,24 @@ The original residual/material evaluation retains O(cells) trial allocations.
 The solve has no explicit diffusion CFL restriction, but it remains first-order
 backward Euler and requires independent time and spatial refinement. It does
 not silently subdivide an interval; events at the target stay pending. There
-is no trajectory adjoint, condition-number certificate, automatic time-error
-control or unconditional nonlinear-convergence claim.
+is no trajectory adjoint, condition-number certificate or unconditional
+nonlinear-convergence claim. This single-interval solve does not supply
+automatic time-error control.
+
+`BoundLayeredThermalBody::advance_adaptive_to` connects the exact
+integrated-conductivity/contact sparse solver to the existing `fs-thermal`
+adaptive step-doubling owner. Only the accepted two-half-step trajectory
+contributes heat and entropy. Local estimates use changes in original specific
+storage and temperature; independent local and whole-advance joule gates still
+decide physical acceptance. One residual-evaluation ceiling charges accepted,
+rejected and nonconverged endpoint trials, including entropy queries. All cells
+and contacts must already be active. Scheduled Boundary events apply at their
+exact times, including the requested target; topology changes, unsupported phase
+observables, missing sensible entropy, source-domain failures and cancellation
+refuse without publishing a partial prefix. Suggested next step size is explicit.
+These are local temporal estimates, not certified global error bounds, spatial
+error estimates or trajectory adjoints. The single-interval
+`LayeredThermalStep::solve` retains its existing pending-target-event semantics.
 
 Focused tests in `xtask/tests/material_layered_implicit.rs` cover independent
 constant coefficients, sources, convection and reservoir coverage;

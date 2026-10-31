@@ -645,6 +645,17 @@ half-step trajectory is accepted. Comparison trials never contribute physical
 heat, entropy or accepted time, and no Richardson-extrapolated state is formed.
 Unequal representable half spans receive their first-order error correction.
 
+`enthalpy::conduction::implicit::adaptive::AdaptiveConductionStepper` supplies
+a typed endpoint seam for the existing adaptive controller. The original
+conduction chain and material-integrated layered endpoints share the same
+step-doubling comparisons, change-based storage/temperature/phase error scales,
+exact event grid, original energy/entropy accounts and whole-call work ceilings.
+An adapter must retain original cell/material identities, charge every residual
+evaluation and completed nonlinear iteration including refused trials, and
+return accepted original backward-Euler endpoints without internal physical
+subdivision. This interface adds no conductivity, caloric law, extrapolated
+state, global-error certificate or trajectory adjoint.
+
 `ImplicitConductionLaw::time_observables` supplies original temperature and an
 optional original phase mass fraction. The per-cell estimator checks stored
 specific energy, temperature and, when requested, phase inventory. Relative

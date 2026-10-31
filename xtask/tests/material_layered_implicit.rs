@@ -15,6 +15,7 @@ use fs_material::thermal::{
             transient::{
                 LayeredThermalIds, PreparedLayeredThermalBody, TransientLayerSourceQuery,
                 implicit::{
+                    LayeredThermalAdaptiveControls, LayeredThermalAdaptiveError,
                     LayeredThermalLinearization, LayeredThermalSolveControls,
                     LayeredThermalSolveError, LayeredThermalStep, LayeredThermalWorkspace,
                 },
@@ -712,6 +713,279 @@ fn g1_sparse_layer_solve_recovers_first_order_diffusion_decay_under_time_refinem
             "first-order error ratio {ratio}: {errors:?}"
         );
     }
+}
+
+fn adaptive_policy(dt: f64, temperature_tolerance: f64) -> LayeredThermalAdaptiveControls {
+    let mut controls = LayeredThermalAdaptiveControls::default();
+    controls.initial_dt_s = dt;
+    controls.step.maximum_dt_s = dt;
+    controls.step.minimum_dt_s = 1e-6;
+    controls.step.maximum_residual_evaluations = 20_000;
+    controls.step.total_tolerance_j = 1e-6;
+    controls.maximum_trials = 1024;
+    controls.relative_tolerance = 0.0;
+    controls.temperature_absolute_tolerance_k = temperature_tolerance;
+    // These authored fixtures have c = 16,000 J/(kg K). Both error coordinates
+    // matter; neither uses an absolute caloric datum as its relative scale.
+    controls.enthalpy_absolute_tolerance_j_kg = 16_000.0 * temperature_tolerance;
+    controls
+}
+
+#[test]
+fn g1_g3_adaptive_layer_controls_actual_diffusion_error_and_replays_across_datums() {
+    let cards = [analytic_card("adaptive decay", [0.4, 0.0], [2e6, 0.0])];
+    let target = 2000.0;
+    let exact = 310.0 + 20.0 * (-0.001_f64 * target).exp();
+    let mut datum_results = Vec::new();
+    for datum in [300.0, 315.0] {
+        let body = prepare(&cards, &[0.04], &[2], &[], 0.02, [280.0, 340.0], datum);
+        let laws = body.thermal_laws(true).unwrap();
+        let bound = body.bind(&laws, IDS).unwrap();
+        let materials: Vec<_> = bound.materials().into_iter().collect();
+        let initial = timeline(
+            bound
+                .birth_events(0.0, &[330.0, 290.0], CONFIG, || Ok(()))
+                .unwrap(),
+            &materials,
+        );
+        let before = initial.cells().clone();
+        let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+        let mut outcomes = Vec::new();
+        for tolerance in [0.2, 0.0125] {
+            let controls = adaptive_policy(target, tolerance);
+            let (next, report) =
+                bound
+                    .advance_adaptive_to(&initial, target, CONFIG, controls, &mut workspace, || {
+                        Ok(())
+                    })
+                    .unwrap();
+            let t = next.temperature_k(CellId(11)).unwrap();
+            outcomes.push((t, report.accepted_comparisons));
+            assert_eq!(next.time_s(), target);
+            assert!(report.accepted_comparisons > 1 && report.accuracy_rejections > 0);
+            assert!(report.maximum_accepted_normalized_error <= 1.0);
+            assert_eq!(
+                report.solve.energy.substeps,
+                2 * report.accepted_comparisons
+            );
+            // Each linear endpoint uses initial + Newton + entropy evaluations.
+            // All three endpoints, including discarded comparisons, cost work.
+            assert_eq!(report.solve.residual_evaluations, 9 * report.comparisons);
+            close(next.energy_j(), initial.energy_j(), 1e-7);
+            close(report.solve.energy.external_heat_j, 0.0, 0.0);
+            assert!(report.solve.entropy.thermal_storage_change_j_k > 0.0);
+            assert!(report.solve.entropy.conduction_generation_j_k > 0.0);
+            let (replay, repeated) =
+                bound
+                    .advance_adaptive_to(&initial, target, CONFIG, controls, &mut workspace, || {
+                        Ok(())
+                    })
+                    .unwrap();
+            assert_eq!(replay.cells(), next.cells());
+            assert_eq!(repeated, report);
+        }
+        let loose_error = (outcomes[0].0 - exact).abs();
+        let tight_error = (outcomes[1].0 - exact).abs();
+        assert!(tight_error < 0.4 * loose_error && tight_error < 0.2);
+        assert!(outcomes[1].1 > outcomes[0].1);
+        datum_results.push(outcomes[1].0);
+        assert_eq!(initial.cells(), &before);
+        assert_eq!(initial.time_s(), 0.0);
+    }
+    close(datum_results[0], datum_results[1], 1e-8);
+}
+
+#[test]
+fn g1_adaptive_layer_hits_boundary_times_and_counts_only_accepted_heat() {
+    let cards = [analytic_card("scheduled heating", [0.4, 0.0], [2e6, 0.0])];
+    let body = prepare(&cards, &[0.04], &[1], &[], 0.02, [280.0, 340.0], 300.0);
+    let laws = body.thermal_laws(true).unwrap();
+    let bound = body.bind(&laws, IDS).unwrap();
+    let materials: Vec<_> = bound.materials().into_iter().collect();
+    let mut events = bound
+        .birth_events(0.0, &[300.0], CONFIG, || Ok(()))
+        .unwrap();
+    for (time_s, source_w) in [(7.0, 16.0), (20.0, 0.0)] {
+        events.push(TimedEvent {
+            time_s,
+            event: Event::Boundary(
+                CellId(11),
+                Boundary {
+                    ambient_k: 300.0,
+                    htc_w_m2_k: 0.0,
+                    reservoir: None,
+                    source_w,
+                },
+            ),
+        });
+    }
+    let initial = timeline(events, &materials);
+    let mut workspace = LayeredThermalWorkspace::new(1).unwrap();
+    let (next, report) = bound
+        .advance_adaptive_to(
+            &initial,
+            20.0,
+            CONFIG,
+            adaptive_policy(20.0, 1e-6),
+            &mut workspace,
+            || Ok(()),
+        )
+        .unwrap();
+    close(
+        next.temperature_k(CellId(11)).unwrap(),
+        300.0 + 16.0 * 13.0 / 1600.0,
+        1e-11,
+    );
+    close(report.solve.energy.external_heat_j, 208.0, 1e-10);
+    close(report.solve.energy.stored_energy_change_j, 208.0, 1e-7);
+    assert_eq!(report.solve.energy.events, 2);
+    assert_eq!(report.solve.energy.substeps, 4);
+    assert_eq!(report.accepted_comparisons, 2);
+    assert_eq!(report.accuracy_rejections, 0);
+    assert_eq!(next.cells()[&CellId(11)].boundary.source_w, 0.0);
+    assert!(report.solve.entropy.has_unclassified_sources);
+    close(
+        report.solve.entropy.thermal_storage_change_j_k,
+        1600.0 * (next.temperature_k(CellId(11)).unwrap() / 300.0).ln(),
+        1e-10,
+    );
+    // The advance consumes the target Boundary event; a new implicit interval
+    // therefore starts immediately, with no duplicate boundary heat or event.
+    assert!(LayeredThermalStep::new(&bound, &next, 21.0, CONFIG, || Ok(())).is_ok());
+    assert_eq!(initial.cells()[&CellId(11)].boundary.source_w, 0.0);
+}
+
+#[test]
+fn g0_g4_adaptive_layer_preserves_state_on_accuracy_work_domain_and_cancellation_refusal() {
+    let cards = [analytic_card("adaptive budgets", [0.4, 0.0], [2e6, 0.0])];
+    let body = prepare(&cards, &[0.04], &[2], &[], 0.02, [280.0, 340.0], 300.0);
+    let laws = body.thermal_laws(true).unwrap();
+    let bound = body.bind(&laws, IDS).unwrap();
+    let materials: Vec<_> = bound.materials().into_iter().collect();
+    let births = bound
+        .birth_events(0.0, &[330.0, 290.0], CONFIG, || Ok(()))
+        .unwrap();
+    let initial = timeline(births.clone(), &materials);
+    let before = initial.cells().clone();
+    let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+    let controls = adaptive_policy(2000.0, 0.05);
+    let mut calls = 0;
+    let (_, report) = bound
+        .advance_adaptive_to(&initial, 2000.0, CONFIG, controls, &mut workspace, || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+    for stop in [1, calls / 2, calls] {
+        let mut count = 0;
+        let result =
+            bound.advance_adaptive_to(&initial, 2000.0, CONFIG, controls, &mut workspace, || {
+                count += 1;
+                if count == stop {
+                    Err(DepositionError::Cancelled)
+                } else {
+                    Ok(())
+                }
+            });
+        assert!(matches!(
+            result,
+            Err(LayeredThermalAdaptiveError::Implicit(
+                fs_thermal::enthalpy::conduction::implicit::ImplicitConductionError::Thermal(
+                    DepositionError::Cancelled
+                )
+            ))
+        ));
+    }
+    let mut limited = controls;
+    limited.step.maximum_residual_evaluations = report.solve.residual_evaluations - 1;
+    assert!(
+        bound
+            .advance_adaptive_to(&initial, 2000.0, CONFIG, limited, &mut workspace, || Ok(()))
+            .is_err()
+    );
+    limited = controls;
+    limited.maximum_trials = report.comparisons - 1;
+    assert!(matches!(
+        bound.advance_adaptive_to(&initial, 2000.0, CONFIG, limited, &mut workspace, || Ok(())),
+        Err(LayeredThermalAdaptiveError::TrialBudget)
+    ));
+    limited = controls;
+    limited.step.minimum_dt_s = 2000.0;
+    assert!(matches!(
+        bound.advance_adaptive_to(&initial, 2000.0, CONFIG, limited, &mut workspace, || Ok(())),
+        Err(LayeredThermalAdaptiveError::TimeAccuracy { .. })
+    ));
+    limited = controls;
+    limited.phase_fraction_absolute_tolerance = Some(0.01);
+    assert!(
+        bound
+            .advance_adaptive_to(&initial, 2000.0, CONFIG, limited, &mut workspace, || Ok(()))
+            .is_err()
+    );
+
+    // A late topology change is not silently integrated on a stale material
+    // graph, even after a valid prefix of the adaptive trajectory exists.
+    let mut events = births.clone();
+    events.push(TimedEvent {
+        time_s: 1000.0,
+        event: Event::Separation(IDS.first_link),
+    });
+    let changed = timeline(events, &materials);
+    assert!(
+        bound
+            .advance_adaptive_to(
+                &changed,
+                2000.0,
+                CONFIG,
+                controls,
+                &mut workspace,
+                || Ok(())
+            )
+            .is_err()
+    );
+    assert_eq!(changed.cells(), &before);
+    assert_eq!(changed.links(), initial.links());
+
+    let mut heated_events = births;
+    let Event::Birth(cell) = &mut heated_events[0].event else {
+        panic!("birth order")
+    };
+    cell.boundary.source_w = 1e6;
+    let heated = timeline(heated_events, &materials);
+    let heated_before = heated.cells().clone();
+    limited = controls;
+    limited.step.maximum_halvings = 0;
+    assert!(
+        bound
+            .advance_adaptive_to(&heated, 1000.0, CONFIG, limited, &mut workspace, || Ok(()))
+            .is_err()
+    );
+    assert_eq!(heated.cells(), &heated_before);
+    assert_eq!(heated.time_s(), 0.0);
+
+    let no_entropy = body.thermal_laws(false).unwrap();
+    let no_entropy_bound = body.bind(&no_entropy, IDS).unwrap();
+    let no_entropy_materials: Vec<_> = no_entropy_bound.materials().into_iter().collect();
+    let no_entropy_state = timeline(
+        no_entropy_bound
+            .birth_events(0.0, &[330.0, 290.0], CONFIG, || Ok(()))
+            .unwrap(),
+        &no_entropy_materials,
+    );
+    assert!(
+        no_entropy_bound
+            .advance_adaptive_to(
+                &no_entropy_state,
+                2000.0,
+                CONFIG,
+                controls,
+                &mut workspace,
+                || Ok(())
+            )
+            .is_err()
+    );
+    assert_eq!(initial.cells(), &before);
+    assert_eq!(initial.time_s(), 0.0);
 }
 
 #[test]
