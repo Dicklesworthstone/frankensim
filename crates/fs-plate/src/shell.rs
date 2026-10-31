@@ -2,7 +2,8 @@
 //! three PHYSICAL axial rotations, not plate slopes. In a local tangent frame
 //! the DKT slopes are (w_x,w_y)=(-theta_y,theta_x). Drilling stabilization
 //! penalizes rotation relative to membrane spin, preserving rigid motions.
-//! Lumped translational/rotary mass and the existing fs-modal solver are used.
+//! Explicit lumped or consistent P1/director mass and the existing fs-modal
+//! solver are used. Legacy assembly entry points retain their lumped pencils.
 //! Moderate rotations, facet-local material axes; no plastic forming model.
 
 use crate::{PlateError, PlateSection, dkt_stiffness};
@@ -13,6 +14,9 @@ use fs_sparse::{Coo, Csr};
 pub mod section;
 pub use section::ShellSection;
 use section::Section;
+/// Consistent midsurface/director inertia and the numerical drilling gauge.
+pub mod inertia;
+pub use inertia::CstDktMass;
 
 /// Radially sampled shells, thickness fields and explicit surface indentations.
 pub mod profile;
@@ -141,7 +145,7 @@ pub enum ShellSupport {
 pub struct ShellModel {
     /// Membrane, bending and relative-spin stabilization stiffness.
     pub k: Csr,
-    /// Positive lumped translational and rotary inertia.
+    /// Positive translational and rotary inertia in the chosen kinetic model.
     pub m: Csr,
     /// Full DOF (6*node+component) to free coordinate.
     pub dof_map: Vec<Option<usize>>,
@@ -190,12 +194,39 @@ pub fn assemble_shell_materials(mesh: &ShellMesh, sections: &[ShellSection],
     }
     assemble(mesh, sections, false, boundary_nodes, support)
 }
+/// Homogeneous shell with explicit P1/director or legacy lumped inertia.
+/// # Errors
+/// The geometry, section, support and arithmetic refusals of [`assemble_shell`].
+pub fn assemble_shell_with_mass(mesh: &ShellMesh, section: &PlateSection,
+    boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
+    assemble_with_inertia(mesh, core::slice::from_ref(section), true, boundary_nodes,
+        support, DRILLING_ALPHA, mass)
+}
+/// Piecewise material/thickness sections with explicit shell inertia.
+/// # Errors
+/// The same refusals as [`assemble_shell_sections`].
+pub fn assemble_shell_sections_with_mass(mesh: &ShellMesh, sections: &[PlateSection],
+    boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
+    assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass)
+}
+/// Independent membrane/bending sections with explicit shell inertia.
+/// # Errors
+/// The same refusals as [`assemble_shell_materials`].
+pub fn assemble_shell_materials_with_mass(mesh: &ShellMesh, sections: &[ShellSection],
+    boundary_nodes: &[usize], support: ShellSupport, mass: CstDktMass) -> Result<ShellModel, PlateError> {
+    assemble_with_inertia(mesh, sections, false, boundary_nodes, support, DRILLING_ALPHA, mass)
+}
 fn assemble<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
     assemble_with_alpha(mesh, sections, uniform, boundary_nodes, support, DRILLING_ALPHA)
 }
 fn assemble_with_alpha<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
     boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64) -> Result<ShellModel, PlateError> {
+    assemble_with_inertia(mesh, sections, uniform, boundary_nodes, support, drilling_alpha, CstDktMass::Lumped)
+}
+fn assemble_with_inertia<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bool,
+    boundary_nodes: &[usize], support: ShellSupport, drilling_alpha: f64, inertia: CstDktMass)
+    -> Result<ShellModel, PlateError> {
     mesh.validate()?;
     let expected = if uniform { 1 } else { mesh.tris.len() };
     if sections.len() != expected {
@@ -213,11 +244,15 @@ fn assemble_with_alpha<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bo
     let dof_map: Vec<_> = constrained.iter().map(|fixed| if *fixed { None } else { let i=free; free+=1; Some(i) }).collect();
     if free == 0 { return Err(PlateError::BadSection { what: "shell has no free coordinates" }); }
     let mut k = Coo::new(free,free);
-    let mut mass = vec![0.0;free];
+    let mut mass = if inertia == CstDktMass::Lumped { vec![0.0;free] } else { Vec::new() };
+    let mut consistent = Coo::new(free,free);
     for (e,tri) in mesh.tris.iter().enumerate() {
         let section = &sections[if uniform { 0 } else { e }];
         let g = mesh.facet(e)?;
         let local = local_stiffness_with_alpha(&g,section,e,drilling_alpha)?;
+        let local_mass = if inertia == CstDktMass::Consistent {
+            Some(self::inertia::consistent_mass(&g, section.plate())?)
+        } else { None };
         // Transform translations and physical axial rotations with the same R.
         for i in 0..18 {
             let Some(ri) = dof_map[6*tri[i/6]+i%6] else { continue; };
@@ -231,14 +266,37 @@ fn assemble_with_alpha<S: Section>(mesh: &ShellMesh, sections: &[S], uniform: bo
                 }}
                 if !value.is_finite() { return Err(PlateError::BadSection { what: "shell stiffness overflow" }); }
                 k.push(ri,cj,value);
+                if let Some(me) = &local_mass { if i <= j {
+                    let mut value = 0.0;
+                    for p in 0..3 { for q in 0..3 {
+                        value += g.frame[p][i%3]*me[(bi+p)*18+bj+q]*g.frame[q][j%3];
+                    }}
+                    if !value.is_finite() {
+                        return Err(PlateError::BadSection { what: "shell inertia rotation overflow" });
+                    }
+                    if value != 0.0 {
+                        consistent.push(ri,cj,value);
+                        if i != j { consistent.push(cj,ri,value); }
+                    }
+                }}
             }
         }
-        let section = section.plate();
-        let m=section.density*section.thickness*g.area_m2/3.0;
-        let jr=m*section.thickness*section.thickness/12.0;
-        for &node in tri { for c in 0..6 {
-            if let Some(i)=dof_map[6*node+c] { mass[i]+=if c<3 {m} else {jr}; }
-        }}
+        if inertia == CstDktMass::Lumped {
+            let section = section.plate();
+            let m=section.density*section.thickness*g.area_m2/3.0;
+            let jr=m*section.thickness*section.thickness/12.0;
+            for &node in tri { for c in 0..6 {
+                if let Some(i)=dof_map[6*node+c] { mass[i]+=if c<3 {m} else {jr}; }
+            }}
+        }
+    }
+    if inertia == CstDktMass::Consistent {
+        let m = consistent.assemble();
+        if (0..free).any(|r| !m.get(r,r).is_finite() || m.get(r,r) <= 0.0
+            || m.row(r).1.iter().any(|v| !v.is_finite())) {
+            return Err(PlateError::BadSection { what: "shell contains unrepresented or overflowing consistent inertia" });
+        }
+        return Ok(ShellModel { k:k.assemble(),m,dof_map,free });
     }
     let mut m = Coo::new(free,free);
     for (i,&value) in mass.iter().enumerate() {

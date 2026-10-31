@@ -450,6 +450,37 @@ against CST/DKT.
   stepping, check common-scale invariance, undamped energy conservation and
   damped decay, and exercise admission/cancellation/refusal behavior.
 
+### Consistent CST/DKT shell inertia
+
+`shell::CstDktMass::Consistent` integrates the existing P1 midsurface velocity
+and P1 physical director rotations over each flat triangular facet and its
+homogeneous thickness. It retains inter-node mass terms and rotates the
+through-thickness transverse inertia into global axes. This is a declared
+kinetic interpolation on the existing CST/DKT stiffness, not an exact dynamic
+interpolation of the DKT interior or a replacement for the MITC shell model.
+
+All six rigid velocities reproduce the exact mass and spatial inertia of the
+represented triangular prism. The original endpoint-lumped triangle instead
+has four times its continuum centroidal midsurface orbital inertia. Physical
+normal spin is already carried by the midsurface translations; it receives no
+additional fictitious through-thickness rotational inertia in the consistent
+model. The drilling coordinate remains numerically invertible through a
+kinetic gauge on `theta_normal_dot - membrane_spin_dot`, using the original
+`rho*h^3/12` scale. That term vanishes for every rigid motion. It is numerical
+stabilization and is not a material micro-rotation law.
+
+`MeshShell::assemble` consumes consistent inertia by default;
+`MeshShell::assemble_with_mass` admits the original lumped comparison. The
+`assemble_shell[_sections|_materials]_with_mass` entry points expose the same
+choice for original shell data. Existing assembly entry points, generated
+profile defaults, and the frozen bonded piano pencil retain their original
+arithmetic. Stiffness, support maps and original signed shell-tie/offset
+congruences are shared. No laminate first mass moment is guessed from a
+homogeneous section. Tests exercise the actual survey consumer against an
+independent triangular-prism inertia, affine velocity/director integration,
+frame changes, three subdivision levels, sparse positive-definite supported
+mass, and explicit legacy profile equivalence.
+
 ### Three-dimensional beam inertia
 
 `shell::stiffened::timoshenko::{segment_matrices, assemble_beam_chain}` and

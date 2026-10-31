@@ -4,7 +4,7 @@
 //! a second FEM or a reconstruction algorithm. It retains the supplied vertices,
 //! triangles, nodal thickness and per-facet isotropic material. No smoothing,
 //! welding, hole filling, resampling or inferred manufacturing data is applied.
-use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, assemble_shell_sections};
+use super::{ShellMesh, ShellModel, ShellSupport, FacetGeometry, CstDktMass, assemble_shell_sections_with_mass};
 use super::profile::{ProfileBudget, ProfileShell};
 use crate::{PlateError, PlateSection};
 use std::collections::{BTreeMap, BTreeSet};
@@ -141,11 +141,19 @@ impl MeshShell {
         Ok(Self { mesh, sections, nodal_thickness_m, mass_kg: mass, max_edge_m: max_edge })
     }
 
-    /// Assemble exactly the same shell FEM as a generated profile.
+    /// Assemble the existing CST/DKT stiffness with consistent P1/director
+    /// inertia, including the full orientation-dependent through-thickness tensor.
     /// # Errors
     /// Propagates the existing physical-section, support and shell assembly errors.
     pub fn assemble(&self, nodes: &[usize], support: ShellSupport) -> Result<ShellModel, PlateError> {
-        assemble_shell_sections(&self.mesh, &self.sections, nodes, support)
+        self.assemble_with_mass(nodes, support, CstDktMass::Consistent)
+    }
+    /// Explicit inertia choice for comparison with an original lumped pencil.
+    /// # Errors
+    /// The same physical-section and support refusals as [`Self::assemble`].
+    pub fn assemble_with_mass(&self, nodes: &[usize], support: ShellSupport, mass: CstDktMass)
+        -> Result<ShellModel, PlateError> {
+        assemble_shell_sections_with_mass(&self.mesh, &self.sections, nodes, support, mass)
     }
 }
 

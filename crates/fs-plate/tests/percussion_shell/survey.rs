@@ -1,4 +1,4 @@
-use fs_plate::shell::{ShellMesh, ShellSupport};
+use fs_plate::shell::{CstDktMass, ShellMesh, ShellSupport};
 use fs_plate::shell::profile::{ProfileBudget, ProfileStation, revolve};
 use fs_plate::shell::survey::{IsotropicMaterial, SurveyMaterial, MeshShell};
 use fs_plate::shell::reduction::{ReductionBudget, ShellReduction};
@@ -83,7 +83,9 @@ fn a_sampled_profile_preserves_geometry_pencil_nonlinearity_and_two_sided_radiat
         &vec![bronze();p.mesh.tris.len()],budget()).unwrap();
     assert_eq!(sampled.mass_kg,p.mass_kg); assert_eq!(sampled.max_edge_m,p.max_edge_m);
     let old = p.assemble(&[],ShellSupport::Free).unwrap();
-    let new = sampled.assemble(&[],ShellSupport::Free).unwrap();
+    // Profile assembly retains its original pencil; survey defaults now use
+    // consistent inertia, so request the legacy comparison explicitly.
+    let new = sampled.assemble_with_mass(&[],ShellSupport::Free,CstDktMass::Lumped).unwrap();
     for i in 0..old.free { for j in 0..old.free {
         assert_eq!(old.k.get(i,j),new.k.get(i,j)); assert_eq!(old.m.get(i,j),new.m.get(i,j));
     }}
@@ -186,5 +188,112 @@ fn orthotropic_survey_refuses_missing_or_normal_only_material_axes() {
         edited(base, |_, g12, _| *g12=f64::NAN),
     ] {
         assert!(MeshShell::new_with_materials(panel(),vec![0.001;4],&[material;2],budget()).is_err());
+    }
+}
+
+fn inertia_cross(a: [f64;3], b: [f64;3]) -> [f64;3] {
+    [a[1]*b[2]-a[2]*b[1],a[2]*b[0]-a[0]*b[2],a[0]*b[1]-a[1]*b[0]]
+}
+fn inertia_norm2(x: [f64;3]) -> f64 { x.into_iter().map(|v|v*v).sum() }
+fn inertia_triangle() -> ShellMesh {
+    ShellMesh::new(vec![[0.,0.,0.],[0.3,0.,0.],[0.07,0.19,0.]],vec![[0,1,2]]).unwrap()
+}
+
+#[test]
+fn consistent_survey_mass_matches_exact_triangular_prism_rigid_inertia() {
+    let h: f64 = 0.01;
+    for turned in [false,true] {
+        let mut mesh = inertia_triangle();
+        if turned { for p in &mut mesh.nodes {
+            *p=super::rotate(*p);
+            for (x,shift) in p.iter_mut().zip([0.4,-0.2,0.7]) { *x+=shift; }
+        }}
+        let s = shell(mesh,h);
+        let model = s.assemble(&[],ShellSupport::Free).unwrap();
+        let center: [f64;3] = std::array::from_fn(|c|s.mesh.nodes.iter().map(|p|p[c]).sum::<f64>()/3.);
+        let normal = s.mesh.facet(0).unwrap().frame[2];
+        for (v,w) in [([0.2,-0.1,0.3],[0.4,0.5,-0.2]),
+            ([0.;3],[1.,0.,0.]),([0.;3],[0.,1.,0.]),([0.;3],[0.,0.,1.]),
+            ([0.2,-0.1,0.3],[0.;3])] {
+            let mut q=vec![0.;18];
+            for (node,p) in s.mesh.nodes.iter().enumerate() {
+                let orbital=inertia_cross(w,*p);
+                for c in 0..3 {q[6*node+c]=v[c]+orbital[c];q[6*node+3+c]=w[c];}
+            }
+            let wc=inertia_cross(w,center);
+            let vc=std::array::from_fn(|c|v[c]+wc[c]);
+            // Uniform triangular-prism central second moment, independently
+            // integrated in volume: sum delta_i delta_i^T/12 + h² nn^T/12.
+            let orbital:f64=s.mesh.nodes.iter().map(|p|
+                inertia_norm2(inertia_cross(w,std::array::from_fn(|c|p[c]-center[c])))).sum();
+            let exact=s.mass_kg*(inertia_norm2(vc)+orbital/12.
+                +h*h/12.*inertia_norm2(inertia_cross(w,normal)));
+            let got=super::energy(&model.m,&q);
+            assert!((got/exact-1.).abs()<2e-13,"rigid kinetic energy {got} != {exact}");
+        }
+        // The old nodal quadrature has four times the centerline orbital
+        // inertia, plus its fictitious section inertia about the facet normal.
+        let mut spin=vec![0.;18];
+        for (node,p) in s.mesh.nodes.iter().enumerate() {
+            let v=inertia_cross(normal,std::array::from_fn(|c|p[c]-center[c]));
+            spin[6*node..6*node+3].copy_from_slice(&v);
+            spin[6*node+3..6*node+6].copy_from_slice(&normal);
+        }
+        let old=s.assemble_with_mass(&[],ShellSupport::Free,CstDktMass::Lumped).unwrap();
+        let orbital=super::energy(&model.m,&spin);
+        let old_orbital=super::energy(&old.m,&spin)-s.mass_kg*h*h/12.;
+        assert!((old_orbital/orbital-4.).abs()<3e-13);
+        assert_eq!(model.k,old.k);
+    }
+}
+
+fn inertia_affine_state(mesh: &ShellMesh) -> Vec<f64> {
+    mesh.nodes.iter().flat_map(|&[x,y,_]|[
+        0.2+0.3*x-0.4*y,-0.1+0.5*x+0.2*y,0.4-0.3*x+0.6*y,
+        0.3+0.7*x,-0.2-0.6*y,0.4+0.2*x-0.5*y,
+    ]).collect()
+}
+fn inertia_refine(mesh: ShellMesh) -> ShellMesh {
+    let mut nodes=mesh.nodes;let mut edges=std::collections::BTreeMap::new();let mut tris=Vec::new();
+    for [a,b,c] in mesh.tris {
+        let mut midpoint=|i:usize,j:usize| *edges.entry((i.min(j),i.max(j))).or_insert_with(|| {
+            let p=std::array::from_fn(|c|0.5*(nodes[i][c]+nodes[j][c]));nodes.push(p);nodes.len()-1
+        });
+        let (ab,bc,ca)=(midpoint(a,b),midpoint(b,c),midpoint(c,a));
+        tris.extend([[a,ab,ca],[ab,b,bc],[ca,bc,c],[ab,bc,ca]]);
+    }
+    ShellMesh::new(nodes,tris).unwrap()
+}
+
+#[test]
+fn affine_kinetic_integral_is_frame_covariant_and_subdivision_invariant() {
+    let h: f64=0.011;let mut mesh=inertia_triangle();
+    let q=inertia_affine_state(&mesh);let area=0.3*0.19/2.;let rho=bronze().density_kg_m3;
+    // Integral of an affine scalar squared, evaluated from its three vertex
+    // values. The independent physical law is |v|² + h²|theta x n|²/12.
+    let square=|values:[f64;3]|area/12.*(values.iter().map(|v|v*v).sum::<f64>()
+        +values.iter().sum::<f64>().powi(2));
+    let physical=rho*h*((0..3).map(|c|square([q[c],q[6+c],q[12+c]])).sum::<f64>()
+        +h*h/12.*(3..5).map(|c|square([q[c],q[6+c],q[12+c]])).sum::<f64>());
+    // Membrane spin is (v_x-u_y)/2 = 0.45. Only its difference from
+    // drilling rotation enters the explicitly numerical kinetic gauge.
+    let gauge=rho*h*h*h/12.*square([q[5]-0.45,q[11]-0.45,q[17]-0.45]);
+    for _ in 0..3 {
+        let source=shell(mesh.clone(),h);let model=source.assemble(&[],ShellSupport::Free).unwrap();
+        let q=inertia_affine_state(&mesh);
+        assert!((super::energy(&model.m,&q)/(physical+gauge)-1.).abs()<2e-13);
+        let rotated=ShellMesh::new(mesh.nodes.iter().copied().map(super::rotate).collect(),mesh.tris.clone()).unwrap();
+        let other=shell(rotated,h).assemble(&[],ShellSupport::Free).unwrap();
+        let rotated_q:Vec<_>=q.chunks_exact(3).flat_map(|p|super::rotate([p[0],p[1],p[2]])).collect();
+        assert!((super::energy(&other.m,&rotated_q)/(physical+gauge)-1.).abs()<2e-13);
+        let supported=source.assemble(&[0],ShellSupport::Clamped).unwrap();
+        let factor=fs_sparse::SymbolicLdlt::analyze(&supported.m,fs_sparse::DirectOrdering::Amd).unwrap()
+            .factor(&supported.m,&fs_sparse::LdltOptions::default()).unwrap();
+        assert_eq!(factor.inertia().positive,supported.free);
+        assert_eq!(factor.inertia().negative,0);
+        for i in 0..model.free {for j in 0..model.free {
+            assert_eq!(model.m.get(i,j).to_bits(),model.m.get(j,i).to_bits());
+        }}
+        mesh=inertia_refine(mesh);
     }
 }
