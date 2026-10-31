@@ -12,6 +12,8 @@
 //! for the scalar camera-path integrator.
 
 mod interface;
+#[cfg(feature = "photometry")]
+pub(super) use interface::spectral_fresnel_dielectric_polarized_borrowed;
 pub use interface::{
     PolarizedDielectricSample, PolarizedFresnel, attenuate_stokes,
     fresnel_dielectric_polarized, sample_smooth_dielectric_polarized,

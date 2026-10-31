@@ -1,6 +1,9 @@
 //! Focused G0/G3/E2E battery for spectral dielectric path transport.
 #![cfg(feature = "tracer")]
 
+#[path = "dielectric_battery/spectra.rs"]
+mod spectra;
+
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};

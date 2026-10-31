@@ -17,8 +17,8 @@
 use fs_geom::Vec3;
 
 use crate::dielectric::{
-    BeerLambertAbsorption, CauchyIor, DielectricError, DielectricEvent,
-    FresnelDielectric, fresnel_dielectric, sample_smooth_dielectric,
+    BeerLambertAbsorption, DielectricError, DielectricEvent, DielectricIor, FresnelDielectric,
+    fresnel_dielectric, sample_smooth_dielectric,
 };
 use crate::polarization::{Mueller, Stokes};
 
@@ -101,16 +101,34 @@ pub fn fresnel_dielectric_polarized(
     })
 }
 
-/// Evaluate the same Cauchy material laws already used by the spectral tracer.
+/// Evaluate the same phase-index laws already used by the spectral tracer.
 /// Indices are in incident/transmitted order; wavelength is vacuum nanometres.
 pub fn spectral_fresnel_dielectric_polarized(
     incident_cosine: f64,
-    incident: CauchyIor,
-    transmitted: CauchyIor,
+    incident: impl Into<DielectricIor>,
+    transmitted: impl Into<DielectricIor>,
+    wavelength_nm: f64,
+) -> Result<PolarizedFresnel, DielectricError> {
+    spectral_fresnel_dielectric_polarized_borrowed(
+        incident_cosine,
+        &incident.into(),
+        &transmitted.into(),
+        wavelength_nm,
+    )
+}
+
+// A spectral filter converts each input law once, then borrows it across bins.
+// This keeps inline index tables out of the per-bin conversion path.
+pub(in crate::polarization) fn spectral_fresnel_dielectric_polarized_borrowed(
+    incident_cosine: f64,
+    incident: &DielectricIor,
+    transmitted: &DielectricIor,
     wavelength_nm: f64,
 ) -> Result<PolarizedFresnel, DielectricError> {
     fresnel_dielectric_polarized(
-        incident_cosine, incident.eval(wavelength_nm)?, transmitted.eval(wavelength_nm)?,
+        incident_cosine,
+        incident.eval(wavelength_nm)?,
+        transmitted.eval(wavelength_nm)?,
     )
 }
 
@@ -176,6 +194,7 @@ pub fn attenuate_stokes(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dielectric::{CauchyIor, DielectricIorSample, TabulatedIor};
 
     fn close(a: f64, b: f64) {
         assert!((a - b).abs() < 2e-12, "{a} != {b}");
@@ -272,5 +291,32 @@ mod tests {
         assert!(fresnel_dielectric_polarized(f64::NAN, 1.0, 1.5).is_err());
         assert!(fresnel_dielectric_polarized(0.5, 0.0, 1.5).is_err());
         assert!(spectral_fresnel_dielectric_polarized(0.5, air, air, 100.0).is_err());
+    }
+
+    #[test]
+    fn tabulated_phase_indices_preserve_polarized_spectral_power() {
+        let air = CauchyIor::try_constant(1.0).unwrap();
+        let indices = [1.61, 1.60, 1.59, 1.58, 1.57, 1.575, 1.56, 1.55, 1.54];
+        let sampled = TabulatedIor::try_new(core::array::from_fn(|bin| {
+            DielectricIorSample::try_new(380.0 + 50.0 * bin as f64, indices[bin]).unwrap()
+        }))
+        .unwrap();
+        let law = DielectricIor::from(sampled);
+        let polarized = Stokes::try_new(1.0, 0.3, 0.4, 0.5).unwrap();
+        for (bin, index) in indices.into_iter().enumerate() {
+            let wavelength = 380.0 + 50.0 * bin as f64;
+            let actual = spectral_fresnel_dielectric_polarized(0.6, air, &law, wavelength).unwrap();
+            let expected = fresnel_dielectric_polarized(0.6, 1.0, index).unwrap();
+            assert_eq!(actual, expected);
+            let reflected = actual.reflection.apply(polarized);
+            let transmitted = actual.transmission.apply(polarized);
+            close(reflected.i + transmitted.i, polarized.i);
+        }
+        let midpoint = spectral_fresnel_dielectric_polarized(0.6, air, sampled, 405.0).unwrap();
+        assert_eq!(
+            midpoint,
+            fresnel_dielectric_polarized(0.6, 1.0, 0.5 * (indices[0] + indices[1])).unwrap()
+        );
+        assert!(spectral_fresnel_dielectric_polarized(0.6, air, &law, 379.0).is_err());
     }
 }

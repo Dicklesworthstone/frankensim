@@ -3426,8 +3426,17 @@ fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
                     );
                     return;
                 }
+                DielectricIor::Tabulated(_) => {
+                    hasher.update(&[5]);
+                    hasher.update(
+                        Material::Dielectric { glass, surface }
+                            .content_identity()
+                            .as_bytes(),
+                    );
+                    return;
+                }
             }
-            match glass.absorption().parameters() {
+            match glass.absorption_ref().parameters() {
                 BeerLambertParameters::Clear => hasher.update(&[0]),
                 BeerLambertParameters::Constant { extinction_per_m } => {
                     hasher.update(&[1]);

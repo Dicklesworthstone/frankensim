@@ -4,7 +4,8 @@
 //! wavelengths are vacuum nanometres, Cauchy coefficients use micrometres,
 //! extinction is in inverse metres, directions point away from the surface,
 //! and sampled transmission uses radiance transport.  Presets are explicitly
-//! representative rather than measured assets.
+//! representative rather than measured assets. Tabulated phase indices and
+//! bulk absorption retain their spectral samples without an RGB conversion.
 
 use fs_geom::Vec3;
 use fs_math::det;
@@ -16,6 +17,11 @@ const MIN_ROUGHNESS_ALPHA: f64 = 1.0e-4;
 const MAX_ROUGHNESS_ALPHA: f64 = 1.0;
 const MAX_GLASS_IOR: f64 = 3.0;
 const UNIT_TOLERANCE: f64 = 2.0e-10;
+
+/// Fixed number of knots in a visible dielectric phase-index table.
+pub const DIELECTRIC_SPECTRAL_SAMPLE_COUNT: usize = 9;
+/// Largest admitted interval between successive phase-index knots (nm).
+pub const MAX_DIELECTRIC_KNOT_SPAN_NM: f64 = 100.0;
 
 /// Refusal from validated dielectric construction or analytic evaluation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -30,6 +36,12 @@ pub enum DielectricError {
     InvalidRoughness,
     /// A wavelength was outside the tracer's declared visible interval.
     InvalidWavelength,
+    /// Spectral knots did not strictly span 380--780 nm, or an interval
+    /// exceeded the declared interpolation envelope.
+    InvalidTable,
+    /// Adjacent tabulated phase-index intervals have different slopes at the
+    /// requested interior knot, so no unique group index exists there.
+    UndefinedGroupIndex,
     /// A direction or normal was non-finite, non-unit, or oriented outside the
     /// interface convention.
     InvalidDirection,
@@ -45,6 +57,8 @@ impl core::fmt::Display for DielectricError {
             Self::InvalidAbsorption => "invalid Beer-Lambert absorption",
             Self::InvalidRoughness => "invalid dielectric GGX roughness",
             Self::InvalidWavelength => "wavelength is outside the visible tracer interval",
+            Self::InvalidTable => "invalid dielectric spectral table",
+            Self::UndefinedGroupIndex => "group index is undefined at this dielectric table knot",
             Self::InvalidDirection => "invalid dielectric direction frame",
             Self::InvalidInterface => "invalid dielectric interface parameters",
         })
@@ -98,13 +112,13 @@ impl CauchyIor {
     }
 
     /// Evaluate the phase index at a visible vacuum wavelength in nanometres.
-    pub fn eval(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         validate_wavelength(wavelength_nm)?;
         Ok(self.eval_unchecked(wavelength_nm))
     }
 
     /// Narrowband group index `n_g = n - lambda dn/dlambda`.
-    pub fn group_index(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    pub fn group_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         validate_wavelength(wavelength_nm)?;
         let wavelength_um = wavelength_nm * 1.0e-3;
         let inverse_square = 1.0 / (wavelength_um * wavelength_um);
@@ -121,7 +135,7 @@ impl CauchyIor {
 
     /// Whether refraction direction varies over the visible interval.
     #[must_use]
-    pub fn is_dispersive(self) -> bool {
+    pub fn is_dispersive(&self) -> bool {
         self.b_um2.to_bits() != 0.0_f64.to_bits() || self.c_um4.to_bits() != 0.0_f64.to_bits()
     }
 
@@ -187,7 +201,7 @@ impl SellmeierIor {
     }
 
     /// Evaluate the visible-band absolute phase index at a vacuum wavelength.
-    pub fn eval(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         validate_wavelength(wavelength_nm)?;
         let wavelength_um = wavelength_nm * 1.0e-3;
         let square = wavelength_um * wavelength_um;
@@ -208,7 +222,7 @@ impl SellmeierIor {
     /// Refraction uses the phase index returned by [`Self::eval`]. This
     /// derivative exposes dispersive propagation diagnostics, not a transient
     /// light-transport or pulse-broadening solver.
-    pub fn group_index(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    pub fn group_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         let phase = self.eval(wavelength_nm)?;
         let wavelength_um = wavelength_nm * 1.0e-3;
         let square = wavelength_um * wavelength_um;
@@ -233,7 +247,7 @@ impl SellmeierIor {
 
     /// Whether the phase index changes over the admitted visible interval.
     #[must_use]
-    pub fn is_dispersive(self) -> bool {
+    pub fn is_dispersive(&self) -> bool {
         self.strengths
             .into_iter()
             .zip(self.resonances_um2)
@@ -241,51 +255,175 @@ impl SellmeierIor {
     }
 }
 
-/// One spectral phase-index law shared by all dielectric transport paths.
+/// One absolute dielectric phase-index measurement or model sample.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DielectricIorSample {
+    wavelength_nm: f64,
+    index: f64,
+}
+
+impl DielectricIorSample {
+    /// Construct a visible-band sample with an absolute index in `[1, 3]`.
+    pub fn try_new(wavelength_nm: f64, index: f64) -> Result<Self, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        if !index.is_finite() || !(1.0..=MAX_GLASS_IOR).contains(&index) {
+            return Err(DielectricError::InvalidIor);
+        }
+        Ok(Self {
+            wavelength_nm,
+            index,
+        })
+    }
+
+    /// Vacuum wavelength in nanometres.
+    #[must_use]
+    pub const fn wavelength_nm(self) -> f64 {
+        self.wavelength_nm
+    }
+
+    /// Absolute real phase index, not an index relative to air.
+    #[must_use]
+    pub const fn index(self) -> f64 {
+        self.index
+    }
+}
+
+/// Bounded piecewise-linear phase dispersion over the complete visible band.
+///
+/// No Cauchy fit, monotonicity assumption or extrapolation is applied. Samples
+/// define an isotropic real-index geometric-optics model; they do not establish
+/// anisotropy or a strongly absorbing complex-interface model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct TabulatedIor {
+    samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
+}
+
+impl TabulatedIor {
+    /// Admit nine ordered knots with exact 380/780 nm endpoints and no gap
+    /// larger than [`MAX_DIELECTRIC_KNOT_SPAN_NM`].
+    pub fn try_new(
+        samples: [DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
+    ) -> Result<Self, DielectricError> {
+        validate_table_wavelengths(samples.map(DielectricIorSample::wavelength_nm))?;
+        Ok(Self { samples })
+    }
+
+    /// Retained phase-index samples, in increasing vacuum-wavelength order.
+    #[must_use]
+    pub const fn samples(&self) -> &[DielectricIorSample; DIELECTRIC_SPECTRAL_SAMPLE_COUNT] {
+        &self.samples
+    }
+
+    /// Evaluate the absolute phase index without extending the support band.
+    pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        Ok(self.eval_unchecked(wavelength_nm))
+    }
+
+    /// Group index `n_g = n - lambda dn/dlambda` of the declared linear law.
+    ///
+    /// Each open interval has its exact linear derivative. An interior knot
+    /// admits a derivative only when the slopes on both sides are equal;
+    /// otherwise this returns [`DielectricError::UndefinedGroupIndex`]. At
+    /// 380/780 nm the one-sided derivative inside the support band is used.
+    /// This describes the interpolant, not an inferred smooth material law.
+    pub fn group_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        let upper = self
+            .samples
+            .partition_point(|sample| sample.wavelength_nm < wavelength_nm)
+            .clamp(1, DIELECTRIC_SPECTRAL_SAMPLE_COUNT - 1);
+        let lo = self.samples[upper - 1];
+        let hi = self.samples[upper];
+        let slope = (hi.index - lo.index) / (hi.wavelength_nm - lo.wavelength_nm);
+        if wavelength_nm == hi.wavelength_nm && upper + 1 < self.samples.len() {
+            let next = self.samples[upper + 1];
+            let next_slope = (next.index - hi.index) / (next.wavelength_nm - hi.wavelength_nm);
+            if slope != next_slope {
+                return Err(DielectricError::UndefinedGroupIndex);
+            }
+        }
+        Ok(self.eval_unchecked(wavelength_nm) - wavelength_nm * slope)
+    }
+
+    /// Whether any retained phase-index sample differs from the first.
+    #[must_use]
+    pub fn is_dispersive(&self) -> bool {
+        self.samples[1..]
+            .iter()
+            .any(|sample| sample.index.to_bits() != self.samples[0].index.to_bits())
+    }
+
+    fn eval_unchecked(&self, wavelength_nm: f64) -> f64 {
+        interpolate_spectral_table(wavelength_nm, |i| {
+            (self.samples[i].wavelength_nm, self.samples[i].index)
+        })
+    }
+}
+
+/// The phase-index law used by every dielectric transport path.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum DielectricIor {
-    /// Positive visible-band Cauchy approximation.
+    /// Nonnegative-coefficient Cauchy dispersion in micrometre units.
     Cauchy(CauchyIor),
     /// Transparent-band Sellmeier oscillator model.
     Sellmeier(SellmeierIor),
+    /// Explicit visible-band absolute phase-index samples.
+    Tabulated(TabulatedIor),
 }
 
 impl DielectricIor {
     /// Absolute phase index used by Fresnel and Snell transport.
-    pub fn eval(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    pub fn eval(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         match self {
-            Self::Cauchy(law) => law.eval(wavelength_nm),
-            Self::Sellmeier(law) => law.eval(wavelength_nm),
+            Self::Cauchy(ior) => ior.eval(wavelength_nm),
+            Self::Sellmeier(ior) => ior.eval(wavelength_nm),
+            Self::Tabulated(ior) => ior.eval(wavelength_nm),
         }
     }
 
     /// Narrowband group index; geometry and Fresnel still use the phase index.
-    pub fn group_index(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    /// A table knot with unequal adjacent slopes has no unique group index.
+    pub fn group_index(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         match self {
-            Self::Cauchy(law) => law.group_index(wavelength_nm),
-            Self::Sellmeier(law) => law.group_index(wavelength_nm),
+            Self::Cauchy(ior) => ior.group_index(wavelength_nm),
+            Self::Sellmeier(ior) => ior.group_index(wavelength_nm),
+            Self::Tabulated(ior) => ior.group_index(wavelength_nm),
         }
     }
 
-    /// Whether the phase index varies over the visible band.
+    /// Whether wavelength-dependent ray directions can occur.
     #[must_use]
-    pub fn is_dispersive(self) -> bool {
+    pub fn is_dispersive(&self) -> bool {
         match self {
-            Self::Cauchy(law) => law.is_dispersive(),
-            Self::Sellmeier(law) => law.is_dispersive(),
+            Self::Cauchy(ior) => ior.is_dispersive(),
+            Self::Sellmeier(ior) => ior.is_dispersive(),
+            Self::Tabulated(ior) => ior.is_dispersive(),
         }
     }
 }
 
 impl From<CauchyIor> for DielectricIor {
-    fn from(law: CauchyIor) -> Self {
-        Self::Cauchy(law)
+    fn from(ior: CauchyIor) -> Self {
+        Self::Cauchy(ior)
     }
 }
 
 impl From<SellmeierIor> for DielectricIor {
-    fn from(law: SellmeierIor) -> Self {
-        Self::Sellmeier(law)
+    fn from(ior: SellmeierIor) -> Self {
+        Self::Sellmeier(ior)
+    }
+}
+
+impl From<TabulatedIor> for DielectricIor {
+    fn from(ior: TabulatedIor) -> Self {
+        Self::Tabulated(ior)
+    }
+}
+
+impl From<&DielectricIor> for DielectricIor {
+    fn from(ior: &DielectricIor) -> Self {
+        *ior
     }
 }
 
@@ -436,7 +574,7 @@ impl BeerLambertAbsorption {
     /// The resulting alpha knots are interpolated linearly, exactly as in
     /// [Self::try_from_spectral_extinction]; this does not fit or reconstruct
     /// a continuous complex-index law between the supplied samples. Interface
-    /// optics retain the separate real Cauchy index and weakly absorbing
+    /// optics retain the separate real phase index and weakly absorbing
     /// dielectric approximation; strongly absorbing conductors use their
     /// complex-index Fresnel owner.
     pub fn try_from_spectral_extinction_index(
@@ -581,8 +719,20 @@ impl DielectricGlass {
         absorption: BeerLambertAbsorption,
         provenance: GlassProvenance,
     ) -> Self {
+        Self::with_ior(ior.into(), absorption, provenance)
+    }
+
+    /// Construct a homogeneous medium from an explicit phase-index law and
+    /// bulk absorption. The real-index interface plus Beer-Lambert interior
+    /// is the existing geometric-optics approximation, not a complex Snell law.
+    #[must_use]
+    pub const fn with_ior(
+        ior: DielectricIor,
+        absorption: BeerLambertAbsorption,
+        provenance: GlassProvenance,
+    ) -> Self {
         Self {
-            ior: ior.into(),
+            ior,
             absorption,
             provenance,
         }
@@ -634,8 +784,8 @@ impl DielectricGlass {
 
     /// Spectral phase-index law.
     #[must_use]
-    pub const fn ior(self) -> DielectricIor {
-        self.ior
+    pub const fn ior(&self) -> &DielectricIor {
+        &self.ior
     }
 
     /// Homogeneous absorption law.
@@ -1060,6 +1210,44 @@ fn validate_wavelength(wavelength_nm: f64) -> Result<(), DielectricError> {
     } else {
         Err(DielectricError::InvalidWavelength)
     }
+}
+
+fn validate_table_wavelengths(
+    wavelengths: [f64; DIELECTRIC_SPECTRAL_SAMPLE_COUNT],
+) -> Result<(), DielectricError> {
+    if wavelengths[0].to_bits() != LAMBDA_MIN.to_bits()
+        || wavelengths[DIELECTRIC_SPECTRAL_SAMPLE_COUNT - 1].to_bits() != LAMBDA_MAX.to_bits()
+        || wavelengths.windows(2).any(|pair| {
+            let span = pair[1] - pair[0];
+            !span.is_finite() || span <= 0.0 || span > MAX_DIELECTRIC_KNOT_SPAN_NM
+        })
+    {
+        Err(DielectricError::InvalidTable)
+    } else {
+        Ok(())
+    }
+}
+
+// At most eight intervals, with no allocation or unbounded search on a path.
+// Return retained values exactly at knots so source samples survive evaluation.
+fn interpolate_spectral_table(wavelength_nm: f64, sample: impl Fn(usize) -> (f64, f64)) -> f64 {
+    let mut lower = sample(0);
+    if wavelength_nm == lower.0 {
+        return lower.1;
+    }
+    for i in 1..DIELECTRIC_SPECTRAL_SAMPLE_COUNT {
+        let upper = sample(i);
+        if wavelength_nm == upper.0 {
+            return upper.1;
+        }
+        if wavelength_nm < upper.0 {
+            let fraction = (wavelength_nm - lower.0) / (upper.0 - lower.0);
+            return lower.1 + fraction * (upper.1 - lower.1);
+        }
+        lower = upper;
+    }
+    // Public callers reject every wavelength outside the inclusive band.
+    lower.1
 }
 
 fn validate_interface_scalar(
@@ -1819,6 +2007,141 @@ mod tests {
                 .expect("green transmission")
                 > 0.9
         );
+    }
+
+    #[test]
+    fn tabulated_phase_index_drives_snell_without_a_cauchy_fit() {
+        let indices = [1.56, 1.53, 1.50, 1.49, 1.51, 1.48, 1.47, 1.46, 1.45];
+        let samples = core::array::from_fn(|i| {
+            DielectricIorSample::try_new(380.0 + 50.0 * i as f64, indices[i]).unwrap()
+        });
+        let table = TabulatedIor::try_new(samples).unwrap();
+        assert_eq!(table.samples(), &samples);
+        assert!(table.is_dispersive());
+        let glass = DielectricGlass::with_ior(
+            DielectricIor::Tabulated(table),
+            BeerLambertAbsorption::CLEAR,
+            GlassProvenance::Custom,
+        );
+        assert!(glass.ior().is_dispersive());
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wo = Vec3::new(0.6, 0.0, 0.8);
+        for sample in samples {
+            let index = glass.ior().eval(sample.wavelength_nm()).unwrap();
+            assert_eq!(index.to_bits(), sample.index().to_bits());
+            let refracted = sample_smooth_dielectric(normal, wo, 1.0, index, 0.99).unwrap();
+            assert_eq!(refracted.event, DielectricEvent::Transmission);
+            assert_close(
+                -refracted.direction.x * index,
+                0.6,
+                3.0e-15,
+                "tabulated Snell tangential invariant",
+            );
+        }
+        assert_close(
+            table.eval(555.0).unwrap(),
+            1.50,
+            2.0e-15,
+            "spectral interpolation",
+        );
+
+        // A constant table must not trigger unnecessary spectral path splitting.
+        let constant = TabulatedIor::try_new(core::array::from_fn(|i| {
+            DielectricIorSample::try_new(380.0 + 50.0 * i as f64, 1.5).unwrap()
+        }))
+        .unwrap();
+        assert!(!DielectricIor::Tabulated(constant).is_dispersive());
+        for wavelength in [379.999, 780.001, f64::NAN, f64::INFINITY] {
+            assert_eq!(
+                glass.ior().eval(wavelength),
+                Err(DielectricError::InvalidWavelength)
+            );
+        }
+    }
+
+    #[test]
+    fn tabulated_group_index_uses_interval_derivatives_and_refuses_cusps() {
+        let mut samples = core::array::from_fn(|i| {
+            DielectricIorSample::try_new(380.0 + 50.0 * i as f64, 2.5 - 0.0625 * i as f64)
+                .expect("linear phase-index samples")
+        });
+        let line = TabulatedIor::try_new(samples).expect("linear visible-band table");
+        let glass =
+            DielectricGlass::new(line, BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
+        for wavelength in [380.0, 405.0, 430.0, 555.0, 780.0] {
+            assert_close(
+                glass
+                    .ior()
+                    .group_index(wavelength)
+                    .expect("linear derivative"),
+                2.975,
+                1.0e-15,
+                "linear group index including one-sided endpoints",
+            );
+        }
+        samples[4] = DielectricIorSample::try_new(580.0, 2.28125).expect("cusp sample");
+        let law = DielectricIor::from(TabulatedIor::try_new(samples).expect("nonlinear table"));
+        assert_eq!(law.eval(580.0), Ok(2.28125));
+        assert_eq!(
+            law.group_index(580.0),
+            Err(DielectricError::UndefinedGroupIndex)
+        );
+        for wavelength in [405.0, 555.0, 605.0, 755.0] {
+            let step = 0.001;
+            let derivative = (law.eval(wavelength + step).unwrap()
+                - law.eval(wavelength - step).unwrap())
+                / (2.0 * step);
+            assert_close(
+                law.group_index(wavelength).expect("interval derivative"),
+                law.eval(wavelength).unwrap() - wavelength * derivative,
+                2.0e-10,
+                "tabulated group index agrees with phase derivative",
+            );
+        }
+        for wavelength in [379.0, 781.0, f64::NAN] {
+            assert_eq!(
+                law.group_index(wavelength),
+                Err(DielectricError::InvalidWavelength)
+            );
+        }
+    }
+
+    #[test]
+    fn dielectric_spectral_tables_refuse_incomplete_or_invalid_support() {
+        let indices = core::array::from_fn(|i| {
+            DielectricIorSample::try_new(380.0 + 50.0 * i as f64, 1.5).unwrap()
+        });
+        for replacement in [
+            DielectricIorSample::try_new(381.0, 1.5).unwrap(),
+            indices[1],
+        ] {
+            let mut invalid = indices;
+            invalid[0] = replacement;
+            assert_eq!(
+                TabulatedIor::try_new(invalid),
+                Err(DielectricError::InvalidTable)
+            );
+        }
+        let mut reversed = indices;
+        reversed.swap(3, 4);
+        assert_eq!(
+            TabulatedIor::try_new(reversed),
+            Err(DielectricError::InvalidTable)
+        );
+        let mut gap = indices;
+        gap[1] = DielectricIorSample::try_new(381.0, 1.5).unwrap();
+        gap[2] = DielectricIorSample::try_new(382.0, 1.5).unwrap();
+        assert_eq!(
+            TabulatedIor::try_new(gap),
+            Err(DielectricError::InvalidTable)
+        );
+
+        for invalid in [0.99, 3.01, f64::INFINITY, f64::NAN] {
+            assert_eq!(
+                DielectricIorSample::try_new(550.0, invalid),
+                Err(DielectricError::InvalidIor)
+            );
+        }
     }
 
     #[test]

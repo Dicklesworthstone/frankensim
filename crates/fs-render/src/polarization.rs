@@ -169,10 +169,10 @@ pub mod photometry {
 
     use core::f64::consts::{PI, TAU};
 
-    use crate::dielectric::{CauchyIor, DielectricEvent};
+    use crate::dielectric::{DielectricEvent, DielectricIor};
     use crate::photometry::source::{PhotometricSource, SPECTRAL_BINS, SourceError, wavelength_nm};
+    use crate::polarization::dielectric::spectral_fresnel_dielectric_polarized_borrowed;
     use crate::polarization::{Mueller, Stokes};
-    use crate::polarization::dielectric::spectral_fresnel_dielectric_polarized;
 
     /// Precomputed passive optics at the existing photometric quadrature bins.
     /// Construction is restricted to physical optical elements, not arbitrary
@@ -244,18 +244,24 @@ pub mod photometry {
         /// Interface losses and walk-off are deliberately not inferred.
         pub fn waveplate(
             angle_rad: f64,
-            principal: CauchyIor,
-            perpendicular: CauchyIor,
+            principal: impl Into<DielectricIor>,
+            perpendicular: impl Into<DielectricIor>,
             thickness_m: f64,
         ) -> Result<Self, SourceError> {
             if !thickness_m.is_finite() || thickness_m < 0.0 {
                 return Err(SourceError::InvalidFilter);
             }
+            let principal = principal.into();
+            let perpendicular = perpendicular.into();
             let mut phase = [0.0; SPECTRAL_BINS];
             for (bin, value) in phase.iter_mut().enumerate() {
                 let wavelength = wavelength_nm(bin);
-                let a = principal.eval(wavelength).map_err(|_| SourceError::InvalidFilter)?;
-                let b = perpendicular.eval(wavelength).map_err(|_| SourceError::InvalidFilter)?;
+                let a = principal
+                    .eval(wavelength)
+                    .map_err(|_| SourceError::InvalidFilter)?;
+                let b = perpendicular
+                    .eval(wavelength)
+                    .map_err(|_| SourceError::InvalidFilter)?;
                 *value = TAU * ((b - a) * thickness_m / (wavelength * 1e-9));
                 if !value.is_finite() {
                     return Err(SourceError::NumericalRange);
@@ -267,17 +273,24 @@ pub mod photometry {
         /// One Fresnel power channel at a fixed incidence angle, in s/p frames.
         /// Reflection and transmission can be applied to separate copies of the
         /// original source; the caller owns the corresponding outgoing placement.
+        /// Both indices use the native Cauchy, Sellmeier or tabulated phase law.
         pub fn dielectric_channel(
             incident_cosine: f64,
-            incident: CauchyIor,
-            transmitted: CauchyIor,
+            incident: impl Into<DielectricIor>,
+            transmitted: impl Into<DielectricIor>,
             event: DielectricEvent,
         ) -> Result<Self, SourceError> {
+            let incident = incident.into();
+            let transmitted = transmitted.into();
             let mut matrices = [Mueller::IDENTITY; SPECTRAL_BINS];
             for (bin, matrix) in matrices.iter_mut().enumerate() {
-                let f = spectral_fresnel_dielectric_polarized(
-                    incident_cosine, incident, transmitted, wavelength_nm(bin),
-                ).map_err(|_| SourceError::InvalidFilter)?;
+                let f = spectral_fresnel_dielectric_polarized_borrowed(
+                    incident_cosine,
+                    &incident,
+                    &transmitted,
+                    wavelength_nm(bin),
+                )
+                .map_err(|_| SourceError::InvalidFilter)?;
                 *matrix = match event {
                     DielectricEvent::Reflection => f.reflection,
                     DielectricEvent::Transmission => f.transmission,
@@ -376,6 +389,7 @@ pub mod photometry {
     #[cfg(test)]
     mod tests {
         use super::*;
+        use crate::dielectric::{CauchyIor, DielectricIorSample, SellmeierIor, TabulatedIor};
         use crate::instances::RigidTransform;
         use crate::photometry::source::{AngularDistribution, SourceSpectrum};
         use fs_geom::Vec3;
@@ -452,15 +466,51 @@ pub mod photometry {
         #[test]
         fn dispersive_fresnel_channels_close_calibrated_luminous_power() {
             let air = CauchyIor::try_constant(1.0).unwrap();
-            let glass = crate::dielectric::DielectricGlass::representative_crown().ior();
+            let material = crate::dielectric::DielectricGlass::representative_crown();
+            let sampled = DielectricIor::from(
+                TabulatedIor::try_new(core::array::from_fn(|bin| {
+                    DielectricIorSample::try_new(
+                        380.0 + 50.0 * bin as f64,
+                        1.6 - 0.005 * bin as f64,
+                    )
+                    .unwrap()
+                }))
+                .unwrap(),
+            );
             let source = source().with_unpolarized_optics();
-            let r = source.through(&SpectralOptics::dielectric_channel(0.6, air, glass,
-                DielectricEvent::Reflection).unwrap()).unwrap();
-            let t = source.through(&SpectralOptics::dielectric_channel(0.6, air, glass,
-                DielectricEvent::Transmission).unwrap()).unwrap();
-            close(r.intensity_source().flux_lm() + t.intensity_source().flux_lm(), 1000.0);
-            assert!(r.relative_stokes()[0].q > 0.0);
-            assert_ne!(r.relative_stokes()[0].i, r.relative_stokes()[SPECTRAL_BINS - 1].i);
+            for glass in [material.ior(), &sampled] {
+                let r = source
+                    .through(
+                        &SpectralOptics::dielectric_channel(
+                            0.6,
+                            air,
+                            glass,
+                            DielectricEvent::Reflection,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                let t = source
+                    .through(
+                        &SpectralOptics::dielectric_channel(
+                            0.6,
+                            air,
+                            glass,
+                            DielectricEvent::Transmission,
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                close(
+                    r.intensity_source().flux_lm() + t.intensity_source().flux_lm(),
+                    1000.0,
+                );
+                assert!(r.relative_stokes()[0].q > 0.0);
+                assert_ne!(
+                    r.relative_stokes()[0].i,
+                    r.relative_stokes()[SPECTRAL_BINS - 1].i
+                );
+            }
         }
 
         #[test]
@@ -470,8 +520,24 @@ pub mod photometry {
             let bin = 30;
             let thickness = wavelength_nm(bin) * 1e-9 / (4.0 * (1.6 - 1.5));
             let plate = SpectralOptics::waveplate(0.0, a, b, thickness).unwrap();
+            let a_sellmeier = SellmeierIor::try_new([1.25, 0.0, 0.0], [0.0; 3]).unwrap();
+            let b_sampled = DielectricIor::from(
+                TabulatedIor::try_new(core::array::from_fn(|i| {
+                    DielectricIorSample::try_new(380.0 + 50.0 * i as f64, 1.6).unwrap()
+                }))
+                .unwrap(),
+            );
+            assert_eq!(
+                plate.matrices,
+                SpectralOptics::waveplate(0.0, a_sellmeier, &b_sampled, thickness)
+                    .unwrap()
+                    .matrices
+            );
             let linear = [Stokes::try_new(1.0, 0.0, 1.0, 0.0).unwrap(); SPECTRAL_BINS];
-            let out = PolarizedSource::try_new(source(), linear).unwrap().through(&plate).unwrap();
+            let out = PolarizedSource::try_new(source(), linear)
+                .unwrap()
+                .through(&plate)
+                .unwrap();
             close(out.relative_stokes()[bin].v, -1.0);
             close(out.intensity_source().flux_lm(), 1000.0);
             assert!(out.relative_stokes()[0].u.abs() > 0.01);

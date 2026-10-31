@@ -1009,8 +1009,15 @@ impl Material {
                         update_material_scalars(&mut hasher, strengths);
                         update_material_scalars(&mut hasher, resonances_um2);
                     }
+                    DielectricIor::Tabulated(ior) => {
+                        hasher.update(&[4]);
+                        for sample in ior.samples() {
+                            update_material_scalar(&mut hasher, sample.wavelength_nm());
+                            update_material_scalar(&mut hasher, sample.index());
+                        }
+                    }
                 }
-                match glass.absorption().parameters() {
+                match glass.absorption_ref().parameters() {
                     BeerLambertParameters::Clear => hasher.update(&[0]),
                     BeerLambertParameters::Constant { extinction_per_m } => {
                         hasher.update(&[1]);
@@ -1055,8 +1062,8 @@ impl Material {
                 update_material_scalar(&mut hasher, surface.roughness_alpha());
             }
             Self::BrushedConductor { optics, detail } => {
-                // Additive family tag 5 (4 is reserved by the dielectric
-                // provenance byte-space note above). The complete detail
+                // Additive family tag 5 (4 is the tabulated dielectric
+                // phase-index law above). The complete detail
                 // identity binds every shading parameter, so an anisotropy
                 // or spin-mark swap re-keys the material.
                 hasher.update(&[5]);
