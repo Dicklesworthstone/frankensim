@@ -16,6 +16,8 @@
 
 /// Mixed rectangular and circular flow sources through the same fitting owner.
 pub mod mixed;
+/// Finite material-body diffraction through the same rational realization owner.
+pub mod boundary;
 
 use super::{MimoRadiationLimits, MimoRadiationModel};
 use crate::pcm_wav::baffled::openings::CircularOpening;
@@ -205,11 +207,11 @@ pub fn bake_baffled_mimo(
 // One unchanged fitting/certification owner for every physical source sampler.
 // Geometry/material/quadrature admission belongs to each caller before this sweep.
 #[allow(clippy::too_many_arguments)]
-fn fit_source(
+fn fit_source<E: From<BaffledMimoBakeError>>(
     n: usize, mechanics_rate_hz: u32, band_hz: [f64; 2],
     options: BaffledMimoBakeOptions, limits: MimoRadiationLimits, gate: &CancelGate,
-    sample: impl Fn(&[f64], &CancelGate) -> Result<Vec<Vec<C64>>, BaffledMimoBakeError>,
-) -> Result<(MimoModel, BaffledMimoBakeReport), BaffledMimoBakeError> {
+    sample: impl Fn(&[f64], &CancelGate) -> Result<Vec<Vec<C64>>, E>,
+) -> Result<(MimoModel, BaffledMimoBakeReport), E> {
     let count = options.frequency_samples;
     let span = det::ln(band_hz[1] / band_hz[0]);
     let mut train_hz: Vec<_> = (0..count).map(|i|
@@ -301,7 +303,7 @@ fn fit_source(
     // An order that passes unchanged is preferred to any repaired order.
     let Some((impedance, continuous, sampled, maximum_fit_relative_error,
         maximum_held_out_relative_error)) = selected.or(repaired) else {
-        return Err(BaffledMimoBakeError::NoConvergedFit { rungs });
+        return Err(BaffledMimoBakeError::NoConvergedFit { rungs }.into());
     };
     let report = BaffledMimoBakeReport { selected_order: impedance.order(),
         frequency_samples: count, held_out_samples: held_hz.len(),

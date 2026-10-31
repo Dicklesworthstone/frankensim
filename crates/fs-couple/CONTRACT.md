@@ -5240,6 +5240,83 @@ These are authored infinite-baffle fixtures, not real-instrument fidelity or a
 full-band reaction match. Native qualification remains required; rustfmt alone
 does not establish the numerical claims.
 
+### Material-body diffraction in the causal multiport loop
+
+`multiport::bake::boundary::bake_boundary_mimo` supplies the existing causal
+terminal from `fs-bem::observation_transfers::IterativeBoundaryObservation`.
+Every source is an original finite `ApertureVolumeFlow` trace. The retained
+physical boundary response supplies its complete self/mutual impedance with
+all passive material patches and disconnected scatterers present. Its pressure
+is projected against the original unit-flow work basis, so the matrix already
+has Pa s/m^3 units: each entry is conjugated exactly once from exp(-iwt) to the
+fitter's s=+iw convention, without another area factor. Point sources and
+structural velocity coordinates refuse this flow-port adapter.
+
+The existing shared-pole fitting owner remains the numerical implementation.
+Its three requested orders, training/interleaved validation errors, explicit
+source-data causality assumptions, bounded residue repair and continuous versus
+actual mean-ZOH passivity reports remain unchanged. Raw BEM asymmetry stays in
+the error measured against the original matrix; its declared allowance must
+fit within one tenth of the total fit error. A negative source Hermitian-work
+margin below the original 1e-12 normalized tolerance, or an unresolved margin,
+refuses before fitting. There is no sample symmetrization, clipping or added
+damping at this boundary. The fitted proper model approximates propagation
+using shared poles; it does not extract per-entry delays.
+
+Before source solves, the full actual interval
+`[min(Fmin,Fmax/(2*frequency_samples-1)),Fmax]` is checked against native material
+support, the observer's declared resolution frequency and unsampled lossless
+wall singularities. `Fmax` reaches the original mechanical Nyquist frequency.
+The lower observation reconstruction window is never applied to a load.
+Both retained pressure/velocity coefficients, all source-pair matrix entries,
+the complete source-solve count and total source-pair/panel products have
+explicit separate budgets. Original GMRES/material/FMM errors remain typed.
+The shared fitter's own bounded, individually uninterruptible numerical calls
+remain unchanged; source sampling retains native tiled cancellation.
+
+`BoundaryMimoLoad` contains the original `PreparedMimoLoad` and an immutable
+`BoundaryMimoRecord`: exact exterior gas, original source order/operator hash,
+actual nonzero trace-support areas, frequency/clock declarations, numerical
+options, complete fit reports and actual source-sampling statistics. Geometry
+is not relabeled as a circular infinite-baffle model. A prescribed unit-flow
+profile is a work-dual coordinate; its support area alone does not prove a
+geometry/profile match to an arbitrary interior port. Source statistics and
+fit errors do not bound continuum or FMM error, unsampled frequencies, DC or
+below-band source fidelity, loaded poles/decay or nonlinear operating regimes.
+GridOnly remains GridOnly and does not supply an exterior storage certificate.
+Full delay-extracted W3b and the W3c instrument falsifier remain separate work.
+
+`DgPortLoad::new_with_boundary_radiation[_branches]` consumes that original
+terminal on its exact clock and binds every unsealed non-inlet `PortId` to its
+named `ApertureVolumeFlow` in baked matrix order. The existing simultaneous
+held-flow terminal solve retains every self/mutual entry without an additional
+area conversion or feedback delay. Admission checks actual axial/finite-branch
+outlet support area and local/exterior equilibrium pressure, and retains the
+`BoundaryMimoRecord`. Subsequent interior gas changes preserve exterior fit
+and pole history and refuse pressure mismatch atomically. Finite branches
+radiate their actual outer flow, not junction inflow; native branch/DG work and
+storage remain with the original owners.
+
+`boundary_radiation_observer(declaration,bake)` binds the immutable native
+material observation FIR by producer/declaration hashes, exact source order
+and clock, before the first accepted mechanical interval.
+`DgBoundaryRadiationObserver::step` consumes each accepted interval exactly
+once and produces receiver-major pressure/gradient from outward terminal mean
+flows. Duplicate, skipped or changed-source calls refuse without advancing FIR
+history. This observer performs no reaction or refit and retains original
+propagation delays, reconstruction latency, tapers and uncertainty. Mean-flow
+sampling is not an exact reconstruction of the continuous within-step boundary.
+
+Authored source regressions cover original physical matrix units/conjugation
+and coherent work, a real two-source/one-passive-body three-order bake, separate
+fresh-frequency comparisons and original-runtime parity, complete source/work
+caps, native GMRES refusal and porous/lossless support that an observation
+window cannot extend. DG regressions exercise the actual physical source with
+mutual feedback/work, complete port/area/pressure binding, branch distal flow,
+live gas transactions and original-FIR routing/history. These synthetic tests
+require native execution before a passing numerical claim; they do not
+establish measured instrument, complete-band or closed-loop qualification.
+
 ## Frequency-domain branched chart and network port (IRP M2.1-W8)
 
 `tract::network::TractBranch` and `TractChart::network_with_branches` turn a

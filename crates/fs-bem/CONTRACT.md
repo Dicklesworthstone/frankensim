@@ -1492,6 +1492,16 @@ numerical claim. The synthetic bodies do not qualify measured player/chair
 models, open two-sided shells, a full-band compact aperture model or the full
 W9 milestone.
 
+The iterative observer also exposes its exact medium, panel count and declared
+maximum angular frequency for downstream physical load admission.
+`aperture_support_areas_m2` sums original panel areas on each nonzero finite
+unit-flow trace without replacing its velocity profile or renormalizing flow.
+`admit_loading_band_hz` checks the complete positive unwindowed interval against
+native material support and the original resolution declaration, including an
+unsampled lossless zero-impedance resonance. It shares the existing material
+resonance check; the observation window still has no authority to extend a
+physical loading domain.
+
 ## Reciprocal complete source loads and matched receiver transfers
 
 `modal_loading::modal_radiation_loading_reciprocal` exposes the existing

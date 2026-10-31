@@ -11,6 +11,9 @@ pub mod input;
 /// Computed exterior radiation from the actual endpoint geometry and gas.
 pub mod radiation;
 
+/// Unbaffled material diffraction loads and matching pressure observations.
+pub mod boundary_radiation;
+
 /// Finite thermochemical storage and feedback on this complete continuing load.
 pub mod finite_gas;
 
@@ -42,6 +45,7 @@ pub use channel::{
 };
 
 use crate::acoustic_realize::AcousticRealizeError;
+use crate::bernoulli_aperture::radiation::environment::multiport::bake::boundary::BoundaryMimoRecord;
 use crate::bernoulli_aperture::radiation::environment::multiport::source::ComputedBaffledRecord;
 use fs_duct::dg::{
     DgBoundary, DgDuct, DgMultiportResponse, DgPortResponse, DgPropagator, DgState,
@@ -100,6 +104,7 @@ pub struct DgPortLoad {
     last_independent_mouth_frame: Option<DgIndependentMouthFrame>,
     last_independent_mouths_frame: Option<DgIndependentMouthsFrame>,
     radiation_record: Option<ComputedBaffledRecord>,
+    boundary_radiation_record: Option<BoundaryMimoRecord>,
     branches: Vec<DgBranchLoad>,
     branch_coupling: Option<BranchCoupling>,
     last_branch_frames: Vec<DgBranchFrame>,
@@ -241,6 +246,7 @@ impl DgPortLoad {
             last_terminal_frames: Vec::new(), last_driven_mouth_frame: None,
             last_independent_mouth_frame: None, last_independent_mouths_frame: None,
             radiation_record: None,
+            boundary_radiation_record: None,
             branches, branch_coupling, last_branch_frames: Vec::new(),
             terminal_channels: Vec::new(), last_terminal_channel_frames: Vec::new(),
         };

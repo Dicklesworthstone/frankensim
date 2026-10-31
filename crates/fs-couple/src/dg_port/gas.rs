@@ -423,6 +423,17 @@ impl DgPortLoad {
                 ));
             }
         }
+        if let Some(record) = &self.boundary_radiation_record {
+            let pressure = record.gas().pressure.to_bits();
+            for &port in self.terminal_ports() {
+                poll(cancelled)?;
+                if terminal_gas(port)?.pressure.to_bits() != pressure {
+                    return Err(invalid(
+                        "live DG openings and their retained material-diffraction exterior require equal equilibrium pressures",
+                    ));
+                }
+            }
+        }
         let mut terminal_channels = Vec::with_capacity(self.terminal_channels.len());
         let mut channel_reports = Vec::with_capacity(self.terminal_channels.len());
         for channel in &self.terminal_channels {

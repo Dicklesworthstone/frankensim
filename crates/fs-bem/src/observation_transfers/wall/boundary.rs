@@ -170,12 +170,37 @@ impl LocalBoundary {
                 "observation band exceeds local-wall source support",
             ));
         }
+        self.admit_resonances(tau * lowest, highest_omega, false)
+    }
+
+    pub(super) fn admit_physical_band_hz(&self, band: [f64; 2]) -> Result<(), TransferError> {
+        if !band.iter().all(|f| f.is_finite() && *f > 0.0)
+            || band[0] > band[1]
+            || band[0] < self.supported_hz.0
+            || band[1] > self.supported_hz.1
+        {
+            return Err(TransferError::Invalid(
+                "physical load band exceeds local-wall source support",
+            ));
+        }
+        let tau = core::f64::consts::TAU;
+        self.admit_resonances(tau * band[0], tau * band[1], true)
+    }
+
+    fn admit_resonances(
+        &self,
+        lowest: f64,
+        highest: f64,
+        include_lowest: bool,
+    ) -> Result<(), TransferError> {
         for law in &self.laws {
             if let LocalWall::Mechanical(pin) = law
                 && pin.resistance == 0.0
             {
                 let resonance = det::sqrt(pin.stiffness_per_area) / det::sqrt(pin.surface_density);
-                if resonance > tau * lowest && resonance <= highest_omega {
+                if (resonance > lowest || (include_lowest && resonance == lowest))
+                    && resonance <= highest
+                {
                     return Err(TransferError::Invalid(
                         "lossless wall resonance requires a pressure-release boundary owner",
                     ));

@@ -98,6 +98,7 @@ impl IterativeBoundaryObservationBake {
     pub fn solver_options(&self) -> &IterativeOptions {
         &self.solver
     }
+
     pub fn observer(&self) -> Result<ObservationFir, TransferError> {
         self.observation.observer()
     }
@@ -214,6 +215,81 @@ impl<'a> IterativeBoundaryObservation<'a> {
     }
     pub fn solver_options(&self) -> &IterativeOptions {
         &self.solver
+    }
+
+    /// Exact exterior coefficients bound by the source/material declaration.
+    pub fn medium(&self) -> Medium {
+        self.field_geometry().1
+    }
+    pub fn surface_panel_count(&self) -> usize {
+        self.field_geometry().0.areas().len()
+    }
+    pub fn highest_omega_rad_s(&self) -> f64 {
+        self.observation.highest_omega
+    }
+
+    /// Admit an unwindowed physical loading interval before a frequency sweep.
+    /// Every material must support the complete interval; an unsampled lossless
+    /// wall resonance also refuses. Observation windows do not extend support.
+    pub fn admit_loading_band_hz(&self, band: [f64; 2]) -> Result<(), IterativeObservationError> {
+        if core::f64::consts::TAU * band[1] > self.observation.highest_omega {
+            return Err(TransferError::Invalid(
+                "physical load band exceeds the observer's declared resolution frequency",
+            )
+            .into());
+        }
+        self.observation.boundary.admit_physical_band_hz(band)?;
+        Ok(())
+    }
+
+    /// Physical support area of each original unit-flow aperture trace [m^2].
+    /// This sums original panel areas where that trace is nonzero; it does not
+    /// replace the admitted profile by a uniform piston or renormalize its flow.
+    /// Structural and point-source coordinates have no such aperture view.
+    pub fn aperture_support_areas_m2(
+        &self,
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, IterativeObservationError> {
+        poll(gate)?;
+        let Excitation::Surface { owner, .. } = &self.observation.excitation else {
+            return Err(TransferError::Invalid(
+                "aperture support requires finite unit-flow source traces",
+            )
+            .into());
+        };
+        if self
+            .sources()
+            .iter()
+            .any(|source| !matches!(source, SourceId::ApertureVolumeFlow(_)))
+        {
+            return Err(TransferError::Invalid(
+                "aperture support requires only unit-volume-flow coordinates",
+            )
+            .into());
+        }
+        let mut areas = Vec::with_capacity(owner.fields.len());
+        for trace in &owner.fields {
+            let mut area = 0.0;
+            for (panel, (&value, &panel_area)) in
+                trace.iter().zip(owner.surface.areas()).enumerate()
+            {
+                if panel % 256 == 0 {
+                    poll(gate)?;
+                }
+                if value != C64::ZERO {
+                    area += panel_area;
+                }
+            }
+            if !area.is_finite() || area <= 0.0 {
+                return Err(TransferError::Invalid(
+                    "aperture support area is not finite and positive",
+                )
+                .into());
+            }
+            areas.push(area);
+        }
+        poll(gate)?;
+        Ok(areas)
     }
 
     pub fn operator_hash(&self) -> ContentHash {
