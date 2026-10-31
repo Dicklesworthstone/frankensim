@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Native lip-valve renders of the tenor trombone description (pexfp.254, lane P5).
-# Run on trj. The binary must contain `music_render lip` (the brass_loop::performance owner):
+# Run on ts1. The binary must contain `music_render lip` (the brass_loop::performance owner):
 #   SHA12=<sha12 whose snapshot holds these files> BIN_SHA12=<sha12 of a music_render with `lip`> \
 #     data/instruments/descriptions/trombone/render.sh
 #
@@ -12,9 +12,9 @@
 #  * sweep-pNNN: lip pre-stress ramps 0.5 -> 2.0 at a held mouth pressure. A diagnostic, not a note:
 #    it records which regime the passive bore + lip speaks as the lip tightens (the one-dimensional
 #    cut through the blowing-pressure x lip-tension threshold map).
-#  * pramp-tNNN: mouth pressure ramps 0 -> 12 kPa -> 0 at a fixed lip pre-stress. The pressure at which the
-#    note starts on the way up and stops on the way down is the oscillation threshold and the extinction
-#    pressure; their gap is the hysteresis.
+#  * pramp-tNNN: mouth pressure ramps 0 -> 12 kPa -> 0 at a fixed lip pre-stress. A diagnostic: at this rate
+#    the pressures where the note starts and stops are mostly lag around one threshold, the time a small
+#    signal takes to grow and a note takes to decay, so a ramp can't place a sustain (see the rule below).
 #  * hold-tNNN: the same lip held at a fixed pre-stress with an attack (see ATTACK_PRESSURE below). The
 #    player's embouchure setting is the free player input; which setting yields which note is read from
 #    the render afterwards, never set from a pitch.
@@ -50,20 +50,25 @@ OUT=${OUT:-/data/tmp/wa-inst/renders/trombone/$SHA12}
 PIECES=${PIECES:-16}
 DIR=data/instruments/descriptions/trombone
 RATE=19200
-HOLD_TENSIONS=${HOLD_TENSIONS-"5e-1 6e-1 7e-1 8.5e-1 1e0 1.15e0"}
+# Each hold is "pre-stress:sustain-Pa" (see the sustain rule below).
+HOLDS=${HOLDS-"5e-1:6e3 6e-1:6e3 7e-1:6e3 8.5e-1:6e3 1e0:7.132e3 1.15e0:6.22e3"}
 # The first native renders (1.5 kPa holds at pre-stress 0.6 to 1.8, and a ramp to 4 kPa at 1.0) never
 # started the lip: the mouth flow stayed steady and the receiver, which differentiates flow, radiated
 # exactly zero. These ramps find where THIS model's lip first speaks.
 RAMP_TENSIONS=${RAMP_TENSIONS-"7e-1 1e0 1.3e0 1.6e0 2e0 2.5e0"}
 RAMP_PEAK=${RAMP_PEAK:-1.2e4}
-# Held notes use an attack: mouth pressure rises to ATTACK_PRESSURE in 50 ms (above the onset the pressure
-# ramps measured), stays there for ATTACK_SECONDS, then relaxes over 0.5 s to SUSTAIN_PRESSURE (inside the
-# hysteresis band: above the extinction pressure, below the onset). Both pressures come from the model's own
-# measured threshold map, not from a recording and not from a published mf pressure (the published mouth
-# pressures belong to other lips; see the note above).
+# Held notes use an attack: mouth pressure rises to ATTACK_PRESSURE in 50 ms, stays there for ATTACK_SECONDS,
+# then relaxes over 0.5 s to the hold's sustain.
+#
+# The sustain rule. Every hold stood at 6 kPa until the reflection moved to the junction's own sample, which
+# raised the small-signal threshold of two of them: pre-stress 1.0 from 5664 to 6733 Pa, and 1.15 from 8161 to
+# 8460 Pa. A hold left under its threshold keeps the ratio of sustain to threshold it had: 6000 / 5664 x 6733 =
+# 7132 Pa, and 6000 / 8161 x 8460 = 6220 Pa. Every other hold is still above its threshold and stays at 6 kPa.
+# A threshold is the root of this model's linearized voice on its own bore response, not a recording and not a
+# published mf pressure (those belong to other lips; see the note above). Pre-stress 1.15 sat under its
+# threshold before the move too, so the rule keeps a ratio below one and that note dies away.
 ATTACK_PRESSURE=${ATTACK_PRESSURE:-1.2e4}
 ATTACK_SECONDS=${ATTACK_SECONDS:-8e-1}
-SUSTAIN_PRESSURE=${SUSTAIN_PRESSURE:-6e3}
 HOLD_SECONDS=${HOLD_SECONDS:-4}
 SWEEP_PRESSURE=${SWEEP_PRESSURE:-8e3}
 
@@ -105,9 +110,8 @@ compose() {
 }
 
 # compose_pressure_ramp <file> <seconds-up> <peak-pressure-pa> <pre-stress>: mouth pressure ramps
-# 0 -> peak over <seconds-up>, then back to 0 over the same time, at a fixed lip pre-stress. The
-# pressure at which the note starts on the way up and stops on the way down is the oscillation
-# threshold and the extinction pressure; the gap between them is the hysteresis.
+# 0 -> peak over <seconds-up>, then back to 0 over the same time, at a fixed lip pre-stress. See
+# pramp-tNNN at the top for what its start and stop pressures do and don't measure.
 compose_pressure_ramp() {
   local file=$1 up=$2 peak=$3 tension=$4
   {
@@ -121,21 +125,21 @@ compose_pressure_ramp() {
   } > "$file"
 }
 
-# compose_attack <file> <seconds> <pre-stress>: the held-note gesture described above.
+# compose_attack <file> <seconds> <pre-stress> <sustain-pa>: the held-note gesture described above.
 compose_attack() {
-  local file=$1 seconds=$2 tension=$3
+  local file=$1 seconds=$2 tension=$3 sustain=$4
   {
     printf 'frankensim-lip-performance-v1\naudio %d %d\n' "$RATE" $((RATE * seconds))
     head_text
     printf 'schedule\nfrankensim-gesture-schedule-v1\ncontrol_rate_hz\t700\ntracks\t2\n'
     printf 'track\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t2\n'
     printf 'event\t0e0\t5e-2\tpressure-pa\t%s\n' "$ATTACK_PRESSURE"
-    printf 'event\t%s\t5e-1\tpressure-pa\t%s\n' "$ATTACK_SECONDS" "$SUSTAIN_PRESSURE"
+    printf 'event\t%s\t5e-1\tpressure-pa\t%s\n' "$ATTACK_SECONDS" "$sustain"
     printf 'track\tlip\tpre-stress\ninitial\tmultiplier\t%s\nevents\t0\n' "$tension"
   } > "$file"
 }
 
-# At most 8 renders at once (lane budget on the shared trj host).
+# At most 8 renders at once (lane budget on the shared ts1 host).
 MAX_JOBS=8
 render() {
   local name=$1
@@ -151,9 +155,10 @@ for tension in $RAMP_TENSIONS; do
   compose_pressure_ramp "$OUT/pramp-t$tension.performance" 8 "$RAMP_PEAK" "$tension"
   render "pramp-t$tension"
 done
-for tension in $HOLD_TENSIONS; do
+for hold in $HOLDS; do
+  IFS=: read -r tension sustain <<< "$hold"
   name="hold-t${tension}"
-  compose_attack "$OUT/$name.performance" "$HOLD_SECONDS" "$tension"
+  compose_attack "$OUT/$name.performance" "$HOLD_SECONDS" "$tension" "$sustain"
   render "$name"
 done
 wait

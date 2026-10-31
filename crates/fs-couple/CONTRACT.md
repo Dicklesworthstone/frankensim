@@ -4425,7 +4425,7 @@ None.
   - the convergence tail is the Frobenius sum over all N^2 entries;
   - peak shift and passivity are checked on the plane entry;
   - its `MatrixLineReceipt` records each entry's tail.
-  `cup_junction` + `CupState` is the D18 mouthpiece-cup lumped
+  `cup_junction_boundary` + `CupState` is the D18 mouthpiece-cup lumped
   compliance, TRAPEZOIDAL so the runtime matches the analytic shunt
   `Z/(1 + i omega C Z)` to `O((omega dt)^2)`. Realization doctrine
   (the recorded bake-off): at a brass input plane the higher modes
@@ -5034,10 +5034,10 @@ accelerates over stable fixed relaxation; light added mass converges naively;
 determinism.
 
 `src/mm_line.rs` `mm_line_tests`, cases ml-001..ml-006 — held-fingering
-line fidelity vs the MM authority (0.39 cents worst over three valve
-combinations; the explicit scattering LOOP additionally carries its
-one-sample junction skew, measured 38 cents at a ~127-sample period and
-gated at a disclosed 45), the realization bake-off receipt, the valve
+line fidelity vs the MM authority (0.00 cents worst over three valve
+combinations; the scattering LOOP closes the reflection at the
+junction's own sample and reads 2.86 cents worst, gated at 4), the
+realization bake-off receipt, the valve
 no-click gate (carry+crossfade within 3x the control's slew; the
 hard-cut falsifier is at least 2x worse), per-line passivity on the
 stored taps, the cup shunt vs its analytic transform, and
@@ -5305,9 +5305,7 @@ spread; gt-006 guitar-strum listening digest chain (Unadjudicated).
   system. Those obligations require a signed, closed-window energy audit.
 - The multimodal line inherits the fs-duct modal image's disclosed
   boundaries (matched-mouth higher modes, no tone holes, no mean flow)
-  and adds its own: the explicit scattering junction carries a
-  one-sample loop skew shared with the reed voice (disclosed, measured,
-  not a line error); a hard (fade = 0) valve swap is genuinely
+  and adds its own: a hard (fade = 0) valve swap is genuinely
   discontinuous and is the caller's choice; the crossfade lift is an
   engineering lane, not a claim about real valve port geometry; and
   the realization cost is O(n_fft) MACs per sample per line (the

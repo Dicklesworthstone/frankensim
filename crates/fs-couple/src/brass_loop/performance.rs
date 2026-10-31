@@ -1432,6 +1432,10 @@ impl PressureRenderer for LipPerformance {
 }
 
 #[cfg(test)]
+#[path = "performance_bank_limit.rs"]
+mod bank_limit;
+
+#[cfg(test)]
 #[path = "../render/schedule/reed/field_input/tests/support.rs"]
 mod gas_test_support;
 

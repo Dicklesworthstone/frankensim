@@ -360,16 +360,34 @@ const LIP_AIR: &str = "ambient moist_air 293.15 101325 0";
 const LIP_HELIOX: &str = "ambient mixture 293.15 101325 mole 2 He 0.8 O2 0.2";
 const LIP_CO2: &str = "ambient mixture 293.15 101325 mole 1 CO2 1";
 
-/// render.sh's hold at lip pre-stress 1.42: the blowing pressure rises to
-/// 1.4e4 Pa in 50 ms and is held.
+/// The F4 hold as render.sh had it at a4ddbd38c: lip pre-stress 1.42, the
+/// blowing pressure rising to 1.4e4 Pa in 50 ms and held.
 fn compose(ambient: &str, rate: u32, seconds: f64, termination: &str) -> String {
+    compose_hold(ambient, rate, seconds, termination, "1.4e4", "1.42e0")
+}
+
+/// A hold: the blowing pressure rises to `pressure` Pa in 50 ms and is held, at
+/// lip pre-stress `pre_stress`.
+fn compose_hold(
+    ambient: &str,
+    rate: u32,
+    seconds: f64,
+    termination: &str,
+    pressure: &str,
+    pre_stress: &str,
+) -> String {
     assert_eq!(HEAD.matches(LIP_AIR).count(), 1);
     assert_eq!(HEAD.matches("termination flanged\n").count(), 1);
-    let head = HEAD.replace(LIP_AIR, ambient).replace("termination flanged\n", &format!("termination {termination}\n"));
-    format!("frankensim-lip-performance-v1\naudio {rate} {}\n{head}schedule\nfrankensim-gesture-schedule-v1\n\
+    let head = HEAD.replace(LIP_AIR, ambient).replace(
+        "termination flanged\n",
+        &format!("termination {termination}\n"),
+    );
+    format!(
+        "frankensim-lip-performance-v1\naudio {rate} {}\n{head}schedule\nfrankensim-gesture-schedule-v1\n\
         control_rate_hz\t700\ntracks\t2\ntrack\tblow\tblowing-pressure\ninitial\tpressure-pa\t0e0\nevents\t1\n\
-        event\t0e0\t5e-2\tpressure-pa\t1.4e4\ntrack\tlip\tpre-stress\ninitial\tmultiplier\t1.42e0\nevents\t0\n",
-        (f64::from(rate) * seconds).round() as u64)
+        event\t0e0\t5e-2\tpressure-pa\t{pressure}\ntrack\tlip\tpre-stress\ninitial\tmultiplier\t{pre_stress}\nevents\t0\n",
+        (f64::from(rate) * seconds).round() as u64
+    )
 }
 
 fn lip(ambient: &str, rate: u32, seconds: f64, termination: &str) -> Result<LipDescription, String> {
@@ -457,7 +475,7 @@ fn render_lip(record: &str) -> Vec<f64> {
 }
 
 #[test]
-fn the_played_pitch_moves_with_the_gas_in_the_rendered_sound() {
+fn the_lip_render_refuses_co2_by_name() {
     // The render refuses CO2 by name, and that is a finding of this test, not
     // a skip. The shipped microphone integrates the 61 mm bell on 128 rings of
     // 512 points up to 6900 Hz. Its quadrature phase 2 pi f cell / c must stay
@@ -465,6 +483,17 @@ fn the_played_pitch_moves_with_the_gas_in_the_rendered_sound() {
     // The refusal is the receiver's admission, independent of the clock.
     let refused = lip(LIP_CO2, 24_000, 1.0, "flanged").and_then(|d| d.build().map(|_| ())).unwrap_err();
     assert!(refused.contains("quadrature underresolves the declared acoustic band"), "{refused}");
+}
+
+#[test]
+#[ignore = "this hold only (24 kHz, pre-stress 1.42, 14 kPa), 0.50-0.95 s, bore AC slope: base air 349.37 Hz settled \
+    (+0.04/s); base heliox 404.51 Hz still growing (+8.1/s); port air 357.30 Hz still growing (+6.2/s); port heliox \
+    reads 352.61 Hz on no note (lip at rest, -19.4/s). Base's green compared a settled note with a growing one. \
+    Retired (ruling 10707): heliox's threshold at this head's D5 lip is 42.3 kPa, past the cited range; bead frankensim-giuhr"]
+fn the_played_pitch_moves_with_the_gas_in_the_rendered_sound() {
+    // Measured at this hold on the same-sample loop: heliox doesn't speak, and
+    // the f0 reader normalises, so it can't tell a note from a growing or dying
+    // one. The CO2 refusal moved to the_lip_render_refuses_co2_by_name.
     // Direction asserted in heliox on a 24 kHz clock. The amount is printed
     // against the c ratio with no pass band: lip-bore pulling sets it, and its
     // bound is research-grade (ruling 6349).
@@ -481,6 +510,139 @@ fn the_played_pitch_moves_with_the_gas_in_the_rendered_sound() {
             f0_gas / f0_air);
         assert_eq!(f0_gas > f0_air, up, "{name}: played {f0_gas} Hz against {f0_air} Hz");
     }
+}
+
+/// The D5 card's hold (ruling 10707): lip pre-stress 2.341 at 14.39 kPa, rising
+/// in 50 ms and held. Air runs on 32 kHz and heliox on 59,154 Hz, the same c dt
+/// (10.73 mm), so both carry the same bank error. The bank check's 1.68 c and
+/// 0.22 dB belongs to air at 32 kHz.
+const HOLD_PRESSURE: &str = "1.439e4";
+const HOLD_PRE_STRESS: &str = "2.341e0";
+/// The read window in seconds: 0.2 s after air's slope first stays within the
+/// hold rule, at 0.3 s (mail 10678). Each render ends with it.
+const HOLD_WINDOW_S: (f64, f64) = (0.5, 1.0);
+
+fn render_hold(record: &str, rate: u32) -> (LipDescription, Vec<f64>) {
+    let text = compose_hold(
+        record,
+        rate,
+        HOLD_WINDOW_S.1,
+        "flanged",
+        HOLD_PRESSURE,
+        HOLD_PRE_STRESS,
+    );
+    let description = LipDescription::from_bytes(text.as_bytes()).unwrap();
+    let mut performance = description.build().unwrap();
+    let mut pressure = vec![0.0; (f64::from(rate) * HOLD_WINDOW_S.1).round() as usize];
+    for block in pressure.chunks_mut(rate as usize / 100) {
+        performance.block(block).unwrap();
+    }
+    assert!(pressure.iter().all(|p| p.is_finite()));
+    (description, pressure)
+}
+
+/// Playing: the radiated rms of every 0.1 s piece of the window is at least
+/// 0.1 Pa, and the least-squares slope of ln rms against time is within 0.2/s
+/// (the cards' hold rule). The f0 reader normalises, so it can't see a growing
+/// or dying note; this can. Returns the lowest rms and the slope, or why not.
+fn playing(window: &[f64], rate: f64) -> Result<(f64, f64), String> {
+    let hop = (rate / 10.0).round() as usize;
+    let rms: Vec<f64> = window
+        .chunks_exact(hop)
+        .map(|piece| (piece.iter().map(|p| p * p).sum::<f64>() / hop as f64).sqrt())
+        .collect();
+    let log: Vec<f64> = rms.iter().map(|r| r.max(f64::MIN_POSITIVE).ln()).collect();
+    let (n, mean_t) = (log.len() as f64, 0.05 * (log.len() as f64 - 1.0));
+    let mean = log.iter().sum::<f64>() / n;
+    let (num, den) = log
+        .iter()
+        .enumerate()
+        .fold((0.0, 0.0), |(num, den), (k, y)| {
+            let t = 0.1 * k as f64 - mean_t;
+            (num + t * (y - mean), den + t * t)
+        });
+    let (lowest, slope) = (rms.iter().copied().fold(f64::INFINITY, f64::min), num / den);
+    if lowest >= 0.1 && slope.abs() <= 0.2 {
+        Ok((lowest, slope))
+    } else {
+        Err(format!("rms {rms:?} Pa, slope {slope:+.3}/s"))
+    }
+}
+
+// It took 438 s on ts1 at bcb39833c, past the ruled five minutes, so it runs by
+// name (ruling 10707): air and heliox stay in one test, so a silent render
+// can't pass the heliox half.
+#[test]
+#[ignore = "438 s; run: cargo test --release -p fs-couple --test gas_direction_amount -- --ignored air_plays_on_its_predicted_peak_at_the_d5_lip"]
+fn air_plays_on_its_predicted_peak_at_the_d5_lip() {
+    // Predicted before the render (mail 10669): the lip's resonance is the
+    // head's lip_response frequency times the pre-stress (stiffness ~ t^2, mass
+    // fixed), 237 x 2.341 = 554.8 Hz, and the note sits on the first bore peak
+    // above it, air's 5th. Limits posted first: playing over the window, then
+    // within 100 c of peak 5 and nearer it than any other peak.
+    let lip_hz: f64 = HEAD
+        .lines()
+        .find_map(|line| line.strip_prefix("lip_response "))
+        .and_then(|row| row.split_whitespace().next())
+        .unwrap()
+        .parse()
+        .unwrap();
+    let f_lip = lip_hz * HOLD_PRE_STRESS.parse::<f64>().unwrap();
+    let (air, pressure) = render_hold(LIP_AIR, 32_000);
+    let rate = 32_000.0;
+    let window = &pressure[(HOLD_WINDOW_S.0 * rate).round() as usize..];
+    let (lowest, slope) =
+        playing(window, rate).unwrap_or_else(|e| panic!("air is not playing: {e}"));
+    let peaks = bore_peaks(&air, 6);
+    assert_eq!(
+        peaks.iter().position(|&f| f > f_lip),
+        Some(4),
+        "lip {f_lip} Hz, peaks {peaks:?}"
+    );
+    let f0 = f0(window, rate, 1500.0);
+    let cents: Vec<f64> = peaks.iter().map(|p| 1200.0 * (f0 / p).log2()).collect();
+    let nearest = (0..cents.len())
+        .min_by(|&i, &j| cents[i].abs().total_cmp(&cents[j].abs()))
+        .unwrap();
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"lip-rendered-hold\",\"gas\":\"air\",\"rate_hz\":32000,\"f0_hz\":{f0:.3},\"peak\":5,\"peak_hz\":{:.3},\"cents\":{:.2},\"lowest_rms_pa\":{lowest:.4},\"slope_per_s\":{slope:+.4}}}",
+        peaks[4], cents[4]
+    );
+    assert_eq!(
+        nearest, 4,
+        "air plays {f0} Hz, cents from each peak {cents:?}"
+    );
+    assert!(
+        cents[4].abs() <= 100.0,
+        "air plays {f0} Hz, {} c from peak 5",
+        cents[4]
+    );
+
+    // Heliox stays silent far below its threshold: the same hold on heliox's own
+    // clock fails the playing check. Its small-signal threshold at this lip is
+    // 42,278 Pa (bead frankensim-giuhr, mail 10706), beyond the cited 25 kPa. That
+    // is the linear rest state's stability, not a statement about large attacks.
+    // It sits after air's note so a render that is silent everywhere fails above.
+    let (heliox, pressure) = render_hold(LIP_HELIOX, 59_154);
+    let (c_air, c_heliox) = (
+        air.ambient_gas().sound_speed,
+        heliox.ambient_gas().sound_speed,
+    );
+    assert!(
+        (59_154.0 - 32_000.0 * c_heliox / c_air).abs() <= 0.5,
+        "equal c dt wants {} Hz",
+        32_000.0 * c_heliox / c_air
+    );
+    let rate = 59_154.0;
+    let verdict = playing(&pressure[(HOLD_WINDOW_S.0 * rate).round() as usize..], rate);
+    println!(
+        "{{\"suite\":\"fs-couple\",\"case\":\"lip-rendered-hold\",\"gas\":\"heliox\",\"rate_hz\":59154,\"playing\":{},\"threshold_pa\":42278}}",
+        verdict.is_ok()
+    );
+    assert!(
+        verdict.is_err(),
+        "heliox plays at 14.39 kPa, under its 42.3 kPa threshold: {verdict:?}"
+    );
 }
 
 // ---- Flue: the shipped examples/flue.performance, FlueFilePerformance::from_bytes.

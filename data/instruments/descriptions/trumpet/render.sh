@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Native lip-valve renders of the Bb trumpet description, valves up (pexfp.254, lane P5).
-# Run on trj. The binary must contain `music_render lip` (the brass_loop::performance owner):
+# Run on ts1. The binary must contain `music_render lip` (the brass_loop::performance owner):
 #   SHA12=<sha12 whose snapshot holds these files> BIN_SHA12=<sha12 of a music_render with `lip`> \
 #     data/instruments/descriptions/trumpet/render.sh
 #
@@ -11,9 +11,9 @@
 #
 #  * sweep-pNNN: lip pre-stress ramps 0.7 -> 3.5 at a held mouth pressure (default 14 kPa). A diagnostic, not a note: it records
 #    which regime the bore + lip speaks as the lip tightens.
-#  * pramp-tNNN: mouth pressure ramps 0 -> 25 kPa -> 0 at a fixed lip pre-stress. The pressure at which
-#    the note starts on the way up and stops on the way down is the oscillation threshold and the
-#    extinction pressure; their gap is the hysteresis.
+#  * pramp-tNNN: mouth pressure ramps 0 -> 25 kPa -> 0 at a fixed lip pre-stress. A diagnostic: the pressures
+#    where a note starts and stops on a ramp include the time a small signal takes to grow and a note takes
+#    to decay, so they don't measure a threshold or a band (see the note on held notes below).
 #  * hold-tNNN-pNNN: the same lip held at a fixed pre-stress and mouth pressure for 3 s. The embouchure
 #    setting is the free player input; which setting yields which note is READ FROM THE RENDER afterwards.
 #
@@ -22,10 +22,12 @@
 # GC, 8 and 4 for two amateurs) and found loud playing at 3.3 to 3.9 times threshold (their Fig 6: C4 2.0 / 3.9 /
 # 6.6 kPa, C5 3.3 / 6.3 / 13.0, C6 6.7 / 11.0 / 24.0 kPa). The held notes use 3.5 x 7 Pa/Hz x f: Bb3 (233.08 Hz)
 # 5.71 kPa, F4 (349.23 Hz) 8.56, Bb4 (466.16 Hz) 11.42, D5 (587.33 Hz) 14.39 kPa. The 25 kPa ramp peak is the
-# highest blowing pressure they measured (Fig 1, p.875); the ramps measure the threshold of THIS lip directly.
+# highest blowing pressure they measured (Fig 1, p.875).
 # Earlier revisions held all four notes at 14 kPa, which gave radiated levels near the measured ones but a
 # shank fundamental 11 dB too strong; at the cited pressures this model's notes are 10 to 21 dB(A) quieter
-# and duller than F&T measured (the status card has both results), and that is the setting kept here. The
+# and duller than F&T measured (the status card has both results), and that is the setting kept here. That
+# 10 to 21 was read with the reflection one sample late, and at the junction's own sample the four holds
+# radiate 2 to 3 dB more; it has not been read again. The
 # lip is Cullen (2000) embouchure 19 (see the head for why, and for the disclosure that playability entered
 # the choice): the first renders used embouchure 7, whose upper open notes started only at 19 to 27.5 kPa and
 # sat on the extinction edge at 21 kPa (the D5 hold fell silent).
@@ -52,24 +54,29 @@ DIR=data/instruments/descriptions/trumpet
 RATE=32000
 RAMP_TENSIONS=${RAMP_TENSIONS-"1e0 1.25e0 1.5e0 1.75e0 2e0 2.5e0"}
 RAMP_PEAK=${RAMP_PEAK:-2.5e4}
-# Held notes use an attack: mouth pressure rises to an ATTACK pressure in 50 ms (above the onset the pressure
-# ramps measured at that pre-stress), stays there for ATTACK_SECONDS, then relaxes over 0.5 s to a SUSTAIN
-# pressure (inside the hysteresis band: above the extinction pressure, below the onset). Each hold is
-# "pre-stress:attack-Pa:sustain-Pa". The SUSTAIN is the cited Fletcher and Tarnopolsky pressure above. This lip
-# needs more than its sustain pressure to start: a slow 0 -> 16 -> 0 kPa ramp at the landed pre-stress starts
-# Bb3, F4, Bb4 and D5 at 5.7, 11.7, 9.7 and 13.0 kPa and stops them at 2.3, 3.0, 3.7 and 7.0 kPa (a diagnostic;
-# their players start a note with an attack and settle at the pressure they hold, which the hysteresis
-# reproduces), so each note starts with a 14 kPa attack for ATTACK_SECONDS (a player's tongued attack, a gesture
-# and not a measured value) and relaxes over 0.5 s to its sustain; D5's sustain is already the attack. The
-# pre-stress of each hold was set from the emergent pitch of a first
+# Held notes use an attack: mouth pressure rises to an ATTACK pressure in 50 ms, stays there for ATTACK_SECONDS,
+# then relaxes over 0.5 s to a SUSTAIN pressure. Each hold is "pre-stress:attack-Pa:sustain-Pa". The SUSTAIN is
+# the cited Fletcher and Tarnopolsky pressure above, and each sits above its hold's small-signal threshold, the
+# root of this model's linearized voice on its own bore response: 1271, 3471, 5004 and 6875 Pa for Bb3, F4, Bb4
+# and D5. With the reflection one sample late, a slow 0 -> 16 -> 0 kPa ramp at the earlier pre-stresses started
+# the four notes at 5.7, 11.7, 9.7 and 13.0 kPa and stopped them at 2.3, 3.0, 3.7 and 7.0 kPa (a diagnostic).
+# Those starts sit far above the thresholds; on the trombone the same gap was measured to be the time a small
+# signal takes to grow. Their players start a note with an attack and settle at the pressure they hold, so each
+# note starts with a 14 kPa attack for ATTACK_SECONDS (a player's tongued attack, a gesture and not a measured
+# value) and relaxes over 0.5 s to its sustain; D5's sustain is already the attack. The pre-stress of each hold
+# was set from the emergent pitch of a first
 # render against equal temperament (a player tuning an embouchure; pitch is never an input): first guesses
 # 0.9, 1.38, 1.86, 2.38 gave Bb3 33 cents flat, F4 26, Bb4 21, D5 21 cents flat; 0.95, 1.42, 1.9, 2.42 gave
 # Bb3 +20, F4 +5, Bb4 +2, D5 -1 cents; Bb3 at 0.92 gave -16 and at 0.93 -5 cents (steady-state, 2 to 4 s).
+# Those readings had the reflection one sample late. With it at the junction's own sample, 0.93, 1.42, 1.9 and
+# 2.42 gave -0.4, +13.2, +22.2 and +27.7 cents (1.8 to 3.9 s), and only pre-stress moved: F4 1.403 and 1.401
+# gave +1.1 and -0.2; Bb4 1.861, 1.846 and 1.843 gave +6.2, +1.1 and +0.1; D5 2.365, 2.344 and 2.341 gave +7.7,
+# +1.1 and +0.2 cents. Bb3 stayed at 0.93.
 # The emergent pitches are the bore's: its passive impedance peaks (music_render lip --impedance) lie 41 to
 # 62 cents flat of the equal-tempered open series for partials 3 to 6, which the lip pulls toward the note.
 ATTACK_SECONDS=${ATTACK_SECONDS:-8e-1}
 HOLD_SECONDS=${HOLD_SECONDS:-4}
-HOLDS=${HOLDS-"9.3e-1:1.4e4:5.71e3 1.42e0:1.4e4:8.56e3 1.9e0:1.4e4:1.142e4 2.42e0:1.439e4:1.439e4"}
+HOLDS=${HOLDS-"9.3e-1:1.4e4:5.71e3 1.401e0:1.4e4:8.56e3 1.843e0:1.4e4:1.142e4 2.341e0:1.439e4:1.439e4"}
 SWEEP_PRESSURE=${SWEEP_PRESSURE:-1.4e4}
 
 cd "$SNAP"
@@ -121,7 +128,7 @@ compose_attack() {
   } > "$file"
 }
 
-# At most 8 renders at once (lane budget on the shared trj host).
+# At most 8 renders at once (lane budget on the shared ts1 host).
 MAX_JOBS=8
 render() {
   local name=$1

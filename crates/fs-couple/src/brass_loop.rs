@@ -33,7 +33,9 @@ use fs_phs::linear_exact::{
 };
 use fs_phs::{PortHamiltonian, mass_spring_damper};
 
-use crate::mm_line::{CupState, MmBankLoad, MmLineBank, MmLineConfig, MmLineError, cup_junction};
+use crate::mm_line::{
+    CupState, MmBankLoad, MmLineBank, MmLineConfig, MmLineError, cup_junction_boundary, cup_port,
+};
 use fs_duct::Duct;
 
 /// File-driven lip-valve performances observed at a baffled microphone.
@@ -344,11 +346,10 @@ impl BrassVoice {
             //    Bernoulli law gives a closed-form quadratic in u, so the
             //    junction is solved exactly with no delay in the flow
             //    path (the lip GAP stays explicit: lip mass filters it).
-            let p_minus = self.bank.incoming();
-            let g = 2.0 * self.cup_compliance / dt;
-            let a = 1.0 / zc0 + g;
-            let c0 = p_minus / zc0 - g * (p_minus - self.cup.p_prev) + self.cup.u_prev;
-            let k_off = c0 / a + p_minus;
+            //    The bore's reflection joins the same solve: the junction,
+            //    the flow and the reflection all hold at this sample.
+            let boundary = self.bank.boundary_response()?;
+            let (a, k_off) = cup_port(boundary, &self.cup, self.cup_compliance, zc0, dt);
             let wh = self.lip.width_m * gap;
             let flow = if wh <= 0.0 {
                 0.0
@@ -364,8 +365,14 @@ impl BrassVoice {
                 }
             };
             blow_work += self.blow_pa * flow * dt;
-            let (p_plus, p_now) =
-                cup_junction(flow, p_minus, &mut self.cup, self.cup_compliance, zc0, dt);
+            let (p_plus, p_minus, p_now) = cup_junction_boundary(
+                flow,
+                boundary,
+                &mut self.cup,
+                self.cup_compliance,
+                zc0,
+                dt,
+            );
             let _ = self.bank.push(p_plus)?;
             if let Some(trace) = outgoing.as_deref_mut() {
                 trace[index] = p_plus;

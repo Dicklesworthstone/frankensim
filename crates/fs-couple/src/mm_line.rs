@@ -35,6 +35,7 @@ use fs_fft::{C64 as FftC64, Fft};
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 use fs_vfit::discretize::{DelayedFilter, DiscretizeError, reflectance};
+use fs_vfit::scattering::ScatteringResponse;
 
 mod matrix_admission;
 
@@ -813,6 +814,27 @@ impl MmLineBank {
         new_in
     }
 
+    /// The reflection of the sample about to be accepted,
+    /// `incoming = direct * outgoing + history`, without advancing. Unlike
+    /// [`Self::incoming`], which re-reads the last completed sample, this is
+    /// what a junction solves against before its one [`Self::push`]. During a
+    /// crossfade both lines blend with the weight that push will commit.
+    ///
+    /// # Errors
+    /// [`MmLineError::Discrete`] on a non-finite boundary.
+    pub fn boundary_response(&self) -> Result<ScatteringResponse, MmLineError> {
+        let new = self.lines[self.active].boundary_response()?;
+        if let Some(old) = self.fade_old.as_ref() {
+            let old = old.boundary_response()?;
+            let w = 1.0 - (self.fade_remaining - 1) as f64 / self.fade_total as f64;
+            return Ok(ScatteringResponse {
+                direct: (1.0 - w) * old.direct + w * new.direct,
+                history: (1.0 - w) * old.history + w * new.history,
+            });
+        }
+        Ok(new)
+    }
+
     /// Reset every line to silence (rebuild from the stored taps) and
     /// clear any crossfade — the cheap probe/battery seam; realization
     /// receipts and the lift log persist.
@@ -1229,6 +1251,28 @@ impl MatrixFirLine {
         }
     }
 
+    /// The reflection of the sample about to be pushed, split as
+    /// `b_m = sum_n direct[m * N + n] * a_n + history[m]`: `direct` is each
+    /// entry's first tap (row-major) and `history` is what earlier pushes
+    /// have already determined.
+    #[must_use]
+    pub fn boundary_response(&self) -> (Vec<f64>, Vec<f64>) {
+        let n = self.n_modes;
+        let len = self.n_fft;
+        let direct = self.taps.iter().map(|taps| taps[0]).collect();
+        let mut history = vec![0.0f64; n];
+        for (m, slot) in history.iter_mut().enumerate() {
+            for j in 0..n {
+                let taps = &self.taps[m * n + j];
+                let hist = &self.history[j];
+                for k in 1..len {
+                    *slot += taps[k] * hist[(self.write + len - k) % len];
+                }
+            }
+        }
+        (direct, history)
+    }
+
     /// Push the per-mode outgoing waves; returns the per-mode incoming
     /// waves `b_m = sum_n R_mn * a_n`. Every mode's waves are pressure waves
     /// against the constant reference [`MatrixFirLine::zc0`].
@@ -1294,7 +1338,7 @@ impl MatrixFirLine {
     }
 }
 
-/// Mouthpiece-cup state for [`cup_junction`] (D18 lumped compliance).
+/// Mouthpiece-cup state for [`cup_junction_boundary`] (D18 lumped compliance).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct CupState {
     /// Previous junction pressure [Pa].
@@ -1303,31 +1347,49 @@ pub struct CupState {
     pub u_prev: f64,
 }
 
-/// One-sample mouthpiece-cup junction (D18 electrically-short lumped
-/// compliance `C = V/(rho c^2)` shunting the input plane): solve the
-/// LINEAR junction `u_src = (p_plus - p_minus)/zc0 + u_cup` with the
-/// TRAPEZOIDAL (bilinear) compliance `(u_cup + u_prev)/2 =
-/// C (p - p_prev)/dt`, `p = p_plus + p_minus` — second-order accurate,
-/// so the runtime matches the analytic shunt `Z/(1 + i omega C Z)` to
-/// `O((omega dt)^2)`. Returns `(p_plus, p)` and updates the cup state.
+/// The cup junction seen from its source, as `p = u_source/a + k`, against the
+/// same-sample reflection `p_minus = direct*p_plus + history`. Returns `(a, k)`.
 #[must_use]
-pub fn cup_junction(
-    u_source: f64,
-    p_minus: f64,
-    cup: &mut CupState,
+pub fn cup_port(
+    boundary: ScatteringResponse,
+    cup: &CupState,
     compliance: f64,
     zc0: f64,
     dt: f64,
 ) -> (f64, f64) {
     let g = 2.0 * compliance / dt;
-    let a = 1.0 / zc0 + g;
-    let rhs = u_source + p_minus / zc0 - g * (p_minus - cup.p_prev) + cup.u_prev;
-    let p_plus = rhs / a;
-    let p = p_plus + p_minus;
+    let scale = (1.0 + boundary.direct) * zc0;
+    let a = (1.0 - boundary.direct) / scale + g;
+    let k = (2.0 * boundary.history / scale + g * cup.p_prev + cup.u_prev) / a;
+    (a, k)
+}
+
+/// One-sample mouthpiece-cup junction (D18 electrically-short lumped
+/// compliance `C = V/(rho c^2)` shunting the input plane) against the
+/// same-sample reflection: solve the LINEAR junction
+/// `u_src = (p_plus - p_minus)/zc0 + u_cup` with the TRAPEZOIDAL (bilinear)
+/// compliance `(u_cup + u_prev)/2 = C (p - p_prev)/dt`, `p = p_plus + p_minus`,
+/// all at one instant. Second-order accurate, so the runtime matches the
+/// analytic shunt `Z/(1 + i omega C Z)` to `O((omega dt)^2)`. Returns
+/// `(p_plus, p_minus, p)` and updates the cup state.
+#[must_use]
+pub fn cup_junction_boundary(
+    u_source: f64,
+    boundary: ScatteringResponse,
+    cup: &mut CupState,
+    compliance: f64,
+    zc0: f64,
+    dt: f64,
+) -> (f64, f64, f64) {
+    let (a, k) = cup_port(boundary, cup, compliance, zc0, dt);
+    let p = u_source / a + k;
+    let p_plus = (p - boundary.history) / (1.0 + boundary.direct);
+    let p_minus = boundary.direct * p_plus + boundary.history;
+    let g = 2.0 * compliance / dt;
     let u_cup = g * (p - cup.p_prev) - cup.u_prev;
     cup.p_prev = p;
     cup.u_prev = u_cup;
-    (p_plus, p)
+    (p_plus, p_minus, p)
 }
 
 #[cfg(test)]
@@ -1755,12 +1817,13 @@ mod mm_line_tests {
     fn impulse_response(bank: &mut MmLineBank, samples: usize) -> Vec<f64> {
         let zc0 = bank.zc0();
         let mut p = Vec::with_capacity(samples);
+        let mut cup = CupState::default();
         for k in 0..samples {
             let u = if k == 0 { 1.0 } else { 0.0 };
-            let p_minus = bank.incoming();
-            let p_plus = p_minus + zc0 * u;
+            let boundary = bank.boundary_response().expect("boundary");
+            let (p_plus, _, p_now) = cup_junction_boundary(u, boundary, &mut cup, 0.0, zc0, 1.0);
             let _ = bank.push(p_plus).expect("push");
-            p.push(p_plus + p_minus);
+            p.push(p_now);
         }
         p
     }
@@ -1845,8 +1908,7 @@ mod mm_line_tests {
         let dt = 1.0 / 24_000.0;
         // LINE FIDELITY: |Z| from the realized taps' own DTFT,
         // Z = zc (1 + R)/(1 - R), peak-matched to the authority. This
-        // isolates the realization from the explicit junction loop's
-        // known one-sample skew (disclosed below).
+        // isolates the realization from the junction loop, read below.
         let taps_peaks = |taps: &[f64], zc0: f64| -> Vec<f64> {
             let count = 391usize;
             let mut mags = Vec::with_capacity(count);
@@ -1901,21 +1963,55 @@ mod mm_line_tests {
             );
         }
         // AUTHORED bands: the realized LINE must track the authority
-        // tightly; the explicit junction LOOP additionally carries its
-        // one-sample skew (about 1200*log2((T+1)/T) ~ 17 cents at a
-        // 100-sample round trip) — a disclosed property of the explicit
-        // scattering loop, shared with the reed voice, not a line error.
-        // Loop arm measured at 38.4 cents on this fixture (a few samples
-        // of loop phase at a ~127-sample fundamental period).
-        let pass = worst_line < 5.0 && worst_loop < 45.0;
+        // tightly. The LOOP closes the reflection at the junction's own
+        // sample through `boundary_response`, so it carries no one-sample
+        // skew. It reads 2.86 cents on this fixture, 1.14 under the bound.
+        // With the reflection one sample late it read 25.53.
+        let pass = worst_line < 5.0 && worst_loop < 4.0;
         verdict(
             "ml-001-held-fingering-cents",
             pass,
             &format!(
                 "{detail}worst line-fidelity {worst_line:.2} cents; worst loop \
-                 (incl. one-sample junction skew) {worst_loop:.2} cents"
+                 {worst_loop:.2} cents"
             ),
         );
+    }
+
+    /// Solve `(I - D) b = D e0 forcing + h`, the plane-driven junction with a
+    /// rigid higher-mode closure, by elimination with partial pivoting.
+    fn same_sample_incoming(direct: &[f64], history: &[f64], forcing: f64) -> Vec<f64> {
+        let n = history.len();
+        let mut rows: Vec<Vec<f64>> = (0..n)
+            .map(|i| {
+                let mut row: Vec<f64> = (0..n)
+                    .map(|j| f64::from(u8::from(i == j)) - direct[i * n + j])
+                    .collect();
+                row.push(direct[i * n] * forcing + history[i]);
+                row
+            })
+            .collect();
+        for column in 0..n {
+            let pivot = (column..n)
+                .max_by(|&x, &y| {
+                    rows[x][column]
+                        .abs()
+                        .partial_cmp(&rows[y][column].abs())
+                        .expect("finite")
+                })
+                .expect("row");
+            rows.swap(column, pivot);
+            let chosen = rows[column].clone();
+            for (r, row) in rows.iter_mut().enumerate() {
+                if r != column {
+                    let weight = row[column] / chosen[column];
+                    for (entry, &value) in row.iter_mut().zip(&chosen) {
+                        *entry -= weight * value;
+                    }
+                }
+            }
+        }
+        (0..n).map(|i| rows[i][n] / rows[i][i]).collect()
     }
 
     #[test]
@@ -1927,9 +2023,9 @@ mod mm_line_tests {
         let mut bank = MmLineBank::new(core::slice::from_ref(&duct), &["open"], &gas, &load, &cfg)
             .expect("dominant multimodal plane response");
         let p_dom = impulse_response(&mut bank, 4096);
-        let peaks_dom = runtime_peaks_hz(&p_dom, 24_000.0, 120.0, 900.0);
+        let peaks_dom = runtime_peaks_hz(&p_dom, 24_000.0, 120.0, 1200.0);
         assert!(p_dom.iter().all(|sample| sample.is_finite()));
-        assert!(peaks_dom.len() >= 3);
+        assert!(peaks_dom.len() >= 5);
 
         // The long entrance makes the higher port equal to the local matched
         // Zc to exponentially small accuracy. The Nyquist bound is the least
@@ -1961,13 +2057,20 @@ mod mm_line_tests {
         ).expect("passive one-mode matrix runtime");
         let scalar_pressure = impulse_response(&mut scalar, 4096);
         let zc0 = matrix.zc0();
-        let mut incoming = 0.0;
         let mut matrix_pressure = Vec::with_capacity(4096);
         for sample in 0..4096 {
             let flow = if sample == 0 { 1.0 } else { 0.0 };
+            // The scalar arm's loop: the reflection, the junction and the
+            // rigid source closure all hold at this sample.
+            let (direct, history) = matrix.boundary_response();
+            let incoming = same_sample_incoming(&direct, &history, zc0 * flow)[0];
             let outgoing = incoming + zc0 * flow;
+            let pushed = matrix.push(&[outgoing]).unwrap()[0];
+            assert!(
+                (incoming - pushed).abs() <= 1e-9 * pushed.abs().max(1.0),
+                "sample {sample}: read {incoming} pushed {pushed}"
+            );
             matrix_pressure.push(outgoing + incoming);
-            incoming = matrix.push(&[outgoing]).unwrap()[0];
         }
         let scalar_peaks = runtime_peaks_hz(&scalar_pressure, 24_000.0, 200.0, 6000.0);
         let matrix_peaks = runtime_peaks_hz(&matrix_pressure, 24_000.0, 200.0, 6000.0);
@@ -2013,10 +2116,11 @@ mod mm_line_tests {
                     }
                 }
                 let u = if k == 0 { 1.0 } else { 0.0 };
-                let p_minus = bank.incoming();
-                let p_plus = p_minus + zc0 * u;
+                let boundary = bank.boundary_response().expect("boundary");
+                let (p_plus, _, p_now) =
+                    cup_junction_boundary(u, boundary, &mut CupState::default(), 0.0, zc0, 1.0);
                 let _ = bank.push(p_plus).expect("push");
-                p.push(p_plus + p_minus);
+                p.push(p_now);
             }
             (p, carried)
         };
@@ -2090,20 +2194,17 @@ mod mm_line_tests {
         let volume_m3 = 6.0e-6; // ~6 cc mouthpiece cup (authored)
         let compliance = volume_m3 / (gas.density * gas.sound_speed * gas.sound_speed);
         let dt = 1.0 / 24_000.0;
+        let n = 32_768usize;
         let render = |with_cup: bool| -> Vec<f64> {
             let mut bank = MmLineBank::new(&combos, &["open"], &gas, &load, &cfg).expect("bank");
             let zc0 = bank.zc0();
             let mut cup = super::CupState::default();
-            let mut p = Vec::with_capacity(8192);
-            for k in 0..8192usize {
+            let mut p = Vec::with_capacity(n);
+            for k in 0..n {
                 let u = if k == 0 { 1.0 } else { 0.0 };
-                let p_minus = bank.incoming();
-                let (p_plus, p_now) = if with_cup {
-                    cup_junction(u, p_minus, &mut cup, compliance, zc0, dt)
-                } else {
-                    let p_plus = p_minus + zc0 * u;
-                    (p_plus, p_plus + p_minus)
-                };
+                let boundary = bank.boundary_response().expect("boundary");
+                let c = if with_cup { compliance } else { 0.0 };
+                let (p_plus, _, p_now) = cup_junction_boundary(u, boundary, &mut cup, c, zc0, dt);
                 let _ = bank.push(p_plus).expect("push");
                 p.push(p_now);
             }
@@ -2111,7 +2212,6 @@ mod mm_line_tests {
         };
         let p_free = render(false);
         let p_cup = render(true);
-        let n = 8192usize;
         let fft = Fft::new(n);
         let spectrum = |p: &[f64]| -> Vec<C64> {
             let mut buf: Vec<FftC64> = p.iter().map(|&x| FftC64::new(x, 0.0)).collect();
@@ -2122,8 +2222,8 @@ mod mm_line_tests {
         let z_free = spectrum(&p_free);
         let z_cup = spectrum(&p_cup);
         let mut worst = 0.0f64;
-        for k in 40..400usize {
-            // 117..1170 Hz at df = 24000/8192.
+        for k in 160..1600usize {
+            // 117..1170 Hz at df = 24000/32768.
             let omega = core::f64::consts::TAU * 24_000.0 * k as f64 / n as f64;
             // Runtime spectra are e^{+iwt} (DFT); the analytic transform
             // must use the SAME convention: Y_cup = -i omega C there.
@@ -2132,7 +2232,13 @@ mod mm_line_tests {
             let rel = (z_cup[k] - want).abs() / want.abs().max(1e-300);
             worst = worst.max(rel);
         }
-        // Backward-Euler compliance: first-order in omega*dt (~3% at 1 kHz).
+        // Trapezoidal compliance. On this window the junction equals the
+        // exact discrete shunt to six places, so what remains is the
+        // trapezoid against the analytic i omega C: 0.0110. An 8192-sample
+        // window cuts the response before it decays and reads 0.0436, near
+        // an impedance minimum at 336.9 Hz. With the reflection one sample
+        // late that cut cost 0.0177. Why it costs 2.5 times more on this
+        // loop is not traced.
         let pass = worst < 0.05;
         verdict(
             "ml-005-cup-shunt-analytic",
