@@ -7171,3 +7171,27 @@ computed latent h/u, common phase Gibbs energy, h-u=p/rho, conservative phase
 amount, energy-reference shifts counted exactly once, and source/domain
 refusals. The synthetic caloric reference tests implementation consistency;
 they do not assert experimental methane caloric accuracy.
+
+
+## Coherent porous-layer reflection and transmission
+
+`porous::layers::TransmittingLayers` reuses the existing prepared layer laws and
+one original incident/saturating-fluid snapshot. A borrowed `FluidAcoustics`
+source supplies one receiving snapshot, explicitly modeled as a lossless
+homogeneous half-space. The original rigid-backed API and source domains remain.
+
+Pressure R is referenced to the entrance, pressure T to the exit. Conserved
+tangential wavenumber, outgoing causal normal wavenumber and pressure/normal
+velocity continuity retain oblique refraction, critical incidence and evanescent
+receiving fields. An evanescent field has complex pressure T and zero outgoing
+normal power. Transmitted power uses its actual normal-admittance weight.
+
+Bounded transfer retains the common complex amplitude with compensated log
+magnitude and phase; it neither infers T from R nor treats an unspecified backing
+as opaque. Weighted power is evaluated before squaring can underflow. Queries
+allocate nothing and preserve the 64-layer limit. All-gap stacks have exactly
+zero absorption. For absorbing transmitting stacks, absorption is entrance work
+minus outgoing power: sub-roundoff loss is unresolved, and values are not clipped.
+The focused regression source covers independent matrices, reciprocity,
+subdivision, critical/TIR phase, matched delays, thick absorption, extreme
+contrast, original-source sampling and admission.

@@ -1,4 +1,4 @@
-//! Coherent rigid-backed porous/fluid multilayers and complex reflection.
+//! Coherent porous/fluid multilayers, reflection and transmission.
 //!
 //! Ordered homogeneous isotropic equivalent-fluid layers share ONE saturating
 //! fluid snapshot. Pore drag, density, bulk modulus and source-frequency support
@@ -7,7 +7,8 @@
 //!
 //! exp(+i omega t), forward exp(-i k_n z). Tangential wavenumber is conserved,
 //! k_n^2=k^2-k_0^2 sin^2(theta), Z_n=Z_c k/k_n. Pressure and normal velocity
-//! are continuous between layers, terminating in v_n=0 at the rigid backing.
+//! are continuous between layers. RigidBackedLayers terminates in v_n=0;
+//! TransmittingLayers retains an outgoing receiving-fluid half-space instead.
 //! A bounded attenuating-wave transfer replaces growing cos/sin matrices:
 //! E=exp(-2i k_n d); [p; Z_ref v] propagates through
 //! [[1+E, (Z_n/Z_ref)(1-E)],[(Z_ref/Z_n)(1-E),1+E]], up to a common scalar.
@@ -23,14 +24,21 @@ use crate::MaterialError;
 use crate::fluid_acoustics::thermoviscous::{ThermoviscousFluid, ThermoviscousFluidState};
 use fs_math::{c64::C64, det};
 
+/// Coherent pressure and power transmission into a sourced receiving fluid.
+pub mod transmission;
+pub use transmission::{LayeredTransmission, TransmittingLayers};
+
 /// Bounded preparation storage and per-angle work.
 pub const MAX_LAYERS: usize = 64;
 
-/// Ordered from the exposed face toward the rigid backing. Zero thickness is
+/// Ordered from the exposed face toward the termination. Zero thickness is
 /// an exact identity, but an included porous source still must admit frequency.
 #[derive(Clone, Copy, Debug)]
 pub enum Layer<'a> {
-    Porous { law: &'a PorousFluidLaw, thickness_m: f64 },
+    Porous {
+        law: &'a PorousFluidLaw,
+        thickness_m: f64,
+    },
     /// Lossless gap filled by the original coherent saturating/exterior fluid.
     FluidGap { thickness_m: f64 },
 }
@@ -77,7 +85,9 @@ impl LayeredReflection {
     /// reflection itself remains valid there. There is no panel-area factor.
     pub fn normalized_surface_admittance(&self) -> Result<C64, MaterialError> {
         if self.pressure == C64::ZERO {
-            return Err(bad("layered boundary has a pressure node, not a finite admittance"));
+            return Err(bad(
+                "layered boundary has a pressure node, not a finite admittance",
+            ));
         }
         let beta = self.normalized_velocity.scale(self.cosine) / self.pressure;
         if !finite(beta) {
@@ -88,7 +98,9 @@ impl LayeredReflection {
 }
 
 fn bad(message: &'static str) -> MaterialError {
-    MaterialError::State { what: message.into() }
+    MaterialError::State {
+        what: message.into(),
+    }
 }
 fn finite(z: C64) -> bool {
     z.re.is_finite() && z.im.is_finite()
@@ -106,10 +118,16 @@ impl<'a> RigidBackedLayers<'a> {
         omega: f64,
         layers: &[Layer<'a>],
     ) -> Result<Self, MaterialError> {
-        if layers.len() > MAX_LAYERS || !omega.is_finite() || omega <= 0.0
-            || layers.iter().any(|l| !l.thickness_m().is_finite() || l.thickness_m() < 0.0)
+        if layers.len() > MAX_LAYERS
+            || !omega.is_finite()
+            || omega <= 0.0
+            || layers
+                .iter()
+                .any(|l| !l.thickness_m().is_finite() || l.thickness_m() < 0.0)
         {
-            return Err(bad("layered reflection needs <=64 layers, positive frequency and finite nonnegative thickness"));
+            return Err(bad(
+                "layered reflection needs <=64 layers, positive frequency and finite nonnegative thickness",
+            ));
         }
         // The actual source is evaluated exactly once. Re-querying it per
         // layer could accidentally compose different evolving fluid states.
@@ -128,7 +146,14 @@ impl<'a> RigidBackedLayers<'a> {
             };
             prepared.push(PreparedLayer { source, porous });
         }
-        Ok(Self { source: fluid, fluid: snapshot, omega, k0, z0, layers: prepared })
+        Ok(Self {
+            source: fluid,
+            fluid: snapshot,
+            omega,
+            k0,
+            z0,
+            layers: prepared,
+        })
     }
 
     pub const fn fluid_source(&self) -> &'a dyn ThermoviscousFluid {
@@ -168,71 +193,11 @@ impl<'a> RigidBackedLayers<'a> {
             if d == 0.0 {
                 continue;
             }
-            let (kn, ratio) = match layer.porous {
-                None => (C64::from_re(self.k0 * cosine), C64::ONE),
-                Some(response) => {
-                    let (zc, k) = response.characteristic();
-                    let kn = if cosine == 1.0 {
-                        k
-                    } else {
-                        let tangential = self.k0 * det::sqrt((1.0-cosine)*(1.0+cosine));
-                        let mut value = (k*k-C64::from_re(tangential*tangential)).sqrt();
-                        if value.im > 0.0 { value = -value; }
-                        value
-                    };
-                    let zn = zc * (k / kn);
-                    (kn, divided(zn, self.z0).scale(cosine))
-                }
-            };
-            if !finite(kn) || kn.re < 0.0 || kn.im > 0.0 || kn == C64::ZERO
-                || !finite(ratio) || ratio.re <= 0.0
-            {
-                return Err(bad("layer normal wave impedance is unrepresentable or nonpassive"));
-            }
+            let (kn, ratio) = self.normal_wave(layer, cosine)?;
             let (sum, difference) = bounded_propagator(kn, d)?;
-            let inverse = ratio.recip();
-            if !finite(inverse) {
-                return Err(bad("layer inverse wave impedance is unrepresentable"));
-            }
-            // A fixed common power-of-two factor leaves headroom for complex
-            // products. Contrast-dependent scaling would erase O(cosine^2)
-            // entries before state normalization at extreme grazing angles.
-            let diagonal = sum.scale(1.0/16.0);
-            let off_diagonal = difference.scale(1.0/16.0);
-            let upper = ratio * off_diagonal;
-            let lower = inverse * off_diagonal;
-            let next_p = diagonal*pressure + upper*velocity;
-            let next_v = lower*pressure + diagonal*velocity;
-            let normalization = magnitude_scale(next_p).max(magnitude_scale(next_v));
-            if !finite(next_p) || !finite(next_v) || normalization == 0.0 {
-                return Err(bad("layer transfer state is unrepresentable"));
-            }
-            pressure = divided(next_p, normalization);
-            velocity = divided(next_v, normalization);
+            (pressure, velocity, _) = transfer_step(pressure, velocity, sum, difference, ratio)?;
         }
-        let denominator = pressure + velocity;
-        let norm = denominator.norm_sq();
-        if !norm.is_finite() || norm <= 0.0 {
-            return Err(bad("layered incident pressure is unrepresentable"));
-        }
-        // Preserve the small complex correction when R approaches +/-1;
-        // direct subtraction and division would lose grazing reflection phase.
-        let reflection = if magnitude_scale(pressure) < 0.25*magnitude_scale(velocity) {
-            -C64::ONE + (pressure/denominator).scale(2.0)
-        } else if magnitude_scale(velocity) < 0.25*magnitude_scale(pressure) {
-            C64::ONE - (velocity/denominator).scale(2.0)
-        } else {
-            (pressure-velocity)/denominator
-        };
-        // Evaluate actual surface work. 1-|R|^2 would erase weak absorption
-        // whenever the reflected magnitude rounds to unity.
-        let absorbed = 4.0*(pressure.re*velocity.re + pressure.im*velocity.im)/norm;
-        let tolerance = 128.0*f64::EPSILON;
-        if !finite(reflection) || !absorbed.is_finite() || absorbed < -tolerance
-            || (reflection.norm_sq()+absorbed-1.0).abs() > tolerance
-        {
-            return Err(bad("layered reflection failed passive surface-work balance"));
-        }
+        let (reflection, absorbed) = reflected_state(pressure, velocity)?;
         Ok(LayeredReflection {
             pressure_reflection: reflection,
             absorbed_fraction: absorbed,
@@ -241,17 +206,123 @@ impl<'a> RigidBackedLayers<'a> {
             cosine,
         })
     }
+
+    // Shared by rigid and transmitting terminations: no second material law.
+    fn normal_wave(
+        &self,
+        layer: &PreparedLayer<'_>,
+        cosine: f64,
+    ) -> Result<(C64, C64), MaterialError> {
+        let (kn, ratio) = match layer.porous {
+            None => (C64::from_re(self.k0 * cosine), C64::ONE),
+            Some(response) => {
+                let (zc, k) = response.characteristic();
+                let kn = if cosine == 1.0 {
+                    k
+                } else {
+                    let tangential = self.k0 * det::sqrt((1.0 - cosine) * (1.0 + cosine));
+                    let mut value = (k * k - C64::from_re(tangential * tangential)).sqrt();
+                    if value.im > 0.0 {
+                        value = -value;
+                    }
+                    value
+                };
+                let zn = zc * (k / kn);
+                (kn, divided(zn, self.z0).scale(cosine))
+            }
+        };
+        if !finite(kn)
+            || kn.re < 0.0
+            || kn.im > 0.0
+            || kn == C64::ZERO
+            || !finite(ratio)
+            || ratio.re <= 0.0
+        {
+            return Err(bad(
+                "layer normal wave impedance is unrepresentable or nonpassive",
+            ));
+        }
+        Ok((kn, ratio))
+    }
+}
+
+// Return the normalization as well, so a transmitting owner can retain the
+// common pressure amplitude that cancels out of rigid reflection.
+fn transfer_step(
+    pressure: C64,
+    velocity: C64,
+    sum: C64,
+    difference: C64,
+    ratio: C64,
+) -> Result<(C64, C64, f64), MaterialError> {
+    let inverse = ratio.recip();
+    if !finite(inverse) {
+        return Err(bad("layer inverse wave impedance is unrepresentable"));
+    }
+    // A fixed common power-of-two factor leaves headroom for complex
+    // products. Contrast-dependent scaling would erase O(cosine^2)
+    // entries before state normalization at extreme grazing angles.
+    let diagonal = sum.scale(1.0 / 16.0);
+    let off_diagonal = difference.scale(1.0 / 16.0);
+    let upper = ratio * off_diagonal;
+    let lower = inverse * off_diagonal;
+    let next_p = diagonal * pressure + upper * velocity;
+    let next_v = lower * pressure + diagonal * velocity;
+    let normalization = magnitude_scale(next_p).max(magnitude_scale(next_v));
+    if !finite(next_p) || !finite(next_v) || normalization == 0.0 {
+        return Err(bad("layer transfer state is unrepresentable"));
+    }
+    Ok((
+        divided(next_p, normalization),
+        divided(next_v, normalization),
+        normalization,
+    ))
+}
+
+fn reflected_state(pressure: C64, velocity: C64) -> Result<(C64, f64), MaterialError> {
+    let denominator = pressure + velocity;
+    let norm = denominator.norm_sq();
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err(bad("layered incident pressure is unrepresentable"));
+    }
+    // Preserve the small complex correction when R approaches +/-1;
+    // direct subtraction and division would lose grazing reflection phase.
+    let reflection = if magnitude_scale(pressure) < 0.25 * magnitude_scale(velocity) {
+        -C64::ONE + (pressure / denominator).scale(2.0)
+    } else if magnitude_scale(velocity) < 0.25 * magnitude_scale(pressure) {
+        C64::ONE - (velocity / denominator).scale(2.0)
+    } else {
+        (pressure - velocity) / denominator
+    };
+    // Evaluate actual surface work. 1-|R|^2 would erase weak absorption
+    // whenever the reflected magnitude rounds to unity.
+    let entered = 4.0 * (pressure.re * velocity.re + pressure.im * velocity.im) / norm;
+    let tolerance = 128.0 * f64::EPSILON;
+    if !finite(reflection)
+        || !entered.is_finite()
+        || entered < -tolerance
+        || (reflection.norm_sq() + entered - 1.0).abs() > tolerance
+    {
+        return Err(bad(
+            "layered reflection failed passive surface-work balance",
+        ));
+    }
+    Ok((reflection, entered))
 }
 
 /// Bounded common-scaled cos/sin pair. The lossless branch is purely real /
 /// imaginary, so a stack of fluid gaps retains exactly zero dissipative work.
 fn bounded_propagator(kn: C64, thickness: f64) -> Result<(C64, C64), MaterialError> {
-    let decay = 2.0*(kn.im*thickness);
-    let attenuation = if decay == f64::NEG_INFINITY { 0.0 } else { det::exp(decay) };
+    let decay = 2.0 * (kn.im * thickness);
+    let attenuation = if decay == f64::NEG_INFINITY {
+        0.0
+    } else {
+        det::exp(decay)
+    };
     if attenuation == 0.0 {
         return Ok((C64::ONE, C64::ONE));
     }
-    let phase = kn.re*thickness;
+    let phase = kn.re * thickness;
     if !phase.is_finite() {
         return Err(bad("layer phase is unrepresentable"));
     }
@@ -260,10 +331,10 @@ fn bounded_propagator(kn: C64, thickness: f64) -> Result<(C64, C64), MaterialErr
         return Ok((C64::from_re(cosine), C64::new(0.0, sine)));
     }
     let loss = -det::expm1(decay);
-    let cross = 2.0*attenuation*sine*cosine;
+    let cross = 2.0 * attenuation * sine * cosine;
     // Stable 1-E and 1+E even at thin layers and near quarter-wave poles.
     Ok((
-        C64::new(loss+2.0*attenuation*cosine*cosine, -cross),
-        C64::new(loss+2.0*attenuation*sine*sine, cross),
+        C64::new(loss + 2.0 * attenuation * cosine * cosine, -cross),
+        C64::new(loss + 2.0 * attenuation * sine * sine, cross),
     ))
 }
