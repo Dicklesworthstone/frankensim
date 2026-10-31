@@ -33,7 +33,7 @@ use crate::state_point::{
     ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES as CTE3,
     ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES as E, ResolvedIsotropicElasticModuli,
     ResolvedMaterialStatePoint, integrate_isotropic_thermal_expansion,
-    integrate_orthotropic_thermal_expansion,
+    integrate_orthotropic_thermal_expansion, pinned_temperature_line,
 };
 use fs_qty::{Dims, Pressure, QuantitySpec};
 use std::ops::{Add, Div, Mul, Neg, Sub};
@@ -77,6 +77,7 @@ struct Coefficient {
     reference: f64,
     slope: f64,
     endpoints: [f64; 2],
+    constant_over_interval: bool,
 }
 impl Coefficient {
     fn new(
@@ -96,12 +97,44 @@ impl Coefficient {
                 "nonconstant layer coefficient derivative underflows",
             ));
         }
+        // Affine admission allows representation-scale residuals. A fixed
+        // native operator needs the stronger statement that every original
+        // support-knot value is exactly constant, not just a zero fitted slope.
+        let constant_over_interval = if slope == 0.0 {
+            let property = state.property(name).expect("coefficient was resolved");
+            let selected = property.answer().receipt.selected;
+            let claim = source
+                .input()
+                .card
+                .claims()
+                .claim(selected)
+                .ok_or(invalid("original layer coefficient claim is absent"))?;
+            let point = |t| {
+                state
+                    .query()
+                    .with("T", t)
+                    .map_err(|_| invalid("layer temperature convention is invalid"))
+            };
+            pinned_temperature_line(
+                &source.input().card,
+                &claim.key,
+                "T",
+                &point(range[0])?,
+                &point(range[1])?,
+                selected,
+            )?
+            .iter()
+            .all(|(_, value)| *value == reference)
+        } else {
+            false
+        };
         Ok(Self {
             name: name.to_owned(),
             dims,
             reference,
             slope,
             endpoints,
+            constant_over_interval,
         })
     }
     fn at(
@@ -257,7 +290,7 @@ impl AffineLaminaThermoelastic {
     /// Certifies fixed Q AND both transverse moduli over the whole admitted
     /// source interval, using exact zero source slopes rather than samples.
     pub fn is_temperature_independent_elasticity(&self) -> bool {
-        self.elastic.iter().all(|c| c.slope == 0.0)
+        self.elastic.iter().all(|c| c.constant_over_interval)
     }
     /// Conservative elastic contribution to fixed-strain heat capacity over
     /// the complete interval/envelope. Add to the actual caloric capacity and

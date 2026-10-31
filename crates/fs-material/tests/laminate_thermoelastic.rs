@@ -114,6 +114,9 @@ fn prepare_source(kind: Kind, variable: bool, kink: Option<&str>) -> LaminateThe
         if kink == Some(name) {
             knots[1].1 += 0.01 * value.abs().max(1e-10);
         }
+        if kink == Some("near_constant") && name == "young_modulus" {
+            knots.insert(2, (320.0, value.next_up()));
+        }
         // The reduced potential needs no alpha3 derivative or fictitious E3.
         // Its complete original expansion path is still retained and admitted.
         if name == CTE[2] {
@@ -518,6 +521,11 @@ fn g1_fixed_elastic_certificate_and_whole_interval_capacity_bound_preserve_signe
 
 #[test]
 fn g0_source_kinks_reference_changes_and_strain_temperature_domains_refuse() {
+    let nearly_constant = prepare_source(Kind::YoungPoisson, false, Some("near_constant"));
+    assert!(
+        AffineLaminaThermoelastic::new(&nearly_constant.layers()[0], RANGE, LIMIT).is_err(),
+        "a source knot differing by one ulp must not certify a fixed native operator"
+    );
     for kink in ["young_modulus", CTE[0]] {
         let source = prepare_source(Kind::YoungPoisson, true, Some(kink));
         assert!(AffineLaminaThermoelastic::new(&source.layers()[0], RANGE, LIMIT).is_err());

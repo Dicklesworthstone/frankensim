@@ -44,6 +44,7 @@ pub struct LayeredThermalStep<'s, 'm, 'a> {
     initial: &'s DepositionSimulation<'m>,
     binding: &'s BoundLayeredThermalBody<'a>,
     external_conductances: Vec<f64>,
+    additional_sources_w: Vec<f64>,
     config: LayerConductionConfig,
 }
 
@@ -86,8 +87,37 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
             initial,
             binding,
             external_conductances,
+            additional_sources_w: vec![0.0; n],
             config,
         })
+    }
+
+    /// Add signed, interval-only cell energies supplied by an external coupled
+    /// owner, in `cell_ids()` order. They become constant powers over this
+    /// interval and do not modify authored sources or any accepted history.
+    /// Calling this again replaces the earlier additions. A reciprocal owner
+    /// must solve its own dependence of these joules on the candidate state;
+    /// the sparse thermal Jacobian holds this explicit input fixed.
+    pub fn with_cell_energy_j(
+        mut self,
+        energy_j: &[f64],
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, DepositionError> {
+        checkpoint()?;
+        if energy_j.len() != self.cell_ids().len() {
+            return Err(bad("one additional energy per original thermal cell required"));
+        }
+        let dt = self.duration_s();
+        for (power, &energy) in self.additional_sources_w.iter_mut().zip(energy_j) {
+            checkpoint()?;
+            let value = energy / dt;
+            if !energy.is_finite() || !value.is_finite() {
+                return Err(DepositionError::Arithmetic);
+            }
+            *power = value;
+        }
+        checkpoint()?;
+        Ok(self)
     }
 
     pub fn cell_ids(&self) -> &[CellId] {
@@ -129,12 +159,22 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
         let checkpoint = RefCell::new(&mut checkpoint);
         let resolve = |candidate: &DepositionSimulation<'m>| {
             let StepCoefficients {
-                sources_w,
+                mut sources_w,
                 conductances_w_k,
                 payload: links,
             } = self
                 .binding
                 .step_coefficients(candidate, self.config, || (*checkpoint.borrow_mut())())?;
+            for (&id, &power) in self.cell_ids().iter().zip(&self.additional_sources_w) {
+                (*checkpoint.borrow_mut())()?;
+                if power != 0.0 {
+                    let entry = sources_w.entry(id).or_insert(0.0);
+                    *entry += power;
+                    if !entry.is_finite() {
+                        return Err(DepositionError::Arithmetic);
+                    }
+                }
+            }
             let linearization =
                 self.linearize(candidate, links, || (*checkpoint.borrow_mut())())?;
             Ok(StepCoefficients {

@@ -12,6 +12,9 @@
 //! advertised as a reciprocal energy balance. Mechanical interfaces are perfectly
 //! bonded; the original thermal contact resistances remain independently owned.
 
+/// Reciprocal finite-heat evolution with retained compatible shell equilibrium.
+pub mod reciprocal;
+
 use fs_material::laminate::thermal::source::{
     LaminaSourceInput, LaminateThermalSource, LaminateThermalSourceError, ResolvedLaminateThermal,
 };
@@ -30,13 +33,15 @@ use fs_plate::{
     shell::{
         ShellMesh,
         mitc::{
-            MitcBudget, MitcShellModel, NodalDirectors, ShellConstraint, ShellMass,
-            assemble_mitc3p,
+            MitcBudget, MitcShellModel, NodalDirectors, PreparedMitcStatic, ShellConstraint,
+            ShellMass, assemble_mitc3p,
+            strain::RealElementStrain,
             thermal::{LaminateThermalField, ThermalShellResponse},
         },
     },
 };
 use fs_thermal::enthalpy::{DepositionError, DepositionSimulation};
+use std::sync::Arc;
 
 /// Explicit reference mesh, directors, supports and numerical shell choices.
 #[derive(Clone, Debug)]
@@ -94,14 +99,17 @@ pub struct LayeredThermalShell<'b, 'a> {
 }
 
 /// One accepted source temperature field and its compatible native deformation.
-/// The native pencil can serve existing vibration consumers; it does not include
-/// geometric prestress stiffness or transfer a previous vibration history.
+/// The material pencil and explicit planar membrane-prestress pencil can serve
+/// existing vibration consumers. Neither transfers a previous vibration history.
 pub struct LaminateShellSnapshot {
     time_s: f64,
     temperatures_k: Vec<f64>,
     material: ResolvedLaminateThermal,
-    model: MitcShellModel,
+    model: Arc<MitcShellModel>,
     response: ThermalShellResponse,
+    thermal_fields: Vec<LaminateThermalField>,
+    strain_fields: Vec<RealElementStrain>,
+    thermal_load_6n: Vec<f64>,
     strain_bound: f64,
 }
 impl LaminateShellSnapshot {
@@ -114,7 +122,7 @@ impl LaminateShellSnapshot {
     pub const fn material(&self) -> &ResolvedLaminateThermal {
         &self.material
     }
-    pub const fn model(&self) -> &MitcShellModel {
+    pub fn model(&self) -> &MitcShellModel {
         &self.model
     }
     pub const fn response(&self) -> &ThermalShellResponse {
@@ -122,6 +130,31 @@ impl LaminateShellSnapshot {
     }
     pub const fn reduced_elastic_strain_upper_bound(&self) -> f64 {
         self.strain_bound
+    }
+    /// Exact accepted native polynomials, including thermally driven internal
+    /// director motion, in original facet order. Reusing these avoids a second
+    /// constitutive preparation for heat/work or observation consumers.
+    pub fn strain_fields(&self) -> &[RealElementStrain] {
+        &self.strain_fields
+    }
+    /// Work-conjugate thermal force/moment, including constrained coordinates.
+    pub fn thermal_load_6n(&self) -> &[f64] {
+        &self.thermal_load_6n
+    }
+
+    /// Signed initial-membrane-stress pencil about this actual compatible
+    /// state. The native owner admits planar geometry and small base motion;
+    /// negative stiffness is retained for a stability consumer to interpret.
+    /// This does not replace the thermal equilibrium with a nonlinear solve.
+    pub fn membrane_prestress(
+        &self,
+        limits: fs_plate::shell::mitc::thermal::prestress::MembranePrestressLimits,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<fs_plate::shell::mitc::thermal::prestress::MembranePrestressedShell<'_>, PlateError>
+    {
+        self.model
+            .prepare_laminate_thermal(&self.thermal_fields, &mut cancelled)?
+            .membrane_prestress_at(&self.response.displacement_6n, limits, cancelled)
     }
 }
 
@@ -277,6 +310,19 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
         &self,
         thermal: &DepositionSimulation<'_>,
         external_load_6n: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<LaminateShellSnapshot, LaminateShellError> {
+        self.resolve_with_solver(thermal, external_load_6n, None, cancelled)
+    }
+
+    // A reciprocal fixed-elasticity owner can retain the same sparse operator
+    // and factorization. Native preparation still verifies every current
+    // section against that immutable model before using the cached solve.
+    fn resolve_with_solver(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        external_load_6n: &[f64],
+        solver: Option<&PreparedMitcStatic>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<LaminateShellSnapshot, LaminateShellError> {
         poll(&mut cancelled)?;
@@ -299,23 +345,46 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
             fields.push(field);
         }
         let d = &self.discretization;
-        let model = assemble_mitc3p(
-            &d.mesh,
-            &d.directors,
-            &sections,
-            &d.constraints,
-            d.mass,
-            d.budget,
-            d.drilling_alpha,
-            &mut cancelled,
-        )
-        .map_err(LaminateShellError::Shell)?;
+        let model = if let Some(solver) = solver {
+            solver.shared_model()
+        } else {
+            Arc::new(
+                assemble_mitc3p(
+                    &d.mesh,
+                    &d.directors,
+                    &sections,
+                    &d.constraints,
+                    d.mass,
+                    d.budget,
+                    d.drilling_alpha,
+                    &mut cancelled,
+                )
+                .map_err(LaminateShellError::Shell)?,
+            )
+        };
         let loading = model
             .prepare_laminate_thermal(&fields, &mut cancelled)
             .map_err(LaminateShellError::Shell)?;
-        let response = loading
-            .solve_static(external_load_6n, &mut cancelled)
-            .map_err(LaminateShellError::Shell)?;
+        let response = if let Some(solver) = solver {
+            model
+                .project_load(external_load_6n)
+                .map_err(LaminateShellError::Shell)?;
+            let total: Vec<_> = external_load_6n
+                .iter()
+                .zip(loading.load_6n())
+                .map(|(external, thermal)| external + thermal)
+                .collect();
+            let displacement = solver
+                .solve(&total, &mut cancelled)
+                .map_err(LaminateShellError::Shell)?;
+            loading
+                .recover(&displacement, &mut cancelled)
+                .map_err(LaminateShellError::Shell)?
+        } else {
+            loading
+                .solve_static(external_load_6n, &mut cancelled)
+                .map_err(LaminateShellError::Shell)?
+        };
         for nodal in response.displacement_6n.chunks_exact(6) {
             poll(&mut cancelled)?;
             envelope(
@@ -330,6 +399,7 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
             )?;
         }
         let mut strain_bound = 0.0_f64;
+        let mut strain_fields = Vec::with_capacity(d.mesh.tris.len());
         for (element, tri) in d.mesh.tris.iter().enumerate() {
             poll(&mut cancelled)?;
             let nodal = core::array::from_fn(|i| response.displacement_6n[6 * tri[i / 6] + i % 6]);
@@ -347,14 +417,19 @@ impl<'b, 'a> LayeredThermalShell<'b, 'a> {
                 )?;
                 strain_bound = strain_bound.max(bound);
             }
+            strain_fields.push(strain);
         }
         poll(&mut cancelled)?;
+        let thermal_load_6n = loading.load_6n().to_vec();
         Ok(LaminateShellSnapshot {
             time_s: thermal.time_s(),
             temperatures_k: temperatures,
             material,
             model,
             response,
+            thermal_fields: fields,
+            strain_fields,
+            thermal_load_6n,
             strain_bound,
         })
     }

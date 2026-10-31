@@ -125,7 +125,10 @@ compatible static displacement, physical stress resultants and stored energy.
 Mesh, layer orientation, reference geometry and all mass moments stay fixed.
 One prepared laminate is shared across facets; each field supplies its exact
 cached oriented section. The resulting native pencil is exposed for existing
-vibration consumers, without claiming a prestress tangent or history transfer.
+vibration consumers. `LaminateShellSnapshot::membrane_prestress` supplies the
+native bounded planar initial-stress pencil from that same compatible state;
+vibration-history transfer remains a separate owner. Accepted strain polynomials
+and the exact thermal load are retained for reusable work/observation queries.
 Explicit translation/rotation limits and whole-element reduced elastic-strain
 bounds enforce the caller's linear-model envelope, including the thermally
 driven internal director field.
@@ -140,6 +143,52 @@ finite rotations, transverse-normal/interlaminar recovery or measured accuracy.
 `tests/laminate_thermal.rs` exercises native two-cell heat exchange against an
 independent CLT solution, five-cell gradient retention, compatible expansion,
 reference mass and late atomic refusal.
+
+### Reciprocal finite heat and layered-shell equilibrium
+
+`laminate_thermal::reciprocal::ReciprocalLayeredThermalShell` adds mechanical
+feedback to the SAME original caloric timeline and compatible native shell.
+One declared temperature interval per actual thermal cell pins the original
+plane-stress potential and integrated expansion. Native Bernstein controls and
+both layer faces admit the complete total/elastic principal strain envelope.
+The original piecewise-affine caloric capacity plus a conservative full-interval
+elastic contribution must remain positive. Caloric/source population and work
+constraints must describe the same unloaded material path; card identity alone
+does not establish that experimental compatibility.
+
+This reciprocal lane requires all original elastic source support knots to be
+constant over their declared intervals. CTE may vary affinely, and cells keep
+independent temperatures. Fixed elasticity keeps the native whole-stack Whitney
+shear correction fixed. Temperature-varying elastic snapshots and the new
+material potential derivatives remain available separately; general reciprocal
+use requires ownership of the nonlocal Whitney temperature derivatives.
+
+At the original triangle quadrature and two points through every layer, endpoint
+average stress times compatible strain change gives mechanical work. The SAME
+potential supplies `S=-Psi_T` and `U=Psi+T*S`; reversible cell heat is mechanical
+work minus the change of that internal energy. It is not free-energy loss or a
+solver residual. Independently integrated physical shear and numerical drilling
+storage/work are reported separately, with no fabricated heat from the gauge.
+Native physical energy and nodal work cross-check the material integration.
+
+Bounded outer iterations restart the original sparse implicit conduction solver
+from accepted heat history. Interval-only reversible joules update through its
+existing source port. One immutable shared native model and scaled LDLT factor
+serve every mechanical candidate. Publication requires local heat consistency,
+summed absolute heat defects, physical/gauge work closure and a combined energy
+gate, followed by a final cancellation checkpoint. Failure leaves both accepted
+histories unchanged; stale temperature/time pairing refuses. The report separates
+external heat/work from reversible exchange and exposes each original cell.
+
+This is quasistatic, small-strain endpoint coupling with explicit iteration and
+energy budgets. It needs time/space refinement and makes no exact discrete
+isentropy, dynamic-history, phase-flow, finite-rotation or moving-transport claim.
+`tests/laminate_thermoelastic.rs` checks independent adiabatic-traction cooling,
+restrained-heating capacity, the accepted thermal-prestress pencil, nonuniform
+bending with nonzero transverse work, energy closure and atomic refusals.
+The existing one-way fixtures share source/mesh helpers without changing their
+CLT oracles. Targeted compiler metadata checks cover these entries; numerical
+execution and experimental material validation remain separate requirements.
 
 ## One shared hysteretic core in a native multiwinding circuit
 

@@ -190,7 +190,9 @@ The declared principal engineering-component envelope covers both total and
 elastic strain. Outward interval arithmetic bounds the elastic capacity over
 the complete source interval and refuses an unresolved rational pole; a thermal
 consumer must add its original caloric capacity and admit a positive total.
-An exact zero-source-slope check identifies temperature-independent elasticity.
+Exact zero source slopes and equality of every original pinned support-knot
+value identify temperature-independent elasticity, without mistaking a tiny
+interior source variation for a constant factorization.
 In-plane evaluation allocates nothing and performs no source query or rotation.
 Local transverse shear uses RAW G13/G23: native whole-stack Whitney corrections
 and their temperature derivatives are separate section physics, not a universal
@@ -5958,6 +5960,12 @@ remain with the original heat-rate owner. Its boundary slopes include reservoir
 coverage and fixed convection/conductance. Pending event admission and target
 left-limit semantics remain those of `BackwardEulerStep`; larger coupled graphs
 continue to use the existing coefficient adapter and their complete Jacobian.
+
+`with_cell_energy_j` adds signed interval-only joules in that same original
+cell order. They become constant powers for one implicit solve, leaving authored
+sources and accepted history unchanged. A coupled owner must solve any physical
+state dependence of those inputs externally; the sparse thermal Jacobian holds
+them fixed and never claims to differentiate that enclosing feedback.
 
 Only three diagonals are retained. Tangent assembly and matrix actions require
 O(cells) storage/work after material flux evaluation. Forward, transpose and
