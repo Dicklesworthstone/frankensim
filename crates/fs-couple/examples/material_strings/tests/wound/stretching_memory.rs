@@ -290,3 +290,23 @@ fn winding_memory_requires_matching_geometry_source_roles_and_complete_band() {
         assert_eq!(cancelled.performance.samples_rendered(), 0);
     });
 }
+
+#[test]
+fn prepared_winding_mean_strain_memory_preserves_physical_playback() {
+    scoped(|cx, gate| {
+        let text = input_text();
+        let ordinary = build(cx, gate, &text, 80e9, 0.003, 200_000.0).unwrap();
+        let mut spec = input::Spec::parse(text.as_bytes()).unwrap();
+        spec.prepared_linear = Some(MEMORY_PREPARATION);
+        let prepared = spec
+            .compile(cx, gate, |name| {
+                Ok(source_pack(name, 80e9, 0.003, 200_000.0))
+            })
+            .unwrap();
+        assert_eq!(
+            prepared.performance.bank().system().nonlinear_material_memory()[0].len(),
+            1
+        );
+        assert_prepared_memory_parity(ordinary, prepared);
+    });
+}

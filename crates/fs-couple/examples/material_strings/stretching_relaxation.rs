@@ -71,9 +71,8 @@ impl Input {
         self.validate()?;
         if spec.geometric_stretching.is_none()
             || spec.longitudinal_waves.is_some()
-            || spec.prepared_linear.is_some()
         {
-            return Err("stretching-memory requires the original exact geometric-stretching owner without longitudinal waves".into());
+            return Err("stretching-memory requires the original geometric-stretching owner without longitudinal waves".into());
         }
         let mut count = 0usize;
         let mut has_winding = false;

@@ -875,8 +875,9 @@ independent constitutive tests check stress work, heat and relaxation time.
 This is a quasistatic axial reduction. It does not add longitudinal-wave or
 winding inertia, interturn friction, wrapping prestress or thermal evolution.
 It refuses combination with `longitudinal-waves`, whose full strain owner has
-its own source-memory selection, and with `prepared-linear`. Existing winding
-geometry and wavelength restrictions still apply. The silver fixture above
+its own source-memory selection. With `prepared-linear`, these histories remain
+in the original nonlinear material owner coupled to the prepared linear baseline.
+Existing winding geometry and wavelength restrictions still apply. The silver fixture above
 supplies no measured relaxation spectrum and therefore remains elastic.
 
 ### Material bending memory on coupled strings

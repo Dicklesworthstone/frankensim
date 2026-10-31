@@ -82,7 +82,8 @@ pub(super) fn assert_prepared_memory_parity(mut ordinary:Ready,mut prepared:Read
         assert!(a.iter().zip(b).all(|(a,b)|a.is_finite() && b.is_finite()
             && (a-b).abs()<=5e-7*scale),"prepared {what} changed the physical trajectory");
     };
-    let a=pressure(&mut ordinary,1);let b=pressure(&mut prepared,37);
+    let prepared_block=37.min(prepared.spec.block);
+    let a=pressure(&mut ordinary,1);let b=pressure(&mut prepared,prepared_block);
     assert!(a.iter().any(|p|*p!=0.0));near("pressure",&a,&b);
     let a=ordinary.performance.bank().system();let b=prepared.performance.bank().system();
     assert_eq!(a.components().len(),b.components().len());
