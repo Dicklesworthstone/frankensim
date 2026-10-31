@@ -17648,11 +17648,23 @@ flow defects. Absolute local defects also share one interval budget, so opposing
 phase streams cannot hide numerical error. Both candidate owners publish only
 after source, transaction, flow, balance and final cancellation admission.
 
-This phase-only simultaneous split is first order and requires timestep
-refinement. Existing single-patch and reciprocal sensible-heat entry points
-retain their behavior. The new route retains positive-interface capacity,
+`advance_liquid_surfaces_with_gas_and_heat` adds the same shared material
+chamber's simultaneous reciprocal sensible heat before joint phase exchange.
+Every native patch supplies an explicit coefficient and admitted liquid heat
+branch. Exact postheat liquid states enter the phase owner, and the native
+storage account retains sensible heat carried by mass leaving after heating.
+Combined source heat/phase defects are counted once before native storage and
+flow defects. Phase, heat and combined reports remain distinct, while one native
+transaction and one flow step store the full original-to-final enthalpy change.
+Zero heat preserves the existing phase-only endpoints. Three focused regression
+sources exercise mixed heat/phase counterflow, zero-heat parity and heat-only
+exchange; the mixed case resolves the heated-mass carry above its energy budget.
+
+These phase/flow and heat/phase/flow splits are first order and require complete
+timestep refinement. Existing single-patch entry points retain their behavior.
+The routes retain positive-interface capacity,
 fixed connected gas volume and original electrical/surface-history admission;
-it adds no distributed sensible heat, dry-wall nucleation, gas recoil,
+they add no dry-wall nucleation, gas recoil,
 sealed-vessel displacement or overflow/exhaustion remap. Four regression sources
 cover cold/warm counterflow, independent whole-system mass/energy accounting,
 input-order invariance, one-clock continuation, singleton equivalence and

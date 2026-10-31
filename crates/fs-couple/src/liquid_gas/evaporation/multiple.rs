@@ -10,6 +10,10 @@ use std::collections::BTreeMap;
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceMassExchangeSample, FreeSurfaceMassProjection,
 };
+use fs_material::evaporation::gas::chamber::heat::{
+    GasLiquidChamberHeatSolve, GasLiquidChamberHeatStep, GasLiquidChamberHeatSurface,
+    GasLiquidChamberSurfaceHeatStep, advance_chamber_with_gas_and_heat_mass_selection,
+};
 use fs_material::evaporation::gas::chamber::{
     GasLiquidChamberSolve, GasLiquidChamberStep, GasLiquidChamberSurface,
     GasLiquidChamberSurfaceStep, advance_chamber_with_gas_mass_selection,
@@ -18,11 +22,21 @@ use fs_material::evaporation::gas::chamber::{
 use super::{
     CancelGate, ClosedGasParcel, EvaporatingLiquidGasError, EvaporationError,
     FreeSurfaceEnthalpyReport, FreeSurfaceMassExchange, FreeSurfaceMassExchangeControls,
-    FreeSurfaceMassExchangeReport, GasEvaporationError, LiquidGasEvaporationSurface,
-    LiquidSurfaceState, MaterialFreeSurfaceEnthalpy3, RefCell, ThermochemicalGasModel, poll,
+    FreeSurfaceMassExchangeReport, GasEvaporationError, GasFilmHeatSolve,
+    LiquidGasEvaporationSurface, LiquidSurfaceState, MaterialFreeSurfaceEnthalpy3, RefCell,
+    ThermochemicalGasModel, poll,
 };
 
 type Error = EvaporatingLiquidGasError;
+
+/// One native patch with an explicit additional sensible heat conductance.
+/// The coefficient excludes latent and vapor-carried sensible energy.
+#[derive(Clone, Copy)]
+pub struct LiquidGasHeatSurface<'a> {
+    pub surface: LiquidGasEvaporationSurface<'a>,
+    pub heat_transfer_coefficient_w_m2_k: f64,
+    pub heat_controls: GasFilmHeatSolve,
+}
 
 /// One joint source budget and one native transaction/flow budget.
 #[derive(Clone, Copy, Debug)]
@@ -39,7 +53,10 @@ pub struct DistributedLiquidGasSolve {
 #[derive(Clone, Debug)]
 pub struct NativeLiquidGasSurfaceStep {
     pub coordinates: [usize; 3],
+    /// Phase-only receipt, starting after optional sensible heating.
     pub phase: GasLiquidChamberSurfaceStep,
+    /// Original sensible heat receipt, including the exact phase-initial h.
+    pub heat: Option<GasLiquidChamberSurfaceHeatStep>,
     pub native: FreeSurfaceMassExchangeSample,
     /// Native minus original source sensible storage, relative to this cell's
     /// original h, before adding any formation-energy reference [J].
@@ -50,7 +67,14 @@ pub struct NativeLiquidGasSurfaceStep {
 #[derive(Clone, Debug)]
 pub struct DistributedLiquidGasReport {
     pub duration_s: f64,
+    /// Phase-only common-gas account after optional joint sensible heating.
+    pub phase: GasLiquidChamberStep,
+    /// Combined original-to-final storage, temperatures and defects. Its
+    /// energy_into_gas_j is vapor-carried energy only; subtract sensible heat
+    /// into liquid to obtain the net gas supply. Equals phase without heat.
     pub exchange: GasLiquidChamberStep,
+    /// Original common sensible heat account, already included in exchange.
+    pub heat: Option<GasLiquidChamberHeatStep>,
     /// Cartesian coordinate order; source IDs are consecutive in this order.
     pub surfaces: Vec<NativeLiquidGasSurfaceStep>,
     pub mass_exchange: FreeSurfaceMassExchangeReport,
@@ -62,7 +86,8 @@ pub struct DistributedLiquidGasReport {
     /// Local source/native mass defects, original gas total/species defects,
     /// native transfer defects and subsequent native-flow mass drift.
     pub absolute_mass_defect_kg: f64,
-    /// Original joint source defect plus native caloric and flow defects.
+    /// Combined original heat/phase defect plus native caloric and flow defects.
+    /// The optional separate heat account is not added a second time.
     pub energy_residual_j: f64,
     /// Absolute local defects cannot cancel between opposing phase streams.
     /// Gas representation rounding remains separately mass-budgeted, matching
@@ -165,11 +190,79 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
     controls: DistributedLiquidGasSolve,
     gate: &CancelGate,
 ) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surfaces.iter().copied().map(|surface| (surface, None)),
+        controls,
+        None,
+        gate,
+    )
+}
+
+/// Joint reciprocal sensible heat, simultaneous phase exchange and one native
+/// flow step over the SAME retained physical interval.
+///
+/// The original material owner solves all sensible film exchanges against one
+/// common gas endpoint, then evaluates phase transfer on those heated states.
+/// Native mass selection occurs only in that final phase stage. The complete
+/// original-to-final liquid h change is stored once on each actual native mass;
+/// no heat is applied again after the one batched native transaction.
+///
+/// This first-order heat/phase/flow split needs full-timestep refinement. Its
+/// geometry, momentum, source and attached-owner limits match the phase-only
+/// entry point. Zero sensible coefficients preserve that entry point's native
+/// and gas endpoints while retaining explicit zero heat reports.
+#[allow(clippy::too_many_arguments)]
+pub fn advance_liquid_surfaces_with_gas_and_heat<'s, 'm, 'catalog>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: &[LiquidGasHeatSurface<'_>],
+    controls: DistributedLiquidGasSolve,
+    heat_controls: GasLiquidChamberHeatSolve,
+    gate: &CancelGate,
+) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
+    advance_native(
+        liquid,
+        gas,
+        catalog,
+        surfaces.iter().map(|surface| {
+            (
+                surface.surface,
+                Some((
+                    surface.heat_transfer_coefficient_w_m2_k,
+                    surface.heat_controls,
+                )),
+            )
+        }),
+        controls,
+        Some(heat_controls),
+        gate,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn advance_native<'s, 'm, 'catalog, 'surface>(
+    liquid: &MaterialFreeSurfaceEnthalpy3<'s, 'm>,
+    gas: &ClosedGasParcel,
+    catalog: &'catalog ThermochemicalGasModel,
+    surfaces: impl ExactSizeIterator<
+        Item = (
+            LiquidGasEvaporationSurface<'surface>,
+            Option<(f64, GasFilmHeatSolve)>,
+        ),
+    >,
+    controls: DistributedLiquidGasSolve,
+    heat_controls: Option<GasLiquidChamberHeatSolve>,
+    gate: &CancelGate,
+) -> Result<DistributedLiquidGasCandidate<'s, 'm, 'catalog>, Error> {
     poll(gate)?;
     if [controls.mass_tolerance_kg, controls.energy_tolerance_j]
         .into_iter()
         .any(|x| !x.is_finite() || x < 0.0)
-        || surfaces.is_empty()
+        || surfaces.len() == 0
         || controls.chamber.maximum_surfaces == 0
         || surfaces.len() > controls.chamber.maximum_surfaces
     {
@@ -177,16 +270,21 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
             "distributed native exchange needs positive bounded work and finite balance budgets",
         ));
     }
-    let binding = surfaces[0].binding;
+    let mut binding = None;
     let mut ordered = BTreeMap::new();
-    for surface in surfaces {
+    for (surface, heat) in surfaces {
         poll(gate)?;
-        if surface.binding != binding || ordered.insert(surface.liquid, surface).is_some() {
+        let common = *binding.get_or_insert(surface.binding);
+        if surface.binding != common
+            || heat.is_some() != heat_controls.is_some()
+            || ordered.insert(surface.liquid, (surface, heat)).is_some()
+        {
             return Err(Error::Invalid(
                 "native patches need unique liquid cells and one volatile/datum binding",
             ));
         }
     }
+    let binding = binding.expect("positive surface count admitted");
 
     let chart_error = RefCell::new(None);
     let temperature = |h| {
@@ -199,7 +297,12 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
     };
     let mut inputs = Vec::with_capacity(ordered.len());
     let mut sources = Vec::with_capacity(ordered.len());
-    for (index, (&coordinates, surface)) in ordered.iter().enumerate() {
+    let mut source_heat = Vec::with_capacity(if heat_controls.is_some() {
+        ordered.len()
+    } else {
+        0
+    });
+    for (index, (&coordinates, (surface, heat))) in ordered.iter().enumerate() {
         poll(gate)?;
         liquid.admit_interface_gas_patch(coordinates, surface.gas, surface.area_m2)?;
         let initial = liquid.project_interface_mass_exchange(coordinates, 0.0)?;
@@ -227,51 +330,117 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
             temperature_from_enthalpy: &temperature,
             mass_transfer_coefficient_m_s: surface.mass_transfer_coefficient_m_s,
         });
+        if let Some((coefficient, controls)) = heat {
+            source_heat.push(GasLiquidChamberHeatSurface {
+                surface: *sources.last().expect("inserted original source"),
+                heat_transfer_coefficient_w_m2_k: *coefficient,
+                heat_controls: *controls,
+            });
+        }
     }
     let duration_s = liquid.flow().scaling().timestep_s();
     let mut selected: Vec<Option<FreeSurfaceMassProjection>> = vec![None; inputs.len()];
     let mut mass_error = None;
-    let proposal = advance_chamber_with_gas_mass_selection(
-        &sources,
-        gas,
-        catalog,
-        duration_s,
-        controls.chamber,
-        |id, mass| {
-            let index = usize::try_from(id).map_err(|_| {
-                GasEvaporationError::Invalid("unknown native surface mass selection")
-            })?;
-            if index >= inputs.len() || selected[index].is_some() {
-                return Err(GasEvaporationError::Invalid(
-                    "unknown or repeated native surface mass selection",
-                ));
+    let select_mass = |id: u64, mass: f64| {
+        let index = usize::try_from(id)
+            .map_err(|_| GasEvaporationError::Invalid("unknown native surface mass selection"))?;
+        if index >= inputs.len() || selected[index].is_some() {
+            return Err(GasEvaporationError::Invalid(
+                "unknown or repeated native surface mass selection",
+            ));
+        }
+        match liquid.project_interface_mass_exchange(inputs[index].coordinates, -mass) {
+            Ok(projection) => {
+                selected[index] = Some(projection);
+                Ok(-projection.mass_change_kg)
             }
-            match liquid.project_interface_mass_exchange(inputs[index].coordinates, -mass) {
-                Ok(projection) => {
-                    selected[index] = Some(projection);
-                    Ok(-projection.mass_change_kg)
-                }
-                Err(error) => {
-                    mass_error = Some(error);
-                    Err(GasEvaporationError::Invalid(
-                        "original native interface mass selection refused",
-                    ))
-                }
+            Err(error) => {
+                mass_error = Some(error);
+                Err(GasEvaporationError::Invalid(
+                    "original native interface mass selection refused",
+                ))
             }
-        },
-        || gate.is_requested(),
-    );
+        }
+    };
+    let proposal = match heat_controls {
+        None => advance_chamber_with_gas_mass_selection(
+            &sources,
+            gas,
+            catalog,
+            duration_s,
+            controls.chamber,
+            select_mass,
+            || gate.is_requested(),
+        )
+        .map(|candidate| {
+            let mass_defect = candidate.gas_exchange().step().mass_residual_kg;
+            let species_defect = candidate
+                .gas_exchange()
+                .step()
+                .maximum_species_mass_residual_kg;
+            let (surfaces, gas, catalog, phase) = candidate.into_parts();
+            (
+                surfaces,
+                gas,
+                catalog,
+                phase.clone(),
+                phase,
+                None,
+                Vec::new(),
+                mass_defect,
+                species_defect,
+            )
+        }),
+        Some(heat_controls) => advance_chamber_with_gas_and_heat_mass_selection(
+            &source_heat,
+            gas,
+            catalog,
+            duration_s,
+            controls.chamber,
+            heat_controls,
+            select_mass,
+            || gate.is_requested(),
+        )
+        .map(|candidate| {
+            let phase = candidate.phase().step().clone();
+            let surfaces = candidate.phase().surfaces().to_vec();
+            let mass_defect = candidate.phase().gas_exchange().step().mass_residual_kg;
+            let species_defect = candidate
+                .phase()
+                .gas_exchange()
+                .step()
+                .maximum_species_mass_residual_kg;
+            let (_, gas, catalog, exchange, heat, heat_surfaces) = candidate.into_parts();
+            (
+                surfaces,
+                gas,
+                catalog,
+                phase,
+                exchange,
+                Some(heat),
+                heat_surfaces,
+                mass_defect,
+                species_defect,
+            )
+        }),
+    };
     if let Some(error) = chart_error.into_inner().or(mass_error) {
         return Err(error.into());
     }
-    let proposal = proposal?;
-    let gas_mass_defect = proposal.gas_exchange().step().mass_residual_kg;
-    let gas_species_defect = proposal
-        .gas_exchange()
-        .step()
-        .maximum_species_mass_residual_kg;
-    let (phase_surfaces, next_gas, catalog, exchange) = proposal.into_parts();
-    if phase_surfaces.len() != inputs.len() {
+    let (
+        phase_surfaces,
+        next_gas,
+        catalog,
+        phase,
+        exchange,
+        film_heat,
+        heat_surfaces,
+        gas_mass_defect,
+        gas_species_defect,
+    ) = proposal?;
+    if phase_surfaces.len() != inputs.len()
+        || (film_heat.is_some() && heat_surfaces.len() != inputs.len())
+    {
         return Err(Error::Invalid("joint source omitted a native surface"));
     }
     let mut transfers = Vec::with_capacity(inputs.len());
@@ -283,6 +452,14 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
         if phase.id != index as u64 || -phase.transferred_mass_kg != projection.mass_change_kg {
             return Err(Error::Invalid(
                 "joint source changed its native mass selection",
+            ));
+        }
+        if film_heat.is_some()
+            && (heat_surfaces[index].id != phase.id
+                || heat_surfaces[index].phase_initial_liquid.mass_kg != input.initial_mass_kg)
+        {
+            return Err(Error::Invalid(
+                "joint sensible heat changed a native surface inventory",
             ));
         }
         let delta_h = phase.liquid.specific_enthalpy_j_kg - input.initial_h_j_kg;
@@ -333,9 +510,22 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
             ));
         }
         let projection = selected[index].expect("selected before native transaction");
+        let heat = film_heat.as_ref().map(|_| heat_surfaces[index]);
+        let source_relative_storage = if let Some(heat) = &heat {
+            // Keep the exact heated h supplied to phase. Evaporating material
+            // carries that heated value, so shifting its reference back to h0
+            // includes the signed mass term rather than adding sensible heat
+            // or latent energy a second time.
+            let heated_h = heat.phase_initial_liquid.specific_enthalpy_j_kg;
+            heat.liquid_enthalpy_change_j
+                + phase.liquid.mass_kg * (phase.liquid.specific_enthalpy_j_kg - heated_h)
+                - phase.transferred_mass_kg * (heated_h - input.initial_h_j_kg)
+        } else {
+            phase.liquid.mass_kg * (phase.liquid.specific_enthalpy_j_kg - input.initial_h_j_kg)
+        };
         let defect = projection.final_mass_kg
             * (native.specific_enthalpy_j_kg[1] - input.initial_h_j_kg)
-            - phase.liquid.mass_kg * (phase.liquid.specific_enthalpy_j_kg - input.initial_h_j_kg);
+            - source_relative_storage;
         native_caloric.add(defect)?;
         absolute_caloric.add(defect.abs())?;
         absolute_mass
@@ -343,6 +533,7 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
         reports.push(NativeLiquidGasSurfaceStep {
             coordinates: input.coordinates,
             phase,
+            heat,
             native,
             native_caloric_defect_j: defect,
         });
@@ -409,7 +600,9 @@ pub fn advance_liquid_surfaces_with_gas<'s, 'm, 'catalog>(
         catalog,
         report: DistributedLiquidGasReport {
             duration_s,
+            phase,
             exchange,
+            heat: film_heat,
             surfaces: reports,
             mass_exchange,
             flow,

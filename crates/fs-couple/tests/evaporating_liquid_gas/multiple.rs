@@ -7,6 +7,9 @@ use fs_material::evaporation::gas::chamber::GasLiquidChamberSolve;
 
 use super::*;
 
+#[path = "multiple/heat.rs"]
+mod heat;
+
 const COLD: [usize; 3] = [3, 2, 5];
 const WARM: [usize; 3] = [3, 4, 2];
 const INITIAL: [([usize; 3], f64, f64); 2] = [(COLD, 0.4, 295.0), (WARM, 0.4, 305.0)];
