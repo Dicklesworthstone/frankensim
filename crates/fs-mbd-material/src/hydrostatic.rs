@@ -78,7 +78,7 @@ pub trait HydrostaticReservoir {
         state: RigidBodyState, cancelled: impl FnMut() -> bool)
         -> Result<HydrostaticLoad, HydrostaticError>;
 
-    /// Reuse the native kick-drift step and its absolute energy-defect gate.
+    /// Reuse the native endpoint-load Verlet step and absolute energy-defect gate.
     /// Both endpoint loads use the supplied frame and actual displacement mesh.
     fn step_frame(&self, mesh: &DisplacementMesh, body: &PrincipalFrame,
         state: RigidBodyState, controls: HydrostaticStepControls,

@@ -77,9 +77,14 @@ fn expansion_data_alone_changes_displacement_and_actual_flotation_velocity() {
             .advance_hydrostatic(&medium, &parts, 2. * DT, config(), || Ok(()))
             .unwrap();
         // Initial half-submerged cube is exactly neutral. First heat update
-        // changes its volume. The SECOND native kick sees that real buoyancy.
+        // changes its volume. The second mechanics step samples buoyancy at
+        // both actual endpoint drafts: V_sub = s²(s/2-z), with fixed mass 2 kg.
         let stretch_first = 1. + alpha * 40. * DT / (2. * 10.);
-        let velocity = DT * 10. * (stretch_first.powi(3) - 1.);
+        let acceleration_before = 10. * (stretch_first.powi(3) - 1.);
+        let endpoint_height = 0.5 * DT * DT * acceleration_before;
+        let acceleration_after =
+            20. * stretch_first.powi(2) * (stretch_first / 2. - endpoint_height) - 10.;
+        let velocity = 0.5 * DT * (acceleration_before + acceleration_after);
         close(
             hot.state()
                 .center_of_mass_velocity_world(hot.principal_frame().properties())
@@ -118,8 +123,8 @@ fn expansion_data_alone_changes_displacement_and_actual_flotation_velocity() {
 fn thermal_expansion_crosses_density_interface_with_closed_mass_and_pressure_work() {
     // G1/G3: the cold half-submerged cube is neutral in rho=4. Its bottom
     // initially touches the deeper layer without displacing any of it.
-    // The first thermal update crosses that interface; the second native
-    // kick must therefore see the newly displaced denser fluid.
+    // The first thermal update crosses that interface; both endpoints of the
+    // second mechanics step must see the newly displaced denser fluid.
     let material = card(10., 0.01, 500.);
     let source = reference(&material, 1);
     let chart = caloric(&material, 1e5, SolidLiquidPhase::Solid);
@@ -139,8 +144,14 @@ fn thermal_expansion_crosses_density_interface_with_closed_mass_and_pressure_wor
         let medium = LayeredHydrostaticMedium::new(
             None,
             &[
-                HydrostaticLayer { depth_m: 0.0, source: &surface },
-                HydrostaticLayer { depth_m: interface_depth, source: &lower },
+                HydrostaticLayer {
+                    depth_m: 0.0,
+                    source: &surface,
+                },
+                HydrostaticLayer {
+                    depth_m: interface_depth,
+                    source: &lower,
+                },
             ],
             gravity(),
             Vec3::default(),
@@ -152,9 +163,15 @@ fn thermal_expansion_crosses_density_interface_with_closed_mass_and_pressure_wor
             .unwrap();
         let jump = lower_density - 4.;
         let first_depth = first_stretch / 2.;
-        let first_displaced_mass = first_stretch.powi(2)
-            * (4. * first_depth + jump * (first_depth - interface_depth));
-        let expected_velocity = DT * (10. * first_displaced_mass / 2. - 10.);
+        let first_displaced_mass =
+            first_stretch.powi(2) * (4. * first_depth + jump * (first_depth - interface_depth));
+        let acceleration_before = 10. * first_displaced_mass / 2. - 10.;
+        let endpoint_height = 0.5 * DT * DT * acceleration_before;
+        let endpoint_depth = first_depth - endpoint_height;
+        let endpoint_displaced_mass = first_stretch.powi(2)
+            * (4. * endpoint_depth + jump * (endpoint_depth - interface_depth).max(0.));
+        let acceleration_after = 10. * endpoint_displaced_mass / 2. - 10.;
+        let expected_velocity = 0.5 * DT * (acceleration_before + acceleration_after);
         let velocity = hot
             .state()
             .center_of_mass_velocity_world(hot.principal_frame().properties())
@@ -164,27 +181,33 @@ fn thermal_expansion_crosses_density_interface_with_closed_mass_and_pressure_wor
         velocities.push(velocity);
 
         let z = hot.world_from_body().unwrap().translation().z;
-        close(z, DT * expected_velocity);
+        close(z, endpoint_height);
         let depth = final_stretch / 2. - z;
         assert!(depth > interface_depth);
         let area = final_stretch.powi(2);
         let displaced_mass = area * (4. * depth + jump * (depth - interface_depth));
         close(audit.load_after.displaced().volume_m3(), area * depth);
         close(audit.load_after.displaced_mass_kg(), displaced_mass);
-        close(audit.load_after.wrench().force_world.z, 10. * displaced_mass);
+        close(
+            audit.load_after.wrench().force_world.z,
+            10. * displaced_mass,
+        );
 
         // Independent rectangular-column integral of the continuous pressure
         // profile. Sum each thermal shape change at its ACTUAL fixed pose;
         // motion between those changes belongs to the mechanical energy audit.
         let potential = |stretch: f64, center_z: f64| {
             let h = stretch / 2. - center_z;
-            5. * stretch.powi(2)
-                * (4. * h.powi(2) + jump * (h - interface_depth).max(0.).powi(2))
+            5. * stretch.powi(2) * (4. * h.powi(2) + jump * (h - interface_depth).max(0.).powi(2))
         };
         let pressure_work = potential(first_stretch, 0.) - potential(1., 0.)
-            + potential(final_stretch, z) - potential(first_stretch, z);
+            + potential(final_stretch, z)
+            - potential(first_stretch, z);
         close(audit.load_before.pressure_potential_j(), potential(1., 0.));
-        close(audit.load_after.pressure_potential_j(), potential(final_stretch, z));
+        close(
+            audit.load_after.pressure_potential_j(),
+            potential(final_stretch, z),
+        );
         close(audit.displacement_parameter_work_j, pressure_work);
         close(audit.parameter_work_j, pressure_work);
         close(hot.configuration().inertia().mass(), 2.);
@@ -194,7 +217,10 @@ fn thermal_expansion_crosses_density_interface_with_closed_mass_and_pressure_wor
     }
     assert!(velocities[1] > velocities[0]);
     close(body.thermal().time_s(), 0.);
-    close(body.configuration().inertia().mass(), source.inertia().mass());
+    close(
+        body.configuration().inertia().mass(),
+        source.inertia().mass(),
+    );
 }
 
 #[test]
@@ -274,7 +300,10 @@ fn source_fluid_density_reaches_the_native_heated_body_step() {
         let (next, audit) = body
             .advance_hydrostatic(&medium, &parts, DT, config(), || Ok(()))
             .unwrap();
-        let expected_v = DT * (density * 10. * 0.5 / 2. - 10.);
+        let acceleration_before = density * 10. * 0.5 / 2. - 10.;
+        let endpoint_height = 0.5 * DT * DT * acceleration_before;
+        let acceleration_after = density * 10. * (0.5 - endpoint_height) / 2. - 10.;
+        let expected_v = 0.5 * DT * (acceleration_before + acceleration_after);
         close(
             next.state()
                 .center_of_mass_velocity_world(next.principal_frame().properties())
@@ -299,13 +328,20 @@ fn restart_and_late_refusals_preserve_one_accepted_thermal_mechanical_history() 
     let medium = LayeredHydrostaticMedium::new(
         None,
         &[
-            HydrostaticLayer { depth_m: 0.0, source: &reservoir },
-            HydrostaticLayer { depth_m: 0.5, source: &lower },
+            HydrostaticLayer {
+                depth_m: 0.0,
+                source: &reservoir,
+            },
+            HydrostaticLayer {
+                depth_m: 0.5,
+                source: &lower,
+            },
         ],
         gravity(),
         Vec3::default(),
         || false,
-    ).unwrap();
+    )
+    .unwrap();
     let parts = [envelope("a", 0.)];
     let (whole, _) = body
         .advance_hydrostatic(&medium, &parts, 4. * DT, config(), || Ok(()))

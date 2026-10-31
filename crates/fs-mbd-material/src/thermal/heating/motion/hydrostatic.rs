@@ -59,7 +59,7 @@ impl<'a> HeatedRigidBody<'a> {
     /// For a volume-changing envelope, a datum shift adds a constant times the
     /// volume change; absolute ambient-pressure compression work is not inferred.
     ///
-    /// Native kick-drift motion precedes each thermal configuration update.
+    /// Native endpoint-load Verlet motion precedes each thermal configuration update.
     /// This first-order split requires timestep refinement. No waves, fluid
     /// inertia/drag, moving reservoir, flooding, phase change, expansion-induced
     /// fluid kinetic energy or reciprocal thermoelastic heat is introduced.

@@ -521,7 +521,7 @@ changes, and atomic refusal. Native execution is reported separately.
 Each original source supplies one retained density snapshot; density must not
 decrease downward. With no upper fluid the first interface is a free surface;
 with no interfaces a supplied gas or liquid fills the entire local reservoir.
-The original single-fluid `HydrostaticMedium` behavior is unchanged.
+The single-fluid `HydrostaticMedium` retains its original load and source semantics.
 
 Force is `-g integral rho dV`, acting through the displaced-fluid mass centroid.
 The geometric centroid and displaced mass remain separately available. Positive
@@ -529,7 +529,7 @@ density-jump combinations of the existing analytic tetrahedral clips integrate
 force, torque and continuous pressure potential without subtracting nearly equal
 thin-layer cut volumes. Cached whole-envelope moments make the uniform ambient
 contribution O(1); load evaluation allocates nothing and polls at interfaces and
-cells. Both medium types advance through the same native kick-drift mechanics
+cells. Both medium types advance through the same native endpoint-load mechanics
 and absolute energy-defect gate, with fresh geometry at each endpoint.
 
 This is a frozen, piecewise constant-density, quasi-static reservoir model.
@@ -592,11 +592,37 @@ refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
 
+## Finite-rotation hydrostatic restoring motion
+
+`HydrostaticMedium::step` and `LayeredHydrostaticMedium::step` share one load
+callback owner. It evaluates displaced fluid mass and its centroid at both
+actual endpoint poses, using the native `step_verlet_with` half-kick/free-drift/
+half-kick integrator. Full material-derived inertia and each endpoint's body
+frame remain with their original owners. This replaces the first-order held
+buoyancy kick with second-order configuration-dependent restoring motion,
+without adding another geometry pass or re-resolving the fluid source.
+
+Both endpoint pressure moments enter the world angular impulse. Horizontal
+free-surface symmetry retains yaw momentum, while roll/righting torque follows
+the changing submerged geometry. The existing absolute kinetic + gravity +
+pressure-potential gate still rejects under-resolved candidates; numerical
+energy defects are not fluid damping. The model remains a prescribed
+homogeneous or stably layered hydrostatic reservoir with no waves, drag or
+added mass.
+
+G1/G3/G4 cases in `tests/hydrostatic/motion.rs` check second-order heave and
+metacentric roll against independent continuum oscillators, finite-rotation
+spin/orbital impulse balance, yaw momentum, and late cancellation/refusal.
+The layered tests also check second-order interfacial roll with the actual
+density-contrast stiffness.
+The coupled thermal/configuration transfer below remains first order even
+though its fixed-configuration mechanics step is now second order.
+
 ## Continuing hydrostatics during material-resolved thermal expansion
 
 `HeatedRigidBody::advance_hydrostatic` composes the original heat scheduler,
-clipped-volume hydrostatics, native kick-drift mechanics and momentum-preserving
-thermal configuration transfer. Named `ThermalDisplacementRegion` envelopes
+clipped-volume hydrostatics, native endpoint-load Verlet mechanics and
+momentum-preserving thermal configuration transfer. Named `ThermalDisplacementRegion` envelopes
 follow their own original integrated free strain and fixed point. Each rebuild
 starts from reference vertices; closed-body mass remains unchanged. Fluid
 density is the exact `FluidTransport` snapshot, and reservoir gravity must
@@ -636,7 +662,7 @@ they do not establish measured material or hydrodynamic validity.
 
 The layered thermal regression starts with a neutrally floating cold body whose
 bottom touches a denser layer. Source-driven expansion crosses that interface;
-the next native kick uses the changed displaced-fluid mass while specimen mass
+the next native mechanics step uses the changed displaced-fluid mass while specimen mass
 is retained. Independent slab integrals check force, pressure potential and each
 thermal configuration-work increment. The layered path also exercises restart
 and late cancellation/work-budget rollback through the same thermal owner.

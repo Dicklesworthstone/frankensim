@@ -403,3 +403,64 @@ fn inadmissible_layers_refuse_and_cancelled_steps_publish_no_candidate() {
         Err(HydrostaticError::Material(_))
     ));
 }
+
+#[test]
+fn interfacial_roll_uses_density_contrast_with_second_order_angular_motion() {
+    let upper = fluid(400.0);
+    let lower = fluid(1000.0);
+    let medium = LayeredHydrostaticMedium::new(
+        Some(&upper),
+        &[HydrostaticLayer {
+            depth_m: 0.0,
+            source: &lower,
+        }],
+        gravity(),
+        origin(),
+        || false,
+    )
+    .unwrap();
+    let sides = Vec3::new(3.0, 2.0, 1.0);
+    let source = body(700.0, sides);
+    let body = source.principal_body(1e-12, || false).unwrap();
+    let mesh = DisplacementMesh::cuboid(sides, || false).unwrap();
+    let amplitude = 1e-4;
+    let initial = body
+        .state_from_kinematics(
+            Se3::from_parts(
+                So3::exp(So3Tangent::new(Vec3::new(amplitude, 0.0, 0.0))).unwrap(),
+                origin(),
+            )
+            .unwrap(),
+            Twist::zero(),
+        )
+        .unwrap();
+    // The upper fluid's uniform contribution acts at the body COM. Restoring
+    // stiffness therefore uses delta_rho=600, while inertia uses rho_body=700:
+    // omega² = [600/(2*700)] * g * GM / (I_x/m) = 30/7 s^-2.
+    let exact = amplitude * ((30.0_f64 / 7.0).sqrt() * 1.3).cos();
+    let mut errors = Vec::new();
+    for (dt, steps) in [(0.02, 65), (0.01, 130), (0.005, 260)] {
+        let controls = HydrostaticStepControls {
+            duration_s: dt,
+            maximum_energy_defect_j: 0.01,
+        };
+        let mut state = initial;
+        for _ in 0..steps {
+            state = medium
+                .step(&mesh, &body, state, controls, || false)
+                .unwrap()
+                .dynamics
+                .state_after;
+        }
+        let y = body
+            .world_from_body(state)
+            .unwrap()
+            .rotation()
+            .rotate(Vec3::new(0.0, 1.0, 0.0))
+            .unwrap();
+        errors.push((y.z.atan2(y.y) - exact).abs());
+    }
+    for pair in errors.windows(2) {
+        assert!((3.7..4.3).contains(&(pair[0] / pair[1])), "{errors:?}");
+    }
+}

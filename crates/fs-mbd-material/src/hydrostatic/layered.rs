@@ -210,7 +210,7 @@ impl<'a> LayeredHydrostaticMedium<'a> {
     }
 
     /// Advance the native rigid-body dynamics with re-evaluated layered
-    /// buoyancy, using the same first-order kick-drift and absolute energy
+    /// buoyancy, using the same second-order endpoint-load step and absolute energy
     /// budget as `HydrostaticMedium::step`. No fluid damping is invented.
     pub fn step(
         &self,
