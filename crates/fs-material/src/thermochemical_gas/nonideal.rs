@@ -5,7 +5,7 @@
 //! density with ideal-gas sound speed or caloric departures by accident.
 
 use fs_matdb::QueryPoint;
-use fs_qty::{Pressure, Temperature};
+use fs_qty::{Density, Pressure, Temperature};
 use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::peng_robinson::{
     PengRobinsonComponentV1, PengRobinsonEvaluationV1, PengRobinsonMixtureV1,
@@ -21,6 +21,9 @@ use crate::MaterialError;
 use crate::fluid_transport::{
     FluidTransport, FluidTransportState, ThermalFluidTransport, ThermalFluidTransportState,
 };
+
+/// Conservative density/energy reconstruction on a homogeneous PR branch.
+pub mod energy;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PengRobinsonSpeciesBinding {
@@ -134,6 +137,46 @@ impl ThermochemicalPengRobinsonModel {
         let mechanics = self.mechanics.evaluate_pt(temperature, pressure)
             .map_err(|error| failure("Peng-Robinson mechanics", error))?;
         let root = mechanics.select(phase).clone();
+        Self::resolve_real_gas(source, mechanics, root)
+    }
+
+    /// Resolve the same constitutive state at the supplied mass density.
+    ///
+    /// The point supplies temperature and retained material coordinates; its
+    /// pressure is replaced by the PR pressure at v=M/rho before source
+    /// evaluation. The given density is retained exactly, with no selection of
+    /// a different PT root. Requires positive pressure, (dp/dv)_T<0 and Cv>0.
+    /// Mechanically stable metastable homogeneous states remain admissible;
+    /// this does not perform an equilibrium flash or two-phase reconstruction.
+    pub fn evaluate_density_temperature(
+        &self, point: &QueryPoint, density_kg_m3: f64,
+    ) -> Result<ResolvedThermochemicalRealGasState, MaterialError> {
+        let (temperature, _) = coordinates(point)?;
+        let direct = self.mechanics.evaluate_density_temperature(
+            temperature, Density::new(density_kg_m3),
+        ).map_err(|error| failure("Peng-Robinson density mechanics", error))?;
+        let point = super::energy::updated_point(point, temperature.value(), direct.pressure().value())
+            .map_err(|error| failure("density state coordinates", error))?;
+        let source = self.source.evaluate(&point)?;
+        // Keep the established PT root inventory available to existing
+        // observers. Only this final material resolution solves a cubic;
+        // caloric inversion uses the direct density evaluator throughout.
+        let mechanics = self.mechanics.evaluate_pt(temperature, direct.pressure())
+            .map_err(|error| failure("Peng-Robinson root inventory", error))?;
+        if !mechanics.phase_roots().iter().any(|root| {
+            (root.mass_density_kg_per_m3() / density_kg_m3 - 1.0).abs()
+                <= 16_384.0 * f64::EPSILON
+        }) {
+            return Err(invalid("Peng-Robinson PT inventory cannot resolve the retained density branch"));
+        }
+        Self::resolve_real_gas(source, mechanics, direct.root().clone())
+    }
+
+    fn resolve_real_gas(
+        source: ResolvedThermochemicalGasState,
+        mechanics: PengRobinsonEvaluationV1,
+        root: PengRobinsonPhaseRootV1,
+    ) -> Result<ResolvedThermochemicalRealGasState, MaterialError> {
         let properties = source.thermodynamics().properties();
         let molar_mass = properties.molar_mass().value();
         let ideal_cv_molar = properties.mass_specific_cv().value() * molar_mass;
@@ -239,6 +282,10 @@ pub struct ResolvedThermochemicalRealGasState {
     volumetric_expansion_per_k: f64,
 }
 impl ResolvedThermochemicalRealGasState {
+    /// Actual absolute temperature shared by reference and real-fluid views.
+    #[must_use]pub const fn temperature_k(&self) -> f64 { self.source.state().temperature }
+    /// Actual EOS pressure used for all original material source queries.
+    #[must_use]pub const fn pressure_pa(&self) -> f64 { self.source.state().pressure }
     #[must_use]pub const fn source(&self) -> &ResolvedThermochemicalGasState { &self.source }
     #[must_use]pub const fn mechanics(&self) -> &PengRobinsonEvaluationV1 { &self.mechanics }
     #[must_use]pub const fn root(&self) -> &PengRobinsonPhaseRootV1 { &self.root }

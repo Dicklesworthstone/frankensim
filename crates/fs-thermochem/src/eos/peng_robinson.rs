@@ -10,7 +10,7 @@
 use core::fmt;
 
 use fs_math::det;
-use fs_qty::{MolarMass, Pressure, Temperature};
+use fs_qty::{Density, MolarMass, Pressure, Temperature};
 
 use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
@@ -63,6 +63,9 @@ pub enum PengRobinsonErrorV1 {
     NonzeroBinaryInteractionDiagonal { component: usize, bits: u64 },
     InvalidTemperature { bits: u64 },
     InvalidPressure { bits: u64 },
+    InvalidDensity { bits: u64 },
+    OutsideCovolume,
+    MechanicallyUnstable,
     Unrepresentable { what: &'static str },
     NoMechanicalRoot,
 }
@@ -214,19 +217,9 @@ impl PengRobinsonMixtureV1 {
         self.molar_mass
     }
 
-    /// Evaluate PT roots and phase-local fugacity/density observables.
-    pub fn evaluate_pt(
-        &self,
-        temperature: Temperature,
-        pressure: Pressure,
-    ) -> Result<PengRobinsonEvaluationV1, PengRobinsonErrorV1> {
-        let t = temperature.value();
-        let p = pressure.value();
+    fn mixing(&self, t: f64) -> Result<MixedParameters, PengRobinsonErrorV1> {
         if !t.is_finite() || t <= 0.0 {
             return Err(PengRobinsonErrorV1::InvalidTemperature { bits: t.to_bits() });
-        }
-        if !p.is_finite() || p <= 0.0 {
-            return Err(PengRobinsonErrorV1::InvalidPressure { bits: p.to_bits() });
         }
 
         let n = self.components.len();
@@ -304,18 +297,28 @@ impl PengRobinsonMixtureV1 {
             });
         }
 
-        let rt = r * t;
-        let dimensionless_a = a_mix * p / (rt * rt);
-        let dimensionless_b = b_mix * p / rt;
-        if !dimensionless_a.is_finite()
-            || !dimensionless_b.is_finite()
-            || dimensionless_a <= 0.0
-            || dimensionless_b <= 0.0
-        {
-            return Err(PengRobinsonErrorV1::Unrepresentable {
-                what: "dimensionless Peng-Robinson coefficients",
-            });
+        Ok(MixedParameters { a_mix, da_mix_dt, d2a_mix_dt2, b_mix, aij, bi })
+    }
+
+    /// Evaluate PT roots and phase-local fugacity/density observables.
+    pub fn evaluate_pt(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+    ) -> Result<PengRobinsonEvaluationV1, PengRobinsonErrorV1> {
+        let t = temperature.value();
+        let p = pressure.value();
+        if !t.is_finite() || t <= 0.0 {
+            return Err(PengRobinsonErrorV1::InvalidTemperature { bits: t.to_bits() });
         }
+        if !p.is_finite() || p <= 0.0 {
+            return Err(PengRobinsonErrorV1::InvalidPressure { bits: p.to_bits() });
+        }
+        let mixed = self.mixing(t)?;
+        let r = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
+        let (dimensionless_a, dimensionless_b) = mixed.dimensionless(t, p)?;
+
+        let rt = r * t;
 
         let c2 = -(1.0 - dimensionless_b);
         let c1 =
@@ -335,46 +338,12 @@ impl PengRobinsonMixtureV1 {
 
         let mut phases = Vec::with_capacity(roots.len());
         for z in roots {
-            let log_phi = fugacity_logs(
-                z,
-                dimensionless_a,
-                dimensionless_b,
-                a_mix,
-                b_mix,
-                &self.mole_fractions,
-                &aij,
-                &bi,
-            )?;
-            let residual_gibbs_over_rt = self
-                .mole_fractions
-                .iter()
-                .zip(&log_phi)
-                .map(|(x, value)| x * value)
-                .sum::<f64>();
             let molar_volume = z * rt / p;
             let density = self.molar_mass.value() / molar_volume;
-            if !residual_gibbs_over_rt.is_finite()
-                || !molar_volume.is_finite()
-                || molar_volume <= b_mix
-                || !density.is_finite()
-                || density <= 0.0
-            {
-                return Err(PengRobinsonErrorV1::Unrepresentable {
-                    what: "phase-root observables",
-                });
-            }
-            phases.push(PengRobinsonPhaseRootV1 {
-                compressibility_factor: z,
-                molar_volume_m3_per_mol: molar_volume,
-                mass_density_kg_per_m3: density,
-                residual_gibbs_over_rt,
-                log_fugacity_coefficients: log_phi,
-                attraction_parameter: a_mix,
-                attraction_temperature_derivative: da_mix_dt,
-                attraction_second_temperature_derivative: d2a_mix_dt2,
-                covolume_m3_per_mol: b_mix,
-                temperature_k: t,
-            });
+            phases.push(mixed.phase_root(
+                &self.mole_fractions, t, z, molar_volume, density,
+                dimensionless_a, dimensionless_b,
+            )?);
         }
 
         Ok(PengRobinsonEvaluationV1 {
@@ -387,6 +356,116 @@ impl PengRobinsonMixtureV1 {
             phases,
         })
     }
+
+    /// Evaluate a homogeneous state at conserved mass density and temperature.
+    ///
+    /// This evaluates p(T,v) directly with v=M/rho, without a cubic root solve
+    /// or a density-changing phase selection. It requires p>0, v>b and
+    /// (dp/dv)_T<0. Mechanical stability includes metastable homogeneous
+    /// states; it does not establish phase equilibrium or exclude coexistence.
+    /// Caloric stability additionally requires the caller's ideal-reference Cv.
+    pub fn evaluate_density_temperature(
+        &self,
+        temperature: Temperature,
+        density: Density,
+    ) -> Result<PengRobinsonDensityEvaluationV1, PengRobinsonErrorV1> {
+        let t = temperature.value();
+        let rho = density.value();
+        if !rho.is_finite() || rho <= 0.0 {
+            return Err(PengRobinsonErrorV1::InvalidDensity { bits: rho.to_bits() });
+        }
+        let mixed = self.mixing(t)?;
+        let v = self.molar_mass.value() / rho;
+        let b = mixed.b_mix;
+        if !v.is_finite() || v <= b {
+            return Err(PengRobinsonErrorV1::OutsideCovolume);
+        }
+        let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
+        let denominator = v * v + 2.0 * b * v - b * b;
+        let p = rt / (v - b) - mixed.a_mix / denominator;
+        if !denominator.is_finite() || denominator <= 0.0 || !p.is_finite() || p <= 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable {
+                what: "positive homogeneous density-temperature pressure",
+            });
+        }
+        let z = p * v / rt;
+        let (a, b) = mixed.dimensionless(t, p)?;
+        let root = mixed.phase_root(&self.mole_fractions, t, z, v, rho, a, b)?;
+        let (dp_dt, dp_dv) = root.pressure_derivatives();
+        if !dp_dt.is_finite() || !dp_dv.is_finite() || dp_dv >= 0.0 {
+            return Err(PengRobinsonErrorV1::MechanicallyUnstable);
+        }
+        Ok(PengRobinsonDensityEvaluationV1 {
+            temperature, pressure: Pressure::new(p), molar_mass: self.molar_mass, root,
+        })
+    }
+}
+
+/// Shared temperature-dependent mixing law for both PT and density inputs.
+struct MixedParameters {
+    a_mix: f64,
+    da_mix_dt: f64,
+    d2a_mix_dt2: f64,
+    b_mix: f64,
+    aij: Vec<f64>,
+    bi: Vec<f64>,
+}
+impl MixedParameters {
+    fn dimensionless(&self, t: f64, p: f64) -> Result<(f64, f64), PengRobinsonErrorV1> {
+        let rt = UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * t;
+        let a = self.a_mix * p / (rt * rt);
+        let b = self.b_mix * p / rt;
+        if !a.is_finite() || !b.is_finite() || a <= 0.0 || b <= 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable {
+                what: "dimensionless Peng-Robinson coefficients",
+            });
+        }
+        Ok((a, b))
+    }
+
+    fn phase_root(&self, fractions: &[f64], t: f64, z: f64, volume: f64,
+        density: f64, dimensionless_a: f64, dimensionless_b: f64)
+        -> Result<PengRobinsonPhaseRootV1, PengRobinsonErrorV1> {
+        let log_phi = fugacity_logs(z, dimensionless_a, dimensionless_b,
+            self.a_mix, self.b_mix, fractions, &self.aij, &self.bi)?;
+        let residual_gibbs_over_rt = fractions.iter().zip(&log_phi)
+            .map(|(x, value)| x * value).sum::<f64>();
+        if !residual_gibbs_over_rt.is_finite() || !volume.is_finite()
+            || volume <= self.b_mix || !density.is_finite() || density <= 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable { what: "phase-root observables" });
+        }
+        Ok(PengRobinsonPhaseRootV1 {
+            compressibility_factor: z,
+            molar_volume_m3_per_mol: volume,
+            mass_density_kg_per_m3: density,
+            residual_gibbs_over_rt,
+            log_fugacity_coefficients: log_phi,
+            attraction_parameter: self.a_mix,
+            attraction_temperature_derivative: self.da_mix_dt,
+            attraction_second_temperature_derivative: self.d2a_mix_dt2,
+            covolume_m3_per_mol: self.b_mix,
+            temperature_k: t,
+        })
+    }
+}
+
+/// Direct homogeneous state at one exact supplied density; no phase switch.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PengRobinsonDensityEvaluationV1 {
+    temperature: Temperature,
+    pressure: Pressure,
+    molar_mass: MolarMass,
+    root: PengRobinsonPhaseRootV1,
+}
+impl PengRobinsonDensityEvaluationV1 {
+    #[must_use]
+    pub const fn temperature(&self) -> Temperature { self.temperature }
+    #[must_use]
+    pub const fn pressure(&self) -> Pressure { self.pressure }
+    #[must_use]
+    pub const fn molar_mass(&self) -> MolarMass { self.molar_mass }
+    #[must_use]
+    pub const fn root(&self) -> &PengRobinsonPhaseRootV1 { &self.root }
 }
 
 fn cubic_real_roots(
@@ -748,6 +827,11 @@ mod tests {
         let ideal_density = methane().molar_mass.value()
             / (UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K * 400.0);
         assert!((root.mass_density_kg_per_m3() / ideal_density - 1.0).abs() < 1e-7);
+        let direct = pure(methane()).evaluate_density_temperature(
+            Temperature::new(400.0), Density::new(ideal_density),
+        ).unwrap();
+        assert!((direct.pressure().value() - 1.0).abs() < 1e-7);
+        assert!((direct.root().compressibility_factor() - 1.0).abs() < 1e-7);
     }
 
     #[test]
@@ -819,6 +903,57 @@ mod tests {
         assert!(mechanics.sound_speed_m_s.is_finite() && mechanics.sound_speed_m_s > 0.0);
         assert!(root.residual_internal_energy_j_mol().is_finite());
         assert!(root.residual_cv_j_mol_k().is_finite());
+    }
+
+    #[test]
+    fn g1_density_temperature_round_trips_each_stable_homogeneous_root() {
+        let model = pure(methane());
+        for (temperature, pressure) in [(150.0, 1.0e6), (300.0, 5.0e6), (500.0, 1.0e5)] {
+            let pt = model.evaluate_pt(Temperature::new(temperature), Pressure::new(pressure)).unwrap();
+            for root in pt.phase_roots() {
+                if root.pressure_derivatives().1 >= 0.0 { continue; }
+                let density = root.mass_density_kg_per_m3();
+                let direct = model.evaluate_density_temperature(
+                    Temperature::new(temperature), Density::new(density),
+                ).unwrap();
+                assert_eq!(direct.root().mass_density_kg_per_m3().to_bits(), density.to_bits());
+                assert!((direct.pressure().value() / pressure - 1.0).abs() < 2.0e-10);
+                assert!((direct.root().residual_internal_energy_j_mol()
+                    - root.residual_internal_energy_j_mol()).abs() < 1.0e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn g1_density_tangent_is_actual_constant_volume_residual_cv() {
+        let model = pure(methane());
+        let temperature = 300.0;
+        let density = Density::new(50.0);
+        let center = model.evaluate_density_temperature(Temperature::new(temperature), density).unwrap();
+        let h = 1.0e-3;
+        let minus = model.evaluate_density_temperature(Temperature::new(temperature - h), density).unwrap();
+        let plus = model.evaluate_density_temperature(Temperature::new(temperature + h), density).unwrap();
+        let cv = (plus.root().residual_internal_energy_j_mol()
+            - minus.root().residual_internal_energy_j_mol()) / (2.0 * h);
+        assert!((cv / center.root().residual_cv_j_mol_k() - 1.0).abs() < 2.0e-8);
+        let dpdt = (plus.pressure().value() - minus.pressure().value()) / (2.0 * h);
+        assert!((dpdt / center.root().pressure_derivatives().0 - 1.0).abs() < 2.0e-9);
+    }
+
+    #[test]
+    fn g0_density_input_refuses_covolume_spinodal_and_invalid_values() {
+        let model = pure(methane());
+        for density in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(matches!(model.evaluate_density_temperature(Temperature::new(300.0), Density::new(density)),
+                Err(PengRobinsonErrorV1::InvalidDensity { .. })));
+        }
+        assert!(matches!(model.evaluate_density_temperature(Temperature::new(300.0), Density::new(1000.0)),
+            Err(PengRobinsonErrorV1::OutsideCovolume)));
+        let subcritical = model.evaluate_pt(Temperature::new(150.0), Pressure::new(1.0e6)).unwrap();
+        let middle = &subcritical.phase_roots()[1];
+        assert!(middle.pressure_derivatives().1 > 0.0);
+        assert!(matches!(model.evaluate_density_temperature(Temperature::new(150.0),
+            Density::new(middle.mass_density_kg_per_m3())), Err(PengRobinsonErrorV1::MechanicallyUnstable)));
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub mod equilibrium;
 pub mod increment;
 /// Closed gas storage with heating and reversible adiabatic boundary work.
 pub mod parcel;
-mod root;
+pub(in crate::thermochemical_gas) mod root;
 
 use super::{ResolvedThermochemicalGasState, ThermochemicalGasModel, coordinates, positive, typed};
 use crate::MaterialError;
@@ -76,7 +76,7 @@ impl std::error::Error for GasEnergyError {}
 impl From<MaterialError> for GasEnergyError {
     fn from(error: MaterialError) -> Self { Self::Material(error) }
 }
-fn map_root(error: root::Error<GasEnergyError>) -> GasEnergyError {
+pub(in crate::thermochemical_gas) fn map_root(error: root::Error<GasEnergyError>) -> GasEnergyError {
     match error {
         root::Error::Evaluation(e) => e,
         root::Error::Invalid(s) => GasEnergyError::Invalid(s),
@@ -109,10 +109,10 @@ impl GasEnergySolution {
     pub const fn iterations(&self) -> usize { self.iterations }
 }
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasEnergyError> {
+pub(in crate::thermochemical_gas) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), GasEnergyError> {
     if cancelled() { Err(GasEnergyError::Cancelled) } else { Ok(()) }
 }
-fn updated_point(context: &QueryPoint, t: f64, p: f64) -> Result<QueryPoint, GasEnergyError> {
+pub(in crate::thermochemical_gas) fn updated_point(context: &QueryPoint, t: f64, p: f64) -> Result<QueryPoint, GasEnergyError> {
     context.clone().with_quantity("temperature", typed(QuantityKind::AbsoluteTemperature), t)
         .and_then(|point| point.with_quantity("pressure", typed(QuantityKind::Pressure), p))
         .map_err(|error| super::failure("energy state coordinates", error).into())

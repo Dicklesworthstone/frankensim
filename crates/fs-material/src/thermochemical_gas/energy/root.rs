@@ -2,17 +2,17 @@
 //! The constitutive owner supplies the residual, its exact thermal tangent and
 //! EOS pressure. This module does not supply a heat-capacity or gas law.
 
-pub(super) struct Sample {
+pub(in crate::thermochemical_gas) struct Sample {
     pub residual: f64,
     pub tangent: f64,
     pub pressure_pa: f64,
 }
-pub(super) struct Solution {
+pub(in crate::thermochemical_gas) struct Solution {
     pub temperature_k: f64,
     pub sample: Sample,
     pub iterations: usize,
 }
-pub(super) enum Error<E> {
+pub(in crate::thermochemical_gas) enum Error<E> {
     Evaluation(E),
     Invalid(&'static str),
     Cancelled,
@@ -22,7 +22,7 @@ pub(super) enum Error<E> {
 
 // Callers validate their units, gas-temperature envelope and iteration cap.
 // A small bracket is never a substitute for satisfying the physical residual.
-pub(super) fn solve<E>(
+pub(in crate::thermochemical_gas) fn solve<E>(
     mut lo: f64, mut hi: f64, tolerance: f64, maximum_iterations: usize,
     mut evaluate: impl FnMut(f64) -> Result<Sample, E>,
     cancelled: &mut impl FnMut() -> bool,

@@ -1516,8 +1516,7 @@ log fugacity coefficient per component. Callers may request the smallest root,
 largest root, or the minimum residual-Gibbs root at the SAME fixed composition.
 The last choice is a mechanical branch selection, not a multiphase flash or
 global tangent-plane stability proof. No root clipping, van-der-Waals loop
-smoothing, phase lever rule, critical-region regularization or caloric departure
-function is added.
+smoothing, phase lever rule or critical-region regularization is added.
 
 Focused tests pin an independently evaluated supercritical methane root and
 density, retain all three subcritical methane roots, recover the ideal-gas
@@ -1525,3 +1524,22 @@ dilute limit, verify binary-component permutation/fugacity invariance, and
 exercise malformed source/composition/state refusals. This creates the reusable
 nonideal mechanical/fugacity primitive needed by later dense-gas flow and flash
 owners; it does not by itself change the existing ideal-gas solvers.
+
+### Conservative density coordinates
+
+`PengRobinsonMixtureV1::evaluate_density_temperature` evaluates the same mixing
+law directly at `v=M/rho`, retaining the caller's finite positive mass density.
+It shares mixture parameters, pressure derivatives, residual internal energy,
+residual Cv and fugacity evaluation with the PT owner, but does not solve a
+cubic or choose a different density. Covolume violations, nonpositive pressure,
+unrepresentable arithmetic and mechanical instability `(dp/dv)_T >= 0` refuse.
+The returned homogeneous root is not an inventory of all PT roots. Mechanical
+stability does not establish equilibrium against phase separation.
+
+G1/G3 tests compare PT and density-coordinate states, the independent pressure
+equation, residual-energy temperature derivatives and the dilute limit. The
+source adapter supplies ideal-reference Cv before complete caloric and acoustic
+stability can be admitted. This coordinate extension enables conservative
+energy reconstruction; it does not implement a spatial compressible solver.
+The cubic residual-thermodynamics convention is described in
+<https://pages.nist.gov/teqp-docs/en/latest/models/cubics.html>.

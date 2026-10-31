@@ -6083,6 +6083,43 @@ inception or collapse. G0/G3 regressions cover source retention/refresh, quantit
 refusal, original water coefficients, pure limits, phase exchange, mass/volume
 conversion and independent compression of the separate phase volumes.
 
+## Conservative real-gas heating at fixed mass and volume
+
+`thermochemical_gas::nonideal::energy` reconstructs a complete source-bound
+Peng--Robinson state from conserved density and internal energy. Absolute
+energy, a fixed-reference energy change, and a temperature-anchored increment
+are explicit entry points. The last integrates the original NASA ideal-reference
+energy change and adds the PR departure change at the same density, avoiding
+subtraction of large common formation energies. Total Cv supplies the tangent
+to the existing bounded safeguarded root solver. Nonlinear iterations use
+direct density/temperature EOS evaluation without cubic root solves or transport
+card resolution. Initial and accepted material states retain source pressure
+and temperature limits; the final PT inventory remains available separately
+from the retained density root.
+
+`nonideal::energy::parcel::IsochoricRealGasParcel` is a continuing rigid-vessel
+consumer. Initial real-gas density and explicit volume determine conserved mass;
+signed heat advances `Q=m Delta u`. Density and volume stay fixed while pressure,
+Cp/Cv, thermal expansion, sound speed, impedance and source transport refresh
+together. The original ideal-reference source remains provenance, not a second
+mechanical density. A whole update commits only after its joule balance and final
+cancellation check. Zero heat preserves the accepted state. Source refusal,
+instability, work exhaustion and cancellation cannot publish partial state.
+
+The caller declares a continuous, homogeneous, frozen-composition branch.
+Positive pressure, negative isothermal pressure/volume derivative and positive
+total Cv are checked at evaluated states. Mechanically stable metastable states
+are allowed; this is not an equilibrium flash, phase-change energy model,
+reaction model, vessel-wall model or spatial compressible-flow solver.
+
+G1/G3/G4 regressions cover an independent high-precision cubic/departure heating
+reference, pressure differing from the ideal fixed-volume shortcut, shared
+material views, heat subdivision and cooling, large formation-energy offsets,
+source-domain refusal, and late cancellation rollback. The `real_gas_vessel`
+example reuses existing synthetic source-card input and emits pressure, density,
+temperature, conserved mass, heat capacity, sound speed and joule residuals as
+CSV. Its manufactured mixture supplies no empirical or vessel-safety claim.
+
 
 ## Native axial and plane-stress plasticity
 
