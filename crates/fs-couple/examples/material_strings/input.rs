@@ -118,9 +118,19 @@ pub enum WireSection {
     Homogeneous,
     /// Whole-assembly measurements with an explicit elastic-only assumption.
     /// Coordinates belong to the measurement, independently of body/gas state.
-    Measured { axes: Vec<(String, f64)>, properties: MeasuredStringProperties },
+    Measured { axes: Vec<(String, f64)>, properties: MeasuredStringProperties, length: MeasuredLength },
     Bonded { core_radius_m: f64, sleeves: Vec<WireLayer> },
     CloseWound { core_radius_m: f64, pack: String, wire_radius_m: f64, pitch_m: f64 },
+}
+/// The length a measured section's length property was taken over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MeasuredLength {
+    /// The source's loaded span between its two pinned ends (`test-span`, the default): the string row's
+    /// length must equal it.
+    TestSpan,
+    /// The source's speaking length from the nut to an interior support, such as a guitar's scale length
+    /// (`speaking-length`): the string row's length times its bridge station must equal it.
+    Speaking,
 }
 #[derive(Clone, Debug)]
 pub struct WireLayer { pub pack: String, pub outer_radius_m: f64 }
@@ -1412,8 +1422,13 @@ impl<'a> Reader<'a> {
                 if row.word()? != "no-intrinsic-loss" {
                     return Err("measured strings require explicit no-intrinsic-loss; assembly measurements do not identify a damping law".into());
                 }
+                let length = match row.words.next() {
+                    None | Some("test-span") => MeasuredLength::TestSpan,
+                    Some("speaking-length") => MeasuredLength::Speaking,
+                    Some(_) => return Err("a measured length is test-span (the default) or speaking-length".into()),
+                };
                 row.end()?;
-                Ok(WireSection::Measured { axes, properties })
+                Ok(WireSection::Measured { axes, properties, length })
             }
             "close-wound" => {
                 let core_radius_m = row.positive()?;
@@ -1449,7 +1464,7 @@ impl<'a> Reader<'a> {
                 }
                 Ok(WireSection::Bonded { core_radius_m, sleeves })
             }
-            _ => Err("section must be homogeneous, measured AXES AXIS VALUE ... LENGTH DIAMETER TENSION LINE_DENSITY EI no-intrinsic-loss, bonded CORE_RADIUS SLEEVE_COUNT, or close-wound CORE_RADIUS WRAP_PACK WIRE_RADIUS PITCH".into()),
+            _ => Err("section must be homogeneous, measured AXES AXIS VALUE ... LENGTH DIAMETER TENSION LINE_DENSITY EI no-intrinsic-loss [test-span|speaking-length], bonded CORE_RADIUS SLEEVE_COUNT, or close-wound CORE_RADIUS WRAP_PACK WIRE_RADIUS PITCH".into()),
         }
     }
     fn row(&mut self, key: &str) -> Result<Row<'a>> {

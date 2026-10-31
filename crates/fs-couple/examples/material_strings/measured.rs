@@ -1,20 +1,19 @@
 //! Whole-string observations enter the same reciprocal renderer without an
 //! invented bulk material, winding construction, or intrinsic damping law.
 use super::*;
-use fs_couple::material_assembly::measured_string::{
-    MeasuredStringProperties, ResolvedMeasuredStringSpecimen,
-};
+use fs_couple::material_assembly::measured_string::ResolvedMeasuredStringSpecimen;
 
 pub(super) fn resolve(
     wire: &input::Wire,
-    axes: &[(String, f64)],
-    properties: &MeasuredStringProperties,
     catalog: &mut Catalog,
     loader: &mut impl FnMut(&str) -> Result<MaterialPack>,
     spec: &input::Spec,
     gate: &CancelGate,
 ) -> Result<MaterialStringSource> {
     poll(gate)?;
+    let input::WireSection::Measured { axes, properties, length } = &wire.section else {
+        return Err("measured resolution requires a measured section".into());
+    };
     let StringPrestress::FixedTension(tension) = wire.prestress else {
         return Err("measured whole strings require their measured fixed-tension setup; axial stiffness is unknown".into());
     };
@@ -50,6 +49,16 @@ pub(super) fn resolve(
         &measurements,
         properties.clone(),
     )?;
+    // A speaking-length source measured nut to saddle: bind it there, on this string's own span and bridge station.
+    let measured_length = specimen.string().length_m;
+    let specimen = match length {
+        input::MeasuredLength::TestSpan => specimen,
+        input::MeasuredLength::Speaking => specimen
+            .on_span_from_speaking_length(wire.length, wire.bridge.station_fraction)
+            .map_err(|error| format!("string speaking length [m] disagrees with its measured setup: declared span \
+                {} x bridge station {} = {}, measured {measured_length}: {error}", wire.length,
+                wire.bridge.station_fraction, wire.length * wire.bridge.station_fraction))?,
+    };
     let string = specimen.string();
     for (name, declared, measured) in [
         ("length [m]", wire.length, string.length_m),

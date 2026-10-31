@@ -33,7 +33,8 @@ pub const BENDING_STIFFNESS_DIMS: Dims = Dims([3, 1, -2, 0, 0, 0]);
 /// Explicit property roles in one original measured specimen's source bundle.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeasuredStringProperties {
-    /// Loaded test span [m].
+    /// Loaded test span [m], or the speaking length bound by
+    /// [`ResolvedMeasuredStringSpecimen::on_span_from_speaking_length`].
     pub length: String,
     /// Finished outside diameter [m].
     pub diameter: String,
@@ -86,6 +87,7 @@ pub struct ResolvedMeasuredStringSpecimen {
     properties: MeasuredStringProperties,
     string: PrestressedString,
     omega_band_rad_s: Option<(f64, f64)>,
+    speaking_length_m: Option<f64>,
 }
 
 impl ResolvedMeasuredStringSpecimen {
@@ -175,6 +177,7 @@ impl ResolvedMeasuredStringSpecimen {
             properties,
             string,
             omega_band_rad_s: band,
+            speaking_length_m: None,
         };
         for mode in 1..=n_modes {
             result.admit_angular_frequency(fs_nlmodal::prestressed_beam_omega(
@@ -186,6 +189,53 @@ impl ResolvedMeasuredStringSpecimen {
             ))?;
         }
         Ok(result)
+    }
+
+    /// Bind a speaking-length measurement to the performance's full pinned span.
+    ///
+    /// Some sources measure over the speaking length, from the nut to an interior support (a guitar's scale
+    /// length), not between the string's two pinned ends. The same uniform string continues past the support, so
+    /// its measured tension, line mass and flexural rigidity hold on the whole `span_m`. The support's station
+    /// times the span must reproduce the measured length to rounding: a span or station that disagrees refuses
+    /// and is never rescaled. Every retained mode of the longer span is re-admitted against the source band.
+    pub fn on_span_from_speaking_length(
+        mut self,
+        span_m: f64,
+        support_fraction: f64,
+    ) -> Result<Self, AcousticRealizeError> {
+        if self.speaking_length_m.is_some() {
+            return Err(invalid("measured speaking length is already bound to a span"));
+        }
+        if !positive(span_m) || !(support_fraction > 0.0 && support_fraction < 1.0) {
+            return Err(invalid(
+                "speaking length needs a positive span and an interior support station",
+            ));
+        }
+        let measured = self.string.length_m;
+        let speaking = span_m * support_fraction;
+        if (speaking - measured).abs() > 8.0 * f64::EPSILON * speaking.max(measured) {
+            return Err(invalid(
+                "measured speaking length disagrees with the support station times the span",
+            ));
+        }
+        self.string.length_m = span_m;
+        self.speaking_length_m = Some(measured);
+        for mode in 1..=self.string.n_modes {
+            self.admit_angular_frequency(fs_nlmodal::prestressed_beam_omega(
+                span_m,
+                self.string.tension_n,
+                self.string.lin_density_kg_m,
+                self.string.bending_stiffness_n_m2,
+                mode,
+            ))?;
+        }
+        Ok(self)
+    }
+
+    /// The source's measured speaking length once bound to a longer span; `None` for a test-span measurement.
+    #[must_use]
+    pub const fn speaking_length_m(&self) -> Option<f64> {
+        self.speaking_length_m
     }
 
     /// Original uniform continuum, with no manufactured constitutive coefficients.

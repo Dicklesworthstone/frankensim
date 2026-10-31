@@ -129,7 +129,7 @@ explicit setup and are checked by the native measured-string owner.
 The section record is one line:
 
 ```text
-section measured AXIS_COUNT AXIS VALUE ... LENGTH_PROPERTY DIAMETER_PROPERTY TENSION_PROPERTY LINEAR_DENSITY_PROPERTY BENDING_STIFFNESS_PROPERTY no-intrinsic-loss
+section measured AXIS_COUNT AXIS VALUE ... LENGTH_PROPERTY DIAMETER_PROPERTY TENSION_PROPERTY LINEAR_DENSITY_PROPERTY BENDING_STIFFNESS_PROPERTY no-intrinsic-loss [test-span|speaking-length]
 ```
 
 For this source the coordinate is `temperature_known 0`. It means the
@@ -154,6 +154,15 @@ remains unstated. The string row's length, radius and fixed tension must agree
 with the selected source values. Changing those setup values alone refuses.
 A different complete measured source can supply its own coefficients and setup
 without modifying the physics implementation.
+
+The last token says which length the source measured. `test-span`, the
+default and this fixture's meaning, is the span between the two pinned ends:
+the string row's length must equal it. `speaking-length` is the length from
+the nut to the bridge, such as a guitar's scale length measured on the
+instrument. The string row's length times its bridge station must then equal
+the measured length to rounding, and the same uniform string continues past
+the bridge to its far end. The source value is never rescaled: a span or
+station that misses it refuses.
 
 The existing prestressed Euler–Bernoulli owner uses line mass and flexural
 rigidity directly. It does not turn them into fictitious bulk density,

@@ -201,6 +201,55 @@ fn actual_source_frequency_domain_and_numerical_limits_are_enforced() {
 }
 
 #[test]
+fn a_speaking_length_binds_nut_to_support_and_no_other_span_or_station() {
+    // A guitar-like source measured over its 0.65 m scale (nut to saddle), on a 0.68 m pinned span.
+    let values = [0.65, 0.0011, 71.6, 0.00624, 57e-6];
+    let state = source(values, None, false);
+    let measured = ResolvedMeasuredStringSpecimen::try_new(24, &state, selectors()).unwrap();
+    assert_eq!(measured.speaking_length_m(), None);
+    let station = 0.65 / 0.68;
+    let bound = measured
+        .clone()
+        .on_span_from_speaking_length(0.68, station)
+        .unwrap();
+    let (original, string) = (measured.string(), bound.string());
+    assert_eq!(string.length_m, 0.68);
+    assert_eq!(bound.speaking_length_m(), Some(0.65));
+    assert_eq!(string.tension_n, original.tension_n);
+    assert_eq!(string.lin_density_kg_m, original.lin_density_kg_m);
+    assert_eq!(string.bending_stiffness_n_m2, original.bending_stiffness_n_m2);
+    assert_eq!(bound.radius_m(), measured.radius_m());
+    assert_eq!(bound.measurements().identity(), measured.measurements().identity());
+    // The measurement is never rescaled: a span or station that misses it by more than rounding refuses,
+    // including the six-digit station 0.955882 (0.68 x 0.955882 = 0.64999976 m).
+    for (span, fraction) in [
+        (0.68, 0.955_882),
+        (0.70, station),
+        (0.65, station),
+        (0.68, 1.0),
+        (0.68, 0.0),
+        (0.68, f64::NAN),
+        (-0.68, station),
+        (f64::INFINITY, station),
+    ] {
+        assert!(
+            measured
+                .clone()
+                .on_span_from_speaking_length(span, fraction)
+                .is_err(),
+            "accepted span {span} station {fraction}"
+        );
+    }
+    assert!(bound.on_span_from_speaking_length(0.68, station).is_err());
+    // The longer span's modes are re-admitted against the source band: a band that holds the 0.65 m
+    // fundamental but not the 4.4 percent lower 0.68 m one refuses the binding.
+    let f1 = fs_nlmodal::prestressed_beam_omega(values[0], values[2], values[3], values[4], 1);
+    let banded = source(values, Some((0.97 * f1, 1.1 * f1)), false);
+    let narrow = ResolvedMeasuredStringSpecimen::try_new(1, &banded, selectors()).unwrap();
+    assert!(narrow.on_span_from_speaking_length(0.68, station).is_err());
+}
+
+#[test]
 fn missing_duplicate_wrong_quantity_and_nonphysical_measurements_refuse() {
     let values = [0.7, 0.00115, 116.3, 0.0062, 0.000303];
     let state = source(values, None, false);

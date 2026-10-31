@@ -31,8 +31,8 @@ impl input::Wire {
         gate: &CancelGate) -> Result<MaterialStringSource>
     {
         poll(gate)?;
-        if let input::WireSection::Measured { axes, properties } = &self.section {
-            return measured::resolve(self, axes, properties, catalog, loader, spec, gate);
+        if matches!(&self.section, input::WireSection::Measured { .. }) {
+            return measured::resolve(self, catalog, loader, spec, gate);
         }
         let thermal = match self.thermal_reference_kelvin {
             Some(reference) => {

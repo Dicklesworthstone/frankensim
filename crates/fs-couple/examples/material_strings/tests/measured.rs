@@ -240,6 +240,49 @@ fn unknown_measurement_temperature_is_independent_of_body_and_declared_lab_gas()
 }
 
 #[test]
+fn a_speaking_length_source_binds_nut_to_bridge_and_a_test_span_source_never_does() {
+    // A 0.875 m span with the bridge at station 0.8 puts nut to bridge at the source's measured 0.7 m.
+    let longer = text().replace("0.7 0.000575", "0.875 0.000575");
+    let speaking = |card: &str| card.replace("no-intrinsic-loss", "no-intrinsic-loss speaking-length");
+    let parse = |card: &str| input::Spec::parse(card.as_bytes()).unwrap();
+    scoped(|cx, gate| {
+        // Planted negative: an unmarked (test-span) source refuses the longer span, although its bridge station
+        // reproduces the measured length from the nut.
+        let error = ready(cx, gate, parse(&longer), 1.0).err().unwrap().to_string();
+        assert!(error.contains("length [m]") && error.contains("measured setup"), "{error}");
+        // Marked speaking-length, the same source binds nut to bridge and keeps its coefficients on the whole span.
+        let mut bound = ready(cx, gate, parse(&speaking(&longer)), 1.0).unwrap();
+        {
+            let source = specimen(&bound.performance.bank().source().bank().strings()[0].source);
+            assert_eq!(source.string().length_m, 0.875);
+            assert_eq!(source.speaking_length_m(), Some(0.7));
+            assert_eq!(source.properties(), &properties());
+            let card = &bound.performance.bank().cards()[0];
+            assert_eq!(card.linear_density_kg_m, 0.0062);
+            assert_eq!(card.bending_stiffness_n_m2, 0.000303);
+            assert_eq!(card.tension_n, 116.3);
+        }
+        let p = pressure(&mut bound, 64);
+        assert!(p.iter().all(|value| value.is_finite()) && p.iter().any(|value| value.abs() > 1e-15));
+        // A speaking-length source whose span times bridge station misses the measured length refuses, including
+        // the original 0.7 m span (0.56 m nut to bridge).
+        for card in [speaking(&longer).replace("116.3 4 0 0.8 ", "116.3 4 0 0.81 "), speaking(&text())] {
+            let error = ready(cx, gate, parse(&card), 1.0).err().unwrap().to_string();
+            assert!(error.contains("speaking length") && error.contains("measured setup"), "{error}");
+        }
+        // test-span spelled out is the default meaning: the same string and the same pressure.
+        let explicit = text().replace("no-intrinsic-loss", "no-intrinsic-loss test-span");
+        let a = pressure(&mut ready(cx, gate, parse(&text()), 1.0).unwrap(), 64);
+        let b = pressure(&mut ready(cx, gate, parse(&explicit), 1.0).unwrap(), 64);
+        assert_eq!(a, b);
+    });
+    for token in ["scale", "speaking-length speaking-length", "test-span extra"] {
+        let invalid = text().replace("no-intrinsic-loss", &format!("no-intrinsic-loss {token}"));
+        assert!(input::Spec::parse(invalid.as_bytes()).is_err(), "accepted {token}");
+    }
+}
+
+#[test]
 fn measured_setup_and_explicit_elastic_scope_are_not_silently_replaced() {
     let original = text();
     for (from, to) in [
