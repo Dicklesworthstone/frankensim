@@ -16,6 +16,8 @@
 
 use super::super::feedback::OpticalFeedbackError;
 use super::super::temperature_field::{TemperatureOpticalField, TemperatureOpticalState};
+pub mod refinement;
+
 use super::{
     EnergySums, RadiativeBath, RadiativeExchangeBudget, RadiativeExchangeEnergy,
     RadiativeExchangeError, RadiativeExchangePower, RadiativeExchangeTolerance,

@@ -4105,6 +4105,45 @@ Its stated synthetic source tables and three 8–16 micrometre bins demonstrate
 integration, not measured material behavior or bolometric cooling. Run with
 `cargo run -p fs-render --example temperature_radiative_balance --no-default-features --features optical-heating`.
 
+### Whole-trajectory assessment of temperature-dependent radiation
+
+`TemperatureRadiativeExchange::advance_ensemble_refined` evolves independent
+optical replicas through complete native enthalpy trajectories from the same
+accepted input state. Each replica shares photon streams across temperature
+updates and paired time/history resolutions. This preserves correlations from
+earlier radiative heat while permitting paired comparisons; existing input-state
+uncertainty is conditional, not resampled. Returned trajectories are actual
+native states. Mean caloric temperature is measured from each trajectory's
+`T(h)`, never inferred by applying a nonlinear caloric law to mean enthalpy.
+
+Acceptance requires two successive real native time refinements, a separate
+final-state sampling gate, and a separate H/2H photon-sensitivity gate. Actual
+substep counts must increase on both time refinements. Volume emission remains
+sampled in a purely absorbing medium, so H/2H is never skipped just because
+scattering is absent. The caller supplies independent h, T and radiative-energy
+tolerances for the three gates. Formation enthalpy does not enlarge relative
+allowances; a native-coordinate floor refuses sub-ULP accuracy claims instead
+of silently relaxing them.
+
+Centered, scaled scalar statistics are shared with the existing incident-heating
+ensemble owner. Compensated interval energy differences retain small new heat
+against large accepted historical accounts. Final sampling uses empirical
+standard errors across complete trajectories; paired widths use the mean
+difference plus the requested multiple of its empirical standard error. These
+are finite-sample diagnostics, not confidence coverage, rare-path guarantees,
+optional-stopping guarantees or certified bounds on nonlinear finite-H bias.
+
+All accepted and discarded trials share substep, source-evaluation and traced-
+segment ceilings. Retained trajectory, observable-cell and conservative operator
+pair/cell-slot limits bound admission, including vacuum coefficient packets and
+temporary operator replacement/construction overlap. Slot limits count retained
+representations, not allocator bytes. The finest accepted trajectories retain
+their refined photon policy and regain the original per-advance continuation
+budgets. Native physics, source-domain, conservation and cancellation refusals
+remain transactional; only unresolved assessment gates trigger further bounded
+refinement. Geometry, spectral quadrature and constitutive-model errors remain
+outside these trajectory assessments.
+
 ### Coherent transparent coatings on dielectric ray boundaries
 
 The polarized forward-power path accepts an original

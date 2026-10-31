@@ -9,9 +9,9 @@
 //! under optional stopping. Finite samples can still miss rare transport paths.
 
 use super::super::CheckedSum;
+use super::super::ensemble_statistics::{self, StatisticsError};
 use super::super::feedback::OpticalFeedbackError;
 use super::TemperatureScatteringHeating;
-use fs_math::det;
 use fs_thermal::enthalpy::{
     CellId, DepositionError, DepositionSimulation, EnergyAudit, StepConfig,
 };
@@ -160,6 +160,14 @@ impl From<OpticalFeedbackError> for ScatteringRefinementError {
 impl From<DepositionError> for ScatteringRefinementError {
     fn from(error: DepositionError) -> Self {
         Self::Physics(error.into())
+    }
+}
+impl From<StatisticsError> for ScatteringRefinementError {
+    fn from(error: StatisticsError) -> Self {
+        match error {
+            StatisticsError::Invalid(message) => Self::Invalid(message),
+            StatisticsError::Heating(error) => Self::Physics(error.into()),
+        }
     }
 }
 impl std::fmt::Display for ScatteringRefinementError {
@@ -697,110 +705,23 @@ fn measure_scalar(
     base: Option<f64>,
     paired: bool,
     multiplier: f64,
-    mut values: impl FnMut(usize) -> Result<(f64, Option<f64>, Option<f64>)>,
+    values: impl FnMut(usize) -> Result<(f64, Option<f64>, Option<f64>)>,
     checkpoint: Checkpoint<'_>,
 ) -> Result<(ScatteringScalarEstimate, f64, f64, f64)> {
-    let mut fine = Moments::default();
-    let mut coarse = Moments::default();
-    let mut difference = Moments::default();
-    let origin = base.unwrap_or(0.0);
-    let mut magnitude = origin.abs();
-    for replica in 0..count {
-        checkpoint()?;
-        let (a, b, paired_difference) = values(replica)?;
-        magnitude = magnitude.max(a.abs());
-        fine.observe(finite(a - origin)?)?;
-        if let Some(b) = b {
-            magnitude = magnitude.max(b.abs());
-            coarse.observe(finite(b - origin)?)?;
-            difference.observe(match paired_difference {
-                Some(value) => value,
-                None => finite(a - b)?,
-            })?;
-        }
-    }
-    let mut estimate = fine.estimate()?;
-    let scale = if base.is_some() {
-        estimate.mean.abs().max(if paired {
-            coarse.estimate()?.mean.abs()
-        } else {
-            0.0
-        })
-    } else {
-        0.0
-    };
-    let width = if paired {
-        let delta = difference.estimate()?;
-        finite(delta.mean.abs() + multiplier * delta.standard_error)?
-    } else {
-        finite(multiplier * estimate.standard_error)?
-    };
-    estimate.mean = finite(origin + estimate.mean)?;
-    Ok((estimate, width, scale, magnitude))
-}
-
-/// Signed, centered and scaled Welford moments. Centering avoids losing thermal
-/// variability against an arbitrary caloric datum; scaling avoids squaring SI
-/// magnitudes that would overflow or underflow the second central moment.
-#[derive(Clone, Copy, Default)]
-struct Moments {
-    count: usize,
-    anchor: f64,
-    scale: f64,
-    mean: f64,
-    m2: f64,
-}
-impl Moments {
-    fn observe(&mut self, value: f64) -> Result<()> {
-        finite(value)?;
-        if self.count == 0 {
-            self.anchor = value;
-        }
-        let shifted = finite(value - self.anchor)?;
-        if shifted.abs() > self.scale {
-            let factor = self.scale / shifted.abs();
-            self.mean *= factor;
-            self.m2 *= factor * factor;
-            self.scale = shifted.abs();
-        }
-        let normalized = if self.scale == 0.0 {
-            0.0
-        } else {
-            shifted / self.scale
-        };
-        self.count += 1;
-        let delta = normalized - self.mean;
-        self.mean += delta / self.count as f64;
-        self.m2 += delta * (normalized - self.mean);
-        Ok(())
-    }
-    fn estimate(self) -> Result<ScatteringScalarEstimate> {
-        if self.count < 2 {
-            return Err(ScatteringRefinementError::Invalid(
-                "independent replicas required",
-            ));
-        }
-        Ok(ScatteringScalarEstimate {
-            mean: finite(self.anchor + self.mean * self.scale)?,
-            standard_error: finite(
-                self.scale
-                    * det::sqrt(self.m2.max(0.0) / self.count as f64 / (self.count - 1) as f64),
-            )?,
-        })
-    }
+    let (estimate, width, scale, magnitude) =
+        ensemble_statistics::measure_scalar(count, base, paired, multiplier, values, checkpoint)?;
+    Ok((
+        ScatteringScalarEstimate {
+            mean: estimate.mean,
+            standard_error: estimate.standard_error,
+        },
+        width,
+        scale,
+        magnitude,
+    ))
 }
 fn sum_difference(a: CheckedSum, b: CheckedSum) -> Result<f64> {
-    let mut difference = CheckedSum::default();
-    difference
-        .add(a.sum - b.sum)
-        .map_err(OpticalFeedbackError::from)?;
-    difference
-        .add(a.correction)
-        .map_err(OpticalFeedbackError::from)?;
-    difference
-        .add(-b.correction)
-        .map_err(OpticalFeedbackError::from)?;
-    Ok(difference.value().map_err(OpticalFeedbackError::from)?)
+    Ok(ensemble_statistics::sum_difference(a, b)?)
 }
 fn record_optical(
     a: &mut ScatteringEnsembleAssessment,

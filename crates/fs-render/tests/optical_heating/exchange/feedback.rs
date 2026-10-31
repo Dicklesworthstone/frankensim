@@ -1,4 +1,7 @@
 //! Local constitutive feedback uses the same reciprocal/native thermal owners.
+#[path = "feedback/refinement.rs"]
+mod refinement;
+
 #[path = "feedback/combined.rs"]
 mod combined;
 

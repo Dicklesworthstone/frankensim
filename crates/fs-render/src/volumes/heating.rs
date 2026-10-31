@@ -34,6 +34,8 @@ pub mod temperature_field;
 /// Passive volumetric emission, reabsorption and bath exchange on native thermal cells.
 pub mod exchange;
 
+mod ensemble_statistics;
+
 /// Retained SI power accounting for the original wavelength packet.
 /// Each lane is already a quadrature-weighted power in W, not spectral radiance.
 #[derive(Clone, Copy, Debug, PartialEq)]
