@@ -1,11 +1,14 @@
 //! Native circuit terminals coupled to the actual nonlinear magnetic field.
 //!
 //! Each stranded winding owns a signed spatial J/current profile and material
-//! resistance. Its original inductor branch becomes a PRIVATE current-source
-//! port in the original Kirchhoff DAE. The input is -I (current leaving the
-//! first terminal), and its native conjugate output is the winding voltage V.
-//! The shared Newton owner solves V = delta(lambda)/dt + R*I, where lambda is
-//! the exact P1 field/profile pairing plus declared series end inductance.
+//! resistance. Its original inductor branch becomes a PRIVATE power port in
+//! the original Kirchhoff DAE. By default its input is -I (current leaving the
+//! first terminal) and its native conjugate output is the winding voltage V.
+//! An explicitly voltage-input port instead imposes the actual field voltage
+//! and reads the native output -I. Both use the same shared Newton owner and
+//! V = delta(lambda)/dt + R*I, where lambda is the exact P1 field/profile pairing
+//! plus declared series end inductance. Voltage-input ports admit current-driven
+//! winding topologies without introducing artificial resistance or storage.
 //!
 //! Every trial restarts the accepted circuit and nonlinear-eddy histories.
 //! Native graph work -dt*I*V cancels terminal work into the field/winding. Core
@@ -17,8 +20,8 @@
 //! fitted inductance is used. The moving-conductor step keeps the stranded
 //! winding geometry fixed and resolves its motional feedback through this same
 //! terminal Newton solve, with signed Lorentz work in the combined account.
-//! The allocating native DAE must admit the held private-current trials; ideal
-//! current-only constraint topologies can refuse this bounded partitioned lane.
+//! The allocating native DAE must admit the declared terminal causality and
+//! initial current/voltage receipt; singular ideal-source topologies can refuse.
 
 /// Moving bulk conductors coupled to stationary, spatially resolved windings.
 pub mod moving;
@@ -85,6 +88,40 @@ pub struct NonlinearWindingInitial {
     pub charges_c: Vec<f64>,
     /// Original source ports only, including any gaps in their index order.
     pub external_inputs: Vec<f64>,
+}
+
+/// Causality of a private native port, in winding order. This selects which
+/// terminal variable the circuit receives; it does not change the field law.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum NonlinearWindingPort {
+    /// Impose -I and read V. The default for voltage-driven windings; the native
+    /// graph must admit independently perturbed winding-current trials.
+    CurrentInput,
+    /// Impose V = delta(lambda)/dt + R*I and read -I. This supports windings
+    /// driven by ideal current sources and mixed current/voltage-driven graphs.
+    /// The native graph must admit independently imposed terminal voltages.
+    VoltageInput {
+        /// Initial first-to-second voltage [V], used only at construction.
+        /// It must admit the original native storage and supplied field current.
+        /// Field linkage at one instant alone does not determine this voltage.
+        initial_voltage_v: f64,
+        /// Positive numerical scale [ohm] converting the native-minus-field
+        /// current residual to volts for the shared interface Newton solver.
+        /// This adds no physical impedance, heat, storage or terminal voltage.
+        residual_scale_ohm: f64,
+        /// Independent physical current allowance [A], at initialization and
+        /// after each finite step; not a scaled Newton convergence threshold.
+        current_tolerance_a: f64,
+    },
+}
+
+impl NonlinearWindingPort {
+    fn branch(self, port: usize) -> Branch {
+        match self {
+            Self::CurrentInput => Branch::CurrentSource { port },
+            Self::VoltageInput { .. } => Branch::VoltageSource { port },
+        }
+    }
 }
 
 /// Explicit physical acceptance and nested work budgets.
@@ -162,6 +199,7 @@ struct Layout {
     graph: CircuitGraph,
     dae: CircuitDae,
     windings: NonlinearWindings,
+    terminal_ports: Vec<NonlinearWindingPort>,
     external_ports: usize,
 }
 
@@ -196,7 +234,11 @@ pub struct NonlinearWindingStep<F = NonlinearEddyStep> {
     /// Native step-average voltage, in original first-to-second orientation.
     pub terminal_voltage_v: Vec<f64>,
     pub flux_linkages_wb: [Vec<f64>; 2],
+    /// Actual native voltage minus the field/copper-required voltage [V].
     pub terminal_residual_v: Vec<f64>,
+    /// Actual native current minus field current [A]. Exactly zero for
+    /// current-input ports; voltage-input ports use their declared allowance.
+    pub terminal_current_residual_a: Vec<f64>,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
     /// Core eddy + stranded conductor + native graph physical heat, once each.
@@ -341,14 +383,36 @@ fn bind(
     )?)
 }
 
-fn ports(layout: &Layout, external: &[f64], currents: &[f64]) -> Result<Vec<f64>> {
+fn admit_external_inputs(layout: &Layout, external: &[f64]) -> Result<()> {
     if external.len() != layout.external_ports || external.iter().any(|v| !v.is_finite()) {
         return Err(NonlinearWindingError::Invalid(
             "complete finite original source inputs required",
         ));
     }
+    Ok(())
+}
+
+fn ports(layout: &Layout, external: &[f64], currents: &[f64], voltage: &[f64]) -> Result<Vec<f64>> {
+    admit_external_inputs(layout, external)?;
+    if currents.len() != layout.terminal_ports.len()
+        || voltage.len() != layout.terminal_ports.len()
+        || currents.iter().chain(voltage).any(|v| !v.is_finite())
+    {
+        return Err(NonlinearWindingError::Invalid(
+            "complete finite winding terminal currents and voltages required",
+        ));
+    }
     let mut input = external.to_vec();
-    input.extend(currents.iter().map(|i| -*i));
+    input.extend(
+        layout
+            .terminal_ports
+            .iter()
+            .enumerate()
+            .map(|(i, port)| match port {
+                NonlinearWindingPort::CurrentInput => -currents[i],
+                NonlinearWindingPort::VoltageInput { .. } => voltage[i],
+            }),
+    );
     Ok(input)
 }
 
@@ -389,6 +453,46 @@ impl<'m> NonlinearWindingCircuit<'m> {
         config: NonlinearWindingConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        poll(cancelled)?;
+        let count = windings.profiles_per_m2.len();
+        if count == 0 || count > config.max_windings || config.max_windings > MAX_WINDINGS {
+            return Err(NonlinearWindingError::Invalid(
+                "invalid winding count or winding capacity",
+            ));
+        }
+        let terminal_ports = vec![NonlinearWindingPort::CurrentInput; count];
+        Self::new_with_ports(
+            field,
+            graph,
+            windings,
+            terminal_ports,
+            sources,
+            initial,
+            config,
+            cancelled,
+        )
+    }
+
+    /// Bind explicit per-winding native port causality to the same physical
+    /// field and circuit histories. Voltage-input ports support ideal current
+    /// drive; current-input ports retain the original voltage-driven operation.
+    ///
+    /// Each voltage-input port declares an initial voltage. The existing native
+    /// initializer must accept that voltage at the supplied original fluxes and
+    /// charges, and its admitted current must match the supplied field current.
+    /// Ambiguous initial current splits may refuse; no stored coordinate or
+    /// field history is projected to conceal incompatible initial conditions.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_ports(
+        field: PlanarNonlinearEddy<'m>,
+        graph: CircuitGraph,
+        windings: NonlinearWindings,
+        terminal_ports: Vec<NonlinearWindingPort>,
+        sources: Vec<WindingConductor>,
+        initial: NonlinearWindingInitial,
+        config: NonlinearWindingConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         use NonlinearWindingError::Invalid;
         poll(cancelled)?;
         let count = windings.profiles_per_m2.len();
@@ -399,6 +503,14 @@ impl<'m> NonlinearWindingCircuit<'m> {
             || values.is_none_or(|n| n > config.max_profile_values)
             || windings.branch_indices.len() != count
             || windings.end_inductance_h.len() != count
+            || terminal_ports.len() != count
+            || terminal_ports.iter().any(|port| {
+                matches!(port, NonlinearWindingPort::VoltageInput {
+                    initial_voltage_v, residual_scale_ohm, current_tolerance_a
+                } if !initial_voltage_v.is_finite()
+                    || !positive(*residual_scale_ohm)
+                    || !positive(*current_tolerance_a))
+            })
             || windings
                 .end_inductance_h
                 .iter()
@@ -467,9 +579,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 ));
             }
             bound[branch] = true;
-            lowered.branches[branch].2 = Branch::CurrentSource {
-                port: external_ports + winding,
-            };
+            lowered.branches[branch].2 = terminal_ports[winding].branch(external_ports + winding);
         }
         let dae = assemble_circuit(&lowered)?;
         if dae.system.state_dim() > 128 {
@@ -500,9 +610,25 @@ impl<'m> NonlinearWindingCircuit<'m> {
             graph,
             dae,
             windings,
+            terminal_ports,
             external_ports,
         });
-        let input = ports(&layout, &initial.external_inputs, &initial.currents_a)?;
+        let initial_voltage: Vec<_> = layout
+            .terminal_ports
+            .iter()
+            .map(|port| match port {
+                NonlinearWindingPort::CurrentInput => 0.0,
+                NonlinearWindingPort::VoltageInput {
+                    initial_voltage_v, ..
+                } => *initial_voltage_v,
+            })
+            .collect();
+        let input = ports(
+            &layout,
+            &initial.external_inputs,
+            &initial.currents_a,
+            &initial_voltage,
+        )?;
         let mut seed = vec![0.0; layout.dae.system.state_dim()];
         for (&index, &value) in layout
             .dae
@@ -516,6 +642,31 @@ impl<'m> NonlinearWindingCircuit<'m> {
             seed[index] = value;
         }
         let state = native_seed(&layout.dae, &seed, &input)?;
+        // The native initializer starts from zero algebraic multipliers. Its
+        // admitted effort is midpoint(0, state), not the returned endpoint.
+        // Native circuit-source columns have support only on that algebraic
+        // block; G^T*effort is the original conjugate output, including -I for
+        // voltage-source ports. Read this receipt without a second dt=0 solve
+        // that could choose another split of redundant initial constraints.
+        let (_, _, g) = layout.dae.system.structure();
+        for (winding, port) in layout.terminal_ports.iter().enumerate() {
+            if let NonlinearWindingPort::VoltageInput {
+                current_tolerance_a,
+                ..
+            } = port
+            {
+                let p = layout.external_ports + winding;
+                let output = (layout.dae.system.differential_dim()..state.len())
+                    .try_fold(0.0, |sum, row| {
+                        finite(g[row * layout.dae.ports + p].mul_add(0.5 * state[row], sum))
+                    })?;
+                if finite(-output - initial.currents_a[winding])?.abs() > *current_tolerance_a {
+                    return Err(Invalid(
+                        "native initial winding current disagrees with accepted field history",
+                    ));
+                }
+            }
+        }
         let total = finite(
             field.energy_j()
                 + layout.dae.system.hamiltonian(&state)
@@ -556,6 +707,9 @@ impl<'m> NonlinearWindingCircuit<'m> {
     pub fn end_inductance_h(&self) -> &[f64] {
         &self.layout.windings.end_inductance_h
     }
+    pub fn terminal_ports(&self) -> &[NonlinearWindingPort] {
+        &self.layout.terminal_ports
+    }
     pub fn conductors(&self) -> &[WindingConductor] {
         &self.conductors
     }
@@ -579,10 +733,14 @@ impl<'m> NonlinearWindingCircuit<'m> {
     }
 
     /// Simultaneously solve native graph voltage/current and nonlinear field.
-    /// Endpoint winding currents are held private circuit inputs over this BE
-    /// step; graph storage uses its native discrete gradient. The combined
-    /// scheme is first order. Final physical residual and energy checks are
-    /// independent of the interface solver's numerical convergence flag.
+    /// Endpoint field currents are paired with native step-average voltages.
+    /// A current-input port holds -I; a voltage-input port holds the actual
+    /// field/copper-required V and solves the returned -I. Original external
+    /// inputs are held over the finite interval; graph storage uses its native
+    /// discrete gradient. This first-order BE coupling reports finite-step work,
+    /// not an instantaneous ideal-source impulse or a reset of stored flux.
+    /// Physical voltage/current residuals and energy checks are independent of
+    /// the interface solver's numerical convergence flag.
     pub fn step_to_candidate(
         &self,
         target_s: f64,
@@ -711,7 +869,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "positive interval, work budgets and physical tolerances required",
             ));
         }
-        ports(&self.layout, external_inputs, &self.currents_a)?;
+        admit_external_inputs(&self.layout, external_inputs)?;
         let (conductors, conductor_windings, resistance_ohm) = bind(
             &self.field,
             materials,
@@ -722,6 +880,10 @@ impl<'m> NonlinearWindingCircuit<'m> {
         )?;
         let cancel = RefCell::new(cancelled);
         let trials = Cell::new(0);
+        let voltage_input = self
+            .terminal_ports()
+            .iter()
+            .any(|port| matches!(port, NonlinearWindingPort::VoltageInput { .. }));
         let evaluate = |currents: &[f64]| -> Result<Trial<'m, F>> {
             let mut check = || (*cancel.borrow_mut())();
             poll(&mut check)?;
@@ -730,31 +892,77 @@ impl<'m> NonlinearWindingCircuit<'m> {
             }
             trials.set(trials.get() + 1);
             let j = impressed(self.profiles_per_m2(), currents, &mut check)?;
-            let input = ports(&self.layout, external_inputs, currents)?;
-            let x0 = native_seed(&self.layout.dae, &self.state, &input)?;
-            poll(&mut check)?;
-            let (native, _) = self.layout.dae.step_audited(&x0, &input, dt)?;
-            poll(&mut check)?;
             let field = evaluate_field(&j, &mut check)?;
             let linkage = linkages(&field.state, &self.layout.windings, currents, &mut check)?;
-            let voltage = native.y[self.layout.external_ports..].to_vec();
-            let residual = currents
+            let required_voltage = currents
                 .iter()
                 .enumerate()
                 .map(|(i, &current)| {
                     finite(
-                        voltage[i]
-                            - (linkage[i] - self.flux_linkages_wb[i]) / dt
-                            - resistance_ohm[i] * current,
+                        (linkage[i] - self.flux_linkages_wb[i]) / dt + resistance_ohm[i] * current,
                     )
                 })
                 .collect::<Result<Vec<_>>>()?;
+            let input = ports(&self.layout, external_inputs, currents, &required_voltage)?;
+            // A voltage trial is a finite-step effort, not an initial voltage
+            // clamp. Reinitializing against it could falsely reject a capacitor
+            // or project its accepted charge. Keep the entire accepted native
+            // state and let the original descriptor step solve its multipliers.
+            let x0 = if voltage_input {
+                self.state.clone()
+            } else {
+                native_seed(&self.layout.dae, &self.state, &input)?
+            };
+            poll(&mut check)?;
+            let (native, _) = self.layout.dae.step_audited(&x0, &input, dt)?;
+            poll(&mut check)?;
+            let mut voltage = Vec::with_capacity(currents.len());
+            let mut voltage_residual = Vec::with_capacity(currents.len());
+            let mut current_residual = Vec::with_capacity(currents.len());
+            let mut residual = Vec::with_capacity(currents.len());
+            for (winding, port) in self.terminal_ports().iter().enumerate() {
+                let output = native.y[self.layout.external_ports + winding];
+                let v = match port {
+                    NonlinearWindingPort::CurrentInput => finite(output)?,
+                    NonlinearWindingPort::VoltageInput { .. } => {
+                        let (a, b, _) = self.graph().branches[self.branch_indices()[winding]];
+                        let potential = |node: usize| {
+                            if node == 0 {
+                                0.0
+                            } else {
+                                let index = self.layout.dae.node_potential_index[node - 1];
+                                f64::midpoint(x0[index], native.x[index])
+                            }
+                        };
+                        finite(potential(a) - potential(b))?
+                    }
+                };
+                let dv = finite(v - required_voltage[winding])?;
+                let di = match port {
+                    NonlinearWindingPort::CurrentInput => 0.0,
+                    NonlinearWindingPort::VoltageInput { .. } => {
+                        finite(-output - currents[winding])?
+                    }
+                };
+                let scaled = match port {
+                    NonlinearWindingPort::CurrentInput => dv,
+                    NonlinearWindingPort::VoltageInput {
+                        residual_scale_ohm, ..
+                    } => finite(residual_scale_ohm * di)?,
+                };
+                voltage.push(v);
+                voltage_residual.push(dv);
+                current_residual.push(di);
+                residual.push(scaled);
+            }
             Ok(Trial {
                 native,
                 field,
                 x0,
                 linkage,
                 voltage,
+                voltage_residual,
+                current_residual,
                 residual,
             })
         };
@@ -789,12 +997,25 @@ impl<'m> NonlinearWindingCircuit<'m> {
         }
         let trial = evaluate(&solver.x)?;
         if trial
-            .residual
+            .voltage_residual
             .iter()
             .any(|v| v.abs() > controls.terminal_voltage_tolerance_v)
         {
             return Err(Balance(
                 "native terminal voltage and actual field linkage do not close",
+            ));
+        }
+        if self
+            .terminal_ports()
+            .iter()
+            .zip(&trial.current_residual)
+            .any(|(port, di)| {
+                matches!(port, NonlinearWindingPort::VoltageInput { current_tolerance_a, .. }
+                if di.abs() > *current_tolerance_a)
+            })
+        {
+            return Err(Balance(
+                "native terminal current and actual field current do not close",
             ));
         }
         let mut check = || (*cancel.borrow_mut())();
@@ -925,7 +1146,8 @@ impl<'m> NonlinearWindingCircuit<'m> {
             currents_a: solver.x.clone(),
             terminal_voltage_v: trial.voltage,
             flux_linkages_wb: [self.flux_linkages_wb.clone(), trial.linkage.clone()],
-            terminal_residual_v: trial.residual,
+            terminal_residual_v: trial.voltage_residual,
+            terminal_current_residual_a: trial.current_residual,
             stored_before_j,
             stored_after_j,
             heat_j,
@@ -959,6 +1181,8 @@ struct Trial<'m, F> {
     x0: Vec<f64>,
     linkage: Vec<f64>,
     voltage: Vec<f64>,
+    voltage_residual: Vec<f64>,
+    current_residual: Vec<f64>,
     residual: Vec<f64>,
 }
 

@@ -30,8 +30,8 @@ impl NonlinearWindingCircuit<'_> {
     /// bindings to an authored graph. Thermal callers must separately admit the
     /// accepted source state and pin source choices across their physical step.
     /// Retained algebraic entries are the previous native receipt, not new
-    /// equilibrium efforts; the original native initializer rebuilds them under
-    /// the actual held inputs before every subsequent field/circuit trial.
+    /// equilibrium efforts; the subsequent original native descriptor solve
+    /// rebuilds the stage efforts under the actual held terminal inputs.
     ///
     /// This supplies no material interpolant, contact law, new circuit solver or
     /// parameter work. The original source must describe a static isotropic
@@ -84,9 +84,8 @@ impl NonlinearWindingCircuit<'_> {
         // Retain the exact original winding ordering and private-port numbers.
         let mut lowered = graph.clone();
         for (winding, &branch) in self.branch_indices().iter().enumerate() {
-            lowered.branches[branch].2 = Branch::CurrentSource {
-                port: self.layout.external_ports + winding,
-            };
+            lowered.branches[branch].2 =
+                self.terminal_ports()[winding].branch(self.layout.external_ports + winding);
         }
         let dae = assemble_circuit(&lowered)?;
         if dae.flux_index != self.dae().flux_index
@@ -106,6 +105,7 @@ impl NonlinearWindingCircuit<'_> {
             graph,
             dae,
             windings: self.layout.windings.clone(),
+            terminal_ports: self.layout.terminal_ports.clone(),
             external_ports: self.layout.external_ports,
         });
         candidate.graph_materials = sources;

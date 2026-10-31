@@ -675,7 +675,8 @@ establish execution of the complete material/mesh/Newton integration.
 currents to `PlanarNonlinearEddy` and the original `fs-phs` Kirchhoff descriptor.
 The authored signed `J_z/I` profiles reuse the original winding component
 balance and exact P1 linkage pairing. A bound original inductor branch becomes
-a private native current-source port with input `-I` and output `V_a-V_b`.
+a private native power port. The default current-input causality has input `-I`
+and output `V_a-V_b`.
 Its placeholder inductance contributes no storage. Unbound inductors,
 capacitors, transformers, graph resistors and external ports retain their
 original circuit owners and coordinate ordering.
@@ -702,12 +703,48 @@ each heat decomposition must pass physical allowances before publication.
 The candidate publishes the circuit and field together, preserving original
 histories on source, budget, native constraint, nonlinear or cancellation refusal.
 
+`NonlinearWindingCircuit::new_with_ports` also admits explicit voltage-input
+causality for current-driven windings, including ideal current sources. That
+private native voltage-source stamp receives the actual
+`delta(lambda)/dt + R_winding*I` and returns `-I_native`; the same Newton owner
+solves `I_native-I_field = 0`. Current-input and voltage-input windings can share
+one nonlinear field, including signed mutual linkage. A declared positive
+`residual_scale_ohm` only converts the current residual to the shared numerical
+voltage scale. It is not a physical resistor and adds no heat, voltage drop,
+stored energy or parasitic regularization. The independent declared
+`current_tolerance_a` checks the actual current mismatch; the existing voltage
+and combined energy allowances remain mandatory. Step receipts expose both
+physical voltage and current residuals, separate from scaled Newton residuals.
+
+Voltage-input initialization requires an explicit initial terminal voltage,
+compatible original native fluxes/charges and matching admitted field current.
+The original rank-aware native initializer owns that consistency check. Its
+zero-time algebraic midpoint receipt determines the current; ambiguous initial
+current splits may refuse instead of silently replacing the field history.
+Finite voltage-input trials retain the accepted native state and let the
+original descriptor step evolve its storage. They do not reinitialize or
+project capacitor charge against a trial step-average voltage. Source-bound
+graph-resistance refresh retains the same terminal causality and port ordering.
+Original external inputs are held over each finite interval, and endpoint field
+currents pair with native step-average voltages in this first-order method.
+The receipt describes finite-step work; it is not an instantaneous-source
+impulse model or an automatic resolution of incompatible ideal-source constraints.
+
 This first-order coupling admits at most 16 windings within the existing
 32-node/64-branch/32-port/128-state allocating circuit bounds. The native graph
-must admit its held private-current trials; ideal current-only constraint
+must admit its explicitly selected private-port trials; singular ideal-source
 topologies can refuse this partitioned lane. Geometry, proposed magnetic law and
 native graph coefficients stay fixed during each native trial. No hysteresis
 or experimental material-qualification claim is introduced.
+
+`nonlinear_winding_circuit::current` supplies independent manufactured oracles
+for signed ideal current drive through linear/saturating fields, declared end
+storage and continuation; smooth-ramp work and numerical-loss time refinement;
+native capacitor/inductor history; mixed causal and reversed mutual windings
+with source-bound graph resistance; core eddy shielding
+and heat; and initialization/current-budget/cancellation refusals. These cases
+exercise the actual field and native circuit owners, not a replacement lumped
+inductance model; their material laws do not claim measured qualification.
 
 `NonlinearWindingCircuit::step_with_eulerian_velocity_candidate` resolves
 moving bulk conductors inside this same terminal Newton solve. Its actual
