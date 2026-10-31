@@ -1282,6 +1282,29 @@ impl PlateMaterialModel {
         }).collect()
     }
 
+    /// Explicit isotropic source roles, or `None` for an orthotropic section.
+    /// Other physics can project these same roles from the retained complete
+    /// material bundle without guessing from whichever properties are present.
+    pub fn isotropic_parameters(self)
+        -> Result<Option<IsotropicElasticParameters>, fs_material::state_point::MaterialStatePointError>
+    {
+        if !self.is_isotropic() { return Ok(None); }
+        let requirements = self.elastic_requirements()?;
+        let (first, second) = (requirements[1].clone(), requirements[2].clone());
+        Ok(Some(match self {
+            Self::Isotropic => IsotropicElasticParameters::YoungPoisson {
+                young_modulus: first, poisson_ratio: second,
+            },
+            Self::IsotropicYoungShear => IsotropicElasticParameters::YoungShear {
+                young_modulus: first, shear_modulus: second,
+            },
+            Self::IsotropicBulkShear => IsotropicElasticParameters::BulkShear {
+                bulk_modulus: first, shear_modulus: second,
+            },
+            Self::Orthotropic12 | Self::Orthotropic21 => return Ok(None),
+        }))
+    }
+
     // A Young-modulus Maxwell spectrum is a different source model from
     // independently relaxing bulk/shear constants. Do not infer that history.
     pub(crate) fn require_canonical_relaxation(self) -> Result<(), AcousticRealizeError> {
@@ -1837,25 +1860,11 @@ pub(crate) fn plate_elasticity(
     let (e1, e2, nu12, g12) = match model {
         PlateMaterialModel::Isotropic | PlateMaterialModel::IsotropicYoungShear
         | PlateMaterialModel::IsotropicBulkShear => {
-            let requirement = |key| ScalarPropertyRequirement::try_new(
-                key, Pressure::DIMS, ScalarAdmissibility::StrictlyPositive);
-            let parameters = (|| {
-                Ok::<_, fs_material::state_point::MaterialStatePointError>(match model {
-                    PlateMaterialModel::Isotropic => IsotropicElasticParameters::YoungPoisson {
-                        young_modulus: requirement(YOUNG_MODULUS_PROPERTY)?,
-                        poisson_ratio: ScalarPropertyRequirement::try_new(POISSON_RATIO_PROPERTY,
-                            Dims::NONE, ScalarAdmissibility::OpenInterval { lower: -1.0, upper: 0.5 })?,
-                    },
-                    PlateMaterialModel::IsotropicYoungShear => IsotropicElasticParameters::YoungShear {
-                        young_modulus: requirement(YOUNG_MODULUS_PROPERTY)?,
-                        shear_modulus: requirement(SHEAR_MODULUS_PROPERTY)?,
-                    },
-                    _ => IsotropicElasticParameters::BulkShear {
-                        bulk_modulus: requirement(BULK_MODULUS_PROPERTY)?,
-                        shear_modulus: requirement(SHEAR_MODULUS_PROPERTY)?,
-                    },
-                })
-            })().map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
+            let parameters = model.isotropic_parameters()
+                .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?
+                .ok_or(AcousticRealizeError::InvalidDescription {
+                    what: "isotropic plate requires its explicitly selected elastic source roles",
+                })?;
             let response = ResolvedIsotropicElasticModuli::try_from_resolved(state.clone(), &parameters)
                 .map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?;
             let (young, poisson) = (response.young_modulus_pa(), response.poisson_ratio());

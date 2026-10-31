@@ -55,6 +55,63 @@ fn common_temperature_limit_preserves_original_source_and_strict_entry_point() {
 }
 
 #[test]
+fn selected_bulk_pairs_retain_complete_sources_in_native_point_contact() {
+    use fs_material::state_point::{IsotropicElasticParameters,IsotropicSolidStatePoint,
+        ScalarAdmissibility as Admit,ScalarPropertyRequirement as Requirement,resolve_material_state_point};
+    let a=thermal_card("A",4e7,4e7);
+    let base=thermal_card("B",2e7,2e7);
+    let mut claims=base.claims().clone();
+    for (name,value,dims) in [("shear_modulus",8e6,Pressure::DIMS),
+        ("bulk_modulus",2e7/1.5,Pressure::DIMS),("retained_viscosity",10.0,fs_qty::DynViscosity::DIMS)] {
+        claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
+            value:PropertyValue::Scalar {value,dims},
+            validity:ValidityDomain::unconstrained().with("T",280.0,340.0),
+            uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
+            observations:vec![],provenance:Provenance {source:"synthetic contact source pair".into(),
+                license:"CC0-1.0".into(),artifact:None}}).unwrap();
+    }
+    let b=MaterialCard::assemble(base.id().clone(),claims,vec![]).unwrap();
+    let i=interface(&a,&b);let c=cards(&a,&b,&i);let p=query();
+    let expected=c.resolve(&p,geometry(),envelope()).unwrap();
+    let sa=resolve_isotropic_solid_state_point(&a,&p,MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let sb=resolve_isotropic_solid_state_point(&b,&p,MaterialPropertySelection::SingleClaimOnly).unwrap();
+    assert_eq!(sa.identity(),sa.resolved().identity());
+    assert_eq!(c.resolve_from_bulk_states_at_temperatures([&sa,&sb],&p,geometry(),envelope()).unwrap(),expected);
+    let requirement=|name,dims|Requirement::try_new(name,dims,Admit::StrictlyPositive).unwrap();
+    let density=requirement("density",Density::DIMS);
+    let yield_requirement=requirement("yield_stress",Pressure::DIMS);
+    for parameters in [IsotropicElasticParameters::YoungShear {
+        young_modulus:requirement("young_modulus",Pressure::DIMS),
+        shear_modulus:requirement("shear_modulus",Pressure::DIMS),
+    },IsotropicElasticParameters::BulkShear {
+        bulk_modulus:requirement("bulk_modulus",Pressure::DIMS),
+        shear_modulus:requirement("shear_modulus",Pressure::DIMS),
+    }] {
+        let mut requirements=vec![density.clone(),yield_requirement.clone(),
+            requirement("retained_viscosity",fs_qty::DynViscosity::DIMS)];
+        requirements.extend(parameters.requirements().into_iter().cloned());
+        let resolved=resolve_material_state_point(&b,&p,&requirements,MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let selected=IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+            resolved.clone(),&density,&parameters,&yield_requirement).unwrap();
+        let law=c.resolve_from_bulk_states_at_temperatures([&sa,&selected],&p,geometry(),envelope()).unwrap();
+        close(law.stiffness_n_per_m_3_2(),expected.stiffness_n_per_m_3_2());
+        let response=law.evaluate("selected-pair",2e-5,0.05,1e-4).unwrap();
+        let reference=expected.evaluate("canonical",2e-5,0.05,1e-4).unwrap();
+        close(response.normal_force_n,reference.normal_force_n);
+        close(response.pressure.peak_pressure_pa,reference.pressure.peak_pressure_pa);
+        let elastic=law.model().normal_state().elastic();
+        assert_eq!(elastic.surface_b_state().resolved(),&resolved);
+        assert_eq!(elastic.surface_b_state_identity(),selected.identity());
+        assert!(resolved.property("poisson_ratio").is_none());
+        assert_eq!(c.resolve_from_bulk_states_at_fixed_environments([&sa,&selected],&p,
+            geometry(),envelope()).unwrap(),law);
+    }
+    let foreign=resolve_isotropic_solid_state_point(&base,&p,MaterialPropertySelection::SingleClaimOnly).unwrap();
+    assert!(c.resolve_from_bulk_states_at_temperatures([&sa,&foreign],&p,geometry(),envelope()).is_err(),
+        "same material ID must not substitute a different immutable card");
+}
+
+#[test]
 fn each_bulk_retains_its_temperature_and_original_force_pressure_and_loss() {
     let a=thermal_card("A",4e7,1e7);let b=thermal_card("B",2e7,2.6e7);let i=interface(&a,&b);
     let c=cards(&a,&b,&i);let pa=point(290.0);let pb=point(310.0);let pi=point(300.0);

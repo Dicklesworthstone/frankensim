@@ -182,6 +182,18 @@ environmental work during loaded evolution. The existing source-point tests
 exercise independent material/interface states, analytical Hertz pressure and
 force, loss, source identity, model temperature limits and frequency refusal.
 
+The additive `PointContactMaterialCards::resolve_from_bulk_states_at_temperatures`
+and `resolve_from_bulk_states_at_fixed_environments` entry points accept the
+existing complete `IsotropicSolidStatePoint` projections. Young/Poisson,
+Young/shear and bulk/shear sources therefore feed the same original
+Hertz/Hunt--Crossley evaluator, including yield, interface, geometry and
+operating-envelope admission. Both supplied solids must belong to the exact
+configured immutable cards. No bulk claim is reselected or replaced by a
+derived property. Physical contact identities retain the selected parameter
+roles; an unchanged source bundle cannot conceal a different constitutive
+choice. These are frozen-state bindings, not a new thermal derivative or
+contact-history law.
+
 - `normal_patch::NormalLawSource` presents `(U,F,dF)` from an immutable
   `SourcePointContact` or a `FiniteGapResponseCurve`. Point stiffness remains
   derived from the bound bulk/interface model and geometry; finite-gap values

@@ -72,6 +72,9 @@ impl Surface {
         temperature_range_k: [f64; 2],
     ) -> Result<Self, ThermalHertzError> {
         let invalid = ThermalHertzError::Invalid;
+        if reference.elastic_state().derivation().is_some() {
+            return Err(invalid("affine thermal contact requires its original canonical Young/Poisson source law"));
+        }
         let [low, high] = temperature_range_k;
         if !low.is_finite() || !high.is_finite() || low <= 0.0 || low >= high {
             return Err(invalid(

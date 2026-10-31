@@ -7243,6 +7243,14 @@ Young-based Prony/tensor histories still require their original source
 parameterization and explicitly refuse the new alternatives; independent
 bulk/shear relaxation is not inferred from static elastic data.
 
+Material shell point receivers also retain the agreed incident elastic model,
+separately from their general nodal force projection. Source contact requires
+one common constitutive selection even when the card is the same.
+`material_strings` point contacts carry that exact pair and the original
+body receipts into the shared solid/contact projection, adding the same card's
+yield source at the same physical point. The existing normal contact owner
+continues to enforce its interface and finite-patch limits.
+
 ## Finite moisture transport into native plate mechanics
 
 The material-reality MR46 slice in `moisture` keeps local water inventory

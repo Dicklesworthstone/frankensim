@@ -2960,6 +2960,21 @@ resolver identities remain unchanged; additional projection-only domains use
 the explicit parameter identity v2. This is endpoint evaluation, not a mass
 transfer, path-support proof, constitutive-history integration or heat solve.
 
+`IsotropicSolidStatePoint::{try_from_resolved,
+try_from_resolved_with_parameters}` adds an explicitly admitted positive yield
+source to that same elastic projection. The complete bundle and its auxiliary
+properties survive adoption and `at_query_point`; elastic constants are never
+re-resolved through a different pair. Its physical `identity()` binds elastic
+and yield roles, and the ordered Hertz reduced-modulus identity carries both
+solid identities into contact and specimen consumers. Canonical solid identities
+remain unchanged. The separate reciprocal `ThermalHertzPair` still requires its
+original affine-Young/fixed-Poisson source model and refuses an independent-pair
+projection rather than changing sources to derive temperature responses.
+`ResolvedMaterialStatePoint::with_additional_requirements` adds disjoint source
+properties at the same immutable card and typed query without re-querying any
+existing property. Contact can therefore append yield while preserving every
+original elastic/loss receipt, including deliberately pinned competing claims.
+
 Focused regressions cover independent constitutive stress, source conditions,
 invalid pairs, conflicting claim pins, unit rescaling, complete-bundle adoption,
 multiaxis refresh and atomic auxiliary-property refusal, and the actual tetrahedral

@@ -378,15 +378,15 @@ impl TetElasticMaterial {
         Self::try_new_mandel(density_kg_m3, world, *identity.finalize().as_bytes())
     }
 
-    /// Bind directly to the canonical temperature/environment-resolved
-    /// isotropic material state.
+    /// Bind directly to the temperature/environment-resolved isotropic solid,
+    /// retaining its explicit elastic/yield source selection in the identity.
     #[must_use]
     pub fn from_resolved_state(state: &IsotropicSolidStatePoint) -> Self {
         Self::try_new(
             state.density_kg_m3(),
             state.young_modulus_pa(),
             state.poisson_ratio(),
-            *state.resolved().identity().as_bytes(),
+            *state.identity().as_bytes(),
         )
         .expect("an admitted isotropic material state satisfies tet invariants")
     }

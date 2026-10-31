@@ -923,6 +923,51 @@ impl ResolvedMaterialStatePoint {
         resolve_material_state_point(card, point, &requirements, selection)
     }
 
+    /// Add disjoint source requirements at this exact state without re-querying
+    /// or reselecting any original property. Every existing usage receipt and
+    /// consumer requirement is retained verbatim in the expanded bundle.
+    ///
+    /// The same immutable card, complete typed query, bounded property count,
+    /// unique complete keys and ordinary material admission remain mandatory.
+    /// A failure returns no partially extended state.
+    pub fn with_additional_requirements(
+        &self,
+        card: &MaterialCard,
+        requirements: &[ScalarPropertyRequirement],
+        selection: MaterialPropertySelection,
+    ) -> Result<Self, MaterialStatePointError> {
+        if card.content_hash() != self.card_identity {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "material extension requires the original immutable card",
+            });
+        }
+        if requirements.is_empty() { return Ok(self.clone()); }
+        let count = self.properties.len().saturating_add(requirements.len());
+        if count > MAX_MATERIAL_STATE_PROPERTIES {
+            return Err(MaterialStatePointError::RequirementCount {
+                observed: count, maximum: MAX_MATERIAL_STATE_PROPERTIES,
+            });
+        }
+        let all_requirements: Vec<_> = self.properties.iter().map(|p|p.requirement.clone())
+            .chain(requirements.iter().cloned()).collect();
+        scalar_property_queries(&all_requirements)?;
+        let additional = resolve_material_state_point(card, &self.query(), requirements, selection)?;
+        if additional.axis_quantities() != self.axis_quantities() {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "material extension must retain the original coordinate schema",
+            });
+        }
+        let mut properties = self.properties.clone();
+        properties.extend(additional.properties);
+        properties.sort_by(|a,b|a.requirement.name.cmp(&b.requirement.name)
+            .then_with(||a.answer.receipt.selected.cmp(&b.answer.receipt.selected)));
+        let identity = resolved_identity(MATERIAL_STATE_POINT_IDENTITY_DOMAIN,
+            TYPED_MATERIAL_STATE_POINT_IDENTITY_DOMAIN, self.card_identity,
+            &self.query_point, &properties);
+        Ok(Self { material: self.material.clone(), card_identity: self.card_identity,
+            query_point: self.query_point.clone(), properties, identity })
+    }
+
     /// Canonically ordered resolved properties.
     #[must_use]
     pub fn properties(&self) -> &[ResolvedScalarProperty] {
@@ -2594,11 +2639,10 @@ pub fn resolve_orthotropic_elastic_state_point(
 /// The four scalar properties needed by an isotropic elastic contact/body rung.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IsotropicSolidStatePoint {
-    resolved: ResolvedMaterialStatePoint,
-    density_kg_m3: f64,
-    young_modulus_pa: f64,
-    poisson_ratio: f64,
+    elastic: IsotropicElasticStatePoint,
+    yield_requirement: ScalarPropertyRequirement,
     yield_stress_pa: f64,
+    identity: ContentHash,
 }
 
 /// One evidence-bearing absolute complex-index sample at a material state.
@@ -2836,25 +2880,44 @@ impl IsotropicSolidStatePoint {
     /// Complete evidence-bearing property bundle.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
-        &self.resolved
+        self.elastic.resolved()
+    }
+
+    /// Elastic projection and its original independent source roles.
+    #[must_use]
+    pub const fn elastic_state(&self) -> &IsotropicElasticStatePoint {
+        &self.elastic
+    }
+
+    /// Physical solid identity, including selected elastic and yield roles.
+    /// Canonical density/Young/Poisson/yield states retain their original identity.
+    #[must_use]
+    pub const fn identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Original source requirement supplying the positive yield limit.
+    #[must_use]
+    pub const fn yield_requirement(&self) -> &ScalarPropertyRequirement {
+        &self.yield_requirement
     }
 
     /// Density at the queried state [kg/m3].
     #[must_use]
     pub const fn density_kg_m3(&self) -> f64 {
-        self.density_kg_m3
+        self.elastic.density_kg_m3()
     }
 
     /// Young's modulus at the queried state [Pa].
     #[must_use]
     pub const fn young_modulus_pa(&self) -> f64 {
-        self.young_modulus_pa
+        self.elastic.young_modulus_pa()
     }
 
     /// Isotropic Poisson ratio at the queried state.
     #[must_use]
     pub const fn poisson_ratio(&self) -> f64 {
-        self.poisson_ratio
+        self.elastic.poisson_ratio()
     }
 
     /// Yield stress at the queried state [Pa].
@@ -2872,8 +2935,8 @@ impl IsotropicSolidStatePoint {
         &self,
         other: &Self,
     ) -> Result<ResolvedReducedModulus, MaterialStatePointError> {
-        let compliance = (1.0 - self.poisson_ratio * self.poisson_ratio) / self.young_modulus_pa
-            + (1.0 - other.poisson_ratio * other.poisson_ratio) / other.young_modulus_pa;
+        let compliance = (1.0 - self.poisson_ratio() * self.poisson_ratio()) / self.young_modulus_pa()
+            + (1.0 - other.poisson_ratio() * other.poisson_ratio()) / other.young_modulus_pa();
         let value_pa = compliance.recip();
         if !compliance.is_finite() || compliance <= 0.0 || !value_pa.is_finite() {
             return Err(MaterialStatePointError::InvalidDerived {
@@ -2881,13 +2944,13 @@ impl IsotropicSolidStatePoint {
             });
         }
         let mut hasher = DomainHasher::new("org.frankensim.fs-material.reduced-modulus.v1");
-        hasher.update(self.resolved.identity().as_bytes());
-        hasher.update(other.resolved.identity().as_bytes());
+        hasher.update(self.identity().as_bytes());
+        hasher.update(other.identity().as_bytes());
         hasher.update(&value_pa.to_bits().to_le_bytes());
         Ok(ResolvedReducedModulus {
             value_pa,
-            surface_a_state_identity: self.resolved.identity(),
-            surface_b_state_identity: other.resolved.identity(),
+            surface_a_state_identity: self.identity(),
+            surface_b_state_identity: other.identity(),
             identity: hasher.finalize(),
         })
     }
@@ -2925,19 +2988,7 @@ pub fn resolve_isotropic_solid_state_point(
         )?,
     ];
     let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
-    let value = |name: &str| {
-        resolved
-            .property(name)
-            .expect("canonical isotropic requirement was resolved")
-            .value_si()
-    };
-    Ok(IsotropicSolidStatePoint {
-        density_kg_m3: value(DENSITY_PROPERTY),
-        young_modulus_pa: value(YOUNG_MODULUS_PROPERTY),
-        poisson_ratio: value(POISSON_RATIO_PROPERTY),
-        yield_stress_pa: value(YIELD_STRESS_PROPERTY),
-        resolved,
-    })
+    IsotropicSolidStatePoint::try_from_resolved(resolved)
 }
 
 /// Ordered two-material Hertz elasticity derived from resolved state points.

@@ -92,6 +92,78 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, young: f64) -> Ready {
         .unwrap()
 }
 
+fn shell_pair_bulk(name:&str,model:PlateMaterialModel)->NormalizedPack {
+    let base=shell_bulk(name,6e9);
+    if !name.contains("body") { return base; }
+    let mut claims=ClaimSet::new();
+    for (_,original) in base.claims().claims_ordered() {
+        if (original.key.name=="poisson_ratio" && model!=PlateMaterialModel::Isotropic)
+            || (original.key.name=="young_modulus" && model==PlateMaterialModel::IsotropicBulkShear) {
+            continue;
+        }
+        let property=match original.key.name.as_str() {
+            "poisson_ratio"=>claim("poisson_ratio",0.25,Dims::NONE),
+            "shear_modulus"=>claim("shear_modulus",2.4e9,Pressure::DIMS),
+            _=>original.clone(),
+        };
+        claims.insert_claim(property).unwrap();
+    }
+    if model==PlateMaterialModel::IsotropicBulkShear {
+        claims.insert_claim(claim("bulk_modulus",4e9,Pressure::DIMS)).unwrap();
+    }
+    pack_claims(name,claims)
+}
+
+#[test]
+fn independent_shell_elastic_pairs_reach_the_same_source_bound_contact_and_body_reaction() {
+    scoped(|cx,gate| {
+        let mut stiffnesses=Vec::new();let mut forces=Vec::new();
+        for (token,model) in [("isotropic",PlateMaterialModel::Isotropic),
+            ("isotropic-young-shear",PlateMaterialModel::IsotropicYoungShear),
+            ("isotropic-bulk-shear",PlateMaterialModel::IsotropicBulkShear)] {
+            let body=include_str!("../../arched.body").replace("orthotropic12",token);
+            let mut instrument=resting_spec().compile_with_profiles(cx,gate,
+                Some(body::Profile::parse(body.as_bytes()).unwrap()),
+                Some(stops(&stop_text(),gate,"body.fsmatpk")),
+                |name|Ok(shell_pair_bulk(name,model))).unwrap();
+            let bank=instrument.performance.bank();
+            let original=&bank.source().bank().material_shell().unwrap()
+                .specimen.regions()[0].input().region.material;
+            let contact=bank.system().obstacle_source(0).unwrap();
+            let solid=contact.model().normal_state().elastic().surface_b_state();
+            assert_eq!(solid.resolved().properties().len(),original.properties().len()+1);
+            assert!(original.properties().iter().all(|p|solid.resolved().properties().contains(p)));
+            assert_eq!(solid.yield_stress_pa(),1e10);
+            if model!=PlateMaterialModel::Isotropic {
+                assert!(solid.resolved().property("poisson_ratio").is_none());
+                assert_eq!(solid.elastic_state().derivation().unwrap().parameters(),
+                    &model.isotropic_parameters().unwrap().unwrap());
+            }
+            if model==PlateMaterialModel::IsotropicBulkShear {
+                assert!(solid.resolved().property("young_modulus").is_none());
+            }
+            stiffnesses.push(contact.stiffness_n_per_m_3_2());
+            let row=bank.source().stops()[0].body.as_ref().unwrap().shapes.clone();
+            let mut samples=vec![0.0;instrument.spec.samples as usize];
+            instrument.performance.block(&mut samples[..1]).unwrap();
+            let system=instrument.performance.bank().system();
+            forces.push(system.last_obstacle_frames().unwrap()[0].normal_force_n);
+            assert!(forces.last().unwrap()> &0.0);
+            let velocity=row.iter().zip(system.components()[1].states())
+                .map(|(shape,state)|shape*state.velocity_m_sqrt_kg_per_s).sum::<f64>();
+            assert!(velocity>0.0,"the contact must react onto the original shell");
+            let frame=system.last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+            for block in samples[1..].chunks_mut(37) {instrument.performance.block(block).unwrap();}
+            assert!(samples.iter().any(|value|*value!=0.0));
+        }
+        for i in 1..3 {
+            assert!((stiffnesses[i]/stiffnesses[0]-1.0).abs()<2e-13);
+            assert!((forces[i]/forces[0]-1.0).abs()<1e-10);
+        }
+    });
+}
+
 #[test]
 fn material_receiver_uses_original_shell_point_and_reacts_in_the_same_step() {
     scoped(|cx, gate| {

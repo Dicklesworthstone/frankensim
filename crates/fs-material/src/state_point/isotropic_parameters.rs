@@ -370,6 +370,70 @@ impl IsotropicElasticStatePoint {
     }
 }
 
+impl IsotropicSolidStatePoint {
+    /// Adopt canonical density/Young/Poisson/yield data while retaining the
+    /// complete bundle, including any coupled physical properties and receipts.
+    pub fn try_from_resolved(resolved: ResolvedMaterialStatePoint)
+        -> Result<Self, MaterialStatePointError>
+    {
+        let elastic = IsotropicElasticStatePoint::try_from_resolved(resolved)?;
+        let yield_requirement = ScalarPropertyRequirement::try_new(
+            YIELD_STRESS_PROPERTY, Pressure::DIMS, ScalarAdmissibility::StrictlyPositive)?;
+        Self::from_elastic(elastic, &yield_requirement)
+    }
+
+    /// Project an explicitly chosen isotropic pair and positive yield source
+    /// from one complete material state. Derived E/nu values are never inserted
+    /// into the original source properties or represented as measured claims.
+    pub fn try_from_resolved_with_parameters(
+        resolved: ResolvedMaterialStatePoint,
+        density: &ScalarPropertyRequirement,
+        parameters: &IsotropicElasticParameters,
+        yield_requirement: &ScalarPropertyRequirement,
+    ) -> Result<Self, MaterialStatePointError> {
+        if std::iter::once(density).chain(parameters.requirements())
+            .any(|requirement| requirement.name() == yield_requirement.name()) {
+            return Err(MaterialStatePointError::DuplicateRequirement {
+                property: yield_requirement.name().to_owned(),
+            });
+        }
+        let elastic = IsotropicElasticStatePoint::try_from_resolved_with_parameters(
+            resolved, density, parameters)?;
+        Self::from_elastic(elastic, yield_requirement)
+    }
+
+    fn from_elastic(elastic: IsotropicElasticStatePoint,
+        yield_requirement: &ScalarPropertyRequirement) -> Result<Self, MaterialStatePointError>
+    {
+        require_scalar_parameter(yield_requirement, Pressure::DIMS)?;
+        let yield_stress_pa = scalar_parameter_value(elastic.resolved(), yield_requirement)?;
+        if !yield_stress_pa.is_finite() || yield_stress_pa <= 0.0 {
+            return Err(MaterialStatePointError::InvalidDerived { quantity: "positive_yield_stress_pa" });
+        }
+        let identity = if elastic.derivation().is_none() {
+            elastic.resolved().identity()
+        } else {
+            let mut identity = DomainHasher::new("org.frankensim.fs-material.isotropic-solid-parameters.v1");
+            identity.update(elastic.identity().as_bytes());
+            identity.update(&(yield_requirement.name().len() as u64).to_le_bytes());
+            identity.update(yield_requirement.name().as_bytes());
+            yield_requirement.admissibility().encode(&mut identity);
+            identity.update(&yield_stress_pa.to_bits().to_le_bytes());
+            identity.finalize()
+        };
+        Ok(Self { elastic, yield_requirement: yield_requirement.clone(), yield_stress_pa, identity })
+    }
+
+    /// Refresh every original elastic, yield and coupled property atomically,
+    /// with the same selected claims and physical source roles. This endpoint
+    /// operation does not evolve contact geometry or constitutive history.
+    pub fn at_query_point(&self, card: &MaterialCard, point: &QueryPoint)
+        -> Result<Self, MaterialStatePointError>
+    {
+        Self::from_elastic(self.elastic.at_query_point(card, point)?, &self.yield_requirement)
+    }
+}
+
 /// Resolve an explicitly selected independent isotropic parameter pair.
 ///
 /// All three source properties are evaluated atomically at the complete query
@@ -649,6 +713,93 @@ mod tests {
             (actual - expected).abs() <= expected.abs().max(1.0) * 2e-14,
             "{actual} != {expected}"
         );
+    }
+
+    #[test]
+    fn g3_contact_projection_retains_yield_loss_and_explicit_parameter_roles() {
+        let base=card([2500.0,60e9,0.25,24e9,40e9]);
+        let mut claims=base.claims().clone();
+        claims.insert_claim(claim("yield-source",Pressure::DIMS,100e6)).unwrap();
+        claims.insert_claim(claim("loss-source",fs_qty::DynViscosity::DIMS,10.0)).unwrap();
+        let material=MaterialCard::assemble(base.id().clone(),claims,Vec::new()).unwrap();
+        let density=requirement("rho-source",Density::DIMS);
+        let yield_requirement=requirement("yield-source",Pressure::DIMS);
+        let loss=requirement("loss-source",fs_qty::DynViscosity::DIMS);
+        for tag in 0..3 {
+            let parameters=parameters(tag);
+            let mut requirements=vec![density.clone(),loss.clone()];
+            requirements.extend(parameters.requirements().into_iter().cloned());
+            let original=resolve_material_state_point(&material,&point(),&requirements,
+                MaterialPropertySelection::SingleClaimOnly).unwrap();
+            let expanded=original.with_additional_requirements(&material,
+                &[yield_requirement.clone()],MaterialPropertySelection::SingleClaimOnly).unwrap();
+            assert!(original.properties().iter().all(|p|expanded.properties().contains(p)));
+            let solid=IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+                expanded.clone(),&density,&parameters,&yield_requirement).unwrap();
+            assert_eq!(solid.resolved(),&expanded);
+            close(solid.young_modulus_pa(),60e9);
+            close(solid.poisson_ratio(),0.25);
+            close(solid.yield_stress_pa(),100e6);
+            assert_eq!(solid.elastic_state().derivation().unwrap().parameters(),&parameters);
+            if tag==2 {
+                assert!(solid.resolved().property("E-source").is_none());
+                assert!(solid.resolved().property("nu-source").is_none());
+            }
+            let hot=solid.at_query_point(&material,&point().with("temperature",313.15).unwrap()).unwrap();
+            assert_eq!(hot.resolved().properties().len(),5);
+            assert_eq!(hot.yield_requirement(),&yield_requirement);
+            assert_eq!(hot.elastic_state().derivation().unwrap().parameters(),&parameters);
+            assert!(solid.at_query_point(&material,&point().with("temperature",330.0).unwrap()).is_err());
+        }
+        let mut requirements=vec![density.clone(),yield_requirement.clone(),loss];
+        for (name,dims) in [("E-source",Pressure::DIMS),("nu-source",Dims::NONE),
+            ("G-source",Pressure::DIMS),("K-source",Pressure::DIMS)] {
+            requirements.push(requirement(name,dims));
+        }
+        let all=resolve_material_state_point(&material,&point(),&requirements,
+            MaterialPropertySelection::SingleClaimOnly).unwrap();
+        let a=IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+            all.clone(),&density,&parameters(1),&yield_requirement).unwrap();
+        let b=IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+            all,&density,&parameters(2),&yield_requirement).unwrap();
+        assert_ne!(a.identity(),b.identity(),"the same bundle cannot erase different selected roles");
+        let aa=a.reduced_modulus_against(&a).unwrap();
+        let ab=a.reduced_modulus_against(&b).unwrap();
+        close(aa.value_pa,ab.value_pa);
+        assert_ne!(aa.identity,ab.identity);
+    }
+
+    #[test]
+    fn g3_appending_yield_retains_original_pinned_receipts_with_competing_elastic_claims() {
+        let mut claims=ClaimSet::new();
+        let mut requirements=Vec::new();
+        let mut pins=Vec::new();
+        for (name,dims,value) in [("rho-source",Density::DIMS,2500.0),
+            ("E-source",Pressure::DIMS,60e9),("G-source",Pressure::DIMS,24e9)] {
+            let id=claims.insert_claim(claim(name,dims,value)).unwrap();
+            requirements.push(requirement(name,dims));
+            pins.push((name.to_owned(),id));
+        }
+        claims.insert_claim(claim("E-source",Pressure::DIMS,48e9)).unwrap();
+        claims.insert_claim(claim("yield-source",Pressure::DIMS,100e6)).unwrap();
+        let original_card=card([2500.0,60e9,0.25,24e9,40e9]);
+        let material=MaterialCard::assemble(original_card.id().clone(),claims,Vec::new()).unwrap();
+        assert!(resolve_material_state_point(&material,&point(),&requirements,
+            MaterialPropertySelection::SingleClaimOnly).is_err());
+        let original=resolve_material_state_point(&material,&point(),&requirements,
+            MaterialPropertySelection::PinnedByProperty(pins)).unwrap();
+        let yield_requirement=requirement("yield-source",Pressure::DIMS);
+        let expanded=original.with_additional_requirements(&material,
+            &[yield_requirement.clone()],MaterialPropertySelection::SingleClaimOnly).unwrap();
+        assert!(original.properties().iter().all(|p|expanded.properties().contains(p)));
+        assert_eq!(expanded.axis_quantities(),original.axis_quantities());
+        let solid=IsotropicSolidStatePoint::try_from_resolved_with_parameters(expanded,
+            &requirements[0],&parameters(1),&yield_requirement).unwrap();
+        close(solid.young_modulus_pa(),60e9);
+        assert!(original.with_additional_requirements(&material,&[requirements[1].clone()],
+            MaterialPropertySelection::SingleClaimOnly).is_err());
+        assert!(original.with_additional_requirements(&original_card,&[yield_requirement],
+            MaterialPropertySelection::SingleClaimOnly).is_err());
     }
 
     #[test]

@@ -223,13 +223,13 @@ impl BoundIsotropicElasticInterface {
     /// Surface-A resolved material-state identity.
     #[must_use]
     pub const fn surface_a_state_identity(&self) -> ContentHash {
-        self.surface_a_state.resolved().identity()
+        self.surface_a_state.identity()
     }
 
     /// Surface-B resolved material-state identity.
     #[must_use]
     pub const fn surface_b_state_identity(&self) -> ContentHash {
-        self.surface_b_state.resolved().identity()
+        self.surface_b_state.identity()
     }
 
     /// Complete surface-A material state and property-use receipts.

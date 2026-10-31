@@ -123,8 +123,12 @@ attachment, not a supplied modal vector; all strings currently use this one
 footprint. The separate string records still specify each bridge's stiffness,
 damping and station on its complete span including afterlength.
 
-Elastic models are `isotropic`, `orthotropic12` or `orthotropic21`; the ordered
-plane and grain angle are passed unchanged to the original material chart.
+Elastic models are `isotropic`, `isotropic-young-shear`, `isotropic-bulk-shear`,
+`orthotropic12` or `orthotropic21`; the ordered plane and grain angle are passed
+unchanged to the original material chart. The isotropic alternatives choose the
+actual source parameter pair explicitly and derive equivalent section constants
+through the shared material owner. They do not add derived values to the source
+card as measured properties.
 Support is `simply-supported` or `clamped` on the perimeter, or
 `clamped-x-min` on only the x=0 edge; the other three edges are free and may
 carry the declared force footprint. Pretension is nonnegative conservative
@@ -134,9 +138,18 @@ or frequencies in Hz. Existing modal/Nyquist/source-band admission still applies
 The finite spatial basis and coupled dashpot time discretization require their
 usual mesh, mode-count and time-step refinement.
 
-Every selected body pack supplies `density` and either `young_modulus` plus
-`poisson_ratio`, or `young_modulus_1`, `young_modulus_2`, `poisson_ratio_12` and
-`shear_modulus_12`. The default tensor loss also requires ALL six reduced in-plane viscosities in Pa s:
+Every selected body pack supplies `density` and the selected elastic properties:
+
+| Elastic model | Original source properties |
+| --- | --- |
+| `isotropic` | `young_modulus`, `poisson_ratio` |
+| `isotropic-young-shear` | `young_modulus`, `shear_modulus` |
+| `isotropic-bulk-shear` | `bulk_modulus`, `shear_modulus` |
+| `orthotropic12`, `orthotropic21` | `young_modulus_1`, `young_modulus_2`, `poisson_ratio_12`, `shear_modulus_12` |
+
+Moduli are in Pa and Poisson ratios are dimensionless. No alternative pair is
+selected when a required property is absent. The default tensor loss also
+requires ALL six reduced in-plane viscosities in Pa s:
 `plane_stress_viscosity_11`, `_22`, `_66`, `_12`, `_16`, `_26`. The engineering
 shear convention is the original shared material owner's convention. Signed
 couplings and explicit zero entries are preserved; the tensor must be positive
@@ -162,6 +175,10 @@ selection replaces the tensor-viscosity requirements; unselected viscosity data
 are not applied in parallel. A zero excess modulus is explicit lossless material
 data. A missing property, incompatible units, unresolved relaxation time,
 insufficient budget or unsupported source band refuses construction.
+The current regional and tensor Maxwell laws require their original elastic
+source model; `isotropic-young-shear` and `isotropic-bulk-shear` refuse these
+history declarations. A static elastic pair does not establish how its two
+moduli relax independently. Both alternatives support the default tensor loss.
 
 The actual region bending forms, including cross-mode terms, use the same DKT
 eigenbasis as all bridge and pressure maps. Within each region each excess
@@ -518,8 +535,10 @@ follow arbitrary triangle-edge numbering. A near-normal grain projection refuses
 The axis names the first selected section axis: material axis 1 for
 `orthotropic12`, material axis 2 for `orthotropic21`. The original ordered
 material interpretation is retained. Orthotropic packs additionally supply `shear_modulus_13` and
-`shear_modulus_23` in Pa. The isotropic model derives its elastic shear from
-the same Young's modulus and Poisson ratio.
+`shear_modulus_23` in Pa. All three isotropic models use the same selected elastic
+pair for in-plane and transverse shear; they do not request orthotropic
+transverse moduli. Young/Poisson sources derive the shear modulus, while the
+Young/shear and bulk/shear alternatives retain their supplied shear modulus.
 
 In addition to all six plane-stress viscosity entries, every selected pack
 supplies `transverse_shear_viscosity_13`, `transverse_shear_viscosity_23` and

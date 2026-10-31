@@ -492,7 +492,7 @@ impl ResolvedEvolvedSolidDiscProfile {
         let mut identity = DomainHasher::new(EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN);
         identity.update(profile_identities.profile.as_bytes());
         identity.update(profile_identities.mass_properties.as_bytes());
-        identity.update(material.resolved().identity().as_bytes());
+        identity.update(material.identity().as_bytes());
         Ok(ResolvedMaterialDiscProfile {
             profile: self.profile.clone(),
             material: material.clone(),
@@ -846,7 +846,7 @@ impl ResolvedPhaseDiscProfile {
         let profile_identities = self.profile.content_identities();
         identity.update(profile_identities.profile.as_bytes());
         identity.update(profile_identities.mass_properties.as_bytes());
-        identity.update(material.resolved().identity().as_bytes());
+        identity.update(material.identity().as_bytes());
         Ok(ResolvedMaterialDiscProfile {
             profile: self.profile.clone(),
             material: material.clone(),
@@ -1356,7 +1356,7 @@ impl DiscProfileSpec {
         let mut identity = DomainHasher::new(EULER_MATERIAL_SPECIMEN_IDENTITY_DOMAIN);
         identity.update(profile_identities.profile.as_bytes());
         identity.update(profile_identities.mass_properties.as_bytes());
-        identity.update(material.resolved().identity().as_bytes());
+        identity.update(material.identity().as_bytes());
         Ok(ResolvedMaterialDiscProfile {
             profile,
             material: material.clone(),

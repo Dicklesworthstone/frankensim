@@ -1411,7 +1411,8 @@ For a `material-stop`, `@receiver` is mandatory with `shell:ID`: the actual
 incident body material supplies the original immutable bulk card, physical
 state and elastic source receipts. A separate receiver pack cannot override
 them. All elements touching the node must have the same resolved material
-state; interfaces between different materials require their own physical patch
+state and select the same constitutive model; interfaces between different
+materials or elastic source selections require their own physical patch
 description and refuse here. Assembly parts share the original assembled body
 basis while retaining their own material identities. Body motion reacts in
 the same simultaneous normal/friction solve as string, bridge and cavity
@@ -1423,9 +1424,14 @@ surface A then receiver surface B. `MODEL_PACK` is an existing
 one supported normal-law selection. The record explicitly associates these
 artifacts; the interface, model and source domains must agree. The common
 material state uses the performance's temperature and angular frequency.
-The original point owner requires density, Young's modulus, Poisson ratio and
-yield stress from both bulk cards, explicit adhesion data from the dry
-interface, and the selected model's applicability parameters. Missing data,
+Both bulk cards must supply density and yield stress. The string and a fixed
+receiver use their Young/Poisson source pair. A shell `@receiver` retains the
+actual `isotropic`, `isotropic-young-shear` or `isotropic-bulk-shear` selection
+used by the body; the common material owner derives the corresponding contact
+elasticity without substituting other source claims. The same immutable card
+supplies yield at that exact state. The point owner also requires explicit
+adhesion data from the dry interface and the selected model's applicability
+parameters. Missing data,
 unsupported laws, incompatible ordered materials and adhesive domains refuse.
 
 Both positive principal curvatures describe the **relative local gap**; they

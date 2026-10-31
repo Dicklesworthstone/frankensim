@@ -1,5 +1,6 @@
 //! One physical shell point for reciprocal axial, normal and other force ports.
 use super::*;
+use crate::thin_plate::PlateMaterialModel;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 
 /// Geometry in the original shell mesh's global XYZ frame.
@@ -53,6 +54,10 @@ pub struct MaterialShellPoint<'a> {
     pub material: &'a ResolvedMaterialStatePoint,
     /// Minimum physical section thickness over those incident elements [m].
     pub thickness_m: f64,
+    /// Exact elastic source selection when every incident section agrees.
+    /// `None` permits a generic force port across differing selections, but
+    /// cannot supply one unambiguous constitutive source to a contact law.
+    pub elastic_model: Option<PlateMaterialModel>,
     /// Every incident section was actually compiled with isotropic elasticity.
     /// Extra isotropic answers on an orthotropic card do not establish this.
     pub isotropic_elasticity: bool,
@@ -122,6 +127,8 @@ impl MaterialStringBankSource {
         let material =
             material.ok_or_else(|| invalid("shell point has no actual material surface"))?;
         let mut thickness_m = f64::INFINITY;
+        let mut elastic_model = None;
+        let mut common_elastic_model = true;
         let mut isotropic_elasticity = true;
         for region in specimen.regions() {
             poll(gate)?;
@@ -134,7 +141,12 @@ impl MaterialStringBankSource {
                 .any(|&element| mesh.tris[element].contains(&geometry.node))
             {
                 thickness_m = thickness_m.min(region.thickness_m());
-                isotropic_elasticity &= region.input().region.model.is_isotropic();
+                let selected = region.input().region.model;
+                if elastic_model.is_some_and(|previous| previous != selected) {
+                    common_elastic_model = false;
+                }
+                elastic_model = Some(selected);
+                isotropic_elasticity &= selected.is_isotropic();
             }
         }
         if !thickness_m.is_finite() || thickness_m <= 0.0 {
@@ -142,6 +154,7 @@ impl MaterialStringBankSource {
                 "shell point has no positive physical section thickness",
             ));
         }
+        if !common_elastic_model { elastic_model = None; }
         let shapes = modes
             .iter()
             .map(|mode| {
@@ -163,6 +176,7 @@ impl MaterialStringBankSource {
             },
             material,
             thickness_m,
+            elastic_model,
             isotropic_elasticity,
         })
     }

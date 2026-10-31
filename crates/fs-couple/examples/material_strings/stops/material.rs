@@ -6,7 +6,8 @@ use fs_contact::normal_patch::InputUncertainty;
 use fs_contact::normal_patch::source::{PointContactEnvelope, PointContactGeometry, SourcePointContact};
 use fs_contact::normal_patch::source::state::PointContactMaterialCards;
 use fs_matdb::{InterfaceSystemCard, NormalizedModelPack};
-use fs_material::state_point::{append_held_environment, query_with_source_conventions};
+use fs_material::state_point::{IsotropicSolidStatePoint,append_held_environment,
+    query_with_source_conventions,resolve_isotropic_solid_state_point};
 use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm}};
 use fs_tribo::InputAuthority;
 use fs_couple::bowed_string::runtime::reciprocal::bank::shell::MaterialShellPoint;
@@ -163,14 +164,12 @@ impl Sources {
                         || d.envelope.half_space_depth_m > point.thickness_m {
                         return Err("material-stop half-space/layer depth exceeds the receiver's actual section thickness".into());
                     }
-                    // The current point owner is isotropic. Merely finding a
-                    // similarly named isotropic property elsewhere on an
-                    // orthotropic card cannot replace its actual body model.
-                    if !point.isotropic_elasticity || ["density", "young_modulus", "poisson_ratio"].iter()
-                        .any(|name| point.material.property(name).is_none()) {
-                        return Err("source point contact requires the receiver's actual isotropic elastic state".into());
+                    // The original section chooses the constitutive roles;
+                    // extra properties elsewhere on its card cannot select them.
+                    if point.elastic_model.is_none_or(|model| !model.is_isotropic()) {
+                        return Err("source point contact requires the receiver's actual isotropic elastic state with one common constitutive source selection".into());
                     }
-                    Some(point.material)
+                    Some(point)
                 },
             };
             let a = &catalog.get(outer).ok_or("outer string material is absent from the catalog")?.card;
@@ -178,7 +177,7 @@ impl Sources {
                 ReceiverMaterial::Pack(path) => &catalog[path].card,
                 ReceiverMaterial::Body => {
                     let actual = receiver.ok_or("source receiver lost its original material")?;
-                    &catalog.values().find(|pack| pack.card.content_hash() == actual.card_identity())
+                    &catalog.values().find(|pack| pack.card.content_hash() == actual.material.card_identity())
                         .ok_or("receiver's original immutable material card is absent from the catalog")?.card
                 },
             };
@@ -189,7 +188,7 @@ impl Sources {
             let receiver_point = match &d.receiver {
                 ReceiverMaterial::Pack(path) => material_inputs::query_with_environment(
                     b, spec.temperature, spec.omega, environment(path))?,
-                ReceiverMaterial::Body => receiver.ok_or("source receiver lost its original material")?.query(),
+                ReceiverMaterial::Body => receiver.ok_or("source receiver lost its original material")?.material.query(),
             };
             let interface = self.interfaces.get(&d.interface).ok_or("material stop interface pack is not loaded")?;
             let models = self.models.get(&d.model).ok_or("material stop model pack is not loaded")?;
@@ -219,7 +218,17 @@ impl Sources {
                 maximum_step_s: 1.0/f64::from(spec.rate), ..d.envelope };
             let independent_environment = [&point, &receiver_point, &interface_point].iter()
                 .any(|p| p.axes().keys().any(|axis| axis != "T" && axis != "omega"));
-            let source = if independent_environment {
+            let source = if let Some(actual) = receiver {
+                let solid_a=resolve_isotropic_solid_state_point(a,&point,Pick::SingleClaimOnly)?;
+                let solid_b=receiver_solid(actual,b)?;
+                if independent_environment {
+                    materials.resolve_from_bulk_states_at_fixed_environments([&solid_a,&solid_b],
+                        &interface_point,d.geometry,envelope)
+                } else {
+                    materials.resolve_from_bulk_states_at_temperatures([&solid_a,&solid_b],
+                        &interface_point,d.geometry,envelope)
+                }
+            } else if independent_environment {
                 materials.resolve_at_fixed_environments([&point, &receiver_point],
                     &interface_point, d.geometry, envelope)
             } else {
@@ -227,17 +236,13 @@ impl Sources {
                     &interface_point, d.geometry, envelope)
             }?;
             if let Some(actual) = receiver {
+                let actual=actual.material;
                 let contact = source.model().normal_state().elastic().surface_b_state().resolved();
                 if contact.card_identity() != actual.card_identity()
                     || contact.query_point() != actual.query_point()
                     || contact.axis_quantities() != actual.axis_quantities()
-                    || ["density", "young_modulus", "poisson_ratio"].iter().any(|name| {
-                        match (actual.property(name), contact.property(name)) {
-                            (Some(body), Some(patch)) => body.answer() != patch.answer(),
-                            _ => true,
-                        }
-                    }) {
-                    return Err("normal contact must retain the receiver body's exact elastic source receipts and state".into());
+                    || actual.properties().iter().any(|original| !contact.properties().contains(original)) {
+                    return Err("normal contact must retain the receiver body's complete original source receipts and state".into());
                 }
             }
             sources.push((index, source));
@@ -245,4 +250,24 @@ impl Sources {
         poll(gate)?;
         Ok(sources)
     }
+}
+
+fn receiver_solid(point:&MaterialShellPoint<'_>,card:&fs_matdb::MaterialCard)
+    ->Result<IsotropicSolidStatePoint>
+{
+    let model=point.elastic_model.ok_or("source contact cannot cross different constitutive source selections")?;
+    let yield_requirement=Requirement::try_new("yield_stress",Pressure::DIMS,Admit::StrictlyPositive)?;
+    let state=if point.material.property_by_key(&fs_matdb::PropertyKey::new("yield_stress",Pressure::DIMS)).is_some() {
+        point.material.clone()
+    } else {
+        point.material.with_additional_requirements(card,&[yield_requirement.clone()],Pick::SingleClaimOnly)?
+    };
+    if model==PlateMaterialModel::Isotropic {
+        return Ok(IsotropicSolidStatePoint::try_from_resolved(state)?);
+    }
+    let parameters=model.isotropic_parameters()?
+        .ok_or("source point contact requires an explicitly selected isotropic elastic pair")?;
+    let density=Requirement::try_new("density",Density::DIMS,Admit::StrictlyPositive)?;
+    Ok(IsotropicSolidStatePoint::try_from_resolved_with_parameters(
+        state,&density,&parameters,&yield_requirement)?)
 }

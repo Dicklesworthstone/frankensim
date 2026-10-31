@@ -830,6 +830,9 @@ derives density, mass, centroid, and inertia from the same complete
 its identity binds the exact chart, mass properties, material card, physical
 query point, selected property values, and usage receipts. Equal density does
 not make copper, steel, gold, wood, ruby, or another named state interchangeable.
+An explicitly projected isotropic solid also retains its selected elastic
+parameter roles in that specimen identity, including fixed-solid and
+thermal-expansion rebinding; canonical Young/Poisson identities are unchanged.
 
 Structural vibration instead consumes `ResolvedElasticDiscProfile`, which
 binds the same geometry/mass authority to either the minimal isotropic elastic
