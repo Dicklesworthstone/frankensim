@@ -97,11 +97,11 @@ fn shell_pair_bulk(name:&str,model:PlateMaterialModel)->NormalizedPack {
     if !name.contains("body") { return base; }
     let mut claims=ClaimSet::new();
     for (_,original) in base.claims().claims_ordered() {
-        if (original.key.name=="poisson_ratio" && model!=PlateMaterialModel::Isotropic)
-            || (original.key.name=="young_modulus" && model==PlateMaterialModel::IsotropicBulkShear) {
+        if (original.key.name()=="poisson_ratio" && model!=PlateMaterialModel::Isotropic)
+            || (original.key.name()=="young_modulus" && model==PlateMaterialModel::IsotropicBulkShear) {
             continue;
         }
-        let property=match original.key.name.as_str() {
+        let property=match original.key.name() {
             "poisson_ratio"=>claim("poisson_ratio",0.25,Dims::NONE),
             "shear_modulus"=>claim("shear_modulus",2.4e9,Pressure::DIMS),
             _=>original.clone(),

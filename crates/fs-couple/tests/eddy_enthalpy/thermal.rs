@@ -2,6 +2,7 @@ use super::*;
 use fs_couple::circuit_enthalpy::eddy::thermal::MagneticThermalLaw;
 use fs_material::field_storage::thermal::magnetic::ThermalMagneticMaterial;
 
+#[path = "thermal/heat.rs"]
 mod heat;
 
 fn thermal_curves(cards: &[MaterialCard; 2]) -> [ResolvedHeatCapacityCurve; 2] {

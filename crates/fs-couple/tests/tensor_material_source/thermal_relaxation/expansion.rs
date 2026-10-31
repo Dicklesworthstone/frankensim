@@ -1,4 +1,5 @@
 //! G1/G3/G4: actual source heating, reciprocal inertia and retained Maxwell strain.
+#[path = "expansion/affine.rs"]
 mod affine;
 
 use super::*;

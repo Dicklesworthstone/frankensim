@@ -200,7 +200,7 @@ fn nonuniform_finite_heating_bends_the_actual_anisotropic_supported_mesh() {
                     cell.stress_mandel_pa().iter().any(|s|s.abs()>1e-3)));
             }
         }
-        assert!(deflections[0]>1e-6 && deflections[2]<-1e-6);
+        assert!(deflections[0]>1e-6 && deflections[2] < -1e-6);
         near(deflections[0],-deflections[2],1e-9);
         // Independent dense B^T C B assembly and six-temperature Newton
         // balance (not the runtime's heat fixed point) gives these values.

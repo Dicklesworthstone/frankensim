@@ -433,7 +433,7 @@ fn independent_pair_card(index: usize) -> MaterialCard {
             YOUNG_MODULUS_PROPERTY,
             POISSON_RATIO_PROPERTY,
         ]
-        .contains(&original.key.name.as_str())
+        .contains(&original.key.name())
         {
             claims.insert_claim(original.clone()).unwrap();
         }
