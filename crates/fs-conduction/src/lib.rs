@@ -122,7 +122,7 @@ pub use radiation::{
     PointwiseAmbientRadiation, PointwiseRadiationAssembly, PointwiseRadiationParameterGradient,
     PointwiseRadiationPatchReport,
     PointwiseRadiationReport,
-    PointwiseEnclosureAssembly, PointwiseEnclosurePatchReport, PointwiseEnclosureRadiation,
+    PointwiseBlackBathReport, PointwiseEnclosureAssembly, PointwiseEnclosurePatchReport, PointwiseEnclosureRadiation,
     PointwiseEnclosureReport, PointwiseEnclosureTolerance,
     RadiosityReport, STEFAN_BOLTZMANN_W_M2_K4, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity,
     ViewFactorEvidence, ViewFactorMatrix, ViewFactorTolerance, solve_with_gray_diffuse_enclosure,

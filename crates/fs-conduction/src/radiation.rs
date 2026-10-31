@@ -57,7 +57,7 @@ pub mod pointwise;
 /// Local P1 emission coupled to reflected, patch-uniform irradiation.
 pub mod pointwise_enclosure;
 pub use pointwise_enclosure::{
-    PointwiseEnclosureAssembly, PointwiseEnclosurePatchReport, PointwiseEnclosureRadiation,
+    PointwiseBlackBathReport, PointwiseEnclosureAssembly, PointwiseEnclosurePatchReport, PointwiseEnclosureRadiation,
     PointwiseEnclosureReport, PointwiseEnclosureTolerance,
 };
 pub use pointwise::{

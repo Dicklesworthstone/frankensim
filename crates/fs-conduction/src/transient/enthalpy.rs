@@ -240,8 +240,9 @@ pub struct EnthalpyStepSolution {
     /// `robin_out_w`; it must not be handed to a convection/coolant heat port.
     pub pointwise_radiation: Option<PointwiseRadiationReport>,
     /// Spatial local emission with reflected, patch-uniform irradiation.
-    /// Internal exchange is separate from authored Neumann and convective heat;
-    /// its actual closure defect is already included in the energy balance.
+    /// Net physical-surface heat is included once in the energy balance, apart
+    /// from authored Neumann/convection. An open model separately records its
+    /// black bath; that bath is never a second debit against solid storage.
     pub pointwise_enclosure_radiation: Option<PointwiseEnclosureReport>,
     /// Prescribed-temperature reservoir heat, W inward, including fixed-node
     /// storage changes. A first-step boundary jump is charged exactly once.
@@ -487,6 +488,9 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
     ///
     /// Original convection, prescribed flux, contact, nonlinear conductivity,
     /// latent storage and prescribed-temperature reactions remain active.
+    /// An owner from `PointwiseEnclosureRadiation::new_open` also exchanges
+    /// heat with its explicit black bath. Finite storage supplies the transient
+    /// anchor without an artificial Dirichlet/Robin boundary or heat capacity.
     /// Irradiation is uniform within each declared view-factor patch; this
     /// does not infer spatial visibility, emissivity variation or moving geometry.
     #[allow(clippy::too_many_arguments)]

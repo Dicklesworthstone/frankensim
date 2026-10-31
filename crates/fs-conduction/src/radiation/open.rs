@@ -34,7 +34,7 @@ use crate::{
 /// Fixed reciprocal surface geometry with one explicitly black open bath.
 /// Matrix preparation is bounded/cancellable and performed once. Temperature
 /// evaluations thereafter reuse the factorization with O(n²) work and storage.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct OpenDiffuseEnclosure {
     surfaces: Vec<RadiationSurface>,
     complete: ViewFactorMatrix,
@@ -206,6 +206,12 @@ impl OpenDiffuseEnclosure {
     /// Its area is an effective exchange area, not a meshed reservoir area.
     pub fn view_factors(&self) -> &ViewFactorMatrix {
         &self.complete
+    }
+
+    // Spatial emission uses the same immutable completed operator; only its
+    // integrated source changes. The bath never gains a solid degree of freedom.
+    pub(super) fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
+        self.factors.solve(cx, rhs)
     }
 
     /// Evaluate changed surface AND ambient temperatures with the same matrix.

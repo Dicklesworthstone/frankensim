@@ -238,6 +238,32 @@ complete reflected spatial tangent and its genuine transpose. Tests in
 reflected derivatives, nonuniform nodal balances, finite latent heat transfer,
 and a strong-self-view case with a negative exact diagonal.
 
+`PointwiseEnclosureRadiation::new_open` uses that same local P1 emission,
+reflected irradiation and complete nonsymmetric tangent with the explicit
+black reservoir of `OpenDiffuseEnclosure`. The reservoir's reciprocal row
+contributes radiation and an independently evaluated heat account, never a
+solid node or artificial storage. `PointwiseEnclosureReport::outward_heat_w`
+remains the physical-surface sum used exactly once by the existing homogeneous,
+heterogeneous and adaptive enthalpy energy accounts. `ambient` retains bath
+temperature, effective area, radiosity, irradiation and signed outward heat;
+`system_energy_closure_w` gates the sum of surface and bath powers. Original
+Robin/Neumann heat remains unchanged. Finite storage permits an otherwise
+unanchored, insulated body to cool radiatively or absorb real latent heat.
+
+The open spatial owner retains an immutable snapshot of the prepared model;
+its lifetime only borrows mesh/boundary. `with_ambient_temperature_k` reuses
+the same factors and sparse geometry for a new prescribed endpoint bath
+temperature without advancing history. The existing accepted-state adjoint
+retains the exact spatial tangent/transpose and surface-emissivity controls;
+its reservoir-temperature gradient contains one shared black-bath control.
+`tests/enthalpy_enclosure/pointwise/open.rs` checks independent simplex-moment
+loads and reflection, tangents/transpose/parameter derivatives, every nodal
+thermal balance, radiation-only transient cooling, latent-plateau heating and
+cooling, and the implicit bath sensitivity. These remain fixed-emissivity,
+patch-uniform-irradiation models: no spatial visibility kernel, spectral bath,
+emissivity-state derivative, or automatic bath-temperature time schedule is
+inferred.
+
 `transient::enthalpy::heterogeneous::EnthalpyRadiation` selects the existing
 prescribed, mean ambient, mean enclosure, pointwise ambient or pointwise
 enclosure owner through `advance_with_radiation`. The selection borrows the

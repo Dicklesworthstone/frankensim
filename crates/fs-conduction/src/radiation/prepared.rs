@@ -75,7 +75,7 @@ impl<'a> PreparedRadiosity<'a> {
 /// Keep the multipliers in elimination-step order, not in a conventional
 /// row-permuted lower triangle: replaying the original interleaved swaps is
 /// what preserves the original RHS arithmetic exactly.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub(super) struct DenseRadiosityFactorization {
     upper: Vec<Vec<f64>>,
     pivots: Vec<usize>,

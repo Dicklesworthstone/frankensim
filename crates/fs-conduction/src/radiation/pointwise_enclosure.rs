@@ -11,7 +11,8 @@ use fs_exec::Cx;
 use std::{collections::BTreeMap, sync::Arc};
 
 use super::{
-    GrayDiffuseEnclosure, PreparedRadiosity, STEFAN_BOLTZMANN_W_M2_K4 as SIGMA,
+    GrayDiffuseEnclosure, OpenDiffuseEnclosure, PreparedRadiosity, RadiationSurface,
+    ViewFactorMatrix, STEFAN_BOLTZMANN_W_M2_K4 as SIGMA,
     SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity, balance, pointwise::TRIANGLE_DEGREE_FIVE,
     radiation_error, pointwise::PointwiseRadiationParameterGradient,
 };
@@ -49,15 +50,33 @@ pub struct PointwiseEnclosurePatchReport {
     pub outward_heat_w: f64,
 }
 
-/// Closed-system radiation accounting, separate from external convection/flux.
+/// Explicit black bath, independently evaluated from its own reciprocal row.
+/// This is an external reservoir, never a solid thermal degree of freedom.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PointwiseBlackBathReport {
+    pub temperature_k: f64,
+    /// Sum of physical surface area times its ambient view factor, m².
+    pub effective_area_m2: f64,
+    pub radiosity_w_m2: f64,
+    pub irradiation_w_m2: f64,
+    /// Positive heat leaves the bath; negative heat is absorbed by the bath.
+    pub outward_heat_w: f64,
+}
+
+/// Radiation accounting, separate from external convection/prescribed flux.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PointwiseEnclosureReport {
     pub patches: Vec<PointwiseEnclosurePatchReport>,
-    /// Actual signed sum; never projected to zero.
+    /// Actual signed PHYSICAL SURFACE sum, included once in solid energy.
+    /// Open cavities generally lose or gain net heat through the black bath.
     pub outward_heat_w: f64,
     pub absolute_patch_heat_w: f64,
     pub linear_residual_max_w_m2: f64,
     pub view_factor_identity: ContentHash,
+    /// Absent for a closed enclosure; otherwise the single external black bath.
+    pub ambient: Option<PointwiseBlackBathReport>,
+    /// Sum of surface and bath powers; neither term is forced to close.
+    pub system_energy_closure_w: f64,
 }
 
 #[derive(Debug)]
@@ -85,6 +104,8 @@ struct Geometry {
     memberships: Vec<(usize, Vec<(usize, usize)>)>,
     /// F [I-(1-epsilon)F]^-1 diag(epsilon), prepared once.
     irradiation_response: Vec<Vec<f64>>,
+    /// Same reflected response to unit BLACK BATH emission, when present.
+    ambient_irradiation_response: Option<Vec<f64>>,
 }
 
 #[derive(Debug, Clone)]
@@ -345,11 +366,24 @@ impl PointwiseEnclosureAssembly {
                     .mul_add(irradiation_bar, *derivative),
             )?;
         }
+        let reservoir_temperatures = if let Some(ambient) = &self.report.ambient {
+            let response = self.geometry.ambient_irradiation_response.as_ref()
+                .ok_or_else(|| invalid("open radiation lost its prepared ambient response"))?;
+            let t = ambient.temperature_k;
+            let derivative = finite(4.0 * SIGMA * t * t * t)?;
+            let mut contraction = 0.0;
+            for (patch, &weight) in area_weights.iter().enumerate() {
+                let coefficient = finite(-self.geometry.patches[patch].emissivity
+                    * response[patch] * derivative)?;
+                contraction = finite(coefficient.mul_add(weight, contraction))?;
+            }
+            vec![contraction]
+        } else { Vec::new() };
         poll(cx, p)?;
         Ok(PointwiseRadiationParameterGradient {
             radiation_regions: self.report.patches.iter().map(|p| p.name.clone()).collect(),
             emissivities,
-            reservoir_temperatures: Vec::new(),
+            reservoir_temperatures,
         })
     }
 
@@ -382,15 +416,41 @@ impl PointwiseEnclosureAssembly {
     }
 }
 
+#[derive(Debug)]
+enum PatchSystem<'a> {
+    Closed { enclosure: &'a GrayDiffuseEnclosure, factors: PreparedRadiosity<'a> },
+    // Own an immutable snapshot so a caller may lower a local open declaration
+    // and return this spatial owner. Bath-temperature changes clone the Arc.
+    Open(Arc<OpenDiffuseEnclosure>),
+}
+
+impl PatchSystem<'_> {
+    fn surfaces(&self) -> &[RadiationSurface] {
+        match self { Self::Closed { enclosure, .. } => enclosure.surfaces(),
+            Self::Open(enclosure) => enclosure.surfaces() }
+    }
+
+    fn view_factors(&self) -> &ViewFactorMatrix {
+        match self { Self::Closed { enclosure, .. } => enclosure.view_factors(),
+            Self::Open(enclosure) => enclosure.view_factors() }
+    }
+
+    fn solve_rhs(&self, cx: &Cx<'_>, rhs: &[f64]) -> Result<Vec<f64>, ConductionError> {
+        match self { Self::Closed { factors, .. } => factors.solve_rhs(cx, rhs),
+            Self::Open(enclosure) => enclosure.solve_rhs(cx, rhs) }
+    }
+}
+
 /// Prepared fixed-geometry enclosure, with sparse trace geometry and one small
 /// radiosity factorization. At most 64 patches; trace storage is linear in
-/// boundary faces/vertices and the reflected matrix is O(patches^2).
+/// boundary faces/vertices and the reflected matrix is O(patches^2). An open
+/// owner includes one external black bath without any corresponding solid node.
 #[derive(Debug)]
 pub struct PointwiseEnclosureRadiation<'a> {
     mesh: &'a ConductionMesh,
     boundary: &'a ThermalBoundary,
-    enclosure: &'a GrayDiffuseEnclosure,
-    factors: PreparedRadiosity<'a>,
+    system: PatchSystem<'a>,
+    ambient_temperature_k: Option<f64>,
     geometry: Arc<Geometry>,
     tolerance: PointwiseEnclosureTolerance,
 }
@@ -404,17 +464,64 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         tolerance: PointwiseEnclosureTolerance,
     ) -> Result<Self, ConductionError> {
         poll(cx, 0)?;
-        let count = enclosure.surfaces().len();
-        if !(2..=64).contains(&count)
-            || !tolerance.absolute_heat_w.is_finite()
-            || tolerance.absolute_heat_w < 0.0
-            || !tolerance.relative_heat.is_finite()
-            || tolerance.relative_heat < 0.0
-        {
-            return Err(invalid(
-                "enclosure requires 2..=64 patches and finite nonnegative watt tolerances",
-            ));
-        }
+        admit_configuration(enclosure.surfaces().len(), tolerance)?;
+        let factors = enclosure.prepare_radiosity(cx)?;
+        Self::prepare(cx, mesh, boundary,
+            PatchSystem::Closed { enclosure, factors }, None, tolerance)
+    }
+
+    /// Integrate actual P1 emission with reflected exchange and one explicitly
+    /// black ambient reservoir. The completed open matrix remains the original
+    /// radiosity owner; a bath is never assigned a fictitious solid node.
+    ///
+    /// Retains an owned immutable snapshot of the supplied model, cloning its
+    /// prepared factors without another factorization. The returned lifetime
+    /// depends only on mesh/boundary, so a locally lowered model is supported.
+    /// All existing pointwise enthalpy, adaptive and accepted-adjoint consumers
+    /// use this same load and complete tangent. Storage supplies a transient
+    /// thermal anchor even when all original boundaries are adiabatic.
+    pub fn new_open(
+        cx: &Cx<'_>,
+        mesh: &'a ConductionMesh,
+        boundary: &'a ThermalBoundary,
+        enclosure: &OpenDiffuseEnclosure,
+        ambient_temperature_k: f64,
+        tolerance: PointwiseEnclosureTolerance,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        admit_configuration(enclosure.surfaces().len(), tolerance)?;
+        super::require_temperature("open-ambient", "black ambient temperature", ambient_temperature_k)?;
+        Self::prepare(cx, mesh, boundary, PatchSystem::Open(Arc::new(enclosure.clone())),
+            Some(ambient_temperature_k), tolerance)
+    }
+
+    /// Change a prescribed black-bath temperature without rebuilding geometry,
+    /// refactoring radiosity or advancing thermal history. Closed owners refuse.
+    /// The caller chooses the endpoint bath temperature for each time interval.
+    pub fn with_ambient_temperature_k(&self, ambient_temperature_k: f64)
+        -> Result<Self, ConductionError>
+    {
+        super::require_temperature("open-ambient", "black ambient temperature", ambient_temperature_k)?;
+        let PatchSystem::Open(enclosure) = &self.system else {
+            return Err(invalid("a closed enclosure has no ambient temperature to replace"));
+        };
+        Ok(Self { mesh: self.mesh, boundary: self.boundary,
+            system: PatchSystem::Open(Arc::clone(enclosure)),
+            ambient_temperature_k: Some(ambient_temperature_k),
+            geometry: Arc::clone(&self.geometry), tolerance: self.tolerance })
+    }
+
+    fn prepare(
+        cx: &Cx<'_>,
+        mesh: &'a ConductionMesh,
+        boundary: &'a ThermalBoundary,
+        system: PatchSystem<'a>,
+        ambient_temperature_k: Option<f64>,
+        tolerance: PointwiseEnclosureTolerance,
+    ) -> Result<Self, ConductionError> {
+        poll(cx, 0)?;
+        let count = system.surfaces().len();
+        admit_configuration(count, tolerance)?;
         mesh.boundary()
             .len()
             .checked_mul(std::mem::size_of::<FaceGeometry>() + std::mem::size_of::<FaceTangent>())
@@ -433,7 +540,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         }
         let mut patches = Vec::with_capacity(count);
         let mut memberships: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
-        for (patch, surface) in enclosure.surfaces().iter().enumerate() {
+        for (patch, surface) in system.surfaces().iter().enumerate() {
             poll(cx, patch)?;
             if surface.mesh_identity != identity {
                 return Err(invalid("pointwise enclosure belongs to a different mesh"));
@@ -501,22 +608,25 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 });
             }
         }
-        let factors = enclosure.prepare_radiosity(cx)?;
         let mut irradiation_response = vec![vec![0.0; count]; count];
-        for column in 0..count {
+        let mut ambient_irradiation_response = ambient_temperature_k.map(|_| vec![0.0; count]);
+        let equations = system.view_factors().len();
+        for column in 0..equations {
             poll(cx, column)?;
-            let mut rhs = vec![0.0; count];
-            rhs[column] = patches[column].emissivity;
-            let response = factors.solve_rhs(cx, &rhs)?;
+            let mut rhs = vec![0.0; equations];
+            rhs[column] = if column < count { patches[column].emissivity } else { 1.0 };
+            let response = system.solve_rhs(cx, &rhs)?;
             for (row, values) in irradiation_response.iter_mut().enumerate() {
-                values[column] = dot(&enclosure.view_factors().factors()[row], &response)?;
+                let value = dot(&system.view_factors().factors()[row], &response)?;
+                if column < count { values[column] = value; }
+                else if let Some(ambient) = &mut ambient_irradiation_response { ambient[row] = value; }
             }
         }
         Ok(Self {
             mesh,
             boundary,
-            enclosure,
-            factors,
+            system,
+            ambient_temperature_k,
             tolerance,
             geometry: Arc::new(Geometry {
                 vertices: mesh.vertex_count(),
@@ -524,6 +634,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 faces,
                 memberships: memberships.into_iter().collect(),
                 irradiation_response,
+                ambient_irradiation_response,
             }),
         })
     }
@@ -571,7 +682,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         let mut minimum = vec![f64::INFINITY; p];
         let mut maximum = vec![f64::NEG_INFINITY; p];
         for (patch, geometry) in self.geometry.patches.iter().enumerate() {
-            let surface = &self.enclosure.surfaces()[patch];
+            let surface = &self.system.surfaces()[patch];
             for (slot, &vertex) in geometry.vertices.iter().enumerate() {
                 if slot % ASSEMBLY_TILE == 0 {
                     poll(cx, slot)?;
@@ -594,7 +705,9 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 maximum[patch] = maximum[patch].max(t);
             }
         }
-        let reference = minimum.iter().copied().fold(f64::INFINITY, f64::min);
+        let surface_reference = minimum.iter().copied().fold(f64::INFINITY, f64::min);
+        let reference = self.ambient_temperature_k
+            .map_or(surface_reference, |ambient| ambient.min(surface_reference));
         let background = finite(SIGMA * reference * reference * reference * reference)?;
         let mut emission_delta = vec![0.0; p];
         let mut load = vec![0.0; n];
@@ -661,12 +774,12 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 });
             }
         }
-        let factors = self.enclosure.view_factors().factors();
+        let factors = self.system.view_factors().factors();
         let mut row_sums = Vec::with_capacity(p);
-        let mut rhs = Vec::with_capacity(p);
+        let mut rhs = Vec::with_capacity(factors.len());
         for patch in 0..p {
             poll(cx, patch)?;
-            let area = self.enclosure.surfaces()[patch].area_m2();
+            let area = self.system.surfaces()[patch].area_m2();
             emission_delta[patch] = finite(emission_delta[patch] / area)?;
             if TANGENT {
                 for value in &mut slopes[patch] {
@@ -682,7 +795,12 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 sum,
             ))?);
         }
-        let radiosity_delta = self.factors.solve_rhs(cx, &rhs)?;
+        // A black bath's radiosity is its Planck integral independently of
+        // incoming light. It contributes a source equation, never a solid row.
+        if let Some(ambient) = self.ambient_temperature_k {
+            rhs.push(finite(balance::emission_difference(SIGMA, ambient, reference))?);
+        }
+        let radiosity_delta = self.system.solve_rhs(cx, &rhs)?;
         let mut reports = Vec::with_capacity(p);
         let mut irradiation_corrections = Vec::with_capacity(if TANGENT { p } else { 0 });
         let mut emission_minus_irradiation = Vec::with_capacity(if TANGENT { p } else { 0 });
@@ -692,7 +810,7 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
         let mut max_area = 0.0_f64;
         for (patch, geometry) in self.geometry.patches.iter().enumerate() {
             poll(cx, patch)?;
-            let surface = &self.enclosure.surfaces()[patch];
+            let surface = &self.system.surfaces()[patch];
             let irradiation_delta = dot(&factors[patch], &radiosity_delta)?;
             let residual = finite(
                 radiosity_delta[patch]
@@ -748,14 +866,34 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 outward_heat_w: heat,
             });
         }
+        let ambient = if let Some(temperature_k) = self.ambient_temperature_k {
+            let sum = finite(factors[p].iter().sum())?;
+            let irradiation_delta = dot(&factors[p], &radiosity_delta)?;
+            let effective_area_m2 = self.system.view_factors().areas_m2()[p];
+            let outward_heat_w = finite(effective_area_m2 * balance::outward_flux(
+                1.0, rhs[p], irradiation_delta, background, sum,
+            ))?;
+            residual_max = residual_max.max(finite(radiosity_delta[p] - rhs[p])?.abs());
+            max_area = max_area.max(effective_area_m2);
+            let radiosity_w_m2 = finite(background + radiosity_delta[p])?;
+            let irradiation_w_m2 = finite(background.mul_add(sum, irradiation_delta))?;
+            if radiosity_w_m2 < 0.0 || irradiation_w_m2 < 0.0 {
+                return Err(invalid("pointwise black bath produced negative radiosity or irradiation"));
+            }
+            Some(PointwiseBlackBathReport { temperature_k, effective_area_m2,
+                radiosity_w_m2, irradiation_w_m2, outward_heat_w })
+        } else { None };
+        let ambient_heat = ambient.as_ref().map_or(0.0, |bath| bath.outward_heat_w);
+        let system_energy_closure_w = finite(total + ambient_heat)?;
+        let total_absolute = finite(absolute + ambient_heat.abs())?;
         let tolerance = finite(
             self.tolerance
                 .relative_heat
-                .mul_add(absolute, self.tolerance.absolute_heat_w),
+                .mul_add(total_absolute, self.tolerance.absolute_heat_w),
         )?;
-        if total.abs() > tolerance || finite(residual_max * max_area)? > tolerance {
+        if system_energy_closure_w.abs() > tolerance || finite(residual_max * max_area)? > tolerance {
             return Err(invalid(
-                "pointwise radiosity equations or closed heat sum exceed the watt budget",
+                "pointwise radiosity equations or complete-system heat sum exceed the watt budget",
             ));
         }
         let emission_diagonal = diagonal.clone();
@@ -787,7 +925,9 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
                 outward_heat_w: total,
                 absolute_patch_heat_w: absolute,
                 linear_residual_max_w_m2: residual_max,
-                view_factor_identity: self.enclosure.view_factors().identity(),
+                view_factor_identity: self.system.view_factors().identity(),
+                ambient,
+                system_energy_closure_w,
             },
             geometry: Arc::clone(&self.geometry),
             local,
@@ -797,6 +937,15 @@ impl<'a> PointwiseEnclosureRadiation<'a> {
             emission_minus_irradiation,
         })
     }
+}
+
+fn admit_configuration(count: usize, tolerance: PointwiseEnclosureTolerance) -> Result<(), ConductionError> {
+    if !(1..=64).contains(&count) || !tolerance.absolute_heat_w.is_finite()
+        || tolerance.absolute_heat_w < 0.0 || !tolerance.relative_heat.is_finite()
+        || tolerance.relative_heat < 0.0
+    {
+        Err(invalid("enclosure requires 1..=64 patches and finite nonnegative watt tolerances"))
+    } else { Ok(()) }
 }
 
 fn dot(a: &[f64], b: &[f64]) -> Result<f64, ConductionError> {

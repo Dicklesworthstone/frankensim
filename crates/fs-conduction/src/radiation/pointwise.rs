@@ -56,7 +56,8 @@ pub struct PointwiseRadiationParameterGradient {
     pub radiation_regions: Vec<String>,
     /// Derivative with respect to absolute emissivity, not its logarithm.
     pub emissivities: Vec<f64>,
-    /// Ambient reservoir-temperature derivatives, K. Empty for an enclosure.
+    /// Ambient reservoir-temperature derivatives, K: one per ambient patch,
+    /// one shared bath for an open enclosure, and none for a closed enclosure.
     pub reservoir_temperatures: Vec<f64>,
 }
 
