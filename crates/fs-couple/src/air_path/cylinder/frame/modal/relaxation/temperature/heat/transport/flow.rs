@@ -54,11 +54,9 @@ impl<F> FrameRelaxationThermalSystem<'_, '_, '_, '_, F> {
     }
 }
 
-pub(super) fn admit<F>(owner: &FrameRelaxationThermalSystem<'_, '_, '_, '_, F>,
-    flow: &Advected<()>, thermal: &DepositionSimulation<'_>,
+pub(super) fn admit_inventory(flow: &Advected<()>, solid: &BTreeSet<CellId>,
     mut checkpoint: impl FnMut() -> core::result::Result<(), DepositionError>) -> Result<()> {
     checkpoint()?;
-    let solid: BTreeSet<_> = owner.receivers.iter().map(|r| r.destination.cell).collect();
     for edge in flow.flows() {
         checkpoint()?;
         if edge.kg_s != 0.0 && (solid.contains(&edge.a) || solid.contains(&edge.b)) {
@@ -74,9 +72,6 @@ pub(super) fn admit<F>(owner: &FrameRelaxationThermalSystem<'_, '_, '_, '_, F>,
             return Err(invalid("mass inlet/outlet cannot replace a structural layer's material history"));
         }
     }
-    // Verify the SAME original flow equations before mechanical work. No
-    // endpoint powers from this cold query are cached or used in later trials.
-    flow.endpoint_transport(thermal, &mut checkpoint)?;
     checkpoint()?;
     Ok(())
 }
@@ -117,4 +112,48 @@ pub(super) fn evaluate(flow: Option<&Advected<()>>, thermal: &DepositionSimulati
         endpoint_transfers: resolved.transfers.clone(), external_enthalpy_j: external,
         internal_at_cell_entropy_j_k: internal_entropy };
     Ok((Some(report), resolved.transfers))
+}
+
+/// One coherent endpoint evaluation from an existing physical source owner.
+/// The heat callback has NOT already added this graph's transported enthalpy.
+/// Keep pressure/material/geometry receipts in `heat.bulk.source.1`; the accepted
+/// payload is returned without a post-publication source re-evaluation.
+pub struct RelaxationFlowCoefficients<S> {
+    pub heat: RelaxationHeatCoefficients<S>,
+    pub flow: Advected<()>,
+}
+
+impl<F> FrameRelaxationThermalSystem<'_, '_, '_, '_, F> {
+    /// Resolve balanced coolant flow and heat from the SAME proposed endpoint.
+    /// This composes an existing pressure/flow evaluator with the original
+    /// coupled thermal residual; it adds no momentum or flow time integrator.
+    ///
+    /// `resolve` is repeatable and returns both the graph and heat coefficients
+    /// from one trial state. It runs during initial admission and every native
+    /// thermal evaluation. Every returned graph is checked for fixed-solid
+    /// exclusion, native caloric identity, enthalpy storage, fixed mass balance
+    /// and bounded transport. The accepted graph's powers and source payload
+    /// accompany the report; discarded evaluations cannot advance flow audits.
+    ///
+    /// The callback must account for pressure work/hydraulic dissipation rather
+    /// than hiding it in convective heat, and preserve original source support.
+    /// There is no coefficient lag, cached last-good flow, mass-flow regularizer,
+    /// or separately accepted hydraulic state. Source refusal and cancellation
+    /// preserve ALL accepted histories through the existing transaction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_heat_network_with_resolved_advection<S, E>(
+        &mut self, thermal: &mut DepositionSimulation<'_>, external: &[f64],
+        heat: RelaxationHeatInput<'_, '_, '_, '_>,
+        electrical_input: Option<RelaxationElectricalInput<'_>>,
+        solve: FrameThermalSolve, energy_guess_j: &[f64], gate: &CancelGate,
+        resolve: impl Fn(&DepositionSimulation<'_>)
+            -> core::result::Result<RelaxationFlowCoefficients<S>, E>,
+    ) -> core::result::Result<RelaxationHeatReport<S>, RelaxationTransportError<E>> {
+        self.step_heat_network_with_flow_source(thermal, external, heat, electrical_input,
+            solve, energy_guess_j, gate, None, |state| {
+                resolve(state).map(|resolved| Evaluation {
+                    coefficients: resolved.heat, flow: Some(resolved.flow),
+                })
+            })
+    }
 }

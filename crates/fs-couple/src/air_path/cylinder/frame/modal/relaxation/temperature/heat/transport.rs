@@ -10,7 +10,7 @@ use fs_thermal::enthalpy::{HeatTransfer, advection::Advected};
 
 /// Prescribed balanced enthalpy circulation on the same finite-cell residual.
 pub mod flow;
-pub use flow::RelaxationEnthalpyFlow;
+pub use flow::{RelaxationEnthalpyFlow, RelaxationFlowCoefficients};
 
 /// The same borrowed prepared heat assembly and execution authority used by
 /// source-defined thermoelastic frames. Retain its preparation to retain pins.
@@ -47,10 +47,17 @@ impl<E: core::fmt::Debug> std::error::Error for RelaxationTransportError<E> {}
 
 // This private adapter is not a solver or new material interface. It allows
 // higher-layer owners to supply the original residual without a dependency cycle.
+// A dynamic graph belongs to this exact source evaluation; a prescribed graph
+// is borrowed from Source::flow instead, with no per-trial graph clone.
+pub(super) struct Evaluation<S> {
+    coefficients: RelaxationHeatCoefficients<S>,
+    flow: Option<Advected<()>>,
+}
+
 pub(super) trait Source<S> {
     fn checkpoint(&self, gate: &CancelGate) -> Result<()>;
     fn resolve(&self, thermal: &DepositionSimulation<'_>, gate: &CancelGate)
-        -> Result<RelaxationHeatCoefficients<S>>;
+        -> Result<Evaluation<S>>;
     fn flow(&self) -> Option<&Advected<()>> { None }
 }
 
@@ -64,24 +71,34 @@ struct Callback<'p, 'n, 'a, 'scope, 'flow, R, E> {
     resolve: R,
     failure: std::cell::RefCell<Option<E>>,
     flow: Option<&'flow Advected<()>>,
+    solid_cells: BTreeSet<fs_thermal::enthalpy::CellId>,
 }
 impl<S, R, E> Source<S> for Callback<'_, '_, '_, '_, '_, R, E>
-where R: Fn(&DepositionSimulation<'_>) -> core::result::Result<RelaxationHeatCoefficients<S>, E> {
+where R: Fn(&DepositionSimulation<'_>) -> core::result::Result<Evaluation<S>, E> {
     fn flow(&self) -> Option<&Advected<()>> { self.flow }
     fn checkpoint(&self, gate: &CancelGate) -> Result<()> {
         if self.heat.cx.checkpoint().is_err() { gate.request(); }
         check(gate)
     }
     fn resolve(&self, thermal: &DepositionSimulation<'_>, gate: &CancelGate)
-        -> Result<RelaxationHeatCoefficients<S>> {
+        -> Result<Evaluation<S>> {
         self.checkpoint(gate)?;
         let _ = self.failure.borrow_mut().take();
         let result = (self.resolve)(thermal);
         self.checkpoint(gate)?;
-        result.map_err(|error| {
+        let evaluated = result.map_err(|error| {
             *self.failure.borrow_mut() = Some(error);
             invalid(SOURCE_REFUSAL)
-        })
+        })?;
+        if evaluated.flow.is_some() && self.flow.is_some() {
+            return Err(invalid("one original advection graph per thermal evaluation required"));
+        }
+        if let Some(flow) = evaluated.flow.as_ref().or(self.flow) {
+            flow::admit_inventory(flow, &self.solid_cells, || {
+                self.checkpoint(gate).map_err(|_| fs_thermal::enthalpy::DepositionError::Cancelled)
+            })?;
+        }
+        Ok(evaluated)
     }
 }
 
@@ -185,13 +202,32 @@ impl<F> FrameRelaxationThermalSystem<'_, '_, '_, '_, F> {
         resolve: impl Fn(&DepositionSimulation<'_>)
             -> core::result::Result<RelaxationHeatCoefficients<S>, E>,
     ) -> core::result::Result<RelaxationHeatReport<S>, RelaxationTransportError<E>> {
-        let callback = Callback { heat, resolve, flow, failure: std::cell::RefCell::new(None) };
+        self.step_heat_network_with_flow_source(thermal, external, heat, electrical_input,
+            solve, energy_guess_j, gate, flow, |state| {
+                resolve(state).map(|coefficients| Evaluation { coefficients, flow: None })
+            })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_heat_network_with_flow_source<S, E>(
+        &mut self,
+        thermal: &mut DepositionSimulation<'_>,
+        external: &[f64],
+        heat: RelaxationHeatInput<'_, '_, '_, '_>,
+        electrical_input: Option<RelaxationElectricalInput<'_>>,
+        solve: FrameThermalSolve,
+        energy_guess_j: &[f64],
+        gate: &CancelGate,
+        flow: Option<&Advected<()>>,
+        resolve: impl Fn(&DepositionSimulation<'_>)
+            -> core::result::Result<Evaluation<S>, E>,
+    ) -> core::result::Result<RelaxationHeatReport<S>, RelaxationTransportError<E>> {
+        let solid_cells = self.receivers.iter().map(|r| r.destination.cell).collect();
+        let callback = Callback { heat, resolve, flow, solid_cells,
+            failure: std::cell::RefCell::new(None) };
         let result = (|| -> Result<RelaxationHeatReport<S>> {
             Source::<S>::checkpoint(&callback, gate)?;
             crate::circuit_enthalpy::admit_driver_unknowns(thermal, controls(solve), energy_guess_j)?;
-            if let Some(flow) = flow { flow::admit(self, flow, thermal, || {
-                Source::<S>::checkpoint(&callback, gate).map_err(|_| fs_thermal::enthalpy::DepositionError::Cancelled)
-            })?; }
             if self.electrical.is_some() != electrical_input.is_some() {
                 return Err(invalid("electrically bound relaxation requires explicit held electrical inputs"));
             }
@@ -201,10 +237,17 @@ impl<F> FrameRelaxationThermalSystem<'_, '_, '_, '_, F> {
                 return Err(invalid("relaxation and complete heat require original cell/link slices"));
             }
             let mut initial = Source::<S>::resolve(&callback, thermal, gate)?;
+            if let Some(graph) = initial.flow.as_ref().or(flow) {
+                // Cold admission only; no power or source payload is cached.
+                graph.endpoint_transport(thermal, &mut || {
+                    Source::<S>::checkpoint(&callback, gate)
+                        .map_err(|_| fs_thermal::enthalpy::DepositionError::Cancelled)
+                })?;
+            }
             let destinations = heat.network.resistor_destinations();
             let routes = heat.network.heat_destinations(thermal)
                 .map_err(|error| source_error(error, gate))?;
-            electrical::admit_heat_sources(self.electrical.as_ref(), &mut initial,
+            electrical::admit_heat_sources(self.electrical.as_ref(), &mut initial.coefficients,
                 &destinations, &routes, thermal, gate)?;
             drop(initial);
             Source::<S>::checkpoint(&callback, gate)?;
@@ -241,9 +284,9 @@ pub(super) fn resolve<S>(
     let Some(input) = input else {
         return Ok((electrical::resolve(electrical, prepared, thermal, gate)?, None, None, Vec::new()));
     };
-    let resolved = input.resolve(thermal, gate)?;
-    let ContactThermalCoefficients { mut bulk, contacts } = resolved;
-    let (flow, transfers) = flow::evaluate(input.flow(), thermal, dt, &mut bulk.sources_w, || {
+    let Evaluation { coefficients, flow: resolved_flow } = input.resolve(thermal, gate)?;
+    let ContactThermalCoefficients { mut bulk, contacts } = coefficients;
+    let (flow, transfers) = flow::evaluate(resolved_flow.as_ref().or(input.flow()), thermal, dt, &mut bulk.sources_w, || {
         input.checkpoint(gate).map_err(|_| fs_thermal::enthalpy::DepositionError::Cancelled)
     })?;
     let (HeatNetworkSample { material, thermal_contacts, integrated_conduction, radiation }, payload) = bulk.source;

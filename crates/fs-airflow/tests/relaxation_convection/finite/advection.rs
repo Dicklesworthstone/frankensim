@@ -158,3 +158,5 @@ fn invalid_mass_path_and_late_failure_preserve_the_complete_circulating_history(
         assert_eq!(owner.mechanical().samples_rendered(),1);
     });
 }
+
+mod resolved;
