@@ -379,7 +379,7 @@ impl MaterialMomentum {
         buoyancy_force_n_m3: Option<&[[f64; 3]]>,
         drag_pa_s_m2: Option<&[f64]>,
         darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
-        forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
+        forchheimer_resistance: Option<&[Option<crate::conjugate::simple::forchheimer::ForchheimerResistance>]>,
         start_s: f64,
         dt_s: f64,
         end_s: f64,
@@ -395,7 +395,7 @@ impl MaterialMomentum {
             force_n_m3,
             drag_pa_s_m2,
             darcy_resistance_pa_s_m2,
-            forchheimer_resistance_kg_m4,
+            forchheimer_resistance,
             config,
             gate,
         )?;

@@ -2,6 +2,9 @@
 //! Synthetic coefficients test the discrete physical model, not a real filter.
 use super::*;
 
+#[path = "forchheimer/rotated.rs"]
+mod rotated;
+
 const BETA_DIMS: Dims = Dims([-1, 0, 0, 0, 0, 0]);
 const BETA_NAMES: [&str; 3] = [
     "forchheimer_beta_1",
@@ -146,10 +149,11 @@ fn material_beta_and_signed_axis_permutation_drive_motion_and_cubic_heat() {
                         power.cell_forchheimer_heat_w.as_ref().unwrap()[cell],
                         0.5 * quadratic * a.abs().powi(3),
                     );
-                    assert_eq!(
-                        epoch.forchheimer_resistance_kg_m4.as_ref().unwrap()[cell],
-                        grid_beta
-                    );
+                    let resistance = epoch.forchheimer_resistance.as_ref().unwrap()[cell]
+                        .as_ref()
+                        .unwrap();
+                    assert_eq!(resistance.principal_kg_m4(), &beta);
+                    assert_eq!(resistance.material_axes_in_world(), &axes);
                     assert_eq!(
                         epoch.porous_samples[cell].material.forchheimer_beta_per_m(),
                         Some(&beta)
@@ -263,7 +267,7 @@ fn nonlinear_porous_heat_updates_original_sources_and_closes_transient_energy() 
 }
 
 #[test]
-fn zero_beta_recovers_rotated_darcy_and_unqualified_nonlinear_rotation_refuses() {
+fn zero_beta_recovers_rotated_darcy_exactly_and_positive_rotated_beta_is_admitted() {
     let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
     let config = driven_box();
     let gate = CancelGate::new();
@@ -310,11 +314,25 @@ fn zero_beta_recovers_rotated_darcy_and_unqualified_nonlinear_rotation_refuses()
             .forchheimer_heat_w,
         0.0
     );
-    let unsupported = nonlinear_skeleton([1.0; 3], false, 810.0);
+    assert!(zero.applied().unwrap().forchheimer_resistance.is_none());
+    let positive = nonlinear_skeleton([1.0; 3], false, 810.0);
+    let rotated = original
+        .with_porous_materials(vec![Some(nonlinear_law(&positive, axes, 1.0)); 4])
+        .unwrap()
+        .with_viscous_heating(controls())
+        .unwrap();
+    let (_, accepted, _) = old
+        .advance_observed(&rotated, 0.01, thermal_step(), || Ok(()))
+        .unwrap();
     assert!(
-        original
-            .with_porous_materials(vec![Some(nonlinear_law(&unsupported, axes, 1.0)); 4])
-            .is_err()
+        accepted
+            .applied()
+            .unwrap()
+            .viscous_power
+            .as_ref()
+            .unwrap()
+            .forchheimer_heat_w
+            > 0.0
     );
 }
 

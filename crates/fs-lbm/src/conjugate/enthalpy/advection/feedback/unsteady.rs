@@ -405,7 +405,7 @@ where
                 if applied.darcy_resistance_pa_s_m2.is_some() { None }
                     else { applied.mushy_drag_pa_s_m2.as_deref() },
                 applied.darcy_resistance_pa_s_m2.as_deref(),
-                applied.forchheimer_resistance_kg_m4.as_deref(),
+                applied.forchheimer_resistance.as_deref(),
                 start_s,
                 dt_s,
                 end_s,

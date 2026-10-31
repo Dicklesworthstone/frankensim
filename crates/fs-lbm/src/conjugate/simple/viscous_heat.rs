@@ -294,7 +294,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
     viscosity_pa_s: &[f64],
     drag_pa_s_m2: Option<&[f64]>,
     darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
-    forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
+    forchheimer_resistance: Option<&[Option<ForchheimerResistance>]>,
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     controls: ViscousHeatControls,
@@ -309,7 +309,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
         force_density_n_m3,
         drag_pa_s_m2,
         darcy_resistance_pa_s_m2,
-        forchheimer_resistance_kg_m4,
+        forchheimer_resistance,
         config,
         gate,
     )?;
@@ -324,7 +324,7 @@ pub(in crate::conjugate) fn creeping_material_heat_with_darcy_tensor(
         force_density_n_m3,
         drag_pa_s_m2,
         darcy_resistance_pa_s_m2,
-        forchheimer_resistance_kg_m4,
+        forchheimer_resistance,
         config,
         gate,
     )?;
@@ -694,7 +694,10 @@ impl Solver<'_> {
                 if *cell_heat != 0.0 {
                     add(&mut heat[c], *cell_heat)?;
                 }
-                if let Some(cubic) = &cell_forchheimer_heat_w {
+                if let Some(cubic) = &mut cell_forchheimer_heat_w {
+                    if !self.porous_framed.is_empty() {
+                        add(&mut cubic[c], self.framed_forchheimer_power(c)?)?;
+                    }
                     add(&mut heat[c], cubic[c])?;
                 }
             }
@@ -723,6 +726,9 @@ impl Solver<'_> {
                         let coefficient = self.comp_face_area(a, index)
                             * (0.5 * wm).mul_add(cm * u.abs(), 0.5 * wp * cp * u.abs());
                         add(&mut staggered_forchheimer_w, coefficient * u * u)?;
+                        if !self.porous_framed.is_empty() {
+                            add(&mut staggered_forchheimer_w, self.framed_forchheimer_force(a, minus, plus)? * u)?;
+                        }
                     }
                     if !self.porous_cross.is_empty() {
                         add(&mut staggered_drag_w, self.darcy_cross_force(a, minus, plus) * u)?;

@@ -3391,16 +3391,34 @@ the older authored `FlowResistance::Volume` convention uses `C_i = 2 beta_i`.
 No coefficient is inferred from permeability, porosity or particle diameter.
 
 This is a calibrated separable material-principal-direction closure, not the
-rotation-invariant vector law `rho beta |u| u`. Nonzero beta therefore requires
-a signed permutation of native grid axes. Equal beta entries do not remove
-this restriction. Exactly zero beta preserves the complete oblique linear
-Darcy path without nonlinear storage or extra residual probes. Each source's
-explicit maximum superficial component speed is checked on every original
-normal face at source/accepted endpoints, including retained transient motion.
+rotation-invariant vector law `rho beta |u| u`. The original orthonormal frame
+is retained for arbitrary rotations, including equal principal beta values.
+`MaterialFlowEpoch::forchheimer_resistance` exposes optional native
+`ForchheimerResistance` values with the principal rho*beta coefficients and
+their material axes; clear or immobile cells are explicit None entries. This
+nonlinear law is not represented as a constant world-frame resistance matrix.
 
-The SAME half-cell momentum coefficient supplies nonnegative local cubic heat
-`sum_a V/2 rho beta_a (|u_a-|^3 + |u_a+|^3)`. An independent face traversal
-checks this heat against actual nonlinear momentum work. `ViscousPower`
+For each voxel, form the eight velocity tuples `u=(u_x±,u_y±,u_z±)` from its
+SAME six MAC normal face values. The convex potential is
+`Phi = V/8 sum_tuples sum_i (rho beta_i/3) |r_i.u|^3`.
+Differentiating this potential supplies the original face momentum forces;
+their physical work is `3 Phi >= 0`. This positive cubature retains face
+coercivity instead of discarding opposing face velocities in a cell average.
+Each component assembly freezes the current principal speeds, retains the
+nonnegative Picard diagonal implicitly and puts cross-coordinate forces in
+the existing RHS. Per-cell face rows reuse allocated storage and are computed
+once per component assembly; no constitutive source query occurs in a solve.
+
+Signed grid-axis permutations retain the EXACT original half-cell force and
+heat arithmetic `sum_a V/2 rho beta_a (|u_a-|^3 + |u_a+|^3)`, with no oblique
+row storage or cubature work. Exactly zero beta preserves the original linear
+Darcy path without nonlinear storage or extra residual probes. Each source's
+maximum superficial principal-component speed is checked on all eight tuples
+at source/accepted endpoints, including retained transient motion. An admitted
+grid face speed or cancelled cell average does not waive this principal limit.
+
+An independent face-force traversal checks local cubic heat against actual
+nonlinear momentum work. `ViscousPower`
 exposes `forchheimer_heat_w` and `cell_forchheimer_heat_w`; both steady and
 unsteady heat audits expose `forchheimer_heat_j`. These are subaccounts of the
 existing total physical heat, not additional thermal inputs. Linear Darcy,
@@ -3412,11 +3430,18 @@ All updates use the original caloric storage and candidate transaction.
 Source, speed, frame, arithmetic, convergence or cancellation failure publishes
 neither momentum nor heat. The fixed, zero-velocity, locally thermally
 equilibrated skeleton, admitted constant density, creeping-flow heat ceiling
-and existing opening restrictions remain. This does not establish turbulent,
+and existing opening restrictions remain. An oblique nonlinear cell must have
+a clear-fluid layer before pressure/inlet/outlet openings because their native
+rows mirror an exterior staggered volume. This also applies when the linear
+permeability is isotropic. Closed normal walls and symmetry remain supported.
+This does not establish turbulent,
 compressible, moving-skeleton or uncalibrated high-Reynolds-number flow.
 The focused material-flow fixtures check source-only beta substitution,
 direction permutation, signed quadratic circulation, exact zero-beta recovery,
 temperature feedback, physical/numerical energy partition and rollback.
+Rotated nonlinear fixtures independently reduce eight-tuple circulation in
+all three coordinate planes, and exercise principal-speed and open-port
+refusal without changing accepted heat or motion.
 
 ### Tetrahedral liquid geometry and momentum enter native VOF
 

@@ -92,6 +92,8 @@ pub mod sgs;
 pub mod viscous_heat;
 mod darcy;
 use darcy::DarcyCross;
+pub(in crate::conjugate) mod forchheimer;
+use forchheimer::ForchheimerResistance;
 #[cfg(feature = "enthalpy-coupling")]
 pub(in crate::conjugate) mod phase_capture;
 
@@ -643,6 +645,10 @@ pub(super) struct Solver<'a> {
     /// Symmetric cross-coordinate Darcy resistance. Empty for every original
     /// scalar/grid-diagonal path; compiled once with the source epoch.
     porous_cross: Vec<DarcyCross>,
+    /// Material-frame nonlinear laws only for oblique cells; empty on the
+    /// exact native grid-aligned path. Face rows are reused across assemblies.
+    porous_framed: Vec<Option<ForchheimerResistance>>,
+    porous_framed_rows: Vec<[[f64; 2]; 2]>,
     /// Internal fan index per face and component (`usize::MAX`: none;
     /// empty: no internal fans).
     fan_face: [Vec<usize>; 3],
@@ -977,6 +983,8 @@ impl<'a> Solver<'a> {
             porous_nonlinear: porous.iter().any(|cell| cell.iter().any(|(_, c)| *c != 0.0)),
             porous,
             porous_cross: Vec::new(),
+            porous_framed: Vec::new(),
+            porous_framed_rows: Vec::new(),
             fan_face,
             internal_fans,
             momentum_rms: [0.0; 3],
@@ -1641,12 +1649,13 @@ impl<'a> Solver<'a> {
     /// this is the residual of the unrelaxed steady equations).
     #[allow(clippy::too_many_lines)] // one staggered control-volume assembly
     fn momentum(&mut self, a: usize, solve: bool, gate: &CancelGate) -> Result<MomentumResidual, ChtError> {
-        let comp = &self.comps[a];
-        let rows = comp.unknowns.len();
+        let rows = self.comps[a].unknowns.len();
         if rows == 0 {
             self.momentum_rms[a] = 0.0;
             return Ok(MomentumResidual { relative: 0.0, rms: 0.0 });
         }
+        self.refresh_forchheimer_rows(a, gate)?;
+        let comp = &self.comps[a];
         let alpha = self.config.velocity_relaxation;
         let advective_density = if self.creeping { 0.0 } else { self.rho };
         let width = |axis: usize, i: usize| self.domain.width(axis, i);
@@ -1845,6 +1854,11 @@ impl<'a> Solver<'a> {
             }
             if !self.porous_cross.is_empty() {
                 rhs -= self.darcy_cross_force(a, minus_cell, plus_cell);
+            }
+            if !self.porous_framed.is_empty() {
+                let [diagonal, cross_force] = self.forchheimer_face_row(minus_cell, plus_cell);
+                a_p += diagonal;
+                rhs -= cross_force;
             }
             if let Some(time) = &self.time {
                 // rho V du/dt over the staggered volume.
@@ -2563,14 +2577,14 @@ pub(in crate::conjugate) fn simple_flow_with_darcy_tensor(
     fluid: &FluidProperties,
     dynamic_viscosity_pa_s: &[f64],
     drag_pa_s_m2: &[[[f64; 3]; 3]],
-    forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
+    forchheimer_resistance: Option<&[Option<ForchheimerResistance>]>,
     force_density_n_m3: Option<&[[f64; 3]]>,
     config: &SimpleConfig,
     gate: &CancelGate,
 ) -> Result<FvFlow, ChtError> {
     let solver = material_solver_with_darcy_tensor(
         domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
-        None, Some(drag_pa_s_m2), forchheimer_resistance_kg_m4, config, gate,
+        None, Some(drag_pa_s_m2), forchheimer_resistance, config, gate,
     )?;
     solve_steady(solver, fluid, config, gate)
 }
@@ -2583,7 +2597,7 @@ pub(super) fn material_solver_with_darcy_tensor<'a>(
     force_density_n_m3: Option<&[[f64; 3]]>,
     drag_pa_s_m2: Option<&[f64]>,
     darcy_resistance_pa_s_m2: Option<&[[[f64; 3]; 3]]>,
-    forchheimer_resistance_kg_m4: Option<&[[f64; 3]]>,
+    forchheimer_resistance: Option<&[Option<ForchheimerResistance>]>,
     config: &'a SimpleConfig,
     gate: &CancelGate,
 ) -> Result<Solver<'a>, ChtError> {
@@ -2650,31 +2664,41 @@ pub(super) fn material_solver_with_darcy_tensor<'a>(
             }
         }
     }
-    if let Some(drag) = forchheimer_resistance_kg_m4 {
+    if let Some(drag) = forchheimer_resistance {
         if drag.len() != domain.cell_count() {
             return Err(ChtError::InvalidInput {
-                field: "simple.forchheimer_resistance_kg_m4",
-                reason: "one directional quadratic resistance per voxel is required".into(),
+                field: "simple.forchheimer_resistance",
+                reason: "one optional framed quadratic resistance per voxel is required".into(),
             });
         }
         if solver.porous.is_empty() {
             solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
         }
-        for (c, beta) in drag.iter().enumerate() {
+        for (c, law) in drag.iter().enumerate() {
             if c % 256 == 0 { poll(gate)?; }
-            for (axis, &coefficient) in beta.iter().enumerate() {
-                finite("simple.forchheimer_resistance_kg_m4", coefficient)?;
-                if coefficient < 0.0 || (!domain.is_fluid(c) && coefficient != 0.0) {
-                    return Err(ChtError::InvalidInput {
-                        field: "simple.forchheimer_resistance_kg_m4",
-                        reason: "quadratic resistance must be nonnegative and zero in solid voxels".into(),
-                    });
+            let Some(law) = law else { continue; };
+            if law.is_zero() { continue; }
+            if !domain.is_fluid(c) {
+                return Err(ChtError::InvalidInput {
+                    field: "simple.forchheimer_resistance",
+                    reason: "quadratic resistance must be zero in solid voxels".into(),
+                });
+            }
+            solver.porous_nonlinear = true;
+            if let Some(beta) = law.grid_coefficients() {
+                for (axis, &coefficient) in beta.iter().enumerate() {
+                    // Exact original half-cell arithmetic for signed axis
+                    // permutations. Authored Volume still uses C=2*beta.
+                    solver.porous[c][axis].1 += coefficient;
+                    finite("simple.forchheimer_resistance", solver.porous[c][axis].1)?;
                 }
-                // This input is rho*beta, already in the SAME native force
-                // coefficient units. Authored Volume uses C=2*beta instead.
-                solver.porous[c][axis].1 += coefficient;
-                finite("simple.forchheimer_resistance_kg_m4", solver.porous[c][axis].1)?;
-                solver.porous_nonlinear |= coefficient != 0.0;
+            } else {
+                solver.admit_forchheimer_opening(c)?;
+                if solver.porous_framed.is_empty() {
+                    solver.porous_framed = vec![None; domain.cell_count()];
+                    solver.porous_framed_rows = vec![[[0.0; 2]; 2]; domain.cell_count()];
+                }
+                solver.porous_framed[c] = Some(*law);
             }
         }
     }

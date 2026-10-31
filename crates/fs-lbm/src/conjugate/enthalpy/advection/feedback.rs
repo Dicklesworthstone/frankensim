@@ -43,7 +43,7 @@ pub mod rheology;
 use rheology::RheologyBinding;
 /// Original porous-skeleton sources on this same flow and heat timeline.
 pub mod porous;
-use porous::PorousFlowSample;
+use porous::{ForchheimerResistance, PorousFlowSample};
 use fs_material::porous::permeability::temperature::PermeabilityTemperatureLaw;
 
 mod viscous;
@@ -153,9 +153,10 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     /// coefficients drive both native force and local heat; do not add the
     /// mushy_drag_pa_s_m2 account a second time.
     pub darcy_resistance_pa_s_m2: Option<Vec<[[f64; 3]; 3]>>,
-    /// rho*beta in grid axes [kg/m4] for the explicitly calibrated separable
-    /// quadratic force. No factor 1/2. None when every source beta is zero.
-    pub forchheimer_resistance_kg_m4: Option<Vec<[f64; 3]>>,
+    /// Explicit material-principal rho*beta [kg/m4] and its original frame.
+    /// No factor 1/2. Outer None when every source beta is zero; cell None for
+    /// clear/immobile voxels. This nonlinear law is not a constant tensor.
+    pub forchheimer_resistance: Option<Vec<Option<ForchheimerResistance>>>,
     /// Molecular heat and independent actuator work at this same source epoch.
     /// Present only after explicit quasisteady closed creeping-flow admission.
     /// Transient heat has a separate endpoint unsteady_mechanical_step receipt.
@@ -857,7 +858,7 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
-        let (porous_samples, darcy_resistance_pa_s_m2, forchheimer_resistance_kg_m4) =
+        let (porous_samples, darcy_resistance_pa_s_m2, forchheimer_resistance) =
             self.porous_drag(&samples, mushy_drag_pa_s_m2.as_deref(), check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.unsteady {
             // Thermal CFL and advection use the accepted old momentum. Its
@@ -886,7 +887,7 @@ where
             if let Some(owner) = &self.viscous_heating {
                 let (flow, power) = if let Some(drag) = &darcy_resistance_pa_s_m2 {
                     crate::conjugate::simple::viscous_heat::creeping_material_heat_with_darcy_tensor(
-                        domain, fluid, &viscosities, None, Some(drag), forchheimer_resistance_kg_m4.as_deref(),
+                        domain, fluid, &viscosities, None, Some(drag), forchheimer_resistance.as_deref(),
                         self.external_force_n_m3.as_deref(), self.config, owner.controls, self.gate,
                     )?
                 } else if let Some(force) = &self.external_force_n_m3 {
@@ -924,7 +925,7 @@ where
             } else if let Some(drag) = &darcy_resistance_pa_s_m2 {
                 (
                     crate::conjugate::simple::simple_flow_with_darcy_tensor(
-                        domain, fluid, &viscosities, drag, forchheimer_resistance_kg_m4.as_deref(),
+                        domain, fluid, &viscosities, drag, forchheimer_resistance.as_deref(),
                         buoyancy_force_n_m3.as_deref(), self.config, self.gate,
                     )?,
                     None,
@@ -1008,7 +1009,7 @@ where
             mushy_drag_pa_s_m2,
             porous_samples,
             darcy_resistance_pa_s_m2,
-            forchheimer_resistance_kg_m4,
+            forchheimer_resistance,
             viscous_power,
         });
         self.solves += usize::from(native_solve);
