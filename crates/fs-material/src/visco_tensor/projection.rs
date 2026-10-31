@@ -6,6 +6,10 @@ use super::*;
 mod transfer;
 pub use transfer::TensorThermalState;
 mod eigenstrain;
+pub use eigenstrain::TensorThermalExpansion;
+
+// Shared by observable-memory admission and the advertised capacity bound.
+const THERMAL_EXPANSION_ENVELOPE_GUARD: f64 = 1.0 + 4096.0 * f64::EPSILON;
 
 /// Cold projection limits; all columns and all six rows of every branch survive.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

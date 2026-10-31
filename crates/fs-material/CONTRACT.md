@@ -6197,13 +6197,22 @@ dU/dT=-T*psi_TT using the original strain map
 and complete native factor memory. Physical Maxwell strain recovery shares
 the native checked transfer inverse. Varying singular factors refuse even
 at zero actual memory; unchanged singular factors retain their original
-free energy with zero thermal entropy. The expansion evaluator includes constant
-alpha in equilibrium and every Maxwell spring. The shared whole-interval
-capacity bound includes nonlinear curvature even when alpha is zero; the
-receiving caloric owner must establish positive total capacity. Mechanical
-capacity is not an extra caloric or dissipative heat source. Other nonlinear
-source paths, varying alpha and finite-strain thermodynamics remain outside
-this admission.
+free energy with zero thermal entropy. The expansion evaluator includes equilibrium and every Maxwell spring.
+The fixed-size TensorThermalExpansion descriptor admits affine alpha(T) and
+carries exact-temperature alpha/alpha' snapshots with whole-interval bounds.
+Its source authority comes from the existing integrated expansion owner;
+it does not replace the free-strain integral. Curvature includes
+-alpha':C_eq:e and -sum alpha':C_j:q_j even where alpha itself is zero.
+Constant singular branches evaluate this work from their original factors,
+without inversion, under an observable |alpha':C_j:q_j| <= 2L ||C_j alpha'||
+envelope. Varying branches retain physical spring-strain reconstruction and
+the 2L envelope; the advertised bound includes the same roundoff allowance.
+
+The shared whole-interval capacity bound includes nonlinear stiffness and
+expansion curvature. The receiving caloric owner must establish positive
+total capacity. Mechanical capacity is not an extra caloric or dissipative
+heat source. Unsupported source paths, expansion derivative jumps and
+finite-strain thermodynamics remain outside this admission.
 
 `ProjectedTensorProny::thermal_stiffness_derivatives` contracts the same admitted
 source derivatives through the original strain columns and physical volume:

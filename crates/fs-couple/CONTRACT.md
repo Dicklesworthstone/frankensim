@@ -17015,22 +17015,31 @@ its endpoint is never renormalized or its work/loss recomputed to hide error.
 Entropy includes both source-derived stiffness derivatives and equilibrium/
 Maxwell expansion terms; the shared finite heat driver receives native dashpot
 loss plus signed reversible exchange and checks physical K+U, with U=psi+T*S.
-Constant source alpha may accompany admitted stored tensors over the complete
-admitted interval. The existing source-law owner admits every selected stiffness
-knot; source-dependent relaxation times remain active.
+Source-affine alpha(T) may accompany admitted stored tensors over the complete
+interval. The existing integrated expansion owner admits each pinned coefficient
+knot and transforms alpha/alpha' through its accepted material frame. Numerical
+derivatives anchor at the current temperature; the stress-free reference may lie
+outside the active interval without extending its affine model there. Actual
+free strain still uses the original source integral. Initial, frozen and evolved
+states use exact-temperature expansion snapshots, with one shared snapshot for
+each trial endpoint. Source-dependent relaxation times remain active.
 
 Actual caloric receiver mass must keep a conservative lower bound on
 C_eff=m*dh/dT-T*psi_TT positive on every chart segment. The mechanical curvature
-includes .5 e:C_eq'':e, alpha:C_inst:alpha, -2 alpha:C_eq':e and
--2 sum alpha:C_j':q_j. Independent affine Young/shear sources retain their
-nonlinear bulk curvature through the same thermal driver.
+includes .5 e:C_eq'':e, alpha:C_inst:alpha, -2 alpha:C_eq':e,
+-2 sum alpha:C_j':q_j, -alpha':C_eq:e and -sum alpha':C_j:q_j.
+These expansion-slope terms remain active when alpha crosses zero. Constant
+singular branches use the exact factor-memory contraction and an observable
+2L envelope, preserving unobserved strain directions without a pseudoinverse.
+Independent affine Young/shear sources retain their nonlinear bulk curvature
+through the same thermal driver.
 The complete interval bound uses the original Mandel elastic-strain limit and
 a separately enforced 2L envelope for varying Maxwell spring strain. Accepted,
 rebound and final thermal states use that same memory admission. A failed
 sufficient bound refuses without claiming that every individual state is
-unstable. Constant tensors and zero alpha retain their original paths.
-Varying alpha, unsupported stored-tensor paths, Kelvin thermal strain rates, finite
-deformation and phase mechanics remain outside this bounded reciprocal model.
+unstable. Constant expansion and the zero expansion law retain their original
+paths. Unsupported coefficient paths, expansion derivative jumps, Kelvin thermal
+strain rates, finite deformation and phase mechanics remain outside this model.
 
 Five native regressions cover two continuing heated Maxwell intervals, rotated
 orthotropic expansion, zero-alpha compatibility, source/capacity/reference/
@@ -17045,6 +17054,11 @@ with retained Maxwell memory, a caloric capacity that passes the old constant-C
 check but fails the combined bound, and excessive hidden spring strain.
 Independent physical-coordinate RK4 plus enthalpy references were executed;
 these new Rust tests were not compiled or run in the unavailable native runtime.
+Additional variable-alpha regressions compare two continuing finite-heat
+intervals against independent physical-coordinate integration and reject an
+insufficient complete-domain capacity even at zero current alpha. Shared
+projection regressions check dU/dT and singular observable-memory admission.
+These are authored numerical regressions; native execution remains unverified.
 
 ## Finite source gas coupled to the actual deforming material wall
 

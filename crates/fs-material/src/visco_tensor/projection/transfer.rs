@@ -188,9 +188,36 @@ impl ProjectedTensorProny {
         temperature_k: f64,
         alpha_mandel: Voigt,
         relative_memory_tolerance: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<TensorThermalState> {
+        let expansion = TensorThermalExpansion::try_new(
+            temperature_k, alpha_mandel, [0.0; 6], derivative.interval_k,
+        )?;
+        self.thermal_state_with_expansion_derivatives(
+            derivative, displacement, memory, temperature_k, &expansion,
+            relative_memory_tolerance, cancelled,
+        )
+    }
+
+    /// Complete original potential for an admitted affine alpha(T).
+    /// At fixed total/viscous strain, e_T=-alpha and e_TT=-alpha'.
+    /// Constant singular Maxwell branches evaluate alpha' work directly from
+    /// retained factors, and admit its observable 2L envelope without inversion.
+    #[allow(clippy::too_many_arguments)]
+    pub fn thermal_state_with_expansion_derivatives(
+        &self,
+        derivative: &source::thermal::TensorTemperatureDerivative,
+        displacement: &[f64],
+        memory: &[f64],
+        temperature_k: f64,
+        expansion: &TensorThermalExpansion,
+        relative_memory_tolerance: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<TensorThermalState> {
         poll(&mut cancelled)?;
+        expansion.admit(derivative, temperature_k)?;
+        let alpha_mandel = expansion.alpha_mandel_per_k();
+        let beta_mandel = expansion.alpha_slope_mandel_per_k2();
         if memory.len() != 6 * self.model.branches.len()
             || derivative.branches_pa_k.len() != self.model.branches.len()
             || memory.iter().any(|v| !v.is_finite())
@@ -225,8 +252,9 @@ impl ProjectedTensorProny {
         let slope_strain = apply(&derivative.equilibrium_pa_k, &strain);
         let mut entropy_j_k = -0.5 * self.volume_m3 * dot(&strain, &slope_strain);
         let has_expansion = alpha_mandel.iter().any(|v| *v != 0.0);
-        // At fixed total/viscous strain, e_T=-alpha. For constant alpha:
-        // psi_TT/V = .5 e:C_TT:e - 2 alpha:C_T:e + alpha:C:alpha.
+        let changing_expansion = beta_mandel.iter().any(|v| *v != 0.0);
+        // At fixed total/viscous strain, e_T=-alpha and e_TT=-beta:
+        // psi_TT/V = .5 e:C_TT:e - 2 alpha:C_T:e + alpha:C:alpha - beta:C:e.
         // The affine Maxwell branches below have no C_TT contribution.
         let mut curvature = if derivative
             .equilibrium_pa_k2
@@ -242,6 +270,9 @@ impl ProjectedTensorProny {
             entropy_j_k += self.volume_m3 * dot(&alpha_mandel, &apply(&self.model.c_eq, &strain));
             curvature += dot(&alpha_mandel, &apply(&self.model.c_eq, &alpha_mandel))
                 - 2.0 * dot(&alpha_mandel, &slope_strain);
+        }
+        if changing_expansion {
+            curvature -= dot(&beta_mandel, &apply(&self.model.c_eq, &strain));
         }
         let root = det::sqrt(self.volume_m3);
         for (index, (branch, slope)) in self
@@ -260,10 +291,23 @@ impl ProjectedTensorProny {
                 entropy_j_k += root * rate.iter().zip(z).map(|(a, b)| a * b).sum::<f64>();
                 curvature += dot(&alpha_mandel, &apply(&branch.c_pa, &alpha_mandel));
             }
+            if changing_expansion {
+                let rows = branch.resolved_gram_rows(&self.model.factors[index]);
+                let rate = apply(&rows, &beta_mandel);
+                let observable = rate.iter().zip(z).map(|(a, b)| a * b).sum::<f64>() / root;
+                let direction = apply(&branch.c_pa, &beta_mandel);
+                let allowed = THERMAL_EXPANSION_ENVELOPE_GUARD
+                    * (2.0 * self.model.maximum_strain_norm()) * det::sqrt(dot(&direction, &direction));
+                if !observable.is_finite() || !allowed.is_finite() || observable.abs() > allowed {
+                    return Err(invalid("thermal expansion Maxwell curvature exceeds its observable 2L envelope"));
+                }
+                // beta:C:q = (B beta).z/sqrt(V), including singular branches.
+                curvature -= observable;
+            }
             if slope.iter().flatten().any(|v| *v != 0.0) {
                 let rows = branch.resolved_gram_rows(&self.model.factors[index]);
                 let q = recover_strain(&branch.c_pa, &rows, z, root, relative_memory_tolerance)?;
-                if has_expansion {
+                if has_expansion || changing_expansion {
                     // The combined capacity bound assumes ||q|| <= 2L.
                     // Use the SAME native Mandel-norm admission as total and
                     // equilibrium elastic strain, scaled by one half.

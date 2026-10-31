@@ -212,3 +212,122 @@ fn expansion_capacity_matches_internal_energy_at_fixed_total_and_viscous_strain(
         ).unwrap());
     }
 }
+
+
+#[test]
+fn variable_expansion_curvature_matches_energy_derivatives_with_singular_memory() {
+    let volume: f64 = 0.25;
+    let beta = [2e-7, -1e-7, 1.5e-7, 0.0, 0.0, 0.0];
+    let expansion = TensorThermalExpansion::try_new(
+        300.0, [0.0; 6], beta, [280.0, 320.0],
+    ).unwrap();
+    let derivative = source::thermal::TensorTemperatureDerivative::from_affine_parts(
+        diagonal(0.0), vec![diagonal(0.0)], [280.0, 320.0],
+    );
+    let row = [20.0, -10.0, 5.0, 0.0, 0.0, 0.0];
+    let mut rows = [[0.0; 6]; 6];
+    rows[0] = row;
+    let native = TensorProny::new_mandel(
+        diagonal(1200.0),
+        vec![TensorPronyBranch::from_gram_rows(rows, 0.2).unwrap()], 0.1,
+    ).unwrap();
+    let column = [1.0, 0.2, -0.4, 0.3, -0.1, 0.15];
+    let total = mandel(&column).map(|x| 0.002 * x);
+    let viscous = [0.001, -0.0002, 0.0003, -0.0001, 0.0, 0.0002];
+    // Direct continuum potential at fixed total and viscous strains. This
+    // reference uses the original rank-one spring, never a factor inverse.
+    let reference = |t: f64| {
+        let dt = t - 300.0;
+        let alpha = beta.map(|b| b * dt);
+        let free = beta.map(|b| 0.5 * b * dt * dt);
+        let elastic: Voigt = core::array::from_fn(|i| total[i] - free[i]);
+        let spring: Voigt = core::array::from_fn(|i| elastic[i] - viscous[i]);
+        let spring_projection = (0..6).map(|i| row[i] * spring[i]).sum::<f64>();
+        let stress: Voigt = core::array::from_fn(|i|
+            1200.0 * elastic[i] + row[i] * spring_projection);
+        let psi = 0.5 * volume * (1200.0 * elastic.iter().map(|x| x*x).sum::<f64>()
+            + spring_projection * spring_projection);
+        let entropy = volume * (0..6).map(|i| alpha[i] * stress[i]).sum::<f64>();
+        let row_alpha = (0..6).map(|i| row[i] * alpha[i]).sum::<f64>();
+        let curvature = volume * (
+            1200.0 * alpha.iter().map(|a| a*a).sum::<f64>() + row_alpha * row_alpha
+            - (0..6).map(|i| beta[i] * stress[i]).sum::<f64>());
+        (psi, entropy, psi + t * entropy, -t * curvature, free, spring_projection)
+    };
+    for temperature in [285.0, 300.0, 315.0] {
+        let (psi, entropy, internal, capacity, free, spring_projection) = reference(temperature);
+        let projected = native.project_strain(&[column], volume, budget(), || false).unwrap()
+            .with_eigenstrain_mandel(free).unwrap();
+        let mut memory = [0.0; 6];
+        memory[0] = det::sqrt(volume) * spring_projection;
+        let original_memory = memory;
+        let snapshot = expansion.at_temperature(temperature).unwrap();
+        let actual = projected.thermal_state_with_expansion_derivatives(
+            &derivative, &[0.002], &memory, temperature, &snapshot, 1e-10, || false,
+        ).unwrap();
+        close(actual.free_energy_j, psi);
+        if entropy == 0.0 { assert_eq!(actual.entropy_j_k, 0.0); }
+        else { close(actual.entropy_j_k, entropy); }
+        close(actual.internal_energy_j, internal);
+        close(actual.heat_capacity_j_k, capacity);
+        let numerical = (reference(temperature + 0.001).2 - reference(temperature - 0.001).2) / 0.002;
+        assert!((numerical-capacity).abs() < 5e-8 * capacity.abs().max(1e-8));
+        let bound = projected.thermal_capacity_bound_with_expansion_j_k2(
+            &derivative, temperature, &snapshot,
+        ).unwrap();
+        assert!(bound >= -actual.heat_capacity_j_k / temperature);
+        assert_eq!(memory, original_memory);
+        if temperature == 300.0 {
+            assert_eq!(snapshot.alpha_mandel_per_k(), [0.0; 6]);
+            assert_ne!(actual.heat_capacity_j_k, 0.0,
+                "alpha crosses zero but its slope still contributes mechanical heat capacity");
+        } else {
+            assert!(projected.thermal_state_with_expansion_derivatives(
+                &derivative, &[0.002], &memory, temperature, &expansion, 1e-10, || false,
+            ).is_err(), "stale expansion derivative must not be reused");
+        }
+    }
+    assert!(expansion.at_temperature(330.0).is_err());
+}
+
+#[test]
+fn variable_expansion_admits_only_the_observable_singular_memory_envelope() {
+    let mut rows = [[0.0; 6]; 6];
+    rows[0][0] = 10.0;
+    rows[1][1] = 20.0;
+    let native = TensorProny::new_mandel(
+        diagonal(1200.0),
+        vec![TensorPronyBranch::from_gram_rows(rows, 0.2).unwrap()], 0.1,
+    ).unwrap();
+    let point = native.project_strain(
+        &[[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]], 1.0, budget(), || false,
+    ).unwrap();
+    let derivative = source::thermal::TensorTemperatureDerivative::from_affine_parts(
+        diagonal(0.0), vec![diagonal(0.0)], [280.0, 320.0],
+    );
+    let expansion = TensorThermalExpansion::try_new(
+        300.0, [0.0; 6], [1e-6, 0.0, 0.0, 0.0, 0.0, 0.0], [280.0, 320.0],
+    ).unwrap();
+    // A retained spring force orthogonal to beta has no curvature work.
+    // No hidden strain is reconstructed from this singular material tensor.
+    let orthogonal_memory = [0.0, 1000.0, 0.0, 0.0, 0.0, 0.0];
+    let state = point.thermal_state_with_expansion_derivatives(
+        &derivative, &[0.0], &orthogonal_memory, 300.0, &expansion, 1e-10, || false,
+    ).unwrap();
+    assert_eq!(state.free_energy_j, 500_000.0);
+    assert_eq!(state.heat_capacity_j_k, 0.0);
+    let outside = [1000.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+    assert!(point.thermal_state_with_expansion_derivatives(
+        &derivative, &[0.0], &outside, 300.0, &expansion, 1e-10, || false,
+    ).is_err());
+    // Constant alpha retains its original unrestricted constant-branch path.
+    assert!(point.thermal_state(
+        &derivative, &[0.0], &outside, 300.0, 1e-10, || false,
+    ).is_ok());
+    let wrong_interval = TensorThermalExpansion::try_new(
+        300.0, [0.0; 6], [1e-6, 0.0, 0.0, 0.0, 0.0, 0.0], [290.0, 310.0],
+    ).unwrap();
+    assert!(point.thermal_capacity_bound_with_expansion_j_k2(
+        &derivative, 300.0, &wrong_interval,
+    ).is_err());
+}

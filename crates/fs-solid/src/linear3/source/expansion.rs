@@ -10,14 +10,17 @@ use crate::linear3::{
     ThermalStrainTransformReceipt,
 };
 use fs_blake3::ContentHash;
-use fs_matdb::{MaterialCard, QueryPoint};
+use fs_matdb::{ClaimSelection, MaterialCard, QueryPoint};
 use fs_material::state_point::{
-    IntegratedIsotropicThermalExpansion, MaterialPropertySelection, ResolvedMaterialStatePoint,
-    integrate_isotropic_thermal_expansion,
+    IntegratedIsotropicThermalExpansion, LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+    MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
+    affine_temperature_slope, integrate_isotropic_thermal_expansion,
 };
 use fs_material::state_point::{
-    IntegratedOrthotropicThermalExpansion, integrate_orthotropic_thermal_expansion,
+    IntegratedOrthotropicThermalExpansion, ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES,
+    integrate_orthotropic_thermal_expansion,
 };
+use fs_material::visco_tensor::TensorThermalExpansion;
 
 /// Source-property schema and fixed material axes for thermal expansion.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -91,6 +94,97 @@ impl ThermalExpansionSource {
             Self::Isotropic { path, .. } => [path.free_linear_strain(); 3],
             Self::OrientedOrthotropic { path, .. } => *path.free_principal_strains(),
         }
+    }
+
+    /// Exact first and second free-strain derivatives for a globally affine
+    /// expansion coefficient on the complete active temperature interval.
+    ///
+    /// Every knot remains pinned to the original integrated source. The current
+    /// state anchors the derivative, so the stress-free reference may be outside
+    /// this interval and need not share its affine extension. Principal rates
+    /// use the same accepted mesh rotation as the integrated free strain.
+    ///
+    /// This does not replace source integration or admit a changed source/frame.
+    /// Coefficient kinks, support gaps, unowned conditions, another card and
+    /// unrepresentable derivative arithmetic refuse the complete result.
+    pub fn affine_temperature_derivatives(
+        &self,
+        card: &MaterialCard,
+        interval_k: [f64; 2],
+    ) -> Result<TensorThermalExpansion, SolidMaterialError> {
+        let invalid = |quantity| {
+            SolidMaterialError::Material(MaterialStatePointError::InvalidDerived { quantity })
+        };
+        let current = self.current();
+        let temperature_k = current
+            .state_coordinate("T")
+            .ok_or_else(|| invalid("expansion derivatives require the current T coordinate"))?;
+        let [low, high] = interval_k;
+        if current.card_identity() != card.content_hash()
+            || self.reference().card_identity() != card.content_hash()
+            || !low.is_finite()
+            || !high.is_finite()
+            || low <= 0.0
+            || high <= low
+            || !(low..=high).contains(&temperature_k)
+        {
+            return Err(invalid(
+                "expansion derivatives require the original card and a bounded current interval",
+            ));
+        }
+        let lower = current.query().with("T", low)
+            .map_err(|_| invalid("invalid expansion derivative lower query"))?;
+        let upper = current.query().with("T", high)
+            .map_err(|_| invalid("invalid expansion derivative upper query"))?;
+        let coefficient = |name: &str| -> Result<(f64, f64), SolidMaterialError> {
+            let property = current.property(name)
+                .ok_or_else(|| invalid("original expansion coefficient is absent"))?;
+            if !property.has_only_fixed_external_conditions(Some("T"), true) {
+                return Err(invalid("expansion derivatives cannot freeze unowned source conditions"));
+            }
+            let selected = property.answer().receipt.selected;
+            let claim = card.claims().claim(selected)
+                .ok_or_else(|| invalid("selected expansion source claim is absent"))?;
+            let path = card.claims().query_line_typed(
+                &claim.key, "T", &lower, &upper, ClaimSelection::Pinned(selected),
+            ).map_err(|source| MaterialStatePointError::Support {
+                property: name.to_owned(), source: Box::new(source),
+            })?;
+            let knots: Vec<_> = path.knots.iter()
+                .map(|(t, answer)| (*t, answer.evidence.value.value)).collect();
+            let alpha = property.value_si();
+            let slope = affine_temperature_slope(&knots, temperature_k, alpha)
+                .map_err(invalid)?;
+            Ok((alpha, slope))
+        };
+        let (alpha, slope) = match self {
+            Self::Isotropic { .. } => {
+                let (alpha, slope) = coefficient(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY)?;
+                ([alpha, alpha, alpha, 0.0, 0.0, 0.0],
+                 [slope, slope, slope, 0.0, 0.0, 0.0])
+            }
+            Self::OrientedOrthotropic { transform, .. } => {
+                let mut principal = [(0.0, 0.0); 3];
+                for (value, name) in principal.iter_mut()
+                    .zip(ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES) {
+                    *value = coefficient(name)?;
+                }
+                let rotation = fs_material::tensor::mandel_rotation(*transform.source_to_target());
+                let alpha = core::array::from_fn(|i| {
+                    rotation[i][0] * principal[0].0
+                        + rotation[i][1] * principal[1].0
+                        + rotation[i][2] * principal[2].0
+                });
+                let slope = core::array::from_fn(|i| {
+                    rotation[i][0] * principal[0].1
+                        + rotation[i][1] * principal[1].1
+                        + rotation[i][2] * principal[2].1
+                });
+                (alpha, slope)
+            }
+        };
+        TensorThermalExpansion::try_new(temperature_k, alpha, slope, interval_k)
+            .map_err(|_| invalid("source-integrated expansion derivatives are unrepresentable"))
     }
 
     /// Original integrated-law identity, before consumer orientation.

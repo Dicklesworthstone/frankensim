@@ -1,7 +1,9 @@
 //! Source tensor thermodynamics on the shared tensor/enthalpy driver.
 use super::*;
 use crate::tensor_material::TensorMaterialError;
-use fs_material::visco_tensor::{TensorThermalState, source::thermal::TensorTemperatureDerivative};
+use fs_material::visco_tensor::{
+    TensorThermalExpansion, TensorThermalState, source::thermal::TensorTemperatureDerivative,
+};
 
 /// Admission of source-operator changes internal to the solved thermal step.
 #[derive(Clone, Copy, Debug)]
@@ -39,12 +41,12 @@ pub(super) fn admit_capacity<E>(
     cells: &[RelaxationThermalCell<'_>],
     derivatives: &[TensorTemperatureDerivative],
     temperatures_k: &[f64],
-    expansion_per_k: Option<&[[f64; 6]]>,
+    expansion: Option<&[TensorThermalExpansion]>,
     gate: &CancelGate,
 ) -> Result<(), Error<E>> {
     if derivatives.len() != cells.len()
         || temperatures_k.len() != cells.len()
-        || expansion_per_k.is_some_and(|a| a.len() != cells.len())
+        || expansion.is_some_and(|a| a.len() != cells.len())
     {
         return Err(invalid(
             "complete thermal derivatives per original caloric receiver required",
@@ -59,16 +61,16 @@ pub(super) fn admit_capacity<E>(
         .zip(history.solid.projection.point_elements())
     {
         check(gate)?;
-        coefficients[element] = finite(
-            coefficients[element]
-                + point
-                    .thermal_capacity_bound_j_k2(
-                        &derivatives[element],
-                        temperatures_k[element],
-                        expansion_per_k.map_or([0.0; 6], |a| a[element]),
-                    )
-                    .map_err(|e| solid(SolidError::Dynamics(TensorMaterialError::Material(e))))?,
-        )?;
+        let coefficient = if let Some(expansion) = expansion {
+            point.thermal_capacity_bound_with_expansion_j_k2(
+                &derivatives[element], temperatures_k[element], &expansion[element],
+            )
+        } else {
+            point.thermal_capacity_bound_j_k2(
+                &derivatives[element], temperatures_k[element], [0.0; 6],
+            )
+        }.map_err(|e| solid(SolidError::Dynamics(TensorMaterialError::Material(e))))?;
+        coefficients[element] = finite(coefficients[element] + coefficient)?;
     }
     // The original caloric owner is piecewise linear in h(T). Bound
     // C_eff = mass*dh/dT - T*psi_TT on every intersecting segment, including
@@ -105,13 +107,13 @@ pub(super) fn states<E>(
     history: &TensorSolidHistory<'_, '_>,
     derivatives: &[TensorTemperatureDerivative],
     temperatures: &[f64],
-    expansion_per_k: Option<&[[f64; 6]]>,
+    expansion: Option<&[TensorThermalExpansion]>,
     tolerance: f64,
     gate: &CancelGate,
 ) -> Result<Vec<TensorThermalState>, Error<E>> {
     if derivatives.len() != history.solid.projection.element_count()
         || temperatures.len() != derivatives.len()
-        || expansion_per_k.is_some_and(|a| a.len() != derivatives.len())
+        || expansion.is_some_and(|a| a.len() != derivatives.len())
     {
         return Err(invalid(
             "complete thermal derivative and temperature per original element required",
@@ -128,17 +130,19 @@ pub(super) fn states<E>(
     {
         check(gate)?;
         let count = 6 * point.branches().len();
-        let state = point
-            .thermal_state_with_expansion(
-                &derivatives[element],
-                history.inner.displacement_m(),
-                &history.inner.state[at..at + count],
-                temperatures[element],
-                expansion_per_k.map_or([0.0; 6], |a| a[element]),
-                tolerance,
-                || gate.is_requested(),
+        let state = if let Some(expansion) = expansion {
+            point.thermal_state_with_expansion_derivatives(
+                &derivatives[element], history.inner.displacement_m(),
+                &history.inner.state[at..at + count], temperatures[element],
+                &expansion[element], tolerance, || gate.is_requested(),
             )
-            .map_err(|e| solid(SolidError::Dynamics(TensorMaterialError::Material(e))))?;
+        } else {
+            point.thermal_state(
+                &derivatives[element], history.inner.displacement_m(),
+                &history.inner.state[at..at + count], temperatures[element],
+                tolerance, || gate.is_requested(),
+            )
+        }.map_err(|e| solid(SolidError::Dynamics(TensorMaterialError::Material(e))))?;
         let total = &mut states[element];
         total.free_energy_j = finite(total.free_energy_j + state.free_energy_j)?;
         total.entropy_j_k = finite(total.entropy_j_k + state.entropy_j_k)?;

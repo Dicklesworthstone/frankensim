@@ -1,8 +1,9 @@
 //! Source-integrated eigenstrain and stable reciprocal tensor thermodynamics.
 use super::*;
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::{ClaimSelection, PropertyKey, QueryPoint};
+use fs_matdb::QueryPoint;
 use fs_material::state_point::MaterialPropertySelection;
+use fs_material::visco_tensor::TensorThermalExpansion;
 use fs_solid::linear3::source::{ThermalExpansionModel, ThermalExpansionSource};
 use fs_solid::linear3::{TetElasticMaterial, TetThermalStrainState};
 
@@ -18,7 +19,7 @@ pub struct ThermalExpansionCell<'m> {
 }
 
 pub(super) struct PreparedExpansion {
-    pub alpha_mandel: Vec<[f64; 6]>,
+    pub derivatives: Vec<TensorThermalExpansion>,
     pub identities: Vec<ContentHash>,
 }
 
@@ -71,7 +72,7 @@ pub(super) fn prepare<E>(
         .material_sources()
         .ok_or_else(|| invalid("expansion needs original tensor sources"))?;
     let mut prepared = PreparedExpansion {
-        alpha_mandel: Vec::with_capacity(cells.len()),
+        derivatives: Vec::with_capacity(cells.len()),
         identities: Vec::with_capacity(cells.len()),
     };
     let mut expected = Vec::with_capacity(cells.len());
@@ -79,7 +80,7 @@ pub(super) fn prepare<E>(
         check(gate)?;
         // The common caller already admitted the original stored
         // tensors over every selected source knot and retained their derivatives.
-        // Expansion still requires its own complete constant-alpha source proof.
+        // Expansion still requires its own complete affine-alpha source proof.
         if cell.point.temperature_axis != "T" || binding.mesh_frame.0 == [0; 32] {
             return Err(invalid(
                 "native integrated expansion requires its T coordinate and a named mesh frame",
@@ -96,47 +97,13 @@ pub(super) fn prepare<E>(
             .with("T", high)
             .map_err(|_| invalid("invalid expansion upper source query"))?;
         let accepted = resolve(source, cell, binding, &query)?;
-        let cold = resolve(source, cell, binding, &lower)?;
-        let warm = resolve(source, cell, binding, &upper)?;
-        for property in accepted.reference().properties() {
-            check(gate)?;
-            if !property.has_only_fixed_external_conditions(Some("T"), true) {
-                return Err(invalid("expansion cannot freeze unowned source conditions"));
-            }
-            let requirement = property.requirement();
-            let path = cell
-                .point
-                .material
-                .claims()
-                .query_line_typed(
-                    &PropertyKey::new(requirement.name(), requirement.dims()),
-                    "T",
-                    &lower,
-                    &upper,
-                    ClaimSelection::Pinned(property.answer().receipt.selected),
-                )
-                .map_err(|_| {
-                    invalid(
-                        "expansion requires continuous support from its original selected source",
-                    )
-                })?;
-            if path.knots.len() < 2
-                || path
-                    .knots
-                    .iter()
-                    .any(|(_, answer)| answer.evidence.value.value != property.value_si())
-            {
-                return Err(invalid(
-                    "tensor reciprocal expansion requires constant alpha over every original source knot",
-                ));
-            }
-        }
-        let a = cold.thermal_strain().free_strain_mandel();
-        let b = warm.thermal_strain().free_strain_mandel();
-        let alpha = core::array::from_fn(|i| (b[i] - a[i]) / (high - low));
-        if alpha.iter().any(|v| !v.is_finite()) {
-            return Err(invalid("source-integrated expansion derivative overflow"));
-        }
+        // Preserve the original integrated-strain admission at both ends;
+        // derivatives come from the pinned coefficient path, never its secant.
+        resolve(source, cell, binding, &lower)?;
+        resolve(source, cell, binding, &upper)?;
+        let derivative = accepted
+            .affine_temperature_derivatives(cell.point.material, cell.temperature_interval_k)
+            .map_err(|e| CircuitEnthalpyError::Source(RelaxationThermalError::Expansion(e)))?;
         let mut identity = DomainHasher::new("org.frankensim.tensor-solid.thermal-expansion.v1");
         identity.update(accepted.reference().identity().as_bytes());
         identity.update(binding.mesh_frame.as_bytes());
@@ -154,7 +121,7 @@ pub(super) fn prepare<E>(
             }
         }
         prepared.identities.push(identity.finalize());
-        prepared.alpha_mandel.push(alpha);
+        prepared.derivatives.push(derivative);
         expected.push(accepted.thermal_strain().free_strain_mandel());
     }
     if history
@@ -183,6 +150,24 @@ pub(super) fn prepare<E>(
     }
     check(gate)?;
     Ok(prepared)
+}
+
+pub(super) fn derivatives<E>(
+    model: &PreparedExpansion,
+    temperatures_k: &[f64],
+    gate: &CancelGate,
+) -> Result<Vec<TensorThermalExpansion>, Error<E>> {
+    if temperatures_k.len() != model.derivatives.len() {
+        return Err(invalid("complete expansion derivative temperatures required"));
+    }
+    model.derivatives.iter().zip(temperatures_k)
+        .map(|(template, &temperature)| {
+            check(gate)?;
+            template.at_temperature(temperature)
+                .map_err(|e| solid(SolidError::Dynamics(
+                    crate::tensor_material::TensorMaterialError::Material(e),
+                )))
+        }).collect()
 }
 
 pub(super) fn strains<E>(
