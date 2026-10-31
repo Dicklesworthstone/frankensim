@@ -20,6 +20,8 @@ use std::sync::Arc;
 
 mod source;
 pub use source::WetPoreLiquidProperties;
+/// Conservative one-dimensional liquid saturation/storage evolution.
+pub mod transient;
 
 /// Inclusive applicability of this liquid calibration. Pressure means the
 /// actual absolute LIQUID pressure, independently of the capillary difference.
