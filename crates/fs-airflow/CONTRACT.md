@@ -1352,6 +1352,15 @@ can bind the shared material barrier and coherent gas viscosity; layer resistanc
 is compiled once and graph iterations use numeric coefficients. A sealed path
 is omitted, and an inertial/Forchheimer coefficient is never inferred from k.
 
+`PassiveBranch::from_darcy_forchheimer` binds both coefficients to the same
+original barrier, area and coherent gas snapshot. The explicit superficial-
+velocity calibration supplies `B = rho sum(beta L)/area²`, while the original
+intrinsic tensor reduction supplies `A = mu sum(L/k)/area`. Graph admission
+checks the retained pair; dropping the calibrated quadratic term from the
+retained linear binding or changing its value refuses. Exact zero inertia
+recovers a linear branch. The existing fan, conservation and sensitivity owners
+consume these coefficients without a second graph solve or material database.
+
 Material edges share one coherent frozen gas state. Its absolute pressure is
 the common reference at graph gauge pressure zero. Actual endpoint absolute
 pressures and their excursions from that reference must remain inside source
@@ -2016,8 +2025,11 @@ of an experimental fire/soot/emission validation remain explicit.
 
 The native temperature-feedback pressure path now accepts a sealed resistance-owner
 abstraction while preserving the existing geometry-law default. Original continuum
-permeability supplies only the unchanged tensor/series sum of thickness over normal
-permeability divided by flow area. The existing hydraulic owner evaluates current
+permeability supplies the unchanged tensor/series sum of thickness over effective
+permeability divided by flow area. An explicitly calibrated inertial skeleton
+also supplies `sum(beta L)/area²`; no beta is inferred from permeability or pore
+radius. Both use the original `dp = a mu Q + b rho Q |Q|` hydraulic owner with
+the same current fluid snapshot. That owner evaluates current
 liquid density, viscosity, Reynolds admission, pressure loss and dissipated power.
 Mixed ordinary/porous sections, the fully dissipative enthalpy march, coupled-solid
 pressure closure, parallel branches, pump-coupled networks, recirculating coolant
@@ -2047,7 +2059,11 @@ their original omitted-power allowance.
 Regression sources exercise data-only permeability/viscosity changes, independently
 derived pressure/heat operating points, hydraulic heat in the same enthalpy state,
 original source receipts, discarded-trial support refusal, sealed topology, solid
-feedback and parallel redistribution/mixing.
+feedback and parallel redistribution/mixing. The calibrated-inertia regressions
+independently reconstruct liquid operating points and regional exponential
+enthalpy balances, including temperature-dependent viscosity and the inertial
+heat contribution exactly once. Gas graph regressions exercise the corresponding
+signed flow, fan intersection, coefficient binding and actual source limits.
 
 
 ## Complete coolant assemblies on native solid motion

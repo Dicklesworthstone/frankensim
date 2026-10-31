@@ -233,7 +233,10 @@ impl LossGraph {
             }
             let resistance = branch.loss.resistance.value();
             let linear = linear_losses[index].as_ref();
-            if let Some(loss) = linear { loss.validate().map_err(invalid)?; }
+            if let Some(loss) = linear {
+                loss.validate().map_err(invalid)?;
+                loss.validate_quadratic(resistance).map_err(invalid)?;
+            }
             if let Some(binding) = linear.and_then(|loss| loss.material()) {
                 if common_gas.is_some_and(|gas| gas != binding.gas) {
                     return Err(invalid("Darcy edges require one identical frozen gas snapshot"));

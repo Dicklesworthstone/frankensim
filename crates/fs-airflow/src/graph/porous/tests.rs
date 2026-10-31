@@ -1,5 +1,7 @@
 //! Analytic G0/G1/G3 checks of Darcy drag in the production graph owner.
 
+mod forchheimer;
+
 use super::*;
 use crate::graph::{GraphFanConfig, LossGraph};
 use crate::graph::sensitivity::{FlowWeight, GraphSensitivityConfig, PressureWeight};

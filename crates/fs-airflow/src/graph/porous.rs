@@ -1,4 +1,4 @@
-//! Darcy drag in the existing passive pressure graph.
+//! Darcy and calibrated Forchheimer drag in the existing passive pressure graph.
 //!
 //! This graph conserves volume at one frozen, low-Mach gas state. A porous
 //! element uses the material owner's intrinsic permeability and actual gas
@@ -14,6 +14,8 @@ use fs_qty::Qty;
 
 use super::{GraphBranch, GraphError};
 use crate::{LossElement, LossResistance, SourceProvenance, ToleranceBasis};
+
+mod forchheimer;
 
 /// Linear hydraulic resistance [Pa s/m³], distinct from quadratic resistance.
 pub type LinearLossResistance = Qty<-4, 1, -1, 0, 0, 0>;
@@ -47,6 +49,9 @@ pub struct LinearLossElement {
     /// Authority classification for the uncertainty.
     pub tolerance_basis: ToleranceBasis,
     material: Option<DarcyLossBinding>,
+    // Some requires this exact quadratic coefficient on the same graph edge.
+    // None preserves independently authored linear/quadratic compositions.
+    quadratic_binding: Option<LossResistance>,
 }
 
 impl LinearLossElement {
@@ -60,7 +65,7 @@ impl LinearLossElement {
     ) -> Result<Self, GraphError> {
         let element = Self {
             name: name.into(), resistance, uncertainty_rel, source, tolerance_basis,
-            material: None,
+            material: None, quadratic_binding: None,
         };
         element.validate().map_err(GraphError::InvalidInput)?;
         Ok(element)
@@ -118,12 +123,32 @@ impl LinearLossElement {
             return Err("linear loss needs an explicit source");
         }
         if let Some(binding) = &self.material {
-            let expected = binding.barrier.linear_volume_resistance(&binding.gas, binding.area_m2)
-                .map_err(|_| "Darcy material binding is outside its source support")?
-                .ok_or("a sealed Darcy path must be omitted from the graph")?;
+            let expected = if let Some(quadratic) = self.quadratic_binding {
+                let coefficients = binding.barrier
+                    .volume_resistance_coefficients(&binding.gas, binding.area_m2)
+                    .map_err(|_| "porous material binding is outside its source support")?
+                    .ok_or("a sealed porous path must be omitted from the graph")?;
+                if coefficients.1 != quadratic.value() {
+                    return Err("porous quadratic resistance no longer matches its material");
+                }
+                coefficients.0
+            } else {
+                binding.barrier.linear_volume_resistance(&binding.gas, binding.area_m2)
+                    .map_err(|_| "Darcy material binding is outside its source support")?
+                    .ok_or("a sealed Darcy path must be omitted from the graph")?
+            };
             if self.resistance.value() != expected {
                 return Err("Darcy resistance no longer matches its retained material binding");
             }
+        }
+        Ok(())
+    }
+
+    pub(super) fn validate_quadratic(&self, actual: f64) -> Result<(), &'static str> {
+        if self.quadratic_binding.is_some_and(|expected| expected.value() != actual) {
+            return Err(
+                "porous edge must retain its original calibrated quadratic resistance",
+            );
         }
         Ok(())
     }

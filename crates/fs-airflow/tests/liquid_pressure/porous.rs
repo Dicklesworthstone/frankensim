@@ -1,4 +1,7 @@
 //! Source permeability through the native heat/pressure/solid owners.
+
+mod forchheimer;
+
 use super::*;
 use fs_airflow::graph::thermal::medium::series::enthalpy::coupled::feedback::pressure::porous::{
     LiquidResistanceLaw, PorousLiquidResistance,

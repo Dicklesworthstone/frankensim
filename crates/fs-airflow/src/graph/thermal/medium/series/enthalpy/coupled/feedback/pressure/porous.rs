@@ -1,6 +1,7 @@
 //! Original continuum permeability in the native liquid pressure/heat solver.
 //!
-//! A rigid, fully liquid-filled skeleton supplies only intrinsic geometry.
+//! A rigid, fully liquid-filled skeleton supplies intrinsic geometry and any
+//! explicitly calibrated superficial-velocity Forchheimer coefficient.
 //! The existing resistance owner supplies the SAME current liquid rho/mu, Re,
 //! pressure loss and power used by the thermal operating point. Gas slip and
 //! gas relative saturation are never converted into a liquid constitutive law.
@@ -70,7 +71,8 @@ pub struct PorousLiquidResistance<'a> {
     outlet_pressure_pa: f64,
 }
 impl<'a> PorousLiquidResistance<'a> {
-    /// Bind intrinsic permeability without sampling a fluid-dependent resistance.
+    /// Bind intrinsic permeability and calibrated inertia without freezing fluid
+    /// properties. Both coefficients use the same current liquid rho and mu.
     /// Reynolds length/band remain explicit geometry/model applicability data.
     ///
     /// # Errors
@@ -95,9 +97,21 @@ impl<'a> PorousLiquidResistance<'a> {
             .ok_or(ResistanceError::Invalid(
                 "sealed porous layer cannot carry positive series liquid flow",
             ))?;
+        let area = flow_area.value();
+        let viscous = geometry / area;
+        let original_inertia = source.inertial_geometric_resistance();
+        let inertial = original_inertia / area / area;
+        if !viscous.is_finite() || viscous <= 0.0
+            || !inertial.is_finite() || inertial < 0.0
+            || (original_inertia > 0.0 && inertial == 0.0)
+        {
+            return Err(ResistanceError::Invalid(
+                "porous liquid viscous or inertial geometry is unrepresentable",
+            ));
+        }
         let law = MaterialFlowResistance::try_new(
-            geometry / flow_area.value(),
-            0.0,
+            viscous,
+            inertial,
             flow_area,
             reynolds_length,
             reynolds_range,
