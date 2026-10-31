@@ -10,6 +10,10 @@
 /// Shared acoustic, caloric and transport state for viscous/thermal sound loss.
 pub mod thermoviscous;
 
+/// Explicit frozen two-phase compressibility shared by acoustic consumers.
+pub mod mixture;
+pub use mixture::FrozenHomogeneousMixture;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_qty::{Density, Dims, Pressure, QuantitySpec, Velocity};

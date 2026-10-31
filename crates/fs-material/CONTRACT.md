@@ -5879,3 +5879,30 @@ stability, external concentration-polarization, or experimental-validation
 claim. Raw coefficients carry no material-card authority; source-backed users
 must retain the original coefficients' full solution and operating support.
 
+
+## Shared cavitation coefficients and frozen mixture acoustics
+
+`cavitation` owns a checked immutable liquid state at one explicit absolute
+temperature: liquid density, dynamic viscosity, surface tension, equilibrium
+vapor partial pressure and liquid sound speed. Optional saturated vapor density
+and latent vaporization enthalpy must be supplied together; no gas EOS, gas
+content or missing coefficient is inferred. Numeric zero-viscosity, zero-surface-
+tension and zero-vapor-pressure limits are explicit. Source wrappers retain
+exact property roles and the original material/query receipts, convert kinematic
+viscosity using the same current density, and refresh all claims atomically.
+Temperature-dependent values remain frozen during a consumer advance.
+`SaturatedWaterCavitation` retains the original IF97 saturation pair and industrial
+transport; its surface tension is caller-supplied for the actual interface.
+It uses the saturated-liquid incompressible approximation and supplies neither
+metastable EOS continuation nor a critical-region validity claim.
+
+`fluid_acoustics::FrozenHomogeneousMixture` supplies Wood's compressibility through
+the existing `FluidAcoustics` trait, preserving exact pure-phase endpoints and
+converting mass quality with additive phase volumes. It assumes homogeneous
+motion, frozen phase masses, phase-adiabatic response, common pressure, negligible
+capillary pressure and negligible bubble inertia. It does not model resonance,
+attenuation, heat or mass exchange, slip, equilibrium boiling sound speed, bubble
+inception or collapse. G0/G3 regressions cover source retention/refresh, quantity
+refusal, original water coefficients, pure limits, phase exchange, mass/volume
+conversion and independent compression of the separate phase volumes.
+

@@ -24,6 +24,8 @@ pub mod axial_reference;
 /// Bounded compression references from original nominal stress/strain observations.
 pub mod compression_reference;
 pub mod calibrate;
+/// Source-bound liquid/vapor properties shared by cavitation consumers.
+pub mod cavitation;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;
 pub mod conductor;

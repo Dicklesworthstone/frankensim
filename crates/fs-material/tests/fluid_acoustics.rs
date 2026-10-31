@@ -28,6 +28,82 @@ use fs_thermochem::water::if97::region3::If97DenseState;
 use fs_thermochem::water::if97::regions::If97FluidState;
 use fs_thermochem::water::if97::{If97Region, If97State};
 
+#[test]
+fn wood_mixture_preserves_endpoints_and_phase_exchange_symmetry() {
+    use fs_material::fluid_acoustics::FrozenHomogeneousMixture;
+    let liquid = FluidAcousticState::try_new(1000.0, 1500.0).unwrap();
+    let gas = FluidAcousticState::try_new(1.2, 340.0).unwrap();
+    assert_eq!(
+        FrozenHomogeneousMixture::try_new(liquid, gas, 0.0)
+            .unwrap()
+            .state(),
+        liquid
+    );
+    assert_eq!(
+        FrozenHomogeneousMixture::try_new(liquid, gas, 1.0)
+            .unwrap()
+            .state(),
+        gas
+    );
+    for alpha in [0.001, 0.05, 0.5, 0.95] {
+        let a = FrozenHomogeneousMixture::try_new(liquid, gas, alpha).unwrap();
+        let b = FrozenHomogeneousMixture::try_new(gas, liquid, 1.0 - alpha).unwrap();
+        near(a.state().density_kg_m3(), b.state().density_kg_m3());
+        near(a.state().sound_speed_m_s(), b.state().sound_speed_m_s());
+        let unchanged = FrozenHomogeneousMixture::try_new(liquid, liquid, alpha).unwrap();
+        near(
+            unchanged.state().sound_speed_m_s(),
+            liquid.sound_speed_m_s(),
+        );
+    }
+    for bad in [f64::NAN, f64::INFINITY, -0.01, 1.01] {
+        assert!(FrozenHomogeneousMixture::try_new(liquid, gas, bad).is_err());
+        assert!(FrozenHomogeneousMixture::from_mass_fraction(liquid, gas, bad).is_err());
+    }
+}
+
+#[test]
+fn wood_compliance_matches_independent_phase_volume_compression() {
+    use fs_material::fluid_acoustics::FrozenHomogeneousMixture;
+    let liquid = FluidAcousticState::from_adiabatic_bulk_modulus(1000.0, 2.0e9).unwrap();
+    let gas = FluidAcousticState::from_adiabatic_bulk_modulus(1.0, 1.4e5).unwrap();
+    let alpha = 0.02;
+    let mixed = FrozenHomogeneousMixture::try_new(liquid, gas, alpha).unwrap();
+    // Separate phase masses are fixed. Integrate each constant bulk modulus
+    // volume law V(p)=V0 exp(-dp/K), then independently differentiate total V.
+    let dp = 0.1;
+    let volume = |p: f64| (1.0 - alpha) * (-p / 2.0e9).exp() + alpha * (-p / 1.4e5).exp();
+    let measured_compliance = (volume(-dp) - volume(dp)) / (2.0 * dp);
+    let predicted = mixed.state().adiabatic_compressibility_per_pa();
+    assert!((measured_compliance / predicted - 1.0).abs() < 1e-8);
+    assert!(mixed.state().sound_speed_m_s() < gas.sound_speed_m_s());
+    assert!(mixed.state().sound_speed_m_s() < liquid.sound_speed_m_s());
+}
+
+#[test]
+fn water_vapor_quality_converts_to_void_volume_before_shared_acoustics() {
+    use fs_material::fluid_acoustics::FrozenHomogeneousMixture;
+    use fs_thermochem::water::if97::If97SaturationPair;
+    let source = If97SaturationPair::at_temperature(Temperature::new(300.0)).unwrap();
+    let liquid = source.liquid().acoustic_state().unwrap();
+    let vapor = source.vapor().acoustic_state().unwrap();
+    let x = 0.001;
+    let mixture = FrozenHomogeneousMixture::from_mass_fraction(liquid, vapor, x).unwrap();
+    let volume = (1.0 - x) / liquid.density_kg_m3() + x / vapor.density_kg_m3();
+    near(mixture.state().density_kg_m3(), 1.0 / volume);
+    near(mixture.dispersed_mass_fraction(), x);
+    assert!(mixture.void_fraction() > 0.9);
+    let from_owners = FrozenHomogeneousMixture::from_phases(
+        source.liquid(),
+        source.vapor(),
+        mixture.void_fraction(),
+    )
+    .unwrap();
+    assert_eq!(from_owners.state(), mixture.state());
+    let shared: &dyn FluidAcoustics = &mixture;
+    assert_eq!(shared.acoustic_state().unwrap(), mixture.state());
+}
+
 fn near(actual: f64, expected: f64) {
     assert!(
         (actual / expected - 1.0).abs() < 3e-13,
