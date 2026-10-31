@@ -13,17 +13,9 @@
 //! densities cell by cell would deposit heat in the wrong places.
 
 use super::*;
+use crate::planar::eddy::solid::SolidRegionLayout;
+pub use crate::planar::eddy::solid::SolidWindingRegion;
 use std::cell::RefCell;
-
-/// One complete edge-connected conducting section carries `signed_turns * I`.
-/// Return sections must be named explicitly with their own sign; the original
-/// winding source remains balanced on every magnetic mesh component.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SolidWindingRegion {
-    pub region: u32,
-    pub winding: usize,
-    pub signed_turns: f64,
-}
 
 /// Original source cell with its ACTUAL total P1 current and irreversible heat.
 /// Neither a uniform DC-current heat nor an eddy-only heat is added elsewhere.
@@ -58,51 +50,25 @@ impl SolidWindings {
         basis: &PlanarIncrementalWindingBasis<'_>,
         conduction: &Conduction,
         sources: &[EddyConductor],
-        mut bindings: Vec<SolidWindingRegion>,
+        bindings: Vec<SolidWindingRegion>,
         controls: HarmonicWindingControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
         let count = basis.winding_count();
-        if bindings.len() > conduction.regions.len() {
-            return Err(HarmonicWindingError::Invalid(
-                "too many driven solid winding regions",
-            ));
-        }
-        bindings.sort_by_key(|binding| binding.region);
         let depth = basis.operating_field().problem().thickness_m();
-        let mut region_bindings = vec![None; conduction.regions.len()];
-        let mut electric_per_current_v_m_a = vec![0.0; conduction.regions.len()];
-        let mut resistance_ohm = vec![0.0; count];
-        for (index, binding) in bindings.iter().enumerate() {
-            poll(cancelled)?;
-            if binding.winding >= count
-                || !binding.signed_turns.is_finite()
-                || binding.signed_turns == 0.0
-                || index > 0 && bindings[index - 1].region == binding.region
-            {
-                return Err(HarmonicWindingError::Invalid(
-                    "invalid or duplicate solid winding region binding",
-                ));
-            }
-            let group = conduction
-                .regions
-                .binary_search(&binding.region)
-                .map_err(|_| {
-                    HarmonicWindingError::Invalid(
-                        "solid winding region has no admitted conductor section",
-                    )
-                })?;
-            let drive = finite((binding.signed_turns * depth) / conduction.weights[group])?;
-            let resistance = finite((binding.signed_turns * depth) * drive)?;
-            if drive == 0.0 || !positive(resistance) {
-                return Err(HarmonicWindingError::Invalid(
-                    "solid winding DC drive or resistance is unrepresentable",
-                ));
-            }
-            region_bindings[group] = Some(index);
-            electric_per_current_v_m_a[group] = drive;
-            resistance_ohm[binding.winding] = finite(resistance_ohm[binding.winding] + resistance)?;
-        }
+        let SolidRegionLayout {
+            bindings,
+            region_bindings,
+            electric_per_current_v_m_a,
+            resistance_ohm,
+        } = SolidRegionLayout::new(
+            &conduction.regions,
+            &conduction.weights,
+            count,
+            depth,
+            bindings,
+            cancelled,
+        )?;
         // Check the original source rather than silently replacing it. The L1
         // volume-weighted discrepancy bounds every free weak-load component;
         // multiplying by max(1, |I_DC|) also checks the actual retained bias.

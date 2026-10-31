@@ -17,8 +17,8 @@
 
 use super::{
     Conduction, EddyCellHeat, EddyConductor, EddyControls, EddyError, EddyHeat, EddySection,
-    admit_algebraic, algebraic_blocks, bind, controls, finite, heat_cells, load, poll, positive,
-    regions,
+    admit_algebraic, algebraic_blocks, bind, controls, finite, heat_cells_with_region_drives, load,
+    poll, positive, regions,
 };
 use crate::planar::{
     MagneticError, PlanarMagnetostatics,
@@ -219,14 +219,22 @@ pub struct NonlinearEddyMagneticCell {
 }
 #[derive(Clone, Debug)]
 pub struct NonlinearEddyStep {
+    /// Actual total E and J on every resolved conducting triangle. When driven
+    /// by a solid winding this includes its uniform drive and local cross terms;
+    /// the winding/thermal owner must deposit this heat exactly once.
     pub cells: Vec<EddyCellHeat>,
     pub magnetic_cells: Vec<NonlinearEddyMagneticCell>,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
     /// Actual integrated sigma E^2; the only deposited magnetic heating here.
     pub heat_j: f64,
-    /// Endpoint impressed source paired with the actual accepted delta A.
+    /// Endpoint impressed source paired with delta A, plus explicit solid
+    /// uniform-drive work. The latter is zero for floating-only conductors.
     pub supplied_work_j: f64,
+    /// Sum(dt * depth * E_uniform * I_region) for driven solid sections [J].
+    /// This equals their DC-resistance work; it is already in supplied_work_j
+    /// and in the ACTUAL total-field heat, never a second deposition.
+    pub uniform_drive_work_j: f64,
     /// Nonnegative first-order time-discretization loss; never material heat.
     pub numerical_dissipation_j: f64,
     /// Sum of source-resolved material work; a thermal/external owner must close it.
@@ -431,6 +439,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
             conductors,
             impressed_jz_a_m2,
             limits,
+            None,
             cancelled,
         )
     }
@@ -464,10 +473,51 @@ impl<'m> PlanarNonlinearEddy<'m> {
             conductors,
             impressed_jz_a_m2,
             limits,
+            None,
             cancelled,
         )
     }
 
+    /// Internal solid-terminal lowering. The original winding owner derives
+    /// both the impressed source and these regional drives from the SAME
+    /// conductivity normalization; the native field and heat owner verifies
+    /// source identity, integrated current and complete work before publication.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_region_drives_candidate(
+        &self,
+        target_s: f64,
+        materials: Option<(Vec<IsotropicMagneticMaterial>, WeightedAssemblyLimits)>,
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        electric_drives_v_m: &[f64],
+        target_currents_a: &[f64],
+        limits: NonlinearEddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PlanarNonlinearEddyCandidate<'m>, NonlinearEddyError> {
+        poll(cancelled)?;
+        let owner = if let Some((materials, assembly)) = materials {
+            admit_material_refresh(self.problem.materials(), &materials, cancelled)?;
+            MagneticOwner::Owned(Arc::new(PlanarNonlinearMagnetostatics::new(
+                self.problem.mesh().clone(),
+                materials,
+                assembly,
+                cancelled,
+            )?))
+        } else {
+            self.problem.clone()
+        };
+        self.step_with_owner(
+            target_s,
+            owner,
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            Some((electric_drives_v_m, target_currents_a)),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn step_with_owner(
         &self,
         target_s: f64,
@@ -475,6 +525,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
         conductors: Vec<EddyConductor>,
         impressed_jz_a_m2: &[f64],
         limits: NonlinearEddyControls,
+        drives: Option<(&[f64], &[f64])>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PlanarNonlinearEddyCandidate<'m>, NonlinearEddyError> {
         poll(cancelled)?;
@@ -526,17 +577,21 @@ impl<'m> PlanarNonlinearEddy<'m> {
             .zip(&self.potential_wb_m)
             .map(|(a, b)| finite(a - b))
             .collect::<Result<Vec<_>, _>>()?;
-        let EddyHeat {
-            cells,
-            heat_j,
-            region_currents_a,
-        } = heat_cells(
+        let (
+            EddyHeat {
+                cells,
+                heat_j,
+                region_currents_a,
+            },
+            uniform_drive_work_j,
+        ) = heat_cells_with_region_drives(
             &conduction,
             &conductors,
             &increments,
             dt,
             next_problem.thickness_m(),
             limits.current_balance_tolerance_a,
+            drives,
             cancelled,
         )?;
         let old_field = self.field(cancelled)?;
@@ -579,7 +634,9 @@ impl<'m> PlanarNonlinearEddy<'m> {
                 parameter_work_j: parameter,
             });
         }
-        let supplied_work_j = finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())?;
+        let supplied_work_j = finite(
+            finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())? + uniform_drive_work_j,
+        )?;
         let energy_residual_j = finite(
             field.energy_j() - self.energy_j + heat_j + numerical_dissipation_j
                 - supplied_work_j
@@ -595,6 +652,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
             stored_after_j: field.energy_j(),
             heat_j,
             supplied_work_j,
+            uniform_drive_work_j,
             numerical_dissipation_j,
             parameter_work_j,
             energy_residual_j,

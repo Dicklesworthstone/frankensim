@@ -41,6 +41,11 @@ impl<'m> NonlinearWindingCircuit<'m> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NonlinearWindingCandidate<'m, NonlinearMovingEddyStep>> {
         poll(cancelled)?;
+        if !self.solid_regions().is_empty() {
+            return Err(NonlinearWindingError::Invalid(
+                "driven solid winding motion requires a transported current constraint",
+            ));
+        }
         let mesh = self.field.problem().mesh();
         if velocity_m_s.len() != mesh.vertices().len() {
             return Err(NonlinearWindingError::Invalid(
@@ -69,10 +74,12 @@ impl<'m> NonlinearWindingCircuit<'m> {
         self.step_coupled(
             target_s,
             None,
+            None,
+            None,
             self.conductors.clone(),
             external_inputs,
             controls,
-            |j, cancelled| {
+            |_currents, j, cancelled| {
                 let mut check = || cancelled();
                 let candidate = self.field.step_with_eulerian_velocity_candidate(
                     target_s,
@@ -87,6 +94,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
                     stored_after_j: step.stored_after_j,
                     heat_j: step.heat_j,
                     supplied_work_j: step.supplied_work_j,
+                    uniform_drive_work_j: 0.0,
                     numerical_dissipation_j: step.numerical_dissipation_j,
                     parameter_work_j: 0.0,
                     mechanical_work_j: step.mechanical_work_j,

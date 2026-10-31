@@ -28,6 +28,8 @@ pub mod harmonic;
 pub mod moving;
 /// Source-defined reversible H(B) induction on the same conduction/heat owners.
 pub mod nonlinear;
+/// Source-normalized driven conductor sections for harmonic and transient coils.
+pub mod solid;
 use conduction::{Conduction, ConductionCell, ConductionError};
 
 use super::{MagneticError, PlanarField, PlanarMagnetostatics};
@@ -627,10 +629,61 @@ fn heat_cells(
     current_tolerance_a: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<EddyHeat, EddyError> {
+    heat_cells_with_region_drives(
+        conduction,
+        conductors,
+        increments,
+        dt,
+        thickness_m,
+        current_tolerance_a,
+        None,
+        cancelled,
+    )
+    .map(|(heat, _)| heat)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn heat_cells_with_region_drives(
+    conduction: &Conduction,
+    conductors: &[EddyConductor],
+    increments: &[f64],
+    dt: f64,
+    thickness_m: f64,
+    current_tolerance_a: f64,
+    drives: Option<(&[f64], &[f64])>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(EddyHeat, f64), EddyError> {
     let cancel = RefCell::new(&mut *cancelled);
-    let heat = conduction.heat(increments, dt, thickness_m, current_tolerance_a, &|| {
-        (*cancel.borrow_mut())()
-    })?;
+    let check = || (*cancel.borrow_mut())();
+    let heat = if let Some((electric, targets)) = drives {
+        conduction.heat_with_region_drives(
+            increments,
+            dt,
+            thickness_m,
+            current_tolerance_a,
+            electric,
+            targets,
+            &check,
+        )?
+    } else {
+        conduction.heat(increments, dt, thickness_m, current_tolerance_a, &check)?
+    };
+    let mut drive_work_j = 0.0;
+    if let Some((electric, targets)) = drives {
+        for (&field, &current) in electric.iter().zip(targets) {
+            if check() {
+                return Err(EddyError::Cancelled);
+            }
+            let power = finite(finite(field * current)? * thickness_m)?;
+            let work = finite(power * dt)?;
+            if power < 0.0 || power != 0.0 && work == 0.0 {
+                return Err(EddyError::Balance(
+                    "solid uniform-drive work is unrepresentable",
+                ));
+            }
+            drive_work_j = finite(drive_work_j + work)?;
+        }
+    }
     let cells = conductors
         .iter()
         .zip(heat.cells)
@@ -643,11 +696,14 @@ fn heat_cells(
             heat_j: cell.heat_j,
         })
         .collect();
-    Ok(EddyHeat {
-        cells,
-        heat_j: heat.heat_j,
-        region_currents_a: heat.region_currents_a,
-    })
+    Ok((
+        EddyHeat {
+            cells,
+            heat_j: heat.heat_j,
+            region_currents_a: heat.region_currents_a,
+        },
+        drive_work_j,
+    ))
 }
 
 impl<'m> PlanarEddy<'m> {

@@ -1,5 +1,50 @@
 # fs-em contract
 
+## Causal solid-winding diffusion in native nonlinear circuits
+
+`winding::nonlinear::NonlinearWindingCircuit::new_with_solid_regions` and its
+explicit-port variant drive whole connected solid regions through the original
+native terminal solve and `PlanarNonlinearEddy` history. The accepted spatial
+potential retains causal skin/proximity memory under finite-amplitude drive
+and source-defined magnetic saturation. The existing sparse magnetic operator,
+projected consistent P1 conductivity mass, winding/end storage and native
+`CircuitDae` remain authoritative; no terminal-impedance realization is fitted.
+
+Harmonic and transient paths share `planar::eddy::solid::SolidWindingRegion`
+and the original source normalization. With `S = integral(sigma dA)`, each
+whole signed section enforces `integral(J dA) = n I` using
+`J_unit = n sigma/S`, `R_DC = depth*n^2/S`, and
+`E = n I/S - (delta(A)/dt - mean_sigma(delta(A)/dt))`. One region belongs to
+one winding coordinate; explicit return sections, floating conductors and
+disjoint stranded copper retain their existing physical roles.
+
+Conductivity refresh updates the source functional and DC drive from the same
+original cells while preserving accepted potential, current, circuit and clock.
+Actual induction is `F_new^T delta(A)/dt`, plus explicit end-inductance voltage.
+An endpoint-linkage change from reweighting a stationary field creates no EMF.
+The old potential paired with new profiles is prepared once per terminal solve.
+`inductive_voltage_v` reports physical induction; endpoint linkage remains a
+diagnostic that can change when the conductor profile changes.
+
+The original concrete field receipt carries actual total local E, J and
+physical Joule heat, including uniform/circulating-current cross terms.
+`uniform_drive_work_j` is already included in supplied field work and physical
+heat; it is never an additional deposit. Stranded heat remains disjoint, and
+backward-Euler magnetic Bregman loss remains numerical dissipation. Independent
+terminal, field, end-storage and global work gates precede publication. Source,
+topology, budget and cancellation refusals preserve accepted histories.
+Moving driven solids explicitly refuse until a transported regional-current
+constraint exists; this owner admits fixed geometry.
+
+G0/G1/G3 tests in `tests/nonlinear_winding_solid.rs` and its `slabs` module
+compare bipolar diffusion/saturation pulses, native loaded-circuit recurrences,
+stationary biased-field conductivity refresh, and two-grid skin/proximity
+profiles against independent scalar and continuous-slab oracles. These authored
+fixtures are not experimental material qualification; native execution requires
+the workspace dependency repositories.
+
+
+
 ## Bias-dependent winding impedance with resolved eddy currents
 
 `planar::eddy::harmonic::PlanarHarmonicWindings` prepares frequency-domain

@@ -1,19 +1,24 @@
 //! Native circuit terminals coupled to the actual nonlinear magnetic field.
 //!
-//! Each stranded winding owns a signed spatial J/current profile and material
-//! resistance. Its original inductor branch becomes a PRIVATE power port in
+//! Each winding owns a signed spatial J/current profile and material
+//! resistance. Explicit solid-region bindings normalize that profile from the
+//! current conductivity and retain resolved diffusion/skin/proximity history.
+//! Its original inductor branch becomes a PRIVATE power port in
 //! the original Kirchhoff DAE. By default its input is -I (current leaving the
 //! first terminal) and its native conjugate output is the winding voltage V.
 //! An explicitly voltage-input port instead imposes the actual field voltage
 //! and reads the native output -I. Both use the same shared Newton owner and
-//! V = delta(lambda)/dt + R*I, where lambda is the exact P1 field/profile pairing
-//! plus declared series end inductance. Voltage-input ports admit current-driven
+//! V = F_new^T delta(A)/dt + L_end delta(I)/dt + R_dc*I. Fixed profiles permit
+//! the equivalent delta(lambda)/dt form. A conductivity refresh changes the
+//! endpoint linkage diagnostic but cannot invent a delta(F)^T A voltage.
+//! Voltage-input ports admit current-driven
 //! winding topologies without introducing artificial resistance or storage.
 //!
 //! Every trial restarts the accepted circuit and nonlinear-eddy histories.
 //! Native graph work -dt*I*V cancels terminal work into the field/winding. Core
-//! eddy heat, stranded Joule heat, graph heat and backward-Euler numerical loss
-//! remain separate. Strand cells cannot also own resolved eddy conductivity.
+//! and solid-conductor Joule heat share one actual total-field receipt. Stranded
+//! Joule heat, graph heat and backward-Euler numerical loss remain separate.
+//! Strand cells cannot also own resolved eddy conductivity.
 //! This is a fixed-geometry reversible isotropic MQS lane. A pinned linear mu(T)
 //! refresh carries explicit magnetic parameter work; a thermal owner must close
 //! it with the field entropy. Nonlinear H(B) stays fixed. No core hysteresis or
@@ -27,7 +32,10 @@
 pub mod moving;
 /// Source-driven ordinary graph resistance on this same native circuit owner.
 pub mod resistors;
+/// Source-resolved solid winding diffusion, skin/proximity current and heat.
+pub mod solid;
 use resistors::GraphResistorMaterial;
+use solid::SolidWindingRegion;
 
 use super::ohmic::{
     OhmicWindingError, WindingCellHeat, WindingConductor, WindingGraphResistorHeat,
@@ -216,6 +224,9 @@ pub struct NonlinearWindingCircuit<'m> {
     state: Vec<f64>,
     currents_a: Vec<f64>,
     flux_linkages_wb: Vec<f64>,
+    solid_regions: Rc<[SolidWindingRegion]>,
+    solid_profiles_per_m2: Option<Rc<Vec<Vec<f64>>>>,
+    profile_balance_tolerance_turns: f64,
 }
 
 #[derive(Clone, Debug)]
@@ -233,7 +244,12 @@ pub struct NonlinearWindingStep<F = NonlinearEddyStep> {
     pub currents_a: Vec<f64>,
     /// Native step-average voltage, in original first-to-second orientation.
     pub terminal_voltage_v: Vec<f64>,
+    /// Endpoint linkage diagnostics. Solid conductivity refresh changes their
+    /// weighting; their difference is NOT the induced voltage in that case.
     pub flux_linkages_wb: [Vec<f64>; 2],
+    /// Actual F_new^T delta(A)/dt plus explicit end-inductance voltage [V].
+    /// Changing conductivity weights in a stationary field creates no EMF.
+    pub inductive_voltage_v: Vec<f64>,
     /// Actual native voltage minus the field/copper-required voltage [V].
     pub terminal_residual_v: Vec<f64>,
     /// Actual native current minus field current [A]. Exactly zero for
@@ -241,7 +257,7 @@ pub struct NonlinearWindingStep<F = NonlinearEddyStep> {
     pub terminal_current_residual_a: Vec<f64>,
     pub stored_before_j: f64,
     pub stored_after_j: f64,
-    /// Core eddy + stranded conductor + native graph physical heat, once each.
+    /// Actual solid/floating field + stranded + native graph heat, once each.
     pub heat_j: f64,
     /// Original external source work ONLY; private port work cancels internally.
     pub supplied_work_j: f64,
@@ -321,12 +337,12 @@ fn impressed(
 
 fn linkages(
     field: &PlanarNonlinearEddy<'_>,
-    windings: &NonlinearWindings,
+    profiles: &[Vec<f64>],
+    end_inductance_h: &[f64],
     currents: &[f64],
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Vec<f64>> {
-    windings
-        .profiles_per_m2
+    profiles
         .iter()
         .enumerate()
         .map(|(i, profile)| {
@@ -336,7 +352,7 @@ fn linkages(
                 profile,
                 cancelled,
             )?;
-            finite(windings.end_inductance_h[i].mul_add(currents[i], active))
+            finite(end_inductance_h[i].mul_add(currents[i], active))
         })
         .collect()
 }
@@ -347,6 +363,7 @@ fn bind(
     profiles: &[Vec<f64>],
     sources: Vec<WindingConductor>,
     previous: Option<&[WindingConductor]>,
+    solid: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Vec<WindingConductor>, Vec<usize>, Vec<f64>)> {
     // A stranded current has already paid rho*J^2 in the terminal model. It
@@ -359,9 +376,44 @@ fn bind(
             ));
         }
     }
-    Ok(ohmic::bind_sources(
+    if !solid
+        && field
+            .conductors()
+            .iter()
+            .any(|s| profiles.iter().any(|p| p[s.triangle] != 0.0))
+    {
+        return Err(NonlinearWindingError::Invalid(
+            "active resolved conductors require explicit solid winding bindings",
+        ));
+    }
+    let mut retained = Vec::new();
+    let mut stranded_profiles = Vec::new();
+    if solid {
+        let mut resolved = vec![false; field.problem().mesh().faces().len()];
+        for source in field.conductors() {
+            resolved[source.triangle] = true;
+        }
+        for (winding, profile) in profiles.iter().enumerate() {
+            poll(cancelled)?;
+            if profile
+                .iter()
+                .enumerate()
+                .any(|(cell, &j)| j != 0.0 && !resolved[cell])
+            {
+                retained.push(winding);
+                stranded_profiles.push(
+                    profile
+                        .iter()
+                        .enumerate()
+                        .map(|(cell, &j)| if resolved[cell] { 0.0 } else { j })
+                        .collect(),
+                );
+            }
+        }
+    }
+    let (sources, mut winding_indices, resistance) = ohmic::bind_sources(
         field.problem().mesh(),
-        profiles,
+        if solid { &stranded_profiles } else { profiles },
         sources,
         previous,
         |source| {
@@ -380,7 +432,19 @@ fn bind(
             Ok(())
         },
         cancelled,
-    )?)
+    )?;
+    if solid {
+        let mut complete = vec![0.0; profiles.len()];
+        for (winding, value) in retained.iter().zip(resistance) {
+            complete[*winding] = value;
+        }
+        for winding in &mut winding_indices {
+            *winding = retained[*winding];
+        }
+        Ok((sources, winding_indices, complete))
+    } else {
+        Ok((sources, winding_indices, resistance))
+    }
 }
 
 fn admit_external_inputs(layout: &Layout, external: &[f64]) -> Result<()> {
@@ -493,6 +557,31 @@ impl<'m> NonlinearWindingCircuit<'m> {
         config: NonlinearWindingConfig,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
+        Self::new_complete(
+            field,
+            graph,
+            windings,
+            terminal_ports,
+            sources,
+            vec![],
+            initial,
+            config,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_complete(
+        field: PlanarNonlinearEddy<'m>,
+        graph: CircuitGraph,
+        windings: NonlinearWindings,
+        terminal_ports: Vec<NonlinearWindingPort>,
+        sources: Vec<WindingConductor>,
+        solid_regions: Vec<SolidWindingRegion>,
+        initial: NonlinearWindingInitial,
+        config: NonlinearWindingConfig,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
         use NonlinearWindingError::Invalid;
         poll(cancelled)?;
         let count = windings.profiles_per_m2.len();
@@ -535,14 +624,30 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 ));
             }
         };
+        let solid = if solid_regions.is_empty() {
+            None
+        } else {
+            Some(solid::prepare(
+                &field,
+                field.conductors(),
+                &windings.profiles_per_m2,
+                &solid_regions,
+                true,
+                cancelled,
+            )?)
+        };
+        let profiles = solid
+            .as_ref()
+            .map(|s| s.profiles.as_slice())
+            .unwrap_or(&windings.profiles_per_m2);
         admit_profiles(
             mesh,
-            &windings.profiles_per_m2,
+            profiles,
             thickness,
             config.current_balance_tolerance_turns,
             cancelled,
         )?;
-        let expected_j = impressed(&windings.profiles_per_m2, &initial.currents_a, cancelled)?;
+        let expected_j = impressed(profiles, &initial.currents_a, cancelled)?;
         if expected_j
             .iter()
             .zip(field.impressed_current_density_a_m2())
@@ -597,15 +702,32 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 "complete finite remaining inductor fluxes and capacitor charges required",
             ));
         }
-        let (conductors, conductor_windings, resistance_ohm) = bind(
+        let (conductors, conductor_windings, mut resistance_ohm) = bind(
             &field,
             None,
-            &windings.profiles_per_m2,
+            profiles,
             sources,
             None,
+            !solid_regions.is_empty(),
             cancelled,
         )?;
-        let flux_linkages_wb = linkages(&field, &windings, &initial.currents_a, cancelled)?;
+        if let Some(solid) = &solid {
+            for (total, &dc) in resistance_ohm.iter_mut().zip(&solid.layout.resistance_ohm) {
+                *total = finite(*total + dc)?;
+            }
+        }
+        if resistance_ohm.iter().any(|&r| !positive(r)) {
+            return Err(Invalid(
+                "every winding requires represented positive DC resistance",
+            ));
+        }
+        let flux_linkages_wb = linkages(
+            &field,
+            profiles,
+            &windings.end_inductance_h,
+            &initial.currents_a,
+            cancelled,
+        )?;
         let layout = Rc::new(Layout {
             graph,
             dae,
@@ -686,6 +808,9 @@ impl<'m> NonlinearWindingCircuit<'m> {
             state,
             currents_a: initial.currents_a,
             flux_linkages_wb,
+            solid_regions: Rc::from(solid_regions),
+            solid_profiles_per_m2: solid.map(|s| s.profiles),
+            profile_balance_tolerance_turns: config.current_balance_tolerance_turns,
         })
     }
 
@@ -702,7 +827,10 @@ impl<'m> NonlinearWindingCircuit<'m> {
         &self.layout.windings.branch_indices
     }
     pub fn profiles_per_m2(&self) -> &[Vec<f64>] {
-        &self.layout.windings.profiles_per_m2
+        self.solid_profiles_per_m2
+            .as_deref()
+            .map(Vec::as_slice)
+            .unwrap_or(&self.layout.windings.profiles_per_m2)
     }
     pub fn end_inductance_h(&self) -> &[f64] {
         &self.layout.windings.end_inductance_h
@@ -716,6 +844,8 @@ impl<'m> NonlinearWindingCircuit<'m> {
     pub fn conductor_windings(&self) -> &[usize] {
         &self.conductor_windings
     }
+    /// Represented solid DC plus stranded resistance. Dynamic redistribution
+    /// and magnetic storage remain in the retained spatial field history.
     pub fn resistance_ohm(&self) -> &[f64] {
         &self.resistance_ohm
     }
@@ -802,9 +932,44 @@ impl<'m> NonlinearWindingCircuit<'m> {
         controls: NonlinearWindingControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NonlinearWindingCandidate<'m>> {
-        let evaluate_field = |j: &[f64], cancelled: &mut dyn FnMut() -> bool| {
+        let solid = if self.solid_regions.is_empty() {
+            None
+        } else {
+            let solid = solid::prepare(
+                &self.field,
+                &core_conductors,
+                self.profiles_per_m2(),
+                &self.solid_regions,
+                false,
+                cancelled,
+            )?;
+            admit_profiles(
+                self.field.problem().mesh(),
+                &solid.profiles,
+                self.field.problem().thickness_m(),
+                self.profile_balance_tolerance_turns,
+                cancelled,
+            )?;
+            Some(solid)
+        };
+        let evaluate_field = |currents: &[f64], j: &[f64], cancelled: &mut dyn FnMut() -> bool| {
             let mut check = || cancelled();
-            let candidate = if let Some((materials, assembly)) = &materials {
+            let candidate = if let Some(solid) = &solid {
+                let (drives, targets) = solid
+                    .layout
+                    .drives(currents, &mut check)
+                    .map_err(NonlinearEddyError::from)?;
+                self.field.step_with_region_drives_candidate(
+                    target_s,
+                    materials.clone(),
+                    core_conductors.clone(),
+                    j,
+                    &drives,
+                    &targets,
+                    controls.field,
+                    &mut check,
+                )?
+            } else if let Some((materials, assembly)) = &materials {
                 self.field.step_with_materials_candidate(
                     target_s,
                     materials.clone(),
@@ -830,6 +995,10 @@ impl<'m> NonlinearWindingCircuit<'m> {
             materials
                 .as_ref()
                 .map(|(materials, _)| materials.as_slice()),
+            solid.as_ref().map(|solid| solid.profiles.clone()),
+            solid
+                .as_ref()
+                .map(|solid| solid.layout.resistance_ohm.as_slice()),
             winding_conductors,
             external_inputs,
             controls,
@@ -846,10 +1015,12 @@ impl<'m> NonlinearWindingCircuit<'m> {
         &self,
         target_s: f64,
         materials: Option<&[IsotropicMagneticMaterial]>,
+        refreshed_profiles: Option<Rc<Vec<Vec<f64>>>>,
+        solid_resistance_ohm: Option<&[f64]>,
         winding_conductors: Vec<WindingConductor>,
         external_inputs: &[f64],
         controls: NonlinearWindingControls<C>,
-        evaluate_field: impl Fn(&[f64], &mut dyn FnMut() -> bool) -> Result<FieldTrial<'m, F>>,
+        evaluate_field: impl Fn(&[f64], &[f64], &mut dyn FnMut() -> bool) -> Result<FieldTrial<'m, F>>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NonlinearWindingCandidate<'m, F>> {
         use NonlinearWindingError::{Balance, Invalid};
@@ -870,12 +1041,44 @@ impl<'m> NonlinearWindingCircuit<'m> {
             ));
         }
         admit_external_inputs(&self.layout, external_inputs)?;
-        let (conductors, conductor_windings, resistance_ohm) = bind(
+        let profiles = refreshed_profiles
+            .as_deref()
+            .map(Vec::as_slice)
+            .unwrap_or_else(|| self.profiles_per_m2());
+        let (conductors, conductor_windings, stranded_resistance_ohm) = bind(
             &self.field,
             materials,
-            self.profiles_per_m2(),
+            profiles,
             winding_conductors,
             Some(&self.conductors),
+            !self.solid_regions.is_empty(),
+            cancelled,
+        )?;
+        let mut resistance_ohm = stranded_resistance_ohm.clone();
+        if let Some(solid) = solid_resistance_ohm {
+            if solid.len() != resistance_ohm.len() {
+                return Err(Invalid("complete solid resistance coordinates required"));
+            }
+            for (resistance, &dc) in resistance_ohm.iter_mut().zip(solid) {
+                if !dc.is_finite() || dc < 0.0 {
+                    return Err(Invalid("nonnegative finite solid resistance required"));
+                }
+                *resistance = finite(*resistance + dc)?;
+            }
+        }
+        if resistance_ohm.iter().any(|&r| !positive(r)) {
+            return Err(Invalid(
+                "every winding requires represented positive DC resistance",
+            ));
+        }
+        // The trial source weighting is fixed throughout this terminal solve.
+        // Pair its accepted-field reference once, avoiding a second complete
+        // mesh/profile traversal in every finite-difference field trial.
+        let reference_linkages = linkages(
+            &self.field,
+            profiles,
+            self.end_inductance_h(),
+            &self.currents_a,
             cancelled,
         )?;
         let cancel = RefCell::new(cancelled);
@@ -891,17 +1094,57 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 return Err(NonlinearWindingError::TrialBudget);
             }
             trials.set(trials.get() + 1);
-            let j = impressed(self.profiles_per_m2(), currents, &mut check)?;
-            let field = evaluate_field(&j, &mut check)?;
-            let linkage = linkages(&field.state, &self.layout.windings, currents, &mut check)?;
-            let required_voltage = currents
+            let j = impressed(profiles, currents, &mut check)?;
+            let field = evaluate_field(currents, &j, &mut check)?;
+            let potential_increment = field
+                .state
+                .potential_wb_m()
+                .iter()
+                .zip(self.field.potential_wb_m())
+                .map(|(&new, &old)| finite(new - old))
+                .collect::<Result<Vec<_>>>()?;
+            let field_linkage_increments_wb = profiles
+                .iter()
+                .map(|profile| {
+                    pairing_on_mesh(
+                        self.field.problem().mesh(),
+                        &potential_increment,
+                        profile,
+                        &mut check,
+                    )
+                    .map_err(NonlinearWindingError::from)
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let linkage = field_linkage_increments_wb
+                .iter()
+                .enumerate()
+                .map(|(i, &increment)| {
+                    finite(
+                        reference_linkages[i]
+                            + increment
+                            + self.end_inductance_h()[i] * (currents[i] - self.currents_a[i]),
+                    )
+                })
+                .collect::<Result<Vec<_>>>()?;
+            // A conductivity refresh changes the source functional itself.
+            // Pair the new functional with delta(A); delta(F^T A) would create
+            // voltage in a stationary biased field merely by changing sigma.
+            let inductive_voltage_v = currents
                 .iter()
                 .enumerate()
                 .map(|(i, &current)| {
                     finite(
-                        (linkage[i] - self.flux_linkages_wb[i]) / dt + resistance_ohm[i] * current,
+                        (field_linkage_increments_wb[i]
+                            + self.end_inductance_h()[i] * (current - self.currents_a[i]))
+                            / dt,
                     )
                 })
+                .collect::<Result<Vec<_>>>()?;
+            let required_voltage = inductive_voltage_v
+                .iter()
+                .zip(currents)
+                .zip(&resistance_ohm)
+                .map(|((&voltage, &current), &r)| finite(r.mul_add(current, voltage)))
                 .collect::<Result<Vec<_>>>()?;
             let input = ports(&self.layout, external_inputs, currents, &required_voltage)?;
             // A voltage trial is a finite-step effort, not an initial voltage
@@ -960,6 +1203,8 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 field,
                 x0,
                 linkage,
+                field_linkage_increments_wb,
+                inductive_voltage_v,
                 voltage,
                 voltage_residual,
                 current_residual,
@@ -1028,10 +1273,10 @@ impl<'m> NonlinearWindingCircuit<'m> {
             .collect();
         let (cells, winding_heat) = ohmic::spatial_heat(
             self.field.problem().mesh(),
-            self.profiles_per_m2(),
+            profiles,
             &conductors,
             &conductor_windings,
-            &resistance_ohm,
+            &stranded_resistance_ohm,
             &solver.x,
             dt,
             controls.power_tolerance_w,
@@ -1081,13 +1326,8 @@ impl<'m> NonlinearWindingCircuit<'m> {
             solver
                 .x
                 .iter()
-                .enumerate()
-                .map(|(i, &current)| {
-                    current
-                        * (trial.linkage[i]
-                            - self.flux_linkages_wb[i]
-                            - self.end_inductance_h()[i] * increments[i])
-                })
+                .zip(&trial.field_linkage_increments_wb)
+                .map(|(&current, &increment)| current * increment)
                 .sum(),
         )?;
         let field_step = &trial.field.account;
@@ -1109,9 +1349,9 @@ impl<'m> NonlinearWindingCircuit<'m> {
             trial.native.dissipated - graph_heat,
             trial.native.delta_h - (circuit_after - circuit_before),
             trial.native.balance_residual(),
-            field_work - field_step.supplied_work_j,
+            field_work + field_step.uniform_drive_work_j - field_step.supplied_work_j,
             end_after - end_before + end_numerical - end_work,
-            terminal_work - field_work - end_work - winding_heat,
+            terminal_work - field_work - end_work - winding_heat - field_step.uniform_drive_work_j,
             energy_residual_j,
         ];
         if circuit_before < 0.0
@@ -1146,6 +1386,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             currents_a: solver.x.clone(),
             terminal_voltage_v: trial.voltage,
             flux_linkages_wb: [self.flux_linkages_wb.clone(), trial.linkage.clone()],
+            inductive_voltage_v: trial.inductive_voltage_v,
             terminal_residual_v: trial.voltage_residual,
             terminal_current_residual_a: trial.current_residual,
             stored_before_j,
@@ -1169,6 +1410,11 @@ impl<'m> NonlinearWindingCircuit<'m> {
             state: trial.native.x,
             currents_a: solver.x,
             flux_linkages_wb: trial.linkage,
+            solid_regions: self.solid_regions.clone(),
+            solid_profiles_per_m2: refreshed_profiles
+                .clone()
+                .or_else(|| self.solid_profiles_per_m2.clone()),
+            profile_balance_tolerance_turns: self.profile_balance_tolerance_turns,
         };
         poll(&mut check)?;
         Ok(NonlinearWindingCandidate { circuit, step })
@@ -1180,6 +1426,8 @@ struct Trial<'m, F> {
     field: FieldTrial<'m, F>,
     x0: Vec<f64>,
     linkage: Vec<f64>,
+    field_linkage_increments_wb: Vec<f64>,
+    inductive_voltage_v: Vec<f64>,
     voltage: Vec<f64>,
     voltage_residual: Vec<f64>,
     current_residual: Vec<f64>,
@@ -1191,6 +1439,7 @@ struct FieldAccount {
     stored_after_j: f64,
     heat_j: f64,
     supplied_work_j: f64,
+    uniform_drive_work_j: f64,
     numerical_dissipation_j: f64,
     parameter_work_j: f64,
     mechanical_work_j: f64,
@@ -1209,6 +1458,7 @@ impl<'m> FieldTrial<'m, NonlinearEddyStep> {
             stored_after_j: step.stored_after_j,
             heat_j: step.heat_j,
             supplied_work_j: step.supplied_work_j,
+            uniform_drive_work_j: step.uniform_drive_work_j,
             numerical_dissipation_j: step.numerical_dissipation_j,
             parameter_work_j: step.parameter_work_j,
             mechanical_work_j: 0.0,
