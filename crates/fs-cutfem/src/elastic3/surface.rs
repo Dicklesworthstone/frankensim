@@ -2,8 +2,9 @@
 //! The same implicit field builds both stiffness and oriented surface geometry.
 //! Loads are integrated once, then reusable as independent dead-load vectors.
 //! Density changes do not change their geometry or scale them implicitly.
+use super::material::ElasticMaterialField3;
 use super::*;
-use crate::quad3::surface::{surface_cell_rules3, SurfaceOptions3};
+use crate::quad3::surface::{SurfaceOptions3, surface_cell_rules3};
 
 mod reference;
 pub use reference::{ReferenceLoad3, SurfaceForce3};
@@ -31,12 +32,40 @@ impl CutElasticity3 {
     /// The original bulk, stiffness, ghost and clamp arithmetic is untouched.
     /// Artificial box faces with phi<0 are not included in the loaded surface.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_with_surface(domain: HexCell, counts: [usize; 3], sdf: &dyn CutSdf3,
-        material: &IsotropicElastic, clamp: &dyn Fn([f64; 3]) -> bool,
-        options: ElasticityOptions3, surface_options: SurfaceOptions3,
-        control: &mut QuadratureControl3<'_>) -> Result<Self, ElasticityError3> {
+    pub fn build_with_surface(
+        domain: HexCell,
+        counts: [usize; 3],
+        sdf: &dyn CutSdf3,
+        material: &IsotropicElastic,
+        clamp: &dyn Fn([f64; 3]) -> bool,
+        options: ElasticityOptions3,
+        surface_options: SurfaceOptions3,
+        control: &mut QuadratureControl3<'_>,
+    ) -> Result<Self, ElasticityError3> {
         surface_options.validate()?;
         let mut operator = Self::build(domain, counts, sdf, material, clamp, options, control)?;
+        operator.integrate_surface(sdf, surface_options, control)?;
+        Ok(operator)
+    }
+
+    /// Retain oriented surface rules beside a source-bound material operator.
+    /// Traction and pressure remain independent reference dead loads; material
+    /// density and design scales never multiply these external forces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_material_field_and_surface(
+        domain: HexCell,
+        counts: [usize; 3],
+        sdf: &dyn CutSdf3,
+        materials: ElasticMaterialField3<'_>,
+        clamp: &dyn Fn([f64; 3]) -> bool,
+        options: ElasticityOptions3,
+        surface_options: SurfaceOptions3,
+        control: &mut QuadratureControl3<'_>,
+    ) -> Result<Self, ElasticityError3> {
+        surface_options.validate()?;
+        let mut operator = Self::build_with_material_field(
+            domain, counts, sdf, materials, clamp, options, control,
+        )?;
         operator.integrate_surface(sdf, surface_options, control)?;
         Ok(operator)
     }
@@ -44,8 +73,12 @@ impl CutElasticity3 {
     // Called only on the not-yet-published result of either builder. Source SDF
     // identity is established by the construction call, not an unrelated field
     // supplied later to an already accepted physical operator.
-    pub(super) fn integrate_surface(&mut self, sdf: &dyn CutSdf3, options: SurfaceOptions3,
-        control: &mut QuadratureControl3<'_>) -> Result<(), ElasticityError3> {
+    pub(super) fn integrate_surface(
+        &mut self,
+        sdf: &dyn CutSdf3,
+        options: SurfaceOptions3,
+        control: &mut QuadratureControl3<'_>,
+    ) -> Result<(), ElasticityError3> {
         for cell in &mut self.cells {
             control.poll()?;
             let rules = surface_cell_rules3(sdf, cell.bounds, options, control)?;
@@ -64,39 +97,69 @@ impl CutElasticity3 {
     /// construction refuses this operation instead of claiming zero loading.
     /// Each callback and each cell is bracketed by cancellation checkpoints;
     /// failure exposes neither a partial vector nor incomplete physical totals.
-    pub fn surface_load(&self, traction: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<SurfaceLoad3, ElasticityError3> {
+    pub fn surface_load(
+        &self,
+        traction: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<SurfaceLoad3, ElasticityError3> {
         surface_poll(&mut checkpoint)?;
         // Admit the entire stored rule family before executing any load law.
         for cell in &self.cells {
             surface_poll(&mut checkpoint)?;
             if cell.rules.surface().is_none() {
-                return Err(ElasticityError3::Invalid("surface rules not retained; use build_with_surface"));
+                return Err(ElasticityError3::Invalid(
+                    "surface rules not retained; use build_with_surface",
+                ));
             }
         }
-        let mut load = SurfaceLoad3 { rhs: vec![0.0; self.n()], resultant: [0.0; 3], moment: [0.0; 3], area: 0.0 };
+        let mut load = SurfaceLoad3 {
+            rhs: vec![0.0; self.n()],
+            resultant: [0.0; 3],
+            moment: [0.0; 3],
+            area: 0.0,
+        };
         for cell in &self.cells {
             surface_poll(&mut checkpoint)?;
-            for node in cell.rules.surface().expect("surface family admitted").points() {
+            for node in cell
+                .rules
+                .surface()
+                .expect("surface family admitted")
+                .points()
+            {
                 surface_poll(&mut checkpoint)?;
                 let f = traction(node.position, node.normal);
                 surface_poll(&mut checkpoint)?;
-                if !f.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("nonfinite surface traction")); }
+                if !f.iter().all(|v| v.is_finite()) {
+                    return Err(ElasticityError3::Invalid("nonfinite surface traction"));
+                }
                 let (values, _) = q1(cell.bounds, node.position);
-                for a in 0..8 { if !self.fixed[cell.nodes[a]] { for c in 0..3 {
-                    load.rhs[3*cell.nodes[a]+c] += node.weight*values[a]*f[c];
-                } } }
-                let force = f.map(|v| node.weight*v);
+                for a in 0..8 {
+                    if !self.fixed[cell.nodes[a]] {
+                        for c in 0..3 {
+                            load.rhs[3 * cell.nodes[a] + c] += node.weight * values[a] * f[c];
+                        }
+                    }
+                }
+                let force = f.map(|v| node.weight * v);
                 for c in 0..3 {
                     load.resultant[c] += force[c];
-                    load.moment[c] += node.position[(c+1)%3]*force[(c+2)%3]
-                        - node.position[(c+2)%3]*force[(c+1)%3];
+                    load.moment[c] += node.position[(c + 1) % 3] * force[(c + 2) % 3]
+                        - node.position[(c + 2) % 3] * force[(c + 1) % 3];
                 }
                 load.area += node.weight;
             }
         }
-        if !load.area.is_finite() || !load.rhs.iter().chain(&load.resultant).chain(&load.moment).all(|v| v.is_finite()) {
-            return Err(ElasticityError3::Invalid("surface load or physical total overflow"));
+        if !load.area.is_finite()
+            || !load
+                .rhs
+                .iter()
+                .chain(&load.resultant)
+                .chain(&load.moment)
+                .all(|v| v.is_finite())
+        {
+            return Err(ElasticityError3::Invalid(
+                "surface load or physical total overflow",
+            ));
         }
         surface_poll(&mut checkpoint)?;
         Ok(load)
@@ -105,11 +168,24 @@ impl CutElasticity3 {
     /// Positive pressure acts INTO the solid: traction = -pressure * normal.
     /// Signed pressure is allowed (negative means outward tension). Pressure is
     /// measured per reference area and is not updated as the solid deforms.
-    pub fn pressure_load(&self, pressure: &dyn Fn([f64; 3]) -> f64,
-        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<SurfaceLoad3, ElasticityError3> {
-        self.surface_load(&|p, n| { let value = pressure(p); n.map(|v| -value*v) }, checkpoint)
+    pub fn pressure_load(
+        &self,
+        pressure: &dyn Fn([f64; 3]) -> f64,
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<SurfaceLoad3, ElasticityError3> {
+        self.surface_load(
+            &|p, n| {
+                let value = pressure(p);
+                n.map(|v| -value * v)
+            },
+            checkpoint,
+        )
     }
 }
 fn surface_poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
-    if checkpoint().is_break() { Err(ElasticityError3::Cancelled) } else { Ok(()) }
+    if checkpoint().is_break() {
+        Err(ElasticityError3::Cancelled)
+    } else {
+        Ok(())
+    }
 }

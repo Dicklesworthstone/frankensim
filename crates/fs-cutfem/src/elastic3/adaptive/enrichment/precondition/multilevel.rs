@@ -147,7 +147,7 @@ fn first_galerkin(op: &AdaptiveElasticity3, p: &Csr, max_terms: usize,
                 *jump.entry(m).or_insert(0.0) += derivative*weight;
             }
         }
-        let weight = face.weight*0.5*(op.scales()[face.cells[0]]+op.scales()[face.cells[1]]);
+        let weight = face.scaled_weight(op.scales());
         for (&m, &jm) in &jump { for (&n, &jn) in &jump {
             if m <= n { for c in 0..3 { out.add(3*m+c,3*n+c,(weight*jm)*jn,control)?; } }
         } }

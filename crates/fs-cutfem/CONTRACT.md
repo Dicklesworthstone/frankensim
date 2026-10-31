@@ -135,10 +135,38 @@ same certified cuts; its constitutive parameters come from
 - `condition_estimate` → `CondReport`: full-spectrum (Jacobi
   rotations) conditioning of fixture-sized systems, gated at n ≤ 4096.
 
+## Native material fields in three-dimensional elasticity
+
+`elastic3::ElasticMaterialField3` binds the existing admitted
+`fs_material::elastic::acoustic::ElasticAcousticState` to Cartesian or adaptive
+Q1 cut cells, uniformly or by physical background-cell bounds. The full global
+Mandel tensor, density, source identity and explicit strain ceiling remain
+attached to each cell. Bulk stiffness, Nitsche tractions and lifting, reactions,
+stress observations and their pullbacks consume that same reference law.
+Uniform fields share a prepared engineering tensor; no new material resolver,
+constitutive admission or isotropic proxy is introduced.
+
+Native tensor penalties use the retained maximum absolute Mandel row sum, a
+conservative spectral upper bound. A face averages each side's reference
+modulus times its own current stiffness scale; both scale derivatives retain
+those distinct coefficients. The legacy isotropic constructor keeps its Lamé
+bulk/traction formulas and shear-modulus ghost coefficient. These choices do
+not certify coercivity, freedom from locking or contrast-independent conditioning.
+
+`reference_cell_masses_kg` integrates original density over retained numerical
+cut volume, including supported material. It is independent of the stiffness
+interpolation and has no invented unit-density fallback for legacy inputs.
+Adaptive transfer requires each child's complete native reference state to
+match its coarse ancestor; child masses are re-integrated from their own
+quadrature. Strain validity is checked on actual bulk stress fields, never on
+algebraic basis strains or arbitrary adjoint vectors. Geometry derivatives,
+material evolution and continuum certification are outside this frozen-linear
+operator's scope.
+
 ## Three-dimensional bulk stress observations
 
 `elastic3::stress` evaluates the retained Cartesian or adaptive Q1 bulk
-quadrature points with the same reference Lamé tensor as stiffness assembly.
+quadrature points with the same retained reference tensor as stiffness assembly.
 Each `BulkStressPoint3` names its active cell, position, positive reference
 volume weight, reference-material stress and current scaled physical stress.
 Voigt order is `[xx, yy, zz, xy, yz, xz]` with physical shear components.

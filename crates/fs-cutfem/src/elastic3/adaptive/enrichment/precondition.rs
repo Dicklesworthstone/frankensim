@@ -81,7 +81,7 @@ impl AdaptiveElasticity3 {
                     }
                 }
             }
-            let weight = face.weight * 0.5 * (self.scales()[face.cells[0]] + self.scales()[face.cells[1]]);
+            let weight = face.scaled_weight(self.scales());
             for (master, value) in jump {
                 charge(&mut count, 3, max_contributions)?;
                 for c in 0..3 { diagonal[3*master+c] += weight * value * value; }

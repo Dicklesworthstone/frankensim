@@ -4,6 +4,7 @@
 //! (no engineering-strain factor in the output). These are numerical samples,
 //! not recovered nodal stresses or bounds on a continuum maximum. Ghost and
 //! Nitsche stabilization affect the solved field but are not material stress.
+use super::material::ReferenceMaterial3;
 use super::*;
 
 /// One original bulk quadrature point; point order is cell order followed by
@@ -39,36 +40,10 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Elastici
     }
 }
 
-/// Stress caused by one Cartesian displacement component with gradient g.
-fn basis(lame: [f64; 2], g: [f64; 3], component: usize) -> [f64; 6] {
-    let [lambda, mu] = lame;
-    let mut s = [lambda * g[component]; 6];
-    s[component] += 2.0 * mu * g[component];
-    s[3] = mu
-        * match component {
-            0 => g[1],
-            1 => g[0],
-            _ => 0.0,
-        };
-    s[4] = mu
-        * match component {
-            1 => g[2],
-            2 => g[1],
-            _ => 0.0,
-        };
-    s[5] = mu
-        * match component {
-            0 => g[2],
-            2 => g[0],
-            _ => 0.0,
-        };
-    s
-}
-
-fn stress(lame: [f64; 2], gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+fn stress(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
     let mut value = [0.0; 6];
     for i in 0..24 {
-        let b = basis(lame, gradients[i / 3], i % 3);
+        let b = material.basis_stress(gradients[i / 3], i % 3);
         for k in 0..6 {
             value[k] += b[k] * local[i];
         }
@@ -76,9 +51,47 @@ fn stress(lame: [f64; 2], gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64;
     value
 }
 
+// Admit the actual displacement strain, never the unit basis functions or
+// arbitrary adjoint vectors. The reference VJP does not evaluate a primal.
+fn admit_material_strain(
+    material: &ReferenceMaterial3,
+    gradients: &[[f64; 3]; 8],
+    local: &[f64; 24],
+) -> Result<(), ElasticityError3> {
+    let Some(source) = material.source_state() else {
+        return Ok(());
+    };
+    let mut gradient = [[0.0; 3]; 3];
+    for a in 0..8 {
+        for c in 0..3 {
+            for d in 0..3 {
+                gradient[c][d] += local[3 * a + c] * gradients[a][d];
+            }
+        }
+    }
+    let shear = core::f64::consts::FRAC_1_SQRT_2;
+    let strain = [
+        gradient[0][0],
+        gradient[1][1],
+        gradient[2][2],
+        shear * (gradient[0][1] + gradient[1][0]),
+        shear * (gradient[1][2] + gradient[2][1]),
+        shear * (gradient[2][0] + gradient[0][2]),
+    ];
+    if strain
+        .iter()
+        .any(|v| !v.is_finite() || v.abs() > source.maximum_absolute_mandel_strain())
+    {
+        return Err(ElasticityError3::Invalid(
+            "bulk strain exceeds retained material domain",
+        ));
+    }
+    Ok(())
+}
+
 impl CutElasticity3 {
     /// Exact `z^T (dK/dscale_c) u`, including each cell's original Nitsche
-    /// block and half of each incident ghost term. No current scale factor is
+    /// block and its material-weighted share of each ghost term. No current scale factor is
     /// applied. Direct contraction avoids cancellation in polarization when
     /// primal and adjoint magnitudes differ substantially.
     pub fn scale_bilinear_forms(
@@ -114,10 +127,10 @@ impl CutElasticity3 {
                         .map(|(&n, &j)| if self.fixed[n] { 0.0 } else { j * x[3 * n + c] })
                         .sum()
                 };
-                value += face.weight * jump(z) * jump(u);
+                value += jump(z) * jump(u);
             }
-            for &cell in &face.cells {
-                result[cell] += 0.5 * value;
+            for (&cell, weight) in face.cells.iter().zip(face.scale_weights()) {
+                result[cell] += weight * value;
             }
         }
         if !result.iter().all(|v| v.is_finite()) {
@@ -191,11 +204,12 @@ impl CutElasticity3 {
         })
     }
 
-    /// Evaluate the actual bulk quadrature stress with the assembly's Lamé
+    /// Evaluate the actual bulk quadrature stress with each cell's retained
     /// tensor and current cell scales. Clamped coefficients are masked exactly
     /// as in the operator. `max_points` admits the output allocation before any
     /// point is evaluated. Every point and publication boundary polls the caller.
-    /// No state changes on success, refusal or cancellation.
+    /// Source-bound samples must remain inside the admitted Mandel strain
+    /// ceiling. No state changes on success, refusal or cancellation.
     pub fn bulk_stress(
         &self,
         u: &[f64],
@@ -215,7 +229,8 @@ impl CutElasticity3 {
             for &(position, weight) in cell.rules.bulk() {
                 poll(&mut checkpoint)?;
                 let (_, gradients) = q1(cell.bounds, position);
-                let reference_stress = stress(self.lame, &gradients, &local);
+                admit_material_strain(&cell.material, &gradients, &local)?;
+                let reference_stress = stress(&cell.material, &gradients, &local);
                 let stress = reference_stress.map(|s| self.scales[id] * s);
                 if !reference_stress
                     .iter()
@@ -302,7 +317,8 @@ impl CutElasticity3 {
                 let d = &derivatives[index];
                 index += 1;
                 if let Some(local) = &local {
-                    let value = stress(self.lame, &gradients, local);
+                    admit_material_strain(&cell.material, &gradients, local)?;
+                    let value = stress(&cell.material, &gradients, local);
                     scales[id] += d.iter().zip(value).map(|(a, b)| a * b).sum::<f64>();
                 }
                 for i in 0..24 {
@@ -310,7 +326,7 @@ impl CutElasticity3 {
                     if self.fixed[node] {
                         continue;
                     }
-                    let b = basis(self.lame, gradients[i / 3], i % 3);
+                    let b = cell.material.basis_stress(gradients[i / 3], i % 3);
                     displacement[3 * node + i % 3] +=
                         factor * d.iter().zip(b).map(|(a, b)| a * b).sum::<f64>();
                 }

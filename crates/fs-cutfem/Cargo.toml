@@ -25,6 +25,9 @@ fs-material = { path = "../fs-material" }
 fs-solver = { path = "../fs-solver" }
 fs-sparse = { path = "../fs-sparse" }
 
+[dev-dependencies]
+fs-blake3 = { path = "../fs-blake3" }
+
 [lints]
 workspace = true
 

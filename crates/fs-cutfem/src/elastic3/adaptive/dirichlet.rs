@@ -1,9 +1,9 @@
 //! The same Nitsche cell blocks and lifting under the existing Q1 constraints.
+use super::enrichment::CellResidual3;
 use super::*;
 use crate::elastic3::dirichlet::EmbeddedDirichletOptions3;
-use crate::quad3::surface::SurfaceOptions3;
 use crate::elastic3::surface::ReferenceLoad3;
-use super::enrichment::CellResidual3;
+use crate::quad3::surface::SurfaceOptions3;
 
 mod reaction;
 
@@ -21,59 +21,120 @@ impl AdaptiveElasticity3 {
     /// still a caller obligation. Resolve narrow patches and junctions explicitly.
     /// The positive penalty is not a coercivity or component-support certificate.
     #[allow(clippy::too_many_arguments)]
-    pub fn build_with_embedded_dirichlet(domain: HexCell, tree: &Octree3, sdf: &dyn CutSdf3,
-        material: &IsotropicElastic, box_clamp: &dyn Fn([f64; 3]) -> bool,
+    pub fn build_with_embedded_dirichlet(
+        domain: HexCell,
+        tree: &Octree3,
+        sdf: &dyn CutSdf3,
+        material: &IsotropicElastic,
+        box_clamp: &dyn Fn([f64; 3]) -> bool,
         patch: &dyn Fn([f64; 3], [f64; 3]) -> bool,
-        options: ElasticityOptions3, boundary: EmbeddedDirichletOptions3,
-        surface: SurfaceOptions3, control: &mut QuadratureControl3<'_>) -> Result<Self, ElasticityError3> {
+        options: ElasticityOptions3,
+        boundary: EmbeddedDirichletOptions3,
+        surface: SurfaceOptions3,
+        control: &mut QuadratureControl3<'_>,
+    ) -> Result<Self, ElasticityError3> {
         boundary.validate()?;
         surface.validate()?;
-        let mut op = Self::build_core(domain, tree, sdf, material, box_clamp, options, false, control)?;
+        let mut op = Self::build_core(
+            domain, tree, sdf, material, box_clamp, options, false, control,
+        )?;
         op.raw.integrate_surface(sdf, surface, control)?;
-        op.raw.attach_embedded_dirichlet(material, patch, boundary, control)?;
-        op.reference[3] = boundary.beta;
+        op.raw.attach_embedded_dirichlet(patch, boundary, control)?;
+        op.reference[1] = boundary.beta;
+        Ok(op)
+    }
+
+    /// Source-bound bulk, ghost and embedded support on the same constrained
+    /// operator. Each source snapshot is retained before attaching its traces.
+    #[allow(clippy::too_many_arguments)]
+    pub fn build_with_material_field_and_embedded_dirichlet(
+        domain: HexCell,
+        tree: &Octree3,
+        sdf: &dyn CutSdf3,
+        field: ElasticMaterialField3<'_>,
+        box_clamp: &dyn Fn([f64; 3]) -> bool,
+        patch: &dyn Fn([f64; 3], [f64; 3]) -> bool,
+        options: ElasticityOptions3,
+        boundary: EmbeddedDirichletOptions3,
+        surface: SurfaceOptions3,
+        control: &mut QuadratureControl3<'_>,
+    ) -> Result<Self, ElasticityError3> {
+        boundary.validate()?;
+        surface.validate()?;
+        control.poll()?;
+        let material = MaterialProvider3::from_field(field)?;
+        let mut op = Self::build_material_core(
+            domain, tree, sdf, &material, box_clamp, options, false, control,
+        )?;
+        op.raw.integrate_surface(sdf, surface, control)?;
+        op.raw.attach_embedded_dirichlet(patch, boundary, control)?;
+        op.reference[1] = boundary.beta;
         Ok(op)
     }
     #[must_use]
-    pub fn embedded_dirichlet_penalty(&self) -> Option<f64> { self.raw.embedded_dirichlet_penalty() }
+    pub fn embedded_dirichlet_penalty(&self) -> Option<f64> {
+        self.raw.embedded_dirichlet_penalty()
+    }
     #[must_use]
-    pub fn embedded_dirichlet_area(&self) -> Option<f64> { self.raw.embedded_dirichlet_area() }
+    pub fn embedded_dirichlet_area(&self) -> Option<f64> {
+        self.raw.embedded_dirichlet_area()
+    }
 
     /// b_g reduced with the SAME T^T used by stiffness and other loads. Add it
     /// to external loads before solving; recompute after any density update.
     /// It is not an applied traction/reaction or a physical actuator-work value.
-    pub fn prescribed_displacement_load(&self,
+    pub fn prescribed_displacement_load(
+        &self,
         prescribed: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
-        let raw = self.raw.prescribed_displacement_load(prescribed, &mut checkpoint)?;
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        let raw = self
+            .raw
+            .prescribed_displacement_load(prescribed, &mut checkpoint)?;
         let mut rhs = vec![0.0; self.n()];
         self.restrict(&raw, &mut rhs);
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
-        if !rhs.iter().all(|x| x.is_finite()) { return Err(ElasticityError3::Invalid("reduced prescribed RHS overflow")); }
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
+        if !rhs.iter().all(|x| x.is_finite()) {
+            return Err(ElasticityError3::Invalid("reduced prescribed RHS overflow"));
+        }
         Ok(rhs)
     }
     /// v^T db_g/dscale_c, using the physical reconstruction T v. Combine with
     /// the existing stiffness contraction for the chosen objective; a nonzero
     /// prescribed g is NOT a fixed independent load in the OC driver.
-    pub fn prescribed_displacement_scale_work(&self,
-        prescribed: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3], v: &[f64],
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+    pub fn prescribed_displacement_scale_work(
+        &self,
+        prescribed: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
+        v: &[f64],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
         let physical = self.physical_displacements(v)?;
-        self.raw.prescribed_displacement_scale_work(prescribed, &physical, checkpoint)
+        self.raw
+            .prescribed_displacement_scale_work(prescribed, &physical, checkpoint)
     }
 
     /// Exact discrete z^T (dK/dscale_c) u for independent primal/adjoint fields.
     /// Reconstruct both with the original Q1 constraint map. Nitsche terms are
-    /// already in the cell block; each adjacent cell receives HALF the reference
-    /// ghost contraction. Do not multiply by current scales: this is dK/dscale.
+    /// already in the cell block; each adjacent cell receives its own reference
+    /// material's ghost derivative. Do not multiply by current scales: this is dK/dscale.
     ///
     /// Direct bilinear contraction avoids subtracting two large quadratic
     /// energies when primal and adjoint have very different magnitudes. Fields
     /// need not be solved; this operation by itself makes no residual claim.
-    pub fn scale_bilinear_forms(&self, z: &[f64], u: &[f64],
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+    pub fn scale_bilinear_forms(
+        &self,
+        z: &[f64],
+        u: &[f64],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
         let u = self.physical_displacements(u)?;
         let z = self.physical_displacements(z)?;
         self.raw.scale_bilinear_forms(&z, &u, checkpoint)
@@ -82,23 +143,36 @@ impl AdaptiveElasticity3 {
     /// Assemble external reference forces plus the CURRENT material's Nitsche
     /// lifting. None preserves the original reference-load path. This is a
     /// variational RHS, not a physical traction or actuator-work definition.
-    pub fn reference_load_with_motion(&self, load: ReferenceLoad3<'_>,
+    pub fn reference_load_with_motion(
+        &self,
+        load: ReferenceLoad3<'_>,
         prescribed: Option<&PrescribedMotion3<'_>>,
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
         if prescribed.is_some() && self.embedded_dirichlet_penalty().is_none() {
-            return Err(ElasticityError3::Invalid("motion requires embedded Dirichlet support"));
+            return Err(ElasticityError3::Invalid(
+                "motion requires embedded Dirichlet support",
+            ));
         }
         let mut rhs = self.reference_load(load, &mut checkpoint)?;
         if let Some(g) = prescribed {
             let lifting = self.prescribed_displacement_load(g, &mut checkpoint)?;
             for (i, (r, b)) in rhs.iter_mut().zip(lifting).enumerate() {
-                if i % 192 == 0 && checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+                if i % 192 == 0 && checkpoint().is_break() {
+                    return Err(ElasticityError3::Cancelled);
+                }
                 *r += b;
-                if !r.is_finite() { return Err(ElasticityError3::Invalid("motion RHS overflow")); }
+                if !r.is_finite() {
+                    return Err(ElasticityError3::Invalid("motion RHS overflow"));
+                }
             }
         }
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
         Ok(rhs)
     }
 
@@ -107,25 +181,43 @@ impl AdaptiveElasticity3 {
     /// cell scale: b_g(w) = sum_c scale_c * (w^T db_g/dscale_c). Its existing
     /// exact pullback therefore supplies localization without a second trace
     /// integrator. Adjoint equations use homogeneous motion (None).
-    pub fn cell_residuals_with_motion(&self, u: &[f64], w: &[f64],
-        load: ReferenceLoad3<'_>, prescribed: Option<&PrescribedMotion3<'_>>,
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<CellResidual3>, ElasticityError3> {
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+    pub fn cell_residuals_with_motion(
+        &self,
+        u: &[f64],
+        w: &[f64],
+        load: ReferenceLoad3<'_>,
+        prescribed: Option<&PrescribedMotion3<'_>>,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<CellResidual3>, ElasticityError3> {
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
         if prescribed.is_some() && self.embedded_dirichlet_penalty().is_none() {
-            return Err(ElasticityError3::Invalid("motion requires embedded Dirichlet support"));
+            return Err(ElasticityError3::Invalid(
+                "motion requires embedded Dirichlet support",
+            ));
         }
         let mut residuals = self.cell_reference_residuals(u, w, load, &mut checkpoint)?;
         if let Some(g) = prescribed {
             let work = self.prescribed_displacement_scale_work(g, w, &mut checkpoint)?;
-            for (i, ((r, b), &scale)) in residuals.iter_mut().zip(work).zip(self.scales()).enumerate() {
-                if i % 64 == 0 && checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
-                r.load += scale*b;
+            for (i, ((r, b), &scale)) in residuals
+                .iter_mut()
+                .zip(work)
+                .zip(self.scales())
+                .enumerate()
+            {
+                if i % 64 == 0 && checkpoint().is_break() {
+                    return Err(ElasticityError3::Cancelled);
+                }
+                r.load += scale * b;
                 if !r.load.is_finite() || !r.residual().is_finite() {
                     return Err(ElasticityError3::Invalid("motion residual overflow"));
                 }
             }
         }
-        if checkpoint().is_break() { return Err(ElasticityError3::Cancelled); }
+        if checkpoint().is_break() {
+            return Err(ElasticityError3::Cancelled);
+        }
         Ok(residuals)
     }
 }

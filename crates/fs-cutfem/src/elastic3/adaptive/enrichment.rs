@@ -6,12 +6,22 @@ use crate::elastic3::surface::ReferenceLoad3;
 pub mod precondition;
 
 fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3> {
-    if checkpoint().is_break() { Err(ElasticityError3::Cancelled) } else { Ok(()) }
+    if checkpoint().is_break() {
+        Err(ElasticityError3::Cancelled)
+    } else {
+        Ok(())
+    }
 }
 fn field(op: &AdaptiveElasticity3, x: &[f64]) -> Result<(), ElasticityError3> {
-    if x.len() != op.n() || !x.iter().all(|v| v.is_finite())
-        || x.iter().enumerate().any(|(i, v)| op.fixed[i / 3] && *v != 0.0) {
-        return Err(ElasticityError3::Invalid("expected finite homogeneous master field"));
+    if x.len() != op.n()
+        || !x.iter().all(|v| v.is_finite())
+        || x.iter()
+            .enumerate()
+            .any(|(i, v)| op.fixed[i / 3] && *v != 0.0)
+    {
+        return Err(ElasticityError3::Invalid(
+            "expected finite homogeneous master field",
+        ));
     }
     Ok(())
 }
@@ -21,7 +31,9 @@ fn field(op: &AdaptiveElasticity3, x: &[f64]) -> Result<(), ElasticityError3> {
 /// Target active leaves must descend from source active leaves; every source
 /// active leaf must retain at least one descendant. Geometry outside active
 /// support is not inferred from this map. Both operators must describe the same
-/// box, reference material and ghost coefficient. The caller owns the unchanged
+/// box, ghost coefficient and support method. Every fine cell must retain its
+/// coarse ancestor's complete reference material, including source identity and
+/// physical density. The caller owns the unchanged
 /// implicit-domain assumption; no geometry equivalence certificate is minted.
 pub struct AdaptiveTransfer3<'a> {
     coarse: &'a AdaptiveElasticity3,
@@ -34,26 +46,50 @@ impl<'a> AdaptiveTransfer3<'a> {
     /// Nodes are located by at most 21 levels of dyadic ancestor lookups, with
     /// at most eight incident boxes tested at a boundary. `max_terms` bounds
     /// the TOTAL retained scalar coefficients, not the number per row.
-    pub fn new(coarse: &'a AdaptiveElasticity3, fine: &'a AdaptiveElasticity3,
-        max_terms: usize, mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Self, ElasticityError3> {
+    pub fn new(
+        coarse: &'a AdaptiveElasticity3,
+        fine: &'a AdaptiveElasticity3,
+        max_terms: usize,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Self, ElasticityError3> {
         poll(&mut checkpoint)?;
         if coarse.domain != fine.domain || coarse.reference != fine.reference {
-            return Err(ElasticityError3::Invalid("enrichment box/material/stabilization mismatch"));
+            return Err(ElasticityError3::Invalid(
+                "enrichment box/material/stabilization mismatch",
+            ));
         }
-        let lookup: BTreeMap<_, _> = coarse.leaves.iter().enumerate()
-            .map(|(i, c)| ((c.level(), c.index()), i)).collect();
+        let lookup: BTreeMap<_, _> = coarse
+            .leaves
+            .iter()
+            .enumerate()
+            .map(|(i, c)| ((c.level(), c.index()), i))
+            .collect();
         let mut parents = Vec::with_capacity(fine.cells());
         let mut covered = vec![false; coarse.cells()];
-        for leaf in &fine.leaves {
+        for (child, leaf) in fine.leaves.iter().enumerate() {
             poll(&mut checkpoint)?;
-            let parent = (0..=leaf.level()).rev().find_map(|level| {
-                lookup.get(&(level, leaf.index().map(|v| v >> (leaf.level() - level)))).copied()
-            }).ok_or(ElasticityError3::Invalid("fine active cell has no coarse active ancestor"))?;
+            let parent = (0..=leaf.level())
+                .rev()
+                .find_map(|level| {
+                    lookup
+                        .get(&(level, leaf.index().map(|v| v >> (leaf.level() - level))))
+                        .copied()
+                })
+                .ok_or(ElasticityError3::Invalid(
+                    "fine active cell has no coarse active ancestor",
+                ))?;
+            if fine.raw.cells[child].material != coarse.raw.cells[parent].material {
+                return Err(ElasticityError3::Invalid(
+                    "enrichment reference material differs from coarse ancestor",
+                ));
+            }
             covered[parent] = true;
             parents.push(parent);
         }
         if covered.iter().any(|v| !v) {
-            return Err(ElasticityError3::Invalid("enrichment lost a coarse active cell"));
+            return Err(ElasticityError3::Invalid(
+                "enrichment lost a coarse active cell",
+            ));
         }
         let mut rows = Vec::with_capacity(fine.nodes.len());
         let mut terms = 0usize;
@@ -66,65 +102,254 @@ impl<'a> AdaptiveTransfer3<'a> {
                 let choices: [Vec<u32>; 3] = std::array::from_fn(|a| {
                     let i = key[a] / span;
                     let mut indices = Vec::with_capacity(2);
-                    if key[a] % span == 0 && i > 0 { indices.push(i - 1); }
-                    if i < side { indices.push(i); }
+                    if key[a] % span == 0 && i > 0 {
+                        indices.push(i - 1);
+                    }
+                    if i < side {
+                        indices.push(i);
+                    }
                     indices
                 });
-                for &x in &choices[0] { for &y in &choices[1] { for &z in &choices[2] {
-                    if let Some(&cell) = lookup.get(&(level, [x, y, z])) {
-                        found = Some(cell); break 'levels;
+                for &x in &choices[0] {
+                    for &y in &choices[1] {
+                        for &z in &choices[2] {
+                            if let Some(&cell) = lookup.get(&(level, [x, y, z])) {
+                                found = Some(cell);
+                                break 'levels;
+                            }
+                        }
                     }
-                } } }
+                }
             }
-            let cell = &coarse.raw.cells[found.ok_or(ElasticityError3::Invalid("target master outside coarse active support"))?];
+            let cell = &coarse.raw.cells[found.ok_or(ElasticityError3::Invalid(
+                "target master outside coarse active support",
+            ))?];
             let p = fine.nodes[target];
             if (0..3).any(|a| p[a] < cell.bounds.lo()[a] || p[a] > cell.bounds.hi()[a]) {
-                return Err(ElasticityError3::Invalid("physical and dyadic transfer coordinates disagree"));
+                return Err(ElasticityError3::Invalid(
+                    "physical and dyadic transfer coordinates disagree",
+                ));
             }
             let (values, _) = q1(cell.bounds, p);
             let mut row = BTreeMap::new();
             for (corner, &value) in values.iter().enumerate() {
-                if value == 0.0 { continue; }
+                if value == 0.0 {
+                    continue;
+                }
                 for &(master, weight) in &coarse.rows[cell.nodes[corner]] {
-                    if coarse.fixed[master] { continue; }
+                    if coarse.fixed[master] {
+                        continue;
+                    }
                     *row.entry(master).or_insert(0.0) += value * weight;
                     if row.len() > max_terms.saturating_sub(terms) {
-                        return Err(ElasticityError3::Invalid("transfer coefficient budget exhausted"));
+                        return Err(ElasticityError3::Invalid(
+                            "transfer coefficient budget exhausted",
+                        ));
                     }
                 }
             }
             if row.values().any(|v: &f64| !v.is_finite() || *v < 0.0)
-                || (fine.fixed[target] && !row.is_empty()) {
-                return Err(ElasticityError3::Invalid("invalid weights or incompatible fine clamp"));
+                || (fine.fixed[target] && !row.is_empty())
+            {
+                return Err(ElasticityError3::Invalid(
+                    "invalid weights or incompatible fine clamp",
+                ));
             }
             terms += row.len();
             rows.push(row.into_iter().collect());
         }
         poll(&mut checkpoint)?;
-        Ok(Self { coarse, fine, rows, parents })
+        Ok(Self {
+            coarse,
+            fine,
+            rows,
+            parents,
+        })
     }
     /// Source geometry and current constitutive scales (immutably borrowed).
-    #[must_use] pub const fn coarse(&self) -> &AdaptiveElasticity3 { self.coarse }
+    #[must_use]
+    pub const fn coarse(&self) -> &AdaptiveElasticity3 {
+        self.coarse
+    }
     /// Enriched geometry and current constitutive scales (immutably borrowed).
-    #[must_use] pub const fn fine(&self) -> &AdaptiveElasticity3 { self.fine }
+    #[must_use]
+    pub const fn fine(&self) -> &AdaptiveElasticity3 {
+        self.fine
+    }
     /// Coarse active-cell index for each fine active cell.
-    #[must_use] pub fn parents(&self) -> &[usize] { &self.parents }
+    #[must_use]
+    pub fn parents(&self) -> &[usize] {
+        &self.parents
+    }
     /// Physical stiffness field inherited by children. Transfer these scales,
     /// not raw densities through a DIFFERENT filter, when estimating one design.
-    #[must_use] pub fn inherited_scales(&self) -> Vec<f64> {
-        self.parents.iter().map(|&parent| self.coarse.scales()[parent]).collect()
+    #[must_use]
+    pub fn inherited_scales(&self) -> Vec<f64> {
+        self.parents
+            .iter()
+            .map(|&parent| self.coarse.scales()[parent])
+            .collect()
     }
     /// Interpolate a homogeneous coarse field into fine MASTER coordinates.
     /// Fine hanging values are subsequently reconstructed by the fine operator.
-    pub fn prolongate(&self, x: &[f64], mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
-        poll(&mut checkpoint)?; field(self.coarse, x)?;
+    pub fn prolongate(
+        &self,
+        x: &[f64],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
+        poll(&mut checkpoint)?;
+        field(self.coarse, x)?;
         let mut result = vec![0.0; self.fine.n()];
         for (i, row) in self.rows.iter().enumerate() {
             poll(&mut checkpoint)?;
-            for c in 0..3 { result[3 * i + c] = row.iter().map(|&(m, w)| w * x[3 * m + c]).sum(); }
+            for c in 0..3 {
+                result[3 * i + c] = row.iter().map(|&(m, w)| w * x[3 * m + c]).sum();
+            }
         }
-        if !result.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("transfer overflow")); }
-        poll(&mut checkpoint)?; Ok(result)
+        if !result.iter().all(|v| v.is_finite()) {
+            return Err(ElasticityError3::Invalid("transfer overflow"));
+        }
+        poll(&mut checkpoint)?;
+        Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod material_transfer_tests {
+    use super::*;
+    use crate::{HeightAxis, quad3::QuadratureOptions3};
+    use fs_blake3::ContentHash;
+    use fs_material::elastic::acoustic::ElasticAcousticState;
+
+    struct Slab;
+    impl CutSdf3 for Slab {
+        fn value(&self, p: [f64; 3]) -> f64 {
+            p[2] - 0.73
+        }
+        fn enclose(&self, lo: [f64; 3], hi: [f64; 3]) -> Interval {
+            Interval::new(lo[2], hi[2]) - Interval::new(0.73, 0.73)
+        }
+        fn derivative_enclose(&self, _: [f64; 3], _: [f64; 3], axis: HeightAxis) -> Interval {
+            let value = if axis == HeightAxis::Z { 1.0 } else { 0.0 };
+            Interval::new(value, value)
+        }
+    }
+
+    fn material(density: f64, identity: u8) -> ElasticAcousticState {
+        ElasticAcousticState::from_isotropic(
+            &IsotropicElastic::new(3.0, 0.25, 0.01).unwrap(),
+            density,
+            ContentHash([identity; 32]),
+        )
+        .unwrap()
+    }
+
+    fn build(
+        tree: &Octree3,
+        field: &dyn Fn(HexCell) -> Result<ElasticAcousticState, ElasticityError3>,
+    ) -> AdaptiveElasticity3 {
+        let mut callback = |_| ControlFlow::Continue(());
+        let mut control = QuadratureControl3::new(
+            QuadratureOptions3 {
+                depth: 1,
+                ..Default::default()
+            },
+            &mut callback,
+        )
+        .unwrap();
+        AdaptiveElasticity3::build_with_material_field(
+            HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
+            tree,
+            &Slab,
+            ElasticMaterialField3::ByCell(field),
+            &|p| p[0] == 0.0,
+            ElasticityOptions3::default(),
+            &mut control,
+        )
+        .unwrap()
+    }
+
+    fn trees() -> (Octree3, Octree3) {
+        let coarse = Octree3::uniform(1, 3, 256).unwrap();
+        let parent = *coarse
+            .leaves()
+            .iter()
+            .find(|leaf| leaf.index() == [0, 0, 1])
+            .unwrap();
+        let fine = coarse
+            .refined(&[parent], || ControlFlow::Continue(()))
+            .unwrap();
+        (coarse, fine)
+    }
+
+    #[test]
+    fn refined_cells_retain_parent_source_and_integrate_their_own_reference_mass() {
+        let (coarse_tree, fine_tree) = trees();
+        let light = material(2.0, 1);
+        let heavy = material(5.0, 2);
+        let field = |bounds: HexCell| {
+            Ok(if bounds.lo()[0] < 0.5 {
+                light.clone()
+            } else {
+                heavy.clone()
+            })
+        };
+        let coarse = build(&coarse_tree, &field);
+        let fine = build(&fine_tree, &field);
+        let transfer =
+            AdaptiveTransfer3::new(&coarse, &fine, 10_000, || ControlFlow::Continue(())).unwrap();
+        assert!(fine.cells() > coarse.cells());
+        for (child, &parent) in transfer.parents().iter().enumerate() {
+            assert_eq!(
+                fine.cell_material_state(child),
+                coarse.cell_material_state(parent)
+            );
+        }
+        for operator in [&coarse, &fine] {
+            let masses = operator.reference_cell_masses_kg().unwrap();
+            assert_eq!(masses.len(), operator.cells());
+            for (cell, (&mass, volume)) in masses.iter().zip(operator.volumes()).enumerate() {
+                let density = operator.cell_material_state(cell).unwrap().density_kg_m3();
+                assert_eq!(mass.to_bits(), (density * volume).to_bits());
+            }
+            // This planar fixture has an analytic cut volume. General refined
+            // quadrature need not reproduce the coarse numerical mass exactly.
+            let expected = 0.73 * (0.5 * 2.0 + 0.5 * 5.0);
+            assert!((masses.iter().sum::<f64>() - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn refinement_rejects_changed_source_identity_or_density_in_one_child() {
+        let (coarse_tree, fine_tree) = trees();
+        let light = material(2.0, 1);
+        let heavy = material(5.0, 2);
+        let original = |bounds: HexCell| {
+            Ok(if bounds.lo()[0] < 0.5 {
+                light.clone()
+            } else {
+                heavy.clone()
+            })
+        };
+        let coarse = build(&coarse_tree, &original);
+        // Identity-only changes and changed values behind the same caller
+        // identity both refuse. Synthetic ids carry no source authority here.
+        for replacement in [material(2.0, 3), material(2.5, 1)] {
+            let changed = |bounds: HexCell| {
+                if bounds.hi()[0] == 0.25 && bounds.lo()[1] == 0.0 && bounds.lo()[2] == 0.5 {
+                    Ok(replacement.clone())
+                } else {
+                    original(bounds)
+                }
+            };
+            let fine = build(&fine_tree, &changed);
+            assert!(matches!(
+                AdaptiveTransfer3::new(&coarse, &fine, 10_000, || ControlFlow::Continue(())),
+                Err(ElasticityError3::Invalid(
+                    "enrichment reference material differs from coarse ancestor"
+                )),
+            ));
+        }
     }
 }
 
@@ -141,38 +366,66 @@ pub struct CellResidual3 {
 }
 impl CellResidual3 {
     /// Local weak residual, before taking any marking absolute value.
-    #[must_use] pub fn residual(self) -> f64 { self.load - self.bulk - self.ghost }
+    #[must_use]
+    pub fn residual(self) -> f64 {
+        self.load - self.bulk - self.ghost
+    }
 }
 impl AdaptiveElasticity3 {
     /// Assemble mixed reference loads, then apply the actual hanging-node
     /// transpose. Both contributions are forces on the same reference geometry;
     /// there is no interpolation of coarse nodal forces onto a refined mesh.
-    pub fn reference_load(&self, law: ReferenceLoad3<'_>,
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<f64>, ElasticityError3> {
+    pub fn reference_load(
+        &self,
+        law: ReferenceLoad3<'_>,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<f64>, ElasticityError3> {
         let raw = self.raw.reference_load(law, &mut checkpoint)?;
         let mut rhs = vec![0.0; self.n()];
         self.restrict(&raw, &mut rhs);
-        if !rhs.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("reduced reference load overflow")); }
-        poll(&mut checkpoint)?; Ok(rhs)
+        if !rhs.iter().all(|v| v.is_finite()) {
+            return Err(ElasticityError3::Invalid("reduced reference load overflow"));
+        }
+        poll(&mut checkpoint)?;
+        Ok(rhs)
     }
 
     /// Recompute the true Euclidean residual for an externally retained field.
     /// Used to reject stale/partial fields before assigning them error evidence.
-    pub fn field_residual(&self, x: &[f64], rhs: &[f64], mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<f64, ElasticityError3> {
-        poll(&mut checkpoint)?; field(self, x)?;
+    pub fn field_residual(
+        &self,
+        x: &[f64],
+        rhs: &[f64],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<f64, ElasticityError3> {
+        poll(&mut checkpoint)?;
+        field(self, x)?;
         if rhs.len() != self.n() || !rhs.iter().all(|v| v.is_finite()) {
             return Err(ElasticityError3::Invalid("invalid residual load"));
         }
-        let b: Vec<_> = rhs.iter().enumerate().map(|(i, &v)| if self.fixed[i / 3] { 0.0 } else { v }).collect();
-        let residual = recomputed_euclidean_residual_claim(self, x, &b).euclidean().expect("explicit Euclidean residual");
+        let b: Vec<_> = rhs
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if self.fixed[i / 3] { 0.0 } else { v })
+            .collect();
+        let residual = recomputed_euclidean_residual_claim(self, x, &b)
+            .euclidean()
+            .expect("explicit Euclidean residual");
         poll(&mut checkpoint)?;
-        if !residual.is_finite() { return Err(ElasticityError3::Invalid("nonfinite field residual")); }
+        if !residual.is_finite() {
+            return Err(ElasticityError3::Invalid("nonfinite field residual"));
+        }
         Ok(residual)
     }
 
     /// Body-only entry point into the shared physical residual kernel.
-    pub fn cell_residuals(&self, u: &[f64], w: &[f64], body: &dyn Fn([f64; 3]) -> [f64; 3],
-        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<CellResidual3>, ElasticityError3> {
+    pub fn cell_residuals(
+        &self,
+        u: &[f64],
+        w: &[f64],
+        body: &dyn Fn([f64; 3]) -> [f64; 3],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<CellResidual3>, ElasticityError3> {
         self.cell_reference_residuals(u, w, ReferenceLoad3::body(body), checkpoint)
     }
 
@@ -182,9 +435,16 @@ impl AdaptiveElasticity3 {
     /// The body, bulk and ghost arithmetic is shared with the body-only API.
     /// Pure load producers must match the solve; unconverged u is intentionally
     /// admitted (for a prolonged coarse field). No continuum bound is asserted.
-    pub fn cell_reference_residuals(&self, u: &[f64], w: &[f64], law: ReferenceLoad3<'_>,
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<Vec<CellResidual3>, ElasticityError3> {
-        poll(&mut checkpoint)?; field(self, u)?; field(self, w)?;
+    pub fn cell_reference_residuals(
+        &self,
+        u: &[f64],
+        w: &[f64],
+        law: ReferenceLoad3<'_>,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<Vec<CellResidual3>, ElasticityError3> {
+        poll(&mut checkpoint)?;
+        field(self, u)?;
+        field(self, w)?;
         law.admit(&self.raw, &mut checkpoint)?;
         let u = self.physical_displacements(u)?;
         let w = self.physical_displacements(w)?;
@@ -202,38 +462,75 @@ impl AdaptiveElasticity3 {
                     poll(&mut checkpoint)?;
                     let f = body(p);
                     poll(&mut checkpoint)?;
-                    if !f.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("nonfinite residual body force")); }
+                    if !f.iter().all(|v| v.is_finite()) {
+                        return Err(ElasticityError3::Invalid("nonfinite residual body force"));
+                    }
                     let (n, _) = q1(cell.bounds, p);
-                    for a in 0..8 { for c in 0..3 { result[id].load += weight * n[a] * f[c] * wc[3 * a + c]; } }
+                    for a in 0..8 {
+                        for c in 0..3 {
+                            result[id].load += weight * n[a] * f[c] * wc[3 * a + c];
+                        }
+                    }
                 }
             }
             if let Some(surface) = law.surface {
-                for point in cell.rules.surface().expect("surface family admitted").points() {
+                for point in cell
+                    .rules
+                    .surface()
+                    .expect("surface family admitted")
+                    .points()
+                {
                     poll(&mut checkpoint)?;
                     let f = surface.value(point.position, point.normal);
                     poll(&mut checkpoint)?;
-                    if !f.iter().all(|v| v.is_finite()) { return Err(ElasticityError3::Invalid("nonfinite residual surface force")); }
+                    if !f.iter().all(|v| v.is_finite()) {
+                        return Err(ElasticityError3::Invalid(
+                            "nonfinite residual surface force",
+                        ));
+                    }
                     let (n, _) = q1(cell.bounds, point.position);
-                    for a in 0..8 { for c in 0..3 {
-                        result[id].load += point.weight * n[a] * f[c] * wc[3 * a + c];
-                    } }
+                    for a in 0..8 {
+                        for c in 0..3 {
+                            result[id].load += point.weight * n[a] * f[c] * wc[3 * a + c];
+                        }
+                    }
                 }
             }
         }
         for face in &self.raw.ghosts {
             poll(&mut checkpoint)?;
-            let scale = 0.5 * (self.scales()[face.cells[0]] + self.scales()[face.cells[1]]);
+            let weight = face.scaled_weight(self.scales());
             let mut work = 0.0;
             for c in 0..3 {
-                let ju: f64 = face.nodes.iter().zip(&face.jump).map(|(&n, &j)| j * u[3 * n + c]).sum();
-                let jw: f64 = face.nodes.iter().zip(&face.jump).map(|(&n, &j)| j * w[3 * n + c]).sum();
-                work += scale * face.weight * ju * jw;
+                let ju: f64 = face
+                    .nodes
+                    .iter()
+                    .zip(&face.jump)
+                    .map(|(&n, &j)| j * u[3 * n + c])
+                    .sum();
+                let jw: f64 = face
+                    .nodes
+                    .iter()
+                    .zip(&face.jump)
+                    .map(|(&n, &j)| j * w[3 * n + c])
+                    .sum();
+                work += weight * ju * jw;
             }
-            for &cell in &face.cells { result[cell].ghost += 0.5 * work; }
+            for &cell in &face.cells {
+                result[cell].ghost += 0.5 * work;
+            }
         }
-        if result.iter().any(|r| !r.load.is_finite() || !r.bulk.is_finite() || !r.ghost.is_finite() || !r.residual().is_finite()) {
-            return Err(ElasticityError3::Invalid("local residual arithmetic overflow"));
+        if result.iter().any(|r| {
+            !r.load.is_finite()
+                || !r.bulk.is_finite()
+                || !r.ghost.is_finite()
+                || !r.residual().is_finite()
+        }) {
+            return Err(ElasticityError3::Invalid(
+                "local residual arithmetic overflow",
+            ));
         }
-        poll(&mut checkpoint)?; Ok(result)
+        poll(&mut checkpoint)?;
+        Ok(result)
     }
 }

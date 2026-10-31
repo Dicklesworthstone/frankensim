@@ -35,24 +35,33 @@ impl CutElasticity3 {
     /// For a solved scalar objective R, solve K z=R_u and use
     /// dR/ds_c=R_s[c]+z^T db_g/ds_c-z^T(dK/ds_c)u. This numerical reference
     /// reaction is not physical actuator work or a follower/shape derivative.
-    pub fn embedded_reaction(&self, u: &[f64],
+    pub fn embedded_reaction(
+        &self,
+        u: &[f64],
         prescribed: Option<&dyn Fn([f64; 3], [f64; 3]) -> [f64; 3]>,
         mode: &dyn Fn([f64; 3], [f64; 3]) -> [f64; 3],
-        mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<EmbeddedReaction3, ElasticityError3> {
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<EmbeddedReaction3, ElasticityError3> {
         poll(&mut checkpoint)?;
         if u.len() != self.n() || u.iter().any(|v| !v.is_finite()) {
             return Err(ElasticityError3::Invalid("invalid embedded reaction field"));
         }
         let local = self.displacement_cells(mode, &mut checkpoint)?;
-        let data = self.embedded.as_ref().expect("lifting admitted embedded support");
-        let mut result = EmbeddedReaction3 { value: 0.0, displacement_gradient: vec![0.0; self.n()],
-            scale_gradient: vec![0.0; self.cells.len()] };
+        let data = self
+            .embedded
+            .as_ref()
+            .expect("lifting admitted embedded support");
+        let mut result = EmbeddedReaction3 {
+            value: 0.0,
+            displacement_gradient: vec![0.0; self.n()],
+            scale_gradient: vec![0.0; self.cells.len()],
+        };
         for (id, cell) in self.cells.iter().enumerate() {
             poll(&mut checkpoint)?;
             let mut direct = 0.0;
             if let Some(g) = prescribed {
                 if !data.points[id].is_empty() {
-                    let gamma = penalty(cell, data.lame, data.beta)?;
+                    let gamma = penalty(cell, data.beta)?;
                     let rule = cell.rules.surface().expect("builder retained surface");
                     for &index in &data.points[id] {
                         poll(&mut checkpoint)?;
@@ -61,26 +70,37 @@ impl CutElasticity3 {
                         let value = g(point.position, point.normal);
                         poll(&mut checkpoint)?;
                         if h.iter().chain(&value).any(|v| !v.is_finite()) {
-                            return Err(ElasticityError3::Invalid("nonfinite reaction mode or prescribed motion"));
+                            return Err(ElasticityError3::Invalid(
+                                "nonfinite reaction mode or prescribed motion",
+                            ));
                         }
-                        direct += point.weight*gamma*h.iter().zip(value).map(|(a,b)| a*b).sum::<f64>();
+                        direct += point.weight
+                            * gamma
+                            * h.iter().zip(value).map(|(a, b)| a * b).sum::<f64>();
                     }
                 }
             }
             for i in 0..24 {
-                let node = cell.nodes[i/3];
+                let node = cell.nodes[i / 3];
                 if !self.fixed[node] {
-                    let dof = 3*node+i%3;
-                    direct -= local[id][i]*u[dof];
-                    result.displacement_gradient[dof] -= self.scales[id]*local[id][i];
+                    let dof = 3 * node + i % 3;
+                    direct -= local[id][i] * u[dof];
+                    result.displacement_gradient[dof] -= self.scales[id] * local[id][i];
                 }
             }
             result.scale_gradient[id] = direct;
-            result.value += self.scales[id]*direct;
+            result.value += self.scales[id] * direct;
         }
-        if !result.value.is_finite() || result.displacement_gradient.iter()
-            .chain(&result.scale_gradient).any(|v| !v.is_finite()) {
-            return Err(ElasticityError3::Invalid("embedded reaction arithmetic overflow"));
+        if !result.value.is_finite()
+            || result
+                .displacement_gradient
+                .iter()
+                .chain(&result.scale_gradient)
+                .any(|v| !v.is_finite())
+        {
+            return Err(ElasticityError3::Invalid(
+                "embedded reaction arithmetic overflow",
+            ));
         }
         poll(&mut checkpoint)?;
         Ok(result)
