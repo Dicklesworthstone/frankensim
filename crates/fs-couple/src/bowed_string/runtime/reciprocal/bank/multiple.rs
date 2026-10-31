@@ -136,16 +136,16 @@ impl MultiBowStringBank {
     ///
     /// The omitted bending tail is quasi-static. Its separately reported
     /// backward-Euler loss is numerical and vanishes with modal enrichment;
-    /// no claim is made near omitted resonances. Normal contacts, migrating
-    /// bows, nonlinear stretching, material compliant ribbons, receiving fibers
+    /// no claim is made near omitted resonances. A material-derived series
+    /// hair spring/dashpot composes on the same load line: its reversible
+    /// storage and physical dashpot loss remain separate from the omitted
+    /// string tail's storage and numerical loss. Normal contacts, migrating
+    /// bows, nonlinear stretching, receiving fibers
     /// and source-bound interface histories refuse in this lane.
     pub fn with_bow_residual_flexibility(mut self, gate: &CancelGate)
         -> Result<Self, ReciprocalStringError>
     {
         poll(gate)?;
-        if self.source.compliant_ribbon.is_some() {
-            return Err(invalid("bow residual flexibility does not yet bind material compliant ribbons"));
-        }
         if !self.source.bank.residual_flexibility() || self.bow_stations.is_some()
             || self.source.fiber_ribbon.is_some()
             || !self.source.bank.translational_body_connections().is_empty() {

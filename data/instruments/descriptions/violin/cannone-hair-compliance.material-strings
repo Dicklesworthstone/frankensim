@@ -17,6 +17,8 @@ string violin-string-dominant-e-pickering1985-section.fsmatpk 0.383 0.0001555 te
 section homogeneous
 polarizations two 1 0 1 0
 prepared-linear 512 4294967296 1000000000000000
+residual-flexibility exact-static-green
+bow-residual-flexibility exact-static-green
 cavity physical-neck 0.002060956 0.027194321 0.003045029 flanged flanged 1
 friction stribeck 0.8 0.4 0.1 0
 bow_ribbon 0.010 3

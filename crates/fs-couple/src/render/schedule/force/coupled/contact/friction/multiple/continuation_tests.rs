@@ -288,6 +288,63 @@ fn friction_residual_cross_terms_match_the_analytic_first_sticking_step() {
 }
 
 #[test]
+fn friction_residual_and_material_drive_share_one_load_line_and_separate_losses() {
+    let g = vec![2e-5, 5e-6, 5e-6, 4e-5];
+    let gate = CancelGate::new_clock_free();
+    let mut joint = residual_system(g.clone())
+        .with_series_compliant_drives(vec![(0, 4e4, 0.4), (1, 7e4, 0.8)], &gate)
+        .unwrap();
+    let dt = joint.sample_period_s();
+    // Independent two-contact static solve: retained response + string tail +
+    // hair compliance. Cross-port coupling belongs only to the original string.
+    let a = joint.compliance[0] + g[0] + 1.0 / (0.5 * 4e4 + 0.4 / dt);
+    let b = joint.compliance[1] + g[1];
+    let d = joint.compliance[3] + g[3] + 1.0 / (0.5 * 7e4 + 0.8 / dt);
+    let distance = 0.02 * dt;
+    let determinant = a * d - b * b;
+    let expected = [-b * distance / determinant, a * distance / determinant];
+    let drive = [FrictionDrive { speed_m_s: 0.0, normal_force_n: 1.0 },
+        FrictionDrive { speed_m_s: 0.02, normal_force_n: 1.0 }];
+    let frame = joint.step(&[0.0, 0.0], &drive).unwrap().clone();
+    let mut hair_storage = 0.0;
+    let mut hair_loss = 0.0;
+    for (i, (k, c)) in [(4e4, 0.4), (7e4, 0.8)].into_iter().enumerate() {
+        let stretch = expected[i] / (0.5 * k + c / dt);
+        let stored = 0.5 * k * stretch * stretch;
+        let heat = c * stretch * stretch / dt;
+        assert_eq!(frame.ports[i].regime, ModalFrictionRegime::Sticking);
+        assert!((frame.ports[i].traction_n - expected[i]).abs() < 1e-10);
+        assert!((frame.ports[i].series_drive_dissipation_j - heat).abs() < 1e-14);
+        assert_eq!(frame.ports[i].dissipation_j, 0.0);
+        hair_storage += stored;
+        hair_loss += heat;
+    }
+    let tail_storage = 0.5 * (g[0] * expected[0].powi(2)
+        + 2.0 * g[1] * expected[0] * expected[1] + g[3] * expected[1].powi(2));
+    assert!((frame.friction_residual_energy_j - tail_storage).abs() < 1e-14);
+    assert_eq!(frame.friction_residual_energy_j, frame.friction_residual_loss_j);
+    assert!((frame.friction_dissipation_j - hair_loss).abs() < 1e-14);
+    let network_storage = joint.core.network.total_energy_j().unwrap();
+    assert!((joint.total_energy_j().unwrap() - network_storage - hair_storage - tail_storage).abs() < 1e-14);
+    assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+
+    // A released interface must unload both stores rather than discard them.
+    // The original series state and residual force carry the history through
+    // reversal and release; numerical tail loss must never become hair heat.
+    for i in 0..96 {
+        let speed = if i < 32 { 0.02 } else { -0.03 };
+        let normal = if i < 64 { 0.1 } else { 0.0 };
+        let frame = joint.step(&[0.0, 0.0], &[
+            FrictionDrive { speed_m_s: speed, normal_force_n: normal },
+            FrictionDrive { speed_m_s: -speed, normal_force_n: normal },
+        ]).unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(frame.ports.iter().all(|p| p.series_drive_dissipation_j >= 0.0));
+    }
+    assert_eq!(joint.last_frame().unwrap().friction_residual_energy_j, 0.0);
+}
+
+#[test]
 fn friction_residual_history_closes_work_through_drive_reversal_and_release() {
     let g = vec![2e-5, -5e-6, -5e-6, 4e-5];
     let mut joint = residual_system(g.clone());

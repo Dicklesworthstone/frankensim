@@ -15714,12 +15714,22 @@ response, and whole-candidate refusal/cancellation.
 
 `material_immersed::RetainedFluidSpheres` binds one original `MaterialScaling`
 and its `FluidTransport` source to the existing D3Q19 moving-sphere assembly.
-The same frozen transport snapshot determines the bulk BGK relaxation,
+The same current transport snapshot determines the bulk BGK relaxation,
 reference-density unit conversion and missing-film dynamic viscosity. Film
 cutoff/regularization are explicit geometry/calibration inputs; there is no
 independent viscosity knob. Each `AdditionalMaterialSphere` retains its
 original `ResolvedBody`, requiring a matching uniform spherical material
 region. Source density supplies mass and inertia without material-name cases.
+
+`rebind_fluid` admits a new original transport snapshot on that continuing
+trajectory and updates bulk relaxation and all normal/tangential film
+resistances together. Every accepted population, body pose and momentum,
+additional inertia, geometry, physical conversion and step count is preserved.
+The original dx/dt and speed bound remain; any changed reference density
+refuses because it would reinterpret conserved mass and momentum. Source,
+scaling or cancellation failure leaves the original binding and laws intact.
+The native collision owner preserves its family and higher-order relaxation;
+film geometry, regularization and work limits likewise remain unchanged.
 
 Held SI forces/couples become native impulses using the same dx/dt and density
 scales. Actual midpoint gaps drive the original cutoff-subtracted normal film
@@ -15732,8 +15742,9 @@ expose their mass, inertia, impulse, angular impulse and energy in SI.
 
 The model deliberately retains the native INTERIOR fluid. Sourced carrier
 inertia is ADDITIONAL to it; this is not a displaced-fluid rigid-solid closure,
-and subtracting a guessed interior mass is not supported. This lane is frozen,
-incompressible Newtonian flow with declared spherical geometry and stationary
+and subtracting a guessed interior mass is not supported. This lane is
+incompressible Newtonian flow with transport held within each step, declared
+spherical geometry and stationary
 or periodic domain faces. It adds no finite heating, phase transition, contact,
 moving-wall model, compressible/rarefied film, measured cutoff calibration or
 trajectory accuracy certificate. Low-Mach and native geometric admission are
@@ -15745,6 +15756,14 @@ SI missing-film impulse/work formula and actual population-plus-carrier
 momentum; physical load conversion, continuation and cancellation/refusal
 rollback; and source/geometry/allocation-domain admission. Fixtures use
 synthetic source cards and do not imply experimental validation.
+
+Three additional focused groups exercise live viscosity intervention after
+native motion, exact history preservation and no-op continuation, current
+bulk relaxation and independent SI film impulse/heat, original population/body
+momentum, density/cancellation rollback with deterministic retry, and native
+collision-family/higher-rate preservation. The refresh can consume externally
+evolved temperature/composition data but adds no such evolution or finite heat
+store; time refinement is still required for varying transport.
 
 ## Source-bound hysteretic circuit heating
 

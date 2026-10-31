@@ -188,6 +188,15 @@ spatial cells retain their own slip and series elastic state in the same
 coupled solver and common gesture timeline. This is a declared bow-family
 model, not a measurement of Cannone's bow or the reference recording's bow.
 
+The same description includes the omitted string-bending compliance at the
+bridge and all three bow cells. The exact static Green function supplies this
+tail and its cross-cell reactions from the string's tension, bending stiffness
+and geometry. The joint solve composes that response with the series hair
+springs and dashpots; changing hair material does not retune the string/body
+modes. Hair spring energy and physical viscous heat remain separate from the
+tail's stored energy and numerical backward-Euler loss. This tail requires
+modal and time refinement and has no validity claim near omitted resonances.
+
 ```bash
 hair_dir="$(mktemp -d)"
 hair=bow-hair-horse-pitteroff-woodhouse-acustica1998

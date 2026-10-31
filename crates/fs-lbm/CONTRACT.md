@@ -35,6 +35,18 @@ does not establish phase/EOS support or bound future external heating. Focused
 `material_buoyancy` tests exercise real 2-D/3-D evolution, pressure/composition
 substitution, signed forces, off-center source temperature and atomic refresh.
 
+`BoundaryGrid3::rebind_shear_relaxation` extends uniform transport refresh to
+the original tiled boundary/moving-body solver. It delegates to the existing
+`ViscousLattice3` rate owner, preserving the collision family, higher-order
+rates, populations, forces, topology and work buffers. D3Q19's original
+second-order bulk/shear tie remains. Invalid rates refuse before mutation;
+the operation does not change mass units or add thermal energy.
+`SphereLubrication3::with_dynamic_viscosity` preserves original film geometry,
+tangential modes and work limits for the same material refresh. A coupled
+consumer must bind both rates from one physical snapshot, as the material
+immersed-sphere adapter does; neither numeric setter supplies material
+identity or a conservative density change.
+
 ### Shared solid/fluid material feedback in natural convection
 
 `MaterialChtFluid::solve_natural_convection_with_material_solids` resolves both

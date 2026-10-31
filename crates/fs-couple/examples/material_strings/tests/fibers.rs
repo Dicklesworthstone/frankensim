@@ -1298,12 +1298,40 @@ fn quasistatic_fibers_refuse_implicit_loss_or_conflicting_material_query() {
     conflict.material_states.insert(conflict.bow_compliance.as_ref().unwrap().pack.clone(),
         vec![("relative_humidity_known".into(), 1.0)]);
     assert!(conflict.network_dimensions(false).is_err());
+}
+
+#[test]
+fn quasistatic_hair_and_omitted_string_bending_compose_without_retuning() {
     scoped(|cx, gate| {
-        let residual = text.replace("cavity neck", "residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green\ncavity neck");
-        let error = input::Spec::parse(residual.as_bytes()).unwrap().compile(cx, gate, |name| {
-            Ok(if name.starts_with("bow-hair-") { quasistatic_pack(7e9, Some(1e6)) }
+        let text = quasistatic_text().replace("cavity neck",
+            "residual-flexibility exact-static-green\nbow-residual-flexibility exact-static-green\ncavity neck");
+        let make = |young| input::Spec::parse(text.as_bytes()).unwrap().compile(cx, gate, |name| {
+            Ok(if name.starts_with("bow-hair-") { quasistatic_pack(young, Some(1e6)) }
             else { pack(name, 7800.0, 200_000.0, None) })
-        }).err().unwrap().to_string();
-        assert!(error.contains("does not yet bind material compliant ribbons"), "{error}");
+        }).unwrap();
+        let mut soft = make(7e9);
+        let mut stiff = make(28e9);
+        let source = soft.performance.bank().source();
+        assert!(source.bank().residual_flexibility());
+        assert!(source.compliant_ribbon().is_some());
+        let tail = soft.performance.bank().system().friction_residual_compliance().unwrap();
+        assert_eq!(tail.len(), 9);
+        assert!(tail[0] > 0.0 && tail[1] != 0.0);
+        assert_eq!(Some(tail), stiff.performance.bank().system().friction_residual_compliance());
+        for (a, b) in soft.performance.bank().system().components().iter()
+            .zip(stiff.performance.bank().system().components()) {
+            assert_eq!(a.modes(), b.modes(), "hair data must not retune string/body modes");
+        }
+        let expected = pressure(&mut soft, 37);
+        let changed = pressure(&mut stiff, 128);
+        assert!(expected.iter().any(|p| p.abs() > 1e-12));
+        assert!(expected.iter().zip(changed).any(|(a, b)| (a-b).abs() > 1e-12));
+        let frame = soft.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert!(frame.ports.iter().any(|p| p.series_drive_dissipation_j > 0.0));
+        assert!(frame.friction_residual_energy_j > 0.0);
+        let (encoded, _) = fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48000, 0.01).unwrap();
+        let (output, _) = make(7e9).write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
+        assert_eq!(output.into_inner(), encoded);
     });
 }
