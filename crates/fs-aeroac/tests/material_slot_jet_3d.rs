@@ -5,9 +5,13 @@ use fs_aeroac::SCOPE_STATEMENT;
 use fs_aeroac::material::{JetPhysicalState, MaterialSlotJet3d, SlotJet3dSetup};
 use fs_aeroac::slot_jet_3d::run_slot_jet_3d;
 use fs_lbm::d3q19::CollisionModel3;
+use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::read_gas_state;
 use fs_math::c64::C64;
+use fs_qty::{Pressure, Temperature};
+use fs_thermochem::water::if97::region3::pressure::DensePressureSolve;
+use fs_thermochem::water::transport::If97TransportState;
 
 fn setup() -> SlotJet3dSetup {
     SlotJet3dSetup {
@@ -214,4 +218,60 @@ fn g0_incoherent_material_mach_and_allocation_refuse_before_execution() {
         ..setup()
     };
     assert!(MaterialSlotJet3d::try_new(&good, &invalid_rate, physical()).is_err());
+}
+
+#[test]
+fn g1_original_liquid_source_reaches_native_3d_flow_and_force_spectrum() {
+    let water = If97TransportState::at_pressure_temperature(
+        Pressure::new(2e6),
+        Temperature::new(300.0),
+        DensePressureSolve {
+            pressure_tolerance_pa: 1e-4,
+            density_tolerance_kg_m3: 1e-8,
+            maximum_iterations: 128,
+        },
+        || false,
+    )
+    .unwrap();
+    let physical = JetPhysicalState {
+        cell_size_m: 1e-5,
+        timestep_s: 1e-6,
+        ..physical()
+    };
+    let model = MaterialSlotJet3d::try_new(&water, &setup(), physical).unwrap();
+    let run = model.run().unwrap();
+    let lattice = run_slot_jet_3d(model.lattice_config()).unwrap();
+    let rho = water.thermodynamics().density().value();
+    let speed = water.thermodynamics().sound_speed().value();
+    let dx = physical.cell_size_m;
+    let dt = physical.timestep_s;
+    assert!(core::ptr::eq(model.scaling().material(), &water));
+    assert!(core::ptr::eq(run.material(), &water));
+    assert_eq!(model.acoustic(), water.acoustic_state().unwrap());
+    assert_eq!(run.acoustic(), model.acoustic());
+    let rate = match model.lattice_config().collision {
+        CollisionModel3::CentralMoment {
+            second_order_rate, ..
+        } => second_order_rate,
+        _ => panic!("original central-moment solver required"),
+    };
+    close(
+        1.0 / rate,
+        0.5 + 3.0 * water.dynamic_viscosity().value() / rho * dt / (dx * dx),
+    );
+    for (actual, original) in run.force_series_n().iter().zip(lattice.force_series) {
+        for axis in 0..2 {
+            close(actual[axis], original[axis] * rho * dx.powi(4) / dt.powi(2));
+        }
+    }
+    close(
+        run.final_plane_physical_mach_max,
+        lattice.diagnostics.mach_max_lattice * dx / dt / speed,
+    );
+    let line = run.force_spectral_line(4).unwrap();
+    close(
+        line.acoustic_wavenumber_rad_m,
+        core::f64::consts::TAU * line.frequency_hz / speed,
+    );
+    assert!(line.force_n[1].abs() > 0.0);
 }

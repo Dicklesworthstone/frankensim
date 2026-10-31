@@ -8,9 +8,14 @@ use fs_aeroac::material::{
     JetLabiumSetup, JetPhysicalState, MaterialJetLabium, MaterialJetLabiumRun,
 };
 use fs_lbm::core2::CollisionModel2;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
+use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_material::gas::GasState;
 use fs_material::gas_species::input::read_gas_state;
 use fs_math::{c64::C64, det};
+use fs_qty::{Pressure, Temperature};
+use fs_thermochem::water::if97::region3::pressure::DensePressureSolve;
+use fs_thermochem::water::transport::If97TransportState;
 
 fn setup() -> JetLabiumSetup {
     JetLabiumSetup {
@@ -242,4 +247,130 @@ fn g0_material_and_physical_applicability_refuse_before_running() {
         ..setup
     };
     assert!(MaterialJetLabium::try_new(&good, &overflow_geometry, physical()).is_err());
+}
+
+#[test]
+fn g3_original_water_eos_drives_flow_force_and_same_state_radiation() {
+    let physical = JetPhysicalState {
+        cell_size_m: 1e-5,
+        timestep_s: 1e-6,
+        ..physical()
+    };
+    let states = [300.0, 330.0].map(|t| {
+        If97TransportState::at_pressure_temperature(
+            Pressure::new(2e6),
+            Temperature::new(t),
+            DensePressureSolve {
+                pressure_tolerance_pa: 1e-4,
+                density_tolerance_kg_m3: 1e-8,
+                maximum_iterations: 128,
+            },
+            || false,
+        )
+        .unwrap()
+    });
+    let models: Vec<_> = states
+        .iter()
+        .map(|water| MaterialJetLabium::try_new(water, &setup(), physical).unwrap())
+        .collect();
+    let runs: Vec<_> = models.iter().map(|model| model.run().unwrap()).collect();
+    for (i, water) in states.iter().enumerate() {
+        let thermo = water.thermodynamics();
+        let rho = thermo.density().value();
+        let speed = thermo.sound_speed().value();
+        let nu = water.dynamic_viscosity().value() / rho;
+        let dx = physical.cell_size_m;
+        let dt = physical.timestep_s;
+        close(
+            models[i].lattice_config().tau,
+            0.5 + 3.0 * nu * dt / (dx * dx),
+        );
+        assert_eq!(models[i].acoustic(), water.acoustic_state().unwrap());
+        assert!(core::ptr::eq(models[i].scaling().material(), water));
+        assert!(core::ptr::eq(runs[i].material(), water));
+        assert_eq!(runs[i].acoustic().sound_speed_m_s(), speed);
+        let lattice = run_jet_labium(models[i].lattice_config()).unwrap();
+        for (actual, original) in runs[i].force_series_n_m().iter().zip(lattice.force_series) {
+            for axis in 0..2 {
+                close(actual[axis], original[axis] * rho * dx.powi(3) / dt.powi(2));
+            }
+        }
+        let line = runs[i]
+            .observe_spectral_line(4, [0.2, 0.1], [0.0, 0.0])
+            .unwrap();
+        let expected = dipole_pressure(
+            line.force_n_m,
+            core::f64::consts::TAU * line.frequency_hz / speed,
+            [0.2, 0.1],
+            [0.0, 0.0],
+        )
+        .unwrap();
+        assert_eq!(line.field.pressure, expected.pressure);
+        assert!(line.field.pressure.abs() > 0.0);
+    }
+    assert_ne!(
+        models[0].lattice_config().tau,
+        models[1].lattice_config().tau
+    );
+    assert_ne!(runs[0].force_series_n_m(), runs[1].force_series_n_m());
+    assert_ne!(
+        runs[0].acoustic().sound_speed_m_s(),
+        runs[1].acoustic().sound_speed_m_s()
+    );
+    // Hold the physical source fixed to isolate the original water EOS in propagation.
+    let force = [C64::new(0.0, 0.0), C64::new(1.0, 0.5)];
+    let pressures: Vec<_> = runs
+        .iter()
+        .map(|run| {
+            run.radiate_force_line(force, 5000.0, [0.2, 0.1], [0.0, 0.0])
+                .unwrap()
+                .pressure
+        })
+        .collect();
+    assert_ne!(pressures[0], pressures[1]);
+}
+
+#[test]
+fn g0_mixed_transport_and_acoustic_density_refuses_both_native_rigs() {
+    struct IncoherentFluid;
+    impl FluidTransport for IncoherentFluid {
+        fn transport_state(&self) -> Result<FluidTransportState, fs_material::MaterialError> {
+            FluidTransportState::try_new(1000.0, 4200.0, 0.6, 0.001)
+        }
+    }
+    impl FluidAcoustics for IncoherentFluid {
+        fn acoustic_state(&self) -> Result<FluidAcousticState, fs_material::MaterialError> {
+            FluidAcousticState::try_new(900.0, 1500.0)
+        }
+    }
+    let error = MaterialJetLabium::try_new(&IncoherentFluid, &setup(), physical())
+        .err()
+        .unwrap();
+    assert!(error.to_string().contains("same density"));
+    let setup3 = fs_aeroac::material::SlotJet3dSetup {
+        nx: 64,
+        ny: 32,
+        nz: 8,
+        slot_half: 3.0,
+        higher_order_rate: 1.2,
+        nozzle_thickness: 2,
+        edge_distance: 12,
+        plate_length: 16,
+        fringe_width: 12,
+        fringe_sigma: 0.3,
+        seed_amplitude: 0.02,
+        steps_settle: 16,
+        steps_record: 64,
+    };
+    let error = fs_aeroac::material::MaterialSlotJet3d::try_new(
+        &IncoherentFluid,
+        &setup3,
+        JetPhysicalState {
+            max_cells: 64 * 32 * 8,
+            ..physical()
+        },
+    )
+    .err()
+    .unwrap();
+    assert!(error.to_string().contains("same density"));
 }

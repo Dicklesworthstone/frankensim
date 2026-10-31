@@ -156,13 +156,19 @@ scope law, pinned as data and by test).
 ### Shared material integration
 
 `material::MaterialJetLabium` binds geometry and physical speed/dx/dt inputs
-to the shared `GasState` and `fs-lbm::material::MaterialScaling` owner. Gas
-coherence is admitted before compilation. The existing jet-labium solver
+to one `FluidTransport + FluidAcoustics` source and the existing
+`fs-lbm::material::MaterialScaling` owner. Gas coherence and each liquid or
+real-gas owner's original state/phase admission remain active. Acoustic and
+transport density must match exactly before compilation. The existing jet-labium solver
 receives material-derived viscosity; its actual surface force is converted
-to N/m with `rho * dx^3 / dt^2`. Physical frequency and the same gas's sound
+to N/m with `rho * dx^3 / dt^2`. Physical frequency and the same fluid's sound
 speed supply `k = 2 pi f / c` to the existing Curle observer. No independent
 rho, viscosity, Reynolds number or acoustic speed can override the binding.
-Pure, humid, mixed and thermochemical gas evaluations use the same path.
+Pure, humid, mixed and thermochemical gases, nonideal gas states and acoustic
+liquids use the same path. Original source owners remain borrowed and available
+through `material()`/`scaling().material()`. The frozen `acoustic()` snapshot
+supplies both physical Mach and propagation; observers never re-query a source
+or reconstruct liquid/real-gas properties through an ideal-gas surrogate.
 `MaterialJetLabiumRun::observe_spectral_line` transforms its own accepted
 force history with `fs-fft`, mean removal and the existing symmetric Hann
 window. Coherent-gain normalization preserves resolved sinusoid amplitude;
@@ -176,7 +182,7 @@ An observed speed-envelope violation refuses output; diagnostics sample the
 existing two planes every 16 steps and do not prove the full-field bound.
 Observer frequencies at or above the force record's Nyquist limit refuse.
 The medium is homogeneous and frozen during a run. Compressible feedback,
-reaction, relaxation/absorption, global flow validity and quantitative
+reaction, cavitation, phase transitions, relaxation/absorption, global flow validity and quantitative
 experimental accuracy are not established by this adapter; the crate's
 two-dimensional shape/scaling scope remains unchanged.
 
@@ -185,15 +191,19 @@ same-state radiation, independent physical/numerical Mach admission, and
 data-only pressure/temperature/mixture changes through executed flow and
 observer outputs (G0/G3). These short transient tests establish integration,
 not a converged tonal spectrum or absolute sound level.
+The original IAPWS IF97 water EOS and industrial transport laws also drive
+executed jet histories, SI forces and same-state radiation at two temperatures.
+Independent force-unit and wavenumber checks cover this liquid path; incompatible
+transport/acoustic densities refuse before either spatial rig runs.
 
 `material::MaterialSlotJet3d` applies the same material/scaling owner to the
 existing D3Q19 central-moment slot-jet rig. Its second-order relaxation rate is
-derived from the gas's actual kinematic viscosity; only higher-order numerical
+derived from the fluid's actual kinematic viscosity; only higher-order numerical
 relaxation remains an independent control. Three-dimensional momentum exchange
 converts with `rho * dx^4 / dt^2` into N across one explicitly retained periodic
 span. Both material adapters share one Hann/coherent-gain/phase FFT extraction.
 The physical line frequency and acoustic wavenumber use the same timestep and
-gas as the flow. A three-dimensional periodic-cell force is not passed to the
+fluid as the flow. A three-dimensional periodic-cell force is not passed to the
 two-dimensional Curle Green function or relabeled as microphone pressure.
 
 The 3-D initial-speed admission includes the rig's 1.5 maximum spanwise seed
@@ -203,6 +213,8 @@ final-plane samples, not a global speed bound or maximum over the recording.
 `tests/material_slot_jet_3d.rs` executes pressure, temperature and composition
 substitutions through the original solver, independently checks SI force and
 DFT amplitude/phase, and checks necessary material/Mach/allocation refusals.
+An original IF97 liquid also reaches the native D3Q19 solver, physical force
+conversion, Mach report and spectral wavenumber without replacing its EOS.
 This frozen homogeneous low-Mach adapter supplies no compressible feedback,
 chemical evolution, acoustic radiation, turbulence-convergence or SPL claim.
 

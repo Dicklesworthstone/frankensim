@@ -1,11 +1,13 @@
 //! Material-bound flow sources and acoustic observations in physical units.
 //!
-//! The same admitted gas supplies viscosity to the existing incompressible
+//! The same admitted fluid supplies viscosity to the existing incompressible
 //! jet solver, density to its surface-force conversion, and sound speed to
 //! Curle radiation. Changing pressure, temperature or composition recompiles
 //! those quantities together. No lattice sound speed is interpreted as a
-//! physical acoustic speed. This is a frozen, homogeneous, low-Mach medium;
-//! chemistry, compressible feedback and atmospheric absorption are absent.
+//! physical acoustic speed. Gas, liquid and real-gas sources use their original
+//! transport and acoustic laws without an ideal-gas conversion. This is a
+//! frozen, homogeneous, low-Mach medium; chemistry, cavitation, compressible
+//! feedback and atmospheric absorption are absent.
 //! The existing two-dimensional shape/scaling scope still applies to Curle
 //! observation. The three-dimensional adapter retains periodic-cell force;
 //! it does not reinterpret that force as an isolated acoustic source.
@@ -18,6 +20,9 @@ pub use slot_jet_3d::{
 
 use fs_lbm::core2::CollisionModel2;
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
+use fs_material::MaterialError;
+use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
+use fs_material::fluid_transport::FluidTransport;
 use fs_material::gas::GasState;
 use fs_math::c64::C64;
 
@@ -82,6 +87,8 @@ pub struct JetPhysicalState {
 pub enum MaterialAeroacError {
     /// The common material-to-lattice owner refused its input.
     Scaling(MaterialLbmError),
+    /// The original material acoustic owner refused its state.
+    Material(MaterialError),
     /// Geometry, applicability, radiation or solver refusal.
     Aeroac(AeroacError),
 }
@@ -90,6 +97,7 @@ impl core::fmt::Display for MaterialAeroacError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Self::Scaling(error) => write!(f, "{error}"),
+            Self::Material(error) => write!(f, "{error}"),
             Self::Aeroac(error) => write!(f, "{error}"),
         }
     }
@@ -110,23 +118,42 @@ fn invalid(what: &'static str) -> MaterialAeroacError {
     AeroacError::InvalidParameter { what }.into()
 }
 
+// Both rigs retain one frozen acoustic snapshot beside the actual transport
+// binding. A caller implementing the two views cannot mix different densities.
+fn acoustic_from_scaling<F: FluidTransport + FluidAcoustics + ?Sized>(
+    scaling: &MaterialScaling<'_, F>,
+) -> Result<FluidAcousticState, MaterialAeroacError> {
+    let acoustic = scaling
+        .material()
+        .acoustic_state()
+        .map_err(MaterialAeroacError::Material)?;
+    if acoustic.density_kg_m3().to_bits() != scaling.transport().density_kg_m3().to_bits() {
+        return Err(invalid(
+            "flow and acoustic material views must share the same density",
+        ));
+    }
+    Ok(acoustic)
+}
+
 /// One compiled medium/geometry binding. Derived controls are read-only.
-pub struct MaterialJetLabium<'a> {
-    scaling: MaterialScaling<'a, GasState>,
+pub struct MaterialJetLabium<'a, F: FluidTransport + FluidAcoustics + ?Sized = GasState> {
+    scaling: MaterialScaling<'a, F>,
+    acoustic: FluidAcousticState,
     config: JetLabiumConfig,
     max_speed_m_s: f64,
     force_per_span_unit_n_m: f64,
 }
 
-impl<'a> MaterialJetLabium<'a> {
-    /// Bind a pure, moist, mixed or thermochemical gas state to the real rig.
-    /// Every gas is admitted through the shared coherent transport contract.
+impl<'a, F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabium<'a, F> {
+    /// Bind one original gas, liquid or real-gas material state to the real rig.
+    /// Transport and acoustic views must have identical density. Source receipts
+    /// and phase policy remain on the borrowed material; no gas surrogate is made.
     ///
     /// # Errors
     /// Refuses inconsistent gas fields, invalid geometry/budgets, unrepresentable
     /// units, an insufficient speed envelope or excessive physical/lattice Mach.
     pub fn try_new(
-        gas: &'a GasState,
+        material: &'a F,
         setup: &JetLabiumSetup,
         physical: JetPhysicalState,
     ) -> Result<Self, MaterialAeroacError> {
@@ -141,14 +168,15 @@ impl<'a> MaterialJetLabium<'a> {
             return Err(invalid("physical jet speed must be finite and positive"));
         }
         let scaling = plan_scaling_from_material(
-            gas,
+            material,
             physical.cell_size_m,
             physical.timestep_s,
             physical.max_speed_m_s,
         )?;
-        if physical.max_speed_m_s / gas.sound_speed >= MAX_PHYSICAL_MACH {
+        let acoustic = acoustic_from_scaling(&scaling)?;
+        if physical.max_speed_m_s / acoustic.sound_speed_m_s() >= MAX_PHYSICAL_MACH {
             return Err(invalid(
-                "gas speed envelope exceeds the incompressible physical Mach limit",
+                "fluid speed envelope exceeds the incompressible physical Mach limit",
             ));
         }
         let config = JetLabiumConfig {
@@ -191,6 +219,7 @@ impl<'a> MaterialJetLabium<'a> {
         }
         Ok(Self {
             scaling,
+            acoustic,
             config,
             max_speed_m_s: physical.max_speed_m_s,
             force_per_span_unit_n_m: force_unit,
@@ -199,11 +228,17 @@ impl<'a> MaterialJetLabium<'a> {
 
     /// Shared material/transport/units binding used by the flow solver.
     #[must_use]
-    pub const fn scaling(&self) -> &MaterialScaling<'a, GasState> {
+    pub const fn scaling(&self) -> &MaterialScaling<'a, F> {
         &self.scaling
     }
 
-    /// Compiled lattice inputs; inspectable without independently mutating gas
+    /// Frozen acoustic coefficients shared by Mach admission and observations.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Compiled lattice inputs; inspectable without independently mutating fluid
     /// viscosity, jet speed, density or acoustic speed.
     #[must_use]
     pub const fn lattice_config(&self) -> &JetLabiumConfig {
@@ -217,7 +252,7 @@ impl<'a> MaterialJetLabium<'a> {
     /// # Errors
     /// Existing rig refusals, an observed speed-envelope violation, or
     /// unrepresentable physical force refuse before any result is returned.
-    pub fn run(&self) -> Result<MaterialJetLabiumRun<'_>, MaterialAeroacError> {
+    pub fn run(&self) -> Result<MaterialJetLabiumRun<'_, F>, MaterialAeroacError> {
         let mut run = run_jet_labium(&self.config)?;
         let observed_speed = self.scaling.velocity_si(run.diagnostics.mach_max_lattice)?;
         if observed_speed > self.max_speed_m_s {
@@ -234,21 +269,23 @@ impl<'a> MaterialJetLabium<'a> {
             }
         }
         Ok(MaterialJetLabiumRun {
-            gas: self.scaling.material(),
+            material: self.scaling.material(),
+            acoustic: self.acoustic,
             timestep_s: self.scaling.timestep_s(),
             force_series_n_m: run.force_series,
-            sampled_physical_mach_max: observed_speed / self.scaling.material().sound_speed,
+            sampled_physical_mach_max: observed_speed / self.acoustic.sound_speed_m_s(),
             lattice_diagnostics: run.diagnostics,
         })
     }
 }
 
-/// The actual force history and observations in the same frozen gas state.
-pub struct MaterialJetLabiumRun<'a> {
-    gas: &'a GasState,
+/// The actual force history and observations in the same frozen fluid state.
+pub struct MaterialJetLabiumRun<'a, F: FluidTransport + FluidAcoustics + ?Sized = GasState> {
+    material: &'a F,
+    acoustic: FluidAcousticState,
     timestep_s: f64,
     force_series_n_m: Vec<[f64; 2]>,
-    /// Maximum sampled physical speed divided by this gas's acoustic speed.
+    /// Maximum sampled physical speed divided by this fluid's acoustic speed.
     /// Samples are restricted to the existing rig's diagnostic planes/ticks.
     pub sampled_physical_mach_max: f64,
     /// Existing Reynolds and numerical flow diagnostics, with their original
@@ -267,7 +304,7 @@ pub struct ObservedJetLine {
     pub field: DipoleField,
 }
 
-impl MaterialJetLabiumRun<'_> {
+impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
     /// Surface-force history `(Fx, Fy)` per unit span [N/m], sampled every dt.
     #[must_use]
     pub fn force_series_n_m(&self) -> &[[f64; 2]] {
@@ -280,10 +317,16 @@ impl MaterialJetLabiumRun<'_> {
         self.timestep_s
     }
 
-    /// Frozen gas shared by flow and the observer, including mixture properties.
+    /// Original material shared by flow and observation, retaining source data.
     #[must_use]
-    pub const fn gas(&self) -> &GasState {
-        self.gas
+    pub const fn material(&self) -> &F {
+        self.material
+    }
+
+    /// Exact frozen acoustic state used by the flow's physical Mach admission.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
     }
 
     /// Authority boundary retained from the existing two-dimensional rig.
@@ -321,7 +364,7 @@ impl MaterialJetLabiumRun<'_> {
 
     /// Radiate a caller-windowed force line [N/m] in the workspace's
     /// `exp(-i omega t)` convention. Frequency is in Hz and coordinates in m;
-    /// wavenumber is always derived from the very gas that generated the flow.
+    /// wavenumber is always derived from the very fluid that generated the flow.
     /// No source-amplitude calibration or absorption model is introduced.
     ///
     /// # Errors
@@ -340,8 +383,17 @@ impl MaterialJetLabiumRun<'_> {
                 what: "frequency must be positive, finite and below the force record's Nyquist limit",
             });
         }
-        let wavenumber = (2.0 * core::f64::consts::PI * frequency_hz) / self.gas.sound_speed;
+        let wavenumber =
+            (2.0 * core::f64::consts::PI * frequency_hz) / self.acoustic.sound_speed_m_s();
         dipole_pressure(force_n_m, wavenumber, observer_m, source_m)
+    }
+}
+
+impl MaterialJetLabiumRun<'_, GasState> {
+    /// Original gas state for gas-bound runs, including mixture properties.
+    #[must_use]
+    pub const fn gas(&self) -> &GasState {
+        self.material
     }
 }
 

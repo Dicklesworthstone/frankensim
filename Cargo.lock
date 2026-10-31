@@ -941,6 +941,8 @@ dependencies = [
  "fs-lbm",
  "fs-material",
  "fs-math",
+ "fs-qty",
+ "fs-thermochem",
  "fsci-runtime",
  "fsci-special",
 ]
