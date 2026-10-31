@@ -507,8 +507,10 @@ def main():
         row["test"] = ("Compare hammer contact time and 2-8 kHz brightness from mf to ff across felt laws (--rt0425-hammer-stiffness, --hammers) "
                        "against the recording's brightness gain.")
         row["fix"] = (f"The A3 renders above include longitudinal string waves (axial rigidity EA = {waves['ea_n'] / 1000:.1f} kN from the scale's own bending stiffness "
-                      f"with steel E = 200 GPa, axial modes to {waves['band_hz'] / 1000:.0f} kHz) whose axial force drives the bridge through a declared 0.06 projection "
-                      "(about 1.8 degrees of downbearing plus a 28 mm bridge-cap lever arm), with the work in the energy ledger. Against the same strokes with linear strings: "
+                      f"with steel E = 200 GPa, axial modes to {waves['band_hz'] / 1000:.0f} kHz) whose axial force drives the bridge through a per-mode participation row read from the board file "
+                      "(each mode's translation plus its rotation acting on the lever arm from the board's neutral surface to the string's bridge-top contact; "
+                      "the string's direction is taken perpendicular to the bridge in plan, an assumption stated in piano/unknowns.tsv, and the flat board gives no downbearing), "
+                      "with the work in the energy ledger. Against the same strokes with linear strings: "
                       f"phantom partials at ff stand at {count(ph_ours)} of {len(ph_ours)} positions (linear {count(ph_lin)}; real Steinway {count(ph_real)}), and the mf-to-ff "
                       f"brightness gain is {gain_ours:.1f} dB (linear {gain_lin:.1f} dB; real piano {gain_real:.1f} dB).") + hard
     hammer_flags = ("--rt0425-hammer-stiffness", "--rt0425-hammer-dissipation")
