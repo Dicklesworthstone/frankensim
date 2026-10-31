@@ -95,10 +95,14 @@ impl input::Wire {
                 };
                 // The wrap's spring law needs density and G, not an invented
                 // flexural viscosity or the core's Young modulus.
-                let wrap = resolve_properties(pack, catalog, loader, spec, &[
+                let mut wrap_requirements = vec![
                     Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
                     Requirement::try_new(SHEAR, Pressure::DIMS, Admit::StrictlyPositive)?,
-                ])?;
+                ];
+                if let Some(memory) = &spec.stretching_memory {
+                    memory.add_winding_requirements(&mut wrap_requirements)?;
+                }
+                let wrap = resolve_properties(pack, catalog, loader, spec, &wrap_requirements)?;
                 let section = fs_material::section::winding::CloseWoundSection::try_new(core,
                     fs_material::section::winding::RoundWireWinding {
                         wire_radius_m: *wire_radius_m, pitch_m: *pitch_m,

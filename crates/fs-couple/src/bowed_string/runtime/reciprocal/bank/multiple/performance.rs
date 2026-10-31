@@ -205,6 +205,19 @@ pub struct MultiBowPerformance {
     coating_monitor: Option<coating::BoundShellCoatingMonitor>,
 }
 impl MultiBowPerformance {
+    /// Source axial/shear memory starts relaxed at the actual preloaded mean
+    /// strain, while the original gesture/force clock and preload stay intact.
+    pub fn with_material_stretching_relaxation(mut self,
+        selections:Vec<super::super::nonlinear::bank::relaxation::StretchingRelaxationSelection>,
+        initial_memory:Option<Vec<f64>>,maximum_states:usize,gate:&fs_exec::CancelGate)
+        -> Result<Self,crate::render::plate::impact::ImpactError> {
+        self.validate_sample_count(0)
+            .map_err(|e|crate::render::plate::impact::ImpactError::Owner(e.to_string()))?;
+        self.bank=self.bank.with_material_stretching_relaxation(
+            selections,initial_memory,maximum_states,gate)?;
+        Ok(self)
+    }
+
     /// Add source material histories AFTER force/static preparation, before any
     /// sample. Relaxed initialization uses the actual preloaded geometry and
     /// leaves the force program and its original preload report intact.

@@ -34,6 +34,8 @@ mod translational_bridges;
 mod bending_memory;
 #[path = "material_strings/longitudinal_memory.rs"]
 mod longitudinal_memory;
+#[path = "material_strings/stretching_relaxation.rs"]
+mod stretching_relaxation;
 #[path = "material_strings/torsion_memory.rs"]
 mod torsion_memory;
 #[path = "material_strings/fibers.rs"]
@@ -186,6 +188,9 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     }
     if !body && let Some(memory) = &spec.longitudinal_memory {
         memory.add_requirements(&mut requirements)?;
+    }
+    if !body && let Some(memory) = &spec.stretching_memory {
+        memory.add_core_requirements(&mut requirements)?;
     }
     if !body && let Some(memory)=&spec.bending_memory {
         memory.add_requirements(name,&spec.strings,&mut requirements)?;
@@ -366,6 +371,7 @@ impl input::Spec {
         let memory = self.string_memory_states()?
             .checked_add(self.bending_memory.as_ref().map_or(0,bending_memory::Input::max_memory_states))
             .and_then(|n| n.checked_add(self.longitudinal_memory.as_ref().map_or(0, |memory| memory.max_states)))
+            .and_then(|n| n.checked_add(self.stretching_memory.as_ref().map_or(0, |memory| memory.max_states)))
             .and_then(|n| n.checked_add(profile.as_ref().map_or(0, |body| body.material_memory_states_for(&self))))
             .and_then(|n| n.checked_add(self.bow_fibers.as_ref()
                 .and_then(|fibers| fibers.memory.as_ref()).map_or(0, |memory| memory.max_states)))
@@ -599,6 +605,9 @@ impl input::Spec {
         };
         if let Some(forces)=&self.forces { performance=performance.with_material_forces(forces.clone(),gate)?; }
         if let Some(memory)=self.longitudinal_memory.as_ref().filter(|memory|memory.finite_strain) {
+            performance=memory.bind_after_preload(performance,&self,gate)?;
+        }
+        if let Some(memory)=&self.stretching_memory {
             performance=memory.bind_after_preload(performance,&self,gate)?;
         }
         if let Some(stops)=&stop_profile { performance=stops.bind_motion(performance,gate)?; }

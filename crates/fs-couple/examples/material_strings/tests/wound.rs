@@ -1,6 +1,8 @@
 //! Material-only winding swaps must change the actual reciprocal pressure path.
 use super::*;
 
+mod stretching_memory;
+
 fn wound_spec() -> input::Spec {
     input::Spec::parse(include_str!("../wound-pluck.material-strings")
         .replace("48000 4096 0.01 128", "48000 256 0.01 128").as_bytes()).unwrap()

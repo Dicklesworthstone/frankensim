@@ -16,6 +16,9 @@ use crate::render::schedule::force::coupled::contact::friction::nonlinear::{
 use fs_exec::CancelGate;
 use fs_phs::Storage;
 
+/// Source-defined axial and winding-shear memory on the same mean strain.
+pub mod relaxation;
+
 /// Frozen source-derived geometric laws in original string declaration order.
 /// Full linear-plus-quartic potentials are retained for diagnostics; only their
 /// quartic remainders are added to the actual bank.
@@ -23,6 +26,7 @@ use fs_phs::Storage;
 pub struct StringBankStretching {
     potentials: Vec<StringPotential>,
     config: NonlinearModalConfig,
+    material_relaxation: Option<relaxation::StringBankStretchingRelaxation>,
 }
 impl StringBankStretching {
     /// Original material stress channels, retaining the loaded mass basis.
@@ -32,6 +36,9 @@ impl StringBankStretching {
     /// Explicit bounded constitutive iteration selected before playback.
     pub const fn config(&self) -> NonlinearModalConfig {
         self.config
+    }
+    pub const fn material_relaxation(&self) -> Option<&relaxation::StringBankStretchingRelaxation> {
+        self.material_relaxation.as_ref()
     }
 }
 impl MaterialStringBankSource {
@@ -167,7 +174,7 @@ impl ReciprocalStringBank {
             .system
             .with_nonlinear_potentials(bindings, config, gate)
             .map_err(|e| ImpactError::Owner(e.to_string()))?;
-        self.source.geometric_stretching = Some(StringBankStretching { potentials, config });
+        self.source.geometric_stretching = Some(StringBankStretching { potentials, config, material_relaxation: None });
         if gate.is_requested() {
             return Err(ImpactError::Cancelled);
         }
@@ -175,23 +182,31 @@ impl ReciprocalStringBank {
     }
     /// Original stress channel at accepted string coordinates; no state advance.
     pub fn stretching_observation(&self, string: usize) -> Result<StringObservation, ImpactError> {
-        observe(&self.source, self.system.components(), string)
+        observe(&self.source, self.system.components(), &self.cards,
+            &self.system.nonlinear_material_memory(), string)
     }
 }
 impl MultiBowStringBank {
     /// The same source-derived strain, tension and energy at the jointly
     /// accepted coordinates of this string, including every prescribed bow.
     pub fn stretching_observation(&self, string: usize) -> Result<StringObservation, ImpactError> {
-        observe(self.source().bank(), self.system().components(), string)
+        observe(self.source().bank(), self.system().components(), self.cards(),
+            &self.system().nonlinear_material_memory(), string)
     }
 }
 fn observe(source: &MaterialStringBankSource, components: &[ModalAcousticTimeModel],
-    string: usize) -> Result<StringObservation, ImpactError>
+    cards: &[crate::bowed_string::BowedStringCard], memory: &[&[f64]], string: usize)
+    -> Result<StringObservation, ImpactError>
 {
     let potential = source.geometric_stretching.as_ref()
         .and_then(|binding| binding.potentials.get(string))
         .ok_or_else(|| invalid("string has no bound material geometric stretching law"))?;
     let q: Vec<_> = components[string].states()[..potential.mode_count()]
         .iter().map(|state| state.displacement_m_sqrt_kg).collect();
-    potential.observe(&q)
+    let mut observation = potential.observe(&q)?;
+    if let Some(memory_source) = source.geometric_stretching.as_ref()
+        .and_then(|binding| binding.material_relaxation()) {
+        memory_source.add_observation(string, cards[string].length_m, memory, &mut observation)?;
+    }
+    Ok(observation)
 }

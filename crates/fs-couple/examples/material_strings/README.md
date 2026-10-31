@@ -786,7 +786,7 @@ cargo run --release -p fs-couple --example material_strings -- \
   "$demo/wound-pluck.material-strings" "$demo/wound-pluck.wav"
 ```
 
-The wrap resolves only its density and shear modulus. Actual helical wire
+The default wrap source resolves its density and shear modulus. Actual helical wire
 length determines its mass; close-coiled spring mechanics determine its
 axial stiffness. The core and wrap share end displacement, with sliding allowed
 along their interface. A free-ended wrap needs a different axial boundary law.
@@ -795,8 +795,9 @@ viscosity or generalized-Maxwell relaxation spectrum. The latter uses the same
 `bending-loss prony` record as a homogeneous string and requires no viscosity
 claim. Each original core arm remains an internal strain in the joint
 string/body/cavity solver, projected with the **total core-plus-wrap mass**.
-The wrap remains elastic in this approximation; it never inherits the core's
-relaxation or counts as a bonded bending layer. Replacing the winding's pack therefore changes mass, tension under
+Without the explicit winding-memory selection below, the wrap remains elastic;
+it never inherits the core's relaxation or counts as a bonded bending layer.
+Replacing the winding's pack therefore changes mass, tension under
 fixed extension, frequencies, gas loading and the shared body's physical
 pressure. Explicit fixed tension and fixed extension keep their different
 experimental meanings. The exposed wrap material also supplies the identity
@@ -808,7 +809,7 @@ mass geometry. It does not treat the winding as a bonded solid sleeve. The
 admission limits are wire/coil radius ≤ 1/4, pitch/circumference ≤ 0.15 and
 maximum modal wavenumber × pitch ≤ 0.2; neighbouring turns must not intersect.
 Those limits are declared scale assumptions, not measured error guarantees.
-Resolved winding friction, wrapping prestress, winding loss, thermal mismatch,
+Resolved interturn friction, wrapping prestress, thermal mismatch,
 torsional response and longitudinal winding waves remain unavailable. Requests
 for those extensions refuse instead of borrowing homogeneous-string laws.
 This fixture demonstrates the constitutive path; it does not validate a real
@@ -830,6 +831,53 @@ changes. The pack combines the NIST review's bulk-silver reference density with
 an explicitly derived isotropic shear modulus at 293.15 K; it supplies no silver
 damping. The winding remains lossless under the declared reduction, and this
 example does not represent a measured silver-wound instrument.
+
+### Core and winding memory on the same mean strain
+
+The original `geometric-stretching` owner can also retain material axial
+relaxation. Place these optional records after `geometric-stretching` and
+before `cavity` (and before any existing `longitudinal-memory` record):
+
+```text
+stretching-memory MAX_STATES CORE_EQUILIBRIUM COUNT DELTA_E_PROPERTY TAU_PROPERTY ...
+winding-memory WRAP_EQUILIBRIUM COUNT DELTA_G_PROPERTY TAU_PROPERTY ...
+```
+
+`stretching-memory` selects the actual Young-modulus spectrum of every core or
+perfectly bonded layer. Each layer retains its own source values, area and
+relaxation times. `winding-memory` selects the wrapping wire's shear spectrum
+and is required explicitly for wound members. A zero count declares that
+channel elastic; it does not assume missing material data are zero loss. The
+equilibrium property must equal the original section's Young or shear modulus.
+Every increment is nonnegative in Pa, and every time is positive in seconds.
+The selected claims must be constants at the held environment and support DC
+through the complete coupled frequency bound. Each channel admits at most
+eight declared arms, within the total `MAX_STATES` allowance of 1–256.
+
+Both transverse planes contribute to the original common geometric strain
+`epsilon = integral(|y_x|^2 + |z_x|^2) / (2 L)`. A core arm has rigidity
+`DeltaEA = area * DeltaE`. A winding arm uses the original close-coiled spring
+without another helix approximation:
+`DeltaEA = DeltaG * a^4 * pitch / (4 R^3)`, where `a` is winding-wire radius
+and `R` is coil radius. Each stores
+`DeltaEA * L * (epsilon - relaxed_strain)^2 / 2`. The original equilibrium
+axial rigidity remains in the existing geometric potential exactly once.
+
+Histories start relaxed at the actual static preload. The same nonlinear
+string/body/contact step integrates the original Prony stress and each arm's
+heat; a midpoint strain gradient makes its work agree with that stored-energy
+change. There is no separately stepped winding oscillator or decay filter.
+`stretching_observation` includes the accepted hereditary tension and storage,
+and material substitutions reach the existing pressure observer. Integration
+tests cover winding-only source changes, zero-strength replay and cancellation;
+independent constitutive tests check stress work, heat and relaxation time.
+
+This is a quasistatic axial reduction. It does not add longitudinal-wave or
+winding inertia, interturn friction, wrapping prestress or thermal evolution.
+It refuses combination with `longitudinal-waves`, whose full strain owner has
+its own source-memory selection, and with `prepared-linear`. Existing winding
+geometry and wavelength restrictions still apply. The silver fixture above
+supplies no measured relaxation spectrum and therefore remains elastic.
 
 ### Material bending memory on coupled strings
 

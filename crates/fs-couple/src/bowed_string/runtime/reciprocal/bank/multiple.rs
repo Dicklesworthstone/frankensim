@@ -186,6 +186,34 @@ impl MultiBowStringBank {
         Ok(self)
     }
 
+    /// Bind core axial and winding-shear histories to the same mean geometric
+    /// strain after static preload; every existing contact and history survives.
+    pub fn with_material_stretching_relaxation(mut self,
+        selections:Vec<super::nonlinear::bank::relaxation::StretchingRelaxationSelection>,
+        initial_memory:Option<Vec<f64>>,maximum_states:usize,gate:&CancelGate)
+        -> Result<Self,crate::render::plate::impact::ImpactError> {
+        use super::nonlinear::bank::relaxation;
+        use crate::render::plate::impact::ImpactError;
+        let (image,bindings)=relaxation::bindings(&self.source.bank,&self.cards,
+            self.system.original_core(),selections,initial_memory,maximum_states,gate)?;
+        if !bindings.is_empty() {
+            self.system=self.system.with_mapped_material_histories(bindings,maximum_states,gate)
+                .map_err(|e|ImpactError::Owner(e.to_string()))?;
+        }
+        relaxation::retain_source(&mut self.source.bank,image);
+        self.source.bank.validate_body_memory_frequencies(self.system.original_core(),gate)
+            .map_err(|e|ImpactError::Owner(e.to_string()))?;
+        self.source.bank.validate_material_bridge_frequencies(self.system.original_core(),gate)
+            .map_err(|e|ImpactError::Owner(e.to_string()))?;
+        if let Some(memory)=self.source.fiber_ribbon.as_ref()
+            .and_then(|ribbon|ribbon.model().material_relaxation()) {
+            memory.validate_band(self.system.linear_frequency_upper_bound_rad_s(),
+                self.system.sample_period_s()).map_err(|e|ImpactError::Owner(e.to_string()))?;
+        }
+        if gate.is_requested() {return Err(ImpactError::Cancelled);}
+        Ok(self)
+    }
+
     /// Bind complete material strain histories after optional static preload.
     /// The relaxed initial history uses that actual solved displacement; all
     /// bow, stop, surface and original mechanical state remain in their owner.

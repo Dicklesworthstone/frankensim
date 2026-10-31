@@ -42,8 +42,11 @@ pub struct StringObservation {
     /// Mean additional axial strain (dimensionless). Moving axial endpoints
     /// contribute their actual extension when longitudinal motion is retained.
     pub additional_strain: f64,
-    /// Initial tension plus E*A times additional_strain [N].
+    /// Initial tension plus equilibrium E*A times additional_strain [N]. A
+    /// material-bound string bank also includes its accepted hereditary stress.
     pub tension_n: f64,
+    /// Axial geometric storage [J], plus accepted axial material storage when
+    /// observed through a string bank carrying the original material history.
     pub stretching_energy_j: f64,
 }
 
@@ -173,6 +176,24 @@ impl StringPotential {
     pub fn slope_limit(&self) -> f64 { self.stretching.maximum_slope }
     /// Transverse components sharing this one physical elongation and tension.
     pub const fn transverse_planes(&self) -> usize { self.transverse_planes }
+
+    /// Work-conjugate derivative of this SAME mean geometric strain. Material
+    /// histories use the original modal normalization and both transverse planes.
+    pub(crate) fn mean_strain_gradient(&self, q: &[f64], out: &mut [f64]) -> Result<(), ImpactError> {
+        self.observe(q)?;
+        if out.len() != self.mode_count() { return Err(invalid("mean strain gradient requires every original coordinate")); }
+        let n = self.mode_count();
+        let channel = &self.storage.channels[0];
+        for i in 0..n { out[i] = 0.5*channel.coupling[i*n+i]*q[i]; }
+        if out.iter().any(|v| !v.is_finite()) { return Err(invalid("mean strain gradient is unrepresentable")); }
+        Ok(())
+    }
+
+    /// Exact norm of the original diagonal positive mean-strain Hessian.
+    pub(crate) fn mean_strain_hessian_norm(&self) -> f64 {
+        let n = self.mode_count();
+        (0..n).map(|i| 0.5*self.storage.channels[0].coupling[i*n+i]).fold(0.0, f64::max)
+    }
 
     /// Extend the SAME stress channel by the affine lift w(s)=d*s*X/L+u(s)
     /// (or d*(1-s/L)*X+u), with unit transverse direction d. This also applies

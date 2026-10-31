@@ -248,6 +248,7 @@ pub struct Spec {
     /// Extend the same omitted bending spectrum to fixed bow contacts.
     pub bow_residual_flexibility: bool,
     pub geometric_stretching: Option<(f64, NonlinearModalConfig)>,
+    pub stretching_memory: Option<stretching_relaxation::Input>,
     pub longitudinal_waves: Option<(LongitudinalStringResolution, NonlinearModalConfig)>,
     pub longitudinal_loss: LongitudinalMaterialLoss,
     pub longitudinal_memory: Option<longitudinal_memory::Input>,
@@ -645,6 +646,30 @@ impl Spec {
             row.end()?;
             loss
         } else { LongitudinalMaterialLoss::Elastic };
+        let stretching_memory = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("stretching-memory") {
+            let mut row = r.row("stretching-memory")?;
+            let max_states = row.count(256)?;
+            let equilibrium_modulus = row.word()?.to_string();
+            let count = row.count(8)?;
+            let mut branches = Vec::with_capacity(count);
+            for _ in 0..count { branches.push((row.word()?.to_string(), row.word()?.to_string())); }
+            row.end()?;
+            let core = fs_material::section::relaxation::LayerRelaxationProperties { equilibrium_modulus, branches };
+            let winding = if r.lines.clone().next()
+                .and_then(|line| line.split_ascii_whitespace().next()) == Some("winding-memory") {
+                let mut row = r.row("winding-memory")?;
+                let equilibrium_modulus = row.word()?.to_string();
+                let count = row.count(8)?;
+                let mut branches = Vec::with_capacity(count);
+                for _ in 0..count { branches.push((row.word()?.to_string(), row.word()?.to_string())); }
+                row.end()?;
+                Some(fs_material::section::relaxation::LayerRelaxationProperties { equilibrium_modulus, branches })
+            } else { None };
+            let memory = stretching_relaxation::Input { max_states, core, winding };
+            memory.validate()?;
+            Some(memory)
+        } else { None };
         let longitudinal_memory = if r.lines.clone().next()
             .and_then(|line| line.split_ascii_whitespace().next()) == Some("longitudinal-memory") {
             let mut row = r.row("longitudinal-memory")?;
@@ -1200,7 +1225,7 @@ impl Spec {
         friction.validate_tracks(&schedule)?;
         let spec = Self { bytes: bytes.to_vec(), rate, samples, full_scale, block, temperature, omega,
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
-            rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching,
+            rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
             longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
             plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
@@ -1397,6 +1422,7 @@ impl Spec {
         if let Some(compliance) = &self.bow_compliance { compliance.preflight(self)?; }
         if let Some(memory)=&self.bending_memory { memory.preflight(self)?; }
         if let Some(memory)=&self.longitudinal_memory { memory.preflight(self)?; }
+        if let Some(memory)=&self.stretching_memory { memory.preflight(self)?; }
         let mut modes = self.body.modes.checked_add(usize::from(self.cavity.is_some()))
             .and_then(|n| n.checked_add(additional_body_modes))
             .ok_or("complete mode count overflow")?;

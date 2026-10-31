@@ -22,6 +22,9 @@ use super::relaxation::ConcentricPronySection;
 use crate::state_point::{DENSITY_PROPERTY, MaterialStatePointError, ResolvedMaterialStatePoint};
 use fs_qty::{Density, Pressure, QuantitySpec};
 
+/// Source-defined shear relaxation of this same close-coiled axial spring.
+pub mod relaxation;
+
 /// Single, non-interpenetrating round-wire helix on a circular core.
 /// Dimensions describe the already loaded, frozen specimen in metres.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -207,7 +210,9 @@ mod tests {
         let mut claims = ClaimSet::new();
         let mut required = Vec::new();
         for (name, value, dims) in [("density", rho, Density::DIMS), ("young_modulus", 200e9, Pressure::DIMS),
-            ("shear_modulus", shear, Pressure::DIMS), ("eta", 10.0, DynViscosity::DIMS)] {
+            ("shear_modulus", shear, Pressure::DIMS), ("eta", 10.0, DynViscosity::DIMS),
+            ("relaxing_shear_modulus", 0.25*shear, Pressure::DIMS),
+            ("shear_relaxation_time", 0.002, fs_qty::Time::DIMS)] {
             claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
                 value: PropertyValue::Scalar { value, dims },
                 validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, band),
@@ -231,6 +236,48 @@ mod tests {
         CloseWoundSection::try_new(core(), RoundWireWinding { wire_radius_m: 0.00005, pitch_m: 0.000101 },
             material(rho, shear, 293.15, 100_000.0), "shear_modulus").unwrap()
     }
+    #[test]
+    fn winding_shear_memory_uses_original_spring_geometry_without_changing_equilibrium_or_mass() {
+        use crate::section::relaxation::LayerRelaxationProperties;
+        let original = section(8900.0,76e9);
+        let law = original.clone().with_winding_relaxation(LayerRelaxationProperties {
+            equilibrium_modulus: "shear_modulus".into(),
+            branches: vec![("relaxing_shear_modulus".into(),"shear_relaxation_time".into())],
+        }).unwrap();
+        assert_eq!(law.section(),&original);
+        assert_eq!(law.arms()[0].relaxation_time_s,0.002);
+        let wire_diameter = 2.0*original.winding().wire_radius_m;
+        let coil_diameter = 2.0*original.helix_radius_m();
+        let expected = 0.25*76e9*wire_diameter.powi(4)*original.winding().pitch_m
+            /(8.0*coil_diameter.powi(3));
+        assert!((law.arms()[0].relaxing_rigidity_n/expected-1.0).abs()<1e-14);
+        assert_eq!(law.shear_spectrum().e_inf,76e9);
+        for omega in [1.0_f64,500.0,10000.0] {
+            let x = omega*0.002;
+            let (storage,loss) = law.shear_spectrum().modulus(omega);
+            let factor = original.winding_axial_stiffness_n()/76e9;
+            assert!((factor*storage-(original.winding_axial_stiffness_n()+expected*x*x/(1.0+x*x))).abs()<1e-13);
+            assert!((factor*loss-expected*x/(1.0+x*x)).abs()<1e-13);
+        }
+    }
+
+    #[test]
+    fn winding_memory_refuses_unknown_or_inconsistent_source_roles() {
+        use crate::section::relaxation::LayerRelaxationProperties;
+        let valid = LayerRelaxationProperties { equilibrium_modulus: "shear_modulus".into(),
+            branches: vec![("relaxing_shear_modulus".into(),"shear_relaxation_time".into())] };
+        for bad in [LayerRelaxationProperties { equilibrium_modulus: "young_modulus".into(), ..valid.clone() },
+            LayerRelaxationProperties { branches: vec![("missing".into(),"shear_relaxation_time".into())], ..valid.clone() },
+            LayerRelaxationProperties { branches: vec![("eta".into(),"shear_relaxation_time".into())], ..valid.clone() },
+            LayerRelaxationProperties { branches: vec![valid.branches[0].clone();2], ..valid.clone() }] {
+            assert!(section(8900.0,76e9).with_winding_relaxation(bad).is_err());
+        }
+        let elastic = section(8900.0,76e9).with_winding_relaxation(LayerRelaxationProperties {
+            branches: vec![], ..valid }).unwrap();
+        assert!(elastic.arms().is_empty());
+        assert_eq!(elastic.omega_band_rad_s(),(0.0,100_000.0));
+    }
+
     #[test]
     fn g1_helix_mass_matches_resolved_wire_polyline_and_is_not_a_solid_sleeve() {
         let winding = section(8900.0, 76e9);
