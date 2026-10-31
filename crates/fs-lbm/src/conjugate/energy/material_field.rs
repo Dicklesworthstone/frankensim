@@ -180,24 +180,27 @@ impl EnergyConfig {
     /// owner may supply secants `m * delta(h) / delta(T)` and iterate to exact
     /// storage on its admitted single-phase enthalpy chart.
     ///
-    /// Storage `C/dt * (T_new - T_old)` lowers to the existing cell-diagonal
-    /// exchange assembly. No second flux discretization, artificial material
-    /// index, or external thermal reservoir is created. This also anchors an
-    /// insulated domain without inventing a fixed-temperature boundary.
+    /// Storage `C/dt * (T_new - T_old)` uses the same physical storage rows
+    /// as the native transient solver. Compact aliases must have zero cell
+    /// capacity; each component instead supplies one positive authored
+    /// `heat_capacity_j_k`. Its aliases must share one old temperature.
+    /// No second flux discretization or external storage reservoir is created.
+    /// Physical storage also anchors an insulated domain.
     ///
-    /// The returned `EnergySolution` reports the *augmented linear system*:
-    /// its `balance.sink_outflow_w` includes storage. The accompanying record
-    /// separates actual physical boundary/sink heat from stored energy and
-    /// reports `stored + physical_outflow - source`. Its local `time_s` is
-    /// `time_step_s`; a march supplies the absolute time. Nonlinear enthalpy
-    /// consumers must additionally audit actual `m * delta(h)`, not call this
-    /// linearization's `C * delta(T)` their final storage evidence.
+    /// The returned `EnergySolution` reports physical sources, reservoirs and
+    /// sinks, excluding storage. The accompanying record separately reports
+    /// `stored + physical_outflow - source`, including any prescribed-cell
+    /// temperature jump supplied by its reservoir. Its local `time_s` is
+    /// `time_step_s`; a march supplies absolute time. Nonlinear enthalpy
+    /// consumers must additionally audit actual `m * delta(h)`; the frozen
+    /// linearization's `C * delta(T)` is not their final storage evidence.
     ///
     /// # Errors
-    /// Refuses wrong field lengths, nonpositive/nonfinite capacities, durations
-    /// or temperatures, unrepresentable storage, fixed-temperature cells and
-    /// capacity-free compact components, or existing solver/cancellation errors.
-    /// Domain-face temperatures and ordinary physical cell sinks are supported.
+    /// Refuses wrong field lengths, nonpositive ordinary/junction capacities,
+    /// nonzero capacity on collapsed aliases, invalid durations/temperatures,
+    /// inconsistent junction aliases, unrepresentable storage, or existing
+    /// solver/cancellation errors. Fixed-temperature cells, domain-face
+    /// temperatures, authored compact capacities and physical sinks are supported.
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     pub fn step_with_conductivity(
         &self,
@@ -250,7 +253,7 @@ impl EnergyConfig {
         enthalpy: Option<AdvectiveEnthalpyField<'_>>, capacity_j_k: &[f64], previous_k: &[f64],
         time_step_s: f64, gate: &CancelGate,
     ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
-        use crate::conjugate::{CellSink, TransientRecord};
+        use super::super::transient::{junction_capacity, storage_record};
         let invalid = |reason: &str| ChtError::InvalidInput {
             field: "thermal.material_storage", reason: reason.into(),
         };
@@ -262,61 +265,60 @@ impl EnergyConfig {
         if !time_step_s.is_finite() || time_step_s <= 0.0 {
             return Err(invalid("time step must be finite and positive"));
         }
-        if !setup.fixed_temperature.is_empty() || !setup.compact_components.is_empty() {
-            return Err(invalid("cell storage requires ordinary unfixed cells, not compact components"));
-        }
-        let mut stepped = setup.clone();
-        for (cell, (&capacity, &temperature)) in capacity_j_k.iter().zip(previous_k).enumerate() {
+        let owners = super::compact_owners(domain, &setup.compact_components, gate)?;
+        let junctions = junction_capacity(domain, setup, &owners, previous_k, gate)?;
+        let mut capacity = Vec::with_capacity(cells + junctions.len());
+        let mut storage = Vec::with_capacity(cells + junctions.len());
+        for (cell, (&value, &temperature)) in capacity_j_k.iter().zip(previous_k).enumerate() {
             if cell.is_multiple_of(4096) { super::super::poll(gate)?; }
-            let rate = capacity / time_step_s;
-            if !capacity.is_finite() || capacity <= 0.0
-                || !temperature.is_finite() || temperature <= 0.0
-                || !rate.is_finite() || rate <= 0.0
+            if !temperature.is_finite() || temperature <= 0.0 {
+                return Err(invalid("previous temperatures must be finite positive kelvin"));
+            }
+            if owners.get(cell).is_some_and(|&owner| owner != usize::MAX) {
+                if value != 0.0 {
+                    return Err(invalid("compact aliases require zero cell capacity; the junction owns storage"));
+                }
+                capacity.push(0.0);
+                storage.push(0.0);
+                continue;
+            }
+            let rate = value / time_step_s;
+            if !value.is_finite() || value <= 0.0 || !rate.is_finite() || rate <= 0.0
                 || !(rate * temperature).is_finite()
             {
-                return Err(invalid("capacity, temperature and storage rate must be representable and positive"));
+                return Err(invalid("ordinary capacity and storage rate must be representable and positive"));
             }
-            stepped.cell_sinks.push(CellSink {
-                cell, conductance_w_k: rate, temperature_k: temperature,
-            });
+            capacity.push(value);
+            storage.push(rate);
         }
+        for (part, value) in setup.compact_components.iter().zip(junctions) {
+            let old = previous_k[domain.index(part.lo[0], part.lo[1], part.lo[2])];
+            let rate = value / time_step_s;
+            if !rate.is_finite() || rate <= 0.0 || !(rate * old).is_finite() {
+                return Err(invalid("junction storage rate must be representable and positive"));
+            }
+            capacity.push(value);
+            storage.push(rate);
+        }
+        let step = PseudoStep {
+            coefficient_w_k: &storage[..cells],
+            previous: previous_k,
+            junction_coefficient_w_k: &storage[cells..],
+        };
         let solution = self.solve_with_fields(
-            domain, fluid, solids, flow, &stepped, molecular_w_m_k, enthalpy, None, gate,
+            domain, fluid, solids, flow, setup, molecular_w_m_k, enthalpy, Some(&step), gate,
         )?;
-        let mut stored = 0.0;
-        for (cell, ((&capacity, &old), &new)) in capacity_j_k.iter().zip(previous_k)
-            .zip(&solution.temperature).enumerate()
-        {
+        for (cell, &temperature) in solution.temperature.iter().enumerate() {
             if cell.is_multiple_of(4096) { super::super::poll(gate)?; }
-            if !new.is_finite() || new <= 0.0 {
+            if !temperature.is_finite() || temperature <= 0.0 {
                 return Err(invalid("solved temperature is not finite positive kelvin"));
             }
-            stored += capacity * (new - old);
         }
-        // Evaluate only the caller's physical sinks. Subtracting two large
-        // augmented totals would hide cancellation in a small physical flux.
-        let physical_sink: f64 = setup.cell_sinks.iter().map(|sink| {
-            sink.conductance_w_k * (solution.temperature[sink.cell] - sink.temperature_k)
-        }).sum();
-        let balance = solution.report.balance;
-        let source_j = time_step_s * balance.source_w;
-        let outflow_j = time_step_s * (balance.boundary_outflow_w + physical_sink);
-        let closure_j = stored + outflow_j - source_j;
-        if [stored, source_j, outflow_j, closure_j].iter().any(|x| !x.is_finite()) {
-            return Err(invalid("stored energy or physical heat transfer is unrepresentable"));
-        }
-        let record = TransientRecord {
-            time_s: time_step_s,
-            max_temperature_k: solution.temperature.iter().copied().fold(f64::NEG_INFINITY, f64::max),
-            max_solid_temperature_k: solution.max_where(|c| !domain.is_fluid(c))
-                .map_or(f64::NAN, |(_, t)| t),
-            stored_energy_change_j: stored,
-            source_j,
-            boundary_outflow_j: outflow_j,
-            closure_j,
-            radiated_w: 0.0,
-            iterations: solution.report.iterations,
-        };
+        let solids_present = (0..cells).any(|cell| !domain.is_fluid(cell));
+        let record = storage_record(
+            domain, setup, &capacity, previous_k, &solution,
+            (time_step_s, time_step_s, solids_present), (0.0, 0.0), gate,
+        )?;
         super::super::poll(gate)?;
         Ok((solution, record))
     }

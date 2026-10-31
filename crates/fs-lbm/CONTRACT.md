@@ -2263,6 +2263,31 @@ Release lane (`--ignored`, executed) on 32 x 32: Ra = 1e4 (tau 0.8) Nu
 2.2308 vs 2.243 (-0.55 %, 3120 steps); Ra = 1e5 (tau 0.56) Nu 4.4087 vs
 4.519 (-2.4 %, 12880 steps); gated at 5 %.
 
+### Resolved-material transient storage
+
+`EnergyConfig::step_with_conductivity` and `step_with_enthalpy` use the
+same physical backward-Euler storage rows and energy ledger as the native
+march. Explicit cell capacities remain in J/K and retain one entry per cell.
+Ordinary cells require positive capacity; every collapsed compact alias must
+supply exactly zero so that the component's authored `heat_capacity_j_k`
+is counted once. Junction aliases must share the accepted old temperature.
+Fixed-temperature cells are supported: their reservoir supplies any imposed
+stored-energy jump as well as the conductive and sink reaction.
+
+The returned `EnergySolution::report.balance` contains physical sources,
+reservoir reactions and sinks; storage is no longer injected into
+`sink_outflow_w`. `TransientRecord` separately accounts for ordinary and
+junction storage and closes the physical step. Callers of the resolved-field
+stepping APIs must use that transient record for the step residual. As before,
+an external nonlinear enthalpy owner must check its actual `m * delta(h)`;
+a frozen capacity secant is not by itself convergence of a nonlinear chart.
+
+`tests/compact_material_storage.rs` independently checks resolved conductivity
+with closed junction equilibration, duplicate-capacity refusals, a prescribed
+reservoir temperature jump with physical sinks, and source-enthalpy advection
+past a storing compact component. The operator retains one common interface
+heat flux and counts internal component/fluid exchange only once.
+
 ### Transient conjugate conduction (`march_energy`)
 
 Backward-Euler steps of `C dT/dt + A T = b(t)` over a FROZEN flow field
