@@ -4,26 +4,20 @@
 //! quadratic epsilon=u_x+(y_x^2+z_x^2)/2; no fitted modal damping is substituted.
 use super::*;
 mod maxwell;
+use fs_nlmodal::longitudinal::relaxation::{StrainRelaxation, StrainRelaxationArm as Arm};
 use crate::render::schedule::force::coupled::contact::friction::nonlinear::history::{
     MappedModalHistoryBinding, ModalMaterialHistory,
 };
 fn constitutive_invalid(what:&'static str) -> ModalCouplingError {ModalCouplingError::Invalid {what}}
 
 #[derive(Clone, Debug)]
-struct Arm {
-    /// Delta(EA)*L. Mean storage is C*r^2/2, cosine storage C*r_j^2/4.
-    stiffness_j: f64,
-    time_s: f64,
-}
-
-#[derive(Clone, Debug)]
 struct StrainHistory {
     string: MaterialLongitudinalString,
     length_m: f64,
-    arms: Vec<Arm>,
+    material: StrainRelaxation,
 }
 impl StrainHistory {
-    fn width(&self) -> usize {1+self.string.model.axial_modes().len()}
+    fn width(&self) -> usize {self.material.width()}
     fn stiffness_bound(&self,memory:Option<&[f64]>)->f64 {
         // Projection cannot increase the spatial L2 norm. The combined slope
         // envelope bounds both planes; no extra plane multiplier belongs in
@@ -31,7 +25,7 @@ impl StrainHistory {
         let axial=0.5*self.string.model.axial_slope_scales().iter().map(|s|s*s).sum::<f64>();
         let transverse=0.5*self.string.slope_scales.iter().map(|s|s*s).sum::<f64>();
         let strain=self.string.resolution.maximum_strain;
-        self.arms.iter().enumerate().map(|(i,arm)| {
+        self.material.arms().iter().enumerate().map(|(i,arm)| {
             // For dt/tau<=2 each updated z is a convex combination of its
             // accepted value and the mean endpoint strain. Thus this original
             // continuous-span bound remains valid through the entire history.
@@ -56,10 +50,10 @@ impl StrainHistory {
         }
         let mut tension:Vec<_>=strain.iter().map(|v|self.string.axial_rigidity_n*v).collect();
         tension[0]+=self.string.prestress_n;
-        for (arm,z) in self.arms.iter().zip(memory.chunks_exact(self.width())) {
-            for ((force,epsilon),z) in tension.iter_mut().zip(strain).zip(z) {
-                *force+=arm.stiffness_j/self.length_m*(epsilon-z);
-            }
+        let mut stress=vec![0.0;self.width()];
+        self.material.stress(strain,memory,&mut stress).map_err(owner)?;
+        for (j,(force,stress)) in tension.iter_mut().zip(stress).enumerate() {
+            *force+=stress/self.length_m*if j==0 {1.0} else {2.0};
         }
         if tension.iter().any(|v|!v.is_finite()) || tension[0]-tension[1..].iter().map(|v|v.abs()).sum::<f64>()<=0.0 {
             return Err(constitutive_invalid("hereditary string stress loses local tension or finite storage"));
@@ -83,7 +77,7 @@ impl StrainHistory {
 }
 impl ModalMaterialHistory for StrainHistory {
     fn coordinate_count(&self) -> usize {self.string.coordinate_count()}
-    fn memory_count(&self) -> usize {self.width()*self.arms.len()}
+    fn memory_count(&self) -> usize {self.material.memory_count()}
     fn stiffness_upper_bound_per_s2(&self,memory:&[f64])->Result<f64,ModalCouplingError> {
         if memory.len()!=self.memory_count() || memory.iter().any(|v|!v.is_finite()) {
             return Err(constitutive_invalid("complete initial history is required for stiffness admission"));
@@ -93,48 +87,23 @@ impl ModalMaterialHistory for StrainHistory {
         Ok(bound)
     }
     fn relaxed_memory(&self,q:&[f64]) -> Result<Vec<f64>,ModalCouplingError> {
-        Ok(self.strain(q)?.repeat(self.arms.len()))
+        self.material.relaxed_memory(&self.strain(q)?).map_err(owner)
     }
     fn energy(&self,q:&[f64],memory:&[f64]) -> Result<f64,ModalCouplingError> {
         let strain=self.strain(q)?;self.validate_memory(&strain,memory)?;
-        let mut energy=0.0;
-        for (arm,z) in self.arms.iter().zip(memory.chunks_exact(self.width())) {
-            for (j,(&epsilon,&z)) in strain.iter().zip(z).enumerate() {
-                energy+=0.5*arm.stiffness_j*if j==0 {1.0} else {0.5}*(epsilon-z).powi(2);
-            }
-        }
-        if !energy.is_finite() {return Err(constitutive_invalid("hereditary strain energy overflows"));}
-        Ok(energy)
+        self.material.energy(&strain,memory).map_err(owner)
     }
     fn reaction(&self,q:&[f64],memory:&[f64],out:&mut[f64]) -> Result<(),ModalCouplingError> {
         let strain=self.strain(q)?;self.validate_memory(&strain,memory)?;
         let mut stress=vec![0.0;self.width()];
-        for (arm,z) in self.arms.iter().zip(memory.chunks_exact(self.width())) {
-            for (j,((force,epsilon),z)) in stress.iter_mut().zip(&strain).zip(z).enumerate() {
-                *force+=arm.stiffness_j*if j==0 {1.0} else {0.5}*(epsilon-z);
-            }
-        }
+        self.material.stress(&strain,memory,&mut stress).map_err(owner)?;
         self.pull(q,&stress,out)
     }
     fn stage(&self,before:&[f64],after:&[f64],memory:&[f64],dt:f64,
         candidate:&mut[f64],reaction:&mut[f64]) -> Result<f64,ModalCouplingError> {
         let a=self.strain(before)?;let b=self.strain(after)?;self.validate_memory(&a,memory)?;
-        if candidate.len()!=memory.len() || !dt.is_finite() || dt<=0.0 {
-            return Err(constitutive_invalid("hereditary strain update needs complete state and positive physical duration"));
-        }
-        let mut stress=vec![0.0;self.width()];let mut loss=0.0;
-        for ((arm,z0),z1) in self.arms.iter().zip(memory.chunks_exact(self.width()))
-            .zip(candidate.chunks_exact_mut(self.width())) {
-            let rate=dt/arm.time_s;
-            if !rate.is_finite() || rate>2.0 {return Err(constitutive_invalid("physical clock does not resolve material relaxation"));}
-            for j in 0..self.width() {
-                // Use mean ENDPOINT strains here, not strain at midpoint q.
-                let c=arm.stiffness_j*if j==0 {1.0} else {0.5};
-                let (next,effort,heat)=maxwell::step(a[j],b[j],z0[j],rate,c)
-                    .ok_or_else(||constitutive_invalid("material strain-history step overflows"))?;
-                z1[j]=next;stress[j]+=effort;loss+=heat;
-            }
-        }
+        let mut stress=vec![0.0;self.width()];
+        let loss=self.material.stage(&a,&b,memory,dt,candidate,&mut stress).map_err(owner)?;
         self.validate_memory(&b,candidate)?;
         let midpoint:Vec<_>=before.iter().zip(after).map(|(&a,&b)|f64::midpoint(a,b)).collect();
         self.pull(&midpoint,&stress,reaction)?;
@@ -152,8 +121,8 @@ mod tests {
         let indices=vec![1,2,3,4];
         let model=fs_nlmodal::longitudinal::LongitudinalString::new(
             fs_nlmodal::KcStringParams {length,lin_density:solid,tension,ea},2,2,&indices).unwrap();
-        StrainHistory {length_m:length,arms:vec![Arm {stiffness_j:2500.0,time_s:0.001},
-            Arm {stiffness_j:1000.0,time_s:0.003}],string:MaterialLongitudinalString {
+        StrainHistory {length_m:length,material:StrainRelaxation::new(indices.len(),vec![Arm {stiffness_j:2500.0,relaxation_time_s:0.001},
+            Arm {stiffness_j:1000.0,relaxation_time_s:0.003}]).unwrap(),string:MaterialLongitudinalString {
                 model,resolution:LongitudinalStringResolution {axial_modes:indices,maximum_slope:0.2,maximum_strain:0.01},
                 transverse_modes:2,planes:2,slope_scales:(1..=2).map(|n|
                     (2.0_f64/(transverse*length)).sqrt()*n as f64*core::f64::consts::PI/length).collect(),
@@ -195,10 +164,10 @@ mod tests {
         for cell in 0..512 {
             let s=(cell as f64+0.5)/512.0;
             let ea=spatial(&law,&a,s).0;let eb=spatial(&law,&b,s).0;let gradient=spatial(&law,&midpoint,s).1;
-            for (arm,z) in law.arms.iter().zip(memory.chunks_exact(law.width())) {
+            for (arm,z) in law.material.arms().iter().zip(memory.chunks_exact(law.width())) {
                 let z=z[0]+z[1..].iter().enumerate().map(|(i,z)|
                     z*((i+1) as f64*core::f64::consts::PI*s).cos()).sum::<f64>();
-                let rate=dt/arm.time_s;let r=(0.5*(ea+eb)-z)/(1.0+0.5*rate);
+                let rate=dt/arm.relaxation_time_s;let r=(0.5*(ea+eb)-z)/(1.0+0.5*rate);
                 spatial_loss+=arm.stiffness_j*rate*r*r/512.0;
                 for (force,g) in spatial_force.iter_mut().zip(&gradient) {*force-=arm.stiffness_j*r*g/512.0;}
             }
@@ -217,7 +186,7 @@ mod tests {
         let law=law();let q=vec![2e-5,-1e-5,1e-5,0.5e-5,1e-8,-2e-8,0.0,1e-8];
         let mut memory=law.relaxed_memory(&q).unwrap();memory[0]-=2e-4;
         let bound=law.stiffness_bound(Some(&memory));
-        let axial: f64=law.arms.iter().map(|arm|arm.stiffness_j*0.5
+        let axial: f64=law.material.arms().iter().map(|arm|arm.stiffness_j*0.5
             *law.string.model.axial_slope_scales().iter().map(|s|s*s).sum::<f64>()).sum();
         assert!(bound>axial,"a bent string's added stiffness includes transverse reactions");
         let direction=[0.2,-0.3,0.1,0.4,0.15,-0.25,0.35,-0.1];let h=1e-10;
@@ -309,11 +278,14 @@ pub(in crate::bowed_string::runtime::reciprocal::bank) fn bindings(
                     if delta==0.0 {continue;}
                     let stiffness_j=delta*geometry.area_m2()*length;
                     if !stiffness_j.is_finite() || stiffness_j<=0.0 {return Err(invalid("finite-strain memory rigidity overflows"));}
-                    arms.push(Arm {stiffness_j,time_s});
+                    arms.push(Arm {stiffness_j,relaxation_time_s:time_s});
                 }
             }
             if arms.is_empty() {continue;}
-            let law=StrainHistory {string:axial.strings[selection.string].clone(),length_m:length,arms};
+            let string=axial.strings[selection.string].clone();
+            let material=StrainRelaxation::new(string.model.axial_modes().len(),arms)
+                .map_err(|_|invalid("invalid full-strain material spectrum"))?;
+            let law=StrainHistory {string,length_m:length,material};
             count=count.checked_add(law.memory_count()).ok_or_else(||invalid("strain history count overflow"))?;
             if count>max_memory_states {return Err(invalid("mean and harmonic histories exceed the full-strain memory budget"));}
             laws.push((selection.string,law));
@@ -338,3 +310,4 @@ pub(in crate::bowed_string::runtime::reciprocal::bank) fn bindings(
         if gate.is_requested() {return Err(ImpactError::Cancelled);}
         Ok((image,bindings))
 }
+

@@ -22,6 +22,8 @@ use fs_math::det;
 
 use crate::{KcStringParams, NlModalError};
 
+pub mod relaxation;
+
 /// Maximum number of transverse sine modes per direction.
 pub const MAX_TRANSVERSE_MODES: usize = 512;
 /// Maximum number of explicitly retained longitudinal sine coordinates.

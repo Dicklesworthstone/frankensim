@@ -1,15 +1,7 @@
 //! One Maxwell strain coordinate, eliminated inside the existing joint trial.
 //! Returns relaxed strain, work-conjugate midpoint stress coefficient, and heat.
-pub(super) fn step(before:f64,after:f64,memory:f64,rate:f64,stiffness:f64)
-    -> Option<(f64,f64,f64)> {
-    if [before,after,memory,rate,stiffness].iter().any(|v|!v.is_finite())
-        || rate<=0.0 || rate>2.0 || stiffness<=0.0 {return None;}
-    let residual=(f64::midpoint(before,after)-memory)/(1.0+0.5*rate);
-    let next=memory+rate*residual;
-    let force=stiffness*residual;
-    let loss=stiffness*rate*residual*residual;
-    [next,force,loss].iter().all(|v|v.is_finite()).then_some((next,force,loss))
-}
+#[cfg(test)]
+use fs_nlmodal::longitudinal::relaxation::maxwell_step as step;
 
 #[cfg(test)]
 mod tests {
@@ -53,3 +45,4 @@ mod tests {
         assert!(step(f64::NAN,0.0,0.0,0.2,1.0).is_none());
     }
 }
+
