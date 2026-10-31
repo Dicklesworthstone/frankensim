@@ -6,6 +6,8 @@
 //! expressed in a common measure before MIS. This module owns those semantics;
 //! it deliberately contains no scene- or Euler-specific policy.
 
+mod polarized_brushed_conductor;
+
 /// Direction in which a scattering function transports throughput.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum TransportMode {
