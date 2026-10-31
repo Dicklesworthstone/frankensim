@@ -77,12 +77,14 @@ impl std::error::Error for PreparedStepError {}
 /// [`crate::Storage`] callbacks not allocating. Storage must be read-only during
 /// a trial; material history belongs at the caller's accepted-step boundary.
 ///
-/// Newton uses central differences by default or explicit analytic tangents.
+/// Newton uses an available source-owned end-state Jacobian, otherwise central
+/// differences or an explicitly supplied analytic storage tangent. Nonlinear
+/// dissipation without its tangent retains finite-difference probes.
 /// Analytic callers may opt into exact independent-pair condensation with the
 /// complete Gonzalez correction; unsuitable layouts retain full dense LU.
 /// Neither mode is a hard-real-time performance certificate. The LU traversal is unblocked and may differ from
-/// [`crate::step`] by floating-point roundoff. Both paths use the same Gonzalez
-/// kernel. Exact nonzero J-R dependency rows are retained across Newton probes;
+/// [`crate::step`] by floating-point roundoff. Both paths use the same source-owned
+/// or Gonzalez kernel. Exact nonzero J-R dependency rows are retained across Newton probes;
 /// they are refreshed from the current operators before every step. No numerical
 /// threshold drops couplings. The full Jacobian is retained for admission and
 /// dense fallback; condensation reduces factorization work, not state dimension.
@@ -266,6 +268,38 @@ impl StepWorkspace {
         Ok(())
     }
 
+    fn constitutive_rows(
+        &self,
+        sys: &PortHamiltonian,
+        x0: &[f64],
+        dt: f64,
+        iterations: usize,
+        stagnant: usize,
+        nonlinear_dissipation: bool,
+    ) -> Result<Option<crate::newton::ConstitutiveRows>, PhsError> {
+        crate::newton::constitutive_row_certificate(
+            sys.storage.as_ref(),
+            x0,
+            &self.x,
+            &self.effort,
+            &sys.j,
+            &sys.r,
+            &self.forcing,
+            dt,
+            if nonlinear_dissipation {
+                &self.nonlinear_loss
+            } else {
+                &[]
+            },
+            &self.residual,
+            self.solve_budget.unwrap_or_default(),
+            NewtonSite::Prepared,
+            iterations,
+            stagnant,
+            self.solve_budget.is_none(),
+        )
+    }
+
     #[allow(clippy::too_many_arguments)] // assess this candidate under its actual scope
     fn certify(
         &self,
@@ -278,6 +312,18 @@ impl StepWorkspace {
         stagnant: usize,
         nonlinear_dissipation: bool,
     ) -> Result<SolveCertificate, PhsError> {
+        // A large independent coordinate cannot certify a small storage row.
+        // Keep the existing global diagnostic, but require BOTH admissions.
+        if let Some(c) = self
+            .constitutive_rows(sys, x0, dt, iterations, stagnant, nonlinear_dissipation)?
+            .and_then(|rows| rows.certificate)
+        {
+            if self.solve_budget.is_some() {
+                admit_newton_iterate(c)?;
+            } else {
+                admit_default_newton_iterate(c)?;
+            }
+        }
         let floor = crate::newton::residual_rounding_floor(
             sys.storage.as_ref(),
             x0,
@@ -427,7 +473,13 @@ impl StepWorkspace {
         norm(&sys.j)?; norm(&sys.r)?; norm(&sys.g)?;
         // Inspect structure once per step, not once per Newton residual probe.
         // Refresh even on workspace reuse with another same-dimension system.
-        self.flow.refresh_for(sys,hessian.is_some() && self.condensation.is_some())?;
+        let owned_rule = sys.storage.discrete_gradient_rule();
+        let automatic_analytic =
+            owned_rule.is_some() && dissipation.is_none_or(|port| port.tangent.is_some());
+        self.flow.refresh_for(
+            sys,
+            (hessian.is_some() || automatic_analytic) && self.condensation.is_some(),
+        )?;
         let h0 = sys.hamiltonian(x0);
         if !h0.is_finite() { return Err(dimensions("nonfinite initial Hamiltonian").into()); }
         self.forcing.fill(0.0);
@@ -445,6 +497,8 @@ impl StepWorkspace {
         self.nonlinear_loss.fill(0.0);
         let mut best_norm = f64::INFINITY;
         let mut previous_norm = f64::INFINITY;
+        let mut best_quality = f64::INFINITY;
+        let mut previous_quality = f64::INFINITY;
         let mut stagnant = 0;
         let mut iterations = 0;
         let target = self.solve_budget.unwrap_or_default().threshold(scale);
@@ -453,16 +507,33 @@ impl StepWorkspace {
             let rnorm = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
                 &mut self.midpoint, &mut self.effort, &mut self.residual,
                 dissipation, &mut self.nonlinear_loss)?;
-            let improved = rnorm < best_norm;
-            if improved { self.best.copy_from_slice(&self.x); best_norm = rnorm; }
-            if rnorm <= target {
+            let rows =
+                self.constitutive_rows(sys, x0, dt, iterations, stagnant, dissipation.is_some())?;
+            let quality = rows.as_ref().map_or(rnorm, |rows| {
+                // Zero requested tolerance permits only an exact residual.
+                let global = if rnorm == 0.0 { 0.0 } else { rnorm / target };
+                rows.strict_score.max(global)
+            });
+            let improved = quality < best_quality || (quality == best_quality && rnorm < best_norm);
+            if improved {
+                self.best.copy_from_slice(&self.x);
+                best_norm = rnorm;
+                best_quality = quality;
+            }
+            if rnorm <= target && rows.as_ref().is_none_or(|rows| rows.strict_score <= 1.0) {
                 break;
             }
             // Contact onset may first increase the residual. Falling residuals
             // after that are progress even before they beat the entry iterate.
             // Keep the global best for admission, not for the stagnation clock.
-            if rnorm < previous_norm { stagnant = 0; } else { stagnant += 1; }
+            if quality < previous_quality || (quality == previous_quality && rnorm < previous_norm)
+            {
+                stagnant = 0;
+            } else {
+                stagnant += 1;
+            }
             previous_norm = rnorm;
+            previous_quality = quality;
             if stagnant >= 3 || iterations >= self.max_iterations {
                 self.x.copy_from_slice(&self.best);
                 let residual = residual_into(sys, x0, &self.x, &self.forcing, dt, &self.flow,
@@ -471,14 +542,38 @@ impl StepWorkspace {
                 self.certify(sys, x0, dt, residual, scale, iterations, stagnant, dissipation.is_some())?;
                 break;
             }
-            if let Some(action) = hessian {
+            // An ordinary prepared call can use the exact derivative of its
+            // owned rule without requiring an unrelated Hamiltonian Hessian.
+            // Probe availability with the zero direction in existing scratch;
+            // explicit analytic calls retain their original refusal contract.
+            let native_action = if hessian.is_none() && automatic_analytic {
+                self.trial.fill(0.0);
+                self.plus.fill(0.0);
+                let available = owned_rule
+                    .expect("owned analytic candidate")
+                    .end_jacobian_action(x0, &self.x, &self.trial, &mut self.plus);
+                if available {
+                    norm(&self.plus)?;
+                }
+                available
+            } else {
+                false
+            };
+            let analytic = hessian.is_some() || native_action;
+            if analytic {
+                let unavailable_hessian = |_: &[f64], _: &[f64], _: &mut [f64]| false;
+                let action = hessian.unwrap_or(&unavailable_hessian);
                 self.analytic_jacobian_into(sys, x0, dt, action, dissipation, &mut poll)?;
             } else {
                 for col in 0..n {
                     poll()?;
-                    // Match the native unprepared probe scale at zero initial
-                    // coordinates with nonzero internal force. Admission is unchanged.
-                    let h = 1.0e-6 * (scale.max(rnorm) + self.x[col].abs());
+                    // Only an owned rule opts into source-coordinate probes.
+                    // Original storage keeps its exact historical FD scale.
+                    let probe_scale = if owned_rule.is_some() {
+                        sys.storage.coordinate_scale(col)
+                            .unwrap_or(scale.max(rnorm) + self.x[col].abs())
+                    } else { scale.max(rnorm) + self.x[col].abs() };
+                    let h = 1.0e-6 * probe_scale;
                     if !h.is_finite() || h <= 0.0 { return Err(dimensions("invalid finite-difference increment").into()); }
                     self.trial.copy_from_slice(&self.x);
                     self.trial[col] += h;
@@ -495,7 +590,7 @@ impl StepWorkspace {
                 }
             }
             poll()?;
-            let condensed=if hessian.is_some() {
+            let condensed=if analytic {
                 if let Some(plan)=&mut self.condensation {
                     let solved=plan.solve(&self.jacobian,&self.residual,&mut self.delta,&mut poll)?;
                     if solved { self.linear_solves.0+=1; }

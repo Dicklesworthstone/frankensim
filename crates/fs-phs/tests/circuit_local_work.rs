@@ -424,3 +424,124 @@ fn native_endpoint_tangent_matches_each_secant_derivative_and_independent_pertur
     assert!(rule.end_jacobian_action(&before, &after, &direction, &mut action));
     close(action[a], direction[a], 1.0);
 }
+
+#[test]
+fn all_native_ode_routes_advance_small_forced_charges_beside_an_unchanged_large_store() {
+    let (scale_a, scale_b) = (1e-9, 1e-12);
+    let dae = two_caps(scale_a, scale_b);
+    let n = dae.system.state_dim();
+    let [a, b, held] = <[usize; 3]>::try_from(dae.charge_index.as_slice()).unwrap();
+    let mut ports = vec![0.0; 2 * n];
+    ports[2 * a] = 1.0;
+    ports[2 * b + 1] = 1.0;
+    let system = PortHamiltonian::new(
+        n,
+        2,
+        vec![0.0; n * n],
+        vec![0.0; n * n],
+        ports,
+        dae.system.storage().shared_clone().unwrap(),
+    )
+    .unwrap();
+    let mut before = vec![0.0; n];
+    before[a] = 2.0 * scale_a;
+    before[b] = 0.25 * scale_b;
+    before[held] = 1e8;
+    let input = [-1.5 * scale_a, 1.25 * scale_b];
+    let expected = [0.5 * scale_a, 1.5 * scale_b];
+    let expected_work = [-2.375 * scale_a, 2.28125 * scale_b];
+    let hessian = |x: &[f64], direction: &[f64], out: &mut [f64]| {
+        out.fill(0.0);
+        out[a] = if x[a].abs() < scale_a { 1.0 } else { 2.0 } * direction[a] / scale_a;
+        out[b] = if x[b].abs() < 0.5 * scale_b { 3.0 } else { 1.0 } * direction[b] / scale_b;
+        out[held] = direction[held];
+        true
+    };
+    let mut failures = Vec::new();
+    for mode in ["allocating", "prepared", "analytic", "condensed"] {
+        let (after, output, delta_h, supplied, dissipated) = if mode == "allocating" {
+            let record = step(&system, &before, &input, 1.0).unwrap();
+            (
+                record.x,
+                record.y,
+                record.delta_h,
+                record.supplied,
+                record.dissipated,
+            )
+        } else {
+            let mut workspace = StepWorkspace::new(&system).unwrap();
+            if mode == "condensed" {
+                workspace.set_condensed_pairs(&[[a, b]]).unwrap();
+            }
+            let mut after = vec![0.0; n];
+            let mut output = vec![0.0; 2];
+            let record = if mode == "prepared" {
+                workspace.step_into(&system, &before, &input, 1.0, &mut after, &mut output)
+            } else {
+                workspace.step_into_analytic(
+                    &system,
+                    &before,
+                    &input,
+                    1.0,
+                    &mut after,
+                    &mut output,
+                    &hessian,
+                )
+            }
+            .unwrap();
+            (
+                after,
+                output,
+                record.delta_h,
+                record.supplied,
+                record.dissipated,
+            )
+        };
+        let charge_ok = (after[a] - expected[0]).abs() <= 3e-12 * scale_a
+            && (after[b] - expected[1]).abs() <= 3e-12 * scale_b;
+        let branch_work_ok = (input[0] * output[0] - expected_work[0]).abs() <= 3e-12 * scale_a
+            && (input[1] * output[1] - expected_work[1]).abs() <= 3e-12 * scale_b;
+        let work = expected_work[0] + expected_work[1];
+        let ledger_ok = (delta_h - work).abs() <= 3e-12 * scale_a
+            && (supplied - work).abs() <= 3e-12 * scale_a
+            && dissipated == 0.0;
+        if !charge_ok || !branch_work_ok || !ledger_ok {
+            failures.push(format!(
+                "{mode}: charge=[{:e},{:e}], voltage={output:?}, delta_h={delta_h:e}, supplied={supplied:e}",
+                after[a], after[b],
+            ));
+        }
+        assert_eq!(after[held].to_bits(), before[held].to_bits());
+        assert_eq!(system.hamiltonian(&after), system.hamiltonian(&before));
+    }
+    assert!(
+        failures.is_empty(),
+        "physical charge/work failures:\n{}",
+        failures.join("\n")
+    );
+    // A large unrelated state must not turn an exhausted Newton budget into
+    // a successful unchanged-state publication on either prepared entrypoint.
+    for analytic in [false, true] {
+        let mut workspace = StepWorkspace::new(&system).unwrap();
+        workspace.set_iteration_limit(0).unwrap();
+        let mut after = vec![123.0; n];
+        let mut output = vec![456.0; 2];
+        let result = if analytic {
+            workspace.step_into_analytic(
+                &system,
+                &before,
+                &input,
+                1.0,
+                &mut after,
+                &mut output,
+                &hessian,
+            )
+        } else {
+            workspace.step_into(&system, &before, &input, 1.0, &mut after, &mut output)
+        };
+        assert!(result.is_err());
+        assert!(after.iter().all(|&value| value == 123.0));
+        assert!(output.iter().all(|&value| value == 456.0));
+        assert!(workspace.last_step_discrete_effort().is_none());
+    }
+}

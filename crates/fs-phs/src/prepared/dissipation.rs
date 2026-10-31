@@ -68,9 +68,11 @@ impl StepWorkspace {
     /// Passing `hessian` selects analytic Newton and requires `tangent`, which
     /// fills `D_state*state_direction + D_effort*effort_direction`. It receives
     /// independent directions, including the full Gonzalez energy correction.
-    /// With no Hessian the canonical finite-difference residual probes include
-    /// D automatically; an unused tangent is not evaluated. There is no silent
-    /// analytic-to-FD fallback. Both paths retain the existing solver limits.
+    /// With no Hessian, an available source-owned effort Jacobian and supplied
+    /// dissipative tangent enable exact Newton; otherwise the finite-difference
+    /// residual probes include D automatically. Explicit analytic calls never
+    /// silently fall back to finite differences. Both paths retain the existing
+    /// solver limits and physical equation.
     ///
     /// Preparation allocates; calls add no solver allocation. This guarantee
     /// requires allocation-free physical callbacks. It is not a real-time claim.

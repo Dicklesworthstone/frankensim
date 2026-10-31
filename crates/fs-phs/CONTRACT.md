@@ -1357,3 +1357,41 @@ work, end derivatives, domain propagation and exact cancellation of a coupled
 quadratic block, including represented-midpoint offsets. An actual matched-mode
 test drives nF and pF stores through separate source knots beside a large held
 bias and checks each source's work against its original capacitor integral.
+
+## SI-scale admission for source-owned ODE storage
+
+Allocating and prepared ODE stepping additionally certify each original
+coordinate when storage declares a complete constitutive discrete gradient.
+The local scale is formed only from that coordinate's two endpoint values and
+its own evaluated held, linear and optional nonlinear-dissipative flow terms.
+A large independent stored coordinate cannot admit a frozen picofarad charge
+while its current port supplies nonzero work. The unchanged global request is
+also required, and independent energy/work accounting remains in place.
+
+Strict coordinate scores participate in initial convergence, best-iterate
+selection and stagnation tracking. Final and exhausted-budget publication
+must pass both global and coordinate certificates. Default arithmetic floors
+come from each row's evaluated operands, without a global endpoint-energy
+quotient. Explicit caller budgets retain their original strict semantics,
+including a below-rounding-floor refusal even when that row's residual is zero.
+Inactive zero rows need no fabricated unit-sized scale. Successful records
+retain their existing global diagnostic; local refusal reports the failing
+coordinate's certificate.
+
+Allocating Newton and ordinary prepared stepping use a supplied complete
+constitutive end-state action automatically. Prepared condensation reuses
+existing scratch and solver ownership. If an ordinary prepared call lacks
+the action or an applicable nonlinear-loss tangent, it retains finite
+differences with source-coordinate probe scales. Explicit analytic requests
+still refuse missing actions. Storage without a declared rule retains its
+previous convergence and probing policy. These additions create no new
+prepared buffers or warm-path allocations.
+
+The eighth `tests/circuit_local_work.rs` regression reproduces the old false
+acceptance in allocating, ordinary prepared, explicit analytic and condensed
+execution: charges remained at 2 nC and 0.25 pC while nonzero source work was
+reported. All four now reach 0.5 nC and 1.5 pC and independently close their
+capacitor work beside the same unchanged large stored coordinate. Zero-update
+ordinary and analytic requests refuse without modifying output sentinels or
+publishing a retained effort. This adds physical-unit algebraic admission;
+it does not certify temporal accuracy or relax source support.

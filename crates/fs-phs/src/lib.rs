@@ -2147,9 +2147,11 @@ const NEWTON_MAX: usize = 50;
 // Bounded attempts to regain descriptor storage support, including probes.
 const DESCRIPTOR_DOMAIN_HALVINGS: usize = 24;
 
-/// One Gonzalez discrete-gradient step of size `dt` under held input
+/// One canonical discrete-gradient step of size `dt` under held input
 /// `u`: solves `x1 = x0 + dt (J - R) dg(x0, x1) + dt G u` by Newton
-/// with a finite-difference Jacobian, then reports the exact ledger.
+/// with a declared constitutive end-state action when available, otherwise
+/// finite differences, then reports the original energy/work ledger. Declared
+/// rules also require convergence in each coordinate's own physical units.
 ///
 /// # Errors
 /// [`PhsError::NewtonStalled`] if the implicit solve exhausts its
@@ -2165,6 +2167,10 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         return Err(PhsError::Dimension {
             what: "dt must be finite and non-negative",
         });
+    }
+    let constitutive = sys.storage.discrete_gradient_rule().is_some();
+    if constitutive && !sys.storage.hamiltonian(x0).is_finite() {
+        return Err(PhsError::Dimension { what: "initial constitutive storage is outside finite support" });
     }
     // Forcing term dt*G*u (held over the step).
     let mut gu = vec![0.0; n];
@@ -2201,14 +2207,23 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     let mut previous_norm = f64::INFINITY;
     let mut best: Option<(Vec<f64>, f64)> = None;
     loop {
+        if constitutive && !sys.storage.hamiltonian(&x1).is_finite() {
+            return Err(PhsError::Dimension { what: "constitutive Newton trial is outside finite support" });
+        }
         let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
         let res = residual(&x1, &dg);
         let rnorm = res.iter().fold(0.0f64, |a, &v| a.max(v.abs()));
-        let improved = best.as_ref().is_none_or(|(_, b)| rnorm < *b);
+        let rows = newton::constitutive_row_certificate(sys.storage.as_ref(), x0, &x1,
+            &dg, &sys.j, &sys.r, &gu, dt, &[], &res, SolveBudget::default(),
+            NewtonSite::Step, iters, stagnant, true)?;
+        let progress = rows.as_ref().map_or(rnorm, |rows| {
+            (rnorm / (NEWTON_TOL * scale)).max(rows.strict_score)
+        });
+        let improved = best.as_ref().is_none_or(|(_, b)| progress < *b);
         if improved {
-            best = Some((x1.clone(), rnorm));
+            best = Some((x1.clone(), progress));
         }
-        if rnorm <= NEWTON_TOL * scale {
+        if rnorm <= NEWTON_TOL * scale && rows.as_ref().is_none_or(|rows| rows.strict_score <= 1.0) {
             break;
         }
         // Judge stagnation against the PREVIOUS iterate, while retaining the
@@ -2217,26 +2232,34 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
         // Counting those as stagnant aborts a recovering Newton solve. The hard
         // update budget and strict convergence target are unchanged. The final
         // algebraic certificate governs every best-iterate fallback.
-        if rnorm < previous_norm {
+        if progress < previous_norm {
             stagnant = 0;
         } else {
             stagnant += 1;
         }
-        previous_norm = rnorm;
+        previous_norm = progress;
         if stagnant >= 3 || iters >= NEWTON_MAX {
-            let (bx, brnorm) = best.expect("at least one iterate");
+            let (bx, _) = best.expect("at least one iterate");
             let dg = discrete_gradient(sys.storage.as_ref(), x0, &bx);
+            let res = residual(&bx, &dg);
+            let brnorm = res.iter().fold(0.0_f64, |a, &v| a.max(v.abs()));
             let floor = newton::residual_rounding_floor(sys.storage.as_ref(), x0, &bx,
                 &dg, &sys.j, &sys.r, &gu, dt, n, &[]);
             admit_default_newton_iterate(SolveBudget::default().certificate(
                 NewtonSite::Step, brnorm, scale, floor, iters, stagnant).with_rounding_allowance())?;
+            if let Some(rows) = newton::constitutive_row_certificate(sys.storage.as_ref(), x0, &bx,
+                &dg, &sys.j, &sys.r, &gu, dt, &[], &res, SolveBudget::default(),
+                NewtonSite::Step, iters, stagnant, true)?
+                && let Some(certificate) = rows.certificate
+            { admit_default_newton_iterate(certificate)?; }
             x1 = bx;
             break;
         }
         // A zero state can still have finite internal force (for example an
         // adhesive gap). The residual is a state increment and supplies a
         // resolvable probe scale without relaxing the convergence target.
-        let jac = fd_jacobian(sys, x0, &x1, scale.max(rnorm), &residual);
+        let jac = constitutive_ode_jacobian(sys, x0, &x1, dt)
+            .unwrap_or_else(|| fd_jacobian(sys, x0, &x1, scale.max(rnorm), &residual));
         let fact = lu(&jac, n).map_err(|_| PhsError::NewtonStalled { residual: rnorm })?;
         let mut delta = res;
         fact.solve(&mut delta);
@@ -2249,6 +2272,11 @@ pub fn step(sys: &PortHamiltonian, x0: &[f64], u: &[f64], dt: f64) -> Result<Ste
     let solver_residual = {
         let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
         let res = residual(&x1, &dg);
+        if let Some(rows) = newton::constitutive_row_certificate(sys.storage.as_ref(), x0, &x1,
+            &dg, &sys.j, &sys.r, &gu, dt, &[], &res, SolveBudget::default(),
+            NewtonSite::Step, iters, stagnant, true)?
+            && let Some(certificate) = rows.certificate
+        { admit_default_newton_iterate(certificate)?; }
         res.iter().fold(0.0f64, |a, &v| a.max(v.abs()))
     };
     let dg = discrete_gradient(sys.storage.as_ref(), x0, &x1);
@@ -2331,6 +2359,37 @@ fn ledger(
 /// its Jacobian.
 type ResidualFn<'a> = &'a dyn Fn(&[f64], &[f64]) -> Vec<f64>;
 
+// Native constitutive actions avoid charge probes sized by unrelated fluxes or
+// held biases. Other storage retains its original finite-difference Newton law.
+fn constitutive_ode_jacobian(
+    sys: &PortHamiltonian, a: &[f64], b: &[f64], dt: f64,
+) -> Option<Vec<f64>> {
+    let rule = sys.storage.discrete_gradient_rule()?;
+    let n = sys.n;
+    let mut direction = vec![0.0; n];
+    let mut action = vec![0.0; n];
+    let mut jac = vec![0.0; n * n];
+    for col in 0..n {
+        direction[col] = 1.0;
+        action.fill(0.0);
+        if !rule.end_jacobian_action(a, b, &direction, &mut action)
+            || action.iter().any(|value| !value.is_finite()) { return None; }
+        direction[col] = 0.0;
+        for row in 0..n {
+            let mut flow = 0.0;
+            for k in 0..n {
+                if action[k] != 0.0 {
+                    flow += (sys.j[row*n+k] - sys.r[row*n+k]) * action[k];
+                }
+            }
+            let value = (if row == col { 1.0 } else { 0.0 }) - dt * flow;
+            if !value.is_finite() { return None; }
+            jac[row*n+col] = value;
+        }
+    }
+    Some(jac)
+}
+
 /// Central-difference Jacobian of the implicit residual in `x1` (h^2
 /// accuracy keeps the approximate-Newton linear-convergence tail
 /// short).
@@ -2344,7 +2403,10 @@ fn fd_jacobian(
     let n = x0.len();
     let mut jac = vec![0.0; n * n];
     for col in 0..n {
-        let h = 1.0e-6 * (scale + x1[col].abs());
+        let probe_scale = if sys.storage.discrete_gradient_rule().is_some() {
+            sys.storage.coordinate_scale(col).unwrap_or(scale + x1[col].abs())
+        } else { scale + x1[col].abs() };
+        let h = 1.0e-6 * probe_scale;
         let mut xp = x1.to_vec();
         let mut xm = x1.to_vec();
         xp[col] += h;

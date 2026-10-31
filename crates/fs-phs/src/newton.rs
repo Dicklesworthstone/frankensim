@@ -192,6 +192,82 @@ pub fn arithmetic_rounding_floor(operations: usize, magnitude: f64) -> f64 {
     ne / (1.0 - ne) * magnitude
 }
 
+/// Local admission for a declared constitutive effort, in each original
+/// coordinate's units. No unrelated stored bias enters another row's budget.
+pub(crate) struct ConstitutiveRows {
+    pub strict_score: f64,
+    pub effective_score: f64,
+    pub certificate: Option<SolveCertificate>,
+}
+
+fn budget_ratio(value: f64, budget: f64) -> f64 {
+    if budget > 0.0 { value / budget }
+    else if value == 0.0 { 0.0 } else { f64::INFINITY }
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn constitutive_row_certificate(
+    storage: &dyn Storage,
+    x0: &[f64],
+    x: &[f64],
+    effort: &[f64],
+    j: &[f64],
+    r: &[f64],
+    gu: &[f64],
+    dt: f64,
+    additional_flow: &[f64],
+    residual: &[f64],
+    budget: SolveBudget,
+    site: NewtonSite,
+    iterations: usize,
+    stagnant_iterations: usize,
+    automatic_floor: bool,
+) -> Result<Option<ConstitutiveRows>, PhsError> {
+    if storage.discrete_gradient_rule().is_none() { return Ok(None); }
+    let n = x.len();
+    let mut result = ConstitutiveRows {
+        strict_score: 0.0, effective_score: 0.0, certificate: None,
+    };
+    for row in 0..n {
+        let mut flow = gu[row].abs()
+            + additional_flow.get(row).copied().unwrap_or(0.0).abs();
+        for col in 0..n {
+            flow += (j[row*n+col].abs() + r[row*n+col].abs()) * effort[col].abs();
+        }
+        let magnitude = x0[row].abs() + x[row].abs() + dt.abs() * flow;
+        let observed = residual[row].abs();
+        if !magnitude.is_finite() || !observed.is_finite() {
+            return Err(PhsError::Dimension {
+                what: "nonfinite constitutive coordinate residual operands",
+            });
+        }
+        // A completely inactive zero row has neither residual nor rounding
+        // arithmetic. It needs no invented unit-sized physical scale.
+        if magnitude == 0.0 && observed == 0.0 { continue; }
+        let floor = arithmetic_rounding_floor(
+            n.saturating_mul(4).saturating_add(8), magnitude,
+        );
+        let mut certificate = budget.certificate(
+            site, observed, magnitude, floor, iterations, stagnant_iterations,
+        );
+        result.strict_score = result.strict_score.max(
+            budget_ratio(observed, certificate.requested_budget),
+        );
+        if automatic_floor { certificate = certificate.with_rounding_allowance(); }
+        let mut score = budget_ratio(observed, certificate.effective_budget);
+        if !automatic_floor {
+            // An impossible explicit request must remain visible even if this
+            // row currently has zero residual and another row has a larger one.
+            score = score.max(budget_ratio(floor, certificate.requested_budget));
+        }
+        if result.certificate.is_none() || score > result.effective_score {
+            result.effective_score = score;
+            result.certificate = Some(certificate);
+        }
+    }
+    Ok(Some(result))
+}
+
 /// Arithmetic floor for x1-x0-dt*((J-R)dg+Gu), or unscaled algebraic rows.
 /// Gonzalez's energy-subtraction quotient contributes an additional propagated
 /// envelope when the SAME cancellation guard used by the DG owner is active.
