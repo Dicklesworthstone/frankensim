@@ -40,6 +40,18 @@ fn resultants(
 }
 
 impl PreparedThermalFacet {
+    pub(in crate::shell::mitc) fn strain_field(
+        &self,
+        nodal: &[f64; 18],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<crate::shell::mitc::strain::RealElementStrain, PlateError> {
+        let mut q = self.field.expand(nodal);
+        for i in 0..2 {
+            q[18 + i] += self.bubble_offset[i];
+        }
+        crate::shell::mitc::strain::real_field_from_expanded(&self.field, &q, cancelled)
+    }
+
     pub(in crate::shell::mitc) fn new(
         field: PreparedStrainField,
         section: &ShearShellSection,

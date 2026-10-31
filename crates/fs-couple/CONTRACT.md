@@ -1,5 +1,37 @@
 # CONTRACT: fs-couple
 
+## Spatial layer heating and native laminate deformation
+
+`laminate_thermal::LayeredThermalShell` binds the original sourced thermal stack
+to the original MITC shell through `LaminateThermalSource`. Mechanical and
+thermal inputs must agree on each card, reference thickness, typed fixed context,
+patch area and per-cell reference mass. Every thermal control volume becomes
+one sublamina at its actual temperature, with current pinned elastic properties
+and the original integrated expansion path. The native 128-lamina limit refuses
+unsupported resolution before subdivision; temperatures and CTEs are never
+averaged to fit that limit.
+
+Current source-backed sections drive native load assembly, bubble condensation,
+compatible static displacement, physical stress resultants and stored energy.
+Mesh, layer orientation, reference geometry and all mass moments stay fixed.
+One prepared laminate is shared across facets; each field supplies its exact
+cached oriented section. The resulting native pencil is exposed for existing
+vibration consumers, without claiming a prestress tangent or history transfer.
+Explicit translation/rotation limits and whole-element reduced elastic-strain
+bounds enforce the caller's linear-model envelope, including the thermally
+driven internal director field.
+
+`advance_to` uses the original sparse implicit layered heat owner and publishes
+heat plus mechanical endpoints only after both succeed. Source-domain exits,
+mechanical refusal and cancellation retain the original accepted thermal state.
+This is one-way quasistatic heat-to-mechanics coupling: the reported heat audit
+excludes elastic entropy, stiffness-change work and mechanical feedback.
+Mechanical energy is separate, with no claim of reciprocal energy conservation,
+finite rotations, transverse-normal/interlaminar recovery or measured accuracy.
+`tests/laminate_thermal.rs` exercises native two-cell heat exchange against an
+independent CLT solution, five-cell gradient retention, compatible expansion,
+reference mass and late atomic refusal.
+
 ## One shared hysteretic core in a native multiwinding circuit
 
 `material_circuit::hysteretic::shared::SharedHystereticCircuit` connects the

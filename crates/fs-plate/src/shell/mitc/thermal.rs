@@ -289,6 +289,31 @@ impl MitcShellModel {
 }
 
 impl PreparedThermalShell<'_> {
+    /// Whole-facet strain polynomial at an actual physical nodal snapshot,
+    /// including the thermally driven affine director-bubble displacement.
+    /// This shares the original Bernstein observation owner; using a cold
+    /// elastic observer alone would omit the thermal offset. The eighteen
+    /// world coordinates use this facet's original triangle-node order.
+    pub fn strain_field(
+        &self,
+        element: usize,
+        nodal_displacement: &[f64; 18],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<super::strain::RealElementStrain, PlateError> {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        if nodal_displacement.iter().any(|v| !v.is_finite()) {
+            return Err(PlateError::BadConstraint {
+                what: "finite physical facet displacement required",
+            });
+        }
+        let facet = self.facets.get(element).ok_or(PlateError::BadConstraint {
+            what: "thermal strain facet out of range",
+        })?;
+        facet.strain_field(nodal_displacement, &mut cancelled)
+    }
+
     /// Exact work-conjugate world force/moment vector, including constrained DOFs.
     /// Existing source displacement maps and modal projections can consume it.
     #[must_use]

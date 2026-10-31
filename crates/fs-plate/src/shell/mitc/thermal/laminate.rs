@@ -66,6 +66,13 @@ impl LaminateThermalField {
         &self.source
     }
 
+    /// Exact oriented section required by this field's native shell assembly.
+    /// Reuse it when rebuilding a temperature-dependent section to avoid a
+    /// second rotation and keep stiffness, inertia and thermal admission aligned.
+    pub const fn section(&self) -> &ShearShellSection {
+        &self.section
+    }
+
     /// Whole-section angle relative to the facet's ex/ey axes [rad].
     pub const fn section_angle_rad(&self) -> f64 {
         self.section_angle_rad
@@ -79,6 +86,33 @@ impl LaminateThermalField {
     /// Positive equivalent thermal first moment `[Mxx,Myy,Mxy]` [N].
     pub const fn bending_moment_n(&self) -> [f64; 3] {
         self.bending_moment_n
+    }
+
+    /// Conservative whole-facet/layer bound on represented elastic strain,
+    /// including transverse shear but not an inferred normal thickness strain.
+    /// Supply a field from the SAME prepared thermal shell and nodal snapshot.
+    pub fn elastic_strain_bound(
+        &self,
+        layer: usize,
+        field: &super::super::strain::RealElementStrain,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
+        let faces = self
+            .source
+            .layer_free_strain_in_section(layer)
+            .map_err(material_error)?;
+        let integral = &self.source.section().layer_integrals()[layer];
+        let t = &self.strain_to_section;
+        // Inverse engineering-strain rotation; the work-conjugate stress
+        // transpose is deliberately not used to transform a free strain.
+        let free = faces.map(|e| {
+            [
+                t[0][0] * e[0] + t[0][1] * e[1] - t[0][2] * e[2],
+                t[1][0] * e[0] + t[1][1] * e[1] - t[1][2] * e[2],
+                -t[2][0] * e[0] - t[2][1] * e[1] + t[2][2] * e[2],
+            ]
+        });
+        field.reduced_elastic_layer_bound([integral.z_bottom_m, integral.z_top_m], free, cancelled)
     }
 
     /// Actual layer-face plane stress at supplied compatible facet strains.

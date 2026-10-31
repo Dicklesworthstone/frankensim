@@ -234,6 +234,11 @@ impl PreparedLayeredThermalBody {
     pub fn layer_cell_counts(&self) -> &[usize] {
         &self.counts
     }
+    /// Fixed mass of ONE control volume in each original layer [kg].
+    /// All subdivisions of a homogeneous layer share this reference inventory.
+    pub fn layer_cell_masses_kg(&self) -> &[f64] {
+        &self.masses
+    }
     pub const fn temperature_span_k(&self) -> [f64; 2] {
         self.span
     }
@@ -335,6 +340,11 @@ impl BoundLayeredThermalBody<'_> {
         self.identity
     }
 
+    /// Original geometry, material sources, subdivisions and fixed mass.
+    pub const fn prepared_body(&self) -> &PreparedLayeredThermalBody {
+        self.body
+    }
+
     pub fn materials(&self) -> BTreeMap<MaterialId, &dyn ThermalLaw> {
         self.laws
             .iter()
@@ -413,18 +423,14 @@ impl BoundLayeredThermalBody<'_> {
         Ok(events)
     }
 
-    /// Evaluate at the original owner's candidate state. No state or source
-    /// account changes here. Replacements retain that owner's contact coverage;
-    /// each edge still exchanges the same signed joules on its two endpoints.
-    /// The caller owns nonlinear solution, acceptance and time-step refinement.
-    /// Sparse result maps/edge diagnostics allocate O(cells); scalar edge kernels
-    /// allocate nothing and all work has layer/cell/iteration bounds.
-    pub fn step_coefficients(
+    /// Read cell temperatures in original thickness order after validating
+    /// the complete original cell/law/contact binding. This shares admission
+    /// with conduction but does not recompute flux or alter the thermal state.
+    pub fn cell_temperatures(
         &self,
         simulation: &DepositionSimulation<'_>,
-        config: LayerConductionConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
-    ) -> Result<StepCoefficients<Vec<LayerConductionResponse>>, DepositionError> {
+    ) -> Result<Vec<f64>, DepositionError> {
         checkpoint()?;
         let mut temperatures = Vec::with_capacity(self.body.cell_count());
         for (i, prepared) in self.body.cells.iter().enumerate() {
@@ -463,6 +469,23 @@ impl BoundLayeredThermalBody<'_> {
                 ));
             }
         }
+        checkpoint()?;
+        Ok(temperatures)
+    }
+
+    /// Evaluate at the original owner's candidate state. No state or source
+    /// account changes here. Replacements retain that owner's contact coverage;
+    /// each edge still exchanges the same signed joules on its two endpoints.
+    /// The caller owns nonlinear solution, acceptance and time-step refinement.
+    /// Sparse result maps/edge diagnostics allocate O(cells); scalar edge kernels
+    /// allocate nothing and all work has layer/cell/iteration bounds.
+    pub fn step_coefficients(
+        &self,
+        simulation: &DepositionSimulation<'_>,
+        config: LayerConductionConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<StepCoefficients<Vec<LayerConductionResponse>>, DepositionError> {
+        let temperatures = self.cell_temperatures(simulation, &mut checkpoint)?;
         let responses = self.responses(&temperatures, config, &mut checkpoint)?;
         let conductances_w_k = responses
             .iter()

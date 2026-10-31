@@ -5672,6 +5672,12 @@ temperature interval containing the explicit common energy datum. Original
 receipts, amounts, physical ordering, geometry and subdivision counts contribute
 to prepared identity. No density law is inferred from the required mass input.
 
+The bound owner's `cell_temperatures` query validates the same original cells,
+borrowed material laws and contacts as conduction, then returns temperatures in
+physical thickness order without recomputing flux. `prepared_body` and original
+per-layer cell masses support mechanical bindings that preserve every thermal
+subdivision and compare each reference mass, rather than only the global sum.
+
 `BoundLayeredThermalBody` attaches the exact original borrowed storage laws and
 checked cell/material/link IDs. Its birth events create independent cell
 enthalpies, then contacts. Each internal face uses the original two-layer

@@ -223,6 +223,20 @@ fn g3_spatial_gradient_retains_thermal_bubble_offset_and_energy_derivative() {
         .collect();
     let prepared = model.prepare_thermal(&fields, || false).unwrap();
     let zero = prepared.recover(&[0.0; 24], || false).unwrap();
+    // Zero physical nodal motion still has an interior thermal director field.
+    // Its whole-element observer must include the affine offset; an observer
+    // reconstructed solely from the cold condensed map would return zero.
+    let mut maximum_internal_strain = 0.0_f64;
+    for element in 0..mesh.tris.len() {
+        let field = prepared
+            .strain_field(element, &[0.0; 18], || false)
+            .unwrap();
+        let bound = field
+            .reduced_elastic_layer_bound([-0.05, 0.05], [[0.0; 3]; 2], &mut || false)
+            .unwrap();
+        maximum_internal_strain = maximum_internal_strain.max(bound);
+    }
+    assert!(maximum_internal_strain > 1e-8);
     // Condensation must shift the interior director response under thermal
     // forcing. A homogeneous-only strain expansion would return -f_n instead.
     for (force, equivalent) in zero.material_nodal_force_6n.iter().zip(prepared.load_6n()) {

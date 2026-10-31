@@ -865,6 +865,17 @@ refusal checks. These are authored numerical checks. Thermal histories of Prony
 layers, temperature-dependent section updates, finite rotations, and coupled
 heat/entropy evolution remain outside this shell adapter.
 
+`PreparedThermalShell::strain_field` exposes the original full-facet strain
+polynomial including the thermal director-bubble offset. It shares the existing
+Bernstein conversion with cold/harmonic observation. The reduced elastic layer
+bound covers all facet coordinates and both layer faces, with engineering-shear
+weights gamma^2/2; no unmeasured normal thickness strain is reconstructed.
+`LaminateThermalField::elastic_strain_bound` subtracts the original cached layer
+free strains using the inverse engineering rotation. Its `section()` getter
+lets temperature-refresh consumers reuse the exact already oriented section.
+The spatial-gradient regression observes a nonzero interior thermal strain
+field even with every physical nodal displacement held at zero.
+
 ## Equilibrium of tied shell assemblies before modal reduction
 
 `shell::preload::assembly::equilibrate_shell_assembly` solves the full CST/DKT

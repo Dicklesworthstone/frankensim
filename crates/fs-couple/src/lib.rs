@@ -134,6 +134,8 @@ pub mod tensor_material;
 pub mod thin_plate;
 /// Material-bound curved shear shells with shared mechanical and pressure ports.
 pub mod shear_shell;
+/// Source-resolved layer temperatures driving compatible native shell deformation.
+pub mod laminate_thermal;
 pub mod tract;
 /// Source-bound dry sliding work and finite-body temperature feedback.
 pub mod tribothermal;

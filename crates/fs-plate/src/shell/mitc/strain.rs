@@ -220,6 +220,27 @@ fn original_controls(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Controls, PlateError> {
     let expanded = field.expand(displacement);
+    expanded_controls(field, &expanded, cancelled)
+}
+
+// Thermal condensation adds an affine director offset to these same twenty
+// coordinates. Both observers use the original point evaluator and Bernstein
+// conversion, including that offset, rather than reconstructing kinematics.
+pub(super) fn real_field_from_expanded(
+    field: &element::PreparedStrainField,
+    expanded: &[f64; 20],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<RealElementStrain, PlateError> {
+    Ok(RealElementStrain {
+        controls: expanded_controls(field, expanded, cancelled)?,
+    })
+}
+
+fn expanded_controls(
+    field: &element::PreparedStrainField,
+    expanded: &[f64; 20],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Controls, PlateError> {
     if expanded.iter().any(|v| !v.is_finite()) {
         return Err(invalid(
             "unrepresentable condensed harmonic element displacement",
@@ -228,7 +249,7 @@ fn original_controls(
     let mut values = [[0.0; 8]; 6];
     for (i, &(r, s)) in POINTS.iter().enumerate() {
         poll(cancelled)?;
-        let (membrane, curvature, shear) = field.eval(&expanded, r, s);
+        let (membrane, curvature, shear) = field.eval(expanded, r, s);
         values[i][..3].copy_from_slice(&membrane);
         values[i][3..6].copy_from_slice(&curvature);
         values[i][6..].copy_from_slice(&shear);
@@ -268,6 +289,66 @@ pub struct RealElementStrain {
 
 impl RealElementStrain {
     pub const RETAINED_BYTES: usize = core::mem::size_of::<Self>();
+
+    /// Bound the represented elastic strain over a whole facet and layer.
+    /// `free_at_faces` is an affine engineering eigenstrain in this facet's
+    /// axes. The norm includes xx, yy, xy, xz and yz, with tensor shear weights;
+    /// no unmeasured out-of-plane normal strain or material failure criterion
+    /// is inferred. Bernstein convexity covers the complete spatial polynomial,
+    /// including an affine thermal bubble when supplied by the thermal owner.
+    pub fn reduced_elastic_layer_bound(
+        &self,
+        faces_m: [f64; 2],
+        free_at_faces: [[f64; 3]; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
+        poll(cancelled)?;
+        if faces_m.iter().any(|z| !z.is_finite())
+            || faces_m[0] > faces_m[1]
+            || free_at_faces.iter().flatten().any(|e| !e.is_finite())
+        {
+            return Err(invalid(
+                "finite ordered faces and integrated free strains required",
+            ));
+        }
+        let mut bound = 0.0_f64;
+        for (face, &z) in faces_m.iter().enumerate() {
+            for control in &self.controls {
+                poll(cancelled)?;
+                let values = [
+                    control[0] + z * control[3] - free_at_faces[face][0],
+                    control[1] + z * control[4] - free_at_faces[face][1],
+                    control[2] + z * control[5] - free_at_faces[face][2],
+                    control[6],
+                    control[7],
+                ];
+                if values.iter().any(|v| !v.is_finite()) {
+                    return Err(invalid("unrepresentable thermal layer strain"));
+                }
+                let scale = values.iter().fold(0.0_f64, |m, v| m.max(v.abs()));
+                let norm = if scale == 0.0 {
+                    0.0
+                } else {
+                    scale
+                        * det::sqrt(
+                            values
+                                .iter()
+                                .enumerate()
+                                .map(|(i, v)| {
+                                    let x = v / scale;
+                                    if i < 2 { x * x } else { 0.5 * x * x }
+                                })
+                                .sum(),
+                        )
+                };
+                if !norm.is_finite() {
+                    return Err(invalid("unrepresentable thermal layer strain bound"));
+                }
+                bound = bound.max(norm);
+            }
+        }
+        Ok(bound)
+    }
 
     /// Bound the full tensor of an isotropic plane-stress film using the same
     /// layer faces, tensor shear convention and Bernstein hull as harmonic
