@@ -3087,6 +3087,16 @@ O(boundary faces) Hessian-vector actions. Positive differential gas pressure
 produces `+p grad(V)`; held-pressure endpoint work is exactly `p ΔV`.
 The generated canonical face field feeds the existing static and dynamic
 pressure owners without a second solid solver or equation of state.
+The cavity also exposes `adiabatic_gas_load`, binding an original
+`ClosedGasParcel` at the undeformed cavity volume to the exact current cavity
+geometry. Every evaluation follows the source-owned isentrope to the trial
+volume and pulls the same pressure and acoustic bulk modulus through
+`GasMechanicalLoad`. The returned full-solid force Jacobian combines the
+matrix-free geometry Hessian with dp/dV; its conservative contribution is
+`Delta U_gas + p_ext Delta V`. This bridge uses no fixed gamma, does not freeze
+pressure or mutate the caller parcel, and adds neither heat nor time integration.
+The existing 256 compact-coordinate material pullback bound still applies.
+
 
 Preparation rejects duplicate, out-of-range, open, disconnected and outer-shell
 selections. Each evaluation admits every material tetrahedron and requires
