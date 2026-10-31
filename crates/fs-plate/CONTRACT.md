@@ -833,3 +833,42 @@ derivatives, rigid rotation, homogeneous reduction, original mass and atomic
 refusal checks. These are authored numerical checks. Thermal histories of Prony
 layers, temperature-dependent section updates, finite rotations, and coupled
 heat/entropy evolution remain outside this shell adapter.
+
+## Equilibrium of tied shell assemblies before modal reduction
+
+`shell::preload::assembly::equilibrate_shell_assembly` solves the full CST/DKT
+body in retained physical coordinates before producing its small-vibration
+pencil. Components keep their independently specified membrane A/bending D,
+reference inertia, essential supports and bonded beams. The existing junction
+owner supplies rigid/compliant edge and face ties, including nonmatching and
+eccentric interfaces. Its exact sparse map expands component deformation,
+transfers dead loads and nonlinear internal forces by `T^T`, and assembles the
+consistent equilibrium tangent by `T^T K T`. One shared map per component
+avoids a separate dense assembly or per-element transfer matrix allocation.
+
+The original preload membrane energy, analytic force/tangent, load-increment
+driver, preconditioner and physical force acceptance are reused. Every accepted
+increment must satisfy the original unpreconditioned equivalent-force residual,
+moderate-gradient/physical-rotation limits (including eliminated slave nodes),
+and positive tangent inertia. Symmetric tangent contributions use identical
+mirrored addends. The returned `TiedShellModel` retains its original mass, maps,
+glue stiffness/damping and mode expansion, with its stiffness replaced by the
+accepted tangent. Glue is already included; it must not be added again. A
+single part without ties preserves the original single-shell pencil arithmetic.
+
+All components explicitly declare the existing `ReferenceLoadState::Unloaded`;
+already loaded scans refuse instead of receiving a second load from an assumed
+stress-free state. Physical supports are required, and disconnected rigid modes
+or instability refuse without diagonal regularization. Essential supports on
+rigid slave nodes refuse until the junction owner composes those constraints;
+supports on masters propagate through the actual tie. Geometry is immutable.
+Aggregate limits are 64 parts, 10,000 nodes and 40,000 facets, with the original
+tie and nonlinear work budgets. Cancellation/refusal returns no partial body.
+
+Focused regressions compare one-part equilibrium bitwise and a tied nonlinear
+cantilever against the same monolithic body, including a slave-seam load, full
+tangent and mass. Independent energy/residual differences exercise a
+nonmatching eccentric seam. The scope remains moderate-deformation CST/DKT
+membrane prestress with reference-frame linear bending, beams and glue; it does
+not claim nonlinear MITC bending, unilateral contact, assembled tethers, beam
+buckling, tension/downbearing/contact force ledgers or closure of M1.4-W1.

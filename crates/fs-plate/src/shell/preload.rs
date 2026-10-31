@@ -20,9 +20,12 @@ use super::stiffened::assemble_stiffened_shell;
 use crate::PlateSection;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltFactor, LdltOptions, SymbolicLdlt};
 use std::cell::Cell;
+use std::sync::Arc;
 
 /// Direction-updating tensile connections at existing shell point ports.
 pub mod tethers;
+/// Full-coordinate equilibrium of shells joined by the original mortar ties.
+pub mod assembly;
 use tethers::{PreparedTether, ShellTether, TetherResponse};
 
 /// Explicit cold work and moderate-deformation admission limits.
@@ -77,10 +80,19 @@ fn mul(a: &[f64;9], b: [f64;3]) -> [f64;3] {
 }
 fn norm(x: &[f64]) -> f64 { x.iter().fold(0.0_f64, |a,b| a.hypot(*b)) }
 
+// One sparse kinematic map per component, shared by all its elements. The
+// identity single-shell path needs no map or per-element mapping allocation.
+type CoordinateRows = Arc<Vec<Vec<(usize, f64)>>>;
+struct ComponentTransform {
+    dof_map: Vec<Option<usize>>,
+    rows: CoordinateRows,
+}
+
 struct Element {
     geometry: FacetGeometry,
     membrane: [f64;9], // area-integrated resultant modulus, N m
     dofs: [Option<usize>;9],
+    transform: Option<CoordinateRows>,
     linear: [[f64;3];9],
 }
 struct Correction {
@@ -101,12 +113,39 @@ impl Element {
                 y*geometry.frame[0][c]+x*geometry.frame[1][c]]
         });
         if membrane.iter().any(|x|!x.is_finite()) { return Err("shell membrane modulus overflow".into()); }
-        Ok(Self { geometry, membrane, dofs, linear })
+        Ok(Self { geometry, membrane, dofs, transform:None, linear })
+    }
+    fn for_dof(&self, i:usize, mut f:impl FnMut(usize,f64)) {
+        if let Some(local)=self.dofs[i] {
+            if let Some(rows)=&self.transform {
+                for &(global,weight) in &rows[local] {f(global,weight);}
+            } else {f(local,1.);}
+        }
+    }
+    fn value(&self, u:&[f64], i:usize)->f64 {
+        let Some(local)=self.dofs[i] else {return 0.;};
+        match &self.transform {
+            Some(rows)=>rows[local].iter().map(|&(d,w)|w*u[d]).sum(),
+            None=>u[local],
+        }
+    }
+    fn add_tangent(&self, tangent:&[f64;81], k:&mut Coo) {
+        // Accumulate each symmetric local pair once and mirror its exact
+        // floating-point addend. Weighted slave rows may overlap: i != j can
+        // contribute twice to a retained diagonal, not just once.
+        for i in 0..9 {for j in i..9 {
+            self.for_dof(i,|a,wa|self.for_dof(j,|b,wb| {
+                if i==j && a>b {return;}
+                let value=wa*tangent[9*i+j]*wb;
+                if a==b {k.push(a,a,if i==j {value}else{2.*value});}
+                else {k.push(a,b,value);k.push(b,a,value);}
+            }));
+        }}
     }
     // Polynomial DIFFERENCES avoid subtracting two nearly equal large membrane
     // forces/stiffnesses. At zero displacement every correction is exactly zero.
     fn correction(&self, u: &[f64]) -> Correction {
-        let at = |a:usize,c:usize| self.dofs[3*a+c].map_or(0.0,|i|u[i]);
+        let at = |a:usize,c:usize| self.value(u,3*a+c);
         let mut dx = [0.;3]; let mut dy = [0.;3];
         for a in 1..3 { for c in 0..3 {
             let v = at(a,c)-at(0,c);
@@ -150,6 +189,7 @@ impl Element {
 pub struct PreloadProblem<'a> {
     model: &'a ShellModel,
     elements: Vec<Element>,
+    transforms: Vec<ComponentTransform>,
     tethers: Vec<PreparedTether>,
     base: LdltFactor,
     scale: Vec<f64>,
@@ -168,6 +208,16 @@ impl PreloadProblem<'_> {
             let rotation: [f64;3] = std::array::from_fn(|i|node[i+3].map_or(0.,|d|u[d]));
             if norm(&rotation)>self.options.maximum_rotation_rad { return false; }
         }
+        // Slave rotations are physical rotations too. Checking only retained
+        // coordinates would miss amplified/nonmatching mortar combinations.
+        for component in &self.transforms {
+            for node in component.dof_map.chunks_exact(6) {
+                let rotation:[f64;3]=std::array::from_fn(|i|node[i+3].map_or(0.,|d|
+                    component.rows[d].iter().map(|&(r,w)|w*u[r]).sum()));
+                if rotation.iter().any(|v|!v.is_finite())
+                    || norm(&rotation)>self.options.maximum_rotation_rad {return false;}
+            }
+        }
         true
     }
     fn reserve(&self) -> bool {
@@ -183,7 +233,7 @@ impl PreloadProblem<'_> {
             let c=element.correction(u);
             if !c.gradient.is_finite() || c.gradient>self.options.maximum_gradient {return None;}
             energy+=c.energy;
-            for i in 0..9 {if let Some(d)=element.dofs[i] {force[d]+=c.force[i];}}
+            for i in 0..9 {element.for_dof(i,|d,w|force[d]+=w*c.force[i]);}
         }
         (energy.is_finite() && force.iter().all(|v|v.is_finite())).then_some(energy)
     }
@@ -217,9 +267,7 @@ impl PreloadProblem<'_> {
             let c=element.correction(u);
             if !c.gradient.is_finite() || c.gradient>self.options.maximum_gradient
                 || c.tangent.iter().any(|v|!v.is_finite()) {return Err("invalid equilibrium tangent".into());}
-            for i in 0..9 {for j in 0..9 {
-                if let (Some(a),Some(b))=(element.dofs[i],element.dofs[j]) {k.push(a,b,c.tangent[9*i+j]);}
-            }}
+            element.add_tangent(&c.tangent,&mut k);
         }
         for tether in &self.tethers {tether.add_tangent(u,&mut k,self.fraction)?;}
         Ok(k.assemble())
@@ -248,8 +296,9 @@ impl PreloadProblem<'_> {
         for element in &self.elements {
             let c=element.correction(&u);
             if !c.gradient.is_finite() || c.gradient>self.options.maximum_gradient {out.fill(f64::NAN);return;}
-            for i in 0..9 {if let Some(a)=element.dofs[i] {
-                for j in 0..9 {if let Some(b)=element.dofs[j] {out[a]+=c.tangent[9*i+j]*v[b];}}
+            for i in 0..9 {for j in 0..9 {
+                element.for_dof(i,|a,wa|element.for_dof(j,|b,wb|
+                    out[a]+=wa*c.tangent[9*i+j]*wb*v[b]));
             }}
         }
         for tether in &self.tethers {
@@ -264,6 +313,53 @@ fn positive_factor(k:&Csr)->Result<LdltFactor,String> {
         .factor(k,&LdltOptions::default()).map_err(|e|e.to_string())?;
     if factor.inertia().negative!=0 {return Err("static shell equilibrium is unstable (negative tangent inertia)".into());}
     Ok(factor)
+}
+
+fn validate_options(options:PreloadOptions)->Result<(),String> {
+    if !(1..=64).contains(&options.load_steps) || !(1..=128).contains(&options.max_iterations)
+        || options.max_evaluations==0 || options.max_evaluations>100_000
+        || !options.maximum_gradient.is_finite() || !(0.0..=0.25).contains(&options.maximum_gradient)
+        || options.maximum_gradient==0. || !options.maximum_rotation_rad.is_finite()
+        || !(0.0..=0.25).contains(&options.maximum_rotation_rad) || options.maximum_rotation_rad==0.
+        || !options.relative_force_tolerance.is_finite()
+        || !(1e-12..=1e-4).contains(&options.relative_force_tolerance) {
+        return Err("invalid shell preload deformation limits or explicit budget".into());
+    }
+    Ok(())
+}
+
+struct Equilibrium {
+    u:Vec<f64>,
+    k:Csr,
+    energy:f64,
+    residual_force_n:f64,
+    iterations:usize,
+    evaluations:usize,
+}
+
+// The original load-increment driver is shared by a single shell and a tied
+// assembly. Solver convergence never replaces physical-force/inertia checks.
+fn solve_problem(problem:&mut PreloadProblem<'_>,
+    solve:&mut impl FnMut(&PreloadProblem<'_>,Vec<f64>,usize)->Result<(Vec<f64>,usize),String>)
+    ->Result<Equilibrium,String> {
+    let options=problem.options;
+    let mut x=vec![0.;problem.model.free];let mut iterations=0;let mut final_k=None;
+    for step in 1..=options.load_steps {
+        problem.fraction=step as f64/options.load_steps as f64;
+        let (candidate,count)=solve(problem,x,options.max_iterations)
+            .map_err(|e|format!("shell preload increment {step}/{}: {e}",options.load_steps))?;
+        if candidate.len()!=problem.model.free || candidate.iter().any(|v|!v.is_finite())
+            || count>options.max_iterations {return Err("invalid injected equilibrium solution".into());}
+        x=candidate;iterations+=count;
+        let u=problem.physical(&x);
+        problem.check_balance(&u)?;
+        let k=problem.tangent(&u)?;positive_factor(&k)?;final_k=Some(k);
+    }
+    let u=problem.physical(&x);let mut force=vec![0.;problem.model.free];
+    let energy=problem.force_energy(&u,&mut force).ok_or("invalid converged shell state")?;
+    let residual_force_n=problem.check_balance(&u)?;
+    let k=final_k.ok_or("no completed preload increment")?;
+    Ok(Equilibrium {u,k,energy,residual_force_n,iterations,evaluations:problem.evaluations.get()})
 }
 
 /// Solve full-coordinate nonlinear static equilibrium, then return its stable
@@ -326,16 +422,10 @@ fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
     ->Result<PreloadedShell,String> {
     if mesh.nodes.len()>10_000 || mesh.tris.len()>40_000 || loads.len()!=6*mesh.nodes.len()
         || tethers.len()>4096
-        || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty()
-        || !(1..=64).contains(&options.load_steps) || !(1..=128).contains(&options.max_iterations)
-        || options.max_evaluations==0 || options.max_evaluations>100_000
-        || !options.maximum_gradient.is_finite() || !(0.0..=0.25).contains(&options.maximum_gradient)
-        || options.maximum_gradient==0. || !options.maximum_rotation_rad.is_finite()
-        || !(0.0..=0.25).contains(&options.maximum_rotation_rad) || options.maximum_rotation_rad==0.
-        || !options.relative_force_tolerance.is_finite()
-        || !(1e-12..=1e-4).contains(&options.relative_force_tolerance) {
+        || loads.iter().any(|v|!v.is_finite()) || support==ShellSupport::Free || boundary.is_empty() {
         return Err("invalid supported-shell preload, load cardinality or explicit budget".into());
     }
+    validate_options(options)?;
     let model=super::stiffened::assemble_sections(mesh,sections,boundary,support,beams).map_err(|e|e.to_string())?;
     let base=positive_factor(&model.k)?;
     let length=(0..3).map(|c| {
@@ -350,24 +440,9 @@ fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
     let elements=sections.iter().enumerate().map(|(e,s)|Element::new(mesh,&model,s,e))
         .collect::<Result<Vec<_>,_>>()?;
     let tethers=tethers.iter().map(|t|PreparedTether::new(t,mesh,&model)).collect::<Result<Vec<_>,_>>()?;
-    let mut problem=PreloadProblem {model:&model,elements,tethers,base,scale,load,fraction:0.,options,evaluations:Cell::new(0)};
-    let mut x=vec![0.;model.free];let mut iterations=0;let mut final_k=None;
-    for step in 1..=options.load_steps {
-        problem.fraction=step as f64/options.load_steps as f64;
-        let (candidate,count)=solve(&problem,x,options.max_iterations)
-            .map_err(|e|format!("shell preload increment {step}/{}: {e}",options.load_steps))?;
-        if candidate.len()!=model.free || candidate.iter().any(|v|!v.is_finite())
-            || count>options.max_iterations {return Err("invalid injected equilibrium solution".into());}
-        x=candidate;iterations+=count;
-        let u=problem.physical(&x);
-        problem.check_balance(&u)?;
-        let k=problem.tangent(&u)?;positive_factor(&k)?;final_k=Some(k);
-    }
-    let u=problem.physical(&x);let mut force=vec![0.;model.free];
-    let energy=problem.force_energy(&u,&mut force).ok_or("invalid converged shell state")?;
-    let residual_force_n=problem.check_balance(&u)?;
-    let k=final_k.ok_or("no completed preload increment")?;
-    let evaluations=problem.evaluations.get();
+    let mut problem=PreloadProblem {model:&model,elements,transforms:Vec::new(),tethers,base,scale,
+        load,fraction:0.,options,evaluations:Cell::new(0)};
+    let Equilibrium {u,k,energy,residual_force_n,iterations,evaluations}=solve_problem(&mut problem,solve)?;
     let tether_responses=problem.tethers.iter().map(|t|t.response(&u)).collect::<Result<Vec<_>,_>>()?;
     let displacement=model.dof_map.iter().map(|i|i.map_or(0.,|i|u[i])).collect();
     drop(problem);
@@ -380,7 +455,7 @@ mod tests {
     use super::*;
     // Independent sparse-direct Newton oracle for small deterministic fixtures.
     // The product adapter supplies the existing fs-solver globalized driver.
-    fn reference_newton(p:&PreloadProblem<'_>,mut x:Vec<f64>,limit:usize)
+    pub(super) fn reference_newton(p:&PreloadProblem<'_>,mut x:Vec<f64>,limit:usize)
         ->Result<(Vec<f64>,usize),String> {
         for iteration in 0..limit {
             if !p.reserve() {return Err("test solve budget exhausted".into());}
