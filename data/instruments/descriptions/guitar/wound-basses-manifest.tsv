@@ -1,0 +1,6 @@
+frankensim.matdb-manifest.v1
+pack_id	guitar-wound-basses-woodhouse-2004
+redistribution	permitted	Numerical values retained as scientific facts with attribution; no article text, figure or scanned table is reproduced
+citation	Woodhouse J. (2004), Plucked guitar transients: comparison of measurements and synthesis, Acta Acustica united with Acustica 90:945-965, Table I as corrected in the author's copy (https://euphonics.org/wp-content/uploads/2022/03/Guitar_II.pdf, the journal print differs); and, for the declared stand-in diameter only, Anderson B.E., Beausoleil R.G. (2024), JASA 156(1):683-705, https://doi.org/10.1121/10.0026483, EJ46 specification table (repository beausol/classical-guitar commit 9f6c87846786814434e5f311b133442012d67142)
+license	Published-Scientific-Facts-Attribution-Retained
+source	primary	wound-basses.tsv	material-tsv-v1

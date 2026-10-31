@@ -1,0 +1,98 @@
+frankensim.matdb-source.v1
+observation	woodhouse-2004-manufacturer	D'Addario Pro Arte Composites hard tension classical guitar strings (EJ46C): the three wound basses D3, A2 and E2, each a stranded nylon core overwound with metal wire, tuned to 146.8, 110.0 and 82.4 Hz on a 0.65 m scale	Tension and mass per unit length are the manufacturer's web-site values quoted by the paper; wave speed c = sqrt(T/mu) and impedance Z0 = sqrt(T mu) are deduced from them (Sec. 3.3); printed units g/m and Ns/m	Corrected Table I of the author's copy ('figures in original paper were printed incorrectly'): these values do not match the journal print. Manufacturer's values, not measured on the test strings; uncertainty not stated; the measurement temperature is not stated
+observation	woodhouse-2004-bending	The same strings, new and fitted a few days, on the paper's flamenco test guitar (650 mm scale) held in foam-padded supports	Bending stiffness B measured: the frequencies of the first 24 string modes of wire-break plucks 20 mm from the bridge (sonogram analysis) fitted to the stiff-string law at each fret and averaged over the frets (Sec. 3.3, Figure 13); printed unit 1e-6 N m^2	Corrected Table I of the author's copy; the journal print differs. For the wound strings B cannot be interpreted as a solid rod's (the paper): a whole-string effective value with no core or winding construction behind it. Uncertainty not stated
+observation	woodhouse-2004-loss-fit	The same strings on the same guitar	Coefficients eta_F (internal friction), eta_A (air, s^-1) and eta_B (bending) of the paper's string damping model, fitted to the floor of the measured damping of string modes in plucks on the guitar and to bandwidths at high frequency (Sec. 3.3, Figure 15)	The paper calls the model a combination of physical modelling and curve-fitting and the air term an ad hoc fit; constant coefficients are pragmatic convenience. Not a measured material law. Corrected Table I; the journal print differs
+observation	anderson-beausoleil-2024-ej46	D'Addario Pro-Arte Nylon hard tension EJ46 strings J4604 D3, J4605 A2 and J4606 E2 (650 mm scale): NOT the EJ46C Composites strings of the Woodhouse observations	String radius from the authors' EJ46 specification table (0.381, 0.457, 0.559 mm), as in their repository; the diameter here is twice the printed radius	A DECLARED STAND-IN for the unknown EJ46C diameter. A measured string's diameter is the cylinder radius of its per-mode air drag, the string's only own loss when no intrinsic loss is selected. Bracketed on the E2 card at 0.559 and 0.6096 mm radius: partial frequencies identical, the thick end decays 0.03 to 0.17 dB/s faster on partials 1 to 24 (guitar unknowns.tsv)
+scalar	scale-length	woodhouse-2004-manufacturer	scale_length	0.65	m	constant
+uncertainty	scale-length	unstated	-	-	-	-
+validity	scale-length	temperature_known	0	0	1
+scalar	fundamental-d3	woodhouse-2004-manufacturer	fundamental_frequency_d3	146.8	Hz	constant
+uncertainty	fundamental-d3	unstated	-	-	-	-
+validity	fundamental-d3	temperature_known	0	0	1
+scalar	tension-d3	woodhouse-2004-manufacturer	tension_d3	71.2	N	constant
+uncertainty	tension-d3	unstated	-	-	-	-
+validity	tension-d3	temperature_known	0	0	1
+scalar	linear-density-d3	woodhouse-2004-manufacturer	linear_density_d3	0.00195	kg/m	constant
+uncertainty	linear-density-d3	unstated	-	-	-	-
+validity	linear-density-d3	temperature_known	0	0	1
+scalar	wave-speed-d3	woodhouse-2004-manufacturer	wave_speed_d3	191	m/s	constant
+uncertainty	wave-speed-d3	unstated	-	-	-	-
+validity	wave-speed-d3	temperature_known	0	0	1
+scalar	wave-impedance-d3	woodhouse-2004-manufacturer	wave_impedance_d3	0.373	kg/s	constant
+uncertainty	wave-impedance-d3	unstated	-	-	-	-
+validity	wave-impedance-d3	temperature_known	0	0	1
+scalar	bending-stiffness-d3	woodhouse-2004-bending	bending_stiffness_d3	5.1e-05	N*m^2	constant
+uncertainty	bending-stiffness-d3	unstated	-	-	-	-
+validity	bending-stiffness-d3	temperature_known	0	0	1
+scalar	eta-f-d3	woodhouse-2004-loss-fit	loss_coefficient_friction_d3	5e-05	1	constant
+uncertainty	eta-f-d3	unstated	-	-	-	-
+validity	eta-f-d3	temperature_known	0	0	1
+scalar	eta-b-d3	woodhouse-2004-loss-fit	loss_coefficient_bending_d3	0.02	1	constant
+uncertainty	eta-b-d3	unstated	-	-	-	-
+validity	eta-b-d3	temperature_known	0	0	1
+scalar	eta-a-d3	woodhouse-2004-loss-fit	loss_coefficient_air_d3	1.2	s^-1	constant
+uncertainty	eta-a-d3	unstated	-	-	-	-
+validity	eta-a-d3	temperature_known	0	0	1
+scalar	diameter-ej46-d3	anderson-beausoleil-2024-ej46	diameter_ej46_stand_in_d3	0.000762	m	constant
+uncertainty	diameter-ej46-d3	unstated	-	-	-	-
+validity	diameter-ej46-d3	temperature_known	0	0	1
+scalar	fundamental-a2	woodhouse-2004-manufacturer	fundamental_frequency_a2	110	Hz	constant
+uncertainty	fundamental-a2	unstated	-	-	-	-
+validity	fundamental-a2	temperature_known	0	0	1
+scalar	tension-a2	woodhouse-2004-manufacturer	tension_a2	73.9	N	constant
+uncertainty	tension-a2	unstated	-	-	-	-
+validity	tension-a2	temperature_known	0	0	1
+scalar	linear-density-a2	woodhouse-2004-manufacturer	linear_density_a2	0.00361	kg/m	constant
+uncertainty	linear-density-a2	unstated	-	-	-	-
+validity	linear-density-a2	temperature_known	0	0	1
+scalar	wave-speed-a2	woodhouse-2004-manufacturer	wave_speed_a2	143	m/s	constant
+uncertainty	wave-speed-a2	unstated	-	-	-	-
+validity	wave-speed-a2	temperature_known	0	0	1
+scalar	wave-impedance-a2	woodhouse-2004-manufacturer	wave_impedance_a2	0.517	kg/s	constant
+uncertainty	wave-impedance-a2	unstated	-	-	-	-
+validity	wave-impedance-a2	temperature_known	0	0	1
+scalar	bending-stiffness-a2	woodhouse-2004-bending	bending_stiffness_a2	4e-05	N*m^2	constant
+uncertainty	bending-stiffness-a2	unstated	-	-	-	-
+validity	bending-stiffness-a2	temperature_known	0	0	1
+scalar	eta-f-a2	woodhouse-2004-loss-fit	loss_coefficient_friction_a2	7e-05	1	constant
+uncertainty	eta-f-a2	unstated	-	-	-	-
+validity	eta-f-a2	temperature_known	0	0	1
+scalar	eta-b-a2	woodhouse-2004-loss-fit	loss_coefficient_bending_a2	0.025	1	constant
+uncertainty	eta-b-a2	unstated	-	-	-	-
+validity	eta-b-a2	temperature_known	0	0	1
+scalar	eta-a-a2	woodhouse-2004-loss-fit	loss_coefficient_air_a2	0.9	s^-1	constant
+uncertainty	eta-a-a2	unstated	-	-	-	-
+validity	eta-a-a2	temperature_known	0	0	1
+scalar	diameter-ej46-a2	anderson-beausoleil-2024-ej46	diameter_ej46_stand_in_a2	0.000914	m	constant
+uncertainty	diameter-ej46-a2	unstated	-	-	-	-
+validity	diameter-ej46-a2	temperature_known	0	0	1
+scalar	fundamental-e2	woodhouse-2004-manufacturer	fundamental_frequency_e2	82.4	Hz	constant
+uncertainty	fundamental-e2	unstated	-	-	-	-
+validity	fundamental-e2	temperature_known	0	0	1
+scalar	tension-e2	woodhouse-2004-manufacturer	tension_e2	71.6	N	constant
+uncertainty	tension-e2	unstated	-	-	-	-
+validity	tension-e2	temperature_known	0	0	1
+scalar	linear-density-e2	woodhouse-2004-manufacturer	linear_density_e2	0.00624	kg/m	constant
+uncertainty	linear-density-e2	unstated	-	-	-	-
+validity	linear-density-e2	temperature_known	0	0	1
+scalar	wave-speed-e2	woodhouse-2004-manufacturer	wave_speed_e2	107	m/s	constant
+uncertainty	wave-speed-e2	unstated	-	-	-	-
+validity	wave-speed-e2	temperature_known	0	0	1
+scalar	wave-impedance-e2	woodhouse-2004-manufacturer	wave_impedance_e2	0.668	kg/s	constant
+uncertainty	wave-impedance-e2	unstated	-	-	-	-
+validity	wave-impedance-e2	temperature_known	0	0	1
+scalar	bending-stiffness-e2	woodhouse-2004-bending	bending_stiffness_e2	5.7e-05	N*m^2	constant
+uncertainty	bending-stiffness-e2	unstated	-	-	-	-
+validity	bending-stiffness-e2	temperature_known	0	0	1
+scalar	eta-f-e2	woodhouse-2004-loss-fit	loss_coefficient_friction_e2	2e-05	1	constant
+uncertainty	eta-f-e2	unstated	-	-	-	-
+validity	eta-f-e2	temperature_known	0	0	1
+scalar	eta-b-e2	woodhouse-2004-loss-fit	loss_coefficient_bending_e2	0.02	1	constant
+uncertainty	eta-b-e2	unstated	-	-	-	-
+validity	eta-b-e2	temperature_known	0	0	1
+scalar	eta-a-e2	woodhouse-2004-loss-fit	loss_coefficient_air_e2	1.2	s^-1	constant
+uncertainty	eta-a-e2	unstated	-	-	-	-
+validity	eta-a-e2	temperature_known	0	0	1
+scalar	diameter-ej46-e2	anderson-beausoleil-2024-ej46	diameter_ej46_stand_in_e2	0.001118	m	constant
+uncertainty	diameter-ej46-e2	unstated	-	-	-	-
+validity	diameter-ej46-e2	temperature_known	0	0	1
