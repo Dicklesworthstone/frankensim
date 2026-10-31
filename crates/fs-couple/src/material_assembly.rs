@@ -13,6 +13,8 @@ pub mod wound;
 pub mod measured_string;
 /// Material-reduced reeds composed with the existing solid/gas assembly.
 pub mod valve;
+/// Source-backed duct walls shared with graph and DG material consumers.
+pub mod duct;
 
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::gas::GasState;
@@ -150,6 +152,8 @@ pub struct AcousticMaterialBindings<'a> {
     pub string: Option<StringMaterialBinding<'a>>,
     /// Uniform or regional plate binding. Other body modes remain authored.
     pub plate: Option<PlateMaterialBinding<'a>>,
+    /// Original wall source; physical observation remains an explicit option.
+    pub duct_wall: Option<duct::DuctWallMaterialBinding<'a>>,
 }
 
 /// Retained plate specimen and any chart-specific realization controls.
@@ -173,10 +177,12 @@ pub struct CompiledMaterialAssembly {
     assembly: AcousticAssembly,
     string: Option<ResolvedStringSpecimen>,
     plate: Option<CompiledMaterialPlate>,
+    duct_wall: Option<crate::bernoulli_aperture::wall::material::LocalMaterialWall>,
 }
 
 impl CompiledMaterialAssembly {
-    /// Numeric description; a regional chart is additionally retained in `plate`.
+    /// Numeric description; regional plates and material walls are retained in
+    /// their respective accessors and must use this compiled realizer.
     #[must_use]
     pub const fn assembly(&self) -> &AcousticAssembly {
         &self.assembly
@@ -194,10 +200,20 @@ impl CompiledMaterialAssembly {
         self.plate.as_ref()
     }
 
+    /// Original wall source, constitutive spectrum, thickness and applicability.
+    #[must_use]
+    pub const fn duct_wall(
+        &self,
+    ) -> Option<&crate::bernoulli_aperture::wall::material::LocalMaterialWall> {
+        self.duct_wall.as_ref()
+    }
+
     /// Run the ordinary acoustic realizer with the compiled members.
     ///
     /// # Errors
     /// Existing assembly, modal-window, excitation and runtime refusals propagate.
+    /// A source-bound duct wall requires an explicit physical observer through
+    /// `realize_with_options`; no receiver geometry is invented here.
     pub fn realize(&self) -> Result<RealizedAssembly, AcousticRealizeError> {
         self.realize_with_options(&RealizeOptions::default())
     }
@@ -215,16 +231,34 @@ impl CompiledMaterialAssembly {
         &self,
         options: &RealizeOptions,
     ) -> Result<RealizedAssembly, AcousticRealizeError> {
+        let observer = match (&self.duct_wall, options.baffled_duct) {
+            (Some(_), None) => return Err(AcousticRealizeError::InvalidDescription {
+                what: "compiled duct wall requires an explicit physical baffled-duct observer",
+            }),
+            (Some(_), Some(binding)) if binding.material_wall.is_some() => {
+                return Err(AcousticRealizeError::InvalidDescription {
+                    what: "compiled duct wall cannot also select an observer wall override",
+                });
+            }
+            (Some(wall), Some(binding)) => Some(
+                crate::acoustic_realize::duct_observer::BaffledDuctObserver {
+                    material_wall: Some(wall),
+                    ..binding
+                },
+            ),
+            (None, binding) => binding,
+        };
+        let options = RealizeOptions { baffled_duct: observer, ..*options };
         match &self.plate {
             Some(CompiledMaterialPlate::Regional { chart, radiation }) => {
                 realize_assembly_with_material_plate_chart_and_options(
                     &self.assembly,
                     chart,
                     radiation,
-                    options,
+                    &options,
                 )
             }
-            _ => realize_assembly_with_options(&self.assembly, options),
+            _ => realize_assembly_with_options(&self.assembly, &options),
         }
     }
 
@@ -307,7 +341,7 @@ impl std::error::Error for MaterialAssemblyError {
 /// guarantees. It is a Rust description API, not a serialized scenario format.
 ///
 /// # Errors
-/// Missing members, unsupported laws, invalid assignments or card/physical
+    /// Missing members, unsupported laws, invalid assignments or card/physical
 /// refusals propagate with component context. Realization admission runs later.
 pub fn compile_material_assembly(
     template: &AcousticAssembly,
@@ -365,10 +399,13 @@ pub fn compile_material_assembly(
         .as_ref()
         .map(|binding| compile_plate(&mut assembly, binding))
         .transpose()?;
+    let duct_wall = bindings.duct_wall.as_ref()
+        .map(|binding| duct::compile(template, binding)).transpose()?;
     Ok(CompiledMaterialAssembly {
         assembly,
         string,
         plate,
+        duct_wall,
     })
 }
 

@@ -13,12 +13,31 @@ use fs_qty::{Density, Dims, DynViscosity, Pressure};
 use fs_vfit::relaxation::MAX_RELAXATION_BRANCHES;
 use std::str::SplitAsciiWhitespace;
 
-/// One source selection shared by DG, graph reed and graph jet ingress.
-pub(crate) enum WallConstitutiveSource {
+/// One source selection shared by material assemblies, DG, graph reed and jet
+/// ingress. These are original property selectors, not fitted wall coefficients.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WallConstitutiveSource {
+    /// Isotropic Young/Poisson membrane with the declared internal loss source.
     Isotropic(WallMaterialLossSource),
-    Orthotropic { axes: [usize; 2], proportional_viscosity_time_property: Option<String> },
-    OrthotropicNormal { axes: [usize; 2], properties: [String; 3],
-        max_dt_over_tau: f64, max_angular_step: f64 },
+    /// Principal material directions aligned with local hoop and axial motion.
+    Orthotropic {
+        /// Distinct zero-based hoop and axial directions in `0..3`.
+        axes: [usize; 2],
+        /// Exact time property for viscosity proportional to elastic stiffness.
+        /// `None` selects an elastic wall.
+        proportional_viscosity_time_property: Option<String>,
+    },
+    /// Independent normal-plane Kelvin viscosity with its exact reduced memory.
+    OrthotropicNormal {
+        /// Distinct zero-based hoop and axial principal directions.
+        axes: [usize; 2],
+        /// Exact `[D_hh, D_ha, D_aa]` viscosity properties in Pa s.
+        properties: [String; 3],
+        /// Declared time-domain resolution limit, in `(0, 2]`.
+        max_dt_over_tau: f64,
+        /// Declared angular-step limit, in `(0, 1]`.
+        max_angular_step: f64,
+    },
 }
 
 impl WallConstitutiveSource {
@@ -107,12 +126,20 @@ impl WallConstitutiveSource {
     }
 }
 
-pub(crate) enum WallMaterialLossSource {
+/// Original material properties supplying isotropic membrane loss and memory.
+#[derive(Clone, Debug, PartialEq)]
+pub enum WallMaterialLossSource {
+    /// Explicitly lossless elastic membrane.
     Elastic,
+    /// Resolve `kelvin_voigt_young_viscosity` at the same material state.
     KelvinVoigt,
+    /// Resolve each generalized-Maxwell arm from the same original card.
     Maxwell {
+        /// Exact relaxing-modulus and relaxation-time property pairs.
         properties: Vec<(String, String)>,
+        /// Declared time-domain resolution limit, in `(0, 2]`.
         max_dt_over_tau: f64,
+        /// Declared angular-step limit, in `(0, 1]`.
         max_angular_step: f64,
     },
 }
@@ -152,6 +179,14 @@ impl WallMaterialLossSource {
     }
 
     pub(crate) fn requirements(&self) -> Result<Vec<Requirement>, MaterialStatePointError> {
+        if let Self::Maxwell { properties, .. } = self
+            && !(1..=MAX_RELAXATION_BRANCHES).contains(&properties.len())
+        {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: "wall Maxwell spectrum".into(),
+                reason: "wall Maxwell source requires 1..=8 explicit property pairs",
+            });
+        }
         let mut required = vec![
             Requirement::try_new("density", Density::DIMS, Admit::StrictlyPositive)?,
             Requirement::try_new("young_modulus", Pressure::DIMS, Admit::StrictlyPositive)?,

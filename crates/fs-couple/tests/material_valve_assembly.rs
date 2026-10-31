@@ -205,12 +205,50 @@ fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
     use fs_couple::acoustic_realize::{RealizeOptions, duct_observer::BaffledDuctObserver};
     use fs_couple::air_path::GasAbsorptionModel;
     use fs_couple::pcm_wav::baffled::CircularOutletReceiver;
+    use fs_couple::bernoulli_aperture::wall::material::AxialConstraint;
+    use fs_couple::material_assembly::duct::{
+        DuctWallMaterialBinding, WallConstitutiveSource, WallMaterialLossSource,
+    };
+    use fs_matdb::*;
+    use fs_material::state_point::MaterialPropertySelection;
+    use fs_qty::{Density, Dims, Pressure};
     with_cx(|cx| {
         let mut input = template();
         input.duct.as_mut().unwrap().termination = WaveguideEnd::FlangedOpen;
         input.duration_s = 1024.0 / f64::from(input.sample_rate_hz);
         let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 310.15, 101_325.0).unwrap();
         let exterior = GasState::try_new(&GasSpec::dry_air_ussa1976(), 283.15, 101_325.0).unwrap();
+        let mut claims = ClaimSet::new();
+        for (name, dims, value) in [
+            ("density", Density::DIMS, 7800.0),
+            ("young_modulus", Pressure::DIMS, 7e10),
+            ("poisson_ratio", Dims::NONE, 0.3),
+        ] {
+            claims.insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims), value: PropertyValue::Scalar { value, dims },
+                validity: fs_evidence::ValidityDomain::unconstrained(),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![], provenance: Provenance {
+                    source: "manufactured wall for valve composition".into(),
+                    license: "CC0-1.0".into(), artifact: None,
+                },
+            }).unwrap();
+        }
+        let card = MaterialCard::assemble(MaterialStateId {
+            chemistry: "manufactured wall".into(), phase: "solid".into(),
+            process: "numerical fixture".into(), revision: 0,
+        }, claims, vec![]).unwrap();
+        let point = QueryPoint::new().with("T", 293.15).unwrap();
+        let materials = AcousticMaterialBindings {
+            duct_wall: Some(DuctWallMaterialBinding {
+                source: MaterialSource { card: &card, point: &point,
+                    selection: MaterialPropertySelection::SingleClaimOnly },
+                constitutive: WallConstitutiveSource::Isotropic(WallMaterialLossSource::Elastic),
+                thickness_m: 0.0001, axial: AxialConstraint::StressFree,
+                band_hz: [1e-6, 30_000.0],
+            }), ..AcousticMaterialBindings::default()
+        };
         let options = RealizeOptions {
             gas: Some(gas), observer_absorption: Some(GasAbsorptionModel::Lossless),
             baffled_duct: Some(BaffledDuctObserver {
@@ -223,10 +261,13 @@ fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
         };
         let render = |young| {
             let compiled = compile_pressure_loaded_reed_assembly(&input, valve(cx, young),
-                admission(), &AcousticMaterialBindings::default()).unwrap();
+                admission(), &materials).unwrap();
             let resolved = compiled.realize_with_options(&options).unwrap();
             assert_eq!(resolved.gas, exterior);
             assert_eq!(resolved.duct_observer.as_ref().unwrap().segment_gases, vec![gas]);
+            assert_eq!(resolved.duct_observer.as_ref().unwrap().material_wall.as_ref(),
+                compiled.compiled().duct_wall());
+            assert_eq!(compiled.compiled().duct_wall().unwrap().material().query(), point);
             assert!(resolved.pressure_pa.iter().all(|p| p.is_finite()));
             assert!(resolved.pressure_pa.iter().any(|p| *p != 0.0));
             resolved
@@ -327,6 +368,7 @@ fn checked_reed_composes_with_independent_source_bound_string() {
         .unwrap();
         let point = QueryPoint::new().with("T", 293.15).unwrap();
         let bindings = AcousticMaterialBindings {
+            duct_wall: None,
             string: Some(StringMaterialBinding {
                 source: MaterialSource {
                     card: &card,

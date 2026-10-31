@@ -30,7 +30,9 @@ use fs_material::state_point::{
 };
 use fs_qty::{Density, Dims, Pressure};
 
-fn material_wall(young_pa: f64, relaxation_s: Option<f64>, band_hz: [f64; 2]) -> LocalMaterialWall {
+fn wall_source(young_pa: f64, relaxation_s: Option<f64>, band_hz: [f64; 2])
+    -> (MaterialCard, QueryPoint, Vec<ScalarPropertyRequirement>)
+{
     let mut properties = vec![
         ("density", Density::DIMS, 1000.0),
         ("young_modulus", Pressure::DIMS, young_pa),
@@ -67,14 +69,141 @@ fn material_wall(young_pa: f64, relaxation_s: Option<f64>, band_hz: [f64; 2]) ->
         chemistry: "manufactured wall".into(), phase: "solid".into(),
         process: "numerical fixture".into(), revision: 0,
     }, claims, vec![]).unwrap();
-    let source = resolve_material_state_point(&card,
-        &QueryPoint::new().with("T", 300.0).unwrap().with("omega", 1000.0).unwrap(),
+    (card, QueryPoint::new().with("T", 300.0).unwrap()
+        .with("omega", 1000.0).unwrap(), requirements)
+}
+
+fn material_wall(young_pa: f64, relaxation_s: Option<f64>, band_hz: [f64; 2]) -> LocalMaterialWall {
+    let (card, point, requirements) = wall_source(young_pa, relaxation_s, band_hz);
+    let source = resolve_material_state_point(&card, &point,
         &requirements, MaterialPropertySelection::SingleClaimOnly).unwrap();
     let loss = if relaxation_s.is_some() {
         WallMaterialLoss::Maxwell(WallRelaxation::from_state_point(&source,
             &[("wall_delta_e".into(), "wall_tau".into())], band_hz, 0.5, 0.5).unwrap())
     } else { WallMaterialLoss::Elastic };
     LocalMaterialWall::new(source, 0.00005, AxialConstraint::StressFree, loss, band_hz).unwrap()
+}
+
+/// G1/G3: the common compiler resolves the same original wall source as the
+/// direct physical path. Changing only card values changes the actual output.
+#[test]
+fn common_material_compiler_carries_elastic_and_relaxing_walls_into_pressure() {
+    use fs_couple::material_assembly::{
+        AcousticMaterialBindings, MaterialSource, compile_material_assembly,
+        duct::{DuctWallMaterialBinding, WallConstitutiveSource, WallMaterialLossSource},
+    };
+    let template = input();
+    let gases = [gas(293.15), gas(310.15)];
+    let observer = binding(Some(&gases), Some(gas(283.15)));
+    let band = [1e-6, 4500.0];
+    for variants in [
+        [(3e7, None), (6e7, None)],
+        [(3e7, Some(0.0003)), (3e7, Some(0.003))],
+    ] {
+        let mut pressures = Vec::new();
+        for (young, relaxation) in variants {
+            let (card, point, requirements) = wall_source(young, relaxation, band);
+            let selection = MaterialPropertySelection::PinnedByProperty(
+                requirements.iter().map(|requirement| {
+                    (requirement.name().to_owned(), card.claims_for(requirement.name())[0].0)
+                }).collect(),
+            );
+            let loss = if relaxation.is_some() {
+                WallMaterialLossSource::Maxwell {
+                    properties: vec![("wall_delta_e".into(), "wall_tau".into())],
+                    max_dt_over_tau: 0.5,
+                    max_angular_step: 0.5,
+                }
+            } else { WallMaterialLossSource::Elastic };
+            let compiled = compile_material_assembly(&template, &AcousticMaterialBindings {
+                duct_wall: Some(DuctWallMaterialBinding {
+                    source: MaterialSource { card: &card, point: &point, selection },
+                    constitutive: WallConstitutiveSource::Isotropic(loss),
+                    thickness_m: 0.00005,
+                    axial: AxialConstraint::StressFree,
+                    band_hz: band,
+                }),
+                ..AcousticMaterialBindings::default()
+            }).unwrap();
+            assert_eq!(compiled.assembly(), &template);
+            let wall = compiled.duct_wall().unwrap();
+            assert_eq!(wall.material().query(), point);
+            assert_eq!(wall.material().properties().len(), requirements.len());
+            let actual = compiled.realize_with_options(&options(observer)).unwrap();
+            assert_eq!(actual.duct_observer.as_ref().unwrap().material_wall.as_ref(), Some(wall));
+            assert_eq!(actual.duct_observer.as_ref().unwrap().segment_gases, gases);
+            assert_eq!(actual.gas, observer.exterior_gas.unwrap());
+            let direct_wall = material_wall(young, relaxation, band);
+            let direct = realize_assembly_with_options(&template, &options(BaffledDuctObserver {
+                material_wall: Some(&direct_wall), ..observer
+            })).unwrap();
+            assert_eq!(actual.pressure_pa, direct.pressure_pa);
+            assert_eq!(actual, compiled.realize_with_options(&options(observer)).unwrap());
+            pressures.push(actual.pressure_pa);
+        }
+        assert_ne!(pressures[0], pressures[1]);
+    }
+}
+
+/// G4: no authored override, unavailable source or unrouted material may be
+/// silently substituted. Failed cold compilation leaves prior state untouched.
+#[test]
+fn common_material_compiler_refuses_ambiguous_unrouted_and_invalid_wall_sources() {
+    use fs_couple::material_assembly::{
+        AcousticMaterialBindings, MaterialSource, compile_material_assembly,
+        duct::{DuctWallMaterialBinding, WallConstitutiveSource, WallMaterialLossSource},
+    };
+    let template = input();
+    let band = [1e-6, 4500.0];
+    let (card, point, _) = wall_source(3e7, None, band);
+    let binding = DuctWallMaterialBinding {
+        source: MaterialSource { card: &card, point: &point,
+            selection: MaterialPropertySelection::SingleClaimOnly },
+        constitutive: WallConstitutiveSource::Isotropic(WallMaterialLossSource::Elastic),
+        thickness_m: 0.00005,
+        axial: AxialConstraint::StressFree,
+        band_hz: band,
+    };
+    let compile = |input: &AcousticAssembly, wall: DuctWallMaterialBinding<'_>| {
+        compile_material_assembly(input, &AcousticMaterialBindings {
+            duct_wall: Some(wall), ..AcousticMaterialBindings::default()
+        })
+    };
+    let compiled = compile(&template, binding.clone()).unwrap();
+    let original_wall = compiled.duct_wall().unwrap().clone();
+    assert!(compiled.realize().is_err(), "material wall must reach a physical observer");
+    let mut absent = template.clone();
+    absent.duct = None;
+    assert!(compile(&absent, binding.clone()).is_err());
+    let mut authored = template.clone();
+    authored.duct.as_mut().unwrap().wall = Some(fs_scenario::LocallyReactingWall {
+        surface_density_kg_m2: 1.0, stiffness_pa_per_m: 1e8, resistance_pa_s_per_m: 0.0,
+    });
+    assert!(compile(&authored, binding.clone()).is_err());
+    for wall in [
+        DuctWallMaterialBinding { thickness_m: 0.001, ..binding.clone() },
+        DuctWallMaterialBinding { band_hz: [1e-6, 9000.0], ..binding.clone() },
+        DuctWallMaterialBinding {
+            constitutive: WallConstitutiveSource::Isotropic(WallMaterialLossSource::Maxwell {
+                properties: vec![("wall_delta_e".into(), "wall_tau".into())],
+                max_dt_over_tau: 0.5, max_angular_step: 0.5,
+            }), ..binding.clone()
+        },
+        DuctWallMaterialBinding {
+            constitutive: WallConstitutiveSource::Isotropic(WallMaterialLossSource::Maxwell {
+                properties: vec![("wall_delta_e".into(), "wall_tau".into()); 9],
+                max_dt_over_tau: 0.5, max_angular_step: 0.5,
+            }), ..binding.clone()
+        },
+    ] {
+        assert!(compile(&template, wall).is_err());
+    }
+    let observer = BaffledDuctObserver {
+        material_wall: Some(&original_wall), ..self::binding(None, None)
+    };
+    assert!(compiled.realize_with_options(&options(observer)).is_err());
+    assert_eq!(compiled.duct_wall(), Some(&original_wall));
+    assert_eq!(compiled.assembly(), &template);
 }
 
 fn gas(temperature: f64) -> GasState {

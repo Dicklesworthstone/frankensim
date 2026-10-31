@@ -1941,6 +1941,7 @@ mod material_plate_tests {
             for model in [Model::Isotropic, Model::IsotropicYoungShear, Model::IsotropicBulkShear] {
                 let card = elastic_pair_card(model);
                 let compiled = compile_material_assembly(&input, &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: None,
                     plate: Some(PlateMaterialBinding::Uniform { source: source(&card, &point),
                         model, thickness: Thickness::FixedMass(0.3) }),
@@ -2050,6 +2051,7 @@ mod material_plate_tests {
                 let compiled = compile_material_assembly(
                     &current,
                     &AcousticMaterialBindings {
+                        duct_wall: None,
                         string: None,
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(&card, &point),
@@ -2162,6 +2164,7 @@ mod material_plate_tests {
             let compiled = compile_material_assembly(
                 &input,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: None,
                     plate: Some(PlateMaterialBinding::Uniform {
                         source: source(&card, &point),
@@ -2272,6 +2275,7 @@ mod material_plate_tests {
                 compile_material_assembly(
                     &input,
                     &AcousticMaterialBindings {
+                        duct_wall: None,
                         string: None,
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(card, &point),
@@ -2585,6 +2589,7 @@ mod material_plate_tests {
                 let compiled = compile_material_assembly(
                     &input,
                     &AcousticMaterialBindings {
+                        duct_wall: None,
                         string: Some(thermal_string_binding(&card, &point, &reference)),
                         plate: None,
                     },
@@ -2678,6 +2683,7 @@ mod material_plate_tests {
         let mut input = plucked(20.0, 0.006, 1e-6);
         input.string.as_mut().unwrap().length_m = 0.502;
         let mut bindings = AcousticMaterialBindings {
+            duct_wall: None,
             string: Some(thermal_string_binding(&card, &point, &reference)),
             plate: None,
         };
@@ -2726,6 +2732,7 @@ mod material_plate_tests {
             compile_material_assembly(
                 &input,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: Some(thermal_string_binding(&card, current, reference)),
                     plate: None,
                 },
@@ -2778,6 +2785,7 @@ mod material_plate_tests {
         let error = compile_material_assembly(
             &input,
             &AcousticMaterialBindings {
+                duct_wall: None,
                 string: Some(thermal_string_binding(&no_alpha, &point, &reference)),
                 plate: None,
             },
@@ -2823,6 +2831,7 @@ mod material_plate_tests {
                     let compiled = compile_material_assembly(
                         &input,
                         &AcousticMaterialBindings {
+                            duct_wall: None,
                             string: None,
                             plate: Some(PlateMaterialBinding::Uniform {
                                 source: source(&card, &point),
@@ -2949,6 +2958,7 @@ mod material_plate_tests {
                     let compiled = compile_material_assembly(
                         &input,
                         &AcousticMaterialBindings {
+                            duct_wall: None,
                             string: None,
                             plate: Some(PlateMaterialBinding::Uniform {
                                 source: source(&card, &point),
@@ -3055,6 +3065,7 @@ mod material_plate_tests {
             let compiled = compile_material_assembly(
                 &input,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: None,
                     plate: Some(PlateMaterialBinding::Uniform {
                         source: selected,
@@ -3116,6 +3127,7 @@ mod material_plate_tests {
                 compile_material_assembly(
                     &input,
                     &AcousticMaterialBindings {
+                        duct_wall: None,
                         string: None,
                         plate: Some(PlateMaterialBinding::Uniform {
                             source: source(&card, &point),
@@ -3156,6 +3168,7 @@ mod material_plate_tests {
             let error = compile_material_assembly(
                 &input,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: None,
                     plate: Some(PlateMaterialBinding::Uniform {
                         source: source(&material, &point),
@@ -3246,6 +3259,7 @@ mod material_plate_tests {
             let error = compile_material_assembly(
                 &input,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: None,
                     plate: Some(PlateMaterialBinding::Uniform {
                         source: source(&card, &point),
@@ -3269,6 +3283,7 @@ mod material_plate_tests {
         input.plate = Some(template());
         let original = input.clone();
         let bindings = AcousticMaterialBindings {
+            duct_wall: None,
             string: Some(StringMaterialBinding {
                 source: source(&card, &point),
                 geometry: StringGeometryConstraint::FixedRadius(0.0008),
@@ -3350,6 +3365,7 @@ mod material_plate_tests {
             compile_material_assembly(
                 &input,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: Some(StringMaterialBinding {
                         source: source(card, &point),
                         geometry: StringGeometryConstraint::FixedRadius(0.0008),
@@ -3456,6 +3472,7 @@ mod material_plate_tests {
                 compile_material_assembly(
                     &input,
                     &AcousticMaterialBindings {
+                        duct_wall: None,
                         string: Some(StringMaterialBinding {
                             source: source(&card, &point),
                             geometry: StringGeometryConstraint::FixedRadius(value(
@@ -3515,6 +3532,7 @@ mod material_plate_tests {
                 compile_material_assembly(
                     &input,
                     &AcousticMaterialBindings {
+                        duct_wall: None,
                         string: Some(StringMaterialBinding {
                             source: source(card, &point),
                             geometry: StringGeometryConstraint::FixedMass(0.001),
@@ -3603,6 +3621,7 @@ mod material_plate_tests {
                 })
                 .collect();
         let mut bindings = AcousticMaterialBindings {
+            duct_wall: None,
             string: None,
             plate: Some(PlateMaterialBinding::Regional {
                 mesh: chart.mesh,
@@ -3681,6 +3700,7 @@ mod material_plate_tests {
             })
             .collect();
         AcousticMaterialBindings {
+            duct_wall: None,
             string: None,
             plate: Some(PlateMaterialBinding::Regional {
                 mesh: chart.mesh.clone(),
@@ -4013,6 +4033,7 @@ mod material_plate_tests {
             let compiled = compile_material_assembly(
                 &candidate,
                 &AcousticMaterialBindings {
+                    duct_wall: None,
                     string: Some(StringMaterialBinding {
                         source: source(&card, &point),
                         geometry: StringGeometryConstraint::FixedRadius(0.0008),
@@ -4118,6 +4139,7 @@ mod material_plate_tests {
         let input = plucked(20.0, 0.006, 1e-5);
         let original = input.clone();
         let mut bindings = AcousticMaterialBindings {
+            duct_wall: None,
             string: Some(StringMaterialBinding {
                 source: source(&card, &point),
                 geometry: StringGeometryConstraint::FixedRadius(0.0008),
@@ -4217,6 +4239,7 @@ mod material_plate_tests {
         input.sample_rate_hz = 192_000;
         input.string.as_mut().unwrap().damping_ratio = 0.0;
         let bindings = AcousticMaterialBindings {
+            duct_wall: None,
             string: Some(StringMaterialBinding {
                 source: source(&card, &point),
                 geometry: StringGeometryConstraint::FixedRadius(0.0008),

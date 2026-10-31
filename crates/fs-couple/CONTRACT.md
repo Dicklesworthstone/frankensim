@@ -2881,11 +2881,13 @@ clarinet is one filling of those objects.
   flanged mouth uses the Rayleigh piston and is not.
 - Card-driven acoustic compilation: `material_assembly::compile_material_assembly`
   resolves exact `MaterialCard`/`QueryPoint` inputs with explicit claim selection,
-  then calls the existing circular-string, uniform-plate and regional-chart
-  specimen binders. Only consumer-needed scalar properties are resolved: rho/E
+  then calls the existing circular-string, uniform-plate, regional-chart and
+  local duct-wall binders. Only consumer-needed scalar properties are resolved: rho/E
   for elastic strings, the selected in-plane plate constants, and additional
   viscosity or equilibrium/modulus/time fields for explicitly selected sourced
   string/plate bending loss and explicitly selected isotropic plate thermal loss.
+  Duct walls use the same source selectors as graph and DG wind performances,
+  including isotropic or principal-aligned elasticity and selected material memory.
   Inactive property families are not queried. Loss selectors
   are retained; old numerical loss coefficients and citations are rebuilt.
   `StringPrestressBinding::ThermalExtension` selects the existing alpha(T)
@@ -2904,7 +2906,9 @@ clarinet is one filling of those objects.
   missing/ambiguous data and slack/compressive states refuse through the existing
   owners. No thermal transport, finite deformation or melting is added.
   `CompiledMaterialAssembly` keeps the numeric assembly and source-bound specimens
-  immutable, and its `realize` method calls the existing ordinary/chart dispatcher.
+  immutable, and realization calls the existing ordinary/chart dispatcher.
+  A source-bound duct wall requires explicit physical receiver geometry through
+  `realize_with_options`; it cannot silently disappear into an unsupported path.
   Unbound components remain authored. Material conditions remain separate from
   ambient-gas conditions; this compiler does not infer thermal equilibrium or
   upgrade the authority of the whole assembly. Geometry, constraints, forcing,
@@ -4881,7 +4885,19 @@ remain distinct; they neither alter the bulk constitutive residual nor become
 an additional heat debit. Complete interface source selections, ordered surface
 identities, coordinate meanings, branch IDs and physical areas are preserved.
 Voltage/current/field-dependent interface sources and applicability refuse
-because this path owns only the bulk electrical response.
+in that fixed-contact entry point.
+
+`conductivity_with_contact_response_candidate` closes bulk and interface
+response in the SAME bounded native circuit iteration. Original interface cards
+bind explicit signed/magnitude voltage, current and current-density axes, plus
+the branch-to-ordered-surface direction. Each contact uses its own drop and area,
+never the total branch drop or a bulk cross section. Full pinned bundles refresh
+together; electrical applicability coordinates cannot remain frozen. Applied
+and actual-point evaluated contacts remain separate in the report. Every contact
+must meet both resistance and constitutive-power tolerances. A zero-thickness
+interface supplies no electric-field coordinate; thickness, carrier storage,
+switching history, breakdown and arcing are outside this instantaneous passive
+scalar response model. Bounded fixed-point nonconvergence refuses atomically.
 
 `circuit_enthalpy::conductivity::step_with_contacts_candidate` refreshes both
 bulk and contact sources at every proposed thermal endpoint, then deposits each
@@ -4892,12 +4908,24 @@ histories remain uncommitted through iteration, source, budget and cancellation
 checks. Fixed geometry, fixed C/L, zero interface storage and the existing
 endpoint-thermal/midpoint-electrical accuracy restrictions remain in force.
 
+`step_with_contact_response_candidate` passes the same source bindings through
+every thermal residual and final admission. Temperature and contact V/I/J are
+evaluated together on the original source surface; no separable law is assumed.
+Its transport callback can consume those evaluated interfaces, while the native
+contact loss remains the only deposited contact heat. All inner solves count against the
+existing thermal circuit-work budget.
+
 Focused G1/G3 regressions compare independent nonlinear RC/contact equations,
 two finite-body enthalpy equations, data-only contact swaps, both current signs,
 continuing state and the native constant-law limit. G4 regressions exercise
 source/geometry changes, missing heat routes, exhausted work and late cancellation.
 Synthetic fixture equations establish implementation behavior, not measured
 material or device qualification.
+Five additional G1/G3/G4 test functions cover joint V/I/J response and explicit
+surface direction, multiple contacts with distinct areas/drops, independent
+two-body electrothermal equations, source-only response swaps, continuation and
+atomic source/budget/cancellation refusal. These are manufactured numerical
+fixtures; execution remains pending while dependency compilation is blocked.
 
 ## Joint nonlinear conduction and finite enthalpy
 
@@ -16769,6 +16797,20 @@ thin-membrane geometry admission remain active. The wall's material temperature
 is independent of the gas states; neither thermal equilibration nor wall radiation
 is inferred. G1/G3 tests compare the independent thin-cylinder reduction, change
 only elastic or relaxation data, and check source/geometry refusal.
+
+`AcousticMaterialBindings::duct_wall` compiles that source through the common
+material-assembly entry point, including assemblies with material-derived reeds.
+The caller supplies the original card/query/claim selection, constitutive source
+model, thickness, restraint and frequency applicability. The compiler reuses the
+existing wall requirements and reduction, checks both endpoint radii of each
+segment, and retains the resulting `LocalMaterialWall`. Realization forwards it
+to the same physical feedback and microphone path while preserving the requested
+regional gases, exterior medium and receiver. Authored wall coefficients or a
+second observer wall override refuse; an absent physical observer also refuses.
+G1/G3/G4 regressions compare the direct physical path, swap only elastic or
+relaxation source values, retain independent gas/material states, and exercise
+unsupported sources, geometry and conflicting bindings. These checks add no
+thermal equilibration, shell evolution or experimental validation claim.
 
 This explicit image currently admits unbranched cylinder/cone bores, their local
 wall law, a flanged terminal and the original default characteristic ladder.
