@@ -276,22 +276,32 @@ impl FractionalZener {
     /// Storage and loss modulus `(E′, E″)` at angular frequency ω — the
     /// [`Real`]-generic core shared by the f64 path and the AD tangents.
     pub fn modulus_parts<R: Real>(e0: R, e_inf: R, alpha: R, tau: R, omega: R) -> (R, R) {
-        // (iωτ)^α = (ωτ)^α · (cos(απ/2) + i·sin(απ/2)).
+        // E* = E0 + (E∞ - E0) z/(1+z). Evaluate the smaller of
+        // |z| and its reciprocal; no growing complex products or subtraction
+        // of almost equal imaginary terms can erase weak physical loss.
+        // Separate logarithms also avoid overflow/underflow of omega*tau.
+        let log_x = alpha * (omega.ln() + tau.ln());
+        let low_frequency = log_x.value() <= 0.0;
+        let u = if low_frequency {
+            log_x.exp()
+        } else {
+            (-log_x).exp()
+        };
         let half_pi = R::from_f64(core::f64::consts::FRAC_PI_2);
-        let x = (alpha * (omega * tau).ln()).exp();
-        let c = (alpha * half_pi).cos();
+        // Complementary sine is exactly zero at alpha=1 while retaining the
+        // correct AD tangent there: the classical Maxwell limit has no cos(π/2)
+        // roundoff tail in its storage modulus.
+        let c = ((R::one() - alpha) * half_pi).sin();
         let s = (alpha * half_pi).sin();
-        let xr = x * c;
-        let xi = x * s;
-        // (E0 + E∞·(xr + i·xi)) / (1 + xr + i·xi).
-        let nr = e0 + e_inf * xr;
-        let ni = e_inf * xi;
-        let dr = R::one() + xr;
-        let di = xi;
-        let den = dr * dr + di * di;
-        let ep = (nr * dr + ni * di) / den;
-        let epp = (ni * dr - nr * di) / den;
-        (ep, epp)
+        let den = R::one() + R::from_f64(2.0) * c * u + u * u;
+        let scaled_delta = (e_inf - e0) * u;
+        let correction = scaled_delta * ((c + u) / den);
+        let ep = if low_frequency {
+            e0 + correction
+        } else {
+            e_inf - correction
+        };
+        (ep, scaled_delta * (s / den))
     }
 
     /// `(E′, E″)` at ω [rad/s] (deterministic `fs_math::det` elementary
@@ -403,9 +413,29 @@ impl GeneralizedMaxwell {
         let mut epp = 0.0;
         for &(e, tau) in &self.terms {
             let wt = omega * tau;
-            let den = 1.0 + wt * wt;
-            ep += e * wt * wt / den;
-            epp += e * wt / den;
+            if wt.abs() <= 1.0 {
+                let den = 1.0 + wt * wt;
+                // Scale before the second small factor, so a representable
+                // branch response is not lost when wt² underflows.
+                let loss = if wt == 0.0 {
+                    (e * omega.abs().min(tau)) * omega.abs().max(tau) * omega.signum()
+                } else {
+                    e * wt / den
+                };
+                ep += loss * wt;
+                epp += loss;
+            } else {
+                let inverse = 1.0 / wt;
+                let den = 1.0 + inverse * inverse;
+                ep += e / den;
+                epp += if wt.is_infinite() {
+                    // Ordered divisions retain a representable loss tail
+                    // even when the intermediate omega*tau overflows.
+                    (e / omega) / tau
+                } else {
+                    (e * inverse) / den
+                };
+            }
         }
         (ep, epp)
     }
@@ -494,40 +524,110 @@ pub struct PronyState {
     pub dissipated: f64,
 }
 
-// Exact scalar Maxwell ramp; r = dt/tau. Returns endpoint strain, mean
-// strain, and integral(q²/tau dt). Complete the square in the analytic
-// integral rather than subtracting nearly equal work/storage quantities:
-// A*(q0+h*delta)² + R*delta², A=(1-exp(-2r))/2,
-// h=tanh(r/2)/r, R=(r-2*tanh(r/2))/r² >= 0.
-pub(crate) fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
-    if r == 0.0 {
-        return (q0 + delta, q0 + 0.5 * delta, 0.0);
+/// Exact scalar Maxwell response to a prescribed linear strain ramp.
+///
+/// `q0` is the initial elastic branch strain, `delta` the total strain
+/// increment, and `r = dt/tau >= 0`. Returns endpoint elastic strain,
+/// interval-mean elastic strain, and the independent physical loss
+/// `integral(q(t)²/tau dt)`. Multiply the last two by branch modulus and,
+/// for work, multiply the mean stress by `delta`.
+///
+/// `r = 0` is an instantaneous elastic jump with zero heat; `r = +inf`
+/// is the fully relaxed limit. The caller admits physical parameters and
+/// checks representability. No state, allocation or energy clamp is involved.
+///
+/// The loss is a sum of squares:
+/// `A*(q0+h*delta)² + R*delta²`, where `A=(1-exp(-2r))/2`,
+/// `h=tanh(r/2)/r`, and `R=(r-2*tanh(r/2))/r² >= 0`.
+#[must_use]
+pub fn prony_ramp(q0: f64, delta: f64, r: f64) -> (f64, f64, f64) {
+    PronyRamp::new(r).apply(q0, delta)
+}
+
+/// Exact Maxwell ramp coefficients for one admitted `r = dt/tau >= 0`.
+///
+/// Prepare once per branch and time step, then reuse for every independent
+/// strain coordinate. Exponentials and cancellation-free small-rate series
+/// are evaluated only at preparation; [`Self::apply`] uses scalar arithmetic.
+/// The physical meaning and caller-admission requirements are [`prony_ramp`]'s.
+#[derive(Debug, Clone, Copy)]
+pub struct PronyRamp {
+    instantaneous: bool,
+    decay: f64,
+    ramp: f64,
+    mean_ramp: f64,
+    heat_shift: f64,
+    heat_scale: f64,
+    heat_remainder: f64,
+}
+
+impl PronyRamp {
+    /// Prepare the exact response, including the elastic zero-rate and fully
+    /// relaxed infinite-rate limits. The caller admits a nonnegative rate.
+    #[must_use]
+    pub fn new(r: f64) -> Self {
+        if r == 0.0 {
+            return Self {
+                instantaneous: true,
+                decay: 1.0,
+                ramp: 1.0,
+                mean_ramp: 0.5,
+                heat_shift: 0.5,
+                heat_scale: 0.0,
+                heat_remainder: 0.0,
+            };
+        }
+        let a = det::exp(-r);
+        let s = -det::expm1(-r);
+        let b = s / r;
+        let h = b / (1.0 + a);
+        let (c, remainder) = if r < 0.1 {
+            // Analytic series preserve weak loss at dt << relaxation time.
+            let c = 0.5
+                + r * (-1.0 / 6.0
+                    + r * (1.0 / 24.0
+                        + r * (-1.0 / 120.0
+                            + r * (1.0 / 720.0
+                                + r * (-1.0 / 5040.0
+                                    + r * (1.0 / 40320.0
+                                        + r * (-1.0 / 362880.0 + r / 3628800.0)))))));
+            let r2 = r * r;
+            let remainder = r
+                * (1.0 / 12.0
+                    + r2 * (-1.0 / 120.0
+                        + r2 * (17.0 / 20160.0
+                            + r2 * (-31.0 / 362880.0 + r2 * (691.0 / 79833600.0)))));
+            (c, remainder)
+        } else {
+            ((1.0 - b) / r, (1.0 - 2.0 * h) / r)
+        };
+        Self {
+            instantaneous: false,
+            decay: a,
+            ramp: b,
+            mean_ramp: c,
+            heat_shift: h,
+            heat_scale: 0.5 * s * (1.0 + a),
+            heat_remainder: remainder,
+        }
     }
-    let a = det::exp(-r);
-    let s = -det::expm1(-r);
-    let b = s / r;
-    let h = b / (1.0 + a);
-    let (c, remainder) = if r < 0.1 {
-        // Analytic series, not a loss clamp. Avoid cancellation in both
-        // (1-b)/r and (1-2h)/r at acoustic dt << material relaxation time.
-        let c = 0.5 + r * (-1.0 / 6.0 + r * (1.0 / 24.0
-            + r * (-1.0 / 120.0 + r * (1.0 / 720.0
-            + r * (-1.0 / 5040.0 + r * (1.0 / 40320.0
-            + r * (-1.0 / 362880.0 + r / 3628800.0)))))));
-        let r2 = r * r;
-        let remainder = r * (1.0 / 12.0 + r2 * (-1.0 / 120.0
-            + r2 * (17.0 / 20160.0 + r2 * (-31.0 / 362880.0
-            + r2 * (691.0 / 79833600.0)))));
-        (c, remainder)
-    } else {
-        // Ordered divisions also cover an overflowing dt/tau: the fully
-        // relaxed branch releases its old stored energy, with no NaN.
-        ((1.0 - b) / r, (1.0 - 2.0 * h) / r)
-    };
-    let shifted = q0 + h * delta;
-    let loss = (0.5 * s * (1.0 + a)) * shifted * shifted
-        + (remainder * delta) * delta;
-    (a * q0 + b * delta, b * q0 + c * delta, loss)
+
+    /// Endpoint strain, interval mean and independent physical loss for one
+    /// coordinate. Preparation is immutable and reusable across coordinates.
+    #[must_use]
+    #[inline]
+    pub fn apply(&self, q0: f64, delta: f64) -> (f64, f64, f64) {
+        if self.instantaneous {
+            return (q0 + delta, q0 + 0.5 * delta, 0.0);
+        }
+        let shifted = q0 + self.heat_shift * delta;
+        let loss = self.heat_scale * shifted * shifted + (self.heat_remainder * delta) * delta;
+        (
+            self.decay * q0 + self.ramp * delta,
+            self.ramp * q0 + self.mean_ramp * delta,
+            loss,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1303,7 +1403,17 @@ impl ThermoelasticZener {
     pub fn loss_factor(&self, omega: f64, thickness: f64) -> f64 {
         let tau = self.relaxation_time(thickness);
         let wt = omega * tau;
-        self.relaxation_strength() * wt / (1.0 + wt * wt)
+        let strength = self.relaxation_strength();
+        if wt.abs() <= 1.0 {
+            strength * wt / (1.0 + wt * wt)
+        } else {
+            let inverse = 1.0 / wt;
+            if wt.is_infinite() {
+                (strength / omega) / tau
+            } else {
+                (strength / wt) / (1.0 + inverse * inverse)
+            }
+        }
     }
 
     /// Handbook aluminum (6061-class) at temperature `t0` [K].
@@ -1743,6 +1853,169 @@ mod tests {
             assert_eq!(fit.alpha, reference.alpha);
             assert_eq!(fit.beta, reference.beta);
         }
+    }
+
+    #[test]
+    fn g0_rayleigh_fit_preserves_passive_pins_and_frequency_units() {
+        // Equal damping pins have positive mass and stiffness coefficients.
+        // Scaling frequency changes the coefficient units, not either ratio.
+        for scale in [1.0e-200, 1.0, 1.0e200] {
+            let lo = scale;
+            let hi = 4.0 * scale;
+            let fitted = RayleighDamping::from_two_points(lo, 0.02, hi, 0.02).unwrap();
+            let reversed = RayleighDamping::from_two_points(hi, 0.02, lo, 0.02).unwrap();
+            assert_eq!(fitted.alpha.to_bits(), reversed.alpha.to_bits());
+            assert_eq!(fitted.beta.to_bits(), reversed.beta.to_bits());
+            assert!((fitted.zeta_at(lo) - 0.02).abs() < 2.0e-17);
+            assert!((fitted.zeta_at(hi) - 0.02).abs() < 2.0e-17);
+        }
+        let mass = RayleighDamping::from_two_points(1.0, 0.04, 4.0, 0.01).unwrap();
+        assert_eq!(mass.beta, 0.0);
+        let stiffness = RayleighDamping::from_two_points(1.0, 0.01, 4.0, 0.04).unwrap();
+        assert_eq!(stiffness.alpha, 0.0);
+    }
+
+    #[test]
+    fn g0_rayleigh_fit_refuses_spectral_changes_and_nonfinite_pins() {
+        // These data require respectively negative stiffness/mass damping.
+        // The former clamp admitted them while missing the requested pins.
+        assert!(RayleighDamping::from_two_points(100.0, 0.4, 1000.0, 0.02).is_err());
+        assert!(RayleighDamping::from_two_points(100.0, 0.02, 1000.0, 0.4).is_err());
+        for invalid in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            for index in 0..4 {
+                let mut pins = [100.0, 0.02, 1000.0, 0.04];
+                pins[index] = invalid;
+                assert!(
+                    RayleighDamping::from_two_points(pins[0], pins[1], pins[2], pins[3]).is_err()
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn g1_fractional_zener_retains_weak_loss_and_extreme_relaxation_tails() {
+        let law = FractionalZener::new(2.0e9, 2.0e9 + 0.125, 1.0, 1.0).unwrap();
+        assert_eq!(law.modulus(0.0), (law.e0, 0.0));
+        for x in [1.0e-200, 1.0e-12, 1.0e-3, 1.0, 1.0e3, 1.0e12, 1.0e200] {
+            // Independent one-arm Maxwell closed form at alpha=1.
+            let y = if x <= 1.0 { x } else { 1.0 / x };
+            let expected_loss = 0.125 * y / (1.0 + y * y);
+            let (storage, loss) = law.modulus(x);
+            assert!(storage >= law.e0 && storage <= law.e_inf);
+            assert!(loss > 0.0);
+            assert!((loss - expected_loss).abs() <= 2.0e-13 * expected_loss);
+        }
+        // omega*tau overflows/underflows, but (omega*tau)^alpha and its
+        // physically nonzero loss are both representable.
+        let reference_loss = 1.0e9 * 0.382_683_432_365_089_8 * 1.0e-150;
+        for (omega, tau, expected_storage) in
+            [(1.0e-300, 1.0e-300, 2.0e9), (1.0e300, 1.0e300, 3.0e9)]
+        {
+            let law = FractionalZener::new(2.0e9, 3.0e9, 0.25, tau).unwrap();
+            let (storage, loss) = law.modulus(omega);
+            assert_eq!(storage, expected_storage);
+            assert!((loss - reference_loss).abs() <= 2.0e-13 * reference_loss);
+        }
+    }
+
+    #[test]
+    fn g1_fractional_zener_weak_loss_ad_tangents_match_analytic_maxwell() {
+        let law = FractionalZener::new(2.0e9, 2.0e9 + 0.125, 1.0, 1.0).unwrap();
+        let omega = 1.0e12;
+        let inverse = 1.0 / omega;
+        let denominator = 1.0 + inverse * inverse;
+        let loss = 0.125 * inverse / denominator;
+        let (_, (value, gradient)) = law.modulus_gradients(omega);
+        let expected = [
+            -inverse / denominator,
+            inverse / denominator,
+            loss * ((inverse * inverse - 1.0) * det::ln(omega) + core::f64::consts::PI * inverse)
+                / denominator,
+            loss * (inverse * inverse - 1.0) / denominator,
+        ];
+        assert!((value - loss).abs() < 2.0e-13 * loss);
+        for (actual, reference) in gradient.into_iter().zip(expected) {
+            assert!((actual - reference).abs() < 3.0e-13 * reference.abs());
+        }
+        // The small high-frequency sensitivity to equilibrium modulus must
+        // also survive; computing 1 minus the instantaneous weight erases it.
+        let ((_, storage_gradient), _) = law.modulus_gradients(omega);
+        let equilibrium_weight = inverse * inverse / denominator;
+        assert!((storage_gradient[0] - equilibrium_weight).abs() < 3.0e-13 * equilibrium_weight);
+    }
+
+    #[test]
+    fn g1_maxwell_and_thermoelastic_spectra_preserve_high_frequency_loss() {
+        let law = GeneralizedMaxwell::new(2.0e9, vec![(1.0e9, 1.0)]).unwrap();
+        for omega in [1.0e160, 1.0e200, 1.0e300] {
+            let (storage, loss) = law.modulus(omega);
+            let expected = 1.0e9 / omega;
+            assert_eq!(storage, 3.0e9);
+            assert!((loss - expected).abs() <= 3.0e-16 * expected);
+            assert_eq!(law.modulus(-omega), (storage, -loss));
+        }
+        let overflowing_product = GeneralizedMaxwell::new(2.0e9, vec![(1.0e9, 1.0e200)])
+            .unwrap()
+            .modulus(1.0e110);
+        assert_eq!(overflowing_product.0, 3.0e9);
+        assert!((overflowing_product.1 - 1.0e-301).abs() <= 1.0e-315);
+        let underflowing_product = GeneralizedMaxwell::new(1.0, vec![(1.0e100, 1.0e-200)])
+            .unwrap()
+            .modulus(1.0e-200);
+        assert_eq!(underflowing_product.0, 1.0);
+        assert!((underflowing_product.1 - 1.0e-300).abs() <= 1.0e-315);
+
+        let thermal = ThermoelasticZener::aluminum(293.0).unwrap();
+        let thickness = 0.002;
+        let omega = 1.0e200;
+        let expected = (thermal.relaxation_strength() / omega) / thermal.relaxation_time(thickness);
+        let actual = thermal.loss_factor(omega, thickness);
+        assert!(actual > 0.0);
+        assert!((actual - expected).abs() <= 4.0e-16 * expected);
+    }
+
+    #[test]
+    fn g3_prepared_prony_ramp_reuses_coefficients_and_composes_exact_histories() {
+        for rate in [0.0, 1.0e-12, 0.03, 0.1, 1.0, 100.0, 1.0e200, f64::INFINITY] {
+            let whole = PronyRamp::new(rate);
+            let halves = PronyRamp::new(0.5 * rate);
+            for (initial, increment) in [(0.0, 0.8), (0.3, -0.8), (-0.7, 0.2)] {
+                let (end, mean, heat) = whole.apply(initial, increment);
+                let (middle, first_mean, first_heat) = halves.apply(initial, 0.5 * increment);
+                let (second_end, second_mean, second_heat) =
+                    halves.apply(middle, 0.5 * increment);
+                for (actual, expected) in [
+                    (end, second_end),
+                    (mean, 0.5 * (first_mean + second_mean)),
+                    (heat, first_heat + second_heat),
+                ] {
+                    assert!(
+                        (actual - expected).abs() <= 4.0e-13 * expected.abs().max(1.0e-300),
+                        "rate={rate}: {actual} versus split-history {expected}"
+                    );
+                }
+                assert!(heat >= 0.0 && first_heat >= 0.0 && second_heat >= 0.0);
+                assert_eq!(whole.apply(initial, increment), prony_ramp(initial, increment, rate));
+            }
+        }
+    }
+
+    #[test]
+    fn g1_thermoelastic_tail_survives_overflowing_frequency_time_product() {
+        // Arithmetic stress case, not a calibrated material: all source
+        // coefficients and the loss remain representable even though omega*tau
+        // does not. The same ordered division is used by Maxwell branches.
+        let thermal = ThermoelasticZener {
+            e: 1.0e300,
+            alpha_t: 1.0,
+            t0: 1.0,
+            rho: 1.0,
+            cp: 1.0,
+            conductivity: 1.0 / (core::f64::consts::PI * core::f64::consts::PI),
+        };
+        let loss = thermal.loss_factor(1.0e200, 1.0e100);
+        assert!(loss > 0.0);
+        assert!((loss - 1.0e-100).abs() < 2.0e-115);
     }
 
     #[test]
