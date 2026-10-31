@@ -6161,6 +6161,16 @@ proper frames. The native compliance inverse supplies stiffness, with exact
 are not treated as affine stiffness. Original source integration supplies the
 full free-strain tensor.
 
+`ThermoelasticSymmetry::IsotropicBulkShear` also accepts independently affine
+bulk and shear modulus sources directly. In Mandel coordinates the exact law
+is `C=3 K P_vol+2 G P_dev`, with constant `C'` and zero `C''`; it does not
+synthesize Young/Poisson claims or treat their rational transforms as affine.
+Expansion remains independently isotropic or oriented orthotropic. Original
+positive source bounds and conservative whole-interval capacity admission
+still apply. Bulk/shear is an elastic source schema and refuses as an expansion
+schema. Independent invariant-energy/entropy/capacity and rotation regressions
+cover this path; Young/shear still requires its rational thermal derivatives.
+
 The same potential supplies stress, entropy, internal energy, fixed-total-strain
 heat capacity and stress-temperature derivatives to the original spatial solid,
 finite-heat, inertial and adiabatic consumers. Full-interval positive-compliance

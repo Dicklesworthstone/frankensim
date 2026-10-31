@@ -132,10 +132,10 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
             check(cx)?;
             let stiffness=match bound.source.stiffness_model {
                 ThermalStiffnessModel::Isotropic=>ThermoelasticSymmetry::Isotropic,
-                ThermalStiffnessModel::IsotropicYoungShear
-                | ThermalStiffnessModel::IsotropicBulkShear=>return Err(
+                ThermalStiffnessModel::IsotropicBulkShear=>ThermoelasticSymmetry::IsotropicBulkShear,
+                ThermalStiffnessModel::IsotropicYoungShear=>return Err(
                     ThermoelasticFeedbackError::Invalid(
-                        "reciprocal affine thermoelasticity requires its original Young/Poisson source law; independent modulus pairs are supported by prescribed-temperature solid response",
+                        "reciprocal Young/shear thermoelasticity needs exact rational source derivatives; prescribed-temperature solid response remains available",
                     )),
                 ThermalStiffnessModel::OrientedOrthotropic {principal_to_mesh,..}=>
                     ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:principal_to_mesh},

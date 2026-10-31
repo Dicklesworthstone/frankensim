@@ -295,3 +295,6 @@ mod heat;
 
 #[path = "thermoelastic/orthotropic.rs"]
 mod orthotropic;
+
+#[path = "thermoelastic/bulk_shear.rs"]
+mod bulk_shear;

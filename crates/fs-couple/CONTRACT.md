@@ -11751,6 +11751,17 @@ otherwise valid wide intervals. No endpoint-only positivity claim, isotropic
 replacement or new mechanical/thermal integrator is introduced. The original
 isotropic path and endpoint thermal coupling convention remain intact.
 
+Original independently affine bulk/shear cards now enter this same reciprocal
+owner through `ThermalStiffnessModel::IsotropicBulkShear`. Their direct tensor
+and exact first/second temperature derivatives feed the existing internal
+energy, entropy, capacity, native stress/energy parity and reversible-heat
+accounts. No derived E/nu source or reference-mass change is inserted. The same
+binding serves equilibrium, inertial, acoustic and complete heat-network
+continuations. Focused free/restrained heating and Newmark work/heat regressions
+are in `tests/solid_enthalpy/thermoelastic/bulk_shear.rs`. Independent Young/shear
+sources remain explicitly refused until their exact rational derivatives are
+implemented; native regression definitions do not imply measured validation.
+
 Each bounded heat fixed-point trial starts from accepted thermal and observer
 histories, runs the original thermal substeps/events with additional reversible
 powers, then resolves local sources and solves the original P1 load,
