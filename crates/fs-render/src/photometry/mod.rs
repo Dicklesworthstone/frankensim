@@ -40,12 +40,14 @@ use source::{PhotometricSource, SourceError};
 use transport::{PhotometricMedium, photopic_transmittance};
 
 /// Version of the calibrated transport model and output interpretation.
-/// Version 6 resolves represented tabulated phase-law cells in homogeneous
+/// Version 7 resolves optically thick foregrounds with geometric optical-depth
+/// panels and refuses convergence before the camera layer is sampled. Version
+/// 6 resolves represented tabulated phase-law cells in homogeneous
 /// single-scattered images. Version 5 admits passive tabulated diffuse
 /// reflectance. Version 4's
 /// shared tabulated haze phase laws, version 3's fixture
 /// angular partitions and version 2's published CIE observer remain in use.
-pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 6;
+pub const PHOTOMETRY_SEMANTICS_VERSION: u32 = 7;
 
 /// Explicit geometric and output budgets for an offline calculation.
 #[derive(Debug, Clone, Copy, PartialEq)]

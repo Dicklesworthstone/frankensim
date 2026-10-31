@@ -9,7 +9,9 @@
 //! The single-scattering integral reuses the volume module's Beer–Lambert and
 //! Henyey–Greenstein kernels. It samples the phase-weighted incident field at
 //! panel midpoints and integrates the homogeneous camera-path extinction within
-//! each panel analytically. Successive refinements report their discrepancy as
+//! each panel analytically. Optically thick intervals use geometric optical-depth
+//! panels to resolve foreground attenuation while retaining distant support.
+//! Successive refinements report their discrepancy as
 //! a numerical estimate, never as a certified error bound. Shadow boundaries,
 //! narrow beams, or unresolved source variation can evade that estimate.
 //! The scene entry point supplies declared angular-profile boundaries and
@@ -23,6 +25,9 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 use crate::{charts::Ray, volumes};
+
+mod panels;
+use panels::OpticalPanels;
 
 // Gray quadrature and spectral paths retain the same immutable angular law.
 // The analytic gray evaluations below preserve their existing arithmetic.
@@ -220,7 +225,8 @@ pub struct ScatterEstimate {
     /// Panels used in the returned quadrature; zero for an analytic zero.
     pub panels: u32,
     /// Whether the **estimated** refinement discrepancy met the requested
-    /// tolerance. This does not certify resolved shadows, beams, or convergence.
+    /// tolerance and the first panel resolves at most one optical depth.
+    /// This does not certify resolved shadows, beams, or convergence.
     pub tolerance_met: bool,
     /// No general multiple-scattering bound is available: `None` for scattering
     /// media. An analytically zero scattering path has the exact model bound 0.
@@ -265,8 +271,12 @@ impl<E: fmt::Debug> std::error::Error for ScatterError<E> {}
 /// to the callback; extinction on the camera leg belongs to this integrator.
 ///
 /// Midpoint incident values use exact analytic Beer–Lambert panel weights,
-/// preserving a constant incident field even in optically thick media. Panel
-/// counts double (clamped to the cap) and accumulation follows fixed order with
+/// preserving a constant incident field even in optically thick media. Intervals
+/// of at most one optical depth retain uniform metric spacing; thicker intervals
+/// use geometric optical-depth spacing over the complete interval. Refinement
+/// cannot meet tolerance until the first panel
+/// spans at most one optical depth. Counts double (clamped to the cap), with
+/// no extra callback evaluations, and accumulation follows fixed order with
 /// compensation. The callback must describe one immutable scene throughout.
 /// Cancellation is checked at each callback and before result publication.
 /// No RNG, window, GPU, scene mutation, or per-panel allocation is involved.
@@ -314,33 +324,48 @@ pub fn single_scattered_luminance<E>(
             omitted_multiple_scattering_bound_cd_m2: Some(0.0),
         });
     }
+    let coordinates =
+        OpticalPanels::new(medium.extinction_per_m, distance_m).ok_or(ScatterError::Arithmetic)?;
     let mut panels = settings.initial_panels;
     let mut previous: Option<f64> = None;
     let mut evaluations = 0_u64;
     loop {
-        let width_m = distance_m / f64::from(panels);
-        if width_m <= 0.0 {
-            return Err(ScatterError::Arithmetic);
-        }
-        let panel_extinction = medium.extinction_per_m * width_m;
-        let panel_weight =
-            (medium.scattering_per_m / medium.extinction_per_m) * -det::expm1(-panel_extinction);
-        if !panel_weight.is_finite() || panel_weight <= 0.0 {
-            return Err(ScatterError::Arithmetic);
-        }
+        // Retain the original shared weight and coordinate arithmetic for
+        // thin intervals. Thick panels integrate their individual widths.
+        let uniform_weight = if coordinates.is_uniform() {
+            let width_m = distance_m / f64::from(panels);
+            if width_m <= 0.0 {
+                return Err(ScatterError::Arithmetic);
+            }
+            let panel_extinction = medium.extinction_per_m * width_m;
+            Some(
+                (medium.scattering_per_m / medium.extinction_per_m)
+                    * -det::expm1(-panel_extinction),
+            )
+        } else {
+            None
+        };
         let (mut sum, mut compensation) = (0.0_f64, 0.0_f64);
         for panel in 0..panels {
             cx.checkpoint().map_err(|_| ScatterError::Cancelled)?;
-            let start_m = f64::from(panel) * width_m;
-            let midpoint_m = (f64::from(panel) + 0.5) * width_m;
-            let value = incident(ray.at(midpoint_m), ray.dir.scale(-1.0))
+            let panel = coordinates
+                .panel(panel, panels)
+                .ok_or(ScatterError::Arithmetic)?;
+            let panel_weight = uniform_weight.unwrap_or_else(|| {
+                (medium.scattering_per_m / medium.extinction_per_m)
+                    * -det::expm1(-medium.extinction_per_m * panel.width_m)
+            });
+            if !panel_weight.is_finite() || panel_weight <= 0.0 {
+                return Err(ScatterError::Arithmetic);
+            }
+            let value = incident(ray.at(panel.midpoint_m), ray.dir.scale(-1.0))
                 .map_err(ScatterError::Incident)?;
             if !value.is_finite() || value < 0.0 {
                 return Err(ScatterError::IncidentValue);
             }
             evaluations += 1;
-            let contribution =
-                (value * panel_weight) * volumes::beer_lambert(medium.extinction_per_m, start_m);
+            let contribution = (value * panel_weight)
+                * volumes::beer_lambert(medium.extinction_per_m, panel.start_m);
             let adjusted = contribution - compensation;
             let next = sum + adjusted;
             compensation = (next - sum) - adjusted;
@@ -350,10 +375,11 @@ pub fn single_scattered_luminance<E>(
             }
         }
         let discrepancy = previous.map(|value| (sum - value).abs());
-        let tolerance_met = discrepancy.is_some_and(|error| {
-            error <= settings.absolute_tolerance_cd_m2
-                || error / sum.max(f64::MIN_POSITIVE) <= settings.relative_tolerance
-        });
+        let tolerance_met = coordinates.optical_scale_resolved(panels)
+            && discrepancy.is_some_and(|error| {
+                error <= settings.absolute_tolerance_cd_m2
+                    || error / sum.max(f64::MIN_POSITIVE) <= settings.relative_tolerance
+            });
         cx.checkpoint().map_err(|_| ScatterError::Cancelled)?;
         if tolerance_met || panels == settings.max_panels {
             return Ok(ScatterEstimate {
@@ -409,6 +435,7 @@ pub(crate) fn single_scattered_luminance_partitioned<E>(
     let mut sums = [0.0_f64; 2];
     let mut compensation = [0.0_f64; 2];
     let mut compared_every_segment = true;
+    let mut resolved_every_segment = true;
     let mut evaluations = 0_u64;
     let mut panels = 0_u32;
     let mut start_m = 0.0;
@@ -442,6 +469,9 @@ pub(crate) fn single_scattered_luminance_partitioned<E>(
             .transmittance(start_m)
             .map_err(ScatterError::Medium)?;
         compared_every_segment &= result.estimated_quadrature_error_cd_m2.is_some();
+        resolved_every_segment &= OpticalPanels::new(medium.extinction_per_m, length_m)
+            .ok_or(ScatterError::Arithmetic)?
+            .optical_scale_resolved(result.panels);
         for (channel, value) in [
             result.luminance_cd_m2 * transmission,
             result.estimated_quadrature_error_cd_m2.unwrap_or(0.0) * transmission,
@@ -462,10 +492,11 @@ pub(crate) fn single_scattered_luminance_partitioned<E>(
         start_m = end_m;
     }
     let discrepancy = compared_every_segment.then_some(sums[1]);
-    let tolerance_met = discrepancy.is_some_and(|error| {
-        error <= settings.absolute_tolerance_cd_m2
-            || error / sums[0].max(f64::MIN_POSITIVE) <= settings.relative_tolerance
-    });
+    let tolerance_met = resolved_every_segment
+        && discrepancy.is_some_and(|error| {
+            error <= settings.absolute_tolerance_cd_m2
+                || error / sums[0].max(f64::MIN_POSITIVE) <= settings.relative_tolerance
+        });
     cx.checkpoint().map_err(|_| ScatterError::Cancelled)?;
     Ok(ScatterEstimate {
         luminance_cd_m2: sums[0],
@@ -569,7 +600,7 @@ mod tests {
     #[test]
     fn g1_constant_incident_field_matches_analytic_homogeneous_slab() {
         with_cx(|_, cx| {
-            for distance in [1.0e-9, 1.0, 1000.0] {
+            for distance in [1.0e-9, 1.0, 1000.0, 1.0e200] {
                 let medium =
                     HomogeneousMedium::try_new(0.05, 0.15, PhaseFunction::Isotropic).unwrap();
                 let incident = 60.0;
@@ -593,6 +624,103 @@ mod tests {
                 assert!(result.tolerance_met);
                 assert_eq!(result.omitted_multiple_scattering_bound_cd_m2, None);
             }
+        });
+    }
+
+    fn thick_point_incident(point: Point3) -> f64 {
+        let r = point.z + 0.01;
+        100.0 * (-100.0 * r).exp() / (4.0 * PI * r * r)
+    }
+
+    #[test]
+    fn g1_thick_point_source_resolves_the_near_camera_incident_layer() {
+        with_cx(|_, cx| {
+            let medium = HomogeneousMedium::try_new(20.0, 80.0, PhaseFunction::Isotropic).unwrap();
+            let settings = ScatterSettings::default();
+            let result =
+                single_scattered_luminance(&medium, &ray(), 100.0, settings, cx, |point, _| {
+                    Ok::<_, Infallible>(thick_point_incident(point))
+                })
+                .unwrap();
+            // Independent scalar integral, evaluated in u=t/0.01 rather than
+            // production panel coordinates: (100*80/4pi) integral_0^100
+            // exp[-100*(0.01+2t)]/(0.01+t)^2 dt. Uniform 32/64-panel grids
+            // gave values below 1e-33 and falsely met the discrepancy test.
+            let expected = 6_495.348_894_75;
+            assert!((result.luminance_cd_m2 / expected - 1.0).abs() < 5e-5);
+            assert!(result.tolerance_met);
+            assert!(result.panels > 64 && result.panels <= settings.max_panels);
+            assert!(result.evaluations < 4 * u64::from(settings.max_panels));
+            assert!(result.estimated_quadrature_error_cd_m2.unwrap() > 0.0);
+            assert_eq!(result.omitted_multiple_scattering_bound_cd_m2, None);
+        });
+    }
+
+    #[test]
+    fn g0_small_discrepancies_cannot_qualify_unresolved_optical_panels() {
+        with_cx(|_, cx| {
+            let medium = HomogeneousMedium::try_new(20.0, 80.0, PhaseFunction::Isotropic).unwrap();
+            let settings = ScatterSettings {
+                initial_panels: 1,
+                max_panels: 2,
+                ..ScatterSettings::default()
+            };
+            let result =
+                single_scattered_luminance(&medium, &ray(), 100.0, settings, cx, |point, _| {
+                    Ok::<_, Infallible>(thick_point_incident(point))
+                })
+                .unwrap();
+            assert_eq!((result.panels, result.evaluations), (2, 3));
+            assert!(
+                result.estimated_quadrature_error_cd_m2.unwrap()
+                    <= settings.absolute_tolerance_cd_m2
+            );
+            assert!(!result.tolerance_met);
+            let partitioned = single_scattered_luminance_partitioned(
+                &medium,
+                &ray(),
+                100.0,
+                ScatterSettings {
+                    initial_panels: 2,
+                    max_panels: 4,
+                    ..settings
+                },
+                cx,
+                &[0.5],
+                |_, _| Ok::<_, Infallible>(1.0),
+            )
+            .unwrap();
+            // This constant field is integrated analytically, but generic
+            // callbacks have not resolved either interval's optical scale.
+            // The wrapper must not override that failure with a zero delta.
+            assert!((partitioned.luminance_cd_m2 - 0.8).abs() < 2e-14);
+            assert_eq!(partitioned.estimated_quadrature_error_cd_m2, Some(0.0));
+            assert_eq!((partitioned.panels, partitioned.evaluations), (4, 6));
+            assert!(!partitioned.tolerance_met);
+        });
+    }
+
+    #[test]
+    fn g1_optical_panels_retain_distant_incident_field_support() {
+        with_cx(|_, cx| {
+            let medium = HomogeneousMedium::try_new(0.0, 1.0, PhaseFunction::Isotropic).unwrap();
+            let settings = ScatterSettings {
+                absolute_tolerance_cd_m2: 0.0,
+                ..ScatterSettings::default()
+            };
+            let result =
+                single_scattered_luminance(&medium, &ray(), 100.0, settings, cx, |point, _| {
+                    Ok::<_, Infallible>(point.z.exp())
+                })
+                .unwrap();
+            // exp(t) exactly cancels camera exp(-t), leaving integral_0^100 1 dt.
+            // A transmission-CDF map rounded to total opacity 1 would leave
+            // much of this finite incident field unsampled even at the cap.
+            assert!((result.luminance_cd_m2 - 100.0).abs() < 0.02);
+            assert_eq!(result.panels, settings.max_panels);
+            assert!(!result.tolerance_met);
+            assert!(result.estimated_quadrature_error_cd_m2.unwrap() > 0.0);
+            assert!(result.evaluations < 4 * u64::from(settings.max_panels));
         });
     }
 

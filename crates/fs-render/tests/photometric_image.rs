@@ -7,6 +7,9 @@
 #[path = "photometric_image/scattering_reference.rs"]
 mod scattering_reference;
 
+#[path = "photometric_image/optical_depth_reference.rs"]
+mod optical_depth_reference;
+
 #[path = "photometric_image/phase_reference.rs"]
 mod phase_reference;
 

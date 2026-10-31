@@ -1731,8 +1731,24 @@ Total callback evaluations remain less than four times the total cap. A missing
 refinement comparison in any interval leaves the aggregate discrepancy unknown
 and `tolerance_met` false. Otherwise the discrepancy is the sum of transmitted
 interval discrepancies, checked against the requested global tolerance.
-Unpartitioned scenes retain the original integration arithmetic. Photometry
-semantics version 3 records this change.
+Photometry semantics version 3 records the angular partitioning.
+
+Since photometry semantics version 7, optically thick intervals use geometric
+optical-depth panel boundaries. For extinction `sigma`, length `L` and `N`
+panels, the boundaries are `expm1(i*ln(1+sigma*L)/N)/sigma`, with endpoints
+exactly zero and `L`. Metric midpoints retain analytic Beer panel weights.
+This resolves foreground source variation that uniform-distance midpoint
+grids could miss completely, while retaining the full ray interval rather
+than truncating it at a chosen number of optical depths. Intervals with
+`sigma*L <= 1` retain their existing uniform arithmetic.
+
+Refinement cannot report `tolerance_met` until the first panel spans at most
+one optical depth. A cap too small to satisfy this prerequisite returns the
+computed estimate and any actual refinement discrepancy, with the tolerance
+flag false. The partitioned wrapper preserves this prerequisite for every
+interval. Panel and callback caps, cancellation, deterministic ordering and
+allocation limits remain unchanged. This resolution check is not a numerical
+enclosure and does not prove arbitrary incident-field variation resolved.
 
 This partition is not a certified intersection or integration enclosure.
 Unresolved shadow boundaries, untabulated analytic phase peaks, smooth
@@ -1872,6 +1888,13 @@ progressive replay tests remain in the photometry batteries.
   apparent convergence. The regressions also check rigid placement, SI scaling,
   shared multi-fixture partition budgets, and unknown discrepancy when no
   actual refinement comparison fits the budget.
+- `photometric_image::optical_depth_reference` checks a nearby point fixture
+  behind the camera in an optically thick medium. An independent dimensionless
+  source-leg integral gives approximately 6495.34889475 cd/m² where the former
+  default uniform grids returned almost zero with an apparent tolerance pass.
+  The reference also checks SI scale covariance and insufficient-budget
+  refusal. Pure panel tests cover numerical range and optical resolution;
+  generic-callback regressions retain constant-field and distant-support cases.
 
 `photometric_path::cie171_analytical` independently reconstructs the diffuse
 point-source subcase of CIE 171:2006 section 5.2 from the factual setup in the
