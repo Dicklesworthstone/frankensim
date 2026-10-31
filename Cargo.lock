@@ -2079,6 +2079,7 @@ dependencies = [
  "fs-ga",
  "fs-la",
  "fs-math",
+ "fs-modal",
  "fs-solver",
  "fs-time",
  "fs-tribo",

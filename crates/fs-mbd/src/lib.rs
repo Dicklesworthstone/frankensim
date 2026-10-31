@@ -39,6 +39,8 @@ pub mod planar_drive;
 pub mod robot_models;
 pub mod rocket;
 pub mod roomba;
+/// Full-matrix gyroscopic rotor-bearing poles and forced harmonic response.
+pub mod rotordynamics;
 pub mod salisbury;
 /// Complete finite-mass sphere-pair flight, frictional impact, and recoil.
 pub mod sphere_pair;

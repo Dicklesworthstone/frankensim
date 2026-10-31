@@ -70,6 +70,9 @@ mass-normalized damped modes (`time`, moved from fs-couple under owner decision 
   scalar quadratics with product-of-roots recovery, retaining slow overdamped
   poles, complex conjugates, free roots and unstable poles. There is no
   tolerance-based decoupling. Values only; canonical `(real, imaginary)` order.
+  `quadratic_eigenvalues_with_cancel` shares this exact owner, adding an explicit
+  per-window QR sweep cap and cancellation through native complex QR. The
+  original entry point retains its 120-sweep cap and numerical arithmetic.
 - `ModalError` — typed refusals with stable `FS-MODAL-*` display codes:
   dimension mismatch, mass-not-SPD, factorization refusal (wrapping the
   fs-sparse `FS-SPARSE-DIRECT-*` code and the shift), invalid window,

@@ -37,7 +37,7 @@
 //! observer pressure); it moved here from `fs-couple` (IRP M1.1-W1a) so that strings, solids and couplers share one acyclic owner.
 
 use fs_la::eigen::jacobi_eigh;
-use fs_la::eigen_complex::eig as complex_eig;
+use fs_la::eigen_complex::{EigError, eig_with_cancel};
 use fs_la::factor::cholesky;
 use fs_math::c64::C64;
 use fs_sparse::{Coo, Csr, DirectOrdering, LdltError, LdltFactor, LdltOptions, SymbolicLdlt};
@@ -1321,6 +1321,33 @@ pub fn quadratic_eigenvalues(
     k: &[f64],
     n: usize,
 ) -> Result<Vec<C64>, ModalError> {
+    quadratic_eigenvalues_with_cancel(m, c, k, n, 120, || false)
+}
+
+/// The same scaled quadratic-pencil owner with bounded QR iteration and
+/// cooperative cancellation. Polls bracket dense preparation stages and each
+/// scalar-pole solve; native complex QR also polls its elimination/rotation
+/// boundaries. Dense storage and preparation work remain the caller's budget.
+/// No partial spectrum is published after a refusal or cancellation.
+///
+/// # Errors
+/// Original [`quadratic_eigenvalues`] refusals, a zero QR sweep budget, or
+/// [`ModalError::Cancelled`]. The sweep cap applies to each active QR window.
+///
+/// # Panics
+/// On the same shape mismatches as [`quadratic_eigenvalues`].
+pub fn quadratic_eigenvalues_with_cancel(
+    m: &[f64],
+    c: &[f64],
+    k: &[f64],
+    n: usize,
+    max_sweeps_per_window: usize,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<Vec<C64>, ModalError> {
+    if cancelled() { return Err(ModalError::Cancelled); }
+    if max_sweeps_per_window == 0 {
+        return Err(ModalError::QuadraticEig { detail: "positive QR sweep budget required".into() });
+    }
     assert_eq!(m.len(), n * n, "m must be n*n");
     assert_eq!(c.len(), n * n, "c must be n*n");
     assert_eq!(k.len(), n * n, "k must be n*n");
@@ -1328,7 +1355,9 @@ pub fn quadratic_eigenvalues(
         return Ok(Vec::new());
     }
     if n == 1 {
-        return quadratic_scalar_eigenvalues(m[0], c[0], k[0]);
+        let poles = quadratic_scalar_eigenvalues(m[0], c[0], k[0])?;
+        if cancelled() { return Err(ModalError::Cancelled); }
+        return Ok(poles);
     }
     let invalid = || ModalError::QuadraticEig {
         detail: "quadratic pencil scaling requires finite, representable coefficients and poles".into(),
@@ -1341,9 +1370,11 @@ pub fn quadratic_eigenvalues(
         || (m[i*n+j] == 0.0 && c[i*n+j] == 0.0 && k[i*n+j] == 0.0))) {
         let mut poles = Vec::with_capacity(2*n);
         for i in 0..n {
+            if cancelled() { return Err(ModalError::Cancelled); }
             poles.extend(quadratic_scalar_eigenvalues(m[i*n+i],c[i*n+i],k[i*n+i])?);
         }
         poles.sort_by(|a,b| a.re.total_cmp(&b.re).then_with(|| a.im.total_cmp(&b.im)));
+        if cancelled() { return Err(ModalError::Cancelled); }
         return Ok(poles);
     }
     // x_i = 2^(-e_i) y_i equilibrates the mass diagonal without rounding a
@@ -1370,10 +1401,12 @@ pub fn quadratic_eigenvalues(
         }).collect()
     };
     let mass = transform(m,0)?;
+    if cancelled() { return Err(ModalError::Cancelled); }
     let chol = cholesky(&mass,n).map_err(|_| ModalError::MassNotSpd { negative: 0 })?;
     let mut damping = transform(c,1)?;
     let mut stiffness = transform(k,2)?;
     quadratic_mass_whiten(&mut damping,n,&chol);
+    if cancelled() { return Err(ModalError::Cancelled); }
     quadratic_mass_whiten(&mut stiffness,n,&chol);
     if damping.iter().chain(&stiffness).any(|v| !v.is_finite()) { return Err(invalid()); }
     // z = L^T y gives mu^2 I + mu L^-1 C L^-T + L^-1 K L^-T.
@@ -1388,8 +1421,10 @@ pub fn quadratic_eigenvalues(
             a[(n+i)*dim+n+j] = C64::from_re(-damping[i*n+j]);
         }
     }
-    let mut poles = complex_eig(&a, dim).map_err(|e| ModalError::QuadraticEig {
-        detail: format!("{e:?}"),
+    let mut poles = eig_with_cancel(&a, dim, max_sweeps_per_window, &mut cancelled).map_err(|e| match e {
+        EigError::Cancelled => ModalError::Cancelled,
+        EigError::NotConverged(failure) => ModalError::QuadraticEig { detail: format!("{failure:?}") },
+        EigError::Invalid { what } => ModalError::QuadraticEig { detail: what.into() },
     })?;
     for pole in &mut poles {
         let original = *pole;
@@ -1399,6 +1434,7 @@ pub fn quadratic_eigenvalues(
             || (original != C64::ZERO && *pole == C64::ZERO) { return Err(invalid()); }
     }
     poles.sort_by(|a,b| a.re.total_cmp(&b.re).then_with(|| a.im.total_cmp(&b.im)));
+    if cancelled() { return Err(ModalError::Cancelled); }
     Ok(poles)
 }
 

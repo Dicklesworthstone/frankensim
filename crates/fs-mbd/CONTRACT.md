@@ -1,5 +1,48 @@
 # CONTRACT: fs-mbd
 
+## Linear rotor-bearing operating points
+
+`rotordynamics::RotorBearingModel` admits 1–32 original generalized coordinates
+with full mass M, bearing velocity operator C, tangent stiffness K and the
+skew gyroscopic coefficient G. M must be symmetric and numerically SPD; C/K
+may be nonsymmetric or active and remain unchanged. A signed frozen spin rate
+assembles `C + Omega G`. Coordinates and their conjugate forces/torques must
+share the caller's declared reference frame and units, so `f dot q_dot` is power.
+
+`RotorOperatingPoint::poles` delegates the complete quadratic pencil to the
+existing scaled `fs-modal` owner; cancellation reaches its native complex QR
+through `quadratic_eigenvalues_with_cancel`, with 120 sweeps per active window.
+`campbell_samples` returns complete pole sets at 1–256 caller-supplied speeds
+for those fixed coefficients. All complex poles, including active/unstable
+ones, remain visible. These are numerical samples: no eigenvectors, persistent
+mode identities, certified critical-speed brackets, stability threshold or
+forced-response peak is inferred. Speed-dependent bearing coefficients require
+a newly supplied physical operating point, not just another sample speed.
+
+`harmonic_response` uses `exp(+i omega t)` and native cancellable complex LU
+on `K - omega^2 M + i omega(C + Omega G)`. Row equilibration precedes the solve;
+the accepted residual and signed mean powers use the original separate matrix
+actions. Singular resonance refuses without a damping floor or pole shift.
+Mean source, bearing-velocity, stiffness, gyroscopic and inertial powers are
+reported separately. Cross-coupled/active work is not called heat. Equilibrium
+residuals are measured numerical defects, not response-error certificates.
+The harmonic solution is a sinusoidal particular solution: unstable homogeneous
+transients need not decay, so it does not imply an attained steady response.
+
+`rotordynamics::rigid::RigidRotor` supplies a concrete physical assembly. It
+lowers the original full centroidal inertia by the supplied proper reference
+rotation and admits axisymmetry under an explicit tight tolerance. Its four
+stationary coordinates are lateral translation and tilt; finite bearings use
+their actual axial stations through `A^T B A`, retaining force moments.
+Signed-speed unbalance uses `A^T F`, and recovered bearing work keeps its sign.
+This is a rigid, constant-speed linearization, without flexible-shaft,
+spin-acceleration or asymmetric-rotor Floquet claims.
+
+Focused regressions use independent Jeffcott amplitude/phase and critical-speed
+references, gyroscopic circular-mode splitting, dense coordinate congruence,
+cross-coupled/active work, original force residuals and cancellation/refusal.
+They do not close the broader certified Campbell/Floquet/whirl bead.
+
 ## Spatial gravity on native rigid-body dynamics
 
 `gravity::PointGravityField` exposes specific potential, acceleration and the
