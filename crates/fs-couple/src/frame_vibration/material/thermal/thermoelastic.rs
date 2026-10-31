@@ -40,7 +40,7 @@ mod heat;
 pub use heat::{FrameHeatError, FrameHeatInput, FrameHeatTransfer};
 pub use assembly::{FrameThermoelasticBinding, FrameThermoelasticFrame};
 pub use connection_heat::{FrameConnectionHeat, FrameConnectionHeatDestination};
-pub use electrical::{FrameElectricalInput, FrameFieldStorageReport};
+pub use electrical::{FrameConductorPath, FrameElectricalInput, FrameFieldStorageReport};
 
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState, ModalAcousticTimeModel};

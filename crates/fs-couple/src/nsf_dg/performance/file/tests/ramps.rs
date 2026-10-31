@@ -82,8 +82,8 @@ fn g0_ramp_variants_keep_physical_location_and_legacy_holds_keep_bits() {
         let mut first = Row { fields: a.split_ascii_whitespace(), line: 1 };
         let mut last = Row { fields: b.split_ascii_whitespace(), line: 1 };
         let segment = BoundarySegment { start: 4, end: 12,
-            first: read_drive(&mut first, kind, aperture, [250.0, 600.0]).unwrap(),
-            last: Some(read_drive(&mut last, kind, aperture, [250.0, 600.0]).unwrap()) };
+            first: read_drive(&mut first, kind, aperture, [250.0, 600.0], None).unwrap(),
+            last: Some(read_drive(&mut last, kind, aperture, [250.0, 600.0], None).unwrap()) };
         first.end().unwrap(); last.end().unwrap();
         assert_eq!(segment.at(8.0).unwrap(), expected);
     }

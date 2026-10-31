@@ -569,7 +569,8 @@ fn multiple_field_branches_share_one_material_cell_without_duplicating_caloric_s
     let resistors = [resistor];
     let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
     let selection = MaterialPropertySelection::SingleClaimOnly;
-    let first = ResolvedCapacitor::resolve(&card, &point(300.0), selection, 1.0, 1.0).unwrap();
+    let first =
+        ResolvedCapacitor::resolve(&card, &point(300.0), selection.clone(), 1.0, 1.0).unwrap();
     let second = ResolvedCapacitor::resolve(&card, &point(300.0), selection, 1.0, 1.0).unwrap();
     let law = ThermalFieldStorage::capacitor(&card, &first, "T", [250.0, 500.0]).unwrap();
     let circuit = MaterialCircuit::new_with_storage(

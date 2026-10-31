@@ -87,7 +87,7 @@ fn reflected_source_aperture_completes_both_duct_histories_across_callback_parti
         let frame = renderer.last_frame().unwrap();
         assert_eq!(frame.step, step as u64);
         assert_eq!(renderer.system().accepted_steps(), step as u64);
-        assert_eq!(renderer.system().zone().steps(), step as u64);
+        assert_eq!(renderer.system().zone().steps(), step);
         assert_eq!(renderer.samples_rendered(), step as u64);
         let patch = frame.source_patch.unwrap();
         let source = frame.upstream.as_ref().unwrap();

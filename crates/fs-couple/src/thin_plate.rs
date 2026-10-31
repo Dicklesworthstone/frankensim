@@ -287,7 +287,15 @@ impl CompactBody {
         Ok(self.radiate(acc, rho, listener_m))
     }
 
-    pub(crate) fn attach_piston_load(
+    /// Load this body's radiating piston with the baffled-piston radiation of `gas` at
+    /// `sample_rate_hz`: the per-body digital filter that the one-port bowed termination
+    /// (`Termination::PlateOnePort`) attaches to its body. A body with no radiating
+    /// area is left unloaded, and a body that already carries a load keeps it.
+    ///
+    /// # Errors
+    /// An incoherent `gas`; a retained load whose gas or clock differs from these; a
+    /// non-positive piston face area or a zero sample clock; the filter's own refusal.
+    pub fn attach_piston_load(
         &mut self,
         gas: &GasState,
         sample_rate_hz: u32,

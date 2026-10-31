@@ -170,8 +170,9 @@ fn momentum(model: &RetainedFluidSpheres<'_, ResolvedLiquidState, 2>) -> [f64; 3
     let mut total = [0.0; 3];
     for populations in snapshot(model) {
         for q in 0..Q3 {
+            let e = [E3[q].0, E3[q].1, E3[q].2];
             for axis in 0..3 {
-                total[axis] += populations[q] * f64::from(E3[q][axis]);
+                total[axis] += populations[q] * f64::from(e[axis]);
             }
         }
     }

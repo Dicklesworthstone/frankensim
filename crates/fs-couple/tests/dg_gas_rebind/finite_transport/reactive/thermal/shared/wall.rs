@@ -15,7 +15,8 @@ use fs_couple::dg_port::finite_gas::transport::assembly::reactive::thermal::shar
 use fs_duct::dg::PortInput;
 use fs_material::phase::EnthalpyPhaseKnot;
 use fs_material::state_point::{
-    ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+    ResolvedMaterialStatePoint, ScalarAdmissibility, ScalarPropertyRequirement,
+    resolve_material_state_point,
 };
 use fs_qty::Dims;
 
