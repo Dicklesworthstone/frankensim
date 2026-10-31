@@ -14,17 +14,20 @@
 //!
 //! Reference: MIT 6.974, "Electromagnetic Waves and Interfaces", §§2.2.1/2.2.3:
 //! <https://ocw.mit.edu/courses/6-974-fundamentals-of-photonics-quantum-electronics-spring-2006/fafcb9e36b7749f4eeb099d666bdf70a_electr_wav_inter.pdf>.
-//! No finite layers, roughness, anisotropy, conducting leakage, magnetic loss,
+//! See [`layers`] for finite coherent films. No roughness, anisotropy, conducting leakage, magnetic loss,
 //! transient wave evolution or measured-material accuracy claim is supplied.
 
 use fs_material::{
     field_storage::{
-        FieldStorageError, dielectric::ResolvedDebyeCapacitor,
-        linear_electric_permittivity, linear_magnetic_permeability,
+        FieldStorageError, dielectric::ResolvedDebyeCapacitor, linear_electric_permittivity,
+        linear_magnetic_permeability,
     },
     state_point::ResolvedMaterialStatePoint,
 };
 use fs_math::{c64::C64, det};
+
+/// Coherent finite dielectric films, with the same source laws and conventions.
+pub mod layers;
 
 /// Electric field transverse to the incidence plane, or magnetic field transverse.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -33,7 +36,7 @@ pub enum Polarization {
     Tm,
 }
 
-/// Explicit existing material law for the transmitted half-space.
+/// Explicit existing material law for a homogeneous isotropic dielectric.
 #[derive(Clone, Copy, Debug)]
 pub enum DielectricResponse<'a> {
     /// Positive, isotropic, nondispersive lossless epsilon and mu.
@@ -65,7 +68,9 @@ impl<'a> DielectricResponse<'a> {
             }
         };
         if !finite(epsilon) || epsilon.re <= 0.0 || epsilon.im > 0.0 {
-            return Err(ReflectionError::Invalid("dielectric response must be finite and passive"));
+            return Err(ReflectionError::Invalid(
+                "dielectric response must be finite and passive",
+            ));
         }
         Ok(epsilon)
     }
@@ -124,7 +129,71 @@ fn positive(x: f64) -> Result<f64, ReflectionError> {
     if x.is_finite() && x > 0.0 {
         Ok(x)
     } else {
-        Err(ReflectionError::Invalid("positive representable wave data required"))
+        Err(ReflectionError::Invalid(
+            "positive representable wave data required",
+        ))
+    }
+}
+
+/// Frequency-resolved material contrast shared by half-spaces and finite films.
+#[derive(Clone, Copy)]
+struct WaveMedium {
+    epsilon_f_m: C64,
+    epsilon_ratio: C64,
+    mu_ratio: f64,
+    index_squared_ratio: C64,
+}
+impl WaveMedium {
+    fn new(
+        epsilon: C64,
+        mu: f64,
+        incident_epsilon: f64,
+        incident_mu: f64,
+    ) -> Result<Self, ReflectionError> {
+        let epsilon_ratio = C64::new(epsilon.re / incident_epsilon, epsilon.im / incident_epsilon);
+        let mu_ratio = positive(mu / incident_mu)?;
+        let index_squared_ratio = epsilon_ratio.scale(mu_ratio);
+        if !finite(index_squared_ratio)
+            || !finite(epsilon_ratio)
+            || epsilon_ratio.re <= 0.0
+            || index_squared_ratio.re <= 0.0
+        {
+            return Err(ReflectionError::Invalid(
+                "material contrast is unrepresentable",
+            ));
+        }
+        Ok(Self {
+            epsilon_f_m: epsilon,
+            epsilon_ratio,
+            mu_ratio,
+            index_squared_ratio,
+        })
+    }
+
+    fn normal(self, cosine: f64) -> Result<C64, ReflectionError> {
+        // Preserve small positive contrast at normal incidence, and c^2 for
+        // equal indices close to grazing where 1-c^2 rounds to one.
+        let normal_real = if cosine > 0.5 {
+            self.index_squared_ratio.re - (1.0 - cosine) * (1.0 + cosine)
+        } else {
+            (self.index_squared_ratio.re - 1.0) + cosine * cosine
+        };
+        let mut normal = if self.index_squared_ratio == C64::ONE {
+            C64::from_re(cosine)
+        } else {
+            C64::new(normal_real, self.index_squared_ratio.im).sqrt()
+        };
+        // The principal square root has +i on the negative real axis; the
+        // outgoing exp(+i omega t) evanescent branch instead has -i.
+        if normal.im > 0.0 {
+            normal = -normal;
+        }
+        if !finite(normal) || normal.re < 0.0 {
+            return Err(ReflectionError::Invalid(
+                "outgoing wave number is unrepresentable",
+            ));
+        }
+        Ok(normal)
     }
 }
 
@@ -170,82 +239,72 @@ impl<'a> PlanarDielectricInterface<'a> {
         let omega = positive(omega_rad_s)?;
         let c = positive(incidence_cosine)?;
         if c > 1.0 {
-            return Err(ReflectionError::Invalid("incidence cosine must lie in (0,1]"));
+            return Err(ReflectionError::Invalid(
+                "incidence cosine must lie in (0,1]",
+            ));
         }
         let epsilon = self.transmitted.permittivity(omega)?;
-        let epsilon_ratio = C64::new(
-            epsilon.re / self.incident_epsilon_f_m,
-            epsilon.im / self.incident_epsilon_f_m,
-        );
-        let mu_ratio = positive(self.transmitted_mu_h_m / self.incident_mu_h_m)?;
-        let index_squared_ratio = epsilon_ratio.scale(mu_ratio);
-        if !finite(index_squared_ratio)
-            || !finite(epsilon_ratio)
-            || epsilon_ratio.re <= 0.0
-            || index_squared_ratio.re <= 0.0
-        {
-            return Err(ReflectionError::Invalid("material contrast is unrepresentable"));
-        }
-        // k_z,t / k_i. This form retains c^2 for identical media even when
-        // 1-c^2 rounds to 1 close to grazing incidence.
-        let normal_real = if c > 0.5 {
-            // Preserve a small positive index contrast at normal incidence.
-            index_squared_ratio.re - (1.0 - c) * (1.0 + c)
-        } else {
-            (index_squared_ratio.re - 1.0) + c * c
-        };
-        let normal_squared = C64::new(normal_real, index_squared_ratio.im);
-        let mut normal = if index_squared_ratio == C64::ONE {
-            C64::from_re(c)
-        } else {
-            normal_squared.sqrt()
-        };
-        // The shared principal root chooses +i for a negative real argument.
-        // With exp(+i omega t), the physical evanescent root is instead -i.
-        if normal.im > 0.0 {
-            normal = -normal;
-        }
+        let medium = WaveMedium::new(
+            epsilon,
+            self.transmitted_mu_h_m,
+            self.incident_epsilon_f_m,
+            self.incident_mu_h_m,
+        )?;
         let wave_number = positive(
             omega * det::sqrt(self.incident_epsilon_f_m) * det::sqrt(self.incident_mu_h_m),
         )?;
-        let incident_normal = positive(wave_number * c)?;
-        let transmitted_normal = normal.scale(wave_number);
-        if !finite(normal) || !finite(transmitted_normal) || normal.re < 0.0 {
-            return Err(ReflectionError::Invalid("outgoing wave number is unrepresentable"));
-        }
-
-        // Multiply through by k_z for TM: no singular admittance evaluation
-        // at the critical angle. a/b = Y_i/Y_t for both polarizations.
-        let (a, b) = match polarization {
-            Polarization::Te => (C64::from_re(mu_ratio * c), normal),
-            Polarization::Tm => (normal, epsilon_ratio.scale(c)),
-        };
-        let scale = positive(a.re.abs().max(a.im.abs()).max(b.re.abs()).max(b.im.abs()))?;
-        let a = C64::new(a.re / scale, a.im / scale);
-        let b = C64::new(b.re / scale, b.im / scale);
-        let denominator = a + b;
-        let norm = positive(denominator.norm_sq())?;
-        let reflected = (a - b) / denominator;
-        let transmitted = a.scale(2.0) / denominator;
-        let reflected_power = reflected.norm_sq();
-        // Stable Poynting flux, not |t|^2 alone and not a clipped 1-|r|^2.
-        let transmitted_power = 4.0 * (a.re * b.re + a.im * b.im) / norm;
-        if !finite(reflected)
-            || !finite(transmitted)
-            || !transmitted_power.is_finite()
-            || transmitted_power < 0.0
-            || (reflected_power + transmitted_power - 1.0).abs() > 128.0 * f64::EPSILON
-        {
-            return Err(ReflectionError::Invalid("passive interface power balance failed"));
-        }
-        Ok(InterfaceReflection {
-            reflected_tangential_e: reflected,
-            transmitted_tangential_e: transmitted,
-            reflected_power_fraction: reflected_power,
-            transmitted_power_fraction: transmitted_power,
-            incident_normal_wavenumber_rad_m: incident_normal,
-            transmitted_normal_wavenumber_rad_m: transmitted_normal,
-            transmitted_permittivity_f_m: epsilon,
-        })
+        interface_response(medium, wave_number, c, polarization)
     }
+}
+
+fn interface_response(
+    medium: WaveMedium,
+    wave_number: f64,
+    cosine: f64,
+    polarization: Polarization,
+) -> Result<InterfaceReflection, ReflectionError> {
+    let normal = medium.normal(cosine)?;
+    let incident_normal = positive(wave_number * cosine)?;
+    let transmitted_normal = normal.scale(wave_number);
+    if !finite(transmitted_normal) {
+        return Err(ReflectionError::Invalid(
+            "outgoing wave number is unrepresentable",
+        ));
+    }
+
+    // Multiply through by k_z for TM: no singular admittance evaluation
+    // at the critical angle. a/b = Y_i/Y_t for both polarizations.
+    let (a, b) = match polarization {
+        Polarization::Te => (C64::from_re(medium.mu_ratio * cosine), normal),
+        Polarization::Tm => (normal, medium.epsilon_ratio.scale(cosine)),
+    };
+    let scale = positive(a.re.abs().max(a.im.abs()).max(b.re.abs()).max(b.im.abs()))?;
+    let a = C64::new(a.re / scale, a.im / scale);
+    let b = C64::new(b.re / scale, b.im / scale);
+    let denominator = a + b;
+    let norm = positive(denominator.norm_sq())?;
+    let reflected = (a - b) / denominator;
+    let transmitted = a.scale(2.0) / denominator;
+    let reflected_power = reflected.norm_sq();
+    // Stable Poynting flux, not |t|^2 alone and not a clipped 1-|r|^2.
+    let transmitted_power = 4.0 * (a.re * b.re + a.im * b.im) / norm;
+    if !finite(reflected)
+        || !finite(transmitted)
+        || !transmitted_power.is_finite()
+        || transmitted_power < 0.0
+        || (reflected_power + transmitted_power - 1.0).abs() > 128.0 * f64::EPSILON
+    {
+        return Err(ReflectionError::Invalid(
+            "passive interface power balance failed",
+        ));
+    }
+    Ok(InterfaceReflection {
+        reflected_tangential_e: reflected,
+        transmitted_tangential_e: transmitted,
+        reflected_power_fraction: reflected_power,
+        transmitted_power_fraction: transmitted_power,
+        incident_normal_wavenumber_rad_m: incident_normal,
+        transmitted_normal_wavenumber_rad_m: transmitted_normal,
+        transmitted_permittivity_f_m: medium.epsilon_f_m,
+    })
 }

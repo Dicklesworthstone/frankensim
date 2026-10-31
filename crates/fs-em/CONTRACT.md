@@ -1701,3 +1701,32 @@ critical incidence, grazing transparency, Debye phase and capacitor-geometry
 invariance, retained source identity and explicit refusals. This is not a mesh
 Maxwell solver, transient wave model, layered-medium solver, or experimental
 qualification of an otherwise static material at an optical frequency.
+
+### Coherent finite dielectric films
+
+`plane_wave::layers::PlanarDielectricLayers` prepares up to 64 ordered finite
+films between an explicit lossless incident source and an explicit lossless
+or Debye exit source. Every film retains its original `DielectricResponse`,
+thickness and sourced permeability. Constitutive data are cached once at the
+selected frequency; angle/polarization queries are allocation-free. Zero
+thickness is an exact identity after source admission. The half-space owner
+and this stack share material-contrast and outgoing-normal-wave calculations.
+
+Composition retains bounded homogeneous E/H states in common real reference
+ports, then reconstructs forward scattering gains. It preserves resonant
+coupling without subtracting products of rounded nearly unit reflections.
+Propagation uses only the decaying/oscillatory exponential; an analytic
+zero-normal-wave limit includes exact internal critical angles. Returned
+tangential-E phases refer to the first and last film faces. Total internal reflection, finite-gap
+evanescent tunnelling, Fabry-Perot resonance and coherent antireflection are
+retained. Exit power is the normal Poynting flux entering the last half-space;
+finite-film absorption is reported separately. Dissipative even/odd slab modes
+retain weak Debye loss that subtracting reflected/transmitted powers would
+round away. Wholly lossless films have exactly zero dissipative work.
+
+The existing plane-wave tests add half-space/zero-thickness reductions,
+quarter-wave and resonant phases, grazing subdivision and distinct-material
+resonances, independent E/H transfer matrices with magnetic media, original
+Debye/geometry invariance, weak-film loss, critical films/exits and thick absorbing/evanescent limits. This remains a coherent
+homogeneous isotropic planar model: finite coherence length, roughness,
+anisotropy and mesh Maxwell evolution are outside its scope.
