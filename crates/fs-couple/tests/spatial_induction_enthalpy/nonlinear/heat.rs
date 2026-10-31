@@ -64,13 +64,39 @@ fn with_heat<R>(
         &MaterialCard,
     ) -> R,
 ) -> R {
+    with_heat_material(
+        nonlinear,
+        epsilon,
+        resistance,
+        upper,
+        magnetic_restriction,
+        |card| card,
+        run,
+    )
+}
+
+pub(super) fn with_heat_material<R>(
+    nonlinear: bool,
+    epsilon: f64,
+    resistance: f64,
+    upper: f64,
+    magnetic_restriction: Option<Dims>,
+    update: impl FnOnce(MaterialCard) -> MaterialCard,
+    run: impl FnOnce(
+        &Cx<'_>,
+        &CancelGate,
+        &MaterialHeatNetwork<'_>,
+        DepositionSimulation<'_>,
+        &MaterialCard,
+    ) -> R,
+) -> R {
     let base = if nonlinear {
         super::card(RHO, ALPHA, BASIS, true)
     } else {
         source::absolute_affine_magnetic_card(RHO, ALPHA, 1.0, MU_SLOPE, BASIS)
     };
     let cards = [
-        base,
+        update(base),
         source::absolute_affine_magnetic_card(0.5, 0.0, 1.0, 0.0, BASIS),
     ]
     .into_iter()
@@ -322,7 +348,7 @@ fn with_heat<R>(
     })
 }
 
-fn transfer(ta: f64, tb: f64, epsilon: f64, contact: f64) -> f64 {
+pub(super) fn transfer(ta: f64, tb: f64, epsilon: f64, contact: f64) -> f64 {
     let g = 1.0 / (1.0 + contact * (1.0 + 0.001 * (ta - 300.0)));
     let radiated = 5.670_374_419e-8 * (tb.powi(4) - ta.powi(4))
         / (1.0 / (epsilon * (1.0 + 0.0001 * (ta - 300.0)))

@@ -12,7 +12,7 @@ use crate::circuit_enthalpy::{
     finite,
     magnetic::caloric::{
         MagneticConstitutiveThermalLaw, MagneticEnergyCell, MagneticThermalLaw,
-        PreparedMagneticCaloric,
+        PreparedMagneticCaloric, ResolvedMagneticConstitutiveThermalLaw,
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -66,69 +66,43 @@ impl MagneticThermalNetwork<'_> {
         ),
         Error,
     > {
-        let mut resolved = BTreeMap::new();
-        for binding in bindings {
-            check(cancel)?;
-            let cell = routes.magnetic[&binding.triangle].expect("admitted thermal law");
-            let temperature = thermal.temperature_k(cell)?;
-            let error = |e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e));
-            let at = match (&binding.law, &problem.materials()[binding.triangle]) {
-                (
-                    MagneticConstitutiveThermalLaw::Linear(law),
-                    IsotropicMagneticMaterial::Linear(original),
-                ) => {
-                    let at = law.at_temperature(temperature).map_err(error)?;
-                    admit_magnetic_temperature_refresh(original, at.material()).map_err(error)?;
-                    IsotropicMagneticMaterial::Linear(at.material().clone())
-                }
-                (
-                    MagneticConstitutiveThermalLaw::Separable(law),
-                    IsotropicMagneticMaterial::Reversible(original),
-                ) => {
-                    let at = law.at_temperature(temperature).map_err(error)?;
-                    original
-                        .admit_temperature_refresh(at.magnetic())
-                        .map_err(error)?;
-                    IsotropicMagneticMaterial::Reversible(at.magnetic().clone())
-                }
-                _ => {
-                    return Err(invalid(
-                        "thermal magnetic law must match its original linear or explicitly source-scaled nonlinear material",
-                    ));
-                }
-            };
-            resolved.insert(binding.triangle, at);
-        }
         let originals: Vec<_> = problem
             .materials()
             .iter()
             .map(IsotropicMagneticMaterial::material)
             .collect();
-        let (sources, samples) = self.materials_at_using(
-            thermal, &originals, conductors, sample, routes, cancel,
-            |triangle, _, snapshot, binding| {
-                let at = &resolved[&triangle];
-                if !same_material(snapshot, at.material()) {
-                    return Err(invalid("nonlinear field and conductor must retain the complete original separable source bundle"));
-                }
-                let (property_name, axes) = match at {
-                    IsotropicMagneticMaterial::Linear(_) => (MAGNETIC_PERMEABILITY_PROPERTY, Vec::new()),
-                    IsotropicMagneticMaterial::Reversible(law) => (REVERSIBLE_FIELD_STRENGTH_PROPERTY,
-                        vec![(law.source_path().axis.as_str(), QuantitySpec::dimensional(FLUX_DENSITY_DIMS))]),
-                    IsotropicMagneticMaterial::Recoil(_) => unreachable!("admitted thermal variants"),
-                };
-                let property = snapshot.property(property_name)
-                    .ok_or_else(|| invalid("missing original nonlinear reference source"))?;
-                binding.point.admit_static_with_axes(property, &axes)
-                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
-                Ok(())
+        let (sources, samples, resolved) = self.constitutive_materials_at(
+            thermal, &originals, conductors, sample, bindings, routes, cancel,
+            |triangle, at| {
+            let error = |e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e));
+            match (at, &problem.materials()[triangle]) {
+                (
+                    ResolvedMagneticConstitutiveThermalLaw::Linear(at),
+                    IsotropicMagneticMaterial::Linear(original),
+                ) => admit_magnetic_temperature_refresh(original, at.material()).map_err(error),
+                (
+                    ResolvedMagneticConstitutiveThermalLaw::Separable(at),
+                    IsotropicMagneticMaterial::Reversible(original),
+                ) => original.admit_temperature_refresh(at.magnetic()).map_err(error),
+                _ => Err(invalid(
+                    "thermal magnetic law must match its original linear or explicitly source-scaled nonlinear material",
+                )),
+            }
             },
         )?;
         let materials = problem
             .materials()
             .iter()
             .enumerate()
-            .map(|(triangle, original)| resolved.get(&triangle).unwrap_or(original).clone())
+            .map(|(triangle, original)| match resolved.get(&triangle) {
+                Some(ResolvedMagneticConstitutiveThermalLaw::Linear(at)) => {
+                    IsotropicMagneticMaterial::Linear(at.material().clone())
+                }
+                Some(ResolvedMagneticConstitutiveThermalLaw::Separable(at)) => {
+                    IsotropicMagneticMaterial::Reversible(at.magnetic().clone())
+                }
+                None => original.clone(),
+            })
             .collect();
         Ok((sources, samples, materials))
     }

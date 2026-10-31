@@ -2,6 +2,8 @@
 //! retained 3D field, native Joule heat and finite caloric cells together.
 #[path = "nonlinear/heat.rs"]
 mod heat;
+#[path = "nonlinear/thermal.rs"]
+mod thermal;
 
 use super::*;
 use fs_em::spatial::{
@@ -158,6 +160,15 @@ fn initial<'m>(
     a: f64,
     saturating: bool,
 ) -> SpatialNonlinearInduction<'m> {
+    initial_with_conductor(problem, conductor(card, 300.0, basis), a, saturating)
+}
+
+fn initial_with_conductor<'m>(
+    problem: &'m SpatialNonlinearVectorMagnetostatics,
+    conductor: ResolvedConductorState,
+    a: f64,
+    saturating: bool,
+) -> SpatialNonlinearInduction<'m> {
     let boundary = VectorMagneticBoundary {
         potential: problem
             .exterior_faces()
@@ -198,7 +209,7 @@ fn initial<'m>(
         .unwrap();
     let state = SpatialNonlinearInduction::new(
         &field,
-        vec![Some(conductor(card, 300.0, basis)); 6],
+        vec![Some(conductor); 6],
         SpatialInductionLimits {
             maximum_unknowns: 1000,
             maximum_conducting_cells: 100,

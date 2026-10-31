@@ -9,13 +9,14 @@
 //! For convex psi, D=H_next.delta_B-delta_psi is nonnegative numerical
 //! dissipation. It is evaluated from original positive source slopes and
 //! angular convexity, never by cancellation of large magnetic energies.
-//! delta_psi+Ohmic_heat+Lorentz_work+D=impressed_work is independently gated.
+//! delta_psi+Ohmic_heat+Lorentz_work+D=impressed_work+P is independently gated,
+//! where P=psi_new(B_old)-psi_old(B_old) is explicit material parameter work.
 //! D is NOT magnetic hysteresis or thermal heat. This first-order fixed-domain
-//! law supports reversible isotropic saturation and fixed recoil. Conductor
-//! coefficients may be refreshed from the same source at an owned temperature;
-//! the original magnetic laws and conducting occupancy remain fixed. No ALE,
-//! hysteresis, magnetic-temperature entropy, terminals or coupled motion is
-//! inferred. A thermal consumer owns local Joule deposition and temperature.
+//! law supports reversible isotropic saturation and fixed recoil. Linear mu(T)
+//! and explicitly source-separable H(B,T) may refresh with the same original
+//! conductor sources and occupancy. A finite thermal consumer must close P
+//! together with magnetic entropy; it owns local Joule deposition and thermal
+//! history. No ALE, hysteresis, terminals or coupled motion is inferred.
 
 use super::super::super::{
     SpatialMagneticError, dot, finite, invalid, nonlinear::SpatialNonlinearMaterial, poll,
@@ -38,13 +39,17 @@ use fs_feec::{
 };
 use fs_material::{
     conductor::ResolvedConductorState,
-    field_storage::{admit_source_temperature_refresh, linear_magnetic_permeability},
+    field_storage::{
+        admit_magnetic_temperature_refresh, admit_source_temperature_refresh,
+        linear_magnetic_permeability,
+    },
 };
 use fs_qty::Dims;
 use fs_solver::{FgmresState, LinearOp, ResidualClaim, SolveReport, SolverRunProgress};
 use fs_sparse::{Csr, ops};
 use std::{
     cell::{Cell, RefCell},
+    ops::Deref,
     sync::Arc,
 };
 
@@ -94,6 +99,8 @@ pub struct SpatialNonlinearInductionMagneticCell {
     pub free_energy_j: [f64; 2],
     /// Stable signed change of original magnetic free energy.
     pub energy_change_j: f64,
+    /// psi_new(B_old)-psi_old(B_old); not constitutive heat.
+    pub parameter_work_j: f64,
     /// Backward-Euler convexity loss; never deposited as constitutive heat.
     pub numerical_dissipation_j: f64,
 }
@@ -105,6 +112,7 @@ pub struct SpatialNonlinearInductionStep {
     pub stored_before_j: f64,
     pub stored_after_j: f64,
     pub stored_change_j: f64,
+    pub parameter_work_j: f64,
     pub heat_j: f64,
     pub mechanical_work_j: f64,
     pub numerical_dissipation_j: f64,
@@ -117,15 +125,65 @@ pub struct SpatialNonlinearInductionStep {
 }
 #[derive(Clone)]
 pub struct SpatialNonlinearInduction<'m> {
-    problem: &'m SpatialNonlinearVectorMagnetostatics,
+    problem: MagneticOwner<'m>,
     prepared: Arc<Prepared>,
     potential_wb: Vec<f64>,
     impressed_current_a_m2: Vec<[f64; 3]>,
     time_s: f64,
 }
+
+#[derive(Clone)]
+enum MagneticOwner<'m> {
+    Borrowed(&'m SpatialNonlinearVectorMagnetostatics),
+    Owned(Arc<SpatialNonlinearVectorMagnetostatics>),
+}
+impl Deref for MagneticOwner<'_> {
+    type Target = SpatialNonlinearVectorMagnetostatics;
+    fn deref(&self) -> &Self::Target {
+        match self {
+            Self::Borrowed(problem) => problem,
+            Self::Owned(problem) => problem,
+        }
+    }
+}
 struct Prepared {
     coupling: Coupling,
     permeability_bound: Vec<f64>,
+}
+
+fn permeability_bounds(
+    materials: &[SpatialNonlinearMaterial],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Vec<f64>> {
+    materials
+        .iter()
+        .map(|material| {
+            poll(cancelled)?;
+            let mu = match material {
+                SpatialNonlinearMaterial::Linear(m) => {
+                    linear_magnetic_permeability(m).map_err(SpatialMagneticError::Material)?
+                }
+                SpatialNonlinearMaterial::Recoil(m) => m.material().permeability_h_m(),
+                SpatialNonlinearMaterial::Reversible(law) => {
+                    // Radial and tangential reluctivity exceed the least positive
+                    // source segment slope, including its actual thermal scale.
+                    let mut minimum = f64::INFINITY;
+                    for segment in law.source_path().knots.windows(2) {
+                        poll(cancelled)?;
+                        let slope = (segment[1].1.evidence.value.value
+                            - segment[0].1.evidence.value.value)
+                            / (segment[1].0 - segment[0].0);
+                        minimum = minimum.min(slope * law.field_scale());
+                    }
+                    minimum.recip()
+                }
+            };
+            if !super::positive(mu) {
+                return Err(invalid("finite source permeability bound required").into());
+            }
+            Ok(mu)
+        })
+        .collect()
 }
 pub struct SpatialNonlinearInductionCandidate<'m> {
     state: SpatialNonlinearInduction<'m>,
@@ -274,37 +332,11 @@ impl<'m> SpatialNonlinearInduction<'m> {
             },
             cancelled,
         )?;
-        let mut permeability_bound = Vec::with_capacity(problem.materials().len());
-        for material in problem.materials() {
-            poll(cancelled)?;
-            let mu = match material {
-                SpatialNonlinearMaterial::Linear(m) => {
-                    linear_magnetic_permeability(m).map_err(SpatialMagneticError::Material)?
-                }
-                SpatialNonlinearMaterial::Recoil(m) => m.material().permeability_h_m(),
-                SpatialNonlinearMaterial::Reversible(law) => {
-                    // Both radial and tangential reluctivity exceed the least
-                    // positive original segment slope on the admitted range.
-                    let mut minimum = f64::INFINITY;
-                    for segment in law.source_path().knots.windows(2) {
-                        poll(cancelled)?;
-                        let slope = (segment[1].1.evidence.value.value
-                            - segment[0].1.evidence.value.value)
-                            / (segment[1].0 - segment[0].0);
-                        minimum = minimum.min(slope * law.field_scale());
-                    }
-                    minimum.recip()
-                }
-            };
-            if !super::positive(mu) {
-                return Err(invalid("finite source permeability bound required").into());
-            }
-            permeability_bound.push(mu);
-        }
+        let permeability_bound = permeability_bounds(problem.materials(), cancelled)?;
         magnetic(problem, &potential_wb, cancelled)?;
         poll(cancelled)?;
         Ok(Self {
-            problem,
+            problem: MagneticOwner::Borrowed(problem),
             prepared: Arc::new(Prepared {
                 coupling,
                 permeability_bound,
@@ -314,8 +346,8 @@ impl<'m> SpatialNonlinearInduction<'m> {
             time_s: 0.0,
         })
     }
-    pub fn problem(&self) -> &'m SpatialNonlinearVectorMagnetostatics {
-        self.problem
+    pub fn problem(&self) -> &SpatialNonlinearVectorMagnetostatics {
+        &self.problem
     }
     pub fn potential_wb(&self) -> &[f64] {
         &self.potential_wb
@@ -333,7 +365,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         self.time_s
     }
     pub fn field(&self, cancelled: &mut impl FnMut() -> bool) -> Result<SpatialInductionField> {
-        Ok(magnetic(self.problem, &self.potential_wb, cancelled)?.field)
+        Ok(magnetic(&self.problem, &self.potential_wb, cancelled)?.field)
     }
 
     /// First-order implicit A–phi step at held nodal velocity and endpoint
@@ -349,6 +381,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
         self.step_prepared_candidate(
+            self.problem.clone(),
             Arc::clone(&self.prepared),
             endpoint_current_a_m2,
             velocity_m_s,
@@ -378,8 +411,87 @@ impl<'m> SpatialNonlinearInduction<'m> {
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
-        let coupling = self.prepared.coupling.refresh_sources(
-            geometry(self.problem),
+        let coupling = self.coupling_at(&self.problem, conductors, cancelled)?;
+        self.step_prepared_candidate(
+            self.problem.clone(),
+            Arc::new(Prepared {
+                coupling,
+                permeability_bound: self.prepared.permeability_bound.clone(),
+            }),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            settings,
+            cancelled,
+        )
+    }
+
+    /// Refresh the original linear mu(T) or explicitly separable H(B,T) laws
+    /// without restarting A, impressed-current history, gauge or time. The
+    /// original geometry, assembly budget and conducting support are retained.
+    /// Every material keeps its original source pins and law kind; a recoil
+    /// law must remain identical. Changed magnetic storage is explicit signed
+    /// parameter work, not Joule heat. A thermal owner must also close entropy.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_materials_candidate(
+        &self,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        duration_s: f64,
+        materials: Vec<SpatialNonlinearMaterial>,
+        conductors: Vec<Option<ResolvedConductorState>>,
+        settings: SpatialNonlinearInductionControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<SpatialNonlinearInductionCandidate<'m>> {
+        poll(cancelled)?;
+        if materials.len() != self.problem.materials().len() {
+            return Err(invalid("complete original magnetic correspondence required").into());
+        }
+        for (before, after) in self.problem.materials().iter().zip(&materials) {
+            poll(cancelled)?;
+            match (before, after) {
+                (SpatialNonlinearMaterial::Linear(a), SpatialNonlinearMaterial::Linear(b)) =>
+                    admit_magnetic_temperature_refresh(a, b)
+                        .map_err(SpatialMagneticError::Material)?,
+                (SpatialNonlinearMaterial::Reversible(a), SpatialNonlinearMaterial::Reversible(b)) =>
+                    a.admit_temperature_refresh(b).map_err(SpatialMagneticError::Material)?,
+                (SpatialNonlinearMaterial::Recoil(a), SpatialNonlinearMaterial::Recoil(b)) if a == b => {},
+                _ => return Err(invalid(
+                    "thermal refresh preserves original linear/separable laws and fixed recoil sources",
+                ).into()),
+            }
+        }
+        let problem = SpatialNonlinearVectorMagnetostatics::new(
+            self.problem.positions_m().to_vec(),
+            self.problem.mesh().tets.clone(),
+            materials,
+            self.problem.limits,
+            cancelled,
+        )?;
+        let coupling = self.coupling_at(&problem, conductors, cancelled)?;
+        let permeability_bound = permeability_bounds(problem.materials(), cancelled)?;
+        self.step_prepared_candidate(
+            MagneticOwner::Owned(Arc::new(problem)),
+            Arc::new(Prepared {
+                coupling,
+                permeability_bound,
+            }),
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            settings,
+            cancelled,
+        )
+    }
+
+    fn coupling_at(
+        &self,
+        problem: &SpatialNonlinearVectorMagnetostatics,
+        conductors: Vec<Option<ResolvedConductorState>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Coupling> {
+        Ok(self.prepared.coupling.refresh_sources(
+            geometry(problem),
             conductors,
             |cell, source| {
                 let original = self.conductors()[cell]
@@ -387,7 +499,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
                     .expect("unchanged conducting support");
                 admit_source_temperature_refresh(original.material(), source.material())
                     .map_err(SpatialMagneticError::Material)?;
-                self.problem.materials()[cell]
+                problem.materials()[cell]
                     .admit_fixed_material_refresh(source.material())
                     .map_err(SpatialMagneticError::Material)?;
                 if original.source_basis() != source.source_basis()
@@ -406,23 +518,13 @@ impl<'m> SpatialNonlinearInduction<'m> {
                 Ok(())
             },
             cancelled,
-        )?;
-        self.step_prepared_candidate(
-            Arc::new(Prepared {
-                coupling,
-                permeability_bound: self.prepared.permeability_bound.clone(),
-            }),
-            endpoint_current_a_m2,
-            velocity_m_s,
-            duration_s,
-            settings,
-            cancelled,
-        )
+        )?)
     }
 
     #[allow(clippy::too_many_arguments)]
     fn step_prepared_candidate(
         &self,
+        problem: MagneticOwner<'m>,
         prepared: Arc<Prepared>,
         endpoint_current_a_m2: &[[f64; 3]],
         velocity_m_s: &[[f64; 3]],
@@ -433,7 +535,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         poll(cancelled)?;
         let controls = settings.induction;
         let c = &prepared.coupling;
-        let g = geometry(self.problem);
+        let g = geometry(&problem);
         let (time_s, restart) = admit_step(
             g,
             c,
@@ -462,7 +564,12 @@ impl<'m> SpatialNonlinearInduction<'m> {
             controls.current_tolerance_a,
             cancelled,
         )?;
-        let before = magnetic(self.problem, &self.potential_wb, cancelled)?;
+        let before = magnetic(&self.problem, &self.potential_wb, cancelled)?;
+        let refreshed_before = if std::ptr::eq(&*problem, &*self.problem) {
+            None
+        } else {
+            Some(magnetic(&problem, &self.potential_wb, cancelled)?)
+        };
         let (motion, drive, maximum_cell_magnetic_peclet) = c.motion(
             g,
             velocity_m_s,
@@ -474,7 +581,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         let transpose = ops::transpose(&motion);
         let mut x = vec![0.0; c.mass.nrows()];
         let mut value = evaluate(
-            self.problem,
+            &problem,
             c,
             &self.potential_wb,
             &mut x,
@@ -503,12 +610,12 @@ impl<'m> SpatialNonlinearInduction<'m> {
             // Original FEEC tensor Hodge and curl-curl owner, with the exact
             // original nonlinear source tangent; no fitted secant stiffness.
             let star = weighted_mass_matrix(
-                self.problem.mesh(),
-                &self.problem.geometry.geometry,
+                problem.mesh(),
+                &problem.geometry.geometry,
                 2,
                 &value.magnetic.tangent,
                 Dims([-1, -1, 2, 0, 2, 0]),
-                self.problem.limits,
+                problem.limits,
                 cancelled,
             )
             .map_err(|e| {
@@ -518,7 +625,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
                     SpatialMagneticError::Assembly(e)
                 }
             })?;
-            let magnetic = c.restrict(&stiffness(&self.problem.curl, star.matrix()), cancelled)?;
+            let magnetic = c.restrict(&stiffness(&problem.curl, star.matrix()), cancelled)?;
             let inverse = (0..x.len())
                 .map(|i| {
                     let d = finite(diagonal(&magnetic, i) + diagonal(&c.mass, i) / duration_s)?;
@@ -564,7 +671,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
                     .map(|(a, d)| finite(alpha.mul_add(*d, *a)))
                     .collect::<super::Result<Vec<_>>>()?;
                 match evaluate(
-                    self.problem,
+                    &problem,
                     c,
                     &self.potential_wb,
                     &mut trial,
@@ -643,8 +750,8 @@ impl<'m> SpatialNonlinearInduction<'m> {
             )
             .into());
         }
-        let face_flux = apply(&self.problem.curl, &value.potential, cancelled)?;
-        for row in self.problem.mesh().d2().rows {
+        let face_flux = apply(&problem.curl, &value.potential, cancelled)?;
+        for row in problem.mesh().d2().rows {
             poll(cancelled)?;
             let flux = finite(row.iter().map(|&(f, s)| f64::from(s) * face_flux[f]).sum())?;
             if flux.abs() > controls.flux_tolerance_wb {
@@ -655,6 +762,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         }
         let mut magnetic_cells = Vec::with_capacity(g.cells.len());
         let mut stored_change_j = 0.0;
+        let mut parameter_work_j = 0.0;
         let mut numerical_dissipation_j = 0.0;
         for cell in 0..g.cells.len() {
             poll(cancelled)?;
@@ -662,7 +770,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
             let new = value.magnetic.field.flux_density_t[cell];
             let db = std::array::from_fn(|j| new[j] - old[j]);
             let volume = g.geometry.geometry.vol_signed[cell].abs();
-            let loss = match &self.problem.materials()[cell] {
+            let loss = match &problem.materials()[cell] {
                 SpatialNonlinearMaterial::Reversible(law) => law
                     .bregman_density_3d_j_m3(old, new)
                     .map_err(SpatialMagneticError::Material)?,
@@ -678,9 +786,15 @@ impl<'m> SpatialNonlinearInduction<'m> {
             if loss < 0.0 {
                 return Err(invalid("negative nonlinear magnetic numerical dissipation").into());
             }
-            let change =
-                finite(volume * dot(value.magnetic.field.field_strength_a_m[cell], db) - loss)?;
+            let parameter = match &refreshed_before {
+                Some(refreshed) => finite(refreshed.energy_j[cell] - before.energy_j[cell])?,
+                None => 0.0,
+            };
+            let change = finite(
+                volume * dot(value.magnetic.field.field_strength_a_m[cell], db) - loss + parameter,
+            )?;
             stored_change_j = finite(stored_change_j + change)?;
+            parameter_work_j = finite(parameter_work_j + parameter)?;
             numerical_dissipation_j = finite(numerical_dissipation_j + loss)?;
             magnetic_cells.push(SpatialNonlinearInductionMagneticCell {
                 cell,
@@ -688,13 +802,15 @@ impl<'m> SpatialNonlinearInduction<'m> {
                 flux_density_t: [old, new],
                 free_energy_j: [before.energy_j[cell], value.magnetic.energy_j[cell]],
                 energy_change_j: change,
+                parameter_work_j: parameter,
                 numerical_dissipation_j: loss,
             });
         }
         let impressed_work_j = finite(load.iter().zip(&delta).map(|(j, a)| j * a).sum())?;
         let energy_residual_j = finite(
             stored_change_j + current.heat_j + current.mechanical_work_j + numerical_dissipation_j
-                - impressed_work_j,
+                - impressed_work_j
+                - parameter_work_j,
         )?;
         if energy_residual_j.abs() > controls.energy_tolerance_j {
             return Err(invalid(
@@ -705,7 +821,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
         poll(cancelled)?;
         Ok(SpatialNonlinearInductionCandidate {
             state: Self {
-                problem: self.problem,
+                problem,
                 prepared,
                 potential_wb: value.potential,
                 impressed_current_a_m2: endpoint_current_a_m2.to_vec(),
@@ -719,6 +835,7 @@ impl<'m> SpatialNonlinearInduction<'m> {
                 stored_before_j: before.field.stored_energy_j,
                 stored_after_j: value.magnetic.field.stored_energy_j,
                 stored_change_j,
+                parameter_work_j,
                 heat_j: current.heat_j,
                 mechanical_work_j: current.mechanical_work_j,
                 numerical_dissipation_j,

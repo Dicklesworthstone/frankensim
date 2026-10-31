@@ -1,6 +1,8 @@
 //! G1/G3/G4: original-source saturation, charge elimination and mechanical work.
 //! Closed-form constants below come from exact integration on the unit cube;
 //! neither reference trajectories nor dissipation use production matrices.
+#[path = "nonlinear/thermal.rs"]
+mod thermal;
 use super::*;
 use fs_em::spatial::{
     nonlinear::SpatialNonlinearMaterial,

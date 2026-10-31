@@ -9,8 +9,12 @@ use super::{
     Error, MagneticRoutes, MagneticThermalError, MagneticThermalNetwork, MagneticThermalSample,
     check, invalid, material, same_material,
 };
-use crate::circuit_enthalpy::{CircuitEnthalpyError, finite, material::MaterialNetworkError};
+use crate::circuit_enthalpy::{
+    CircuitEnthalpyError, finite,
+    material::{MaterialNetworkError, MaterialNetworkSample},
+};
 use fs_material::{
+    conductor::ResolvedConductorState,
     field_storage::{
         FieldStorageError, MAGNETIC_PERMEABILITY_PROPERTY,
         nonlinear::{
@@ -19,6 +23,7 @@ use fs_material::{
                 ResolvedThermalReversibleMagneticMaterial, ThermalReversibleMagneticMaterial,
             },
         },
+        permanent::FLUX_DENSITY_DIMS,
         thermal::{
             FieldThermalState,
             magnetic::{ResolvedThermalMagneticMaterial, ThermalMagneticMaterial},
@@ -167,6 +172,88 @@ impl MagneticCaloricState for ResolvedMagneticConstitutiveThermalLaw {
             Self::Linear(at) => at.state(b, v),
             Self::Separable(at) => at.state(b, v),
         }
+    }
+}
+
+impl MagneticThermalNetwork<'_> {
+    /// Refresh original linear/separable magnetic and conductor bundles for
+    /// either planar or tetrahedral fields. Native field owners admit their
+    /// own law variants; this shared source owner retains every requirement,
+    /// pin and explicitly admitted field axis at the same caloric temperature.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(in crate::circuit_enthalpy) fn constitutive_materials_at(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        originals: &[&ResolvedMaterialStatePoint],
+        conductors: &BTreeMap<usize, &ResolvedConductorState>,
+        sample: &MaterialNetworkSample,
+        bindings: &[MagneticThermalLaw<MagneticConstitutiveThermalLaw>],
+        routes: &MagneticRoutes,
+        cancel: &RefCell<impl FnMut() -> bool>,
+        admit: impl Fn(usize, &ResolvedMagneticConstitutiveThermalLaw) -> Result<(), Error>,
+    ) -> Result<
+        (
+            Vec<(usize, ResolvedConductorState)>,
+            Vec<MagneticThermalSample>,
+            BTreeMap<usize, ResolvedMagneticConstitutiveThermalLaw>,
+        ),
+        Error,
+    > {
+        let mut resolved = BTreeMap::new();
+        for binding in bindings {
+            check(cancel)?;
+            let cell = routes
+                .magnetic
+                .get(&binding.triangle)
+                .copied()
+                .flatten()
+                .ok_or_else(|| {
+                    invalid("thermal magnetic law requires its original finite receiver")
+                })?;
+            if binding.triangle >= originals.len() {
+                return Err(invalid(
+                    "thermal magnetic law leaves its original field correspondence",
+                ));
+            }
+            let at = binding
+                .law
+                .at_temperature(thermal.temperature_k(cell)?)
+                .map_err(field_error)?;
+            admit(binding.triangle, &at)?;
+            if resolved.insert(binding.triangle, at).is_some() {
+                return Err(invalid(
+                    "a magnetic region has duplicate thermal constitutive laws",
+                ));
+            }
+        }
+        let (sources, samples) = self.materials_at_using(
+            thermal, originals, conductors, sample, routes, cancel,
+            |region, _, snapshot, binding| {
+                let at = resolved.get(&region).ok_or_else(|| invalid(
+                    "finite magnetic region lacks its original thermal constitutive law",
+                ))?;
+                if !same_material(snapshot, at.material()) {
+                    return Err(invalid(
+                        "field and conductor must retain the complete original thermal source bundle",
+                    ));
+                }
+                let (name, axes) = match at {
+                    ResolvedMagneticConstitutiveThermalLaw::Linear(_) =>
+                        (MAGNETIC_PERMEABILITY_PROPERTY, Vec::new()),
+                    ResolvedMagneticConstitutiveThermalLaw::Separable(at) =>
+                        (REVERSIBLE_FIELD_STRENGTH_PROPERTY, vec![(
+                            at.magnetic().source_path().axis.as_str(),
+                            QuantitySpec::dimensional(FLUX_DENSITY_DIMS),
+                        )]),
+                };
+                let property = snapshot.property(name)
+                    .ok_or_else(|| invalid("missing original magnetic source"))?;
+                binding.point.admit_static_with_axes(property, &axes)
+                    .map_err(|e| material(MaterialNetworkError::Material(e)))?;
+                Ok(())
+            },
+        )?;
+        Ok((sources, samples, resolved))
     }
 }
 

@@ -7,7 +7,7 @@ use super::nonlinear::SpatialNonlinearInductionThermalCandidate;
 use super::*;
 use crate::circuit_enthalpy::{
     contacts::heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance},
-    magnetic::MagneticThermalError,
+    magnetic::{MagneticThermalError, caloric::MagneticConstitutiveThermalLaw},
 };
 use fs_em::spatial::{
     nonlinear::SpatialNonlinearMaterial,
@@ -153,6 +153,80 @@ impl PreparedHeatNetwork<'_, '_> {
         field_controls: SpatialNonlinearInductionControls,
         initial_energy_increments_j: &[f64],
     ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample>, Error> {
+        self.step_spatial_nonlinear_induction_with_laws_candidate(
+            cx,
+            thermal,
+            target_s,
+            field,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            regions,
+            volume_tolerance_m3,
+            None,
+            controls,
+            field_controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    /// Continue the original three-dimensional nonlinear field with sourced
+    /// magnetic entropy and the complete contact/layer/radiation heat assembly.
+    ///
+    /// Linear and source-separable nonlinear thermal laws share the same
+    /// material cells, source selections and trial temperatures as conductivity
+    /// and boundary heat. The native field owns coefficient work and its
+    /// retained A/current history; the common caloric owner supplies reversible
+    /// heat and U=psi+T*S. Numerical magnetic loss never enters finite heat.
+    /// The geometry, source support and physical scope of
+    /// `SpatialMagneticThermalNetwork::step_nonlinear_thermal_candidate` apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_spatial_nonlinear_induction_thermal_candidate<'t, 'm>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &SpatialNonlinearInduction<'m>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        regions: &[SpatialMagneticRegion],
+        volume_tolerance_m3: f64,
+        bindings: &[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>],
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialNonlinearInductionControls,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample>, Error> {
+        self.step_spatial_nonlinear_induction_with_laws_candidate(
+            cx,
+            thermal,
+            target_s,
+            field,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            regions,
+            volume_tolerance_m3,
+            Some(bindings),
+            controls,
+            field_controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_spatial_nonlinear_induction_with_laws_candidate<'t, 'm>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        field: &SpatialNonlinearInduction<'m>,
+        endpoint_current_a_m2: &[[f64; 3]],
+        velocity_m_s: &[[f64; 3]],
+        regions: &[SpatialMagneticRegion],
+        volume_tolerance_m3: f64,
+        bindings: Option<&[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>]>,
+        controls: CircuitEnthalpySolve,
+        field_controls: SpatialNonlinearInductionControls,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, HeatNetworkSample>, Error> {
         let cancel = RefCell::new(|| cx.checkpoint().is_err());
         check(&cancel)?;
         let bulk = self.thermal_material_network().map_err(heat_error)?;
@@ -175,12 +249,13 @@ impl PreparedHeatNetwork<'_, '_> {
             magnetic_regions: regions,
             volume_tolerance_m3,
         };
-        let mut next = layout.step_nonlinear_resolved_candidate(
+        let mut next = layout.step_constitutive_resolved_candidate(
             thermal,
             target_s,
             field,
             endpoint_current_a_m2,
             velocity_m_s,
+            bindings,
             controls,
             field_controls,
             initial_energy_increments_j,

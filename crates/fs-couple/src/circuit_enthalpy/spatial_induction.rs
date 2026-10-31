@@ -51,9 +51,9 @@ pub enum SpatialMagneticRegion {
 
 /// Original temperature-dependent source and admitted B envelope of one tet.
 #[derive(Clone, Debug, PartialEq)]
-pub struct SpatialMagneticThermalLaw {
+pub struct SpatialMagneticThermalLaw<L = ThermalMagneticMaterial> {
     pub tetrahedron: usize,
-    pub law: ThermalMagneticMaterial,
+    pub law: L,
     pub maximum_flux_density_t: f64,
 }
 
