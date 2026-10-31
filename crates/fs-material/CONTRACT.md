@@ -5294,20 +5294,33 @@ uses the actual opposite diagonals. Every tangent is bound to its exact trial,
 with original temperatures, capacities and link responses available for clients.
 
 The existing thermal trial still owns residuals, optional entropy and independent
-local/total joule acceptance. This addition supplies no new nonlinear solver,
-time integrator, trajectory adjoint, condition-number certificate or automatic
-time-step accuracy claim. The existing `fs-la` prepared LU is used only by the
-focused integration test's bounded small-system Newton iteration.
+local/total joule acceptance. `LayeredThermalStep::{solve,solve_with_entropy}`
+adds bounded damped Newton using reusable `fs-la::tridiagonal` factors and
+O(cells) Newton storage. Every proposal reevaluates original integrated k(T),
+contact fluxes and storage; backtracking enforces the original source domain
+and residual decrease. Work limits count rejected trials and the final optional
+entropy evaluation. Only original local and aggregate joule acceptance publishes
+an endpoint. Cancellation, source refusal and nonconvergence return no state.
+The original residual/material evaluation retains O(cells) trial allocations.
 
-All four tests in `xtask/tests/material_layered_implicit.rs` pass. Independent
-constant coefficients include sources, convection and reservoir coverage;
+The solve has no explicit diffusion CFL restriction, but it remains first-order
+backward Euler and requires independent time and spatial refinement. It does
+not silently subdivide an interval; events at the target stay pending. There
+is no trajectory adjoint, condition-number certificate, automatic time-error
+control or unconditional nonlinear-convergence claim.
+
+Focused tests in `xtask/tests/material_layered_implicit.rs` cover independent
+constant coefficients, sources, convection and reservoir coverage;
 nonlinear finite differences verify the full energy-coordinate matrix and the
 transpose inner-product identity. Invalid/cancelled matrix actions preserve
-outputs. An actual six-cell FSRI wall converges at a 3,000-second implicit step
-and passes original energy/entropy acceptance; material substitution changes
-the endpoint. This establishes algebraic convergence at that step, separately
-from time-discretization accuracy. Scope, source, event, identity, overflow and
-cancellation refusals preserve the initial timeline.
+outputs. The six-cell FSRI wall fixture now uses the production sparse solve
+for its 3,000-second interval and original energy/entropy acceptance. Analytical
+two-cell tests check unequal-material relaxation, conservative exchange,
+workspace reuse and deterministic replay. An independent exponential decay
+reference checks first-order time convergence over 8, 16 and 32 intervals.
+Work-budget, source-domain, scope, event, identity, overflow and cancellation
+refusal fixtures require the initial timeline to remain unchanged. These are
+numerical/source-path checks, not experimental material validation.
 
 
 ## Source-backed spatial water freezing

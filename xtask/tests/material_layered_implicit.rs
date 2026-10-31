@@ -2,7 +2,6 @@
 #![deny(unsafe_code)]
 
 use fs_evidence::ValidityDomain;
-use fs_la::prepared_lu::LuWorkspace;
 use fs_matdb::{
     ClaimSelection, ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, NormalizedPack,
     PropertyClaim, PropertyKey, PropertyValue, Provenance, QueryPoint, SelectionPolicy,
@@ -15,7 +14,10 @@ use fs_material::thermal::{
             LayerStackSourceQuery,
             transient::{
                 LayeredThermalIds, PreparedLayeredThermalBody, TransientLayerSourceQuery,
-                implicit::{LayeredThermalLinearization, LayeredThermalStep},
+                implicit::{
+                    LayeredThermalLinearization, LayeredThermalSolveControls,
+                    LayeredThermalSolveError, LayeredThermalStep, LayeredThermalWorkspace,
+                },
             },
         },
         storage::{HeatStorageAmount, HeatStorageComponentQuery},
@@ -514,7 +516,7 @@ fn compiled(slug: &str) -> MaterialCard {
 }
 
 #[test]
-fn g1_g3_real_fsri_wall_uses_original_lu_and_heat_owner_for_stiff_newton_steps() {
+fn g1_g3_real_fsri_wall_uses_sparse_production_solve_and_original_heat_owner() {
     let cards = [
         compiled("fsri-gypsum-wallboard-unconditioned-2021"),
         compiled("fsri-mineral-wool-unconditioned-2021"),
@@ -543,42 +545,32 @@ fn g1_g3_real_fsri_wall_uses_original_lu_and_heat_owner_for_stiff_newton_steps()
             &materials,
         );
         let step = LayeredThermalStep::new(&bound, &initial, 3000.0, CONFIG, || Ok(())).unwrap();
-        let mut lu = LuWorkspace::new(6).unwrap();
-        let mut increments = vec![0.0; 6];
-        let mut correction = vec![0.0; 6];
-        let mut converged = false;
-        let mut iterations = 0;
-        // This bounded test-local Newton solve exercises algebraic convergence
-        // at a stiff timestep. It makes no timestep-accuracy claim; independent
-        // spatial/temporal refinement is covered by material_layered_transient.
-        for iteration in 0..12 {
-            let trial = step.evaluate(&increments, || Ok(())).unwrap();
-            if iteration == 0 {
-                assert!(trial.payload().diagonal().iter().any(|d| *d > 10.0));
-            }
-            if trial.maximum_cell_residual_j() < 1e-7 {
-                converged = true;
-                iterations = iteration;
-                break;
-            }
-            let rhs: Vec<_> = trial.residual_j().iter().map(|v| -v).collect();
-            lu.solve_into(&dense(trial.payload()), &rhs, &mut correction)
-                .unwrap();
-            for (increment, delta) in increments.iter_mut().zip(&correction) {
-                *increment += delta;
-            }
-        }
-        assert!(converged, "bounded six-cell Newton iteration failed");
-        assert!(iterations > 0 && iterations < 12);
-        let trial = step.evaluate_with_entropy(&increments, || Ok(())).unwrap();
-        assert!(trial.maximum_cell_residual_j() < 1e-7);
-        let entropy = trial.entropy_audit().unwrap();
+        let mut workspace = LayeredThermalWorkspace::new(6).unwrap();
+        assert!(
+            step.evaluate(&[0.0; 6], || Ok(()))
+                .unwrap()
+                .payload()
+                .diagonal()
+                .iter()
+                .any(|d| *d > 10.0)
+        );
+        let controls = LayeredThermalSolveControls {
+            maximum_newton_iterations: 12,
+            cell_tolerance_j: 1e-7,
+            total_tolerance_j: 1e-7,
+            ..LayeredThermalSolveControls::default()
+        };
+        let (accepted, linearization, report) = step
+            .solve_with_entropy(controls, &mut workspace, || Ok(()))
+            .unwrap();
+        assert!(report.newton_iterations > 0 && report.newton_iterations < 12);
+        assert!(report.maximum_cell_residual_j < 1e-7);
+        let entropy = report.entropy.unwrap();
         assert!(entropy.thermal_storage_change_j_k > 0.0);
         assert!(entropy.conduction_generation_j_k > 0.0);
         assert!(entropy.temporal_defect_j_k > 0.0);
-        let (accepted, linearization, audit) = trial.accept(1e-7, 1e-7, || Ok(())).unwrap();
         close(accepted.energy_j(), initial.energy_j(), 1e-8);
-        assert_eq!(audit.external_heat_j, 0.0);
+        assert_eq!(report.energy.external_heat_j, 0.0);
         assert_eq!(linearization.dimension(), 6);
         assert_eq!(linearization.link_responses().len(), 5);
         let temperatures: Vec<_> = bound
@@ -598,6 +590,272 @@ fn g1_g3_real_fsri_wall_uses_original_lu_and_heat_owner_for_stiff_newton_steps()
             .zip(&outcomes[1])
             .any(|(a, b)| (a - b).abs() > 0.1)
     );
+}
+
+#[test]
+fn g1_g3_sparse_layer_solve_matches_heterogeneous_closed_form_and_replays() {
+    let cards = [
+        analytic_card("high capacity", [0.4, 0.0], [2e6, 0.0]),
+        analytic_card("low capacity", [0.2, 0.0], [1e6, 0.0]),
+    ];
+    let body = prepare(
+        &cards,
+        &[0.02, 0.03],
+        &[1, 1],
+        &[0.03],
+        0.02,
+        [280.0, 340.0],
+        300.0,
+    );
+    let laws = body.thermal_laws(true).unwrap();
+    let bound = body.bind(&laws, IDS).unwrap();
+    let materials: Vec<_> = bound.materials().into_iter().collect();
+    let initial = timeline(
+        bound
+            .birth_events(0.0, &[330.0, 290.0], CONFIG, || Ok(()))
+            .unwrap(),
+        &materials,
+    );
+    let initial_cells = initial.cells().clone();
+    let dt = 100_000.0;
+    let conductance = 0.02 / (0.01 / 0.4 + 0.03 + 0.015 / 0.2);
+    let capacities = [800.0, 600.0];
+    let difference = 40.0 / (1.0 + dt * conductance * (1.0 / capacities[0] + 1.0 / capacities[1]));
+    let heat = dt * conductance * difference;
+    let expected = [330.0 - heat / capacities[0], 290.0 + heat / capacities[1]];
+    let step = LayeredThermalStep::new(&bound, &initial, dt, CONFIG, || Ok(())).unwrap();
+    let controls = LayeredThermalSolveControls::default();
+    let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+    assert_eq!(workspace.cells(), 2);
+    let (next, tangent, report) = step
+        .solve_with_entropy(controls, &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(report.newton_iterations, 1);
+    assert_eq!(report.residual_evaluations, 3);
+    assert_eq!(report.backtracks, 0);
+    for (id, t) in bound.cell_ids().into_iter().zip(expected) {
+        close(next.temperature_k(id).unwrap(), t, 3e-12);
+    }
+    close(next.energy_j(), initial.energy_j(), 1e-8);
+    assert_eq!(report.energy.external_heat_j, 0.0);
+    let entropy = report.entropy.unwrap();
+    assert!(entropy.thermal_storage_change_j_k > 0.0);
+    assert!(entropy.conduction_generation_j_k > 0.0);
+    assert!(entropy.temporal_defect_j_k > 0.0);
+    assert_eq!(next.time_s(), dt);
+    let (replay, repeated, replay_report) = step
+        .solve_with_entropy(controls, &mut workspace, || Ok(()))
+        .unwrap();
+    assert_eq!(replay.cells(), next.cells());
+    assert_eq!(repeated, tangent);
+    assert_eq!(replay_report, report);
+    let (without_entropy, _, ordinary) = step.solve(controls, &mut workspace, || Ok(())).unwrap();
+    assert_eq!(without_entropy.cells(), next.cells());
+    assert_eq!(ordinary.entropy, None);
+    assert_eq!(ordinary.residual_evaluations, 2);
+    assert_eq!(initial.cells(), &initial_cells);
+    assert_eq!(initial.time_s(), 0.0);
+}
+
+#[test]
+fn g1_sparse_layer_solve_recovers_first_order_diffusion_decay_under_time_refinement() {
+    let cards = [analytic_card(
+        "diffusive relaxation",
+        [0.4, 0.0],
+        [2e6, 0.0],
+    )];
+    let body = prepare(&cards, &[0.04], &[2], &[], 0.02, [280.0, 340.0], 300.0);
+    let laws = body.thermal_laws(false).unwrap();
+    let bound = body.bind(&laws, IDS).unwrap();
+    let materials: Vec<_> = bound.materials().into_iter().collect();
+    let initial = timeline(
+        bound
+            .birth_events(0.0, &[330.0, 290.0], CONFIG, || Ok(()))
+            .unwrap(),
+        &materials,
+    );
+    let target = 2000.0;
+    // Each C = 800 J/K and G = 0.4 W/K, so the exact semidiscrete
+    // temperature difference decays at lambda = 2G/C = 0.001 /s.
+    let expected_difference = 40.0 * (-0.001_f64 * target).exp();
+    let mut errors = Vec::new();
+    let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+    for count in [8, 16, 32] {
+        let mut state = initial.clone();
+        for index in 1..=count {
+            let step = LayeredThermalStep::new(
+                &bound,
+                &state,
+                target * index as f64 / count as f64,
+                CONFIG,
+                || Ok(()),
+            )
+            .unwrap();
+            state = step
+                .solve(
+                    LayeredThermalSolveControls::default(),
+                    &mut workspace,
+                    || Ok(()),
+                )
+                .unwrap()
+                .0;
+        }
+        let difference =
+            state.temperature_k(CellId(11)).unwrap() - state.temperature_k(CellId(12)).unwrap();
+        errors.push((difference - expected_difference).abs());
+        close(state.energy_j(), initial.energy_j(), 1e-8);
+    }
+    for pair in errors.windows(2) {
+        let ratio = pair[0] / pair[1];
+        assert!(
+            ratio > 1.8 && ratio < 2.2,
+            "first-order error ratio {ratio}: {errors:?}"
+        );
+    }
+}
+
+#[test]
+fn g0_g4_sparse_layer_solve_refuses_work_domain_and_cancellation_atomically() {
+    let cards = [analytic_card("nonlinear", [0.3, 0.003], [1e6, 15000.0])];
+    let body = prepare(&cards, &[0.04], &[2], &[], 0.02, [280.0, 340.0], 300.0);
+    let laws = body.thermal_laws(true).unwrap();
+    let bound = body.bind(&laws, IDS).unwrap();
+    let materials: Vec<_> = bound.materials().into_iter().collect();
+    let initial = timeline(
+        bound
+            .birth_events(0.0, &[335.0, 285.0], CONFIG, || Ok(()))
+            .unwrap(),
+        &materials,
+    );
+    let before = initial.cells().clone();
+    let step = LayeredThermalStep::new(&bound, &initial, 3000.0, CONFIG, || Ok(())).unwrap();
+    let mut workspace = LayeredThermalWorkspace::new(2).unwrap();
+    let controls = LayeredThermalSolveControls::default();
+    for invalid in [
+        LayeredThermalSolveControls {
+            maximum_newton_iterations: 0,
+            ..controls
+        },
+        LayeredThermalSolveControls {
+            maximum_residual_evaluations: 0,
+            ..controls
+        },
+        LayeredThermalSolveControls {
+            cell_tolerance_j: f64::NAN,
+            ..controls
+        },
+        LayeredThermalSolveControls {
+            total_tolerance_j: -1.0,
+            ..controls
+        },
+    ] {
+        assert!(matches!(
+            step.solve(invalid, &mut workspace, || Ok(())),
+            Err(LayeredThermalSolveError::Thermal(
+                DepositionError::InvalidInput(_)
+            ))
+        ));
+    }
+    assert!(matches!(
+        step.solve(
+            LayeredThermalSolveControls {
+                maximum_residual_evaluations: 1,
+                ..controls
+            },
+            &mut workspace,
+            || Ok(())
+        ),
+        Err(LayeredThermalSolveError::Thermal(DepositionError::Budget(
+            _
+        )))
+    ));
+    assert!(matches!(
+        step.solve(
+            LayeredThermalSolveControls {
+                maximum_newton_iterations: 1,
+                ..controls
+            },
+            &mut workspace,
+            || Ok(())
+        ),
+        Err(LayeredThermalSolveError::NotConverged { .. })
+    ));
+    assert!(LayeredThermalWorkspace::new(0).is_err());
+    assert!(LayeredThermalWorkspace::new(513).is_err());
+    assert!(LayeredThermalWorkspace::new(512).is_ok());
+    assert!(
+        step.solve(
+            controls,
+            &mut LayeredThermalWorkspace::new(1).unwrap(),
+            || Ok(())
+        )
+        .is_err()
+    );
+    let mut calls = 0;
+    let (next, _, report) = step
+        .solve_with_entropy(controls, &mut workspace, || {
+            calls += 1;
+            Ok(())
+        })
+        .unwrap();
+    assert!(report.newton_iterations > 1);
+    for stop in [1, calls / 2, calls] {
+        let mut count = 0;
+        let result = step.solve_with_entropy(controls, &mut workspace, || {
+            count += 1;
+            if count == stop {
+                Err(DepositionError::Cancelled)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(matches!(
+            result,
+            Err(LayeredThermalSolveError::Thermal(
+                DepositionError::Cancelled
+            ))
+        ));
+    }
+    // Final entropy evaluation consumes the SAME work budget. No accepted
+    // thermal state is published if only that last required query cannot run.
+    assert!(matches!(
+        step.solve_with_entropy(
+            LayeredThermalSolveControls {
+                maximum_residual_evaluations: report.residual_evaluations - 1,
+                ..controls
+            },
+            &mut workspace,
+            || Ok(())
+        ),
+        Err(LayeredThermalSolveError::Thermal(DepositionError::Budget(
+            _
+        )))
+    ));
+    assert_eq!(initial.cells(), &before);
+    assert_eq!(initial.time_s(), 0.0);
+    assert!(next.temperature_k(CellId(11)).unwrap() < 335.0);
+    close(next.energy_j(), initial.energy_j(), 1e-8);
+
+    // No endpoint in the source domain can store this supplied heat. A line
+    // search may retry in-domain candidates, but must never extrapolate a
+    // capacity/conductivity chart or publish a clipped temperature.
+    let mut events = bound
+        .birth_events(0.0, &[335.0, 285.0], CONFIG, || Ok(()))
+        .unwrap();
+    let Event::Birth(cell) = &mut events[0].event else {
+        panic!("birth order")
+    };
+    cell.boundary.source_w = 1e6;
+    let heated = timeline(events, &materials);
+    let original = heated.cells().clone();
+    let impossible = LayeredThermalStep::new(&bound, &heated, 3000.0, CONFIG, || Ok(())).unwrap();
+    assert!(
+        impossible
+            .solve(controls, &mut workspace, || Ok(()))
+            .is_err()
+    );
+    assert_eq!(heated.cells(), &original);
+    assert_eq!(heated.time_s(), 0.0);
 }
 
 #[test]

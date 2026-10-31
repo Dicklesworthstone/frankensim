@@ -21,11 +21,19 @@ use fs_thermal::enthalpy::{
 };
 use std::cell::RefCell;
 
+#[path = "implicit/solve.rs"]
+mod solve;
+pub use solve::{
+    LayeredThermalSolveControls, LayeredThermalSolveError, LayeredThermalSolveReport,
+    LayeredThermalWorkspace,
+};
+
 /// One frozen original thermal step and its source-qualified material binding.
-/// This supplies residuals and derivatives to a caller's nonlinear solver; it
-/// never advances or accepts a physical state on its own.
+/// Residuals and derivatives serve either a caller's nonlinear solver or the
+/// bounded sparse solve below. The original thermal trial owns acceptance.
 pub struct LayeredThermalStep<'s, 'm, 'a> {
     step: BackwardEulerStep<'s, 'm>,
+    initial: &'s DepositionSimulation<'m>,
     binding: &'s BoundLayeredThermalBody<'a>,
     external_conductances: Vec<f64>,
     config: LayerConductionConfig,
@@ -67,6 +75,7 @@ impl<'s, 'm, 'a> LayeredThermalStep<'s, 'm, 'a> {
         checkpoint()?;
         Ok(Self {
             step,
+            initial,
             binding,
             external_conductances,
             config,
