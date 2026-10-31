@@ -13,7 +13,10 @@
 use fs_exec::Cx;
 use fs_material::liquid::ResolvedLiquidState;
 use fs_material::porous::permeability::{ContinuumDarcyGeometry, DarcyGasBarrier};
-use fs_material::porous::wet::liquid::WetPoreLiquidState;
+use fs_material::porous::wet::liquid::{
+    WetPoreLiquidState,
+    transient::LiquidSaturationColumn,
+};
 use fs_qty::{Area, Length, MassFlowRate, Pressure, Temperature};
 
 use super::super::LiquidHeatRegion;
@@ -141,6 +144,46 @@ impl<'a> PorousLiquidResistance<'a> {
     ) -> Result<Self, ResistanceError> {
         Self::try_new(
             self.source.with_liquid_states(states)?,
+            self.law.flow_area(),
+            self.law.reynolds_length(),
+            self.law.reynolds_range(),
+            Pressure::new(self.outlet_pressure_pa),
+        )
+    }
+
+    /// Bind the cached constitutive states from one conservative saturation column.
+    ///
+    /// Geometry is not inferred from the transient owner: every cell thickness
+    /// and projected intrinsic permeability must exactly match the original
+    /// barrier layer. This prevents a saturation history from being attached to
+    /// a different specimen or anisotropic reduction merely because lengths match.
+    pub fn with_saturation_column<'b>(
+        self,
+        column: &'b LiquidSaturationColumn,
+    ) -> Result<PorousLiquidResistance<'b>, ResistanceError>
+    where
+        'a: 'b,
+    {
+        let barrier = self.source.barrier();
+        if column.cells().len() != barrier.layers().len() {
+            return Err(ResistanceError::Invalid(
+                "transient saturation column must cover every original porous layer exactly once",
+            ));
+        }
+        for (cell, layer) in column.cells().iter().zip(barrier.layers()) {
+            let projected = barrier
+                .flow_constraint()
+                .permeability(layer.permeability(), barrier.normal())?;
+            if cell.thickness_m != layer.thickness_m()
+                || cell.intrinsic_permeability_m2 != projected
+            {
+                return Err(ResistanceError::Invalid(
+                    "transient saturation cell geometry/permeability differs from the original porous layer",
+                ));
+            }
+        }
+        PorousLiquidResistance::try_new(
+            self.source.with_liquid_states(column.states())?,
             self.law.flow_area(),
             self.law.reynolds_length(),
             self.law.reynolds_range(),

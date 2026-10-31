@@ -60,10 +60,13 @@ impl<'a> ContinuumDarcyGeometry<'a> {
     /// Refuses an incomplete state list, disjoint support, unrepresentable
     /// positive resistance, or any positive original Forchheimer calibration:
     /// a fully filled inertial law does not qualify partial-saturation inertia.
-    pub fn with_liquid_states(
+    pub fn with_liquid_states<'b>(
         self,
-        states: &'a [WetPoreLiquidState],
-    ) -> Result<Self, MaterialError> {
+        states: &'b [WetPoreLiquidState],
+    ) -> Result<ContinuumDarcyGeometry<'b>, MaterialError>
+    where
+        'a: 'b,
+    {
         if states.len() != self.barrier.layers.len() {
             return Err(invalid(
                 "liquid mobility requires exactly one state per original porous layer",

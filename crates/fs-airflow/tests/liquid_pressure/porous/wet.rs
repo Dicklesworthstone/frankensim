@@ -3,6 +3,7 @@
 use super::*;
 use fs_material::porous::wet::liquid::{
     LiquidCapillaryPressure, WetPoreLiquidLaw, WetPoreLiquidState, WetPoreLiquidSupport,
+    transient::{LiquidSaturationCell, LiquidSaturationColumn, LiquidSaturationStepInput},
 };
 
 fn wet_support() -> WetPoreLiquidSupport {
@@ -266,4 +267,99 @@ fn dry_liquid_seals_and_wet_source_limits_refuse_without_changing_original_law()
         );
     }
     assert!(original.source().liquid_states().is_none());
+}
+
+
+#[test]
+fn evolving_saturation_rebinds_the_live_pressure_heat_operating_point() {
+    let barrier = skeleton(5e9, support());
+    let base = porous(&barrier, 100000.0);
+    let law = wet_law(10000.0, wet_support());
+    let k = barrier.flow_constraint()
+        .permeability(barrier.layers()[0].permeability(), barrier.normal())
+        .unwrap();
+    let mut column = LiquidSaturationColumn::new(
+        barrier.layers().iter().map(|layer| LiquidSaturationCell {
+            thickness_m: layer.thickness_m(),
+            porosity: 0.4,
+            intrinsic_permeability_m2: k,
+            law: law.clone(),
+        }).collect(),
+        vec![0.6, 0.6],
+    ).unwrap();
+
+    let initial_states = column.states().to_vec();
+    let initial = base.with_saturation_column(&column).unwrap();
+    let initial_mass = with_path(
+        false,
+        1.0,
+        LiquidPropertyTemperature::BulkMean,
+        |cx, path| path.solve_pressure_driven(
+            cx,
+            &[300.0; 2],
+            &wet_sections(initial),
+            Pressure::new(50.0),
+            local(),
+            wet_budget(),
+        ).unwrap().mass_flow_kg_per_s,
+    );
+
+    let pc = match column.states()[0].capillary_pressure() {
+        LiquidCapillaryPressure::Finite(pc) => pc,
+        LiquidCapillaryPressure::DryLimit => panic!("fixture must be mobile"),
+    };
+    let pl = 150000.0 - pc;
+    let candidate = column.step_candidate(
+        LiquidSaturationStepInput {
+            duration_s: 0.02,
+            temperature_k: 300.0,
+            gas_pressure_pa: 150000.0,
+            dynamic_viscosity_pa_s: 0.002,
+            body_force_pressure_gradient_pa_m: 0.0,
+            boundary_liquid_pressure_pa: [pl + 2000.0, pl],
+        },
+        || false,
+    ).unwrap();
+    assert!(candidate.state().saturations()[0] > column.saturations()[0]);
+    assert!(candidate.step().balance_residual_m.abs()
+        <= 64.0 * f64::EPSILON * candidate.step().liquid_volume_per_area_after_m);
+    column = candidate.into_parts().0;
+
+    let rebound = base.with_saturation_column(&column).unwrap();
+    let evolved_mass = with_path(
+        false,
+        1.0,
+        LiquidPropertyTemperature::BulkMean,
+        |cx, path| path.solve_pressure_driven(
+            cx,
+            &[300.0; 2],
+            &wet_sections(rebound),
+            Pressure::new(50.0),
+            local(),
+            wet_budget(),
+        ).unwrap().mass_flow_kg_per_s,
+    );
+    assert!(evolved_mass > initial_mass);
+    assert_ne!(column.states(), initial_states.as_slice());
+    assert_eq!(rebound.source().barrier(), &barrier);
+    assert_eq!(rebound.source().liquid_states(), Some(column.states()));
+
+    let wrong = LiquidSaturationColumn::new(
+        vec![
+            LiquidSaturationCell {
+                thickness_m: barrier.layers()[0].thickness_m() * 2.0,
+                porosity: 0.4,
+                intrinsic_permeability_m2: k,
+                law: law.clone(),
+            },
+            LiquidSaturationCell {
+                thickness_m: barrier.layers()[1].thickness_m(),
+                porosity: 0.4,
+                intrinsic_permeability_m2: k,
+                law,
+            },
+        ],
+        vec![0.6, 0.6],
+    ).unwrap();
+    assert!(base.with_saturation_column(&wrong).is_err());
 }

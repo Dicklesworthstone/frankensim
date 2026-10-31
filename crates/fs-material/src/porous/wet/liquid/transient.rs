@@ -109,6 +109,7 @@ impl LiquidSaturationCandidate {
 pub struct LiquidSaturationColumn {
     cells: Vec<LiquidSaturationCell>,
     saturations: Vec<f64>,
+    states: Vec<WetPoreLiquidState>,
     elapsed_s: f64,
 }
 impl LiquidSaturationColumn {
@@ -121,28 +122,28 @@ impl LiquidSaturationColumn {
                 "transient liquid column needs 1..4096 cells with one saturation per cell",
             ));
         }
+        let mut states = Vec::with_capacity(cells.len());
         for (cell, &s) in cells.iter().zip(&saturations) {
             cell.validate()?;
-            if !fraction(s) || cell.law.sample(s).is_err() {
+            if !fraction(s) {
                 return Err(invalid(
                     "initial liquid saturation must be finite and inside each cell calibration",
                 ));
             }
+            states.push(cell.law.sample(s)?);
         }
-        Ok(Self { cells, saturations, elapsed_s: 0.0 })
+        Ok(Self { cells, saturations, states, elapsed_s: 0.0 })
     }
 
     pub fn cells(&self) -> &[LiquidSaturationCell] { &self.cells }
     pub fn saturations(&self) -> &[f64] { &self.saturations }
+    /// Cached constitutive states for allocation-free hydraulic rebinding.
+    pub fn states(&self) -> &[WetPoreLiquidState] { &self.states }
     pub const fn elapsed_s(&self) -> f64 { self.elapsed_s }
 
-    /// Material states ready for continuum liquid-resistance rebinding.
+    /// Compatibility copy of the cached material states.
     pub fn liquid_states(&self) -> Result<Vec<WetPoreLiquidState>, MaterialError> {
-        self.cells
-            .iter()
-            .zip(&self.saturations)
-            .map(|(cell, &s)| cell.law.sample(s))
-            .collect()
+        Ok(self.states.clone())
     }
 
     pub fn liquid_volume_per_area_m(&self) -> Result<f64, MaterialError> {
@@ -170,8 +171,8 @@ impl LiquidSaturationColumn {
             return Err(invalid("transient liquid saturation step cancelled"));
         }
         let n = self.cells.len();
-        let before_states = self.liquid_states()?;
-        let before_pressures = pressures(&before_states, input.gas_pressure_pa)?;
+        let before_states = &self.states;
+        let before_pressures = pressures(before_states, input.gas_pressure_pa)?;
         let mut mobility = Vec::with_capacity(n);
         for (i, ((cell, state), pressure)) in self
             .cells
@@ -244,18 +245,24 @@ impl LiquidSaturationColumn {
             }
             next_saturation.push(next);
         }
+        let after_states = self
+            .cells
+            .iter()
+            .zip(&next_saturation)
+            .map(|(cell, &s)| cell.law.sample(s))
+            .collect::<Result<Vec<_>, _>>()?;
         let next = Self {
             cells: self.cells.clone(),
             saturations: next_saturation,
+            states: after_states,
             elapsed_s: self.elapsed_s + input.duration_s,
         };
         if !next.elapsed_s.is_finite() {
             return Err(invalid("transient liquid time is unrepresentable"));
         }
-        let after_states = next.liquid_states()?;
-        let after_pressures = pressures(&after_states, input.gas_pressure_pa)?;
+        let after_pressures = pressures(&next.states, input.gas_pressure_pa)?;
         for i in 0..n {
-            let state = &after_states[i];
+            let state = &next.states[i];
             let speed = faces[i].abs().max(faces[i + 1].abs());
             if state.liquid_relative_permeability() > 0.0 {
                 let p = after_pressures[i].ok_or_else(|| invalid("accepted mobile liquid pressure is missing"))?;
