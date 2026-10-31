@@ -8,6 +8,8 @@
 //! Independent affine bulk/shear sources instead give an affine isotropic C:
 //! its first derivative is exact and its second derivative is zero. Derived
 //! Young/Poisson values are not misrepresented as affine source measurements.
+//! Independent affine Young/shear sources retain the exact rational bulk
+//! response and both derivatives; their original claims remain the sources.
 //!
 //! Whole-interval admission uses outward-rounded coefficient bounds, a
 //! sufficient positive-compliance determinant bound and an operator-norm bound
@@ -36,6 +38,10 @@ pub enum ThermoelasticSymmetry {
     /// still chooses `Isotropic` or `OrientedOrthotropic` independently; this
     /// elastic-only source schema is refused in the expansion argument.
     IsotropicBulkShear,
+    /// Independent affine Young/shear sources with exact rational stiffness
+    /// derivatives. Requires positive `3 G - E` over the entire interval;
+    /// expansion is still selected independently.
+    IsotropicYoungShear,
     /// Columns are the original principal directions in the target frame.
     OrientedOrthotropic { principal_to_target: [[f64; 3]; 3] },
 }
@@ -43,7 +49,7 @@ pub enum ThermoelasticSymmetry {
 impl ThermoelasticSymmetry {
     fn rotation(self) -> [[f64; 3]; 3] {
         match self {
-            Self::Isotropic | Self::IsotropicBulkShear => IDENTITY,
+            Self::Isotropic | Self::IsotropicBulkShear | Self::IsotropicYoungShear => IDENTITY,
             Self::OrientedOrthotropic { principal_to_target } => principal_to_target,
         }
     }
@@ -180,6 +186,9 @@ impl AffineTensorThermoelastic {
             ThermoelasticSymmetry::IsotropicBulkShear => vec![
                 (BULK_MODULUS_PROPERTY, Pressure::DIMS, true),
                 (SHEAR_MODULUS_PROPERTY, Pressure::DIMS, true)],
+            ThermoelasticSymmetry::IsotropicYoungShear => vec![
+                (YOUNG_MODULUS_PROPERTY, Pressure::DIMS, true),
+                (SHEAR_MODULUS_PROPERTY, Pressure::DIMS, true)],
             ThermoelasticSymmetry::OrientedOrthotropic { .. } => ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
                 .map(|name| (name, Pressure::DIMS, true)).into_iter()
                 .chain(ORTHOTROPIC_POISSON_RATIO_PROPERTIES.map(|name| (name, Dims::NONE, false)))
@@ -187,8 +196,9 @@ impl AffineTensorThermoelastic {
         };
         let expansion_names: Vec<_> = match expansion {
             ThermoelasticSymmetry::Isotropic => vec![LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY],
-            ThermoelasticSymmetry::IsotropicBulkShear => return Err(ThermoelasticError::Invalid(
-                "bulk/shear is an elastic source schema, not an expansion law")),
+            ThermoelasticSymmetry::IsotropicBulkShear | ThermoelasticSymmetry::IsotropicYoungShear =>
+                return Err(ThermoelasticError::Invalid(
+                    "independent elastic moduli are not an expansion law")),
             ThermoelasticSymmetry::OrientedOrthotropic { .. } => ORTHOTROPIC_THERMAL_EXPANSION_COEFFICIENT_PROPERTIES.to_vec(),
         };
         let elastic_coefficients = elastic_schema.into_iter().map(|(name, dims, positive)|
@@ -241,8 +251,8 @@ impl AffineTensorThermoelastic {
                 (*path.free_principal_strains(), [alpha[0], alpha[1], alpha[2]],
                     core::array::from_fn(|i| self.expansion_coefficients[i].slope))
             }
-            ThermoelasticSymmetry::IsotropicBulkShear => return Err(ThermoelasticError::Invalid(
-                "bulk/shear cannot supply thermal expansion")),
+            ThermoelasticSymmetry::IsotropicBulkShear | ThermoelasticSymmetry::IsotropicYoungShear =>
+                return Err(ThermoelasticError::Invalid("elastic moduli cannot supply thermal expansion")),
         };
         let response = TensorThermalResponse {
             stiffness_mandel_pa: stiffness, stiffness_derivative_mandel_pa_k: first,
@@ -337,15 +347,19 @@ fn rotation_norm_bound(q: [[f64; 3]; 3]) -> Result<f64, ThermoelasticError> {
 fn principal_stiffness(symmetry: ThermoelasticSymmetry, values: &[f64], slopes: &[f64], limit: f64)
     -> Result<(Tangent6, Tangent6, Tangent6), ThermoelasticError> {
     let (e, nu, et, nut, c) = match symmetry {
-        ThermoelasticSymmetry::IsotropicBulkShear => {
-            let c = bulk_shear_matrix(values[0], values[1])?;
+        ThermoelasticSymmetry::IsotropicBulkShear | ThermoelasticSymmetry::IsotropicYoungShear => {
+            let (bulk, bulk_first, bulk_second) = if symmetry == ThermoelasticSymmetry::IsotropicYoungShear {
+                young_shear_bulk(values[0], values[1], slopes[0], slopes[1])?
+            } else { (values[0], slopes[0], 0.0) };
+            let c = bulk_shear_matrix(bulk, values[1])?;
             // Positive source K/G must also retain a representable positive
             // volumetric/shear response in the actual finite tensor.
             if !values.iter().all(|value| *value > 0.0)
                 || c[0][0] + 2.0 * c[0][1] <= 0.0 || c[3][3] <= 0.0 {
                 return Err(ThermoelasticError::Invalid("bulk/shear stiffness loses positive representability"));
             }
-            return Ok((c, bulk_shear_matrix(slopes[0], slopes[1])?, [[0.0; 6]; 6]));
+            return Ok((c, bulk_shear_matrix(bulk_first, slopes[1])?,
+                bulk_shear_matrix(bulk_second, 0.0)?));
         }
         ThermoelasticSymmetry::Isotropic => {
             let law = IsotropicElastic::new(values[0], values[1], limit)?;
@@ -388,13 +402,36 @@ fn principal_stiffness(symmetry: ThermoelasticSymmetry, values: &[f64], slopes: 
                 second[i][i] = finite(-2.0 * slopes[1] * first[i][i] / q)?;
             }
             ThermoelasticSymmetry::OrientedOrthotropic { .. } => { first[i][i] = finite(2.0 * slopes[i + 3])?; }
-            ThermoelasticSymmetry::IsotropicBulkShear => unreachable!("bulk/shear returned above"),
+            ThermoelasticSymmetry::IsotropicBulkShear | ThermoelasticSymmetry::IsotropicYoungShear =>
+                unreachable!("independent isotropic moduli returned above"),
         }
     }
     if c.iter().flatten().any(|x| !x.is_finite()) {
         return Err(ThermoelasticError::Invalid("native orthotropic stiffness is unrepresentable"));
     }
     Ok((c, first, second))
+}
+
+// For affine E/G, D=3G-E is affine but K=EG/(3D) is rational. Ratios avoid
+// squaring/cubing dimensional moduli. The squared cross derivative gives
+// K''=2(G E'-E G')^2/D^3 >= 0 without subtracting two large curvatures.
+fn young_shear_bulk(e: f64, g: f64, et: f64, gt: f64)
+    -> Result<(f64, f64, f64), ThermoelasticError> {
+    let d = finite(3.0_f64.mul_add(g, -e))?;
+    if e <= 0.0 || g <= 0.0 || d <= 0.0 {
+        return Err(ThermoelasticError::Invalid("Young/shear requires positive E, G and 3G-E"));
+    }
+    let er = finite(e / d)?;
+    let gr = finite(g / d)?;
+    let bulk = finite((e / 3.0) * gr)?;
+    let first = finite(finite(gr * finite(gr * et)?)?
+        - finite((er / 3.0) * finite(er * gt)?)?)?;
+    let cross = finite(gr.mul_add(et, -finite(er * gt)?))?;
+    let second = finite(2.0 * finite(cross * finite(cross / d)?)?)?;
+    if bulk <= 0.0 {
+        return Err(ThermoelasticError::Invalid("Young/shear bulk response is unrepresentable"));
+    }
+    Ok((bulk, first, second))
 }
 
 // C = 3 K P_vol + 2 G P_dev in Mandel coordinates. Form the diagonal
@@ -433,14 +470,32 @@ fn row_norm(a: &[[f64; 3]; 3]) -> Result<f64, ThermoelasticError> {
 // admission over the ENTIRE affine source interval, including signed nu.
 fn stiffness_bounds(symmetry: ThermoelasticSymmetry, coefficients: &[Coefficient])
     -> Result<(f64, f64, f64), ThermoelasticError> {
+    let norm = |bulk, shear| upper_add(upper_mul(3.0, bulk)?, upper_mul(4.0, shear)?);
     if symmetry == ThermoelasticSymmetry::IsotropicBulkShear {
         for coefficient in coefficients { positive_lower(coefficient.minimum())?; }
         // Conservative row/operator-norm bounds, including signed Lamé
         // coupling. Each independent affine modulus has endpoint extrema;
         // no rational E/nu conversion or endpoint-only capacity check enters.
-        let norm = |bulk, shear| upper_add(upper_mul(3.0, bulk)?, upper_mul(4.0, shear)?);
         return Ok((norm(coefficients[0].maximum(), coefficients[1].maximum())?,
             norm(coefficients[0].slope.abs(), coefficients[1].slope.abs())?, 0.0));
+    }
+    if symmetry == ThermoelasticSymmetry::IsotropicYoungShear {
+        let (e, g) = (&coefficients[0], &coefficients[1]);
+        positive_lower(e.minimum())?; positive_lower(g.minimum())?;
+        // FMA rounds each affine endpoint difference once. Round downward
+        // before taking the minimum: endpoint positivity then bounds D on
+        // the complete interval, including opposing E/G source slopes.
+        let d = positive_lower(3.0_f64.mul_add(g.endpoints[0], -e.endpoints[0]))?
+            .min(positive_lower(3.0_f64.mul_add(g.endpoints[1], -e.endpoints[1]))?);
+        let er = upper_div(e.maximum(), d)?;
+        let gr = upper_div(g.maximum(), d)?;
+        let et = e.slope.abs(); let gt = g.slope.abs();
+        let bulk = upper_mul(upper_div(e.maximum(), 3.0)?, gr)?;
+        let first = upper_add(upper_mul(gr, upper_mul(gr, et)?)?,
+            upper_mul(upper_div(er, 3.0)?, upper_mul(er, gt)?)?)?;
+        let cross = upper_add(upper_mul(gr, et)?, upper_mul(er, gt)?)?;
+        let second = upper_mul(2.0, upper_mul(cross, upper_div(cross, d)?)?)?;
+        return Ok((norm(bulk, g.maximum())?, norm(first, gt)?, upper_mul(3.0, second)?));
     }
     let isotropic = symmetry == ThermoelasticSymmetry::Isotropic;
     let e: [&Coefficient; 3] = core::array::from_fn(|i| &coefficients[if isotropic { 0 } else { i }]);

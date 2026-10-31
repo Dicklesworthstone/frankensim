@@ -6249,7 +6249,17 @@ Expansion remains independently isotropic or oriented orthotropic. Original
 positive source bounds and conservative whole-interval capacity admission
 still apply. Bulk/shear is an elastic source schema and refuses as an expansion
 schema. Independent invariant-energy/entropy/capacity and rotation regressions
-cover this path; Young/shear still requires its rational thermal derivatives.
+cover this path.
+
+`ThermoelasticSymmetry::IsotropicYoungShear` retains independently affine E/G
+claims with the exact rational bulk response `K=E G/[3(3G-E)]`. Its first and
+second derivatives, including nonzero `C''`, enter the same thermodynamic
+potential. Scaled ratios avoid cubing dimensional moduli. Whole-interval
+admission requires positive E, G and `3G-E`; outward-rounded derivative bounds
+feed the original combined heat-capacity check. Expansion remains independent,
+and no derived bulk or Poisson claims are inserted. The same regression seam
+checks both source schemas, with the E/G oracle differentiating volumetric
+compliance independently and refusing an interval that crosses the elastic pole.
 
 The same potential supplies stress, entropy, internal energy, fixed-total-strain
 heat capacity and stress-temperature derivatives to the original spatial solid,

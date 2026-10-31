@@ -133,10 +133,7 @@ impl<'s,'m> ThermoelasticSolid<'s,'m> {
             let stiffness=match bound.source.stiffness_model {
                 ThermalStiffnessModel::Isotropic=>ThermoelasticSymmetry::Isotropic,
                 ThermalStiffnessModel::IsotropicBulkShear=>ThermoelasticSymmetry::IsotropicBulkShear,
-                ThermalStiffnessModel::IsotropicYoungShear=>return Err(
-                    ThermoelasticFeedbackError::Invalid(
-                        "reciprocal Young/shear thermoelasticity needs exact rational source derivatives; prescribed-temperature solid response remains available",
-                    )),
+                ThermalStiffnessModel::IsotropicYoungShear=>ThermoelasticSymmetry::IsotropicYoungShear,
                 ThermalStiffnessModel::OrientedOrthotropic {principal_to_mesh,..}=>
                     ThermoelasticSymmetry::OrientedOrthotropic {principal_to_target:principal_to_mesh},
             };
