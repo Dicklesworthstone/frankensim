@@ -772,10 +772,6 @@ mod evolving_materials {
                 ),
                 "Boussinesq specific heat relative departure",
             ),
-            (
-                paired,
-                "transient fluid_enthalpy requires authored or frozen solid storage",
-            ),
         ]
         .into_iter()
         .enumerate()
@@ -788,6 +784,24 @@ mod evolving_materials {
             assert!(result.get("material_feedback").is_none());
             assert_eq!(std::fs::read_to_string(path).unwrap(), input);
         }
+        // The original caloric chart now shares the native heat step with
+        // evolving solid conductivity and exact source-integral solid storage.
+        let paired_path_run = scratch("source-enthalpy-paired-success.json", &paired);
+        let (code, result, error) = run(&paired_path_run);
+        assert_eq!(code, 0, "{error}");
+        let feedback = result.get("material_feedback").unwrap();
+        assert_eq!(feedback.str_field("solid_coupling"), Some("joint-implicit-endpoint"));
+        assert_eq!(f(feedback, &["solid_endpoint", "cells"]), 6.0);
+        assert_eq!(f(feedback, &["fluid_endpoint", "cells"]), 30.0);
+        assert!(f(&result, &["flow", "final_kinetic_energy_j"]) > 0.0);
+        assert!(f(&result, &["transient", "worst_step_closure_j"]) <= 1e-8);
+        let caloric = feedback.get("fluid_enthalpy").unwrap();
+        assert!(caloric.str_field("chart_identity").is_some());
+        assert!(f(caloric, &["energy_solves"]) <= f(caloric, &["maximum_energy_solves"]));
+        let solids = feedback.path(&["solid_storage", "records"]).and_then(J::as_array).unwrap();
+        assert_eq!(solids.len(), 2);
+        assert!(solids.iter().all(|r| f(r, &["storage_defect_j"]) <= 1e-8));
+        assert_eq!(std::fs::read_to_string(&paired_path_run).unwrap(), paired);
         assert_eq!(std::fs::read(pack_path).unwrap(), bytes);
         assert_eq!(std::fs::read_to_string(paired_path).unwrap(), paired_scene);
         assert_eq!(std::fs::read(paired_solid_path).unwrap(), paired_solid);
@@ -895,6 +909,124 @@ mod evolving_materials {
         );
         assert!(result.get("material_feedback").is_none());
         assert_eq!(std::fs::read_to_string(path).unwrap(), exhausted);
+        assert_eq!(std::fs::read(pack_path).unwrap(), bytes);
+    }
+
+
+    #[test]
+    fn exact_isobaric_cp_and_solid_storage_share_the_original_physical_heat_ledger() {
+        // Two unit voxels exchange heat through their native interface.
+        // rho_fluid=1, Cp_fluid=2+.04*dT; rho_solid=2, Cp_solid=2+.4*dT.
+        // An inward 1 W/m2 wall flux supplies exactly 2 J in four half-second steps.
+        let input = r#"{
+          "schema":"frankensim.cooling-cht.v1","size_m":[2,1,1],"voxel_m":1,
+          "fluid":{"mode":"temperature-dependent","temperature_axis":"T",
+            "pack":"exact-paired-fluid.fsmcdpk","viscosity":"dynamic",
+            "state":[{"name":"T","value":"300 K","kind":"absolute-temperature"},
+              {"name":"pressure","value":"100 kPa","kind":"pressure"}]},
+          "fluid_enthalpy":{"basis":"isobaric-cp","pressure_axis":"pressure",
+            "minimum_temperature_k":290,"maximum_temperature_k":350,"maximum_flux_defect_w":1e-10,
+            "transient_controls":{"maximum_passes_per_step":80,"maximum_energy_solves":200,
+              "temperature_tolerance_k":1e-9,"maximum_storage_defect_w":1e-9,
+              "maximum_energy_closure_j":1e-8,"temperature_relaxation":1}},
+          "materials":[{"name":"body","source":{"mode":"temperature-dependent",
+            "temperature_axis":"T","storage_temperature_range_k":[290,350],
+            "pack":"exact-paired-solid.fsmcdpk",
+            "state":[{"name":"T","value":"300 K","kind":"absolute-temperature"},
+              {"name":"pressure","value":"100 kPa","kind":"pressure"}]}}],
+          "solids":[{"material":"body","min_m":[0,0,0],"max_m":[1,1,1]}],
+          "faces":{"x-":{"type":"wall","heat_flux_w_m2":1}},
+          "probes":[{"name":"solid","at_m":[0.5,0.5,0.5]},
+            {"name":"fluid","at_m":[1.5,0.5,0.5]}],
+          "transient":{"flow":"unsteady","scheme":"bdf2","time_step_s":0.5,"steps":4,
+            "initial_temperature_k":300,
+            "solid_storage":{"temperature_tolerance_k":1e-9,"storage_tolerance_j":1e-9}}
+        }"#;
+        let path = scratch("exact-paired-storage.json", input);
+        let fluid_path = path.with_file_name("exact-paired-fluid.fsmcdpk");
+        let solid_path = path.with_file_name("exact-paired-solid.fsmcdpk");
+        let fluid = pack_with_caloric(true, 0.0, 350.0, 1.0, 0.04);
+        let solid = pack_with_caloric(false, 0.05, 350.0, 1.0, 0.4);
+        std::fs::write(&fluid_path, &fluid).unwrap();
+        std::fs::write(&solid_path, &solid).unwrap();
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        let probes = result.get("probes").and_then(J::as_array).unwrap();
+        let solid_rise = f(&probes[0], &["temperature_k"]) - 300.0;
+        let fluid_rise = f(&probes[1], &["temperature_k"]) - 300.0;
+        assert!(solid_rise > fluid_rise && fluid_rise > 0.0);
+        let solid_heat = 4.0 * solid_rise + 0.4 * solid_rise * solid_rise;
+        let fluid_heat = 2.0 * fluid_rise + 0.02 * fluid_rise * fluid_rise;
+        assert!((solid_heat + fluid_heat - 2.0).abs() < 1e-7);
+        let histories = result.path(&["transient", "records"]).and_then(J::as_array).unwrap();
+        assert_eq!(histories.len(), 4);
+        for record in histories {
+            assert_eq!(f(record, &["source_energy_j"]), 0.0);
+            assert!((f(record, &["boundary_outflow_j"]) + 0.5).abs() < 1e-10);
+            assert!((f(record, &["stored_energy_change_j"]) - 0.5).abs() < 1e-8);
+            assert!(f(record, &["closure_j"]).abs() <= 1e-8);
+        }
+        let feedback = result.get("material_feedback").unwrap();
+        let caloric = feedback.get("fluid_enthalpy").unwrap();
+        assert_eq!(caloric.str_field("basis"), Some("isobaric-cp"));
+        assert!(caloric.str_field("caloric_identity").is_some());
+        assert_eq!(caloric.get("chart_identity"), Some(&J::Null));
+        assert_eq!(caloric.get("maximum_interpolation_error_j_kg"), Some(&J::Null));
+        assert_eq!(f(caloric, &["pressure_pa"]), 100000.0);
+        assert!(f(caloric, &["energy_solves"]) <= 200.0);
+        let solid_records = feedback.path(&["solid_storage", "records"]).and_then(J::as_array).unwrap();
+        let reported_solid: f64 = solid_records.iter()
+            .map(|r| f(r, &["solid_stored_energy_change_j"])).sum();
+        assert!((reported_solid - solid_heat).abs() < 1e-8);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+        assert_eq!(std::fs::read(&fluid_path).unwrap(), fluid);
+        assert_eq!(std::fs::read(&solid_path).unwrap(), solid);
+
+        // The combined path retains the existing whole-march solve budget.
+        let exhausted = input.replace("\"maximum_energy_solves\":200", "\"maximum_energy_solves\":2");
+        let (code, document, error) = run(&scratch("exact-paired-storage-budget.json", &exhausted));
+        assert_ne!(code, 0, "{error}");
+        assert_eq!(document.str_field("code"), Some("cooling-cht-budget"));
+        assert!(document.get("material_feedback").is_none());
+    }
+
+    #[test]
+    fn exact_isobaric_cp_uses_original_steady_sources_and_refuses_ambiguous_ingress() {
+        let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
+        let liquid = CALORIC_LIQUID.replace("PACK", "exact-cp-steady.fsmcdpk");
+        let policy = r#"{"basis":"isobaric-cp","pressure_axis":"pressure",
+            "minimum_temperature_k":300,"maximum_temperature_k":310,"maximum_flux_defect_w":1e-10}"#;
+        let input = caloric_channel(&liquid, policy, false);
+        let path = scratch("exact-cp-steady.json", &input);
+        let pack_path = path.with_file_name("exact-cp-steady.fsmcdpk");
+        std::fs::write(&pack_path, &bytes).unwrap();
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        let caloric = result.path(&["material_feedback", "fluid_enthalpy"]).unwrap();
+        assert_eq!(caloric.str_field("basis"), Some("isobaric-cp"));
+        assert!(caloric.str_field("caloric_identity").is_some());
+        for defect in ["maximum_face_flux_defect_w", "maximum_cell_flux_defect_w"] {
+            assert!(f(caloric, &[defect]) <= f(caloric, &["flux_tolerance_w"]));
+        }
+        assert!(f(&result, &["energy", "balance_relative_residual"]) < 1e-8);
+        for (index, rejected) in [
+            input.replace(",\"pressure_axis\":\"pressure\"", ""),
+            input.replace("\"kind\":\"pressure\"", "\"kind\":\"stress\""),
+            input.replace("\"maximum_temperature_k\":310", "\"maximum_temperature_k\":320"),
+            input.replace("\"maximum_flux_defect_w\":1e-10",
+                "\"maximum_interpolation_error_j_kg\":1e-8,\"maximum_flux_defect_w\":1e-10"),
+        ].into_iter().enumerate() {
+            let (code, result, error) = run(&scratch(&format!("exact-cp-refusal-{index}.json"), &rejected));
+            assert_ne!(code, 0, "{error}");
+            assert!(result.get("material_feedback").is_none());
+        }
+        let gas_policy = policy.replace(",\"pressure_axis\":\"pressure\"", "");
+        let gas = caloric_channel(CALORIC_GAS, &gas_policy, false);
+        let (code, result, error) = run(&scratch("exact-cp-gas.json", &gas));
+        assert_eq!(code, 0, "{error}");
+        let caloric = result.path(&["material_feedback", "fluid_enthalpy"]).unwrap();
+        assert_eq!(caloric.str_field("basis"), Some("isobaric-cp"));
+        assert_eq!(f(caloric, &["pressure_pa"]), 100000.0);
         assert_eq!(std::fs::read(pack_path).unwrap(), bytes);
     }
 

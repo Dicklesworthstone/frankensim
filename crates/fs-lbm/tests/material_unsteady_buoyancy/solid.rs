@@ -20,7 +20,7 @@ fn quantity(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
 }
 
-fn card(capacity_slope: f64, conductivity_slope: f64) -> MaterialCard {
+pub(super) fn card(capacity_slope: f64, conductivity_slope: f64) -> MaterialCard {
     let mut claims = ClaimSet::new();
     for (name, dims, values) in [
         // Evolving source density MUST NOT change the fixed reference mass.
@@ -100,7 +100,7 @@ fn card(capacity_slope: f64, conductivity_slope: f64) -> MaterialCard {
     .unwrap()
 }
 
-fn law(card: &MaterialCard, span: [f64; 2]) -> SolidThermalLaw<'_> {
+pub(super) fn law(card: &MaterialCard, span: [f64; 2]) -> SolidThermalLaw<'_> {
     let point = QueryPoint::new()
         .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 300.0)
         .unwrap()
@@ -134,7 +134,7 @@ fn law(card: &MaterialCard, span: [f64; 2]) -> SolidThermalLaw<'_> {
 
 // Closed-form integral of the SYNTHETIC piecewise-affine Cp source, from 300 K.
 // Keeping this independent of PreparedHeatStorage catches missed source knots.
-fn specific_energy(temperature: f64, slope: f64) -> f64 {
+pub(super) fn specific_energy(temperature: f64, slope: f64) -> f64 {
     let theta = temperature - 300.0;
     if theta <= 0.0 {
         2.0 * theta

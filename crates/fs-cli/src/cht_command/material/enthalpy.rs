@@ -6,23 +6,34 @@ use fs_lbm::material::conjugate::buoyant::enthalpy::{
     ConvectionCaloricLaw, MaterialEnthalpyConfig, MaterialEnthalpyState,
     MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig,
 };
-use fs_matdb::{PropertyKey, SelectionPolicy};
+use fs_matdb::{ClaimSelection, PropertyKey, SelectionPolicy};
 use fs_material::MaterialError;
 use fs_material::gas_species::input::temperature::IsobaricGasLaw;
 use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
 use fs_material::state_point::{
     DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, SPECIFIC_HEAT_CAPACITY_PROPERTY,
 };
+use fs_material::thermal::transport::isobaric::{
+    IsobaricHeatCapacityLaw, IsobaricHeatCapacityQuery,
+};
 use fs_qty::{Density, Temperature};
 
 /// The source span and approximation/acceptance tolerances are scene inputs.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(in crate::cht_command) struct Input {
     minimum_temperature_k: f64,
     maximum_temperature_k: f64,
     maximum_interpolation_error_j_kg: Option<f64>,
     maximum_flux_defect_w: f64,
     transient: Option<TransientControls>,
+    /// Opt-in exact original Cp integration; the existing chart path remains unchanged.
+    basis: Basis,
+}
+
+#[derive(Clone, Debug)]
+enum Basis {
+    Existing,
+    IsobaricCp { pressure_axis: Option<String> },
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -54,13 +65,41 @@ pub(in crate::cht_command) fn parse(
             "maximum_interpolation_error_j_kg",
             "maximum_flux_defect_w",
             "transient_controls",
+            "basis",
+            "pressure_axis",
         ],
     )?;
+    let basis = match value.get("basis") {
+        None => {
+            if value.get("pressure_axis").is_some() {
+                return Err(bad("fluid_enthalpy.pressure_axis requires basis isobaric-cp"));
+            }
+            Basis::Existing
+        }
+        Some(basis) if basis.as_str() == Some("isobaric-cp") => {
+            let pressure_axis = match source {
+                FluidSource::Liquid { .. } => Some(super::string(value, "pressure_axis")?.into()),
+                FluidSource::Gas { .. } => {
+                    if value.get("pressure_axis").is_some() {
+                        return Err(bad("gas isobaric-cp retains its original pressure; pressure_axis is only for liquid cards"));
+                    }
+                    None
+                }
+            };
+            Basis::IsobaricCp { pressure_axis }
+        }
+        Some(_) => return Err(bad("fluid_enthalpy.basis must be isobaric-cp when specified")),
+    };
     let number = |name| super::super::number(value, name, "fluid_enthalpy");
     let minimum_temperature_k = number("minimum_temperature_k")?;
     let maximum_temperature_k = number("maximum_temperature_k")?;
     let maximum_flux_defect_w = number("maximum_flux_defect_w")?;
-    let maximum_interpolation_error_j_kg = match source {
+    let maximum_interpolation_error_j_kg = if matches!(basis, Basis::IsobaricCp { .. }) {
+        if value.get("maximum_interpolation_error_j_kg").is_some() {
+            return Err(bad("isobaric-cp uses the exact original Cp integral; no interpolation-error field applies"));
+        }
+        None
+    } else { match source {
         FluidSource::Liquid { .. } => Some(number("maximum_interpolation_error_j_kg")?),
         FluidSource::Gas { .. } => {
             if value.get("maximum_interpolation_error_j_kg").is_some() {
@@ -70,7 +109,7 @@ pub(in crate::cht_command) fn parse(
             }
             None
         }
-    };
+    }};
     let reference = source
         .evolving_reference_temperature()
         .expect("evolving source admitted");
@@ -105,6 +144,7 @@ pub(in crate::cht_command) fn parse(
         maximum_interpolation_error_j_kg,
         maximum_flux_defect_w,
         transient,
+        basis,
     }))
 }
 
@@ -156,6 +196,7 @@ impl TransientControls {
 enum Source<'a> {
     Gas(&'a IsobaricGasLaw),
     Liquid(ResolvedHeatCapacityCurve),
+    IsobaricCp(IsobaricHeatCapacityLaw),
 }
 
 pub(super) struct Bound<'a> {
@@ -164,7 +205,7 @@ pub(super) struct Bound<'a> {
 }
 
 impl Input {
-    pub(super) fn controls(self, reference_temperature_k: f64) -> MaterialEnthalpyConfig {
+    pub(super) fn controls(&self, reference_temperature_k: f64) -> MaterialEnthalpyConfig {
         MaterialEnthalpyConfig {
             reference_temperature_k,
             maximum_flux_defect_w: self.maximum_flux_defect_w,
@@ -172,7 +213,7 @@ impl Input {
     }
 
     pub(super) fn transient_controls(
-        self,
+        &self,
         reference_temperature_k: f64,
     ) -> Result<MaterialEnthalpyTransientConfig> {
         let controls = self
@@ -189,7 +230,7 @@ impl Input {
         })
     }
 
-    pub(super) fn bind(self, fluid: &FluidSource) -> Result<Bound<'_>> {
+    pub(super) fn bind<'a>(&self, fluid: &'a FluidSource) -> Result<Bound<'a>> {
         let source = match fluid {
             FluidSource::Gas {
                 temperature_law: Some(law),
@@ -200,6 +241,12 @@ impl Input {
                 law.at_temperature(Temperature::new(self.minimum_temperature_k))
                     .and_then(|_| law.at_temperature(Temperature::new(self.maximum_temperature_k)))
                     .map_err(|error| bad(error.to_string()))?;
+                if matches!(self.basis, Basis::IsobaricCp { .. }) {
+                    law.admit_caloric_interval(
+                        Temperature::new(self.minimum_temperature_k),
+                        Temperature::new(self.maximum_temperature_k),
+                    ).map_err(|error| bad(error.to_string()))?;
+                }
                 Source::Gas(law)
             }
             FluidSource::Liquid {
@@ -216,6 +263,25 @@ impl Input {
                 let upper = point
                     .with(axis, self.maximum_temperature_k)
                     .map_err(|error| bad(error.to_string()))?;
+                if let Basis::IsobaricCp { pressure_axis: Some(pressure_axis) } = &self.basis {
+                    let cp = state.material().property(SPECIFIC_HEAT_CAPACITY_PROPERTY)
+                        .ok_or_else(|| bad("isobaric-cp requires the original resolved fluid Cp claim"))?;
+                    let selected = cp.answer().receipt.selected;
+                    let claim = pack.card().claims().claim(selected)
+                        .ok_or_else(|| bad("original fluid Cp claim is missing from its retained card"))?;
+                    Source::IsobaricCp(IsobaricHeatCapacityLaw::try_new(
+                        pack.card(),
+                        IsobaricHeatCapacityQuery {
+                            specific_heat_cp: &claim.key,
+                            temperature_axis: axis,
+                            pressure_axis,
+                            lower: &lower,
+                            upper: &upper,
+                            selection: ClaimSelection::Pinned(selected),
+                        },
+                        fluid.evolving_reference_temperature().expect("evolving fluid admitted"),
+                    ).map_err(|error| bad(error.to_string()))?)
+                } else {
                 Source::Liquid(
                     ResolvedHeatCapacityCurve::try_new(
                         pack.card(),
@@ -237,6 +303,7 @@ impl Input {
                     )
                     .map_err(|error| bad(error.to_string()))?,
                 )
+                }
             }
             _ => {
                 return Err(bad(
@@ -246,7 +313,7 @@ impl Input {
         };
         Ok(Bound {
             source,
-            input: self,
+            input: self.clone(),
         })
     }
 }
@@ -270,6 +337,9 @@ impl ConvectionCaloricLaw for Bound<'_> {
         match &self.source {
             Source::Gas(law) => law.tangent_at_temperature(reference_temperature_k, temperature_k),
             Source::Liquid(law) => {
+                law.tangent_at_temperature(reference_temperature_k, temperature_k)
+            }
+            Source::IsobaricCp(law) => {
                 law.tangent_at_temperature(reference_temperature_k, temperature_k)
             }
         }
@@ -314,9 +384,20 @@ impl Bound<'_> {
         state: &MaterialEnthalpyState,
     ) -> Result<String> {
         let number = super::super::num;
-        let identity = match &self.source {
-            Source::Gas(_) => "null".into(), // Original gas receipts remain in material_inputs.
-            Source::Liquid(law) => super::super::quote(&law.curve().identity().to_hex()),
+        let (identity, exact) = match &self.source {
+            Source::Gas(law) => (
+                "null".into(), // Original gas receipts remain in material_inputs.
+                if matches!(self.input.basis, Basis::IsobaricCp { .. }) {
+                    format!(",\"basis\":\"isobaric-cp\",\"pressure_pa\":{}",
+                        number(law.reference().state().pressure)?)
+                } else { String::new() },
+            ),
+            Source::Liquid(law) => (super::super::quote(&law.curve().identity().to_hex()), String::new()),
+            Source::IsobaricCp(law) => (
+                "null".into(),
+                format!(",\"basis\":\"isobaric-cp\",\"caloric_identity\":{},\"pressure_pa\":{}",
+                    super::super::quote(&law.identity().to_hex()), number(law.pressure_pa())?),
+            ),
         };
         let interpolation = self
             .input
@@ -329,7 +410,7 @@ impl Bound<'_> {
                 "{{\"advection\":\"source-enthalpy-first-order-upwind\",",
                 "\"reference_temperature_k\":{},\"minimum_temperature_k\":{},\"maximum_temperature_k\":{},",
                 "\"maximum_interpolation_error_j_kg\":{},\"chart_identity\":{},",
-                "\"flux_tolerance_w\":{},\"maximum_face_flux_defect_w\":{},\"maximum_cell_flux_defect_w\":{}}}"
+                "\"flux_tolerance_w\":{},\"maximum_face_flux_defect_w\":{},\"maximum_cell_flux_defect_w\":{}{}}}"
             ),
             number(reference_temperature_k)?,
             number(self.input.minimum_temperature_k)?,
@@ -338,7 +419,8 @@ impl Bound<'_> {
             identity,
             number(self.input.maximum_flux_defect_w)?,
             number(state.report.maximum_face_flux_defect_w)?,
-            number(state.report.maximum_cell_flux_defect_w)?
+            number(state.report.maximum_cell_flux_defect_w)?,
+            exact,
         ))
     }
 }

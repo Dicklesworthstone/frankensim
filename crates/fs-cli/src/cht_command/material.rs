@@ -662,7 +662,7 @@ pub(super) fn solve(
         },
         _ => bad(error.to_string()),
     };
-    let (run, caloric_report) = if let Some(input) = scene.fluid_enthalpy {
+    let (run, caloric_report) = if let Some(input) = scene.fluid_enthalpy.as_ref() {
         let caloric = input.bind(source)?;
         let energy = fs_lbm::conjugate::EnergyConfig {
             scheme: fs_lbm::conjugate::ConvectionScheme::Upwind,
@@ -848,7 +848,7 @@ pub(super) fn march(
         },
         _ => bad(error.to_string()),
     };
-    let (run, caloric_report, solid_feedback) = if let Some(input) = scene.fluid_enthalpy {
+    let (run, caloric_report, solid_feedback) = if let Some(input) = scene.fluid_enthalpy.as_ref() {
         let caloric = input.bind(source)?;
         let reference_temperature = source.evolving_reference_temperature()
             .expect("evolving fluid admitted");

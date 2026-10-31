@@ -282,6 +282,57 @@ reference temperature, declared span and tolerances, liquid chart identity
 (or `null` for the original analytic gas law), and final face/cell flux defects.
 Existing material input and endpoint receipts remain available.
 
+### Exact original isobaric Cp
+
+To integrate the original liquid Cp segments directly, add
+`basis: "isobaric-cp"` to the same `fluid_enthalpy` object:
+
+```json
+{
+  "fluid_enthalpy": {
+    "basis": "isobaric-cp",
+    "pressure_axis": "pressure",
+    "minimum_temperature_k": 290,
+    "maximum_temperature_k": 315,
+    "maximum_flux_defect_w": 1e-7
+  }
+}
+```
+
+This explicit option uses the existing `IsobaricHeatCapacityLaw` and pins the
+Cp claim selected by the complete original fluid state. It retains the source's
+full fixed pressure/composition context and every Cp breakpoint across the
+declared interval. The native caloric owner integrates those segments directly,
+without an interpolated enthalpy chart or a second material fit. Omit
+`maximum_interpolation_error_j_kg` with this basis: no chart approximation
+tolerance applies. Omitting `basis` preserves the existing liquid chart path
+and its required interpolation tolerance.
+
+A liquid must name its original pressure coordinate with `pressure_axis`.
+The source state must carry positive typed absolute temperature and pressure,
+and the selected Cp claim must explicitly support that pressure over the
+complete interval. An unsupported extra coordinate, legacy untyped pressure,
+stress quantity or incompatible semantic kind refuses. The selected specific
+heat must represent single-phase isobaric Cp at the held conditions; this
+declaration does not convert Cv or an apparent phase-change capacity into Cp.
+
+A gas may also select `basis: "isobaric-cp"`, while omitting both
+`pressure_axis` and `maximum_interpolation_error_j_kg`. Its existing record
+owns pressure and composition. Preparation calls the original gas owner's
+whole-interval caloric admission, including capacity bounds and crossed
+thermochemical region seams. An unreconciled NASA-9 enthalpy jump refuses;
+this adapter does not adjust or reconcile source coefficients.
+
+Exact liquid results report `basis: "isobaric-cp"`, held `pressure_pa`
+and `caloric_identity`, which retains the prepared original source receipts.
+Their `chart_identity` and interpolation tolerance are `null`.
+Original material input and endpoint identities remain unchanged. Exact gas
+results report their basis and held pressure alongside the existing source
+evidence. The same 5% density/Cp bounds, upwind operator and nonlinear heat-flux
+acceptance apply.
+
+### Transient source enthalpy
+
 For an unsteady scene, add explicit nonlinear and total-work controls inside
 the same object:
 
@@ -305,9 +356,11 @@ the same object:
 ```
 
 These controls are required for transient source enthalpy and refuse on a
-steady scene. Transient `fluid_enthalpy` requires authored or frozen solid
-storage; combining it with temperature-dependent solid calorics is currently
-refused. Counts must be positive integers, with at most 1,000,000 passes
+steady scene. Transient `fluid_enthalpy` supports authored or frozen solid
+storage, or every solid evolving through its original source storage interval.
+The latter shares one native thermal endpoint with fluid calorimetry and retains
+the additional `transient.solid_storage` conductivity/storage controls.
+Counts must be positive integers, with at most 1,000,000 passes
 per step and 10,000,000 energy solves for the whole march. All tolerances must
 be finite and nonnegative, and relaxation must be in `(0, 1]`. Choose them for
 the scene's temperature, heat and energy scales; the examples are explicit
@@ -328,6 +381,19 @@ transient history record includes `stored_energy_change_j`, `source_energy_j`,
 `boundary_outflow_j` and `closure_j`, with positive boundary energy directed
 outward. These are the native physical heat records, including thermostat and
 radiation heat. The existing history sampling limit still applies.
+
+When evolving solid storage is also selected, each accepted native heat step
+contains both the fluid's original enthalpy increment and each solid's
+fixed-reference-mass Cp integral. Solid conductivity is evaluated at that same
+thermal endpoint. Native interface/contact fluxes exchange equal and opposite
+heat; they do not create a second fluid/solid heat budget. The ordinary
+`stored_energy_change_j`, `source_energy_j`, `boundary_outflow_j` and
+`closure_j` records retain the combined physical ledger.
+`material_feedback.solid_storage` continues to report original source
+identities, solid endpoint defects and solid stored-energy increments.
+The combined report identifies `solid_coupling: "joint-implicit-endpoint"`.
+The fluid caloric report keeps its explicit per-step and whole-march work caps;
+a source, acceptance or budget failure publishes no partial result.
 
 
 ## Unsteady flow with temperature-dependent fluid properties

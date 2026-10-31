@@ -169,6 +169,22 @@ entry retains its original behavior. Focused tests independently reduce a
 piecewise-Cp two-cell energy balance, material substitutions, fixed-reservoir
 storage/radiation, bounded large-step iteration, and source/iteration refusals.
 
+### Exact source Cp and local solid storage admission
+
+The original `IsobaricHeatCapacityLaw` implements `ConvectionCaloricLaw`
+directly through its exact source-Cp segment integral and tangent. Both existing
+steady and transient enthalpy entries can therefore retain every original Cp
+breakpoint without constructing a resampled enthalpy chart.
+
+The joint fluid/solid transient owner admits EACH solid cell's constitutive
+storage defect against that cell's own floating-point allowance. Another
+voxel's large reference mass or temperature cannot waive a local energy error.
+Summed roundoff is used only by the whole-domain heat ledger; nonfinite
+allowances refuse. Focused source-based regressions cover an independently
+reduced coupled energy balance, repeated thermostats with radiation, source and
+work-budget refusals, and a large unheated specimen that cannot hide a small
+voxel's 30 J nonlinear caloric defect.
+
 ### Solved material flow on the shared enthalpy timeline
 
 With `enthalpy-coupling`, `MaterialChtFluid::solve_flow` retains the actual

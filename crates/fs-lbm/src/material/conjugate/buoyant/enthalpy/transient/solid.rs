@@ -327,6 +327,7 @@ fn joint_energy_step(
         let mut maximum_solid_storage_defect_j = 0.0_f64;
         let mut solid_stored_energy_change_j = 0.0_f64;
         let mut solid_roundoff_j = 0.0_f64;
+        let mut solid_storage_ok = true;
         let mut outflow_correction_w = radiation_correction_w;
         for cell in 0..domain.cell_count() {
             poll(gate)?;
@@ -352,11 +353,22 @@ fn joint_energy_step(
                 maximum_solid_storage_defect_j =
                     maximum_solid_storage_defect_j.max(defect_j.abs());
                 solid_stored_energy_change_j += stored[cell];
-                solid_roundoff_j += 64.0
+                let cell_roundoff_j = 64.0
                     * f64::EPSILON
                     * storage_w_k[cell]
                     * step.time_step_s
                     * (old.abs() + new.abs());
+                // A different voxel's reference mass must not loosen this
+                // cell's constitutive closure; only the global ledger sums
+                // independently bounded floating-point roundoff.
+                solid_storage_ok &= defect_j.abs()
+                    <= solid_controls.storage_tolerance_j + cell_roundoff_j;
+                solid_roundoff_j += cell_roundoff_j;
+                if !cell_roundoff_j.is_finite() || !solid_roundoff_j.is_finite() {
+                    return Err(MaterialBuoyancyError::Invalid(
+                        "joint solid storage roundoff is unrepresentable",
+                    ));
+                }
             }
         }
 
@@ -405,8 +417,6 @@ fn joint_energy_step(
 
         let temperature_roundoff =
             64.0 * f64::EPSILON * largest_temperature;
-        let solid_storage_ok = maximum_solid_storage_defect_j
-            <= solid_controls.storage_tolerance_j + solid_roundoff_j;
         let fluid_ok = temperature_defect_k
             <= fluid_controls.temperature_tolerance_k + temperature_roundoff
             && maximum_fluid_storage_defect_w

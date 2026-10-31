@@ -23,6 +23,7 @@ use fs_material::{
     phase::ResolvedHeatCapacityCurve,
     thermochemical_gas::energy::enthalpy::GasEnthalpyLaw,
 };
+use fs_material::thermal::transport::isobaric::IsobaricHeatCapacityLaw;
 use fs_qty::{Pressure, Temperature};
 
 /// One immutable, single-phase caloric owner at fixed pressure/composition.
@@ -65,6 +66,24 @@ impl ConvectionCaloricLaw for ResolvedHeatCapacityCurve {
                 .map_err(source_error)?,
             heat_capacity_j_kg_k: self
                 .secant_heat_capacity(temperature_k, temperature_k)
+                .map_err(source_error)?,
+        })
+    }
+}
+
+impl ConvectionCaloricLaw for IsobaricHeatCapacityLaw {
+    fn tangent_at_temperature(
+        &self,
+        reference_temperature_k: f64,
+        temperature_k: f64,
+    ) -> Result<AffineSpecificEnthalpy, MaterialError> {
+        Ok(AffineSpecificEnthalpy {
+            temperature_k,
+            enthalpy_j_kg: self
+                .specific_enthalpy_change_j_kg(reference_temperature_k, temperature_k)
+                .map_err(source_error)?,
+            heat_capacity_j_kg_k: self
+                .specific_heat_cp_j_kg_k(temperature_k)
                 .map_err(source_error)?,
         })
     }
