@@ -574,6 +574,86 @@ fn prestressed_beam_is_harmonic_without_ei_and_inharmonic_with_it() {
 }
 
 #[test]
+fn g1_pinned_beam_harmonics_survive_zero_and_vanishing_tension() {
+    let (length, density, ei): (f64, f64, f64) = (0.7, 1.0e-3, 2.0e-3);
+    for k in 1..=16 {
+        // Independent simply-supported bending eigenvalue: EI*kappa^4/mu.
+        let kappa = k as f64 * core::f64::consts::PI / length;
+        let expected = (ei / density).sqrt() * kappa.powi(2);
+        for tension in [0.0, 1.0e-320, 1.0e-20] {
+            let actual = fs_nlmodal::prestressed_beam_omega(length, tension, density, ei, k);
+            assert!(
+                (actual / expected - 1.0).abs() < 2.0e-14,
+                "mode {k}, tension {tension}: {actual} vs {expected}"
+            );
+        }
+    }
+    let fundamental = fs_nlmodal::prestressed_beam_omega(length, 0.0, density, ei, 1);
+    let second = fs_nlmodal::prestressed_beam_omega(length, 0.0, density, ei, 2);
+    assert!((second / fundamental - 4.0).abs() < 1.0e-14);
+}
+
+#[test]
+fn g1_pinned_beam_compression_retains_the_euler_buckling_boundary() {
+    // L=pi gives kappa=k. For EI=1, the first critical compressive load is
+    // T=-1, and the second is T=-4. Only the unstable mode loses a real omega.
+    let length = core::f64::consts::PI;
+    let frequency = |tension, k| fs_nlmodal::prestressed_beam_omega(length, tension, 4.0, 1.0, k);
+    assert_eq!(frequency(-0.75, 1), 0.25);
+    assert_eq!(frequency(-1.0, 1), 0.0);
+    assert!(frequency(-1.25, 1).is_nan());
+    assert!((frequency(-1.0, 2) - 3.0_f64.sqrt()).abs() < 1.0e-14);
+    let offset = 1.0e-8_f64;
+    let expected = 0.5 * offset.sqrt();
+    assert!((frequency(-1.0 + offset, 1) / expected - 1.0).abs() < 5.0e-9);
+    assert!(frequency(-1.0 - offset, 1).is_nan());
+}
+
+#[test]
+fn g3_pinned_beam_dispersion_preserves_physical_scaling() {
+    let (length, tension, density, ei) = (0.7, 80.0, 1.0e-3, 2.0e-3);
+    let reference = fs_nlmodal::prestressed_beam_omega(length, tension, density, ei, 7);
+    for scale in [1.0e-250, 1.0e250] {
+        // Scale every extensive mass/stiffness by the same factor.
+        let actual = fs_nlmodal::prestressed_beam_omega(
+            length,
+            scale * tension,
+            scale * density,
+            scale * ei,
+            7,
+        );
+        assert!((actual / reference - 1.0).abs() < 2.0e-14);
+    }
+    for scale in [1.0e-60_f64, 1.0e60_f64] {
+        // Same material and tensile stress, with all lengths scaled: A~s^2,
+        // I~s^4, mu~s^2, T~s^2. Every angular frequency must scale as 1/s.
+        let actual = fs_nlmodal::prestressed_beam_omega(
+            length * scale,
+            tension * scale.powi(2),
+            density * scale.powi(2),
+            ei * scale.powi(4),
+            7,
+        );
+        assert!((actual * scale / reference - 1.0).abs() < 2.0e-14);
+    }
+    for (density, ei, expected) in [(1.0e200, 1.0e-200, 1.0e-200), (1.0e-200, 1.0e200, 1.0e200)] {
+        let actual = fs_nlmodal::prestressed_beam_omega(core::f64::consts::PI, 0.0, density, ei, 1);
+        assert!((actual / expected - 1.0).abs() < 2.0e-14);
+    }
+}
+
+#[test]
+fn g0_beam_dispersion_never_discards_invalid_bending_stiffness() {
+    for ei in [-1.0, f64::NAN, f64::INFINITY] {
+        assert!(fs_nlmodal::prestressed_beam_omega(1.0, 10.0, 1.0, ei, 1).is_nan());
+    }
+    assert!(fs_nlmodal::prestressed_beam_omega(1.0, 10.0, 1.0, 0.0, 0).is_nan());
+    assert!(fs_nlmodal::prestressed_beam_omega(0.0, 10.0, 1.0, 0.0, 1).is_nan());
+    assert!(fs_nlmodal::prestressed_beam_omega(1.0, 10.0, 0.0, 0.0, 1).is_nan());
+    assert!(fs_nlmodal::prestressed_beam_omega(1.0, f64::NAN, 1.0, 0.0, 1).is_nan());
+}
+
+#[test]
 fn energy_conserved_undamped() {
     let model =
         von_karman_ss_plate(&steel_plate(), &modes_grid(2, 2), &modes_grid(3, 3)).expect("plate");

@@ -81,10 +81,17 @@ the crash cascade with structurally exact energy accounting.
   cosines `κ = (k−½)π/L`. `φ(0) ≠ 0`, so the attachment is a
   Dirac port. Fixed-fixed sines stay the one-way bridge.
 - `prestressed_beam_omega` — linear angular frequency of sine mode
-  `k` on a tensioned Euler–Bernoulli beam,
-  `ω = n π c/L √(1 + B n²)` with `B = π² EI/(T L²)`. `EI = 0` is
-  the flexible taut-string limit. Cables, stays, and strings share
-  this waveguide law.
+  `k` on a uniform pinned-pinned Euler–Bernoulli beam,
+  `ω² = κ² (T + EI κ²)/μ`, `κ = kπ/L`. `EI = 0` is the flexible
+  taut-string limit; zero or vanishing tension retains the pure-bending
+  `k²` spectrum without division by the preload. Subcritical compression
+  lowers the spectrum, critical modal stiffness gives zero, and negative
+  modal stiffness returns NaN instead of fabricating a stable frequency.
+  Invalid dimensions, mode index, or bending stiffness also return NaN.
+  Cables, stays, and strings share this law; it is not a free-free or
+  clamped beam formula. G1 checks the bending and Euler-load limits;
+  G3 checks mass/stiffness and geometric scaling, including representable
+  frequencies whose squares lie outside the f64 range.
 - `longitudinal::LongitudinalString` — the same moderate-slope axial
   material strain `u_x + (y_x² + z_x²)/2` with explicit finite longitudinal
   inertia. The caller supplies one or two cosine slope series, including

@@ -1126,11 +1126,18 @@ pub fn kirchhoff_carrier_moving_end(
     })
 }
 
-/// Linear angular frequency of sine mode `k` (1-based) on a prestressed
-/// Euler–Bernoulli beam: `ω = n π c / L √(1 + B n²)` with
-/// `c = √(T/μ)` and `B = π² EI / (T L²)`. `ei == 0` is the flexible
-/// taut-string limit. This is a 1-D waveguide law (cables, stays,
-/// guy wires, strings), not an instrument primitive.
+/// Linear angular frequency of sine mode `k` (1-based) on a uniform,
+/// pinned-pinned Euler–Bernoulli beam: `ω² = κ² (T + EI κ²) / μ`,
+/// `κ = k π / L`. `ei == 0` is the flexible taut-string limit;
+/// `tension == 0` retains the simply-supported beam's bending spectrum.
+/// This is a 1-D continuum law (cables, stays, wires, strings), not an
+/// instrument primitive or the free-free/clamped beam spectrum.
+///
+/// Positive tension stiffens the beam; negative tension represents compression.
+/// At that mode's Euler load the result is zero. Beyond it the modal stiffness
+/// is negative and this real-valued frequency is NaN, never clamped to a stable
+/// oscillator. NaN also denotes invalid/nonfinite parameters, negative `ei`,
+/// nonpositive length/density, or the nonexistent sine mode `k == 0`.
 #[must_use]
 pub fn prestressed_beam_omega(
     length: f64,
@@ -1139,14 +1146,30 @@ pub fn prestressed_beam_omega(
     ei: f64,
     k: usize,
 ) -> f64 {
-    let n = k as f64;
-    let wave = det::sqrt(tension / lin_density);
-    let omega_flex = n * core::f64::consts::PI * wave / length;
-    if !(ei > 0.0) {
-        return omega_flex;
+    if !length.is_finite()
+        || length <= 0.0
+        || !tension.is_finite()
+        || !lin_density.is_finite()
+        || lin_density <= 0.0
+        || !ei.is_finite()
+        || ei < 0.0
+        || k == 0
+    {
+        return f64::NAN;
     }
-    let inharm = core::f64::consts::PI * core::f64::consts::PI * ei / (tension * length * length);
-    omega_flex * det::sqrt(1.0 + inharm * n * n)
+    let kappa = k as f64 * core::f64::consts::PI / length;
+    // Substituting sin(kappa*x) into mu*w_tt + EI*w_xxxx - T*w_xx = 0
+    // adds the bending and axial stiffness BEFORE taking the square root.
+    // Factoring through sqrt(T) instead makes a finite bending mode 0*infinity
+    // at zero tension, overflows near it, and loses stable compressed modes.
+    let modal_load = if ei == 0.0 {
+        tension
+    } else {
+        tension + (ei * kappa) * kappa
+    };
+    // Taking roots before the mass quotient also retains representable
+    // frequencies whose squared value would overflow or underflow.
+    kappa * (det::sqrt(modal_load) / det::sqrt(lin_density))
 }
 
 /// First-order Duffing backbone: for
