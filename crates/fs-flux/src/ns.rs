@@ -27,6 +27,8 @@ pub mod boundary;
 pub mod linearization;
 /// Bounded damped Newton integration of stiff generalized-Newtonian flow.
 pub mod newton;
+/// Spatial intrinsic-permeability tensors in the existing Stokes operator.
+pub mod porous;
 
 fn positive_viscosity(nu: f64) -> f64 {
     assert!(
@@ -243,7 +245,7 @@ impl<'m> FluxSystem<'m> {
         inv_dt: f64,
         uprev: Option<&[f64]>,
     ) -> (Csr, Vec<f64>) {
-        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev, None)
+        self.assemble_operator(params, None, f, g, advect, inv_dt, uprev, None, None)
     }
 
     /// Assemble `-div(2 nu D(u)) + grad(p) = f`, with
@@ -297,7 +299,17 @@ impl<'m> FluxSystem<'m> {
             params.sigma.is_finite() && params.sigma > 0.0,
             "SIP penalty must be positive and finite"
         );
-        self.assemble_operator(params, Some(viscosity), f, g, advect, inv_dt, uprev, None)
+        self.assemble_operator(
+            params,
+            Some(viscosity),
+            f,
+            g,
+            advect,
+            inv_dt,
+            uprev,
+            None,
+            None,
+        )
     }
 
     #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
@@ -311,6 +323,7 @@ impl<'m> FluxSystem<'m> {
         inv_dt: f64,
         uprev: Option<&[f64]>,
         boundary: Option<&boundary::AdmittedBoundary>,
+        darcy: Option<&[porous::DarcyDrag]>,
     ) -> (Csr, Vec<f64>) {
         let mesh = self.mesh;
         let nu = params.nu;
@@ -360,6 +373,7 @@ impl<'m> FluxSystem<'m> {
                     .map(|(q, w)| w * positive_viscosity(field(t, q)))
                     .sum::<f64>()
             });
+            let reaction = darcy.map(|cells| cells[t].local_matrix(basis, p, area));
             for i in 0..6 {
                 let gi = self.dof(t, i);
                 // Load.
@@ -382,7 +396,12 @@ impl<'m> FluxSystem<'m> {
                                 }
                             }
                         }
-                        coo.push(gi, gj, integrated_nu * visc);
+                        let value = integrated_nu * visc;
+                        coo.push(
+                            gi,
+                            gj,
+                            reaction.as_ref().map_or(value, |drag| value + drag[i][j]),
+                        );
                     }
                 }
                 // Div coupling: b(u, q) = −∫ q div u; symmetric block.

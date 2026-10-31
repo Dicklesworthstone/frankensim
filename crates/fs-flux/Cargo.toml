@@ -69,6 +69,11 @@ name = "stokes_boundary"
 path = "tests/stokes_boundary.rs"
 required-features = ["continuum"]
 
+[[test]]
+name = "brinkman"
+path = "tests/brinkman.rs"
+required-features = ["continuum"]
+
 [[example]]
 name = "pressure_channel"
 path = "examples/pressure_channel.rs"

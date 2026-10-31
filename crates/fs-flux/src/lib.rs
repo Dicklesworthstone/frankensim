@@ -64,7 +64,7 @@ pub use gas_film::{
 };
 #[cfg(feature = "continuum")]
 pub use material::{
-    MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
+    MaterialBrinkmanSolution, MaterialFluxError, MaterialFluxNumerics, MaterialFluxRheologyPoint, MaterialFluxRheologySample,
     MaterialFluxRheologyStep, MaterialFluxSolution, MaterialFluxSystem, MaterialStokesBoundary,
     MaterialStokesRheologySolution,
 };
@@ -81,6 +81,8 @@ pub use ns::linearization::{
 };
 #[cfg(feature = "continuum")]
 pub use ns::newton::{FluxNewtonControls, FluxNewtonError, FluxNewtonStep};
+#[cfg(feature = "continuum")]
+pub use ns::porous::{BrinkmanAssembly, BrinkmanCell};
 #[cfg(feature = "continuum")]
 pub use ns::{FluxParams, FluxRheologyError, FluxRheologyStep, FluxSolution, FluxSystem};
 #[cfg(feature = "continuum")]

@@ -1651,3 +1651,46 @@ the independent collapse oracle uses
 [Obreschkow et al., equations 3--8](https://arxiv.org/abs/1205.4202).
 These checks establish mathematical-model behavior, not experimental accuracy
 or a resolved multiphase CFD/film-cavitation result.
+
+## Anisotropic Stokes–Brinkman permeability (`continuum`)
+
+`FluxSystem::assemble_brinkman_mixed` adds `nu K^-1 u` to the existing
+BDM1–P0 velocity operator. The stationary, fully saturated rigid-frame model
+is `-div(2 nu_eff D(u)) + nu K^-1 u + grad(p/rho) = f/rho`, `div(u)=0`.
+Velocity is superficial, geometry is metres, intrinsic permeability is m²,
+and `nu=mu/rho` comes from the actual fluid. `BrinkmanCell` retains the
+original `fs_material::porous::permeability::IntrinsicPermeability` and an
+explicit `mu_eff/mu` shear closure; effective shear viscosity never replaces
+molecular viscosity in Darcy drag. The reference for that distinction is
+[Sandia Aria, Brinkman Momentum](https://www.sandia.gov/files/sierra/Aria_Users_5_28/theory/gov_eq/brinkman_mom.html).
+
+All in-plane tensor couplings enter the same momentum matrix. Positive
+principal rates and world-axis projections compile once per cell; symmetric
+cell integrals use the original quadrature without a second global matrix.
+The original SIP interface law, strong normal velocity moments, total-traction
+loads, exact cell continuity, pressure datum and checked residuals remain in
+force. Positive pore drag anchors rigid velocity modes, allowing an entirely
+traction-driven connected porous domain; disconnected meshes still refuse.
+Free-fluid cells have exactly zero drag and preserve the original Stokes law.
+
+`MaterialFluxSystem::solve_brinkman_mixed` uses the original immutable material
+snapshot for viscosity, force/traction division and physical pressure. The
+accepted result retains cell laws and reports nonnegative cell/total Darcy
+dissipation `integral(mu u.K^-1.u)` in W/m of out-of-plane depth. It does not
+automatically deposit that loss into a thermal model or reinterpret superficial
+velocity as pore-scale inertia. Raw pore tensors and viscosity ratios do not
+gain measured source authority through this binding.
+
+Admission refuses zero principal permeability (no artificial leak floor),
+coupling to unresolved out-of-plane flow, unrepresentable drag/shear
+coefficients and all original boundary/solve failures. There is no claim for
+zero-shear pure Darcy discretization, pore storage, deformation, slip,
+Forchheimer inertia, unsaturated/capillary coupling or thermal feedback. The
+steady entry inherits the original synchronous Stokes execution and iteration
+budget; no new cancellation or performance claim is made.
+
+`cargo test -p fs-flux --test brinkman` checks G0/G1/G3: a pressure-driven
+rotated Darcy slab without artificial velocity pins, affine tensor-flow and
+dissipation identities, hyperbolic Brinkman-channel refinement, symmetric
+positive drag power, mixed free/porous cells, original-source viscosity versus
+density scaling, free-fluid equivalence and explicit refusal boundaries.

@@ -291,6 +291,17 @@ impl<'m> FluxSystem<'m> {
         force: &dyn Fn([f64; 2]) -> [f64; 2],
         admitted: &AdmittedBoundary,
     ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
+        self.assemble_stokes_admitted_viscosity_and_drag(params, viscosity, force, admitted, None)
+    }
+
+    pub(super) fn assemble_stokes_admitted_viscosity_and_drag<'a>(
+        &'a self,
+        params: FluxParams,
+        viscosity: &dyn Fn(usize, [f64; 2]) -> f64,
+        force: &dyn Fn([f64; 2]) -> [f64; 2],
+        admitted: &AdmittedBoundary,
+        darcy: Option<&[super::porous::DarcyDrag]>,
+    ) -> Result<StokesAssembly<'a, 'm>, StokesBoundaryError> {
         let bad_viscosity = Cell::new(None);
         let checked_viscosity = |cell, point| {
             if bad_viscosity.get().is_some() {
@@ -325,6 +336,7 @@ impl<'m> FluxSystem<'m> {
             0.0,
             None,
             Some(admitted),
+            darcy,
         );
         if let Some((cell, point, value)) = bad_viscosity.get() {
             return Err(StokesBoundaryError::InvalidViscosity { cell, point, value });
@@ -358,6 +370,15 @@ impl<'m> FluxSystem<'m> {
         params: FluxParams,
         boundaries: &[StokesBoundary<'_>],
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
+        self.admit_stokes_problem_with_drag(params, boundaries, false)
+    }
+
+    pub(super) fn admit_stokes_problem_with_drag(
+        &self,
+        params: FluxParams,
+        boundaries: &[StokesBoundary<'_>],
+        drag_anchors_velocity: bool,
+    ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         if !(params.sigma.is_finite()
             && params.sigma > 0.0
             && params.tol.is_finite()
@@ -371,12 +392,20 @@ impl<'m> FluxSystem<'m> {
         if self.mesh.tris.is_empty() {
             return Err(StokesBoundaryError::InvalidInput("empty fluid mesh"));
         }
-        self.admit_stokes_boundaries(boundaries)
+        self.admit_stokes_boundaries_with_drag(boundaries, drag_anchors_velocity)
     }
 
     pub(super) fn admit_stokes_boundaries(
         &self,
         boundaries: &[StokesBoundary<'_>],
+    ) -> Result<AdmittedBoundary, StokesBoundaryError> {
+        self.admit_stokes_boundaries_with_drag(boundaries, false)
+    }
+
+    fn admit_stokes_boundaries_with_drag(
+        &self,
+        boundaries: &[StokesBoundary<'_>],
+        drag_anchors_velocity: bool,
     ) -> Result<AdmittedBoundary, StokesBoundaryError> {
         let mesh = self.mesh;
         let mut owners = vec![None; mesh.edges.len()];
@@ -409,7 +438,7 @@ impl<'m> FluxSystem<'m> {
                 return Err(StokesBoundaryError::MissingEdge { edge });
             }
         }
-        if !has_velocity {
+        if !has_velocity && !drag_anchors_velocity {
             return Err(StokesBoundaryError::NoVelocityBoundary);
         }
         let mut visited = vec![false; mesh.tris.len()];
