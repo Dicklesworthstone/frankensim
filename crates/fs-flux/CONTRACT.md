@@ -1569,8 +1569,12 @@ positive, conservative endpoint inventories. A bounded scalar solve closes
 the water transfer. Near-complete donor depletion preserves the small donor
 remainder using positive implicit weights. The bracket grows from zero along
 the initial driving direction; a distant inadmissible volume-floor state does
-not veto an admissible interior root. General leaking-solute residuals do not
-carry a uniqueness claim.
+not veto an admissible interior root. Scaled secant interpolation stays inside
+that bracket; bisection follows an interpolation that failed to halve it.
+Acceptance requires the water-residual tolerance or a sign-changing bracket
+narrow enough to bound water-transfer error. The latter avoids false refusal
+when steep osmotic feedback amplifies floating-point residual noise. General
+leaking-solute residuals do not carry a uniqueness claim.
 
 Membrane sweeps follow their declared fixed order. The first-order Lie split
 compares one full sweep with two half sweeps, retains the latter, and controls
@@ -1601,8 +1605,8 @@ Its explicit numerical coefficients are illustrative, not a calibrated source.
 
 This owner assumes well-mixed, isothermal dilute compartments with negligible
 solute volume and fixed membrane area/coefficients. It supplies no electrolyte
-activity law, Donnan potential, resolved boundary-layer concentration
-polarization, nonisothermal heat/entropy balance, mechanical inertia, ionic
+activity law, Donnan potential, transient boundary-layer storage or resolved
+crossflow fields, nonisothermal heat/entropy balance, mechanical inertia, ionic
 reaction chemistry or experimentally validated membrane selectivity. Ordinary
 nonselective fluid links use zero reflection; gas solution-diffusion retains
 its separate existing physical law and permeability units.
@@ -1779,3 +1783,26 @@ internal gas pressure gradients/viscous resistance, liquid/gas inertia,
 dynamic contact-angle laws, liquid heating, dissolution and phase change
 are outside this rung. The caller explicitly assigns the gas to the declared
 wetting environment; material-name strings do not establish that assignment.
+
+### Polarized membrane faces in finite networks
+
+`OsmoticMembrane::new_polarized` consumes the original shared
+`PolarizedMembraneTransport`. At each scalar water trial it obtains effective
+bulk donor coefficients, eliminates the implicit solute transfers conservatively,
+and reconstructs actual membrane-face concentrations before evaluating osmotic
+water flow. Each species fit is evaluated once and reused. The membrane and its
+films carry the same solute flux; no hidden film inventory, artificial solute
+floor or separate nested water root is introduced. Pure-solvent layouts and
+explicitly absent films preserve the original limits. Preparation memory counts
+the actual boxed membrane and film arrays under the original network budget.
+
+G1/G3 checks compare finite diffusion with the series-resistance analytical
+solution, tiny-step retained-solute water rates with independent film roots,
+slow polarized relaxation with the unchanged finite-reservoir equilibrium,
+and leaking-mixture conservation, orientation and ideal free-energy decrease.
+`cargo run -p fs-flux --example osmotic_filtration` compares finite forward and
+pressure-driven reverse osmosis with and without films. It reports actual
+bulk inventories and conserved interval-mean water flux, using illustrative
+explicit coefficients. Films prescribe quasi-steady mass transfer and negligible
+mechanical pressure loss; transient film storage, concentration-dependent
+transport, and empirically inferred crossflow coefficients remain separate.

@@ -15,11 +15,14 @@
 //!
 //! Compartments are well mixed, isothermal and dilute, with negligible solute
 //! volume. A common declared species ordering, solvent and temperature is
-//! mandatory. There is no ionic electrochemistry, solvent inertia, boundary
-//! layer concentration polarization, heat balance or mechanical inertia here.
+//! mandatory. Optional quasi-steady concentration films reconstruct the actual
+//! membrane-face concentrations without adding hidden species inventories or
+//! another nonlinear solve. There is no ionic electrochemistry, solvent inertia,
+//! transient film storage, heat balance or mechanical inertia here.
 //! Successful advances allocate no memory. All workspace is prepared up front;
 //! failed, cancelled or exhausted advances publish neither state nor time.
 
+use fs_material::osmosis::polarization::PolarizedMembraneTransport;
 use fs_material::osmosis::{IdealDiluteSolution, MembraneTransport, OsmosisError};
 
 /// Maximum independently conserved dissolved particle species.
@@ -156,7 +159,13 @@ pub struct OsmoticMembrane {
     left: usize,
     right: usize,
     area_m2: f64,
-    material: MembraneTransport,
+    material: MembraneBoundary,
+}
+
+#[derive(Clone, Debug)]
+enum MembraneBoundary {
+    WellMixed(MembraneTransport),
+    Polarized(PolarizedMembraneTransport),
 }
 
 impl OsmoticMembrane {
@@ -166,6 +175,31 @@ impl OsmoticMembrane {
         right: usize,
         area_m2: f64,
         material: MembraneTransport,
+    ) -> Result<Self, OsmoticNetworkError> {
+        Self::from_boundary(left, right, area_m2, MembraneBoundary::WellMixed(material))
+    }
+
+    /// Add species-specific concentration films on either membrane face.
+    ///
+    /// Films have negligible storage and prescribed mass-transfer coefficients.
+    /// The original membrane owns selectivity and hydraulic resistance. Its
+    /// osmotic force uses reconstructed face concentrations, while the same
+    /// species flux debits and credits the finite bulk inventories. Film viscous
+    /// losses and transient boundary-layer storage are outside this model.
+    pub fn new_polarized(
+        left: usize,
+        right: usize,
+        area_m2: f64,
+        material: PolarizedMembraneTransport,
+    ) -> Result<Self, OsmoticNetworkError> {
+        Self::from_boundary(left, right, area_m2, MembraneBoundary::Polarized(material))
+    }
+
+    fn from_boundary(
+        left: usize,
+        right: usize,
+        area_m2: f64,
+        material: MembraneBoundary,
     ) -> Result<Self, OsmoticNetworkError> {
         if left == right || !positive(area_m2) {
             return Err(OsmoticNetworkError::Invalid(
@@ -178,6 +212,20 @@ impl OsmoticMembrane {
             area_m2,
             material,
         })
+    }
+
+    fn membrane_law(&self) -> &MembraneTransport {
+        match &self.material {
+            MembraneBoundary::WellMixed(material) => material,
+            MembraneBoundary::Polarized(material) => material.membrane(),
+        }
+    }
+
+    fn heap_bytes(&self) -> usize {
+        match &self.material {
+            MembraneBoundary::WellMixed(material) => core::mem::size_of_val(material.solutes()),
+            MembraneBoundary::Polarized(material) => material.heap_bytes(),
+        }
     }
 }
 
@@ -196,7 +244,7 @@ pub struct OsmoticStepControls {
     pub maximum_steps: usize,
     /// Maximum total rejected trials across the requested interval.
     pub maximum_rejections: usize,
-    /// Maximum bisection iterations per implicit membrane exchange.
+    /// Maximum bracket-search and safeguarded scalar iterations per exchange.
     pub maximum_root_iterations: usize,
 }
 
@@ -282,7 +330,7 @@ impl OsmoticNetwork {
         }) || membranes.iter().any(|m| {
             m.left >= cells.len()
                 || m.right >= cells.len()
-                || m.material.solutes().len() != species.len()
+                || m.membrane_law().solutes().len() != species.len()
         }) {
             return Err(OsmoticNetworkError::Invalid(
                 "all cells need one solvent, temperature and species ordering",
@@ -298,11 +346,9 @@ impl OsmoticNetwork {
             .checked_add(3 * cells.len())
             .and_then(|n| n.checked_mul(cell_bytes))
             .and_then(|n| {
-                n.checked_add(
-                    membranes.capacity()
-                        * (core::mem::size_of::<OsmoticMembrane>() + species.len() * 16),
-                )
+                n.checked_add(membranes.capacity() * core::mem::size_of::<OsmoticMembrane>())
             })
+            .and_then(|n| n.checked_add(membranes.iter().map(OsmoticMembrane::heap_bytes).sum()))
             .and_then(|n| n.checked_add(species.capacity() * core::mem::size_of::<String>()))
             .and_then(|n| n.checked_add(species.iter().map(String::capacity).sum()))
             .ok_or(OsmoticNetworkError::Invalid(
@@ -623,10 +669,23 @@ fn pair_endpoint(
     let mut cl = [0.0; MAX_OSMOTIC_SPECIES];
     let mut cr = [0.0; MAX_OSMOTIC_SPECIES];
     let count = left.solution.solute_moles().len();
+    let volume_flux_m_s = water / area_time;
     for i in 0..count {
-        let (kl, kr) = membrane
-            .material
-            .solute_stream_coefficients(i, water / area_time)?;
+        // Each film/membrane exponential fit is evaluated once for this trial.
+        // The cached positive reconstruction is reused after the conservative
+        // implicit species update. No nested water solve or film inventory.
+        let polarization = match &membrane.material {
+            MembraneBoundary::WellMixed(_) => None,
+            MembraneBoundary::Polarized(material) => {
+                Some(material.coefficients(i, volume_flux_m_s)?)
+            }
+        };
+        let (kl, kr) = match &polarization {
+            Some(coefficients) => coefficients.donor_coefficients(),
+            None => membrane
+                .membrane_law()
+                .solute_stream_coefficients(i, volume_flux_m_s)?,
+        };
         let a = area_time * kl / vl;
         let b = area_time * kr / vr;
         if !nonnegative(a) || !nonnegative(b) {
@@ -657,10 +716,16 @@ fn pair_endpoint(
             endpoint.left[i] = nl - transfer;
             endpoint.right[i] = nr + transfer;
         }
-        cl[i] = endpoint.left[i] / vl;
-        cr[i] = endpoint.right[i] / vr;
+        let bulk_left = endpoint.left[i] / vl;
+        let bulk_right = endpoint.right[i] / vr;
+        (cl[i], cr[i]) = match &polarization {
+            Some(coefficients) => {
+                coefficients.membrane_face_concentrations(bulk_left, bulk_right)?
+            }
+            None => (bulk_left, bulk_right),
+        };
     }
-    let flux = membrane.material.water_flux(
+    let flux = membrane.membrane_law().water_flux(
         left.solution.temperature_k(),
         left.pressure.pressure_pa(vl)?,
         right.pressure.pressure_pa(vr)?,
@@ -751,8 +816,31 @@ fn exchange(
         }
     }
     let (mut lo, mut hi, mut flo, mut fhi) = bracket.ok_or(OsmoticNetworkError::Unbracketed)?;
+    let mut bisect_next = false;
     for _ in 0..controls.maximum_root_iterations {
-        let water = lo + 0.5 * (hi - lo);
+        let width = hi - lo;
+        let midpoint = lo + 0.5 * width;
+        // A narrow sign-changing bracket controls the transferred volume even
+        // when a steep polarized osmotic force amplifies floating-point noise
+        // in the residual. This is a state-error stopping rule, not permission
+        // to publish an arbitrary last iterate after work exhaustion.
+        if width <= 2.0 * (atol + rtol * midpoint.abs()) {
+            return evaluate(midpoint);
+        }
+        // Scaled secant weights avoid overflow in fhi-flo. A midpoint follows
+        // any interpolation that failed to halve the bracket, so interpolation
+        // cannot stagnate at one endpoint. Keep the near-origin bracket itself:
+        // permeating-solute models do not have a global unique-root guarantee.
+        let scale = (-flo).max(fhi);
+        let low_weight = -flo / scale;
+        let high_weight = fhi / scale;
+        let fraction = low_weight / (low_weight + high_weight);
+        let interpolate = !bisect_next && fraction > 0.01 && fraction < 0.99;
+        let water = if interpolate {
+            lo + fraction * width
+        } else {
+            midpoint
+        };
         let endpoint = evaluate(water)?;
         let residual = endpoint.residual_m3;
         if residual.abs() <= atol + rtol * water.abs() {
@@ -768,8 +856,8 @@ fn exchange(
             hi = water;
             fhi = residual;
         }
-        // Keep both endpoint signs explicit: no unbracketed Newton jump or
-        // unconverged final midpoint is ever published as a solution.
+        bisect_next = interpolate && hi - lo > 0.5 * width;
+        // Both endpoint signs stay explicit; no unbracketed Newton jump is used.
         debug_assert!(flo <= 0.0 && fhi >= 0.0);
     }
     Err(OsmoticNetworkError::NonlinearConvergence)
@@ -777,3 +865,6 @@ fn exchange(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod polarization_tests;
