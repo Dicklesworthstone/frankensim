@@ -274,6 +274,59 @@ fn thin_and_thick_slabs_follow_exact_beer_lambert_scaling() {
 }
 
 #[test]
+fn spectral_absorption_reaches_native_slab_transport_without_rgb_reconstruction() {
+    let spectral_material = |knots: &[(f64, f64)]| Material::Dielectric {
+        glass: DielectricGlass::new(
+            CauchyIor::try_constant(1.0).expect("null-index fixture"),
+            BeerLambertAbsorption::try_from_spectral_extinction(knots).expect("spectral source"),
+            GlassProvenance::Custom,
+        ),
+        surface: DielectricSurface::SMOOTH,
+    };
+    let clear = material(1.0, 0.0, DielectricSurface::SMOOTH);
+    let constant = material(1.0, 2.0, DielectricSurface::SMOOTH);
+    let flat = spectral_material(&[(380.0, 2.0), (550.0, 2.0), (780.0, 2.0)]);
+    let selective = spectral_material(&[(380.0, 0.0), (500.0, 0.0), (501.0, 20.0), (780.0, 20.0)]);
+    let [clear_film, constant_film, flat_film, selective_film] = with_cx(|cx| {
+        [clear, constant, flat, selective].map(|material| {
+            render(
+                &scene_with_boundaries(&[(0.0, -0.5, material, false)], -1.0, 2.0),
+                cx,
+                &settings(DirectStrategy::Mis, 128, 3),
+            )
+            .expect("spectral slab render")
+        })
+    });
+    assert_channel_ratio(
+        &flat_film,
+        &constant_film,
+        1.0,
+        2.0e-14,
+        "flat spectral equivalence",
+    );
+    assert_channel_ratio(
+        &flat_film,
+        &clear_film,
+        (-1.0_f64).exp(),
+        2.0e-14,
+        "spectral path length",
+    );
+    let blue_ratio = selective_film.xyz[0][2] / clear_film.xyz[0][2];
+    let green_ratio = selective_film.xyz[0][1] / clear_film.xyz[0][1];
+    assert!(
+        blue_ratio > 3.0 * green_ratio,
+        "wavelength-selective absorption was flattened: Z={blue_ratio}, Y={green_ratio}"
+    );
+    let other_declaration = spectral_material(&[(380.0, 2.0), (780.0, 2.0)]);
+    assert_ne!(
+        flat.content_identity(),
+        other_declaration.content_identity(),
+        "material identity must retain the supplied spectral knots"
+    );
+    assert_ne!(flat.content_identity(), selective.content_identity());
+}
+
+#[test]
 fn nested_equal_ior_media_apply_only_the_active_medium_per_segment() {
     let clear_outer = material(1.0, 0.0, DielectricSurface::SMOOTH);
     let outer = material(1.0, 2.0, DielectricSurface::SMOOTH);

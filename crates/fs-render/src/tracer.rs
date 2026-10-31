@@ -1001,6 +1001,14 @@ impl Material {
                         update_material_scalars(&mut hasher, linear_rgb);
                         update_material_scalar(&mut hasher, distance_m);
                     }
+                    BeerLambertParameters::Spectral { spectrum } => {
+                        hasher.update(&[3]);
+                        hasher.update(&(spectrum.knots().len() as u64).to_le_bytes());
+                        for &(wavelength_nm, extinction_per_m) in spectrum.knots() {
+                            update_material_scalar(&mut hasher, wavelength_nm);
+                            update_material_scalar(&mut hasher, extinction_per_m);
+                        }
+                    }
                 }
                 hasher.update(&[match glass.provenance() {
                     GlassProvenance::Custom => 0,
@@ -15518,7 +15526,7 @@ fn medium_transmittance(
 ) -> Result<f64, TracerError> {
     medium.map_or(Ok(1.0), |glass| {
         glass
-            .absorption()
+            .absorption_ref()
             .transmittance(wavelength_nm, distance_m)
             .map_err(Into::into)
     })
@@ -15545,7 +15553,7 @@ fn attenuate_segment(
         if throughput[lane].to_bits() != 0.0_f64.to_bits() {
             throughput[lane] *= active
                 .glass
-                .absorption()
+                .absorption_ref()
                 .transmittance(lambda, distance_m)?;
         }
     }

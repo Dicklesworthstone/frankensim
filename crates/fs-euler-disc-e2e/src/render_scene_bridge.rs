@@ -3409,6 +3409,14 @@ fn hash_material(hasher: &mut DomainHasher, style: EulerMaterialStyle) {
                     hash_linear_rgb(hasher, linear_rgb);
                     hasher.update(&distance_m.to_bits().to_le_bytes());
                 }
+                BeerLambertParameters::Spectral { spectrum } => {
+                    hasher.update(&[3]);
+                    hasher.update(&(spectrum.knots().len() as u64).to_le_bytes());
+                    for &(wavelength_nm, extinction_per_m) in spectrum.knots() {
+                        hasher.update(&wavelength_nm.to_bits().to_le_bytes());
+                        hasher.update(&extinction_per_m.to_bits().to_le_bytes());
+                    }
+                }
             }
             hasher.update(&[match glass.provenance() {
                 GlassProvenance::Custom => 0,

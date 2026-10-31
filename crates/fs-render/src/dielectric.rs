@@ -122,6 +122,74 @@ impl CauchyIor {
     }
 }
 
+/// Maximum number of wavelength knots retained inline by a bulk absorption law.
+pub const MAX_SPECTRAL_ABSORPTION_KNOTS: usize = 16;
+
+/// Piecewise-linear visible-band intensity absorption in inverse metres.
+///
+/// The law retains the declared wavelengths and coefficients without an RGB
+/// reconstruction. It describes homogeneous bulk attenuation, independently
+/// of the dielectric surface's Fresnel reflection and transmission.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpectralAbsorption {
+    knots: [(f64, f64); MAX_SPECTRAL_ABSORPTION_KNOTS],
+    count: usize,
+}
+
+impl SpectralAbsorption {
+    /// Admit 2–16 (vacuum_wavelength_nm, intensity_absorption_per_m) knots.
+    ///
+    /// Knots must increase strictly, cover exactly 380–780 nm, and have finite
+    /// nonnegative coefficients. Values are neither sorted nor extrapolated.
+    pub fn try_new(knots: &[(f64, f64)]) -> Result<Self, DielectricError> {
+        if !(2..=MAX_SPECTRAL_ABSORPTION_KNOTS).contains(&knots.len())
+            || knots[0].0 != LAMBDA_MIN
+            || knots[knots.len() - 1].0 != LAMBDA_MAX
+            || knots.iter().any(|(wavelength, coefficient)| {
+                !wavelength.is_finite() || !coefficient.is_finite() || *coefficient < 0.0
+            })
+            || knots.windows(2).any(|pair| pair[0].0 >= pair[1].0)
+        {
+            return Err(DielectricError::InvalidAbsorption);
+        }
+        let mut spectrum = Self {
+            knots: [(0.0, 0.0); MAX_SPECTRAL_ABSORPTION_KNOTS],
+            count: knots.len(),
+        };
+        for (slot, &(wavelength, coefficient)) in spectrum.knots.iter_mut().zip(knots) {
+            *slot = (
+                wavelength,
+                if coefficient == 0.0 { 0.0 } else { coefficient },
+            );
+        }
+        Ok(spectrum)
+    }
+
+    /// Original wavelength/absorption knots, without unused inline storage.
+    #[must_use]
+    pub fn knots(&self) -> &[(f64, f64)] {
+        &self.knots[..self.count]
+    }
+
+    /// Evaluate intensity absorption [1/m] within the declared visible band.
+    pub fn extinction_per_m(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        let knots = self.knots();
+        let upper = knots
+            .partition_point(|(wavelength, _)| *wavelength < wavelength_nm)
+            .clamp(1, self.count - 1);
+        let (lo, a) = knots[upper - 1];
+        let (hi, b) = knots[upper];
+        if a == b {
+            return Ok(a);
+        }
+        let weight = (wavelength_nm - lo) / (hi - lo);
+        // A convex combination preserves nonnegative coefficients and exact
+        // endpoints without cancellation or an artificial opacity floor.
+        Ok((1.0 - weight) * a + weight * b)
+    }
+}
+
 /// Canonical source parameters retained by Beer-Lambert absorption.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum BeerLambertParameters {
@@ -131,6 +199,11 @@ pub enum BeerLambertParameters {
     Constant {
         /// Nonnegative extinction coefficient (1/m).
         extinction_per_m: f64,
+    },
+    /// A declared spectral intensity-absorption law in inverse metres.
+    Spectral {
+        /// Wavelength knots and their nonnegative absorption coefficients.
+        spectrum: SpectralAbsorption,
     },
     /// A bounded lifted spectrum defining transmittance at one path length.
     ReferenceRgb {
@@ -145,6 +218,7 @@ pub enum BeerLambertParameters {
 enum AbsorptionModel {
     Clear,
     Constant(f64),
+    Spectral(SpectralAbsorption),
     ReferenceRgb {
         spectrum: LiftedSpectrum,
         linear_rgb: [f64; 3],
@@ -174,6 +248,42 @@ impl BeerLambertAbsorption {
         }
         Ok(Self {
             model: AbsorptionModel::Constant(extinction_per_m),
+        })
+    }
+
+    /// Construct a measured or authored visible absorption spectrum [1/m].
+    ///
+    /// This is an intensity/power attenuation coefficient, not an amplitude
+    /// decay coefficient or the dimensionless imaginary refractive index.
+    /// Input data retains its caller-declared authority; admission checks the
+    /// numerical law, not the accuracy of the measurements.
+    pub fn try_from_spectral_extinction(knots: &[(f64, f64)]) -> Result<Self, DielectricError> {
+        Ok(Self {
+            model: AbsorptionModel::Spectral(SpectralAbsorption::try_new(knots)?),
+        })
+    }
+
+    /// Convert dimensionless imaginary-index samples to intensity absorption.
+    ///
+    /// At every supplied vacuum wavelength, alpha = 4*pi*k/lambda_m.
+    /// The resulting alpha knots are interpolated linearly, exactly as in
+    /// [Self::try_from_spectral_extinction]; this does not fit or reconstruct
+    /// a continuous complex-index law between the supplied samples. Interface
+    /// optics retain the separate real Cauchy index and weakly absorbing
+    /// dielectric approximation; strongly absorbing conductors use their
+    /// complex-index Fresnel owner.
+    pub fn try_from_spectral_extinction_index(
+        knots: &[(f64, f64)],
+    ) -> Result<Self, DielectricError> {
+        let mut spectrum = SpectralAbsorption::try_new(knots)?;
+        for (wavelength_nm, coefficient) in &mut spectrum.knots[..spectrum.count] {
+            *coefficient *= (4.0 * PI) / (*wavelength_nm * 1.0e-9);
+            if !coefficient.is_finite() {
+                return Err(DielectricError::InvalidAbsorption);
+            }
+        }
+        Ok(Self {
+            model: AbsorptionModel::Spectral(spectrum),
         })
     }
 
@@ -210,30 +320,50 @@ impl BeerLambertAbsorption {
     }
 
     /// Spectral extinction coefficient in inverse metres.
-    pub fn extinction_per_m(self, wavelength_nm: f64) -> Result<f64, DielectricError> {
+    pub fn extinction_per_m(&self, wavelength_nm: f64) -> Result<f64, DielectricError> {
         validate_wavelength(wavelength_nm)?;
-        Ok(match self.model {
+        Ok(match &self.model {
             AbsorptionModel::Clear => 0.0,
-            AbsorptionModel::Constant(extinction) => extinction,
+            AbsorptionModel::Constant(extinction) => *extinction,
+            AbsorptionModel::Spectral(spectrum) => spectrum.extinction_per_m(wavelength_nm)?,
             AbsorptionModel::ReferenceRgb {
                 spectrum,
                 distance_m,
                 ..
-            } => -det::ln(spectrum.eval(wavelength_nm)) / distance_m,
+            } => -det::ln(spectrum.eval(wavelength_nm)) / *distance_m,
         })
     }
 
     /// Transmittance after a nonnegative path length in metres.
     pub fn transmittance(
-        self,
+        &self,
         wavelength_nm: f64,
         distance_m: f64,
     ) -> Result<f64, DielectricError> {
+        Ok(det::exp(-self.optical_depth(wavelength_nm, distance_m)?))
+    }
+
+    /// Fraction of radiance absorbed along a homogeneous bulk path.
+    ///
+    /// This excludes interface reflection/transmission. The expm1 form retains
+    /// optically thin absorption that would vanish in a subtraction from one.
+    pub fn absorbed_fraction(
+        &self,
+        wavelength_nm: f64,
+        distance_m: f64,
+    ) -> Result<f64, DielectricError> {
+        Ok(-det::expm1(-self.optical_depth(wavelength_nm, distance_m)?))
+    }
+
+    fn optical_depth(&self, wavelength_nm: f64, distance_m: f64) -> Result<f64, DielectricError> {
         if !distance_m.is_finite() || distance_m < 0.0 {
             return Err(DielectricError::InvalidAbsorption);
         }
         let extinction = self.extinction_per_m(wavelength_nm)?;
-        Ok(det::exp(-extinction * distance_m))
+        if distance_m == 0.0 {
+            return Ok(0.0);
+        }
+        Ok(extinction * distance_m)
     }
 
     /// Canonical source parameters for content identity and reporting.
@@ -244,6 +374,7 @@ impl BeerLambertAbsorption {
             AbsorptionModel::Constant(extinction_per_m) => {
                 BeerLambertParameters::Constant { extinction_per_m }
             }
+            AbsorptionModel::Spectral(spectrum) => BeerLambertParameters::Spectral { spectrum },
             AbsorptionModel::ReferenceRgb {
                 linear_rgb,
                 distance_m,
@@ -344,6 +475,12 @@ impl DielectricGlass {
     #[must_use]
     pub const fn absorption(self) -> BeerLambertAbsorption {
         self.absorption
+    }
+
+    /// Borrow the original absorption law without copying its spectral table.
+    #[must_use]
+    pub const fn absorption_ref(&self) -> &BeerLambertAbsorption {
+        &self.absorption
     }
 
     /// Declared provenance class.
@@ -1122,6 +1259,118 @@ mod tests {
                 .expect("zero length")
                 .to_bits(),
             1.0_f64.to_bits()
+        );
+    }
+
+    #[test]
+    fn spectral_absorption_preserves_knots_and_resolves_a_narrow_band() {
+        let knots = [(380.0, 0.0), (500.0, 0.0), (501.0, 20.0), (780.0, 20.0)];
+        let absorption = BeerLambertAbsorption::try_from_spectral_extinction(&knots)
+            .expect("declared absorption band");
+        let BeerLambertParameters::Spectral { spectrum } = absorption.parameters() else {
+            panic!("spectral source was replaced by an RGB or constant approximation");
+        };
+        assert_eq!(spectrum.knots(), knots);
+        for (wavelength, expected) in [(380.0, 0.0), (500.0, 0.0), (500.5, 10.0), (780.0, 20.0)] {
+            assert_eq!(absorption.extinction_per_m(wavelength), Ok(expected));
+        }
+        assert_eq!(absorption.transmittance(500.0, 1.0), Ok(1.0));
+        assert_close(
+            absorption
+                .transmittance(500.5, 0.1)
+                .expect("mid-band transmission"),
+            (-1.0_f64).exp(),
+            2.0e-15,
+            "spectral Beer-Lambert law",
+        );
+        let one = absorption.transmittance(501.0, 0.01).expect("one segment");
+        let two = absorption.transmittance(501.0, 0.02).expect("two segments");
+        assert_close(two, one * one, 2.0e-15, "spectral path composition");
+    }
+
+    #[test]
+    fn spectral_extinction_index_uses_intensity_not_amplitude_decay() {
+        let absorption = BeerLambertAbsorption::try_from_spectral_extinction_index(&[
+            (380.0, 1.0e-6),
+            (500.0, 1.0e-6),
+            (780.0, 1.0e-6),
+        ])
+        .expect("weakly absorbing imaginary index");
+        // A plane-wave field has amplitude exp(-2*pi*k*z/lambda);
+        // its power decays twice as quickly. At 500 nm, alpha = 8*pi / m.
+        assert_close(
+            absorption
+                .extinction_per_m(500.0)
+                .expect("index conversion"),
+            25.132_741_228_718_345,
+            8.0e-15,
+            "vacuum-nanometre intensity conversion",
+        );
+        assert_close(
+            absorption
+                .transmittance(500.0, 0.25)
+                .expect("power transmission"),
+            (-2.0 * PI).exp(),
+            2.0e-17,
+            "power rather than amplitude attenuation",
+        );
+    }
+
+    #[test]
+    fn spectral_absorption_admission_and_extreme_limits_are_physical() {
+        for knots in [
+            vec![],
+            vec![(380.0, 1.0)],
+            vec![(381.0, 1.0), (780.0, 1.0)],
+            vec![(380.0, 1.0), (779.0, 1.0)],
+            vec![(380.0, 1.0), (500.0, 2.0), (500.0, 3.0), (780.0, 1.0)],
+            vec![(380.0, -1.0), (780.0, 1.0)],
+            vec![(380.0, f64::INFINITY), (780.0, 1.0)],
+            vec![(380.0, 1.0), (f64::NAN, 1.0), (780.0, 1.0)],
+            (0..17)
+                .map(|i| (380.0 + 25.0 * f64::from(i), 1.0))
+                .collect(),
+        ] {
+            assert_eq!(
+                BeerLambertAbsorption::try_from_spectral_extinction(&knots),
+                Err(DielectricError::InvalidAbsorption),
+            );
+        }
+        let absorption = BeerLambertAbsorption::try_from_spectral_extinction(&[
+            (380.0, 1.0e-20),
+            (780.0, 1.0e-20),
+        ])
+        .expect("weak absorption");
+        for wavelength in [379.0, 781.0, f64::NAN] {
+            assert_eq!(
+                absorption.transmittance(wavelength, 1.0),
+                Err(DielectricError::InvalidWavelength),
+            );
+        }
+        assert_eq!(absorption.transmittance(550.0, 1.0), Ok(1.0));
+        assert_close(
+            absorption
+                .absorbed_fraction(550.0, 1.0)
+                .expect("thin absorbed fraction"),
+            1.0e-20,
+            1.0e-35,
+            "thin absorption retained despite rounded unit transmittance",
+        );
+        let opaque = BeerLambertAbsorption::try_from_spectral_extinction(&[
+            (380.0, f64::MAX),
+            (780.0, f64::MAX),
+        ])
+        .expect("large finite coefficients");
+        assert_eq!(opaque.transmittance(550.0, 0.0), Ok(1.0));
+        assert_eq!(opaque.absorbed_fraction(550.0, 0.0), Ok(0.0));
+        assert_eq!(opaque.transmittance(550.0, 2.0), Ok(0.0));
+        assert_eq!(opaque.absorbed_fraction(550.0, 2.0), Ok(1.0));
+        assert_eq!(
+            BeerLambertAbsorption::try_from_spectral_extinction_index(&[
+                (380.0, f64::MAX),
+                (780.0, f64::MAX),
+            ]),
+            Err(DielectricError::InvalidAbsorption),
         );
     }
 
