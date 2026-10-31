@@ -78,9 +78,19 @@ rule). Layer: L2 (MORPH). Runtime deps: `std`, fs-geom.
   (membrane + bending via the cotan machinery), `crossfade_path` /
   `straighten_from` / `straighten_path` (monotone-energy discrete
   geodesics; for affinely related shapes the crossfade IS the fixed
-  point). `pullback_metric` — the elastic form through the harmonics
-  basis is DIAGONAL with weights λ + λ² — and `within_trust_region`
-  (step size = bounded deformation, not bounded coefficients).
+  point). `pullback_metric` prepares a `PullbackMetric` for the actual
+  vector normal-displacement map. With `U_c = diag(n_c) Ψ`, its symmetric
+  Gram matrix is `Σ_c [U_cᵀ L U_c + (L U_c)ᵀ M^-1 (L U_c)]`. Curved
+  normals contribute modal cross terms and positive inflation energy;
+  `λ + λ²` is only the constant-normal, converged scalar-mode limit.
+  Preparation costs `O(k * nnz(L) + n * k²)` with `O(n * k)` temporary
+  memory; repeated `PullbackMetric::energy` calls cost `O(k²)` without
+  allocation. `within_trust_region` consumes this full metric and a finite
+  nonnegative energy budget, refusing non-finite/negative energy. Basis
+  shapes and finite positive masses are checked; malformed coefficient
+  counts panic rather than silently truncate. Both the full-field and
+  reduced forms use the actual lumped mass, with no dimensional denominator
+  floor.
 
 ## Invariants
 
@@ -184,5 +194,11 @@ recomputation, and distinct constant offsets on disconnected components.
   with remeshing correspondence is the [F] growth path the plan names.
 - The DP matching is slope-constrained (1/3..3) on a fixed lattice —
   invariance holds to the documented ~5% grid tolerance, not exactly.
-- Trust-region superiority is demonstrated on the seeded fixture
-  (median-calibrated, ledgered), not claimed universally.
+- The membrane-plus-bending form is an unweighted geometric regularizer,
+  not a material-calibrated elastic shell law. The prepared metric agrees
+  with that discrete vector-field form; it is not a continuum error bound.
+- `tests/elastic.rs` compares prepared and independently evaluated surface
+  energy on 300 seeded steps, retains coefficient-ball optimization
+  comparisons as diagnostics, and checks curved-surface inflation,
+  curvature-induced mode coupling, and the flat-normal diagonal limit.
+  No optimization-superiority guarantee follows from those comparisons.

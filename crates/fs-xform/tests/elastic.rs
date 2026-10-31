@@ -3,14 +3,14 @@
 //! analytic fixtures; reparameterization invariance under random
 //! monotone reparams; surface path-straightening produces
 //! monotone-energy paths (golden energies ledgered); the
-//! deformation-energy trust region measurably beats the
-//! coefficient-norm trust region on a shape-matching fixture; Karcher
-//! means converge at a documented geometric rate.
+//! deformation-energy trust region matches independently evaluated vector
+//! displacement energy (with shape-matching comparisons retained as
+//! diagnostics); Karcher means converge at a documented geometric rate.
 #![cfg(feature = "elastic-shapes")]
 
 use fs_xform::elastic::{
-    Curve, elastic_distance, karcher_mean, pullback_metric, srv_distance, srv_geodesic,
-    straighten_path, within_trust_region,
+    Curve, deformation_energy, elastic_distance, karcher_mean, pullback_metric, srv_distance,
+    srv_geodesic, straighten_path, within_trust_region,
 };
 use fs_xform::harmonics::{ManifoldBasis, Surface};
 
@@ -271,13 +271,10 @@ fn ec_003_surface_path_straightening() {
 }
 
 #[test]
-fn ec_004_deformation_trust_region_beats_coefficient_ball() {
-    // THE MEASURED CONSUMER: spectral shape search where step quality
-    // is judged before evaluation. The deformation-energy ball scales
-    // steps by smoothness (high-frequency steps are expensive); the
-    // coefficient ball treats all directions alike. Accepting only
-    // in-region candidates, the elastic region should pass a HIGHER
-    // fraction of misfit-improving steps.
+fn ec_004_deformation_trust_region_matches_surface_energy() {
+    // The prepared metric must predict the actual normal-displacement
+    // field energy. A comparison to a coefficient ball is informative,
+    // but a particular seeded optimization win is not a physics identity.
     let sphere = icosphere(2);
     let basis = ManifoldBasis::compute(&sphere, 12, 900);
     let metric = pullback_metric(&basis);
@@ -314,10 +311,7 @@ fn ec_004_deformation_trust_region_beats_coefficient_ball() {
     let candidates: Vec<Vec<f64>> = (0..300)
         .map(|_| (0..basis.dof()).map(|_| 0.03 * rnd()).collect())
         .collect();
-    let energies: Vec<f64> = candidates
-        .iter()
-        .map(|d| metric.iter().zip(d).map(|(g, x)| g * x * x).sum())
-        .collect();
+    let energies: Vec<f64> = candidates.iter().map(|d| metric.energy(d)).collect();
     let norms: Vec<f64> = candidates
         .iter()
         .map(|d| d.iter().map(|x| x * x).sum())
@@ -333,6 +327,14 @@ fn ec_004_deformation_trust_region_beats_coefficient_ball() {
     let mut good_coeff = 0usize;
     let mut n_coeff = 0usize;
     for (i, d) in candidates.iter().enumerate() {
+        let measured = deformation_energy(&sphere, &basis.displace(d));
+        assert!((measured - energies[i]).abs() < 1e-10 * measured.max(1.0));
+        if (measured - r_elastic).abs() > 1e-10 * r_elastic.max(1.0) {
+            assert_eq!(
+                within_trust_region(&metric, d, r_elastic),
+                measured <= r_elastic
+            );
+        }
         let improves = misfit(d) < j0;
         if within_trust_region(&metric, d, r_elastic) {
             n_elastic += 1;
@@ -353,15 +355,10 @@ fn ec_004_deformation_trust_region_beats_coefficient_ball() {
          \"elastic_good_frac\":{fe:.3},\"coeff_accept\":{n_coeff},\
          \"coeff_good_frac\":{fc:.3}}}"
     );
-    assert!(
-        fe > fc,
-        "the deformation-energy region passes better steps: {fe:.3} vs {fc:.3}"
-    );
     verdict(
         "ec-004",
-        "median-calibrated trust regions on 300 seeded candidates: the deformation-energy \
-         ball admits a strictly higher fraction of misfit-improving steps than the \
-         coefficient ball (measured, ledgered)",
+        "prepared vector-normal metric agrees with independent surface energy on 300 \
+         seeded candidates; trust-region admission matches the energy budget",
     );
 }
 
@@ -413,4 +410,80 @@ fn ec_005_karcher_mean_converges() {
         "Karcher mean of 4 arcs: shift collapses geometrically to a fixed point (<1e-9); \
          the mean sits inside the family envelope",
     );
+}
+
+#[test]
+fn ec_006_uniform_inflation_costs_energy_on_a_curved_surface() {
+    let sphere = icosphere(1);
+    let basis = ManifoldBasis::compute(&sphere, 6, 100);
+    let metric = pullback_metric(&basis);
+    assert_eq!(metric.dof(), basis.dof());
+    assert_eq!(basis.eigenvalues[0], 0.0);
+    let mut step = vec![0.0; basis.dof()];
+    step[0] = 0.05;
+    let measured = deformation_energy(&sphere, &basis.displace(&step));
+    assert!(
+        measured > 1e-3,
+        "inflation strains the surface; it is not a free rigid motion"
+    );
+    assert!((metric.energy(&step) - measured).abs() < 1e-12);
+    assert!(!within_trust_region(&metric, &step, measured * 0.5));
+    assert!(within_trust_region(&metric, &step, measured * 1.01));
+    assert!(!within_trust_region(&metric, &step, f64::INFINITY));
+    assert!(!within_trust_region(&metric, &step, f64::NAN));
+}
+
+#[test]
+fn ec_007_flat_normals_recover_the_scalar_diagonal_limit() {
+    let surface = Surface {
+        positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+        triangles: vec![[0, 1, 2]],
+    };
+    let basis = ManifoldBasis::compute(&surface, 3, 100);
+    let metric = pullback_metric(&basis);
+    for a in 0..3 {
+        for b in 0..3 {
+            let lambda = basis.eigenvalues[a];
+            let expected = if a == b {
+                lambda + lambda * lambda
+            } else {
+                0.0
+            };
+            assert!((metric.entry(a, b) - expected).abs() < 1e-10);
+        }
+    }
+    assert!(within_trust_region(&metric, &[0.0; 3], 0.0));
+}
+
+#[test]
+fn ec_008_curvature_couples_normal_displacement_harmonics() {
+    let mut surface = icosphere(1);
+    for p in &mut surface.positions {
+        p[0] *= 1.7;
+        p[2] *= 0.7;
+    }
+    let basis = ManifoldBasis::compute(&surface, 10, 100);
+    let metric = pullback_metric(&basis);
+    let mut pair = (0, 1);
+    for a in 0..metric.dof() {
+        for b in a + 1..metric.dof() {
+            assert_eq!(metric.entry(a, b), metric.entry(b, a));
+            if metric.entry(a, b).abs() > metric.entry(pair.0, pair.1).abs() {
+                pair = (a, b);
+            }
+        }
+    }
+    assert!(
+        metric.entry(pair.0, pair.1).abs() > 1e-3,
+        "ellipsoid must expose nonzero modal coupling"
+    );
+    let mut step = vec![0.0f64; metric.dof()];
+    step[pair.0] = 0.03;
+    step[pair.1] = -0.02;
+    let diagonal_only = metric.entry(pair.0, pair.0) * step[pair.0].powi(2)
+        + metric.entry(pair.1, pair.1) * step[pair.1].powi(2);
+    let predicted = metric.energy(&step);
+    let measured = deformation_energy(&surface, &basis.displace(&step));
+    assert!((predicted - diagonal_only).abs() > 1e-6);
+    assert!((predicted - measured).abs() < 1e-10 * measured.max(1.0));
 }

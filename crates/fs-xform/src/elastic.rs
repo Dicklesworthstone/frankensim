@@ -12,9 +12,9 @@
 //! (closed-form), and reparameterization is handled by dynamic
 //! programming over monotone correspondences. Surfaces (same
 //! connectivity) use discrete path-straightening on a
-//! membrane-plus-bending energy. The pullback through the
-//! manifold-harmonics basis is DIAGONAL — the mathematically honest
-//! preconditioner for spectral shape search.
+//! membrane-plus-bending energy. Its pullback through the manifold-harmonic
+//! normal-displacement map includes the spatial variation of the normals:
+//! curved surfaces generally couple scalar harmonic coefficients.
 
 use crate::harmonics::{ManifoldBasis, Surface, cotan_laplacian};
 
@@ -229,6 +229,16 @@ pub fn karcher_mean(curves: &[Curve], n: usize, iters: usize) -> (Curve, Vec<f64
 pub fn deformation_energy(base: &Surface, displaced: &Surface) -> f64 {
     let (rows, mass) = cotan_laplacian(base);
     let n = base.positions.len();
+    assert_eq!(
+        displaced.positions.len(),
+        n,
+        "surface displacement shape mismatch"
+    );
+    assert!(
+        mass.iter().all(|m| m.is_finite() && *m > 0.0),
+        "deformation vertex masses must be finite and positive"
+    );
+    let root_mass: Vec<f64> = mass.iter().map(|m| m.sqrt()).collect();
     let mut energy = 0.0f64;
     for comp in 0..3 {
         let u: Vec<f64> = (0..n)
@@ -243,8 +253,8 @@ pub fn deformation_energy(base: &Surface, displaced: &Surface) -> f64 {
         // Bending: (M⁻¹Lu)ᵀ M (M⁻¹Lu) = luᵀ M⁻¹ lu.
         let bending: f64 = lu
             .iter()
-            .zip(&mass)
-            .map(|(l, m)| l * l / m.max(1e-300))
+            .zip(&root_mass)
+            .map(|(l, m)| (l / m).powi(2))
             .sum();
         energy += membrane + bending;
     }
@@ -319,20 +329,157 @@ pub fn straighten_path(
     (path, energies)
 }
 
-/// The elastic metric PULLED BACK through a manifold-harmonics basis:
-/// for normal displacements `u = Σ θⱼ ψⱼ n̂`, the membrane+bending
-/// quadratic form is DIAGONAL in θ with weights `λⱼ + λⱼ²` (M-orthonormal
-/// modes) — Bet 6's "right inner product" doctrine as an exact formula.
+/// Prepared pullback of the discrete vector membrane-plus-bending form.
+///
+/// The symmetric row-major Gram matrix includes variation of the surface
+/// normals. Preparing it costs `O(k * nnz(L) + n * k²)` with `O(n * k)`
+/// temporary storage; subsequent energy evaluations cost `O(k²)` and
+/// allocate nothing. This is the geometric regularizer used by
+/// [`deformation_energy`], not a material-calibrated shell constitutive law.
+#[derive(Debug, Clone)]
+pub struct PullbackMetric {
+    dimension: usize,
+    gram: Vec<f64>,
+}
+
+impl PullbackMetric {
+    /// Number of harmonic coefficients.
+    #[must_use]
+    pub fn dof(&self) -> usize {
+        self.dimension
+    }
+
+    /// Entry of the symmetric Gram matrix, including modal cross terms.
+    #[must_use]
+    pub fn entry(&self, row: usize, column: usize) -> f64 {
+        assert!(
+            row < self.dimension && column < self.dimension,
+            "metric index out of bounds"
+        );
+        self.gram[row * self.dimension + column]
+    }
+
+    /// Predicted vector-field deformation energy `θᵀ G θ`.
+    ///
+    /// # Panics
+    /// If the coefficient count differs from [`Self::dof`] or a coefficient
+    /// is non-finite. An unrepresentable energy may overflow to infinity.
+    #[must_use]
+    pub fn energy(&self, theta: &[f64]) -> f64 {
+        assert_eq!(
+            theta.len(),
+            self.dimension,
+            "metric coefficient count mismatch"
+        );
+        assert!(
+            theta.iter().all(|x| x.is_finite()),
+            "metric coefficients must be finite"
+        );
+        if self.dimension == 0 {
+            return 0.0;
+        }
+        self.gram
+            .chunks_exact(self.dimension)
+            .zip(theta)
+            .map(|(row, value)| value * row.iter().zip(theta).map(|(g, t)| g * t).sum::<f64>())
+            .sum()
+    }
+}
+
+/// Pull back [`deformation_energy`] through `u = Σ θⱼ ψⱼ n̂`.
+///
+/// For each Cartesian component c, `U_c = diag(n̂_c) Ψ`. The exact
+/// discrete Gram matrix is `Σ_c [U_cᵀ L U_c + (L U_c)ᵀ M^-1 (L U_c)]`.
+/// The diagonal `λ + λ²` formula applies only to a scalar field, or a
+/// constant unit normal with converged orthonormal eigenmodes. On a curved
+/// surface it misses normal gradients and curvature-induced mode coupling;
+/// in particular a constant scalar mode is inflation, not a rigid motion.
+///
+/// # Panics
+/// On inconsistent or non-finite basis/normal data, invalid surface geometry,
+/// zero vertex mass, or an unrepresentable Gram matrix.
 #[must_use]
-pub fn pullback_metric(basis: &ManifoldBasis) -> Vec<f64> {
-    basis.eigenvalues.iter().map(|l| l + l * l).collect()
+pub fn pullback_metric(basis: &ManifoldBasis) -> PullbackMetric {
+    let (rows, mass) = cotan_laplacian(&basis.surface);
+    let n = mass.len();
+    let k = basis.dof();
+    assert_eq!(
+        basis.normals.len(),
+        n,
+        "normal count must match the surface"
+    );
+    assert!(
+        basis.normals.iter().flatten().all(|v| v.is_finite()),
+        "normals must be finite"
+    );
+    assert!(
+        basis
+            .modes
+            .iter()
+            .all(|v| v.len() == n && v.iter().all(|x| x.is_finite())),
+        "harmonic mode shape or values are invalid"
+    );
+    assert!(
+        mass.iter().all(|m| m.is_finite() && *m > 0.0),
+        "metric vertex masses must be finite and positive"
+    );
+    let root_mass: Vec<f64> = mass.iter().map(|m| m.sqrt()).collect();
+    let mut gram = vec![0.0; k.checked_mul(k).expect("metric dimension overflow")];
+    // Prepare one Cartesian component at a time; do not retain three copies
+    // of all mode fields. Whiten the bending actions once, outside k² dots.
+    for component in 0..3 {
+        let fields: Vec<Vec<f64>> = basis
+            .modes
+            .iter()
+            .map(|mode| {
+                mode.iter()
+                    .zip(&basis.normals)
+                    .map(|(p, normal)| p * normal[component])
+                    .collect()
+            })
+            .collect();
+        let actions: Vec<Vec<f64>> = fields
+            .iter()
+            .map(|field| {
+                rows.iter()
+                    .map(|row| row.iter().map(|&(j, w)| w * field[j]).sum())
+                    .collect()
+            })
+            .collect();
+        let bending: Vec<Vec<f64>> = actions
+            .iter()
+            .map(|action| action.iter().zip(&root_mass).map(|(l, m)| l / m).collect())
+            .collect();
+        for a in 0..k {
+            for b in a..k {
+                let value: f64 = (0..n)
+                    .map(|i| {
+                        0.5 * (fields[a][i] * actions[b][i] + fields[b][i] * actions[a][i])
+                            + bending[a][i] * bending[b][i]
+                    })
+                    .sum();
+                gram[a * k + b] += value;
+                if a != b {
+                    gram[b * k + a] += value;
+                }
+            }
+        }
+    }
+    assert!(
+        gram.iter().all(|g| g.is_finite()),
+        "metric energy is not representable"
+    );
+    PullbackMetric { dimension: k, gram }
 }
 
 /// A deformation-energy TRUST REGION: accept a spectral step `δθ` iff
-/// its pullback elastic energy `Σ (λⱼ+λⱼ²) δθⱼ²` is at most `radius`.
-/// "Step size" means bounded deformation, not bounded coefficients.
+/// its full vector-field pullback energy is finite, nonnegative, and at
+/// most the finite nonnegative `radius`. The radius is an energy budget.
 #[must_use]
-pub fn within_trust_region(metric: &[f64], dtheta: &[f64], radius: f64) -> bool {
-    let e: f64 = metric.iter().zip(dtheta).map(|(g, d)| g * d * d).sum();
-    e <= radius
+pub fn within_trust_region(metric: &PullbackMetric, dtheta: &[f64], radius: f64) -> bool {
+    if !radius.is_finite() || radius < 0.0 || dtheta.iter().any(|x| !x.is_finite()) {
+        return false;
+    }
+    let e = metric.energy(dtheta);
+    e.is_finite() && e >= 0.0 && e <= radius
 }
