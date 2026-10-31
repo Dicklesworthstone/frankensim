@@ -20,6 +20,8 @@
 pub mod source;
 /// Source-bound uniform physical-heat feedback with explicit zero expansion.
 pub mod thermal;
+/// Free-sided axial restriction for the existing fiber-section material contract.
+pub mod uniaxial;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, trace};
@@ -183,6 +185,16 @@ struct Update {
     delta_alpha: f64,
 }
 
+// One scalar kinetic owner for tensor relaxation (3G) and its free-sided axial
+// restriction (E). The dimensional stiffness is supplied through its prepared
+// logarithmic step scale, never through a second constitutive flow rule.
+struct Relaxation {
+    q: f64,
+    delta_alpha: f64,
+    ratio: f64,
+    radial: f64,
+}
+
 impl NortonCreep {
     pub fn new(
         elastic: IsotropicElastic,
@@ -324,10 +336,9 @@ impl NortonCreep {
     // q/q_trial = exp(y), exp(y)+exp(log_k+n*y)=1. Log-space evaluation avoids
     // ever forming q^n or a potentially overflowing kinetic prefactor. The
     // bracket has width ln(2); safeguarded Newton usually takes a few steps.
-    fn stress_ratio(&self, q_trial: f64) -> Result<f64> {
+    fn stress_ratio(&self, q_trial: f64, log_step_scale: f64) -> Result<f64> {
         let n = self.parameters.stress_exponent;
-        let log_k =
-            self.log_step_scale + (n - 1.0) * (det::ln(q_trial) - self.log_reference_stress);
+        let log_k = log_step_scale + (n - 1.0) * (det::ln(q_trial) - self.log_reference_stress);
         require(
             log_k.is_finite(),
             "dimensionless creep step is not representable",
@@ -370,6 +381,38 @@ impl NortonCreep {
         Err(CreepError::Invalid("bounded creep root did not converge"))
     }
 
+    fn relaxation(&self, q_trial: f64, log_step_scale: f64) -> Result<Relaxation> {
+        let n = self.parameters.stress_exponent;
+        let ratio = if q_trial > 0.0 {
+            self.stress_ratio(q_trial, log_step_scale)?
+        } else if n == 1.0 {
+            logistic_inverse(log_step_scale)
+        } else {
+            1.0
+        };
+        let q = q_trial * ratio;
+        let delta_alpha = if q_trial == 0.0 {
+            0.0
+        } else {
+            det::exp(self.log_duration + self.log_rate(q))
+        };
+        require(
+            q_trial == 0.0 || positive(q) && delta_alpha.is_finite() && delta_alpha >= 0.0,
+            "creep increment or relaxed stress is not representable",
+        )?;
+        let radial = if q_trial == 0.0 {
+            ratio
+        } else {
+            ratio / (ratio + n * (1.0 - ratio))
+        };
+        Ok(Relaxation {
+            q,
+            delta_alpha,
+            ratio,
+            radial,
+        })
+    }
+
     fn update(&self, strain: &Voigt, old: &CreepState) -> Result<Update> {
         self.validate_history(strain, old)?;
         let elastic_strain = difference(strain, &old.creep_strain);
@@ -402,24 +445,12 @@ impl NortonCreep {
             q_trial.is_finite(),
             "equivalent trial stress is not representable",
         )?;
-        let n = self.parameters.stress_exponent;
-        let ratio = if q_trial > 0.0 {
-            self.stress_ratio(q_trial)?
-        } else if n == 1.0 {
-            logistic_inverse(self.log_step_scale)
-        } else {
-            1.0
-        };
-        let q = q_trial * ratio;
-        let delta_alpha = if q_trial == 0.0 {
-            0.0
-        } else {
-            det::exp(self.log_duration + self.log_rate(q))
-        };
-        require(
-            q_trial == 0.0 || positive(q) && delta_alpha.is_finite() && delta_alpha >= 0.0,
-            "creep increment or relaxed stress is not representable",
-        )?;
+        let Relaxation {
+            q,
+            delta_alpha,
+            ratio,
+            radial,
+        } = self.relaxation(q_trial, self.log_step_scale)?;
         let mut state = old.clone();
         if delta_alpha > 0.0 {
             for i in 0..6 {
@@ -436,11 +467,6 @@ impl NortonCreep {
         }
         self.validate_history(strain, &state)?;
         let stress = core::array::from_fn(|i| ratio * s[i] + if i < 3 { pressure } else { 0.0 });
-        let radial = if q_trial == 0.0 {
-            ratio
-        } else {
-            ratio / (ratio + n * (1.0 - ratio))
-        };
         let direction: Voigt = if s_norm > 0.0 {
             core::array::from_fn(|i| s[i] / s_norm)
         } else {

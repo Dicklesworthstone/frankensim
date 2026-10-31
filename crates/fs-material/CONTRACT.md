@@ -96,6 +96,20 @@ tests cover stress-controlled creep, strain-held relaxation and timestep
 convergence, shear, temperature, reversal, objectivity, tangent consistency,
 hydrostatic invariance, work/heat and unchanged inputs on refusal.
 
+`creep::uniaxial::UniaxialNorton` eliminates transverse stress through
+`q + E dt rate(q) = |E (epsilon - epsilon_c_old)|`, using the same bounded
+logarithmic kinetic solve as the tensor law. The axial tangent is condensed
+at zero transverse stress; it is not the tensor C_xxxx entry. Signed axial
+history retains Poisson contraction, traceless lateral creep and accumulated
+path length. Checked work/heat admission delegates to the original tensor
+owner and independently compares axial stress, zero lateral stress and history.
+The existing `Uniaxial` interface evaluates immutable physical-step candidates;
+consumers commit history once per actual interval. Source-bound laws retain
+the original complete material bundle through shared immutable storage.
+`tests/creep_uniaxial.rs` supplies analytical constant-stress and held-strain
+references, refinement, finite-difference/Schur-complement tangents, reversal,
+source-temperature continuation and refusal checks.
+
 `creep::thermal::ZeroExpansionCaloricPoint` couples the source-bound native
 history to the existing uniform enthalpy-transport protocol. Its type explicitly
 selects zero thermal expansion, fixed reference density/volume and constant
