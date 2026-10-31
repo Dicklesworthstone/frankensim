@@ -7850,3 +7850,36 @@ Public integration targets `nonideal_equilibrium` and
 heating and cooling across both liquid and vapor dome boundaries, large-datum
 invariance, retained density, total-work limits and atomic refusal. Synthetic
 NASA fixtures check constitutive consistency rather than experimental accuracy.
+
+
+### Simultaneous creep and yielding in free-sided axial fibers
+
+`creep::plastic::uniaxial::UniaxialNortonJ2` condenses the original joint
+Norton/J2 law by eliminating transverse stress. The same prepared logarithmic
+scalar return map uses E for an axial fiber and 3G for a three-dimensional
+point. It solves creep and isotropic plastic flow together, including perfect
+plasticity, and supplies the exact condensed tangent. It retains separate signed
+creep/plastic strains and separate accumulated equivalent paths through unloading
+and reversal. Each history reconstructs its original traceless tensor, including
+lateral inelastic contraction; the transverse elastic strain uses the original
+Poisson ratio.
+
+The optional source-bound law retains all original kinetic, elastic, yield and
+hardening claims through a shared immutable source bundle. Checked energy delegates
+to the native full-tensor joint law and independently compares stress, free-side
+conditions and both reconstructed histories. Hardening remains stored energy;
+creep heat, plastic heat and numerical loss remain distinct. The generic energy
+carrier also reserves explicit reversible thermal-storage and transfer accounts,
+both exactly zero for these unexpanded laws.
+
+The `creep_plastic_uniaxial` regressions compare linear closed-form solutions,
+nonlinear tangents, the native three-dimensional law, zero-stress unloading,
+reversal, original source selection, and the yield/creep activation boundary.
+This remains small-strain, isotropic secondary creep with isotropic J2 hardening.
+It does not imply finite-strain validity, thermal expansion, kinematic hardening,
+primary/tertiary creep, damage, rupture or measured service-life qualification.
+
+Validation for this increment: 22 actual material tests passed (8 joint axial,
+8 three-dimensional joint, 6 original Norton axial) using the pinned Cargo
+runner and genuine cached dependencies. This focused exact-source material
+assembly is supplementary evidence, not the complete workspace/DSR gate.

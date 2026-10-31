@@ -70,7 +70,8 @@ pub struct CreepTolerances {
     pub energy_j_m3: f64,
 }
 
-/// Per-reference-volume work account for fixed elastic/storage coefficients [J/m3].
+/// Per-reference-volume work account [J/m3]. Elastic/hardening free energy,
+/// reversible thermal storage/transfer and irreversible losses remain distinct.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CreepEnergy {
     pub initial_stored_j_m3: f64,
@@ -85,8 +86,19 @@ pub struct CreepEnergy {
     pub plastic_dissipation_j_m3: f64,
     /// Backward-Euler elastic and, when selected, hardening loss; never heat.
     pub numerical_dissipation_j_m3: f64,
-    /// Work minus change of storage minus both separately computed losses.
+    /// Change in T times mechanical entropy; zero for isothermal storage laws.
+    pub thermoelastic_storage_change_j_m3: f64,
+    /// Signed reversible transfer into the caloric chart; never dissipation.
+    pub reversible_heat_j_m3: f64,
+    /// Work minus free/internal storage changes, heat transfer and numerical loss.
     pub residual_j_m3: f64,
+}
+
+impl CreepEnergy {
+    /// Physical creep/plastic heat plus signed reciprocal thermal exchange.
+    pub fn caloric_heat_j_m3(&self) -> f64 {
+        self.physical_dissipation_j_m3 + self.reversible_heat_j_m3
+    }
 }
 
 /// Admitted candidate; the caller atomically commits state after its solve.
@@ -604,6 +616,8 @@ impl NortonCreep {
             creep_dissipation_j_m3: next.q * next.delta_alpha,
             plastic_dissipation_j_m3: 0.0,
             numerical_dissipation_j_m3: self.stored_energy(&difference(&new_e, &old_e))?,
+            thermoelastic_storage_change_j_m3: 0.0,
+            reversible_heat_j_m3: 0.0,
             residual_j_m3: 0.0,
         };
         energy.residual_j_m3 = energy.mechanical_work_j_m3
