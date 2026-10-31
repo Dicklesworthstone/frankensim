@@ -3,6 +3,8 @@
 #[path = "electrical_contacts/source.rs"]
 #[allow(dead_code)]
 mod source;
+#[path = "coupled_gap_motion/saturating.rs"]
+mod saturating;
 
 use fs_couple::material_circuit::motion::FieldMotionInput;
 use fs_couple::material_circuit::motion::coupled_gap::{

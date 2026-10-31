@@ -1,8 +1,10 @@
 //! Reciprocal motion of windings sharing one uniform magnetic gap.
 //!
 //! With signed turns `n`, fixed leakage `D`, gap `g` and `k = mu A`, the complete
-//! inductance is `L(g) = D + (k/g) n n^T`. Every retained winding has explicit,
-//! strictly positive leakage; ideal rank-deficient flux coordinates are refused.
+//! inductance without a core is `L(g) = D + (k/g) n n^T`. An optional original
+//! reversible H(B) source adds a finite, saturating return-path reluctance.
+//! Every retained winding has explicit, strictly positive leakage;
+//! ideal rank-deficient flux coordinates are refused.
 //! One magnetic energy supplies all terminal currents and the gap force. The
 //! original descriptor advances electrical linkage, gap and source-derived body
 //! momentum together, so changes in mutual inductance generate reciprocal emf.
@@ -23,6 +25,9 @@ use super::{
     within,
 };
 
+mod core;
+pub use core::ReversibleMagneticCore;
+
 /// A winding in original graph branch order, with a physical leakage store.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GapWinding {
@@ -39,9 +44,10 @@ pub struct GapWinding {
 /// Source-resolved gap medium and a set of windings sharing its common flux.
 ///
 /// The one-turn `medium` retains the actual permeability receipt, constant area
-/// and present gap. The return path has negligible reluctance; leakage is fixed
-/// and does not act on this gap. Fringing, core saturation, hysteresis, skin loss,
-/// changing leakage and thermal coefficient evolution need additional owners.
+/// and present gap. The return path has negligible reluctance unless an explicit
+/// reversible core is bound. Leakage is fixed and does not act on this gap.
+/// Fringing, hysteresis, skin loss, changing leakage and thermal coefficient
+/// evolution need additional owners.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CommonMagneticGap {
     medium: ResolvedInductor,
@@ -49,6 +55,7 @@ pub struct CommonMagneticGap {
     limits_m: [f64; 2],
     scale: f64,
     inverse_leakage_turns: f64,
+    core: Option<ReversibleMagneticCore>,
 }
 
 impl CommonMagneticGap {
@@ -105,7 +112,30 @@ impl CommonMagneticGap {
             limits_m,
             scale,
             inverse_leakage_turns,
+            core: None,
         })
+    }
+
+    /// Add one source-resolved reversible core in series with this gap.
+    /// Its complete H(B) source range remains authoritative; neither a magnetic
+    /// trial nor an accepted endpoint may extrapolate beyond that range.
+    pub fn with_reversible_core(
+        mut self,
+        core: ReversibleMagneticCore,
+    ) -> Result<Self, MaterialCircuitError> {
+        if self.core.is_some() {
+            return Err(invalid("shared gap already has a reversible core"));
+        }
+        for bound in self.limits_m {
+            core.admit_reluctance(self.inverse_leakage_turns + bound / self.scale)?;
+        }
+        self.core = Some(core);
+        Ok(self)
+    }
+
+    /// Original reversible core source and physical geometry, if present.
+    pub const fn core(&self) -> Option<&ReversibleMagneticCore> {
+        self.core.as_ref()
     }
 
     /// Original material receipt, constant area and current one-turn gap geometry.
@@ -132,7 +162,11 @@ impl CommonMagneticGap {
             .enumerate()
             .map(|(i, w)| f64::from(w.signed_turns) * (linkage(i) / w.leakage_h))
             .sum::<f64>();
-        numerator / (self.inverse_leakage_turns + gap / self.scale)
+        let reluctance = self.inverse_leakage_turns + gap / self.scale;
+        self.core.as_ref().map_or_else(
+            || numerator / reluctance,
+            |core| core.flux(reluctance, numerator),
+        )
     }
 
     fn current(&self, winding: usize, linkage: f64, common_flux: f64) -> f64 {
@@ -153,7 +187,56 @@ impl CommonMagneticGap {
                 0.5 * current * (w.leakage_h * current)
             })
             .sum::<f64>();
-        leakage + 0.5 * common_flux * ((gap / self.scale) * common_flux)
+        leakage
+            + 0.5 * common_flux * ((gap / self.scale) * common_flux)
+            + self
+                .core
+                .as_ref()
+                .map_or(0.0, |core| core.energy(common_flux))
+    }
+
+    // The original CircuitDae needs the exact accepted-state winding currents
+    // to admit ideal constraints. A secant stamp supplies those currents only;
+    // its quadratic energy is never used by the nonlinear coupled Storage.
+    fn secant_permeance(
+        &self,
+        gap: f64,
+        linkage: impl Fn(usize) -> f64,
+    ) -> Result<f64, MaterialCircuitError> {
+        let permeance = match &self.core {
+            None => self.scale / gap,
+            Some(core) => {
+                let flux = self.flux(gap, linkage);
+                1.0 / (gap / self.scale + core.secant_reluctance(flux))
+            }
+        };
+        if !positive(permeance) {
+            return Err(invalid(
+                "shared-gap operating point leaves the core source range or has unrepresentable permeance",
+            ));
+        }
+        Ok(permeance)
+    }
+
+    fn linkage_slots(&self, graph: &CircuitGraph) -> Result<Vec<usize>, MaterialCircuitError> {
+        self.windings
+            .iter()
+            .map(|winding| {
+                if graph
+                    .branches
+                    .get(winding.branch)
+                    .is_none_or(|(_, _, branch)| !matches!(branch, Branch::Inductor { .. }))
+                {
+                    return Err(invalid(
+                        "shared-gap winding must name an original inductor branch",
+                    ));
+                }
+                Ok(graph.branches[..winding.branch]
+                    .iter()
+                    .filter(|(_, _, branch)| matches!(branch, Branch::Inductor { .. }))
+                    .count())
+            })
+            .collect()
     }
 
     fn at_gap(&self, gap: f64) -> Result<Self, MaterialCircuitError> {
@@ -170,13 +253,12 @@ impl CommonMagneticGap {
         Ok(next)
     }
 
-    fn lower(
+    fn lower_at_permeance(
         &self,
         graph: &CircuitGraph,
-        gap: f64,
+        permeance: f64,
     ) -> Result<(CircuitGraph, Vec<MutualInductance>), MaterialCircuitError> {
         let mut lowered = graph.clone();
-        let permeance = self.scale / gap;
         let mut mutual = Vec::with_capacity(self.windings.len() * (self.windings.len() - 1) / 2);
         for (index, winding) in self.windings.iter().enumerate() {
             let branch = lowered
@@ -312,7 +394,20 @@ impl CoupledGapMotion {
                 "source-derived shared-gap body mass or momentum is unrepresentable",
             ));
         }
-        let (graph, mutual) = gap.lower(&graph, gap.gap_m())?;
+        let flux_slots = gap.linkage_slots(&graph)?;
+        if initial.fluxes_wb.len()
+            != graph
+                .branches
+                .iter()
+                .filter(|(_, _, branch)| matches!(branch, Branch::Inductor { .. }))
+                .count()
+        {
+            return Err(invalid(
+                "shared-gap initial linkages must cover all original inductors",
+            ));
+        }
+        let permeance = gap.secant_permeance(gap.gap_m(), |i| initial.fluxes_wb[flux_slots[i]])?;
+        let (graph, mutual) = gap.lower_at_permeance(&graph, permeance)?;
         let circuit = MaterialCircuit::new_with_contacts_and_mutual_inductance(
             graph,
             sources,
@@ -324,9 +419,11 @@ impl CoupledGapMotion {
         )?;
         // Admit the entire geometric domain through the native full-matrix
         // checker, including resolved leakage at the most strongly coupled end.
-        // No initial flux is projected onto an endpoint current clamp here.
+        // Positive core reluctance only reduces coupling, so the no-core bound
+        // remains conservative for every supported saturation segment. No initial
+        // flux is projected onto an endpoint current clamp here.
         for bound in gap.limits_m {
-            let (bounded, links) = gap.lower(&circuit.graph, bound)?;
+            let (bounded, links) = gap.lower_at_permeance(&circuit.graph, gap.scale / bound)?;
             bind_with_mutual(
                 &bounded,
                 circuit.resistors.clone(),
@@ -334,16 +431,6 @@ impl CoupledGapMotion {
                 &links,
             )?;
         }
-        let flux_slots = gap
-            .windings
-            .iter()
-            .map(|w| {
-                circuit.graph.branches[..w.branch]
-                    .iter()
-                    .filter(|(_, _, b)| matches!(b, Branch::Inductor { .. }))
-                    .count()
-            })
-            .collect();
         let model = Self {
             circuit,
             gap,
@@ -357,7 +444,10 @@ impl CoupledGapMotion {
         Ok(model)
     }
 
-    /// Original circuit topology and the complete L/M coefficients at this gap.
+    /// Original circuit topology with coefficients reproducing the accepted
+    /// endpoint currents. With a nonlinear core these are SECANT coefficients
+    /// for native constraint admission, not its physical magnetic energy or
+    /// differential inductance. Use this owner's corresponding accessors.
     pub const fn circuit(&self) -> &MaterialCircuit {
         &self.circuit
     }
@@ -418,7 +508,8 @@ impl CoupledGapMotion {
         }
         Ok(currents)
     }
-    /// Common-gap plus all declared leakage energy [J], counted exactly once.
+    /// Common-gap, reversible core and all declared leakage energy [J], counted
+    /// exactly once. A nonlinear core uses its integrated source potential.
     pub fn magnetic_energy_j(&self) -> Result<f64, MaterialCircuitError> {
         let energy = self
             .gap
@@ -427,6 +518,41 @@ impl CoupledGapMotion {
             return Err(invalid("shared-gap magnetic energy is unrepresentable"));
         }
         Ok(energy)
+    }
+
+    /// Bias differential inductance `dLambda / di` [H], a symmetric row-major
+    /// matrix in `gap().windings()` order. Core saturation uses source `dH/dB`,
+    /// never secant `H/B`; each diagonal includes its explicit physical leakage.
+    /// At a source knee the material's right-hand magnitude slope is retained.
+    pub fn differential_inductance_h(&self) -> Result<Vec<f64>, MaterialCircuitError> {
+        let flux = self.common_flux_wb()?;
+        let core_reluctance = self
+            .gap
+            .core
+            .as_ref()
+            .map_or(0.0, |core| core.differential_reluctance(flux));
+        let permeance = 1.0 / (self.gap_m() / self.gap.scale + core_reluctance);
+        if !positive(permeance) {
+            return Err(invalid(
+                "shared-gap differential permeance is unrepresentable",
+            ));
+        }
+        let windings = &self.gap.windings;
+        let mut matrix = vec![0.0; windings.len() * windings.len()];
+        for (i, a) in windings.iter().enumerate() {
+            for (j, b) in windings[..=i].iter().enumerate() {
+                let value = permeance * f64::from(a.signed_turns) * f64::from(b.signed_turns)
+                    + if i == j { a.leakage_h } else { 0.0 };
+                if !value.is_finite() || value == 0.0 {
+                    return Err(invalid(
+                        "shared-gap differential inductance is unrepresentable",
+                    ));
+                }
+                matrix[i * windings.len() + j] = value;
+                matrix[j * windings.len() + i] = value;
+            }
+        }
+        Ok(matrix)
     }
     /// Fixed-linkage force `-Phi^2/(2 mu A)` [N]. Leakage produces no force on
     /// this coordinate because its declared inductances are gap-independent.
@@ -569,7 +695,10 @@ impl CoupledGapMotion {
                 "shared-gap electrical, magnetic, mechanical work and branch heat disagree",
             ));
         }
-        let (graph, mutual) = gap.lower(&graph, gap.gap_m())?;
+        let permeance = gap.secant_permeance(gap.gap_m(), |i| {
+            record.x[dae.flux_index[self.flux_slots[i]]]
+        })?;
+        let (graph, mutual) = gap.lower_at_permeance(&graph, permeance)?;
         poll(&mut cancelled)?;
         let circuit = MaterialCircuit::new_with_contacts_and_mutual_inductance(
             graph,
@@ -746,7 +875,8 @@ impl Storage for CoupledGapStorage {
         let (fa, fb, fm) = (self.flux(a), self.flux(b), self.flux(mid));
         let delta_gap = b[self.gap_index] - a[self.gap_index];
         // Exact two-endpoint identity:
-        // dH = avg(i_a,i_b).dLambda + Phi_a Phi_b dg/(2 mu A).
+        // dH = avg(i_a,i_b).dLambda + Phi_a Phi_b dg/(2 mu A)
+        //      + dW_core - avg(core_mmf_a,core_mmf_b)*dPhi.
         // Subtract midpoint efforts in factored form; never difference large H.
         let mut remainder = 0.5 * ((fa - fm) * fb + fm * (fb - fm)) * (delta_gap / self.gap.scale);
         for (winding, &index) in self.indices.iter().enumerate() {
@@ -754,6 +884,9 @@ impl Storage for CoupledGapStorage {
             let ib = self.gap.current(winding, b[index], fb);
             let im = self.gap.current(winding, mid[index], fm);
             remainder += 0.5 * ((ia - im) + (ib - im)) * (b[index] - a[index]);
+        }
+        if let Some(core) = &self.gap.core {
+            remainder += core.trapezoid_remainder(fa, fb);
         }
         remainder += self.other.midpoint_energy_remainder(a, b, mid)?;
         let p = self.momentum_index;

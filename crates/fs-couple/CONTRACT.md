@@ -5212,17 +5212,60 @@ source constraints, bulk/contact losses and `FieldMotionStep` work accounting
 remain attached. Endpoint geometry regenerates self and mutual coefficients
 and rechecks native constraints without projecting conserved linkage.
 
-Scope is one uniform constant-area gap with negligible return-path reluctance,
-validity-wide constant nondispersive permeability, constant explicit leakage
-and guided translation. Thermally live coefficients/supports, changing leakage,
-saturation, hysteresis, fringing and pole contact require their own physical
-owners. No input path for an additional external mutual group is supplied.
+Without an explicit core, scope is one uniform constant-area gap with negligible
+return-path reluctance, validity-wide constant nondispersive permeability,
+constant explicit leakage and guided translation. Thermally live coefficients
+or supports, changing leakage, hysteresis, fringing and pole contact require
+their own physical owners. No input path for an additional external mutual
+group is supplied.
 
 G1/G3 regressions cover independent matrix current/force, driven refinement
 against RK4, electrical/mechanical/heat closure, winding reversal, noncontiguous
 windings with unrelated RLC and series-contact losses, source substitutions
 and atomic refusal/replay. Exact-nightly parsing and independent arithmetic
 checks passed. Native execution remains unverified on the saturated shared host.
+
+### Source-resolved saturation in the shared magnetic return path
+
+`CommonMagneticGap::with_reversible_core(ReversibleMagneticCore)` adds one
+uniform fixed-area, fixed-length reversible core in series with the moving gap.
+The original `ReversibleMagneticMaterial`, complete source path and receipts
+are shared across candidates through `Arc`. For signed turns n_i, explicit
+leakage D_i, total linkages lambda_i and gap g, the common flux solves
+
+sum(n_i*lambda_i/D_i) = (sum(n_i^2/D_i) + g/(mu_gap*A_gap))*Phi
+                      + length_core*H(Phi/A_core).
+
+Binary search locates an original source segment of this strictly monotone odd
+law; one affine inversion returns Phi without iteration, allocation, source
+extrapolation or a fitted permeability curve. Currents are
+i_i=(lambda_i-n_i*Phi)/D_i. Actual energy is the sum of leakage energy,
+g*Phi^2/(2*mu_gap*A_gap), and A_core*length_core*w(abs(Phi)/A_core), where w
+is the original source integral of H dB. The same energy supplies reciprocal
+back-emf, fixed-linkage gap force -Phi^2/(2*mu_gap*A_gap) and the original
+descriptor update. Saturation creates no additional heat or loss channel.
+
+`circuit()` exposes accepted-state SECANT L/M coefficients only for native
+constraint admission, including the zero-field limit. Their quadratic energy
+does not replace the nonlinear potential; `magnetic_energy_j()` supplies the
+physical magnetic storage. `differential_inductance_h()` separately returns
+the symmetric row-major bias tangent using source dH/dB, with the material's
+right-hand magnitude slope at a knee. Every accepted endpoint recomputes its
+secant stamp from actual common flux. The midpoint energy remainder adds the
+source-integrated core trapezoid defect from crossed signed slope jumps,
+avoiding cancellation between large endpoint energies.
+
+Both flux signs retain the source's original support. Unsupported trials and
+cancellation leave the original model unchanged. Nonzero explicit thermal
+scaling refuses without a field-entropy owner. This uniform reversible-path
+reduction does not supply hysteresis, remanence, eddy loss, fringing or live
+core temperature. Five authored regressions cover physical potential/force
+derivatives, secant versus differential response, driven knee crossing and
+refinement, flux reversal across signed knees, support bounds and rollback.
+Exact-nightly parsing and independent arithmetic checks passed, including
+10,000 source-knot energy defects and 1,000 complete endpoint identities.
+Native Rust execution remains unverified; these are synthetic numerical
+fixtures, not experimental actuator qualification.
 
 ## Reciprocal material electric and magnetic gap motion
 
