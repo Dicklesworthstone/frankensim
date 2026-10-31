@@ -150,10 +150,33 @@ the crash cascade with structurally exact energy accounting.
   elastic/fully-relaxed limits.
 - `duffing_backbone` / `single_mode_beta` — the analytic
   perturbation pins.
-- Time stepping, striking, damping, and the energy ledger are
-  fs-phs's (Gonzalez discrete gradients — implicit, energy-exact,
-  stable at crash amplitudes). No explicit integrator exists in this
-  crate to misuse; the "explicit scheme refusal" is by construction.
+- The `assemble*` systems retain fs-phs's original-energy discrete-gradient
+  stepping, striking, damping, and work ledger.
+- `sav::{SavStepper, SavConfig, SavState, SavRecord}` is a separate opt-in
+  exact-linear, non-iterative stepper for the complete retained SOS potential.
+  It introduces ONE `r=sqrt(V+C0)` for the total nonlinear potential; all
+  stress channels, signed couplings and physical linear coefficients remain.
+  The exact scalar `PreparedExactZoh` owner supplies held-force trajectories,
+  same-interval mean velocities and independently integrated positive heat.
+  A half-step predictor uses the current extended state, then one scalar
+  Sherman-Morrison solve closes the held nonlinear force. Diagonal KC
+  channels cost O(N); dense channels retain O(N^2) multiplication. Preparation
+  and hot work grow with the retained modes without a dense 2N-state solve;
+  warm stepping allocates nothing. Damping input is `C_i` [1/s], not zeta.
+  The declared mode cap is at most 4096, and every retained omega*dt must
+  remain within a positive caller band strictly below pi. Exact nonnegative
+  displacement gains make the rank-one denominator at least one; invalid
+  data or arithmetic refuses, without dropping modes or clipping a gain.
+  This is a second-order exponential SAV method (Jiang/Wang/Cai, JCP 419,
+  109690, doi:10.1016/j.jcp.2020.109690; scalar string formulation in
+  Russo/Bilbao/Ducceschi, IFAC 2024). Its invariant is the MODIFIED energy
+  `H_linear+r^2-C0`, not the original `H_linear+V`. Each accepted record
+  reports both, their discrepancy, physical held-force work and independent
+  viscous heat. The balance must close to 1e-12 of the physical/evolved energy
+  scale; the arbitrary offset cannot inflate that allowance. The shifted
+  auxiliary representation `r-sqrt(C0)` avoids losing weak nonlinear energy
+  beside the offset. `SavState` contains the entire auxiliary checkpoint;
+  reinitializing r from q during restart would change the method.
 
 ## Invariants
 
@@ -196,6 +219,10 @@ the crash cascade with structurally exact energy accounting.
 
 Typed `NlModalError` (parameter, asymmetric coupling, quadrature
 mismatch, pHS passthrough). No silent degradation.
+The opt-in stepper adds `SavError` for incompatible state/inputs, the exact
+mode and angular-step band, physical linear-owner refusal, modified-energy
+balance failure, and cancellation. Refused steps publish no physical or
+auxiliary state; retry and checkpoint replay retain the same trajectory.
 
 ## Determinism class
 
@@ -207,6 +234,9 @@ stepping; no RNG or time dependence.
 Construction is milliseconds at analytic-mode scale; stepping is the
 long pole (implicit Newton per step). No `Cx` integration (workspace
 `frankensim-ccmn`).
+`SavStepper::step_controlled` polls the supplied cancellation callback between
+modal operations and immediately before publication. Its state and auxiliary
+coordinate are transactional; scratch may change on refusal.
 
 ## Unsafe boundary
 
@@ -217,6 +247,19 @@ long pole (implicit Newton per step). No `Cx` integration (workspace
 None.
 
 ## Conformance tests
+
+`tests/sav.rs` independently checks exact 1/5/10 kHz linear phase at 48 kHz,
+bitwise equality with the existing damped/forced exact owner when V is zero,
+unchanged nonlinear static compliance, and a forced/damped modified-energy
+ledger. A signed two-channel model transfers energy into an initially silent
+mode and converges to an independent continuous RK4 oracle; both state error
+and physical-versus-auxiliary energy defect refine at second order. An AGM
+elliptic Duffing oracle checks a 5 kHz mode at nonlinear ratios .01, .1 and .5,
+with 1/2/4/8/16 substeps and finer asymptotic-order rungs. At 16 substeps the
+frequency error is below 0.1 cent for these fixtures; this is not an automatic
+production clock or a wider nonlinear-band guarantee. The suite also retains
+all 128 KC modes with one rank-one solve, tests band/capacity/offset refusals,
+mid-step cancellation, unchanged rejected state, and bitwise checkpoint replay.
 
 `tests/nlmodal.rs::full_viscous_operator_preserves_local_damper_nullspace_and_forced_response`
 checks an independent common/differential analytic oscillator solution,
@@ -268,6 +311,14 @@ modal energies, leaked fractions, tensor size); typed refusals.
 
 ## No-claim boundaries
 
+- The opt-in SAV API does not migrate existing render consumers or close the
+  full M1.1-W3/M5.2-W1 work items. Conserving auxiliary energy alone certifies
+  neither physical nonlinear energy nor accurate harmonics. The caller must
+  refine temporal resolution and inspect state, pitch and auxiliary-energy
+  defect; nonlinear harmonics can exceed the retained linear band. Offset
+  sensitivity, modal/stress truncation and physical model error remain separate
+  convergence axes. Full matrix viscosity, contact, constitutive memory and
+  reciprocal termination coupling remain with their existing pHS owners.
 - Moderate-rotation von Karman regime only: no damage, plasticity,
   wrinkling, or full shell curvature (quadratic coupling from
   curvature is the shells follow-up).

@@ -11,9 +11,10 @@
 //! the nonlinear potential is a positive sum of squares, `H` is
 //! bounded below and the whole system is a PORT-HAMILTONIAN system
 //! with non-quadratic storage: time stepping, damping, striking, and
-//! the energy ledger all come from fs-phs (Gonzalez discrete
-//! gradients — implicit, energy-exact, stable at crash amplitudes; no
-//! explicit integrator exists in this crate to misuse).
+//! the original-energy ledger come from fs-phs discrete gradients.
+//! The opt-in [`sav`] path instead uses exact linear propagation and one
+//! non-iterative auxiliary-variable solve. Its conserved numerical energy
+//! and its discrepancy from the physical quartic energy are reported separately.
 //!
 //! Constructors:
 //! - [`von_karman_ss_plate`] — simply-supported rectangular plate with
@@ -43,6 +44,7 @@ use fs_math::det;
 use fs_phs::{PhsError, PortHamiltonian, Storage};
 
 pub mod longitudinal;
+pub mod sav;
 
 /// One Airy-stress coupling channel: coefficient `c >= 0` and the
 /// symmetric matrix `E` (row-major `n x n`) of `q^T E q`.
