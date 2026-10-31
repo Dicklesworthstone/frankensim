@@ -1,14 +1,14 @@
 //! Stage 5: CVaR-constrained MASS MINIMIZATION in the
 //! Rockafellar–Uryasev form: CVaR_β(L) = min_t t + E[(L−t)₊]/(1−β),
 //! evaluated over the motion ensemble with the section scale s as the
-//! design variable. Peak drift decreases monotonically in s at smoke
-//! scale (bigger sections, stiffer/stronger hinges), so the minimal
-//! feasible scale is found by bisection — deterministic and honest;
-//! the multi-variable trust-region tier is the recorded successor.
-//! The chosen scale then snaps UP to the section catalog and the
-//! snapped design is INDEPENDENTLY re-checked.
+//! design variable. The smoke-tier bisection assumes a monotone feasible
+//! interval in section scale; resonance can violate that assumption.
+//! Every nonlinear history must converge, and the final catalog-snapped
+//! candidate must independently satisfy the risk limit or be refused.
+//! Use [building] for material-bearing finite-catalog design with actual
+//! physical mass and no size-response monotonicity assumption.
 
-use crate::history::{StoryFrame, StoryParams, peak_drift};
+use crate::history::{GroundMotion, HistoryError, HistoryLimits, StoryFrame, StoryParams};
 pub use fs_robust::{EmpiricalCvarReport, RobustError, cvar, empirical_cvar};
 use fs_scenario::ensemble::{SpectrumModel, StochasticEnsemble};
 
@@ -18,7 +18,7 @@ pub mod building;
 /// The CVaR design record.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CvarDesign {
-    /// Minimal feasible section scale (continuous).
+    /// Feasible bisection endpoint under the smoke-tier monotonicity assumption.
     pub scale_star: f64,
     /// Catalog-snapped scale (≥ scale_star).
     pub scale_snapped: f64,
@@ -43,6 +43,13 @@ pub enum FrameCvarError {
         /// Member index that failed realization.
         member: u32,
     },
+    /// The checked nonlinear history refused its inputs or failed to converge.
+    History {
+        /// Ensemble member whose history was refused.
+        member: u32,
+        /// Original history-owner diagnostic.
+        source: HistoryError,
+    },
     /// Non-finite drift loss encountered.
     NonFiniteLoss {
         /// Member index where non-finite loss was observed.
@@ -66,6 +73,15 @@ pub enum FrameCvarError {
         /// Declared CVaR limit.
         limit: f64,
     },
+    /// The independently evaluated snapped candidate violates the risk target.
+    CatalogRiskExceeded {
+        /// Catalog scale evaluated.
+        scale: f64,
+        /// Actual empirical CVaR at that scale.
+        cvar_observed: f64,
+        /// Declared CVaR limit.
+        limit: f64,
+    },
     /// The catalog has no section scale greater than or equal to the continuous optimum.
     NoFeasibleCatalogScale {
         /// Continuous optimal scale.
@@ -78,6 +94,7 @@ impl core::fmt::Display for FrameCvarError {
         match self {
             Self::EnsembleMalformed(msg) => write!(f, "malformed ensemble: {msg}"),
             Self::RealizationFailed { member } => write!(f, "failed to realize member {member}"),
+            Self::History { member, source } => write!(f, "history member {member}: {source}"),
             Self::NonFiniteLoss { member, value } => {
                 write!(f, "non-finite drift loss {value} at member {member}")
             }
@@ -96,6 +113,10 @@ impl core::fmt::Display for FrameCvarError {
                 f,
                 "even scale {hi_scale} violates CVaR limit {limit} (observed {cvar_observed})"
             ),
+            Self::CatalogRiskExceeded { scale, cvar_observed, limit } => write!(
+                f,
+                "catalog scale {scale} violates CVaR limit {limit} (observed {cvar_observed})"
+            ),
             Self::NoFeasibleCatalogScale { scale_star } => {
                 write!(f, "catalog has no section above scale {scale_star}")
             }
@@ -103,7 +124,14 @@ impl core::fmt::Display for FrameCvarError {
     }
 }
 
-impl std::error::Error for FrameCvarError {}
+impl std::error::Error for FrameCvarError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::History { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+}
 
 impl From<RobustError> for FrameCvarError {
     fn from(err: RobustError) -> Self {
@@ -130,6 +158,11 @@ pub(crate) fn try_assert_ground_motion_ensemble(
 }
 
 /// Peak-drift losses over the whole ensemble at section scale `s` (fallible).
+///
+/// Each smoke-tier history uses the existing checked owner: at most 30 Newton
+/// corrections per sample, displacement tolerance 1e-12 m and equilibrium
+/// tolerance 1 N. The native realization budget already bounds sample count.
+/// Input, nonfinite-state and convergence failures retain their member index.
 pub fn try_losses(
     ensemble: &StochasticEnsemble,
     base: StoryParams,
@@ -144,8 +177,13 @@ pub fn try_losses(
             .map_err(|_| FrameCvarError::RealizationFailed { member })?;
         let params = StoryParams { scale: s, ..base };
         let mut frame = StoryFrame::new(params);
-        let drifts = frame.run(&real.values, dt);
-        let drift = peak_drift(&drifts, base.h);
+        let history = frame
+            .run_checked(
+                GroundMotion::new(&real.values, dt),
+                HistoryLimits::new(real.values.len(), 30, 1e-12, 1.0),
+            )
+            .map_err(|source| FrameCvarError::History { member, source })?;
+        let drift = history.peak_abs_displacement_m / base.h;
         if !drift.is_finite() {
             return Err(FrameCvarError::NonFiniteLoss {
                 member,
@@ -216,6 +254,13 @@ pub fn try_cvar_mass_min(
         return Err(FrameCvarError::NoFeasibleCatalogScale { scale_star });
     }
     let cvar_snapped = try_ensemble_cvar(ensemble, base, scale_snapped, beta)?;
+    if cvar_snapped > limit {
+        return Err(FrameCvarError::CatalogRiskExceeded {
+            scale: scale_snapped,
+            cvar_observed: cvar_snapped,
+            limit,
+        });
+    }
     Ok(CvarDesign {
         scale_star,
         scale_snapped,
@@ -238,8 +283,8 @@ pub fn ensemble_cvar(ensemble: &StochasticEnsemble, base: StoryParams, s: f64, b
 /// bisection on the scale, then snap UP to `catalog` and re-check.
 ///
 /// # Panics
-/// If even the largest catalog scale is infeasible (the drill fixture
-/// checks the diagnostics path instead).
+/// On invalid inputs, failed nonlinear histories, or a refused final catalog
+/// candidate. The fallible entry point retains the corresponding diagnostic.
 #[must_use]
 pub fn cvar_mass_min(
     ensemble: &StochasticEnsemble,

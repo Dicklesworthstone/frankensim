@@ -117,6 +117,23 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   the smoke-tier story model, level 1 the building-minus-story correction
   on the same motion (telescoping, so unbiased for the building).
 
+## Checked smoke-tier CVaR feasibility
+
+The legacy `try_losses` path uses the same checked story-history owner as
+recorded-response diagnostics. Every step must satisfy the finite-state,
+Newton-correction and equilibrium gates; original history errors retain the
+ensemble-member index. Nonfinite or unconverged trajectories cannot disappear
+inside a peak-reduction operation and become zero-drift design losses.
+
+Smoke-tier scale bisection retains an explicit monotonic-feasibility assumption.
+Its final catalog candidate is independently evaluated and refused if the
+actual empirical CVaR exceeds the declared limit. Resonance can make a larger
+section less feasible. The material-bearing building catalog owner below
+avoids this assumption by evaluating every supplied candidate.
+`tests/cvar_refusals.rs` targets invalid/overflowing sections and a narrowband
+resonance fixture whose bisection endpoints pass but snapped catalog member
+fails; these are synthetic model checks, not population-risk qualification.
+
 ## Material-bearing building catalog CVaR
 
 `cvar::building::building_cvar_from_motions` evaluates an explicit finite catalog
