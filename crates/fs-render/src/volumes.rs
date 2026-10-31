@@ -21,7 +21,7 @@ pub mod transport;
 ///
 /// Bump this when transfer interpolation, stream keying, ray placement, or
 /// collision-estimator arithmetic changes in a way that can move image bits.
-pub const TRANSFER_RENDER_SEMANTICS_VERSION: u32 = 1;
+pub const TRANSFER_RENDER_SEMANTICS_VERSION: u32 = 2;
 
 /// One knot in a scalar-to-optical-properties transfer function.
 ///
@@ -438,7 +438,8 @@ impl MajorantGrid {
 pub struct Ray {
     /// Ray origin.
     pub origin: [f64; 3],
-    /// Direction (unit for metric lengths).
+    /// Direction with finite, positive norm. Extinction is per world length;
+    /// tracking accounts for this norm, so `dir` need not be a unit vector.
     pub dir: [f64; 3],
     /// Segment start.
     pub t0: f64,
@@ -447,6 +448,16 @@ pub struct Ray {
 }
 
 impl Ray {
+    // Extinction has units 1/world-length, while t is an arbitrary ray
+    // parameter: ds = |dir| dt. Resolve this conversion once per track.
+    fn direction_length(self) -> f64 {
+        self.dir
+            .iter()
+            .map(|value| value * value)
+            .sum::<f64>()
+            .sqrt()
+    }
+
     /// Point at parameter `t`.
     #[must_use]
     pub fn at(&self, t: f64) -> [f64; 3] {
@@ -480,6 +491,7 @@ pub fn woodcock_transmittance(
     stream: &mut fs_rand::Stream,
 ) -> (f64, u32) {
     let mut t = ray.t0;
+    let direction_length = ray.direction_length();
     let mut nulls = 0u32;
     if majorant_bound <= 0.0 {
         return (1.0, 0);
@@ -491,7 +503,7 @@ pub fn woodcock_transmittance(
         // estimator unbiased and the tile stage is where loose global
         // bounds stop costing σ-lookups).
         let u = stream.next_f64().max(f64::MIN_POSITIVE);
-        t -= u.ln() / majorant_bound;
+        t -= (u.ln() / majorant_bound) / direction_length;
         if t >= ray.t1 {
             return (1.0, nulls);
         }
@@ -526,9 +538,10 @@ pub fn woodcock_emission(
         return 0.0;
     }
     let mut t = ray.t0;
+    let direction_length = ray.direction_length();
     loop {
         let u = stream.next_f64().max(f64::MIN_POSITIVE);
-        t -= u.ln() / majorant_bound;
+        t -= (u.ln() / majorant_bound) / direction_length;
         if t >= ray.t1 {
             return 0.0;
         }
@@ -603,9 +616,10 @@ fn track_transfer_emission(
         return Ok([0.0; 3]);
     }
     let mut t = ray.t0;
+    let direction_length = ray.direction_length();
     for _ in 0..max_tracking_steps {
         let u = stream.next_f64().max(f64::MIN_POSITIVE);
-        t -= u.ln() / majorant_bound;
+        t -= (u.ln() / majorant_bound) / direction_length;
         if t >= ray.t1 {
             return Ok([0.0; 3]);
         }
@@ -816,4 +830,106 @@ pub fn render_transfer_emission(
         }
     }
     Ok(image)
+}
+
+#[cfg(test)]
+mod metric_absorption_tests {
+    use super::*;
+
+    /// G3: changing ray coordinates must not change the physical path,
+    /// collision positions, null counts, absorption, or emission.
+    #[test]
+    fn absorption_is_invariant_under_ray_reparameterization() {
+        let values = [0.1, 3.2, 0.4, 1.5];
+        let grid = VolumeGrid::new([1, 1, 4], &values, [0.0; 3], [1.0, 1.0, 0.25]);
+        let transfer = TransferFunction::new(vec![
+            TransferPoint {
+                scalar: 0.0,
+                extinction: 0.2,
+                source_rgb: [0.2, 0.4, 0.8],
+            },
+            TransferPoint {
+                scalar: 4.0,
+                extinction: 3.0,
+                source_rgb: [1.0, 0.6, 0.4],
+            },
+        ])
+        .unwrap();
+        let ray = Ray {
+            origin: [0.5, 0.5, -0.5],
+            dir: [0.0, 0.0, 1.0],
+            t0: 0.5,
+            t1: 1.5,
+        };
+        let majorant = |_point| 4.0;
+        let source = |point: [f64; 3]| 1.0 + point[2];
+        for scale in [0.25, 2.0, 8.0] {
+            let scaled = Ray {
+                dir: ray.dir.map(|value| value * scale),
+                t0: ray.t0 / scale,
+                t1: ray.t1 / scale,
+                ..ray
+            };
+            for sample in 0..1_024 {
+                let mut reference = pixel_stream(0xAB50_001, sample);
+                let mut replay = pixel_stream(0xAB50_001, sample);
+                assert_eq!(
+                    woodcock_transmittance(&grid, &majorant, 4.0, ray, &mut reference),
+                    woodcock_transmittance(&grid, &majorant, 4.0, scaled, &mut replay),
+                );
+                let mut reference = pixel_stream(0xAB50_002, sample);
+                let mut replay = pixel_stream(0xAB50_002, sample);
+                assert_eq!(
+                    woodcock_emission(&grid, 4.0, &source, ray, &mut reference).to_bits(),
+                    woodcock_emission(&grid, 4.0, &source, scaled, &mut replay).to_bits(),
+                );
+                let mut reference = pixel_stream(0xAB50_003, sample);
+                let mut replay = pixel_stream(0xAB50_003, sample);
+                assert_eq!(
+                    woodcock_transfer_emission(&grid, &transfer, 4.0, ray, &mut reference, 128, 4),
+                    woodcock_transfer_emission(&grid, &transfer, 4.0, scaled, &mut replay, 128, 4),
+                );
+            }
+        }
+    }
+
+    /// G1: an oblique 3-4-5 path has five world-length units of optical
+    /// depth, independent of its unit parameter interval.
+    #[test]
+    fn oblique_absorption_matches_physical_beer_lambert_length() {
+        let grid = VolumeGrid::new([1; 3], &[0.4], [0.0; 3], [3.0, 1.0, 4.0]);
+        let ray = Ray {
+            origin: [0.0, 0.5, 0.0],
+            dir: [3.0, 0.0, 4.0],
+            t0: 0.0,
+            t1: 1.0,
+        };
+        let transfer = TransferFunction::new(vec![TransferPoint {
+            scalar: 0.4,
+            extinction: 0.4,
+            source_rgb: [2.0, 3.0, 4.0],
+        }])
+        .unwrap();
+        let mut transmission = 0.0;
+        let mut emission = 0.0;
+        let mut transferred = [0.0; 3];
+        let samples = 40_000;
+        let mut stream = pixel_stream(0xAB50_004, 0);
+        for _ in 0..samples {
+            transmission += woodcock_transmittance(&grid, &|_| 0.4, 0.4, ray, &mut stream).0;
+            emission += woodcock_emission(&grid, 0.4, &|_| 2.0, ray, &mut stream);
+            let sample =
+                woodcock_transfer_emission(&grid, &transfer, 0.4, ray, &mut stream, 1, 1).unwrap();
+            for (total, value) in transferred.iter_mut().zip(sample) {
+                *total += value;
+            }
+        }
+        let expected = (-0.4_f64 * 5.0).exp();
+        let tolerance = 5.0 * (expected * (1.0 - expected) / f64::from(samples)).sqrt();
+        assert!((transmission / f64::from(samples) - expected).abs() < tolerance);
+        assert!((emission / (2.0 * f64::from(samples)) - (1.0 - expected)).abs() < tolerance);
+        for (value, source) in transferred.into_iter().zip([2.0, 3.0, 4.0]) {
+            assert!((value / (source * f64::from(samples)) - (1.0 - expected)).abs() < tolerance);
+        }
+    }
 }
