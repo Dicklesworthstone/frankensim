@@ -30,6 +30,10 @@ pub const MAX_POLARIZED_PATH_EVENTS: u32 = 65_536;
 /// Curved paths through immutable gradient-index fields and native geometry.
 pub mod curved;
 
+/// Molecular multiple scattering between the original native surface events.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
 /// Material or measurement attached to an existing stable geometry ID.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Interaction {
@@ -109,6 +113,8 @@ pub enum SceneError {
     Geometry(InstanceError),
     Beam(BeamError),
     Conductor(ConductorBeamError),
+    #[cfg(feature = "volumes")]
+    Scattering(crate::volumes::transport::scattering::polarized::PolarizedScatteringError),
     Cancelled,
 }
 impl From<InstanceError> for SceneError {
@@ -142,6 +148,8 @@ pub enum PathTermination {
     Extinguished,
     DistanceLimit,
     SurfaceLimit,
+    /// A surviving molecular path exhausted its explicit collision budget.
+    VolumeLimit,
 }
 
 /// Immutable path result. The final native hit retains geometry authority and
@@ -162,6 +170,21 @@ impl PathResult {
     pub const fn surface_events(&self) -> u32 { self.surface_events }
     pub const fn termination(&self) -> PathTermination { self.termination }
     pub const fn last_hit(&self) -> Option<&InstanceHit> { self.last_hit.as_ref() }
+}
+
+// Internal segment seam: native surface traversal/dispatch remains one owner.
+// A segment either reaches its endpoint or supplies one volume continuation.
+struct SegmentProgress {
+    beam: PolarizedBeam,
+    distance_m: f64,
+    collision: bool,
+    volume_limit: bool,
+}
+impl SegmentProgress {
+    fn homogeneous(beam: PolarizedBeam, distance_m: f64) -> Result<Self, SceneError> {
+        Ok(Self { beam: beam.advance(distance_m)?, distance_m,
+            collision: false, volume_limit: false })
+    }
 }
 
 /// Prepared bindings borrow the actual native scene and spectral materials.
@@ -240,7 +263,22 @@ impl<'a> PolarizedScene<'a> {
         beam: PolarizedBeam,
         initial_medium: usize,
         settings: TraceSettings,
+        samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<PathResult, SceneError> {
+        self.trace_segments(cx, beam, initial_medium, settings, samples,
+            |beam, _, distance| SegmentProgress::homogeneous(beam, distance))
+    }
+
+    // A monomorphized segment continuation shares ALL geometry, surface laws,
+    // media transitions and receiver semantics with the surface-only API.
+    fn trace_segments(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: TraceSettings,
         mut samples: impl FnMut(u32) -> [f64; 3],
+        mut propagate: impl FnMut(PolarizedBeam, usize, f64) -> Result<SegmentProgress, SceneError>,
     ) -> Result<PathResult, SceneError> {
         cx.checkpoint()?;
         settings.validate()?;
@@ -255,38 +293,64 @@ impl<'a> PolarizedScene<'a> {
             termination: PathTermination::SurfaceLimit, last_hit: None,
         };
         let mut offset = 0.0;
-        for event in 0..settings.max_surface_events {
+        while result.surface_events < settings.max_surface_events {
             cx.checkpoint()?;
             if result.beam.power().i == 0.0 {
                 result.termination = PathTermination::Extinguished;
                 return finish(cx, result);
             }
             let remaining = settings.max_distance_m - result.traveled_m;
-            if remaining <= offset {
-                return distance_limit(cx, result, remaining, settings.max_distance_m);
-            }
-            let mut query = result.beam.ray();
-            query.origin = query.at(offset);
-            if ![query.origin.x, query.origin.y, query.origin.z].iter().all(|x| x.is_finite())
-                || (offset > 0.0 && query.origin == result.beam.ray().origin) {
+            // Find a prospective surface ONCE, but let a physical volume event
+            // preempt it. Extinction starts at the physical origin, including
+            // any prefix suppressed only in the geometry query.
+            let hit = if remaining <= offset {
+                None
+            } else {
+                let mut query = result.beam.ray();
+                query.origin = query.at(offset);
+                if ![query.origin.x, query.origin.y, query.origin.z].iter().all(|x| x.is_finite())
+                    || (offset > 0.0 && query.origin == result.beam.ray().origin) {
+                    return Err(SceneError::UnrepresentableProgress);
+                }
+                self.geometry.intersect(
+                    cx, &query, remaining - offset, settings.surface_epsilon_m,
+                )?
+            };
+            let distance = if let Some(hit) = hit {
+                if !hit.hit.t.is_finite() || hit.hit.t <= 0.0 || hit.hit.t > remaining - offset {
+                    return Err(SceneError::InvalidHit);
+                }
+                (offset + hit.hit.t).min(remaining)
+            } else { remaining.max(0.0) };
+            let progress = propagate(result.beam, result.medium, distance)?;
+            if !progress.distance_m.is_finite() || progress.distance_m < 0.0
+                || progress.distance_m > distance {
                 return Err(SceneError::UnrepresentableProgress);
             }
-            let Some(hit) = self.geometry.intersect(
-                cx, &query, remaining - offset, settings.surface_epsilon_m,
-            )? else {
-                return distance_limit(cx, result, remaining, settings.max_distance_m);
-            };
-            if !hit.hit.t.is_finite() || hit.hit.t <= 0.0 || hit.hit.t > remaining - offset {
-                return Err(SceneError::InvalidHit);
+            let traveled = result.traveled_m + progress.distance_m;
+            if progress.distance_m > 0.0 && traveled <= result.traveled_m {
+                return Err(SceneError::UnrepresentableProgress);
             }
-            // Native traversal already admitted the query-space endpoint.
-            // Adding the prefix back can round one ulp past the physical cap.
-            let distance = (offset + hit.hit.t).min(remaining);
-            let traveled = result.traveled_m + distance;
-            if traveled <= result.traveled_m { return Err(SceneError::UnrepresentableProgress); }
-            // Advance from the PHYSICAL origin, not the displaced query origin.
-            result.beam = result.beam.advance(distance)?;
+            result.beam = progress.beam;
             result.traveled_m = traveled.min(settings.max_distance_m);
+            if progress.collision {
+                if result.beam.power().i == 0.0 || progress.volume_limit {
+                    result.termination = if result.beam.power().i == 0.0 {
+                        PathTermination::Extinguished
+                    } else { PathTermination::VolumeLimit };
+                    return finish(cx, result);
+                }
+                // A volume collision is not a surface hit. Re-query the changed
+                // direction from its true origin without a new surface offset.
+                offset = 0.0;
+                continue;
+            }
+            let Some(hit) = hit else {
+                result.traveled_m = settings.max_distance_m;
+                result.termination = PathTermination::DistanceLimit;
+                return finish(cx, result);
+            };
+            let event = result.surface_events;
             result.surface_events += 1;
             result.last_hit = Some(hit);
             let index = self.bindings.binary_search_by_key(&hit.object_id, |b| b.object_id)
@@ -464,15 +528,6 @@ fn finish(cx: &Cx<'_>, result: PathResult) -> Result<PathResult, SceneError> {
     cx.checkpoint()?;
     Ok(result)
 }
-fn distance_limit(
-    cx: &Cx<'_>, mut result: PathResult, remaining: f64, maximum: f64,
-) -> Result<PathResult, SceneError> {
-    result.beam = result.beam.advance(remaining.max(0.0))?;
-    result.traveled_m = maximum;
-    result.termination = PathTermination::DistanceLimit;
-    finish(cx, result)
-}
-
 /// Spectral receiving power and ideal analyzer readouts on native CIE bins.
 #[cfg(feature = "photometry")]
 pub mod measurement;

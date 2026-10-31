@@ -189,7 +189,7 @@ impl SpectralPowerMeter {
                     next.detected += 1;
                 }
             }
-            PathTermination::SurfaceLimit | PathTermination::DistanceLimit => {
+            PathTermination::SurfaceLimit | PathTermination::DistanceLimit | PathTermination::VolumeLimit => {
                 if input.power().i > 0.0 {
                     next.unresolved += 1;
                 }
