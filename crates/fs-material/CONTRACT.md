@@ -6025,3 +6025,60 @@ assembly, finite-strain plasticity, damage and experimental calibration are
 separate capabilities. Focused native material tests cover axial/cyclic/energy
 limits, nonproportional plane stress, retained transverse history and rate-law
 semantics; no full-workspace or runtime qualification follows from those tests.
+## Finite-rate liquid-water evaporation and condensation
+
+`evaporation::WaterEvaporation` binds a strictly liquid interval of the original
+IF97 `IsobaricWater` chart to `fs_thermal::evaporation`'s signed Stefan-film
+transport. The same source owns liquid enthalpy, density, temperature inversion
+and entropy; IF97 Region 4 owns saturation pressure and its derivative, and
+Region 2 owns saturated-vapor enthalpy. The carried vapor-minus-liquid enthalpy
+gap includes the original liquid pressure contribution. Latent energy is a
+subaccount of carried vapor energy, never an additional thermal source.
+
+The water adapter admits 273.16–373.15 K and liquid pressure at most 0.2 MPa,
+restricted further by its caller-selected pure-liquid branch below boiling.
+The shared original heat timeline evolves actual liquid mass and enthalpy;
+reference geometry stays fixed and recession is reported separately. Explicit
+gas-film temperature, volatile partial pressure, total pressure and binary
+diffusion conductance are required. This does not supply activity/fugacity,
+Poynting or humidity-enhancement corrections, freezing, nucleation, boiling,
+droplet transport or native free-surface mass/topology evolution. Tests cover
+source reuse, independent Stefan fluxes, signed heat/mass balance, analytic
+temperature tangents and unsupported-regime refusal.
+
+### Finite atmosphere and shared thermal history
+
+`evaporation::gas::advance_surface_with_gas` couples the signed Stefan-film
+transfer to the original finite gas species inventory and caloric inverse.
+The explicit volatile binding retains one fixed liquid-to-gas enthalpy datum;
+source disagreement is bounded at both surface endpoints and its admitted
+remainder is carried in the energy transfer. Evaporating vapor carries its
+surface enthalpy, while condensing vapor carries its upstream gas enthalpy,
+including sensible heat once. Carrier inventories, source identities, gas
+volume and auxiliary coordinates survive the original-owner reconstruction.
+Finite humidity, pressure and temperature feed the following interval. Donor
+inventory, temperature departure and equilibrium-overshoot limits refuse an
+oversized step without publishing either phase. This frozen-film update is
+first order and requires physical timestep refinement.
+
+`evaporation::gas::timeline::advance_deposition_with_gas` advances one admitted
+pure-liquid cell, its original heat/contact/source network and one finite gas
+on the same event-clipped clock. Births and every heat substep retain original
+caloric/storage admission. Catalog and control admission also run for no-op
+and before-birth requests. Initial exposure survives endpoint covering; no
+phase transfer precedes birth. Selected birth-datum offsets enter incoming
+and stored energy once. Source-relative defects accumulate before diagnostic
+formation references, with unchanged whole-window mass/energy tolerances and
+one original thermal work allowance.
+
+The conserved thermal account is liquid enthalpy plus gas internal energy in
+fixed reference geometry. It is not the total internal energy of a sealed
+moving two-phase vessel. The regression suite covers independently computed
+storage balances, finite backpressure, heat/event coupling, datum shifts,
+cancellation/refusals and timestep refinement. Two source tests retain the
+checked-in NASA-9 water/nitrogen coefficients and original IF97 water chart;
+their transport cards and film coefficient are explicit numerical choices,
+not experimental evaporation-rate evidence. Sensible gas-film conduction,
+moving interfaces, dryout, boiling, gas momentum and spatial two-phase flow
+remain outside this bounded owner.
+

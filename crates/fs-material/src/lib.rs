@@ -82,6 +82,8 @@ pub mod sheet;
 pub mod state_point;
 /// Bounded solid-vapor pressure and latent-heat laws for shared phase transfer.
 pub mod sublimation;
+/// Original-water calorics and shared continuum evaporation/condensation.
+pub mod evaporation;
 pub mod tensor;
 pub mod thermal;
 /// Source-bound reciprocal Seebeck and Peltier cross-domain transport.
