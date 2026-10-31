@@ -385,6 +385,36 @@ fn g1_native_connections_external_load_and_prescribed_motion_share_one_work_acco
 }
 
 #[test]
+fn g1_tiny_prescribed_3d_capillary_motion_carries_roundoff_separately_from_force_and_heat() {
+    let source = model3d(0.05);
+    let gate = CancelGate::new_clock_free();
+    let state = source.solve_at_suction(2.0, numerical(), &gate).unwrap();
+    let mut system = AxisymmetricCapillaryModalSystem::new_axisymmetric(
+        native_network(false),
+        &source,
+        materials(&source),
+        state,
+        vec![0.0; 2],
+        controls(),
+        &gate,
+    )
+    .unwrap();
+    let initial = system.total_energy_j().unwrap();
+    let rate = 1e-9 * system.gap_m() / system.sample_period_s();
+    let mut work = 0.0;
+    for direction in [1.0, 1.0, -1.0, -1.0] {
+        let frame = *system.step(&[0.0; 2], direction * rate).unwrap();
+        work += frame.prescribed_work_j;
+        assert!(frame.estimated_constitutive_force_error_n < 1e-3 * frame.force_tolerance_n);
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        assert_eq!(frame.topology_release_j, 0.0);
+        assert_eq!(frame.network_dissipation_j, 0.0);
+        assert_eq!(frame.network_energy_j, 0.0);
+        close(system.total_energy_j().unwrap() - initial, work, 1e-20);
+    }
+}
+
+#[test]
 fn g0_g4_source_accuracy_and_cancel_refusals_preserve_native_state_and_retry() {
     let source = model3d(0.05);
     let other = model3d(0.06);

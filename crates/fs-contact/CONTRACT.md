@@ -1347,9 +1347,16 @@ perturbations with mobile Young contact lines and fixed plates. This is not
 an exact fold or a full three-dimensional/nonlinear/dynamic stability claim;
 lateral translations are neutral. Continued equilibria report their actual
 converged gap and requested-gap residual. Surface-energy differences define
-work-conjugate mean force on that actual gap increment; estimated quadrature
-and energy-subtraction errors are exposed, and unresolved nonzero work is
-refused. These estimates are not interval certificates.
+work-conjugate mean force on that actual gap increment. If subtracting two
+large endpoint energies cannot resolve the mean force, bounded dyadic
+quadrature instead integrates the same original force against its exact
+branch height derivative. Normalized integrals retain finite-step force and
+tangent accuracy without dividing nearby energy or force differences.
+This fallback allocates nothing and uses the original quadrature panel ceiling;
+ordinary resolved energy secants remain unchanged. Stored-energy roundoff is
+reported separately from force-work error and never becomes heat or physical
+dissipation. Geometrically unresolved increments still refuse. These numerical
+estimates are not interval certificates.
 
 This branch is quasistatic and has no finite-rate liquid or contact-line model.
 Positive pressure, obtuse angles, pinning, evaporation, cavitation, dynamic
@@ -1389,7 +1396,7 @@ profile gap. Source identity, admitted branch, stability, quadrature, root,
 work and physical increment limits remain active on every proposal.
 
 Independent force-error and compatibility-error estimates accompany bounded
-cancellation-aware continuation. An unresolved nonzero energy difference or
+cancellation-aware continuation. An unresolved physical gap/force integral or
 nonpositive admitted compatibility slope refuses without changing accepted
 state. Runtime continuation allocates nothing. `advance_actual` supplies the
 same constitutive and accuracy checks for the receiving mechanics' final
@@ -1397,6 +1404,13 @@ staged-motion audit. Numerical estimates and a positive local slope do not
 certify global uniqueness, interval accuracy or physical trajectory accuracy.
 The liquid model remains quasistatic; no rupture, topology release, heat or
 liquid inertia is inferred.
+
+Focused G1/G3 regressions include tiny opening/closing increments, the original
+force and half-tangent limits, conservative signed work, explicitly retained
+surface-energy residuals, fine-gap mechanical load lines and the native modal
+owner's prescribed-motion energy account. The receiving modal balance includes
+the stored-energy residual separately; force accuracy is never contaminated by
+dividing that residual by a tiny gap increment.
 
 ## Coupled sourced DMT adhesion and real-area junction shear
 

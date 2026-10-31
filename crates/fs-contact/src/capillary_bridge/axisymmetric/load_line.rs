@@ -7,15 +7,18 @@
 //! There is no liquid time integrator: the receiving mechanics must establish
 //! that the original quasistatic bridge assumptions apply at its physical rate.
 //!
-//! A finite-step force uncertainty is estimated from the original energy error
-//! divided by the actual gap increment. At exact rest, the original endpoint
+//! A finite-step force uncertainty is estimated from the original work error
+//! divided by the actual gap increment. Cancellation-prone tiny steps integrate
+//! the original force directly; stored-energy subtraction roundoff remains a
+//! separate balance residual and is not divided by the gap as force uncertainty.
+//! At exact rest, the original endpoint
 //! force and half endpoint tangent are used with their quadrature estimate.
 //! A distinct but unresolved physical increment refuses; it is never replaced
 //! by rest, a force projection, or an invented rupture. The error estimates and
 //! positive local compatibility slope are not global uniqueness, interval, or
 //! trajectory-accuracy certificates. Mechanical timestep refinement can address
-//! an attractive instability; tighter source accuracy may be needed for small
-//! energy differences, including the accepted initial state.
+//! an attractive instability; tighter source accuracy may still be needed to
+//! resolve distinct physical gaps, including the accepted initial state.
 
 use super::{
     AxisymmetricError, AxisymmetricState, AxisymmetricStep, AxisymmetricWorkBudget,

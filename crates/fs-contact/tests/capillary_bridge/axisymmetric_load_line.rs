@@ -248,6 +248,46 @@ fn g1_prescribed_motion_exact_rest_and_unresolved_finite_work_stay_distinct() {
 }
 
 #[test]
+fn g1_fine_gap_load_line_retains_a_resolved_force_instead_of_amplifying_energy_roundoff() {
+    let source = model3d(0.05);
+    let gate = CancelGate::new_clock_free();
+    let previous = source.solve_at_suction(2.0, numerical3d(), &gate).unwrap();
+    let solver = AxisymmetricBridgeLoadLine::new(&source, 0.0, controls()).unwrap();
+    for increment in [-1e-9, 1e-9] {
+        let step = solver
+            .trial(
+                previous,
+                (1.0 + increment) * previous.profile().gap_m,
+                &gate,
+            )
+            .unwrap();
+        let dh = step.bridge.state().profile().gap_m - previous.profile().gap_m;
+        assert_ne!(dh, 0.0);
+        near(
+            step.bridge.mean_normal_force_n,
+            previous.profile().normal_force_n,
+            2e-9,
+            0.0,
+        );
+        let old_subtraction_force_error = (previous.report().surface_energy_error_estimate_j
+            + step.bridge.state().report().surface_energy_error_estimate_j)
+            / dh.abs();
+        assert!(old_subtraction_force_error > step.force_error_tolerance_n);
+        assert!(step.estimated_force_error_n < 1e-3 * step.force_error_tolerance_n);
+        let actual = solver
+            .advance_actual(previous, step.bridge.state().profile().gap_m, &gate)
+            .unwrap();
+        near(
+            actual.mean_normal_force_n,
+            step.bridge.mean_normal_force_n,
+            3e-12,
+            0.0,
+        );
+        assert_eq!(previous.profile().liquid_volume_m3, VOLUME);
+    }
+}
+
+#[test]
 fn g0_g4_source_force_accuracy_attractive_slope_and_budget_refusals_are_atomic() {
     let source = model3d(0.05);
     let other = model3d(0.06);

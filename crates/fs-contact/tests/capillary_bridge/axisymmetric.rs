@@ -507,6 +507,68 @@ fn g3_axisymmetric_true_three_dimensional_scaling_and_plate_exchange() {
 }
 
 #[test]
+fn g1_g3_tiny_axisymmetric_motion_resolves_force_work_and_tangent_without_energy_cancellation() {
+    let gate = CancelGate::new_clock_free();
+    let model = make([1.1, 1.3], 0.05, VOLUME, true);
+    let previous = model.solve_at_suction(2.0, numerical(), &gate).unwrap();
+    let p = previous.profile();
+    for fraction in [-1e-7, -1e-9, 1e-9, 1e-7] {
+        let step = model
+            .continue_to_gap(previous, (1.0 + fraction) * p.gap_m, work_budget(), &gate)
+            .unwrap();
+        let end = step.state();
+        let dh = end.profile().gap_m - p.gap_m;
+        // Independent local Taylor limit of the original endpoint force. Both
+        // opening and closing retain the correct finite-path half tangent.
+        near(
+            step.mean_normal_force_n,
+            p.normal_force_n + 0.5 * p.force_gap_derivative_n_per_m * dh,
+            3e-11,
+            0.0,
+        );
+        near(
+            step.mean_force_gap_derivative_n_per_m,
+            0.5 * p.force_gap_derivative_n_per_m,
+            3e-7,
+            0.0,
+        );
+        near(
+            -step.mean_normal_force_n * dh,
+            step.work_on_liquid_j,
+            2e-15,
+            0.0,
+        );
+        assert_eq!(step.work_on_liquid_j.signum(), dh.signum());
+        assert!(step.estimated_work_error_j < 1e-9 * step.work_on_liquid_j.abs());
+        let subtraction_error = p.surface_free_energy_j.abs() * 32.0 * f64::EPSILON;
+        assert!(step.estimated_work_error_j < subtraction_error);
+        assert_eq!(
+            step.surface_energy_balance_residual_j,
+            end.profile().surface_free_energy_j - p.surface_free_energy_j - step.work_on_liquid_j
+        );
+        assert!(
+            step.surface_energy_balance_residual_j.abs()
+                <= previous.report().surface_energy_error_estimate_j
+                    + end.report().surface_energy_error_estimate_j
+                    + step.estimated_work_error_j
+        );
+        let reverse = model
+            .continue_to_gap(end, p.gap_m, work_budget(), &gate)
+            .unwrap();
+        near(
+            reverse.mean_normal_force_n,
+            step.mean_normal_force_n,
+            3e-11,
+            0.0,
+        );
+        assert_eq!(
+            previous.profile().liquid_volume_m3,
+            end.profile().liquid_volume_m3
+        );
+    }
+}
+
+#[test]
 fn g0_g4_axisymmetric_sources_stability_budgets_and_cancellation_are_atomic() {
     let gate = CancelGate::new_clock_free();
     let model = make([1.1, 1.3], 0.05, VOLUME, true);

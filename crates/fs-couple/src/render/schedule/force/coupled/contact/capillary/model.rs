@@ -224,7 +224,8 @@ impl<'a> NativeCapillaryModel<'a> for AxisymmetricBridgeLoadLine<'a> {
             contact_line_dissipation_j: 0.0,
             // The original axisymmetric owner has no topology transition.
             topology_release_j: 0.0,
-            estimated_energy_error_j: step.estimated_work_error_j,
+            estimated_energy_error_j: step.estimated_work_error_j
+                + step.surface_energy_balance_residual_j.abs(),
         }
     }
     fn force_error(

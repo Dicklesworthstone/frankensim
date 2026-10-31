@@ -23,7 +23,9 @@
 //! no full three-dimensional, nonlinear or dynamic stability is certified.
 //!
 //! Continuation is quasistatic and conservative, without a time/rate model.
-//! It returns the surface-energy difference and its work-conjugate mean force.
+//! It returns the surface-energy work and its work-conjugate mean force. Tiny
+//! steps integrate the same force directly when endpoint-energy subtraction
+//! loses accuracy; the stored-energy roundoff residual remains explicit.
 //! Numerical quadrature/work errors are estimates, not interval certificates.
 //! Refusal does not mean physical rupture. Positive-pressure branches, obtuse
 //! angles, pinning, finite gravity, cavitation, disjoining pressure, evaporation,
@@ -95,6 +97,7 @@ pub struct AxisymmetricNumerics {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AxisymmetricWorkBudget {
+    /// Also bounds each dyadic force-work rule by `maximum_quadrature_panels`.
     pub equilibrium: AxisymmetricNumerics,
     pub absolute_tolerance_j: f64,
     pub relative_tolerance: f64,
@@ -105,6 +108,8 @@ pub enum AxisymmetricError {
     Physical(BridgeError),
     QuadratureBudget,
     RootBudget,
+    /// Direct finite-work quadrature exhausted its declared panel ceiling.
+    WorkQuadratureBudget,
     /// Endpoint of the declared q interval fails the sufficient criterion.
     StabilityUnestablished {
         margin: f64,
@@ -116,7 +121,7 @@ pub enum AxisymmetricError {
         maximum_m: f64,
     },
     StateMismatch,
-    /// Energy subtraction cannot support the requested finite-step work accuracy.
+    /// The finite gap or force-work integral cannot support the requested accuracy.
     WorkUnresolved {
         estimated_error_j: f64,
         tolerance_j: f64,
@@ -231,8 +236,13 @@ pub struct AxisymmetricStep {
     pub requested_gap_m: f64,
     /// Positive work is supplied to the liquid surface free-energy store.
     pub work_on_liquid_j: f64,
+    /// Force-work quadrature/roundoff uncertainty; independent of subtraction
+    /// of the two much larger endpoint surface-energy stores.
     pub estimated_work_error_j: f64,
-    /// -Delta(E)/Delta(actual converged gap), never an endpoint-force shortcut.
+    /// Delta(stored surface energy) - work. This is numerical roundoff/error,
+    /// never physical dissipation or an unreported thermal exchange.
+    pub surface_energy_balance_residual_j: f64,
+    /// -work/Delta(actual converged gap), never an endpoint-force shortcut.
     pub mean_normal_force_n: f64,
     pub mean_force_gap_derivative_n_per_m: f64,
 }
@@ -564,8 +574,9 @@ impl SourceAxisymmetricCapillaryBridge {
     }
 
     /// Quasistatic continuation on the same original-source branch. No topology
-    /// release or heat is invented. Distinct but numerically unresolved work is
-    /// refused; tightening equilibrium accuracy can resolve it. This is not a
+    /// release or heat is invented. A cancellation-prone energy secant uses
+    /// bounded direct force quadrature on the same branch. A geometrically
+    /// unresolved increment still refuses. This is not a
     /// finite-speed contact-line or liquid-momentum integrator.
     pub fn continue_to_gap(
         &self,
@@ -593,6 +604,7 @@ impl SourceAxisymmetricCapillaryBridge {
                 requested_gap_m: gap_m,
                 work_on_liquid_j: 0.0,
                 estimated_work_error_j: 0.0,
+                surface_energy_balance_residual_j: 0.0,
                 mean_normal_force_n: previous.profile.normal_force_n,
                 mean_force_gap_derivative_n_per_m: 0.5
                     * previous.profile.force_gap_derivative_n_per_m,
@@ -600,28 +612,59 @@ impl SourceAxisymmetricCapillaryBridge {
         }
         let state = self.solve_gap(gap_m, Some(previous.q), budget.equilibrium, gate)?;
         let dh = state.profile.gap_m - previous.profile.gap_m;
-        let work = finite(
+        let energy_difference = finite(
             state.profile.surface_free_energy_j - previous.profile.surface_free_energy_j,
             "axisymmetric branch work",
         )?;
-        let error = finite(
+        let subtraction_error = finite(
             previous.report.surface_energy_error_estimate_j
                 + state.report.surface_energy_error_estimate_j,
             "axisymmetric work error estimate",
+        )?;
+        // A few ulps of gap are not a resolved mechanical trajectory, even if
+        // the absolute energy allowance would admit it. Keep rest distinct.
+        if dh.abs() <= 64.0 * f64::EPSILON * gap_m.abs().max(previous.profile.gap_m.abs()) {
+            return Err(AxisymmetricError::WorkUnresolved {
+                estimated_error_j: subtraction_error,
+                tolerance_j: budget.absolute_tolerance_j,
+            });
+        }
+        // An absolute energy tolerance can hide an inaccurate force after
+        // division by a very small dh. Retain the inexpensive energy secant
+        // only when its relative accuracy also resolves that mean force.
+        let relative = budget.relative_tolerance.max(32.0 * f64::EPSILON);
+        let (work, error, mean, tangent) = if energy_difference.signum() == dh.signum()
+            && subtraction_error <= relative * energy_difference.abs()
+        {
+            let mean = finite(-energy_difference / dh, "axisymmetric mean force")?;
+            (
+                energy_difference,
+                subtraction_error,
+                mean,
+                finite(
+                    (state.profile.normal_force_n - mean) / dh,
+                    "axisymmetric mean force derivative",
+                )?,
+            )
+        } else {
+            self.integrate_force_work(previous, state, budget, gate)?
+        };
+        let residual = finite(
+            energy_difference - work,
+            "axisymmetric surface-energy residual",
         )?;
         let tolerance = finite(
             budget.absolute_tolerance_j + budget.relative_tolerance * work.abs(),
             "axisymmetric work tolerance",
         )?;
-        // Even a loose absolute tolerance must not authorize a collapsed secant.
         if error > tolerance
-            || dh == 0.0
             || work == 0.0
             || work.signum() != dh.signum()
             || error >= work.abs()
+            || residual.abs() > subtraction_error + error
         {
             return Err(AxisymmetricError::WorkUnresolved {
-                estimated_error_j: error,
+                estimated_error_j: error.max(residual.abs() - subtraction_error),
                 tolerance_j: tolerance,
             });
         }
@@ -630,15 +673,10 @@ impl SourceAxisymmetricCapillaryBridge {
             self.limits.maximum_abs_step_work_j,
             "axisymmetric step work",
         )?;
-        let mean = finite(-work / dh, "axisymmetric mean force")?;
         limit(
             mean.abs(),
             self.limits.maximum_abs_force_n,
             "axisymmetric mean force",
-        )?;
-        let tangent = finite(
-            (state.profile.normal_force_n - mean) / dh,
-            "axisymmetric mean force derivative",
         )?;
         poll(gate)?;
         Ok(AxisymmetricStep {
@@ -646,6 +684,7 @@ impl SourceAxisymmetricCapillaryBridge {
             requested_gap_m: gap_m,
             work_on_liquid_j: work,
             estimated_work_error_j: error,
+            surface_energy_balance_residual_j: residual,
             mean_normal_force_n: mean,
             mean_force_gap_derivative_n_per_m: tangent,
         })
