@@ -5,6 +5,8 @@ use fixture::*;
 use fs_material::conductor::planar::{PlanarConductivity, PlanarOhmicResponse};
 use fs_material::ionized_gas::{IonizedGasConductivity, IonizedGasError};
 
+#[path = "ionized_gas/coulomb.rs"]
+mod coulomb;
 #[path = "ionized_gas/frozen.rs"]
 mod frozen;
 

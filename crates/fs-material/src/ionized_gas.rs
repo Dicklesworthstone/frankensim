@@ -3,11 +3,13 @@
 //! The original source-bound state supplies every carrier abundance, charge,
 //! mass and temperature, including frozen finite-rate populations. A separately
 //! sourced momentum-relaxation rate
-//! supplies drag against a prescribed massive background. Thus
+//! supplies drag against a prescribed massive background. Without mutual drag,
 //! `sigma = sum_s n_s (z_s e)^2 / (m_s nu_s)` and `J = sigma E`.
 //! The rates are effective momentum-transfer rates, not total collision counts
-//! or freely moving electron-ion collision frequencies. Interspecies drag,
-//! magnetic/Hall response, finite-frequency inertia, sheaths, diffusion currents,
+//! or freely moving electron-ion collision frequencies. `with_coulomb_drag`
+//! adds source-bound symmetric friction between every charged pair and solves
+//! their correlated velocities with the original background anchors retained.
+//! Magnetic/Hall response, finite-frequency inertia, sheaths, diffusion currents,
 //! electrical breakdown and radiation require different constitutive models.
 //!
 //! Reference for the relaxation law and its frequency dependence: R. Fitzpatrick,
@@ -17,6 +19,7 @@
 
 use fs_math::det::{exp, ln, sqrt};
 use fs_qty::{Dims, Volume};
+use fs_thermochem::coulomb::CoulombErrorV1;
 use fs_thermochem::equilibrium::composition::state::{
     FrozenIonizedGasStateErrorV1, FrozenIonizedGasStateV1,
 };
@@ -25,6 +28,7 @@ use fs_thermochem::equilibrium::composition::{
 };
 use fs_thermochem::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K};
 
+mod coulomb;
 mod relaxation;
 pub use relaxation::{
     CarrierMomentumRelaxation, CarrierMomentumSource, ElectronNeutralMomentumContribution,
@@ -52,6 +56,8 @@ pub enum IonizedGasError {
     UnrepresentableCarrier(SpeciesId),
     /// Original frozen-composition/source admission refusal.
     State(FrozenIonizedGasStateErrorV1),
+    /// Original Coulomb moment source or its physical-domain refusal.
+    Coulomb(CoulombErrorV1),
     /// Cancellation before any snapshot is published.
     Cancelled,
 }
@@ -90,6 +96,7 @@ pub struct IonizedGasCarrier {
     mass_kg: f64,
     temperature_k: f64,
     is_electron: bool,
+    drift_mobility_m2_v_s: f64,
     conductivity_s_m: f64,
     maximum_electric_field_v_m: f64,
     relaxation: CarrierMomentumRelaxation,
@@ -120,7 +127,14 @@ impl IonizedGasCarrier {
     pub const fn is_electron(&self) -> bool {
         self.is_electron
     }
-    /// This carrier's positive contribution to total conductivity [S/m].
+    /// Signed drift velocity per unit electric field [m²/(V s)]. Mutual drag
+    /// can entrain a carrier against its own electric force.
+    pub const fn drift_mobility_m2_v_s(&self) -> f64 {
+        self.drift_mobility_m2_v_s
+    }
+    /// This carrier's signed contribution to total current conductivity [S/m].
+    /// Independent background drag gives a positive value. With mutual drag,
+    /// this is electrical work, not that carrier's thermal heating allocation.
     pub const fn conductivity_s_m(&self) -> f64 {
         self.conductivity_s_m
     }
@@ -134,13 +148,18 @@ impl IonizedGasCarrier {
     }
 }
 
-/// Electrical work per unit volume supplied to the two thermal pools [W/m³].
+/// Electrical dissipation supplied to the two thermal pools [W/m³].
 /// The static weak-drift closure has no separately evolved drift kinetic energy.
-/// Electron/heavy thermal exchange is a separate conservative energy process.
+/// Pair friction has nonnegative mass-weighted shares; a signed correction
+/// accounts for the drift dependence of unequal-temperature Coulomb exchange.
+/// Zero-drift electron/heavy thermal exchange remains a separate energy process.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct IonizedGasJouleHeating {
     electron_power_density_w_m3: f64,
     heavy_power_density_w_m3: f64,
+    electron_friction_power_density_w_m3: f64,
+    heavy_friction_power_density_w_m3: f64,
+    thermal_exchange_correction_to_electrons_w_m3: f64,
 }
 impl IonizedGasJouleHeating {
     pub const fn electron_power_density_w_m3(&self) -> f64 {
@@ -151,6 +170,20 @@ impl IonizedGasJouleHeating {
     }
     pub fn total_power_density_w_m3(&self) -> f64 {
         self.electron_power_density_w_m3 + self.heavy_power_density_w_m3
+    }
+    /// Nonnegative background and mass-weighted pair friction heating.
+    pub const fn electron_friction_power_density_w_m3(&self) -> f64 {
+        self.electron_friction_power_density_w_m3
+    }
+    /// Nonnegative background and mass-weighted pair friction heating.
+    pub const fn heavy_friction_power_density_w_m3(&self) -> f64 {
+        self.heavy_friction_power_density_w_m3
+    }
+    /// Signed O(relative drift²) correction to zero-drift Coulomb thermal
+    /// exchange. It is already included in the electron power above; the heavy
+    /// correction is its opposite. Do not add it a second time.
+    pub const fn thermal_exchange_correction_to_electrons_w_m3(&self) -> f64 {
+        self.thermal_exchange_correction_to_electrons_w_m3
     }
 }
 
@@ -168,6 +201,7 @@ pub struct IonizedGasConductivity {
     charged_mole_fraction: f64,
     coulomb_coupling: f64,
     maximum_thermal_phase_space_density: f64,
+    coulomb: Option<coulomb::CoulombDrag>,
 }
 impl IonizedGasConductivity {
     /// Resolve all charged particles from the SAME source-bound equilibrium.
@@ -346,6 +380,7 @@ impl IonizedGasConductivity {
                 mass_kg: m,
                 temperature_k: t,
                 is_electron: Some(index) == state.electron_index(),
+                drift_mobility_m2_v_s: (z.signum() as f64) * (charge / m) / nu,
                 conductivity_s_m: sigma,
                 maximum_electric_field_v_m: max_e,
                 relaxation,
@@ -386,6 +421,7 @@ impl IonizedGasConductivity {
             charged_mole_fraction: charged_fraction,
             coulomb_coupling: coupling,
             maximum_thermal_phase_space_density: maximum_phase_space,
+            coulomb: None,
         })
     }
     /// Original accepted LTE receipt when constructed from equilibrium. Frozen
@@ -397,7 +433,7 @@ impl IonizedGasConductivity {
     pub const fn state(&self) -> &FrozenIonizedGasStateV1 {
         &self.state
     }
-    /// Canonical present charge carriers with their independent collision sources.
+    /// Canonical present charge carriers and original background collision sources.
     pub fn carriers(&self) -> &[IonizedGasCarrier] {
         &self.carriers
     }
@@ -425,8 +461,10 @@ impl IonizedGasConductivity {
     pub const fn maximum_electric_field_v_m(&self) -> f64 {
         self.maximum_electric_field_v_m
     }
-    /// Partition the actual local `E.J` into electron and heavy-particle work
-    /// using the original carriers, without equipartition or a species-name rule.
+    /// Partition the actual local `E.J` into electron and heavy thermal powers.
+    /// Mutual Coulomb drag uses its original friction and signed drift-dependent
+    /// thermal-exchange moments; individual carrier electrical work is not
+    /// substituted for heat. A pool correction can be negative at unequal T.
     /// Multiply by the same field-cell volume before supplying external powers
     /// to a conservative thermal-pool step. Do not also add the unsplit total.
     pub fn joule_heating_w_m3(
@@ -437,6 +475,9 @@ impl IonizedGasConductivity {
             return Err(IonizedGasError::Invalid(
                 "Joule partition requires an admitted actual field",
             ));
+        }
+        if self.coulomb.is_some() {
+            return self.coulomb_joule_heating_w_m3(electric_field_v_m);
         }
         let [x, y] = electric_field_v_m;
         let mut powers = [0.0, 0.0];
@@ -459,6 +500,9 @@ impl IonizedGasConductivity {
         Ok(IonizedGasJouleHeating {
             electron_power_density_w_m3: powers[1],
             heavy_power_density_w_m3: powers[0],
+            electron_friction_power_density_w_m3: powers[1],
+            heavy_friction_power_density_w_m3: powers[0],
+            thermal_exchange_correction_to_electrons_w_m3: 0.0,
         })
     }
     /// A static, unmagnetized, spatially local field is admissible only within

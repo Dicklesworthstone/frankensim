@@ -16,6 +16,7 @@ use fs_material::state_point::{
 };
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{Amount, Area, Energy, MolarMass, Pressure, QuantitySpec, Temperature, Volume};
+use fs_thermochem::coulomb::{CoulombLimitsV1, CoulombModelV1, CoulombScreeningV1};
 use fs_thermochem::electron_collision::{
     ElectronCollisionKindV1, ElectronCrossSectionPointV1, ElectronCrossSectionV1,
     MaxwellianRateControlsV1, MaxwellianRateWeightingV1,
@@ -239,6 +240,28 @@ pub fn frozen_rates(state: &FrozenIonizedGasStateV1) -> Vec<CarrierMomentumRelax
         source_two_temperature("e-", th, te, p, 1e10),
         source_two_temperature("H+", th, te, p, 1e9),
     ]
+}
+
+pub fn coulomb_limits() -> CoulombLimitsV1 {
+    CoulombLimitsV1 {
+        minimum_coulomb_logarithm: 3.0,
+        minimum_particles_per_debye_sphere: 10.0,
+        maximum_coulomb_coupling: 0.1,
+        maximum_thermal_phase_space_density: 0.1,
+        maximum_thermal_energy_rest_energy_ratio: 0.01,
+        maximum_quantum_to_classical_ratio: 0.5,
+        maximum_relative_drift_thermal_ratio: 0.1,
+    }
+}
+
+pub fn coulomb_model(state: &FrozenIonizedGasStateV1) -> CoulombModelV1 {
+    CoulombModelV1::new(
+        state,
+        CoulombScreeningV1::StaticAllChargedDebye,
+        coulomb_limits(),
+        || false,
+    )
+    .unwrap()
 }
 pub fn momentum_cross_section(target: &str, sigma: f64) -> ElectronCrossSectionV1 {
     ElectronCrossSectionV1::tabulated(

@@ -156,7 +156,7 @@ a new accepted snapshot and resolve collision rates there. A kinetic endpoint
 is never projected back onto LTE merely to obtain conductivity.
 
 The material's checked Joule partition consumes the actual recovered FEEC
-electric field and supplies electron/heavy electrical work separately. Each
+electric field and supplies separate electron/heavy thermal powers. Each
 power density uses that field cell's physical volume before entering the
 conservative thermal-pool update. Their sum is the original field's `E.J`;
 the native resistor heat is not added a second time. Updated temperatures feed
@@ -180,6 +180,19 @@ storage once. Refreshed populations and collision rates then change the native
 current and circuit resistance. This is an ionization substep with a subsequent
 field feedback evaluation, not a continuously fixed-voltage transient or an
 empirically validated discharge; elastic exchange remains its separate owner.
+
+`tests/coulomb_feedback.rs` uses the same native field/circuit path with
+reciprocal Coulomb momentum transfer. The material resolves correlated carrier
+velocities, retaining both its original background drag and every charged pair.
+Original FEEC cell volumes convert its friction heating and signed
+drift-dependent thermal correction to two held powers. The existing gas energy
+owner consumes the identical population-bound Coulomb source together with the
+original neutral momentum source, refreshes their zero-drift exchange at actual
+temperatures, and closes both pool budgets against one electrical-work input.
+Refreshed two-temperature material changes native current and resistance.
+This remains an explicitly held-power energy interval followed by field
+feedback, without a second PDE, a free plasma common-velocity gauge, or an
+additional `E.J` charge to either thermal pool.
 
 ## Prescribed Eulerian moving-conductor induction
 

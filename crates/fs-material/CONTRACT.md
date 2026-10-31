@@ -260,12 +260,27 @@ requirement by having a small thermal speed.
 This is a Maxwellian fluid momentum closure, not an exact solution of the
 energy-dependent Lorentz-Boltzmann electrical mobility problem.
 
-The declared scalar law is `sigma=sum(n_s*(z_s*e)^2/(m_s*nu_s))`, with drag
-against a prescribed massive neutral background, zero magnetic field and zero
-frequency. It is a local constitutive closure; background dynamics, nonlocal
-transport, electron-ion two-fluid momentum transfer, Hall effects, electrical
-breakdown, non-Maxwellian distributions, excited-state kinetics and radiation
-are outside its scope. Explicit
+With independent background drag, the scalar law is
+`sigma=sum(n_s*(z_s*e)^2/(m_s*nu_s))`. The optional consuming
+`with_coulomb_drag` builder retains the original `CoulombModelV1` and evaluates
+every unordered charged pair at the snapshot's actual two temperatures.
+Electron-ion and ion-ion forces use the same symmetric pair coefficient K.
+The full momentum system is
+`a_s*u_s + sum_t K_st*(u_s-u_t) = n_s*q_s*E`, where
+`a_s=n_s*m_s*nu_background_s`. Each original positive background anchor remains;
+there is no independent-carrier substitution of an electron-ion collision
+frequency and no arbitrary gauge for a pure-Coulomb common velocity.
+The existing diagonally scaled Cholesky owner solves at most 128 carrier
+velocities once per snapshot. Original force balances and
+`sum_s E.J_s = sum_s a_s*|u_s|² + sum_pairs K_st*|u_s-u_t|²`
+must close to a relative numerical tolerance of 1e-10. Signed carrier mobility,
+current contributions and complete pair receipts remain inspectable.
+
+Both paths require a prescribed massive neutral background, zero magnetic
+field and zero frequency. They are local Maxwellian fluid closures; background
+dynamics, nonlocal transport, Spitzer-Harm kinetic electrical conductivity,
+Hall effects, electrical breakdown, non-Maxwellian distributions, excited-state
+kinetics and radiation are outside their scope. Explicit
 caller bounds admit the charged mole fraction, classical phase-space density,
 Coulomb coupling and carrier drift relative to thermal speed. These are domain
 limits, not certified error bounds or empirical validation. Each carrier's
@@ -273,11 +288,19 @@ actual temperature supplies its classical phase-space and drift screens;
 the coldest present carrier temperature supplies a conservative Coulomb screen.
 The actual field
 must satisfy the weak-drift limit before current and heat can be published.
-`joule_heating_w_m3` checks that same actual field and partitions `E.J` by the
-structural electron row and remaining charged carriers. The resulting electron
-and heavy power densities feed separate thermal budgets; the unsplit total
-must not be charged a second time. Thermal exchange remains a separate
-conservative process, and state changes require newly resolved transport.
+`joule_heating_w_m3` checks that same actual field, including every pair's
+relative-drift limit. With Coulomb coupling, it separates nonnegative
+background/pair friction heating from the original source's signed O(drift²)
+correction to unequal-temperature thermal exchange. Each pair's mass-weighted
+friction shares sum to `K*|u_s-u_t|²`; the thermal correction has equal and
+opposite pool contributions. A pool's combined thermal power may be negative
+and is never clipped or replaced by that carrier's electrical work. Three
+scalar thermal coefficients are prepared once, so actual cell heating remains
+O(1) regardless of pair count. Electron and heavy powers feed the original
+thermal budgets; the unsplit `E.J` and the correction must not be charged a
+second time. Zero-drift Coulomb/neutral thermal exchange remains a separate
+conservative process in the existing energy owner. State changes require
+newly resolved background transport and refreshed original Coulomb moments.
 
 The sealed `conductor::planar::PlanarOhmicResponse` trait exposes the common
 static field response. Existing source-material conductor implementations use
@@ -289,7 +312,10 @@ G0/G1/G3 tests in `tests/ionized_gas.rs` check actual carrier number density and
 mass conversion, conductivity and collision-rate scaling, temperature-driven
 ionization, frozen carrier abundance, separate temperatures, complete source
 coverage, momentum/event distinction, stale-state and stationary-target
-refusals. Cancellation is polled per species before publication. There
+refusals. Further cases compare the coupled two-fluid result with an independent
+analytic inverse, prove that ion-ion drag changes relative motion, and retain
+signed thermal corrections and exact population binding. Cancellation is
+polled per species/pair before publication. There
 is no unsafe code, evolving state, default source, or new runtime dependency.
 
 ## Permanent secondary creep
