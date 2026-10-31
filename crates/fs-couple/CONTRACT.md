@@ -17348,6 +17348,36 @@ This is fixed-equilibrium planar solid heat spreading, with the original common
 temperature and physical thickness. It does not add mean-temperature evolution,
 phase changes, curved extrusions or a measured instrument-realism claim.
 
+### Distributed native liquid/gas condensation
+
+`liquid_gas::evaporation::multiple::advance_liquid_surfaces_with_gas` connects
+several existing native liquid interfaces to the original material finite-gas
+chamber. Every surface samples the same gas snapshot and shares its old vapor
+inventory. Unique liquid cells, measured adjacent exposed faces, one volatile
+identity and one constant liquid/gas datum are required. Canonical coordinate
+order selects each actual native mass before caloric reconstruction. Native
+samples are subsequently matched by coordinates, independently of sparse-tile
+iteration order.
+
+One batched native mass/enthalpy transaction refreshes material state; one native
+flow step advances the physical clock. There is no per-patch flow advance or
+full-grid copy. The original liquid caloric chart, Stefan-film law, species gas
+owner and native VOF transport remain authoritative. Whole total/volatile mass
+and source-relative energy accounts include actual native storage and subsequent
+flow defects. Absolute local defects also share one interval budget, so opposing
+phase streams cannot hide numerical error. Both candidate owners publish only
+after source, transaction, flow, balance and final cancellation admission.
+
+This phase-only simultaneous split is first order and requires timestep
+refinement. Existing single-patch and reciprocal sensible-heat entry points
+retain their behavior. The new route retains positive-interface capacity,
+fixed connected gas volume and original electrical/surface-history admission;
+it adds no distributed sensible heat, dry-wall nucleation, gas recoil,
+sealed-vessel displacement or overflow/exhaustion remap. Four regression sources
+cover cold/warm counterflow, independent whole-system mass/energy accounting,
+input-order invariance, one-clock continuation, singleton equivalence and
+transactional refusal. These sources do not replace native Rust execution.
+
 ### Condensate storage in finite gas/body heat exchange
 
 `finite_gas_thermal::condensation` consumes the original source-bound

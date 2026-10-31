@@ -204,6 +204,15 @@ pub fn with_liquid<R>(
     fill: f64,
     run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
 ) -> R {
+    with_liquid_interfaces(datum, &[(INTERFACE, fill, 300.0)], run)
+}
+
+/// Explicit initial fill and temperature for each authored native interface.
+pub fn with_liquid_interfaces<R>(
+    datum: f64,
+    interfaces: &[([usize; 3], f64, f64)],
+    run: impl FnOnce(&MaterialFreeSurfaceEnthalpy3<'_, '_>, &CancelGate) -> R,
+) -> R {
     let card = liquid_card();
     let point = QueryPoint::new().with("T", 300.0).unwrap();
     let law = LiquidTemperatureLaw::try_new(
@@ -242,7 +251,10 @@ pub fn with_liquid<R>(
                 let coordinates = [x, y, z];
                 cells.push(MaterialFreeSurfaceInitialCell3 {
                     coordinates,
-                    fill_fraction: if coordinates == INTERFACE { fill } else { 1.0 },
+                    fill_fraction: interfaces
+                        .iter()
+                        .find(|(cell, _, _)| *cell == coordinates)
+                        .map_or(1.0, |(_, fill, _)| *fill),
                     velocity_m_s: [0.0, 0.003 * (x as f64 - 1.5), 0.0],
                 });
             }
@@ -281,7 +293,12 @@ pub fn with_liquid<R>(
                 &law,
                 &caloric,
                 FreeSurfaceEnthalpyControls::default(),
-                |_| datum,
+                |coordinates| {
+                    interfaces
+                        .iter()
+                        .find(|(cell, _, _)| *cell == coordinates)
+                        .map_or(datum, |(_, _, t)| datum + CP * (*t - 300.0))
+                },
                 &gate,
             )
             .unwrap();

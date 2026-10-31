@@ -7,6 +7,8 @@
 //! candidate publishes the gas and native liquid together, without a second
 //! film inventory or a reset of the atmosphere on subsequent calls.
 
+pub mod multiple;
+
 use fs_exec::CancelGate;
 use fs_lbm::material::free_surface::enthalpy::{
     FreeSurfaceEnthalpyError, FreeSurfaceEnthalpyReport, FreeSurfaceMassExchange,
