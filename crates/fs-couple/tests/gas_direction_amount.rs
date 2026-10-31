@@ -42,6 +42,17 @@ fn corrections(gas: &GasState, r: f64, f: f64) -> (f64, f64) {
 /// Autocorrelation f0 over a steady window, 60 Hz to `highest` Hz. A periodic
 /// signal also correlates at two and three periods, so the period is the
 /// shortest lag whose normalized score is within 5 % of the best (stated rule).
+/// The period is not that whole number of samples: it is the vertex of the
+/// parabola through the scores at that lag and its two neighbours.
+///
+/// What this replaced: the period was the integer lag itself, which is off by
+/// up to half a sample, f0 / (2 lag) in f0 (0.13 Hz at 113 Hz and 48 kHz).
+/// `harmonic_centroid` samples an unwindowed window at exact multiples of the
+/// f0 it is given, so at harmonic k the comb sat k times that far from the true
+/// line. Past about the 20th harmonic that is a whole bin of a 0.35 s window
+/// (2.86 Hz), and the centroid, which weighs those lines, moved with the
+/// rounding of the lag alone: a gas verdict could pass or fail on where the
+/// integer lag fell, not on the sound.
 fn f0(signal: &[f64], rate: f64, highest: f64) -> f64 {
     let lags = (rate / highest) as usize..=(rate / 60.0) as usize;
     let score = |lag: usize| {
@@ -52,9 +63,18 @@ fn f0(signal: &[f64], rate: f64, highest: f64) -> f64 {
     let scores: Vec<(usize, f64)> = lags.map(|lag| (lag, score(lag))).collect();
     let best = scores.iter().map(|(_, s)| *s).fold(f64::NEG_INFINITY, f64::max);
     // The first local maximum within 5 % of the best, not the best itself.
-    let period = scores.windows(3).find(|w| w[1].1 >= w[0].1 && w[1].1 >= w[2].1 && w[1].1 >= 0.95 * best)
-        .map_or(scores.iter().max_by(|p, q| p.1.total_cmp(&q.1)).unwrap().0, |w| w[1].0);
-    rate / period as f64
+    let at = scores.windows(3).position(|w| w[1].1 >= w[0].1 && w[1].1 >= w[2].1 && w[1].1 >= 0.95 * best)
+        .map_or_else(|| scores.iter().enumerate().max_by(|p, q| p.1.1.total_cmp(&q.1.1)).unwrap().0, |i| i + 1);
+    // Vertex of the parabola through (-1, l), (0, c), (1, r), in samples from the peak lag; none at an
+    // edge of the searched range, or where the three scores do not bend downward.
+    let offset = match (at.checked_sub(1).map(|i| scores[i].1), scores.get(at + 1).map(|s| s.1)) {
+        (Some(l), Some(r)) => {
+            let bend = l - 2.0 * scores[at].1 + r;
+            if bend < 0.0 { 0.5 * (l - r) / bend } else { 0.0 }
+        }
+        _ => 0.0,
+    };
+    rate / (scores[at].0 as f64 + offset)
 }
 
 // ---- Voice: the Story (2008) [ɑ] description, VoiceDescription::from_bytes -> build.
