@@ -1470,25 +1470,18 @@ fn finish_observer(
             0.5 * f64::from(assembly.sample_rate_hz),
         )?),
     };
-    if law == GasAbsorptionModel::MolecularRelaxation {
-        // The remaining receiver delay is returned, not applied. This source-time
-        // history includes the FIR's declared latency, as the streaming filter
-        // does; no observer law here places the physical arrival.
-        crate::air_path::propagate_pressure_history_relaxing(
-            &mut pressure_pa,
-            dt,
-            assembly.listener.distance_m,
-            admit_relaxation(absorption.relaxation, gas)?,
-        )?;
-    } else {
-        crate::air_path::absorb_pressure_history_with_model(
-            &mut pressure_pa,
-            dt,
-            assembly.listener.distance_m,
-            gas,
-            law,
-        )?;
-    }
+    // Every law uses its original causal response, including ISO's molecular
+    // phase and the classical law's declared minimum-phase realization.
+    // The remaining receiver delay is returned, not applied: this is a
+    // source-time history including FIR latency, not an absolute arrival.
+    crate::air_path::propagate_pressure_history_with_model(
+        &mut pressure_pa,
+        dt,
+        assembly.listener.distance_m,
+        gas,
+        law,
+        absorption.relaxation,
+    )?;
     Ok(RealizedAssembly {
         sample_rate_hz: assembly.sample_rate_hz,
         pressure_pa,
@@ -6216,7 +6209,7 @@ mod arbitrary_gas_realization_tests {
 
     #[test]
     fn observer_absorption_law_is_explicit_for_thermochemical_gas() {
-        use crate::air_path::{GasAbsorptionModel, absorb_pressure_history_with_model};
+        use crate::air_path::{GasAbsorptionModel, propagate_pressure_history_with_model};
         let description = fixture();
         let mut gas = gas_state(description.ambient).unwrap();
         // Perturb a coherent coefficient set to distinguish an externally
@@ -6244,12 +6237,13 @@ mod arbitrary_gas_realization_tests {
             ))
         );
         let mut expected = history.clone();
-        absorb_pressure_history_with_model(
+        propagate_pressure_history_with_model(
             &mut expected,
             1.0 / 16000.0,
             description.listener.distance_m,
             &gas,
             model,
+            None,
         )
         .unwrap();
         let result = finish_observer(&description, &gas, history.clone(), Some(model).into()).unwrap();
@@ -6282,12 +6276,13 @@ mod arbitrary_gas_realization_tests {
             air: legacy_air,
         };
         let mut original = history.clone();
-        absorb_pressure_history_with_model(
+        propagate_pressure_history_with_model(
             &mut original,
             1.0 / 16000.0,
             description.listener.distance_m,
             &legacy,
             scenario_law,
+            None,
         )
         .unwrap();
         assert_eq!(
@@ -6302,6 +6297,36 @@ mod arbitrary_gas_realization_tests {
                 .pressure_pa,
             realize_assembly(&description).unwrap().pressure_pa
         );
+    }
+
+    /// G3: the public offline default and a supplied gas's classical observer
+    /// produce the same phased pressure as the existing streaming law.
+    #[test]
+    fn offline_observer_defaults_use_the_streaming_complex_transfer() {
+        use crate::air_path::{GasAbsorptionModel, ObserverFilter, absorb_pressure_history_with_model};
+        let mut description = fixture();
+        description.listener.distance_m = 30.0;
+        let (air_gas, air) = legacy_admission(&description);
+        let iso = GasAbsorptionModel::Iso9613Air {
+            relative_humidity: description.ambient.relative_humidity, air,
+        };
+        let history: Vec<_> = (0..513).map(|i| det::sin(i as f64 * 0.29)).collect();
+        for (gas, selected, expected_law) in [
+            (air_gas, None, iso),
+            (helium_like(), Some(GasAbsorptionModel::StokesKirchhoff), GasAbsorptionModel::StokesKirchhoff),
+        ] {
+            let realized = finish_observer(&description, &gas, history.clone(), selected.into()).unwrap();
+            let mut filter = ObserverFilter::for_law(
+                expected_law, &gas, None, description.listener.distance_m, description.sample_rate_hz,
+            ).unwrap();
+            let expected: Vec<_> = history.iter().map(|&x| filter.process(x)).collect();
+            assert!(realized.pressure_pa.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-12));
+            assert_eq!(realized.observer_absorption.law, expected_law);
+            let mut magnitude_only = history.clone();
+            absorb_pressure_history_with_model(&mut magnitude_only, 1.0 / f64::from(description.sample_rate_hz),
+                description.listener.distance_m, &gas, expected_law).unwrap();
+            assert!(realized.pressure_pa.iter().zip(&magnitude_only).any(|(a, b)| (a - b).abs() > 1e-6));
+        }
     }
 
     /// The scenario's legacy moist air with its own terrestrial-air admission.
@@ -6388,7 +6413,7 @@ mod arbitrary_gas_realization_tests {
     /// default or by choice, carries the molecular-relaxation omission. Its
     /// figure at the listener distance over the band up to Nyquist is labelled
     /// the standard-air convention, not a bound. ISO asked of the helium-like
-    /// gas refuses. Numerics are unchanged.
+    /// gas refuses. The source-time history uses that law's causal response.
     #[test]
     fn observer_absorption_receipt_names_the_law_and_labels_any_omitted_relaxation() {
         use crate::air_path::{GasAbsorptionModel, OmissionBound, relaxation_omission};
@@ -6416,8 +6441,8 @@ mod arbitrary_gas_realization_tests {
         let realized = realize_assembly_with_gas(&description, &supplied).unwrap();
         assert_eq!(realized.observer_absorption.relaxation_omitted, Some(expected));
         let mut reference = history.clone();
-        crate::air_path::absorb_pressure_history_with_model(&mut reference, 1.0 / 16000.0,
-            description.listener.distance_m, &supplied, GasAbsorptionModel::StokesKirchhoff).unwrap();
+        crate::air_path::propagate_pressure_history_with_model(&mut reference, 1.0 / 16000.0,
+            description.listener.distance_m, &supplied, GasAbsorptionModel::StokesKirchhoff, None).unwrap();
         assert_eq!(classical.pressure_pa, reference);
         assert!(matches!(
             realize_assembly_with_gas_and_absorption(&description, &supplied,

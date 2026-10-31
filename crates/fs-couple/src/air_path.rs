@@ -505,6 +505,80 @@ pub fn omitted_observer_absorption(
     Ok(ObserverOmission { range_m, band_top_hz, figure, classical_db })
 }
 
+/// Apply a declared observer law as its causal, dispersive pressure transfer.
+///
+/// Unlike [`absorb_pressure_history_with_model`]'s deliberately magnitude-only
+/// map, this uses the same FIR response as [`ObserverFilter`] with linear
+/// convolution. ISO's molecular terms retain their complex Debye phase; its
+/// classical term and Stokes-Kirchhoff use the declared in-band minimum-phase
+/// realization. Molecular relaxation uses its original complex wavenumber.
+/// Lossless observation leaves the history untouched.
+///
+/// The clock is exactly `1 / dt`, including non-integer sample rates. Input is
+/// zero before the record, and output beyond its end is discarded. The returned
+/// signed receiver delay is `range_m / c_0` minus the FIR's DC group delay,
+/// including its implementation latency, matching the streaming receipt's
+/// [`ObserverFilterReceipt::receiver_delay_s`]. No absolute arrival is placed
+/// here; a negative delay cannot be realized by a causal physical receiver.
+/// The caller's absorption receipt continues to identify the law and its
+/// omissions; it does not turn this source-time history into an arrival record.
+///
+/// # Errors
+/// Invalid gas, clock, range or samples; an ISO admission for another gas;
+/// missing/mismatched molecular state (or a state supplied for another law);
+/// and the original FIR response/length refusals. All leave the history intact.
+pub fn propagate_pressure_history_with_model(
+    pressure_pa: &mut [f64],
+    dt: f64,
+    range_m: f64,
+    gas: &GasState,
+    model: GasAbsorptionModel,
+    relaxation: Option<&RelaxationState>,
+) -> Result<f64, AcousticRealizeError> {
+    gas.validate_coherence().map_err(|_| invalid("observer propagation needs a coherent gas state"))?;
+    if model == GasAbsorptionModel::MolecularRelaxation {
+        let state = relaxation.ok_or_else(|| invalid("molecular relaxation needs its evaluated relaxation state"))?;
+        if state.gas() != gas {
+            return Err(invalid("the observer relaxation state was evaluated for a different gas state"));
+        }
+        return propagate_pressure_history_relaxing(pressure_pa, dt, range_m, state);
+    }
+    if relaxation.is_some() {
+        return Err(invalid("an observer relaxation state requires the molecular-relaxation law"));
+    }
+    if !dt.is_finite() || dt <= 0.0 || !range_m.is_finite() || range_m < 0.0
+        || pressure_pa.iter().any(|sample| !sample.is_finite())
+    {
+        return Err(invalid("propagation needs finite pressure, positive dt and nonnegative range"));
+    }
+    if model == GasAbsorptionModel::Lossless {
+        let delay_s = range_m / gas.sound_speed;
+        return if delay_s.is_finite() {
+            Ok(delay_s)
+        } else {
+            Err(invalid("observer receiver delay is unrepresentable"))
+        };
+    }
+    let rate = 1.0 / dt;
+    let response = match model {
+        GasAbsorptionModel::Iso9613Air { relative_humidity, air } => {
+            iso9613_response(&air, gas, relative_humidity, range_m, rate)?
+        }
+        GasAbsorptionModel::StokesKirchhoff => stokes_kirchhoff_response(gas, range_m, rate)?,
+        GasAbsorptionModel::MolecularRelaxation | GasAbsorptionModel::Lossless => {
+            unreachable!("molecular and lossless observation returned above")
+        }
+    };
+    let delay_s = response.receiver_delay_s(gas, range_m);
+    if !delay_s.is_finite() {
+        return Err(invalid("observer receiver delay is unrepresentable"));
+    }
+    if range_m != 0.0 {
+        convolve_pressure_history(pressure_pa, &response.taps)?;
+    }
+    Ok(delay_s)
+}
+
 /// Propagate a pressure history through the evaluated gas's molecular relaxation.
 ///
 /// Uses the same energy-bounded causal FIR as [`ObserverFilter::molecular_relaxation`],
@@ -753,6 +827,51 @@ fn molecular_response(
     })
 }
 
+// Shared exact-clock response owners for offline and streaming observation.
+// Neither path reconstructs dispersion from a separate amplitude-only law.
+fn iso9613_response(
+    air: &TerrestrialAir,
+    gas: &GasState,
+    relative_humidity: f64,
+    range_m: f64,
+    rate: f64,
+) -> Result<ObserverResponse, AcousticRealizeError> {
+    air.check(gas).map_err(AcousticRealizeError::NonTerrestrialAir)?;
+    let terms = fs_material::iso9613::iso9613_terms(gas.temperature, gas.pressure, relative_humidity)
+        .map_err(|_| invalid("explicit ISO 9613 air conditions are outside the model domain"))?;
+    design_observer_response(range_m, rate, |n| {
+        let log_classical: Vec<f64> = (0..=n / 2)
+            .map(|k| {
+                let f = k as f64 * rate / n as f64;
+                -terms.classical_np_per_m_hz2 * f * f * range_m
+            })
+            .collect();
+        let mut bins = minimum_phase(&log_classical, n);
+        for (k, bin) in bins.iter_mut().enumerate().skip(1) {
+            let f = k as f64 * rate / n as f64;
+            for (strength, fr_hz) in terms.relaxation {
+                let (re, im) = debye_transfer(strength, fr_hz, f, range_m);
+                *bin = FftC64::new(bin.re * re - bin.im * im, bin.re * im + bin.im * re);
+            }
+        }
+        Ok(bins)
+    })
+}
+
+fn stokes_kirchhoff_response(
+    gas: &GasState,
+    range_m: f64,
+    rate: f64,
+) -> Result<ObserverResponse, AcousticRealizeError> {
+    gas.validate_coherence().map_err(|_| invalid("observer absorption needs a coherent gas state"))?;
+    design_observer_response(range_m, rate, |n| {
+        let log_magnitude: Vec<f64> = (0..=n / 2)
+            .map(|k| -gas.stokes_kirchhoff_absorption(core::f64::consts::TAU * k as f64 * rate / n as f64) * range_m)
+            .collect();
+        Ok(minimum_phase(&log_magnitude, n))
+    })
+}
+
 // Build the positive-frequency transfer on growing DFT grids, align its
 // Nyquist bin to be real, and keep the shortest FIR (precursor padding D
 // plus causal part) whose left-out energy meets the certificate.
@@ -973,32 +1092,15 @@ impl ObserverFilter {
         range_m: f64,
         sample_rate_hz: u32,
     ) -> Result<Self, AcousticRealizeError> {
-        air.check(gas).map_err(AcousticRealizeError::NonTerrestrialAir)?;
-        let terms = fs_material::iso9613::iso9613_terms(gas.temperature, gas.pressure, relative_humidity)
-            .map_err(|_| invalid("explicit ISO 9613 air conditions are outside the model domain"))?;
-        let rate = f64::from(sample_rate_hz);
+        let response = iso9613_response(air, gas, relative_humidity, range_m, f64::from(sample_rate_hz))?;
         let absorption = ObserverAbsorptionReceipt {
             law: GasAbsorptionModel::Iso9613Air { relative_humidity, air: *air },
             relaxation_omitted: None,
         };
-        let validity = classical_validity(gas, sample_rate_hz);
-        Self::design(absorption, gas, range_m, sample_rate_hz, validity, |n| {
-            let log_classical: Vec<f64> = (0..=n / 2)
-                .map(|k| {
-                    let f = k as f64 * rate / n as f64;
-                    -terms.classical_np_per_m_hz2 * f * f * range_m
-                })
-                .collect();
-            let mut bins = minimum_phase(&log_classical, n);
-            for (k, bin) in bins.iter_mut().enumerate().skip(1) {
-                let f = k as f64 * rate / n as f64;
-                for (strength, fr_hz) in terms.relaxation {
-                    let (re, im) = debye_transfer(strength, fr_hz, f, range_m);
-                    *bin = FftC64::new(bin.re * re - bin.im * im, bin.re * im + bin.im * re);
-                }
-            }
-            Ok(bins)
-        })
+        Ok(Self::from_response(
+            response, absorption, gas, range_m, sample_rate_hz,
+            classical_validity(gas, sample_rate_hz),
+        ))
     }
 
     /// Stokes-Kirchhoff, the gas's classical viscothermal law, as the in-band
@@ -1011,19 +1113,15 @@ impl ObserverFilter {
         range_m: f64,
         sample_rate_hz: u32,
     ) -> Result<Self, AcousticRealizeError> {
-        gas.validate_coherence().map_err(|_| invalid("observer absorption needs a coherent gas state"))?;
-        let rate = f64::from(sample_rate_hz);
+        let response = stokes_kirchhoff_response(gas, range_m, f64::from(sample_rate_hz))?;
         let absorption = ObserverAbsorptionReceipt {
             law: GasAbsorptionModel::StokesKirchhoff,
-            relaxation_omitted: Some(relaxation_omission(range_m, 0.5 * rate)?),
+            relaxation_omitted: Some(relaxation_omission(range_m, 0.5 * f64::from(sample_rate_hz))?),
         };
-        let validity = classical_validity(gas, sample_rate_hz);
-        Self::design(absorption, gas, range_m, sample_rate_hz, validity, |n| {
-            let log_magnitude: Vec<f64> = (0..=n / 2)
-                .map(|k| -gas.stokes_kirchhoff_absorption(core::f64::consts::TAU * k as f64 * rate / n as f64) * range_m)
-                .collect();
-            Ok(minimum_phase(&log_magnitude, n))
-        })
+        Ok(Self::from_response(
+            response, absorption, gas, range_m, sample_rate_hz,
+            classical_validity(gas, sample_rate_hz),
+        ))
     }
 
     /// A declared lossless observation (`observer_law none`), for comparisons
@@ -1090,21 +1188,6 @@ impl ObserverFilter {
             }
             GasAbsorptionModel::Lossless => Self::lossless(gas, range_m, sample_rate_hz),
         }
-    }
-
-    fn design(
-        absorption: ObserverAbsorptionReceipt,
-        gas: &GasState,
-        range_m: f64,
-        sample_rate_hz: u32,
-        classical_validity_exceeded_from_hz: Option<f64>,
-        spectrum: impl FnMut(usize) -> Result<Vec<FftC64>, AcousticRealizeError>,
-    ) -> Result<Self, AcousticRealizeError> {
-        let response = design_observer_response(range_m, f64::from(sample_rate_hz), spectrum)?;
-        Ok(Self::from_response(
-            response, absorption, gas, range_m, sample_rate_hz,
-            classical_validity_exceeded_from_hz,
-        ))
     }
 
     fn from_response(
@@ -1346,6 +1429,87 @@ mod tests {
         };
         let law = RelaxationAbsorption::new(vec![SpeciesRelaxation { species: id.clone(), processes }]).unwrap();
         law.evaluate(&RelaxingMedium::new(gas, vec![(id, 1.0)]).unwrap()).unwrap()
+    }
+
+    /// G3: every observer law has one complex transfer for batch and stream,
+    /// with zero extension on short records and across FFT block boundaries.
+    #[test]
+    fn observer_batch_shares_streaming_phase_without_wrap() {
+        let (gas, air) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.5).unwrap();
+        for law in [
+            GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air },
+            GasAbsorptionModel::StokesKirchhoff,
+            GasAbsorptionModel::Lossless,
+        ] {
+            let filter = ObserverFilter::for_law(law, &gas, None, 30.0, 48_000).unwrap();
+            let block = 2 * filter.taps().len().next_power_of_two() - filter.taps().len() + 1;
+            for n in [0, 1, 3, 257, 2 * block + 17] {
+                let mut input = vec![0.0; n];
+                if n > 0 { input[n / 3] = 1.0; input[n - 1] += 0.75; }
+                let mut streaming = filter.clone();
+                let expected: Vec<_> = input.iter().map(|&x| streaming.process(x)).collect();
+                let mut batch = input;
+                let delay = propagate_pressure_history_with_model(
+                    &mut batch, 1.0 / 48_000.0, 30.0, &gas, law, None,
+                ).unwrap();
+                assert!(batch.iter().zip(&expected).all(|(a, b)| (a - b).abs() < 1e-12), "{law:?}, n={n}");
+                assert!(batch[..n / 3].iter().all(|x| x.abs() < 1e-12), "{law:?}, n={n}");
+                assert_eq!(delay.to_bits(), filter.receipt().receiver_delay_s.to_bits());
+            }
+        }
+    }
+
+    /// G1/G3: the common response uses the actual fractional-Hz clock and
+    /// reports the receiver delay independently of its own realized group delay.
+    #[test]
+    fn iso_and_classical_batch_keep_the_exact_clock_and_delay() {
+        let (gas, air) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.5).unwrap();
+        let dt = 1.0 / 44_100.25;
+        for law in [
+            GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air },
+            GasAbsorptionModel::StokesKirchhoff,
+        ] {
+            let response = match law {
+                GasAbsorptionModel::Iso9613Air { relative_humidity, air } =>
+                    iso9613_response(&air, &gas, relative_humidity, 30.0, 1.0 / dt).unwrap(),
+                _ => stokes_kirchhoff_response(&gas, 30.0, 1.0 / dt).unwrap(),
+            };
+            let mut impulse = vec![0.0; response.taps.len() + 17];
+            impulse[0] = 1.0;
+            let delay = propagate_pressure_history_with_model(
+                &mut impulse, dt, 30.0, &gas, law, None,
+            ).unwrap();
+            assert!(impulse.iter().zip(&response.taps).all(|(a, b)| (a - b).abs() < 1e-12));
+            assert!(impulse[response.taps.len()..].iter().all(|x| x.abs() < 1e-12));
+            assert!((delay + response.low_frequency_delay_s - 30.0 / gas.sound_speed).abs() < 1e-14);
+        }
+    }
+
+    /// G0: zero range is bitwise identity after admission, and even empty
+    /// records cannot transfer an ISO admission to another gas.
+    #[test]
+    fn causal_observer_admission_and_zero_range_are_atomic() {
+        let (gas, air) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.5).unwrap();
+        let original = [1.0, -0.0, -2.0];
+        for law in [
+            GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air },
+            GasAbsorptionModel::StokesKirchhoff,
+            GasAbsorptionModel::Lossless,
+        ] {
+            let mut pressure = original;
+            assert!(propagate_pressure_history_with_model(&mut pressure, 0.0, 0.0, &gas, law, None).is_err());
+            assert!(pressure.iter().zip(&original).all(|(a, b)| a.to_bits() == b.to_bits()));
+            assert_eq!(propagate_pressure_history_with_model(
+                &mut pressure, 1.0 / 48_000.0, 0.0, &gas, law, None,
+            ).unwrap(), 0.0);
+            assert!(pressure.iter().zip(&original).all(|(a, b)| a.to_bits() == b.to_bits()));
+        }
+        let (other, _) = TerrestrialAir::moist_air(293.15, 101_325.0, 0.2).unwrap();
+        assert!(matches!(
+            propagate_pressure_history_with_model(&mut [], 1.0 / 48_000.0, 0.0, &other,
+                GasAbsorptionModel::Iso9613Air { relative_humidity: 0.5, air }, None),
+            Err(AcousticRealizeError::NonTerrestrialAir(_))
+        ));
     }
 
     /// G1: the batch FIR carries the causal law's complex phase, including

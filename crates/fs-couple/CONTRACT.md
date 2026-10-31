@@ -3254,6 +3254,18 @@ clarinet is one filling of those objects.
   This remains fixed-gas, infinite-baffle, one-way observation, with original
   source-law, filter-tail, temporal and spatial approximation limits.
 
+  Offline acoustic assemblies apply every selected observer law through
+  `air_path::propagate_pressure_history_with_model`: ISO's complex Debye
+  phase, the classical law's declared in-band minimum phase, and molecular
+  relaxation all share the streaming response designer and linear batch
+  convolution. The batch clock remains the exact reciprocal of dt. Short and
+  non-power-of-two histories are filtered, with zero input before the record.
+  The signed remaining receiver delay has the same semantics as above; the
+  absorption receipt identifies the law and omissions, not an absolute arrival.
+  The explicitly magnitude-only `absorb_pressure_history_with_model` API
+  remains available for that declared comparison; assembly defaults no longer
+  route through it.
+
   Streaming renderers apply the same laws through `air_path::ObserverFilter`,
   a causal FIR built once per law, range and clock. The reed performance
   (`render::schedule::reed`) applies it to both observers, the legacy
