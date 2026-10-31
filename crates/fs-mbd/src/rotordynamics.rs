@@ -8,8 +8,9 @@
 //!
 //! Native fs-modal owns the scaled quadratic poles; native fs-la owns complex
 //! factorization and solve. These are numerical operating-point estimates,
-//! without certified crossings, mode identities, continuum stability or peak
-//! response claims. Changing bearings, preload or spin requires the caller's
+//! without interval-certified eigenvalues, persistent physical mode identities,
+//! continuum stability or peak-response claims. Numerical stability and sampled
+//! synchronous-crossing brackets retain their explicit limitations. Changing bearings, preload or spin requires the caller's
 //! actual new coefficients; a fixed-matrix speed sweep does not infer them.
 
 use fs_la::eigen_complex::{LuComplexError, lu_complex_with_cancel};
@@ -122,6 +123,25 @@ pub struct RotorStabilityBracket {
     /// Maximum pole real part at the upper endpoint [1/s].
     pub upper_spectral_abscissa_per_s: f64,
     /// Number of midpoint pole evaluations used after the original samples.
+    pub bisections: usize,
+}
+
+/// A sampled numerical bracket where one or more oscillatory poles cross a
+/// synchronous excitation line `omega_exc = order * Omega`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RotorCriticalSpeedBracket {
+    /// Lower nonnegative shaft speed [rad/s].
+    pub lower_spin_rad_s: f64,
+    /// Upper nonnegative shaft speed [rad/s].
+    pub upper_spin_rad_s: f64,
+    /// Number of positive-frequency poles below the synchronous line at lower speed.
+    pub lower_modes_below_excitation: usize,
+    /// Number of positive-frequency poles below the synchronous line at upper speed.
+    pub upper_modes_below_excitation: usize,
+    /// Absolute count jump retained by this bracket. Values >1 mean the supplied
+    /// grid/budget did not numerically separate simultaneous or very close crossings.
+    pub crossing_count: usize,
+    /// Midpoint pole evaluations used to isolate this bracket.
     pub bisections: usize,
 }
 
@@ -266,10 +286,6 @@ impl RotorBearingModel {
         })
     }
 
-    /// Sample a fixed-coefficient Campbell spectrum in caller-supplied speed
-    /// order. Returns complete pole sets, never persistent sorted-index modes
-    /// or certified critical-speed brackets. Real bearing speed dependence
-    /// requires newly supplied physical C/K matrices at each operating point.
     /// Locate sign-changing linear-stability transitions over an ordered speed grid.
     ///
     /// Stability is measured by the spectral abscissa `max Re(lambda)` of the
@@ -283,6 +299,143 @@ impl RotorBearingModel {
     /// does not turn the native QR result into a certified eigenvalue enclosure;
     /// it only guarantees deterministic bounded refinement of the observed sign
     /// change. Real speed-dependent bearings require rebuilding their coefficients.
+    /// Bracket sampled 1x/nx Campbell crossings without assigning pole identities.
+    ///
+    /// At each nonnegative shaft speed this counts positive-frequency poles with
+    /// `Im(lambda) < order * Omega`. A change in that integer count between
+    /// adjacent samples proves that the sampled numerical pole set crossed the
+    /// excitation line somewhere in that interval, assuming the oscillatory-pole
+    /// count itself stays constant. Bisection isolates the first such count jump,
+    /// then continues through the remainder of the original interval.
+    ///
+    /// This deliberately does NOT pair eigenvalues between speeds. It therefore
+    /// survives ordinary branch swaps better than nearest-index mode tracking and
+    /// makes simultaneous crossings explicit through `crossing_count > 1`. It
+    /// can still miss an even number of crossings whose endpoint counts cancel;
+    /// callers must provide an adequately resolved speed grid. A pole becoming
+    /// real changes the oscillatory inventory and is refused rather than reported
+    /// as a critical speed. Results are numerical brackets, not eigenvalue or
+    /// coefficient uncertainty certificates.
+    pub fn synchronous_critical_speed_brackets(
+        &self,
+        spin_samples_rad_s: &[f64],
+        excitation_order: f64,
+        spin_tolerance_rad_s: f64,
+        maximum_bisections: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<RotorCriticalSpeedBracket>, RotorError> {
+        poll(&mut cancelled)?;
+        if spin_samples_rad_s.len() < 2
+            || spin_samples_rad_s.len() > MAX_CAMPBELL_SAMPLES
+            || spin_samples_rad_s.iter().any(|x| !x.is_finite() || *x < 0.0)
+            || spin_samples_rad_s.windows(2).any(|pair| pair[1] <= pair[0])
+            || !excitation_order.is_finite()
+            || excitation_order <= 0.0
+            || !spin_tolerance_rad_s.is_finite()
+            || spin_tolerance_rad_s <= 0.0
+            || !(1..=MAX_STABILITY_BISECTIONS).contains(&maximum_bisections)
+        {
+            return Err(RotorError::Invalid(
+                "ordered nonnegative speeds, positive excitation order/tolerance and bounded bisections required",
+            ));
+        }
+
+        let signature = |speed: f64, cancelled: &mut dyn FnMut() -> bool|
+            -> Result<(usize, usize), RotorError> {
+            let point = self.at_speed(speed, &mut *cancelled)?;
+            let threshold = finite(excitation_order * speed)?;
+            point.positive_frequency_signature(threshold, &mut *cancelled)
+        };
+
+        let mut samples = Vec::with_capacity(spin_samples_rad_s.len());
+        for &speed in spin_samples_rad_s {
+            poll(&mut cancelled)?;
+            let sig = signature(speed, &mut cancelled)?;
+            samples.push((speed, sig));
+        }
+        let oscillatory = samples[0].1.1;
+        if samples.iter().any(|(_, (_, total))| *total != oscillatory) {
+            return Err(RotorError::Invalid(
+                "oscillatory pole count changed across the critical-speed sample grid",
+            ));
+        }
+
+        let mut brackets = Vec::new();
+        for window in samples.windows(2) {
+            let (mut left_speed, (mut left_count, left_total)) = window[0];
+            let (right_limit, (right_limit_count, right_total)) = window[1];
+            if left_total != right_total {
+                return Err(RotorError::Invalid(
+                    "oscillatory pole count changed across a critical-speed interval",
+                ));
+            }
+            if left_count == right_limit_count {
+                continue;
+            }
+            let mut remaining_budget = maximum_bisections;
+            while left_count != right_limit_count {
+                poll(&mut cancelled)?;
+                let mut lo = left_speed;
+                let mut hi = right_limit;
+                let mut lo_count = left_count;
+                let mut hi_count = right_limit_count;
+                let mut used = 0usize;
+                while hi - lo > spin_tolerance_rad_s && used < remaining_budget {
+                    let mid = finite(0.5 * lo + 0.5 * hi)?;
+                    if mid == lo || mid == hi {
+                        break;
+                    }
+                    let (mid_count, mid_total) = signature(mid, &mut cancelled)?;
+                    if mid_total != oscillatory {
+                        return Err(RotorError::Invalid(
+                            "oscillatory pole count changed during critical-speed refinement",
+                        ));
+                    }
+                    used += 1;
+                    if mid_count == lo_count {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                        hi_count = mid_count;
+                    }
+                }
+                let crossing_count = hi_count.abs_diff(lo_count);
+                if crossing_count == 0 {
+                    return Err(RotorError::Invalid(
+                        "critical-speed refinement lost its count-changing bracket",
+                    ));
+                }
+                brackets.push(RotorCriticalSpeedBracket {
+                    lower_spin_rad_s: lo,
+                    upper_spin_rad_s: hi,
+                    lower_modes_below_excitation: lo_count,
+                    upper_modes_below_excitation: hi_count,
+                    crossing_count,
+                    bisections: used,
+                });
+                remaining_budget = remaining_budget.saturating_sub(used);
+                left_speed = hi;
+                left_count = hi_count;
+                if left_count == right_limit_count {
+                    break;
+                }
+                if remaining_budget == 0 || right_limit - left_speed <= spin_tolerance_rad_s {
+                    brackets.push(RotorCriticalSpeedBracket {
+                        lower_spin_rad_s: left_speed,
+                        upper_spin_rad_s: right_limit,
+                        lower_modes_below_excitation: left_count,
+                        upper_modes_below_excitation: right_limit_count,
+                        crossing_count: right_limit_count.abs_diff(left_count),
+                        bisections: 0,
+                    });
+                    break;
+                }
+            }
+        }
+        poll(&mut cancelled)?;
+        Ok(brackets)
+    }
+
     pub fn stability_transition_brackets(
         &self,
         spin_samples_rad_s: &[f64],
@@ -393,6 +546,10 @@ impl RotorBearingModel {
         Ok(brackets)
     }
 
+    /// Sample a fixed-coefficient Campbell spectrum in caller-supplied speed
+    /// order. Returns complete pole sets, never persistent physical mode identities
+    /// or interval-certified critical speeds. Real bearing speed dependence
+    /// requires newly supplied physical C/K matrices at each operating point.
     pub fn campbell_samples(
         &self,
         spin_rad_s: &[f64],
@@ -427,6 +584,31 @@ impl RotorOperatingPoint<'_> {
     /// Complete assembled C + Omega G, without modal decoupling.
     pub fn velocity_operator(&self) -> &[f64] {
         &self.velocity_operator
+    }
+
+    fn positive_frequency_signature(
+        &self,
+        threshold_rad_s: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(usize, usize), RotorError> {
+        if !threshold_rad_s.is_finite() || threshold_rad_s < 0.0 {
+            return Err(RotorError::Invalid(
+                "finite nonnegative excitation frequency required",
+            ));
+        }
+        let report = self.poles(&mut cancelled)?;
+        let mut below = 0usize;
+        let mut oscillatory = 0usize;
+        for pole in report.poles_per_s {
+            poll(&mut cancelled)?;
+            if pole.im > 0.0 {
+                oscillatory += 1;
+                if pole.im < threshold_rad_s {
+                    below += 1;
+                }
+            }
+        }
+        Ok((below, oscillatory))
     }
 
     /// Maximum real part of the complete quadratic pole set [1/s].
