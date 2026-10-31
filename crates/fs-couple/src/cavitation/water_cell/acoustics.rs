@@ -15,6 +15,7 @@
 use super::WaterCellState;
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics, FrozenHomogeneousMixture};
+use fs_material::phase::water::acoustics::HomogeneousEquilibriumWater;
 
 /// Explicit frozen-phase acoustic view of one accepted water-cell snapshot.
 ///
@@ -72,6 +73,61 @@ impl<'a> FrozenWaterCellAcoustics<'a> {
 }
 
 impl FluidAcoustics for FrozenWaterCellAcoustics<'_> {
+    fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
+        Ok(self.acoustic)
+    }
+}
+
+/// Explicit fast-equilibration acoustic view of one accepted water inventory.
+///
+/// Unlike the frozen-phase observer, this lets liquid and vapor exchange heat
+/// and mass during an adiabatic perturbation. The original IF97 energy/volume
+/// tangent supplies its compressibility. Both are distinct asymptotic closures;
+/// no frequency interpolation or relaxation time is inferred. Use this view
+/// only when equilibration is fast and the perturbation stays on its source
+/// branch. Exact coexistence endpoints refuse the ambiguous two-sided tangent.
+#[derive(Clone, Copy, Debug)]
+pub struct EquilibriumWaterCellAcoustics<'a> {
+    source: &'a WaterCellState,
+    acoustic: FluidAcousticState,
+    equilibrium: Option<HomogeneousEquilibriumWater>,
+}
+
+impl<'a> EquilibriumWaterCellAcoustics<'a> {
+    pub fn new(source: &'a WaterCellState) -> Result<Self, MaterialError> {
+        let thermodynamic = source.source_state();
+        let (acoustic, equilibrium) = if let Some(single) = thermodynamic.single_phase_source() {
+            (single.acoustic_state()?, None)
+        } else if let Some(pair) = thermodynamic.saturation_pair() {
+            let equilibrium =
+                HomogeneousEquilibriumWater::try_new(pair, thermodynamic.vapor_mass_fraction())?;
+            (equilibrium.state(), Some(equilibrium))
+        } else {
+            return Err(MaterialError::State {
+                what: "equilibrium acoustic observation requires the retained IF97 phase source"
+                    .into(),
+            });
+        };
+        Ok(Self {
+            source,
+            acoustic,
+            equilibrium,
+        })
+    }
+
+    pub const fn source(&self) -> &'a WaterCellState {
+        self.source
+    }
+    pub const fn state(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+    /// Original equilibrium source, analytic tangent and source-fit defects.
+    pub const fn equilibrium(&self) -> Option<HomogeneousEquilibriumWater> {
+        self.equilibrium
+    }
+}
+
+impl FluidAcoustics for EquilibriumWaterCellAcoustics<'_> {
     fn acoustic_state(&self) -> Result<FluidAcousticState, MaterialError> {
         Ok(self.acoustic)
     }

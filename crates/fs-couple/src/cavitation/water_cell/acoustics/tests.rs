@@ -110,6 +110,9 @@ fn liquid_and_steam_observations_retain_exact_original_single_phase_response() {
         let native = accepted.source_state().single_phase_source().unwrap();
         let acoustic = FrozenWaterCellAcoustics::new(&accepted).unwrap();
         assert!(acoustic.mixture().is_none());
+        let equilibrium = EquilibriumWaterCellAcoustics::new(&accepted).unwrap();
+        assert!(equilibrium.equilibrium().is_none());
+        assert_eq!(equilibrium.state(), acoustic.state());
         assert_eq!(
             acoustic.acoustic_state().unwrap(),
             native.acoustic_state().unwrap()
@@ -126,6 +129,56 @@ fn liquid_and_steam_observations_retain_exact_original_single_phase_response() {
         );
         assert_eq!(acoustic.source().time_s(), 2.0);
     }
+}
+
+#[test]
+fn explicit_equilibrium_phase_exchange_changes_native_duct_response_at_same_inventory() {
+    let mut cell = EquilibriumWaterCell::at_temperature(
+        0.1,
+        1.0,
+        Temperature::new(400.0),
+        0.0,
+        controls(380.0, 430.0),
+        || false,
+    )
+    .unwrap();
+    let before = cell.state();
+    let frozen = FrozenWaterCellAcoustics::new(&before).unwrap();
+    let equilibrium = EquilibriumWaterCellAcoustics::new(&before).unwrap();
+    assert!(core::ptr::eq(equilibrium.source(), &before));
+    assert_eq!(
+        equilibrium.equilibrium().unwrap().source(),
+        &before.source_state().saturation_pair().unwrap()
+    );
+    near(
+        equilibrium.state().density_kg_m3(),
+        frozen.state().density_kg_m3(),
+        1e-13,
+    );
+    assert!(equilibrium.state().sound_speed_m_s() < frozen.state().sound_speed_m_s());
+    let omega = 2.0 * core::f64::consts::PI * 10.0;
+    let wave = segment_wave(&equilibrium, 0.005, omega).unwrap();
+    near(
+        wave.wavenumber.re,
+        omega / equilibrium.state().sound_speed_m_s(),
+        1e-13,
+    );
+    assert!(wave.wavenumber.re > segment_wave(&frozen, 0.005, omega).unwrap().wavenumber.re);
+    assert_eq!(cell.state(), before);
+
+    let step = cell.advance(&[], 0.0, 10_000.0, 0.1, || false).unwrap();
+    let after = cell.state();
+    let changed = EquilibriumWaterCellAcoustics::new(&after).unwrap();
+    assert_eq!(changed.source().time_s(), 0.1);
+    assert_ne!(changed.state(), equilibrium.state());
+    assert!(after.phase_masses_kg()[1] > before.phase_masses_kg()[1]);
+    near(
+        after.internal_energy_j() - before.internal_energy_j(),
+        10_000.0,
+        1e-12,
+    );
+    assert!(step.energy_residual_j.abs() <= cell.controls().energy_tolerance_j);
+    assert_eq!(equilibrium.source().time_s(), 0.0);
 }
 
 #[test]

@@ -43,6 +43,24 @@ phase masses and assume common pressure/velocity, adiabatic individual phases
 and long wavelengths. They do not use an equilibrated boiling sound speed or
 infer a resonant bubble radius from vapor volume.
 
+`EquilibriumWaterCellAcoustics` provides the separate rapid-equilibration
+limit. The reusable material `phase::water::acoustics::HomogeneousEquilibriumWater`
+uses the original saturation pair, analytic Gibbs derivatives and Region 4
+pressure slope. Its phase-fraction tangent satisfies original `du + p dv = 0`,
+and its compressibility includes the resulting phase exchange. Original IF97
+Gibbs/Clapeyron matching defects and the raw entropy tangent remain visible;
+no source data are shifted or declared entropy production. Production evaluation
+needs no inverse solve, finite differencing or workspace allocation.
+
+Single-phase accepted water retains its exact original acoustic response.
+Two-phase equilibrium observation requires both phase masses strictly positive;
+an exact saturation endpoint refuses the ambiguous two-sided tangent. Caller
+frequency and amplitude must admit rapid equilibration, negligible slip and an
+interior coexistence perturbation. There is no guessed relaxation frequency or
+interpolation between this response and frozen-phase acoustics. Native checks
+compare the analytic tangent with independent reversible-work compression and
+exercise distinct propagation and heat-driven updates from the same inventory.
+
 Eight native regressions exercise withdrawal-induced vapor, refill condensation,
 conservative two-cell transfer, late cancellation, nonaccumulating inverse error,
 original phase acoustics and actual phase-change feedback into duct propagation.

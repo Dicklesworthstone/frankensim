@@ -21,6 +21,9 @@ pub mod flow;
 /// Sealed rigid-vessel heating with internal-energy storage and evolving pressure.
 pub mod isochoric;
 
+/// Adiabatic homogeneous-equilibrium acoustics from original IF97 derivatives.
+pub mod acoustics;
+
 /// Dense Region 3 rigid-vessel calorimetry with reusable whole-path Cv bounds.
 pub mod dense;
 
