@@ -23,6 +23,7 @@ from pitchlib import f0_samples, midi_of, read_wav, resample as pitchlib_resampl
 JOBS = PLAN = EXTRA = OUT = None  # set by main(); analyze.py imports spectrogram() without them
 SR = 48000
 PX_PER_S, HEIGHT, RANGE_DB = 110, 380, 80.0
+VIBRATO_SETTLED_S = 0.26  # a sung note's onset is over: the unmodulated vowels hold one pitch from here to their release
 # magma, 9 anchors
 MAGMA = np.array([[0, 0, 4], [28, 16, 68], [79, 18, 123], [129, 37, 129], [181, 54, 122], [229, 80, 100],
                   [251, 135, 97], [254, 194, 135], [252, 253, 191]], float)
@@ -130,6 +131,35 @@ def pitch(x, a, b, want):
     elif folded:
         out["octave_check"] = f"the autocorrelation's period was {2 ** folded}x too long (no odd harmonics); corrected"
     return out
+
+
+def whole_cycles(x, a, b, rate, m, want):
+    """m, a pitch() row, read again as the mean frequency of x[a:b] seconds over the whole cycles of a vibrato at `rate` Hz.
+
+    One autocorrelation across a swing does not read its centre: it favours the loud moments, and sung notes are louder
+    in the low half of the swing (/e/ C4 read -75 cents with its swing centred near -5). So count the fundamental's
+    cycles instead: its phase advance over a whole number of vibrato cycles weighs every moment alike, whatever the
+    level does. m's f0_hz only has to be within a tenth of the note, to find the band. This is a mean of frequency, not
+    of cents: at +-90 cents it stands about 1.2 cents above the mean of cents. On the ten unmodulated vowels it agrees
+    with pitch() within 0.15 cents."""
+    cycles = int((b - a) * rate)
+    if cycles < 1:
+        return m
+    f, n = m["f0_hz"], int(round(cycles / rate * SR))
+    i = int((a + b) / 2 * SR) - n // 2
+    lo = max(0, i - SR // 10)  # a margin either side keeps the band filter's edges off the span
+    seg = x[lo:i + n + SR // 10 + 1]
+    off = np.abs(np.fft.fftfreq(len(seg), 1 / SR) - f) / f
+    gain = np.where(off <= 0.2, 1.0, np.where(off >= 0.3, 0.0, 0.5 + 0.5 * np.cos(np.pi * (off - 0.2) / 0.1)))
+    phase = np.unwrap(np.angle(np.fft.ifft(np.fft.fft(seg - seg.mean()) * gain)))
+    f = float(phase[i - lo + n] - phase[i - lo]) / (2 * math.pi) * SR / n
+    t = hz(want) if want else None
+    # periodicity too: one span across a swing has no single period to repeat, and /e/ C4 read as no steady pitch for it.
+    # Windows this short read lower on any tone: the unmodulated vowels give 0.81 to 0.90 here and 0.99 on the long span.
+    w = SR // 25
+    clear = np.median([f0_samples(x[j:j + w], SR)[1] for j in range(i, i + n - w, w)])
+    return dict(m, f0_hz=round(f, 2), cents=None if not t else round(1200 * math.log2(f / t), 1),
+                periodicity=round(float(clear), 3), whole_cycles=cycles)
 
 
 def fade_out(y, at, secs):
@@ -269,6 +299,8 @@ def render_planned(pid, p):
             m = pitch(full, 0.25 * len(full) / SR, 0.75 * len(full) / SR, want)
         else:
             m = None if is_chord else pitch(x if p["join"] != "legato" else load(n["wav"])[0], lead, max(lead + 0.06, n["dur"] - 0.04), want)
+            if m and p.get("vibrato_hz"):  # legato, so this reads the note's own render and its times are the render's
+                m = whole_cycles(load(n["wav"])[0], VIBRATO_SETTLED_S, max(lead + 0.06, n["dur"] - 0.04), p["vibrato_hz"], m, want)
         row = dict(at=n["at"], dur=n["dur"], note=n["note"])
         if not is_chord and want and hz(want):
             row["target_hz"] = round(hz(want), 2)

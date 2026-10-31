@@ -262,18 +262,21 @@ plan["pan-pipes/arpeggio"] = dict(family="pan-pipes", kind="arpeggio", title="G 
 # phrase cards were rendered at 0.082 (music_render at 1b45708e0), n_i = (2^(E_i/1200) - 1)/0.082 per card, mean n = 0.344
 # with no exclusions, so a = (2^(69.5/1200) - 1)/0.344 = 0.119, rendered once and not iterated. Measured at 0.119: +-71 cents
 # on average, 55 to 89 by vowel, because each vowel's tract loads the fold differently.
+VIBRATO_HZ = 5.9
 VIBRATO = [
     "# VIBRATO (sung phrases only): tension_modulation <rate_hz> <amplitude>, a cricothyroid gesture on the fold.",
     "#   5.9 Hz and +-69.5 cents: the means of 50 professional singers, Larrouy-Maestri, Magis and Morsomme 2014, J Voice,",
     "#   doi:10.1016/j.jvoice.2013.10.019 (Prame 1997's mean extent, 71 cents, is quoted there). Amplitude a = (2^(69.5/1200) - 1)",
     "#   / 0.344 = 0.119, from the mean exponent measured on the ten phrase cards at 0.082: derived, not fitted.",
-    "tension_modulation 5.9 0.119",
+    f"tension_modulation {VIBRATO_HZ} 0.119",
 ]
 VOICE_HOW = ("Each vowel is its own render (tract shape and fold settings are fixed within a render); consecutive "
              "vowels are joined with 80 ms crossfades, the later vowel entering after its own onset. The fold's "
              "tension is modulated at 5.9 Hz by +-11.9 %, derived from the model's own response to give the vibrato "
              "rate and extent (+-69.5 cents) of 50 professional singers (Larrouy-Maestri, Magis and Morsomme 2014). "
              "Measured on these renders, the pitch swings by +-71 cents on average (55 to 89 by vowel). "
+             "The pitch shown for each note is its mean frequency over whole vibrato cycles, once the note has "
+             "settled, since one reading across a swing does not find its centre. "
              "The graded straight-tone notes carry no vibrato.")
 
 
@@ -311,7 +314,7 @@ for pitch in ["C3", "C4"]:
         notes.append(dict(wav=wav, at=round(t, 4), dur=d, note=f"/{v}/ {pitch}"))
         t += d
     plan[f"voice/vowels-{pitch}"] = dict(family="voice", kind="vowels", title=f"Five vowels on {pitch}",
-                                         notes=notes, join="legato", how=VOICE_HOW)
+                                         notes=notes, join="legato", how=VOICE_HOW, vibrato_hz=VIBRATO_HZ)
 
 # ---------------------------------------------------------------- lip valves: one render per phrase
 LIP = {

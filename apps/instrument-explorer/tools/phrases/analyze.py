@@ -674,6 +674,8 @@ def main():
                 out_notes.append(dict(i=k, refused=n["refused"], sim={}))
                 continue
             row = dict(i=k, sim=note_measures(x, fs, n, p["family"]))
+            if n.get("whole_cycles"):  # a median of frames across a vibrato swing is not its centre; the map's reading is
+                row["sim"]["cents"] = n["cents"]
             if fr_ref is not None and k not in missing and n["at"] + 0.05 < len(ref_x) / SR:
                 row["ref"] = note_measures(ref_x, fr_ref, n, p["family"])
                 row["timbre_distance_db"] = timbre_distance(row["sim"].get("bands_db"), row["ref"].get("bands_db"))
