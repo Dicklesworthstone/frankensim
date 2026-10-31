@@ -1,7 +1,7 @@
 //! Source-material natural and mixed convection on the native transient clock.
 
 use super::{MaterialBuoyancyError, MaterialBuoyancySample, poll, samples};
-use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, march_conjugate_with_material};
+use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, compact_owners, march_conjugate_with_material};
 use crate::conjugate::{
     ConjugateMarch, EnergyConfig, RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup,
     TransientRecord, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
@@ -128,6 +128,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 "material transient feedback requires laminar flow without a second conductivity owner",
             ));
         }
+        let compact = compact_owners(domain, &thermal.compact_components, gate)?;
         let mut fields = MaterialCoefficients {
             viscosity_pa_s: vec![self.transport.dynamic_viscosity_pa_s(); domain.cell_count()],
             conductivity_w_m_k: vec![
@@ -138,6 +139,11 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         };
         for (cell, values) in fields.conductivity_w_m_k.iter_mut().enumerate() {
             poll(gate)?;
+            if compact.get(cell).is_some_and(|&owner| owner != usize::MAX) {
+                // This numeric field slot is inactive: the authored junction
+                // links replace every bulk face of a collapsed package.
+                continue;
+            }
             if let Voxel::Solid(index) = domain.voxel_at(cell) {
                 *values = solids
                     .get(usize::from(index))
@@ -147,6 +153,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                     .axis_conductivity();
             }
         }
+        drop(compact);
         let mut applied = Vec::new();
         let mut endpoint = Vec::new();
         let mut refresh = |temperature: &[f64], fields: &mut MaterialCoefficients| {

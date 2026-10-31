@@ -33,7 +33,7 @@
 use fs_exec::CancelGate;
 
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
-use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, compact_owners, solve_energy_inner};
+use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, check_ordinary_materials, compact_owners, solve_energy_inner};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::{ChtError, finite, finite_positive, poll};
@@ -179,6 +179,7 @@ pub(crate) fn heat_capacity(
     gate: &CancelGate,
 ) -> Result<Vec<f64>, ChtError> {
     let owners = compact_owners(domain, &setup.compact_components, gate)?;
+    check_ordinary_materials(domain, solids.len(), &owners, gate)?;
     let junctions = junction_capacity(domain, setup, &owners, initial, gate)?;
     let cells = domain.cell_count();
     let mut capacity = Vec::with_capacity(cells + junctions.len());
@@ -303,6 +304,38 @@ pub(crate) fn energy_step_with_conductivity(
     Ok((next.temperature, record))
 }
 
+/// One contribution per authored compact junction, in the common
+/// cell-then-junction capacity layout. Collapsed voxel temperatures are aliases
+/// of these same unknowns; they must never contribute a bulk storage term.
+pub(super) fn junction_stored_energy_change_j(
+    domain: &VoxelDomain,
+    setup: &ThermalSetup,
+    capacity: &[f64],
+    previous: &[f64],
+    temperature: &[f64],
+    gate: &CancelGate,
+) -> Result<f64, ChtError> {
+    let cells = domain.cell_count();
+    if capacity.len() != cells + setup.compact_components.len()
+        || previous.len() != cells || temperature.len() != cells
+    {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.storage",
+            reason: "storage needs cell capacities followed by one capacity per junction".into(),
+        });
+    }
+    let mut stored = 0.0;
+    for (j, part) in setup.compact_components.iter().enumerate() {
+        if j.is_multiple_of(256) { poll(gate)?; }
+        let cell = domain.index(part.lo[0], part.lo[1], part.lo[2]);
+        let change = capacity[cells + j] * (temperature[cell] - previous[cell]);
+        finite("thermal.storage.junction_energy_j", change)?;
+        stored += change;
+    }
+    finite("thermal.storage.junction_energy_j", stored)?;
+    Ok(stored)
+}
+
 /// Constant-capacity storage, including one independent contribution per
 /// compact junction, composed with the shared physical boundary ledger.
 #[allow(clippy::too_many_arguments)]
@@ -317,15 +350,13 @@ pub(super) fn storage_record(
     gate: &CancelGate,
 ) -> Result<TransientRecord, ChtError> {
     poll(gate)?;
-    let cells = domain.cell_count();
+    let junction_storage = junction_stored_energy_change_j(
+        domain, setup, capacity, previous, &next.temperature, gate,
+    )?;
     let mut record = record_energy_step(domain, setup, next,
         |cell| capacity[cell] * (next.temperature[cell] - previous[cell]),
         (time_s, dt, solids_present), radiated_w, outflow_correction_w)?;
-    for (j, (part, junction)) in setup.compact_components.iter().zip(&next.junctions).enumerate() {
-        if j.is_multiple_of(256) { poll(gate)?; }
-        let old = previous[domain.index(part.lo[0], part.lo[1], part.lo[2])];
-        record.stored_energy_change_j += capacity[cells + j] * (junction.temperature_k - old);
-    }
+    record.stored_energy_change_j += junction_storage;
     record.closure_j = record.stored_energy_change_j - (record.source_j - record.boundary_outflow_j);
     finite("thermal.storage.energy_j", record.stored_energy_change_j)?;
     finite("thermal.storage.energy_j", record.closure_j)?;

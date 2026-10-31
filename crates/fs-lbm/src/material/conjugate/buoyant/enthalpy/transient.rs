@@ -183,7 +183,7 @@ fn energy_step(
     let mut endpoint = Vec::with_capacity(domain.cell_count());
     let mut trial_stored = Vec::with_capacity(domain.cell_count());
     let mut stored = Vec::with_capacity(domain.cell_count());
-    let mut storage_w_k = Vec::with_capacity(domain.cell_count());
+    let mut storage_w_k = Vec::with_capacity(step.reference_capacity_j_k.len());
     let mut cell_defects = vec![0.0; domain.cell_count()];
     stored_change(
         caloric,
@@ -217,6 +217,10 @@ fn energy_step(
         storage_w_k.clear();
         for cell in 0..domain.cell_count() {
             poll(gate)?;
+            if step.is_compact_cell(cell) {
+                storage_w_k.push(0.0);
+                continue;
+            }
             let delta = iterate[cell] - step.previous_temperature_k[cell];
             let capacity = if let Some(tangent) = applied[cell] {
                 let mass = reference.density_kg_m3() * domain.volume(cell);
@@ -242,6 +246,7 @@ fn energy_step(
             }
             storage_w_k.push(coefficient);
         }
+        step.append_junction_storage(&mut storage_w_k)?;
         let (mut next, radiated_w, radiation_correction_w) = step.solve_with_enthalpy(
             &storage_w_k,
             conductivity_w_m_k,
@@ -386,7 +391,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// and buoyancy retain the explicit native material lag. Reference rho
     /// owns mass/inertia; original density AND raw/chart Cp departure limits
     /// remain enforced. Fixed solid storage, contacts, thermostat reservoirs
-    /// and converged endpoint radiation retain their original owners. No new
+    /// and converged endpoint radiation retain their original owners. Compact
+    /// components add their authored constant junction capacity exactly once;
+    /// their collapsed aliases have no bulk source law or cell storage. No new
     /// latent-plateau, variable-mass, pressure-work or viscous-heating model is
     /// implied. The caller binds caloric and transport laws to the same fluid,
     /// pressure, composition and source context, as for the steady entry.

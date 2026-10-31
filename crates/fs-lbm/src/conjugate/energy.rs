@@ -868,7 +868,14 @@ fn solve_energy_field(
             finite_positive("solid.orthotropic_w_m_k", k)?;
         }
     }
-    domain.check_materials(solids.len())?;
+    let compact_owner = compact_owners(domain, &setup.compact_components, gate)?;
+    if molecular_conductivity.is_some() {
+        // Collapsed aliases have no bulk law. Their material slots need not
+        // appear in the source table; every ordinary solid still must.
+        check_ordinary_materials(domain, solids.len(), &compact_owner, gate)?;
+    } else {
+        domain.check_materials(solids.len())?;
+    }
     if flow.dims() != domain.dims() {
         return Err(ChtError::InvalidDomain {
             reason: format!(
@@ -1006,7 +1013,7 @@ fn solve_energy_field(
         contacts.push(((a.min(b), a.max(b)), contact.resistance_m2_k_w));
     }
     let conductivity_temperature = nonlinear.and_then(|(_, temperature)| temperature);
-    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature, gate)?;
+    let compact = Compact::new(domain, solids, &k, setup, conductivity_temperature, compact_owner, gate)?;
     let face_contacts = face_contact::prepare(domain, flow, setup, &compact, gate)?;
     let ctx = Context {
         domain,
@@ -1384,9 +1391,32 @@ fn solve_energy_field(
     })
 }
 
+/// Validate bulk material references only where a spatial bulk equation exists.
+/// Compact aliases are governed by their authored junction and never query a
+/// numerical placeholder material or manufacture a second heat-storage law.
+pub(super) fn check_ordinary_materials(
+    domain: &VoxelDomain,
+    materials: usize,
+    owner: &[usize],
+    gate: &CancelGate,
+) -> Result<(), ChtError> {
+    for cell in 0..domain.cell_count() {
+        if cell.is_multiple_of(4096) { super::poll(gate)?; }
+        if owner.get(cell).is_some_and(|&j| j != usize::MAX) {
+            continue;
+        }
+        if let Voxel::Solid(material) = domain.voxel_at(cell)
+            && usize::from(material) >= materials
+        {
+            return Err(ChtError::UnknownMaterial { cell, material });
+        }
+    }
+    Ok(())
+}
+
 /// Shared compact geometry admission for conduction and physical storage.
 /// `usize::MAX` denotes an ordinary cell; an empty result means no components.
-pub(super) fn compact_owners(
+pub(crate) fn compact_owners(
     domain: &VoxelDomain,
     parts: &[CompactComponent],
     gate: &CancelGate,
@@ -1454,12 +1484,14 @@ struct Compact {
 }
 
 impl Compact {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         domain: &VoxelDomain,
         solids: &[SolidMaterial],
         k: &[[f64; 3]],
         setup: &ThermalSetup,
         conductivity_temperature: Option<&[f64]>,
+        owner: Vec<usize>,
         gate: &CancelGate,
     ) -> Result<Self, ChtError> {
         let parts = &setup.compact_components;
@@ -1468,11 +1500,11 @@ impl Compact {
             field: "thermal.compact_components",
             reason,
         };
-        let owner = compact_owners(domain, parts, gate)?;
         let mut links = Vec::with_capacity(parts.len());
         let mut by_cell: std::collections::BTreeMap<usize, Vec<(usize, f64)>> =
             std::collections::BTreeMap::new();
         for (i, part) in parts.iter().enumerate() {
+            super::poll(gate)?;
             let board = part.board_face as usize;
             let axis = board / 2;
             let area = part.face_area(domain);

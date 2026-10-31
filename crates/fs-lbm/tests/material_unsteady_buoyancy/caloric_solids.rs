@@ -1,6 +1,9 @@
 //! Original source Cp on native transient storage and donor enthalpy fluxes.
 //! Synthetic scalar curves are numerical oracles, not measured fluid claims.
 
+#[path = "compact_caloric.rs"]
+mod compact;
+
 use super::solid::{card, law, specific_energy};
 use super::*;
 use fs_lbm::conjugate::ConvectionScheme;

@@ -47,13 +47,14 @@ mod material;
 pub(super) use material::MaterialMomentum;
 
 use super::domain::{FluidProperties, SolidMaterial, VoxelDomain};
+pub(crate) use super::energy::compact_owners;
 use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, ThermalSetup};
 use super::flow::FlowField;
 use super::radiation::{RadiationConfig, Radiators};
 use super::simple::sgs::FvSgsConfig;
 use super::simple::{FvFlow, SimpleConfig, Solver, TimeScheme, Turbulence, admit};
 use super::transient::{TransientRecord, energy_step_with_conductivity, heat_capacity,
-    record_energy_step, scale_power, solve_step_with_fields};
+    junction_stored_energy_change_j, record_energy_step, scale_power, solve_step_with_fields};
 use super::turbulence::TURBULENT_PRANDTL;
 use super::{ChtError, finite, finite_positive, poll};
 
@@ -531,6 +532,43 @@ pub(crate) struct MaterialHeatStep<'a> {
 }
 
 impl MaterialHeatStep<'_> {
+    /// Only validated compact aliases have zero native cell capacity.
+    pub(crate) fn is_compact_cell(&self, cell: usize) -> bool {
+        self.reference_capacity_j_k[cell] == 0.0
+    }
+
+    /// Append the independent junction rows to a material owner's cell rates.
+    /// Their constant authored capacity stays unchanged across caloric trials.
+    pub(crate) fn append_junction_storage(&self, storage_w_k: &mut Vec<f64>) -> Result<(), ChtError> {
+        let cells = self.domain.cell_count();
+        if storage_w_k.len() != cells
+            || self.reference_capacity_j_k.len() != cells + self.setup.compact_components.len()
+        {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.storage",
+                reason: "material storage requires one rate per cell before junction rates".into(),
+            });
+        }
+        for (j, part) in self.setup.compact_components.iter().enumerate() {
+            if j.is_multiple_of(256) { poll(self.gate)?; }
+            let rate = self.reference_capacity_j_k[cells + j] / self.time_step_s;
+            let old = self.previous_temperature_k[
+                self.domain.index(part.lo[0], part.lo[1], part.lo[2])
+            ];
+            finite_positive("thermal.storage.junction_coefficient_w_k", rate)?;
+            finite("thermal.storage.junction_rhs_w", rate * old)?;
+            storage_w_k.push(rate);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn junction_stored_energy_change_j(&self, temperature: &[f64]) -> Result<f64, ChtError> {
+        junction_stored_energy_change_j(
+            self.domain, self.setup, self.reference_capacity_j_k,
+            self.previous_temperature_k, temperature, self.gate,
+        )
+    }
+
     pub(crate) fn solve(
         &self,
         capacity_j_k: &[f64],
@@ -575,9 +613,29 @@ impl MaterialHeatStep<'_> {
         radiated_w: f64,
         outflow_correction_w: f64,
     ) -> Result<TransientRecord, ChtError> {
-        record_energy_step(self.domain, self.setup, solution, |cell| stored_by_cell_j[cell],
+        if stored_by_cell_j.len() != self.domain.cell_count() {
+            return Err(ChtError::InvalidInput {
+                field: "thermal.storage",
+                reason: "one actual source storage increment per cell is required".into(),
+            });
+        }
+        for (cell, &stored) in stored_by_cell_j.iter().enumerate() {
+            if cell.is_multiple_of(4096) { poll(self.gate)?; }
+            if self.is_compact_cell(cell) && stored != 0.0 {
+                return Err(ChtError::InvalidInput {
+                    field: "thermal.storage",
+                    reason: "compact aliases cannot also carry source-material storage".into(),
+                });
+            }
+        }
+        let mut record = record_energy_step(self.domain, self.setup, solution, |cell| stored_by_cell_j[cell],
             (self.time_s, self.time_step_s, self.solids_present),
-            radiated_w, outflow_correction_w)
+            radiated_w, outflow_correction_w)?;
+        record.stored_energy_change_j += self.junction_stored_energy_change_j(&solution.temperature)?;
+        record.closure_j = record.stored_energy_change_j + record.boundary_outflow_j - record.source_j;
+        finite("thermal.storage.energy_j", record.stored_energy_change_j)?;
+        finite("thermal.storage.energy_j", record.closure_j)?;
+        Ok(record)
     }
 }
 
@@ -732,12 +790,6 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     for &t in initial_temperature {
         finite("unsteady.initial_temperature", t)?;
     }
-    if material_heat.is_some() && !setup.compact_components.is_empty() {
-        return Err(ChtError::InvalidInput {
-            field: "thermal.compact_components",
-            reason: "source-caloric marching does not own compact-junction storage; use the native constant-capacity march".into(),
-        }.into());
-    }
     if let Some(b) = buoyancy {
         for g in b.gravity_m_s2 {
             finite("buoyancy.gravity_m_s2", g)?;
@@ -748,7 +800,11 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
             b.reference_temperature_k,
         )?;
     }
-    domain.check_materials(solids.len())?;
+    if material.is_none() || radiation.is_some() {
+        // The source-field heat path can omit unused compact material slots.
+        // Radiation still requires its separately declared surface materials.
+        domain.check_materials(solids.len())?;
+    }
     let capacity = heat_capacity(domain, fluid, solids, setup, initial_temperature, gate)?;
     let storage: Vec<f64> = capacity.iter().map(|c| c / unsteady.time_step_s).collect();
     let solids_present = (0..cells).any(|c| !domain.is_fluid(c));

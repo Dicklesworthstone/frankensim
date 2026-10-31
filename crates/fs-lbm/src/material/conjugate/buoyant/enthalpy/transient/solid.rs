@@ -42,7 +42,8 @@ pub struct MaterialEnthalpySolidMarch<'a, F, C: ConvectionCaloricLaw> {
     /// One joint nonlinear solid record per native thermal interval.
     pub solid_records: Vec<SolidThermalRecord>,
     /// Per voxel sensible energy relative to each solid storage law's lower
-    /// declared temperature. Fluid entries are zero.
+    /// declared temperature. Fluid and compact-alias entries are zero; authored
+    /// junction storage belongs only to the combined native heat ledger.
     pub solid_energy_j: Vec<f64>,
 }
 
@@ -74,7 +75,7 @@ fn solid_failure(
 }
 
 fn solid_samples(
-    domain: &VoxelDomain,
+    step: &MaterialHeatStep<'_>,
     sources: &[SolidThermalLaw<'_>],
     temperature: &[f64],
     gate: &CancelGate,
@@ -82,7 +83,10 @@ fn solid_samples(
     let mut samples = Vec::new();
     for (cell, &temperature_k) in temperature.iter().enumerate() {
         poll(gate)?;
-        let Voxel::Solid(index) = domain.voxel_at(cell) else {
+        if step.is_compact_cell(cell) {
+            continue;
+        }
+        let Voxel::Solid(index) = step.domain.voxel_at(cell) else {
             continue;
         };
         let source = sources
@@ -126,6 +130,10 @@ fn stored_change(
     )?;
     for cell in 0..domain.cell_count() {
         poll(gate)?;
+        if step.is_compact_cell(cell) {
+            stored[cell] = 0.0;
+            continue;
+        }
         let Voxel::Solid(index) = domain.voxel_at(cell) else {
             continue;
         };
@@ -181,11 +189,11 @@ fn joint_energy_step(
     let mut iterate = step.previous_temperature_k.to_vec();
     let mut applied = caloric.field(domain, &iterate, reference, bounds, gate)?;
     let mut endpoint = Vec::with_capacity(domain.cell_count());
-    let mut solid_applied = solid_samples(domain, solid_sources, &iterate, gate)?;
+    let mut solid_applied = solid_samples(step, solid_sources, &iterate, gate)?;
     let mut solid_endpoint = Vec::new();
     let mut trial_stored = Vec::with_capacity(domain.cell_count());
     let mut stored = Vec::with_capacity(domain.cell_count());
-    let mut storage_w_k = Vec::with_capacity(domain.cell_count());
+    let mut storage_w_k = Vec::with_capacity(step.reference_capacity_j_k.len());
     let mut cell_defects = vec![0.0; domain.cell_count()];
     stored_change(
         caloric,
@@ -238,6 +246,10 @@ fn joint_energy_step(
         storage_w_k.clear();
         for cell in 0..domain.cell_count() {
             poll(gate)?;
+            if step.is_compact_cell(cell) {
+                storage_w_k.push(0.0);
+                continue;
+            }
             let old = step.previous_temperature_k[cell];
             let delta = iterate[cell] - old;
             let capacity = if let Some(tangent) = applied[cell] {
@@ -279,6 +291,7 @@ fn joint_energy_step(
             }
             storage_w_k.push(coefficient);
         }
+        step.append_junction_storage(&mut storage_w_k)?;
 
         let (mut next, radiated_w, radiation_correction_w) = step.solve_with_enthalpy(
             &storage_w_k,
@@ -298,7 +311,7 @@ fn joint_energy_step(
             &mut endpoint,
             gate,
         )?;
-        solid_endpoint = solid_samples(domain, solid_sources, &next.temperature, gate)?;
+        solid_endpoint = solid_samples(step, solid_sources, &next.temperature, gate)?;
         stored_change(
             caloric,
             solid_sources,
@@ -335,6 +348,9 @@ fn joint_energy_step(
             let new = next.temperature[cell];
             temperature_defect_k = temperature_defect_k.max((new - iterate[cell]).abs());
             largest_temperature = largest_temperature.max(iterate[cell].abs()).max(new.abs());
+            if step.is_compact_cell(cell) {
+                continue;
+            }
             let linear_j =
                 storage_w_k[cell] * step.time_step_s * (new - old);
             let defect_j = stored[cell] - linear_j;
@@ -467,7 +483,7 @@ fn joint_energy_step(
                     &mut applied,
                     gate,
                 )?;
-                solid_applied = solid_samples(domain, solid_sources, &iterate, gate)?;
+                solid_applied = solid_samples(step, solid_sources, &iterate, gate)?;
                 stored_change(
                     caloric,
                     solid_sources,

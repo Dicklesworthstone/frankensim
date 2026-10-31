@@ -1,7 +1,7 @@
 //! Source-integral solid storage on the existing native thermal step.
 
 use super::{MaterialBuoyancyMarch, MaterialChtFluid};
-use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep};
+use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, compact_owners};
 use crate::conjugate::{
     EnergyConfig, RadiationConfig, SimpleConfig, ThermalSetup, TransientRecord, UnsteadyConfig,
     Voxel, VoxelDomain,
@@ -95,8 +95,9 @@ pub struct MaterialSolidBuoyancyMarch<F> {
     pub solid_endpoint: Vec<SolidConductivitySample>,
     /// One admitted solid constitutive/energy record per original native step.
     pub solid_records: Vec<SolidThermalRecord>,
-    /// Per original voxel: zero for fluid, solid sensible energy relative to
-    /// that material's declared lower Cp temperature. This is not formation energy.
+    /// Per original voxel: zero for fluid and compact aliases, source-solid
+    /// sensible energy relative to that material's declared lower Cp temperature.
+    /// This is not formation energy or authored junction storage.
     pub solid_energy_j: Vec<f64>,
 }
 
@@ -104,7 +105,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// Advance temperature-dependent solid conduction and exact source storage
     /// together with the original material-buoyant native flow march.
     ///
-    /// Every solid assignment names an original `SolidThermalLaw`. Its fixed
+    /// Every ordinary solid assignment names an original `SolidThermalLaw`. Its fixed
     /// reference mass multiplies the exact integral of selected source Cp(T),
     /// while the same source bundle supplies grid-aligned k(T). Inside each
     /// original backward-Euler thermal interval, source-integral secants and
@@ -150,7 +151,15 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 MaterialBuoyancyError::Invalid("solid reference storage is not representable")
             })?);
         }
-        let endpoint = samples(domain, solid_sources, initial_temperature_k, gate)?;
+        let owners = compact_owners(domain, &thermal.compact_components, gate)?;
+        let endpoint = samples(
+            domain,
+            solid_sources,
+            initial_temperature_k,
+            |cell| owners.get(cell).is_some_and(|&owner| owner != usize::MAX),
+            gate,
+        )?;
+        drop(owners);
         let mut fixed = vec![false; domain.cell_count()];
         for &(cell, _) in &thermal.fixed_temperature {
             if let Some(value) = fixed.get_mut(cell) {
@@ -238,11 +247,15 @@ fn samples(
     domain: &VoxelDomain,
     sources: &[SolidThermalLaw<'_>],
     temperature: &[f64],
+    is_compact: impl Fn(usize) -> bool,
     gate: &CancelGate,
 ) -> Result<Vec<SolidConductivitySample>, MaterialBuoyancyError> {
     let mut output = Vec::new();
     for (cell, &temperature_k) in temperature.iter().enumerate() {
         poll(gate)?;
+        if is_compact(cell) {
+            continue;
+        }
         if let Voxel::Solid(index) = domain.voxel_at(cell) {
             let source = sources
                 .get(usize::from(index))
@@ -276,7 +289,9 @@ impl SolidHeat<'_, '_> {
         step: &MaterialHeatStep<'_>,
         fields: &mut MaterialCoefficients,
     ) -> Result<(Vec<f64>, TransientRecord), MaterialBuoyancyError> {
+        self.capacity.resize(step.reference_capacity_j_k.len(), 0.0);
         self.capacity.copy_from_slice(step.reference_capacity_j_k);
+        self.storage.resize(self.capacity.len(), 0.0);
         let mut trial = step.previous_temperature_k.to_vec();
         let mut applied = core::mem::take(&mut self.endpoint);
         let mut linear_iterations = 0usize;
@@ -298,18 +313,32 @@ impl SolidHeat<'_, '_> {
                 self.capacity[cell] = step.domain.volume(cell) * capacity;
                 fields.conductivity_w_m_k[cell] = sample.conductivity_w_m_k;
             }
-            for (rate, &capacity) in self.storage.iter_mut().zip(&self.capacity) {
+            for (slot, (rate, &capacity)) in
+                self.storage.iter_mut().zip(&self.capacity).enumerate()
+            {
                 *rate = capacity / step.time_step_s;
-                if !capacity.is_finite() || capacity <= 0.0 || !rate.is_finite() || *rate <= 0.0 {
+                let alias = slot < step.domain.cell_count() && step.is_compact_cell(slot);
+                let invalid_storage = if alias {
+                    capacity != 0.0 || *rate != 0.0
+                } else {
+                    capacity <= 0.0 || *rate <= 0.0
+                };
+                if !capacity.is_finite() || !rate.is_finite() || invalid_storage {
                     return Err(MaterialBuoyancyError::Invalid(
-                        "positive representable source storage and rate required",
+                        "finite positive storage and rates required outside compact aliases",
                     ));
                 }
             }
             let (next, mut heat) =
                 step.solve(&self.capacity, &self.storage, &fields.conductivity_w_m_k)?;
             linear_iterations = linear_iterations.saturating_add(heat.iterations);
-            let endpoint = match samples(step.domain, self.sources, &next, self.gate) {
+            let endpoint = match samples(
+                step.domain,
+                self.sources,
+                &next,
+                |cell| step.is_compact_cell(cell),
+                self.gate,
+            ) {
                 Ok(endpoint) => endpoint,
                 Err(error) => {
                     if iteration == self.controls.maximum_iterations
@@ -317,7 +346,7 @@ impl SolidHeat<'_, '_> {
                     {
                         return Err(error);
                     }
-                    (trial, applied) = self.backtrack(step.domain, &trial, &next, error)?;
+                    (trial, applied) = self.backtrack(step, &trial, &next, error)?;
                     continue;
                 }
             };
@@ -341,12 +370,15 @@ impl SolidHeat<'_, '_> {
                         .max((y - x).abs() / x.max(y));
                 }
             }
-            let mut true_storage = 0.0;
+            let mut true_storage = step.junction_stored_energy_change_j(&next)?;
             let mut fixed_correction = 0.0;
             let mut roundoff = 0.0;
             let mut storage_admitted = true;
             for (cell, (&old, &new)) in step.previous_temperature_k.iter().zip(&next).enumerate() {
                 poll(self.gate)?;
+                if step.is_compact_cell(cell) {
+                    continue;
+                }
                 let linear = self.capacity[cell] * (new - old);
                 let actual = match step.domain.voxel_at(cell) {
                     Voxel::Fluid => linear,
@@ -414,7 +446,13 @@ impl SolidHeat<'_, '_> {
                     *value = (1.0 - self.controls.temperature_relaxation) * *value
                         + self.controls.temperature_relaxation * target;
                 }
-                applied = samples(step.domain, self.sources, &trial, self.gate)?;
+                applied = samples(
+                    step.domain,
+                    self.sources,
+                    &trial,
+                    |cell| step.is_compact_cell(cell),
+                    self.gate,
+                )?;
             }
         }
         unreachable!("positive bounded solid iteration accepts or refuses its last endpoint")
@@ -425,7 +463,7 @@ impl SolidHeat<'_, '_> {
     // unconstrained endpoint and pass the source-integral heat residual.
     fn backtrack(
         &self,
-        domain: &VoxelDomain,
+        step: &MaterialHeatStep<'_>,
         trial: &[f64],
         target: &[f64],
         failure: MaterialBuoyancyError,
@@ -438,12 +476,20 @@ impl SolidHeat<'_, '_> {
                 .zip(target)
                 .map(|(&a, &b)| a + fraction * (b - a))
                 .collect();
-            if (0..domain.cell_count())
-                .all(|cell| domain.is_fluid(cell) || candidate[cell] == trial[cell])
-            {
+            if (0..step.domain.cell_count()).all(|cell| {
+                step.domain.is_fluid(cell)
+                    || step.is_compact_cell(cell)
+                    || candidate[cell] == trial[cell]
+            }) {
                 return Err(failure);
             }
-            match samples(domain, self.sources, &candidate, self.gate) {
+            match samples(
+                step.domain,
+                self.sources,
+                &candidate,
+                |cell| step.is_compact_cell(cell),
+                self.gate,
+            ) {
                 Ok(source) => return Ok((candidate, source)),
                 Err(
                     error @ MaterialBuoyancyError::Solver(crate::conjugate::ChtError::Cancelled),
