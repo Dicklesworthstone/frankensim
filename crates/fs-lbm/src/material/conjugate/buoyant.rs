@@ -6,7 +6,7 @@
 //! feedback. It never replaces density response with an ideal-gas beta.
 
 mod unsteady;
-pub use unsteady::MaterialBuoyancyMarch;
+pub use unsteady::{MaterialBuoyancyMarch, MaterialSolidBuoyancyMarch, SolidThermalConfig, SolidThermalRecord};
 
 use super::{
     EnergyConfig, EnergySolution, FvFlow, MaterialChtFluid, SimpleConfig, SolidMaterial,
@@ -22,7 +22,7 @@ use fs_material::{
     fluid_transport::{FluidTransport, FluidTransportState},
     state_point::MaterialStatePointError,
 };
-use super::solid::{SolidConductivityLaw, SolidConductivitySample};
+use super::solid::{SolidConductivityLaw, SolidConductivitySample, SolidThermalError};
 
 /// Source-caloric h(T) transport on the same steady material fixed point.
 pub mod enthalpy;
@@ -118,6 +118,14 @@ pub enum MaterialBuoyancyError {
         temperature_k: f64,
         source: MaterialError,
     },
+    /// Original solid material or caloric source refused this exact temperature.
+    SolidThermal {
+        cell: usize,
+        temperature_k: f64,
+        source: SolidThermalError,
+    },
+    /// The bounded nonlinear solid heat solve did not close its source/storage defects.
+    SolidNotConverged(SolidThermalRecord),
     /// Original momentum, thermal or cancellation refusal.
     Solver(ChtError),
     /// All available passes completed without a consistent material endpoint.

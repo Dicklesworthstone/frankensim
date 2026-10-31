@@ -1,6 +1,9 @@
 //! Synthetic constitutive fixtures exercise the native transient equations.
 //! They are numerical regressions, not empirical material qualifications.
 
+#[path = "material_unsteady_buoyancy/solid.rs"]
+mod solid;
+
 use fs_exec::CancelGate;
 use fs_lbm::conjugate::{
     ChtError, EnergyConfig, FlowResistance, FvBoundary, RadiationConfig, STEFAN_BOLTZMANN,

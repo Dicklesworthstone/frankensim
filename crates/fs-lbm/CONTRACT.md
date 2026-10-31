@@ -102,6 +102,38 @@ work remain outside this steady single-phase entry. `material_conjugate`'s
 `source_enthalpy` regressions specify actual channel heat, source Cp(T) changes,
 reversed flow, datum invariance, local closure and atomic refusal.
 
+### Source calorimetry in native unsteady material convection
+
+`SolidConductivityLaw::with_heat_storage` prepares the original selected Cp(T)
+claim through `PreparedHeatStorage` on an explicitly declared temperature span.
+`march_natural_convection_with_material_solids` then uses the SAME native
+momentum history, projected fluxes, backward-Euler heat operator and time steps.
+Every solid assignment supplies this original source law. Fixed reference
+rho times voxel volume defines invariant mass; a changing source density cannot
+create mass. Original source knots, conditions, selected claims and storage
+identity remain retained, with no resampled enthalpy or invented Cp average.
+
+Within each native heat interval, exact source-integral secants and grid-aligned
+k(T) converge to a common supported endpoint. The acceptance gate checks the
+unrelaxed temperature defect, conductivity defect, each cell's exact storage
+defect, and the corrected whole-step heat closure, with explicit roundoff
+allowance. The existing native contact, radiation, source and boundary owners
+remain authoritative. Prescribed-temperature reservoirs supply actual integrated
+storage once even with repeated declarations. Result heat records contain true
+integrated storage; solid records retain nonlinear defects and solid increments.
+Per-cell solid sensible energy uses the declared lower-span temperature datum.
+
+Unsupported linear predictors may backtrack only their constitutive trial;
+accepted temperatures are never clamped or extrapolated. Initial and endpoint
+source failures, nonconvergence and cancellation return no candidate march.
+This is single-phase fixed-geometry solid calorimetry at the source's declared
+mechanical conditions, without latent plateaus, density-driven deformation or
+inferred Cp/Cv conversion. Fluid properties and buoyancy retain their existing
+explicit first-order coupling, even with BDF2 momentum. The old frozen-solid
+entry retains its original behavior. Focused tests independently reduce a
+piecewise-Cp two-cell energy balance, material substitutions, fixed-reservoir
+storage/radiation, bounded large-step iteration, and source/iteration refusals.
+
 ### Solved material flow on the shared enthalpy timeline
 
 With `enthalpy-coupling`, `MaterialChtFluid::solve_flow` retains the actual

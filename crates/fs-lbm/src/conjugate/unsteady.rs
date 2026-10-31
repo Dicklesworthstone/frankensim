@@ -511,6 +511,48 @@ pub(crate) struct MaterialCoefficients {
     pub force_n_m3: Vec<[f64; 3]>,
 }
 
+/// One native thermal interval. A constitutive iteration may replace its
+/// storage linearization and conductivity, never its clock, old state or fluxes.
+pub(crate) struct MaterialHeatStep<'a> {
+    pub domain: &'a VoxelDomain,
+    pub setup: &'a ThermalSetup,
+    pub previous_temperature_k: &'a [f64],
+    pub reference_capacity_j_k: &'a [f64],
+    pub time_s: f64,
+    pub time_step_s: f64,
+    fluid: &'a FluidProperties,
+    solids: &'a [SolidMaterial],
+    flow: &'a FlowField,
+    energy: &'a EnergyConfig,
+    solids_present: bool,
+    radiation: Option<(&'a Radiators, &'a RadiationConfig)>,
+    gate: &'a CancelGate,
+}
+
+impl MaterialHeatStep<'_> {
+    pub(crate) fn solve(
+        &self,
+        capacity_j_k: &[f64],
+        storage_w_k: &[f64],
+        conductivity_w_m_k: &[[f64; 3]],
+    ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
+        energy_step_with_conductivity(
+            self.domain,
+            self.fluid,
+            self.solids,
+            self.flow,
+            self.setup,
+            self.energy,
+            (capacity_j_k, storage_w_k),
+            self.previous_temperature_k,
+            (self.time_s, self.time_step_s, self.solids_present),
+            self.radiation,
+            Some(conductivity_w_m_k),
+            self.gate,
+        )
+    }
+}
+
 struct MaterialCoupling<'a, E> {
     fields: &'a mut MaterialCoefficients,
     refresh: &'a mut dyn FnMut(&[f64], &mut MaterialCoefficients) -> Result<(), E>,
@@ -533,6 +575,12 @@ pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
     radiation: Option<&RadiationConfig>,
     fields: &mut MaterialCoefficients,
     refresh: &mut dyn FnMut(&[f64], &mut MaterialCoefficients) -> Result<(), E>,
+    material_heat: Option<
+        &mut dyn FnMut(
+            &MaterialHeatStep<'_>,
+            &mut MaterialCoefficients,
+        ) -> Result<(Vec<f64>, TransientRecord), E>,
+    >,
     gate: &CancelGate,
 ) -> Result<ConjugateMarch, E> {
     march_conjugate_inner_with_material(
@@ -546,6 +594,7 @@ pub(crate) fn march_conjugate_with_material<E: From<ChtError>>(
         None,
         None,
         Some(MaterialCoupling { fields, refresh }),
+        material_heat,
         initial_temperature,
         inlet_schedule,
         power_schedule,
@@ -584,6 +633,7 @@ fn march_conjugate_inner(
         wall_heat,
         buoyancy,
         None,
+        None,
         initial_temperature,
         inlet_schedule,
         power_schedule,
@@ -605,6 +655,12 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
     mut wall_heat: Option<&mut wall_heat::Coupling<'_>>,
     buoyancy: Option<&Boussinesq>,
     mut material: Option<MaterialCoupling<'_, E>>,
+    mut material_heat: Option<
+        &mut dyn FnMut(
+            &MaterialHeatStep<'_>,
+            &mut MaterialCoefficients,
+        ) -> Result<(Vec<f64>, TransientRecord), E>,
+    >,
     initial_temperature: &[f64],
     inlet_schedule: impl Fn(f64) -> f64,
     power_schedule: impl Fn(f64) -> f64,
@@ -730,24 +786,50 @@ fn march_conjugate_inner_with_material<E: From<ChtError>>(
         // `stepped` never receives generated wall corrections: it remains the
         // authored setup plus this step's source schedule.
         let field = marcher.solver.field();
-        let prepared_walls = wall_heat.as_deref_mut()
+        let prepared_walls = wall_heat
+            .as_deref_mut()
             .map(|wall| wall.prepare(&marcher.solver, &field, &stepped, gate))
             .transpose()?;
-        let thermal = prepared_walls.as_ref().map_or(&stepped, |walls| &walls.thermal);
-        let (next, record) = energy_step_with_conductivity(
-            domain,
-            fluid,
-            solids,
-            &field,
-            thermal,
-            energy,
-            (&capacity, &storage),
-            &temperature,
-            (time_s, unsteady.time_step_s, solids_present),
-            radiators.as_ref().zip(radiation),
-            material.as_ref().map(|coupling| coupling.fields.conductivity_w_m_k.as_slice()),
-            gate,
-        )?;
+        let thermal = prepared_walls
+            .as_ref()
+            .map_or(&stepped, |walls| &walls.thermal);
+        let (next, record) = if let (Some(advance), Some(coupling)) =
+            (material_heat.as_deref_mut(), material.as_mut())
+        {
+            let interval = MaterialHeatStep {
+                domain,
+                setup: thermal,
+                previous_temperature_k: &temperature,
+                reference_capacity_j_k: &capacity,
+                time_s,
+                time_step_s: unsteady.time_step_s,
+                fluid,
+                solids,
+                flow: &field,
+                energy,
+                solids_present,
+                radiation: radiators.as_ref().zip(radiation),
+                gate,
+            };
+            advance(&interval, coupling.fields)?
+        } else {
+            energy_step_with_conductivity(
+                domain,
+                fluid,
+                solids,
+                &field,
+                thermal,
+                energy,
+                (&capacity, &storage),
+                &temperature,
+                (time_s, unsteady.time_step_s, solids_present),
+                radiators.as_ref().zip(radiation),
+                material
+                    .as_ref()
+                    .map(|coupling| coupling.fields.conductivity_w_m_k.as_slice()),
+                gate,
+            )?
+        };
         // Validate every source at the accepted endpoint, including the final
         // step, before exposing results. Reuse these fields for the next step.
         if let Some(coupling) = material.as_mut() {

@@ -56,7 +56,8 @@ pub struct TransientRecord {
     pub max_temperature_k: f64,
     /// Largest solid-cell temperature, K (NaN without solids).
     pub max_solid_temperature_k: f64,
-    /// `sum C (T^(n+1) - T^n)`, J.
+    /// Stored-energy increment, J. Ordinary constant-storage steps use
+    /// `sum C (T^(n+1) - T^n)`; sourced solid coupling uses its exact Cp integral.
     pub stored_energy_change_j: f64,
     /// `dt * sources`, J.
     pub source_j: f64,

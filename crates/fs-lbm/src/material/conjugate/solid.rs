@@ -11,6 +11,9 @@ use fs_material::state_point::{
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
+mod thermal;
+pub use thermal::{SolidThermalError, SolidThermalLaw};
+
 /// One original solid source with an explicit grid-frame conductivity mapping.
 ///
 /// Repeating a property for all three axes declares isotropy. Three independent

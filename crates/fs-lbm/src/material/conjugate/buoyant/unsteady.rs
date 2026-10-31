@@ -1,10 +1,10 @@
 //! Source-material natural and mixed convection on the native transient clock.
 
 use super::{MaterialBuoyancyError, MaterialBuoyancySample, poll, samples};
-use crate::conjugate::unsteady::{MaterialCoefficients, march_conjugate_with_material};
+use crate::conjugate::unsteady::{MaterialCoefficients, MaterialHeatStep, march_conjugate_with_material};
 use crate::conjugate::{
     ConjugateMarch, EnergyConfig, RadiationConfig, SimpleConfig, SolidMaterial, ThermalSetup,
-    Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
+    TransientRecord, Turbulence, UnsteadyConfig, Voxel, VoxelDomain,
 };
 use crate::material::conjugate::MaterialChtFluid;
 use crate::material::transport::boussinesq::BoussinesqConfig;
@@ -13,6 +13,9 @@ use fs_material::{
     MaterialError,
     fluid_transport::{FluidTransport, FluidTransportState},
 };
+
+mod solid;
+pub use solid::{MaterialSolidBuoyancyMarch, SolidThermalConfig, SolidThermalRecord};
 
 /// Native transient solution with the exact final applied and endpoint sources.
 pub struct MaterialBuoyancyMarch<F> {
@@ -51,8 +54,9 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
     /// Solids retain their explicitly authored/frozen heat capacity and
     /// grid-aligned conductivity. Existing contacts, sources, inlet schedules,
     /// fixed-temperature reservoirs and converged endpoint radiation retain
-    /// their original assembly and accounting. Dynamic solid constitutive
-    /// response and variable-density enthalpy storage require their own owners.
+    /// their original assembly and accounting. Source-dependent solid caloric
+    /// and conductivity response uses `march_natural_convection_with_material_solids`.
+    /// Variable-density fluid enthalpy storage requires its own owner.
     ///
     /// # Errors
     /// Refuses SGS/LVEL, independently authored eddy conductivity or solid
@@ -75,6 +79,31 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
         power_schedule: impl Fn(f64) -> f64,
         radiation: Option<&RadiationConfig>,
         gate: &CancelGate,
+        resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
+    ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
+        self.march_natural_convection_inner(
+            domain, solids, flow_config, thermal, energy_config, initial_temperature_k,
+            config, unsteady, inlet_schedule, power_schedule, radiation, None, gate, resolve,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn march_natural_convection_inner<S: FluidTransport>(
+        &self,
+        domain: &VoxelDomain,
+        solids: &[SolidMaterial],
+        flow_config: &SimpleConfig,
+        thermal: &ThermalSetup,
+        energy_config: &EnergyConfig,
+        initial_temperature_k: &[f64],
+        config: BoussinesqConfig<3>,
+        unsteady: &UnsteadyConfig,
+        inlet_schedule: impl Fn(f64) -> f64,
+        power_schedule: impl Fn(f64) -> f64,
+        radiation: Option<&RadiationConfig>,
+        material_heat: Option<&mut dyn FnMut(&MaterialHeatStep<'_>, &mut MaterialCoefficients)
+            -> Result<(Vec<f64>, TransientRecord), MaterialBuoyancyError>>,
+        gate: &CancelGate,
         mut resolve: impl FnMut(usize, f64, &FluidTransportState) -> Result<S, MaterialError>,
     ) -> Result<MaterialBuoyancyMarch<S>, MaterialBuoyancyError> {
         poll(gate)?;
@@ -95,7 +124,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
                 .any(|solid| !solid.conductivity_table.is_empty())
         {
             return Err(MaterialBuoyancyError::Invalid(
-                "material transient feedback requires laminar flow and explicit fixed solid storage/conductivity",
+                "material transient feedback requires laminar flow without a second conductivity owner",
             ));
         }
         let mut fields = MaterialCoefficients {
@@ -152,6 +181,7 @@ impl<F: FluidTransport + ?Sized> MaterialChtFluid<'_, F> {
             radiation,
             &mut fields,
             &mut refresh,
+            material_heat,
             gate,
         )?;
         poll(gate)?;
