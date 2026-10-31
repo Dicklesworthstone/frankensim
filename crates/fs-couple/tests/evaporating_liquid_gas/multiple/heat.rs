@@ -33,10 +33,10 @@ fn g1_joint_native_reciprocal_heat_precedes_phase_with_one_common_gas_and_flow_s
         let binding = binding(&source, 0.0);
         let surfaces = [
             heated_patch(COLD, 10000.0, &binding),
-            heated_patch(WARM, 10000.0, &binding),
+            heated_patch(WARM, 11000.0, &binding),
         ];
-        // Symmetric strong heat moves each film by about 0.03 K while the
-        // heated-mass carry is larger than the whole accepted caloric defect.
+        // Strong heat moves each film by about 0.03 K and produces a resolved
+        // gas temperature change. Heated-mass carry exceeds the accepted defect.
         // Omitting that carry from the native ledger must therefore refuse.
         let mut controls = joint_controls();
         controls.chamber.surface.gas.energy_tolerance_j = 1e-13;

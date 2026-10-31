@@ -13,6 +13,9 @@ pub use entropy::FiniteGasEntropyReport;
 /// Finite water condensation/evaporation in the same reciprocal thermal solve.
 pub mod condensation;
 
+/// Dry onset and complete evaporation of a retained film on a finite wall.
+pub mod wall_film;
+
 mod wall;
 pub use wall::{WallConvectionError, WallConvectionSample, WallConvectionSolve};
 

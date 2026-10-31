@@ -17882,6 +17882,37 @@ cover cold/warm counterflow, independent whole-system mass/energy accounting,
 input-order invariance, one-clock continuation, singleton equivalence and
 transactional refusal. These sources do not replace native Rust execution.
 
+### A finite thermal wall with a zero-capable liquid film
+
+`finite_gas_thermal::wall_film` couples the original fully-wetting material
+boundary to the existing uniform-body thermal and finite-gas caloric owners.
+A cold dry wall can acquire condensate, warm as it receives condensation heat,
+and later lose its entire film. The wall and liquid retain separate masses,
+caloric charts and energy storage; a dry surface supplies no liquid capacity.
+
+Nested bounded scalar feedback closes the wall endpoint and reciprocal
+sensible heat. Each trial heats the original gas, applies the original phase
+boundary at the trial wall temperature, and checks convection against the
+actual final gas. The original body solver consumes the same phase heat debit
+and retains its conductivity, radiation enclosure and Biot admission. Film and
+wall temperatures must agree at acceptance. Radiation remains an external
+source, and vapor-carried sensible/latent energy is not applied a second time.
+
+The returned uniform-body callback carries candidate wall, gas and film states
+for one full requested interval, even when its frozen-rate film dries earlier.
+Source-addition and boundary-port rounding enter the signed and absolute
+energy accounts. Whole-system and volatile mass changes are independently
+checked. Failure or cancellation publishes no partial physical state.
+
+This is a first-order, fixed-area, fixed-gas-volume, fully-wetting planar
+closure requiring complete-timestep refinement. Original uniform-wall
+admission remains necessary; a small convective Biot number alone does not
+justify localized rapid phase heating. Nucleation barriers, drainage, liquid
+motion, displacement work and a coupled entropy theorem are outside this
+boundary. Four focused regression sources check new-film heat capacity,
+complete dry-out against an independent coupled caloric solution, the original
+sensible-only limit, and atomic refusal/cancellation.
+
 ### Condensate storage in finite gas/body heat exchange
 
 `finite_gas_thermal::condensation` consumes the original source-bound
