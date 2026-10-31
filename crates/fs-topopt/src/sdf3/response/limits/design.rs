@@ -10,6 +10,18 @@ pub use checkpoint::{MinimumMaterialCheckpoint3, MinimumMaterialEndpoint3, Minim
 mod wire;
 pub use wire::{MinimumMaterialCodecBudget3, MinimumMaterialCodecError3};
 
+/// Material inventory minimized while retaining every original response limit.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum MinimumMaterialObjective3 {
+    /// Projected geometric volume fraction, normalized by `volume_scale`.
+    VolumeFraction,
+    /// Physical inventory from each native source material's reference density
+    /// and cut-cell volume. `scale_kg` is a positive numerical objective scale;
+    /// reported mass remains in kg. Legacy E/nu-only operators have no density
+    /// authority and cannot use this objective.
+    MassKg { scale_kg: f64 },
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct MinimumMaterialOptions3 {
     pub limits: ResponseLimitOptions3,
@@ -19,45 +31,104 @@ pub struct MinimumMaterialOptions3 {
     /// Positive fixed scale for the numerical volume-fraction objective.
     /// It never rescales reported physical volume or individual response limits.
     pub volume_scale: f64,
+    pub objective: MinimumMaterialObjective3,
     pub optimizer: ProjectedAlOptions,
 }
 impl Default for MinimumMaterialOptions3 {
     fn default() -> Self {
         Self { limits: ResponseLimitOptions3::default(), density_floor: 1e-3,
-            volume_scale: 1.0, optimizer: ProjectedAlOptions::default() }
+            volume_scale: 1.0, objective: MinimumMaterialObjective3::VolumeFraction,
+            optimizer: ProjectedAlOptions::default() }
     }
 }
 #[derive(Debug, Clone, PartialEq)]
 pub struct MinimumMaterialIteration3 {
     pub iteration: usize,
     pub volume_fraction: f64,
+    /// Present for a physical-mass objective, in kg before normalization.
+    pub mass_kg: Option<f64>,
+    /// The normalized objective actually supplied to the optimizer.
+    pub objective: f64,
     pub constraint: f64,
     pub worst_residual: f64,
 }
-fn row(e: &ResponseLimitEvaluation3, iteration: usize) -> MinimumMaterialIteration3 {
+fn row(e: &ResponseLimitEvaluation3, iteration: usize, objective: f64) -> MinimumMaterialIteration3 {
     MinimumMaterialIteration3 { iteration, volume_fraction: e.volume_fraction,
+        mass_kg: e.mass_kg, objective,
         constraint: e.constraint, worst_residual: e.worst_residual }
 }
-fn optimization_sample(e: &ResponseLimitEvaluation3, options: MinimumMaterialOptions3) -> ProjectedAlSample {
-    ProjectedAlSample { objective: e.volume_fraction/options.volume_scale,
-        gradient: e.volume_gradient.iter().map(|g| g/options.volume_scale).collect(),
-        constraint: e.constraint, constraint_gradient: e.constraint_gradient.clone() }
+fn objective_inventory(volume: f64, mass_kg: Option<f64>, objective: MinimumMaterialObjective3) -> Option<f64> {
+    let value = match objective {
+        MinimumMaterialObjective3::VolumeFraction if mass_kg.is_none() => volume,
+        MinimumMaterialObjective3::MassKg { .. } => mass_kg?,
+        _ => return None,
+    };
+    (value.is_finite() && value >= 0.0).then_some(value)
+}
+fn objective_value(volume: f64, mass_kg: Option<f64>, options: MinimumMaterialOptions3) -> Option<f64> {
+    let inventory = objective_inventory(volume, mass_kg, options.objective)?;
+    let scale = match options.objective {
+        MinimumMaterialObjective3::VolumeFraction => options.volume_scale,
+        MinimumMaterialObjective3::MassKg { scale_kg } => scale_kg,
+    };
+    let value = inventory/scale;
+    (value.is_finite() && (inventory == 0.0 || value != 0.0)).then_some(value)
+}
+// Admission also serves reference-load refits, before invoking any callback.
+pub(super) fn admit_objective<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>,
+    options: MinimumMaterialOptions3) -> Result<(), ProjectedAlError<ResponseError3>> {
+    if let MinimumMaterialObjective3::MassKg { scale_kg } = options.objective {
+        if !scale_kg.is_finite() || scale_kg <= 0.0 || !(1.0/scale_kg).is_finite() {
+            return Err(ProjectedAlError::Invalid("mass objective requires a positive invertible kg scale"));
+        }
+        let masses = study.operator.reference_cell_masses_kg()
+            .ok_or(ProjectedAlError::Invalid("mass objective requires native source material densities"))?;
+        if masses.len() != study.cells() || masses.iter().any(|m| !m.is_finite() || *m <= 0.0) {
+            return Err(ProjectedAlError::Invalid("mass objective has invalid reference cell inventory"));
+        }
+    }
+    Ok(())
+}
+fn optimization_sample(e: &ResponseLimitEvaluation3, options: MinimumMaterialOptions3)
+    -> Result<ProjectedAlSample, ResponseError3> {
+    let objective = objective_value(e.volume_fraction, e.mass_kg, options)
+        .ok_or(ResponseError3::Invalid("missing or unrepresentable minimum-material objective"))?;
+    let (gradient, scale) = match options.objective {
+        MinimumMaterialObjective3::VolumeFraction => (&e.volume_gradient, options.volume_scale),
+        MinimumMaterialObjective3::MassKg { scale_kg } =>
+            (e.mass_gradient.as_ref().ok_or(ResponseError3::Invalid("missing material mass gradient"))?, scale_kg),
+    };
+    Ok(ProjectedAlSample { objective,
+        gradient: gradient.iter().map(|g| {
+            let normalized = finite(g/scale)?;
+            if *g != 0.0 && normalized == 0.0 {
+                return Err(ResponseError3::Invalid("minimum-material objective gradient underflow"));
+            }
+            Ok(normalized)
+        }).collect::<Result<_, _>>()?,
+        constraint: e.constraint, constraint_gradient: e.constraint_gradient.clone() })
+}
+fn evaluate<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>, cases: &[ResponseLimitCase3<'_>],
+    rho: &[f64], options: MinimumMaterialOptions3, control: &mut SolveControl<'_>)
+    -> Result<ResponseLimitEvaluation3, ResponseError3> {
+    study.response_limits_with_mass(rho, cases, options.limits,
+        matches!(options.objective, MinimumMaterialObjective3::MassKg { .. }), control)
 }
 fn sample<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>, cases: &[ResponseLimitCase3<'_>],
     rho: &[f64], options: MinimumMaterialOptions3, last: &mut Option<ResponseLimitEvaluation3>,
     control: &mut SolveControl<'_>) -> Result<Option<ProjectedAlSample>, ResponseError3> {
-    let e = study.evaluate_response_limits(rho, cases, options.limits, control)?;
-    let s = optimization_sample(&e, options);
+    let e = evaluate(study, cases, rho, options, control)?;
+    let s = optimization_sample(&e, options)?;
     *last = Some(e); Ok(Some(s))
 }
 
-/// Resumable fixed-grid design minimizing projected material volume while
+/// Resumable fixed-grid design minimizing projected material volume or mass while
 /// bounding independently solved displacement and embedded reaction responses.
 /// The one smooth inequality is a conservative aggregate of all original limits;
 /// individual feasibility is checked again when retaining the best endpoint.
 ///
 /// Ordinary AL accepted steps may be infeasible. `best_feasible()` stores the
-/// least-volume ACCEPTED feasible point separately from the last optimizer
+/// least-objective ACCEPTED feasible point separately from the last optimizer
 /// iterate. A stop/KKT result belongs to the latter; never to an earlier best.
 /// Only fully accepted steps install physical scales. Late cancellation after
 /// an optimizer transition still synchronizes its complete fields. Probes and
@@ -66,8 +137,10 @@ fn sample<O: AdaptiveSdf3Elasticity>(study: &mut CutDensityStudy3<O>, cases: &[R
 /// Smoothing stays fixed across resumed runs. A tight window can be infeasible
 /// for the upper aggregate even when the original inequalities are feasible.
 /// This is not an exact equality-constrained solver or continuum certificate.
-/// For uniform reference mass density minimizing volume is minimizing mass;
-/// spatially varying material cost and geometric shape changes are not modeled.
+/// Mass uses the retained heterogeneous native material densities and the same
+/// projected design as stiffness. The geometric filter and reported volume stay
+/// unchanged. Reference material properties remain fixed during a session;
+/// material-catalog switching and geometric shape changes are not modeled.
 pub struct MinimumMaterialStudy3<'a, 'callback, O: AdaptiveSdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>,
     cases: &'a [ResponseLimitCase3<'a>],
@@ -90,6 +163,7 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
             || rho.iter().any(|r| !r.is_finite() || *r < options.density_floor || *r > 1.0) {
             return Err(ProjectedAlError::Invalid("invalid minimum-material options or initial design"));
         }
+        admit_objective(study, options)?;
         admit_limits(study, cases, options.limits).map_err(ProjectedAlError::Evaluation)?;
         let mut last = None;
         let state = {
@@ -104,7 +178,7 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
         let accepted = last.expect("accepted initial sample owns complete physical fields");
         study.operator.set_scales(&accepted.scales).expect("evaluated scales are admitted");
         let best_feasible = accepted.feasible(options.optimizer.tolerance).then(|| accepted.clone());
-        let history = vec![row(&accepted, 0)];
+        let history = vec![row(&accepted, 0, state.sample().objective)];
         Ok(Self { study, cases, control, options, state, accepted, best_feasible, history, restoration_evaluations: 0 })
     }
     #[must_use] pub fn accepted(&self) -> &ResponseLimitEvaluation3 { &self.accepted }
@@ -135,10 +209,12 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
                 self.study.operator.set_scales(&accepted.scales).expect("accepted scales are admitted");
                 self.accepted = accepted;
                 if self.accepted.feasible(self.options.optimizer.tolerance)
-                    && self.best_feasible.as_ref().is_none_or(|best| self.accepted.volume_fraction < best.volume_fraction) {
+                    && self.best_feasible.as_ref().is_none_or(|best|
+                        objective_inventory(self.accepted.volume_fraction, self.accepted.mass_kg, self.options.objective)
+                        < objective_inventory(best.volume_fraction, best.mass_kg, self.options.objective)) {
                     self.best_feasible = Some(self.accepted.clone());
                 }
-                self.history.push(row(&self.accepted, self.state.work().iterations));
+                self.history.push(row(&self.accepted, self.state.work().iterations, self.state.sample().objective));
                 self.control.checkpoint("response-limit-design-accepted")
                     .map_err(|e| ProjectedAlError::Evaluation(e.into()))?;
             }
@@ -147,7 +223,7 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
             remaining -= 1;
         }
     }
-    /// End the optimizer and install the least-volume accepted feasible design.
+    /// End the optimizer and install the least-objective accepted feasible design.
     /// Consuming the session prevents further iterations from confusing this
     /// earlier endpoint with the latest AL state. No extra solve is performed.
     /// A missing incumbent is an error, never a feasible-result placeholder.

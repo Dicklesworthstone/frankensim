@@ -134,6 +134,9 @@ fn assessment(e: &ResponseLimitRefinement3, tolerance: f64) -> Result<MinimumMat
 /// bounded geometry control and unchanged geometry/material/support laws. This
 /// owner reconstructs the same filter/SIMP policy. The existing refitter carries
 /// protected solid/void regions through the exact geometric parent map.
+/// The selected volume or mass objective is retained on every refit. This
+/// owner's two-grid stopping tolerances assess responses and geometric volume;
+/// they do not establish convergence of physical mass across discretizations.
 ///
 /// Complete probes are cached across pauses. A candidate is installed only after
 /// fitting succeeds, a feasible incumbent exists, and the promotion checkpoint

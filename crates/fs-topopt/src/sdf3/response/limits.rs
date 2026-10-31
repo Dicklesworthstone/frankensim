@@ -72,6 +72,11 @@ pub struct ResponseLimitEvaluation3 {
     pub projected_rho: Vec<f64>,
     pub volume_fraction: f64,
     pub volume_gradient: Vec<f64>,
+    /// Physical material inventory, populated by a mass-objective design.
+    /// Ordinary response-only evaluation does not request this extra pullback.
+    pub mass_kg: Option<f64>,
+    /// Exact raw-design derivative of `mass_kg`, including filter/projection.
+    pub mass_gradient: Option<Vec<f64>>,
     pub constraint: f64,
     pub constraint_gradient: Vec<f64>,
     /// Maximum ORIGINAL signed normalized residual, without smoothing bias.
@@ -165,17 +170,31 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     pub fn evaluate_response_limits(&mut self, rho: &[f64], cases: &[ResponseLimitCase3<'_>],
         options: ResponseLimitOptions3, control: &mut SolveControl<'_>)
         -> Result<ResponseLimitEvaluation3, ResponseError3> {
+        self.response_limits_with_mass(rho, cases, options, false, control)
+    }
+
+    // The minimum-material owner requests physical inventory from the SAME
+    // prepared design. No second forward filter or elasticity solve is needed.
+    fn response_limits_with_mass(&mut self, rho: &[f64], cases: &[ResponseLimitCase3<'_>],
+        options: ResponseLimitOptions3, include_mass: bool, control: &mut SolveControl<'_>)
+        -> Result<ResponseLimitEvaluation3, ResponseError3> {
         control.checkpoint("response-limits-start")?;
         admit_limits(self, cases, options)?;
         if rho.len() != self.cells() || rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r)) {
             return Err(ResponseError3::Invalid("one raw response-limit density in [0,1] per cell required"));
         }
         let design = self.design(rho, control)?;
+        let mass = if include_mass { Some(self.mass_prepared(&design, control)?) } else { None };
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales)?;
         let result = (|| {
             let prepared = self.operator.prepare_elasticity(control)?;
-            self.response_limits_prepared(rho, cases, options, &design, &prepared, control)
+            let mut evaluation = self.response_limits_prepared(rho, cases, options, &design, &prepared, control)?;
+            if let Some((value, gradient)) = mass {
+                evaluation.mass_kg = Some(value);
+                evaluation.mass_gradient = Some(gradient);
+            }
+            Ok(evaluation)
         })();
         self.operator.set_scales(&previous).expect("previous admitted scales remain valid");
         result
@@ -244,6 +263,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             control.checkpoint("response-limits-publish")?;
             Ok(ResponseLimitEvaluation3 { rho: rho.to_vec(), projected_rho: design.projected.clone(),
                 scales: design.scales.clone(), volume_fraction: design.volume, volume_gradient,
+                mass_kg: None, mass_gradient: None,
                 constraint, constraint_gradient, worst_residual, measurements, residuals,
                 displacements, adjoints, work: control.work() })
     }

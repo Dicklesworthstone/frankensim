@@ -34,27 +34,33 @@ pub struct MinimumMaterialEndpoint3 {
     pub projected_rho: Vec<f64>,
     pub scales: Vec<f64>,
     pub volume_fraction: f64,
+    pub mass_kg: Option<f64>,
+    pub objective: f64,
     pub constraint: f64,
     pub worst_residual: f64,
     pub measurements: Vec<Vec<f64>>,
     pub residuals: Vec<Vec<f64>>,
 }
 impl MinimumMaterialEndpoint3 {
-    fn from_evaluation(e: &ResponseLimitEvaluation3) -> Self {
+    fn from_evaluation(e: &ResponseLimitEvaluation3, options: MinimumMaterialOptions3) -> Self {
         Self { rho: e.rho.clone(), projected_rho: e.projected_rho.clone(), scales: e.scales.clone(),
-            volume_fraction: e.volume_fraction, constraint: e.constraint, worst_residual: e.worst_residual,
+            volume_fraction: e.volume_fraction, mass_kg: e.mass_kg,
+            objective: objective_value(e.volume_fraction, e.mass_kg, options).expect("admitted endpoint objective"),
+            constraint: e.constraint, worst_residual: e.worst_residual,
             measurements: e.measurements.clone(), residuals: e.residuals.clone() }
     }
     fn row(&self, iteration: usize) -> MinimumMaterialIteration3 {
         MinimumMaterialIteration3 { iteration, volume_fraction: self.volume_fraction,
+            mass_kg: self.mass_kg, objective: self.objective,
             constraint: self.constraint, worst_residual: self.worst_residual }
     }
-    fn validate(&self, n: usize, cases: &[ResponseLimitCase3<'_>], floor: f64) -> Result<(), Error> {
+    fn validate(&self, n: usize, cases: &[ResponseLimitCase3<'_>], options: MinimumMaterialOptions3) -> Result<(), Error> {
         if self.rho.len() != n || self.projected_rho.len() != n || self.scales.len() != n
-            || self.rho.iter().any(|r| !r.is_finite() || !(floor..=1.0).contains(r))
+            || self.rho.iter().any(|r| !r.is_finite() || !(options.density_floor..=1.0).contains(r))
             || self.projected_rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
             || self.scales.iter().any(|s| !s.is_finite() || *s <= 0.0 || *s > 1.0)
             || !self.volume_fraction.is_finite() || !(0.0..=1.0).contains(&self.volume_fraction)
+            || objective_value(self.volume_fraction, self.mass_kg, options) != Some(self.objective)
             || !self.constraint.is_finite() || !self.worst_residual.is_finite()
             || self.measurements.len() != cases.len() || self.residuals.len() != cases.len() {
             return Err(invalid("invalid minimum-material endpoint shape or values"));
@@ -83,8 +89,12 @@ pub struct MinimumMaterialCheckpoint3 {
     pub options: MinimumMaterialOptions3,
     pub limits: Vec<Vec<MinimumMaterialLimit3>>,
     pub prescribed: Vec<bool>,
+    /// Ordered native reference inventory binds a mass objective to every cell,
+    /// including changes invisible in the current projected design. None for
+    /// the geometric-volume objective; full source identity remains external.
+    pub reference_cell_masses_kg: Option<Vec<f64>>,
     pub accepted: MinimumMaterialEndpoint3,
-    /// Distinct least-volume feasible accepted point; may genuinely be absent.
+    /// Distinct least-objective feasible accepted point; may genuinely be absent.
     pub best_feasible: Option<MinimumMaterialEndpoint3>,
     pub history: Vec<MinimumMaterialIteration3>,
     /// Reserved endpoint evaluations already included in optimizer.work.
@@ -106,7 +116,7 @@ fn same_policy(a: MinimumMaterialOptions3, b: MinimumMaterialOptions3) -> bool {
     let floats = |o: MinimumMaterialOptions3| [o.limits.sharpness, o.density_floor, o.volume_scale,
         o.optimizer.tolerance, o.optimizer.initial_penalty, o.optimizer.max_penalty,
         o.optimizer.inner_tolerance, o.optimizer.min_spectral_step, o.optimizer.max_spectral_step].map(f64::to_bits);
-    counts(a) == counts(b) && floats(a) == floats(b)
+    counts(a) == counts(b) && floats(a) == floats(b) && a.objective == b.objective
 }
 fn feasible_row(r: &MinimumMaterialIteration3, tolerance: f64) -> bool {
     r.constraint <= tolerance && r.worst_residual <= tolerance
@@ -119,8 +129,13 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
         MinimumMaterialCheckpoint3 {
             optimizer: self.state.checkpoint(), options: self.options,
             limits: signatures(self.cases), prescribed: self.cases.iter().map(|c| c.prescribed.is_some()).collect(),
-            accepted: MinimumMaterialEndpoint3::from_evaluation(&self.accepted),
-            best_feasible: self.best_feasible.as_ref().map(MinimumMaterialEndpoint3::from_evaluation),
+            reference_cell_masses_kg: match self.options.objective {
+                MinimumMaterialObjective3::VolumeFraction => None,
+                MinimumMaterialObjective3::MassKg { .. } => Some(self.study.operator.reference_cell_masses_kg()
+                    .expect("admitted source material inventory").to_vec()),
+            },
+            accepted: MinimumMaterialEndpoint3::from_evaluation(&self.accepted, self.options),
+            best_feasible: self.best_feasible.as_ref().map(|e| MinimumMaterialEndpoint3::from_evaluation(e, self.options)),
             history: self.history.clone(), restoration_evaluations: self.restoration_evaluations,
         }
     }
@@ -152,13 +167,21 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
             || !same_policy(checkpoint.options, options) {
             return Err(invalid("minimum-material restart policy changed"));
         }
+        admit_objective(study, options)?;
+        let inventory = match options.objective {
+            MinimumMaterialObjective3::VolumeFraction => None,
+            MinimumMaterialObjective3::MassKg { .. } => study.operator.reference_cell_masses_kg(),
+        };
+        if checkpoint.reference_cell_masses_kg.as_deref() != inventory {
+            return Err(invalid("minimum-material restart changed its reference cell masses"));
+        }
         admit_limits(study, cases, options.limits).map_err(ProjectedAlError::Evaluation)?;
         if checkpoint.limits != signatures(cases)
             || checkpoint.prescribed != cases.iter().map(|c| c.prescribed.is_some()).collect::<Vec<_>>() {
             return Err(invalid("minimum-material restart changed its original limit family"));
         }
-        checkpoint.accepted.validate(n, cases, options.density_floor)?;
-        if let Some(best) = &checkpoint.best_feasible { best.validate(n, cases, options.density_floor)?; }
+        checkpoint.accepted.validate(n, cases, options)?;
+        if let Some(best) = &checkpoint.best_feasible { best.validate(n, cases, options)?; }
         let lower = vec![options.density_floor; n]; let upper = vec![1.0; n];
         // Check the original numerical state before reservation; a malformed
         // derivative or work counter is never repaired by adding restore cost.
@@ -168,18 +191,20 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
             .and_then(|v| v.checked_add(checkpoint.restoration_evaluations)).and_then(|v| v.checked_add(1))
             .ok_or(invalid("minimum-material checkpoint evaluation count overflow"))?;
         if original.point() != checkpoint.accepted.rho
-            || original.sample().objective != checkpoint.accepted.volume_fraction/options.volume_scale
+            || original.sample().objective != checkpoint.accepted.objective
             || original.sample().constraint != checkpoint.accepted.constraint
             || work.evaluations < minimum || work.iterations.checked_add(1) != Some(checkpoint.history.len())
             || checkpoint.history.iter().enumerate().any(|(i, r)| r.iteration != i
                 || !r.volume_fraction.is_finite() || !(0.0..=1.0).contains(&r.volume_fraction)
+                || objective_value(r.volume_fraction, r.mass_kg, options) != Some(r.objective)
                 || !r.constraint.is_finite() || !r.worst_residual.is_finite())
             || checkpoint.history.last() != Some(&checkpoint.accepted.row(work.iterations)) {
             return Err(invalid("minimum-material checkpoint history/sample mismatch"));
         }
         let best_row = checkpoint.history.iter().filter(|r| feasible_row(r, options.optimizer.tolerance))
             .fold(None, |best: Option<&MinimumMaterialIteration3>, r| {
-                if best.is_none_or(|b| r.volume_fraction < b.volume_fraction) { Some(r) } else { best }
+                if best.is_none_or(|b| objective_inventory(r.volume_fraction, r.mass_kg, options.objective)
+                    < objective_inventory(b.volume_fraction, b.mass_kg, options.objective)) { Some(r) } else { best }
             });
         match (best_row, &checkpoint.best_feasible) {
             (None, None) => {},
@@ -203,10 +228,10 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
         checkpoint.optimizer = reserved;
         checkpoint.restoration_evaluations = restoration_evaluations;
         control.checkpoint("minimum-material-restore-reserved").map_err(physical)?;
-        let mut accepted = study.evaluate_response_limits(state.point(), cases, options.limits, control)
+        let mut accepted = evaluate(study, cases, state.point(), options, control)
             .map_err(ProjectedAlError::Evaluation)?;
-        if optimization_sample(&accepted, options) != *state.sample()
-            || MinimumMaterialEndpoint3::from_evaluation(&accepted) != checkpoint.accepted {
+        if optimization_sample(&accepted, options).map_err(ProjectedAlError::Evaluation)? != *state.sample()
+            || MinimumMaterialEndpoint3::from_evaluation(&accepted, options) != checkpoint.accepted {
             return Err(invalid("restored minimum-material endpoint changed its physical problem"));
         }
         let best_feasible = match &checkpoint.best_feasible {
@@ -214,9 +239,10 @@ impl<'a, 'callback, O: AdaptiveSdf3Elasticity> MinimumMaterialStudy3<'a, 'callba
             Some(best) if best.rho == accepted.rho => Some(accepted.clone()),
             Some(best) => {
                 control.checkpoint("minimum-material-restore-incumbent").map_err(physical)?;
-                let e = study.evaluate_response_limits(&best.rho, cases, options.limits, control)
+                let e = evaluate(study, cases, &best.rho, options, control)
                     .map_err(ProjectedAlError::Evaluation)?;
-                if !e.feasible(options.optimizer.tolerance) || MinimumMaterialEndpoint3::from_evaluation(&e) != *best {
+                optimization_sample(&e, options).map_err(ProjectedAlError::Evaluation)?;
+                if !e.feasible(options.optimizer.tolerance) || MinimumMaterialEndpoint3::from_evaluation(&e, options) != *best {
                     return Err(invalid("restored minimum-material incumbent changed its physical limits"));
                 }
                 Some(e)

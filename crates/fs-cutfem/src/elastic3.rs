@@ -464,6 +464,7 @@ impl CutElasticity3 {
         self.cells.get(cell)?.material.source_state()
     }
     /// Full-material cell masses [kg] from density times retained cut quadrature.
+    /// Geometry coordinates must be in metres for this SI inventory.
     /// Includes supported material; no SIMP stiffness scaling is applied here.
     /// These are numerical measures, not certified mass bounds. Legacy material
     /// construction returns `None` because it has no physical density.

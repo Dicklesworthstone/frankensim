@@ -143,8 +143,44 @@ these derivatives vary occupancy, not the selected material card or its state.
 
 `material_elasticity`, `material_modal` and `material_mass` cover tensor work,
 physical density scaling, full-chain derivatives, robust mass curvature and
-live-IR mass/compliance composition. This fixed-tetrahedron integration does not
-extend the separate CutFEM operator's material model or close the raw-SDF marquee.
+live-IR mass/compliance composition. The raw-SDF path below uses the same
+physical-inventory convention with its own retained cut-cell quadrature.
+
+## Physical mass on raw-SDF designs
+
+All three `Sdf3Elasticity` backends expose the original native reference cell
+masses from `fs-cutfem`: Cartesian, adaptive and explicitly preconditioned
+adaptive operators. `CutDensityStudy3::mass_and_gradient` integrates
+`rho_material * cut_volume * projected_occupancy` in kilograms, with geometry in
+metres, and pulls its exact discrete derivative through the existing projection
+and graph-filter transpose. Physical solid regions contribute inventory with
+zero local derivative; physical void contributes none. The normalized geometric
+weights defining the filter and volume fraction remain unchanged. No unit-density
+fallback, SIMP ersatz mass or elasticity solve is added by this query.
+
+`MinimumMaterialOptions3::objective` selects `VolumeFraction` or
+`MassKg { scale_kg }`. The existing response-constrained AL owner uses the chosen
+value and derivative, and ranks feasible accepted designs by actual physical
+inventory. The mass value and pullback use the same prepared design as the
+response solves; only the necessary transpose-filter work is added and charged.
+History reports geometric volume, actual mass and the normalized AL objective
+separately. Normalization that overflows or erases a nonzero inventory/gradient
+is refused. Material tensors and densities stay fixed during a design session.
+
+Refits preserve the objective and require native mass availability. Restart
+binds the objective kind/scale and the ordered reference-cell mass vector, then
+re-solves retained endpoints before installing them. The minimum-material byte
+codec is version 2; older bytes are refused explicitly. Source/executable and
+callback identity retain the existing external binding requirement. Adaptive
+stopping continues to measure response and geometric-volume changes; it does
+not certify mass convergence.
+
+`material_sdf3` covers heterogeneous inventory and finite differences, protected
+regions, cancellation, density-independent geometric filtering, adaptive
+inventory and real response-constrained mass minimization. The
+`material_mass_sdf3` example exposes the path with independently tunable density
+and stiffness in two explicitly synthetic material regions. These additions do
+not claim a continuum certificate or completion of the full marquee milestone.
 
 ## 3-D cut-cell continuation
 

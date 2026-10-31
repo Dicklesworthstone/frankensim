@@ -15,7 +15,7 @@ fn physics(e: impl Into<ResponseError3>) -> FitError { ProjectedAlError::Evaluat
 pub struct ReferenceMinimumMaterialFit3 {
     pub initial: ResponseLimitEvaluation3,
     pub accepted: ResponseLimitEvaluation3,
-    /// Least-volume accepted point satisfying BOTH smooth and original limits.
+    /// Least-objective accepted point satisfying BOTH smooth and original limits.
     /// None is a genuine absence of a feasible result, not an empty placeholder.
     pub best_feasible: Option<ResponseLimitEvaluation3>,
     pub history: Vec<MinimumMaterialIteration3>,
@@ -51,6 +51,7 @@ fn admit<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>, cases: &[Refere
         || rho.iter().any(|r| !r.is_finite() || *r < options.density_floor || *r > 1.0) {
         return Err(ProjectedAlError::Invalid("invalid reference minimum-material starting design or policy"));
     }
+    super::super::design::admit_objective(study, options)?;
     admit_reference_limits(study, cases, options.limits).map_err(physics)
 }
 impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
@@ -121,6 +122,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         control.checkpoint("minimum-material-refit-start").map_err(physics)?;
         admit(self, cases, &source.rho, options)?;
         options.optimizer.validate(candidate.cells())?;
+        super::super::design::admit_objective(&candidate, options)?;
         if max_transfer_terms == 0 { return Err(ProjectedAlError::Invalid("empty material-refit transfer allowance")); }
         admit_reference_limits(&candidate, cases, options.limits).map_err(physics)?;
         let design = self.design(&source.rho, control).map_err(physics)?;

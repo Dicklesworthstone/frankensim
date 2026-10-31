@@ -4,7 +4,7 @@
 use super::*;
 use fs_ascent::projected_al::ProjectedAlCheckpoint;
 
-const MAGIC: &[u8; 8] = b"FSMMLCP\x01";
+const MAGIC: &[u8; 8] = b"FSMMLCP\x02";
 
 /// Caps apply to the entire payload and cumulative vector entries, including
 /// nested lists. They bound decoded storage, not process-wide peak memory.
@@ -112,6 +112,22 @@ impl Wire for ResponseLimitSense3 {
         Ok(if bool::read(r)? { Self::AtLeast } else { Self::AtMost })
     }
 }
+impl Wire for MinimumMaterialObjective3 {
+    const MIN: usize = 1;
+    fn write(&self, w: &mut Writer) -> Result<()> {
+        match self {
+            Self::VolumeFraction => w.put(&[0]),
+            Self::MassKg { scale_kg } => { w.put(&[1])?; scale_kg.write(w) },
+        }
+    }
+    fn read(r: &mut Reader<'_>) -> Result<Self> {
+        match r.take()? {
+            [0] => Ok(Self::VolumeFraction),
+            [1] => Ok(Self::MassKg { scale_kg: f64::read(r)? }),
+            _ => Err(Invalid("unknown minimum-material objective tag")),
+        }
+    }
+}
 macro_rules! fields {
     ($t:ty { $($field:ident : $kind:ty),+ $(,)? }) => {
         impl Wire for $t {
@@ -129,13 +145,17 @@ fields!(ProjectedAlSample { objective: f64, gradient: Vec<f64>, constraint: f64,
 fields!(ProjectedAlCheckpoint { point: Vec<f64>, sample: ProjectedAlSample, work: ProjectedAlWork,
     multiplier: f64, penalty: f64, spectral_step: f64, inner_tolerance: f64, previous_violation: Option<f64> });
 fields!(ResponseLimitOptions3 { sharpness: f64, max_cases: usize, max_limits: usize });
-fields!(MinimumMaterialOptions3 { limits: ResponseLimitOptions3, density_floor: f64, volume_scale: f64, optimizer: ProjectedAlOptions });
+fields!(MinimumMaterialOptions3 { limits: ResponseLimitOptions3, density_floor: f64, volume_scale: f64,
+    objective: MinimumMaterialObjective3, optimizer: ProjectedAlOptions });
 fields!(MinimumMaterialLimit3 { reaction: bool, sense: ResponseLimitSense3, bound: f64, scale: f64 });
 fields!(MinimumMaterialEndpoint3 { rho: Vec<f64>, projected_rho: Vec<f64>, scales: Vec<f64>,
-    volume_fraction: f64, constraint: f64, worst_residual: f64, measurements: Vec<Vec<f64>>, residuals: Vec<Vec<f64>> });
-fields!(MinimumMaterialIteration3 { iteration: usize, volume_fraction: f64, constraint: f64, worst_residual: f64 });
+    volume_fraction: f64, mass_kg: Option<f64>, objective: f64, constraint: f64, worst_residual: f64,
+    measurements: Vec<Vec<f64>>, residuals: Vec<Vec<f64>> });
+fields!(MinimumMaterialIteration3 { iteration: usize, volume_fraction: f64, mass_kg: Option<f64>,
+    objective: f64, constraint: f64, worst_residual: f64 });
 fields!(MinimumMaterialCheckpoint3 { optimizer: ProjectedAlCheckpoint, options: MinimumMaterialOptions3,
-    limits: Vec<Vec<MinimumMaterialLimit3>>, prescribed: Vec<bool>, accepted: MinimumMaterialEndpoint3,
+    limits: Vec<Vec<MinimumMaterialLimit3>>, prescribed: Vec<bool>, reference_cell_masses_kg: Option<Vec<f64>>,
+    accepted: MinimumMaterialEndpoint3,
     best_feasible: Option<MinimumMaterialEndpoint3>, history: Vec<MinimumMaterialIteration3>, restoration_evaluations: usize });
 
 impl MinimumMaterialCheckpoint3 {

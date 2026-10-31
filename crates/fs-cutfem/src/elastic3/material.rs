@@ -14,7 +14,9 @@ use crate::HexCell;
 
 /// Complete reference materials for active background cells.
 ///
-/// All tensors use the simulation's global frame. Density and material identity
+/// Stiffness is in pascals and density in kg/m³; use geometry in metres for
+/// physical forces and kg inventory. All tensors use the simulation's global
+/// frame. Density and material identity
 /// remain attached to the original immutable state. Design stiffness scales do
 /// not modify this reference state or its density. Each returned state applies
 /// throughout its cell; material interfaces must therefore follow the supplied

@@ -181,6 +181,43 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         Ok((d.volume,self.pullback(&local,control)?))
     }
 
+    /// Physical inventory [kg] and its exact raw-density gradient through the
+    /// existing graph filter and projection. Density comes from each retained
+    /// native material; the normalized geometric filter mass is unchanged.
+    /// Solid regions contribute full mass and have zero local derivative;
+    /// authored void contributes none. The SIMP ersatz modulus has no mass.
+    /// This query does not mutate the operator or perform an elasticity solve.
+    /// Legacy E/nu-only operators refuse because their density is unspecified.
+    pub fn mass_and_gradient(&self, rho: &[f64], control: &mut SolveControl<'_>)
+        -> Result<(f64, Vec<f64>), EvaluationStop> {
+        control.checkpoint("sdf3-material-mass")?;
+        if self.operator.reference_cell_masses_kg().is_none() {
+            return Err(failure("sdf3-material-mass-unavailable"));
+        }
+        let design = self.design(rho, control)?;
+        self.mass_prepared(&design, control)
+    }
+
+    // Reuse a prepared physical design when mass is a live optimizer objective;
+    // its projected field and slope must be those of the same realization.
+    fn mass_prepared(&self, design: &Design3, control: &mut SolveControl<'_>)
+        -> Result<(f64, Vec<f64>), EvaluationStop> {
+        control.checkpoint("sdf3-material-mass")?;
+        let weights = self.operator.reference_cell_masses_kg()
+            .ok_or_else(|| failure("sdf3-material-mass-unavailable"))?;
+        let mass: f64 = weights.iter().zip(&design.projected).map(|(m,r)|m*r).sum();
+        let local: Vec<f64> = weights.iter().zip(&design.slope).map(|(m,s)|m*s).collect();
+        if !mass.is_finite() || mass < 0.0 || local.iter().any(|v| !v.is_finite()) {
+            return Err(failure("sdf3-material-mass-overflow"));
+        }
+        let gradient = self.pullback(&local, control)?;
+        if gradient.iter().any(|v| !v.is_finite()) {
+            return Err(failure("sdf3-material-mass-pullback"));
+        }
+        control.checkpoint("sdf3-material-mass-publish")?;
+        Ok((mass, gradient))
+    }
+
     /// Evaluate real independent equilibria and the full filter/projection/SIMP
     /// chain. All filter, load and pullback solves share the existing SolveControl.
     /// Invalid inputs panic before mutation. Any returned stop restores scales;
