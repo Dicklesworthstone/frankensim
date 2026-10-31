@@ -151,10 +151,12 @@ impl FlowField {
 
     /// Interpolate cell-centred velocities (m/s, one per cell; solid entries
     /// are ignored) to faces and project the result onto discretely
-    /// divergence-free fluxes. Interior fluid faces take the arithmetic mean
-    /// of their two cells; open boundary faces take the boundary cell's
-    /// velocity. [`FlowFace::Fixed`] fluxes are held fixed and the correction
-    /// potential vanishes on [`FlowFace::Free`] faces.
+    /// divergence-free fluxes. Interior fluid faces interpolate linearly
+    /// between cell centres, using their actual distances on a graded grid;
+    /// open boundary faces take the boundary cell's velocity. The projection
+    /// uses each face's area and centre distance. [`FlowFace::Fixed`] fluxes
+    /// are held fixed and the correction potential vanishes on
+    /// [`FlowFace::Free`] faces.
     ///
     /// # Errors
     /// [`ChtError::InvalidInput`] for a wrong-length or non-finite velocity
@@ -177,21 +179,31 @@ impl FlowField {
             });
         }
         finite_positive("flow.projection_tolerance", tolerance)?;
-        let dx = domain.require_uniform("the cell-velocity projection")?;
+        poll(gate)?;
+        let uniform = domain.is_uniform();
         let mut field = Self::quiescent(domain);
-        let area = dx * dx;
         for c in 0..domain.cell_count() {
+            poll_every(gate, c)?;
             if !domain.is_fluid(c) {
                 continue;
             }
             for component in velocities[c] {
                 finite("flow.velocities", component)?;
             }
+            let widths = domain.widths(c);
             for f in [1usize, 3, 5, 0, 2, 4] {
                 let axis = f / 2;
                 let value = match domain.neighbor(c, f) {
                     Some(n) if f % 2 == 1 && domain.is_fluid(n) => {
-                        0.5 * (velocities[c][axis] + velocities[n][axis])
+                        if uniform {
+                            // Retain the established uniform-grid arithmetic.
+                            0.5 * (velocities[c][axis] + velocities[n][axis])
+                        } else {
+                            let half_c = 0.5 * widths[axis];
+                            let half_n = 0.5 * domain.width(axis, domain.coords(n)[axis]);
+                            let fraction = half_c / (half_c + half_n);
+                            (1.0 - fraction) * velocities[c][axis] + fraction * velocities[n][axis]
+                        }
                     }
                     None if faces[f] != FlowFace::Wall => velocities[c][axis],
                     // Plus-side copies of interior faces, solid neighbours,
@@ -199,7 +211,10 @@ impl FlowField {
                     _ => continue,
                 };
                 let (slot, _) = field.slot(domain, c, f);
-                *field.face_mut(axis, slot) = value * area;
+                let area = widths[(axis + 1) % 3] * widths[(axis + 2) % 3];
+                let flux = value * area;
+                finite("flow.interpolated_flux", flux)?;
+                *field.face_mut(axis, slot) = flux;
             }
         }
         let report = field.project(domain, faces, tolerance, gate)?;
@@ -310,8 +325,9 @@ impl FlowField {
     }
 
     /// Remove the discrete divergence with one correction potential `phi` on
-    /// the fluid cells: corrected flux `F - (A/dx)(phi_N - phi_P)` on interior
-    /// faces and `F + (2A/dx) phi_P` on outflow faces (`phi = 0` there).
+    /// the fluid cells: corrected flux `F - (A/d)(phi_N - phi_P)` on interior
+    /// faces and `F + (A/d_boundary) phi_P` on outflow faces (`phi = 0` there).
+    /// Distances are between centres or from the centre to the boundary plane.
     #[allow(clippy::too_many_lines)] // components, assembly, solve, correction
     fn project(
         &mut self,
@@ -366,7 +382,22 @@ impl FlowField {
                 pinned_components += 1;
             }
         }
-        let g = domain.dx(); // A / dx
+        let conductance = |c: usize, f: usize, neighbor: Option<usize>| {
+            if domain.is_uniform() {
+                // Keep the uniform path's exact arithmetic (A / dx = dx).
+                return if neighbor.is_some() {
+                    domain.dx()
+                } else {
+                    2.0 * domain.dx()
+                };
+            }
+            let axis = f / 2;
+            let widths = domain.widths(c);
+            let distance = 0.5 * widths[axis]
+                + neighbor.map_or(0.0, |n| 0.5 * domain.width(axis, domain.coords(n)[axis]));
+            let area = widths[(axis + 1) % 3] * widths[(axis + 2) % 3];
+            area / distance
+        };
         let mut coo = Coo::new(n, n);
         let mut b = vec![0.0f64; n];
         for (row, &c) in fluid.iter().enumerate() {
@@ -376,10 +407,16 @@ impl FlowField {
             for f in 0..6 {
                 match domain.neighbor(c, f) {
                     Some(nb) if domain.is_fluid(nb) => {
+                        let g = conductance(c, f, Some(nb));
+                        finite_positive("flow.projection_conductance", g)?;
                         diag += g;
                         coo.push(row, row_of[nb], -g);
                     }
-                    None if faces[f] == FlowFace::Free => diag += 2.0 * g,
+                    None if faces[f] == FlowFace::Free => {
+                        let g = conductance(c, f, None);
+                        finite_positive("flow.projection_conductance", g)?;
+                        diag += g;
+                    }
                     _ => {}
                 }
             }
@@ -387,7 +424,13 @@ impl FlowField {
             // component; a component with zero net boundary flux then
             // solves to phi_pin = 0 exactly and loses no equation.
             if is_pinned[row] {
-                diag += g;
+                let pin = if domain.is_uniform() {
+                    domain.dx()
+                } else {
+                    conductance(c, 0, domain.neighbor(c, 0))
+                };
+                finite_positive("flow.projection_conductance", pin)?;
+                diag += pin;
             }
             coo.push(row, row, diag);
             b[row] = rhs;
@@ -409,9 +452,9 @@ impl FlowField {
                 let correction = match domain.neighbor(c, f) {
                     // Each interior face once, from its minus-side cell.
                     Some(nb) if f % 2 == 1 && domain.is_fluid(nb) => {
-                        -g * (phi[row_of[nb]] - phi[row])
+                        -conductance(c, f, Some(nb)) * (phi[row_of[nb]] - phi[row])
                     }
-                    None if faces[f] == FlowFace::Free => 2.0 * g * phi[row],
+                    None if faces[f] == FlowFace::Free => conductance(c, f, None) * phi[row],
                     _ => continue,
                 };
                 let (slot, sign) = self.slot(domain, c, f);

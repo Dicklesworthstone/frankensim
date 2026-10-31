@@ -244,6 +244,208 @@ fn temperature_dependent_conductivity_follows_the_kirchhoff_transform() {
 }
 
 #[test]
+fn graded_cell_projection_preserves_linear_face_interpolation_and_fixed_inflow() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::graded([vec![1.0, 4.0, 2.0, 3.0], vec![0.2], vec![0.5]]).unwrap();
+    let velocity: Vec<_> = (0..domain.cell_count())
+        .map(|c| {
+            let [x, y, z] = domain.coords(c);
+            [domain.center(x, y, z)[0], 0.0, 0.0]
+        })
+        .collect();
+    let (field, report) =
+        FlowField::from_cell_velocities(&domain, &velocity, OPEN_X, 1e-12, &gate).unwrap();
+    // For u=x the interior faces are exactly x=1,5,7. The copied boundary
+    // samples are 0.5 and 8.5, so the largest initial volume imbalance is
+    // 4*area. An arithmetic cell average gives 2.75*area instead.
+    let area = 0.2 * 0.5;
+    assert!((report.max_divergence_before_m3_s - 4.0 * area).abs() < 1e-14);
+    for x in 0..=4 {
+        assert!((field.flux_x(x, 0, 0) - 0.5 * area).abs() < 1e-12);
+    }
+    assert!(report.max_divergence_after_m3_s < 1e-12);
+}
+
+#[test]
+fn graded_cell_projection_removes_a_zero_pressure_drop_gradient_on_every_axis() {
+    let gate = CancelGate::new();
+    for axis in 0..3 {
+        let mut widths = [vec![0.25, 0.75], vec![2.0], vec![0.5]];
+        widths[axis] = vec![1.0, 4.0, 2.0];
+        let domain = VoxelDomain::graded(widths).unwrap();
+        let velocity: Vec<_> = (0..domain.cell_count())
+            .map(|c| {
+                let mut value = [0.0; 3];
+                value[axis] = [3.0, -5.0, 0.0][domain.coords(c)[axis]];
+                value
+            })
+            .collect();
+        let mut faces = [FlowFace::Wall; 6];
+        faces[2 * axis] = FlowFace::Free;
+        faces[2 * axis + 1] = FlowFace::Free;
+        let (field, report) =
+            FlowField::from_cell_velocities(&domain, &velocity, faces, 1e-12, &gate).unwrap();
+        // Interior interpolated speeds are 7/5 and -5/3, with distances
+        // 5/2 and 3. Including the two boundary half cells gives potential
+        // drop 3*(1/2)+(7/5)*(5/2)-(5/3)*3+0*1=0. Therefore this is purely
+        // a discrete gradient with equal boundary potentials: no flow remains.
+        // Using uniform conductances or arithmetic interpolation fails this.
+        assert!(report.max_divergence_before_m3_s > 0.0);
+        assert!(field.max_flux() < 1e-11, "axis {axis}: {report:?}");
+        assert!(report.max_divergence_after_m3_s < 1e-11);
+    }
+}
+
+#[test]
+fn graded_cell_projection_conserves_each_disconnected_closed_pocket() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::graded_from_fn(
+        [vec![1.0, 4.0, 2.0, 3.0, 1.0], vec![0.2, 0.3], vec![0.25]],
+        |p| {
+            if p[0] > 5.0 && p[0] < 7.0 {
+                Voxel::Solid(0)
+            } else {
+                Voxel::Fluid
+            }
+        },
+    )
+    .unwrap();
+    let velocity: Vec<_> = (0..domain.cell_count())
+        .map(|c| {
+            if !domain.is_fluid(c) {
+                return [f64::NAN; 3]; // Solid velocity samples are intentionally ignored.
+            }
+            let [x, y, z] = domain.coords(c);
+            let p = domain.center(x, y, z);
+            [0.3 * p[0] + 0.2 * p[1], -0.4 * p[0] + 0.1 * p[1], 0.0]
+        })
+        .collect();
+    let (field, report) = FlowField::from_cell_velocities(
+        &domain,
+        &velocity,
+        [FlowFace::Wall; 6],
+        1e-12,
+        &gate,
+    )
+    .unwrap();
+    assert_eq!(report.pinned_components, 2);
+    assert!(report.max_divergence_after_m3_s < 1e-12);
+    assert!(
+        field.max_flux() > 1e-6,
+        "projection removed the solenoidal circulation"
+    );
+    for c in 0..domain.cell_count() {
+        for f in 0..6 {
+            if !domain.is_fluid(c) || domain.neighbor(c, f).is_none() {
+                assert_eq!(field.outward(&domain, c, f), 0.0);
+            }
+        }
+    }
+}
+
+#[test]
+fn graded_cell_projection_drives_conservative_heat_advection() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::graded([vec![0.05, 0.2, 0.1, 0.15], vec![0.2], vec![0.3]]).unwrap();
+    let (flow, report) = FlowField::from_cell_velocities(
+        &domain,
+        &vec![[0.4, 0.0, 0.0]; domain.cell_count()],
+        OPEN_X,
+        1e-12,
+        &gate,
+    )
+    .unwrap();
+    assert!(report.max_divergence_after_m3_s < 1e-14);
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Inflow { temperature: 300.0 };
+    faces[1] = ThermalFace::Outflow {
+        backflow_temperature: 300.0,
+    };
+    let mut setup = ThermalSetup::new(faces);
+    setup.power_w = (0..domain.cell_count())
+        .map(|c| 8.0 * domain.volume(c))
+        .collect();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 1e-8,
+        ..unit_fluid()
+    };
+    let config = EnergyConfig {
+        scheme: ConvectionScheme::Upwind,
+        ..EnergyConfig::default()
+    };
+    let result = solve_energy(&domain, &fluid, &[], &flow, &setup, &config, &gate).unwrap();
+    // 0.24 W enters a 0.024 kg/s stream with Cp=1, giving 10 K warming.
+    // The very small axial conduction perturbs this plug-flow limit by <1e-6 K.
+    let outlet = result.bulk_temperature_x(&domain, &flow, 3).unwrap();
+    assert!((outlet - 310.0).abs() < 1e-6, "outlet={outlet}");
+    assert!((result.report.balance.source_w - 0.24).abs() < 1e-14);
+    assert!(result.report.balance.relative_residual < 1e-10);
+}
+
+#[test]
+fn graded_signed_buoyancy_reverses_convection_with_density_response() {
+    let gate = CancelGate::new();
+    let domain = VoxelDomain::graded([
+        vec![0.1, 0.2, 0.4, 0.2, 0.1],
+        vec![0.2, 0.3, 0.3, 0.2],
+        vec![0.25],
+    ])
+    .unwrap();
+    let fluid = FluidProperties {
+        conductivity_w_m_k: 0.01,
+        kinematic_viscosity_m2_s: 0.01,
+        ..unit_fluid()
+    };
+    let mut faces = [ThermalFace::Adiabatic; 6];
+    faces[0] = ThermalFace::Temperature(301.0);
+    faces[1] = ThermalFace::Temperature(299.0);
+    let setup = ThermalSetup::new(faces);
+    let solve = |beta: f64, gravity: f64| {
+        let mut flow = SimpleConfig::new([
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::wall(),
+            FvBoundary::Symmetry,
+            FvBoundary::Symmetry,
+        ]);
+        flow.tolerance = 1e-9;
+        let mut config = FvBuoyancyConfig::new([0.0, gravity, 0.0], beta, 300.0, flow);
+        config.temperature_tolerance = 1e-9;
+        fv_natural_convection(&domain, &fluid, &[], &setup, &config, &gate).unwrap()
+    };
+    let ordinary = solve(0.001, -9.81);
+    let negative = solve(-0.001, -9.81);
+    let reversed_gravity = solve(0.001, 9.81);
+    let hot = domain.index(0, 1, 0);
+    assert!(ordinary.flow.velocity_m_s[hot][1] > 0.0);
+    assert!(negative.flow.velocity_m_s[hot][1] < 0.0);
+    // Reversing beta is exactly the same physical source as reversing g.
+    for (a, b) in negative
+        .flow
+        .velocity_m_s
+        .iter()
+        .zip(&reversed_gravity.flow.velocity_m_s)
+    {
+        for axis in 0..3 {
+            assert!((a[axis] - b[axis]).abs() < 1e-10);
+        }
+    }
+    for (a, b) in negative
+        .energy
+        .temperature
+        .iter()
+        .zip(&reversed_gravity.energy.temperature)
+    {
+        assert!((a - b).abs() < 1e-9);
+    }
+    for run in [&ordinary, &negative, &reversed_gravity] {
+        assert!(run.energy.report.balance.relative_residual < 1e-9);
+        assert!(run.flow.field.max_divergence(&domain) < 1e-10);
+    }
+}
+
+#[test]
 fn graded_composite_slab_is_exact() {
     // Piecewise-constant k on arbitrary widths: the series profile is exact.
     let gate = CancelGate::new();

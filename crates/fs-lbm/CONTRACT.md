@@ -2346,8 +2346,15 @@ electronics-cooling grid). Every finite-volume path generalizes:
   seed's box (exact for axis-aligned walls; at a solid corner the corner
   distance, not the earlier centre distance less half a voxel).
 
-The lattice-Boltzmann paths (`lbm_duct_flow`, `natural_convection`, the
-cell-velocity projection) need uniform voxels and refuse a graded domain;
+- cell-velocity projection: distance-weighted interpolation to the actual
+  face plane, followed by the same conservative pressure correction with
+  `A / distance` on each interior/open face. Fixed inlet fluxes and zero
+  solid-face fluxes retain their semantics. Focused `graded_cell_projection`
+  tests check linear interpolation, removal of a zero-pressure-drop gradient
+  along each axis, disconnected closed pockets, and downstream heat balance.
+
+The lattice-Boltzmann paths (`lbm_duct_flow`, `natural_convection`)
+need uniform voxels and refuse a graded domain;
 `VoxelDomain::dx` is NaN there so any uniform-spacing assumption fails
 loudly.
 
