@@ -15,7 +15,8 @@ mod media;
 pub use media::NetworkMedia;
 mod loaded;
 pub use loaded::{
-    network_drive, network_drive_coupled, network_drive_coupled_regional, network_drive_regional,
+    network_drive, network_drive_coherent, network_drive_coherent_regional, network_drive_coupled,
+    network_drive_coupled_regional, network_drive_regional,
 };
 
 #[cfg(test)]
@@ -283,6 +284,137 @@ pub struct NetworkDriveResponse {
     pub port_pressures: Vec<C64>,
     /// Currents into the graph / unit injected flow, in the same order.
     pub port_inflows: Vec<C64>,
+}
+
+/// One prescribed harmonic volume-flow source into a labelled external port.
+/// All sources in a solve share its frequency and exp(-i omega t) clock.
+#[derive(Debug, Clone)]
+pub struct PortFlowSource {
+    /// Exact external port label. Each driven port is specified once.
+    pub label: String,
+    /// Complex peak volume flow [m³/s], including the source's phase.
+    /// Zero prescribes zero flow; it does not remove this boundary condition.
+    pub volume_flow_m3_s: C64,
+}
+
+/// Actual simultaneous harmonic fields, with interference retained before
+/// calculating power. These are peak phasors, not unit-flow transfer ratios.
+#[derive(Debug, Clone)]
+pub struct NetworkCoherentResponse {
+    /// Common angular frequency [rad/s].
+    pub omega: f64,
+    /// Port labels in the original graph's node-array order.
+    pub ports: Vec<String>,
+    /// Complex peak pressure [Pa] in port order.
+    pub port_pressures: Vec<C64>,
+    /// Complex peak volume flow into the graph [m³/s] in port order.
+    pub port_inflows: Vec<C64>,
+    /// Signed mean power into the graph, 0.5 Re(p conj(U)) [W], per port.
+    /// A source may absorb power, and mutually coupled loads may exchange it.
+    pub port_powers_w: Vec<f64>,
+    /// Signed mean work supplied by all prescribed sources together [W].
+    pub source_power_w: f64,
+    /// Signed mean work delivered to the external scalar/coupled loads [W].
+    pub external_load_power_w: f64,
+    /// Sum of all signed port powers [W], without clipping roundoff.
+    /// This includes internal nodal loads, wall work and gas losses; it is not
+    /// an attribution of heat to any particular physical mechanism.
+    pub network_power_w: f64,
+}
+
+fn source_currents(
+    labels: &[&str],
+    sources: &[PortFlowSource],
+) -> Result<Vec<Option<C64>>, DuctError> {
+    if sources.is_empty() || sources.len() > MAX_NETWORK_PORTS {
+        return Err(bad("network needs 1..=32 coherent flow sources"));
+    }
+    let mut currents = vec![None; labels.len()];
+    for source in sources {
+        let port = labels
+            .iter()
+            .position(|&label| label == source.label)
+            .ok_or_else(|| bad("unknown network source port label"))?;
+        if currents[port].is_some() || !finite(source.volume_flow_m3_s) {
+            return Err(bad(
+                "network sources need unique ports and finite peak flows",
+            ));
+        }
+        currents[port] = Some(source.volume_flow_m3_s);
+    }
+    Ok(currents)
+}
+
+// Neumaier accumulation preserves weak residuals of strongly cancelling
+// sources. Callers supply canonical port order, independent of input order.
+fn coherent_sum(values: impl Iterator<Item = C64>) -> C64 {
+    let mut sum = C64::ZERO;
+    let mut correction = C64::ZERO;
+    for value in values {
+        let next = sum + value;
+        correction.re += if sum.re.abs() >= value.re.abs() {
+            (sum.re - next.re) + value.re
+        } else {
+            (value.re - next.re) + sum.re
+        };
+        correction.im += if sum.im.abs() >= value.im.abs() {
+            (sum.im - next.im) + value.im
+        } else {
+            (value.im - next.im) + sum.im
+        };
+        sum = next;
+    }
+    sum + correction
+}
+
+impl NetworkCoherentResponse {
+    fn from_fields(
+        omega: f64,
+        labels: &[&str],
+        sources: &[Option<C64>],
+        port_pressures: Vec<C64>,
+        port_inflows: Vec<C64>,
+    ) -> Result<Self, DuctError> {
+        let port_powers_w: Vec<f64> = port_pressures
+            .iter()
+            .zip(&port_inflows)
+            .map(|(&p, &u)| 0.5 * (p * u.conj()).re)
+            .collect();
+        let mut canonical: Vec<usize> = (0..labels.len()).collect();
+        canonical.sort_unstable_by(|&a, &b| labels[a].cmp(labels[b]));
+        let work = |driven: Option<bool>| {
+            coherent_sum(canonical.iter().filter_map(|&port| {
+                driven
+                    .is_none_or(|value| sources[port].is_some() == value)
+                    .then(|| C64::from_re(port_powers_w[port]))
+            }))
+            .re
+        };
+        let source_power_w = work(Some(true));
+        let external_load_power_w = -work(Some(false));
+        let network_power_w = work(None);
+        if port_pressures
+            .iter()
+            .chain(&port_inflows)
+            .any(|&v| !finite(v))
+            || port_powers_w.iter().any(|p| !p.is_finite())
+            || !source_power_w.is_finite()
+            || !external_load_power_w.is_finite()
+            || !network_power_w.is_finite()
+        {
+            return Err(DuctError::Singular);
+        }
+        Ok(Self {
+            omega,
+            ports: labels.iter().map(|label| (*label).to_owned()).collect(),
+            port_pressures,
+            port_inflows,
+            port_powers_w,
+            source_power_w,
+            external_load_power_w,
+            network_power_w,
+        })
+    }
 }
 
 /// Explicit termination of one external port; no omitted-port default exists.
@@ -1143,6 +1275,23 @@ impl NetworkResponse {
         self.drive_with(active, loads, Some(coupled), &self.gas)
     }
 
+    /// Drive all prescribed sources simultaneously, retaining their relative
+    /// phases. Every remaining port needs exactly one scalar or coupled load.
+    /// The already-bound exterior resolves all gas-dependent load physics.
+    /// One loaded factorization serves the complete source vector; powers are
+    /// computed from the combined fields, never by summing isolated powers.
+    pub fn drive_coherent(
+        &self,
+        sources: &[PortFlowSource],
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+    ) -> Result<NetworkCoherentResponse, DuctError> {
+        let (pressures, inflows) = self.drive_sources_with(sources, loads, coupled, &self.gas)?;
+        let labels: Vec<&str> = self.ports.iter().map(String::as_str).collect();
+        let currents = source_currents(&labels, sources)?;
+        NetworkCoherentResponse::from_fields(self.omega, &labels, &currents, pressures, inflows)
+    }
+
     /// Terminate EVERY other labelled port explicitly, then return the driving
     /// point p/U at `active`. Missing/duplicate/unknown terminations refuse.
     pub fn driving_point(
@@ -1185,16 +1334,36 @@ impl NetworkResponse {
         coupled: Option<&CoupledTermination>,
         gas: &GasState,
     ) -> Result<NetworkDriveResponse, DuctError> {
+        let sources = [PortFlowSource {
+            label: active.to_owned(),
+            volume_flow_m3_s: C64::ONE,
+        }];
+        let (port_pressures, port_inflows) =
+            self.drive_sources_with(&sources, loads, coupled, gas)?;
+        let active = self
+            .ports
+            .iter()
+            .position(|label| label == active)
+            .expect("source port was admitted");
+        Ok(NetworkDriveResponse {
+            impedance: port_pressures[active],
+            port_pressures,
+            port_inflows,
+        })
+    }
+
+    fn drive_sources_with(
+        &self,
+        sources: &[PortFlowSource],
+        loads: &[PortTermination],
+        coupled: Option<&CoupledTermination>,
+        gas: &GasState,
+    ) -> Result<(Vec<C64>, Vec<C64>), DuctError> {
         validate_medium(gas, self.omega)?;
         if *gas != self.gas {
             return Err(bad("network response and termination gas states differ"));
         }
         let n = self.ports.len();
-        let active = self
-            .ports
-            .iter()
-            .position(|s| s == active)
-            .ok_or(bad("unknown network port label"))?;
         if self.z.len() != n * n
             || self.port_gases.len() != n
             || n == 0
@@ -1203,15 +1372,16 @@ impl NetworkResponse {
         {
             return Err(bad("invalid network response matrix"));
         }
+        let labels: Vec<&str> = self.ports.iter().map(String::as_str).collect();
+        let source_flows = source_currents(&labels, sources)?;
         let coupled_count = coupled.map_or(0, |c| c.labels.len());
-        if loads.len() + coupled_count != n - 1 {
+        if loads.len() + coupled_count != n - sources.len() {
             return Err(bad(
                 "every other network port needs an explicit termination",
             ));
         }
         let mut resolved = vec![None; n];
-        let mut seen = vec![false; n];
-        seen[active] = true;
+        let mut seen: Vec<bool> = source_flows.iter().map(Option::is_some).collect();
         // Port index of each coupled-matrix row, and each port's coupled row.
         let mut coupled_rows = vec![None; n];
         if let Some(c) = coupled {
@@ -1248,11 +1418,33 @@ impl NetworkResponse {
         // A rigid external termination imposes U=0, so it needs no unknown.
         // Coupled ports are always unknowns.
         let mut live: Vec<usize> = (0..n)
-            .filter(|&j| j != active && (resolved[j].is_some() || coupled_rows[j].is_some()))
+            .filter(|&j| {
+                source_flows[j].is_none() && (resolved[j].is_some() || coupled_rows[j].is_some())
+            })
             .collect();
         live.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
-        let mut currents = vec![C64::ZERO; n];
-        currents[active] = C64::ONE;
+        let mut currents: Vec<C64> = source_flows
+            .iter()
+            .map(|value| value.unwrap_or(C64::ZERO))
+            .collect();
+        let mut canonical: Vec<usize> = (0..n).collect();
+        canonical.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
+        // Keep the original unit-source arithmetic unchanged. Other source
+        // vectors retain their phase, with compensation for deep cancellation.
+        let unit_source = (sources.len() == 1 && sources[0].volume_flow_m3_s == C64::ONE)
+            .then(|| source_flows.iter().position(Option::is_some).unwrap());
+        let incident: Vec<C64> = (0..n)
+            .map(|row| {
+                unit_source.map_or_else(
+                    || {
+                        coherent_sum(canonical.iter().filter_map(|&port| {
+                            source_flows[port].map(|u| self.z[row * n + port] * u)
+                        }))
+                    },
+                    |active| self.z[row * n + active],
+                )
+            })
+            .collect();
         let m = live.len();
         let mut a = vec![C64::ZERO; m * m];
         for (i, &p) in live.iter().enumerate() {
@@ -1268,26 +1460,33 @@ impl NetworkResponse {
         if m > 0 {
             let (inv, _) = inverse(&a, m)?;
             for (i, &p) in live.iter().enumerate() {
-                for (j, &q) in live.iter().enumerate() {
-                    currents[p] = currents[p] - inv[i * m + j] * self.z[q * n + active];
+                if unit_source.is_some() {
+                    for (j, &q) in live.iter().enumerate() {
+                        currents[p] = currents[p] - inv[i * m + j] * incident[q];
+                    }
+                } else {
+                    currents[p] = -coherent_sum(
+                        live.iter()
+                            .enumerate()
+                            .map(|(j, &q)| inv[i * m + j] * incident[q]),
+                    );
                 }
             }
         }
         let mut pressures = vec![C64::ZERO; n];
-        let mut canonical: Vec<usize> = (0..n).collect();
-        canonical.sort_unstable_by(|&a, &b| self.ports[a].cmp(&self.ports[b]));
         for i in 0..n {
-            for &j in &canonical {
-                pressures[i] = pressures[i] + self.z[i * n + j] * currents[j];
+            if unit_source.is_some() {
+                for &j in &canonical {
+                    pressures[i] = pressures[i] + self.z[i * n + j] * currents[j];
+                }
+            } else {
+                pressures[i] =
+                    coherent_sum(canonical.iter().map(|&j| self.z[i * n + j] * currents[j]));
             }
         }
         if pressures.iter().chain(&currents).any(|&v| !finite(v)) {
             return Err(DuctError::Singular);
         }
-        Ok(NetworkDriveResponse {
-            impedance: pressures[active],
-            port_pressures: pressures,
-            port_inflows: currents,
-        })
+        Ok((pressures, currents))
     }
 }

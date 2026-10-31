@@ -3,8 +3,9 @@ use fs_material::gas::GasSpec;
 use fs_math::det;
 use std::time::Instant;
 
-mod porous;
+mod coherent;
 mod loaded;
+mod porous;
 
 fn gas() -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap()

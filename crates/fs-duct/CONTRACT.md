@@ -1192,6 +1192,46 @@ combination, mean power balance, regional gas binding, bit parity with the
 original admitted route, and invalid load refusals. The driving-point adapter
 has a matching half-wave regression.
 
+### Coherent simultaneous network excitation
+
+`network_drive_coherent` and `network_drive_coherent_regional` prescribe 1..=32
+`PortFlowSource` values at the same physical angular frequency. Each source is
+a complex peak volume flow in m3/s under `exp(-i omega t)`, with its authored
+phase retained. Every remaining external port has exactly one explicit scalar
+or coupled impedance boundary. A zero source remains a prescribed zero-flow
+boundary; source ports are never silently terminated or normalized. The source
+model is ideal prescribed volume flow, with no implicit source impedance.
+
+The existing network operator, regional material bindings and complete loaded
+scattering equations remain authoritative. All source amplitudes share one
+factorization per loaded representation, including when the actual loads
+regularize an open-circuit pole. The source vector is combined before the
+passive-port closure. `NetworkResponse::drive_coherent` reuses a previously
+admitted open-circuit operator. Single-unit-source entry points delegate to the
+same equations and retain their original arithmetic. Source order cannot change
+the summation order; compensated complex sums retain cancellation residuals.
+
+`NetworkCoherentResponse` returns physical peak pressures in Pa and inward
+volume flows in m3/s, followed by signed mean port powers
+`0.5 Re(p conj(U))`. Source work, external-load work and net work into the graph
+use the combined fields, including the interference cross terms. Individual
+sources may absorb work and individual mutually coupled mouths may receive
+work; neither is clipped. Net graph work includes internal nodal terminations,
+gas losses and mechanical wall work and is not a heat-source attribution.
+Frequency, source finiteness/uniqueness, full boundary partition, passive load
+admission and original graph/conditioning caps remain mandatory.
+
+`network/tests/coherent.rs` compares unequal-arm pressure and flow to independent
+line equations; checks constructive and destructive interference and signed
+source work at an exact half-wave open-circuit pole; closes full mutual loads;
+and exercises regional-gas dephasing, common-phase rotation, source-order
+invariance, unit-source bit parity and invalid/zero-source boundaries. These
+are harmonic linear-model checks. The API does not infer source statistics,
+cross-frequency coherence, nonlinear excitation, or time-domain beat envelopes.
+The `coherent_network` example takes the relative source phase in degrees and
+prints physical pressure, flow and signed power for two equal duct arms feeding
+an explicit matched scalar load; 0 and 180 degrees exercise addition and cancellation.
+
 ### Regional material and exterior binding
 
 `NetworkMedia` binds a complete original `GasRecord` to every exact edge id,
