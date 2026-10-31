@@ -571,6 +571,44 @@ impl ParticipatingEnclosure {
                 }
             }
         }
+        // Every reflective component needs a thermal anchor. Checking graph
+        // reachability before LU also rejects a lossless cycle whose singular
+        // pivot would otherwise appear nonzero through floating-point roundoff.
+        // Positive gray emissivities take the original fast path.
+        if emissivities.iter().any(|&e| e == 0.0) {
+            let mut anchored = [false; MAX_RADIATION_SURFACES];
+            let mut queue = [0_usize; MAX_RADIATION_SURFACES];
+            let mut tail = 0;
+            for i in 0..n {
+                checkpoint(cancelled)?;
+                if emissivities[i] > 0.0
+                    || work.exchange[i * m + n] > 0.0
+                    || work.exchange[i * m + n + 1] > 0.0
+                {
+                    anchored[i] = true;
+                    queue[tail] = i;
+                    tail += 1;
+                }
+            }
+            let mut head = 0;
+            while head < tail {
+                checkpoint(cancelled)?;
+                let i = queue[head];
+                head += 1;
+                for j in 0..n {
+                    if !anchored[j] && work.exchange[i * m + j] > 0.0 {
+                        anchored[j] = true;
+                        queue[tail] = j;
+                        tail += 1;
+                    }
+                }
+            }
+            if anchored[..n].iter().any(|&value| !value) {
+                return Err(RadiationError::Invalid(
+                    "closed lossless surface component has indeterminate radiosity",
+                ));
+            }
+        }
         work.matrix.fill(0.0);
         for i in 0..n {
             checkpoint(cancelled)?;

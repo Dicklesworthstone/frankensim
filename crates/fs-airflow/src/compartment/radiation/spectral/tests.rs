@@ -344,7 +344,7 @@ fn g3_constant_surface_bands_recover_gray_surfaces_with_participating_gas_and_so
 #[test]
 fn spectral_surface_sources_refuse_conflicting_axes_and_out_of_domain_temperatures() {
     let range = [Temperature::new(200.0), Temperature::new(600.0)];
-    for value in [0.0, -0.1, 1.1, f64::NAN] {
+    for value in [-0.1, 1.1, f64::NAN] {
         assert!(BandSurfaceEmissivity::new(value, range, "source").is_err());
     }
     assert!(BandSurfaceEmissivity::new(0.5, range, " ").is_err());
@@ -800,4 +800,163 @@ fn g4_spectral_domain_work_cancellation_and_scratch_replay_are_explicit() {
     let mut rates = [LayerRates::default(); 2];
     baseline.add_gas_heat(&mut rates).unwrap();
     assert_eq!(rates, [LayerRates::default(); 2]);
+}
+
+#[test]
+fn perfect_reflectors_have_no_thermal_spectrum_and_gas_can_anchor_their_radiosity() {
+    let enclosure = plates();
+    let optics = SpectralOptics::new_with_surface_bands(
+        vec![band(1e-7, 1e-3, [0.2, 0.7])],
+        [None; 2],
+        vec![vec![band_emissivity(0.0), band_emissivity(0.6)]],
+    )
+    .unwrap();
+    let controls = SpectralSolve {
+        maximum_omitted_blackbody_fraction: 3e-6,
+        ..controls()
+    };
+    let mut work = enclosure.spectral_workspace().unwrap();
+    let run = |reflector_temperature, work: &mut SpectralWorkspace| {
+        enclosure
+            .evaluate_spectral(
+                &[
+                    Temperature::new(reflector_temperature),
+                    Temperature::new(450.0),
+                ],
+                &[],
+                [Temperature::new(1200.0), Temperature::new(600.0)],
+                &optics,
+                controls,
+                work,
+                || false,
+            )
+            .unwrap()
+    };
+    let cold = run(200.0, &mut work);
+    let hot = run(2000.0, &mut work);
+    close(cold.surface_heat_power[0].value(), 0.0, 1e-8);
+    assert_eq!(heat(&cold), heat(&hot));
+    assert_eq!(cold.surface_radiosity_w_m2, hot.surface_radiosity_w_m2);
+    assert!(!cold.coverage[0].participating);
+    assert!(cold.coverage[0].longwave_fraction > controls.maximum_omitted_blackbody_fraction);
+    assert!(cold.surface_heat_power[1].value() > 0.0);
+    conserved(&cold);
+
+    // Both boundaries may reflect perfectly when absorbing gas fixes the
+    // radiation field. Only the two gas accounts exchange thermal energy.
+    let gas_anchored = SpectralOptics::new_with_surface_bands(
+        optics.bands().to_vec(),
+        [None; 2],
+        vec![vec![band_emissivity(0.0); 2]],
+    )
+    .unwrap();
+    let report = enclosure
+        .evaluate_spectral(
+            &[Temperature::new(200.0), Temperature::new(2000.0)],
+            &[],
+            [Temperature::new(1200.0), Temperature::new(600.0)],
+            &gas_anchored,
+            controls,
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    for surface in &report.surface_heat_power {
+        close(surface.value(), 0.0, 1e-8);
+    }
+    assert!(report.coverage[..2].iter().all(|c| !c.participating));
+    assert!(report.gas_heat_power[0].value() < 0.0);
+    assert!(report.gas_heat_power[1].value() > 0.0);
+    conserved(&report);
+}
+
+#[test]
+fn lossless_surface_components_are_refused_even_beside_an_emitting_component() {
+    use fs_conduction::radiation::{ViewFactorEvidence, ViewFactorTolerance};
+
+    // Reciprocal nonbinary factors form a closed three-mirror cycle, separate
+    // from two ordinary emitting plates. A global Planck reference exists, but
+    // cannot give the disconnected mirror component a unique radiosity.
+    let chords = [(0, 1, 0.4), (0, 2, 0.7), (1, 2, 0.9), (3, 4, 2.1)];
+    let mut areas = vec![0.0; 5];
+    for &(a, b, area) in &chords {
+        areas[a] += area;
+        areas[b] += area;
+    }
+    let mut factors = vec![vec![0.0; 5]; 5];
+    for &(a, b, area) in &chords {
+        factors[a][b] = area / areas[a];
+        factors[b][a] = area / areas[b];
+    }
+    let geometry = ViewFactorMatrix::admit(
+        areas,
+        factors,
+        ViewFactorEvidence::Analytic {
+            geometry: "authored disconnected reciprocal mirror-cycle fixture".into(),
+        },
+        ViewFactorTolerance::default(),
+    )
+    .unwrap();
+    let enclosure = ParticipatingEnclosure::new(
+        geometry,
+        chords
+            .into_iter()
+            .map(|(a, b, area)| OpticalPath {
+                surfaces: [a, b],
+                exchange_area: Area::new(area),
+                segments: Vec::new(),
+            })
+            .collect(),
+        "authored disconnected reciprocal optical paths",
+        1e-12,
+        || false,
+    )
+    .unwrap();
+    let optics = SpectralOptics::new_with_surface_bands(
+        vec![band(1e-7, 1e-3, [0.0; 2])],
+        [None; 2],
+        vec![
+            [0.0, 0.0, 0.0, 0.6, 0.7]
+                .into_iter()
+                .map(band_emissivity)
+                .collect(),
+        ],
+    )
+    .unwrap();
+    assert!(matches!(
+        enclosure.evaluate_spectral(
+            &[500.0, 600.0, 700.0, 900.0, 300.0].map(Temperature::new),
+            &[],
+            [Temperature::new(500.0); 2],
+            &optics,
+            controls(),
+            &mut enclosure.spectral_workspace().unwrap(),
+            || false,
+        ),
+        Err(RadiationError::Invalid(
+            "closed lossless surface component has indeterminate radiosity"
+        ))
+    ));
+
+    let mirrors = SpectralOptics::new_with_surface_bands(
+        optics.bands().to_vec(),
+        [None; 2],
+        vec![vec![band_emissivity(0.0); 2]],
+    )
+    .unwrap();
+    let plates = plates();
+    assert!(matches!(
+        plates.evaluate_spectral(
+            &[Temperature::new(500.0); 2],
+            &[],
+            [Temperature::new(500.0); 2],
+            &mirrors,
+            controls(),
+            &mut plates.spectral_workspace().unwrap(),
+            || false,
+        ),
+        Err(RadiationError::Invalid(
+            "closed lossless enclosure has no thermal radiation anchor"
+        ))
+    ));
 }

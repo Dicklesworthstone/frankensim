@@ -79,8 +79,9 @@ pub struct BandSurfaceEmissivity {
 }
 impl BandSurfaceEmissivity {
     /// Bind the band value to its measured/model source and temperature domain.
-    /// Strictly positive values retain the original reflection solver's domain;
-    /// perfectly reflecting, disconnected cavities are not admitted here.
+    /// Zero explicitly denotes a perfect reflector in this band. Each connected
+    /// optical component must still reach an emitting surface or absorbing gas
+    /// when evaluated, so its reflected radiation has a unique thermal anchor.
     pub fn new(
         value: f64,
         temperature_range: [Temperature; 2],
@@ -88,7 +89,7 @@ impl BandSurfaceEmissivity {
     ) -> Result<Self, RadiationError> {
         let source = source.into();
         let [lo, hi] = temperature_range.map(Temperature::value);
-        if !positive(value)
+        if !nonnegative(value)
             || value > 1.0
             || !positive(lo)
             || !positive(hi)
@@ -96,7 +97,7 @@ impl BandSurfaceEmissivity {
             || source.trim().is_empty()
         {
             return Err(RadiationError::Invalid(
-                "sourced band emissivity in (0,1] and a positive temperature domain required",
+                "sourced band emissivity in [0,1] and a positive temperature domain required",
             ));
         }
         Ok(Self {
@@ -497,10 +498,7 @@ impl ParticipatingEnclosure {
         let log_range = finite(wavelengths[1].value().ln() - wavelengths[0].value().ln())?;
         let mut temperatures = [0.0; MAX_RADIATION_SURFACES + 2];
         let mut coverage = Vec::with_capacity(m);
-        let mut reference = surface_temperatures
-            .iter()
-            .map(|t| t.value())
-            .fold(f64::INFINITY, f64::min);
+        let mut reference = f64::INFINITY;
         let mut maximum_omitted = 0.0_f64;
         for (i, t) in surface_temperatures
             .iter()
@@ -509,13 +507,22 @@ impl ParticipatingEnclosure {
         {
             checkpoint(&mut cancelled)?;
             temperatures[i] = t.value();
-            let participating = i < n
-                || (optics.participating(i - n)
+            // A perfect reflector has no thermal spectrum of its own. Its
+            // temperature cannot choose the subtracted background or reject
+            // the wavelength window for emission that is identically zero.
+            let participating = if i < n {
+                optics
+                    .surface_bands
+                    .as_ref()
+                    .is_none_or(|bands| bands.iter().any(|band| band[i].value > 0.0))
+            } else {
+                optics.participating(i - n)
                     && self.paths().iter().any(|p| {
                         p.segments
                             .iter()
                             .any(|s| s.layer.index() == i - n && s.length.value() > 0.0)
-                    }));
+                    })
+            };
             let record = coverage_at(wavelengths, *t, participating)?;
             if participating {
                 reference = reference.min(t.value());
@@ -523,6 +530,11 @@ impl ParticipatingEnclosure {
                     maximum_omitted.max(record.shortwave_fraction + record.longwave_fraction);
             }
             coverage.push(record);
+        }
+        if !reference.is_finite() {
+            return Err(RadiationError::Invalid(
+                "closed lossless enclosure has no thermal radiation anchor",
+            ));
         }
         if maximum_omitted > controls.maximum_omitted_blackbody_fraction {
             return Err(RadiationError::SpectralTruncation {
@@ -724,8 +736,14 @@ impl SpectralSample<'_, '_> {
                     *factorizations += 1;
                 }
                 let reference_emission = planck_log_emission(wavelength, self.reference)?;
-                for (value, &temperature) in work.emission.iter_mut().zip(self.temperatures) {
-                    *value = planck_log_difference(wavelength, temperature, self.reference)?;
+                for (i, (value, &temperature)) in
+                    work.emission.iter_mut().zip(self.temperatures).enumerate()
+                {
+                    *value = if i < n && self.emissivities[i] == 0.0 {
+                        0.0
+                    } else {
+                        planck_log_difference(wavelength, temperature, self.reference)?
+                    };
                 }
                 let (residual, _) = self.enclosure.solve_emission(
                     self.emissivities,

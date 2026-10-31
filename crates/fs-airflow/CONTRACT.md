@@ -1675,8 +1675,15 @@ Constant band optics still use one LU factorization per band. G1 tests compare
 selective plate exchange against independent Planck integration with unlike
 source temperatures; G3 covers exact gray recovery with gas/soot, equilibrium,
 and conservative finite-wall feedback. The source must justify the constant
-band approximation; perfect reflectors, transmission and directional surface
-optics remain outside this opaque diffuse lane.
+band approximation. Zero band values admit perfect diffuse reflectors: their
+material temperature contributes no emission or spectral-coverage restriction,
+and reflected irradiation is retained without thermal absorption. Before
+factorization, every connected optical component must reach an absorbing
+surface or participating gas. An unanchored lossless component refuses even
+when another disconnected cavity emits, rather than relying on roundoff to
+make its singular system appear solvable. Positive-emissivity gray paths skip
+this additional component check. Transmission and directional surface optics
+remain outside this opaque diffuse lane.
 
 Positive 8/16-point Gauss--Legendre integration in log wavelength splits at
 every supplied band boundary, with initial panel widths at most one logarithmic
