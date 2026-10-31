@@ -9,6 +9,34 @@ Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
 multi-case identifiability authority schema [F]. Ogden and tension-only
 HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
+## Permanent secondary creep
+
+`creep::NortonCreep` adds sub-yield permanent deformation on the existing
+isotropic small-strain elasticity and tensor-Voigt convention. Its normalized
+Norton rate uses explicit reference stress [Pa], reference rate [1/s], exponent
+at least one, molar activation energy [J/mol], absolute temperature [K] and
+physical duration [s]. Arrhenius kinetics are admitted only in the declared
+temperature interval. Signed traceless creep strain and its nondecreasing
+equivalent path length remain specimen history, separate from plastic strain.
+
+The implicit radial solve is monotone and bounded; a logarithmic safeguarded
+Newton solve avoids forming overflowing stress powers. The algorithmic tangent
+includes transverse and radial derivatives, including the zero-stress linear
+creep limit. Trial evaluations never mutate history. The checked candidate
+admission audits its flow residual, consistency with stored strain, and the
+independent identity `endpoint work = delta elastic storage + q delta_alpha +
+backward-Euler loss`. Numerical loss is never deposited as heat. Elastic
+coefficients are fixed during this work account; temperature changes kinetics.
+
+Total, elastic and signed creep Frobenius strain norms must remain within the
+same ceiling, at most 0.05; invalid, nonfinite or unrepresentable histories
+refuse. This is an authored secondary-creep model until source-bound. It does
+not infer creep from melting temperature or yield, and makes no primary/tertiary
+creep, anisotropy, finite-strain, damage, rupture or lifetime claim. Focused G0/G1
+tests cover stress-controlled creep, strain-held relaxation and timestep
+convergence, shear, temperature, reversal, objectivity, tangent consistency,
+hydrostatic invariance, work/heat and unchanged inputs on refusal.
+
 ## Elastic wave and hydrostatic response
 
 `elastic::acoustic::ElasticAcousticState` derives wave and pressure properties

@@ -29,6 +29,8 @@ pub mod cavitation;
 /// Irreversible mixed-mode cohesive interfaces with work and fracture accounting.
 pub mod cohesive;
 pub mod conductor;
+/// Permanent sub-yield Norton/Arrhenius creep and consistent physical-step updates.
+pub mod creep;
 /// Ordered source-backed Ohmic contact resistance, distinct from bulk resistivity.
 pub mod electrical_interface;
 pub mod liquid;
