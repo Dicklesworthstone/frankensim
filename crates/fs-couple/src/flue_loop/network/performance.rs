@@ -536,9 +536,9 @@ impl FlueOutletPerformance {
             let flow_tap = &mut self.flow_tap;
             let ceiling = self.config.maximum_abs_pressure_pa;
             let mut destinations = output[written..].iter_mut();
-            self.voice.step_block_observed(&mut self.launched[..count], |line| {
+            self.voice.step_block_labium_observed(&mut self.launched[..count], |line, labium| {
                 let FlueResonator::Network(network) = line else { unreachable!("owned physical graph") };
-                if let Some(tap) = flow_tap.as_mut() { tap.record(network)?; }
+                if let Some(tap) = flow_tap.as_mut() { tap.record(network, labium)?; }
                 let pressure = receiver.push_frame(|_, node| network.node_frame(node)
                     .map(|frame| frame.net_flow_into_node_m3_s))
                     .map_err(|e| FlueError::Physics(AcousticRealizeError::Nonlinear(e)))?;

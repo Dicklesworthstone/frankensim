@@ -11,19 +11,26 @@
 //! f64 per aperture per mechanical frame, in header order. The sink is flushed
 //! and checked when the declared window completes; a short file is an error,
 //! never a silent truncation.
+//!
+//! The labium variant (schema v2) appends two f64 to every frame: the jet
+//! displacement and labium offset that the frame's accepted cut used. Its
+//! header states the cut half-width. A v1 reader refuses it by its first line.
 use super::{FlueOutletPerformance, invalid};
-use crate::flue_loop::FlueError;
+use crate::flue_loop::{FlueError, LabiumSample};
 use crate::flue_loop::network::FlueNetwork;
 use crate::render::schedule::GestureCompileError;
 use std::io::Write;
 
 /// First line of an aperture-flow file.
 pub const APERTURE_FLOWS_SCHEMA: &str = "frankensim-aperture-flows-v1";
+/// First line of an aperture-flow file that also carries the labium displacement.
+pub const APERTURE_FLOWS_LABIUM_SCHEMA: &str = "frankensim-aperture-flows-v2";
 /// Bytes buffered before a write to the sink.
 const CHUNK_BYTES: usize = 1 << 20;
 
 pub(super) struct ApertureFlowTap {
     nodes: Vec<usize>,
+    labium: bool,
     sink: Box<dyn Write + Send>,
     buffer: Vec<u8>,
     frames: u64,
@@ -32,7 +39,11 @@ pub(super) struct ApertureFlowTap {
 
 impl ApertureFlowTap {
     /// Append one mechanical frame; flush and check the sink after the last one.
-    pub(super) fn record(&mut self, network: &FlueNetwork) -> Result<(), FlueError> {
+    pub(super) fn record(
+        &mut self,
+        network: &FlueNetwork,
+        labium: LabiumSample,
+    ) -> Result<(), FlueError> {
         if self.frames == self.total_frames {
             return Err(FlueError::Invalid {
                 what: "aperture flow tap ran past its declared window",
@@ -46,6 +57,10 @@ impl ApertureFlowTap {
                 })?
                 .net_flow_into_node_m3_s;
             self.buffer.extend_from_slice(&flow.to_le_bytes());
+        }
+        if self.labium {
+            self.buffer.extend_from_slice(&labium.eta_m.to_le_bytes());
+            self.buffer.extend_from_slice(&labium.offset_m.to_le_bytes());
         }
         self.frames += 1;
         if self.buffer.len() >= CHUNK_BYTES || self.frames == self.total_frames {
@@ -78,8 +93,31 @@ impl FlueOutletPerformance {
     /// A rendered, poisoned or already tapped performance, a window too long to
     /// count, or a failed header write.
     pub fn with_aperture_flow_tap(
+        self,
+        sink: Box<dyn Write + Send>,
+    ) -> Result<Self, GestureCompileError> {
+        self.attach_flow_tap(sink, false)
+    }
+
+    /// The same tap, schema v2: after each frame's apertures it writes the jet
+    /// displacement `eta_m` and labium offset `offset_m` [m] that the frame's
+    /// accepted cut `0.5 q_max (1 + tanh((eta_m - offset_m)/b))` used, b being
+    /// the header's cut half-width. The header also gives the forced jet's
+    /// exit half-width, or `none`.
+    ///
+    /// # Errors
+    /// As [`Self::with_aperture_flow_tap`].
+    pub fn with_aperture_flow_and_labium_tap(
+        self,
+        sink: Box<dyn Write + Send>,
+    ) -> Result<Self, GestureCompileError> {
+        self.attach_flow_tap(sink, true)
+    }
+
+    fn attach_flow_tap(
         mut self,
         mut sink: Box<dyn Write + Send>,
+        labium: bool,
     ) -> Result<Self, GestureCompileError> {
         if self.poisoned || self.voice.samples_rendered() != 0 || self.flow_tap.is_some() {
             return Err(invalid(
@@ -97,8 +135,9 @@ impl FlueOutletPerformance {
                 .flat_map(|r| r.additional_outlets.iter().map(|o| o.center_m)),
         );
         let mut nodes = Vec::new();
+        let schema = if labium { APERTURE_FLOWS_LABIUM_SCHEMA } else { APERTURE_FLOWS_SCHEMA };
         let mut header = format!(
-            "{APERTURE_FLOWS_SCHEMA}\nmechanics_rate_hz {}\noutput_rate_hz {}\nwindow_frames {total_frames}\n",
+            "{schema}\nmechanics_rate_hz {}\noutput_rate_hz {}\nwindow_frames {total_frames}\n",
             self.mechanics_rate_hz, self.config.sample_rate_hz
         );
         for (&node, center) in self.outlet_nodes.iter().zip(centers) {
@@ -116,12 +155,23 @@ impl FlueOutletPerformance {
             );
             nodes.push(mouth.inlet_node);
         }
-        header +=
-            "values outward_volume_flow_m3_s f64le aperture_order_per_mechanical_frame\ndata\n";
+        header += "values outward_volume_flow_m3_s f64le aperture_order_per_mechanical_frame\n";
+        if labium {
+            let forced = self.voice.forced_jet().map_or_else(
+                || "none".to_owned(),
+                |jet| format!("{:e}", jet.half_width_m()),
+            );
+            let cut_half_width_m = 0.5 * self.voice.geometry.flue_height_m;
+            header += "labium values eta_m offset_m f64le after_apertures_per_mechanical_frame\n";
+            header += &format!("labium cut_half_width_m {cut_half_width_m:e}\n");
+            header += &format!("labium forced_jet_half_width_m {forced}\n");
+        }
+        header += "data\n";
         sink.write_all(header.as_bytes())
             .map_err(|_| invalid("aperture flow tap header write failed"))?;
         self.flow_tap = Some(ApertureFlowTap {
             nodes,
+            labium,
             sink,
             buffer: Vec::with_capacity(CHUNK_BYTES + 64),
             frames: 0,

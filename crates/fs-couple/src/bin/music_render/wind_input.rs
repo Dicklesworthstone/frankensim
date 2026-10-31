@@ -39,9 +39,13 @@ fn opening_loss_provenance<'a>(
     format!(",\"opening_losses\":[{records}],\"opening_loss_scope\":\"same-sample symmetric quasi-steady separation in series with original local radiation; no vortex memory, directional pressure recovery or measured instrument coefficient\"")
 }
 
-fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, Option<&str>, bool, Vec<&str>), String> {
+// The aperture-flow path, and whether `--labium` adds the labium displacement to it.
+type FlowsOption<'a> = Option<(&'a str, bool)>;
+
+fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolicy, FlowsOption<'_>, bool, Vec<&str>), String> {
     let mut paths = Vec::new();
     let mut flows = None;
+    let mut labium = false;
     let mut block = None;
     let mut decimate = false;
     let mut self_contained = false;
@@ -71,6 +75,10 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
                 flows = Some(iter.next().map(String::as_str).filter(|v| !v.starts_with('-'))
                     .ok_or_else(|| "--aperture-flows needs an output path".to_string())?);
             }
+            "--labium" => {
+                if labium { return Err("--labium may only be supplied once".into()); }
+                labium = true;
+            }
             "--decimate" => {
                 if decimate { return Err("--decimate may only be supplied once".into()); }
                 decimate = true;
@@ -90,10 +98,13 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
     if !attached_sources.is_empty() && !self_contained {
         return Err("--attached-source requires --self-contained".into());
     }
+    if labium && flows.is_none() {
+        return Err("--labium adds the labium jet displacement to --aperture-flows".into());
+    }
     let [input, output] = paths.as_slice() else {
-        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS] [--self-contained [--attached-source RELATIVE_PATH]...]".into());
+        return Err("usage: music_render wind INPUT.performance OUT.wav [--block N] [--decimate] [--acceptance] [--aperture-flows FLOWS [--labium]] [--self-contained [--attached-source RELATIVE_PATH]...]".into());
     };
-    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows, self_contained, attached_sources))
+    Ok((*input, *output, block.unwrap_or(512), decimate, policy, flows.map(|f| (f, labium)), self_contained, attached_sources))
 }
 
 // A physical propagation delay is source geometry, not an output/filter latency
@@ -508,7 +519,7 @@ pub(super) fn resolved_provenance(
         fs_couple::nsf_dg::NsfDgDrive::UpstreamPressureRise(_) =>
             ",\"external_boundary\":{\"kind\":\"upstream-series-pressure-rise\",\"units\":\"Pa\",\"definition\":\"resolved face pressure minus finite upstream duct pressure\",\"flow\":\"both original acoustic loads and resolved faces solved on the same physical interval\",\"source_work\":\"minus pressure rise times outward upstream volume flow times physical interval\"}",
         fs_couple::nsf_dg::NsfDgDrive::FiniteReservoirActuation { .. } =>
-            ",\"external_boundary\":{\"kind\":\"finite-material-reservoir-actuation\",\"volume_rate_units\":\"m3/s; positive expands chamber\",\"heat_power_units\":\"W; positive adds heat to chamber\",\"definition\":\"accepted finite inventory supplies aperture pressure and temperature; authored chamber-volume and heat rates change that same original named-mixture or thermochemical inventory\",\"partition\":\"explicit first order: original NSF flow exchange, then heat/volume solve over the same physical interval; refine interval for source feedback accuracy\"}",
+            ",\"external_boundary\":{\"kind\":\"finite-thermochemical-reservoir-actuation\",\"volume_rate_units\":\"m3/s; positive expands chamber\",\"heat_power_units\":\"W; positive adds heat to chamber\",\"definition\":\"accepted finite inventory supplies aperture pressure and temperature; authored chamber-volume and heat rates change that same thermochemical inventory\",\"partition\":\"explicit first order: original NSF flow exchange, then heat/volume solve over the same physical interval; refine interval for source feedback accuracy\"}",
         fs_couple::nsf_dg::NsfDgDrive::FiniteReservoir { .. } =>
             ",\"external_boundary\":{\"kind\":\"finite-thermochemical-reservoir\",\"pressure_units\":\"Pa absolute\",\"temperature_units\":\"K\",\"definition\":\"accepted finite inventory supplies held pressure and temperature to the original aperture; its streamed mass and complete FV energy update the same inventory atomically with fluid and ducts\",\"partition\":\"explicit first order over each original physical interval; refine interval for source feedback accuracy\"}",
         fs_couple::nsf_dg::NsfDgDrive::Reservoir { .. }
@@ -539,8 +550,8 @@ pub(super) fn resolved_provenance(
             fs_couple::nsf_dg::NsfFiniteReservoirSource::NamedMixture => "named-mixture",
         };
         let (scope, actuation) = if let Some(limit) = finite_reservoir_actuation {
-            ("original named-mixture or thermochemical law; well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; prescribed heat and chamber-volume rates update the same retained inventory; no stored source momentum, anatomical player model, or mean transport into acoustic ducts",
-                format!(",\"actuation\":{{\"maximum_relative_volume_change\":{limit:e},\"volume_rate_units\":\"m3/s; positive expands chamber\",\"heat_power_units\":\"W; positive adds heat\",\"increments\":\"physical rates times original NSF/DG interval; independent of output sample clock\",\"mechanical_work\":\"midpoint pressure times volume change; positive work by gas on expansion; separate from complete FV energy already exchanged at aperture\",\"partition\":\"first-order original flow exchange then heat/volume solve; all owners publish atomically\",\"scope\":\"prescribed well-mixed chamber actuation; fixed composition; original NASA9 heat-volume owner or analytic conservative midpoint with original named constant-Cv law\"}}"))
+            ("original thermochemical law; well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; prescribed heat and chamber-volume rates update the same parcel; no stored source momentum, anatomical player model, or mean transport into acoustic ducts",
+                format!(",\"actuation\":{{\"maximum_relative_volume_change\":{limit:e},\"volume_rate_units\":\"m3/s; positive expands chamber\",\"heat_power_units\":\"W; positive adds heat\",\"increments\":\"physical rates times original NSF/DG interval; independent of output sample clock\",\"mechanical_work\":\"midpoint pressure times volume change; positive work by gas on expansion; separate from complete FV energy already exchanged at aperture\",\"partition\":\"first-order original flow exchange then heat/volume solve; all owners publish atomically\",\"scope\":\"prescribed well-mixed chamber actuation; fixed composition and original thermochemical heat-volume law\"}}"))
         } else {
             ("same original frozen named-mixture or thermochemical law; rigid well-mixed chamber thermalizes incoming kinetic energy; original substep exchange variations bound hidden withdrawal and energy excursions; complete FV energy includes work already; no stored source momentum, mechanical breathing effort, pump, or mean transport into acoustic ducts", String::new())
         };
@@ -1196,7 +1207,7 @@ fn load_with_all_sources(
     sources: Option<&ThermochemicalSources<'_>>,
     load_material: impl FnMut(&str) -> Result<NormalizedMaterialCardPack, String>,
     load_radiation: impl FnMut(&str) -> Result<Vec<u8>, String>,
-    flow_tap: Option<Box<dyn Write + Send>>,
+    flow_tap: Option<(Box<dyn Write + Send>, bool)>,
 ) -> Result<Loaded, String> {
     if flow_tap.is_some() && !bytes.starts_with(b"frankensim-flue-performance-v1\n") {
         return Err("--aperture-flows observes flue files only".into());
@@ -1288,7 +1299,9 @@ fn load_with_all_sources(
             i.mechanics_rate_hz,renderer.receiver().filter_delay_samples(),propagation.0,
             propagation.1,ratio-1);
         let renderer = match flow_tap {
-            Some(sink) => p.into_renderer().with_aperture_flow_tap(sink).map_err(|e| e.to_string())?,
+            Some((sink, false)) => p.into_renderer().with_aperture_flow_tap(sink).map_err(|e| e.to_string())?,
+            Some((sink, true)) => p.into_renderer().with_aperture_flow_and_labium_tap(sink)
+                .map_err(|e| e.to_string())?,
             None => p.into_renderer(),
         };
         Ok(Loaded { source:Box::new(renderer),rate:i.sample_rate_hz,samples:i.samples,
@@ -1399,12 +1412,12 @@ fn run_with_prepared_sources(
     if output == sidecar.as_path() || output.exists() || sidecar.exists() {
         return Err("output/sidecar paths must be distinct and must not already exist".into());
     }
-    let flow_tap: Option<Box<dyn Write + Send>> = match flows.map(Path::new) {
-        Some(path) if path == output || path == sidecar.as_path() => {
+    let flow_tap: Option<(Box<dyn Write + Send>, bool)> = match flows.map(|(p, l)| (Path::new(p), l)) {
+        Some((path, _)) if path == output || path == sidecar.as_path() => {
             return Err("--aperture-flows must name a file distinct from the WAV and its sidecar".into());
         }
-        Some(path) => Some(Box::new(std::io::BufWriter::new(std::fs::File::create_new(path)
-            .map_err(|e| format!("aperture flow file {} create failed: {e}", path.display()))?))),
+        Some((path, labium)) => Some((Box::new(std::io::BufWriter::new(std::fs::File::create_new(path)
+            .map_err(|e| format!("aperture flow file {} create failed: {e}", path.display()))?)), labium)),
         None => None,
     };
     let file = std::fs::File::open(input).map_err(|e| format!("wind input open failed: {e}"))?;

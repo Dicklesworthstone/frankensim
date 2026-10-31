@@ -273,6 +273,15 @@ struct JetTrial {
     source_pa: f64,
 }
 
+/// The labium displacement one accepted sample's cut used: the jet flow was
+/// `0.5 q_max (1 + tanh((eta_m - offset_m)/b))` with b half the flue height,
+/// whichever voice (relay chain, forced jet or published transfer) set eta.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct LabiumSample {
+    pub(crate) eta_m: f64,
+    pub(crate) offset_m: f64,
+}
+
 // Series source + inertance + resistance, coupled to an affine wave boundary:
 //   source = L*(Q-Qold)/dt + R*Q + Pin
 //   Pin = p+ + p-; Zc*Q = p+ - p-; p- = r0*p+ + history.
@@ -1579,7 +1588,15 @@ impl FlueVoice {
     // A failed sample/observer poisons this voice; partial callbacks cannot resume.
     fn step_block_observed(
         &mut self, out: &mut [f64],
-        observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+        mut observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+    ) -> Result<(), FlueError> {
+        self.step_block_labium_observed(out, |line, _| observe(line))
+    }
+
+    // The same, also handing the observer the displacement each accepted cut used.
+    fn step_block_labium_observed(
+        &mut self, out: &mut [f64],
+        observe: impl FnMut(&FlueResonator, LabiumSample) -> Result<(), FlueError>,
     ) -> Result<(), FlueError> {
         self.validate_blowing_pressure(self.blow_pa)?;
         if out.is_empty() { return Err(FlueError::Invalid { what: "empty block" }); }
@@ -1596,7 +1613,7 @@ impl FlueVoice {
     fn advance_block(
         &mut self,
         out: &mut [f64],
-        mut observe: impl FnMut(&FlueResonator) -> Result<(), FlueError>,
+        mut observe: impl FnMut(&FlueResonator, LabiumSample) -> Result<(), FlueError>,
     ) -> Result<(), FlueError> {
         let dt = self.dt;
         let b = 0.5 * self.geometry.flue_height_m;
@@ -1848,7 +1865,7 @@ impl FlueVoice {
                 _ => p_plus,
             };
             self.samples += 1;
-            observe(&self.line)?;
+            observe(&self.line, LabiumSample { eta_m: eta, offset_m: y0 })?;
         }
         if ![windway_work, windway_stored_delta, windway_viscous, windway_exit,
             windway_numerical, windway_defect].iter().all(|v| v.is_finite()) {
@@ -2090,6 +2107,7 @@ mod convection_tests {
                 let travel = geometry.cut_up_m + spec.chamfer_depth_m;
                 let leak = spec.leak_rel * speed / travel;
                 let q_max = speed * geometry.flue_height_m * geometry.flue_width_m;
+                let mut moved = false;
                 for _ in 0..17 {
                     let previous = v.nolle_jet().unwrap().receptivity_displacement_m();
                     let response = v
@@ -2097,10 +2115,27 @@ mod convection_tests {
                         .unwrap()
                         .prepare_step(speed, geometry.flue_width_m, 0.0)
                         .unwrap();
-                    v.step_block(&mut [0.0]).unwrap();
+                    let mut seen = None;
+                    v.step_block_labium_observed(&mut [0.0], |_, labium| {
+                        seen = Some(labium);
+                        Ok(())
+                    })
+                    .unwrap();
                     let candidate = response
                         .candidate(v.mouth_flow_m3_s(), v.flow_prev - 0.5 * q_max)
                         .unwrap();
+                    // The labium tap reads back the displacement the transfer imposed on the cut,
+                    // not the idle island chain's.
+                    let seen = seen.expect("one observed sample");
+                    assert_eq!(seen.offset_m, geometry.effective_offset_m());
+                    assert!(
+                        (seen.eta_m - candidate.eta_m).abs()
+                            <= 256.0 * f64::EPSILON * seen.eta_m.abs().max(candidate.eta_m.abs()),
+                        "tapped {} against imposed {} at {rate} Hz, {pressure} Pa",
+                        seen.eta_m,
+                        candidate.eta_m
+                    );
+                    moved |= candidate.eta_m != 0.0;
                     let constitutive_cut = 0.5
                         * q_max
                         * (1.0
@@ -2126,6 +2161,7 @@ mod convection_tests {
                         "{rate} Hz, {pressure} Pa"
                     );
                 }
+                assert!(moved, "the imposed displacement moves at {rate} Hz, {pressure} Pa");
                 assert_work(&v);
             }
         }
@@ -2760,6 +2796,41 @@ mod speed_edge_tests {
         let held = (0..480).map(|n| HOLD_PA*f64::from(n)/480.0)
             .chain(core::iter::repeat_n(0.3, 7200));
         assert!(declared_samples(&mut slow, held) > 0);
+    }
+
+    #[test]
+    fn labium_tap_reads_the_displacement_each_accepted_cut_used() {
+        // 10 ms up and 20 ms held. On the relay and the forced jet every tapped (eta, offset) gives
+        // back the accepted jet flow bit for bit, and observing changes no sample. A jet never
+        // blown carries no displacement: the tap reads exactly 0.
+        let blown: Vec<f64> = (0..480).map(|n| HOLD_PA*f64::from(n)/480.0)
+            .chain(core::iter::repeat_n(HOLD_PA, 960)).collect();
+        for forced in [false, true] {
+            for (pressures, rest) in [(blown.clone(), false), (vec![0.0; 480], true)] {
+                let (mut plain, mut tapped) = (voice(1.0, 4096, forced), voice(1.0, 4096, forced));
+                let (h, w) = (tapped.geometry.flue_height_m, tapped.geometry.flue_width_m);
+                let mut moved = false;
+                for pressure in pressures {
+                    let (mut p, mut q) = ([0.0], [0.0]);
+                    plain.apply(FlueControl::SetBlowingPressure(pressure)).unwrap();
+                    tapped.apply(FlueControl::SetBlowingPressure(pressure)).unwrap();
+                    plain.step_block(&mut p).unwrap();
+                    let mut seen = None;
+                    tapped.step_block_labium_observed(&mut q, |_, s| { seen = Some(s); Ok(()) }).unwrap();
+                    assert_eq!(p[0].to_bits(), q[0].to_bits(), "forced {forced}");
+                    let s = seen.expect("one observed sample");
+                    assert_eq!(s.offset_m, tapped.geometry.effective_offset_m());
+                    let q_max = tapped.jet_speed_m_s()*h*w;
+                    let cut = if q_max > 0.0 {
+                        0.5*q_max*(1.0+((s.eta_m-s.offset_m)/(0.5*h)).tanh())
+                    } else { 0.0 };
+                    assert_eq!(tapped.flow_prev.to_bits(), cut.to_bits(), "forced {forced}, {pressure} Pa");
+                    if rest { assert_eq!(s.eta_m, 0.0, "forced {forced}"); }
+                    moved |= s.eta_m != 0.0;
+                }
+                assert_eq!(moved, !rest, "forced {forced}");
+            }
+        }
     }
 }
 
