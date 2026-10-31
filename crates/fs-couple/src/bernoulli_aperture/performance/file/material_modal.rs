@@ -47,6 +47,11 @@
 //! The fully developed laminar incompressible passage is additional geometry;
 //! it must not also be represented in either acoustic network. Taper, entrance
 //! development and compressibility require other physical models.
+//!
+//! Optional `observer_gas` immediately after `receiver` uses the same material
+//! propagation grammar as DG valves and jets. Its original exterior gas supplies
+//! each aperture-quadrature path's absorption and dispersion before pressures
+//! are summed; physical travel and numerical padding retain separate accounts.
 /// Material modal mechanics bound to the shared exact DG bore and source clock.
 pub mod dg;
 /// Original three-dimensional source geometry and complete material selections.
@@ -78,6 +83,7 @@ use crate::bernoulli_aperture::two_sided::supply::combined_inlet_state_with_supp
 use crate::bernoulli_aperture::two_sided::observer::TwoSidedPressure;
 use crate::bernoulli_aperture::two_sided::observer::schedule::ScheduledTwoSidedPressure;
 use crate::pcm_wav::baffled::openings::duct::{DuctOpening, DuctRadiationSpec, DuctReconstruction};
+use crate::pcm_wav::baffled::gas::GasPropagation;
 use crate::render::schedule::GestureCompileError;
 use fs_blake3::{ContentHash, hash_domain};
 use fs_dcontact::Obstacle;
@@ -290,6 +296,12 @@ impl MaterialModalValvePerformance {
         let mut row = rows.row("receiver")?;
         let receiver = read_receiver(&mut row)?;
         row.finish()?;
+        let observer_gas = if rows.lines.clone().next().and_then(|line|
+            line.split_ascii_whitespace().next()) == Some("observer_gas") {
+            let mut row = rows.row("observer_gas")?;
+            Some(GasPropagation::read_record_for_gas(&mut row.fields, &exterior_record)
+                .map_err(|source| PlateValveInputError::Gas { line: row.line, source })?)
+        } else { None };
         for side in &sides {
             if side.viscothermal.iter().any(|s| s.maximum_frequency_hz < receiver.maximum_frequency_hz) {
                 return Err(bad(rows.line, "every selected viscothermal band must cover the receiver band"));
@@ -439,6 +451,11 @@ impl MaterialModalValvePerformance {
             }
         }
         let (source, radiation, mimo_radiation, computed_radiation) = prepared.observe(max_block)?;
+        let source = match observer_gas {
+            Some(propagation) => source.with_observer_gas(&propagation, gate)
+                .map_err(|e| PlateValveInputError::Gesture(GestureCompileError::Render(e)))?,
+            None => source,
+        };
         let mut renderer = programs.compile(source, schedule, AperturePerformanceConfig {
             sample_rate_hz: output, samples, max_block, max_compile_work, max_controls,
         })?;

@@ -28,6 +28,35 @@ Absent species data, unsupported local temperatures and ineligible ISO mixtures
 refuse; the source never substitutes a generic air-loss coefficient. Fields
 remain frozen during a performance; live molecular-history transfer is absent.
 
+## Exterior material propagation on both acoustic hosts
+
+The ordinary two-sided `frankensim-material-modal-valve-v1` format also accepts
+the shared optional propagation record immediately after `receiver`:
+
+```text
+receiver 0 0 0.25 4 16 1000
+observer_gas stokes-kirchhoff 4096 1000000 50000000
+openings 1
+opening downstream 2 0 0
+```
+
+The three counts bound distinct physical path lengths, retained filter taps,
+and kernel-construction scalar products. `lossless` selects an explicit
+comparison. `molecular MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS LAW` uses the
+same species/reservoir grammar as the DG host; it requires the original
+`exterior` record to contain explicit mixture or thermochemical species.
+The inlet gas does not supply the exterior's molecular identity.
+
+Every quadrature path from every selected opening uses its actual distance,
+the same exterior material, and the existing `ObserverFilter`. Absorption and
+dispersion act before the signed pressures are summed. Residual travel and
+common causal padding preserve each path's physical delay; only numerical
+padding participates in ensemble alignment. The wind and ensemble sidecars
+retain the original path-filter reports and delay accounts. Omission preserves
+the existing propagation image. The optional observation changes neither
+valve/material motion nor the installed compact or MIMO radiation reaction;
+it is not a new dispersive exterior loading model or instrument qualification.
+
 ## Run
 
 With the repository's admitted Rust toolchain and dependencies:
@@ -158,6 +187,7 @@ propagation fractional MAX_HZ SUMMED_PHASE_ERROR_RAD
 supply none
 slit_length LENGTH_M
 receiver X Y Z RADIAL_RINGS ANGULAR_POINTS MAX_HZ
+observer_gas stokes-kirchhoff|lossless MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS
 openings COUNT
 opening upstream|downstream NODE X Y
 radiation mimo GROUP_COUNT

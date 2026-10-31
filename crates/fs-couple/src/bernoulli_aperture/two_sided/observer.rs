@@ -4,6 +4,7 @@
 //! radiation reaction is inferred. Declare radiative mechanical loads in the ducts.
 use super::{LoadedAperture, TwoSidedAperture, TwoSidedDrive, TwoSidedFrame, ValveSide};
 use crate::pcm_wav::baffled::{BaffledPressure, CircularOutletReceiver};
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::{ObservationError, ObservationPolicy, PressureRenderer};
 use crate::bernoulli_aperture::radiation::environment::BaffledOutletBinding;
 use crate::render::RenderError;
@@ -151,6 +152,33 @@ impl TwoSidedPressure {
     /// Admission scope, retained independently of the source's mechanical clock.
     pub const fn observation_policy(&self) -> ObservationPolicy {
         self.observation_policy
+    }
+    /// Bind the shared material propagation law to every original aperture path
+    /// before either source or receiver advances. The same exterior gas, signed
+    /// port ordering, numerical clocks and mechanical radiation loads remain.
+    /// Absorption and dispersion act before pressure summation; the receiver's
+    /// residual travel and common causal padding count their delays exactly once.
+    ///
+    /// This consumes the cold source atomically. Original gas-law, work-budget,
+    /// cancellation and differentiating-reconstruction refusals propagate.
+    pub fn with_observer_gas(
+        mut self,
+        propagation: &GasPropagation,
+        gate: &CancelGate,
+    ) -> Result<Self, RenderError> {
+        if self.poisoned || self.mechanical_samples_rendered() != 0
+            || self.completed != 0 || self.receiver.mechanical_samples() != 0 {
+            return Err(sizing("material gas propagation requires an unadvanced two-sided source and receiver"));
+        }
+        self.receiver = self.receiver.with_observer_gas(propagation,
+            &mut || gate.is_requested()).map_err(observation)?;
+        Ok(self)
+    }
+    /// Original exterior material and individual path-filter accounts. Numerical
+    /// padding also appears in `receiver().filter_delay_samples`; physical flight
+    /// and molecular dispersion are never removed by ensemble alignment.
+    pub fn observer_gas(&self) -> Option<&GasPropagationReport> {
+        self.receiver.observer_gas()
     }
     /// Set physical supplies between callbacks; zero releases the source/actuator,
     /// not the retained vibration. A refused input changes neither held control

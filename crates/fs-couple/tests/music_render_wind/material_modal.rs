@@ -82,6 +82,41 @@ fn pack() -> NormalizedMaterialCardPack {
 }
 
 #[test]
+fn native_two_sided_material_observer_gas_reaches_pcm_and_shared_delay_metadata() {
+    let text = include_str!("../../examples/material_modal_valve/paired.performance")
+        .replace("audio 768000 48000 2400 0.005", "audio 768000 48000 512 0.005")
+        .replacen("\nopenings ",
+            "\nobserver_gas stokes-kirchhoff 4096 1000000 50000000\nopenings ", 1);
+    let material = pack();
+    let source = MaterialModalValvePerformance::from_bytes_with_sources(text.as_bytes(), 37,
+        &CancelGate::new_clock_free(), None, |_| Ok(material.clone())).unwrap();
+    let observed = source.renderer().source();
+    assert_eq!(observed.observer_gas().unwrap().gas, observed.radiation().exterior.unwrap());
+    let delay = observed.receiver().filter_delay_samples();
+    let mut renderer = source.into_renderer();
+    let mut pressure = vec![0.0; 512];
+    for block in pressure.chunks_mut(37) { renderer.block(block).unwrap(); }
+    assert!(pressure.iter().any(|p| p.abs() > 1e-15));
+    let expected = encode_pcm16_wav(&pressure, 48000, 0.005).unwrap().0;
+    let dir = directory();
+    let input = dir.join("two-sided-observer-gas.performance");
+    std::fs::write(&input, text).unwrap();
+    std::fs::write(dir.join("blade.matpack"), material.to_bytes()).unwrap();
+    for block in [1, 37] {
+        let output = dir.join(format!("two-sided-observer-gas-{block}.wav"));
+        success(run(&input, &output, block, false));
+        assert_eq!(std::fs::read(&output).unwrap(), expected);
+        let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
+        for token in ["\"observer_gas\":{\"law\":\"stokes-kirchhoff\"",
+            "\"retained_modes\":6", "\"molecular_relaxation_omitted\":true",
+            "\"propagation_fir_support_output_samples\":"] {
+            assert!(metadata.contains(token), "{token}");
+        }
+        assert!(metadata.contains(&format!("\"delay_output_samples\":{delay:e}")));
+    }
+}
+
+#[test]
 fn native_material_dg_observer_gas_preserves_source_and_pcm() {
     use fs_couple::bernoulli_aperture::performance::file::material_modal::dg::MaterialModalDgValvePerformance;
     use fs_couple::pcm_wav::observation::DecimatedRenderer;

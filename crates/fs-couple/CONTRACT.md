@@ -6130,6 +6130,25 @@ bounded and cancellable, and leaves the jet, bore and radiation reaction
 unchanged. Omitting the record preserves the original observer arithmetic.
 These changes neither qualify the estimated jet nor establish flute realism.
 
+`TwoSidedPressure::with_observer_gas` binds that same `DuctPressure` propagation
+owner to the original single, paired or material-modal valve and both acoustic
+networks. Attachment requires an unadvanced source and receiver, retains all
+original port ordering, material and mechanical histories, and is cold, bounded
+and cancellable. It requires the explicitly differentiating reconstruction;
+finite-difference observation is not silently upgraded. The `observer_gas`
+record after `receiver` in `frankensim-material-modal-valve-v1` resolves the
+shared classical, lossless or molecular grammar against the original exterior
+`GasRecord`, independently of the tract and bore composition. Both the wind and
+ensemble paths retain its path-filter report and numerical padding; physical
+flight and material dispersion are not alignment latency. Compact and MIMO
+reaction bindings keep their original admission and are not replaced by this
+one-way exterior propagation choice. Omission retains the prior arithmetic.
+G1/G3 integration tests compare the shared geometric receiver, every path's
+delay account, unchanged loaded mechanical state under an observer-only edit,
+explicit exterior species and callback-independent pressure. The CLI regression
+compares actual emitted PCM and metadata with the original source. These are
+numerical integration checks, not measured source or instrument qualification.
+
 ### Retained material inertia in contact and electrical feedback
 
 `solid_enthalpy::plastic::dynamics::ThermoplasticDynamics` now composes with the

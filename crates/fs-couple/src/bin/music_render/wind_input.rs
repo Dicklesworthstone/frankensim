@@ -946,7 +946,9 @@ pub(super) fn material_modal_provenance(
     let closure_scope = if valve.plate_closure().is_some() {
         "source-mesh distributed contact and positive-P1 slit flow on every retained mode"
     } else { "effective uniform slit/contact" };
-    let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}{wetted_json}}}",
+    let observer_gas = super::duct_metadata::observer_gas_provenance(
+        p.renderer().source().observer_gas());
+    let source_json = format!("\"material_modal_valve_input\":{{\"schema\":\"frankensim-material-modal-valve-v1\",\"blake3\":\"{}\",\"blades\":{},\"retained_modes\":{},\"nodes\":{},\"triangles\":{},\"compiled_controls\":{},\"full_tensor_viscosity\":{},\"radiation_terminals\":{},\"structural_propagator\":\"{propagator}\",\"linear_scope\":\"{linear_scope}\",\"material_sources\":[{materials}],\"supply_channel\":{supply},\"observer_gas\":{observer_gas},\"model_scope\":\"regional material flat DKT walls; original signed pressure and force projections; {closure_scope}; both gas-bound ducts; {radiation_scope}; no measured reed, unbaffled or resolved moving-channel qualification\"{gas_sources}{mimo_json}{boundary_json}{wall_json}{force_json}{relaxation_json}{opening_loss_json}{wetted_json}}}",
         i.input_hash.to_hex(), i.blades, i.modes, i.nodes, i.triangles,
         compiled_controls, valve.viscosity_matrix_n_s_m().is_some(),
         terminals);
@@ -1285,8 +1287,10 @@ fn load_with_all_sources(
         }
         let source_json = material_modal_provenance(&p);
         let ratio = i.mechanics_rate_hz / i.output_rate_hz;
-        let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
-            i.mechanics_rate_hz, i.samples * u64::from(ratio), i.output_rate_hz);
+        let microphone = p.renderer().source().receiver();
+        let observation_json = format!("{{\"mechanics_sample_rate_hz\":{},\"mechanics_samples\":{},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\"filter\":\"shared multirate differentiating Rayleigh receiver with bandlimited propagation\",\"delay_output_samples\":{:e},\"propagation_fir_support_output_samples\":[{},{}],\"initial_history\":\"zero\",\"delay_compensated\":false,\"tail\":\"no-flush-declared-window\"}}",
+            i.mechanics_rate_hz, i.samples * u64::from(ratio), i.output_rate_hz,
+            microphone.filter_delay_samples(), microphone.delay_samples.0, microphone.delay_samples.1);
         return Ok(Loaded { source: Box::new(p.into_renderer()), rate: i.output_rate_hz,
             samples: i.samples, full_scale_pa: i.full_scale_pa, hash: i.input_hash,
             fixture: "material-modal-valve-input", source_json, observation_json: Some(observation_json) });
