@@ -817,53 +817,53 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         rhs: &[f64],
         increment: usize,
     ) -> Result<(Vec<f64>, bool), SmallStrainTetError> {
-        let tol = self.settings.linear_tolerance;
-        if norm(rhs) == 0.0 {
-            return Ok((vec![0.0; rhs.len()], false));
+        solve_increment_linear(kff, rhs, increment, self.settings)
+    }
+}
+
+/// Shared sparse linear correction for small-strain continuum increments.
+pub(crate) fn solve_increment_linear(
+    kff: &Csr,
+    rhs: &[f64],
+    increment: usize,
+    settings: IncrementSettings,
+) -> Result<(Vec<f64>, bool), SmallStrainTetError> {
+    let tol = settings.linear_tolerance;
+    if norm(rhs) == 0.0 {
+        return Ok((vec![0.0; rhs.len()], false));
+    }
+    let true_relative = |x: &[f64]| {
+        let mut ax = vec![0.0f64; rhs.len()];
+        kff.spmv(x, &mut ax);
+        let r: Vec<f64> = rhs.iter().zip(&ax).map(|(b, a)| b - a).collect();
+        norm(&r) / norm(rhs)
+    };
+    if let Ok(m) = ilu0(kff) {
+        let mut x = vec![0.0f64; rhs.len()];
+        let report = pcg(kff, rhs, &mut x, &m, tol, settings.max_linear_iterations);
+        if report.converged && x.iter().all(|v| v.is_finite()) && true_relative(&x) <= 10.0 * tol {
+            return Ok((x, false));
         }
-        let true_relative = |x: &[f64]| {
-            let mut ax = vec![0.0f64; rhs.len()];
-            kff.spmv(x, &mut ax);
-            let r: Vec<f64> = rhs.iter().zip(&ax).map(|(b, a)| b - a).collect();
-            norm(&r) / norm(rhs)
-        };
-        if let Ok(m) = ilu0(kff) {
-            let mut x = vec![0.0f64; rhs.len()];
-            let report = pcg(
-                kff,
-                rhs,
-                &mut x,
-                &m,
-                tol,
-                self.settings.max_linear_iterations,
-            );
-            if report.converged
-                && x.iter().all(|v| v.is_finite())
-                && true_relative(&x) <= 10.0 * tol
-            {
-                return Ok((x, false));
-            }
-        }
-        let jacobi = AbsJacobi {
-            inv: (0..kff.nrows())
-                .map(|i| {
-                    let d = kff.get(i, i).abs();
-                    if d > 0.0 { 1.0 / d } else { 1.0 }
-                })
-                .collect(),
-        };
-        let op = CsrOp::symmetric(kff.clone());
-        let mut state = PminresState::new(&op, &jacobi, rhs);
-        let _ = state.run(&op, &jacobi, tol, self.settings.max_linear_iterations);
-        let rel = true_relative(&state.x);
-        if rel.is_finite() && rel <= 1e3 * tol.max(1e-14) {
-            Ok((state.x.clone(), true))
-        } else {
-            Err(SmallStrainTetError::LinearSolveFailed {
-                increment,
-                relative_residual: rel,
+    }
+    let jacobi = AbsJacobi {
+        inv: (0..kff.nrows())
+            .map(|i| {
+                let d = kff.get(i, i).abs();
+                if d > 0.0 { 1.0 / d } else { 1.0 }
             })
-        }
+            .collect(),
+    };
+    let op = CsrOp::symmetric(kff.clone());
+    let mut state = PminresState::new(&op, &jacobi, rhs);
+    let _ = state.run(&op, &jacobi, tol, settings.max_linear_iterations);
+    let rel = true_relative(&state.x);
+    if rel.is_finite() && rel <= 1e3 * tol.max(1e-14) {
+        Ok((state.x.clone(), true))
+    } else {
+        Err(SmallStrainTetError::LinearSolveFailed {
+            increment,
+            relative_residual: rel,
+        })
     }
 }
 

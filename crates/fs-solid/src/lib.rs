@@ -56,6 +56,8 @@ pub mod membrane;
 /// Initial-stress vibration pencils from the existing thermal equilibrium owner.
 pub mod prestress;
 pub mod mesh2;
+/// History-dependent P1/Q1 plane-stress and plane-strain continua.
+pub mod plastic2;
 /// Incremental small-strain inelasticity (J2 and any `SmallStrainLaw`) on tetrahedra.
 pub mod plastic3;
 pub mod reduce;
@@ -88,6 +90,9 @@ pub use linear3::{
     TetThermalDisplacementSolution, TetThermalLoad, TetThermalStrainField, TetThermalStrainState,
 };
 pub use mesh2::{Mesh2, Patch};
+pub use plastic2::{
+    PlaneAssemblyBudget, SmallStrainPlaneError, SmallStrainPlaneProblem, SmallStrainPlaneSolution,
+};
 pub use plastic3::{
     IncrementRecord, IncrementSettings, SmallStrainLawField, SmallStrainTetError,
     SmallStrainTetProblem, SmallStrainTetSolution,

@@ -2624,3 +2624,31 @@ consistent section tangent, source retention, unloading curvature, and matching
 beam/frame permanent deflection. These fixed-condition, small-strain material
 checks do not establish cyclic calibration, thermal recoupling, damage, or
 finite-strain forming. Existing geometric choices keep their own model limits.
+
+## Incremental plane continua
+
+`plastic2::SmallStrainPlaneProblem` uses the existing `Mesh2` P1 triangles and
+Q1 quadrilaterals with a native uniform or per-element `SmallStrainLaw`.
+Plane stress solves all transverse stress constraints with the original
+material reduction and its condensed algorithmic tangent. Plane strain
+retains the constrained transverse stress. Every quadrature point carries its
+complete three-dimensional strain and committed constitutive history.
+
+Absolute chronological load factors support loading, unloading, reversal and
+repeated physical intervals for timed laws. All Newton and line-search trials
+reuse the incoming history. Only a converged increment returns updated history
+and its matching endpoint stresses. `solve_from` leaves its borrowed accepted
+state untouched on refusal. Reactions and free-row force convergence retain
+their original mechanical meaning. Geometry, quadrature, matrix-entry and
+load-path budgets are explicit, as are full tensor strain and small-rotation
+bounds. Prepared geometry and B columns, reused C B products, and one accumulated
+element matrix avoid repeated geometry work and duplicate quadrature insertion.
+The existing tetrahedral sparse linear correction is shared without changing
+its numerical acceptance criteria.
+
+G0/G1/G3 `plastic2` tests cover P1/Q1 cyclic analytical references, confined
+plane strain, skew-element global tangents, heterogeneous yielding, timed
+relaxation, atomic continuation/refusal, geometry and rotation admission, and
+Voce saturation. Standard displacement elements can lock in confined nearly
+incompressible plastic flow. This does not implement mixed/B-bar plasticity,
+shell bending, finite-strain forming, or limit-load continuation.
