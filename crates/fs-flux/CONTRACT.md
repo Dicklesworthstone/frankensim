@@ -1873,6 +1873,52 @@ at equal ideal osmolarity, long-step conservation, concentration-boundary roots,
 unsupported combined-law admission and atomic failure/cancellation.
 
 
+## Nonideal solution diffusion in finite stationary-solvent networks
+
+`osmosis::OsmoticNetwork::with_solution_diffusion` evolves finite solute
+inventories using the original material `SolutionMaxwellStefan` owner and its
+virial chemical-potential forces. Every compartment and connection retains one
+original thermodynamic model, fixed temperature/solvent convention and the same
+explicit solute ordering. Each link supplies complete solvent/solute and
+solute/solute binary Maxwell–Stefan coefficients and original molar masses;
+thermodynamics supplies no kinetic data. Canonical endpoint ordering makes
+connection input order and orientation immaterial. Duplicate endpoint pairs
+refuse. All solutes must initially and finally remain positive; singular
+zero-concentration chemical potentials are not replaced by floors or seeds.
+
+This constructor admits only fixed-solvent diffusion connections, with no
+membrane water path. Solvent volumes stay exactly unchanged. Original mechanical
+pressure laws remain attached to compartments but do no pressure/volume work.
+The material owner performs the sole friction solve and the explicit
+molar-to-solvent frame conversion; neither gas EOS nor barycentric zero-mass
+flux is substituted for the stationary-solvent constraint.
+
+The existing prepared state buffers and complete-duration adaptive timeline
+compare one canonical pair sweep with two half sweeps. Diffusion pair stages
+use conservative explicit fluxes and remain first order in time; the local
+step-doubling estimate is not a certified global bound or an implicit-stiffness
+claim. Typed per-pair withdrawal/passivity refusals can halve the interval.
+Original source/domain/friction refusals are hard failures. Nonzero transfers
+that disappear in both endpoint inventories return `StepUnderflow`, while one
+shared actual molar balance budget governs representable rounding. Every face
+evaluation, including rejected probes, enters the reported work count.
+
+Before state and clock publish, compensated actual original-to-final species
+amount changes and the original source's reference-cancelled mixing-free-energy
+change must fit explicit whole-window absolute budgets. Budgets do not grow
+with accepted step count. The common linear concentration-reference term is
+cancelled analytically; inventory rounding is checked separately. Only this
+fixed-volume mode reports `diffusion_free_energy_change_j: Some(...)`; it does
+not claim a caloric, electrochemical or mechanically open free-energy balance.
+All numerical/source workspaces are admitted at preparation; successful
+advances allocate nothing and late failure publishes no partial inventory/time.
+
+Focused native tests compare binary relaxation with an independent nonlinear
+solvent-frame ODE, tighten temporal error, demonstrate finite uphill ternary
+transport with decreasing free energy, permute branched links and concentration
+references, and exercise actual source-boundary, tiny-step, work, cancellation,
+sealed-face and layout/workspace refusals.
+
 ## Finite-storage transient concentration films
 
 `osmosis::transient::TransientOsmoticPair` advances two finite bulk solutions

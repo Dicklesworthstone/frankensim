@@ -25,6 +25,9 @@
 //! Successful advances allocate no memory. All workspace is prepared up front;
 //! failed, cancelled or exhausted advances publish neither state nor time.
 
+/// Nonideal Maxwell–Stefan diffusion at fixed solvent volume on this timeline.
+pub mod diffusion;
+
 /// Finite-storage concentration films coupled to membrane water transport.
 pub mod transient;
 
@@ -51,6 +54,14 @@ pub enum OsmoticNetworkError {
     Invalid(&'static str),
     /// The original solution or membrane law refused the state.
     Material(OsmosisError),
+    /// Source-owned solution thermodynamics or original MS friction refused.
+    SolutionDiffusion(fs_material::osmosis::diffusion::SolutionDiffusionError),
+    /// A smaller physical diffusion step may satisfy withdrawal or passivity.
+    DiffusionStep(diffusion::SolutionDiffusionStepRefusal),
+    /// Actual closed-window species inventory failed its absolute molar budget.
+    DiffusionBalance { species: usize, residual_mol: f64 },
+    /// Closed fixed-volume mixing free energy increased beyond its whole-window budget.
+    DiffusionFreeEnergy { change_j: f64, maximum_j: f64 },
     /// Prepared numerical workspace exceeds the caller's byte budget.
     Workspace {
         required_bytes: usize,
@@ -286,7 +297,7 @@ pub struct OsmoticStepReport {
     pub accepted_steps: usize,
     /// Trials rejected for source, root or error-control reasons.
     pub rejected_steps: usize,
-    /// Total scalar water-residual evaluations, including rejected trials.
+    /// Scalar water residuals or solution-diffusion face evaluations, including rejected trials.
     pub residual_evaluations: usize,
     /// Largest accepted step-doubling error divided by its requested scale.
     pub maximum_scaled_error: f64,
@@ -297,6 +308,10 @@ pub struct OsmoticStepReport {
     pub solute_balance_residual_mol: [f64; MAX_OSMOTIC_SPECIES],
     /// Number of active entries in the amount balance.
     pub species_count: usize,
+    /// Reference-cancelled original-to-final mixing free-energy change [J].
+    /// Some only for fixed-volume solution diffusion; membrane water work is
+    /// not silently dropped from a mixed mechanical/chemical energy account.
+    pub diffusion_free_energy_change_j: Option<f64>,
 }
 
 /// Prepared closed network. Public compartments are read-only checkpoints;
@@ -306,6 +321,8 @@ pub struct OsmoticNetwork {
     species: Vec<String>,
     cells: Vec<OsmoticCompartment>,
     membranes: Vec<OsmoticMembrane>,
+    diffusion: Vec<diffusion::SolutionDiffusionLink>,
+    diffusion_controls: Option<diffusion::SolutionDiffusionControls>,
     work: Vec<OsmoticCompartment>,
     coarse: Vec<OsmoticCompartment>,
     fine: Vec<OsmoticCompartment>,
@@ -411,6 +428,8 @@ impl OsmoticNetwork {
             fine: cells.clone(),
             cells,
             membranes,
+            diffusion: Vec::new(),
+            diffusion_controls: None,
             workspace_bytes: required,
             time_s: 0.0,
         })
@@ -433,7 +452,8 @@ impl OsmoticNetwork {
     }
 
     /// Advance exactly the requested interval with conservative, positive
-    /// implicit exchange and bounded adaptive substeps. Pass
+    /// exchange and bounded adaptive substeps. Membrane stages are implicit;
+    /// fixed-solvent diffusion stages use explicit paired fluxes. Pass
     /// `|| cx.checkpoint().is_err()` to use the shared execution scope.
     /// Cancellation is polled per scalar iteration, membrane and publication.
     pub fn advance(
@@ -459,6 +479,7 @@ impl OsmoticNetwork {
             water_balance_residual_m3: 0.0,
             solute_balance_residual_mol: [0.0; MAX_OSMOTIC_SPECIES],
             species_count: self.species.len(),
+            diffusion_free_energy_change_j: None,
         };
         let mut elapsed = 0.0;
         let mut step = duration_s.min(controls.maximum_step_s);
@@ -475,25 +496,31 @@ impl OsmoticNetwork {
             copy_state(&self.work, &mut self.coarse)?;
             copy_state(&self.work, &mut self.fine)?;
             let trial = (|| {
-                sweep(
+                sweep_all(
                     &mut self.coarse,
                     &self.membranes,
+                    &mut self.diffusion,
+                    self.diffusion_controls,
                     step,
                     controls,
                     &mut report.residual_evaluations,
                     &mut cancelled,
                 )?;
-                sweep(
+                sweep_all(
                     &mut self.fine,
                     &self.membranes,
+                    &mut self.diffusion,
+                    self.diffusion_controls,
                     0.5 * step,
                     controls,
                     &mut report.residual_evaluations,
                     &mut cancelled,
                 )?;
-                sweep(
+                sweep_all(
                     &mut self.fine,
                     &self.membranes,
+                    &mut self.diffusion,
+                    self.diffusion_controls,
                     0.5 * step,
                     controls,
                     &mut report.residual_evaluations,
@@ -503,6 +530,8 @@ impl OsmoticNetwork {
             let error = match trial {
                 Ok(()) => scaled_error(&self.work, &self.coarse, &self.fine, controls),
                 Err(OsmoticNetworkError::Cancelled) => return Err(OsmoticNetworkError::Cancelled),
+                Err(OsmoticNetworkError::DiffusionStep(_)) => f64::INFINITY,
+                Err(error) if self.diffusion_controls.is_some() => return Err(error),
                 Err(_) => f64::INFINITY,
             };
             if !error.is_finite() || error > 1.0 {
@@ -540,6 +569,40 @@ impl OsmoticNetwork {
         report.water_balance_residual_m3 = water_after - water_before;
         for i in 0..self.species.len() {
             report.solute_balance_residual_mol[i] = amounts_after[i] - amounts_before[i];
+        }
+        if let Some(physical) = self.diffusion_controls {
+            // Sum actual endpoint changes, avoiding subtraction of two large
+            // inventory totals. The same absolute budget covers the complete
+            // window, independent of accepted/rejected stage counts.
+            report.solute_balance_residual_mol.fill(0.0);
+            let mut correction = [0.0; MAX_OSMOTIC_SPECIES];
+            for (old, next) in self.cells.iter().zip(&self.work) {
+                poll(&mut cancelled)?;
+                for i in 0..self.species.len() {
+                    compensated_add(
+                        &mut report.solute_balance_residual_mol[i],
+                        &mut correction[i],
+                        next.solution.solute_moles()[i] - old.solution.solute_moles()[i],
+                    );
+                }
+            }
+            for i in 0..self.species.len() {
+                let residual = report.solute_balance_residual_mol[i];
+                if !residual.is_finite() || residual.abs() > physical.amount_balance_tolerance_mol {
+                    return Err(OsmoticNetworkError::DiffusionBalance {
+                        species: i,
+                        residual_mol: residual,
+                    });
+                }
+            }
+            let change = diffusion::free_energy_change(&self.cells, &self.work, &mut cancelled)?;
+            if change > physical.free_energy_tolerance_j {
+                return Err(OsmoticNetworkError::DiffusionFreeEnergy {
+                    change_j: change,
+                    maximum_j: physical.free_energy_tolerance_j,
+                });
+            }
+            report.diffusion_free_energy_change_j = Some(change);
         }
         poll(&mut cancelled)?;
         core::mem::swap(&mut self.cells, &mut self.work);
@@ -643,6 +706,23 @@ fn compensated_add(sum: &mut f64, correction: &mut f64, value: f64) {
     let next = *sum + corrected;
     *correction = (next - *sum) - corrected;
     *sum = next;
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sweep_all(
+    cells: &mut [OsmoticCompartment],
+    membranes: &[OsmoticMembrane],
+    links: &mut [diffusion::SolutionDiffusionLink],
+    physical: Option<diffusion::SolutionDiffusionControls>,
+    dt: f64,
+    controls: OsmoticStepControls,
+    evaluations: &mut usize,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), OsmoticNetworkError> {
+    match physical {
+        Some(physical) => diffusion::sweep(cells, links, dt, physical, evaluations, cancelled),
+        None => sweep(cells, membranes, dt, controls, evaluations, cancelled),
+    }
 }
 
 fn sweep(
