@@ -287,9 +287,35 @@ fn material_fiber_history_changes_contact_and_survives_support_motion_and_callba
 }
 
 #[test]
+fn fast_fiber_axial_and_bending_history_reaches_the_original_contact_owner() {
+    with_cx(|cx, gate| {
+        let tau = 1e-7;
+        let (ribbon, spectrum) = specimen(1, 1e9, tau, (0.0, 1e8), gate);
+        let fiber = ribbon.with_material_relaxation(spectrum, 256, gate).unwrap();
+        let mut bank = base(cx, gate, 7800.0)
+            .with_tensioned_fiber_ribbon(fiber, 0.4, ribbon_limits(), gate).unwrap();
+        assert!(bank.system().sample_period_s() / tau > 200.0);
+        assert!(bank.system().material_relaxation_branches().iter()
+            .any(|branch| branch.relaxation_time_s == tau));
+        let zero = vec![0.0; bank.system().mode_count()];
+        let mut heat = 0.0;
+        for _ in 0..32 {
+            bank.step(&zero, &[drive(0.01, 0.03)]).unwrap();
+            let frame = bank.system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            heat += bank.system().coupled_frame().unwrap().material_dissipation_j;
+        }
+        assert!(heat > 0.0);
+        assert!(bank.system().material_memory().iter().any(|z| *z != 0.0));
+    });
+}
+
+#[test]
 fn full_strain_fiber_memory_composes_in_both_orders_and_retains_original_coordinates() {
     with_cx(|cx, gate| {
-        let (ribbon, spectrum) = specimen(3, 1e9, 0.0003, (0.0, 1e8), gate);
+        // Both exact bending and exact nonlinear strain histories must remain
+        // composable when each physical sample spans hundreds of decay times.
+        let (ribbon, spectrum) = specimen(3, 1e9, 1e-7, (0.0, 1e8), gate);
         let strain_first = ribbon
             .clone()
             .with_axial_transverse_strain(strain_limits(), strain_config())
@@ -413,12 +439,6 @@ fn material_fiber_memory_refuses_incompatible_sources_clocks_and_incomplete_laws
     assert!(
         ribbon
             .with_material_relaxation(different, 256, &gate)
-            .is_err()
-    );
-    let (ribbon, spectrum) = specimen(1, 1e9, 1e-7, (0.0, 1e8), &gate);
-    assert!(
-        ribbon
-            .with_material_relaxation(spectrum, 256, &gate)
             .is_err()
     );
     let (ribbon, spectrum) = specimen(1, 1e9, 0.0003, (1.0, 1e8), &gate);

@@ -154,15 +154,15 @@ impl StringBankLongitudinalRelaxation {
         // The shared owner ALREADY includes every admitted history envelope in
         // this band. Never add this source's stiffness again on revalidation.
         // Full-strain history uses the exact material ramp, whose memory stays
-        // in the convex endpoint hull at every dt/tau. Other constitutive
-        // owners retain their own clock admission; the mechanical angular cap
-        // and original source frequency support remain binding here.
+        // in the convex endpoint hull at every dt/tau. Linear axial histories
+        // join the complete exact coupled exponential. Neither owner needs a
+        // midpoint memory cap; the mechanical angular cap and original source
+        // frequency support remain binding here.
         if !high.is_finite() || high < 0.0 || !dt.is_finite() || dt <= 0.0
             || self.finite_strain && high*dt>=core::f64::consts::PI
             || self.sections.iter().any(|section| {
                 let (lo, hi) = section.omega_band_rad_s(); lo > 0.0 || high > hi
-            }) || !self.finite_strain && self.sections.iter().flat_map(|section| section.spectra())
-                .flat_map(|spectrum| &spectrum.terms).any(|&(_, tau)| dt / tau > 2.0) {
+            }) {
             return Err(bank_invalid("complete coupled band or clock exceeds original axial-memory support"));
         }
         Ok(())

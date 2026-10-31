@@ -106,10 +106,17 @@ Later supported torque/topology rebuilding re-embeds the same history in the
 same string basis. Appending longitudinal coordinates preserves it through the
 existing common extension. A changed string mass or basis refuses stale rows;
 it needs a fresh cold binding. Playback cannot be used as a material-swap point.
-The prepared mechanical-only backend still refuses constitutive memory. The
-ordinary exact owner's combined state/setup/energy/Nyquist limits remain binding.
+The public coupled owner's `with_prepared_linear_propagation` path retains all
+original mechanical and material coordinates in its augmented exponential,
+including when preparation precedes material binding. Its explicit augmented
+state, byte and multiply-work budgets remain binding. The `material_strings`
+performer's current `prepared-linear` input selection still refuses this
+bending-memory record before loading sources. The ordinary exact owner's
+combined state/setup/energy/Nyquist limits remain binding.
 Source validity covers DC through the complete coupled instantaneous stiffness
-bound, and the declared clock must satisfy dt/tau <= 2 for every positive arm.
+bound. Each material arm joins the exact coupled exponential, so fast decay
+does not impose a midpoint `dt/tau <= 2` restriction. The declared physical
+clock and the exponential's representability/work limits remain binding.
 
 This is frozen, small-curvature bending of uniform homogeneous or perfectly
 bonded circular layers. It does not model helical winding, interlayer slip,

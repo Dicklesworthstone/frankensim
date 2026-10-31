@@ -110,9 +110,11 @@ impl PlateBendingRelaxation {
         Self::from_chart(chart, &self.properties, gate)
     }
     pub(crate) fn validate_band(&self, low: f64, high: f64, dt: f64) -> Result<(), AcousticRealizeError> {
+        // These rows join the complete coupled exact exponential. A fast
+        // first-order material pole is not an oscillatory Nyquist mode and
+        // does not inherit the midpoint memory condition dt/tau <= 2.
         if !low.is_finite() || !high.is_finite() || low < 0.0 || high < low
-            || !dt.is_finite() || dt <= 0.0 || self.bands.iter().any(|&(a,b)| low < a || high > b)
-            || self.spectra.iter().flat_map(|s| &s.terms).any(|&(e,t)| e > 0.0 && dt/t > 2.0) {
+            || !dt.is_finite() || dt <= 0.0 || self.bands.iter().any(|&(a,b)| low < a || high > b) {
             return Err(invalid("complete coupled frequency band or clock is outside the original material relaxation support"));
         }
         Ok(())

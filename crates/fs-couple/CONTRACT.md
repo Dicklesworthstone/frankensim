@@ -1087,8 +1087,9 @@ axial/transverse strain selected, axial arms act on the same retained
 The shared material owner integrates each endpoint-strain ramp exactly;
 interval-mean stress is pulled back at midpoint mechanical coordinates and
 physical heat is integrated independently. This keeps nonlinear geometric
-work and original source memory together. Bending histories retain their own
-linear owner and clock admission. Source-selected Kelvin--Voigt viscosities
+work and original source memory together. Linear axial and bending histories
+join the same exact augmented mechanical propagator and also admit fast decay
+without a midpoint material-time restriction. Source-selected Kelvin--Voigt viscosities
 remain explicit independent parallel losses. Nonlinear mechanical motion,
 material bandwidth and strain require their original resolution checks;
 exact constitutive integration does not imply exact coupled trajectories.
@@ -1099,8 +1100,8 @@ The full-strain longitudinal string binding uses this same constitutive
 update and quadratic-strain work pullback. Its source admission no longer
 requires dt/tau <= 2 for these exact ramp histories; the complete instantaneous
 mechanical frequency, original material support, strain bounds and all other
-participants' clock limits remain binding. Linear axial branch selection
-retains its existing clock check.
+participants' clock limits remain binding. Linear axial branch selection uses
+the exact coupled exponential with these same source and mechanical limits.
 Synthetic layered-continuum tests compare complex displacement and dissipated
 power with independent Young-modulus assembly, and exercise source substitution
 through real contact, support reversal, accepted work and callback invariance.
@@ -5657,6 +5658,12 @@ memory; static equilibrium publishes the corresponding relaxed memory.
 
 The original dense augmented exponential ceiling, instantaneous stiffness
 Nyquist bound, total energy and explicit setup-work budget remain binding.
+Source-bound regional scalar/tensor plate, string bending, torsional, linear
+longitudinal and fiber histories use this same exact operator. Their first-order decay
+rates do not inherit the midpoint restriction `dt/tau <= 2`: source bandwidth
+still covers DC through the complete instantaneous mechanical frequency bound,
+and exact exponential representability and work limits still apply. Separate
+nonlinear midpoint consumers retain their own constitutive clock admission.
 The existing prepared backend also advances material histories, in either
 binding order. Its input-augmented dimension is `d = 3*N + M` for N mechanical
 coordinates and M histories; the original Van Loan ceiling `2*d <= 6144`
@@ -5695,7 +5702,8 @@ gas and torsion rebuilds preserve the original body basis, source image and
 accepted histories; internal axial-component extension preserves and extends
 the same projections. Scalar/tensor body viscosity and authored body decay are
 mutually exclusive with this selection. Source support covers DC through the
-complete instantaneous coupled frequency bound, with positive-arm `dt/tau <= 2`.
+complete instantaneous coupled frequency bound; exact material propagation also
+admits relaxation faster than the audio sample period.
 Original exact-state, retained-mode and projection-work limits remain binding;
 singular nonzero strain forms refuse without rank truncation.
 
@@ -5704,8 +5712,10 @@ The ordinary `material_strings --body-profile` v1/v2 plate route accepts
 MODULUS TIME ...`. It resolves only the chosen material properties and attaches
 the law after selected gas/torsion/axial construction, before the existing
 multibow performer and PCM writer. An omitted record keeps the prior tensor
-selection. Source bytes and identities remain inspectable. The mechanical-only
-prepared backend refuses this selection before material-pack I/O, and augmented
+selection. Source bytes and identities remain inspectable. The performer's
+current `prepared-linear` input selection refuses this regional memory record
+before material-pack I/O, although the public prepared coupled owner supports
+internal strains as described above. Augmented
 setup work is reserved in the original budget. `regional-relaxing.body` is an
 explicitly synthetic runnable example, not a measured instrument calibration.
 
@@ -7008,7 +7018,7 @@ bending additions. They survive gas, torque and axial rebuilds and act through
 the existing surface-friction and rotational-bridge maps, with no direct twist
 acoustic gain. Existing shear Kelvin viscosity remains a separate parallel loss.
 
-Complete instantaneous frequency support, positive-arm `dt/tau <= 2`, original
+Complete instantaneous frequency support, exact exponential admission, original
 memory/setup ceilings and cancellation gates apply. Unsupported scalar/impact
 conversion refuses instead of dropping history. This is frozen small-angle
 torsion of bonded circular sections; it does not add axial Prony loss, winding

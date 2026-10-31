@@ -93,6 +93,69 @@ fn first_order_memory_joins_disconnected_masses_and_matches_analytic_maxwell_mot
     }
 }
 
+#[test]
+fn stiff_coupled_memory_matches_overdamped_motion_and_integrated_heat_in_both_exact_owners() {
+    let gate = CancelGate::new_clock_free();
+    let (c, tau, q0) = (100.0_f64, 1e-7_f64, 1e-3_f64);
+    let rate = 48_000;
+    assert!(1.0 / (f64::from(rate) * tau) > 200.0);
+    let gamma = 0.5 / tau;
+    let root = (gamma * gamma - 2.0 * c * c).sqrt();
+    // Product-preserving slow root avoids cancelling gamma - root. The
+    // relative coordinate solves q'' + q'/tau + 2*c^2*q = 0, with z(0)=0.
+    let fast = -gamma - root;
+    let slow = 2.0 * c * c / fast;
+    let separation = slow - fast;
+    let initial = 0.5 * (c * q0).powi(2);
+    for prepared in [false, true] {
+        let network = CoupledModalSystem::new(vec![
+            model(rate, 0.0, 0.0, q0 / 2.0, 0.0),
+            model(rate, 0.0, 0.0, -q0 / 2.0, 0.0),
+        ], vec![], config(), &gate).unwrap();
+        let network = if prepared {
+            network.with_prepared_linear_propagation(PreparedModalBudget {
+                max_modes: 2, max_dense_bytes: 8 * 1024 * 1024,
+                max_multiply_terms: 1_000_000_000,
+            }, &gate).unwrap()
+        } else { network };
+        let mut system = network.with_material_relaxation(vec![
+            arm(vec![1.0, 0.0, -1.0, 0.0], c * c, tau),
+        ], Some(vec![0.0]), &gate).unwrap();
+        let mut heat = 0.0;
+        for tick in 1..=8 {
+            let frame = system.step(&[0.0, 0.0]).unwrap().clone();
+            let t = f64::from(tick) / f64::from(rate);
+            let es = (slow * t).exp();
+            let ef = (fast * t).exp();
+            let q = q0 * (-fast * es + slow * ef) / separation;
+            let v = q0 * 2.0 * c * c * (ef - es) / separation;
+            let z = -v / (2.0 * c * tau);
+            let pair = states(&system);
+            close(pair[0].displacement_m_sqrt_kg, q / 2.0);
+            close(pair[1].displacement_m_sqrt_kg, -q / 2.0);
+            close(pair[0].velocity_m_sqrt_kg_per_s, v / 2.0);
+            close(pair[1].velocity_m_sqrt_kg_per_s, -v / 2.0);
+            close(system.material_memory()[0], z);
+            // Integrate the independent analytic mismatch squared / tau,
+            // rather than infer heat from the owner's energy residual.
+            let a = c * q0 * slow / separation;
+            let b = -c * q0 * fast / separation;
+            let integral = |pole: f64| (pole * t).exp_m1() / pole;
+            let expected_heat = (a * a * integral(2.0 * slow)
+                + 2.0 * a * b * integral(slow + fast)
+                + b * b * integral(2.0 * fast)) / tau;
+            heat += frame.material_dissipation_j;
+            close(heat, expected_heat);
+            close(system.total_energy_j().unwrap() + heat, initial);
+            assert!(frame.material_dissipation_j >= 0.0);
+            assert_eq!(frame.component_dissipation_j, 0.0);
+            assert_eq!(frame.connection_dissipation_j, 0.0);
+            assert_eq!(frame.external_work_j, 0.0);
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+    }
+}
+
 fn coupled(rate: u32) -> CoupledModalSystem {
     let gate = CancelGate::new_clock_free();
     CoupledModalSystem::new_with_columns(vec![

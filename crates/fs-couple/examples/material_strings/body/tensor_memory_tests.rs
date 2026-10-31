@@ -232,7 +232,7 @@ fn g3_shared_tensor_coordinates_admit_finer_original_mesh_at_unchanged_state_cap
         }
         let mut changed=build_profile(cx,gate,8e9,0.001,Profile::parse(text.as_bytes()).unwrap());
         assert!(p.iter().zip(pressure(&mut changed,128)).any(|(a,b)|(a-b).abs()>1e-15));
-        for (upper,time,limit) in [(100.0,0.001,0.02),(100000.0,1e-9,0.02),(100000.0,0.001,1e-20)] {
+        for (upper,time,limit) in [(100.0,0.001,0.02),(100000.0,0.0,0.02),(100000.0,0.001,1e-20)] {
             assert!(tensor_spec().compile_with_body(cx,gate,Some(Profile::parse(text.as_bytes()).unwrap()),
                 |name|Ok(if name=="tensor-blade.fsmatpk" {tensor_pack(3e8,time,limit,"",upper)}
                     else {pack(name,1.0,None)})).is_err());
@@ -264,7 +264,7 @@ fn g3_complete_tensor_body_source_changes_normal_history_bridge_feedback_and_pcm
             .to_vec();
         let p = pressure(&mut original, 37);
         assert!(p.iter().any(|p| p.abs() > 1e-15));
-        for (c33, time) in [(8e9, 0.001), (3e8, 0.005)] {
+        for (c33, time) in [(8e9, 0.001), (3e8, 0.005), (3e8, 1e-7)] {
             let mut changed = build(cx, gate, c33, time);
             assert_eq!(
                 changed.performance.bank().system().components()[1].modes(),
@@ -329,7 +329,7 @@ fn g0_native_tensor_body_preserves_complete_source_strain_band_and_capacity_admi
             ("branch_33", 100000.0, 0.001, 0.02),
             ("zero_modulus", 100000.0, 0.001, 0.02),
             ("", 100.0, 0.001, 0.02),
-            ("", 100000.0, 1e-9, 0.02),
+            ("", 100000.0, 0.0, 0.02),
             ("", 100000.0, 0.001, 1e-20),
         ] {
             assert!(

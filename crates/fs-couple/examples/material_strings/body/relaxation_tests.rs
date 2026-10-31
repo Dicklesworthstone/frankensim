@@ -123,7 +123,7 @@ fn incomplete_unresolved_and_over_budget_material_history_refuses() {
     scoped(|cx,gate| {
         for (modulus,time,band,omit) in [(4e9,0.002,200_000.0,Some("maxwell_time")),
             (-1.0,0.002,200_000.0,None),(4e9,0.0,200_000.0,None),
-            (4e9,1e-8,200_000.0,None),(4e9,0.002,2000.0,None)] {
+            (4e9,0.002,2000.0,None)] {
             assert!(spec().compile_with_body(cx,gate,Some(memory_profile(false)),|name|
                 Ok(if name=="body.fsmatpk" {body_pack(name,modulus,time,band,omit)}
                     else {pack(name,1.0,None)})).is_err());

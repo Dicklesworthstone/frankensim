@@ -67,7 +67,9 @@ impl MaterialStringBankSource {
         &self, system: &FrictionModalSystem, gate: &CancelGate,
     ) -> Result<(), ReciprocalStringError> {
         let high = system.linear_frequency_upper_bound_rad_s();
-        let dt = system.sample_period_s();
+        // Bending and torsion histories are original first-order states in the
+        // exact coupled owner, including when nonlinear friction is attached.
+        // Their source support is independent of the midpoint dt/tau cap.
         for member in &self.strings {
             poll(gate)?;
             if let Some(law) = member.source.bending_relaxation() {
@@ -75,16 +77,14 @@ impl MaterialStringBankSource {
                 if !lo.is_finite() || !hi.is_finite() || lo != 0.0 || hi < high
                     || law.branches.iter().any(|b| !b.relaxing_stiffness_n_m2.is_finite()
                         || b.relaxing_stiffness_n_m2 < 0.0
-                        || !b.relaxation_time_s.is_finite() || b.relaxation_time_s <= 0.0
-                        || (b.relaxing_stiffness_n_m2 > 0.0 && dt/b.relaxation_time_s > 2.0)) {
-                    return Err(invalid("string material memory requires source support from DC through the complete instantaneous coupled band and dt/tau <= 2"));
+                        || !b.relaxation_time_s.is_finite() || b.relaxation_time_s <= 0.0) {
+                    return Err(invalid("string material memory requires positive finite times and source support from DC through the complete instantaneous coupled band"));
                 }
             }
             if let Some(law) = member.source.torsional_relaxation() {
                 let (lo, hi) = law.omega_band_rad_s();
-                if lo != 0.0 || hi < high || law.branches().iter().any(|arm|
-                    arm.relaxing_stiffness_n_m2 > 0.0 && dt / arm.relaxation_time_s > 2.0) {
-                    return Err(invalid("torsional material memory requires source support from DC through the complete instantaneous coupled band and dt/tau <= 2"));
+                if lo != 0.0 || hi < high {
+                    return Err(invalid("torsional material memory requires source support from DC through the complete instantaneous coupled band"));
                 }
             }
         }

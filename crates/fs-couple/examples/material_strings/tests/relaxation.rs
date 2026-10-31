@@ -235,7 +235,7 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
                 Ok(source_pack(name,80e9,0.001,200_000.0,Some(missing)))).is_err());
         }
         for (delta,time,band) in [(-1.0,0.001,200_000.0),(80e9,0.0,200_000.0),
-            (80e9,1e-9,200_000.0),(80e9,0.001,1000.0)] {
+            (80e9,0.001,1000.0)] {
             assert!(selected().compile(cx,gate,|name|Ok(source_pack(name,delta,time,band,None))).is_err());
         }
         let mut unsupported=selected();

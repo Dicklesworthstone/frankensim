@@ -138,9 +138,11 @@ impl StringBankBendingRelaxation {
     }
 
     pub(super) fn validate_band(&self, high: f64, dt: f64) -> Result<(), ReciprocalStringError> {
+        // Every curvature arm is retained in the complete exact propagator.
+        // Source bandwidth and mechanical Nyquist admission remain binding;
+        // an exponential material decay need not be resolved by midpoint.
         if !high.is_finite() || high < 0.0 || !dt.is_finite() || dt <= 0.0
-            || self.bands.iter().any(|&(lo,hi)| lo > 0.0 || high > hi)
-            || self.channels.iter().any(|c| dt/c.relaxation_time_s > 2.0) {
+            || self.bands.iter().any(|&(lo,hi)| lo > 0.0 || high > hi) {
             return Err(invalid("complete coupled band or clock exceeds original string bending-memory support"));
         }
         Ok(())

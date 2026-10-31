@@ -147,7 +147,7 @@ fn explicit_zero_is_elastic_and_invalid_or_stale_selections_refuse() {
         assert_eq!(render(&mut original),render(&mut zero));
         for (delta,tau,band,limit) in [(40e9,0.004,200_000.0,1),
             (-1.0,0.004,200_000.0,16),(40e9,0.0,200_000.0,16),
-            (40e9,1e-7,200_000.0,16),(40e9,0.004,8_000.0,16)] {
+            (40e9,0.004,8_000.0,16)] {
             assert!(bank(cx,gate,delta,tau,band,1,1)
                 .with_material_string_bending_relaxation(selection(),None,limit,gate).is_err());
         }
@@ -273,10 +273,8 @@ fn original_zero_memory_preserves_elastic_trajectory_and_source_limits_refuse() 
         let mut elastic=make(false); let mut zero=make(true);
         assert!(zero.system().material_memory().is_empty());
         assert_eq!(render(&mut elastic),render(&mut zero));
-        for (tau,band) in [(1e-7,200_000.0),(0.004,8_000.0)] {
-            assert!(bank_with_sources(cx,gate,
-                vec![original_source(40e9,tau,band,true)]).is_err());
-        }
+        assert!(bank_with_sources(cx,gate,
+            vec![original_source(40e9,0.004,8_000.0,true)]).is_err());
     });
 }
 
@@ -445,9 +443,7 @@ fn zero_shear_arms_preserve_pressure_and_unsupported_history_consumers_refuse() 
         let mut ordinary=make(false); let mut zero=make(true);
         assert!(zero.system().material_memory().is_empty());
         assert_eq!(render(&mut ordinary),render(&mut zero));
-        for (tau,band) in [(1e-7,200_000.0),(0.004,8_000.0)] {
-            assert!(bank_with_sources(cx,gate,vec![shear_source(40e9,tau,band,true)]).is_err());
-        }
+        assert!(bank_with_sources(cx,gate,vec![shear_source(40e9,0.004,8_000.0,true)]).is_err());
         assert!(shear_source(40e9,0.004,200_000.0,true)
             .with_torsional_relaxation(&shear_layers()).is_err());
         let mut wrong=shear_layers(); wrong[0].equilibrium_modulus="young_modulus".into();
@@ -457,6 +453,29 @@ fn zero_shear_arms_preserve_pressure_and_unsupported_history_consumers_refuse() 
         };5];
         assert!(shear_source(40e9,0.004,200_000.0,true)
             .into_nonlinear(cx,gas(),48_000,0.2,initial,gate).is_err());
+    });
+}
+
+#[test]
+fn fast_layered_bending_original_bending_and_torsion_share_the_exact_material_owner() {
+    with_cx(|cx,gate| {
+        let tau = 1e-7;
+        let layered = bank(cx,gate,40e9,tau,200_000.0,1,1)
+            .with_material_string_bending_relaxation(selection(),None,16,gate).unwrap();
+        let original = bank_with_sources(cx,gate,
+            vec![original_source(40e9,tau,200_000.0,true)]).unwrap();
+        let torsion = bank_with_sources(cx,gate,
+            vec![shear_source(40e9,tau,200_000.0,true)]).unwrap();
+        for mut bank in [layered, original, torsion] {
+            assert!(bank.system().sample_period_s() / tau > 200.0);
+            assert!(bank.system().material_relaxation_branches().iter()
+                .any(|branch| branch.relaxation_time_s == tau));
+            let pressure = render(&mut bank);
+            assert!(pressure.iter().all(|p|p.is_finite()));
+            assert!(pressure.iter().any(|p|p.abs()>1e-15));
+            assert!(bank.system().material_memory().iter().any(|z|*z!=0.0));
+            assert!(bank.system().coupled_frame().unwrap().material_dissipation_j>0.0);
+        }
     });
 }
 

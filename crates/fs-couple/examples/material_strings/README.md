@@ -895,9 +895,11 @@ The fixture declares density 7800 kg/m³, equilibrium modulus 200 GPa, excess
 bending modulus 80 GPa and relaxation time 0.001 s. Every property covers
 280–320 K and 0–200000 rad/s. Source admission requires coverage from zero
 through the complete coupled instantaneous frequency bound, including later gas
-and body changes. Every positive arm also requires `dt / tau <= 2`; at 48 kHz
-this example has `dt / tau = 1/48`. Unsupported coefficients or bands refuse
-before output creation.
+and body changes. The shared exact propagator retains fast material decay even
+when its relaxation time is shorter than one audio sample; at 48 kHz this
+example has `dt / tau = 1/48`. The mechanical Nyquist guard and exact-state
+capacity still apply. Unsupported coefficients or bands refuse before output
+creation.
 
 The original shared solver carries eight internal material histories alongside
 15 mechanical modes, including torsion, body and cavity. Changing a selected
@@ -2151,16 +2153,17 @@ each positive modulus increment supplies additional Maxwell storage.
 For each arm, `psi = Delta_E*A*integral((epsilon-z)^2)/2` and
 `z_dot = (epsilon-z)/tau`, with the existing
 `epsilon = u_x + (y_x^2+z_x^2)/2`. The joint constitutive/contact solve uses
-arithmetic endpoint strain means for the material midpoint update and the
-strain gradient at midpoint displacement for exact discrete mechanical work.
+the exact endpoint-strain ramp for each material arm and the strain gradient at
+midpoint displacement for exact discrete mechanical work.
 Physical relaxation loss, stored material stress, both transverse/axial
 reactions and endpoint acceleration pressure are accounted together. Repeated
 nonlinear or thermal trials restart accepted memory; publication commits once.
 The input initializes each arm relaxed at the actual initial displacement.
 
 This requires source validity from DC (including mean strain) through the
-complete coupled small-signal instantaneous band, and `dt/tau <= 2` for every
-source arm. The additional-stiffness bound includes the declared slope/strain
+complete coupled small-signal instantaneous band. Exact ramp propagation admits
+fast material histories without a midpoint `dt/tau` limit. The
+additional-stiffness bound includes the declared slope/strain
 envelope and initial retained stress, so a bent static preload cannot bypass
 admission through an axial-only frequency check. The common mechanical owner
 retains and sums these bounds with its current linear operator; original body,

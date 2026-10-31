@@ -81,7 +81,9 @@ fn g3_axial_material_substitution_changes_shared_pressure_and_preserves_callback
     scoped(|cx, gate| {
         let input = selected();
         let mut slow = build(cx,gate,&input,20e9,0.004,200_000.0).unwrap();
-        let mut fast = build(cx,gate,&input,20e9,0.0002,200_000.0).unwrap();
+        // The linear axial arms belong to the coupled exact exponential;
+        // this source decays more than 2000 times within one audio sample.
+        let mut fast = build(cx,gate,&input,20e9,1e-8,200_000.0).unwrap();
         assert_eq!(slow.spec.bytes,fast.spec.bytes);
         assert_eq!(slow.catalog["wire.fsmatpk"].pack.content_hash(),fast.catalog["wire.fsmatpk"].pack.content_hash());
         assert_ne!(slow.catalog["sleeve.fsmatpk"].pack.content_hash(),fast.catalog["sleeve.fsmatpk"].pack.content_hash());
@@ -116,7 +118,7 @@ fn g0_axial_memory_requires_original_waves_valid_sources_and_complete_history_bu
         &format!("prepared-linear 64 67108864 200000000000\n{RECORD}")).as_bytes()).is_err());
     scoped(|cx,gate| {
         for (delta,tau,high) in [(-1.0,0.004,200_000.0),(20e9,0.0,200_000.0),
-            (20e9,1e-8,200_000.0),(20e9,0.004,1000.0)] {
+            (20e9,0.004,1000.0)] {
             assert!(build(cx,gate,&input,delta,tau,high).is_err());
         }
         assert!(build(cx,gate,&input.replace("axial_time","absent_time"),20e9,0.004,200_000.0).is_err());
@@ -137,7 +139,9 @@ fn g3_full_strain_material_data_changes_real_pressure_and_preserves_history_repl
     scoped(|cx,gate| {
         let input=selected().replace(MEMORY,"longitudinal-memory finite-strain 8 young_modulus 1 axial_delta axial_time");
         let mut slow=build(cx,gate,&input,20e9,0.004,200_000.0).unwrap();
-        let mut fast=build(cx,gate,&input,20e9,0.0002,200_000.0).unwrap();
+        // The finite-strain owner uses the exact endpoint-strain ramp rather
+        // than the linear network, and must also retain this stiff source.
+        let mut fast=build(cx,gate,&input,20e9,1e-8,200_000.0).unwrap();
         let source=slow.performance.bank().source().bank();
         assert!(source.longitudinal_waves().unwrap().material_relaxation().unwrap().is_finite_strain());
         let initial:Vec<Vec<f64>>=slow.performance.bank().system().nonlinear_material_memory()
@@ -167,7 +171,7 @@ fn g0_full_strain_history_counts_the_mean_channel_before_any_source_io() {
     assert!(input::Spec::parse(input.as_bytes()).is_err());
     let full=selected().replace(MEMORY,"longitudinal-memory finite-strain 8 young_modulus 1 axial_delta axial_time");
     scoped(|cx,gate| {
-        for (delta,tau,high) in [(-1.0,0.004,200_000.0),(20e9,1e-8,200_000.0),(20e9,0.004,1000.0)] {
+        for (delta,tau,high) in [(-1.0,0.004,200_000.0),(20e9,0.0,200_000.0),(20e9,0.004,1000.0)] {
             assert!(build(cx,gate,&full,delta,tau,high).is_err());
         }
         assert!(build(cx,gate,&full.replace("axial_time","absent_time"),20e9,0.004,200_000.0).is_err());

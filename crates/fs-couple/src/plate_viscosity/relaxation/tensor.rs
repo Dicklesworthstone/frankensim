@@ -310,6 +310,9 @@ impl TensorPlateRelaxation {
     }
 
     pub(crate) fn validate_band(&self, high: f64, dt: f64) -> Result<(), AcousticRealizeError> {
+        // Full tensor memory, including the normal-strain elimination, belongs
+        // to the same exact augmented owner as the mechanics. Its exponential
+        // admission handles stiffness; no midpoint dt/tau condition applies.
         if !high.is_finite()
             || high < 0.0
             || !dt.is_finite()
@@ -318,7 +321,6 @@ impl TensorPlateRelaxation {
                 .bands
                 .iter()
                 .any(|&(low, upper)| low > 0.0 || high > upper)
-            || self.times.iter().any(|time| dt / time > 2.0)
         {
             return Err(invalid(
                 "complete coupled spectrum or clock exceeds original tensor material support",

@@ -288,13 +288,15 @@ impl FiberRibbonRelaxation {
     }
 
     pub(crate) fn validate_band(&self, high: f64, dt: f64) -> Result<(), FiberRibbonError> {
+        // Linear fiber arms join the complete coupled exact exponential;
+        // finite-strain axial arms use the shared exact strain-ramp owner.
+        // Both retain fast material decay without a midpoint dt/tau cap.
         if !high.is_finite()
             || high < 0.0
             || !dt.is_finite()
             || dt <= 0.0
             || self.omega_band_rad_s.0 > 0.0
             || high > self.omega_band_rad_s.1
-            || self.channels.iter().any(|c| dt / c.relaxation_time_s > 2.0)
         {
             return Err(FiberRibbonError::Invalid(
                 "complete fiber band or physical clock exceeds original material-memory support",

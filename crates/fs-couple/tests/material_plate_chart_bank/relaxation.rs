@@ -127,6 +127,29 @@ fn memory(bank: ReciprocalStringBank, gate: &CancelGate) -> ReciprocalStringBank
 }
 
 #[test]
+fn fast_regional_memory_reaches_the_original_string_body_cavity_trajectory() {
+    with_cx(|cx, gate| {
+        let tau = 1e-7;
+        let mut bank = memory(base(cx, gate, memory_body(tau, (0.0, 100_000.0))), gate);
+        assert!(bank.system().sample_period_s() / tau > 200.0);
+        assert!(bank.system().material_relaxation_branches().iter()
+            .any(|branch| branch.relaxation_time_s == tau));
+        let zero = vec![0.0; bank.system().mode_count()];
+        let mut material_heat = 0.0;
+        let mut peak_pressure = 0.0_f64;
+        for _ in 0..32 {
+            let frame = *bank.step(&zero, drive()).unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            peak_pressure = peak_pressure.max(frame.observer_pressure_pa.abs());
+            material_heat += bank.system().coupled_frame().unwrap().material_dissipation_j;
+        }
+        assert!(peak_pressure > 0.0);
+        assert!(material_heat > 0.0);
+        assert!(bank.system().material_memory().iter().any(|z| *z != 0.0));
+    });
+}
+
+#[test]
 fn original_string_and_regional_body_memories_survive_gas_rebuild_together() {
     use fs_scenario::acoustic::BendingRelaxationProperties;
     with_cx(|cx, gate| {
