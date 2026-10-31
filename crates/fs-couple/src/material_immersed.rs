@@ -4,7 +4,8 @@
 //! This adapter only binds source material, physical units and geometry. Its
 //! native partial-saturation model retains fluid INSIDE each carrier: the sourced
 //! carrier inertia is explicitly ADDITIONAL to that fluid. It is not an ordinary
-//! displaced-fluid rigid solid, and no density subtraction is inferred here.
+//! displaced-fluid rigid solid. The explicit [`settling`] adapter derives excess
+//! inertia from ordinary heavy solids on this same native owner.
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
@@ -19,6 +20,8 @@ use fs_time::lie::gyrostat::InertiaTensor3;
 use fs_time::{So3, Vec3};
 
 mod ellipsoid;
+/// Ordinary heavy solids with source-derived displaced-fluid inertia and gravity.
+pub mod settling;
 use ellipsoid::NativeEllipsoid3;
 pub use ellipsoid::{AdditionalMaterialEllipsoid, RetainedFluidEllipsoids};
 
@@ -232,6 +235,35 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         poll(gate)?;
+        let scaling = plan_scaling_from_material(
+            fluid,
+            domain.cell_size_m,
+            domain.timestep_s,
+            domain.maximum_speed_m_s,
+        )?;
+        Self::new_with_scaling(
+            scaling,
+            domain,
+            sources,
+            materials.map(ResolvedBody::inertia),
+            initial,
+            build_surfaces,
+            gate,
+        )
+    }
+
+    // A physical displaced-solid adapter supplies its explicit excess inertia.
+    // Ordinary additional-carrier construction passes original inertia unchanged.
+    fn new_with_scaling(
+        scaling: MaterialScaling<'a, F>,
+        domain: ImmersedDomain,
+        sources: [S; N],
+        inertias: [fs_mbd::articulated::SpatialInertia; N],
+        initial: [BodyStateSi; N],
+        build_surfaces: impl FnOnce(&MaterialScaling<'a, F>) -> Result<CarrierSurfaces<N>, Error>,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        poll(gate)?;
         let count = domain
             .cells
             .into_iter()
@@ -250,12 +282,6 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
                 "invalid grid/body/quadrature allocation budget",
             ));
         }
-        let scaling = plan_scaling_from_material(
-            fluid,
-            domain.cell_size_m,
-            domain.timestep_s,
-            domain.maximum_speed_m_s,
-        )?;
         let dx = domain.cell_size_m;
         let dt = domain.timestep_s;
         let mass_unit = positive(scaling.transport().density_kg_m3() * dx * dx * dx)?;
@@ -265,9 +291,9 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
         let energy_unit = positive(impulse_unit * (dx / dt))?;
         let surfaces = build_surfaces(&scaling)?;
         let mut bodies = Vec::with_capacity(N);
-        for (material, state) in materials.iter().zip(initial) {
+        for (material, state) in inertias.iter().zip(initial) {
             poll(gate)?;
-            let mut tensor = material.inertia().inertia_com();
+            let mut tensor = material.inertia_com();
             for entry in &mut tensor.m {
                 *entry = finite(*entry / inertia_unit)?;
             }
@@ -276,7 +302,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, 
             bodies.push(MovingPartialSaturationBody3 {
                 center: convert(state.center_m, 1.0 / dx)?,
                 orientation: state.orientation,
-                mass: positive(material.inertia().mass() / mass_unit)?,
+                mass: positive(material.mass() / mass_unit)?,
                 inertia,
                 velocity: convert(state.velocity_m_s, dt / dx)?,
                 angular_momentum_body: vector(convert(

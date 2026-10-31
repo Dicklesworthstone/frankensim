@@ -18266,3 +18266,39 @@ otherwise unseen sphere-pair crossing, late budget/offset/cancellation rollback,
 and loss of requested time at a large native timestamp. These are authored
 analytic references, not experimental validation.
 
+### Ordinary heavy solids on the resolved immersed-fluid owner
+
+`material_immersed::settling::{SubmergedMaterialSpheres, SubmergedMaterialEllipsoids}`
+bind original ordinary solid sources to the same native D3Q19 moving-body and
+sphere-film solver. The analytic shape supplies displaced reference-fluid mass
+and the complete rotated tensor. The carrier receives their explicit difference
+from the original physical mass/inertia; source cards and receipts stay unchanged.
+One frozen fluid snapshot supplies density, units and bulk/film viscosity.
+
+The grid uses reduced pressure with zero fluid gravity. Each carrier receives
+`(M_s-rho_f V)g` once, plus separately authored center loads. Strictly positive
+excess mass and full physical excess tensor are required; equal/lighter solids
+refuse without an artificial mass. Construction releases all bodies from rest,
+matching the quiescent fictitious interior fluid. Full immersion, fixed source
+geometry, native clearance/Mach bounds and existing film assumptions apply.
+
+The native solver remains the sole time/pose/population owner. Its raw receipt
+retains represented-fluid/excess-carrier impulse/work and numerical rotation
+error. Optional SI observations reconstruct dry-body momentum using displaced
+inertia acceleration and Archimedes terms; these are distinguished from measured
+population reactions. No fallible conversion follows native publication.
+Density-preserving source viscosity refresh retains accepted history and updates
+bulk flow and any films together.
+
+Optional current-state diagnostics reuse native sampler scratch to report
+occupancy-volume error, actual interior velocity slip and momentum mismatch.
+They neither enforce interior rigidity nor alter state. Continuum excess-inertia
+equivalence requires rigid interior fluid; the finite partial-saturation law and
+subcell quadrature approximate it and require spatial/time refinement. This is
+not a free-surface, arbitrary-density, calibrated-drag or thermal-dissipation
+closure. No complete fluid-energy theorem is inferred from body work.
+
+Focused synthetic tests independently check source mass/tensor subtraction,
+actual population-plus-excess momentum under gravity, reconstructed dry momentum,
+represented work, rotated ellipsoids, simultaneous sphere-film reciprocity,
+density-preserving source refresh and atomic native/source/cancellation refusals.

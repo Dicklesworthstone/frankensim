@@ -60,6 +60,15 @@ impl<'a> AdditionalMaterialEllipsoid<'a> {
     }
 }
 
+impl AdditionalMaterialEllipsoid<'_> {
+    pub(super) fn lattice_shape(self, cell_size_m: f64) -> Result<NativeEllipsoid3, Error> {
+        Ok(NativeEllipsoid3 {
+            shape: BodyFrameEllipsoid3::new(vector(convert(self.semiaxes_m, 1.0 / cell_size_m)?))?,
+            shape_from_body: self.body_from_shape.inverse().matrix(),
+        })
+    }
+}
+
 /// Material-derived ellipsoids with resolved native fluid torque and motion.
 ///
 /// This uses retained interior fluid PLUS the additional sourced carrier mass
@@ -91,13 +100,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidEllipsoids<'a,
                 let mut shapes = Vec::with_capacity(N);
                 for source in sources {
                     poll(gate)?;
-                    shapes.push(NativeEllipsoid3 {
-                        shape: BodyFrameEllipsoid3::new(vector(convert(
-                            source.semiaxes_m,
-                            1.0 / scaling.cell_size_m(),
-                        )?))?,
-                        shape_from_body: source.body_from_shape.inverse().matrix(),
-                    });
+                    shapes.push(source.lattice_shape(scaling.cell_size_m())?);
                 }
                 Ok(CarrierSurfaces::Ellipsoids(
                     shapes
