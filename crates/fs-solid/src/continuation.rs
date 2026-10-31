@@ -6,10 +6,11 @@
 //! fixtures, and [`crate::HyperProblem`] plugs in for the real thing.
 //!
 //! Keller's bordered corrector: at arc state (u, λ) with predictor
-//! tangent (u̇, λ̇), each Newton step solves the bordered system via two
-//! tangent solves (K a = −R, K b = F_ext) — MINRES underneath, so
-//! passing a limit point (singular K in the load direction) is
-//! routine. Step control halves on failed correction and grows on
+//! tangent (u̇, λ̇), each Newton step solves the full bordered system
+//! `[K, -F_ext; u̇ᵀ, λ̇]`. Unlike a Schur reduction using K⁻¹, this stays
+//! regular at a simple fold even when K is singular. Small systems use
+//! pivoted LU; larger systems use matrix-free FGMRES on the generally
+//! nonsymmetric border. Step control reduces on failed correction and grows on
 //! fast success. Events (limit points via λ̇ sign change, branch
 //! points via stiffness-definiteness change without a λ̇ flip) are
 //! recorded on the path; branch switching perturbs along the pencil's
@@ -20,9 +21,10 @@
 //! proves split runs are bit-identical to straight runs.
 
 use crate::SolidError;
-use fs_solver::krylov::MinresState;
-use fs_solver::op::CsrOp;
+use fs_solver::nonlinear::FgmresState;
+use fs_solver::op::LinearOp;
 use fs_sparse::Csr;
+use fs_sparse::precond::IdentityPrecond;
 use std::fmt::Write as _;
 
 /// A parameterized equilibrium residual `R(u, λ) = R_int(u) − λ F_ext`.
@@ -54,7 +56,9 @@ pub struct ArcSettings {
     pub ds_max: f64,
     /// Newton iterations per corrector.
     pub max_corrector_iters: usize,
-    /// Corrector residual gate.
+    /// Absolute corrector gate, applied separately to the force-residual
+    /// Euclidean norm and the tangent-plane arclength defect. The caller
+    /// must use a consistent displacement/load-factor coordinate scaling.
     pub tol: f64,
 }
 
@@ -149,41 +153,155 @@ impl PathState {
     }
 }
 
-fn minres_solve(k: &Csr, b: &[f64]) -> Result<Vec<f64>, SolidError> {
-    let n = k.nrows();
-    if n <= 1024 {
-        // Fixture scale: one pivoted dense LU per solve —
-        // indefinite-capable (limit points!), deterministic, and an
-        // order faster than unpreconditioned Krylov on thin-structure
-        // tangents. Production scale falls through to MINRES.
-        if let Ok(f) = fs_la::factor::lu(&k.to_dense(), n) {
-            let mut x = b.to_vec();
-            f.solve(&mut x);
-            // Residual gate (LU on a singular tangent can be junk).
-            let mut r = vec![0.0f64; n];
-            k.spmv(&x, &mut r);
-            let bn: f64 = b.iter().map(|v| v * v).sum::<f64>().sqrt();
-            let rn: f64 = r
+fn norm(x: &[f64]) -> f64 {
+    x.iter().fold(0.0_f64, |value, &x| value.hypot(x))
+}
+
+fn invalid(what: &str) -> SolidError {
+    SolidError::InvalidInput { what: what.into() }
+}
+
+/// Row equilibration changes neither the equilibrium equation nor the arc
+/// constraint. It avoids hiding the arc row behind a large force unit scale.
+struct Bordered<'a> {
+    k: &'a Csr,
+    load: &'a [f64],
+    tangent: &'a [f64],
+    lambda_tangent: f64,
+    scales: Vec<f64>,
+}
+
+impl LinearOp for Bordered<'_> {
+    fn n(&self) -> usize {
+        self.load.len() + 1
+    }
+
+    fn apply(&self, x: &[f64], y: &mut [f64]) {
+        let n = self.load.len();
+        for (i, value) in y[..n].iter_mut().enumerate() {
+            let (columns, values) = self.k.row(i);
+            *value = columns
                 .iter()
-                .zip(b)
-                .map(|(a, v)| (a - v) * (a - v))
+                .zip(values)
+                .map(|(&j, &entry)| (entry / self.scales[i]) * x[j])
                 .sum::<f64>()
-                .sqrt();
-            if rn <= 1e-6 * bn.max(1e-300) {
+                - (self.load[i] / self.scales[i]) * x[n];
+        }
+        y[n] = (self.tangent.iter().zip(x).map(|(t, v)| t * v).sum::<f64>()
+            + self.lambda_tangent * x[n])
+            / self.scales[n];
+    }
+
+    fn apply_transpose(&self, x: &[f64], y: &mut [f64]) {
+        let n = self.load.len();
+        y.fill(0.0);
+        for (i, value) in x[..n].iter().enumerate() {
+            let (columns, values) = self.k.row(i);
+            for (&j, &entry) in columns.iter().zip(values) {
+                y[j] += (entry / self.scales[i]) * value;
+            }
+            y[n] -= (self.load[i] / self.scales[i]) * value;
+        }
+        let last = x[n] / self.scales[n];
+        for (value, t) in y[..n].iter_mut().zip(self.tangent) {
+            *value += t * last;
+        }
+        y[n] += self.lambda_tangent * last;
+    }
+}
+
+fn bordered_solve(
+    k: &Csr,
+    load: &[f64],
+    tangent: &[f64],
+    lambda_tangent: f64,
+    rhs: &[f64],
+    arc_rhs: f64,
+) -> Result<Vec<f64>, SolidError> {
+    let n = load.len();
+    if k.nrows() != n || k.ncols() != n || tangent.len() != n || rhs.len() != n {
+        return Err(invalid("continuation tangent/residual dimensions disagree"));
+    }
+    let mut scales = Vec::with_capacity(n + 1);
+    for (i, force) in load.iter().enumerate() {
+        let (_, values) = k.row(i);
+        if values.iter().any(|x| !x.is_finite()) {
+            return Err(invalid("nonfinite continuation tangent"));
+        }
+        scales.push(
+            values
+                .iter()
+                .fold(force.abs(), |s, x| s.max(x.abs()))
+                .max(f64::MIN_POSITIVE),
+        );
+    }
+    scales.push(
+        tangent
+            .iter()
+            .fold(lambda_tangent.abs(), |s, x| s.max(x.abs()))
+            .max(f64::MIN_POSITIVE),
+    );
+    let op = Bordered {
+        k,
+        load,
+        tangent,
+        lambda_tangent,
+        scales,
+    };
+    let b: Vec<_> = rhs
+        .iter()
+        .copied()
+        .chain([arc_rhs])
+        .zip(&op.scales)
+        .map(|(value, scale)| value / scale)
+        .collect();
+    if b.iter().any(|x| !x.is_finite()) {
+        return Err(invalid(
+            "nonfinite equilibrated continuation right hand side",
+        ));
+    }
+    let relative_residual = |x: &[f64]| {
+        if x.iter().any(|value| !value.is_finite()) {
+            return f64::INFINITY;
+        }
+        let mut residual = vec![0.0; n + 1];
+        op.apply(x, &mut residual);
+        for (value, rhs) in residual.iter_mut().zip(&b) {
+            *value -= rhs;
+        }
+        norm(&residual) / norm(&b).max(f64::MIN_POSITIVE)
+    };
+    if n < 1024 {
+        // The dimension cap applies to the entire bordered dense matrix.
+        let size = n + 1;
+        let mut dense = vec![0.0; size * size];
+        for i in 0..n {
+            let (columns, values) = k.row(i);
+            for (&j, &value) in columns.iter().zip(values) {
+                dense[i * size + j] = value / op.scales[i];
+            }
+            dense[i * size + n] = -load[i] / op.scales[i];
+            dense[n * size + i] = tangent[i] / op.scales[n];
+        }
+        dense[n * size + n] = lambda_tangent / op.scales[n];
+        if let Ok(factor) = fs_la::factor::lu(&dense, size) {
+            let mut x = b.clone();
+            factor.solve(&mut x);
+            if relative_residual(&x) <= 1e-10 {
                 return Ok(x);
             }
         }
     }
-    let op = CsrOp::symmetric(k.clone());
-    let mut st = MinresState::new(&op, b);
-    let _ = st.run(&op, 1e-11, 20_000);
-    if !st.rel_residual().is_finite() || st.rel_residual() > 1e-6 {
+    let mut state = FgmresState::new(&b, (n + 1).min(64));
+    let _ = state.run(&op, &IdentityPrecond, &b, 1e-11, 320);
+    let rel_residual = relative_residual(&state.x);
+    if !rel_residual.is_finite() || rel_residual > 1e-10 {
         return Err(SolidError::SolveFailed {
-            iters: st.iters,
-            rel_residual: st.rel_residual(),
+            iters: state.iters,
+            rel_residual,
         });
     }
-    Ok(st.x)
+    Ok(state.x)
 }
 
 /// Definiteness probe: a Cholesky attempt on the (fixture-scale)
@@ -203,59 +321,92 @@ fn is_positive_definite(k: &Csr) -> bool {
 ///
 /// # Errors
 /// [`SolidError::NewtonStalled`] when the step controller bottoms out;
-/// solver/material refusals propagate.
+/// solver/material refusals propagate. A failed step leaves the complete
+/// checkpoint unchanged; earlier accepted steps in the call remain committed.
 pub fn advance<P: PathResidual>(
     problem: &P,
     state: &mut PathState,
     settings: &ArcSettings,
     steps: usize,
 ) -> Result<(), SolidError> {
+    let n = problem.ndof();
+    let tangent_length = norm(&state.tangent.0).hypot(state.tangent.1);
+    if n == 0
+        || state.u.len() != n
+        || state.tangent.0.len() != n
+        || state
+            .u
+            .iter()
+            .chain(&state.tangent.0)
+            .any(|x| !x.is_finite())
+        || !state.lambda.is_finite()
+        || !state.tangent.1.is_finite()
+        || !tangent_length.is_finite()
+        || tangent_length <= 0.0
+        || !settings.ds_min.is_finite()
+        || settings.ds_min <= 0.0
+        || !settings.ds_max.is_finite()
+        || settings.ds_max < settings.ds_min
+        || !state.ds.is_finite()
+        || state.ds < settings.ds_min
+        || state.ds > settings.ds_max
+        || !settings.tol.is_finite()
+        || settings.tol <= 0.0
+        || settings.max_corrector_iters == 0
+        || state.step.checked_add(steps).is_none()
+    {
+        return Err(invalid(
+            "finite dimension-matched path and positive ordered continuation controls required",
+        ));
+    }
     let fext = problem.load_vector();
+    if fext.len() != n || fext.iter().any(|x| !x.is_finite()) {
+        return Err(invalid(
+            "finite dimension-matched continuation load required",
+        ));
+    }
     for _ in 0..steps {
         let k = problem.tangent(&state.u, state.lambda)?;
+        if k.nrows() != n
+            || k.ncols() != n
+            || (0..n).any(|row| k.row(row).1.iter().any(|x| !x.is_finite()))
+        {
+            return Err(invalid(
+                "finite dimension-matched continuation tangent required",
+            ));
+        }
         let (u_dot, lam_dot) = if state.pending_switch {
             // Honor the branch-switch null direction: the arc
             // constraint then PINS progress along the mode, so the
             // corrector cannot fall back to the fundamental branch.
-            state.pending_switch = false;
-            (state.tangent.0.clone(), state.tangent.1)
+            let length = norm(&state.tangent.0).hypot(state.tangent.1);
+            (
+                state.tangent.0.iter().map(|x| x / length).collect(),
+                state.tangent.1 / length,
+            )
         } else {
-            // Predictor tangent: K u̇ = λ̇ F_ext with arc normalization.
-            let v = minres_solve(&k, &fext)?;
-            let norm2: f64 = v.iter().map(|x| x * x).sum::<f64>() + 1.0;
-            let mut lam_dot = 1.0 / norm2.sqrt();
-            let mut u_dot: Vec<f64> = v.iter().map(|x| x * lam_dot).collect();
-            // Orient along the previous tangent (path continuity).
-            let dot: f64 = u_dot
-                .iter()
-                .zip(&state.tangent.0)
-                .map(|(a, b)| a * b)
-                .sum::<f64>()
-                + lam_dot * state.tangent.1;
-            if dot < 0.0 {
-                for x in &mut u_dot {
-                    *x = -*x;
-                }
-                lam_dot = -lam_dot;
+            // The last row orients the new tangent along the previous one.
+            // No inverse of K is needed at a simple fold.
+            let v = bordered_solve(
+                &k,
+                &fext,
+                &state.tangent.0,
+                state.tangent.1,
+                &vec![0.0; n],
+                1.0,
+            )?;
+            let length = norm(&v);
+            if !length.is_finite() || length == 0.0 {
+                return Err(invalid("unresolved continuation predictor direction"));
             }
-            (u_dot, lam_dot)
+            (v[..n].iter().map(|x| x / length).collect(), v[n] / length)
         };
         // Events: λ̇ sign change = limit point; definiteness change
         // without a λ̇ flip = branch-point candidate.
-        if state.step > 0 && lam_dot * state.tangent.1 < 0.0 {
-            state.events.push(PathEvent::LimitPoint {
-                lambda: state.lambda,
-                step: state.step,
-            });
-        }
+        let limit_point = state.step > 0 && lam_dot * state.tangent.1 < 0.0;
         let definite = is_positive_definite(&k);
-        if state.step > 0 && definite != state.last_definite && lam_dot * state.tangent.1 > 0.0 {
-            state.events.push(PathEvent::BranchPoint {
-                lambda: state.lambda,
-                step: state.step,
-            });
-        }
-        state.last_definite = definite;
+        let branch_point =
+            state.step > 0 && definite != state.last_definite && lam_dot * state.tangent.1 > 0.0;
         // Corrector with step halving.
         let mut ds = state.ds;
         loop {
@@ -270,6 +421,20 @@ pub fn advance<P: PathResidual>(
                 settings,
             ) {
                 Ok((u1, l1, iters)) => {
+                    if limit_point {
+                        state.events.push(PathEvent::LimitPoint {
+                            lambda: state.lambda,
+                            step: state.step,
+                        });
+                    }
+                    if branch_point {
+                        state.events.push(PathEvent::BranchPoint {
+                            lambda: state.lambda,
+                            step: state.step,
+                        });
+                    }
+                    state.last_definite = definite;
+                    state.pending_switch = false;
                     state.u = u1;
                     state.lambda = l1;
                     state.step += 1;
@@ -285,7 +450,7 @@ pub fn advance<P: PathResidual>(
                     break;
                 }
                 Err(_) if ds > settings.ds_min => {
-                    ds *= 0.25;
+                    ds = (ds * 0.25).max(settings.ds_min);
                 }
                 Err(e) => return Err(e),
             }
@@ -308,29 +473,44 @@ fn correct<P: PathResidual>(
 ) -> Result<(Vec<f64>, f64, usize), SolidError> {
     let mut u: Vec<f64> = u0.iter().zip(u_dot).map(|(a, b)| a + ds * b).collect();
     let mut lam = l0 + ds * lam_dot;
-    for it in 0..settings.max_corrector_iters {
+    let mut history = Vec::new();
+    for it in 0..=settings.max_corrector_iters {
+        if u.iter().any(|x| !x.is_finite()) || !lam.is_finite() {
+            return Err(invalid("nonfinite continuation trial"));
+        }
         let r = problem.residual(&u, lam)?;
-        let rn: f64 = r.iter().map(|x| x * x).sum::<f64>().sqrt();
-        if rn < settings.tol {
+        if r.len() != u.len() || r.iter().any(|x| !x.is_finite()) {
+            return Err(invalid(
+                "finite dimension-matched continuation residual required",
+            ));
+        }
+        let rn = norm(&r);
+        let arc = u
+            .iter()
+            .zip(u0)
+            .zip(u_dot)
+            .map(|((u, u0), t)| (u - u0) * t)
+            .sum::<f64>()
+            + (lam - l0) * lam_dot
+            - ds;
+        history.push(rn);
+        if rn <= settings.tol && arc.abs() <= settings.tol {
             return Ok((u, lam, it));
         }
-        let k = problem.tangent(&u, lam)?;
-        // Bordered solve (Keller): K a = −R, K b = F_ext; the arc
-        // constraint u̇ᵀΔu + λ̇Δλ = 0 pins the mixture.
-        let neg_r: Vec<f64> = r.iter().map(|x| -x).collect();
-        let a = minres_solve(&k, &neg_r)?;
-        let b = minres_solve(&k, fext)?;
-        let num: f64 = u_dot.iter().zip(&a).map(|(t, x)| t * x).sum();
-        let den: f64 = u_dot.iter().zip(&b).map(|(t, x)| t * x).sum::<f64>() + lam_dot;
-        let dlam = -num / den;
-        for ((ui, ai), bi) in u.iter_mut().zip(&a).zip(&b) {
-            *ui += ai + dlam * bi;
+        if it == settings.max_corrector_iters {
+            break;
         }
-        lam += dlam;
+        let k = problem.tangent(&u, lam)?;
+        // Solve the complete Newton equations, including any accumulated arc
+        // defect. At a simple fold this matrix is regular although K is not.
+        let neg_r: Vec<f64> = r.iter().map(|x| -x).collect();
+        let delta = bordered_solve(&k, fext, u_dot, lam_dot, &neg_r, -arc)?;
+        for (ui, du) in u.iter_mut().zip(&delta) {
+            *ui += du;
+        }
+        lam += delta[u.len()];
     }
-    Err(SolidError::NewtonStalled {
-        history: vec![f64::NAN],
-    })
+    Err(SolidError::NewtonStalled { history })
 }
 
 /// Branch switching: seed a small perturbation along the buckling

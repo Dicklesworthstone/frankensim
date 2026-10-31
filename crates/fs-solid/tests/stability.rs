@@ -197,6 +197,193 @@ impl PathResidual for VonMises {
     }
 }
 
+/// Exact saddle-node normal form, with optional uncoupled stable coordinates.
+/// The physical force unit may change without changing the equilibrium curve.
+struct ExactFold {
+    dimension: usize,
+    force_scale: f64,
+}
+
+impl PathResidual for ExactFold {
+    fn ndof(&self) -> usize {
+        self.dimension
+    }
+    fn residual(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError> {
+        let mut residual: Vec<_> = u.iter().map(|x| self.force_scale * x).collect();
+        residual[0] = self.force_scale * (2.0 * u[0] - u[0] * u[0] - lambda);
+        Ok(residual)
+    }
+    fn tangent(&self, u: &[f64], _lambda: f64) -> Result<Csr, SolidError> {
+        let mut coo = Coo::new(self.dimension, self.dimension);
+        for i in 0..self.dimension {
+            coo.push(
+                i,
+                i,
+                self.force_scale * if i == 0 { 2.0 - 2.0 * u[0] } else { 1.0 },
+            );
+        }
+        Ok(coo.assemble())
+    }
+    fn load_vector(&self) -> Vec<f64> {
+        let mut load = vec![0.0; self.dimension];
+        load[0] = self.force_scale;
+        load
+    }
+}
+
+#[test]
+fn g1_equilibrium_continuation_restarts_at_exact_fold_on_dense_and_sparse_paths() {
+    let settings = ArcSettings {
+        ds: 0.05,
+        ds_max: 0.05,
+        tol: 1e-10,
+        ..ArcSettings::default()
+    };
+    for (dimension, force_scale) in [(1, 1.0), (1, 1e5), (1024, 1.0)] {
+        let problem = ExactFold {
+            dimension,
+            force_scale,
+        };
+        let mut path = PathState::start(dimension, &settings);
+        path.u[0] = 1.0;
+        path.lambda = 1.0;
+        path.tangent.0[0] = 1.0;
+        path.tangent.1 = 0.0;
+        path.trace = vec![(1.0, 1.0)];
+        // K has an exactly zero first row. The bordered matrix is regular.
+        advance(&problem, &mut path, &settings, 1).expect("regular fold continuation");
+        assert!((path.u[0] - 1.05).abs() < 1e-13);
+        assert!((path.lambda - 0.9975).abs() < 1e-13);
+        advance(&problem, &mut path, &settings, 6).expect("descending branch");
+        assert!(path.u[0] > 1.3 && path.tangent.1 < 0.0);
+        for &(lambda, u) in &path.trace {
+            assert!((2.0 * u - u * u - lambda).abs() < 1e-10);
+        }
+        assert!(path.u[1..].iter().all(|u| *u == 0.0));
+    }
+}
+
+/// A smooth, monotone equilibrium curve whose stiffness vanishes at u = 1.
+/// Starting at zero, the exact unit tangent predicts that singular point.
+struct StationaryInflection;
+impl PathResidual for StationaryInflection {
+    fn ndof(&self) -> usize {
+        1
+    }
+    fn residual(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError> {
+        Ok(vec![((u[0] - 1.0).powi(3) + 1.0) / 3.0 - lambda])
+    }
+    fn tangent(&self, u: &[f64], _lambda: f64) -> Result<Csr, SolidError> {
+        let mut coo = Coo::new(1, 1);
+        coo.push(0, 0, (u[0] - 1.0).powi(2));
+        Ok(coo.assemble())
+    }
+    fn load_vector(&self) -> Vec<f64> {
+        vec![1.0]
+    }
+}
+
+#[test]
+fn g1_equilibrium_corrector_handles_singular_stiffness_at_predictor() {
+    let settings = ArcSettings {
+        ds: 2.0_f64.sqrt(),
+        ds_min: 2.0_f64.sqrt(),
+        ds_max: 2.0_f64.sqrt(),
+        max_corrector_iters: 20,
+        tol: 1e-12,
+    };
+    let mut path = PathState::start(1, &settings);
+    advance(&StationaryInflection, &mut path, &settings, 1).expect("full bordered corrector");
+    // Independent bisection of f(u) + u = 2, the predictor's tangent plane.
+    let (mut lo, mut hi) = (1.0_f64, 2.0_f64);
+    for _ in 0..60 {
+        let mid = f64::midpoint(lo, hi);
+        if ((mid - 1.0).powi(3) + 1.0) / 3.0 + mid < 2.0 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    assert!((path.u[0] - f64::midpoint(lo, hi)).abs() < 1e-12);
+    assert!((path.u[0] + path.lambda - 2.0).abs() < 1e-12);
+    assert!(StationaryInflection.residual(&path.u, path.lambda).unwrap()[0].abs() < 1e-12);
+}
+
+struct RefusedContinuation;
+impl PathResidual for RefusedContinuation {
+    fn ndof(&self) -> usize {
+        1
+    }
+    fn residual(&self, _u: &[f64], _lambda: f64) -> Result<Vec<f64>, SolidError> {
+        Err(SolidError::MaterialRefused {
+            what: "trial lies outside the material envelope".into(),
+        })
+    }
+    fn tangent(&self, _u: &[f64], _lambda: f64) -> Result<Csr, SolidError> {
+        let mut coo = Coo::new(1, 1);
+        coo.push(0, 0, 1.0);
+        Ok(coo.assemble())
+    }
+    fn load_vector(&self) -> Vec<f64> {
+        vec![1.0]
+    }
+}
+
+#[test]
+fn g0_equilibrium_refusal_preserves_events_and_pending_branch_switch() {
+    let settings = ArcSettings {
+        ds: 0.05,
+        ds_min: 0.05,
+        ds_max: 0.05,
+        ..ArcSettings::default()
+    };
+    for pending_switch in [false, true] {
+        let mut path = PathState::start(1, &settings);
+        path.step = 2;
+        path.last_definite = false;
+        path.pending_switch = pending_switch;
+        let before = format!("{path:?}");
+        assert!(advance(&RefusedContinuation, &mut path, &settings, 1).is_err());
+        assert_eq!(format!("{path:?}"), before);
+    }
+}
+
+struct TranslatedLinear;
+impl PathResidual for TranslatedLinear {
+    fn ndof(&self) -> usize {
+        1
+    }
+    fn residual(&self, u: &[f64], lambda: f64) -> Result<Vec<f64>, SolidError> {
+        Ok(vec![(u[0] - 1e20) - lambda])
+    }
+    fn tangent(&self, _u: &[f64], _lambda: f64) -> Result<Csr, SolidError> {
+        let mut coo = Coo::new(1, 1);
+        coo.push(0, 0, 1.0);
+        Ok(coo.assemble())
+    }
+    fn load_vector(&self) -> Vec<f64> {
+        vec![1.0]
+    }
+}
+
+#[test]
+fn g0_equilibrium_force_balance_alone_cannot_accept_a_lost_arc_increment() {
+    let settings = ArcSettings {
+        ds: 1.0,
+        ds_min: 1.0,
+        ds_max: 1.0,
+        max_corrector_iters: 40,
+        tol: 1e-9,
+    };
+    let mut path = PathState::start(1, &settings);
+    path.u[0] = 1e20;
+    let before = format!("{path:?}");
+    // A one-unit displacement cannot be represented around 1e20. Returning
+    // to the old equilibrium satisfies R = 0, but has made no arc progress.
+    assert!(advance(&TranslatedLinear, &mut path, &settings, 1).is_err());
+    assert_eq!(format!("{path:?}"), before);
+}
+
 #[test]
 fn stab_002_von_mises_truss_closed_form() {
     let truss = VonMises {

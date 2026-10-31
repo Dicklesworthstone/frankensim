@@ -1118,8 +1118,14 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
 - `continuation` (bead tfz.15): `PathResidual` (generic equilibrium
   residual R(u,λ) = R_int − λF_ext; `HyperProblem` implements it for
   homogeneous clamps + ramped dead tractions), `advance` — Keller
-  bordered pseudo-arclength with MINRES/dense-LU tangent solves
-  (indefinite-safe through limit points), step halving/growth,
+  bordered pseudo-arclength with pivoted dense LU for total bordered dimension
+  at most 1024 and matrix-free FGMRES above that cap. Both predictor and
+  corrector solve the complete, row-equilibrated nonsymmetric border, so a
+  simple fold does not require an inverse of the singular structural tangent.
+  Corrector acceptance requires both physical force balance and the tangent-plane
+  arclength constraint; a lost displacement increment cannot pass by returning
+  to the previous equilibrium. Step reduction/growth respects the declared
+  minimum/maximum, and failure preserves the complete pre-step checkpoint,
   limit-point events (λ̇ sign flips) and branch-point candidates
   (Cholesky definiteness flips without a λ̇ flip, gated n ≤ 1024);
   `PathState` — the checkpointable trajectory (clone to checkpoint,
