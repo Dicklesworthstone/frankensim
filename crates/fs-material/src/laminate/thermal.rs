@@ -23,6 +23,8 @@ use std::sync::Arc;
 pub mod history;
 /// Source-bound elastic snapshots at one admitted temperature per layer.
 pub mod source;
+/// Source-pinned plane-stress potentials and exact temperature derivatives.
+pub mod thermoelastic;
 
 /// Refusal of one complete preparation or response; no partial state is returned.
 #[derive(Clone, Debug, PartialEq)]

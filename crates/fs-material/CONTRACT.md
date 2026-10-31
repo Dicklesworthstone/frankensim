@@ -129,6 +129,31 @@ history, heat/work feedback, or solved-strain calibration admission.
 formulas, nonlinear CTE integration, fixed mass, heating/cooling, claim pinning,
 directional response and source/domain/cancellation refusals.
 
+### Source-pinned plane-stress thermoelastic potentials
+
+`laminate::thermal::thermoelastic::AffineLaminaThermoelastic` differentiates the
+original affine E/nu, E/G, K/G or orthotropic plane-12 sources before evaluating
+their rational reduced stiffness. Current source receipts and the original
+integrated expansion path remain authoritative. Exact first/second temperature
+derivatives supply work-conjugate stress, entropy `S = -Psi_T`, internal energy
+`U = Psi + T*S`, fixed-total-strain capacity and the mixed stress/temperature
+derivative. No unmeasured thickness-normal elastic constants are invented.
+
+The declared principal engineering-component envelope covers both total and
+elastic strain. Outward interval arithmetic bounds the elastic capacity over
+the complete source interval and refuses an unresolved rational pole; a thermal
+consumer must add its original caloric capacity and admit a positive total.
+An exact zero-source-slope check identifies temperature-independent elasticity.
+In-plane evaluation allocates nothing and performs no source query or rotation.
+Local transverse shear uses RAW G13/G23: native whole-stack Whitney corrections
+and their temperature derivatives are separate section physics, not a universal
+per-layer 5/6 factor. These potentials neither advance heat nor reset memory.
+
+`tests/laminate_thermoelastic.rs` uses independent compliance/eigenchannel
+oracles for all four schemas, work/Maxwell and thermal derivatives, capacity
+bounds, source pinning and domain/kink refusals. Targeted Cargo metadata checks
+pass; numerical execution and experimental validation are separate evidence.
+
 ### Thermal-strain histories of compatible viscoelastic laminates
 
 `laminate::thermal::history::LaminateThermalHistory` retains original full-3D
