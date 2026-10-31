@@ -47,9 +47,10 @@
 
 use fs_exec::Cx;
 use fs_material::{SmallStrainLaw, Tangent6, Voigt};
-use fs_solver::krylov::PminresState;
+use fs_solver::krylov::{PminresState, StallDiagnosis};
+use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
 use fs_solver::op::CsrOp;
-use fs_sparse::precond::{Precond, ilu0, pcg};
+use fs_sparse::precond::{Ilu0, Precond, ilu0, pcg};
 use fs_sparse::{Coo, Csr};
 
 use crate::linear3::TetAssemblyBudget;
@@ -734,7 +735,8 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
                         }
                     }
                 }
-                let (direction, fallback) = self.linear_solve(&coo.assemble(), &rhs, increment)?;
+                let (direction, fallback) =
+                    self.linear_solve(&coo.assemble(), &rhs, increment, cx)?;
                 fallbacks += usize::from(fallback);
                 let before = norm(&residual);
                 let mut alpha = 1.0f64;
@@ -819,8 +821,15 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         kff: &Csr,
         rhs: &[f64],
         increment: usize,
+        cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, bool), SmallStrainTetError> {
-        solve_increment_linear(kff, rhs, increment, self.settings)
+        let symmetric = match self.laws {
+            SmallStrainLawField::Uniform(law) => law.admissibility().tangent_symmetric,
+            SmallStrainLawField::PerElement(laws) => {
+                laws.iter().all(|law| law.admissibility().tangent_symmetric)
+            }
+        };
+        solve_increment_linear(kff, rhs, increment, self.settings, symmetric, cx)
     }
 }
 
@@ -830,7 +839,10 @@ pub(crate) fn solve_increment_linear(
     rhs: &[f64],
     increment: usize,
     settings: IncrementSettings,
+    symmetric: bool,
+    cx: &Cx<'_>,
 ) -> Result<(Vec<f64>, bool), SmallStrainTetError> {
+    checkpoint(cx)?;
     let tol = settings.linear_tolerance;
     if norm(rhs) == 0.0 {
         return Ok((vec![0.0; rhs.len()], false));
@@ -841,6 +853,58 @@ pub(crate) fn solve_increment_linear(
         let r: Vec<f64> = rhs.iter().zip(&ax).map(|(b, a)| b - a).collect();
         norm(&r) / norm(rhs)
     };
+    // Dynamic-recovery plasticity has a genuinely nonsymmetric consistent
+    // tangent under nonproportional loading. Preserve it and select the existing
+    // general Krylov owner; neither PCG nor MINRES is admitted for this operator.
+    if !symmetric {
+        if settings.max_linear_iterations == 0 {
+            return Err(SmallStrainTetError::LinearSolveFailed {
+                increment,
+                relative_residual: 1.0,
+            });
+        }
+        let preconditioner = match ilu0(kff) {
+            Ok(ilu) => GeneralPreconditioner::Ilu(ilu),
+            Err(_) => GeneralPreconditioner::Jacobi(AbsJacobi::new(kff)),
+        };
+        let op = CsrOp::general(kff.clone());
+        let restart = rhs.len().min(32).min(settings.max_linear_iterations);
+        let mut state = FgmresState::new(rhs, restart);
+        while state.iters < settings.max_linear_iterations {
+            state.restart = restart.min(settings.max_linear_iterations - state.iters);
+            let before = state.iters;
+            let report = state.run_cancellable(&op, &preconditioner, rhs, tol, 1, cx);
+            match report.progress {
+                SolverRunProgress::Complete => {}
+                SolverRunProgress::Paused => return Err(SmallStrainTetError::Cancelled),
+                _ => {
+                    return Err(SmallStrainTetError::LinearSolveFailed {
+                        increment,
+                        relative_residual: f64::INFINITY,
+                    });
+                }
+            }
+            if report.report.converged
+                || report.report.diagnosis == Some(StallDiagnosis::Breakdown)
+                || state.iters == before
+            {
+                break;
+            }
+        }
+        let relative_residual = true_relative(&state.x);
+        checkpoint(cx)?;
+        return if relative_residual.is_finite()
+            && relative_residual <= 10.0 * tol
+            && state.x.iter().all(|value| value.is_finite())
+        {
+            Ok((state.x, false))
+        } else {
+            Err(SmallStrainTetError::LinearSolveFailed {
+                increment,
+                relative_residual,
+            })
+        };
+    }
     if let Ok(m) = ilu0(kff) {
         let mut x = vec![0.0f64; rhs.len()];
         let report = pcg(kff, rhs, &mut x, &m, tol, settings.max_linear_iterations);
@@ -848,14 +912,7 @@ pub(crate) fn solve_increment_linear(
             return Ok((x, false));
         }
     }
-    let jacobi = AbsJacobi {
-        inv: (0..kff.nrows())
-            .map(|i| {
-                let d = kff.get(i, i).abs();
-                if d > 0.0 { 1.0 / d } else { 1.0 }
-            })
-            .collect(),
-    };
+    let jacobi = AbsJacobi::new(kff);
     let op = CsrOp::symmetric(kff.clone());
     let mut state = PminresState::new(&op, &jacobi, rhs);
     let _ = state.run(&op, &jacobi, tol, settings.max_linear_iterations);
@@ -872,6 +929,33 @@ pub(crate) fn solve_increment_linear(
 
 struct AbsJacobi {
     inv: Vec<f64>,
+}
+
+impl AbsJacobi {
+    fn new(matrix: &Csr) -> Self {
+        Self {
+            inv: (0..matrix.nrows())
+                .map(|i| {
+                    let diagonal = matrix.get(i, i).abs();
+                    if diagonal > 0.0 { 1.0 / diagonal } else { 1.0 }
+                })
+                .collect(),
+        }
+    }
+}
+
+enum GeneralPreconditioner {
+    Ilu(Ilu0),
+    Jacobi(AbsJacobi),
+}
+
+impl Precond for GeneralPreconditioner {
+    fn apply(&self, r: &[f64], z: &mut [f64]) {
+        match self {
+            Self::Ilu(ilu) => ilu.apply(r, z),
+            Self::Jacobi(jacobi) => jacobi.apply(r, z),
+        }
+    }
 }
 
 impl Precond for AbsJacobi {

@@ -2755,8 +2755,9 @@ G0/G1/G3 `plastic2` tests cover P1/Q1 cyclic analytical references, confined
 plane strain, skew-element global tangents, heterogeneous yielding, timed
 relaxation, atomic continuation/refusal, geometry and rotation admission, and
 Voce saturation. Standard displacement elements can lock in confined nearly
-incompressible plastic flow. This does not implement mixed/B-bar plasticity,
-shell bending, finite-strain forming, or limit-load continuation.
+incompressible plastic flow; the opt-in Q1 plane-strain B-bar path below reduces
+volumetric locking. Shell bending, finite-strain forming and limit-load
+continuation remain outside this owner.
 
 ## Nonlinear backstress recovery in metal fibers and members
 
@@ -2779,4 +2780,36 @@ independently stress-parametrized implicit-recovery curve, checks a reversed
 section tangent and retained history, and exercises complete sourced properties
 and mass. These are numerical constitutive/member checks, not calibration of
 real cyclic behavior, finite-strain forming or a fatigue-life prediction.
+
+## B-bar plastic flow and general constitutive Newton tangents
+
+`SmallStrainPlaneProblem::formulation` admits `Standard` for existing P1/Q1
+behavior and `BBar` for Q1 plane strain. The latter replaces only the full
+three-dimensional volumetric strain by its element-quadrature mean, adding
+`(mean(div u) - div u)/3` to each normal component. Local deviatoric strain,
+plastic flow and separate quadrature histories survive unchanged. The same
+projected B drives constitutive strain, internal force and algorithmic tangent;
+the zz stress contributes to projected virtual work. Returned B-bar strains are
+assumed material strains, whose zz component can be nonzero even though the
+compatible displacement is plane strain. Both raw and projected strains, and
+the raw rotation, must satisfy their independently declared admission limits.
+B-bar plane stress and P1 are explicit refusals. History cannot be transferred
+between formulations without a separately admitted projection.
+
+Both native plane and tetrahedral increments preserve nonsymmetric constitutive
+tangents. A law declaring `tangent_symmetric=false` selects existing FGMRES with
+ILU(0) or absolute-diagonal preconditioning, bounded restart/iteration work,
+in-Arnoldi cancellation checks and a recomputed true residual. The original
+symmetric PCG/PMINRES path remains available. Nonlinear backstress recovery is
+therefore usable under nonproportional load without false symmetrization; timed
+tetrahedral dynamics inherits the same correction owner.
+
+The focused plane battery includes constant plastic patches, skew-element
+deviator/tangent checks, raw-domain refusal and a nearly incompressible pressure
+cylinder against the independent plane-strain Lame displacement solution.
+`tests/plastic_chaboche.rs` exercises actually nonsymmetric free tangents,
+finite-difference force derivatives, triaxial/plane-stress/B-bar equilibrium,
+retained nonproportional backstress and exhausted linear-budget refusal.
+These tests do not establish a finite-strain, shear-locking or plastic-collapse
+mesh-convergence claim.
 

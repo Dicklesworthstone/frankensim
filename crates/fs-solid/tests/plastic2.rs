@@ -7,7 +7,7 @@ use fs_material::plastic::reduction::{ReducedState, ReductionConfig};
 use fs_material::plastic::{J2Plasticity, J2State};
 use fs_material::{IsotropicElastic, SmallStrainLaw};
 use fs_solid::{
-    IncrementSettings, Mesh2, PlaneAssemblyBudget, PlaneKind, SmallStrainLawField,
+    Formulation, IncrementSettings, Mesh2, PlaneAssemblyBudget, PlaneKind, SmallStrainLawField,
     SmallStrainPlaneProblem, SmallStrainPlaneSolution,
 };
 
@@ -50,6 +50,7 @@ fn problem<'a, L: SmallStrainLaw>(
         mesh,
         laws: SmallStrainLawField::Uniform(law),
         plane: PlaneKind::Stress,
+        formulation: Formulation::Standard,
         thickness_m: 0.2,
         reduction: ReductionConfig {
             max_iterations: 40,
@@ -430,5 +431,310 @@ fn saturating_voce_hardening_drives_the_plane_continuum() {
         close(state.history.plastic_strain[0], plastic, 2e-11);
         close(stress[0], sigma, 2e-8);
         close(state.strain[2], -NU * sigma / E - 0.5 * plastic, 2e-11);
+    }
+}
+
+#[test]
+fn bbar_preserves_a_constant_strain_plastic_patch() {
+    let mesh = Mesh2::mapped_quads(2, 2, &|s, t| [2.0 * s + 0.3 * t, t + 0.2 * s]);
+    let law = metal();
+    let prescribed: Vec<_> = mesh
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(n, x)| {
+            [
+                (2 * n, 0.004 * x[0] + 0.001 * x[1]),
+                (2 * n + 1, -0.001 * x[1]),
+            ]
+        })
+        .collect();
+    let mut standard = problem(&mesh, &law, &prescribed, &[0.5, 1.0, 0.25]);
+    standard.plane = PlaneKind::Strain;
+    let mut bbar = standard.clone();
+    bbar.formulation = Formulation::BBar;
+    let original = with_cx(|cx| standard.solve(cx)).unwrap();
+    let projected = with_cx(|cx| bbar.solve(cx)).unwrap();
+    for (a, b) in original
+        .quadrature_states
+        .iter()
+        .zip(&projected.quadrature_states)
+    {
+        close(a.history.alpha, b.history.alpha, 2e-14);
+        for i in 0..6 {
+            close(a.strain[i], b.strain[i], 2e-16);
+            close(
+                a.history.plastic_strain[i],
+                b.history.plastic_strain[i],
+                2e-14,
+            );
+        }
+    }
+    for (a, b) in original
+        .quadrature_stress_pa
+        .iter()
+        .zip(&projected.quadrature_stress_pa)
+    {
+        for i in 0..6 {
+            close(a[i], b[i], 2e-11);
+        }
+    }
+    for (a, b) in original.increments.iter().zip(&projected.increments) {
+        for (&r, &s) in a.reactions_n.iter().zip(&b.reactions_n) {
+            close(r, s, 2e-12);
+        }
+    }
+}
+
+#[test]
+fn bbar_keeps_local_deviatoric_plasticity_and_a_consistent_full_tensor_tangent() {
+    use fs_solid::mesh2::{quad_points, shapes_at};
+    let mesh = Mesh2::mapped_quads(1, 1, &|s, t| [2.0 * s + 0.3 * s * t, t + 0.4 * s * t]);
+    let law = metal();
+    let u: Vec<_> = mesh
+        .nodes
+        .iter()
+        .flat_map(|x| {
+            [
+                0.004 * x[0] + 0.001 * x[0] * x[1],
+                -0.0003 * x[1] + 0.0004 * x[0],
+            ]
+        })
+        .collect();
+    let prescribed: Vec<_> = u.iter().copied().enumerate().collect();
+    let mut p = problem(&mesh, &law, &prescribed, &[1.0]);
+    p.plane = PlaneKind::Strain;
+    let standard = with_cx(|cx| p.solve(cx)).unwrap();
+    p.formulation = Formulation::BBar;
+    let projected = with_cx(|cx| p.solve(cx)).unwrap();
+    let mut volume = 0.0;
+    let mut integrated_trace = 0.0;
+    for (q, (xi, eta, weight)) in quad_points(4).into_iter().enumerate() {
+        let (_, _, det) = shapes_at(&mesh.nodes, &mesh.elems[0], xi, eta);
+        let strain = standard.quadrature_states[q].strain;
+        volume += weight * det;
+        integrated_trace += weight * det * (strain[0] + strain[1]);
+    }
+    let mean_trace = integrated_trace / volume;
+    for (raw, assumed) in standard
+        .quadrature_states
+        .iter()
+        .zip(&projected.quadrature_states)
+    {
+        let raw_trace = raw.strain[..3].iter().sum::<f64>();
+        let trace = assumed.strain[..3].iter().sum::<f64>();
+        close(trace, mean_trace, 2e-16);
+        for i in 0..3 {
+            close(
+                assumed.strain[i] - trace / 3.0,
+                raw.strain[i] - raw_trace / 3.0,
+                2e-16,
+            );
+        }
+        close(assumed.strain[3], raw.strain[3], 2e-16);
+        close(assumed.history.alpha, raw.history.alpha, 2e-14);
+    }
+    assert!(
+        projected
+            .quadrature_states
+            .iter()
+            .any(|s| s.strain[2].abs() > 1e-5)
+    );
+    assert!(
+        (projected.quadrature_states[0].history.alpha
+            - projected.quadrature_states[2].history.alpha)
+            .abs()
+            > 1e-4
+    );
+    let old: Vec<_> = (0..4)
+        .map(|_| ReducedState {
+            strain: [0.0; 6],
+            history: law.initial_state(),
+        })
+        .collect();
+    let direction = [0.3, -0.4, 0.7, 0.2, -0.6, 0.1, 0.5, -0.8];
+    let h = 1e-7;
+    let plus: Vec<_> = u.iter().zip(direction).map(|(u, d)| u + h * d).collect();
+    let minus: Vec<_> = u.iter().zip(direction).map(|(u, d)| u - h * d).collect();
+    let (matrix, fp, fm) = with_cx(|cx| {
+        (
+            p.tangent_matrix(&u, &old, cx).unwrap(),
+            p.internal_force(&plus, &old, cx).unwrap(),
+            p.internal_force(&minus, &old, cx).unwrap(),
+        )
+    });
+    let mut derivative = [0.0; 8];
+    matrix.spmv(&direction, &mut derivative);
+    let mut error = 0.0_f64;
+    let mut scale = 0.0_f64;
+    for i in 0..8 {
+        let fd = (fp[i] - fm[i]) / (2.0 * h);
+        error = error.hypot(derivative[i] - fd);
+        scale = scale.hypot(fd);
+        for j in 0..8 {
+            close(matrix.get(i, j), matrix.get(j, i), 2e-11);
+        }
+    }
+    assert!(
+        error / scale < 3e-7,
+        "B-bar tangent relative error {}",
+        error / scale
+    );
+}
+
+/// Quarter thick cylinder, a=1, b=2, inner pressure=0.001, outer pressure=0.
+/// Plane-strain Lame solution: u(a)=(1+nu)/E [(1-2nu) A a+B/a],
+/// with A=p a^2/(b^2-a^2), B=p a^2 b^2/(b^2-a^2).
+fn pressure_cylinder(nr: usize, nt: usize, formulation: Formulation) -> f64 {
+    let mesh = Mesh2::mapped_quads(nr, nt, &|s, t| {
+        let angle = 0.5 * core::f64::consts::PI * t;
+        [(1.0 + s) * angle.cos(), (1.0 + s) * angle.sin()]
+    });
+    let law = IsotropicElastic::new(E, 0.4999, 0.05).unwrap();
+    let mut fixed: Vec<_> = mesh
+        .patch_nodes(fs_solid::Patch::Bottom)
+        .iter()
+        .map(|&n| (2 * n + 1, 0.0))
+        .collect();
+    fixed.extend(
+        mesh.patch_nodes(fs_solid::Patch::Top)
+            .iter()
+            .map(|&n| (2 * n, 0.0)),
+    );
+    let mut forces = Vec::new();
+    let thickness = 0.2;
+    for &(a, b) in mesh.patch_edges(fs_solid::Patch::Left).unwrap() {
+        let dx = mesh.nodes[b][0] - mesh.nodes[a][0];
+        let dy = mesh.nodes[b][1] - mesh.nodes[a][1];
+        // Exact constant pressure work on each straight reference edge.
+        for node in [a, b] {
+            forces.push((2 * node, -0.5 * 0.001 * thickness * dy));
+            forces.push((2 * node + 1, 0.5 * 0.001 * thickness * dx));
+        }
+    }
+    let mut p = problem(&mesh, &law, &fixed, &[1.0]);
+    p.plane = PlaneKind::Strain;
+    p.formulation = formulation;
+    p.nodal_forces_n = &forces;
+    // This nearly incompressible pencil is ill-conditioned. Inexact Newton
+    // corrections still have to pass the unchanged 1e-10 physical force gate.
+    p.settings.linear_tolerance = 1e-9;
+    let solution = with_cx(|cx| p.solve(cx))
+        .unwrap_or_else(|e| panic!("cylinder {nr}x{nt} {formulation:?}: {e}"));
+    let inner = mesh.patch_nodes(fs_solid::Patch::Left);
+    inner
+        .iter()
+        .map(|&n| {
+            let x = mesh.nodes[n];
+            let u = solution.displacement_m[n];
+            (x[0] * u[0] + x[1] * u[1]) / x[0].hypot(x[1])
+        })
+        .sum::<f64>()
+        / inner.len() as f64
+}
+
+#[test]
+fn bbar_reduces_nearly_incompressible_locking_against_lame_cylinder_solution() {
+    let nu = 0.4999;
+    let exact = (1.0 + nu) / E * ((1.0 - 2.0 * nu) * 0.001 / 3.0 + 0.004 / 3.0);
+    let standard = pressure_cylinder(4, 16, Formulation::Standard);
+    let coarse = pressure_cylinder(4, 16, Formulation::BBar);
+    let fine = pressure_cylinder(8, 32, Formulation::BBar);
+    let standard_error = (standard / exact - 1.0).abs();
+    let coarse_error = (coarse / exact - 1.0).abs();
+    let fine_error = (fine / exact - 1.0).abs();
+    assert!(
+        standard_error > 0.2,
+        "fixture did not exercise locking: {standard_error}"
+    );
+    assert!(
+        coarse_error < 0.04,
+        "coarse B-bar cylinder error {coarse_error}"
+    );
+    assert!(
+        fine_error < 0.006 && fine_error < 0.3 * coarse_error,
+        "B-bar refinement: coarse {coarse_error}, fine {fine_error}"
+    );
+}
+
+#[test]
+fn bbar_refuses_unsupported_reductions_and_does_not_hide_raw_strain() {
+    let law = metal();
+    let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+    let mut p = problem(&mesh, &law, &[], &[1.0]);
+    p.formulation = Formulation::BBar;
+    assert!(
+        with_cx(|cx| p.solve(cx)).is_err(),
+        "unproved plane-stress B-bar was admitted"
+    );
+    p.plane = PlaneKind::Strain;
+    let triangles = Mesh2::triangles(1.0, 1.0, 1, 1);
+    let mut triangle_problem = p.clone();
+    triangle_problem.mesh = &triangles;
+    assert!(
+        with_cx(|cx| triangle_problem.solve(cx)).is_err(),
+        "P1 projection was admitted"
+    );
+    // ux=0.0215*x*y: the projected maximum is below 0.02, while the raw
+    // compatible maximum is above it. Averaging must not expand the domain.
+    let u: Vec<_> = mesh
+        .nodes
+        .iter()
+        .flat_map(|x| [0.0215 * x[0] * x[1], 0.0])
+        .collect();
+    let high = 0.5 + 0.5 / 3.0_f64.sqrt();
+    let raw = 0.0215 * high * 1.5_f64.sqrt();
+    let projected = 0.0215 * ((7.0 / 6.0) * high * high + 1.0 / 12.0).sqrt();
+    assert!(raw > p.reduction.strain_limit && projected < p.reduction.strain_limit);
+    let old: Vec<_> = (0..4)
+        .map(|_| ReducedState {
+            strain: [0.0; 6],
+            history: law.initial_state(),
+        })
+        .collect();
+    assert!(with_cx(|cx| p.internal_force(&u, &old, cx)).is_err());
+}
+
+#[test]
+fn nonlinear_backstress_material_uses_the_general_global_solver() {
+    use fs_material::plastic::chaboche::{BackstressBranch, ChabocheJ2};
+    use fs_material::plastic::voce::VoceJ2;
+    let mesh = Mesh2::quads(1.0, 1.0, 2, 2);
+    let modulus = 80.0;
+    let recovery = 500.0;
+    let law = ChabocheJ2::new(
+        VoceJ2::new(metal(), 0.0, 1.0).unwrap(),
+        [BackstressBranch::new(modulus, recovery).unwrap()],
+    )
+    .unwrap();
+    assert!(!law.admissibility().tangent_symmetric);
+    let strain = 0.005;
+    let supports = axial_supports(&mesh, 1.0, Some(strain));
+    let result = with_cx(|cx| problem(&mesh, &law, &supports, &[1.0]).solve(cx)).unwrap();
+    // Independent backward-Euler axial consistency, including finite recovery.
+    let (mut lo, mut hi) = (0.0, strain);
+    for _ in 0..80 {
+        let p = 0.5 * (lo + hi);
+        let residual =
+            E * (strain - p) - YIELD - (HI + HK) * p - modulus * p / (1.0 + recovery * p);
+        if residual > 0.0 {
+            lo = p;
+        } else {
+            hi = p;
+        }
+    }
+    let plastic = 0.5 * (lo + hi);
+    for (state, stress) in result
+        .quadrature_states
+        .iter()
+        .zip(&result.quadrature_stress_pa)
+    {
+        close(state.history.plastic.alpha, plastic, 2e-11);
+        close(stress[0], E * (strain - plastic), 2e-8);
+        close(
+            1.5 * state.history.backstress_pa[0][0],
+            modulus * plastic / (1.0 + recovery * plastic),
+            2e-9,
+        );
     }
 }

@@ -10,22 +10,34 @@
 //! advances its declared interval once per entry, including repeated load
 //! factors. Endpoint stresses are retained from that same update.
 //!
-//! Work uses tensor shear: `B = [epsilon_xx, epsilon_yy, epsilon_xy]` and
-//! `W = diag(1, 1, 2)`, so `f = integral B^T W sigma` and
+//! Work uses tensor shear: `B = [epsilon_xx, epsilon_yy, epsilon_zz, epsilon_xy]`
+//! and `W = diag(1, 1, 1, 2)`, so `f = integral B^T W sigma` and
 //! `K = integral B^T W C_alg B`. Positive reference thickness converts
 //! stresses into forces; geometry and quadrature are prepared once per solve.
 //! Full compatible strain is bounded, including the solved thickness strain.
 //! The independent small-rotation bound checks the skew displacement gradient
 //! at the same integration points; a large rigid spin cannot pass as zero strain.
 //!
-//! This is small-strain, small-rotation, standard displacement FE with dead
-//! nodal loads. Confined nearly incompressible plastic flow can lock these
-//! elements; there is no mixed/B-bar, finite-strain forming, shell bending or
-//! limit-load continuation claim. Use prescribed displacement past a load
+//! For Q1 plane strain, opt-in [`Formulation::BBar`] replaces only the
+//! three-dimensional volumetric strain by its quadrature-weighted element
+//! mean: `eps_bar = dev(eps) + mean(trace(eps)) I / 3`. The same projected B
+//! drives strain, force and tangent, including the out-of-plane normal stress.
+//! This retains local deviatoric strain and full quadrature histories. The
+//! returned material strain is then an ASSUMED strain: its zz component can
+//! be nonzero even though the underlying displacement has zero zz strain.
+//! Both raw compatible and projected strains are checked against the domain.
+//! See the original INL MOOSE small-strain implementation:
+//! <https://mooseframework.inl.gov/docs/doxygen/modules/Compute2DSmallStrain_8C_source.html>.
+//!
+//! This is small-strain, small-rotation FE with dead nodal loads. Standard
+//! displacement elements can lock in confined plastic flow. B-bar is admitted
+//! only for Q1 plane strain; there is no B-bar plane-stress, shear-locking-free,
+//! finite-strain forming, shell bending or plastic limit-load convergence
+//! claim. Use prescribed displacement past a load
 //! maximum. Material coefficients and time intervals stay fixed within a
 //! path; `solve_from` supports a subsequent law/interval with retained history.
 
-use crate::linear::PlaneKind;
+use crate::linear::{Formulation, PlaneKind};
 use crate::mesh2::{Mesh2, quad_points, shapes_at};
 use crate::plastic3::{
     IncrementRecord, IncrementSettings, SmallStrainLawField, SmallStrainTetError,
@@ -80,6 +92,9 @@ pub struct SmallStrainPlaneProblem<'a, L: SmallStrainLaw> {
     pub laws: SmallStrainLawField<'a, L>,
     /// Zero transverse strain or zero transverse stress.
     pub plane: PlaneKind,
+    /// Standard displacement, or full 3-D volumetric B-bar projection for
+    /// Q1 plane strain. B-bar plane stress and P1 triangles are refused.
+    pub formulation: Formulation,
     /// Positive reference thickness in metres, including plane-strain slices.
     pub thickness_m: f64,
     /// Full tensor strain admission and plane-stress local-solve controls.
@@ -105,7 +120,9 @@ pub struct SmallStrainPlaneProblem<'a, L: SmallStrainLaw> {
 pub struct SmallStrainPlaneSolution<S> {
     /// Nodal displacement in metres.
     pub displacement_m: Vec<[f64; 2]>,
-    /// Committed full strain/history, element-major and then `quad_points` order.
+    /// Committed full material strain/history, element-major and then
+    /// `quad_points` order. B-bar stores its projected assumed strain; the
+    /// underlying compatible plane-strain displacement still has epsilon_zz=0.
     pub quadrature_states: Vec<ReducedState<S>>,
     /// Full endpoint stresses [Pa] from the same frozen-history update.
     pub quadrature_stress_pa: Vec<Voigt>,
@@ -169,12 +186,24 @@ fn tensor_norm(strain: &Voigt) -> f64 {
     norm(strain.iter().copied().chain(strain[3..].iter().copied()))
 }
 const IN_PLANE: [usize; 3] = [0, 1, 3];
-const WEIGHT: [f64; 3] = [1.0, 1.0, 2.0];
+const WEIGHT: [f64; 4] = [1.0, 1.0, 1.0, 2.0];
 
 #[derive(Debug)]
 struct Point {
+    /// Original compatible [xx, yy, xy] columns, also used for rotation admission.
     columns: [[f64; 3]; 8],
+    /// One third of (mean divergence - local divergence), per nodal DOF.
+    volumetric_correction: [f64; 8],
     volume: f64,
+}
+impl Point {
+    fn assumed_columns(&self) -> [[f64; 4]; 8] {
+        std::array::from_fn(|i| {
+            let b = self.columns[i];
+            let correction = self.volumetric_correction[i];
+            [b[0] + correction, b[1] + correction, correction, b[2]]
+        })
+    }
 }
 #[derive(Debug)]
 struct Element {
@@ -185,7 +214,7 @@ struct Element {
 struct Trial<S> {
     states: Vec<ReducedState<S>>,
     stress: Vec<Voigt>,
-    tangent: Vec<[[f64; 3]; 3]>,
+    tangent: Vec<[[f64; 4]; 4]>,
     force: Vec<f64>,
     force_scale: f64,
 }
@@ -221,6 +250,11 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
             && laws.len() != ne
         {
             return Err(invalid("material count must equal the element count"));
+        }
+        if self.formulation == Formulation::BBar
+            && (self.plane != PlaneKind::Strain || self.mesh.elems.iter().any(|e| e.len() != 4))
+        {
+            return Err(invalid("B-bar requires Q1 quadrilaterals in plane strain"));
         }
         // Validate the shared controls once, even when no transverse solve is needed.
         PlaneStressReduction::new(self.law(0), self.reduction)
@@ -289,11 +323,6 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
         let mut elements = Vec::with_capacity(ne);
         for (e, conn) in self.mesh.elems.iter().enumerate() {
             checkpoint(cx)?;
-            if !self.law(e).admissibility().tangent_symmetric {
-                return Err(invalid(
-                    "the shared symmetric solver requires an associative symmetric tangent",
-                ));
-            }
             let mut nodes = [0; 4];
             nodes[..conn.len()].copy_from_slice(conn);
             // The original geometry owner receives translated coordinates to
@@ -340,7 +369,35 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                     columns[2 * a] = [g[0], 0.0, 0.5 * g[1]];
                     columns[2 * a + 1] = [0.0, g[1], 0.5 * g[0]];
                 }
-                points.push(Point { columns, volume });
+                points.push(Point {
+                    columns,
+                    volumetric_correction: [0.0; 8],
+                    volume,
+                });
+            }
+            if self.formulation == Formulation::BBar {
+                let volume: f64 = points.iter().map(|p| p.volume).sum();
+                if !volume.is_finite() || volume <= 0.0 {
+                    return Err(invalid(format!("element {e} has invalid B-bar volume")));
+                }
+                let mut mean = [0.0; 8];
+                for point in &points {
+                    let fraction = point.volume / volume;
+                    for (d, value) in mean.iter_mut().enumerate() {
+                        *value =
+                            fraction.mul_add(point.columns[d][0] + point.columns[d][1], *value);
+                    }
+                }
+                for point in &mut points {
+                    for (d, value) in point.volumetric_correction.iter_mut().enumerate() {
+                        *value = (mean[d] - (point.columns[d][0] + point.columns[d][1])) / 3.0;
+                    }
+                    if point.volumetric_correction.iter().any(|v| !v.is_finite()) {
+                        return Err(invalid(format!(
+                            "element {e} has nonfinite B-bar gradients"
+                        )));
+                    }
+                }
             }
             elements.push(Element {
                 nodes,
@@ -431,16 +488,43 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                                 point: q,
                                 source,
                             })?;
-                        (response.state, response.full_stress_pa, response.tangent_pa)
+                        let mut tangent = [[0.0; 4]; 4];
+                        for (a, &i) in IN_PLANE.iter().enumerate() {
+                            for (b, &j) in IN_PLANE.iter().enumerate() {
+                                tangent[i][j] = response.tangent_pa[a][b];
+                            }
+                        }
+                        (response.state, response.full_stress_pa, tangent)
                     }
                     PlaneKind::Strain => {
-                        let full = [strain[0], strain[1], 0.0, strain[2], 0.0, 0.0];
+                        let mut full = [strain[0], strain[1], 0.0, strain[2], 0.0, 0.0];
                         if !tensor_norm(&full).is_finite()
                             || tensor_norm(&full) > self.reduction.strain_limit
                         {
                             return Err(invalid(format!(
                                 "element {e} point {q} exceeds the small-strain domain"
                             )));
+                        }
+                        if self.formulation == Formulation::BBar {
+                            let mut correction = 0.0;
+                            for a in 1..element.count {
+                                for c in 0..2 {
+                                    let du =
+                                        u[2 * element.nodes[a] + c] - u[2 * element.nodes[0] + c];
+                                    correction = point.volumetric_correction[2 * a + c]
+                                        .mul_add(du, correction);
+                                }
+                            }
+                            for value in &mut full[..3] {
+                                *value += correction;
+                            }
+                            if !tensor_norm(&full).is_finite()
+                                || tensor_norm(&full) > self.reduction.strain_limit
+                            {
+                                return Err(invalid(format!(
+                                    "element {e} point {q} projected strain exceeds the domain"
+                                )));
+                            }
                         }
                         let stress = law.stress(&full, &incoming.history);
                         let tangent = law.tangent(&full, &incoming.history);
@@ -455,7 +539,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                                 history: law.update_state(&full, &incoming.history),
                             },
                             stress,
-                            IN_PLANE.map(|i| IN_PLANE.map(|j| tangent[i][j])),
+                            std::array::from_fn(|i| std::array::from_fn(|j| tangent[i][j])),
                         )
                     }
                 };
@@ -466,14 +550,20 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                         "element {e} point {q} has a nonfinite constitutive response"
                     )));
                 }
-                let stress_norm = norm([stress[0], stress[1], stress[3], stress[3]]);
+                let stress_norm = if self.formulation == Formulation::BBar {
+                    norm([stress[0], stress[1], stress[2], stress[3], stress[3]])
+                } else {
+                    norm([stress[0], stress[1], stress[3], stress[3]])
+                };
+                let columns = point.assumed_columns();
                 for a in 0..2 * element.count {
                     let dof = 2 * element.nodes[a / 2] + a % 2;
-                    let b = point.columns[a];
-                    let work: f64 = (0..3).map(|i| WEIGHT[i] * b[i] * stress[IN_PLANE[i]]).sum();
+                    let b = columns[a];
+                    let work: f64 = (0..4).map(|i| WEIGHT[i] * b[i] * stress[i]).sum();
                     trial.force[dof] = point.volume.mul_add(work, trial.force[dof]);
                     if !fixed[dof] {
-                        bounds[dof] += point.volume * norm([b[0], b[1], b[2], b[2]]) * stress_norm;
+                        bounds[dof] +=
+                            point.volume * norm([b[0], b[1], b[2], b[3], b[3]]) * stress_norm;
                     }
                 }
                 trial.states.push(next);
@@ -505,14 +595,13 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                 index += 1;
                 // Reuse C B for every test column and accumulate quadrature
                 // locally: at most one 8-by-8 matrix enters the sparse COO.
-                let cb = point.columns.map(|b| {
-                    std::array::from_fn::<_, 3, _>(|i| (0..3).map(|j| c[i][j] * b[j]).sum::<f64>())
+                let columns = point.assumed_columns();
+                let cb = columns.map(|b| {
+                    std::array::from_fn::<_, 4, _>(|i| (0..4).map(|j| c[i][j] * b[j]).sum::<f64>())
                 });
                 for (p, row) in stiffness.iter_mut().enumerate().take(2 * element.count) {
                     for (q, entry) in row.iter_mut().enumerate().take(2 * element.count) {
-                        let work: f64 = (0..3)
-                            .map(|i| WEIGHT[i] * point.columns[p][i] * cb[q][i])
-                            .sum();
+                        let work: f64 = (0..4).map(|i| WEIGHT[i] * columns[p][i] * cb[q][i]).sum();
                         *entry = point.volume.mul_add(work, *entry);
                     }
                 }
@@ -544,7 +633,8 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
 
     /// Continue with absolute load factors from supplied committed history.
     /// The inputs are borrowed and remain unchanged on success or refusal.
-    /// Integration-point ordering must match this mesh and plane reduction.
+    /// Integration-point ordering must match this mesh, plane reduction and
+    /// formulation; histories are not transferred between discretizations.
     pub fn solve_from(
         &self,
         displacement_m: &[f64],
@@ -605,6 +695,7 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
         cx: &Cx<'_>,
     ) -> Result<SmallStrainPlaneSolution<L::State>, SmallStrainPlaneError> {
         let elements = self.prepare(cx)?;
+        let symmetric = (0..elements.len()).all(|e| self.law(e).admissibility().tangent_symmetric);
         let n = 2 * self.mesh.nodes.len();
         let mut fixed = vec![false; n];
         for &(d, _) in self.prescribed_m {
@@ -701,12 +792,18 @@ impl<L: SmallStrainLaw> SmallStrainPlaneProblem<'_, L> {
                         }
                     }
                 }
-                let (direction, fallback) =
-                    solve_increment_linear(&coo.assemble(), &rhs, increment, self.settings)
-                        .map_err(|source| SmallStrainPlaneError::LinearSolveFailed {
-                            increment,
-                            source,
-                        })?;
+                let (direction, fallback) = solve_increment_linear(
+                    &coo.assemble(),
+                    &rhs,
+                    increment,
+                    self.settings,
+                    symmetric,
+                    cx,
+                )
+                .map_err(|source| match source {
+                    SmallStrainTetError::Cancelled => SmallStrainPlaneError::Cancelled,
+                    source => SmallStrainPlaneError::LinearSolveFailed { increment, source },
+                })?;
                 fallbacks += usize::from(fallback);
                 let mut alpha = 1.0_f64;
                 let mut accepted = None;
