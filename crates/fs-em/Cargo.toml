@@ -10,7 +10,11 @@ description = "Material-resolved planar magnetostatics on the shared FEEC and so
 [package.metadata.frankensim]
 layer = "L3"
 
+[features]
+plane-wave = ["dep:fs-math"]
+
 [dependencies]
+fs-math = { path = "../fs-math", optional = true }
 fs-feec = { path = "../fs-feec" }
 fs-ga = { path = "../fs-ga" }
 fs-la = { path = "../fs-la" }

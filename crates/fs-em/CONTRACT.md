@@ -1523,3 +1523,29 @@ voltage and current control, surface-source changes, both polarities, local and
 total heat, and missing/replaced-source refusal. Interfaces remain stationary,
 Ohmic at each supplied context and without storage; nonlinear or hysteretic
 contact laws require their own physical state and closure.
+
+## Exact planar dielectric reflection
+
+The opt-in `plane-wave` feature exposes
+`plane_wave::PlanarDielectricInterface`, an exact monochromatic boundary solve
+for two homogeneous isotropic half-spaces. It retains both original material
+states. Incident epsilon and both permeabilities use the existing lossless
+field-storage admission. Transmitted epsilon is either the explicitly chosen
+nondispersive law or the original `ResolvedDebyeCapacitor` response, converted
+from terminal admittance to bulk permittivity without a second Debye law.
+
+The convention is exp(+i omega t), with a forward transmitted wave
+exp(-i k_z z) and Im(k_z) <= 0. TE and TM amplitudes refer to the same
+tangential electric-field axis on both sides. The TM coefficient therefore
+differs in sign from a rotating optical p-polarization basis. Returned power
+fractions are normal Poynting fluxes; transmitted power is evaluated at the
+interface, before subsequent absorption in the half-space. Total internal
+reflection retains its complex phase and evanescent field. The exact critical
+angle avoids division by vanishing normal wavenumber.
+
+Synthetic source-bound tests cover normal incidence, magnetic impedance,
+Brewster cancellation, independent Poynting balance, total internal reflection,
+critical incidence, grazing transparency, Debye phase and capacitor-geometry
+invariance, retained source identity and explicit refusals. This is not a mesh
+Maxwell solver, transient wave model, layered-medium solver, or experimental
+qualification of an otherwise static material at an optical frequency.

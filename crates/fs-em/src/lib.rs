@@ -55,6 +55,9 @@ pub mod conduction;
 pub mod electrostatic;
 pub mod force;
 pub mod planar;
+/// Exact source-bound planar dielectric scattering, separate from MQS fields.
+#[cfg(feature = "plane-wave")]
+pub mod plane_wave;
 /// Three-dimensional current-free fields with sourced linear/recoil materials.
 pub mod spatial;
 pub mod transfer;
