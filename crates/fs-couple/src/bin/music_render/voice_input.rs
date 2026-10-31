@@ -89,6 +89,7 @@ pub(super) fn run_with_gas_sources(
          \"microphone_m\":[{:e},{:e},{:e}],\"mouth_flow_taps\":{},\"mouth_flow_rungs\":{},\
          \"passive_tract_formants_hz\":{passive},\
          \"peak_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},\
          \"model_scope\":\"lumped fold pHS on a plane-wave series tract with TMM viscothermal loss and a declared radiation load; mouth flow radiated through an infinite-baffle circular opening, no head diffraction, nasal branch or side cavity; the supraglottal pressure is never the output\"}}{gas_sources}}}",
         description.full_scale_pa, rendered.clipped, rendered.peak_pa, rendered.rms_pa,
         info.mechanics_rate_hz, info.two_mass, info.sections, info.tract_length_m,
@@ -96,6 +97,7 @@ pub(super) fn run_with_gas_sources(
         info.has_wall, json_string(&description.tract_source), json_string(&description.tract_licence),
         mic[0], mic[1], mic[2], info.mouth_flow_taps, info.mouth_flow_rungs,
         stats.peak_glottal_flow_m3_s, stats.closed_fraction,
+        stats.max_force_passes, stats.mean_force_passes,
     );
     writeln!(metadata, "{provenance}").and_then(|_| metadata.flush())
         .map_err(|e| format!("sidecar write failed: {e}"))?;
@@ -103,9 +105,11 @@ pub(super) fn run_with_gas_sources(
         "{{\"suite\":\"music-render\",\"verdict\":\"rendered\",\"fixture\":\"voice-input\",\
          \"wav\":{},\"samples\":{samples},\"clipped\":{},\"peak_pa\":{:e},\"rms_pa\":{:e},\
          \"peak_glottal_flow_m3_s\":{:e},\"closed_fraction\":{:e},\
+         \"max_force_passes\":{},\"mean_force_passes\":{:e},\
          \"wav_blake3\":\"{wav_hash}\",\"input_blake3\":\"{input_hash}\"}}",
         json_string(&output.display().to_string()), rendered.clipped, rendered.peak_pa,
         rendered.rms_pa, stats.peak_glottal_flow_m3_s, stats.closed_fraction,
+        stats.max_force_passes, stats.mean_force_passes,
     );
     Ok(())
 }

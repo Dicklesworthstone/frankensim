@@ -225,6 +225,7 @@ fn voice_source(gas: &str) -> String {
     let mut text = format!("frankensim-voice-performance-v1\n\
         audio 48000 1200 2\nfull_scale_pa 2\nambient {gas}\n\
         fold two_mass 1.25e-4 2.5e-5 128 12.8 40 0.1 3.57e-4 1.4e-2 2.5e-3\n\
+        fold_damping_upper 0.6\n\
         termination flanged\ntract_source test-fixture\ntract_licence test fixture, not data\n\
         microphone 0 0 0.3 4 16 4000\nsubglottal 0 0\nsubglottal 0.02 900\n");
     for area in [0.5e-4, 0.6e-4, 1.5e-4, 2.5e-4, 3.0e-4, 3.0e-4, 2.5e-4, 2.0e-4] {

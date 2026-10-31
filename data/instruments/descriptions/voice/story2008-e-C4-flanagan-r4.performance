@@ -13,14 +13,20 @@
 # FOLD: lower/upper mass 0.125 g / 0.025 g, k 80 / 8 N/m, coupling 25 N/m, fold length 1.4 cm, lower-mass
 #   thickness 0.25 cm: Ishizaka & Flanagan (1972) two-mass set in the Steinecke & Herzel (1995) form, as carried by
 #   the CC-BY model-card pack twomass-if72-standard-plos-pone0187486 (see crates/fs-couple/src/glottis.rs).
-#   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratio 0.1 is AUTHORED ESTIMATE
-#   (source would be tissue-loss measurements; Q1 sweeps it). Collision law and mucosal delay are fixed in glottis.rs.
+#   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratios 0.1 lower, 0.6 upper
+#   open: Ishizaka & Flanagan (1972) p. 1238, their typical condition, and the law adds 1.0 to each while its own section
+#   is shut (eq 3 and 4; per mass is the working reading, see glottis.rs). Collision law and mucosal delay are fixed in
+#   glottis.rs. RETRIM on this law: only q moved, pressure held, emergent f0 to within 3 cents of the note, no recording, q 2.0412 to 3.11785.
+#   Trace:
+#     q 2.0412: f0 221.40 Hz (-289.0 c) -> q 2.8503: f0 252.18 Hz (-63.7 c) -> q 3.13234: f0 262.12 Hz (+3.3 c) ->
+#     q 3.11785: f0 261.95 Hz (+2.1 c)
+#   Any other trace in this header is from an earlier law and ended at an earlier q.
 #   FLOW LAW: the kinetic (Bernoulli) drop plus a Poiseuille viscous drop 12 mu d l^2 U / a^3 per channel section (a = l h), d = 0.25 cm
 #   (lower) and 0.05 cm (upper), mu from the ambient gas: Ishizaka & Flanagan (1972); the section drops are printed as P12 and P21 in
 #   Assaneo & Trevisan, arXiv:1312.2950, which also gives the 0.05 cm. The 0.05 cm is the card default (an optional eleventh `fold`
 #   field would override it). Without the viscous term the flow has a corner at closure and the radiated harmonics fall at only
 #   6 dB/octave. Forces on the masses keep the Steinecke-Herzel form (a stated simplification). Added in glottis.rs e2dd8616d.
-#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 2.0412. q was found by
+#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 3.11785. q was found by
 #   rendering and measuring the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, then
 #   re-measured on the full 3 s render) and iterating q until it was
 #   within 3 cents of the target note C4 = 261.63 Hz (equal temperament, A4 = 440 Hz). No recording enters. Trace on the
@@ -34,7 +40,7 @@
 #   sharp: the pair oscillates nearer its second eigenmode (200.5 Hz at q = 1, pack values) than its in-phase mode (120.4 Hz).
 #   Eigenmodes from det(K - w^2 M) = 0 with the pack masses, stiffnesses and coupling; tract loading then moves f0 by a
 #   vowel-dependent amount, which is why q differs between vowels at the same note.
-# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q: the drive rule of the in-repo vowel gate,
+# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 1837.08 Pa: 900 Pa x the q 2.0412 of the previous trim, held when q moved on this law, so no longer 900 Pa x the q above: the drive rule of the in-repo vowel gate,
 #   tests/vowel_gates.rs vw-002, which scales the drive with the stiffness. UNKNOWN for the recorded speaker: Story (2008) reports none; a measured source
 #   would be Holmberg, Hillman & Perkell (1988) subglottal pressures. Q1 sweeps it (voice_q1_subglottal_pressure_metamorphic).
 #   Ramp 0 -> P over 150 ms, hold, ramp to 0 over the last 150 ms. The 150 ms RISE is cited: Fant and Kruckenberg 2005,
@@ -57,8 +63,8 @@
 # MICROPHONE: 0.30 m from the mouth at 45 degrees off axis (x = z = 0.30 sin 45 deg), the geometry of the paper's
 #   recordings (AKG CK92 at 30 cm, 45 degrees off axis). Infinite baffle: no head diffraction. 16 rings x 64 points,
 #   8 kHz resolved band (quadrature admission: 2 pi f cell / c <= pi/4).
-# LEVEL: full_scale_pa 4.0 Pa (106 dB SPL peak at the PCM ceiling) is a recording-level choice, the same for
-#   every description so vowel levels compare; the loudest render (a-D4) peaks near 3.2 Pa. Output is never normalized.
+# LEVEL: full_scale_pa 8.0 Pa (112 dB SPL peak at the PCM ceiling) is a recording-level choice, the same for
+#   every description so vowel levels compare; the loudest render (a-D4) peaks at 4.89 Pa. Output is never normalized.
 # MECHANICS: 192 kHz physical clock (4 per output sample), read through the bandlimited differentiating receiver. The 96 kHz twin
 #   story2008-e-C4-flanagan is the same description at half this clock. The fold-contact dynamics are under-resolved at 96 kHz:
 #   with an ideal-open mouth and the earlier Bernoulli-only flow law the /a/ C4 non-harmonic floor fell with the clock and was converged by
@@ -71,9 +77,10 @@
 #   not for the grade. f0 261.200 Hz (-2.8 c of the note), so the pitch trim of the 96 kHz file still holds within 3 cents and was NOT redone.
 frankensim-voice-performance-v1
 audio 48000 144000 4
-full_scale_pa 4.0
+full_scale_pa 8.0
 ambient moist_air 310.15 101325 1.0
-fold two_mass 0.000125 2.5e-05 163.296 16.3296 51.0299 0.1 3.57e-4 1.4e-2 2.5e-3
+fold two_mass 0.000125 2.5e-05 249.428 24.9428 77.9463 0.1 3.57e-4 1.4e-2 2.5e-3
+fold_damping_upper 0.6
 termination flanged
 tract_wall 15 1.48e+06 1.6e4
 tract_source story-2008-jasa-123-327-table-I-e

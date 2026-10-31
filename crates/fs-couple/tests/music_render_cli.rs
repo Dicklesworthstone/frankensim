@@ -68,6 +68,7 @@ fn lip_and_voice_commands_resolve_the_shared_gas_registry_and_preserve_source_re
         audio 48000 2400 2\nfull_scale_pa 2\n\
         ambient thermochemical 310.15 101325 mole 1 specimen-gas 1\n\
         fold two_mass 1.25e-4 2.5e-5 128 12.8 40 0.1 3.57e-4 1.4e-2 2.5e-3\n\
+        fold_damping_upper 0.6\n\
         termination flanged\ntract_source test-fixture\ntract_licence test fixture, not data\n\
         microphone 0 0 0.3 4 16 4000\nsubglottal 0 0\nsubglottal 0.02 900\n\
         section 5e-5 0.02\nsection 6e-5 0.02\nsection 1.5e-4 0.02\nsection 2.5e-4 0.02\n\

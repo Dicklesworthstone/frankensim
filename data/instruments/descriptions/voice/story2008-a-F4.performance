@@ -13,9 +13,15 @@
 # FOLD: lower/upper mass 0.125 g / 0.025 g, k 80 / 8 N/m, coupling 25 N/m, fold length 1.4 cm, lower-mass
 #   thickness 0.25 cm: Ishizaka & Flanagan (1972) two-mass set in the Steinecke & Herzel (1995) form, as carried by
 #   the CC-BY model-card pack twomass-if72-standard-plos-pone0187486 (see crates/fs-couple/src/glottis.rs).
-#   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratio 0.1 is AUTHORED ESTIMATE
-#   (source would be tissue-loss measurements; Q1 sweeps it). Collision law and mucosal delay are fixed in glottis.rs.
-#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 3.42775. q was found by
+#   Rest half-gap 3.57e-4 m = Steinecke-Herzel rest area 0.05 cm^2 / 1.4 cm. Damping ratios 0.1 lower, 0.6 upper
+#   open: Ishizaka & Flanagan (1972) p. 1238, their typical condition, and the law adds 1.0 to each while its own section
+#   is shut (eq 3 and 4; per mass is the working reading, see glottis.rs). Collision law and mucosal delay are fixed in
+#   glottis.rs. RETRIM on this law: only q moved, pressure held, emergent f0 to within 3 cents of the note, no recording, q 3.42775 to 6.01333.
+#   Trace:
+#     q 3.42775: f0 276.66 Hz (-403.3 c) -> q 5.46188: f0 336.24 Hz (-65.6 c) -> q 5.97919: f0 348.45 Hz (-3.9 c) ->
+#     q 6.01333: f0 349.09 Hz (-0.7 c)
+#   Any other trace in this header is from an earlier law and ended at an earlier q.
+#   PITCH CONTROL (model-only objective): the three fold stiffnesses are the pack values x q = 6.01333. q was found by
 #   rendering and measuring the EMERGENT f0 of the radiated pressure (autocorrelation over 0.5-1.5 s of a 1.5 s trial render, then
 #   re-measured on the full 3 s render) and iterating q until it was
 #   within 10 cents of the target note F4 = 349.23 Hz (equal temperament, A4 = 440 Hz). No recording enters. Trace on the
@@ -28,7 +34,7 @@
 #   F4 CAVEAT: q sits within about 1% of a period-doubling boundary of the fold pair. In the trace a nearby q (3.40103) phonated
 #   at HALF the target (174.57 Hz, period 2). The chosen point is the closest one that kept the target regime. /i/ and /u/
 #   found no stable F4 inside a sane stiffness range (/u/ only near q = 19.5, 19x the pack) and are not provided.
-# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 900 Pa x q: the drive rule of the in-repo vowel gate,
+# SUBGLOTTAL PRESSURE: AUTHORED PLAYER INPUT, 3084.97 Pa: 900 Pa x the q 3.42775 of the previous trim, held when q moved on this law, so no longer 900 Pa x the q above: the drive rule of the in-repo vowel gate,
 #   tests/vowel_gates.rs vw-002, which scales the drive with the stiffness. UNKNOWN for the recorded speaker: Story (2008) reports none; a measured source
 #   would be Holmberg, Hillman & Perkell (1988) subglottal pressures. Q1 sweeps it (voice_q1_subglottal_pressure_metamorphic).
 #   Ramp 0 -> P over 60 ms, hold, ramp to 0 over the last 150 ms.
@@ -41,13 +47,14 @@
 #   recordings (AKG CK92 at 30 cm, 45 degrees off axis). Infinite baffle: no head diffraction. 16 rings x 64 points,
 #   8 kHz resolved band (quadrature admission: 2 pi f cell / c <= pi/4).
 # LEVEL: full_scale_pa 8.0 Pa (112 dB SPL peak at the PCM ceiling) is a recording-level choice, the same for
-#   every description so vowel levels compare; the loudest render (a-D4) peaks near 3.2 Pa. Output is never normalized.
+#   every description so vowel levels compare; the loudest render (a-D4) peaks at 4.89 Pa. Output is never normalized.
 # MECHANICS: 96 kHz physical clock (2 per output sample), read through the bandlimited differentiating receiver.
 frankensim-voice-performance-v1
 audio 48000 144000 2
 full_scale_pa 8.0
 ambient moist_air 310.15 101325 1.0
-fold two_mass 0.000125 2.5e-05 274.22 27.422 85.6938 0.1 3.57e-4 1.4e-2 2.5e-3
+fold two_mass 0.000125 2.5e-05 481.066 48.1066 150.333 0.1 3.57e-4 1.4e-2 2.5e-3
+fold_damping_upper 0.6
 termination flanged
 tract_source story-2008-jasa-123-327-table-I-a
 tract_licence published measurements transcribed with citation (Story 2008 Table I); redistribution terms unconfirmed, owner to decide

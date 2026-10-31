@@ -21,7 +21,8 @@
 //!
 //! The rendered direction is asserted. The amount is printed against the c
 //! ratio with no pass band: source-resonator pulling sets it, and its bound is
-//! research-grade.
+//! research-grade. The voice is the exception: its formants are read from the
+//! render and held to the c ratio, with the bound argued at the measure.
 use fs_couple::brass_loop::performance::LipDescription;
 use fs_couple::flue_loop::network::performance::file::FlueFilePerformance;
 use fs_couple::pcm_wav::observation::PressureRenderer;
@@ -158,8 +159,9 @@ fn the_tract_resonances_follow_the_declared_gas_by_its_sound_speed() {
 }
 
 
-/// Amplitude-weighted mean frequency of the harmonics of f0 up to 5 kHz: the
-/// formant region's position in the radiated sound.
+/// Amplitude-weighted mean frequency of the harmonics of f0 up to 5 kHz. It
+/// weighs a band fixed in Hz, so it is not the formants' position: a tract that
+/// scales with c brings more formants inside the same 5 kHz.
 fn harmonic_centroid(signal: &[f64], rate: f64, f0: f64) -> f64 {
     let (mut weighted, mut total) = (0.0, 0.0);
     let mut k = 1.0;
@@ -176,38 +178,178 @@ fn harmonic_centroid(signal: &[f64], rate: f64, f0: f64) -> f64 {
     weighted / total
 }
 
-fn render_voice(record: &str) -> Result<Vec<f64>, String> {
+/// Hann frame of the voice's spectrum: 10 ms, too short to resolve harmonics
+/// near 100 Hz, so the spectrum does not depend on where they fall.
+const SPECTRUM_FRAME_S: f64 = 0.01;
+/// Spacing of the spectrum, well inside the frame's 200 Hz half main lobe.
+const SPECTRUM_STEP_HZ: f64 = 25.0;
+/// Top of the spectrum: 4.5 kHz, the band's top, at the largest scale tried.
+const SPECTRUM_TOP_HZ: f64 = 9000.0;
+
+/// Log amplitude spectrum, frames overlapped by half and averaged in power.
+fn log_spectrum(signal: &[f64], rate: f64) -> Vec<f64> {
+    let n = (SPECTRUM_FRAME_S * rate).round() as usize;
+    let window: Vec<f64> = (0..n)
+        .map(|i| 0.5 - 0.5 * (TAU * i as f64 / (n - 1) as f64).cos())
+        .collect();
+    let bins = (SPECTRUM_TOP_HZ / SPECTRUM_STEP_HZ) as usize + 1;
+    (0..bins)
+        .map(|bin| {
+            let w = TAU * bin as f64 * SPECTRUM_STEP_HZ / rate;
+            let (cos, sin): (Vec<f64>, Vec<f64>) = window
+                .iter()
+                .enumerate()
+                .map(|(i, h)| (h * (w * i as f64).cos(), h * (w * i as f64).sin()))
+                .unzip();
+            let (mut power, mut frames) = (0.0, 0.0);
+            for start in (0..=signal.len() - n).step_by(n / 2) {
+                let frame = &signal[start..start + n];
+                let re: f64 = frame.iter().zip(&cos).map(|(x, c)| x * c).sum();
+                let im: f64 = frame.iter().zip(&sin).map(|(x, s)| x * s).sum();
+                power += re * re + im * im;
+                frames += 1.0;
+            }
+            0.5 * (power / frames).ln()
+        })
+        .collect()
+}
+
+/// `spectrum` at `f` Hz, linear between its points.
+fn spectrum_at(spectrum: &[f64], f: f64) -> f64 {
+    let at = f / SPECTRUM_STEP_HZ;
+    let low = (at as usize).min(spectrum.len() - 2);
+    spectrum[low] + (at - low as f64) * (spectrum[low + 1] - spectrum[low])
+}
+
+/// The one frequency scale that best lays the gas's spectrum on the air's: the
+/// gas at `scale f` against the air at f, 300-4500 Hz of air, which holds this
+/// tract's F1 to F4, scanned from 0.5 to 2 in steps of 0.1 %. Mean and slope
+/// against ln f are removed first, because a source's tilt is not a resonance.
+/// F1 to F4 are read together because a peak picker merges F1 and F2 here.
+fn spectral_scale(air: &[f64], gas: &[f64]) -> f64 {
+    const POINTS: usize = 500;
+    const STEPS: usize = 1386;
+    let (low, high) = (300.0_f64.ln(), 4500.0_f64.ln());
+    let log_f: Vec<f64> = (0..POINTS)
+        .map(|i| low + (high - low) * i as f64 / (POINTS - 1) as f64)
+        .collect();
+    let x_mean = log_f.iter().sum::<f64>() / POINTS as f64;
+    let shape = |spectrum: &[f64], scale: f64| -> Vec<f64> {
+        let y: Vec<f64> = log_f
+            .iter()
+            .map(|x| spectrum_at(spectrum, scale * x.exp()))
+            .collect();
+        let y_mean = y.iter().sum::<f64>() / POINTS as f64;
+        let slope = log_f
+            .iter()
+            .zip(&y)
+            .map(|(x, y)| (x - x_mean) * (y - y_mean))
+            .sum::<f64>()
+            / log_f.iter().map(|x| (x - x_mean).powi(2)).sum::<f64>();
+        log_f
+            .iter()
+            .zip(&y)
+            .map(|(x, y)| y - y_mean - slope * (x - x_mean))
+            .collect()
+    };
+    let reference = shape(air, 1.0);
+    let correlation = |scale: f64| {
+        let trial = shape(gas, scale);
+        reference
+            .iter()
+            .zip(&trial)
+            .map(|(a, b)| a * b)
+            .sum::<f64>()
+            / (reference.iter().map(|a| a * a).sum::<f64>()
+                * trial.iter().map(|b| b * b).sum::<f64>())
+            .sqrt()
+    };
+    (0..=STEPS)
+        .map(|i| 0.5 * 4.0_f64.powf(i as f64 / STEPS as f64))
+        .map(|scale| (correlation(scale), scale))
+        .max_by(|p, q| p.0.total_cmp(&q.0))
+        .unwrap()
+        .1
+}
+
+/// The pressure, and the passive formants of the tract it was rendered through.
+fn render_voice(record: &str) -> Result<(Vec<f64>, Vec<f64>), String> {
     // The shipped description, 0.75 s instead of 3 s; the same ramp to the same
     // drive, held, then released.
     let text = FIXTURE.replace(VOICE_AIR, record).replace("audio 48000 144000 2", "audio 48000 36000 2")
         .replace("subglottal 2.85 411.859\nsubglottal 3 0", "subglottal 0.7 411.859\nsubglottal 0.75 0");
     assert!(text.contains("subglottal 0.7 411.859\n"));
     let mut voice = VoiceDescription::from_bytes(text.as_bytes())?.build()?;
+    let formants = voice.info().passive_formants_hz.clone()?;
     let mut pressure = vec![0.0; 36_000];
     for block in pressure.chunks_mut(480) { voice.block(block).map_err(|e| format!("{e:?}"))?; }
-    Ok(pressure)
+    Ok((pressure, formants))
 }
 
 #[test]
 fn the_rendered_voice_moves_its_formant_region_with_the_gas_while_the_folds_keep_f0() {
+    // Position asserted against the c ratio of the card's own gases. The bound
+    // comes from the sampling, not from any render: a voice's spectrum exists
+    // only at its harmonics, so no reading places a resonance closer than half
+    // the harmonic spacing, f0 / 2F in each gas. One scale fitted to four
+    // resonances takes the mean of that over F1 to F4. That is the argued size
+    // of the error, not a theorem about the fit. Source-tract pulling is inside
+    // it or the test fails. The gas's F are the air's at the c ratio, because
+    // the passive list for a fast gas stops short of F4 (heliox lists two).
+    let rate = 48_000.0;
+    let steady = 14_400..31_200; // 0.30-0.65 s
+    let (air, formants_air) = render_voice(VOICE_AIR).unwrap();
+    let f0_air = f0(&air[steady.clone()], rate, 400.0);
+    let spectrum_air = log_spectrum(&air[steady.clone()], rate);
+    let c_air = voice(VOICE_AIR, "flanged").ambient_gas().sound_speed;
+    for (name, record, up) in [("heliox", VOICE_HELIOX, true), ("co2", VOICE_CO2, false)] {
+        let (pressure, _) = render_voice(record).unwrap_or_else(|e| panic!("{name}: the voice render refused the gas: {e}"));
+        let f0_gas = f0(&pressure[steady.clone()], rate, 400.0);
+        let c_ratio = voice(record, "flanged").ambient_gas().sound_speed / c_air;
+        assert!(formants_air.len() >= 4, "{formants_air:?}");
+        let spacing = formants_air[..4]
+            .iter()
+            .map(|f| (f0_gas / c_ratio + f0_air) / (2.0 * f))
+            .sum::<f64>()
+            / 4.0;
+        let scale = spectral_scale(
+            &spectrum_air,
+            &log_spectrum(&pressure[steady.clone()], rate),
+        );
+        println!(
+            "{{\"suite\":\"fs-couple\",\"case\":\"voice-rendered-position\",\"gas\":\"{name}\",\"f0_air_hz\":{f0_air:.2},\"f0_gas_hz\":{f0_gas:.2},\"scale\":{scale:.4},\"c_ratio\":{c_ratio:.4},\"bound\":{spacing:.4}}}"
+        );
+        assert_eq!(scale > 1.0, up, "{name}: formants scaled by {scale}");
+        assert!(
+            (scale / c_ratio - 1.0).abs() <= spacing,
+            "{name}: formants scaled by {scale} against c ratio {c_ratio}, bound {spacing}"
+        );
+        assert!((f0_gas / f0_air - 1.0).abs() <= F0_TOLERANCE, "{name}: f0 {f0_gas} Hz against {f0_air} Hz");
+    }
+}
+
+#[test]
+#[ignore = "CO2 reads 1.0552 of air, 927.5 against 879.0 Hz, and the test wants it lower; 1.0402 before the fixture's trim; ruling 10298: the wrong measure for position; bead frankensim-irp-v5-instrument-realism-pexfp.325.2"]
+fn the_rendered_voice_centroid_to_5_khz_moves_with_the_gas() {
     // Direction asserted; amount printed against the c ratio, with no pass
     // band: how far the sound's formant region moves is set by source-tract
     // pulling, whose bound is research-grade (ruling 6349).
+    // The reading above is on the trimmed fixture, q 0.90736. Before that trim,
+    // at q 0.45762, the same assertion read 1.0402.
     let rate = 48_000.0;
     let steady = 14_400..31_200; // 0.30-0.65 s
-    let air = render_voice(VOICE_AIR).unwrap();
+    let (air, _) = render_voice(VOICE_AIR).unwrap();
     let f0_air = f0(&air[steady.clone()], rate, 400.0);
     let centroid_air = harmonic_centroid(&air[steady.clone()], rate, f0_air);
     let c_air = voice(VOICE_AIR, "flanged").ambient_gas().sound_speed;
     for (name, record, up) in [("heliox", VOICE_HELIOX, true), ("co2", VOICE_CO2, false)] {
-        let pressure = render_voice(record).unwrap_or_else(|e| panic!("{name}: the voice render refused the gas: {e}"));
+        let (pressure, _) = render_voice(record).unwrap_or_else(|e| panic!("{name}: the voice render refused the gas: {e}"));
         let f0_gas = f0(&pressure[steady.clone()], rate, 400.0);
         let centroid = harmonic_centroid(&pressure[steady.clone()], rate, f0_gas);
         let c_ratio = voice(record, "flanged").ambient_gas().sound_speed / c_air;
         println!("{{\"suite\":\"fs-couple\",\"case\":\"voice-rendered-direction\",\"gas\":\"{name}\",\"f0_air_hz\":{f0_air:.2},\"f0_gas_hz\":{f0_gas:.2},\"centroid_air_hz\":{centroid_air:.1},\"centroid_gas_hz\":{centroid:.1},\"centroid_ratio\":{:.4},\"c_ratio\":{c_ratio:.4},\"amount\":\"printed, no band\"}}",
             centroid / centroid_air);
         assert_eq!(centroid > centroid_air, up, "{name}: formant region {centroid} Hz against {centroid_air} Hz");
-        assert!((f0_gas / f0_air - 1.0).abs() <= F0_TOLERANCE, "{name}: f0 {f0_gas} Hz against {f0_air} Hz");
     }
 }
 

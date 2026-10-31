@@ -3593,8 +3593,8 @@ muscle; it is an **apparatus response** (properties end `_apparatus_effective`, 
 any of them. Every number comes from 1 Hz cyclic or quasi-static loading except the cover rheology; donors are mostly
 geriatric and cadaveric; test temperature is unstated in three of the four. No constitutive law family,
 no active stress of the muscle, no tongue and no fingertip value is admitted here: they are UNKNOWN. The
-fold model's per-mass damping ratio of 0.1 in `glottis.rs` has no counterpart in these packs (the cover
-loss factor is a different quantity).
+fold model's per-mass damping ratios in `glottis.rs`, Ishizaka and Flanagan's printed 0.1 and 0.6 open and 1.0
+more while shut, have no counterpart in these packs (the cover loss factor is a different quantity).
 
 ## Clear-wood thermal completion, October 2026
 
