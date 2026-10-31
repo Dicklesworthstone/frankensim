@@ -5,10 +5,15 @@
 
 use super::{ApertureObservation, NsfDgPerformance, RenderError, sizing};
 use crate::acoustic_realize::AcousticRealizeError;
-use crate::pcm_wav::baffled::gas::GasPropagationReport;
+use crate::dg_port::DgPortLoad;
+use crate::nsf_dg::NsfDgReservoirRadiation;
+use crate::pcm_wav::baffled::BaffledPressure;
+use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::baffled::tiles::{BaffledTilePressure, FlowSurfaceSample, TilePressureLimits};
+use fs_exec::CancelGate;
 use fs_lbm::lattice3::Lattice3;
-use fs_lbm::nsf3::NsfReservoirFlow;
+use fs_lbm::nsf3::{NsfGrid3, NsfReservoirFlow};
+use fs_material::gas::GasState;
 use fs_math::det;
 use std::collections::BTreeMap;
 
@@ -24,7 +29,7 @@ pub struct ReservoirObservation {
     pub angle_rad: f64,
 }
 
-pub(super) struct ReservoirPressure {
+pub(in crate::nsf_dg) struct ReservoirPressure {
     pub aperture: usize,
     pub input: ReservoirObservation,
     pub surface: Vec<FlowSurfaceSample>,
@@ -135,6 +140,164 @@ pub(super) fn admit_storage<'a>(
     Ok(())
 }
 
+impl ReservoirPressure {
+    /// The same original per-tile receiver preparation for either acoustic
+    /// assembly. The caller admits its own cold history and observation order.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::nsf_dg) fn prepare<L: Lattice3<27>>(
+        zone: &NsfGrid3<L>, reference: &GasState, load: &DgPortLoad,
+        observation: ApertureObservation, sample_rate_hz: u32,
+        aperture: usize, input: ReservoirObservation,
+        reaction: Option<&NsfDgReservoirRadiation>, existing: &[Self], gate: &CancelGate,
+    ) -> Result<Self, RenderError> {
+        if reaction.is_some_and(|reaction|
+            reaction.origin_m != input.origin_m || input.angle_rad != 0.0)
+        {
+            return Err(sizing(
+                "reservoir observation must retain the original joint radiation placement",
+            ));
+        }
+        let ApertureObservation::TubeBaffled(location) = observation else {
+            return Err(sizing(
+                "reservoir observation requires the original exterior microphone",
+            ));
+        };
+        let opening = zone.reservoir_aperture_at(aperture).ok_or_else(|| {
+            sizing("reservoir observation requires an original transverse aperture")
+        })?;
+        let source = load.radiation_record().ok_or_else(|| {
+            sizing("reservoir observation requires the bore's computed exterior")
+        })?;
+        let exterior = source.gas_record().state();
+        let near = |a: f64, b: f64| (a - b).abs() <= 32.0 * f64::EPSILON * a.abs().max(b.abs());
+        if reference != exterior
+            || !near(opening.state.density_kg_m3, exterior.density)
+            || !near(opening.state.temperature_k, exterior.temperature)
+            || opening.state.velocity_m_s != [0.0; 3]
+        {
+            return Err(sizing(
+                "reservoir radiation requires one quiescent exterior and source reference gas",
+            ));
+        }
+        let accepted = zone.last_reservoir_flows_at(aperture);
+        let limits = TilePressureLimits::surface_reference();
+        let existing_tiles = existing.iter().map(|observer| observer.surface.len()).sum::<usize>();
+        if accepted.is_empty() || accepted.len() > limits.maximum_tiles.saturating_sub(existing_tiles) {
+            return Err(sizing(
+                "reservoir radiation exceeds its original per-tile input budget",
+            ));
+        }
+        let dx = zone.law().dx_m;
+        let phase = core::f64::consts::TAU * location.maximum_frequency_hz * (2.0_f64.sqrt() * dx)
+            / exterior.sound_speed;
+        if !phase.is_finite() || phase > core::f64::consts::FRAC_PI_4 {
+            return Err(sizing(
+                "reservoir grid tiles underresolve the declared acoustic band",
+            ));
+        }
+        let a = (opening.axis + 1) % 3;
+        let b = (opening.axis + 2) % 3;
+        let sign = if opening.high { 1.0 } else { -1.0 };
+        let cosine = det::cos(input.angle_rad);
+        let sine = det::sin(input.angle_rad);
+        let mut surface = Vec::with_capacity(accepted.len());
+        for flow in accepted {
+            if gate.is_requested() { return Err(sizing("reservoir observation cancelled")); }
+            let local = [
+                (flow.cell[a] as f64 + 0.5) * dx,
+                sign * (flow.cell[b] as f64 + 0.5) * dx,
+            ];
+            let center = [
+                input.origin_m[0] + cosine * local[0] - sine * local[1],
+                input.origin_m[1] + sine * local[0] + cosine * local[1],
+            ];
+            for outlet in source.apertures() {
+                let d = [
+                    outlet.center_m[0] - center[0],
+                    outlet.center_m[1] - center[1],
+                ];
+                let nearest = [
+                    (cosine * d[0] + sine * d[1]).abs() - 0.5 * dx,
+                    (-sine * d[0] + cosine * d[1]).abs() - 0.5 * dx,
+                ];
+                if nearest[0].max(0.0).hypot(nearest[1].max(0.0)) < outlet.radius_m {
+                    return Err(sizing(
+                        "reservoir tiles and bore radiation apertures must not overlap",
+                    ));
+                }
+            }
+            surface.push(FlowSurfaceSample {
+                position_m: [center[0], center[1], 0.0],
+                area_m2: dx * dx,
+            });
+        }
+        disjoint_surfaces(existing, &surface, input, dx, &mut || gate.is_requested())?;
+        let receiver = BaffledTilePressure::new_differentiating(
+            &surface, sample_rate_hz, location.position_m, exterior.into(), limits,
+            &mut || gate.is_requested(),
+        ).map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+        admit_storage(existing.iter().map(|observer| &observer.receiver)
+            .chain(std::iter::once(&receiver)))?;
+        Ok(Self {
+            aperture, input, surface, receiver, gas: None,
+            cells: accepted.iter().map(|flow| flow.cell).collect(),
+            flows: vec![0.0; accepted.len()],
+        })
+    }
+}
+
+/// Prepare every selected path under one original material budget and align
+/// numerical padding only. Physical propagation stays in the original kernels.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::nsf_dg) fn prepare_gas_observers(
+    load: &DgPortLoad, mut receiver: BaffledPressure, mut report: GasPropagationReport,
+    reservoirs: &[ReservoirPressure], propagation: &GasPropagation,
+    sample_rate_hz: u32, position_m: [f64; 3], gate: &CancelGate,
+) -> Result<(BaffledPressure, GasPropagationReport,
+    Vec<(BaffledTilePressure, GasPropagationReport)>), RenderError>
+{
+    let mut remaining = propagation.limits;
+    let mut charge = |report: &GasPropagationReport| -> Result<_, RenderError> {
+        let taps = report.filters.iter().try_fold(0usize,
+            |sum, filter| sum.checked_add(filter.taps))
+            .ok_or_else(|| sizing("resolved observer filter count overflow"))?;
+        remaining.max_unique_paths = remaining.max_unique_paths.checked_sub(report.filters.len())
+            .ok_or_else(|| sizing("resolved observer exceeds its shared gas path allowance"))?;
+        remaining.max_filter_taps = remaining.max_filter_taps.checked_sub(taps)
+            .ok_or_else(|| sizing("resolved observer exceeds its shared gas filter allowance"))?;
+        remaining.max_kernel_terms = remaining.max_kernel_terms.checked_sub(report.kernel_terms)
+            .ok_or_else(|| sizing("resolved observer exceeds its shared gas kernel allowance"))?;
+        Ok(remaining)
+    };
+    let mut allowance = charge(&report)?;
+    let mut reservoir_receivers = Vec::with_capacity(reservoirs.len());
+    for reservoir in reservoirs {
+        let gas = load.radiation_record().ok_or_else(||
+            sizing("resolved material observation lost its original exterior"))?.gas_record().state();
+        let mut bounded = propagation.clone();
+        bounded.limits = allowance;
+        let (receiver, report) = BaffledTilePressure::new_gas_differentiating(&reservoir.surface,
+            sample_rate_hz, position_m, gas, &bounded,
+            TilePressureLimits::surface_reference(), &mut || gate.is_requested())
+            .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+        allowance = charge(&report)?;
+        reservoir_receivers.push((receiver, report));
+    }
+    if !reservoir_receivers.is_empty() {
+        let latency = reservoir_receivers.iter().fold(report.additional_latency_samples,
+            |latency, (_, escape)| latency.max(escape.additional_latency_samples));
+        receiver.align_gas_latency(&mut report, latency)
+            .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+        for (escape, escape_report) in &mut reservoir_receivers {
+            escape.align_gas_latency(escape_report, latency)
+                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+        }
+    }
+    admit_storage(reservoir_receivers.iter().map(|(receiver, _)| receiver))?;
+    if gate.is_requested() { return Err(sizing("resolved material observation cancelled")); }
+    Ok((receiver, report, reservoir_receivers))
+}
+
 impl<L: Lattice3<27>> NsfDgPerformance<L> {
     /// Add the escape aperture's original per-tile flow to the same microphone
     /// as the bore outlets. Physical pressure is signed superposition with
@@ -183,112 +346,12 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
                 "reservoir observation needs a unique cold finite placement before gas preparation",
             ));
         }
-        if self.system.reservoir_radiation_at(aperture).is_some_and(|reaction|
-            reaction.origin_m != input.origin_m || input.angle_rad != 0.0)
-        {
-            return Err(sizing(
-                "reservoir observation must retain the original joint radiation placement",
-            ));
-        }
-        let ApertureObservation::TubeBaffled(location) = self.observation else {
-            return Err(sizing(
-                "reservoir observation requires the original exterior microphone",
-            ));
-        };
-        let zone = self.system.zone();
-        let opening = zone.reservoir_aperture_at(aperture).ok_or_else(|| {
-            sizing("reservoir observation requires an original transverse aperture")
-        })?;
-        let source =
-            self.system.load().radiation_record().ok_or_else(|| {
-                sizing("reservoir observation requires the bore's computed exterior")
-            })?;
-        let exterior = source.gas_record().state();
-        let near = |a: f64, b: f64| (a - b).abs() <= 32.0 * f64::EPSILON * a.abs().max(b.abs());
-        if self.system.reference_gas() != exterior
-            || !near(opening.state.density_kg_m3, exterior.density)
-            || !near(opening.state.temperature_k, exterior.temperature)
-            || opening.state.velocity_m_s != [0.0; 3]
-        {
-            return Err(sizing(
-                "reservoir radiation requires one quiescent exterior and source reference gas",
-            ));
-        }
-        let accepted = zone.last_reservoir_flows_at(aperture);
-        let limits = TilePressureLimits::surface_reference();
-        let existing_tiles = self.reservoirs.iter().map(|observer| observer.surface.len()).sum::<usize>();
-        if accepted.is_empty() || accepted.len() > limits.maximum_tiles.saturating_sub(existing_tiles) {
-            return Err(sizing(
-                "reservoir radiation exceeds its original per-tile input budget",
-            ));
-        }
-        let dx = zone.law().dx_m;
-        let phase = core::f64::consts::TAU * location.maximum_frequency_hz * (2.0_f64.sqrt() * dx)
-            / exterior.sound_speed;
-        if !phase.is_finite() || phase > core::f64::consts::FRAC_PI_4 {
-            return Err(sizing(
-                "reservoir grid tiles underresolve the declared acoustic band",
-            ));
-        }
-        let a = (opening.axis + 1) % 3;
-        let b = (opening.axis + 2) % 3;
-        let sign = if opening.high { 1.0 } else { -1.0 };
-        let cosine = det::cos(input.angle_rad);
-        let sine = det::sin(input.angle_rad);
-        let mut surface = Vec::with_capacity(accepted.len());
-        for flow in accepted {
-            if self.gate.is_requested() {
-                return Err(sizing("reservoir observation cancelled"));
-            }
-            let local = [
-                (flow.cell[a] as f64 + 0.5) * dx,
-                sign * (flow.cell[b] as f64 + 0.5) * dx,
-            ];
-            let center = [
-                input.origin_m[0] + cosine * local[0] - sine * local[1],
-                input.origin_m[1] + sine * local[0] + cosine * local[1],
-            ];
-            for outlet in source.apertures() {
-                let d = [
-                    outlet.center_m[0] - center[0],
-                    outlet.center_m[1] - center[1],
-                ];
-                let nearest = [
-                    (cosine * d[0] + sine * d[1]).abs() - 0.5 * dx,
-                    (-sine * d[0] + cosine * d[1]).abs() - 0.5 * dx,
-                ];
-                if nearest[0].max(0.0).hypot(nearest[1].max(0.0)) < outlet.radius_m {
-                    return Err(sizing(
-                        "reservoir tiles and bore radiation apertures must not overlap",
-                    ));
-                }
-            }
-            surface.push(FlowSurfaceSample {
-                position_m: [center[0], center[1], 0.0],
-                area_m2: dx * dx,
-            });
-        }
-        disjoint_surfaces(&self.reservoirs, &surface, input, dx, &mut || self.gate.is_requested())?;
-        let receiver = BaffledTilePressure::new_differentiating(
-            &surface,
-            self.sample_rate_hz,
-            location.position_m,
-            exterior.into(),
-            limits,
-            &mut || self.gate.is_requested(),
-        )
-        .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
-        admit_storage(self.reservoirs.iter().map(|observer| &observer.receiver)
-            .chain(std::iter::once(&receiver)))?;
-        self.reservoirs.push(ReservoirPressure {
-            aperture,
-            input,
-            surface,
-            receiver,
-            gas: None,
-            cells: accepted.iter().map(|flow| flow.cell).collect(),
-            flows: vec![0.0; accepted.len()],
-        });
+        let observer = ReservoirPressure::prepare(
+            self.system.zone(), self.system.reference_gas(), self.system.load(),
+            self.observation, self.sample_rate_hz, aperture, input,
+            self.system.reservoir_radiation_at(aperture), &self.reservoirs, &self.gate,
+        )?;
+        self.reservoirs.push(observer);
         Ok(self)
     }
 

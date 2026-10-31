@@ -9,7 +9,6 @@ use super::{NsfDg, NsfDgDrive, NsfDgFrame, same_clock};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::baffled::BaffledPressure;
-use crate::pcm_wav::baffled::tiles::{BaffledTilePressure, TilePressureLimits};
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
@@ -22,7 +21,7 @@ use std::sync::Arc;
 pub mod file;
 pub(super) mod clock;
 use clock::IntervalClock;
-mod reservoir;
+pub(super) mod reservoir;
 pub use reservoir::ReservoirObservation;
 
 fn sizing(what: &'static str) -> RenderError { RenderError::Sizing { what } }
@@ -240,54 +239,16 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         let ApertureObservation::TubeBaffled(location) = self.observation else {
             return Err(sizing("resolved material gas propagation requires an exterior receiver"));
         };
-        let (mut receiver, mut report) = if self.projected_observer {
+        let (receiver, report) = if self.projected_observer {
             self.system.load().baffled_receiver_projected_with_gas(
                 self.sample_rate_hz, location, propagation, &self.gate)
         } else { self.system.load().baffled_receiver_with_gas(
             self.sample_rate_hz, location, propagation, &self.gate)
         }.map_err(RenderError::Voice)?;
-        // One supplied preparation budget covers the bore and every selected
-        // escape. Adding apertures cannot multiply the material-path allowance.
-        let mut remaining = propagation.limits;
-        let mut charge = |report: &GasPropagationReport| -> Result<_, RenderError> {
-            let taps = report.filters.iter().try_fold(0usize,
-                |sum, filter| sum.checked_add(filter.taps))
-                .ok_or_else(|| sizing("resolved observer filter count overflow"))?;
-            remaining.max_unique_paths = remaining.max_unique_paths.checked_sub(report.filters.len())
-                .ok_or_else(|| sizing("resolved observer exceeds its shared gas path allowance"))?;
-            remaining.max_filter_taps = remaining.max_filter_taps.checked_sub(taps)
-                .ok_or_else(|| sizing("resolved observer exceeds its shared gas filter allowance"))?;
-            remaining.max_kernel_terms = remaining.max_kernel_terms.checked_sub(report.kernel_terms)
-                .ok_or_else(|| sizing("resolved observer exceeds its shared gas kernel allowance"))?;
-            Ok(remaining)
-        };
-        let mut allowance = charge(&report)?;
-        let mut reservoir_receivers = Vec::with_capacity(self.reservoirs.len());
-        for reservoir in &self.reservoirs {
-            let gas = self.system.load().radiation_record().expect("original exterior").gas_record().state();
-            let mut bounded = propagation.clone();
-            bounded.limits = allowance;
-            let (receiver, report) = BaffledTilePressure::new_gas_differentiating(&reservoir.surface,
-                self.sample_rate_hz, location.position_m, gas, &bounded,
-                TilePressureLimits::surface_reference(), &mut || self.gate.is_requested())
-                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
-            allowance = charge(&report)?;
-            reservoir_receivers.push((receiver, report));
-        }
-        if !reservoir_receivers.is_empty() {
-            // Align numerical padding once across ALL original paths. Physical
-            // distance, attenuation and phase stay in each source's own kernel.
-            let latency = reservoir_receivers.iter().fold(report.additional_latency_samples,
-                |latency, (_, escape)| latency.max(escape.additional_latency_samples));
-            receiver.align_gas_latency(&mut report, latency)
-                .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
-            for (escape, escape_report) in &mut reservoir_receivers {
-                escape.align_gas_latency(escape_report, latency)
-                    .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
-            }
-        }
-        reservoir::admit_storage(reservoir_receivers.iter().map(|(receiver, _)| receiver))?;
-        if self.gate.is_requested() { return Err(sizing("resolved material observation cancelled")); }
+        let (receiver, report, reservoir_receivers) = reservoir::prepare_gas_observers(
+            self.system.load(), receiver, report, &self.reservoirs, propagation,
+            self.sample_rate_hz, location.position_m, &self.gate,
+        )?;
         self.receiver = Some(receiver);
         self.observer_gas = Some(report);
         for (reservoir, (receiver, report)) in self.reservoirs.iter_mut().zip(reservoir_receivers) {

@@ -2,16 +2,19 @@
 //!
 //! Every source control belongs to the original physical interval. The shared
 //! NSF observation clock projects actual interval means when the output clock
-//! differs; the existing DG exterior and Rayleigh receiver supply microphone
-//! pressure. No physical state is retimed or reconstructed from audio samples.
+//! differs; the existing DG exterior and original resolved escape tile receivers
+//! supply signed microphone pressure. No physical state is retimed or
+//! reconstructed from audio samples.
 
 use super::{NsfThermoviscousDg, NsfThermoviscousDgFrame};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::nsf_dg::{NsfDgDrive, NsfDgError, same_clock};
-use crate::nsf_dg::performance::{clock::IntervalClock, source_intervals_for};
+use crate::nsf_dg::performance::{ReservoirObservation, clock::IntervalClock, source_intervals_for};
+use crate::nsf_dg::performance::reservoir::{self, ReservoirPressure};
 use crate::pcm_wav::baffled::BaffledPressure;
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationReport};
+use crate::pcm_wav::baffled::tiles::BaffledTilePressure;
 use crate::pcm_wav::observation::PressureRenderer;
 use crate::render::RenderError;
 use fs_exec::CancelGate;
@@ -38,6 +41,7 @@ pub struct NsfThermoviscousDgPerformance<'a, 'c, L: Lattice3<27>> {
     controls: Vec<NsfDgDrive>,
     receiver: Option<BaffledPressure>,
     observer_gas: Option<GasPropagationReport>,
+    reservoirs: Vec<ReservoirPressure>,
     terminal_flows: Vec<f64>,
     sample_rate_hz: u32,
     maximum_block: usize,
@@ -125,12 +129,54 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
             else { Vec::new() };
         if gate.is_requested() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
         Ok(Self { system, observation_port, observation, controls, receiver,
-            observer_gas: None, terminal_flows, sample_rate_hz, maximum_block, gate,
+            observer_gas: None, reservoirs: Vec::new(), terminal_flows, sample_rate_hz, maximum_block, gate,
             last: None, clock, projected_observer, output_samples, output_cursor: 0, poisoned: false })
+    }
+
+    /// Add the original resolved escape tiles to the selected duct microphone.
+    /// Multiple original apertures require `with_reservoir_observation_at` so
+    /// independently prescribed supply tiles cannot be selected implicitly.
+    pub fn with_reservoir_observation(self, input: ReservoirObservation) -> Result<Self, RenderError> {
+        if self.system.zone().reservoir_aperture_count() != 1 {
+            return Err(sizing("select the observed reservoir explicitly when multiple apertures exist"));
+        }
+        self.with_reservoir_observation_at(0, input)
+    }
+
+    /// Observe one explicitly placed escape aperture using its accepted signed
+    /// tile flows, original propagation paths and the shared observation clock.
+    /// A reciprocally loaded mouth retains its primary DG exterior and exact
+    /// reaction placement. Unloaded apertures remain one-way observations.
+    /// All selected surfaces share the original geometry and storage allowance;
+    /// gas propagation must be attached after the last surface is selected.
+    pub fn with_reservoir_observation_at(mut self, aperture: usize,
+        input: ReservoirObservation) -> Result<Self, RenderError>
+    {
+        if self.poisoned || self.system.accepted_steps() != 0 || self.observer_gas.is_some()
+            || self.reservoirs.iter().any(|observer| observer.aperture == aperture)
+            || self.gate.is_requested()
+            || !input.origin_m.iter().chain([input.angle_rad].iter()).all(|x| x.is_finite())
+        {
+            return Err(sizing("reservoir observation needs a unique cold finite placement before gas preparation"));
+        }
+        let reaction = self.system.reservoir_radiation_at(aperture);
+        if reaction.is_some() && self.observation_port != self.system.load().system().port() {
+            return Err(sizing("joint reservoir observation requires its primary duct's original shared exterior"));
+        }
+        let load = self.system.load().system().load_at_port(self.observation_port)
+            .ok_or_else(|| sizing("resolved field microphone lost its original duct"))?;
+        let observer = ReservoirPressure::prepare(
+            self.system.zone(), self.system.reference_gas(), load, self.observation,
+            self.sample_rate_hz, aperture, input, reaction, &self.reservoirs, &self.gate,
+        )?;
+        self.reservoirs.push(observer);
+        Ok(self)
     }
 
     /// Retain the selected duct's original exterior gas propagation on every
     /// microphone path, including attenuation, phase and causal travel time.
+    /// Duct outlets and selected escapes share the one supplied preparation
+    /// budget and align only numerical padding; each physical path is retained.
     pub fn with_observer_gas(mut self, propagation: &GasPropagation) -> Result<Self, RenderError> {
         if self.poisoned || self.system.accepted_steps() != 0 || self.observer_gas.is_some() {
             return Err(sizing("resolved field atmosphere requires one cold microphone attachment"));
@@ -144,9 +190,16 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
             load.baffled_receiver_projected_with_gas(self.sample_rate_hz, location, propagation, &self.gate)
         } else { load.baffled_receiver_with_gas(self.sample_rate_hz, location, propagation, &self.gate) }
             .map_err(RenderError::Voice)?;
-        if self.gate.is_requested() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
+        let (receiver, report, reservoir_receivers) = reservoir::prepare_gas_observers(
+            load, receiver, report, &self.reservoirs, propagation,
+            self.sample_rate_hz, location.position_m, &self.gate,
+        )?;
         self.receiver = Some(receiver);
         self.observer_gas = Some(report);
+        for (reservoir, (receiver, report)) in self.reservoirs.iter_mut().zip(reservoir_receivers) {
+            reservoir.receiver = receiver;
+            reservoir.gas = Some(report);
+        }
         Ok(self)
     }
 
@@ -157,6 +210,38 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
     pub const fn observation(&self) -> ApertureObservation { self.observation }
     pub fn baffled_receiver(&self) -> Option<&BaffledPressure> { self.receiver.as_ref() }
     pub fn observer_gas(&self) -> Option<&GasPropagationReport> { self.observer_gas.as_ref() }
+    /// Number of explicitly observed original escape apertures.
+    pub fn reservoir_observation_count(&self) -> usize { self.reservoirs.len() }
+    /// Explicit placement for an original aperture identity.
+    pub fn reservoir_observation_at(&self, aperture: usize) -> Option<ReservoirObservation> {
+        self.reservoirs.iter().find(|observer| observer.aperture == aperture).map(|observer| observer.input)
+    }
+    /// Actual shared per-tile receiver for one original aperture identity.
+    pub fn reservoir_receiver_at(&self, aperture: usize) -> Option<&BaffledTilePressure> {
+        self.reservoirs.iter().find(|observer| observer.aperture == aperture).map(|observer| &observer.receiver)
+    }
+    /// Original material law and aligned numerical padding for one aperture.
+    pub fn reservoir_observer_gas_at(&self, aperture: usize) -> Option<&GasPropagationReport> {
+        self.reservoirs.iter().find(|observer| observer.aperture == aperture)
+            .and_then(|observer| observer.gas.as_ref())
+    }
+    /// Singular view; multiple selections require explicit identity.
+    pub fn reservoir_observation(&self) -> Option<ReservoirObservation> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        Some(observer.input)
+    }
+    pub fn reservoir_observation_aperture(&self) -> Option<usize> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        Some(observer.aperture)
+    }
+    pub fn reservoir_receiver(&self) -> Option<&BaffledTilePressure> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        Some(&observer.receiver)
+    }
+    pub fn reservoir_observer_gas(&self) -> Option<&GasPropagationReport> {
+        let [observer] = self.reservoirs.as_slice() else { return None; };
+        observer.gas.as_ref()
+    }
     pub fn cancellation_gate(&self) -> &CancelGate { &self.gate }
     pub fn remaining_samples(&self) -> u64 { self.output_samples - self.output_cursor }
 
@@ -183,12 +268,18 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
                 *flow += weight * terminal.outward_flow_m3_s;
             }
         }
+        if !self.reservoirs.is_empty() {
+            let accepted = &self.last.as_ref()
+                .ok_or_else(|| sizing("resolved escape observation has no accepted interval"))?.reservoir_flows;
+            for reservoir in &mut self.reservoirs { reservoir.accumulate(accepted, weight)?; }
+        }
         Ok(weight * pressure)
     }
 
     fn advance(&mut self) -> Result<f64, RenderError> {
         if self.gate.is_requested() { return Err(RenderError::Voice(AcousticRealizeError::Cancelled)); }
         self.terminal_flows.fill(0.0);
+        for reservoir in &mut self.reservoirs { reservoir.flows.fill(0.0); }
         let pressure = if let Some(clock) = self.clock {
             let (mut cursor, end) = clock.output_bounds(self.output_cursor).map_err(sizing)?;
             let mut pressure = 0.0;
@@ -205,10 +296,15 @@ impl<'a, 'c, L: Lattice3<27>> NsfThermoviscousDgPerformance<'a, 'c, L> {
             self.advance_source()?;
             self.accumulate(1.0)?
         };
-        let pressure = if let Some(receiver) = &mut self.receiver {
+        let mut pressure = if let Some(receiver) = &mut self.receiver {
             receiver.step_trace(&self.terminal_flows)
                 .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?
         } else { pressure };
+        for reservoir in &mut self.reservoirs {
+            pressure += reservoir.receiver.step_trace_with_cancel(
+                &reservoir.flows, &mut || self.gate.is_requested(),
+            ).map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error)))?;
+        }
         if !pressure.is_finite() { return Err(sizing("resolved field observation produced nonfinite pressure")); }
         self.output_cursor += 1;
         Ok(pressure)
