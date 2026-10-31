@@ -1,5 +1,8 @@
 //! Source-caloric storage and transport on the original native CHT clock.
 
+mod solid;
+pub use solid::MaterialEnthalpySolidMarch;
+
 use super::super::{
     MaterialBuoyancyError, MaterialBuoyancyMarch, MaterialChtFluid, admit_open_boundary_materials,
     poll,

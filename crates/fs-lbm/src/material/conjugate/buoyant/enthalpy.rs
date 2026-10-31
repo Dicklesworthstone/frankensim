@@ -1,7 +1,10 @@
 //! Original caloric laws on the existing material/flow fixed point and clock.
 
 mod transient;
-pub use transient::{MaterialEnthalpyMarch, MaterialEnthalpyStepReport, MaterialEnthalpyTransientConfig};
+pub use transient::{
+    MaterialEnthalpyMarch, MaterialEnthalpySolidMarch, MaterialEnthalpyStepReport,
+    MaterialEnthalpyTransientConfig,
+};
 
 use super::{
     MaterialBuoyancyConfig, MaterialBuoyancyError, MaterialBuoyancySolution, MaterialChtFluid,

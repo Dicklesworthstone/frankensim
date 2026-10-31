@@ -856,14 +856,77 @@ pub(super) fn march(
             scheme: fs_lbm::conjugate::ConvectionScheme::Upwind,
             ..fs_lbm::conjugate::EnergyConfig::default()
         };
-        let run = bound.march_natural_convection_with_enthalpy(
-            domain, &scene.materials, flow, thermal, &energy, initial_temperature,
-            bounds, &caloric, input.transient_controls(reference_temperature)?,
-            unsteady, inlet_schedule, power_schedule, radiation, gate,
-            |_, temperature, _| fluid.at_temperature(temperature),
-        ).map_err(failure)?;
-        let report = caloric.transient_report(reference_temperature, &run.enthalpy, &run.records)?;
-        (run.convection, report, String::new())
+        if scene.solid_sources.iter().any(SolidSource::temperature_dependent) {
+            let solids = scene.solid_sources.iter().map(SolidSource::thermal_law)
+                .collect::<Result<Vec<_>>>()?;
+            let solid_controls = scene.transient.as_ref().and_then(|t| t.solid_storage)
+                .unwrap_or_default();
+            let result = bound.march_natural_convection_with_enthalpy_and_material_solids(
+                domain, &solids, flow, thermal, &energy, initial_temperature,
+                bounds, &caloric, input.transient_controls(reference_temperature)?,
+                solid_controls, unsteady, inlet_schedule, power_schedule, radiation, gate,
+                |_, temperature, _| fluid.at_temperature(temperature),
+            ).map_err(failure)?;
+            let report = caloric.transient_report(
+                reference_temperature, &result.fluid.enthalpy, &result.fluid.records,
+            )?;
+            let endpoint = endpoint_json(result.solid_endpoint.iter().map(|sample| (
+                sample.cell, sample.temperature_k, sample.conductivity_w_m_k[0], &sample.material,
+            )), gate)?;
+            let mut storage = format!(concat!(
+                ",\"solid_coupling\":\"joint-implicit-endpoint\",\"solid_endpoint\":{},",
+                "\"solid_storage\":{{\"model\":\"fixed-reference-mass-integral-cp\",",
+                "\"maximum_iterations\":{},\"temperature_tolerance_k\":{},",
+                "\"conductivity_relative_tolerance\":{},\"storage_tolerance_j\":{},",
+                "\"temperature_relaxation\":{},\"sources\":["),
+                endpoint, solid_controls.maximum_iterations,
+                super::num(solid_controls.temperature_tolerance_k)?,
+                super::num(solid_controls.conductivity_relative_tolerance)?,
+                super::num(solid_controls.storage_tolerance_j)?,
+                super::num(solid_controls.temperature_relaxation)?);
+            for (index, solid) in solids.iter().enumerate() {
+                if gate.is_requested() {
+                    return Err(super::solver_failure(&fs_lbm::conjugate::ChtError::Cancelled));
+                }
+                if index > 0 { storage.push(','); }
+                let [lo, hi] = solid.storage().temperature_span_k();
+                storage.push_str(&format!(concat!(
+                    "{{\"index\":{},\"storage_identity\":{},\"reference_density_kg_m3\":{},",
+                    "\"temperature_range_k\":[{},{}]}}"),
+                    index, quote(&solid.storage().identity().to_hex()),
+                    super::num(solid.reference_density_kg_m3())?,
+                    super::num(lo)?, super::num(hi)?));
+            }
+            storage.push_str("],\"records\":[");
+            for (index, record) in result.solid_records.iter().enumerate() {
+                if gate.is_requested() {
+                    return Err(super::solver_failure(&fs_lbm::conjugate::ChtError::Cancelled));
+                }
+                if index > 0 { storage.push(','); }
+                storage.push_str(&format!(concat!(
+                    "{{\"time_s\":{},\"iterations\":{},\"temperature_defect_k\":{},",
+                    "\"conductivity_relative_defect\":{},\"storage_defect_j\":{},",
+                    "\"solid_stored_energy_change_j\":{}}}"),
+                    super::num(record.time_s)?, record.iterations,
+                    super::num(record.temperature_defect_k)?,
+                    super::num(record.conductivity_relative_defect)?,
+                    super::num(record.storage_defect_j)?,
+                    super::num(record.solid_stored_energy_change_j)?));
+            }
+            storage.push_str("]}");
+            (result.fluid.convection, report, storage)
+        } else {
+            let run = bound.march_natural_convection_with_enthalpy(
+                domain, &scene.materials, flow, thermal, &energy, initial_temperature,
+                bounds, &caloric, input.transient_controls(reference_temperature)?,
+                unsteady, inlet_schedule, power_schedule, radiation, gate,
+                |_, temperature, _| fluid.at_temperature(temperature),
+            ).map_err(failure)?;
+            let report = caloric.transient_report(
+                reference_temperature, &run.enthalpy, &run.records,
+            )?;
+            (run.convection, report, String::new())
+        }
     } else if scene.solid_sources.iter().any(SolidSource::temperature_dependent) {
         let solids = scene.solid_sources.iter().map(SolidSource::thermal_law)
             .collect::<Result<Vec<_>>>()?;
@@ -939,7 +1002,7 @@ pub(super) fn march(
 }
 
 /// Source-caloric storage shares the same fixed-density physical approximation.
-pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady laminar fixed-geometry Boussinesq flow and conservative conjugate heat storage; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density retained in inertia and continuity; storage and advection use reference Cp unless fluid_enthalpy selects original source h(T), backward-Euler source storage and conservative first-order upwind; source density and Cp departures remain at most 5 percent; explicit first-order fluid-material coupling even with BDF2 momentum; solids use authored/frozen storage or implicit endpoint conductivity and source-integrated heat capacity on a declared single-phase span at fixed reference mass; simultaneous source-caloric fluid and evolving solid storage is unsupported; original optional surface-radiation model; no compressibility, latent phase change, deformation, turbulence closure or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
+pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady laminar fixed-geometry Boussinesq flow and conservative conjugate heat storage; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density retained in inertia and continuity; storage and advection use reference Cp unless fluid_enthalpy selects original source h(T), backward-Euler source storage and conservative first-order upwind; source density and Cp departures remain at most 5 percent; explicit first-order fluid-material coupling even with BDF2 momentum; solids use authored/frozen storage or implicit endpoint conductivity and source-integrated heat capacity on a declared single-phase span at fixed reference mass; source-caloric fluid and source-integral solid storage may close in one joint implicit thermal endpoint; original optional surface-radiation model; no compressibility, latent phase change, deformation, turbulence closure or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
 
 fn fluid_endpoint_json(
     samples: &[fs_lbm::material::conjugate::buoyant::MaterialBuoyancySample<FluidState>],
