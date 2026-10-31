@@ -1,6 +1,8 @@
 //! G0/G1/G3: coherent line sources, spatial phase, fluid momentum and energy.
 use fs_aeroac::SCOPE_STATEMENT;
-use fs_aeroac::curle2d::{PreparedDipoleObserver, dipole_pressure};
+use fs_aeroac::curle2d::{
+    CoherenceBudget, DipoleFieldStatistics, PreparedDipoleObserver, dipole_pressure,
+};
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{c64::C64, det};
 
@@ -245,4 +247,286 @@ fn g0_budget_geometry_frequency_and_force_refusals_are_transactional() {
     );
     assert!(prepared.evaluate(&[[C64::from_re(f64::MAX); 2]]).is_err());
     assert!(prepared.evaluate(&[[C64::ONE, C64::ZERO]]).is_ok());
+}
+
+fn moments_close(actual: &DipoleFieldStatistics, expected: &DipoleFieldStatistics) {
+    close(
+        C64::from_re(actual.mean_square_pressure_pa2),
+        C64::from_re(expected.mean_square_pressure_pa2),
+        2.0e-13,
+    );
+    for axis in 0..2 {
+        close(
+            C64::new(
+                actual.active_intensity_w_m2[axis],
+                actual.reactive_intensity_w_m2[axis],
+            ),
+            C64::new(
+                expected.active_intensity_w_m2[axis],
+                expected.reactive_intensity_w_m2[axis],
+            ),
+            2.0e-13,
+        );
+        for other in 0..2 {
+            close(
+                actual.velocity_covariance_m2_s2[axis][other],
+                expected.velocity_covariance_m2_s2[axis][other],
+                2.0e-13,
+            );
+        }
+    }
+}
+
+const TWO_MODES: CoherenceBudget = CoherenceBudget {
+    max_modes: 2,
+    max_source_mode_pairs: 4,
+};
+
+#[test]
+fn g1_partial_coherence_matches_complex_cross_spectral_propagation() {
+    let positions = [[-0.17, 0.07], [0.29, -0.13]];
+    let forces = [
+        [C64::new(1.0, 0.3), C64::new(-0.2, 0.5)],
+        [C64::new(-0.7, 0.4), C64::new(0.3, -0.2)],
+    ];
+    let observer = [0.61, 0.38];
+    let prepared = PreparedDipoleObserver::new(medium(), 530.0, observer, &positions, 2).unwrap();
+    let fields = core::array::from_fn::<_, 2, _>(|source| {
+        PreparedDipoleObserver::new(medium(), 530.0, observer, &positions[source..source + 1], 1)
+            .unwrap()
+            .evaluate(&forces[source..source + 1])
+            .unwrap()
+    });
+    // E[xi_1 conj(xi_2)] = gamma. A non-real gamma catches reversed
+    // conjugations that real in-phase/antiphase comparisons cannot reveal.
+    for gamma in [-C64::ONE, C64::ZERO, C64::ONE, C64::new(0.3, 0.7)] {
+        let independent_weight = det::sqrt((1.0 - gamma.norm_sq()).max(0.0));
+        let first = [forces[0], scaled(forces[1], gamma.conj())];
+        let second = [
+            [C64::ZERO; 2],
+            scaled(forces[1], C64::from_re(independent_weight)),
+        ];
+        let statistics = prepared
+            .evaluate_coherence_modes(&[&first, &second], TWO_MODES)
+            .unwrap();
+        let covariance = [[C64::ONE, gamma], [gamma.conj(), C64::ONE]];
+        // Independently assemble H C H*: do not use the factorization for the
+        // reference. Source positions and all source phases remain explicit.
+        let moment = |left: [C64; 2], right: [C64; 2]| {
+            let mut result = C64::ZERO;
+            for i in 0..2 {
+                for j in 0..2 {
+                    result = result + left[i] * covariance[i][j] * right[j].conj();
+                }
+            }
+            result.scale(0.5)
+        };
+        let pressure = fields.each_ref().map(|field| field.pressure_pa);
+        close(
+            C64::from_re(statistics.mean_square_pressure_pa2),
+            moment(pressure, pressure),
+            4.0e-14,
+        );
+        for axis in 0..2 {
+            let velocity = fields
+                .each_ref()
+                .map(|field| field.particle_velocity_m_s[axis]);
+            close(
+                C64::new(
+                    statistics.active_intensity_w_m2[axis],
+                    statistics.reactive_intensity_w_m2[axis],
+                ),
+                moment(pressure, velocity),
+                4.0e-14,
+            );
+            for other in 0..2 {
+                close(
+                    statistics.velocity_covariance_m2_s2[axis][other],
+                    moment(
+                        velocity,
+                        fields
+                            .each_ref()
+                            .map(|field| field.particle_velocity_m_s[other]),
+                    ),
+                    4.0e-14,
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g1_independent_sources_add_power_while_coherent_sources_can_cancel() {
+    let prepared =
+        PreparedDipoleObserver::new(medium(), 700.0, [0.8, 0.3], &[[0.0; 2]; 2], 2).unwrap();
+    let force = [C64::new(1.0, 0.2), C64::new(-0.1, 0.3)];
+    let forces = [force, scaled(force, -C64::ONE)];
+    let field = prepared.evaluate(&forces).unwrap();
+    assert_eq!(field.pressure_pa, C64::ZERO);
+    let independent = prepared.evaluate_independent_sources(&forces).unwrap();
+    let first = [forces[0], [C64::ZERO; 2]];
+    let second = [[C64::ZERO; 2], forces[1]];
+    let factored = prepared
+        .evaluate_coherence_modes(&[&first, &second], TWO_MODES)
+        .unwrap();
+    moments_close(&independent, &factored);
+    let single = prepared.evaluate(&first).unwrap();
+    close(
+        C64::from_re(independent.mean_square_pressure_pa2),
+        C64::from_re(single.pressure_pa.norm_sq()),
+        4.0e-15,
+    );
+    assert!(independent.mean_square_pressure_pa2 > 0.0);
+    assert_eq!(independent.scope, SCOPE_STATEMENT);
+}
+
+#[test]
+fn g1_statistical_standing_wave_separates_pressure_from_flux() {
+    let prepared =
+        PreparedDipoleObserver::new(medium(), 430.0, [0.0; 2], &[[-0.3, 0.0], [0.3, 0.0]], 2)
+            .unwrap();
+    let forces = [[C64::ONE, C64::ZERO], [-C64::ONE, C64::ZERO]];
+    let coherent = prepared
+        .evaluate_coherence_modes(&[&forces], TWO_MODES)
+        .unwrap();
+    let independent = prepared.evaluate_independent_sources(&forces).unwrap();
+    assert!(coherent.mean_square_pressure_pa2 > 0.0);
+    assert_eq!(coherent.velocity_covariance_m2_s2, [[C64::ZERO; 2]; 2]);
+    assert_eq!(coherent.active_intensity_w_m2, [0.0; 2]);
+    assert_eq!(independent.active_intensity_w_m2, [0.0; 2]);
+    assert!(independent.velocity_covariance_m2_s2[0][0].re > 0.0);
+    close(
+        C64::from_re(coherent.mean_square_pressure_pa2),
+        C64::from_re(2.0 * independent.mean_square_pressure_pa2),
+        4.0e-15,
+    );
+}
+
+#[test]
+fn g3_coherence_factor_basis_and_clock_do_not_change_statistics() {
+    let prepared =
+        PreparedDipoleObserver::new(medium(), 343.0, [0.4, -0.2], &[[0.0, 0.0], [0.2, 0.1]], 2)
+            .unwrap();
+    let first = [
+        [C64::ONE, C64::new(0.2, -0.7)],
+        [C64::new(0.3, 0.4), C64::ZERO],
+    ];
+    let second = [
+        [C64::new(0.3, -0.1), C64::ONE],
+        [C64::ZERO, C64::new(-0.7, 0.2)],
+    ];
+    let baseline = prepared
+        .evaluate_coherence_modes(&[&first, &second], TWO_MODES)
+        .unwrap();
+    // A unitary rotation of the independent factor basis leaves B B* fixed.
+    let i = C64::new(0.0, 1.0);
+    let factor = 1.0 / det::sqrt(2.0);
+    let rotated_first = core::array::from_fn::<_, 2, _>(|source| {
+        core::array::from_fn(|axis| (first[source][axis] + i * second[source][axis]).scale(factor))
+    });
+    let rotated_second = core::array::from_fn::<_, 2, _>(|source| {
+        core::array::from_fn(|axis| (i * first[source][axis] + second[source][axis]).scale(factor))
+    });
+    let rotated = prepared
+        .evaluate_coherence_modes(&[&rotated_first, &rotated_second], TWO_MODES)
+        .unwrap();
+    moments_close(&rotated, &baseline);
+    let phase = C64::new(det::cos(0.7), det::sin(0.7));
+    let shifted_first = first.map(|force| scaled(force, phase));
+    let shifted_second = second.map(|force| scaled(force, phase));
+    let shifted = prepared
+        .evaluate_coherence_modes(&[&shifted_first, &shifted_second], TWO_MODES)
+        .unwrap();
+    moments_close(&shifted, &baseline);
+}
+
+#[test]
+fn g0_statistics_preserve_quiet_coherent_residuals_and_refuse_invalid_factors() {
+    let prepared =
+        PreparedDipoleObserver::new(medium(), 343.0, [1.0, 0.0], &[[0.0; 2]; 3], 3).unwrap();
+    let budget = CoherenceBudget {
+        max_modes: 1,
+        max_source_mode_pairs: 3,
+    };
+    let force = [C64::ONE, C64::ZERO];
+    let quiet = [[C64::ZERO; 2], force, [C64::ZERO; 2]];
+    let strong = [
+        scaled(force, C64::from_re(1.0e18)),
+        force,
+        scaled(force, C64::from_re(-1.0e18)),
+    ];
+    let expected = prepared
+        .evaluate_coherence_modes(&[&quiet], budget)
+        .unwrap();
+    let actual = prepared
+        .evaluate_coherence_modes(&[&strong], budget)
+        .unwrap();
+    moments_close(&actual, &expected);
+    assert!(
+        prepared
+            .evaluate_coherence_modes(&[&quiet, &quiet], budget)
+            .is_err()
+    );
+    assert!(
+        prepared
+            .evaluate_coherence_modes(
+                &[&quiet],
+                CoherenceBudget {
+                    max_modes: 1,
+                    max_source_mode_pairs: 2,
+                }
+            )
+            .is_err()
+    );
+    assert!(
+        prepared
+            .evaluate_coherence_modes(&[&quiet[..2]], budget)
+            .is_err()
+    );
+    assert!(prepared.evaluate_independent_sources(&quiet[..2]).is_err());
+    for bad in [f64::NAN, f64::INFINITY, 1.0e200] {
+        let bad_forces = [[C64::from_re(bad); 2]; 3];
+        assert!(
+            prepared
+                .evaluate_coherence_modes(&[&bad_forces], budget)
+                .is_err()
+        );
+        assert!(prepared.evaluate_independent_sources(&bad_forces).is_err());
+    }
+    let silence = prepared
+        .evaluate_coherence_modes(
+            &[],
+            CoherenceBudget {
+                max_modes: 0,
+                max_source_mode_pairs: 0,
+            },
+        )
+        .unwrap();
+    assert_eq!(silence.mean_square_pressure_pa2, 0.0);
+    let empty = PreparedDipoleObserver::new(medium(), 343.0, [0.0; 2], &[], 0).unwrap();
+    assert_eq!(
+        empty
+            .evaluate_independent_sources(&[])
+            .unwrap()
+            .mean_square_pressure_pa2,
+        0.0
+    );
+    assert!(
+        empty
+            .evaluate_coherence_modes(
+                &[&[]],
+                CoherenceBudget {
+                    max_modes: 0,
+                    max_source_mode_pairs: 0,
+                }
+            )
+            .is_err()
+    );
+    // A failed observation cannot mutate the prepared operator.
+    moments_close(
+        &prepared
+            .evaluate_coherence_modes(&[&quiet], budget)
+            .unwrap(),
+        &expected,
+    );
 }

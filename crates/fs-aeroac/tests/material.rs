@@ -142,6 +142,19 @@ fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
     let summed = prepared.evaluate(&[force, force]).unwrap();
     close(summed.pressure_pa.re, 2.0 * expected.pressure.re);
     close(summed.pressure_pa.im, 2.0 * expected.pressure.im);
+    let independent = prepared
+        .evaluate_independent_sources(&[force, force])
+        .unwrap();
+    close(
+        independent.mean_square_pressure_pa2,
+        expected.pressure.norm_sq(),
+    );
+    for axis in 0..2 {
+        close(
+            independent.active_intensity_w_m2[axis],
+            0.5 * summed.active_intensity_w_m2[axis],
+        );
+    }
     assert!(
         run.prepare_coherent_observer(0.5 / dt, observer, &[source], 1)
             .is_err()

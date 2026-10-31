@@ -21,7 +21,9 @@
 
 /// Prepared, phase-preserving radiation from multiple compact line dipoles.
 pub mod array;
-pub use array::{CoherentDipoleField, PreparedDipoleObserver};
+pub use array::{
+    CoherenceBudget, CoherentDipoleField, DipoleFieldStatistics, PreparedDipoleObserver,
+};
 
 use crate::bessel::hankel1_outgoing;
 use crate::{AeroacError, SCOPE_STATEMENT};

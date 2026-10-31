@@ -56,11 +56,36 @@ material scaling and domain/representability refusals.
   double-double reductions. `MaterialJetLabiumRun::prepare_coherent_observer`
   binds the exact source medium and rejects frequencies at/above its Nyquist
   limit. Independent records must be physically phase-aligned by the caller.
-  No scattering, mutual loading, incoherent-source statistics, absorption, or
+  No scattering, mutual loading, absorption, or
   absolute-SPL validation is inferred. G0/G1/G3 `tests/interference.rs` checks
   cancellation, quadrature, path phase, near-field momentum, standing-wave
   intensity, rigid motion, dynamic-range residuals, and bounded admission;
   `tests/material.rs` exercises the real material-bound flow consumer.
+- `PreparedDipoleObserver::evaluate_coherence_modes` propagates explicit source
+  coherence factors: `F = B xi`, `E[xi xi*] = I`. The source second moments
+  `B B*` are positive semidefinite by construction, without a dense source
+  covariance matrix, phase synthesis or a post-hoc positivity repair. Each
+  factor coherently combines all source positions and x/y forces before forming
+  quadratic observations; only independent factors add powers. Returned
+  `DipoleFieldStatistics` contains `E[|p|²]/2`, the Hermitian velocity spectral
+  covariance `E[u_i conj(u_j)]/2`, and signed active/reactive intensity
+  `E[p conj(u)]/2`. These are spectral-line powers, not PSD/Hz: one-sided PSD
+  factors for a bin width df must be scaled by sqrt(2 df) into peak-force units.
+  Broadband bin addition assumes stationary resolved frequencies, not arbitrary
+  finite-time signals. Application is allocation-free O(N r), with explicit
+  `CoherenceBudget` limits on factor count r and source-factor products N r,
+  and double-double reductions both within and between factors.
+  `evaluate_independent_sources` gives the equivalent O(N) path for mutually
+  uncorrelated sources with coherent x/y force components, without N sparse
+  N-vector factors. Independence and any supplied correlation are caller-declared
+  physical assumptions; this API does not estimate a cross-spectrum or validate
+  a turbulence model. G0/G1/G3 cases in `tests/interference.rs` compare the
+  factor propagation with independent dense cross-spectral algebra (including
+  complex correlation), coherent nulls versus independent power, standing waves,
+  unitary factor changes, common-clock shifts, cancellation residuals and work
+  limits. The material-run test exercises the independent-source observation
+  through its actual source-medium binding. The existing 2D and one-way source
+  authority boundaries remain in every statistical result.
 - `curle3d::CompactForceObserver` prepares a stationary 3D point-force observer
   from one coherent `FluidAcousticState` and physical source/observer positions.
   For actual force ON the fluid [N], full pressure is

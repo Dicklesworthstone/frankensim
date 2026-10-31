@@ -394,6 +394,8 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
     /// Unlike collapsing their net force, this retains each propagation path
     /// and the near-field particle velocity. Force phasors must share one time
     /// origin; independently started flow records do not imply phase locking.
+    /// The returned operator also accepts explicitly independent sources or
+    /// caller-supplied coherence factors, retaining the same material snapshot.
     ///
     /// # Errors
     /// Refuses frequencies outside the recorded band, invalid geometry, or a
