@@ -655,3 +655,313 @@ fn affine_young_shear_accepts_common_scale_and_refuses_changing_ratio() {
         assert_eq!(material, before);
     }
 }
+
+#[test]
+fn g1_rational_young_shear_reaches_native_entropy_capacity_and_source_refresh() {
+    use crate::visco_tensor::TensorProjectionBudget;
+    let (card, material) = affine_equilibrium_pair_fixture(
+        TensorElasticity::IsotropicYoungShear,
+        [
+            ("young_modulus", 12e9, -12e6),
+            ("shear_modulus", 4.8e9, 6e6),
+        ],
+    );
+    let before = material.clone();
+    assert!(thermal::AffineTensorThermal::try_new(&material, &card, "T", [280.0, 360.0]).is_err());
+    let law = thermal::TensorThermalLaw::try_new(&material, &card, "T", [280.0, 360.0]).unwrap();
+    assert_eq!(law.source(), &material);
+    assert_eq!(law.temperature_axis(), "T");
+    assert_eq!(law.temperature_interval_k(), [280.0, 360.0]);
+    let reference = law
+        .in_frame([[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]])
+        .unwrap();
+    let bounds = reference.equilibrium_bounds.unwrap();
+    let column: [f64; 6] = [1.0, -0.5, 0.25, 0.3, -0.1, 0.2];
+    let displacement = 0.001;
+    let strain = column.map(|v| v * displacement);
+    let volume = 0.01;
+    let trace = strain[0] + strain[1] + strain[2];
+    let dev_norm = strain[..3]
+        .iter()
+        .map(|v| (v - trace / 3.0).powi(2))
+        .sum::<f64>()
+        + 2.0 * strain[3..].iter().map(|v| v * v).sum::<f64>();
+    let close = |a: f64, b: f64| {
+        assert!(
+            (a - b).abs() <= 2e-11 * a.abs().max(b.abs()).max(1.0),
+            "{a} != {b}"
+        );
+    };
+    // Quotient differentiation, independently of the implementation's
+    // normalized constant-cross-product evaluation.
+    let coefficients = |t: f64| {
+        let e = 12e9 - 12e6 * (t - 300.0);
+        let g = 4.8e9 + 6e6 * (t - 300.0);
+        let numerator = e * g;
+        let numerator_prime = -12e6 * g + e * 6e6;
+        let numerator_second = 2.0 * -12e6 * 6e6;
+        let denominator = 3.0 * (3.0 * g - e);
+        let denominator_prime: f64 = 3.0 * (3.0 * 6e6 + 12e6);
+        let bulk = numerator / denominator;
+        let first =
+            numerator_prime / denominator - numerator * denominator_prime / denominator.powi(2);
+        let second = numerator_second / denominator
+            - 2.0 * numerator_prime * denominator_prime / denominator.powi(2)
+            + 2.0 * numerator * denominator_prime.powi(2) / denominator.powi(3);
+        (bulk, g, first, second)
+    };
+    let evaluate = |temperature: f64| {
+        let endpoint = material
+            .at_query_point(
+                &card,
+                &material.state().query().with("T", temperature).unwrap(),
+            )
+            .unwrap();
+        let point = endpoint
+            .law()
+            .project_strain(
+                &[column],
+                volume,
+                TensorProjectionBudget {
+                    max_coordinates: 1,
+                    max_scalar_terms: 256,
+                },
+                || false,
+            )
+            .unwrap();
+        let derivative = reference.at_temperature(temperature).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &reference.branches_pa_k,
+            &derivative.branches_pa_k
+        ));
+        assert_eq!(derivative.resolved_temperature_k, Some(temperature));
+        if temperature != 300.0 {
+            assert!(
+                point
+                    .thermal_state(
+                        &reference,
+                        &[displacement],
+                        &[0.0; 6],
+                        temperature,
+                        1e-10,
+                        || false
+                    )
+                    .is_err(),
+                "stale nonlinear derivative accepted"
+            );
+        }
+        let value = point
+            .thermal_state(
+                &derivative,
+                &[displacement],
+                &[0.0; 6],
+                temperature,
+                1e-10,
+                || false,
+            )
+            .unwrap();
+        let (bulk, shear, bulk_prime, bulk_second) = coefficients(temperature);
+        let expected_free = volume * (0.5 * bulk * trace * trace + shear * dev_norm);
+        let expected_entropy = -volume * (0.5 * bulk_prime * trace * trace + 6e6 * dev_norm);
+        let expected_capacity = -temperature * volume * 0.5 * bulk_second * trace * trace;
+        close(value.free_energy_j, expected_free);
+        close(value.entropy_j_k, expected_entropy);
+        close(
+            value.internal_energy_j,
+            expected_free + temperature * expected_entropy,
+        );
+        close(value.heat_capacity_j_k, expected_capacity);
+        close(derivative.equilibrium_pa_k[0][0], bulk_prime + 8e6);
+        close(derivative.equilibrium_pa_k2[0][1], bulk_second);
+        assert!(value.heat_capacity_j_k < 0.0);
+        assert!(3.0 * bulk <= bounds.stiffness_norm_pa);
+        assert!(2.0 * shear <= bounds.stiffness_norm_pa);
+        assert!(3.0 * bulk_prime.abs() <= bounds.slope_norm_pa_k);
+        assert!(3.0 * bulk_second <= bounds.curvature_norm_pa_k2);
+        assert!(
+            point
+                .thermal_capacity_bound_j_k2(&derivative, temperature, [0.0; 6])
+                .unwrap()
+                >= -value.heat_capacity_j_k / temperature
+        );
+        assert!(endpoint.state().property("poisson_ratio").is_none());
+        assert_eq!(endpoint.law().branches()[0].c_pa, BRANCH);
+        for property in material.state().properties() {
+            assert_eq!(
+                property.answer().receipt.selected,
+                endpoint
+                    .state()
+                    .property(property.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+        }
+        value
+    };
+    for temperature in [280.0, 295.0, 300.0, 315.0, 360.0] {
+        evaluate(temperature);
+    }
+    let h = 0.01;
+    let difference =
+        (evaluate(320.0 + h).internal_energy_j - evaluate(320.0 - h).internal_energy_j) / (2.0 * h);
+    let capacity = evaluate(320.0).heat_capacity_j_k;
+    assert!((difference - capacity).abs() < 2e-7 * capacity.abs());
+    // The same nonlinear source with a constant free-strain derivative and
+    // fixed, nonzero viscous strain exercises curvature and expansion jointly.
+    let alpha = [2e-6, 2e-6, 2e-6, 0.0, 0.0, 0.0];
+    let total_mandel: [f64; 6] = core::array::from_fn(|i| {
+        strain[i]
+            * if i < 3 {
+                1.0
+            } else {
+                core::f64::consts::SQRT_2
+            }
+    });
+    let branch_bilinear = |a: &[f64; 6], b: &[f64; 6]| {
+        let mut value = 0.0;
+        for i in 0..6 {
+            for j in 0..6 {
+                value += a[i] * BRANCH[i][j] * b[j];
+            }
+        }
+        value
+    };
+    let evaluate_expansion = |temperature: f64| {
+        let endpoint = material
+            .at_query_point(
+                &card,
+                &material.state().query().with("T", temperature).unwrap(),
+            )
+            .unwrap();
+        let free = alpha.map(|a| a * (temperature - 300.0));
+        let point = endpoint
+            .law()
+            .project_strain(
+                &[column],
+                volume,
+                TensorProjectionBudget {
+                    max_coordinates: 1,
+                    max_scalar_terms: 256,
+                },
+                || false,
+            )
+            .unwrap()
+            .with_eigenstrain_mandel(free)
+            .unwrap();
+        let free_memory = point.eigenstrain_factor_coordinates().unwrap();
+        let memory: Vec<_> = point.branches()[0]
+            .rows()
+            .iter()
+            .zip(free_memory)
+            .map(|(row, offset)| 0.6 * displacement * row[0] - offset)
+            .collect();
+        let spring: [f64; 6] = core::array::from_fn(|i| 0.6 * total_mandel[i] - free[i]);
+        let derivative = reference.at_temperature(temperature).unwrap();
+        let value = point
+            .thermal_state_with_expansion(
+                &derivative,
+                &[displacement],
+                &memory,
+                temperature,
+                alpha,
+                1e-10,
+                || false,
+            )
+            .unwrap();
+        let (bulk, shear, bulk_prime, bulk_second) = coefficients(temperature);
+        let elastic_trace = trace - 6e-6 * (temperature - 300.0);
+        let free_energy = volume
+            * (0.5 * bulk * elastic_trace.powi(2)
+                + shear * dev_norm
+                + 0.5 * branch_bilinear(&spring, &spring));
+        let entropy = volume
+            * (6e-6 * bulk * elastic_trace
+                - 0.5 * bulk_prime * elastic_trace.powi(2)
+                - 6e6 * dev_norm
+                + branch_bilinear(&alpha, &spring));
+        let curvature = volume
+            * (0.5 * bulk_second * elastic_trace.powi(2) - 12e-6 * bulk_prime * elastic_trace
+                + 36e-12 * bulk
+                + branch_bilinear(&alpha, &alpha));
+        close(value.free_energy_j, free_energy);
+        close(value.entropy_j_k, entropy);
+        close(value.internal_energy_j, free_energy + temperature * entropy);
+        close(value.heat_capacity_j_k, -temperature * curvature);
+        assert!(
+            point
+                .thermal_capacity_bound_j_k2(&derivative, temperature, alpha)
+                .unwrap()
+                >= curvature
+        );
+        value
+    };
+    for temperature in [280.0, 295.0, 300.0, 315.0, 360.0] {
+        evaluate_expansion(temperature);
+    }
+    let difference = (evaluate_expansion(320.0 + h).internal_energy_j
+        - evaluate_expansion(320.0 - h).internal_energy_j)
+        / (2.0 * h);
+    let capacity = evaluate_expansion(320.0).heat_capacity_j_k;
+    assert!((difference - capacity).abs() < 2e-7 * capacity.abs());
+    assert!(reference.at_temperature(279.0).is_err());
+    assert!(reference.at_temperature(f64::NAN).is_err());
+    assert_eq!(material, before);
+}
+
+#[test]
+fn g3_rational_tensor_law_retains_complete_source_path_admission() {
+    for mutation in ["kink", "narrow", "unstable"] {
+        let (properties, mut claims) =
+            isotropic_pair_fixture(TensorElasticity::IsotropicYoungShear);
+        claims.push(scalar("density", Density::DIMS, 850.0));
+        for claim in &mut claims {
+            let (value, slope): (f64, f64) = match claim.key.name() {
+                "young_modulus" => (12e9, -12e6),
+                "shear_modulus" => (4.8e9, if mutation == "unstable" { -25e6 } else { 6e6 }),
+                _ => continue,
+            };
+            let mut knots: Vec<_> = [273.0, 300.0, 373.0]
+                .into_iter()
+                .map(|t| (t, slope.mul_add(t - 300.0, value)))
+                .collect();
+            if claim.key.name() == "shear_modulus" {
+                if mutation == "kink" {
+                    knots[1].1 += 1e8;
+                }
+                if mutation == "narrow" {
+                    claim.validity = ValidityDomain::unconstrained()
+                        .with("T", 290.0, 330.0)
+                        .with("omega", 0.0, 1000.0);
+                }
+            }
+            claim.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots,
+                dims: Pressure::DIMS,
+            };
+            claim.interpolation = InterpolationPolicy::LinearInside;
+        }
+        let card = card(claims);
+        let point = QueryPoint::new()
+            .with("T", 300.0)
+            .unwrap()
+            .with("omega", 100.0)
+            .unwrap();
+        let material = ResolvedTensorMaterial::resolve(
+            &card,
+            &point,
+            properties,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let before = material.clone();
+        assert!(
+            thermal::TensorThermalLaw::try_new(&material, &card, "T", [280.0, 360.0]).is_err(),
+            "accepted {mutation}"
+        );
+        assert_eq!(material, before);
+    }
+}

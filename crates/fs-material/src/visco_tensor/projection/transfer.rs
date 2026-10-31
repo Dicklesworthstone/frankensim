@@ -9,6 +9,9 @@ pub struct TensorThermalState {
     pub free_energy_j: f64,
     pub entropy_j_k: f64,
     pub internal_energy_j: f64,
+    /// Mechanical dU/dT at fixed total and viscous strains [J/K]. The
+    /// caloric material contributes separately; only their total must be positive.
+    pub heat_capacity_j_k: f64,
 }
 
 fn recoverable_factor(
@@ -171,7 +174,7 @@ impl ProjectedTensorProny {
         )
     }
 
-    /// The same complete potential, with a source-admitted free-strain
+    /// The same complete potential, with a source-admitted constant free-strain
     /// derivative in this point's Mandel frame. At fixed total/viscous strains,
     /// S includes V*alpha:sigma for equilibrium AND every Maxwell spring.
     /// Constant singular branches need no inverse: B*alpha dotted with their
@@ -192,13 +195,16 @@ impl ProjectedTensorProny {
             || derivative.branches_pa_k.len() != self.model.branches.len()
             || memory.iter().any(|v| !v.is_finite())
             || !(derivative.interval_k[0]..=derivative.interval_k[1]).contains(&temperature_k)
+            || derivative
+                .resolved_temperature_k
+                .is_some_and(|t| t.to_bits() != temperature_k.to_bits())
             || !relative_memory_tolerance.is_finite()
             || relative_memory_tolerance <= 0.0
             || relative_memory_tolerance > 1e-8
             || !finite(&alpha_mandel)
         {
             return Err(invalid(
-                "thermal tensor state needs complete memory, bounded temperature and reconstruction tolerance",
+                "thermal tensor state needs complete memory, matching derivative temperature and reconstruction tolerance",
             ));
         }
         let total = mandel(&self.strain(displacement)?);
@@ -216,40 +222,69 @@ impl ProjectedTensorProny {
             // equal affine terms would lose free-expansion energy accuracy.
             free_energy_j = 0.5 * self.volume_m3 * dot(&strain, &apply(&self.model.c_eq, &strain));
         }
-        let mut entropy_j_k =
-            -0.5 * self.volume_m3 * dot(&strain, &apply(&derivative.equilibrium_pa_k, &strain));
-        entropy_j_k += self.volume_m3 * dot(&alpha_mandel, &apply(&self.model.c_eq, &strain));
+        let slope_strain = apply(&derivative.equilibrium_pa_k, &strain);
+        let mut entropy_j_k = -0.5 * self.volume_m3 * dot(&strain, &slope_strain);
+        let has_expansion = alpha_mandel.iter().any(|v| *v != 0.0);
+        // At fixed total/viscous strain, e_T=-alpha. For constant alpha:
+        // psi_TT/V = .5 e:C_TT:e - 2 alpha:C_T:e + alpha:C:alpha.
+        // The affine Maxwell branches below have no C_TT contribution.
+        let mut curvature = if derivative
+            .equilibrium_pa_k2
+            .iter()
+            .flatten()
+            .any(|v| *v != 0.0)
+        {
+            0.5 * dot(&strain, &apply(&derivative.equilibrium_pa_k2, &strain))
+        } else {
+            0.0
+        };
+        if has_expansion {
+            entropy_j_k += self.volume_m3 * dot(&alpha_mandel, &apply(&self.model.c_eq, &strain));
+            curvature += dot(&alpha_mandel, &apply(&self.model.c_eq, &alpha_mandel))
+                - 2.0 * dot(&alpha_mandel, &slope_strain);
+        }
         let root = det::sqrt(self.volume_m3);
         for (index, (branch, slope)) in self
             .model
             .branches
             .iter()
-            .zip(&derivative.branches_pa_k)
+            .zip(derivative.branches_pa_k.iter())
             .enumerate()
         {
             poll(&mut cancelled)?;
             let z = &memory[6 * index..6 * index + 6];
             free_energy_j += 0.5 * z.iter().map(|v| v * v).sum::<f64>();
-            if alpha_mandel.iter().any(|v| *v != 0.0) {
+            if has_expansion {
                 let rows = branch.resolved_gram_rows(&self.model.factors[index]);
                 let rate = apply(&rows, &alpha_mandel);
                 entropy_j_k += root * rate.iter().zip(z).map(|(a, b)| a * b).sum::<f64>();
+                curvature += dot(&alpha_mandel, &apply(&branch.c_pa, &alpha_mandel));
             }
             if slope.iter().flatten().any(|v| *v != 0.0) {
                 let rows = branch.resolved_gram_rows(&self.model.factors[index]);
                 let q = recover_strain(&branch.c_pa, &rows, z, root, relative_memory_tolerance)?;
-                if alpha_mandel.iter().any(|v| *v != 0.0) {
+                if has_expansion {
                     // The combined capacity bound assumes ||q|| <= 2L.
                     // Use the SAME native Mandel-norm admission as total and
                     // equilibrium elastic strain, scaled by one half.
                     self.model.validate_mandel_strain(&q.map(|v| 0.5 * v))
                         .map_err(|_| invalid("affine expansion Maxwell spring strain exceeds its 2L thermal envelope"))?;
+                    curvature -= 2.0 * dot(&alpha_mandel, &apply(slope, &q));
                 }
                 entropy_j_k -= 0.5 * self.volume_m3 * dot(&q, &apply(slope, &q));
             }
         }
         let internal_energy_j = temperature_k.mul_add(entropy_j_k, free_energy_j);
-        if !free_energy_j.is_finite() || !entropy_j_k.is_finite() || !internal_energy_j.is_finite()
+        let heat_capacity_j_k = if curvature == 0.0 {
+            0.0
+        } else {
+            -temperature_k * (self.volume_m3 * curvature)
+        };
+        if !free_energy_j.is_finite()
+            || !entropy_j_k.is_finite()
+            || !internal_energy_j.is_finite()
+            || !curvature.is_finite()
+            || !heat_capacity_j_k.is_finite()
         {
             return Err(invalid(
                 "tensor mechanical thermodynamic contribution overflow",
@@ -260,6 +295,7 @@ impl ProjectedTensorProny {
             free_energy_j,
             entropy_j_k,
             internal_energy_j,
+            heat_capacity_j_k,
         })
     }
 }

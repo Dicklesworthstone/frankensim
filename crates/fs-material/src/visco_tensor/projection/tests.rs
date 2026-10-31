@@ -112,10 +112,9 @@ fn thermal_projection_retains_signed_full_tensor_derivatives_and_original_strain
     first[0][0] = -1.1; first[1][4] = -0.8; first[4][1] = -0.8;
     let mut second = diagonal(-0.3);
     second[2][5] = 0.9; second[5][2] = 0.9;
-    let derivative = source::thermal::TensorTemperatureDerivative {
-        equilibrium_pa_k: equilibrium, branches_pa_k: vec![first,second],
-        interval_k: [280.0,320.0],
-    };
+    let derivative = source::thermal::TensorTemperatureDerivative::from_affine_parts(
+        equilibrium, vec![first,second], [280.0,320.0],
+    );
     let projected = p.thermal_stiffness_derivatives(&derivative,budget(),||false).unwrap();
     let pairs = [(equilibrium,projected.equilibrium()),
         (first,projected.branches()[0].as_slice()),
@@ -144,6 +143,72 @@ fn thermal_projection_retains_signed_full_tensor_derivatives_and_original_strain
         TensorProjectionBudget {max_scalar_terms:504,..budget()},||false).unwrap());
     assert!(matches!(p.thermal_stiffness_derivatives(&derivative,budget(),||true),
         Err(TensorPronyError::Cancelled)));
-    let mut incomplete = derivative; incomplete.branches_pa_k.pop();
+    let mut incomplete = derivative;
+    incomplete.branches_pa_k = incomplete.branches_pa_k[..1].to_vec().into();
     assert!(p.thermal_stiffness_derivatives(&incomplete,budget(),||false).is_err());
+}
+
+#[test]
+fn expansion_capacity_matches_internal_energy_at_fixed_total_and_viscous_strain() {
+    let column = [1.0, 0.2, -0.4, 0.3, -0.1, 0.15];
+    let displacement = [0.002];
+    let volume = 0.25;
+    let alpha = [1e-5, -2e-5, 0.5e-5, 0.0, 0.0, 0.0];
+    let viscous = [0.001, -0.0002, 0.0003, -0.0001, 0.0, 0.0002];
+    let total = mandel(&column).map(|v| v * displacement[0]);
+    let derivative = source::thermal::TensorTemperatureDerivative::from_affine_parts(
+        diagonal(-2.0), vec![diagonal(3.0)], [280.0, 320.0],
+    );
+    // Independent scalar continuum potential. Both the total strain and the
+    // physical viscous strain stay fixed as temperature changes; factor
+    // coordinates themselves must change with branch stiffness and free strain.
+    let reference = |temperature: f64| {
+        let dt = temperature - 300.0;
+        let equilibrium = 1200.0 - 2.0 * dt;
+        let branch = 400.0 + 3.0 * dt;
+        let elastic: [f64; 6] = core::array::from_fn(|i| total[i] - alpha[i] * dt);
+        let spring: [f64; 6] = core::array::from_fn(|i| elastic[i] - viscous[i]);
+        let free = 0.5 * volume * (0..6).map(|i|
+            equilibrium * elastic[i] * elastic[i] + branch * spring[i] * spring[i]
+        ).sum::<f64>();
+        let entropy = volume * (0..6).map(|i|
+            alpha[i] * (equilibrium * elastic[i] + branch * spring[i])
+                + elastic[i] * elastic[i] - 1.5 * spring[i] * spring[i]
+        ).sum::<f64>();
+        let capacity = -temperature * volume * (0..6).map(|i|
+            (equilibrium + branch) * alpha[i] * alpha[i]
+                - 2.0 * alpha[i] * (-2.0 * elastic[i] + 3.0 * spring[i])
+        ).sum::<f64>();
+        (free, entropy, free + temperature * entropy, capacity, spring)
+    };
+    for temperature in [285.0, 300.0, 315.0] {
+        let dt = temperature - 300.0;
+        let branch = 400.0 + 3.0 * dt;
+        let law = TensorProny::new_mandel(
+            diagonal(1200.0 - 2.0 * dt),
+            vec![TensorPronyBranch::from_gram_rows(diagonal(det::sqrt(branch)), 0.2).unwrap()],
+            0.1,
+        ).unwrap();
+        let projected = law.project_strain(&[column], volume, budget(), || false).unwrap()
+            .with_eigenstrain_mandel(alpha.map(|a| a * dt)).unwrap();
+        let (free, entropy, internal, capacity, spring) = reference(temperature);
+        let memory = spring.map(|q| det::sqrt(volume) * det::sqrt(branch) * q);
+        let state = projected.thermal_state_with_expansion(
+            &derivative, &displacement, &memory, temperature, alpha, 1e-10, || false,
+        ).unwrap();
+        close(state.free_energy_j, free);
+        close(state.entropy_j_k, entropy);
+        close(state.internal_energy_j, internal);
+        close(state.heat_capacity_j_k, capacity);
+        let step = 0.001;
+        let numerical = (reference(temperature + step).2 - reference(temperature - step).2)
+            / (2.0 * step);
+        assert!((state.heat_capacity_j_k - numerical).abs()
+            < 5e-8 * capacity.abs().max(1e-8));
+        let bound = projected.thermal_capacity_bound_j_k2(&derivative, temperature, alpha).unwrap();
+        assert!(bound >= -state.heat_capacity_j_k / temperature);
+        close(bound, projected.affine_expansion_capacity_bound_j_k2(
+            &derivative, temperature, alpha,
+        ).unwrap());
+    }
 }

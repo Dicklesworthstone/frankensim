@@ -3628,8 +3628,9 @@ choices into the existing history evolution, stress, stored energy and physical
 loss. Scalar Young-based spectra retain their original source assumptions.
 The affine thermal tensor adapter admits independent affine bulk/shear sources
 through exact stiffness derivatives, including a changing derived Poisson ratio.
-Young/shear sources require one common affine scale; nonproportional paths need
-a different thermodynamic law. Added native regressions cover source retention,
+The shared `TensorThermalLaw` also admits independent affine Young/shear
+sources through the exact rational bulk response and its thermal curvature;
+the strict affine adapter retains its common-scale restriction. Added native regressions cover source retention,
 stress/work/heat, actual plate/string pressure equivalence, and the existing
 projected thermal owner's free energy, entropy and internal energy. Native
 workspace execution remains separate from source and syntax checks.
@@ -5992,27 +5993,42 @@ geometry reduction, data-defined branch sharing, source-domain/quantity refusal
 and memory-preserving temperature continuation.
 
 
-### Affine tensor thermal potentials
+### Source tensor thermal potentials
 
-`visco_tensor::source::thermal::AffineTensorThermal` admits source-derived
-affine stored tensors over every original selected temperature knot.
+`visco_tensor::source::thermal::TensorThermalLaw` admits source-derived
+stored tensors over every original selected temperature knot.
 Isotropic E(T) requires fixed Poisson ratio. Independent affine bulk and shear
 sources use the exact Mandel stiffness derivatives: normal diagonal K'+4G'/3,
 normal cross terms K'-2G'/3, and shear diagonal 2G'. Their derived Young modulus
-and Poisson ratio need not be affine. Young/shear sources and orthotropic Young
-and shear moduli require one common affine scale with fixed Poisson ratios.
+and Poisson ratio need not be affine. Independent affine Young/shear sources
+retain K(T)=E(T)G(T)/(3(3G(T)-E(T))) and its exact first and second derivatives.
+Positive E, G and 3G-E across the complete interval remain required. Orthotropic
+Young and shear moduli require one common affine scale with fixed Poisson ratios.
 Each of the 21 coefficients of every symmetric Maxwell branch may have an independent
 affine slope, including signed cross terms. Positive piecewise-linear
 relaxation times remain supported. Reference density and strain validity
 remain fixed.
 
+`AffineTensorThermal` is the strict affine subset of that same source admission;
+consumers retaining one constant derivative still refuse independent Young/shear
+paths. A general derivative snapshot is tied to its resolved temperature and
+must be refreshed before evaluating another endpoint. Rotated branch slopes
+are shared immutably, and rational equilibrium refresh uses fixed-size scalar
+arithmetic without source queries, repeated rotations or branch allocations.
+
 `ProjectedTensorProny::thermal_state` evaluates Helmholtz free energy psi,
-entropy S=-psi_T, and internal energy U=psi+T*S using the original strain map
+entropy S=-psi_T, internal energy U=psi+T*S and mechanical heat capacity
+dU/dT=-T*psi_TT using the original strain map
 and complete native factor memory. Physical Maxwell strain recovery shares
 the native checked transfer inverse. Varying singular factors refuse even
 at zero actual memory; unchanged singular factors retain their original
-free energy with zero thermal entropy. Non-affine stored tensors, thermal
-expansion and finite-strain thermodynamics are outside this admission.
+free energy with zero thermal entropy. The expansion evaluator includes constant
+alpha in equilibrium and every Maxwell spring. The shared whole-interval
+capacity bound includes nonlinear curvature even when alpha is zero; the
+receiving caloric owner must establish positive total capacity. Mechanical
+capacity is not an extra caloric or dissipative heat source. Other nonlinear
+source paths, varying alpha and finite-strain thermodynamics remain outside
+this admission.
 
 `ProjectedTensorProny::thermal_stiffness_derivatives` contracts the same admitted
 source derivatives through the original strain columns and physical volume:

@@ -72,6 +72,7 @@ pub(super) fn states<E>(
         total.free_energy_j = finite(total.free_energy_j + state.free_energy_j)?;
         total.entropy_j_k = finite(total.entropy_j_k + state.entropy_j_k)?;
         total.internal_energy_j = finite(total.internal_energy_j + state.internal_energy_j)?;
+        total.heat_capacity_j_k = finite(total.heat_capacity_j_k + state.heat_capacity_j_k)?;
         at += count;
     }
     check(gate)?;

@@ -98,16 +98,50 @@ impl ProjectedTensorProny {
         temperature_k: f64,
         alpha_mandel: Voigt,
     ) -> Result<f64> {
+        if derivative.resolved_temperature_k.is_some() {
+            return Err(invalid(
+                "non-affine storage needs the general thermal capacity bound",
+            ));
+        }
+        self.thermal_capacity_bound_j_k2(derivative, temperature_k, alpha_mandel)
+    }
+
+    /// Upper bound on psi_TT over the complete admitted source interval and
+    /// native strain envelope, including zero-expansion nonlinear storage.
+    /// Source-wide symmetric operator-norm bounds give
+    /// .5 L^2 ||C_TT|| + 2 ||alpha|| L ||C_T|| + ||alpha||^2 ||C||.
+    /// Affine tensors retain their original entrywise bound and constant-law
+    /// limit. The receiving caloric owner must admit C_caloric - T*bound > 0;
+    /// this value is not an extra caloric energy or dissipative heat source.
+    pub fn thermal_capacity_bound_j_k2(
+        &self,
+        derivative: &source::thermal::TensorTemperatureDerivative,
+        temperature_k: f64,
+        alpha_mandel: Voigt,
+    ) -> Result<f64> {
         if !finite(&alpha_mandel)
             || !temperature_k.is_finite()
             || !(derivative.interval_k[0]..=derivative.interval_k[1]).contains(&temperature_k)
+            || derivative
+                .resolved_temperature_k
+                .is_some_and(|t| t.to_bits() != temperature_k.to_bits())
             || derivative.branches_pa_k.len() != self.model.branches.len()
         {
-            return Err(invalid("affine expansion capacity needs the matching bounded source state"));
+            return Err(invalid(
+                "thermal capacity needs the matching bounded source state",
+            ));
         }
-        let varying = derivative.equilibrium_pa_k.iter().flatten()
+        let varying = derivative
+            .equilibrium_pa_k
+            .iter()
+            .flatten()
             .chain(derivative.branches_pa_k.iter().flatten().flatten())
-            .any(|v| *v != 0.0);
+            .chain(derivative.equilibrium_pa_k2.iter().flatten())
+            .any(|v| *v != 0.0)
+            || derivative
+                .equilibrium_bounds
+                .as_ref()
+                .is_some_and(|b| b.slope_norm_pa_k != 0.0 || b.curvature_norm_pa_k2 != 0.0);
         if !varying {
             return self.expansion_capacity_coefficient_j_k2(alpha_mandel);
         }
@@ -135,13 +169,46 @@ impl ProjectedTensorProny {
             }
             Ok(value)
         };
-        let mut value = bound(&self.model.c_eq, &derivative.equilibrium_pa_k, strain_limit)?;
-        for (branch, slope) in self.model.branches.iter().zip(&derivative.branches_pa_k) {
+        let mut value = if let Some(bounds) = &derivative.equilibrium_bounds {
+            if [
+                bounds.stiffness_norm_pa,
+                bounds.slope_norm_pa_k,
+                bounds.curvature_norm_pa_k2,
+            ]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+            {
+                return Err(invalid("thermal tensor interval bounds are inadmissible"));
+            }
+            let alpha_squared = dot(&alpha, &alpha);
+            let alpha_norm = det::sqrt(alpha_squared);
+            0.5 * strain_limit * strain_limit * bounds.curvature_norm_pa_k2
+                + 2.0 * alpha_norm * strain_limit * bounds.slope_norm_pa_k
+                + alpha_squared * bounds.stiffness_norm_pa
+        } else {
+            if derivative
+                .equilibrium_pa_k2
+                .iter()
+                .flatten()
+                .any(|v| *v != 0.0)
+            {
+                return Err(invalid(
+                    "nonlinear tensor curvature needs complete source interval bounds",
+                ));
+            }
+            bound(&self.model.c_eq, &derivative.equilibrium_pa_k, strain_limit)?
+        };
+        for (branch, slope) in self
+            .model
+            .branches
+            .iter()
+            .zip(derivative.branches_pa_k.iter())
+        {
             value += bound(&branch.c_pa, slope, 2.0 * strain_limit)?;
         }
         value *= self.volume_m3;
         if !value.is_finite() || value < 0.0 {
-            return Err(invalid("affine expansion volume-scaled capacity bound overflows"));
+            return Err(invalid("volume-scaled thermal capacity bound overflows"));
         }
         Ok(value)
     }
