@@ -410,13 +410,28 @@ impl FrozenGas {
         if !positive(speed) || !fl.iter().chain(&fr).all(|x| x.is_finite()) {
             return Err(Error::Invalid("unrepresentable Euler flux or signal speed"));
         }
+        let (ql, qr) = (left.array(), right.array());
+        // Consistency is exact for equal traces. Forming a redundant HLLC
+        // star state can round (rho*s)/s away from rho and manufacture flux
+        // in a resting atmosphere or a uniform moving flow.
+        if ql == qr && pl == pr {
+            return flux(fl, speed, false);
+        }
+        // A stationary pressure contact (including a tangential shear jump)
+        // transports no mass, tangential momentum or energy in inviscid Euler.
+        if pl.velocity == 0.0 && pr.velocity == 0.0 && pl.pressure == pr.pressure {
+            return flux(
+                core::array::from_fn(|k| if k == 1 { pl.pressure } else { 0.0 }),
+                speed,
+                false,
+            );
+        }
         if sl >= 0.0 {
             return flux(fl, speed, false);
         }
         if sr <= 0.0 {
             return flux(fr, speed, false);
         }
-        let (ql, qr) = (left.array(), right.array());
         let al = ql[0] * (sl - pl.velocity);
         let ar = qr[0] * (sr - pr.velocity);
         let contact = (pr.pressure - pl.pressure + al * pl.velocity - ar * pr.velocity) / (al - ar);

@@ -13,6 +13,7 @@ mod eos;
 mod evolve;
 mod flux;
 mod geometry;
+mod hydrostatic;
 /// Synchronized shock propagation through passages and finite rigid gas volumes.
 pub mod network;
 pub(crate) mod wall;
@@ -27,6 +28,7 @@ pub use flux::{
     SpatialPrimitive,
 };
 pub use geometry::Mesh1d;
+pub use hydrostatic::IsothermalAtmosphere;
 
 use fs_thermochem::mixture::FrozenIdealGasMixtureErrorV1;
 

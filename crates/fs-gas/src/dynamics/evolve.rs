@@ -1,3 +1,4 @@
+use super::hydrostatic::HydrostaticBalance;
 use super::{Conserved, Error, FaceFlux, FrozenGas, Mesh1d, Primitive, allocated, poll, positive};
 use fs_qty::{Length, Time};
 
@@ -113,7 +114,11 @@ pub struct StepReport {
     pub right_boundary_change: Totals,
     /// Integrated p*dA/dx force on the gas [kg m/s]. Stationary walls do no work.
     pub area_momentum_impulse: f64,
-    /// `after - before - boundary_change - area momentum impulse`.
+    /// Integrated gravitational force [kg m/s], zero without an atmosphere.
+    pub gravity_momentum_impulse: f64,
+    /// Work by gravity on the gas [J], using the same transported mass flux.
+    pub gravity_work: f64,
+    /// `after - before - boundary_change - geometric/gravitational sources`.
     pub conservation_residual: Totals,
 }
 
@@ -160,6 +165,7 @@ pub struct Euler1d {
     pub(super) boundaries: Boundaries,
     pub(super) time: f64,
     pub(super) work: Workspace,
+    pub(super) hydrostatic: Option<HydrostaticBalance>,
 }
 
 impl Euler1d {
@@ -218,6 +224,7 @@ impl Euler1d {
             boundaries,
             time: 0.0,
             work,
+            hydrostatic: None,
         })
     }
     /// Original frozen-mixture EOS and source.
@@ -245,6 +252,11 @@ impl Euler1d {
             ));
         }
         validate_reservoirs(&self.gas, boundaries, &mut cancelled)?;
+        if self.hydrostatic.is_some() && boundaries == Boundaries::Periodic {
+            return Err(Error::Invalid(
+                "a gravitational atmosphere needs physical end boundaries",
+            ));
+        }
         poll(&mut cancelled)?;
         self.boundaries = boundaries;
         Ok(())
@@ -310,6 +322,11 @@ impl Euler1d {
         if self.boundaries == Boundaries::Periodic {
             return Err(Error::Invalid("end ports need a non-periodic interval"));
         }
+        if self.hydrostatic.is_some() {
+            return Err(Error::Invalid(
+                "atmosphere end ports need a gravitational energy convention",
+            ));
+        }
         self.advance(maximum_duration, controls, Some(&mut ports), cancelled)
     }
 
@@ -362,11 +379,18 @@ impl Euler1d {
         }
         let mut signal_rate = 0.0_f64;
         for (i, &state) in self.states.iter().enumerate() {
-            let p = self.gas.decode(
-                state,
-                Some(self.work.primitive[i].temperature),
-                &mut cancelled,
-            )?;
+            let p = if let Some(balance) =
+                self.hydrostatic.as_ref().filter(|b| b.cells[i].0 == state)
+            {
+                poll(&mut cancelled)?;
+                balance.cells[i].1
+            } else {
+                self.gas.decode(
+                    state,
+                    Some(self.work.primitive[i].temperature),
+                    &mut cancelled,
+                )?
+            };
             self.work.primitive[i] = p;
             let area = 0.5 * self.mesh.face_areas()[i] + 0.5 * self.mesh.face_areas()[i + 1];
             let rate = (p.velocity.abs() + p.sound_speed) * (area / self.mesh.volumes()[i]);
@@ -403,6 +427,7 @@ impl Euler1d {
                 [self.time, dt],
                 controls.cfl,
                 reconstruction,
+                self.hydrostatic.as_ref(),
                 &mut self.work,
                 ports.as_deref_mut(),
                 &mut cancelled,
@@ -424,11 +449,17 @@ impl Euler1d {
                         -factor * right_area * (a.right.array()[k] + b.right.array()[k])
                     }));
                     let area_momentum_impulse = factor * (a.area_force + b.area_force);
+                    let gravity_momentum_impulse = factor * (a.gravity_force + b.gravity_force);
+                    let gravity_work = factor * (a.gravity_power + b.gravity_power);
                     let residual = Totals::from_array(core::array::from_fn(|k| {
                         after.array()[k]
                             - before.array()[k]
                             - boundary.array()[k]
-                            - if k == 1 { area_momentum_impulse } else { 0.0 }
+                            - match k {
+                                1 => area_momentum_impulse + gravity_momentum_impulse,
+                                2 => gravity_work,
+                                _ => 0.0,
+                            }
                     }));
                     if !after
                         .array()
@@ -458,6 +489,8 @@ impl Euler1d {
                         left_boundary_change,
                         right_boundary_change,
                         area_momentum_impulse,
+                        gravity_momentum_impulse,
+                        gravity_work,
                         conservation_residual: residual,
                     });
                 }
@@ -486,6 +519,8 @@ pub(super) struct Stage {
     pub(super) right: FaceFlux,
     pub(super) signal_rate: f64,
     pub(super) area_force: f64,
+    pub(super) gravity_force: f64,
+    pub(super) gravity_power: f64,
     pub(super) fallbacks: usize,
     pub(super) limited: usize,
 }
@@ -499,6 +534,7 @@ fn attempt<P>(
     [time, dt]: [f64; 2],
     cfl: f64,
     reconstruction: Reconstruction,
+    hydrostatic: Option<&HydrostaticBalance>,
     work: &mut Workspace,
     mut ports: Option<&mut P>,
     cancelled: &mut impl FnMut() -> bool,
@@ -521,6 +557,7 @@ where
         mesh,
         boundaries,
         reconstruction,
+        hydrostatic,
         &mut work.primitive,
         &mut work.slopes,
         &mut work.faces,
@@ -535,7 +572,7 @@ where
     }
     for (i, &q) in states.iter().enumerate() {
         poll(cancelled)?;
-        work.stage[i] = forward(q, i, dt, mesh, &work.primitive, &work.faces);
+        work.stage[i] = forward(q, i, dt, mesh, &work.primitive, &work.faces, hydrostatic);
         if !gas.admissible_state(work.stage[i]) {
             return Err(Error::Invalid("first RK stage outside source domain"));
         }
@@ -555,6 +592,7 @@ where
         mesh,
         boundaries,
         reconstruction,
+        hydrostatic,
         &mut work.primitive,
         &mut work.slopes,
         &mut work.faces,
@@ -569,15 +607,18 @@ where
     }
     for (i, &q) in work.stage.iter().enumerate() {
         poll(cancelled)?;
-        let second = forward(q, i, dt, mesh, &work.primitive, &work.faces);
+        let second = forward(q, i, dt, mesh, &work.primitive, &work.faces, hydrostatic);
         if !gas.admissible_state(second) {
             return Err(Error::Invalid("second RK stage outside source domain"));
         }
         let candidate = Conserved::from_array(core::array::from_fn(|k| {
             0.5 * states[i].array()[k] + 0.5 * second.array()[k]
         }));
-        // Final EOS evaluation, including source finite-arithmetic checks, before publication.
-        gas.decode(candidate, Some(work.primitive[i].temperature), cancelled)?;
+        // Exact reference states already carry the immutable source evaluation.
+        // Every changed candidate receives the complete EOS admission.
+        if !hydrostatic.is_some_and(|balance| balance.cells[i].0 == candidate) {
+            gas.decode(candidate, Some(work.primitive[i].temperature), cancelled)?;
+        }
         work.candidate[i] = candidate;
     }
     Ok((a, b))
@@ -630,6 +671,7 @@ pub(super) fn operator(
     mesh: &Mesh1d,
     boundaries: Boundaries,
     reconstruction: Reconstruction,
+    hydrostatic: Option<&HydrostaticBalance>,
     primitive: &mut [Primitive],
     slopes: &mut [[f64; 3]],
     faces: &mut [FaceFlux],
@@ -638,9 +680,30 @@ pub(super) fn operator(
 ) -> Result<Stage, Error> {
     let n = states.len();
     for (i, &q) in states.iter().enumerate() {
-        primitive[i] = gas.decode(q, Some(primitive[i].temperature), cancelled)?;
+        primitive[i] = if let Some(balance) = hydrostatic.filter(|b| b.cells[i].0 == q) {
+            poll(cancelled)?;
+            balance.cells[i].1
+        } else {
+            gas.decode(q, Some(primitive[i].temperature), cancelled)?
+        };
     }
     let values = |p: Primitive| [p.density, p.velocity, p.pressure];
+    let deviations = |i: usize| {
+        let value = values(primitive[i]);
+        if let Some(balance) = hydrostatic {
+            let reference = values(balance.cells[i].1);
+            core::array::from_fn(|k| value[k] - reference[k])
+        } else {
+            value
+        }
+    };
+    let trace_values = |i: usize, side: f64, slope: [f64; 3]| {
+        let value = deviations(i);
+        let reference = hydrostatic.map_or([0.0; 3], |balance| {
+            values(balance.faces[i + usize::from(side > 0.0)].1)
+        });
+        core::array::from_fn::<_, 3, _>(|k| reference[k] + value[k] + side * slope[k])
+    };
     let mut limited = 0;
     for i in 0..n {
         poll(cancelled)?;
@@ -655,11 +718,7 @@ pub(super) fn operator(
         } else {
             (i - 1, i + 1)
         };
-        let (a, b, c) = (
-            values(primitive[prev]),
-            values(primitive[i]),
-            values(primitive[next]),
-        );
+        let (a, b, c) = (deviations(prev), deviations(i), deviations(next));
         let slope = core::array::from_fn(|k| {
             let x = mesh.center(i);
             let length = mesh.positions()[n] - mesh.positions()[0];
@@ -675,9 +734,7 @@ pub(super) fn operator(
         let mut scale = 1.0;
         for reduction in 0..=12 {
             let valid = [-0.5, 0.5].into_iter().all(|side| {
-                let rho = b[0] + side * scale * slope[0];
-                let u = b[1] + side * scale * slope[1];
-                let p = b[2] + side * scale * slope[2];
+                let [rho, u, p] = trace_values(i, side, slope.map(|s| scale * s));
                 let t = (p / rho) / gas.gas_constant();
                 positive(rho)
                     && positive(p)
@@ -696,6 +753,13 @@ pub(super) fn operator(
         }
     }
     let reconstruct = |i: usize, sign: f64| {
+        if let Some(balance) = hydrostatic {
+            if states[i] == balance.cells[i].0 && slopes[i] == [0.0; 3] {
+                return Ok(balance.faces[i + usize::from(sign > 0.0)]);
+            }
+            let [rho, u, p] = trace_values(i, sign, slopes[i]);
+            return gas.state_at(rho, u, p);
+        }
         if slopes[i] == [0.0; 3] {
             return Ok((states[i], primitive[i]));
         }
@@ -780,6 +844,9 @@ pub(super) fn operator(
     let mut signal_rate = 0.0_f64;
     let mut area_force = 0.0;
     let mut compensation = 0.0;
+    let mut gravity_force = 0.0;
+    let mut gravity_power = 0.0;
+    let mut gravity_compensation = [0.0; 2];
     for i in 0..n {
         poll(cancelled)?;
         let rate = (0.5 * mesh.face_areas()[i] * faces[i].signal_speed
@@ -794,12 +861,26 @@ pub(super) fn operator(
         let next = area_force + y;
         compensation = (next - area_force) - y;
         area_force = next;
+        if let Some(balance) = hydrostatic {
+            let force = balance.force(i, states[i], mesh);
+            let power = balance.power(i, mesh, faces);
+            let y = force - gravity_compensation[0];
+            let next = gravity_force + y;
+            gravity_compensation[0] = (next - gravity_force) - y;
+            gravity_force = next;
+            let y = power - gravity_compensation[1];
+            let next = gravity_power + y;
+            gravity_compensation[1] = (next - gravity_power) - y;
+            gravity_power = next;
+        }
     }
     Ok(Stage {
         left: faces[0],
         right: faces[n],
         signal_rate,
         area_force,
+        gravity_force,
+        gravity_power,
         fallbacks,
         limited,
     })
@@ -821,12 +902,27 @@ pub(super) fn forward(
     mesh: &Mesh1d,
     primitive: &[Primitive],
     faces: &[FaceFlux],
+    hydrostatic: Option<&HydrostaticBalance>,
 ) -> Conserved {
     let left = faces[i].array();
     let right = faces[i + 1].array();
     let al = mesh.face_areas()[i];
     let ar = mesh.face_areas()[i + 1];
     let ratio = dt / mesh.volumes()[i];
+    if let Some(balance) = hydrostatic {
+        // Cancel the hydrostatic pressure traction before time scaling. The
+        // perturbation source is the physical rho*g minus its reference value.
+        return Conserved {
+            density: q.density + ratio * (al * left[0] - ar * right[0]),
+            momentum: q.momentum
+                + ratio
+                    * (al * (left[1] - balance.faces[i].1.pressure)
+                        - ar * (right[1] - balance.faces[i + 1].1.pressure)
+                        + balance.perturbation_force(i, q, mesh)),
+            energy: q.energy
+                + ratio * (al * left[2] - ar * right[2] + balance.power(i, mesh, faces)),
+        };
+    }
     Conserved::from_array(core::array::from_fn(|k| {
         // Pair pressure traction with the geometric source before multiplying
         // by area: a uniform-pressure resting state then cancels exactly.

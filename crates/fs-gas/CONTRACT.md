@@ -237,6 +237,51 @@ This is a manufactured convergence result, not a throughput benchmark.
 Source geometry/quadrature accuracy and the quasi-one-dimensional smooth-area
 model remain explicit assumptions; abrupt junction losses are not supplied.
 
+## Gravity-balanced isothermal atmospheres
+
+`Euler1d::new_isothermal_atmosphere` adds signed constant axial gravity to the
+existing frozen-mixture Euler owner. Its `IsothermalAtmosphere` contains typed
+acceleration, temperature, pressure and position. The source's original gas
+constant determines the exponential hydrostatic profile; original NASA calorics
+determine energy and sound speed. Nonuniform constant-area cells receive
+analytically integrated density/energy averages, with a regular small-gravity
+series. Unsupported temperatures, unrepresentable profiles, nonconstant area,
+inconsistent volumes and periodic boundaries refuse before publication.
+
+Both first-order and MUSCL reconstruction operate on perturbations about the
+retained reference. Source-evaluated reference faces are prepared once. Pressure
+traction and the reference gravitational force cancel before the update; the
+remaining density perturbation receives its actual gravitational force. The
+gas evolves adiabatically after initialization: the reference is not a
+thermostat and does not freeze disturbances or substitute constant gamma.
+Successful steps reuse the original RK workspace and allocate no new numerical
+arrays. Original source-domain admission, CFL checks, retries and cancellation
+remain in force.
+
+The shared one-, two- and three-dimensional HLLC kernel returns the physical
+flux directly for identical admitted traces and the exact pressure-only flux
+for a stationary pressure contact. This avoids roundoff transport from a
+redundant star-state multiplication/division, including across a stationary
+tangential shear jump. Ordinary shocks, moving contacts and HLL fallback still
+use the original source-admitted wave solver.
+
+Gravity's energy work uses the same face mass flux as continuity, making the
+discrete sum of gas energy and `rho*phi(cell_center)` conservative up to boundary
+transport and rounding. `StepReport` exposes the gravitational impulse and
+work separately from area force and includes both in the balance residual.
+`gravitational_potential_energy` exposes the retained midpoint potential
+quadrature; this is not an exact within-cell gravitational-energy integral.
+The focused G1/G3/G4 cases cover exact atmospheric averages, stationary balance,
+disturbance evolution with closed energy accounting, analytic free fall under
+refinement, formation-reference/coordinate covariance and cancellation rollback.
+
+This reference-state method is bounded to a frozen ideal mixture, constant
+acceleration and constant area. It does not claim balance for arbitrary
+nonisothermal atmospheres, self-gravity, multicomponent/reaction transport or
+an entropy/positivity theorem. Large disturbances may still refuse source
+admission. Coupling into a network or caller-owned end port refuses until that
+interface declares a common gravitational-potential and energy convention.
+
 ## Physical reflecting-wall Riemann boundary
 
 Reflecting ends now solve a one-sided thermally perfect Riemann problem

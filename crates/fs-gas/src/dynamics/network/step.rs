@@ -286,6 +286,7 @@ impl GasNetwork1d {
                 &branch.mesh,
                 branch.boundaries,
                 reconstruction,
+                None,
                 &mut branch.work.primitive,
                 &mut branch.work.slopes,
                 &mut branch.work.faces,
@@ -326,6 +327,7 @@ impl GasNetwork1d {
                     &branch.mesh,
                     &branch.work.primitive,
                     &branch.work.faces,
+                    None,
                 );
                 if !branch.gas.admissible_state(advanced) {
                     return Err(Error::Invalid(
@@ -447,6 +449,8 @@ impl GasNetwork1d {
                 left_boundary_change,
                 right_boundary_change,
                 area_momentum_impulse: impulse,
+                gravity_momentum_impulse: 0.0,
+                gravity_work: 0.0,
                 conservation_residual: residual,
             };
             after.add(branch_after.mass, branch_after.energy)?;

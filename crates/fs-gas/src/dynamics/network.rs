@@ -215,6 +215,11 @@ impl GasNetwork1d {
         let mut cells = plenums.len();
         for branch in &branches {
             poll(&mut cancelled)?;
+            if branch.atmosphere().is_some() {
+                return Err(Error::Invalid(
+                    "network gravity needs a shared potential datum",
+                ));
+            }
             if branch.gas() != gas {
                 return Err(Error::Invalid(
                     "network branches must retain the identical frozen gas source",
@@ -358,6 +363,8 @@ fn empty_stage() -> Stage {
         right: FaceFlux::default(),
         signal_rate: 0.0,
         area_force: 0.0,
+        gravity_force: 0.0,
+        gravity_power: 0.0,
         fallbacks: 0,
         limited: 0,
     }
@@ -376,6 +383,8 @@ fn empty_report() -> StepReport {
         left_boundary_change: Totals::default(),
         right_boundary_change: Totals::default(),
         area_momentum_impulse: 0.0,
+        gravity_momentum_impulse: 0.0,
+        gravity_work: 0.0,
         conservation_residual: Totals::default(),
     }
 }
