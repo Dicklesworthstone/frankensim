@@ -145,6 +145,7 @@ impl Conduction {
             dt,
             thickness_m,
             current_tolerance_a,
+            None,
             check,
             |index, cell| {
                 let anchor = rate[self.anchors[cell.group]];
@@ -211,11 +212,63 @@ impl Conduction {
         let means = self
             .means(increments, check)
             .ok_or(ConductionError::Cancelled)?;
-        self.integrate_heat(dt, thickness_m, current_tolerance_a, check, |_, cell| {
-            let anchor = increments[self.anchors[cell.group]];
-            cell.vertices
-                .map(|v| -((increments[v] - anchor) - means[cell.group]) / dt)
-        })
+        self.integrate_heat(
+            dt,
+            thickness_m,
+            current_tolerance_a,
+            None,
+            check,
+            |_, cell| {
+                let anchor = increments[self.anchors[cell.group]];
+                cell.vertices
+                    .map(|v| -((increments[v] - anchor) - means[cell.group]) / dt)
+            },
+        )
+    }
+
+    /// Add a physical uniform axial electric drive AFTER the zero-current
+    /// projection. Solid winding sections prescribe their integrated current;
+    /// unbound regions pass zero drive/target and retain floating behavior.
+    /// The same exact P1 quadrature includes all local drive/eddy cross terms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn heat_with_region_drives(
+        &self,
+        increments: &[f64],
+        dt: f64,
+        thickness_m: f64,
+        current_tolerance_a: f64,
+        electric_drives_v_m: &[f64],
+        target_currents_a: &[f64],
+        check: &dyn Fn() -> bool,
+    ) -> Result<JouleHeat, ConductionError> {
+        if electric_drives_v_m.len() != self.regions.len()
+            || target_currents_a.len() != self.regions.len()
+            || electric_drives_v_m
+                .iter()
+                .chain(target_currents_a)
+                .any(|v| !v.is_finite())
+        {
+            return Err(ConductionError::Invalid(
+                "complete finite regional electric drives and current targets required",
+            ));
+        }
+        let means = self
+            .means(increments, check)
+            .ok_or(ConductionError::Cancelled)?;
+        self.integrate_heat(
+            dt,
+            thickness_m,
+            current_tolerance_a,
+            Some(target_currents_a),
+            check,
+            |_, cell| {
+                let anchor = increments[self.anchors[cell.group]];
+                cell.vertices.map(|v| {
+                    electric_drives_v_m[cell.group]
+                        - ((increments[v] - anchor) - means[cell.group]) / dt
+                })
+            },
+        )
     }
 
     // One quadrature/accounting owner serves stationary, nonlinear and moving
@@ -225,6 +278,7 @@ impl Conduction {
         dt: f64,
         thickness_m: f64,
         current_tolerance_a: f64,
+        target_currents_a: Option<&[f64]>,
         check: &dyn Fn() -> bool,
         electric: impl Fn(usize, &ConductionCell) -> [f64; 3],
     ) -> Result<JouleHeat, ConductionError> {
@@ -265,9 +319,12 @@ impl Conduction {
                 heat_j: heat,
             });
         }
-        if net_current.iter().any(|i| i.abs() > current_tolerance_a) {
+        if net_current.iter().enumerate().any(|(group, &i)| {
+            (i - target_currents_a.map_or(0.0, |targets| targets[group])).abs()
+                > current_tolerance_a
+        }) {
             return Err(ConductionError::Balance(
-                "floating conductor has unresolved net axial current",
+                "conductor has unresolved prescribed axial-current balance",
             ));
         }
         Ok(JouleHeat {

@@ -25,11 +25,11 @@ Original source-paired linkage gives the complete reciprocal terminal matrix
 `Z = R_copper - i omega (F^T a + L_end)` and effective inductance `-Im(Z)/omega`.
 Every active stranded triangle binds its complete original conductor source;
 its resistance integrates `rho J_unit^2` over the actual extruded volume.
-Stranded and resolved eddy cells must be disjoint. Explicit end/leakage storage
-is retained; end resistance is not inferred. Resolved core/shield eddy currents
-produce actual frequency-dependent loss and inductance. Stranded-copper skin
-and proximity redistribution, fitted hysteresis loss and full-wave effects are
-outside this reduction.
+Stranded and resolved conductor cells must be disjoint. Explicit end/leakage
+storage is retained; end resistance is not inferred. Resolved core/shield eddy
+currents produce actual frequency-dependent loss and inductance. Stranded
+profiles remain fixed; driven solid sections use the additive path below.
+Fitted hysteresis loss and full-wave effects remain outside this reduction.
 
 Acceptance audits complex reciprocity and the COMPLETE mutual power identity
 `Z_ij = R_ij + omega^2 a_i* C_sigma a_j - i omega a_i* K_t a_j`, including
@@ -51,6 +51,46 @@ exercise the implementation; they do not validate an empirical material/device.
 Native test execution remains a separate requirement where workspace dependency
 repositories are available. Finite-amplitude nonlinear cycles, material/geometry
 evolution and causal transient realization of the terminal matrix are not claimed.
+
+### Resolved skin and proximity currents in solid windings
+
+`new_with_solid_regions` adds `SolidWindingRegion { region, winding, signed_turns }`
+bindings to the same prepared owner. Each whole connected conductive section
+has the signed constraint `integral(J dA) = n I_w`. With
+`S = integral(sigma dA)`, eliminating its axial potential gradient gives
+`J_unit = n sigma/S`, `R_DC = depth*n^2/S`, and actual peak field
+`E = n I_w/S + i omega (A - mean_sigma(A))`. The existing sparse magnetic
+pencil, projected conductivity operator, current-closure topology, original
+source/flux pairing and complex mutual power identity are unchanged.
+
+The retained DC winding profile must already match this source-normalized
+distribution. Its volume-weighted absolute discrepancy, scaled by
+`max(1, abs(I_DC))`, must satisfy both the caller's weak-load and integrated
+current allowances. No operating point or profile is silently replaced.
+One conductive region has one winding coordinate and a declared polarity;
+every return section is explicit. Other regions remain floating. A winding
+may combine solid and stranded sections without sharing source cells.
+
+`Conduction::heat_with_region_drives` adds the uniform drive after the original
+conductivity projection and reuses its exact P1 total-field Joule quadrature.
+Every driven region checks its actual complex integrated current against `n I`.
+Solid-cell heat includes the local uniform/circulating-current cross terms;
+separate DC and eddy densities would give the wrong spatial thermal load.
+Returned solid, stranded and floating source-cell partitions are disjoint.
+`mean_dissipated_power_w()` sums their actual heat once for circuit/thermal
+consumers. An unpowered solid winding can still develop resolved proximity
+currents while its integrated current remains zero.
+
+`tests/winding_solid.rs` exercises four separated slab sections with two
+independent currents against `J'' = -i omega mu sigma J`, with interface data
+from Ampere's law. It checks spatial-current refinement, independently
+integrated heat, changing neighboring-current phase at fixed winding current,
+the uniform low-frequency limit, local Joule cross terms, mixed solid/stranded
+sections plus a floating shield, explicit returns, source-profile refusals and
+unchanged accepted bias after cancellation. These are manufactured planar
+MQS tests, not empirical winding validation. Axial end redistribution, individual
+insulated strands inside an authored homogeneous region, full 3-D end turns,
+and displacement-current regimes are not inferred.
 
 ## Ionized-gas current and Joule heating
 

@@ -2,7 +2,6 @@
 
 use super::*;
 use crate::planar::gradients;
-use std::cell::RefCell;
 
 impl HarmonicWindingFrequency<'_, '_, '_> {
     /// Superpose peak AC winding currents with arbitrary relative phases.
@@ -72,77 +71,14 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
                 "negative magnetic perturbation storage",
             ));
         }
-        // exp(-i omega t): E = i omega (A - mean_sigma(A)). Existing heat()
-        // computes -project(increment)/dt, so imaginary A gives real E, and
-        // real A gives minus imaginary E. Its exact P1 sigma E^2 quadrature
-        // and floating-current check are reused for both components.
-        let (electric_real, minus_electric_imaginary) = {
-            let callback = RefCell::new(&mut *cancelled);
-            let check = || (*callback.borrow_mut())();
-            let depth = model.basis.operating_field().problem().thickness_m();
-            let first = model
-                .conduction
-                .heat(
-                    &imaginary,
-                    self.omega_rad_s.recip(),
-                    depth,
-                    model.controls.current_balance_tolerance_a,
-                    &check,
-                )
-                .map_err(EddyError::from)?;
-            let second = model
-                .conduction
-                .heat(
-                    &real,
-                    self.omega_rad_s.recip(),
-                    depth,
-                    model.controls.current_balance_tolerance_a,
-                    &check,
-                )
-                .map_err(EddyError::from)?;
-            (first, second)
-        };
-        let mut eddy_cells = Vec::with_capacity(model.eddy_conductors.len());
-        let mut mean_eddy_power_w = 0.0;
-        for ((source, re), minus_im) in model
-            .eddy_conductors
-            .iter()
-            .zip(&electric_real.cells)
-            .zip(&minus_electric_imaginary.cells)
-        {
-            poll(cancelled)?;
-            let mean_power_w = finite(0.5 * re.power_w + 0.5 * minus_im.power_w)?;
-            mean_eddy_power_w = finite(mean_eddy_power_w + mean_power_w)?;
-            eddy_cells.push(HarmonicEddyCell {
-                source: source.clone(),
-                volume_m3: re.volume_m3,
-                electric_field_v_m: std::array::from_fn(|k| {
-                    C64::new(re.electric_field_v_m[k], -minus_im.electric_field_v_m[k])
-                }),
-                current_density_a_m2: std::array::from_fn(|k| {
-                    C64::new(
-                        re.current_density_a_m2[k],
-                        -minus_im.current_density_a_m2[k],
-                    )
-                }),
-                mean_power_w,
-            });
-        }
-        let mut region_currents_a = Vec::with_capacity(electric_real.region_currents_a.len());
-        for (&(region, re), &(_, minus_im)) in electric_real
-            .region_currents_a
-            .iter()
-            .zip(&minus_electric_imaginary.region_currents_a)
-        {
-            poll(cancelled)?;
-            let current = phasor(C64::new(re, -minus_im))?;
-            if current.abs() > model.controls.current_balance_tolerance_a {
-                return Err(HarmonicWindingError::Balance(
-                    "floating conductor peak current does not balance",
-                ));
-            }
-            region_currents_a.push((region, current));
-        }
+        let conductors = solid::recover(
+            model,
+            &real,
+            &imaginary,
+            currents_a,
+            self.omega_rad_s,
+            cancelled,
+        )?;
         let mut winding_cells = Vec::with_capacity(model.winding_conductors.len());
         let mut mean_winding_power_w = 0.0;
         for (source, &winding) in model
@@ -184,7 +120,10 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
         for (&current, &v) in currents_a.iter().zip(&voltage) {
             supplied = phasor(supplied + (current.conj() * v).scale(0.5))?;
         }
-        let power_residual_w = finite(mean_eddy_power_w + mean_winding_power_w - supplied.re)?;
+        let power_residual_w = finite(
+            conductors.mean_eddy_power_w + conductors.mean_solid_power_w + mean_winding_power_w
+                - supplied.re,
+        )?;
         let reactive_power_residual_var =
             finite(supplied.im + (2.0 * self.omega_rad_s) * mean_magnetic_energy_j)?;
         if supplied.re < 0.0
@@ -202,12 +141,15 @@ impl HarmonicWindingFrequency<'_, '_, '_> {
             terminal_voltages_v: voltage,
             potential_wb_m: potential,
             flux_density_t: flux_density,
-            eddy_cells,
+            eddy_cells: conductors.eddy_cells,
             winding_cells,
-            region_currents_a,
+            solid_cells: conductors.solid_cells,
+            solid_region_currents: conductors.solid_region_currents,
+            region_currents_a: conductors.region_currents_a,
             mean_magnetic_energy_j,
-            mean_eddy_power_w,
+            mean_eddy_power_w: conductors.mean_eddy_power_w,
             mean_winding_power_w,
+            mean_solid_power_w: conductors.mean_solid_power_w,
             mean_supplied_power_w: supplied.re,
             reactive_power_var: supplied.im,
             power_residual_w,

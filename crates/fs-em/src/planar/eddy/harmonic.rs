@@ -9,8 +9,10 @@
 //! The same signed P1 winding loads recover linkage and terminal impedance
 //! `Z = R_copper - i omega (F^T a + L_end)`. Stranded winding cells and resolved
 //! eddy cells must be disjoint. Winding resistance comes from original material
-//! sources and represented volume. Conducting core/shield loss is resolved;
-//! skin/proximity redistribution inside the stranded windings is not inferred.
+//! sources and represented volume. Explicit [`SolidWindingRegion`] bindings
+//! additionally resolve skin/proximity redistribution in driven solid sections,
+//! using their prescribed integrated current and the same conductivity operator.
+//! Stranded profiles stay fixed; their internal redistribution is not inferred.
 //!
 //! Geometry, temperature, boundary trace, remanence and DC bias stay fixed.
 //! These are infinitesimal perturbations, with incremental stored energy and
@@ -19,7 +21,10 @@
 //! of the frequency-dependent terminal matrix remain outside this owner.
 
 mod response;
+/// Resolved solid winding currents, skin/proximity redistribution and heat.
+pub mod solid;
 mod solve;
+pub use solid::{HarmonicSolidCell, SolidWindingCurrent, SolidWindingRegion};
 
 use super::{Conduction, EddyConductor, EddyError, bind, load, poll, positive, regions};
 use crate::{
@@ -135,6 +140,7 @@ pub struct PlanarHarmonicWindings<'b, 'm> {
     winding_conductors: Vec<WindingConductor>,
     conductor_windings: Vec<usize>,
     resistance_ohm: Vec<f64>,
+    solid: solid::SolidWindings,
     skin_ratio_per_sqrt_rad_s: Vec<f64>,
     controls: HarmonicWindingControls,
     restart: usize,
@@ -226,11 +232,20 @@ pub struct HarmonicWindingResponse {
     pub flux_density_t: Vec<[C64; 2]>,
     pub eddy_cells: Vec<HarmonicEddyCell>,
     pub winding_cells: Vec<HarmonicWindingCell>,
+    /// Actual total current and heat in driven solid sections, deposited once.
+    pub solid_cells: Vec<HarmonicSolidCell>,
+    /// Signed current targets and measured integrals in driven solid sections.
+    pub solid_region_currents: Vec<SolidWindingCurrent>,
+    /// Unbound floating regions only; driven sections have separate receipts.
     pub region_currents_a: Vec<(u32, C64)>,
     /// Local quadratic perturbation storage, including declared end leakage.
     pub mean_magnetic_energy_j: f64,
+    /// Unbound floating conductor cells only.
     pub mean_eddy_power_w: f64,
+    /// Fixed-profile stranded conductor cells only.
     pub mean_winding_power_w: f64,
+    /// Total heat in driven solid cells, including all local cross terms.
+    pub mean_solid_power_w: f64,
     pub mean_supplied_power_w: f64,
     /// Im(sum(conj(I) V))/2; negative for this convention's inductive load.
     pub reactive_power_var: f64,
@@ -238,6 +253,13 @@ pub struct HarmonicWindingResponse {
     pub power_residual_w: f64,
     /// Terminal reactive power + 2 omega * mean magnetic perturbation storage.
     pub reactive_power_residual_var: f64,
+}
+impl HarmonicWindingResponse {
+    /// Physical cycle-mean heat across disjoint floating, stranded and solid
+    /// source cells. No DC or circulating-current subtotal is deposited twice.
+    pub fn mean_dissipated_power_w(&self) -> f64 {
+        self.mean_eddy_power_w + self.mean_winding_power_w + self.mean_solid_power_w
+    }
 }
 
 impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
@@ -249,6 +271,32 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
         eddy_conductors: Vec<EddyConductor>,
         non_eddy_triangles: &[usize],
         winding_conductors: Vec<WindingConductor>,
+        controls: HarmonicWindingControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self> {
+        Self::new_with_solid_regions(
+            basis,
+            eddy_conductors,
+            non_eddy_triangles,
+            winding_conductors,
+            vec![],
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Add explicitly driven solid conductor sections. Their existing DC
+    /// profiles must equal n*sigma/integral(sigma dA); this constructor never
+    /// substitutes a different winding load or operating field. Unbound
+    /// conducting sections remain floating. Stranded and solid pieces may
+    /// belong to one winding, but may never occupy the same source cell.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_solid_regions(
+        basis: &'b PlanarIncrementalWindingBasis<'m>,
+        eddy_conductors: Vec<EddyConductor>,
+        non_eddy_triangles: &[usize],
+        winding_conductors: Vec<WindingConductor>,
+        solid_regions: Vec<SolidWindingRegion>,
         controls: HarmonicWindingControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Self> {
@@ -279,7 +327,8 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
             .checked_mul(m)
             .and_then(|v| v.checked_mul(3))
             .and_then(|v| n.checked_mul(32).and_then(|w| v.checked_add(w)))
-            .and_then(|v| cells.checked_mul(80).and_then(|w| v.checked_add(w)))
+            .and_then(|v| cells.checked_mul(120).and_then(|w| v.checked_add(w)))
+            .and_then(|v| cells.checked_mul(m).and_then(|w| v.checked_add(w)))
             .and_then(|v| {
                 m.checked_mul(m)
                     .and_then(|w| w.checked_mul(8))
@@ -337,6 +386,14 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
         }
         let (eddy_conductors, conduction) = bind(problem, eddy_conductors, None, cancelled)?;
         let components = regions(problem, &eddy_conductors, non_eddy_triangles, cancelled)?;
+        let solid = solid::SolidWindings::new(
+            basis,
+            &conduction,
+            &eddy_conductors,
+            solid_regions,
+            controls,
+            cancelled,
+        )?;
         let mut is_eddy = vec![false; cells];
         for source in &eddy_conductors {
             is_eddy[source.triangle] = true;
@@ -349,9 +406,30 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
                 "stranded winding and resolved eddy conductor cells must be disjoint",
             ));
         }
-        let (winding_conductors, conductor_windings, resistance_ohm) = bind_sources(
+        // Only stranded pieces pass through the original fixed-profile copper
+        // owner. Solid pieces are already source-bound by the conduction owner.
+        let mut stranded_profiles = Vec::new();
+        let mut stranded_windings = Vec::new();
+        for (winding, profile) in basis.profiles_per_m2().iter().enumerate() {
+            poll(cancelled)?;
+            if profile
+                .iter()
+                .enumerate()
+                .any(|(cell, &j)| j != 0.0 && !is_eddy[cell])
+            {
+                stranded_windings.push(winding);
+                stranded_profiles.push(
+                    profile
+                        .iter()
+                        .enumerate()
+                        .map(|(cell, &j)| if is_eddy[cell] { 0.0 } else { j })
+                        .collect::<Vec<_>>(),
+                );
+            }
+        }
+        let (winding_conductors, mut conductor_windings, stranded_resistance) = bind_sources(
             mesh,
-            basis.profiles_per_m2(),
+            &stranded_profiles,
             winding_conductors,
             None,
             |source| {
@@ -371,6 +449,18 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
             },
             cancelled,
         )?;
+        for winding in &mut conductor_windings {
+            *winding = stranded_windings[*winding];
+        }
+        let mut resistance_ohm = solid.resistance_ohm.clone();
+        for (&winding, &resistance) in stranded_windings.iter().zip(&stranded_resistance) {
+            resistance_ohm[winding] = finite(resistance_ohm[winding] + resistance)?;
+        }
+        if resistance_ohm.iter().any(|&r| !positive(r)) {
+            return Err(HarmonicWindingError::Invalid(
+                "every winding requires represented positive DC resistance",
+            ));
+        }
         let mut loads = Vec::with_capacity(m);
         for profile in basis.profiles_per_m2() {
             loads.push(load(
@@ -429,6 +519,7 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
             winding_conductors,
             conductor_windings,
             resistance_ohm,
+            solid,
             skin_ratio_per_sqrt_rad_s,
             controls,
             restart,
@@ -437,14 +528,19 @@ impl<'b, 'm> PlanarHarmonicWindings<'b, 'm> {
     pub fn basis(&self) -> &'b PlanarIncrementalWindingBasis<'m> {
         self.basis
     }
+    /// All spatially resolved conductive cells, including driven solid sections.
     pub fn eddy_conductors(&self) -> &[EddyConductor] {
         &self.eddy_conductors
     }
     pub fn winding_conductors(&self) -> &[WindingConductor] {
         &self.winding_conductors
     }
-    /// Source-integrated stranded copper resistance, excluding all resolved eddy loss.
+    /// Source-integrated stranded plus solid DC resistance. Frequency-dependent
+    /// circulating-current loss is resolved by the field, not added here.
     pub fn resistance_ohm(&self) -> &[f64] {
         &self.resistance_ohm
+    }
+    pub fn solid_regions(&self) -> &[SolidWindingRegion] {
+        &self.solid.bindings
     }
 }
