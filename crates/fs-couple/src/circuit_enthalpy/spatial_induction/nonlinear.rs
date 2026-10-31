@@ -15,7 +15,7 @@ use super::{
     SpatialInductionThermalReport, SpatialInductionThermalSource, SpatialMagneticCaloricSample,
     SpatialMagneticMaterialSample, SpatialMagneticThermalLaw, SpatialMagneticThermalNetwork,
     ThermalDriver, cell_driver_candidate, check, deposit_cell_heat, finite, invalid, material,
-    same_material,
+    native_error, same_material, MagneticThermalError,
 };
 use crate::circuit_enthalpy::magnetic::caloric::{
     MagneticCaloricExchange, MagneticConstitutiveThermalLaw, MagneticEnergyCell,
@@ -172,7 +172,7 @@ impl SpatialMagneticThermalNetwork<'_> {
     // Full sourced heat assemblies keep these original field and enthalpy
     // equations and carry their complete interface/radiation source payload.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn step_nonlinear_resolved_candidate<'t, 'm, S>(
+    pub(super) fn step_nonlinear_resolved_candidate<'t, 'm, S, E: From<MagneticThermalError>>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
@@ -184,10 +184,10 @@ impl SpatialMagneticThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         resolve_sources: impl Fn(
             &DepositionSimulation<'_>,
-        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, S>, Error> {
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, S>, CircuitEnthalpyError<E>> {
         self.step_constitutive_resolved_candidate(
             thermal,
             target_s,
@@ -208,7 +208,7 @@ impl SpatialMagneticThermalNetwork<'_> {
     // cancellation and acceptance operation. Only constitutive admission and
     // its explicitly owned entropy exchange differ.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn step_constitutive_resolved_candidate<'t, 'm, S>(
+    pub(super) fn step_constitutive_resolved_candidate<'t, 'm, S, E: From<MagneticThermalError>>(
         &self,
         thermal: &DepositionSimulation<'t>,
         target_s: f64,
@@ -221,11 +221,11 @@ impl SpatialMagneticThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         resolve_sources: impl Fn(
             &DepositionSimulation<'_>,
-        ) -> Result<CircuitThermalCoefficients<S>, Error>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
-    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, S>, Error> {
-        check(cancel)?;
+    ) -> Result<SpatialNonlinearInductionThermalCandidate<'t, 'm, S>, CircuitEnthalpyError<E>> {
+        check(cancel).map_err(native_error)?;
         crate::circuit_enthalpy::admit_driver_unknowns(
             thermal,
             controls,
@@ -234,9 +234,9 @@ impl SpatialMagneticThermalNetwork<'_> {
         if field.time_s().to_bits() != thermal.time_s().to_bits()
             || self.cells.len() != thermal.cells().len()
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "matching nonlinear spatial field/thermal clocks and complete cells required",
-            ));
+            )));
         }
         let regions = self.regions();
         let network = MagneticThermalNetwork {
@@ -247,14 +247,14 @@ impl SpatialMagneticThermalNetwork<'_> {
         };
         let problem = field.problem();
         for original in problem.materials() {
-            check(cancel)?;
+            check(cancel).map_err(native_error)?;
             if bindings.is_none()
                 && matches!(original, SpatialNonlinearMaterial::Reversible(law)
                 if law.field_scale_slope_per_k().is_some_and(|s| s != 0.0))
             {
-                return Err(invalid(
+                return Err(native_error(invalid(
                     "temperature-scaled nonlinear magnetism requires an explicit spatial field-entropy receiver",
-                ));
+                )));
             }
         }
         let originals = problem
@@ -269,7 +269,8 @@ impl SpatialMagneticThermalNetwork<'_> {
                     .cell_volume_m3(cell)
                     .ok_or_else(|| invalid("original nonlinear tetrahedron has no physical volume"))
             })
-            .collect::<Result<Vec<_>, Error>>()?;
+            .collect::<Result<Vec<_>, Error>>()
+            .map_err(native_error)?;
         let conductors = field
             .conductors()
             .iter()
@@ -281,7 +282,8 @@ impl SpatialMagneticThermalNetwork<'_> {
             &volumes,
             &conductors.keys().copied().collect::<Vec<_>>(),
             &cancel,
-        )?;
+        )
+        .map_err(native_error)?;
         let laws = bindings.map(|bindings| {
             bindings
                 .iter()
@@ -294,28 +296,29 @@ impl SpatialMagneticThermalNetwork<'_> {
         });
         let caloric = if let Some(laws) = &laws {
             for (&cell, &receiver) in &routes.magnetic {
-                check(cancel)?;
+                check(cancel).map_err(native_error)?;
                 if matches!(
                     problem.materials()[cell],
                     SpatialNonlinearMaterial::Recoil(_)
                 ) {
-                    return Err(invalid(
+                    return Err(native_error(invalid(
                         "spatial recoil temperature response requires its own remanence entropy law",
-                    ));
+                    )));
                 }
                 if receiver.is_none()
                     && matches!(&problem.materials()[cell],
                     SpatialNonlinearMaterial::Reversible(law)
                         if law.field_scale_slope_per_k().is_some_and(|s| s != 0.0))
                 {
-                    return Err(invalid(
+                    return Err(native_error(invalid(
                         "temperature-scaled spatial magnetic region requires a finite entropy receiver",
-                    ));
+                    )));
                 }
             }
             let native = field
                 .field(&mut || (*cancel.borrow_mut())())
-                .map_err(induction)?;
+                .map_err(induction)
+                .map_err(native_error)?;
             Some(PreparedMagneticCaloric::new_for_volumes(
                 &network,
                 thermal,
@@ -325,7 +328,8 @@ impl SpatialMagneticThermalNetwork<'_> {
                 laws,
                 &routes,
                 cancel,
-            )?)
+            )
+            .map_err(native_error)?)
         } else {
             None
         };
@@ -425,9 +429,11 @@ impl SpatialMagneticThermalNetwork<'_> {
             Ok((sources, samples, None))
         };
         let initial = resolve_sources(thermal)?;
-        let (accepted, samples, _) = resolve(thermal, sample(&initial.source))?;
+        let (accepted, samples, _) = resolve(thermal, sample(&initial.source))
+            .map_err(native_error)?;
         if let Some(caloric) = &caloric {
-            caloric.validate_sources(thermal, &samples, cancel)?;
+            caloric.validate_sources(thermal, &samples, cancel)
+                .map_err(native_error)?;
         }
         if accepted.len() != conductors.len()
             || accepted.iter().any(|(cell, source)| {
@@ -438,9 +444,9 @@ impl SpatialMagneticThermalNetwork<'_> {
                 })
             })
         {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "accepted nonlinear spatial conductor sources differ from their thermal state",
-            ));
+            )));
         }
         let dt = target_s - thermal.time_s();
         let (thermal, field, report) = cell_driver_candidate(
@@ -449,11 +455,13 @@ impl SpatialMagneticThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             |trial, _| {
-                check(&cancel)?;
+                check(&cancel).map_err(native_error)?;
                 let mut coefficients = resolve_sources(trial)?;
-                let (sources, magnetic, materials) = resolve(trial, sample(&coefficients.source))?;
+                let (sources, magnetic, materials) = resolve(trial, sample(&coefficients.source))
+                    .map_err(native_error)?;
                 if let Some(caloric) = &caloric {
-                    caloric.validate_sources(trial, &magnetic, cancel)?;
+                    caloric.validate_sources(trial, &magnetic, cancel)
+                        .map_err(native_error)?;
                 }
                 let mut refreshed = vec![None; originals.len()];
                 for (cell, source) in sources {
@@ -479,7 +487,8 @@ impl SpatialMagneticThermalNetwork<'_> {
                         &mut || (*cancel.borrow_mut())(),
                     )
                 }
-                .map_err(induction)?;
+                .map_err(induction)
+                .map_err(native_error)?;
                 let exchange = if let Some(caloric) = &caloric {
                     caloric.deposit(
                         trial,
@@ -497,7 +506,8 @@ impl SpatialMagneticThermalNetwork<'_> {
                         dt,
                         controls.total_energy_tolerance_j,
                         cancel,
-                    )?
+                    )
+                    .map_err(native_error)?
                 } else {
                     MagneticCaloricExchange {
                         fields: Vec::new(),
@@ -543,6 +553,7 @@ impl SpatialMagneticThermalNetwork<'_> {
             },
             |proposal: &SpatialNonlinearInductionCandidate<'_>, dt, checkpoint| {
                 deposit_cell_heat(&proposal.step().cells, &routes, dt, checkpoint)
+                    .map_err(native_error)
             },
             || (*cancel.borrow_mut())(),
         )?;
@@ -557,11 +568,11 @@ impl SpatialMagneticThermalNetwork<'_> {
                 - external_heat_j,
         )?;
         if total_energy_residual_j.abs() > controls.total_energy_tolerance_j {
-            return Err(invalid(
+            return Err(native_error(invalid(
                 "spatial nonlinear field, finite enthalpy and external work do not close",
-            ));
+            )));
         }
-        check(&cancel)?;
+        check(&cancel).map_err(native_error)?;
         Ok(SpatialNonlinearInductionThermalCandidate {
             thermal,
             field,

@@ -316,6 +316,32 @@ The core fit stays at its separately held preparation temperature and biased
 reference. This connection changes motion through the actual winding; it adds
 no unsupported core thermal, hysteretic or acoustic law.
 
+### Complete coolant on three-dimensional induction fields
+
+The original linear, fixed-law nonlinear and temperature-dependent nonlinear
+`fs_couple::circuit_enthalpy::spatial_induction` drivers accept this same
+complete `HeatAssembly` through `heat_assembly_candidate`,
+`nonlinear_heat_assembly_candidate` and
+`nonlinear_thermal_heat_assembly_candidate`. Finite coolant remains in its
+native caloric cell. Each field/thermal trial resolves transport at the same
+proposed temperature and retains the full accepted fluid sample with the
+original magnetic field history.
+
+Local Ohmic heat enters its original whole-volume receivers once. Affine-mu(T)
+and explicitly bound separable nonlinear temperature laws retain their
+original magnetic entropy, internal energy, parameter work and reversible
+heat. Backward-Euler loss remains separate from physical heat. Native source,
+charge, volume, field-domain, capacity and radiation-energy gates remain.
+Graph circuit work cannot be discarded through this thermal provider, and
+typed source refusals or cancellation publish no partial field or heat state.
+
+The finite-links spatial-induction fixture uses an independent Whitney-mode
+and finite-fluid balance for source-only viscosity, heat-capacity and
+resistivity changes, continued intervals and transactional refusal. Its
+nonlinear checks use fixed- and affine-mu(T) linear-material limits and
+independently account for numerical energy export. No moving geometry,
+arbitrary thermal magnetic law or empirical device validation is implied.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared

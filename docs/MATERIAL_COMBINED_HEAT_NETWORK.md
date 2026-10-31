@@ -111,6 +111,52 @@ source-pinned; arbitrary two-coordinate magnetic laws are not inferred.
 Backward-Euler magnetic convexity loss remains a numerical export and is
 never deposited as material heat.
 
+## Three-dimensional induction with complete material coolant
+
+`spatial_induction::heat_assembly_candidate`,
+`nonlinear_heat_assembly_candidate` and
+`nonlinear_thermal_heat_assembly_candidate` connect the original
+three-dimensional Whitney A-phi fields to any complete `HeatAssembly`.
+Each proposed thermal endpoint resolves the same pinned conductor sources and
+coolant properties. The original field, material-caloric and finite-enthalpy
+owners retain all accepted histories.
+
+The existing region map still assigns every electromagnetic volume to its
+original whole solid caloric receiver. Additional passive thermal cells may
+hold finite coolant. Its native link conductances transfer energy internally
+and are re-resolved at each trial temperature. Prescribed reservoirs,
+interfaces, integrated layers and closed radiation retain their full source
+samples in `report().coupled.source.network`.
+
+The linear magnetic path retains affine source-backed permeability versus
+temperature, its magnetic entropy/internal energy and signed reversible heat.
+The fixed-law nonlinear path retains its saturation/recoil law over its
+admitted field range while refreshing conductivity. The explicit thermal
+nonlinear path accepts the existing linear mu(T) or separable
+`H(B,T) = s(T) H_ref(B)` law with its original positive affine scale and
+finite field-entropy receivers. It retains the original parameter work,
+magnetic internal energy and reversible heat. Backward-Euler magnetic loss
+remains numerical dissipation and is never added to material heat. All paths
+route native Ohmic heat once and retain explicit impressed-source and
+prescribed-motion work.
+
+Prepared circuit bindings and resolved resistor/contact work refuse because
+the spatial field is the current owner. Original field-independent boundary
+admission and both closed-radiation energy gates remain. Provider failures stay
+typed under `SpatialInductionHeatError::Heat`, native magnetic failures under
+`Native`, and cancellation retains its original class. Existing concrete
+prepared-network methods use these same implementations.
+
+A focused six-tetrahedron finite-coolant fixture checks an independent Whitney
+mode and thermal balance through continued intervals, including coolant
+viscosity/heat-capacity and conductor-resistivity substitutions. The nonlinear
+entries recover their fixed- and affine-mu(T) linear-material limits while
+retaining numerical loss separately. These are synthetic equation checks,
+not measured device validation. Fixed geometry and conducting occupancy,
+source ranges, original thermal capacity gates and first-order coupling
+remain authoritative. General H(B,T), recoil entropy, hysteresis and phase
+change require their own compatible physical owners.
+
 ## Complete heat assemblies and material field storage
 
 `contacts::heat::HeatAssembly` is the common interface for the prepared heat

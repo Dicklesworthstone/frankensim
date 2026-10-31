@@ -44,6 +44,9 @@ fs-sparse = { path = "../fs-sparse" }
 
 [dev-dependencies]
 fs-alloc = { path = "../fs-alloc" }
+# Exercise original three-dimensional induction with finite material coolant.
+fs-em = { path = "../fs-em" }
+fs-feec = { path = "../fs-feec" }
 # Exercise the original nonideal EOS branch through material-bound flow and heat.
 fs-thermochem = { path = "../fs-thermochem" }
 # Reuse the native graph's cell identities and signed mass-flow connections.
