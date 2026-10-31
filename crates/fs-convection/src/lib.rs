@@ -16,6 +16,7 @@
 use core::fmt;
 use std::collections::BTreeMap;
 
+mod mixed;
 mod natural;
 mod sensitivity;
 
@@ -74,12 +75,14 @@ pub enum CorrelationId {
     HorizontalPlateUnstableTurbulent,
     /// Buoyantly stable horizontal plate; length is area/perimeter.
     HorizontalPlateStable,
+    /// Laminar aiding mixed convection over an isothermal vertical plate.
+    ManningQureshiAidingVerticalPlate,
 }
 
 impl CorrelationId {
     /// Complete catalog order. This is stable audit order, not a selection
     /// preference.
-    pub const ALL: [CorrelationId; 16] = [
+    pub const ALL: [CorrelationId; 17] = [
         Self::CircularDuctLaminarCwt,
         Self::CircularDuctLaminarChf,
         Self::CircularDuctHausen,
@@ -96,6 +99,7 @@ impl CorrelationId {
         Self::HorizontalPlateUnstableLaminar,
         Self::HorizontalPlateUnstableTurbulent,
         Self::HorizontalPlateStable,
+        Self::ManningQureshiAidingVerticalPlate,
     ];
 
     /// Stable model-card identifier.
@@ -122,6 +126,9 @@ impl CorrelationId {
                 "convection.horizontal-plate-unstable-turbulent"
             }
             Self::HorizontalPlateStable => "convection.horizontal-plate-stable",
+            Self::ManningQureshiAidingVerticalPlate => {
+                "convection.manning-qureshi-aiding-vertical-plate"
+            }
         }
     }
 
@@ -161,6 +168,9 @@ impl CorrelationId {
             Self::HorizontalPlateUnstableLaminar => "Nu_L = 0.54 Ra_L^(1/4); L = A/P",
             Self::HorizontalPlateUnstableTurbulent => "Nu_L = 0.15 Ra_L^(1/3); L = A/P",
             Self::HorizontalPlateStable => "Nu_L = 0.27 Ra_L^(1/4); L = A/P",
+            Self::ManningQureshiAidingVerticalPlate => {
+                "Nu_L = [(2 Ff sqrt(Re))^n + ((4/3) Fn (Ra/Pr)^(1/4))^n]^(1/n); Ff=0.339 Pr^(1/3)(1+0.100 Pr^(-3/4))^(-2/9); Fn=0.503 Pr^(1/4)(1+0.670 Pr^(-9/16))^(-4/9); n=3.5 Pr^0.075"
+            }
         }
     }
 }
@@ -267,6 +277,25 @@ impl CorrelationInputs {
         }
     }
 
+    /// Aiding mixed-convection point with nonnegative Reynolds and Rayleigh
+    /// magnitudes and positive Prandtl number. Both flow drivers cannot vanish.
+    ///
+    /// The caller declares an isothermal vertical plate with an external stream
+    /// parallel to and aiding buoyancy. Dimensionless magnitudes cannot verify
+    /// that geometry or alignment; a dimensional adapter must check their signs.
+    /// The mixed card admits either pure-convection limit continuously.
+    #[must_use]
+    pub const fn mixed(reynolds: f64, rayleigh: f64, prandtl: f64) -> Self {
+        Self {
+            reynolds: Some(reynolds),
+            prandtl: Some(prandtl),
+            length_over_hydraulic_diameter: None,
+            aspect_ratio: None,
+            rayleigh: Some(rayleigh),
+            direction: ThermalDirection::HeatingFluid,
+        }
+    }
+
     /// Declare the duct length-to-hydraulic-diameter ratio.
     #[must_use]
     pub const fn with_length_ratio(mut self, ratio: f64) -> Self {
@@ -288,32 +317,33 @@ impl CorrelationInputs {
         self
     }
 
-    fn groups(self) -> Result<BTreeMap<String, f64>, CorrelationError> {
+    fn groups(self, id: CorrelationId) -> Result<BTreeMap<String, f64>, CorrelationError> {
         let mut groups = BTreeMap::new();
+        let mixed = id == CorrelationId::ManningQureshiAidingVerticalPlate;
         if let Some(value) = self.reynolds {
-            insert_group(&mut groups, "Re", value)?;
+            insert_group(&mut groups, "Re", value, mixed)?;
         }
         if let Some(value) = self.prandtl {
-            insert_group(&mut groups, "Pr", value)?;
+            insert_group(&mut groups, "Pr", value, false)?;
         }
         if let Some(value) = self.length_over_hydraulic_diameter {
-            insert_group(&mut groups, "L_over_Dh", value)?;
+            insert_group(&mut groups, "L_over_Dh", value, false)?;
         }
         if let Some(value) = self.aspect_ratio {
-            insert_group(&mut groups, "aspect_ratio", value)?;
+            insert_group(&mut groups, "aspect_ratio", value, false)?;
         }
         if let Some(value) = self.rayleigh {
-            insert_group(&mut groups, "Ra", value)?;
+            insert_group(&mut groups, "Ra", value, mixed)?;
         }
         if let (Some(re), Some(pr)) = (self.reynolds, self.prandtl) {
-            insert_group(&mut groups, "Pe", re * pr)?;
+            insert_group(&mut groups, "Pe", re * pr, mixed)?;
         }
         if let (Some(re), Some(pr), Some(length_ratio)) = (
             self.reynolds,
             self.prandtl,
             self.length_over_hydraulic_diameter,
         ) {
-            insert_group(&mut groups, "Gz", re * pr / length_ratio)?;
+            insert_group(&mut groups, "Gz", re * pr / length_ratio, mixed)?;
         }
         Ok(groups)
     }
@@ -323,8 +353,9 @@ fn insert_group(
     groups: &mut BTreeMap<String, f64>,
     name: &'static str,
     value: f64,
+    allow_zero: bool,
 ) -> Result<(), CorrelationError> {
-    if !(value.is_finite() && value > 0.0) {
+    if !(value.is_finite() && (value > 0.0 || (allow_zero && value == 0.0))) {
         return Err(CorrelationError::InvalidGroup {
             axis: name,
             value_bits: value.to_bits(),
@@ -350,7 +381,9 @@ pub struct DomainViolation {
 /// Structured correlation refusal.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CorrelationError {
-    /// A supplied group is non-finite or not strictly positive.
+    /// A supplied group is non-finite or violates its sign requirement.
+    /// Only the mixed card admits zero Re/Ra and their derived groups;
+    /// `max(Re,Ra)` must still be positive.
     InvalidGroup {
         /// Axis name.
         axis: &'static str,
@@ -387,7 +420,7 @@ impl fmt::Display for CorrelationError {
         match self {
             Self::InvalidGroup { axis, value_bits } => write!(
                 f,
-                "dimensionless group {axis} must be finite and positive; got bits 0x{value_bits:016x}"
+                "dimensionless group {axis} must be finite and positive (zero is allowed only for the mixed card's individual flow drivers); got bits 0x{value_bits:016x}"
             ),
             Self::OutOfDomain {
                 correlation,
@@ -601,12 +634,21 @@ pub fn evaluate(
     inputs: CorrelationInputs,
 ) -> Result<NusseltEvaluation, CorrelationError> {
     let card = card_for(id);
-    let groups = inputs.groups()?;
+    let groups = inputs.groups(id)?;
     let violations = domain_violations(&card.model.validity, &groups);
     if !violations.is_empty() {
         return Err(CorrelationError::OutOfDomain {
             correlation: id,
             violations,
+        });
+    }
+    if id == CorrelationId::ManningQureshiAidingVerticalPlate
+        && groups["Re"] == 0.0
+        && groups["Ra"] == 0.0
+    {
+        return Err(CorrelationError::InvalidGroup {
+            axis: "max(Re,Ra)",
+            value_bits: 0.0_f64.to_bits(),
         });
     }
     let nu = evaluate_formula(id, inputs, &groups);
@@ -760,6 +802,9 @@ fn evaluate_formula(
         CorrelationId::HorizontalPlateUnstableLaminar => 0.54 * det::pow(group("Ra"), 0.25),
         CorrelationId::HorizontalPlateUnstableTurbulent => 0.15 * det::pow(group("Ra"), 1.0 / 3.0),
         CorrelationId::HorizontalPlateStable => 0.27 * det::pow(group("Ra"), 0.25),
+        CorrelationId::ManningQureshiAidingVerticalPlate => {
+            mixed::AidingVerticalPlate::new(group("Re"), group("Ra"), group("Pr")).nusselt()
+        }
     }
 }
 
@@ -859,6 +904,10 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
     const HORIZONTAL_PLATE: SourceProvenance = SourceProvenance {
         citation: "ASHRAE Handbook Fundamentals 2025, SI, Ch. 4, Table 9, Eqs. (T9.7)-(T9.9); handbook heat-transfer use of Lloyd-Moran and Goldstein-Sparrow-Jones correlations",
         identifier: "https://handbook.ashrae.org/Handbooks/F25/SI/f25_ch04/f25_ch04_si.aspx#Table9",
+    };
+    const MANNING_QURESHI: SourceProvenance = SourceProvenance {
+        citation: "K. S. Manning and Z. H. Qureshi, Transport Correlations for Laminar Aiding Mixed Convection Over a Vertical Isothermal Surface, Journal of Heat Transfer 116(3), 1994, 777-780, Eqs. (4), (8), (10), (11)",
+        identifier: "doi:10.1115/1.2910940",
     };
 
     let fully_developed = || {
@@ -1117,6 +1166,30 @@ fn card_for(id: CorrelationId) -> CorrelationCard {
                 "forced or mixed convection",
                 "confinement or cylinder arrays",
                 "axial end effects",
+            ],
+            0.20,
+            DiscrepancyBasis::EngineeringAllowance,
+        ),
+        CorrelationId::ManningQureshiAidingVerticalPlate => (
+            MANNING_QURESHI,
+            ValidityDomain::unconstrained()
+                .with("Pr", 0.003, 100.0)
+                .with("Ra", 0.0, 1.0e9_f64.next_down())
+                .with("Re", 0.0, 5.0e5_f64.next_down()),
+            vec![
+                "average coefficient over an isothermal vertical plate; characteristic length is height",
+                "laminar external stream parallel to and aiding buoyancy; caller must establish alignment",
+                "constant-property Boussinesq boundary-layer theory; uniform external stream",
+                "strict source laminar bounds Re < 5e5 and Ra < 1e9, with either pure-flow limit admitted",
+                "Pr interval [0.003,100] is an implementation policy spanning source comparison points, not a continuously validated experimental range",
+                "film-mean properties, if used by an adapter, are a frozen-property approximation and not a source-mandated convention",
+                "the two flow drivers cannot both vanish; no zero-Rayleigh conduction intercept is supplied",
+            ],
+            vec![
+                "opposing or oblique flow, separation, transition or turbulence",
+                "enclosure confinement, finite-width edge effects or non-isothermal walls",
+                "strong property variation or non-Boussinesq density response",
+                "creeping-flow or diffusion-dominated regimes outside boundary-layer theory",
             ],
             0.20,
             DiscrepancyBasis::EngineeringAllowance,

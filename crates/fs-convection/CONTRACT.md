@@ -21,22 +21,26 @@ correlation.
 
 ## Public types and semantics
 
-- `CorrelationId` names sixteen implemented relations: circular-duct 3.66 and
+- `CorrelationId` names seventeen implemented relations: circular-duct 3.66 and
   4.36 limits; a thermally developing circular-duct relation; rectangular-
   duct constant-temperature and constant-flux limits; one simultaneously
   developing constant-temperature rectangular-duct table slice at
   `alpha*=0.5`, `Pr=0.72`; Dittus-Boelter; Gnielinski; laminar and
-  leading-edge-corrected mixed average flat-plate relations;
+  leading-edge-corrected turbulent average flat-plate relations;
   Churchill-Bernstein cylinder crossflow; and Churchill-Chu vertical-plate
   natural convection; Churchill-Chu horizontal-cylinder natural convection;
   and the stable, unstable-laminar and unstable-turbulent horizontal-plate
-  rows of ASHRAE 2025 Fundamentals, Chapter 4, Table 9 (T9.7--T9.9).
+  rows of ASHRAE 2025 Fundamentals, Chapter 4, Table 9 (T9.7--T9.9); and
+  Manning--Qureshi aiding laminar mixed convection over an isothermal vertical
+  plate, including its pure forced and natural boundary-layer limits.
 - `CorrelationCard` combines an `fs-evidence::ModelCard`, bibliographic
   provenance, and `DiscrepancyBasis`.
 - `CorrelationInputs` makes Re, Pr, L/Dh, aspect ratio, Ra, and the
   heating/cooling convention explicit. Pe is deterministically derived from
   Re and Pr when both exist; Gz is deterministically derived as
-  `Re Pr/(L/Dh)` when all three inputs exist.
+  `Re Pr/(L/Dh)` when all three inputs exist. `mixed(Re, Ra, Pr)` supplies both
+  flow drivers; their magnitudes presume the caller has established aiding
+  vertical alignment. The dimensional owner checks the actual signs.
 - `evaluate` returns `NusseltEvaluation` only after every shared
   `ValidityDomain` axis is present and inside its inclusive bounds.
 - `NusseltEvaluation::heat_transfer_coefficient` returns
@@ -59,8 +63,10 @@ correlation.
    interoperability boundary: its accessor exposes the downstream
    `ThermalBc` raw coherent-SI row, which has no standalone `fs-convection`
    authority if cloned or detached from `CorrelationRobinBoundary`.
-2. Missing, non-finite, non-positive, or out-of-domain dimensionless inputs
-   refuse; there is no silent extrapolation.
+2. Missing, non-finite, incorrectly signed, or out-of-domain dimensionless
+   inputs refuse; there is no silent extrapolation. Only the aiding mixed card
+   admits zero Re or Ra (and corresponding derived Pe/Gz); at least one flow
+   driver must be positive. All other cards retain positive-group admission.
 3. Every successful value carries exactly the selected model card, its
    validity domain, assumptions, discrepancy, and deterministic evaluation
    provenance.
@@ -124,6 +130,11 @@ None.
 ## Conformance tests
 
 - catalog completeness, source presence, and shared-domain integrity;
+- G0/G3 aiding mixed-plate checks of independent 60-decimal-digit source-formula
+  arithmetic, strict laminar bounds, continuous pure limits, power-sum
+  homogeneity down to tiny drivers, and analytic derivatives including the
+  Prandtl-dependent mixing exponent and a representable derivative whose
+  intermediate power weight underflows;
 - direct `fs-vvreg` execution bindings for both Level-A circular-duct limits,
   with a complete two-row family partition, JSON comparison verdicts, and
   frozen rectangular-duct square values;
@@ -167,6 +178,27 @@ None.
   heat removal.
 
 ## No-claim boundaries
+
+- `ManningQureshiAidingVerticalPlate` implements the **average**, aiding-only
+  isothermal vertical-plate correlation in Manning and Qureshi, Journal of Heat
+  Transfer 116(3), 777--780 (1994), doi:10.1115/1.2910940, Eqs. (4), (8), (10),
+  and (11). Its constant-property Boussinesq boundary-layer assumptions remain
+  visible on the card. The source's strict laminar bounds `Re < 5e5` and
+  `Ra < 1e9` are encoded as inclusive bounds at the immediately preceding
+  floating-point numbers. `Pr in [0.003,100]` is a declared implementation
+  policy spanning source comparison points, not a continuously validated
+  experimental range. An adapter's film averaging is a declared frozen-property
+  approximation; the source does not mandate that sampling temperature. No
+  opposing-flow difference formula, transition blend, finite-width correction,
+  stagnant conductive floor, or experimental confidence interval is supplied.
+  The pure limits remain boundary-layer models and do not resolve
+  diffusion-dominated or creeping-flow heat transfer. At Re=Ra=0 the card
+  refuses; thermal owners can handle zero temperature difference as equilibrium.
+  The formula cancels `Pr^(1/4) (Ra/Pr)^(1/4)` and normalizes component powers
+  before summation, avoiding a division by Re or a singular mixed parameter
+  `Gr/Re^2`. Input partials include the derivative of `n=3.5 Pr^0.075` and omit
+  only directions that move a validity endpoint, including each zero driver.
+  Formula tests establish arithmetic and limit behavior, not external validation.
 
 - `NaturalConvectionGeometry` selects vertical plates, horizontal cylinders,
   or the stable/unstable horizontal face from signed `g beta (Tw-Ta)`.

@@ -6,6 +6,7 @@ use super::{
     HeatTransferCoefficient, Length, NusseltEvaluation, ProvenanceHash, Temperature,
     ThermalConductivity, ThermalDirection, det, evaluate,
 };
+use super::mixed::AidingVerticalPlate;
 
 const INPUT_AXES: [&str; 5] = ["Re", "Pr", "L_over_Dh", "aspect_ratio", "Ra"];
 
@@ -38,15 +39,24 @@ impl CorrelationInputs {
         id: CorrelationId,
     ) -> Result<NusseltEvaluation, CorrelationError> {
         let mut evaluation = evaluate(id, self)?;
+        let mixed_plate = (id == CorrelationId::ManningQureshiAidingVerticalPlate).then(|| {
+            let groups = evaluation.groups();
+            AidingVerticalPlate::new(groups["Re"], groups["Ra"], groups["Pr"])
+        });
         for axis in INPUT_AXES {
             let Some(&input) = evaluation.groups().get(axis) else {
                 continue;
             };
-            if let Some(elasticity) = input_elasticity(&evaluation, self.direction, axis)? {
-                let derivative = finite_derivative(
-                    evaluation.evidence().value * elasticity / input,
-                    "Nusselt input derivative",
-                )?;
+            let derivative = if let Some(mixed_plate) = &mixed_plate
+                && input_is_interior(&evaluation, axis)
+            {
+                Some(mixed_plate.partial(axis))
+            } else {
+                input_elasticity(&evaluation, self.direction, axis)?
+                    .map(|elasticity| evaluation.evidence().value * elasticity / input)
+            };
+            if let Some(derivative) = derivative {
+                let derivative = finite_derivative(derivative, "Nusselt input derivative")?;
                 evaluation
                     .evidence
                     .sensitivity
@@ -198,6 +208,9 @@ fn input_elasticity(
         CorrelationId::HorizontalPlateUnstableTurbulent => {
             if axis == "Ra" { 1.0 / 3.0 } else { 0.0 }
         }
+        CorrelationId::ManningQureshiAidingVerticalPlate => {
+            AidingVerticalPlate::new(group("Re"), group("Ra"), group("Pr")).elasticity(axis)
+        }
     };
     finite_derivative(value, "Nusselt input elasticity").map(Some)
 }
@@ -293,7 +306,7 @@ impl NusseltEvaluation {
     /// `d ln(Nu) / d ln(Re)` at fixed Pr, length ratio, aspect and heat-flow
     /// direction. At fixed geometry/fluid properties this is also dln(h)/dln(Re).
     ///
-    /// Supports the smooth duct, flat-plate and cylinder formulas. Returns
+    /// Supports the smooth duct, flat-plate, aiding mixed plate and cylinder formulas. Returns
     /// None for the piecewise developing table, natural convection, or a
     /// Reynolds-dependent validity-axis endpoint. A caller must not interpret
     /// None as zero. Analytic laminar constants return Some(0); this does not
@@ -345,6 +358,10 @@ impl NusseltEvaluation {
             CorrelationId::ChurchillBernsteinCylinder => {
                 let b = det::pow(group("Re")?/282000.0, 5.0/8.0);
                 (nu-0.3)/nu*0.5*(1.0+b/(1.0+b))
+            }
+            CorrelationId::ManningQureshiAidingVerticalPlate => {
+                AidingVerticalPlate::new(group("Re")?, self.groups()["Ra"], group("Pr")?)
+                    .elasticity("Re")
             }
             _ => return Ok(None),
         };
