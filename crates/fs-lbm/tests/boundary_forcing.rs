@@ -318,7 +318,124 @@ fn initial_force_frame_semantics_and_open_face_refusal_remain_explicit() {
         [0.0; 3],
         BoundarySpec3::pressure_duct_z(1.0, 1.0),
     );
+    // Every cell of this 4-deep z duct is an open-face cell or its first
+    // interior neighbour: only the force-free field is admitted.
     let before = snapshot(&open);
-    assert!(catch_unwind(AssertUnwindSafe(|| open.rebind_force_field(|_| [0.0; 3]))).is_err());
+    assert!(
+        catch_unwind(AssertUnwindSafe(
+            || open.rebind_force_field(|_| [0.0, 1e-4, 0.0])
+        ))
+        .is_err()
+    );
     assert_eq!(snapshot(&open), before);
+    open.rebind_force_field(|_| [0.0; 3]);
+    assert_eq!(snapshot(&open), before);
+}
+
+fn raw_first_moment(grid: &BoundaryGrid3, keep: impl Fn([usize; 3]) -> bool) -> [f64; 3] {
+    cells(grid)
+        .into_iter()
+        .filter(|&cell| keep(cell))
+        .fold([0.0; 3], |sum, [x, y, z]| {
+            let f = grid.populations(x, y, z);
+            core::array::from_fn(|a| {
+                sum[a]
+                    + f.iter()
+                        .zip(E3)
+                        .map(|(f, (ex, ey, ez))| f * f64::from([ex, ey, ez][a]))
+                        .sum::<f64>()
+            })
+        })
+}
+
+#[test]
+fn open_faces_admit_a_field_that_vanishes_where_they_reconstruct() {
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+
+    let periodic = FaceBoundary3::Periodic;
+    let duct = BoundarySpec3::new([
+        FaceBoundary3::Velocity {
+            velocity: [0.02, 0.0, 0.0],
+        },
+        FaceBoundary3::Pressure { density: 1.0 },
+        periodic,
+        periodic,
+        periodic,
+        periodic,
+    ]);
+    let pull = 2e-5;
+    let mut grid = BoundaryGrid3::new(12, 4, 4, 0.8, [0.0; 3], duct);
+    // Cells 0/11 are the open faces and 1/10 their first-interior cells.
+    grid.set_force_field(|[x, _, _]| {
+        if (2..=9).contains(&x) {
+            [0.0, pull, 0.0]
+        } else {
+            [0.0; 3]
+        }
+    });
+    for reach in [0, 1, 10, 11] {
+        let before = snapshot(&grid);
+        assert!(
+            catch_unwind(AssertUnwindSafe(|| grid.set_force_field(|[x, _, _]| {
+                if x == reach {
+                    [0.0, pull, 0.0]
+                } else {
+                    [0.0; 3]
+                }
+            })))
+            .is_err(),
+            "a force read by the open face at x={reach} must be refused"
+        );
+        assert_eq!(snapshot(&grid), before);
+    }
+    // From rest, cells 1..=10 exchange only rest populations with the faces
+    // in the first step, so they gain exactly one held force per forced cell.
+    grid.step();
+    let gained = raw_first_moment(&grid, |[x, _, _]| (1..=10).contains(&x));
+    close(gained[1], 8.0 * 16.0 * pull, 1e-13);
+    close(gained[0], 0.0, 1e-13);
+}
+
+#[test]
+fn scaled_field_is_shape_times_scale_with_one_held_force_per_step() {
+    let shape = |[x, y, z]: [usize; 3]| {
+        [
+            1e-5 * (x as f64 + 1.0),
+            -2e-5 * (y as f64 + 1.0),
+            3e-6 * (z as f64 + 1.0),
+        ]
+    };
+    for model in [
+        CollisionModel3::Bgk { tau: 0.7 },
+        CollisionModel3::ReducedCumulant {
+            second_order_rate: 1.6,
+            third_order_rate: 1.0,
+            fourth_order_rate: 1.0,
+        },
+    ] {
+        let mut scaled = uniform_grid(model);
+        let mut direct = uniform_grid(model);
+        scaled.set_force_field(shape);
+        let total_shape = cells(&scaled).into_iter().fold([0.0; 3], |sum, cell| {
+            let local = shape(cell);
+            core::array::from_fn(|a| sum[a] + local[a])
+        });
+        let start = raw_first_moment(&scaled, |_| true);
+        let mut impulse = [0.0; 3];
+        for scale in [1.0, 0.6, -0.3, 0.0, 1.7] {
+            scaled.set_force_field_scale(scale);
+            direct.set_force_field(|cell| shape(cell).map(|value| scale * value));
+            assert_eq!(snapshot(&scaled), snapshot(&direct));
+            scaled.step();
+            direct.step();
+            impulse = core::array::from_fn(|a| impulse[a] + scale * total_shape[a]);
+        }
+        assert_eq!(snapshot(&scaled), snapshot(&direct));
+        // Guo adds the held force to the raw first moment every step; the
+        // physical momentum, raw + F/2, therefore gains the trapezoid.
+        let end = raw_first_moment(&scaled, |_| true);
+        for a in 0..3 {
+            close(end[a] - start[a], impulse[a], 1e-13);
+        }
+    }
 }

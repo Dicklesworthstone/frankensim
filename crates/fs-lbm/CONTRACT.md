@@ -2019,8 +2019,15 @@ the next collision supplies one step of the new force. Zero per-cell force
 disables that contribution while retaining any declared uniform force.
 `force_density` exposes their total for physical-moment sampling.
 
-Both field APIs support BGK, central moments, and reduced cumulants and refuse
-open velocity/pressure faces. All fluid samples and total forces must be
+Both field APIs support BGK, central moments, and reduced cumulants. Beside
+open velocity/pressure faces they admit only a field that is exactly zero on
+every open-face cell and its first-interior neighbour, the cells the force-free
+regularized reconstruction reads; such a grid keeps a zero uniform force.
+`set_force_field_scale(s)` holds exactly `s * selected` in every cell for a
+fixed spatial shape with a caller-owned time history (an imposed acoustic
+pressure gradient). It does not reframe populations: Guo adds the held force
+to `sum(f_q c_q)` each step, so physical momentum gains the trapezoidal
+impulse `(F_old + F_new) / 2`. All fluid samples and total forces must be
 finite. Rebinding preflights every changed cell's physical velocity and new
 population frame in the existing collision scratch before publishing either
 populations or field; callback failure or late invalid-cell refusal leaves

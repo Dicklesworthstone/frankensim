@@ -559,6 +559,9 @@ pub struct BoundaryGrid3 {
     /// (flat index `tile * TILE_CELLS + lane`). `None` leaves every result
     /// bit-identical to the uniform-force grid.
     force_field: Option<Vec<[f64; 3]>>,
+    /// The field last selected or rebound, held once it is scaled: then
+    /// `force_field` is exactly `scale * shape` in every cell.
+    force_field_shape: Option<Vec<[f64; 3]>>,
     /// Open-face cells in canonical reconstruction order (face, then z, y,
     /// x) with the interior cell each reads. Cached on the first step; the
     /// topology is immutable from then on, so the per-step pass visits only
@@ -658,7 +661,8 @@ impl BoundaryGrid3 {
     /// Every dimension must be a positive multiple of [`TILE`]. The collision
     /// model and force must be finite and admissible. BGK and moment-space
     /// models support body forces on periodic/walled domains; regularized
-    /// open velocity/pressure faces still require a force-free domain.
+    /// open velocity/pressure faces require a zero uniform force and a
+    /// per-cell field that vanishes where their reconstruction reads.
     ///
     /// # Panics
     /// Panics when dimensions, allocation geometry, collision parameters,
@@ -733,6 +737,7 @@ impl BoundaryGrid3 {
             pull: Vec::new(),
             next: None,
             force_field: None,
+            force_field_shape: None,
             open_cells: None,
             velocity_profiles: core::array::from_fn(|_| None),
         };
@@ -924,13 +929,20 @@ impl BoundaryGrid3 {
     /// on an evolved state, use [`Self::rebind_force_field`] to preserve
     /// physical momentum and stress instead.
     ///
+    /// An open velocity/pressure face reconstructs its cells from the first
+    /// interior cell with the force-free regularized closure, so the field
+    /// must be exactly zero on every open-face cell and its first-interior
+    /// neighbour. Forcing elsewhere (an imposed pressure gradient in the
+    /// interior of an open duct, for example) is admitted.
+    ///
     /// # Panics
-    /// If the grid has an open velocity/pressure face (whose regularized
-    /// reconstruction assumes a force-free fluid), the collision model does
-    /// not admit body forcing, or a sample or its sum with the uniform force
-    /// is non-finite. Refusal leaves the prior field and populations intact.
+    /// A nonzero sample on or beside an open face, a collision model that
+    /// does not admit body forcing, or a sample or its sum with the uniform
+    /// force that is non-finite. Refusal leaves the prior field and
+    /// populations intact.
     pub fn set_force_field(&mut self, force: impl FnMut([usize; 3]) -> [f64; 3]) {
         self.force_field = Some(self.sample_force_field(force));
+        self.force_field_shape = None;
     }
 
     /// Replace a held per-cell body force without advancing time or adding
@@ -995,19 +1007,69 @@ impl BoundaryGrid3 {
         }
         core::mem::swap(&mut self.f, &mut self.post);
         self.force_field = Some(field);
+        self.force_field_shape = None;
+    }
+
+    /// Multiply the field last selected by [`Self::set_force_field`] or
+    /// [`Self::rebind_force_field`] by `scale` for the following steps. The
+    /// held field becomes exactly `scale * selected` in every cell, so its
+    /// zeros (and the open-face admission) are kept.
+    ///
+    /// This is the caller's time history for a fixed spatial shape, such as
+    /// an imposed acoustic pressure gradient. Populations are not reframed:
+    /// Guo forcing adds exactly the held force to the first population
+    /// moment each step, so the physical momentum `sum_q(f_q c_q) + F/2`
+    /// gains the trapezoidal impulse `(F_old + F_new) / 2`, second order for
+    /// a smooth history. A discontinuous change belongs to
+    /// [`Self::rebind_force_field`].
+    ///
+    /// # Panics
+    /// No per-cell field is held, `scale` is non-finite, or a scaled total
+    /// force is non-finite. Refusal leaves the held field intact.
+    pub fn set_force_field_scale(&mut self, scale: f64) {
+        assert!(scale.is_finite(), "force-field scale must be finite");
+        let field = self
+            .force_field
+            .as_mut()
+            .expect("a per-cell force field must be selected before it is scaled");
+        let shape = self.force_field_shape.get_or_insert_with(|| field.clone());
+        let uniform = self.force;
+        assert!(
+            shape.iter().all(|local| {
+                local
+                    .iter()
+                    .zip(uniform)
+                    .all(|(value, total)| (scale * value + total).is_finite())
+            }),
+            "scaled per-cell force and total force must be finite"
+        );
+        for (held, local) in field.iter_mut().zip(shape.iter()) {
+            *held = local.map(|value| scale * value);
+        }
     }
 
     fn sample_force_field(&self, mut force: impl FnMut([usize; 3]) -> [f64; 3]) -> Vec<[f64; 3]> {
         assert!(
-            !Face3::ALL
-                .into_iter()
-                .any(|face| self.boundaries.face(face).is_open()),
-            "per-cell forcing requires a grid without open velocity/pressure faces"
-        );
-        assert!(
             self.collision_model.supports_body_force(),
             "the selected collision model does not admit body forcing"
         );
+        let open: Vec<Face3> = Face3::ALL
+            .into_iter()
+            .filter(|&face| self.boundaries.face(face).is_open())
+            .collect();
+        let dims = [self.nx, self.ny, self.nz];
+        // An open-face cell and its first-interior neighbour: the cells the
+        // force-free regularized reconstruction reads.
+        let read_by_open_face = |cell: [usize; 3]| {
+            open.iter().any(|face| {
+                let axis = face.axis();
+                if face.is_min() {
+                    cell[axis] <= 1
+                } else {
+                    cell[axis] + 2 >= dims[axis]
+                }
+            })
+        };
         let mut field = vec![[0.0; 3]; self.f[0].len() * TILE_CELLS];
         for z in 0..self.nz {
             for y in 0..self.ny {
@@ -1023,6 +1085,10 @@ impl BoundaryGrid3 {
                             .all(|(local, uniform)| local.is_finite()
                                 && (local + uniform).is_finite()),
                         "per-cell force and total force must be finite"
+                    );
+                    assert!(
+                        value == [0.0; 3] || !read_by_open_face([x, y, z]),
+                        "per-cell force must vanish on open-face cells and their first-interior neighbours"
                     );
                     let (tile, lane) = self.addr(x, y, z);
                     field[tile * TILE_CELLS + lane] = value;
