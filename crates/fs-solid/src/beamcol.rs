@@ -50,13 +50,15 @@ impl ForceBasedElement {
     /// Tip deflection under tip shear `v` (state determination:
     /// per-section Newton on (ε₀, κ) against the EXACT internal forces
     /// N = 0, M = v·(L − x)), then curvature integration by virtual
-    /// work. Commits the section states.
+    /// work. Commits the section states only after every section converges;
+    /// a refused load leaves the entire accepted element history unchanged.
     ///
     /// # Errors
     /// [`SolidError::NewtonStalled`] if a section refuses to converge.
     pub fn tip_deflection_under_shear(&mut self, v: f64) -> Result<f64, SolidError> {
         let l = self.length;
         let mut defl = 0.0;
+        let mut proposed = Vec::with_capacity(self.xi.len());
         for p in 0..self.xi.len() {
             let x = self.xi[p] * l;
             let m_target = v * (l - x);
@@ -65,7 +67,7 @@ impl ForceBasedElement {
             let mut converged = false;
             let mut history = Vec::new();
             for _ in 0..60 {
-                let r = self.sections[p].respond(e0, k0);
+                let r = self.sections[p].try_respond(e0, k0)?;
                 let rn = [r.n, r.m - m_target];
                 let norm = rn[0].hypot(rn[1]);
                 history.push(norm);
@@ -85,8 +87,9 @@ impl ForceBasedElement {
                 // at reversals; fixed damping oscillates there).
                 let mut alpha = 1.0f64;
                 for _ in 0..25 {
-                    let r2 = self.sections[p].respond(e0 - alpha * de, k0 - alpha * dk);
-                    if (r2.n).hypot(r2.m - m_target) < norm {
+                    if let Ok(r2) = self.sections[p].try_respond(e0 - alpha * de, k0 - alpha * dk)
+                        && (r2.n).hypot(r2.m - m_target) < norm
+                    {
                         break;
                     }
                     alpha *= 0.5;
@@ -97,10 +100,13 @@ impl ForceBasedElement {
             if !converged {
                 return Err(SolidError::NewtonStalled { history });
             }
-            self.sections[p].commit(e0, k0);
-            self.committed[p] = (e0, k0);
+            proposed.push((e0, k0));
             // Virtual work: δ_tip = ∫ κ(x)·(L − x) dx.
             defl += self.wi[p] * l * k0 * (l - x);
+        }
+        for (p, &(e0, k0)) in proposed.iter().enumerate() {
+            self.sections[p].commit(e0, k0);
+            self.committed[p] = (e0, k0);
         }
         Ok(defl)
     }

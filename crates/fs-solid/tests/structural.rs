@@ -430,3 +430,50 @@ fn str_006_forcebased_pushover_and_resume() {
         ),
     );
 }
+
+#[test]
+fn forcebased_refusal_preserves_every_section_history_for_retry() {
+    use fs_solid::fiber::{FiberState, Section};
+
+    let make = || rc_section(0.5, 0.3, 16, 1e-3);
+    let mut element = ForceBasedElement::new(3.0, &make);
+    let yield_shear = 1e-3 * 450e6 * 0.4 / 3.0;
+    element
+        .tip_deflection_under_shear(0.4 * yield_shear)
+        .unwrap();
+    let accepted = element.clone();
+    // The base section can reach the next load; the following section has
+    // lost all capacity. Its refusal must not leave the base advanced.
+    element.sections[1] = Section::new(Vec::new());
+    assert!(
+        element
+            .tip_deflection_under_shear(0.5 * yield_shear)
+            .is_err()
+    );
+    assert_eq!(element.committed, accepted.committed);
+    for (next, old) in element.sections[0]
+        .states
+        .iter()
+        .zip(&accepted.sections[0].states)
+    {
+        match (next, old) {
+            (FiberState::Steel(next), FiberState::Steel(old)) => assert_eq!(next, old),
+            (FiberState::Concrete(next), FiberState::Concrete(old)) => assert_eq!(next, old),
+            _ => panic!("section state type changed"),
+        }
+    }
+    // Repair the failed section, then retry and reverse from exactly the
+    // same history as a trajectory which never attempted the refused step.
+    element.sections[1] = accepted.sections[1].clone();
+    let mut reference = accepted;
+    for shear in [0.5, -0.3, 0.2] {
+        let actual = element
+            .tip_deflection_under_shear(shear * yield_shear)
+            .unwrap();
+        let expected = reference
+            .tip_deflection_under_shear(shear * yield_shear)
+            .unwrap();
+        assert_eq!(actual.to_bits(), expected.to_bits());
+        assert_eq!(element.committed, reference.committed);
+    }
+}

@@ -2435,3 +2435,34 @@ and native coupled PHS owners; projection adds no heat or independent solver.
 Source-integrated isotropic/oriented-orthotropic expansion and reciprocal heat
 are exercised by the tensor coupling regressions, currently authored but unrun
 in this environment.
+
+## Shared J2 plasticity in fibers, beam-columns and frames
+
+`FiberLaw::J2` consumes the original material owner's exact uniaxial stress
+reduction, including plastic lateral contraction and separate isotropic/Prager
+history. The existing section tangent, force-based beam-column and planar frame
+solvers therefore support metal yielding, elastic unloading and permanent
+curvature/deflection without a second structural plasticity law. Raw section
+kernels retain their caller-admission convention; `Section::try_respond` and the
+beam/frame nonlinear paths check finite response and the full compatible tensor
+strain against the original J2 small-strain domain.
+
+`FiberMaterial::resolve_j2` uses the same source requirements, explicit hardening
+basis and coefficient conversion as tetrahedral solids, retaining density and
+all original receipts at one fixed external state. RC reinforcement may select
+the existing steel law or native J2; its replaced concrete area and reference
+mass remain coherent. A source post-yield tangent does not invent a kinematic
+hardening split. Temperature feedback, rate effects and calibrated cyclic steel
+behavior are not inferred for this fixed-state axial reduction.
+
+A force-based cantilever commits every section only after all sections converge;
+a refused step preserves the whole accepted element for retry or reversal.
+Focused regressions compare independent bilinear section and beam formulas,
+source/mass consistency, full-tensor domain refusal and transactional history.
+These additions do not provide finite-strain forming, plastic collapse
+continuation, fatigue/damage or a complete nonlinear plastic shell solver.
+
+Complete unloading in the native frame iteration retains its independent
+compatibility and relative force checks while admitting a local constitutive
+roundoff floor derived from section tangent and strain. This avoids rejecting
+a physically equilibrated permanent bend solely because endpoint load is zero.

@@ -13,8 +13,10 @@
 //! closure, positive per-cycle dissipation, and the peak moment
 //! against a hand capacity estimate.
 
+use crate::SolidError;
 use fs_la::batched::{BatchMat, BatchVec, batch_cholesky, batch_cholesky_solve};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
+use fs_material::plastic::reduction::{UniaxialJ2, UniaxialJ2State};
 
 /// Material-bound fiber laws, RC section geometry and coherent member mass.
 pub mod material;
@@ -22,6 +24,9 @@ pub mod material;
 /// A fiber's constitutive card.
 #[derive(Debug, Clone)]
 pub enum FiberLaw {
+    /// Free-sided axial restriction of the shared three-dimensional J2 law.
+    /// Isotropic and Prager hardening retain separate reversal histories.
+    J2(UniaxialJ2),
     /// Menegotto–Pinto steel.
     Steel(MenegottoPintoSteel),
     /// Mander concrete (confined or unconfined by parameters).
@@ -31,6 +36,8 @@ pub enum FiberLaw {
 /// A fiber's committed state.
 #[derive(Debug, Clone)]
 pub enum FiberState {
+    /// Signed axial plastic strain and accumulated equivalent plastic strain.
+    J2(UniaxialJ2State),
     /// Steel state.
     Steel(MpState),
     /// Concrete state.
@@ -75,6 +82,7 @@ impl Section {
         let states = fibers
             .iter()
             .map(|f| match &f.law {
+                FiberLaw::J2(l) => FiberState::J2(l.initial_state()),
                 FiberLaw::Steel(l) => FiberState::Steel(l.initial_state()),
                 FiberLaw::Concrete(l) => FiberState::Concrete(l.initial_state()),
             })
@@ -86,18 +94,59 @@ impl Section {
     /// separately).
     #[must_use]
     pub fn respond(&self, eps0: f64, kappa: f64) -> SectionState {
+        self.response(eps0, kappa, false)
+            .expect("law/state pairing fixed at construction")
+    }
+
+    /// Checked response for nonlinear structural solvers. J2 admission uses
+    /// the full compatible tensor strain, including lateral contraction.
+    /// Failure leaves every fiber's accepted history unchanged.
+    pub fn try_respond(&self, eps0: f64, kappa: f64) -> Result<SectionState, SolidError> {
+        self.response(eps0, kappa, true)
+    }
+
+    fn response(&self, eps0: f64, kappa: f64, checked: bool) -> Result<SectionState, SolidError> {
+        let refused = |what: &str| SolidError::MaterialRefused { what: what.into() };
+        if checked
+            && (!eps0.is_finite() || !kappa.is_finite() || self.fibers.len() != self.states.len())
+        {
+            return Err(refused(
+                "fiber strains and law/state cardinality must be valid",
+            ));
+        }
         let mut out = SectionState::default();
         for (f, st) in self.fibers.iter().zip(&self.states) {
             let eps = eps0 - f.y * kappa;
+            if checked
+                && (!eps.is_finite() || !f.y.is_finite() || !(f.area.is_finite() && f.area > 0.0))
+            {
+                return Err(refused(
+                    "finite fiber strain and positive finite area required",
+                ));
+            }
             // Section convention is tension-positive; the Mander card
             // is compression-positive (tension returns zero) — flip in
             // and out for concrete.
             let (sig, tan) = match (&f.law, st) {
+                (FiberLaw::J2(l), FiberState::J2(s)) => {
+                    let response = l.response(eps, s);
+                    if checked {
+                        let norm_squared =
+                            fs_material::tensor::contract(&response.strain, &response.strain);
+                        let bound = l.backbone().elastic.strain_limit.min(0.05);
+                        if !norm_squared.is_finite() || norm_squared > bound * bound {
+                            return Err(refused(
+                                "J2 fiber exceeds its full-tensor small-strain domain",
+                            ));
+                        }
+                    }
+                    (response.stress_pa, response.tangent_pa)
+                }
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => (l.stress(eps, s), l.tangent(eps, s)),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     (-l.stress(-eps, s), l.tangent(-eps, s))
                 }
-                _ => unreachable!("law/state pairing fixed at construction"),
+                _ => return Err(refused("fiber law and committed state must match")),
             };
             out.n += sig * f.area;
             out.m -= sig * f.y * f.area;
@@ -107,7 +156,15 @@ impl Section {
             out.tangent[1][0] -= ea * f.y;
             out.tangent[1][1] += ea * f.y * f.y;
         }
-        out
+        if checked
+            && (![out.n, out.m].into_iter().all(f64::is_finite)
+                || out.tangent.iter().flatten().any(|v| !v.is_finite()))
+        {
+            return Err(refused(
+                "fiber section force and tangent must be representable",
+            ));
+        }
+        Ok(out)
     }
 
     /// Commit the states at (ε₀, κ).
@@ -115,6 +172,7 @@ impl Section {
         for (f, st) in self.fibers.iter().zip(self.states.iter_mut()) {
             let eps = eps0 - f.y * kappa;
             match (&f.law, st) {
+                (FiberLaw::J2(l), FiberState::J2(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Steel(l), FiberState::Steel(s)) => *s = l.update_state(eps, s),
                 (FiberLaw::Concrete(l), FiberState::Concrete(s)) => {
                     *s = l.update_state(-eps, s);

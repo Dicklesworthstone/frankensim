@@ -6005,3 +6005,23 @@ inception or collapse. G0/G3 regressions cover source retention/refresh, quantit
 refusal, original water coefficients, pure limits, phase exchange, mass/volume
 conversion and independent compression of the separate phase volumes.
 
+
+## Native axial and plane-stress plasticity
+
+`plastic::reduction::UniaxialJ2` is the exact free-sided axial stress restriction
+of the original rate-independent J2 law, with separate isotropic/Prager hardening,
+signed axial plastic strain, accumulated equivalent strain and retained lateral
+plastic contraction. Its checked work/heat entry delegates to the original 3-D
+energetic owner. No additional heat fraction or cyclic calibration is inferred.
+
+`PlaneStressReduction<L>` enforces zero zz/yz/zx stress using the original law
+and frozen accepted history throughout local Newton and line search. It returns
+full tensor strain/history and the Schur-condensed consistent tangent in tensor-
+shear order [xx, yy, xy]. Existing Perzyna laws advance one physical interval;
+local iterations do not accumulate material time. `PlaneStressWorkspace` reuses
+the original dense factorization storage. Failed admission or iteration changes
+no accepted state. These are small-strain material reductions; nonlinear shell
+assembly, finite-strain plasticity, damage and experimental calibration are
+separate capabilities. Focused native material tests cover axial/cyclic/energy
+limits, nonproportional plane stress, retained transverse history and rate-law
+semantics; no full-workspace or runtime qualification follows from those tests.

@@ -70,6 +70,15 @@ pub enum SectionModel {
 }
 
 impl SectionModel {
+    /// Checked constitutive response used by the nonlinear frame solve. Native
+    /// J2 fibers retain their full-tensor small-strain bound under chord rotation.
+    pub fn try_respond(&self, eps0: f64, kappa: f64) -> Result<SectionState, SolidError> {
+        match self {
+            Self::Fiber(section) => section.try_respond(eps0, kappa),
+            Self::Elastic { .. } => Ok(self.respond(eps0, kappa)),
+        }
+    }
+
     /// Response at `(ε₀, κ)` from the committed state (pure).
     #[must_use]
     pub fn respond(&self, eps0: f64, kappa: f64) -> SectionState {
@@ -313,7 +322,7 @@ impl FrameElement {
             let mut vr = [0.0; 3];
             let mut resp = Vec::with_capacity(np);
             for p in 0..np {
-                let s = self.sections[p].respond(d[p].0, d[p].1);
+                let s = self.sections[p].try_respond(d[p].0, d[p].1)?;
                 let fs = inv2(s.tangent);
                 let b = Self::b(self.xi[p]);
                 let wl = self.w[p] * l;
@@ -337,6 +346,7 @@ impl FrameElement {
             // Section unbalance at the current q.
             let mut unbal = 0.0f64;
             let mut dscale = 1.0f64;
+            let mut roundoff_scale = 0.0f64;
             for p in 0..np {
                 let b = Self::b(self.xi[p]);
                 let dn = b[0][0] * q[0];
@@ -344,11 +354,23 @@ impl FrameElement {
                 let (s, _) = resp[p];
                 unbal = unbal.max((dn - s.n).abs()).max((dm - s.m).abs());
                 dscale = dscale.max(dn.abs()).max(dm.abs());
+                for row in s.tangent {
+                    roundoff_scale = roundoff_scale
+                        .max(row[0].abs() * d[p].0.abs() + row[1].abs() * d[p].1.abs());
+                }
             }
             let dv: Vec<f64> = (0..3).map(|a| v[a] - vr[a]).collect();
             let dvn = dv.iter().fold(0.0f64, |m, x| m.max(x.abs()));
             history.push(dvn);
-            if dvn <= 1e-15 + 1e-13 * vnorm && unbal <= 1e-12 * dscale {
+            // At complete plastic unloading, stress subtracts retained
+            // plastic strain while endpoint force approaches zero. Propagate
+            // strain roundoff through the actual section tangent; the strict
+            // relative force and independent compatibility gates still apply.
+            let force_tolerance = 1e-12 * dscale + 64.0 * f64::EPSILON * roundoff_scale;
+            if dvn <= 1e-15 + 1e-13 * vnorm
+                && force_tolerance.is_finite()
+                && unbal <= force_tolerance
+            {
                 return Ok((q, kb, d));
             }
             // Compatibility correction, then section corrections.

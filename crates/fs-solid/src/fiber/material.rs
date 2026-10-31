@@ -14,6 +14,10 @@ use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
+use fs_material::plastic::reduction::UniaxialJ2;
+use fs_material::plastic::source::{
+    HardeningPropertyBasis, J2SourceError, ResolvedJ2Plasticity, j2_requirements,
+};
 use fs_material::state_point::{
     MaterialPropertySelection, MaterialStatePointError, ResolvedMaterialStatePoint,
     ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
@@ -63,6 +67,8 @@ pub enum RcSectionError {
     Source(MaterialStatePointError),
     /// The owning constitutive law rejected its parameters.
     Law(MaterialError),
+    /// The native J2 material-source owner rejected its constitutive reduction.
+    Plasticity(J2SourceError),
     /// Geometry, density or numerical representation was inadmissible.
     Invalid(&'static str),
 }
@@ -71,6 +77,7 @@ impl core::fmt::Display for RcSectionError {
         match self {
             Self::Source(error) => error.fmt(f),
             Self::Law(error) => error.fmt(f),
+            Self::Plasticity(error) => error.fmt(f),
             Self::Invalid(message) => write!(f, "RC section: {message}"),
         }
     }
@@ -80,6 +87,7 @@ impl std::error::Error for RcSectionError {
         match self {
             Self::Source(error) => Some(error),
             Self::Law(error) => Some(error),
+            Self::Plasticity(error) => Some(error),
             Self::Invalid(_) => None,
         }
     }
@@ -92,6 +100,11 @@ impl From<MaterialStatePointError> for RcSectionError {
 impl From<MaterialError> for RcSectionError {
     fn from(error: MaterialError) -> Self {
         Self::Law(error)
+    }
+}
+impl From<J2SourceError> for RcSectionError {
+    fn from(error: J2SourceError) -> Self {
+        Self::Plasticity(error)
     }
 }
 type Result<T> = core::result::Result<T, RcSectionError>;
@@ -120,9 +133,62 @@ impl FiberMaterial {
     /// Explicit authored law and density, without implied source authority.
     pub fn authored(law: FiberLaw, density_kg_m3: f64) -> Result<Self> {
         match law {
+            FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Concrete(law) => Self::concrete(law, density_kg_m3),
             FiberLaw::Steel(law) => Self::steel(law, density_kg_m3),
         }
+    }
+
+    /// An authored native J2 law for metal fibers, with explicit reference mass.
+    /// This uses the exact axial stress reduction, including plastic lateral
+    /// contraction; it is not a uniaxial-strain approximation.
+    pub fn j2(law: UniaxialJ2, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "J2 fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::J2(law),
+            density_kg_m3,
+            source: None,
+        })
+    }
+
+    /// Resolve density and the original J2 coefficients at one fixed source
+    /// state. The same hardening-basis conversion and source admission used by
+    /// tetrahedral solids now supplies fiber beams and frame reinforcement.
+    /// Mixed hardening requires independent isotropic and Prager data.
+    /// Temperature remains fixed for this load path; no creep, thermal feedback
+    /// or material-specific cyclic calibration is inferred.
+    pub fn resolve_j2(
+        card: &MaterialCard,
+        point: &QueryPoint,
+        density_property: &str,
+        basis: HardeningPropertyBasis,
+        strain_limit: f64,
+        selection: MaterialPropertySelection,
+    ) -> Result<Self> {
+        let mut requirements = j2_requirements(basis)?;
+        requirements.push(ScalarPropertyRequirement::try_new(
+            density_property,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+        let source = resolve_material_state_point(card, point, &requirements, selection)?;
+        let density = source
+            .property(density_property)
+            .expect("required density was resolved");
+        if !density.is_static_at_fixed_external_conditions() {
+            return Err(MaterialStatePointError::InvalidRequirement {
+                property: density_property.into(),
+                reason: "J2 fiber density cannot freeze sampled strain, stress, rate or history dependence",
+            }.into());
+        }
+        let density_kg_m3 = density.value_si();
+        let resolved = ResolvedJ2Plasticity::try_from_material(source, basis, strain_limit)?;
+        let mut material = Self::j2(UniaxialJ2::new(resolved.law().clone())?, density_kg_m3)?;
+        material.source = Some(resolved.material().clone());
+        Ok(material)
     }
 
     /// Explicit research-model parameters, with no implied catalog authority.
@@ -373,8 +439,8 @@ impl RcSection {
         require(
             matches!(core.law, FiberLaw::Concrete(_))
                 && matches!(cover.law, FiberLaw::Concrete(_))
-                && matches!(steel.law, FiberLaw::Steel(_)),
-            "core and cover require concrete; reinforcement requires steel",
+                && matches!(steel.law, FiberLaw::Steel(_) | FiberLaw::J2(_)),
+            "core and cover require concrete; reinforcement requires a steel or native J2 law",
         )?;
         let core_width = g.width_m - 2.0 * g.cover_m;
         let core_half_depth = 0.5 * g.depth_m - g.cover_m;
