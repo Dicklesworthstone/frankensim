@@ -1196,3 +1196,25 @@ refusal, manufactured-liquid pulsating-sphere impedance against its analytic
 value, and radiated-power scaling with `rho c` at fixed wavenumber. This does not
 add liquid attenuation, cavitation or an experimental accuracy claim; existing
 boundary-integral discretization and wavelength limits remain.
+
+### Porous material reflection on closed Robin surfaces
+
+`helmholtz::bc::PorousRigidBoundary` resolves the existing
+`fs_material::porous::PorousFluidLaw` once per frequency and fluid state.
+It retains the original skeleton source and sampled thermoviscous fluid,
+and derives both the exterior medium and `beta=rho*c/conj(Zs)` from that
+same response. The conjugation preserves the exp(-i omega t) pressure phase;
+specific impedance is not divided by panel area. Dense radiation/scattering
+and iterative scattering use the existing Robin owners and their work,
+geometry, resolution and cancellation limits. The scalar beta is also exposed
+for mixed rigid/coated patches. No constitutive kernel or absorber fit is copied.
+
+The complex planar diagnostic uses `R=(cos(theta)-beta)/(cos(theta)+beta)`.
+This is explicitly a locally reacting, planar rigid-backing approximation:
+no lateral layer propagation, frame motion, curved-layer correction, diffuse
+room model or experimental qualification is inferred. Exterior propagation
+retains the existing lossless-medium model. `tests/porous_boundary.rs` checks
+independent high-precision phase/absorption references, oblique normal-power
+balance, shared-fluid substitution, original Robin solve equality, total-wall
+work and invalid source support. Authored Rust tests require native execution;
+the test definitions alone establish no passing numerical qualification.

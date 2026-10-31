@@ -132,6 +132,189 @@ impl Admittance<'_> {
     }
 }
 
+/// A uniform, rigid-backed porous coating resolved from one material and fluid.
+///
+/// The JCA(L) constitutive law remains in `fs-material`. This adapter retains
+/// its source card, frequency support and coherent saturating-fluid snapshot,
+/// and converts its exp(+i omega t) specific impedance to this solver's
+/// exp(-i omega t) normalized admittance: `beta = rho*c / conj(Zs)`.
+/// Specific impedance is pressure / particle velocity; no panel-area factor
+/// belongs in this conversion.
+///
+/// This is a locally reacting boundary. Lateral propagation within the layer,
+/// frame motion, curvature corrections to its planar backing, and exterior
+/// viscothermal attenuation are not resolved.
+#[derive(Debug, Clone)]
+pub struct PorousRigidBoundary<'a> {
+    law: &'a fs_material::porous::PorousFluidLaw,
+    response: fs_material::porous::PorousFluidResponse,
+    thickness_m: f64,
+    medium: Medium,
+    k: f64,
+    beta: C64,
+}
+
+impl<'a> PorousRigidBoundary<'a> {
+    /// Evaluate the porous law once at the actual frequency and fluid state.
+    ///
+    /// Source support, coherent fluid data and layer thickness are admitted by
+    /// the original material owner. No air default or absorption-only fit is
+    /// substituted for the complex impedance.
+    pub fn new<M: fs_material::fluid_acoustics::thermoviscous::ThermoviscousFluid + ?Sized>(
+        law: &'a fs_material::porous::PorousFluidLaw,
+        fluid: &M,
+        omega: f64,
+        thickness_m: f64,
+    ) -> Result<Self, fs_material::MaterialError> {
+        let response = law.effective_fluid(fluid, omega)?;
+        let impedance = response.surface_impedance_rigid(thickness_m)?;
+        let acoustic = response.fluid().acoustic();
+        let medium = Medium {
+            density: acoustic.density_kg_m3(),
+            sound_speed: acoustic.sound_speed_m_s(),
+        };
+        let k = omega / medium.sound_speed;
+        let beta = C64::from_re(acoustic.characteristic_impedance_pa_s_m()) / impedance.conj();
+        if !k.is_finite() || k <= 0.0 || !finite(beta) || beta.re < 0.0 {
+            return Err(fs_material::MaterialError::State {
+                what: "porous BEM boundary needs finite passive admittance and positive wavenumber"
+                    .into(),
+            });
+        }
+        Ok(Self { law, response, thickness_m, medium, k, beta })
+    }
+
+    /// Original skeleton characterization, provenance and frequency support.
+    pub const fn law(&self) -> &fs_material::porous::PorousFluidLaw {
+        self.law
+    }
+
+    /// The single coherent material response used for both wall and exterior.
+    pub const fn response(&self) -> &fs_material::porous::PorousFluidResponse {
+        &self.response
+    }
+
+    /// Thickness measured along the locally planar backing normal [m].
+    pub const fn thickness_m(&self) -> f64 {
+        self.thickness_m
+    }
+
+    /// Exterior acoustic coefficients copied from the same saturating fluid.
+    pub const fn medium(&self) -> Medium {
+        self.medium
+    }
+
+    /// Exterior wavenumber at the material query frequency [rad/m].
+    pub const fn wavenumber_rad_m(&self) -> f64 {
+        self.k
+    }
+
+    /// Dimensionless exp(-i omega t) coefficient for `Admittance::Local`.
+    ///
+    /// This also supports mixed rigid/coated patches: put this value on coated
+    /// DOFs and zero on rigid DOFs, retaining this medium and query frequency.
+    pub const fn normalized_admittance(&self) -> C64 {
+        self.beta
+    }
+
+    /// Complex pressure reflection of a plane wave at this locally reacting
+    /// surface, `R = (cos(theta) - beta) / (cos(theta) + beta)`.
+    ///
+    /// The cosine is positive for incidence toward the wall. This preserves
+    /// phase; absorption alone does not determine a reflected pressure wave.
+    /// It is a planar diagnostic, not a replacement for the BEM field solve.
+    /// See COMSOL Acoustics, Wall / Normal impedance:
+    /// <https://doc.comsol.com/6.3/doc/com.comsol.help.aco/aco_ug_pressure.05.124.html>.
+    pub fn plane_wave_reflection(&self, incidence_cosine: f64) -> Result<C64, HelmholtzError> {
+        if !incidence_cosine.is_finite()
+            || incidence_cosine <= 0.0
+            || incidence_cosine > 1.0
+        {
+            return Err(bad("porous reflection needs incidence cosine in (0, 1]"));
+        }
+        let cosine = C64::from_re(incidence_cosine);
+        let reflected = (cosine - self.beta) / (cosine + self.beta);
+        if !finite(reflected) {
+            return Err(bad("nonfinite porous pressure reflection"));
+        }
+        Ok(reflected)
+    }
+
+    /// Uniform coating on the existing dense closed-surface radiation owner.
+    pub fn solve_radiation(
+        &self,
+        surface: &SpherePanels,
+        drive_velocity: &[C64],
+        formulation: Formulation,
+    ) -> Result<BoundarySolution, HelmholtzError> {
+        // Reuse the original mesh/wavelength/cap admission before allocation.
+        admit_resolution(surface, self.k)?;
+        let beta = vec![self.beta; surface.areas().len()];
+        solve_radiation_bc(
+            surface,
+            self.k,
+            self.medium,
+            SurfaceBc {
+                drive_velocity,
+                admittance: Admittance::Local { beta: &beta, declared_active: false },
+            },
+            formulation,
+        )
+    }
+
+    /// Uniform coating on the existing dense plane-wave scattering owner.
+    /// Absorbed work is evaluated from total incident plus scattered pressure.
+    pub fn solve_scattering(
+        &self,
+        surface: &SpherePanels,
+        incident: PlaneWave,
+        formulation: Formulation,
+    ) -> Result<ScatteringSolution, HelmholtzError> {
+        admit_resolution(surface, self.k)?;
+        let beta = vec![self.beta; surface.areas().len()];
+        solve_scattering_bc(
+            surface,
+            self.k,
+            self.medium,
+            Admittance::Local { beta: &beta, declared_active: false },
+            incident,
+            formulation,
+        )
+    }
+
+    /// The same material boundary through the original bounded FMM/GMRES owner.
+    pub fn solve_scattering_iterative(
+        &self,
+        surface: &SpherePanels,
+        incident: PlaneWave,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        gate: &CancelGate,
+    ) -> Result<
+        (
+            ScatteringSolution,
+            fs_solver::krylov::SolveReport,
+            ResourceReceipt,
+        ),
+        IterativeError,
+    > {
+        if gate.is_requested() {
+            return Err(IterativeError::Cancelled { matvecs: 0 });
+        }
+        let beta = vec![self.beta; surface.areas().len()];
+        solve_scattering_bc_iterative(
+            surface,
+            self.k,
+            self.medium,
+            Admittance::Local { beta: &beta, declared_active: false },
+            incident,
+            formulation,
+            options,
+            gate,
+        )
+    }
+}
+
 /// Drive velocity [m/s] and the frequency/space-dependent boundary law.
 #[derive(Clone, Copy)]
 pub struct SurfaceBc<'a> {
