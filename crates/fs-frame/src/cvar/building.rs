@@ -12,7 +12,23 @@ use fs_exec::Cx;
 use fs_robust::{EmpiricalCvarReport, RobustError, empirical_cvar};
 use fs_scenario::ScenarioError;
 use fs_scenario::ensemble::{RealizationBudget, SpectrumModel, StochasticEnsemble};
+use fs_scenario::signal::{Interp, TimeSignal};
 use fs_solid::SolidError;
+use std::borrow::Cow;
+
+/// Original typed forcing retained by a building risk/design study.
+#[derive(Debug, Clone, Copy)]
+pub enum BuildingMotionSource<'a> {
+    /// Seeded Kanai-Tajimi motions, synthesized once per member.
+    Ensemble(&'a StochasticEnsemble),
+    /// Equally weighted recorded acceleration tables, each with its own grid.
+    ///
+    /// Only linear, uniform SI acceleration tables beginning at zero are
+    /// admitted. The first value is the native building's initial forcing;
+    /// n samples yield n - 1 advancing steps. Tables carry their original
+    /// units/interpolation but do not themselves certify recording provenance.
+    Records(&'a [TimeSignal]),
+}
 
 /// Explicit risk target and deterministic bounds for the finite catalog study.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -23,9 +39,9 @@ pub struct BuildingCvarControls {
     pub drift_limit: f64,
     /// Maximum admitted complete building candidates.
     pub max_candidates: usize,
-    /// Maximum admitted ground-motion ensemble members.
+    /// Maximum admitted generated motions or recorded tables.
     pub max_members: u32,
-    /// Per-motion sample and spectral-synthesis work limits.
+    /// Per-motion sample limit; max_work additionally bounds ensemble synthesis.
     pub realization_budget: RealizationBudget,
 }
 
@@ -49,8 +65,8 @@ pub struct BuildingCvarDesign<'a> {
     pub selected: &'a BuildingFrame,
     /// Original catalog in evaluation order.
     pub catalog: &'a [BuildingFrame],
-    /// Original complete motion-generation specification.
-    pub ensemble: &'a StochasticEnsemble,
+    /// Original complete generation recipe or borrowed typed recording suite.
+    pub motions: BuildingMotionSource<'a>,
     /// Exact controls used for this study.
     pub controls: BuildingCvarControls,
     /// Complete results aligned with the original catalog.
@@ -77,6 +93,13 @@ pub enum BuildingCvarError {
         /// Original member index.
         member: u32,
         /// Original scenario diagnostic.
+        source: ScenarioError,
+    },
+    /// A recorded table or its sampling contract was refused.
+    Record {
+        /// Original recording index.
+        member: u32,
+        /// Original signal diagnostic or explicit structural sampling refusal.
         source: ScenarioError,
     },
     /// The owning nonlinear building solver refused a complete history.
@@ -125,6 +148,9 @@ impl core::fmt::Display for BuildingCvarError {
             Self::Realization { member, source } => {
                 write!(f, "ground-motion member {member}: {source}")
             }
+            Self::Record { member, source } => {
+                write!(f, "ground-acceleration recording {member}: {source}")
+            }
             Self::History { candidate, member, source } => {
                 write!(f, "building candidate {candidate}, motion {member}: {source}")
             }
@@ -144,7 +170,7 @@ impl core::fmt::Display for BuildingCvarError {
 impl std::error::Error for BuildingCvarError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::Realization { source, .. } => Some(source),
+            Self::Realization { source, .. } | Self::Record { source, .. } => Some(source),
             Self::History { source, .. } => Some(source),
             _ => None,
         }
@@ -172,6 +198,72 @@ fn same_problem(a: &BuildingFrame, b: &BuildingFrame) -> bool {
         && a.sections_per_member == b.sections_per_member
 }
 
+fn record_error(member: u32, what: &str) -> BuildingCvarError {
+    BuildingCvarError::Record {
+        member,
+        source: ScenarioError::Evaluate { what: what.into() },
+    }
+}
+
+fn admit_record<'a>(
+    signal: &'a TimeSignal,
+    member: u32,
+    max_samples: usize,
+    cx: &Cx<'_>,
+) -> Result<(&'a [f64], f64), BuildingCvarError> {
+    checkpoint(cx)?;
+    let TimeSignal::Table { times, values, dims, interp } = signal else {
+        return Err(record_error(member, "a tabulated acceleration recording is required"));
+    };
+    // Apply cheap shape/work caps before the native signal owner scans payloads.
+    if times.len() < 2 || times.len() != values.len() || times.len() > max_samples {
+        return Err(record_error(member, "record needs matching sample/time counts in 2..=max_samples"));
+    }
+    if dims.0 != [1, 0, -2, 0, 0, 0] || *interp != Interp::Linear {
+        return Err(record_error(member, "record must carry SI acceleration with linear interpolation"));
+    }
+    let mut violations = Vec::new();
+    signal.check("building ground-acceleration recording", &mut violations);
+    if let Some(first) = violations.first() {
+        return Err(record_error(member, &first.what));
+    }
+    checkpoint(cx)?;
+    if times[0] != 0.0 {
+        return Err(record_error(member, "record must include its initial forcing at time zero"));
+    }
+    let dt = times[1];
+    if !dt.is_finite() || dt <= 0.0 {
+        return Err(record_error(member, "record timestep must be finite and positive"));
+    }
+    for (index, &time) in times.iter().enumerate() {
+        if index % 256 == 0 {
+            checkpoint(cx)?;
+        }
+        #[allow(clippy::cast_precision_loss)]
+        let expected = index as f64 * dt;
+        // Admit only roundoff around the complete nominal grid, never an
+        // accumulated sequence of locally similar but drifting intervals.
+        let tolerance = 64.0 * f64::EPSILON * expected.abs().max(dt);
+        if !expected.is_finite() || (time - expected).abs() > tolerance {
+            return Err(record_error(member, "record is not uniformly sampled on its declared grid"));
+        }
+    }
+    Ok((values, dt))
+}
+
+/// Evaluate generated motions through the shared material-building catalog path.
+///
+/// This is the ensemble convenience entry point for
+/// [building_cvar_from_motions]; the returned source retains the original recipe.
+pub fn building_cvar_mass_min<'a>(
+    ensemble: &'a StochasticEnsemble,
+    catalog: &'a [BuildingFrame],
+    controls: BuildingCvarControls,
+    cx: &Cx<'_>,
+) -> Result<BuildingCvarDesign<'a>, BuildingCvarError> {
+    building_cvar_from_motions(BuildingMotionSource::Ensemble(ensemble), catalog, controls, cx)
+}
+
 /// Select minimum reference mass subject to empirical peak-drift CVaR.
 ///
 /// Candidates must be admitted through BuildingFrame::with_sections. Section
@@ -180,8 +272,13 @@ fn same_problem(a: &BuildingFrame, b: &BuildingFrame) -> bool {
 /// Compare candidates using the same intended inertia formulation and initial
 /// loading/history assumptions.
 ///
-/// Each original motion is realized once under the supplied native budget and
-/// applied to every candidate. Each history runs on an independent clone, so
+/// Generated motions are synthesized once under the native work budget.
+/// Recorded tables are all admitted before any history runs, then their
+/// original value slices are used without resampling or dropping the initial
+/// sample. Each record has its own timestep and contributes one equally
+/// weighted peak-drift loss, regardless of duration. Uniformity admits only
+/// 64 machine epsilons times max(abs(i * dt), dt) around the nominal grid.
+/// Each motion is applied to every candidate on an independent clone, so
 /// the catalog's source bindings, gravity preload and constitutive states are
 /// unchanged even on failure. Every candidate is evaluated: resonance and
 /// material-dependent inertia need not give monotone risk versus section size.
@@ -201,19 +298,29 @@ fn same_problem(a: &BuildingFrame, b: &BuildingFrame) -> bool {
 /// exceeded budgets, failed realization/history, nonfinite loss, cancellation,
 /// or a catalog with no empirically feasible design. A failed candidate is not
 /// silently discarded from the minimum-mass search.
-pub fn building_cvar_mass_min<'a>(
-    ensemble: &'a StochasticEnsemble,
+pub fn building_cvar_from_motions<'a>(
+    motions: BuildingMotionSource<'a>,
     catalog: &'a [BuildingFrame],
     controls: BuildingCvarControls,
     cx: &Cx<'_>,
 ) -> Result<BuildingCvarDesign<'a>, BuildingCvarError> {
     checkpoint(cx)?;
-    if catalog.is_empty()
-        || ensemble.members == 0
-        || !matches!(ensemble.model, SpectrumModel::KanaiTajimi { .. })
-    {
+    let member_count = match motions {
+        BuildingMotionSource::Ensemble(ensemble) => {
+            if !matches!(ensemble.model, SpectrumModel::KanaiTajimi { .. }) {
+                return Err(BuildingCvarError::InvalidInput(
+                    "ensemble must describe Kanai-Tajimi ground acceleration",
+                ));
+            }
+            ensemble.members
+        }
+        BuildingMotionSource::Records(records) => u32::try_from(records.len()).map_err(|_| {
+            BuildingCvarError::InvalidInput("recording count is not representable")
+        })?,
+    };
+    if catalog.is_empty() || member_count == 0 {
         return Err(BuildingCvarError::InvalidInput(
-            "nonempty material catalog and Kanai-Tajimi motion ensemble are required",
+            "nonempty material catalog and motion suite are required",
         ));
     }
     if !controls.drift_limit.is_finite() || controls.drift_limit < 0.0 {
@@ -223,12 +330,12 @@ pub fn building_cvar_mass_min<'a>(
     }
     // Use the canonical risk owner's admission before expensive histories.
     empirical_cvar(&[0.0], controls.beta)?;
-    if catalog.len() > controls.max_candidates || ensemble.members > controls.max_members {
+    if catalog.len() > controls.max_candidates || member_count > controls.max_members {
         return Err(BuildingCvarError::InvalidInput(
             "candidate or motion count exceeds its explicit study limit",
         ));
     }
-    let members = usize::try_from(ensemble.members).map_err(|_| {
+    let members = usize::try_from(member_count).map_err(|_| {
         BuildingCvarError::InvalidInput("ensemble member count is not representable")
     })?;
     catalog.len().checked_mul(members).ok_or(
@@ -249,6 +356,26 @@ pub fn building_cvar_mass_min<'a>(
         }
     }
 
+    let mut recorded = Vec::new();
+    if let BuildingMotionSource::Records(records) = motions {
+        recorded.try_reserve_exact(members)
+            .map_err(|_| BuildingCvarError::AllocationFailed)?;
+        let mut total_samples = 0usize;
+        for (index, signal) in records.iter().enumerate() {
+            let member = u32::try_from(index).map_err(|_| {
+                BuildingCvarError::InvalidInput("recording index is not representable")
+            })?;
+            let record = admit_record(signal, member, controls.realization_budget.max_samples, cx)?;
+            total_samples = total_samples.checked_add(record.0.len()).ok_or(
+                BuildingCvarError::InvalidInput("recorded suite sample count overflows"),
+            )?;
+            recorded.push(record);
+        }
+        total_samples.checked_mul(catalog.len()).ok_or(
+            BuildingCvarError::InvalidInput("catalog-by-record sample work overflows"),
+        )?;
+    }
+
     let mut losses = Vec::new();
     losses.try_reserve_exact(catalog.len())
         .map_err(|_| BuildingCvarError::AllocationFailed)?;
@@ -259,15 +386,26 @@ pub fn building_cvar_mass_min<'a>(
             .map_err(|_| BuildingCvarError::AllocationFailed)?;
         losses.push(sample);
     }
-    for member in 0..ensemble.members {
+    for member in 0..member_count {
         checkpoint(cx)?;
-        let motion = ensemble.realize_with_budget(member, controls.realization_budget)
-            .map_err(|source| BuildingCvarError::Realization { member, source })?;
+        let (values, dt): (Cow<'_, [f64]>, f64) = match motions {
+            BuildingMotionSource::Ensemble(ensemble) => {
+                let motion = ensemble.realize_with_budget(member, controls.realization_budget)
+                    .map_err(|source| BuildingCvarError::Realization { member, source })?;
+                (Cow::Owned(motion.values), ensemble.dt.value)
+            }
+            BuildingMotionSource::Records(_) => {
+                let index = usize::try_from(member).map_err(|_| {
+                    BuildingCvarError::InvalidInput("recording index is not representable")
+                })?;
+                (Cow::Borrowed(recorded[index].0), recorded[index].1)
+            }
+        };
         checkpoint(cx)?;
         for (candidate, frame) in catalog.iter().enumerate() {
             checkpoint(cx)?;
             let mut trial = frame.clone();
-            let response = trial.run(&motion.values, ensemble.dt.value)
+            let response = trial.run(values.as_ref(), dt)
                 .map_err(|source| BuildingCvarError::History { candidate, member, source })?;
             checkpoint(cx)?;
             let value = response.peak_drift_ratio;
@@ -304,7 +442,7 @@ pub fn building_cvar_mass_min<'a>(
         selected_index,
         selected: &catalog[selected_index],
         catalog,
-        ensemble,
+        motions,
         controls,
         evaluations,
     })

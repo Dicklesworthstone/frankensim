@@ -4,7 +4,8 @@
 use fs_evidence::ValidityDomain;
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_frame::cvar::building::{
-    BuildingCvarControls, BuildingCvarError, building_cvar_mass_min,
+    BuildingCvarControls, BuildingCvarError, BuildingMotionSource, building_cvar_from_motions,
+    building_cvar_mass_min,
 };
 use fs_frame::{BuildingFrame, BuildingSpec, RcMember};
 use fs_matdb::{
@@ -15,6 +16,7 @@ use fs_material::fiber::MenegottoPintoSteel;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::{Density, Dims, Pressure, QtyAny};
 use fs_scenario::ensemble::{RealizationBudget, SpectrumModel, StochasticEnsemble};
+use fs_scenario::signal::{Interp, TimeSignal};
 use fs_solid::fiber::material::{
     ConcreteFiberProperties, FiberMaterial, RcSection, RcSectionGeometry,
 };
@@ -194,7 +196,12 @@ fn minimum_actual_mass_preserves_sources_and_exact_native_fractional_risk() {
     assert!(catalog[1].spec().scale > catalog[0].spec().scale);
     assert!(std::ptr::eq(design.selected, &catalog[1]));
     assert!(std::ptr::eq(design.catalog, catalog.as_slice()));
-    assert!(std::ptr::eq(design.ensemble, &ensemble));
+    match &design.motions {
+        BuildingMotionSource::Ensemble(retained) => {
+            assert!(std::ptr::eq(*retained, &ensemble));
+        }
+        _ => panic!("ensemble source was replaced"),
+    }
     assert_eq!(design.evaluations.len(), catalog.len());
     for (index, (model, evaluation)) in catalog.iter().zip(&design.evaluations).enumerate() {
         let density = if index == 0 { 4000.0 } else { 1000.0 };
@@ -316,6 +323,157 @@ fn missing_materials_and_incompatible_comparisons_are_named() {
             &ensemble,
             &incompatible[..1],
             BuildingCvarControls { beta: f64::NAN, ..controls() },
+            cx,
+        ).is_err());
+    });
+}
+
+fn recorded_motion(dt: f64, values: &[f64]) -> TimeSignal {
+    TimeSignal::Table {
+        times: (0..values.len()).map(|i| i as f64 * dt).collect(),
+        values: values.to_vec(),
+        dims: Dims([1, 0, -2, 0, 0, 0]),
+        interp: Interp::Linear,
+    }
+}
+
+#[test]
+fn realized_ensemble_and_retained_record_suite_have_identical_evaluations() {
+    let ensemble = ensemble();
+    let catalog = vec![building(spec(1.0), 2400.0), building(spec(1.3), 1800.0)];
+    let records: Vec<_> = (0..ensemble.members)
+        .map(|member| {
+            let motion = ensemble.realize(member).unwrap();
+            TimeSignal::Table {
+                times: motion.times,
+                values: motion.values,
+                dims: Dims([1, 0, -2, 0, 0, 0]),
+                interp: Interp::Linear,
+            }
+        })
+        .collect();
+    let stochastic = with_cx(false, |cx| {
+        building_cvar_mass_min(&ensemble, &catalog, controls(), cx).unwrap()
+    });
+    let recorded = with_cx(false, |cx| {
+        building_cvar_from_motions(
+            BuildingMotionSource::Records(&records),
+            &catalog,
+            controls(),
+            cx,
+        )
+        .unwrap()
+    });
+    assert_eq!(recorded.selected_index, stochastic.selected_index);
+    assert_eq!(recorded.evaluations.len(), stochastic.evaluations.len());
+    for (a, b) in recorded.evaluations.iter().zip(&stochastic.evaluations) {
+        assert_eq!(a.mass_kg, b.mass_kg);
+        assert_eq!(a.peak_drifts, b.peak_drifts);
+        assert_eq!(a.tail, b.tail);
+    }
+    match &recorded.motions {
+        BuildingMotionSource::Records(retained) => {
+            assert!(std::ptr::eq(*retained, records.as_slice()));
+        }
+        _ => panic!("recorded source was replaced"),
+    }
+    match &stochastic.motions {
+        BuildingMotionSource::Ensemble(retained) => {
+            assert!(std::ptr::eq(*retained, &ensemble));
+        }
+        _ => panic!("ensemble source was replaced"),
+    }
+}
+
+#[test]
+fn records_preserve_initial_samples_individual_steps_and_equal_record_weight() {
+    let catalog = vec![building(spec(1.0), 2400.0)];
+    let records = vec![
+        recorded_motion(0.01, &[0.3, 0.0, 0.0, 0.0]),
+        recorded_motion(0.02, &[0.2, -0.1, 0.05, 0.0, -0.03, 0.01]),
+        recorded_motion(0.04, &[0.12, 0.0, -0.04, 0.01, 0.0, -0.02, 0.0, 0.01]),
+    ];
+    let report = with_cx(false, |cx| {
+        building_cvar_from_motions(
+            BuildingMotionSource::Records(&records),
+            &catalog,
+            BuildingCvarControls {
+                realization_budget: RealizationBudget { max_samples: 8, max_work: 0 },
+                ..controls()
+            },
+            cx,
+        )
+        .unwrap()
+    });
+    let direct: Vec<f64> = records.iter()
+        .map(|record| {
+            let TimeSignal::Table { times, values, .. } = record else {
+                unreachable!()
+            };
+            catalog[0].clone().run(values, times[1]).unwrap().peak_drift_ratio
+        })
+        .collect();
+    assert!(direct[0] > 0.0);
+    // Omitting the nonzero t=0 sample would turn the first motion into rest.
+    assert!(catalog[0].clone().run(&[0.0; 3], 0.01).unwrap().peak_drift_ratio < 1e-10);
+    assert_eq!(report.evaluations[0].peak_drifts, direct);
+    assert_eq!(
+        report.evaluations[0].tail,
+        fs_robust::empirical_cvar(&direct, 0.5).unwrap(),
+    );
+    let mut ordered = direct;
+    ordered.sort_by(f64::total_cmp);
+    let expected = (ordered[2] + 0.5 * ordered[1]) / 1.5;
+    assert!((report.evaluations[0].tail.cvar() - expected).abs() <= 1e-12 * expected);
+    assert_eq!(report.evaluations[0].tail.boundary_weight(), 0.5);
+}
+
+#[test]
+fn all_record_shapes_are_preflighted_before_any_candidate_history() {
+    let catalog = vec![building(spec(1.0), 2400.0)];
+    let valid = recorded_motion(0.02, &[0.1; 8]);
+    let acceleration = Dims([1, 0, -2, 0, 0, 0]);
+    for defect in 0..9 {
+        let invalid = if defect == 8 {
+            TimeSignal::Constant(QtyAny::new(0.0, acceleration))
+        } else {
+            let mut record = valid.clone();
+            let TimeSignal::Table { times, values, dims, interp } = &mut record else {
+                unreachable!()
+            };
+            match defect {
+                0 => *dims = Dims::NONE,
+                1 => *interp = Interp::Hold,
+                2 => times[1] = 0.03,
+                3 => times.iter_mut().for_each(|time| *time += 1.0),
+                4 => values[0] = f64::NAN,
+                5 => { times.truncate(1); values.truncate(1); }
+                6 => { times.push(0.16); values.push(0.0); }
+                7 => { values.pop(); }
+                _ => unreachable!(),
+            }
+            record
+        };
+        // These finite first-record samples would overflow native forcing.
+        // The malformed later record must be refused before any history solve.
+        let suite = vec![recorded_motion(0.02, &[f64::MAX; 2]), invalid];
+        with_cx(false, |cx| {
+            assert!(matches!(
+                building_cvar_from_motions(
+                    BuildingMotionSource::Records(&suite),
+                    &catalog,
+                    controls(),
+                    cx,
+                ),
+                Err(BuildingCvarError::Record { member: 1, .. })
+            ), "record defect {defect} did not fail suite preflight");
+        });
+    }
+    with_cx(false, |cx| {
+        assert!(building_cvar_from_motions(
+            BuildingMotionSource::Records(&[]),
+            &catalog,
+            controls(),
             cx,
         ).is_err());
     });

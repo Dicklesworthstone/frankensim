@@ -119,12 +119,28 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
 
 ## Material-bearing building catalog CVaR
 
-`cvar::building::building_cvar_mass_min` evaluates an explicit finite catalog
-of admitted `BuildingFrame::with_sections` models against the original motion
-ensemble. Each motion is realized once by the native scenario owner under an
-explicit sample/work budget; independent candidate clones retain their own
-material sources, gravity preload, inertia and constitutive history. Candidate
-and member caps bound the number of complete nonlinear histories.
+`cvar::building::building_cvar_from_motions` evaluates an explicit finite catalog
+of admitted `BuildingFrame::with_sections` models against a borrowed
+`BuildingMotionSource`. The ensemble convenience entry
+`building_cvar_mass_min` delegates to the same implementation. Generated
+motions are realized once by the native scenario owner under an explicit
+sample/work budget; independent candidate clones retain their own material
+sources, gravity preload, inertia and constitutive history. Candidate and
+member caps bound the number of complete nonlinear histories.
+
+Recorded suites reuse `fs-scenario::TimeSignal::Table`: acceleration dimensions,
+linear interpolation, at least two finite samples, initial time zero and a
+uniform grid are required. The entire suite passes its original signal owner's
+validation plus structural sampling admission before any nonlinear history.
+Each recording keeps its own timestep; its original complete values, including
+the initial forcing at time zero, enter the building solver. N samples mean
+N-1 advancing steps. Uniformity permits only 64 machine epsilons times
+max(abs(i*dt), dt) around the complete nominal grid, without resampling or
+silently shifting/dropping rows. Each record contributes one equally weighted
+peak-drift loss regardless of duration. The sample cap applies to both sources;
+the spectral synthesis work cap applies only to generated ensembles. Original
+typed tables are retained, without inventing recording provenance or
+measurement authority.
 
 The shared `fs-robust::empirical_cvar` owner supplies fractional-tail risk and
 order-statistic metadata. Selection minimizes actual full reference mass among

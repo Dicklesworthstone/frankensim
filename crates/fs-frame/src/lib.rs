@@ -34,7 +34,7 @@ pub use building::{
 };
 pub use cvar::building::{
     BuildingCvarControls, BuildingCvarDesign, BuildingCvarError, BuildingCvarEvaluation,
-    building_cvar_mass_min,
+    BuildingMotionSource, building_cvar_from_motions, building_cvar_mass_min,
 };
 pub use cvar::{
     CvarDesign, FrameCvarError, cvar_mass_min, ensemble_cvar, try_cvar_mass_min, try_ensemble_cvar,
