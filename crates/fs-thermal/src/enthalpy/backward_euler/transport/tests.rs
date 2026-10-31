@@ -1,6 +1,6 @@
 //! G1/G3: independent upwind balances, caloric datum and native energy/entropy.
 use super::*;
-use crate::enthalpy::advection::{MassBoundary, MassFlow};
+use super::super::super::advection::{MassBoundary, MassFlow};
 
 struct Law { datum: f64 }
 impl ThermalLaw for Law {
