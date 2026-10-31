@@ -17,6 +17,9 @@ use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
 use fs_qty::{Area, Length, MassFlowRate};
 
+/// Source-preserving inversion of complete fixed-state series pressure losses.
+pub mod pressure;
+
 /// Immutable geometry/calibration, not fluid-specific pressure-loss constants.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MaterialFlowResistance {
