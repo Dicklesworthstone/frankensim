@@ -7389,6 +7389,20 @@ the same continuing trajectory and original-law energy account as CSV. These
 homogeneous frozen-composition models require supported single-phase paths
 and time resolution; they do not establish experimental actuator accuracy.
 
+`GasPiston<G>::thermal_candidate` closes finite-body enthalpy, signed heat
+exchange and real-gas motion through the same bounded reciprocal solve. The
+conductance callback receives the complete actual gas midpoint. Its pressure
+supplies mechanical work while its temperature supplies heat transfer; the
+same interface heat is credited to gas and debited from the body once.
+`MaterialGasPiston<G>::thermal_candidate` retains the original resolved solid
+inertia and the full accepted piston/port history in the returned joint
+candidate. Publishing its parts advances both continuing owners together.
+The thermal store may be separate from the rigid moving specimen; its phase
+does not silently replace the specimen's conserved mass or geometry.
+Focused real-gas thermal regressions cover signed exchange, source-density
+substitution through continuing motion, independent endpoint energy accounts,
+complete midpoint material views and atomic source/cancellation refusal.
+
 ### Fixed-volume chambers in the shared reacting gas assembly
 
 `GasPiston::with_fixed_support` and `MaterialGasPiston::with_fixed_support`

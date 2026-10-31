@@ -37,7 +37,8 @@ use fs_material::thermochemical_gas::energy::parcel::midpoint::{
 /// The default is the existing ideal thermochemical parcel. A source-backed
 /// `IsochoricRealGasParcel` uses the SAME mechanics and acceptance with its
 /// nonideal midpoint pressure, calorics and acoustic compressibility. Existing
-/// nozzle, reactive and thermal adapters retain their ideal-parcel domain.
+/// nozzle and reactive adapters retain their ideal-parcel domain; finite-body
+/// thermal exchange also accepts this same real-gas owner.
 #[derive(Clone, Debug)]
 pub struct GasPiston<G: PistonGas = ClosedGasParcel> {
     gas: G,

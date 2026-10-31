@@ -7,6 +7,7 @@ use fs_airflow::graph::thermal::medium::convection::{
 };
 use fs_conduction::lumped::LumpedThermalEnvironment;
 use fs_couple::cavity_phs::piston::thermal::{HeatExchangeSolve, ThermalPistonError};
+use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
 use fs_couple::finite_gas_thermal::{
     ConvectionCoefficient, ConvectionError, FiniteGasThermalEnvironment, WallConvectionSolve,
 };
@@ -349,4 +350,201 @@ fn real_gas_source_refusal_and_callback_cancellation_preserve_both_inputs() {
             curve.state_at_specific_enthalpy(260000.0).unwrap()
         );
     });
+}
+
+fn moving_controls() -> PistonSolve {
+    PistonSolve {
+        volume_bracket_m3: [0.000095, 0.000105],
+        gas: GasEnergySolve {
+            minimum_temperature_k: 280.0,
+            maximum_temperature_k: 450.0,
+            ..super::controls().gas
+        },
+        ..super::controls()
+    }
+}
+
+fn moving_input() -> PistonInput {
+    // The real 0.1-litre inventory and 2 kg wall need this shorter acoustic
+    // clock; no resolution gate is relaxed to admit the dense-gas example.
+    PistonInput {
+        duration_s: 1e-5,
+        heat_j: 0.0,
+        exterior_pressure_pa: 4.5e6,
+        external_force_n: 0.0,
+    }
+}
+
+#[test]
+fn moving_real_gas_convection_retains_actual_midpoint_and_reciprocal_energy() {
+    let curve = source::body_curve();
+    let surface = ForcedGasSurface {
+        speed_m_s: 0.5,
+        ..surface()
+    };
+    for (temperature_k, enthalpy) in [(300.0, 260000.0), (400.0, 50000.0)] {
+        let old = GasPiston::new(gas(temperature_k, 0.0), 2.0, 0.01, 0.15).unwrap();
+        let saved = old.clone();
+        let thermal = UniformEnthalpyStepInput {
+            duration_s: moving_input().duration_s,
+            ..body(&curve, enthalpy)
+        };
+        let candidate = surface
+            .finite_body_candidate(
+                &old,
+                moving_input(),
+                thermal,
+                moving_controls(),
+                super::exchange(),
+                || false,
+            )
+            .unwrap();
+        let next = candidate.piston();
+        let report = candidate.step();
+        let sample = &candidate.thermal().report;
+        let midpoint = &report.piston.midpoint;
+        let evaluation = sample.evaluation.as_ref().unwrap();
+        assert_eq!(sample.gas, *midpoint);
+        assert_eq!(sample.body, report.thermal_midpoint);
+        assert_eq!(evaluation.transport, midpoint.transport_state().unwrap());
+        assert_eq!(
+            evaluation.transport.density_kg_m3(),
+            midpoint.density_kg_m3()
+        );
+        assert_ne!(
+            evaluation.transport.density_kg_m3(),
+            midpoint.source().state().density
+        );
+        assert_eq!(
+            evaluation.transport.specific_heat_j_kg_k(),
+            midpoint.specific_heat_cp_j_kg_k()
+        );
+        assert_eq!(
+            sample.gas.source().source_packs(),
+            old.gas().model().source().source_packs()
+        );
+        assert_eq!(sample.gas.source().source_packs().len(), 2);
+        let checked = evaluate_forced_from_material(
+            surface.correlation,
+            midpoint,
+            surface.speed_m_s,
+            surface.characteristic_length,
+            surface.settings,
+        )
+        .unwrap();
+        assert_eq!(
+            evaluation.coefficient.value.value(),
+            checked.coefficient().value.value()
+        );
+        assert_eq!(
+            report.conductance_w_k,
+            surface.area_m2 * checked.coefficient().value.value()
+        );
+        let heat = report.exchanged_heat_j;
+        assert_eq!(heat > 0.0, thermal.initial.temperature_k() > temperature_k);
+        near(
+            heat,
+            moving_input().duration_s
+                * report.conductance_w_k
+                * (sample.body.temperature_k() - sample.gas.temperature_k()),
+            super::exchange().source_tolerance_j,
+        );
+        assert_eq!(candidate.thermal().external_heat_j, -heat);
+
+        let gas_energy = old.gas().mass_kg()
+            * (next.gas().state().specific_internal_energy_j_kg()
+                - old.gas().state().specific_internal_energy_j_kg());
+        let body_energy = thermal.mass_kg
+            * (candidate.thermal().state.specific_enthalpy_j_kg()
+                - thermal.initial.specific_enthalpy_j_kg());
+        let kinetic = 0.5
+            * old.mass_kg()
+            * (next.velocity_m_s() - old.velocity_m_s())
+            * (next.velocity_m_s() + old.velocity_m_s());
+        let dv = next.gas().volume_m3() - old.gas().volume_m3();
+        near(
+            gas_energy + body_energy + kinetic + moving_input().exterior_pressure_pa * dv,
+            0.0,
+            super::exchange().energy_tolerance_j,
+        );
+        near(
+            body_energy + heat,
+            0.0,
+            super::exchange().energy_tolerance_j,
+        );
+        assert!(report.total_energy_residual_j.abs() <= super::exchange().energy_tolerance_j);
+        assert!(next.gas().volume_m3() > old.gas().volume_m3());
+        assert_eq!(next.gas().mass_kg(), old.gas().mass_kg());
+        assert_eq!(
+            next.gas().density_kg_m3(),
+            next.gas().mass_kg() / next.gas().volume_m3()
+        );
+        assert_eq!(old, saved);
+        assert_eq!(
+            thermal.initial,
+            curve.state_at_specific_enthalpy(enthalpy).unwrap()
+        );
+    }
+}
+
+#[test]
+fn moving_real_gas_correlation_refusal_and_late_cancellation_publish_neither_state() {
+    let curve = source::body_curve();
+    let old = GasPiston::new(gas(300.0, 0.0), 2.0, 0.01, 0.15).unwrap();
+    let saved = old.clone();
+    let thermal = UniformEnthalpyStepInput {
+        duration_s: moving_input().duration_s,
+        ..body(&curve, 260000.0)
+    };
+    let initial_body = thermal.initial;
+    let surface = ForcedGasSurface {
+        speed_m_s: 0.5,
+        ..surface()
+    };
+    let unsupported = ForcedGasSurface {
+        speed_m_s: 1e20,
+        ..surface
+    };
+    assert!(matches!(
+        unsupported.finite_body_candidate(
+            &old,
+            moving_input(),
+            thermal,
+            moving_controls(),
+            super::exchange(),
+            || false
+        ),
+        Err(ThermalPistonError::Interface(_))
+    ));
+    let mut total = 0;
+    surface
+        .finite_body_candidate(
+            &old,
+            moving_input(),
+            thermal,
+            moving_controls(),
+            super::exchange(),
+            || {
+                total += 1;
+                false
+            },
+        )
+        .unwrap();
+    let mut polls = 0;
+    assert!(matches!(
+        surface.finite_body_candidate(
+            &old,
+            moving_input(),
+            thermal,
+            moving_controls(),
+            super::exchange(),
+            || {
+                polls += 1;
+                polls == total
+            }
+        ),
+        Err(ThermalPistonError::Cancelled)
+    ));
+    assert_eq!(old, saved);
+    assert_eq!(thermal.initial, initial_body);
 }

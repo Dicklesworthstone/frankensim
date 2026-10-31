@@ -707,8 +707,8 @@ Prandtl and the live coefficient; the accepted parcel retains its real pressure,
 caloric storage, entropy and acoustic state. No ideal-reference density enters
 that transfer. `tests/finite_gas_convection/real_gas.rs` covers dense-gas heating
 and cooling, reciprocal energy/entropy accounting, wall feedback, formation
-reference invariance and transactional source/cancellation refusals. Film,
-natural-convection and piston adapters retain their existing source assumptions.
+reference invariance and transactional source/cancellation refusals. Film and
+natural-convection adapters retain their existing source assumptions.
 A positive patch must cover the whole body surface; zero area explicitly
 insulates it. Bulk-gas property evaluation and prescribed relative flow retain
 their correlation limits. Dittus-Boelter selects its heating/cooling branch
@@ -716,6 +716,17 @@ from the proposed signed heat inside the same residual. Its neutral zero-heat
 seed uses the smaller branch coefficient, preventing an authored direction
 from falsely rejecting the physical branch at the Biot gate. Constant-heat-flux
 duct correlations refuse on this isothermal-body path.
+
+`ForcedGasSurface::finite_body_candidate` also accepts the original real-gas
+piston through its shared conservative thermal/motion candidate. The actual
+Peng--Robinson midpoint supplies density and complete Cp for Reynolds, Prandtl
+and the forced-convection coefficient, while its temperature selects heating
+or cooling. That same midpoint supplies pressure work in the mechanical solve;
+the finite-body heat debit and gas heat credit remain one reciprocal exchange.
+The returned sample retains the concrete gas material, transport and original
+correlation evidence. The moving-gas regressions exercise both heat directions,
+independent total energy, retained source views and atomic refusal. Relative
+speed remains prescribed; no resolved flow or fan-energy account is inferred.
 The explicit constant-h API remains available. `tests/finite_gas_convection.rs`
 checks endpoint coefficient re-evaluation, transport-only data substitution,
 energy closure, fixed-h identity and transactional refusals. Additional tests in

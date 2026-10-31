@@ -11,7 +11,7 @@ pub mod solid;
 
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonGas, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;
-use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError};
+use super::thermal::{ConductanceSample, HeatExchangeSolve, ThermalPistonError, ThermalPistonStep};
 use super::exchange::thermal::NozzleThermalPistonCandidate;
 use super::exchange::network::NozzleNetworkCandidate;
 use super::thermal::boundary::network::{NetworkGasDrive, NetworkGasError, NetworkGasSolve};
@@ -91,6 +91,50 @@ impl<G: PistonGas> MaterialGasPiston<G> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<PistonStep<G::State>, PistonError> {
         self.piston.step(input, controls, cancelled)
+    }
+
+    /// Exchange heat with a finite material body while retaining this wall's
+    /// original source-resolved inertia, geometry and accepted port history.
+    /// The thermal store may be separate from the rigid moving specimen;
+    /// heating it does not silently change that specimen's density or mass.
+    /// The original gas/body/momentum solver owns all balances and callbacks.
+    /// Publish both returned endpoints together; neither input is mutated.
+    #[allow(clippy::too_many_arguments)]
+    pub fn thermal_candidate<S, E>(
+        &self, input: PistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve, exchange: HeatExchangeSolve,
+        resolve: impl FnMut(&G::State, EquilibriumPhaseState)
+            -> Result<ConductanceSample<S>, E>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialThermalPistonCandidate<S, G>, ThermalPistonError<E>> {
+        let candidate = self.piston.thermal_candidate(input, thermal_body, controls,
+            exchange, resolve, &mut cancelled)?;
+        let (piston, thermal, step) = candidate.into_parts();
+        let candidate = MaterialThermalPistonCandidate {
+            piston: Self { body: self.body.clone(), piston }, thermal, step,
+        };
+        if cancelled() { return Err(ThermalPistonError::Cancelled); }
+        Ok(candidate)
+    }
+}
+
+/// Joint finite-body heat and piston candidate retaining sourced wall inertia.
+#[derive(Clone, Debug, PartialEq)]
+pub struct MaterialThermalPistonCandidate<S, G: PistonGas = ClosedGasParcel> {
+    piston: MaterialGasPiston<G>,
+    thermal: UniformEnthalpyStep<S>,
+    step: ThermalPistonStep<G::State>,
+}
+impl<S, G: PistonGas> MaterialThermalPistonCandidate<S, G> {
+    /// Complete candidate with its original source-resolved inertial specimen.
+    pub const fn piston(&self) -> &MaterialGasPiston<G> { &self.piston }
+    /// Thermal endpoint retaining the concrete accepted interface source.
+    pub const fn thermal(&self) -> &UniformEnthalpyStep<S> { &self.thermal }
+    /// Original gas, body, momentum and energy accounting.
+    pub const fn step(&self) -> &ThermalPistonStep<G::State> { &self.step }
+    /// Publish the source-bound mechanism and thermal state together.
+    pub fn into_parts(self) -> (MaterialGasPiston<G>, UniformEnthalpyStep<S>, ThermalPistonStep<G::State>) {
+        (self.piston, self.thermal, self.step)
     }
 }
 

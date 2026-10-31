@@ -1,4 +1,6 @@
 //! Real gas/momentum owner plus source-bound enthalpy/phase charts.
+mod real_gas;
+
 use super::*;
 use crate::cavity_phs::piston::tests::{gas, controls, drive};
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve, SolidLiquidPhase};

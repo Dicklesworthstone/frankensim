@@ -19,10 +19,11 @@ pub(crate) mod feedback;
 /// A thermal port for reservoirs and jointly solved finite network boundaries.
 pub mod boundary;
 
-use super::{GasPiston, PistonError, PistonInput, PistonSolve, PistonStep};
+use super::{GasPiston, PistonError, PistonGas, PistonGasState, PistonInput, PistonSolve, PistonStep};
 use fs_material::phase::{EquilibriumPhaseState, PhaseStateError,
     UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
+use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 
 /// Whole-step source/exchange bracket and absolute residual/work limits.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -95,9 +96,9 @@ impl<E: std::error::Error + 'static> std::error::Error for ThermalPistonError<E>
 
 /// Actual accepted balances; no independent entropy-production claim is implied.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ThermalPistonStep {
+pub struct ThermalPistonStep<S = ResolvedThermochemicalGasState> {
     /// Original coupled gas/momentum result, including the gas midpoint sources.
-    pub piston: PistonStep,
+    pub piston: PistonStep<S>,
     /// Actual material state at midpoint BODY ENTHALPY, including liquid fraction.
     pub thermal_midpoint: EquilibriumPhaseState,
     /// Accepted total interface conductance [W/K].
@@ -121,20 +122,20 @@ pub struct ThermalPistonStep {
 
 /// Both accepted physical states in one candidate. Neither input is mutated.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ThermalPistonCandidate<S> {
-    piston: GasPiston,
+pub struct ThermalPistonCandidate<S, G: PistonGas = ClosedGasParcel> {
+    piston: GasPiston<G>,
     thermal: UniformEnthalpyStep<S>,
-    step: ThermalPistonStep,
+    step: ThermalPistonStep<G::State>,
 }
-impl<S> ThermalPistonCandidate<S> {
+impl<S, G: PistonGas> ThermalPistonCandidate<S, G> {
     /// Tentative gas, volume and momentum; old sources/history remain intact.
-    pub const fn piston(&self) -> &GasPiston { &self.piston }
+    pub const fn piston(&self) -> &GasPiston<G> { &self.piston }
     /// Canonical thermal proposal with original concrete interface source.
     pub const fn thermal(&self) -> &UniformEnthalpyStep<S> { &self.thermal }
     /// Independently checked coupled balances.
-    pub const fn step(&self) -> &ThermalPistonStep { &self.step }
+    pub const fn step(&self) -> &ThermalPistonStep<G::State> { &self.step }
     /// Publish both states together in the caller's existing physical owner.
-    pub fn into_parts(self) -> (GasPiston, UniformEnthalpyStep<S>, ThermalPistonStep) {
+    pub fn into_parts(self) -> (GasPiston<G>, UniformEnthalpyStep<S>, ThermalPistonStep<G::State>) {
         (self.piston, self.thermal, self.step)
     }
 }
@@ -144,7 +145,7 @@ fn poll<E>(cancelled: &mut impl FnMut() -> bool) -> Result<(), ThermalPistonErro
     if cancelled() { Err(ThermalPistonError::Cancelled) } else { Ok(()) }
 }
 
-impl GasPiston {
+impl<G: PistonGas> GasPiston<G> {
     /// Simultaneously solve motion, gas energy, finite-body enthalpy and heat
     /// exchange. `input.heat_j` and `body.internal_heat_j` are independent
     /// prescribed sources; neither includes the inter-body exchange Q.
@@ -168,14 +169,16 @@ impl GasPiston {
     /// Any refusal/cancellation returns neither partial state. The caller must
     /// publish both candidate endpoints together, not debit a live reservoir in
     /// the callback or separately re-apply its returned boundary heat.
+    /// Ideal and real-gas owners use this same reciprocal residual; the actual
+    /// source-bearing midpoint carries its own pressure, density and transport.
     #[allow(clippy::too_many_arguments)]
     pub fn thermal_candidate<S, E>(
         &self, input: PistonInput, body: UniformEnthalpyStepInput<'_>,
         controls: PistonSolve, exchange: HeatExchangeSolve,
-        mut resolve: impl FnMut(&ResolvedThermochemicalGasState, EquilibriumPhaseState)
+        mut resolve: impl FnMut(&G::State, EquilibriumPhaseState)
             -> Result<ConductanceSample<S>, E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<ThermalPistonCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<ThermalPistonCandidate<S, G>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
         feedback::admit(exchange)?;
         if !positive(body.mass_kg) || !positive(body.volume_m3)
@@ -206,7 +209,7 @@ impl GasPiston {
             poll(cancelled)?;
             let sample = resolve(&piston.midpoint, thermal_midpoint).map_err(ThermalPistonError::Interface)?;
             let g = sample.conductance_w_k;
-            let delta = thermal_midpoint.temperature_k() - piston.midpoint.state().temperature;
+            let delta = thermal_midpoint.temperature_k() - piston.midpoint.temperature_k();
             let power = g*delta;
             let heat = input.duration_s*power;
             let residual = q-heat;

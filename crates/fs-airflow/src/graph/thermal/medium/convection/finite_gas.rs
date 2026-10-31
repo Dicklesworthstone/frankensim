@@ -17,7 +17,7 @@ pub use natural::NaturalGasSurface;
 
 use super::{ForcedConvectionSettings, MaterialConvectionError, evaluate_forced_from_material};
 use fs_convection::{CorrelationId, HeatTransferCoefficient, NusseltEvaluation, ThermalDirection};
-use fs_couple::cavity_phs::piston::{GasPiston, PistonInput, PistonSolve};
+use fs_couple::cavity_phs::piston::{GasPiston, PistonGas, PistonGasState, PistonInput, PistonSolve};
 use fs_couple::cavity_phs::piston::thermal::{
     ConductanceSample, HeatExchangeSolve, ThermalPistonCandidate, ThermalPistonError,
 };
@@ -27,7 +27,7 @@ use fs_couple::finite_gas_thermal::{
 use fs_evidence::Evidence;
 use fs_exec::Cx;
 use fs_material::MaterialError;
-use fs_material::fluid_transport::FluidTransportState;
+use fs_material::fluid_transport::{FluidTransportState, ThermalFluidTransport};
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_material::thermochemical_gas::energy::storage::IsochoricGasStorage;
@@ -60,8 +60,8 @@ pub struct GasConvectionEvaluation {
 /// Complete accepted interface sample; gas sources are not reduced to a tuple.
 /// The body source identity remains in its canonical phase state/enthalpy chart.
 #[derive(Debug)]
-pub struct FiniteGasConvectionSample {
-    pub gas: ResolvedThermochemicalGasState,
+pub struct FiniteGasConvectionSample<S = ResolvedThermochemicalGasState> {
+    pub gas: S,
     pub body: EquilibriumPhaseState,
     pub area_m2: f64,
     /// None for an explicitly isolated zero-area patch or the natural law's
@@ -93,9 +93,9 @@ impl ForcedGasSurface {
     ///
     /// G=h*A and Q=dt*G*(T_body-T_gas). This returns G and its sources only; the
     /// existing coupled solver owns Q and debits both sides exactly once.
-    pub fn resolve(
-        self, gas: &ResolvedThermochemicalGasState, body: EquilibriumPhaseState,
-    ) -> Result<ConductanceSample<FiniteGasConvectionSample>, MaterialConvectionError> {
+    pub fn resolve<S: PistonGasState + ThermalFluidTransport>(
+        self, gas: &S, body: EquilibriumPhaseState,
+    ) -> Result<ConductanceSample<FiniteGasConvectionSample<S>>, MaterialConvectionError> {
         self.validate()?;
         let temperature = body.temperature_k();
         if !temperature.is_finite() || temperature <= 0.0 {
@@ -107,9 +107,9 @@ impl ForcedGasSurface {
                     area_m2: 0.0, evaluation: None } });
         }
         let mut settings = self.settings;
-        if temperature > gas.state().temperature {
+        if temperature > gas.temperature_k() {
             settings.direction = ThermalDirection::HeatingFluid;
-        } else if temperature < gas.state().temperature {
+        } else if temperature < gas.temperature_k() {
             settings.direction = ThermalDirection::CoolingFluid;
         }
         let evaluated = evaluate_forced_from_material(self.correlation, gas,
@@ -135,11 +135,14 @@ impl ForcedGasSurface {
     /// heating, turbulence field, or boundary-layer resolution is inferred.
     /// Correlation-domain errors and insufficient temporal resolution refuse;
     /// no coefficient is clipped, extrapolated, or replaced with an air preset.
+    /// The same path admits ideal and real-gas storage and retains its complete
+    /// midpoint in the returned convection sample, including actual EOS density.
     #[allow(clippy::too_many_arguments)]
-    pub fn finite_body_candidate(
-        self, piston: &GasPiston, input: PistonInput, body: UniformEnthalpyStepInput<'_>,
+    pub fn finite_body_candidate<G: PistonGas>(
+        self, piston: &GasPiston<G>, input: PistonInput, body: UniformEnthalpyStepInput<'_>,
         controls: PistonSolve, exchange: HeatExchangeSolve, mut cancelled: impl FnMut() -> bool,
-    ) -> Result<ThermalPistonCandidate<FiniteGasConvectionSample>, ThermalPistonError<MaterialConvectionError>> {
+    ) -> Result<ThermalPistonCandidate<FiniteGasConvectionSample<G::State>, G>, ThermalPistonError<MaterialConvectionError>>
+    where G::State: ThermalFluidTransport {
         if cancelled() { return Err(ThermalPistonError::Cancelled); }
         self.validate().map_err(ThermalPistonError::Interface)?;
         if !body.surface_area_m2.is_finite() || body.surface_area_m2 <= 0.0
