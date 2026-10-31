@@ -4,8 +4,10 @@
 //! Stdout is per-probe CSV; stderr names the independent analytic reference.
 //! Add `-- --direct` for direct-lux arithmetic enclosures at the ten CIE-derived
 //! diffuse point-source positions, or `-- --direct-haze` for an authored gray
-//! extinction extension. These use the same source/probe owners and the shared
-//! fs-ivl attenuation enclosure, not a separate renderer.
+//! extinction extension. `--direct-shadow` and `--direct-shadow-haze` add a
+//! native opaque triangular screen and a receiving floor, including two probes
+//! on the screen's shadow edge. Their unresolved visibility widens the bound.
+//! These use the original source, geometry, material and medium owners.
 //!
 //! An inward-facing 2 m cube emits uniform Le=8 cd/m² and reflects rho=0.5.
 //! Its ideal vacuum equilibrium is L=Le/(1-rho), E=pi*L for every interior
@@ -15,9 +17,10 @@
 //! The 0.01 lx budget covers only the admitted model's omitted reflection
 //! orders. Fixed-count IID sampling error is estimated separately; arithmetic,
 //! spectral, geometry, physical-model and calibration errors remain unknown.
-//! The optional direct modes instead enclose arithmetic of the retained source
-//! coefficients, positions and homogeneous medium. Source construction,
-//! calibration, model discrepancy and total physical error remain unknown.
+//! The optional direct modes instead enclose the retained numerical model,
+//! including supported mesh visibility. Source construction, physical geometry
+//! fidelity, calibration and total physical error remain unknown. Haze and
+//! shadows are authored extensions, not additional CIE validation cases.
 //! No mode establishes full CIE 171 conformance or measured-fixture accuracy.
 
 use std::error::Error;
@@ -59,7 +62,7 @@ fn scene() -> Result<Scene, Box<dyn Error>> {
             [-1.0, -1.0, 1.0],
             [1.0, -1.0, 1.0],
             [1.0, 1.0, 1.0],
-            [-1.0, 1.0, 1.0],
+            [1.0, 1.0, 1.0],
         ],
         vec![
             [0, 1, 2], [0, 2, 3],
@@ -168,7 +171,33 @@ fn calculate(cx: &Cx<'_>) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn direct_reference(cx: &Cx<'_>, haze: bool) -> Result<(), Box<dyn Error>> {
+fn shadow_geometry() -> Result<Vec<Primitive>, Box<dyn Error>> {
+    let material = Material::SpectralDiffuse {
+        reflectance: SpectralReflectance::constant(0.3)?,
+    };
+    Ok(vec![
+        Primitive {
+            shape: Shape::Mesh(TriMesh::new(
+                vec![[-0.25, -0.25, 1.5], [0.75, -0.25, 1.5], [-0.25, 0.75, 1.5]],
+                vec![[0, 1, 2]],
+            )),
+            material,
+            emission: None,
+        },
+        Primitive {
+            // The floor passes through the probes; receiver endpoint exclusion
+            // must prevent self-blocking without discarding the separate screen.
+            shape: Shape::Mesh(TriMesh::new(
+                vec![[-2.0, -2.0, 0.0], [2.0, -2.0, 0.0], [2.0, 2.0, 0.0], [-2.0, 2.0, 0.0]],
+                vec![[0, 1, 2], [0, 2, 3]],
+            )),
+            material,
+            emission: None,
+        },
+    ])
+}
+
+fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool) -> Result<(), Box<dyn Error>> {
     // Factual setup and provenance are retained in
     // tests/photometric_path/cie171_analytical.rs. No rounded table is copied.
     let positions: [[f64; 2]; 10] = [
@@ -185,8 +214,9 @@ fn direct_reference(cx: &Cx<'_>, haze: bool) -> Result<(), Box<dyn Error>> {
     let absorption = if haze { 0.07 } else { 0.0 };
     let scattering = if haze { 0.13 } else { 0.0 };
     let medium = HomogeneousMedium::try_new(absorption, scattering, PhaseFunction::Isotropic)?;
+    let geometry = if shadow { shadow_geometry()? } else { Vec::new() };
     let scene = PhotometricScene::try_new(
-        &[], &sources, medium, TransportOptions::default(), cx,
+        &geometry, &sources, medium, TransportOptions::default(), cx,
     )?;
     let probes: Vec<_> = positions.iter().map(|[x, y]| {
         IlluminanceProbe::try_new(Point3::new(*x, *y, 0.0), Vec3::new(0.0, 0.0, 1.0))
@@ -195,19 +225,27 @@ fn direct_reference(cx: &Cx<'_>, haze: bool) -> Result<(), Box<dyn Error>> {
     while !job.is_complete() {
         job.advance(cx, 3)?;
     }
-    eprintln!("direct unscattered lux; source construction, calibration and total physical error unknown");
-    eprintln!("reference formula: 9000/(9+x*x+y*y)^2 * exp(-(absorption+scattering)*sqrt(9+x*x+y*y))");
-    eprintln!("gray absorption_per_m={absorption} scattering_per_m={scattering}; haze is an authored extension, not a CIE case");
+    eprintln!("direct unscattered lux; source construction, geometry fidelity, calibration and total physical error unknown");
+    eprintln!("unblocked reference: 9000/(9+x*x+y*y)^2 * exp(-(absorption+scattering)*sqrt(9+x*x+y*y))");
+    eprintln!("gray absorption_per_m={absorption} scattering_per_m={scattering} shadow={shadow}; haze and shadows are authored extensions, not CIE cases");
+    if shadow {
+        eprintln!("screen intersection is (x/2,y/2,1.5); blocked when x>=-0.5, y>=-0.5, x+y<=1; the two edge probes may retain both visibility branches");
+    }
     let stdout = io::stdout();
     let mut writer = stdout.lock();
     EnclosedIlluminance::write_csv_header(&mut writer)?;
     for (index, (report, [x, y])) in job.results().iter().zip(positions).enumerate() {
         let distance_squared = 9.0 + x * x + y * y;
-        // Independent formula evaluation is a diagnostic f64 reference, NOT
-        // the source of the rigorous interval emitted by the production API.
-        let reference = 9000.0 / (distance_squared * distance_squared)
-            * (-(absorption + scattering) * distance_squared.sqrt()).exp();
-        eprintln!("probe={index} x_m={x} y_m={y} analytic_reference_f64_lux={reference}");
+        // These independent formula/plane tests are diagnostics, NOT the
+        // source of the production interval or a measured-fixture reference.
+        let blocked = shadow && x >= -0.5 && y >= -0.5 && x + y <= 1.0;
+        let reference = if blocked {
+            0.0
+        } else {
+            9000.0 / (distance_squared * distance_squared)
+                * (-(absorption + scattering) * distance_squared.sqrt()).exp()
+        };
+        eprintln!("probe={index} x_m={x} y_m={y} analytic_blocked={blocked} analytic_reference_f64_lux={reference}");
         report.write_csv_row(index, &mut writer)?;
     }
     writer.flush()?;
@@ -220,9 +258,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         [] => 0,
         [arg] if arg == "--direct" => 1,
         [arg] if arg == "--direct-haze" => 2,
+        [arg] if arg == "--direct-shadow" => 3,
+        [arg] if arg == "--direct-shadow-haze" => 4,
         _ => return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: photometric_error_budget [--direct | --direct-haze]",
+            "usage: photometric_error_budget [--direct | --direct-haze | --direct-shadow | --direct-shadow-haze]",
         ).into()),
     };
     let gate = CancelGate::new_clock_free();
@@ -241,8 +281,10 @@ fn main() -> Result<(), Box<dyn Error>> {
             ExecMode::Deterministic,
         );
         match mode {
-            1 => direct_reference(&cx, false),
-            2 => direct_reference(&cx, true),
+            1 => direct_reference(&cx, false, false),
+            2 => direct_reference(&cx, true, false),
+            3 => direct_reference(&cx, false, true),
+            4 => direct_reference(&cx, true, true),
             _ => calculate(&cx),
         }
     })
