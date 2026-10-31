@@ -31,6 +31,10 @@
 //! gain/phase margins on the REAL aero assembly are V-05b (E4.6a). This
 //! module's pole-convergence receipts cover the hinge subsystem's exact
 //! discrete map.
+//!
+//! The staged contract above belongs to [`partitioned_step`]. [`coupled`]
+//! solves a constant dry body and one hinge simultaneously; [`articulated`]
+//! retains moving dry-link inertia and attached fluid on the native body tree.
 
 use crate::Refusal;
 use crate::spine::{Loads, RigidBody, SixDofState, step};
@@ -39,6 +43,10 @@ use fs_math::det;
 /// Simultaneous effective-mass stepping with finite-configuration fluid inertia.
 #[path = "partitioned/coupled.rs"]
 pub mod coupled;
+
+/// Shared native articulated dry and fluid inertia in one midpoint step.
+#[path = "partitioned/articulated.rs"]
+pub mod articulated;
 
 /// dt/τ cap for explicit states (refusals at cap AND cap+1 ulp).
 pub const MAX_EXPLICIT_RATIO: f64 = 0.2;

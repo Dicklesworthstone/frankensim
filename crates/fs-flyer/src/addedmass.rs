@@ -45,6 +45,13 @@ use crate::spine::RigidBody;
 #[path = "addedmass/hinged.rs"]
 pub mod hinged;
 
+#[path = "addedmass/joint.rs"]
+pub(crate) mod joint;
+pub use joint::solve_articulated_joint;
+
+#[path = "addedmass/articulated.rs"]
+pub mod articulated;
+
 /// Active-dynamic control-coordinate cap (refusals at cap AND cap+1).
 pub const MAX_CONTROL_COORDS: usize = 8;
 /// Strip-count cap.
@@ -392,6 +399,7 @@ pub fn solve_joint(
     loads: &AeroGeneralizedLoads,
 ) -> Result<(Vec<f64>, Vec<f64>), Refusal> {
     body.admit()?;
+    joint::admit_fluid(loads)?;
     let nc = loads.q_control_nonaccel.len();
     if m_control.len() != nc || !m_control.iter().all(|m| m.is_finite() && *m > 0.0) {
         return Err(refuse(
@@ -435,40 +443,6 @@ pub fn solve_joint(
     for k in 0..nc {
         rhs[6 + k] = loads.q_control_nonaccel[k] + loads.q_added_bias[6 + k];
     }
-    // Fixed-order dense Cholesky (the declared deterministic factorization).
-    for i in 0..n {
-        for j in 0..=i {
-            let mut sum = a[i * n + j];
-            for k in 0..j {
-                sum -= a[i * n + k] * a[j * n + k];
-            }
-            if i == j {
-                if sum <= 0.0 {
-                    return Err(refuse(
-                        "joint-mass-not-pd",
-                        format!("Cholesky pivot {sum:e} at row {i}"),
-                        "the total effective mass must be PD; check strip geometry",
-                    ));
-                }
-                a[i * n + j] = sum.sqrt();
-            } else {
-                a[i * n + j] = sum / a[j * n + j];
-            }
-        }
-    }
-    for i in 0..n {
-        let mut sum = rhs[i];
-        for k in 0..i {
-            sum -= a[i * n + k] * rhs[k];
-        }
-        rhs[i] = sum / a[i * n + i];
-    }
-    for i in (0..n).rev() {
-        let mut sum = rhs[i];
-        for k in i + 1..n {
-            sum -= a[k * n + i] * rhs[k];
-        }
-        rhs[i] = sum / a[i * n + i];
-    }
+    let rhs = joint::solve_positive(a, rhs, n, 0.0)?;
     Ok((rhs[..6].to_vec(), rhs[6..].to_vec()))
 }

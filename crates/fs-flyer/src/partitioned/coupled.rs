@@ -8,8 +8,9 @@
 //! gyroscopic and load coupling still requires convergence within the budget.
 //!
 //! This advances the existing constant dry-body + scalar dry-hinge model. A
-//! mechanical linkage whose motion changes the dry mass matrix belongs to the
-//! articulated owner; it cannot be represented by an extra diagonal inertia.
+//! mechanical linkage whose motion changes the dry mass matrix uses
+//! [`super::articulated`] and the native articulated owner; it cannot be
+//! represented by an extra diagonal inertia.
 //! Lie reconstruction stays on SO(3). General nonlinear energy/world-momentum
 //! conservation is a time-refinement property, not a finite-step exact claim.
 

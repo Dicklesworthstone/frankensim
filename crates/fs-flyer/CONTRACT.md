@@ -141,6 +141,35 @@ test-only mass differentiation, joint-solve energy rate, finite-strip
 subdivision and original resource/geometry refusals. Fixed-strip goldens retain
 their previous arithmetic and values.
 
+### Fluid inertia on the native articulated tree
+
+`addedmass::articulated::LinkedStrip` binds the original finite-strip geometry
+to a native `fs-mbd::articulated` link. `assemble_articulated_strips` consumes
+that owner's `GeneralizedKinematics`, shared with the complete dry mass and
+bias extraction. Fixed/root links, serial revolute hinges, prismatic and
+helical joints inherit the same native poses, local velocity Jacobians and
+zero-generalized-acceleration bias. No second geometry or dynamics tree is
+constructed. Authored strip control gains refuse rather than compete with the
+native joints.
+
+The original three positive local kinetic modes supply `J^T G J` and
+`-J^T(G c + ad*_V G V)`, with `V = J u` and `c = Jdot u`. The Lie bracket
+supplies both rotational and translational momentum transport. This includes
+off-diagonal control inertia and the full analytic configuration bias, without
+runtime finite differences or per-strip derivative matrices. The adapter alone
+permutes native angular/linear columns into the existing Flyer linear/angular
+block order. Applied loads remain zero in this fluid-only contribution; callers
+combine the complete native dry metric and bias at the same configuration.
+
+The original control/strip caps remain active. Density is constant in the
+inertial bias; strip deformation and cross-surface fluid interaction remain
+excluded. `addedmass_articulated` checks recovery of fixed/offset-link and
+finite single-hinge results, two serial oblique hinges and mixed sliding/helical
+motion against independent Lagrange bias differentiation, local strip energy,
+nonzero control cross blocks, released-control torque, finite-strip subdivision
+and resource/geometry refusals. These are idealized physics checks, not a
+validation of historical geometry or aerodynamic interference.
+
 ### Simultaneous body and hinge motion
 
 `partitioned::coupled::step` advances the existing six-DOF body and one active
@@ -166,6 +195,40 @@ not exact finite-step guarantees. `partitioned_coupled` checks an independently
 solved stiff-hinge recoil problem and damping work, second-order inertial-frame
 translation and finite-hinge kinetic-energy convergence, exact memory timing,
 and bounded atomic refusals.
+
+### Moving dry links and fluid in one coupled step
+
+`partitioned::articulated::step` advances the native free-base articulated
+state, up to eight active scalar joints and 256 links, with exact linear-memory
+transitions. Every midpoint prepares one `fs-mbd` generalized inertia/motion
+map. The callback uses that same map for attached strips and applied link-origin
+wrenches. `addedmass::solve_articulated_joint` sums the complete dry and fluid
+matrices, retains every body/joint and joint/joint block, and applies each
+owner's inertial bias once. Moving dry COMs and rotated intrinsic link tensors
+therefore participate in the same recoil solve as the surrounding fluid.
+
+The adapter explicitly permutes native `[angular, linear, joints]` coordinates
+to the existing Flyer ordering. It reuses the original fixed-order Cholesky,
+with a diagonal congruence for mixed units and refusal of unresolved normalized
+pivots. It adds no fictitious diagonal inertia or numerical regularization.
+The original constant-body solve retains its arithmetic and fluid goldens.
+
+World-axis wrenches are moments about each actual link origin; native virtual
+work projects them and explicit uniform gravity into generalized loads. Only
+total internal effort, including declared passive impedance, is compared with
+native joint effort limits. External forces do not consume that actuator bound.
+Spring/damper terms are eliminated implicitly in the same mass solve; position,
+rate and effort limits remain active. Each joint declares its own rate tolerance
+in radians/s or metres/s. Bounded iteration and cancellation publish no partial
+state. The pose update uses the original SE(3) exponential.
+
+The `partitioned_articulated` tests compare the full adapter with native ABA
+under gravity and link loads, two stiff dry/fluid rotors with an independent
+Schur/Cayley solution and damping-work balance, and an oblique moving-COM chain
+with independently computed strip energy/spatial momentum. Energy, linear
+momentum and angular momentum errors all converge at second order in that free
+trajectory. No exact finite-step nonlinear conservation, impact, joint-stop or
+closed-loop constraint claim is made by this smooth coupled lane.
 
 ## Hydrostatic pressure and material atmosphere loads
 
