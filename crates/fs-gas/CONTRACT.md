@@ -1927,3 +1927,30 @@ Fixed-opening construction retains its previous behavior. Focused
 thresholds and directions, finite-tank blowdown and energy/species balance,
 source rollback, and pressure-wave propagation in the original gas network.
 Their presence is not an executed validation claim.
+
+
+## Prescribed species-bearing pressure reservoirs
+
+`MixtureEuler1d::step_with_reservoirs` accepts stationary species-bearing end
+cells in the same source species order and per-species energy-reference gauges.
+It recomputes the existing characteristic fluxes from the actual interior cell
+at both SSP RK stages and every halved retry. Reservoir inflow carries the
+source composition and stagnation enthalpy; outflow carries the evolving
+interior composition and total enthalpy. Reservoir pressure supplies inflow
+stagnation pressure or outflow backpressure through the original variable-
+caloric shock/fan and choking owner.
+
+An absent endpoint preserves its declared boundary; two absent reservoirs
+execute the original step exactly. Periodic intervals with reservoirs, moving
+reservoirs, invalid dimensions and source-domain violations refuse before cell
+or clock publication. Borrowed `Cell` values carry no owner identity token:
+callers retain responsibility for matching canonical species order and energy
+gauges, as with `MixtureGas::reservoir_flux`. Stack endpoint buffers add no
+per-step heap workspace. Prescribed states are fixed during one step and are
+not depleted; finite-reservoir feedback remains with the existing network owner.
+
+Six focused `reservoir_boundary_tests` regressions exercise independently
+reconstructed predictor/corrector fluxes, variable-Cp donor enthalpy, pressure/
+temperature/composition drives, end reversal, formation-reference invariance,
+CFL retry replay, exact absent-reservoir parity and cancellation/refusal rollback.
+Their presence does not establish executed native validation.

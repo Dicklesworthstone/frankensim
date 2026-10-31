@@ -107,6 +107,7 @@ pub(super) struct Workspace {
 /// Periodic, reflecting and transmissive boundaries are supported. The shared
 /// frozen-gas `Boundary::Reservoir` variant refuses because it cannot specify
 /// the required species masses and their separate formation-energy references.
+/// Prescribed species-bearing reservoirs use [`Self::step_with_reservoirs`].
 pub struct MixtureEuler1d {
     pub(super) gas: MixtureGas,
     pub(super) states: Vec<f64>,
@@ -286,6 +287,70 @@ impl MixtureEuler1d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        self.advance(maximum_duration, controls, [None; 2], cancelled)
+    }
+
+    /// Advance against prescribed stationary reservoirs at the left/right ends.
+    ///
+    /// Each `Some` overrides that end's declared physical boundary for this
+    /// call; `None` retains it. Both `None` execute the original step exactly.
+    /// Periodic intervals cannot have reservoirs. The borrowed cells must use
+    /// this gas owner's canonical species order and per-species energy gauges,
+    /// exactly as for [`MixtureGas::reservoir_flux`]. Momentum must be zero;
+    /// the complete source state is admitted before starting a trial.
+    ///
+    /// Pressure and temperature are stagnation conditions for inflow; the
+    /// reservoir pressure supplies outflow backpressure. Inflow transports the
+    /// reservoir composition and stagnation enthalpy, while outflow transports
+    /// the evolving interior composition and total enthalpy. The original
+    /// characteristic closure handles sonic transitions and original calorics.
+    /// Its flux is recomputed from the actual end cell at BOTH RK stages and
+    /// every halved retry, with the same face CFL and extensive balance report.
+    ///
+    /// These reservoirs remain prescribed throughout the accepted step and
+    /// are not depleted. Change their source states between calls for an
+    /// explicit boundary drive; use the existing finite network owner for
+    /// reservoir feedback. No reservoir state or flux is retained, no numerical
+    /// workspace is allocated per step, and refusal/cancellation publishes no
+    /// cell or time change.
+    pub fn step_with_reservoirs(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: [Option<Cell<'_>>; 2],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        if reservoirs.iter().all(Option::is_none) {
+            return self.step(maximum_duration, controls, cancelled);
+        }
+        poll(&mut cancelled)?;
+        if self.boundaries == Boundaries::Periodic {
+            return Err(Error::Invalid(
+                "prescribed mixture reservoirs require physical ends",
+            ));
+        }
+        let mut admitted = [None; 2];
+        for (target, reservoir) in admitted.iter_mut().zip(reservoirs) {
+            if let Some(state) = reservoir {
+                poll(&mut cancelled)?;
+                if state.momentum != 0.0 {
+                    return Err(Error::Invalid(
+                        "stationary mixture reservoir has nonzero momentum",
+                    ));
+                }
+                *target = Some((state, self.gas.primitive(state, &mut cancelled)?));
+            }
+        }
+        self.advance(maximum_duration, controls, admitted, cancelled)
+    }
+
+    fn advance(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        reservoirs: ReservoirEnds<'_>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
         poll(&mut cancelled)?;
@@ -335,6 +400,7 @@ impl MixtureEuler1d {
                 dt,
                 controls.cfl,
                 order,
+                reservoirs,
                 &mut self.work,
                 &mut cancelled,
             ) {
@@ -433,6 +499,45 @@ pub(super) struct EndpointFlux<'a> {
     pub(super) data: Face,
 }
 
+type ReservoirEnds<'a> = [Option<(Cell<'a>, Primitive)>; 2];
+
+// The state and primitive refer to the SAME RK stage. Only the prescribed
+// outside primitive is reusable; the interior trace and flux are always fresh.
+fn reservoir_fluxes<'a>(
+    gas: &MixtureGas,
+    states: &[f64],
+    primitive: &[Primitive],
+    reservoirs: ReservoirEnds<'_>,
+    storage: &'a mut [[f64; MAX_COMPONENTS]; 2],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Option<EndpointFlux<'a>>; 2], Error> {
+    let n = gas.species_count();
+    let m = n + 2;
+    let mut result = [None; 2];
+    for (end, (reservoir, values)) in reservoirs.into_iter().zip(storage.iter_mut()).enumerate() {
+        if let Some((outside, outside_primitive)) = reservoir {
+            let i = if end == 0 { 0 } else { states.len() / m - 1 };
+            let inside = cell(&states[i * m..(i + 1) * m], n);
+            let inside_primitive =
+                gas.decode_cell(inside, Some(primitive[i].temperature), cancelled)?;
+            let data = gas.plenum_flux(
+                inside,
+                inside_primitive,
+                outside,
+                outside_primitive,
+                if end == 0 { -1.0 } else { 1.0 },
+                &mut values[..m],
+                cancelled,
+            )?;
+            result[end] = Some(EndpointFlux {
+                values: &values[..m],
+                data,
+            });
+        }
+    }
+    Ok(result)
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Stage {
     pub(super) left: [f64; MAX_COMPONENTS],
@@ -451,11 +556,21 @@ fn attempt(
     dt: f64,
     cfl: f64,
     reconstruction: Reconstruction,
+    reservoirs: ReservoirEnds<'_>,
     work: &mut Workspace,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(Stage, Stage), Error> {
     let n = gas.species_count();
     let m = n + 2;
+    let mut endpoint_storage = [[0.0; MAX_COMPONENTS]; 2];
+    let ends = reservoir_fluxes(
+        gas,
+        states,
+        &work.primitive,
+        reservoirs,
+        &mut endpoint_storage,
+        cancelled,
+    )?;
     let a = operator(
         gas,
         states,
@@ -466,7 +581,7 @@ fn attempt(
         &mut work.slopes,
         &mut work.faces,
         &mut work.face_data,
-        [None; 2],
+        ends,
         cancelled,
     )?;
     check_cfl(a.signal_rate * dt, cfl)?;
@@ -488,6 +603,14 @@ fn attempt(
             ));
         }
     }
+    let ends = reservoir_fluxes(
+        gas,
+        &work.stage,
+        &work.primitive,
+        reservoirs,
+        &mut endpoint_storage,
+        cancelled,
+    )?;
     let b = operator(
         gas,
         &work.stage,
@@ -498,7 +621,7 @@ fn attempt(
         &mut work.slopes,
         &mut work.faces,
         &mut work.face_data,
-        [None; 2],
+        ends,
         cancelled,
     )?;
     check_cfl(b.signal_rate * dt, cfl)?;
@@ -816,3 +939,7 @@ pub(super) fn totals(
     }
     Ok(Totals::from_values(&values[..m], n))
 }
+
+#[cfg(test)]
+#[path = "reservoir_boundary_tests.rs"]
+mod reservoir_boundary_tests;

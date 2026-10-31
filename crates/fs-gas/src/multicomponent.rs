@@ -11,6 +11,8 @@
 //! A frozen `Boundary::Reservoir` has no species-mass axis or species energy
 //! references and therefore refuses. Species-bearing compact-reservoir ports
 //! use [`MixtureGas::reservoir_flux`] with the original local compositions.
+//! [`MixtureEuler1d::step_with_reservoirs`] applies those original characteristic
+//! fluxes to prescribed physical end reservoirs at both accepted RK stages.
 
 mod characteristic;
 mod eos;
