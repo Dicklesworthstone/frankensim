@@ -350,6 +350,94 @@ impl VirialSolutionModel {
         )
     }
 
+    /// Mixing free-energy change [J] between actual finite inventories with
+    /// independently changing solvent volume and solute amounts.
+    ///
+    /// Analytically cancels the common linear `-RT ln(c_ref) sum(n_i)` term.
+    /// This primitive must be summed over a closed, species-conserving system;
+    /// an individual open compartment still owes its chemical-reference flux.
+    /// It supplies no mechanical pressure work or caloric energy. Both original
+    /// endpoint concentrations must lie in this model's admitted convex box.
+    ///
+    /// Relative amount/volume logarithms retain dilution even when rounded
+    /// `n/V` values coincide. Bilinear differences retain the excess potential
+    /// without subtracting large absolute energies. Exact absent-species limits
+    /// are supported. O(N²) work uses only fixed-size stack scratch.
+    pub fn reference_cancelled_inventory_free_energy_change_j(
+        &self,
+        before_volume_m3: f64,
+        before_amounts_mol: &[f64],
+        after_volume_m3: f64,
+        after_amounts_mol: &[f64],
+    ) -> Result<f64> {
+        let before = self.inventory_concentrations(before_volume_m3, before_amounts_mol)?;
+        let after = self.inventory_concentrations(after_volume_m3, after_amounts_mol)?;
+        let n = self.species_count();
+        self.admit_concentrations(&before[..n])?;
+        self.admit_concentrations(&after[..n])?;
+        let log_volume_ratio = log_ratio(before_volume_m3, after_volume_m3);
+        let relative_volume_change = (after_volume_m3 - before_volume_m3) / after_volume_m3;
+        let nearby_volumes = (-1.0..=0.5).contains(&relative_volume_change);
+        let mut delta_c = [0.0; MAX_OSMOTIC_SOLUTES];
+        let mut change = Sum::default();
+        for i in 0..n {
+            let (a, b) = (before_amounts_mol[i], after_amounts_mol[i]);
+            let delta = b - a;
+            let ideal = if a == 0.0 && b == 0.0 {
+                0.0
+            } else if a == 0.0 {
+                b * (det::ln(after[i]) - 1.0)
+            } else if b == 0.0 {
+                -a * (det::ln(before[i]) - 1.0)
+            } else {
+                delta * (det::ln(before[i]) - 1.0) + b * (log_ratio(b, a) + log_volume_ratio)
+            };
+            change.add(finite(
+                ideal,
+                "inventory mixing free-energy difference is not representable",
+            )?);
+            // dc = (dn - c_before*dV)/V_after. Use this cancellation-stable
+            // identity near the original volume, where intermediate terms
+            // stay bounded. Distant volumes use the admitted endpoint values.
+            delta_c[i] = finite(
+                if nearby_volumes && a > 0.0 && b > 0.0 {
+                    delta / after_volume_m3 - before[i] * relative_volume_change
+                } else {
+                    after[i] - before[i]
+                },
+                "inventory concentration change is not representable",
+            )?;
+        }
+        // Q = n^T B c/2, so dQ = (dn^T B mean(c) + mean(n)^T B dc)/2.
+        // The means use differences to preserve equal subnormal inventories.
+        for i in 0..n {
+            let mut mean_interaction = Sum::default();
+            let mut changed_interaction = Sum::default();
+            for j in 0..n {
+                let bij = self.interaction_matrix_m3_mol[i * n + j];
+                let mean_c = before[j] + 0.5 * (after[j] - before[j]);
+                mean_interaction.add(finite(
+                    bij * mean_c,
+                    "mean excess chemical potential is not representable",
+                )?);
+                changed_interaction.add(finite(
+                    bij * delta_c[j],
+                    "excess chemical-potential change is not representable",
+                )?);
+            }
+            let delta_n = after_amounts_mol[i] - before_amounts_mol[i];
+            let mean_n = before_amounts_mol[i] + 0.5 * delta_n;
+            change.add(finite(
+                0.5 * (delta_n * sum(mean_interaction)? + mean_n * sum(changed_interaction)?),
+                "inventory excess free-energy difference is not representable",
+            )?);
+        }
+        finite(
+            self.rt * sum(change)?,
+            "inventory mixing free-energy difference is not representable",
+        )
+    }
+
     /// Row-major `d mu_i/d c_j = RT*(delta_ij/c_i+B_ij)` [J m³/mol²].
     /// Exact zero concentrations refuse the singular derivative without changing
     /// the output. The returned matrix is symmetric on the admitted convex box.

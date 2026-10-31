@@ -26,9 +26,14 @@
 //! Material-sourced solution diffusion allocates transient original queries and
 //! receipts; its prepared-storage estimate is not a peak-memory bound. Failed,
 //! cancelled or exhausted advances publish neither state nor time.
+//! [`coupled`] combines retained-water and independent molecular pathways using
+//! the original pressure-law primitive and mixing free energy in one account.
 
 /// Nonideal Maxwell–Stefan diffusion at fixed solvent volume on this timeline.
 pub mod diffusion;
+
+/// Joint nonideal water and molecular transport with mechanical work accounted.
+pub mod coupled;
 
 /// Finite-storage concentration films coupled to membrane water transport.
 pub mod transient;
@@ -64,6 +69,12 @@ pub enum OsmoticNetworkError {
     DiffusionBalance { species: usize, residual_mol: f64 },
     /// Closed fixed-volume mixing free energy increased beyond its whole-window budget.
     DiffusionFreeEnergy { change_j: f64, maximum_j: f64 },
+    /// Closed coupled transport failed its absolute solvent-volume budget.
+    CoupledWaterBalance { residual_m3: f64, maximum_m3: f64 },
+    /// A smaller finite water stage may satisfy the total-potential budget.
+    CoupledStepFreeEnergy { change_j: f64, maximum_j: f64 },
+    /// The complete coupled window increased mixing plus mechanical potential.
+    CoupledFreeEnergy { change_j: f64, maximum_j: f64 },
     /// Prepared numerical workspace exceeds the caller's byte budget.
     Workspace {
         required_bytes: usize,
@@ -139,6 +150,52 @@ impl OsmoticPressureVolume {
             ));
         }
         Ok(pressure)
+    }
+
+    /// Difference of the SAME linear pressure laws, cancelling common pressure
+    /// references before arithmetic can hide a small elastic response.
+    pub fn pressure_difference_pa(
+        self,
+        volume_m3: f64,
+        other: Self,
+        other_volume_m3: f64,
+    ) -> Result<f64, OsmoticNetworkError> {
+        self.pressure_pa(volume_m3)?;
+        other.pressure_pa(other_volume_m3)?;
+        let difference = (self.reference_pressure_pa - other.reference_pressure_pa)
+            + self.elastance_pa_per_m3 * (volume_m3 - self.reference_volume_m3)
+            - other.elastance_pa_per_m3 * (other_volume_m3 - other.reference_volume_m3);
+        if !difference.is_finite() {
+            return Err(OsmoticNetworkError::Invalid(
+                "pressure difference is not representable",
+            ));
+        }
+        Ok(difference)
+    }
+
+    /// Exact linear-pressure primitive change, with a COMMON linear pressure
+    /// reference removed. This is a closed-volume accounting primitive; the
+    /// actual solvent-volume residual must be checked independently. It supplies
+    /// no caloric energy. Prescribed loads contribute their pressure work here.
+    pub fn reference_cancelled_potential_change_j(
+        self,
+        before_volume_m3: f64,
+        after_volume_m3: f64,
+        common_pressure_pa: f64,
+    ) -> Result<f64, OsmoticNetworkError> {
+        self.pressure_pa(before_volume_m3)?;
+        self.pressure_pa(after_volume_m3)?;
+        let delta = after_volume_m3 - before_volume_m3;
+        let change = delta
+            * ((self.reference_pressure_pa - common_pressure_pa)
+                + self.elastance_pa_per_m3
+                    * ((before_volume_m3 - self.reference_volume_m3) + 0.5 * delta));
+        if !common_pressure_pa.is_finite() || !change.is_finite() {
+            return Err(OsmoticNetworkError::Invalid(
+                "mechanical potential difference is not representable",
+            ));
+        }
+        Ok(change)
     }
 }
 
@@ -317,6 +374,9 @@ pub struct OsmoticStepReport {
     /// Some only for fixed-volume solution diffusion; membrane water work is
     /// not silently dropped from a mixed mechanical/chemical energy account.
     pub diffusion_free_energy_change_j: Option<f64>,
+    /// Closed coupled-window source mixing and pressure-primitive changes.
+    /// Present only for `with_coupled_solution_transport`; no heat balance.
+    pub coupled_potential_change: Option<coupled::CoupledPotentialChange>,
 }
 
 /// Prepared closed network. Public compartments are read-only checkpoints;
@@ -328,6 +388,7 @@ pub struct OsmoticNetwork {
     membranes: Vec<OsmoticMembrane>,
     diffusion: Vec<diffusion::SolutionDiffusionLink>,
     diffusion_controls: Option<diffusion::SolutionDiffusionControls>,
+    coupled_controls: Option<coupled::CoupledSolutionControls>,
     work: Vec<OsmoticCompartment>,
     coarse: Vec<OsmoticCompartment>,
     fine: Vec<OsmoticCompartment>,
@@ -435,6 +496,7 @@ impl OsmoticNetwork {
             membranes,
             diffusion: Vec::new(),
             diffusion_controls: None,
+            coupled_controls: None,
             workspace_bytes: required,
             time_s: 0.0,
         })
@@ -458,7 +520,7 @@ impl OsmoticNetwork {
 
     /// Advance exactly the requested interval with conservative, positive
     /// exchange and bounded adaptive substeps. Membrane stages are implicit;
-    /// fixed-solvent diffusion stages use explicit paired fluxes. Pass
+    /// molecular stages use explicit paired fluxes at their current volumes. Pass
     /// `|| cx.checkpoint().is_err()` to use the shared execution scope.
     /// Cancellation is polled per scalar iteration, membrane and publication.
     pub fn advance(
@@ -485,6 +547,7 @@ impl OsmoticNetwork {
             solute_balance_residual_mol: [0.0; MAX_OSMOTIC_SPECIES],
             species_count: self.species.len(),
             diffusion_free_energy_change_j: None,
+            coupled_potential_change: None,
         };
         let mut elapsed = 0.0;
         let mut step = duration_s.min(controls.maximum_step_s);
@@ -506,6 +569,7 @@ impl OsmoticNetwork {
                     &self.membranes,
                     &mut self.diffusion,
                     self.diffusion_controls,
+                    self.coupled_controls,
                     step,
                     controls,
                     &mut report.residual_evaluations,
@@ -516,6 +580,7 @@ impl OsmoticNetwork {
                     &self.membranes,
                     &mut self.diffusion,
                     self.diffusion_controls,
+                    self.coupled_controls,
                     0.5 * step,
                     controls,
                     &mut report.residual_evaluations,
@@ -526,6 +591,7 @@ impl OsmoticNetwork {
                     &self.membranes,
                     &mut self.diffusion,
                     self.diffusion_controls,
+                    self.coupled_controls,
                     0.5 * step,
                     controls,
                     &mut report.residual_evaluations,
@@ -536,6 +602,10 @@ impl OsmoticNetwork {
                 Ok(()) => scaled_error(&self.work, &self.coarse, &self.fine, controls),
                 Err(OsmoticNetworkError::Cancelled) => return Err(OsmoticNetworkError::Cancelled),
                 Err(OsmoticNetworkError::DiffusionStep(_)) => f64::INFINITY,
+                Err(OsmoticNetworkError::CoupledStepFreeEnergy { .. }) => f64::INFINITY,
+                Err(
+                    OsmoticNetworkError::Unbracketed | OsmoticNetworkError::NonlinearConvergence,
+                ) if self.coupled_controls.is_some() => f64::INFINITY,
                 Err(error) if self.diffusion_controls.is_some() => return Err(error),
                 Err(_) => f64::INFINITY,
             };
@@ -600,14 +670,37 @@ impl OsmoticNetwork {
                     });
                 }
             }
-            let change = diffusion::free_energy_change(&self.cells, &self.work, &mut cancelled)?;
-            if change > physical.free_energy_tolerance_j {
-                return Err(OsmoticNetworkError::DiffusionFreeEnergy {
-                    change_j: change,
-                    maximum_j: physical.free_energy_tolerance_j,
-                });
+            if let Some(coupled) = self.coupled_controls {
+                let mut water = 0.0;
+                let mut correction = 0.0;
+                for (before, after) in self.cells.iter().zip(&self.work) {
+                    compensated_add(
+                        &mut water,
+                        &mut correction,
+                        after.solution.solvent_volume_m3() - before.solution.solvent_volume_m3(),
+                    );
+                }
+                coupled::admit_water_balance(water, coupled.water_balance_tolerance_m3)?;
+                report.water_balance_residual_m3 = water;
+                let change = coupled::potential_change(&self.cells, &self.work, &mut cancelled)?;
+                if change.total_potential_change_j > physical.free_energy_tolerance_j {
+                    return Err(OsmoticNetworkError::CoupledFreeEnergy {
+                        change_j: change.total_potential_change_j,
+                        maximum_j: physical.free_energy_tolerance_j,
+                    });
+                }
+                report.coupled_potential_change = Some(change);
+            } else {
+                let change =
+                    diffusion::free_energy_change(&self.cells, &self.work, &mut cancelled)?;
+                if change > physical.free_energy_tolerance_j {
+                    return Err(OsmoticNetworkError::DiffusionFreeEnergy {
+                        change_j: change,
+                        maximum_j: physical.free_energy_tolerance_j,
+                    });
+                }
+                report.diffusion_free_energy_change_j = Some(change);
             }
-            report.diffusion_free_energy_change_j = Some(change);
         }
         poll(&mut cancelled)?;
         core::mem::swap(&mut self.cells, &mut self.work);
@@ -719,11 +812,24 @@ fn sweep_all(
     membranes: &[OsmoticMembrane],
     links: &mut [diffusion::SolutionDiffusionLink],
     physical: Option<diffusion::SolutionDiffusionControls>,
+    coupled: Option<coupled::CoupledSolutionControls>,
     dt: f64,
     controls: OsmoticStepControls,
     evaluations: &mut usize,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), OsmoticNetworkError> {
+    if let Some(coupled) = coupled {
+        return coupled::sweep(
+            cells,
+            membranes,
+            links,
+            coupled,
+            dt,
+            controls,
+            evaluations,
+            cancelled,
+        );
+    }
     match physical {
         Some(physical) => diffusion::sweep(cells, links, dt, physical, evaluations, cancelled),
         None => sweep(cells, membranes, dt, controls, evaluations, cancelled),
@@ -870,7 +976,10 @@ fn pair_endpoint(
                 .solution
                 .osmotic_pressure_at(vr, &endpoint.right[..count])?;
         membrane.membrane_law().hydraulic_permeance().value()
-            * (left.pressure.pressure_pa(vl)? - right.pressure.pressure_pa(vr)? - osmotic_drop)
+            * (left
+                .pressure
+                .pressure_difference_pa(vl, right.pressure, vr)?
+                - osmotic_drop)
     };
     endpoint.residual_m3 = water - area_time * volume_flux;
     if !endpoint.residual_m3.is_finite() {

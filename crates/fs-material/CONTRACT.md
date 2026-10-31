@@ -8286,6 +8286,29 @@ including the five expansion cases, compiled, linked and executed successfully
 with the pinned compiler and genuine dependency libraries. This was an exact-source
 material-owner assembly, not a Cargo workspace acceptance gate.
 
+### Variable-volume nonideal solution free-energy changes
+
+`VirialSolutionModel::reference_cancelled_inventory_free_energy_change_j`
+evaluates the same original mixing potential between finite solute inventories
+whose solvent volumes may also change. It admits both endpoint concentration
+states and removes only the common linear concentration-reference term before
+arithmetic. The caller must close actual species inventories independently;
+an open compartment still owes its chemical-reference transfer.
+
+Relative amount and volume logarithms preserve dilution even when the rounded
+endpoint concentrations coincide. Symmetric bilinear differences retain the
+virial excess contribution without subtracting absolute background energies.
+Exact absent-species limits remain continuous, with no concentration floor.
+The bounded O(N²) evaluation uses stack scratch and supplies no caloric energy
+or mechanical work. The coupled finite solution-network owner composes this
+change with its existing pressure law's exact potential primitive and checks
+one complete-window mixing-plus-mechanical account.
+
+Four public inventory-energy regressions check independent finite potential
+differences, concentration-reference invariance, the fixed-volume limit,
+next-representable-volume dilution and its osmotic-pressure derivative,
+chemical-potential derivatives, zero-species limits and original support.
+
 ### Source-bound conductivity through latent phase change
 
 `thermal::conduction::phase::PreparedPhaseConductivity` binds one selected

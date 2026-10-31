@@ -1953,6 +1953,59 @@ independent concentration-dependent mobility ODE, distinguish frozen mobility,
 and cover later-edge support loss, late failure atomicity, unsupported initial
 endpoints and retained source workspace admission.
 
+## Coupled nonideal water and molecular solution transport
+
+`OsmoticNetwork::with_coupled_solution_transport` composes the existing fully
+retaining nonideal water exchanges and original solvent-frame Maxwell–Stefan
+links on ONE existing complete-duration adaptive timeline. All compartments
+retain the same virial model, fixed temperature, solvent-volume convention and
+original species ordering. Water membranes must be bare, with reflection one
+and zero solute permeance. Molecular connections remain independent stationary-
+solvent pathways; sharing endpoint compartments does not infer a solvent-drag
+law or Onsager cross coefficient. Either path set can be empty for its physical
+limiting case. Both sets have canonical endpoint order; duplicates within one
+set and an oversized combined graph refuse.
+
+Each trial first sweeps the original implicit water owner, then the original
+molecular owner. The existing full/two-half comparison controls the combined
+first-order Lie-splitting error in BOTH volumes and species inventories. No new
+transport solver, EOS, pressure closure, hidden water inventory or ideal leaky
+membrane law is substituted. Material-backed pair coefficients refresh at the
+actual concentrations produced by water motion, including endpoints and face;
+all source links are requalified after water and after the complete molecular
+sweep. Pinned-source and physical-domain failures stay hard refusals. Only typed
+water root/bracket failures and finite-step withdrawal/passivity failures may
+shrink the step.
+
+The coupled potential is `Phi = F_mix + sum(Psi(V))`, with `dPsi/dV=p(V)` from
+the original linear chamber-pressure law. Thus `dPhi/dV=p-Pi`, exactly the force
+already consumed by the retaining water law. Each water stage checks the
+original inventory free-energy change plus the exact pressure-primitive
+change; molecular stages retain their original fixed-volume passivity gate.
+Before the complete interval publishes, compensated actual water/species
+changes satisfy explicit absolute conservation budgets and actual total
+`Delta Phi` satisfies ONE whole-window allowance. The allowance does not grow
+with accepted/rejected stage count. Mixing free energy may increase during
+pressure-driven separation when the declared pressure loads supply work.
+
+Common linear concentration and pressure reference terms cancel analytically
+before potential arithmetic, with inventory residuals checked independently.
+Pressure differences also cancel the common reference before evaluating elastic
+response. `coupled_potential_change` separates mixing and mechanical changes
+and their compensated total; the negative mechanical change is pressure work
+delivered to the solution. `diffusion_free_energy_change_j` remains exclusive
+to the fixed-volume mode. This is an isothermal potential/work account, not a
+caloric-energy, thermal-reservoir, inertia or cavitation model.
+
+All existing publication, bounded-work, source-payload and allocation rules
+remain: a failed/cancelled window publishes no volume, amount or clock; constant
+data advance without allocation, while material queries allocate their declared
+transient receipts. Focused tests use an independent two-state nonideal
+water/species ODE with state-dependent mobility, temporal refinement,
+pressure-driven separation, concentration/pressure datum and link-orientation
+invariance, water-induced source-boundary failure, cancellation, work and
+workspace refusal, and unsupported leaky membranes.
+
 ## Finite-storage transient concentration films
 
 `osmosis::transient::TransientOsmoticPair` advances two finite bulk solutions

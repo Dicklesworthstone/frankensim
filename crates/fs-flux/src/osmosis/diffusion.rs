@@ -198,100 +198,119 @@ impl OsmoticNetwork {
         controls: SolutionDiffusionControls,
         maximum_workspace_bytes: usize,
     ) -> Result<Self, OsmoticNetworkError> {
-        let friction = controls.constitutive.friction;
-        if cells.is_empty()
-            || cells.len() > MAX_COMPARTMENTS
-            || links.len() > MAX_MEMBRANES
-            || !positive(controls.maximum_species_fraction)
-            || controls.maximum_species_fraction >= 1.0
-            || !positive(controls.amount_balance_tolerance_mol)
-            || !positive(controls.free_energy_tolerance_j)
-            || !positive(controls.constitutive.entropy_tolerance_w_m3_k)
-            || !positive(friction.relative_tolerance)
-            || friction.relative_tolerance > 1e-3
-            || !positive(friction.absolute_gradient_tolerance_per_m)
-            || !positive(friction.absolute_molar_flux_tolerance_mol_m2_s)
-        {
-            return Err(OsmoticNetworkError::Invalid(
-                "bounded diffusion graph and explicit positive physical budgets required",
-            ));
-        }
-        let source = cells[0].solution.nonideal_model().ok_or(OsmoticNetworkError::Invalid(
-            "solution diffusion requires the explicit original virial model (zero interactions admit its ideal limit)"))?;
-        if cells.iter().any(|cell| {
-            cell.solution.nonideal_model() != Some(source)
-                || cell.solution.solute_moles().iter().any(|&n| !positive(n))
-        }) {
-            return Err(OsmoticNetworkError::Invalid(
-                "one original thermodynamic model and positive inventories required",
-            ));
-        }
-        links.sort_by_key(|link| (link.left, link.right));
-        if links
-            .windows(2)
-            .any(|pair| pair[0].endpoints() == pair[1].endpoints())
-        {
-            return Err(OsmoticNetworkError::Invalid(
-                "duplicate physical solution-diffusion face",
-            ));
-        }
-        for link in &links {
-            if link.right >= cells.len()
-                || link.material().species().len() != species.len()
-                || !link
-                    .material()
-                    .species()
-                    .iter()
-                    .zip(&species)
-                    .all(|(id, name)| id.as_str() == name)
-            {
-                return Err(OsmoticNetworkError::Invalid(
-                    "diffusion faces must retain the exact original species order and existing endpoints",
-                ));
-            }
-            link.material()
-                .admit_solution(&cells[link.left].solution)
-                .map_err(OsmoticNetworkError::SolutionDiffusion)?;
-            link.material()
-                .admit_solution(&cells[link.right].solution)
-                .map_err(OsmoticNetworkError::SolutionDiffusion)?;
-        }
-        let required = links
-            .iter()
-            .fold(
-                links
-                    .capacity()
-                    .checked_mul(core::mem::size_of::<SolutionDiffusionLink>()),
-                |total, link| total.and_then(|bytes| bytes.checked_add(link.heap_bytes())),
-            )
-            .ok_or(OsmoticNetworkError::Invalid(
-                "diffusion workspace byte count overflow",
-            ))?;
-        let remaining = maximum_workspace_bytes.checked_sub(required).ok_or(
-            OsmoticNetworkError::Workspace {
-                required_bytes: required,
-                budget_bytes: maximum_workspace_bytes,
-            },
+        let required = prepare_solution_diffusion(
+            &species,
+            &cells,
+            &mut links,
+            controls,
+            maximum_workspace_bytes,
         )?;
-        for link in &links {
-            link.qualify_sources(
-                [
-                    cells[link.left].solution.solvent_volume_m3(),
-                    cells[link.right].solution.solvent_volume_m3(),
-                ],
-                [
-                    cells[link.left].solution.solute_moles(),
-                    cells[link.right].solution.solute_moles(),
-                ],
-                &mut || false,
-            )?;
-        }
+        let remaining = maximum_workspace_bytes - required;
         let mut network = Self::new(species, cells, Vec::new(), remaining)?;
         network.workspace_bytes += required;
         network.diffusion = links;
         network.diffusion_controls = Some(controls);
         Ok(network)
     }
+}
+
+/// Shared preparation for fixed-volume and coupled-water networks.
+pub(super) fn prepare_solution_diffusion(
+    species: &[String],
+    cells: &[OsmoticCompartment],
+    links: &mut Vec<SolutionDiffusionLink>,
+    controls: SolutionDiffusionControls,
+    maximum_workspace_bytes: usize,
+) -> Result<usize, OsmoticNetworkError> {
+    let friction = controls.constitutive.friction;
+    if cells.is_empty()
+        || cells.len() > MAX_COMPARTMENTS
+        || links.len() > MAX_MEMBRANES
+        || !positive(controls.maximum_species_fraction)
+        || controls.maximum_species_fraction >= 1.0
+        || !positive(controls.amount_balance_tolerance_mol)
+        || !positive(controls.free_energy_tolerance_j)
+        || !positive(controls.constitutive.entropy_tolerance_w_m3_k)
+        || !positive(friction.relative_tolerance)
+        || friction.relative_tolerance > 1e-3
+        || !positive(friction.absolute_gradient_tolerance_per_m)
+        || !positive(friction.absolute_molar_flux_tolerance_mol_m2_s)
+    {
+        return Err(OsmoticNetworkError::Invalid(
+            "bounded diffusion graph and explicit positive physical budgets required",
+        ));
+    }
+    let source = cells[0].solution.nonideal_model().ok_or(OsmoticNetworkError::Invalid(
+        "solution diffusion requires the explicit original virial model (zero interactions admit its ideal limit)"))?;
+    if cells.iter().any(|cell| {
+        cell.solution.nonideal_model() != Some(source)
+            || cell.solution.solute_moles().iter().any(|&n| !positive(n))
+    }) {
+        return Err(OsmoticNetworkError::Invalid(
+            "one original thermodynamic model and positive inventories required",
+        ));
+    }
+    links.sort_by_key(|link| (link.left, link.right));
+    if links
+        .windows(2)
+        .any(|pair| pair[0].endpoints() == pair[1].endpoints())
+    {
+        return Err(OsmoticNetworkError::Invalid(
+            "duplicate physical solution-diffusion face",
+        ));
+    }
+    for link in links.iter() {
+        if link.right >= cells.len()
+            || link.material().species().len() != species.len()
+            || !link
+                .material()
+                .species()
+                .iter()
+                .zip(species)
+                .all(|(id, name)| id.as_str() == name)
+        {
+            return Err(OsmoticNetworkError::Invalid(
+                "diffusion faces must retain the exact original species order and existing endpoints",
+            ));
+        }
+        link.material()
+            .admit_solution(&cells[link.left].solution)
+            .map_err(OsmoticNetworkError::SolutionDiffusion)?;
+        link.material()
+            .admit_solution(&cells[link.right].solution)
+            .map_err(OsmoticNetworkError::SolutionDiffusion)?;
+    }
+    let required = links
+        .iter()
+        .fold(
+            links
+                .capacity()
+                .checked_mul(core::mem::size_of::<SolutionDiffusionLink>()),
+            |total, link| total.and_then(|bytes| bytes.checked_add(link.heap_bytes())),
+        )
+        .ok_or(OsmoticNetworkError::Invalid(
+            "diffusion workspace byte count overflow",
+        ))?;
+    maximum_workspace_bytes
+        .checked_sub(required)
+        .ok_or(OsmoticNetworkError::Workspace {
+            required_bytes: required,
+            budget_bytes: maximum_workspace_bytes,
+        })?;
+    for link in links.iter() {
+        link.qualify_sources(
+            [
+                cells[link.left].solution.solvent_volume_m3(),
+                cells[link.right].solution.solvent_volume_m3(),
+            ],
+            [
+                cells[link.left].solution.solute_moles(),
+                cells[link.right].solution.solute_moles(),
+            ],
+            &mut || false,
+        )?;
+    }
+    Ok(required)
 }
 
 fn source(error: OsmosisError) -> OsmoticNetworkError {
@@ -449,9 +468,15 @@ pub(super) fn sweep(
             .replace_inventories(volumes[1], &next_right[..n])
             .map_err(source)?;
     }
-    // A later connection may move an earlier connection's endpoint outside its
-    // pinned source support. Qualify the WHOLE candidate sweep before the
-    // enclosing controller can accept it, including its final time endpoint.
+    qualify_sources(cells, links, cancelled)
+}
+
+/// A later water or species connection can move an earlier source endpoint.
+pub(super) fn qualify_sources(
+    cells: &[OsmoticCompartment],
+    links: &[SolutionDiffusionLink],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), OsmoticNetworkError> {
     for link in links.iter() {
         if link.material_sources().is_none() {
             continue;
