@@ -388,3 +388,78 @@ fn invalid_work_bounds_source_failures_and_late_cancellation_roll_back() {
     assert_eq!(piston, before);
     assert_eq!(window(&piston), before_window);
 }
+
+#[cfg(test)]
+mod adiabatic_solid_cavity_bridge {
+    use super::gas;
+    use fs_alloc::{ArenaConfig, ArenaPool};
+    use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
+    use fs_material::thermochemical_gas::energy::entropy::GasEntropySolve;
+    use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
+    use fs_solid::hyper3::pressure::{ClosedTetPressureSurface, TetPressure};
+    use fs_solid::hyper3::pressure::cavity::ClosedTetCavity;
+    use fs_solid::linear3::TetAssemblyBudget;
+    use std::sync::Arc;
+
+    fn with_cx<R>(f: impl FnOnce(&CancelGate, &Cx<'_>) -> R) -> R {
+        let gate = CancelGate::new();
+        ArenaPool::new(ArenaConfig::default()).scope(|arena| {
+            f(&gate, &Cx::new(&gate, arena, StreamKey { seed: 101, kernel_id: 7, tile: 0, iteration: 0 },
+                Budget::INFINITE, ExecMode::Deterministic))
+        })
+    }
+    fn entropy() -> GasEntropySolve {
+        GasEntropySolve { minimum_temperature_k: 200.0, maximum_temperature_k: 1800.0,
+            entropy_tolerance_j_kg_k: 1e-9, maximum_iterations: 128 }
+    }
+    fn shell() -> (Vec<[f64;3]>, Vec<[usize;4]>) {
+        let nodes=vec![[0.,0.,0.],[3.,0.,0.],[0.,3.,0.],[0.,0.,3.],
+            [0.5,0.5,0.5],[1.5,0.5,0.5],[0.5,1.5,0.5],[0.5,0.5,1.5]];
+        let mut tets=Vec::new();
+        for [a,b,c] in [[0,1,2],[0,1,3],[0,2,3],[1,2,3]] {
+            tets.push([a+4,b+4,c+4,c]); tets.push([a+4,b+4,b,c]); tets.push([a+4,a,b,c]);
+        }
+        (nodes,tets)
+    }
+    fn cavity(nodes:&[[f64;3]],tets:&[[usize;4]],cx:&Cx<'_>)->ClosedTetCavity {
+        let surface=Arc::new(ClosedTetPressureSurface::new(nodes,tets,TetAssemblyBudget::standard(),
+            4*tets.len(),cx).unwrap());
+        let inner:Vec<_>=surface.faces().iter().enumerate()
+            .filter_map(|(i,f)| f.iter().all(|&n| n>=4).then_some(i)).collect();
+        ClosedTetCavity::new(surface,&inner,cx).unwrap()
+    }
+    fn close(a:f64,b:f64,tol:f64){ assert!((a-b).abs()<=tol*a.abs().max(b.abs()).max(1.0),"{a} != {b}"); }
+
+    #[test]
+    fn source_gas_pressure_energy_and_acoustic_tangent_follow_the_actual_cavity() {
+        with_cx(|_,cx| {
+            let (nodes,tets)=shell(); let cavity=cavity(&nodes,&tets,cx);
+            let seed=gas(0.75,0.001);
+            let gas=ClosedGasParcel::new(seed.model().clone(),seed.point().clone(),cavity.reference_volume_m3()).unwrap();
+            let exterior=30_000.0;
+            let u:Vec<f64>=nodes.iter().flat_map(|x| x.map(|v| -0.04*v)).collect();
+            let load=cavity.adiabatic_gas_load(&u,&gas,exterior,entropy(),cx).unwrap();
+            assert!(load.volume_m3 < cavity.reference_volume_m3());
+            assert!(load.gas.state().state().pressure > gas.state().state().pressure);
+            assert!(load.potential_change_j > 0.0);
+            let face=cavity.face_pressures_pa(load.net_pressure_pa,cx).unwrap();
+            let expected=cavity.surface().force_n(&u,TetPressure::PerFace(&face),cx).unwrap();
+            for (&a,&b) in load.force_n.iter().zip(&expected) { close(a,b,2e-11); }
+            let mut d=vec![0.0;u.len()];
+            for (i,&node) in cavity.nodes().iter().enumerate() {
+                d[3*node]=0.02*(i as f64-1.5); d[3*node+1]=-0.01*(i as f64+1.0); d[3*node+2]=0.015;
+            }
+            let eps=1e-6; let mut plus=u.clone(); let mut minus=u.clone();
+            for i in 0..u.len(){ plus[i]+=eps*d[i]; minus[i]-=eps*d[i]; }
+            let fp=cavity.adiabatic_gas_load(&plus,&gas,exterior,entropy(),cx).unwrap().force_n;
+            let fm=cavity.adiabatic_gas_load(&minus,&gas,exterior,entropy(),cx).unwrap().force_n;
+            for row in 0..u.len() {
+                let applied:f64=(0..u.len()).map(|col| load.force_tangent.get(row,col)*d[col]).sum();
+                close(applied,(fp[row]-fm[row])/(2.0*eps),3e-6);
+            }
+            let before=gas.clone();
+            assert!(cavity.adiabatic_gas_load(&u,&gas,-1.0,entropy(),cx).is_err());
+            assert_eq!(gas,before);
+        });
+    }
+}
