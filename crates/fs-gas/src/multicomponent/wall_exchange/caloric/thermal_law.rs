@@ -32,6 +32,14 @@ impl<'law> EnergyStorage<'law> {
         initial: DepositedCell,
         range_j_kg: [f64; 2],
     ) -> Result<Self, WallExchangeError> {
+        Self::from_shared(Arc::new(law), initial, range_j_kg)
+    }
+
+    pub(super) fn from_shared(
+        law: Arc<dyn ThermalLaw + Send + Sync + 'law>,
+        initial: DepositedCell,
+        range_j_kg: [f64; 2],
+    ) -> Result<Self, WallExchangeError> {
         let [lower, upper] = range_j_kg;
         if !lower.is_finite()
             || !upper.is_finite()
@@ -53,7 +61,7 @@ impl<'law> EnergyStorage<'law> {
             ));
         }
         let source = Self {
-            law: Arc::new(law),
+            law,
             initial,
             range_j_kg,
         };

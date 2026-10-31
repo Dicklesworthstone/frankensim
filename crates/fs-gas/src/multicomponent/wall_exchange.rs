@@ -184,6 +184,12 @@ pub enum WallExchangeError {
     /// Original solid-wall conductivity source refused its actual temperature.
     #[cfg(feature = "material")]
     Conduction(fs_material::thermal::transport::ThermalTransportError),
+    /// Original phase chart refused the wall's actual enthalpy inventory.
+    #[cfg(feature = "material")]
+    PhaseConductionState(fs_material::phase::PhaseStateError),
+    /// Original phase-dependent conductivity source or coordinate refused.
+    #[cfg(feature = "material")]
+    PhaseConduction(fs_material::thermal::source::ThermalMaterialError),
     /// Original finite-wall thermal source refused its state or geometry.
     Thermal(fs_thermal::enthalpy::DepositionError),
     /// Actual cell state is outside the declared developed-wall approximation.

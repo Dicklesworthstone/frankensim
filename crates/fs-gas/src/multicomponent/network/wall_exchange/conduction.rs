@@ -2,9 +2,13 @@
 
 use super::{NetworkWallOperator, WallContact, WallExchangeError, WallThermal, poll};
 use crate::multicomponent::{allocated, positive};
+use crate::multicomponent::wall_exchange::MaterialWallCaloric;
 use fs_material::thermal::transport::PreparedThermalTransport;
 use fs_qty::{Area, Length};
 use std::sync::Arc;
+
+mod phase;
+pub use phase::PhaseWallConductionSource;
 
 /// Fixed-geometry conduction between the gas-facing surface and the retained
 /// wall temperature. The original material supplies directional k(T).
@@ -15,23 +19,29 @@ use std::sync::Arc;
 /// represents ONLY the gas-side film. This adds their resistances in series;
 /// it never adds a second wall mass, heat supply, or caloric law.
 ///
-/// Conductivity is sampled at the actual wall temperature at the beginning of
+/// Conductivity is sampled at the actual wall state at the beginning of
 /// each source half and frozen for that half's conservative implicit exchange.
-/// The final wall temperature must remain in the original source domain. This
+/// The final wall state must remain in the original source domain. This
 /// is a first-order local constitutive approximation, not an exact nonlinear
 /// through-wall profile. Refine the interval and wall discretization when its
 /// spatial or temporal temperature variation matters.
 ///
-/// This fixed-context source admits temperature-coordinate contacts only.
-/// Latent/phase-changing energy contacts require their separate phase-aware
-/// conductivity owner and refuse here; a melting plateau must not reuse a
-/// solid conductivity merely because its temperature has not changed.
+/// The temperature-source constructor admits temperature-coordinate contacts.
+/// The phase-source constructor consumes the same enthalpy chart as the finite
+/// caloric wall and evaluates source k(T(h),phi(h)), including latent plateaus.
+/// Neither form invents a phase conductivity interpolation or extra heat store.
 #[derive(Clone, Debug, PartialEq)]
 pub struct MaterialWallConduction {
-    source: Arc<PreparedThermalTransport>,
+    source: ConductionSource,
     length: Length,
     area: Area,
     length_over_area: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum ConductionSource {
+    Temperature(Arc<PreparedThermalTransport>),
+    Phase(Arc<PhaseWallConductionSource>),
 }
 
 impl MaterialWallConduction {
@@ -42,6 +52,23 @@ impl MaterialWallConduction {
         source: Arc<PreparedThermalTransport>,
         length: Length,
         area: Area,
+    ) -> Result<Self, WallExchangeError> {
+        Self::with_source(ConductionSource::Temperature(source), length, area)
+    }
+
+    /// Use the original phase chart and pinned k(T,phi) source with this same
+    /// resistance geometry. Bind the matching `MaterialWallCaloric::from_phase_curve`
+    /// before attaching this layer to a network; a different chart refuses.
+    pub fn from_phase_source(
+        source: Arc<PhaseWallConductionSource>,
+        length: Length,
+        area: Area,
+    ) -> Result<Self, WallExchangeError> {
+        Self::with_source(ConductionSource::Phase(source), length, area)
+    }
+
+    fn with_source(
+        source: ConductionSource, length: Length, area: Area,
     ) -> Result<Self, WallExchangeError> {
         let length_over_area = length.value() / area.value();
         if !positive(length.value()) || !positive(area.value()) || !positive(length_over_area) {
@@ -55,9 +82,19 @@ impl MaterialWallConduction {
         })
     }
 
-    /// Original material-card identity, source lines, fixed context and k(T).
-    pub fn source(&self) -> &PreparedThermalTransport {
-        &self.source
+    /// Original prepared temperature-only source, when that form is selected.
+    pub fn source(&self) -> Option<&PreparedThermalTransport> {
+        match &self.source {
+            ConductionSource::Temperature(source) => Some(source),
+            ConductionSource::Phase(_) => None,
+        }
+    }
+    /// Original chart, material, typed context and pinned phase conductivity.
+    pub fn phase_source(&self) -> Option<&PhaseWallConductionSource> {
+        match &self.source {
+            ConductionSource::Phase(source) => Some(source),
+            ConductionSource::Temperature(_) => None,
+        }
     }
     /// Distance from gas-facing surface to the retained wall-temperature state.
     pub const fn length(&self) -> Length {
@@ -68,18 +105,41 @@ impl MaterialWallConduction {
         self.area
     }
 
-    fn conductance(&self, temperature_k: f64) -> Result<f64, WallExchangeError> {
-        let sample = self
-            .source
-            .at_temperature(temperature_k)
-            .map_err(WallExchangeError::Conduction)?;
-        let conductance = sample.conductivity_w_m_k() / self.length_over_area;
+    fn conductance(
+        &self,
+        thermal: WallThermal,
+        caloric: Option<&MaterialWallCaloric<'_>>,
+    ) -> Result<(f64, f64), WallExchangeError> {
+        let (conductivity, film) = match &self.source {
+            ConductionSource::Temperature(source) => {
+                let (temperature, film) = thermal_state(thermal)?;
+                let sample = source.at_temperature(temperature)
+                    .map_err(WallExchangeError::Conduction)?;
+                (sample.conductivity_w_m_k(), film)
+            }
+            ConductionSource::Phase(source) => {
+                source.admit_caloric(caloric)?;
+                // The original law checks its mass, h-domain and caloric state.
+                caloric.expect("phase source admitted its caloric binding")
+                    .temperature_k(thermal)?;
+                let WallThermal::Caloric {
+                    specific_energy_j_kg, conductance_w_per_k, ..
+                } = thermal else {
+                    return Err(WallExchangeError::Invalid(
+                        "phase conductivity requires the original enthalpy coordinate",
+                    ));
+                };
+                let resolved = source.at_specific_enthalpy(specific_energy_j_kg)?;
+                (resolved.properties()[0].value_si(), conductance_w_per_k)
+            }
+        };
+        let conductance = conductivity / self.length_over_area;
         if !positive(conductance) {
             return Err(WallExchangeError::Invalid(
                 "wall conduction is unrepresentable",
             ));
         }
-        Ok(conductance)
+        Ok((conductance, film))
     }
 }
 
@@ -92,7 +152,7 @@ pub(super) struct BoundWallConduction {
 }
 
 impl NetworkWallOperator<'_> {
-    /// Bind solid k(T) and geometry to any branch/plenum thermal contact.
+    /// Bind original k(T) or k(T,phi) and geometry to branch/plenum contacts.
     ///
     /// The original contact's conductance becomes the gas-side film coefficient.
     /// A bound circular gas-transport model still refreshes that film from its
@@ -103,7 +163,8 @@ impl NetworkWallOperator<'_> {
     /// Finite thermal storage remains exclusively in the original contact and
     /// optional material caloric binding. The gas/wall heat debit is performed
     /// exactly once by that same exchange owner. Bind before evolution; source,
-    /// geometry and topology refusals publish no gas or wall state.
+    /// geometry and topology refusals publish no gas or wall state. Phase-aware
+    /// layers require their identical original caloric chart to be bound first.
     pub fn with_material_conduction(
         mut self,
         branches: Vec<Vec<Option<MaterialWallConduction>>>,
@@ -138,8 +199,9 @@ impl NetworkWallOperator<'_> {
         for (index, layer) in branches.into_iter().flatten().chain(plenums).enumerate() {
             poll(&mut cancelled)?;
             if let Some(layer) = layer {
-                let (temperature, film) = thermal_state(self.contacts[index].thermal)?;
-                layer.conductance(temperature)?;
+                let (_, film) = layer.conductance(
+                    self.contacts[index].thermal, self.caloric[index].as_ref(),
+                )?;
                 bindings[index] = Some(BoundWallConduction {
                     layer,
                     fixed_film_w_k: film,
@@ -195,8 +257,9 @@ impl NetworkWallOperator<'_> {
         mut contact: WallContact,
     ) -> Result<WallContact, WallExchangeError> {
         if let Some(binding) = self.conduction.as_ref().and_then(|all| all[index].as_ref()) {
-            let (temperature, film) = thermal_state(contact.thermal)?;
-            let solid = binding.layer.conductance(temperature)?;
+            let (solid, film) = binding.layer.conductance(
+                contact.thermal, self.caloric[index].as_ref(),
+            )?;
             // Stable harmonic combination without overflowing Gfilm * Gsolid
             // or taking the reciprocal of an exactly disabled gas film.
             let smaller = film.min(solid);
@@ -217,8 +280,7 @@ impl NetworkWallOperator<'_> {
         contact: WallContact,
     ) -> Result<(), WallExchangeError> {
         if let Some(binding) = self.conduction.as_ref().and_then(|all| all[index].as_ref()) {
-            let (temperature, _) = thermal_state(contact.thermal)?;
-            binding.layer.conductance(temperature)?;
+            binding.layer.conductance(contact.thermal, self.caloric[index].as_ref())?;
         }
         Ok(())
     }
@@ -261,8 +323,11 @@ fn set_conductance(contact: &mut WallContact, conductance: f64) {
         | WallThermal::Reservoir {
             conductance_w_per_k,
             ..
+        }
+        | WallThermal::Caloric {
+            conductance_w_per_k,
+            ..
         } => *conductance_w_per_k = conductance,
-        // Only admitted temperature-coordinate contacts have a binding.
-        WallThermal::Adiabatic | WallThermal::Caloric { .. } => {}
+        WallThermal::Adiabatic => {}
     }
 }

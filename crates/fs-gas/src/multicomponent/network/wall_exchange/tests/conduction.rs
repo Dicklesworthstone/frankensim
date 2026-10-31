@@ -424,7 +424,7 @@ fn disabled_film_stays_disabled_and_unsupported_wall_models_refuse() {
     }
     assert!(
         MaterialWallConduction::new(
-            Arc::new(material.source().clone()),
+            Arc::new(material.source().unwrap().clone()),
             Length::new(0.0),
             Area::new(0.25)
         )

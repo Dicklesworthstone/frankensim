@@ -377,4 +377,6 @@ mod transport;
 mod caloric;
 #[cfg(feature = "material")]
 mod conduction;
+#[cfg(feature = "material")]
+mod phase_conduction;
 mod thermal_law;

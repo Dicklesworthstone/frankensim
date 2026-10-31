@@ -31,7 +31,7 @@ use transport::CircularWallTransport;
 #[cfg(feature = "material")]
 mod conduction;
 #[cfg(feature = "material")]
-pub use conduction::MaterialWallConduction;
+pub use conduction::{MaterialWallConduction, PhaseWallConductionSource};
 #[cfg(feature = "material")]
 use conduction::BoundWallConduction;
 

@@ -7,14 +7,14 @@ caloric model. Production dependencies remain pure Rust and Franken-owned.
 ## Material wall conduction in gas networks
 
 With `experimental-euler,material`, `NetworkWallOperator::with_material_conduction`
-binds the original `PreparedThermalTransport` conductivity source and explicit
+binds original temperature or phase-dependent conductivity sources and explicit
 planar length/area to each selected branch or plenum thermal contact. The gas
 film and solid resistances add in series. Existing source-bound circular gas
 transport still supplies the film from the actual gas mixture, density, T and p;
 other contacts retain their originally authored film. The operator preserves
 that separate film so repeated steps do not compound the same solid resistance.
 
-Solid k(T) is evaluated at the actual starting wall temperature of each source
+Material k is evaluated at the actual starting wall state of each source
 half, then frozen for the original conservative implicit heat solve. The final
 wall state must remain inside the original source domain. Each next half reads
 the evolved wall temperature, including the existing reaction/wave composition.
@@ -22,17 +22,38 @@ Finite wall storage remains exclusively with the original contact and optional
 material caloric binding; conductivity adds no second heat capacity or heat
 supply. Any source refusal or late cancellation preserves all accepted gas,
 wall temperatures and reports. Source lines, card identity and geometry remain
-inspectable, with no database query or allocation during coefficient refresh.
+inspectable. The prepared temperature-only source refreshes without database
+queries or allocation; phase-source refresh uses the original scalar resolver
+with its selected claim pinned, retaining each query's evidence and conditions.
 
-This is a single-phase, fixed-geometry, lumped-wall approximation with first-order
+`MaterialWallConduction::from_phase_source` uses `PhaseWallConductionSource`
+and the same `MaterialWallCaloric::from_phase_curve` chart to derive BOTH T(h)
+and liquid mass fraction. Thus equal temperatures on a melting plateau can
+produce different source k(T,phi); no phase interpolation is invented by gas
+code. The source card must match the chart, the storage chart must match the
+conduction chart, and the original density must remain compatible with the
+fixed reference mass/volume. Latent heat stays entirely in h. Missing phase
+coordinates, a different chart, source extrapolation or an unavailable pinned
+claim refuse before state publication. Temperature-only sources continue to
+refuse energy-coordinate walls. Inspectors distinguish the two source forms.
+
+This is a fixed-geometry, lumped-wall approximation with first-order
 constitutive lag, not a resolved nonlinear through-wall temperature profile.
 For centre-temperature storage, the conduction length is the surface-to-centre
-distance. Adiabatic and latent energy-coordinate contacts refuse this binding;
-temperature alone cannot select conductivity on a melting plateau. Original
-phase-aware spatial owners remain responsible for that extension. Focused
+distance. Adiabatic contacts refuse. Original phase-aware spatial and mechanical
+owners remain responsible for moving fronts, wall support, shrinkage and liquid
+motion; a thermal wall cannot remain a mechanical support after melting merely
+because this heat-transfer operator still exists. Source endpoint admission is
+not a continuous source-domain certificate between sampled states. Focused
 G1/G3 tests check independent two-body heat balances, source-only conductivity
 and capacity swaps, combined gas-film/solid response, actual chemical-rate and
 pressure feedback, endpoint-domain refusal, cancellation and deterministic replay.
+Phase regressions additionally check equal-T distinct latent inventories,
+sensible-to-latent crossing, three-rung time refinement against an independently
+integrated latent-plateau energy equation, k refresh without compounding resistance, exact
+original-chart matching, pinned-source refusal and native reacting-network
+energy/rate feedback. These manufactured fixtures are not measured-material
+or wall-geometry qualification.
 
 ## Experimental frozen-composition Euler flow
 

@@ -31,6 +31,8 @@ pub enum WallCaloricConstraint {
 pub struct MaterialWallCaloric<'law> {
     storage: Storage<'law>,
     constraint: WallCaloricConstraint,
+    #[cfg(feature = "material")]
+    phase_curve: Option<Arc<fs_material::phase::EquilibriumEnthalpyPhaseCurve>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,6 +58,7 @@ impl<'law> MaterialWallCaloric<'law> {
         Self {
             storage: Storage::Capacity(storage),
             constraint,
+            phase_curve: None,
         }
     }
     /// Retain the original immutable T(h/u), including a latent plateau.
@@ -74,7 +77,49 @@ impl<'law> MaterialWallCaloric<'law> {
         Ok(Self {
             storage: Storage::Energy(EnergyStorage::new(law, initial, energy_range_j_kg)?),
             constraint,
+            #[cfg(feature = "material")]
+            phase_curve: None,
         })
+    }
+
+    /// Bind the original phase chart simultaneously as the caloric law and as
+    /// the material phase identity used by wall conduction. Both consumers
+    /// share one immutable Arc; temperature alone never identifies latent h.
+    ///
+    /// This stationary, fixed-volume reduction requires the chart's constant
+    /// density to agree with the reference mass/volume. Expansion, shrinkage,
+    /// motion and phase-front geometry require their separate physical owners.
+    #[cfg(feature = "material")]
+    pub fn from_phase_curve(
+        curve: Arc<fs_material::phase::EquilibriumEnthalpyPhaseCurve>,
+        initial: DepositedCell,
+        energy_range_j_kg: [f64; 2],
+    ) -> Result<Self, WallExchangeError> {
+        let density = initial.mass_kg / initial.geometry.volume_m3;
+        if !positive(density)
+            || curve.knots().iter().any(|knot| {
+                (knot.bulk_density_kg_m3 - density).abs()
+                    > 64.0 * f64::EPSILON * density.max(knot.bulk_density_kg_m3)
+            })
+        {
+            return Err(WallExchangeError::Invalid(
+                "phase wall requires the chart's constant reference mass density",
+            ));
+        }
+        Ok(Self {
+            storage: Storage::Energy(EnergyStorage::from_shared(
+                curve.clone(), initial, energy_range_j_kg,
+            )?),
+            constraint: WallCaloricConstraint::SourceEnthalpy,
+            phase_curve: Some(curve),
+        })
+    }
+
+    /// The exact chart also held by the native h-storage law, when phase-aware
+    /// material wall conduction was explicitly admitted.
+    #[cfg(feature = "material")]
+    pub fn phase_curve(&self) -> Option<&Arc<fs_material::phase::EquilibriumEnthalpyPhaseCurve>> {
+        self.phase_curve.as_ref()
     }
     /// Original fixed-amount capacity source, when that representation is bound.
     #[cfg(feature = "material")]
