@@ -48,6 +48,7 @@ pub(super) struct SolidSource {
     state: ResolvedMaterialStatePoint,
     pack: NormalizedMaterialCardPack,
     temperature_axis: Option<String>,
+    storage_temperature_range_k: Option<[f64; 2]>,
 }
 
 fn fields(value: &J, allowed: &[&str]) -> Result<()> {
@@ -253,8 +254,26 @@ pub(super) fn solid(
     name: &str,
     index: usize,
 ) -> Result<(SolidMaterial, SolidSource)> {
-    fields(value, &["mode", "pack", "state", "temperature_axis"])?;
+    fields(value, &[
+        "mode", "pack", "state", "temperature_axis", "storage_temperature_range_k",
+    ])?;
     let temperature_axis = temperature_axis(value)?;
+    let storage_temperature_range_k = value.get("storage_temperature_range_k")
+        .map(|range| {
+            if temperature_axis.is_none() {
+                return Err(bad("storage_temperature_range_k belongs to temperature-dependent solid sources"));
+            }
+            let pair = range.as_array().filter(|pair| pair.len() == 2)
+                .ok_or_else(|| bad("storage_temperature_range_k must be [lower_kelvin, upper_kelvin]"))?;
+            let lo = pair[0].as_f64();
+            let hi = pair[1].as_f64();
+            match (lo, hi) {
+                (Some(lo), Some(hi)) if lo.is_finite() && hi.is_finite() && lo > 0.0 && lo < hi => {
+                    Ok([lo, hi])
+                }
+                _ => Err(bad("storage_temperature_range_k needs positive, finite, increasing bounds")),
+            }
+        }).transpose()?;
     let (pack, point) = load_card(value, base, total)?;
     let positive = ScalarAdmissibility::StrictlyPositive;
     let conductivity_quantity = if pack
@@ -318,6 +337,7 @@ pub(super) fn solid(
             state,
             pack,
             temperature_axis,
+            storage_temperature_range_k,
         },
     ))
 }
@@ -483,11 +503,24 @@ impl SolidSource {
         self.temperature_axis.is_some()
     }
 
+    pub(super) fn has_storage_range(&self) -> bool {
+        self.storage_temperature_range_k.is_some()
+    }
+
     fn law(&self) -> Result<SolidConductivityLaw<'_>> {
         let axis = self.temperature_axis.as_deref()
             .ok_or_else(|| bad("temperature-dependent CHT needs every solid source in the same mode"))?;
         SolidConductivityLaw::try_new(
             self.pack.card(), self.state.clone(), axis, [THERMAL_CONDUCTIVITY_PROPERTY; 3],
+        ).map_err(|error| bad(error.to_string()))
+    }
+
+    fn thermal_law(&self) -> Result<fs_lbm::material::conjugate::solid::SolidThermalLaw<'_>> {
+        let span = self.storage_temperature_range_k.ok_or_else(|| {
+            bad("temperature-dependent unsteady solids require storage_temperature_range_k")
+        })?;
+        self.law()?.with_heat_storage(
+            DENSITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_PROPERTY, span,
         ).map_err(|error| bad(error.to_string()))
     }
 
@@ -498,8 +531,11 @@ impl SolidSource {
                 .expect("required source property resolved")
                 .value_si()
         };
+        let storage = self.storage_temperature_range_k.map_or_else(String::new, |[lo, hi]| {
+            format!(",\"storage_temperature_range_k\":[{lo},{hi}]")
+        });
         format!(
-            "{{\"index\":{},{},\"pack_identity\":{},\"material_state\":{},\"conductivity_w_m_k\":{},\"density_kg_m3\":{},\"specific_heat_j_kg_k\":{}}}",
+            "{{\"index\":{},{},\"pack_identity\":{},\"material_state\":{},\"conductivity_w_m_k\":{},\"density_kg_m3\":{},\"specific_heat_j_kg_k\":{}{storage}}}",
             self.index,
             mode_json(self.temperature_axis.as_deref()),
             quote(&self.pack.content_hash().to_hex()),
@@ -518,6 +554,47 @@ fn mode_json(axis: Option<&str>) -> String {
 }
 
 pub(super) const EVOLVING_NO_CLAIM: &str = "steady laminar fixed-geometry Boussinesq flow and conservative conjugate heat transfer; original gas or liquid density, viscosity and conductivity and solid conductivity reevaluated at local temperature with source claims pinned; reference fluid density and heat capacity retained in inertia, continuity and heat advection with at most 5 percent departures; fixed thermodynamic pressure and composition; isotropic source solids; no compressibility, solid storage, melting, deformation, radiation, turbulence closure or phase-stability claim; staircase geometry and one declared resolution unless grid_convergence is requested; Estimated numerical evidence, not experimental validation";
+
+/// Independent units and limits for the nonlinear solid heat-storage solve.
+pub(super) fn storage_controls(
+    value: &J,
+) -> Result<fs_lbm::material::conjugate::buoyant::SolidThermalConfig> {
+    use fs_lbm::material::conjugate::buoyant::SolidThermalConfig;
+    fields(value, &[
+        "maximum_iterations", "temperature_tolerance_k", "conductivity_relative_tolerance",
+        "storage_tolerance_j", "temperature_relaxation",
+    ])?;
+    let defaults = SolidThermalConfig::default();
+    let at = "transient.solid_storage";
+    let maximum_iterations = super::optional_number(value, "maximum_iterations", at)?
+        .unwrap_or(defaults.maximum_iterations as f64);
+    if !maximum_iterations.is_finite()
+        || !(1.0..=100_000.0).contains(&maximum_iterations)
+        || maximum_iterations.fract() != 0.0
+    {
+        return Err(bad("transient.solid_storage.maximum_iterations must be an integer in 1..=100000"));
+    }
+    let positive = |name, default| {
+        let number = super::optional_number(value, name, at)?.unwrap_or(default);
+        if !number.is_finite() || number <= 0.0 {
+            return Err(bad(format!("{at}.{name} must be finite and positive")));
+        }
+        Ok(number)
+    };
+    let controls = SolidThermalConfig {
+        maximum_iterations: maximum_iterations as usize,
+        temperature_tolerance_k: positive("temperature_tolerance_k", defaults.temperature_tolerance_k)?,
+        conductivity_relative_tolerance: positive(
+            "conductivity_relative_tolerance", defaults.conductivity_relative_tolerance,
+        )?,
+        storage_tolerance_j: positive("storage_tolerance_j", defaults.storage_tolerance_j)?,
+        temperature_relaxation: positive("temperature_relaxation", defaults.temperature_relaxation)?,
+    };
+    if controls.temperature_relaxation > 1.0 {
+        return Err(bad("transient.solid_storage.temperature_relaxation must lie in (0,1]"));
+    }
+    Ok(controls)
+}
 
 /// Existing CLI geometry and boundaries, existing coupled momentum/heat owner.
 /// Every runtime query borrows the same owned cards admitted by the loader.
@@ -736,34 +813,91 @@ pub(super) fn march(
     let fluid = source.law()?;
     let bound = MaterialChtFluid::try_new(fluid.reference())
         .map_err(|error| bad(error.to_string()))?;
-    let run = bound.march_natural_convection(
-        domain, &scene.materials, flow, thermal,
-        &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
-        BoussinesqConfig {
-            gravity_m_s2: scene.gravity.unwrap_or([0.0; 3]),
-            max_relative_density_departure: 0.05,
-            max_relative_specific_heat_departure: 0.05,
-        },
-        unsteady, inlet_schedule, power_schedule, radiation, gate,
-        |_, temperature, _| fluid.at_temperature(temperature),
-    ).map_err(|error| match &error {
+    let buoyancy = BoussinesqConfig {
+        gravity_m_s2: scene.gravity.unwrap_or([0.0; 3]),
+        max_relative_density_departure: 0.05,
+        max_relative_specific_heat_departure: 0.05,
+    };
+    let failure = |error: MaterialBuoyancyError| match &error {
         MaterialBuoyancyError::Solver(source) => super::solver_failure(source),
         _ => bad(error.to_string()),
-    })?;
+    };
+    let (run, solid_feedback) = if scene.solid_sources.iter().any(SolidSource::temperature_dependent) {
+        let solids = scene.solid_sources.iter().map(SolidSource::thermal_law)
+            .collect::<Result<Vec<_>>>()?;
+        let controls = scene.transient.as_ref().and_then(|t| t.solid_storage)
+            .unwrap_or_default();
+        let result = bound.march_natural_convection_with_material_solids(
+            domain, &solids, flow, thermal,
+            &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
+            buoyancy, unsteady, controls, inlet_schedule, power_schedule, radiation, gate,
+            |_, temperature, _| fluid.at_temperature(temperature),
+        ).map_err(failure)?;
+        let endpoint = endpoint_json(result.solid_endpoint.iter().map(|sample| (
+            sample.cell, sample.temperature_k, sample.conductivity_w_m_k[0], &sample.material,
+        )), gate)?;
+        let mut storage = format!(concat!(
+            ",\"solid_coupling\":\"implicit-endpoint\",\"solid_endpoint\":{},",
+            "\"solid_storage\":{{\"model\":\"fixed-reference-mass-integral-cp\",",
+            "\"maximum_iterations\":{},\"temperature_tolerance_k\":{},",
+            "\"conductivity_relative_tolerance\":{},\"storage_tolerance_j\":{},",
+            "\"temperature_relaxation\":{},\"sources\":["),
+            endpoint, controls.maximum_iterations, super::num(controls.temperature_tolerance_k)?,
+            super::num(controls.conductivity_relative_tolerance)?,
+            super::num(controls.storage_tolerance_j)?, super::num(controls.temperature_relaxation)?);
+        for (index, solid) in solids.iter().enumerate() {
+            if gate.is_requested() {
+                return Err(super::solver_failure(&fs_lbm::conjugate::ChtError::Cancelled));
+            }
+            if index > 0 { storage.push(','); }
+            let [lo, hi] = solid.storage().temperature_span_k();
+            storage.push_str(&format!(concat!(
+                "{{\"index\":{},\"storage_identity\":{},\"reference_density_kg_m3\":{},",
+                "\"temperature_range_k\":[{},{}]}}"),
+                index, quote(&solid.storage().identity().to_hex()),
+                super::num(solid.reference_density_kg_m3())?, super::num(lo)?, super::num(hi)?));
+        }
+        storage.push_str("],\"records\":[");
+        for (index, record) in result.solid_records.iter().enumerate() {
+            if gate.is_requested() {
+                return Err(super::solver_failure(&fs_lbm::conjugate::ChtError::Cancelled));
+            }
+            if index > 0 { storage.push(','); }
+            storage.push_str(&format!(concat!(
+                "{{\"time_s\":{},\"iterations\":{},\"temperature_defect_k\":{},",
+                "\"conductivity_relative_defect\":{},\"storage_defect_j\":{},",
+                "\"solid_stored_energy_change_j\":{}}}"),
+                super::num(record.time_s)?, record.iterations,
+                super::num(record.temperature_defect_k)?,
+                super::num(record.conductivity_relative_defect)?,
+                super::num(record.storage_defect_j)?,
+                super::num(record.solid_stored_energy_change_j)?));
+        }
+        storage.push_str("]}");
+        (result.fluid, storage)
+    } else {
+        let run = bound.march_natural_convection(
+            domain, &scene.materials, flow, thermal,
+            &fs_lbm::conjugate::EnergyConfig::default(), initial_temperature,
+            buoyancy, unsteady, inlet_schedule, power_schedule, radiation, gate,
+            |_, temperature, _| fluid.at_temperature(temperature),
+        ).map_err(failure)?;
+        (run, String::new())
+    };
     let applied = fluid_endpoint_json(&run.applied, gate)?;
     let endpoint = fluid_endpoint_json(&run.endpoint, gate)?;
     let feedback = format!(concat!(
         "{{\"mode\":\"temperature-dependent\",\"coupling\":\"explicit-first-order\",",
         "\"max_relative_density_departure\":0.05,\"max_relative_specific_heat_departure\":0.05,",
         "\"applied_time_s\":{},\"endpoint_time_s\":{},",
-        "\"fluid_applied\":{},\"fluid_endpoint\":{}}}"),
+        "\"fluid_applied\":{},\"fluid_endpoint\":{}{}}}"),
         super::num(run.applied_time_s)?, super::num(run.endpoint_time_s)?,
-        applied, endpoint);
+        applied, endpoint, solid_feedback);
     Ok((run.march, feedback))
 }
 
 /// Reference rho/Cp storage is deliberately kept distinct from local transport.
-pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady laminar fixed-geometry Boussinesq flow and conservative conjugate heat storage; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density and heat capacity retained in inertia, continuity, storage and advection with at most 5 percent departures; explicit first-order material and heat coupling even with BDF2 momentum; solid storage and conductivity are fixed from authored or explicitly frozen data; original optional surface-radiation model; no compressibility, latent phase change, deformation, turbulence closure or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
+pub(super) const UNSTEADY_NO_CLAIM: &str = "unsteady laminar fixed-geometry Boussinesq flow and conservative conjugate heat storage; original fluid density, viscosity and conductivity reevaluated at each accepted temperature with fixed pressure, composition and selected source claims; reference fluid density and heat capacity retained in inertia, continuity, storage and advection with at most 5 percent departures; explicit first-order fluid-material coupling even with BDF2 momentum; solids use authored/frozen storage or implicit endpoint conductivity and source-integrated heat capacity on a declared single-phase span at fixed reference mass; original optional surface-radiation model; no compressibility, latent phase change, deformation, turbulence closure or time/grid convergence claim; Estimated numerical evidence, not experimental validation";
 
 fn fluid_endpoint_json(
     samples: &[fs_lbm::material::conjugate::buoyant::MaterialBuoyancySample<FluidState>],

@@ -210,9 +210,9 @@ momentum solve, and the existing wall-time cancellation budget remains active.
 This steady mode supports laminar gas or liquid flow and isotropic sourced solids.
 Mixed frozen/authored/evolving material assignments, radiation, LVEL turbulence
 and compact components refuse explicitly in the steady source-feedback solve.
-The distinct unsteady fluid path below retains fixed solid storage. Phase change,
-deformation and arbitrary anisotropic source conductivity remain outside these
-CLI paths.
+The distinct unsteady path below also supports source-integrated solid heat
+storage at fixed reference mass. Phase change, deformation and arbitrary
+anisotropic source conductivity remain outside these CLI paths.
 
 Results identify `solver: "fv-simplec-material"`. `material_feedback` reports
 the accepted defects and tolerances, the solid-to-fluid heat transfer, and
@@ -252,14 +252,14 @@ and heat-storage calculation. Add this block to the scene:
 }
 ```
 
-Select `mode: "temperature-dependent"` on the fluid. Solid thermal coefficients
-and storage must be authored or explicitly `mode: "frozen"` source data. Frozen
-solid packs retain the original density-times-specific-heat storage already
-used by the native transient solver. A temperature-dependent solid source
-refuses here: its conductivity law alone does not define evolving solid
-enthalpy, phase inventory or storage. Authored `conductivity_table` entries also
-refuse in this path, so a dynamic solid law cannot silently become constant.
-The steady all-evolving solid path above is unchanged.
+Select `mode: "temperature-dependent"` on the fluid. Solids can retain authored
+or explicitly `mode: "frozen"` thermal coefficients and storage; frozen packs
+use their original density-times-specific-heat storage. Alternatively, put every
+solid source in temperature-dependent mode and declare its supported storage
+temperature range as described below. That path integrates the original heat
+capacity and solves solid conductivity at each accepted heat endpoint. Authored
+`conductivity_table` entries still refuse in these material-fluid paths; they
+cannot silently become constant or replace a sourced solid response.
 
 At each accepted temperature, the original fluid source resolves local density,
 viscosity, heat capacity and conductivity together. The next native momentum
@@ -270,7 +270,7 @@ step uses the same projected volume fluxes, local conductivity and reference
 Pressure, composition, source choices and source domains retain the same rules
 as in the steady path.
 
-This is **first-order explicit material/thermal coupling**, even when the
+This retains **first-order fluid-material/thermal coupling**, even when the
 momentum scheme is BDF2. The viscosity update preserves native velocity,
 pressure and BDF history. This coupling order is reported separately from the
 requested momentum scheme; time refinement is still required to assess error.
@@ -297,3 +297,64 @@ no partial march.
 These additions retain the existing laminar, fixed-geometry Boussinesq
 approximation. They do not supply compressible gas dynamics, evolving mass,
 latent heat or experimental validation.
+
+### Temperature-dependent solid heat storage
+
+An evolving solid source supplies the same density, heat capacity and
+conductivity bundle used by the steady path, plus an explicit single-phase
+temperature interval:
+
+```json
+{
+  "name": "solid",
+  "source": {
+    "mode": "temperature-dependent",
+    "temperature_axis": "T",
+    "storage_temperature_range_k": [290, 350],
+    "pack": "solid.fsmcdpk",
+    "state": [
+      {"name": "T", "value": "300 K", "kind": "absolute-temperature"},
+      {"name": "pressure", "value": "100 kPa", "kind": "pressure"}
+    ]
+  }
+}
+```
+
+The selected source must support the complete declared interval. Preparation
+retains the original heat-capacity claim and its breakpoints. Each voxel stores
+`rho_reference * volume * integral(Cp(T) dT)`; density changes cannot manufacture
+or remove solid mass in a fixed voxel. The source integrator evaluates every
+crossed segment, so the stored-energy change does not substitute endpoint Cp
+or an arbitrary temperature average. The reference density comes from the same
+original solid snapshot as the other thermal properties.
+
+The native backward-Euler heat equation iterates solid conductivity and the
+source-integrated storage response together, retaining the original fluid
+fluxes, thermal contacts and radiation calculation. Optional
+`transient.solid_storage` sets its acceptance controls independently of the
+momentum solve. The defaults are:
+
+```json
+{
+  "maximum_iterations": 100,
+  "temperature_tolerance_k": 1e-9,
+  "conductivity_relative_tolerance": 1e-9,
+  "storage_tolerance_j": 1e-8,
+  "temperature_relaxation": 1.0
+}
+```
+
+Acceptance checks the unrelaxed temperature and conductivity defects, the true
+per-cell caloric-storage defect, and the corrected whole-step heat balance.
+`material_feedback.solid_storage` reports the controls, original storage
+identities, reference densities, declared intervals, and accepted step records.
+`solid_endpoint` retains the actual endpoint material samples;
+`solid_coupling: "implicit-endpoint"` distinguishes this solve from the explicit
+fluid coefficient update. The overall time discretization remains first order.
+
+All solids must use this evolving source path when any one does; mixed
+evolving/frozen solid storage is refused. A missing caloric interval, unsupported
+source state, failed nonlinear acceptance or cancellation publishes no partial
+march. The model supplies single-phase sensible storage in fixed reference
+geometry, without latent heat, phase inventory changes, deformation or inferred
+mechanical work.

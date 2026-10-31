@@ -424,13 +424,21 @@ mod evolving_materials {
     // Actual canonical pack bytes, decoded by the ordinary binary input path.
     // These deliberately synthetic laws test coupling, not a measured substance.
     fn pack(liquid: bool, slope: f64, upper: f64) -> Vec<u8> {
+        pack_with_caloric(liquid, slope, upper, 1.0, 0.0)
+    }
+
+    fn pack_with_caloric(
+        liquid: bool, slope: f64, upper: f64, reference_conductivity: f64, capacity_slope: f64,
+    ) -> Vec<u8> {
         let mut properties = vec![
             (DENSITY_PROPERTY, Density::DIMS, if liquid {
                 [1.01, 1.0, 1.0-0.001*(upper-300.0)]
             } else { [2.0; 3] }),
-            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS, [2.0; 3]),
+            (SPECIFIC_HEAT_CAPACITY_PROPERTY, SPECIFIC_HEAT_CAPACITY_DIMS,
+                [2.0, 2.0, 2.0 + capacity_slope * (upper - 300.0)]),
             (THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS,
-                [1.0, 1.0, 1.0+slope*(upper-300.0)]),
+                [reference_conductivity, reference_conductivity,
+                    reference_conductivity+slope*(upper-300.0)]),
         ];
         if liquid { properties.push((DYNAMIC_VISCOSITY_PROPERTY, DYNAMIC_VISCOSITY_DIMS, [1.0; 3])); }
         let mut claims = ClaimSet::new();
@@ -555,13 +563,129 @@ mod evolving_materials {
     }
 
     #[test]
+    fn unsteady_solid_storage_integrates_original_capacity_instead_of_freezing_cp() {
+        // One nearly insulated unit-volume solid, rho_ref=2 kg/m3, heated by
+        // 1 W for 2 s. Its sourced Cp is 2 + slope*(T-300), so the independent
+        // energy integral is 4*dT + slope*dT^2 = 2 J. The adjacent fluid's
+        // conductivity is 1e-12 W/(m K); its exchange is below 1e-10 J here.
+        for (index, capacity_slope) in [0.0, 0.4].into_iter().enumerate() {
+            let liquid = format!("integrated-storage-{index}-liquid.fsmcdpk");
+            let solid = format!("integrated-storage-{index}-solid.fsmcdpk");
+            let input = format!(r#"{{
+              "schema":"frankensim.cooling-cht.v1","size_m":[2,1,1],"voxel_m":1,
+              "fluid":{{"mode":"temperature-dependent","temperature_axis":"T",
+                "pack":"{liquid}","viscosity":"dynamic",
+                "state":[{{"name":"T","value":"300 K","kind":"absolute-temperature"}},
+                  {{"name":"pressure","value":"100 kPa","kind":"pressure"}}]}},
+              "materials":[{{"name":"body","source":{{"mode":"temperature-dependent",
+                "temperature_axis":"T","storage_temperature_range_k":[290,350],
+                "pack":"{solid}",
+                "state":[{{"name":"T","value":"300 K","kind":"absolute-temperature"}},
+                  {{"name":"pressure","value":"100 kPa","kind":"pressure"}}]}}}}],
+              "solids":[{{"material":"body","min_m":[0,0,0],"max_m":[1,1,1]}}],
+              "sources":[{{"name":"heater","power_w":1,"min_m":[0,0,0],"max_m":[1,1,1]}}],
+              "transient":{{"flow":"unsteady","time_step_s":0.5,"steps":4,
+                "initial_temperature_k":300,
+                "solid_storage":{{"temperature_tolerance_k":1e-10,
+                  "conductivity_relative_tolerance":1e-10,"storage_tolerance_j":1e-10}}}}
+            }}"#);
+            let path = scratch(&format!("integrated-storage-{index}.json"), &input);
+            let base = path.parent().unwrap();
+            std::fs::write(base.join(liquid), pack_with_caloric(true, 0.0, 350.0, 1e-12, 0.0)).unwrap();
+            std::fs::write(base.join(solid), pack_with_caloric(false, 0.0, 350.0, 1e-12, capacity_slope)).unwrap();
+            let (code, result, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            let rise = 4.0 / (4.0 + (16.0_f64 + 8.0 * capacity_slope).sqrt());
+            let actual = f(&result, &["transient", "final_max_solid_temperature_k"]);
+            assert!((actual - (300.0 + rise)).abs() < 1e-8, "{actual}, {rise}");
+            assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-8);
+            let feedback = result.get("material_feedback").unwrap();
+            assert_eq!(feedback.str_field("solid_coupling"), Some("implicit-endpoint"));
+            assert_eq!(f(feedback, &["solid_endpoint", "cells"]), 1.0);
+            let storage = feedback.get("solid_storage").unwrap();
+            assert_eq!(storage.str_field("model"), Some("fixed-reference-mass-integral-cp"));
+            let records = storage.get("records").unwrap().as_array().unwrap();
+            assert_eq!(records.len(), 4);
+            let heat: f64 = records.iter().map(|r| f(r, &["solid_stored_energy_change_j"])).sum();
+            assert!((heat - 2.0).abs() < 1e-8, "{heat}");
+            for record in records {
+                assert!(f(record, &["storage_defect_j"]) <= 1e-10);
+                assert!(f(record, &["temperature_defect_k"]) <= 1e-10);
+            }
+            assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+        }
+    }
+
+    #[test]
+    fn evolving_solid_caloric_data_changes_heat_transfer_and_actual_buoyant_motion() {
+        let mut answers = Vec::new();
+        for (index, capacity_slope) in [0.0, 0.4].into_iter().enumerate() {
+            let name = format!("unsteady-evolving-storage-{index}");
+            let (path, scene) = prepare(&name, 0.02, 350.0);
+            std::fs::write(path.parent().unwrap().join(format!("{name}-solid.fsmcdpk")),
+                pack_with_caloric(false, 0.02, 350.0, 1.0, capacity_slope)).unwrap();
+            let input = scene.replace("\"source\":{\"mode\":\"temperature-dependent\",",
+                "\"source\":{\"mode\":\"temperature-dependent\",\"storage_temperature_range_k\":[290,350],")
+                .replacen('{', r#"{"transient":{"flow":"unsteady","time_step_s":0.02,
+                    "steps":4,"initial_temperature_k":300,
+                    "inner_iterations":2000,"inner_tolerance":1e-9},"#, 1);
+            std::fs::write(&path, &input).unwrap();
+            let (code, result, error) = run(&path);
+            assert_eq!(code, 0, "{error}");
+            let original = &result.path(&["material_inputs", "solids"]).unwrap().as_array().unwrap()[0];
+            assert_eq!(f(original, &["specific_heat_j_kg_k"]), 2.0);
+            assert!(f(&result, &["flow", "final_kinetic_energy_j"]) > 0.0);
+            assert!(f(&result, &["transient", "worst_step_closure_j"]) < 1e-7);
+            assert_eq!(f(&result, &["material_feedback", "solid_endpoint", "cells"]), 6.0);
+            assert_eq!(std::fs::read_to_string(path).unwrap(), input);
+            answers.push(result);
+        }
+        assert!(f(&answers[1], &["transient", "final_max_solid_temperature_k"])
+            < f(&answers[0], &["transient", "final_max_solid_temperature_k"]));
+        assert_ne!(answers[0].path(&["flow", "final_kinetic_energy_j"]),
+            answers[1].path(&["flow", "final_kinetic_energy_j"]));
+        assert_eq!(answers[0].path(&["material_inputs", "fluid"]),
+            answers[1].path(&["material_inputs", "fluid"]));
+    }
+
+    #[test]
+    fn evolving_solid_storage_refuses_incomplete_sources_and_failed_endpoints_atomically() {
+        let (path, scene) = prepare("unsteady-storage-refusals", 0.02, 350.0);
+        std::fs::write(path.parent().unwrap().join("unsteady-storage-refusals-solid.fsmcdpk"),
+            pack_with_caloric(false, 0.02, 350.0, 1.0, 0.4)).unwrap();
+        let input = scene.replace("\"source\":{\"mode\":\"temperature-dependent\",",
+            "\"source\":{\"mode\":\"temperature-dependent\",\"storage_temperature_range_k\":[290,350],")
+            .replacen('{', r#"{"transient":{"flow":"unsteady","time_step_s":0.5,
+                "steps":2,"initial_temperature_k":300,
+                "inner_iterations":2000,"inner_tolerance":1e-9},"#, 1);
+        for (index, refused) in [
+            input.replace("\"storage_temperature_range_k\":[290,350],", ""),
+            input.replace("[290,350]", "[301,350]"),
+            input.replace("[290,350]", "[290,360]"),
+            input.replace("[290,350]", "[290,300.01]"),
+            input.replace("\"steps\":2", "\"steps\":2,\"solid_storage\":{\"maximum_iterations\":1}"),
+            input.replace("\"steps\":2", "\"steps\":2,\"solid_storage\":{\"storage_tolerance_j\":0}"),
+            input.replace("\"source\":{\"mode\":\"temperature-dependent\",\"storage_temperature_range_k\":[290,350],\"temperature_axis\":\"T\",",
+                "\"source\":{\"mode\":\"frozen\",\"storage_temperature_range_k\":[290,350],"),
+        ].into_iter().enumerate() {
+            let candidate = scratch(&format!("unsteady-solid-storage-refusal-{index}.json"), &refused);
+            let (code, result, error) = run(&candidate);
+            assert_ne!(code, 0, "{index}: unexpectedly accepted {refused}");
+            assert!(!error.is_empty());
+            assert!(result.get("material_feedback").is_none());
+            assert!(result.get("transient").is_none());
+            assert_eq!(std::fs::read_to_string(candidate).unwrap(), refused);
+        }
+    }
+
+    #[test]
     fn temperature_dependent_mode_refuses_conflicting_physics_and_unsupported_endpoints() {
         let (_, scene) = prepare("evolving-refusals", 1.0, 350.0);
         let insert = |field: &str| scene.replacen('{', &format!("{{{field},"), 1);
         for (index, (input, reason)) in [
             (insert("\"expansion_per_k\":0.001"), "density owns buoyancy"),
             (insert("\"reference_temperature_k\":301"), "conflicts with the original fluid"),
-            (insert("\"transient\":{}"), "fixed solid storage"),
+            (insert("\"transient\":{}"), "storage_temperature_range_k"),
             (insert("\"radiation\":{}"), "does not support radiation"),
             (scene.replace("\"tolerance\":1e-10", "\"tolerance\":1e-10,\"turbulence\":\"lvel\""), "requires laminar"),
             (scene.replacen("\"mode\":\"temperature-dependent\",\"temperature_axis\":\"T\"",

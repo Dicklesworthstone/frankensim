@@ -728,6 +728,8 @@ struct Transient {
     /// `flow: "unsteady"`: march the flow with the energy (else the energy
     /// marches over the steady flow).
     unsteady: Option<UnsteadyOptions>,
+    /// Nonlinear solid conductivity and integrated heat-storage acceptance.
+    solid_storage: Option<fs_lbm::material::conjugate::buoyant::SolidThermalConfig>,
 }
 
 /// Controls of the unsteady flow march.
@@ -853,6 +855,7 @@ impl Transient {
             initial_temperature_k: optional_number(value, "initial_temperature_k", at)?,
             schedule,
             unsteady,
+            solid_storage: value.get("solid_storage").map(material::storage_controls).transpose()?,
         })
     }
 
@@ -1386,9 +1389,20 @@ impl Scene {
             }
             if root.get("transient").is_some() {
                 if solid_sources.iter().any(material::SolidSource::temperature_dependent) {
-                    return Err(bad(
-                        "unsteady material CHT requires fixed solid storage and authored or explicitly frozen solid sources; evolving solid storage needs its own enthalpy owner",
-                    ));
+                    if solid_sources.len() != materials.len()
+                        || solid_sources.iter().enumerate().any(|(index, source)| {
+                            source.index != index || !source.temperature_dependent()
+                        })
+                    {
+                        return Err(bad(
+                            "unsteady material CHT with evolving solids requires every solid in temperature-dependent source mode",
+                        ));
+                    }
+                    if solid_sources.iter().any(|source| !source.has_storage_range()) {
+                        return Err(bad(
+                            "temperature-dependent unsteady solids require storage_temperature_range_k for their original heat-capacity integral",
+                        ));
+                    }
                 }
                 if materials.iter().any(|solid| !solid.conductivity_table.is_empty()) {
                     return Err(bad(
@@ -1454,6 +1468,11 @@ impl Scene {
             ));
         }
         let transient = root.get("transient").map(Transient::parse).transpose()?;
+        if transient.as_ref().is_some_and(|transient| transient.solid_storage.is_some())
+            && !solid_sources.iter().any(material::SolidSource::temperature_dependent)
+        {
+            return Err(bad("transient.solid_storage requires temperature-dependent solid sources"));
+        }
         if evolving && let Some(transient) = &transient {
             if transient.unsteady.as_ref().is_none_or(|options| options.mean_flow_energy) {
                 return Err(bad(
@@ -2643,7 +2662,7 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let mut help = format!(
-            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid and fixed solid storage; material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid; solids may use fixed storage or\nall evolve with a source storage_temperature_range_k. The latter integrates\noriginal Cp at fixed reference mass and solves endpoint conductivity;\ntransient.solid_storage controls nonlinear acceptance. Fluid-material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
         help.push_str(sgs::HELP);
         return CommandOutput {
