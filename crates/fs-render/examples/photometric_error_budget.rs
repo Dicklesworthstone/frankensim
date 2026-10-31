@@ -7,6 +7,9 @@
 //! extinction extension. `--direct-shadow` and `--direct-shadow-haze` add a
 //! native opaque triangular screen and a receiving floor, including two probes
 //! on the screen's shadow edge. Their unresolved visibility widens the bound.
+//! `--direct-power` and `--direct-power-haze` use a fractional narrow beam
+//! with exponent 73.5 and independently derived references on the same plane.
+//! These are authored cases, not additional CIE validation cases.
 //! These use the original source, geometry, material and medium owners.
 //!
 //! An inward-facing 2 m cube emits uniform Le=8 cd/m² and reflects rho=0.5.
@@ -197,7 +200,7 @@ fn shadow_geometry() -> Result<Vec<Primitive>, Box<dyn Error>> {
     ])
 }
 
-fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool) -> Result<(), Box<dyn Error>> {
+fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool, exponent: f64) -> Result<(), Box<dyn Error>> {
     // Factual setup and provenance are retained in
     // tests/photometric_path/cie171_analytical.rs. No rounded table is copied.
     let positions: [[f64; 2]; 10] = [
@@ -206,9 +209,9 @@ fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool) -> Result<(), Box<dyn
     ];
     let sources = [PhotometricSource::try_new(
         RigidTransform::try_new([1.0, 0.0, 0.0, 0.0], [0.0, 0.0, 3.0])?,
-        1000.0 * PI,
+        if exponent == 1.0 { 1000.0 * PI } else { 2000.0 * PI / (exponent + 1.0) },
         1.0,
-        AngularDistribution::cosine_power(1.0, FRAC_PI_2)?,
+        AngularDistribution::cosine_power(exponent, FRAC_PI_2)?,
         SourceSpectrum::equal_energy(),
     )?];
     let absorption = if haze { 0.07 } else { 0.0 };
@@ -226,7 +229,10 @@ fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool) -> Result<(), Box<dyn
         job.advance(cx, 3)?;
     }
     eprintln!("direct unscattered lux; source construction, geometry fidelity, calibration and total physical error unknown");
-    eprintln!("unblocked reference: 9000/(9+x*x+y*y)^2 * exp(-(absorption+scattering)*sqrt(9+x*x+y*y))");
+    eprintln!("unblocked reference: (1000/9)*(9/(9+x*x+y*y))^((p+3)/2) * exp(-(absorption+scattering)*sqrt(9+x*x+y*y)); p={exponent}");
+    if exponent != 1.0 {
+        eprintln!("fractional cosine-power beam: authored analytical extension, not a CIE case");
+    }
     eprintln!("gray absorption_per_m={absorption} scattering_per_m={scattering} shadow={shadow}; haze and shadows are authored extensions, not CIE cases");
     if shadow {
         eprintln!("screen intersection is (x/2,y/2,1.5); blocked when x>=-0.5, y>=-0.5, x+y<=1; the two edge probes may retain both visibility branches");
@@ -242,8 +248,12 @@ fn direct_reference(cx: &Cx<'_>, haze: bool, shadow: bool) -> Result<(), Box<dyn
         let reference = if blocked {
             0.0
         } else {
-            9000.0 / (distance_squared * distance_squared)
-                * (-(absorption + scattering) * distance_squared.sqrt()).exp()
+            let clear = if exponent == 1.0 {
+                9000.0 / (distance_squared * distance_squared)
+            } else {
+                (1000.0 / 9.0) * (9.0 / distance_squared).powf((exponent + 3.0) / 2.0)
+            };
+            clear * (-(absorption + scattering) * distance_squared.sqrt()).exp()
         };
         eprintln!("probe={index} x_m={x} y_m={y} analytic_blocked={blocked} analytic_reference_f64_lux={reference}");
         report.write_csv_row(index, &mut writer)?;
@@ -260,9 +270,11 @@ fn main() -> Result<(), Box<dyn Error>> {
         [arg] if arg == "--direct-haze" => 2,
         [arg] if arg == "--direct-shadow" => 3,
         [arg] if arg == "--direct-shadow-haze" => 4,
+        [arg] if arg == "--direct-power" => 5,
+        [arg] if arg == "--direct-power-haze" => 6,
         _ => return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
-            "usage: photometric_error_budget [--direct | --direct-haze | --direct-shadow | --direct-shadow-haze]",
+            "usage: photometric_error_budget [--direct | --direct-haze | --direct-shadow | --direct-shadow-haze | --direct-power | --direct-power-haze]",
         ).into()),
     };
     let gate = CancelGate::new_clock_free();
@@ -281,10 +293,12 @@ fn main() -> Result<(), Box<dyn Error>> {
             ExecMode::Deterministic,
         );
         match mode {
-            1 => direct_reference(&cx, false, false),
-            2 => direct_reference(&cx, true, false),
-            3 => direct_reference(&cx, false, true),
-            4 => direct_reference(&cx, true, true),
+            1 => direct_reference(&cx, false, false, 1.0),
+            2 => direct_reference(&cx, true, false, 1.0),
+            3 => direct_reference(&cx, false, true, 1.0),
+            4 => direct_reference(&cx, true, true, 1.0),
+            5 => direct_reference(&cx, false, false, 73.5),
+            6 => direct_reference(&cx, true, false, 73.5),
             _ => calculate(&cx),
         }
     })

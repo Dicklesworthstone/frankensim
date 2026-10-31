@@ -19,7 +19,7 @@
 //! retained observer weights, not an assumed exact spectral normalization.
 //! Cell-boundary uncertainty widens the interval; grid discretization and
 //! measured-medium accuracy remain unknown. Supported source laws are
-//! isotropic, uniform cone, integer cosine powers 0..=64 and the full native
+//! isotropic, uniform cone, all admitted nonnegative cosine powers and the full native
 //! polar/azimuth tables, including asymmetric distributions. Angle and cutoff
 //! uncertainty encloses all branches. Table-query work is bounded; a broad
 //! angular box can fall back to the declared global intensity envelope. The
@@ -47,9 +47,9 @@ use visibility::{Visibility, VisibilityIndex};
 pub use visibility::MAX_VISIBILITY_TRIANGLES;
 
 /// Version of the represented-function and numerical-enclosure interpretation.
-/// Version 4 adds full polar/azimuth tables with series-bounded angular evaluation.
-/// Version 3's spectral-grid extinction and original scene owners are retained.
-pub const DIRECT_ENCLOSURE_SEMANTICS_VERSION: u32 = 4;
+/// Version 5 adds fractional and large cosine powers using a proved log remainder.
+/// Version 4's full angular tables and version 3's spectral grids remain in use.
+pub const DIRECT_ENCLOSURE_SEMANTICS_VERSION: u32 = 5;
 
 /// Why the unchanged nominal result has no numerical enclosure.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +62,7 @@ pub enum EnclosureUnavailable {
     MediumBudgetExceeded,
     /// The physical grid could not supply the requested spectral coefficients.
     PhysicalGridTransport,
-    /// This source needs an unsupported angular law (for example fractional powers).
+    /// The retained source law does not satisfy the numerical admission domain.
     SourceLaw {
         /// Source index in the original caller order.
         source: usize,
@@ -227,10 +227,11 @@ impl<'a, 'scene> EnclosedIlluminanceJob<'a, 'scene> {
 
 fn prepare<'field>(scene: &PhotometricScene<'field>, cx: &Cx<'_>) -> Result<Prepared<'field>, PhotometryError> {
     cx.checkpoint()?;
-    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.model.v4");
+    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.model.v5");
     hash.update(&DIRECT_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::INTERVAL_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::angle::ANGLE_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
+    hash.update(&fs_ivl::power::UNIT_POWER_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
     hash.update(&crate::photometry::PHOTOMETRY_SEMANTICS_VERSION.to_le_bytes());
     let medium = match PreparedMedium::prepare(&scene.medium, &mut hash, cx) {
@@ -259,7 +260,7 @@ fn prepare<'field>(scene: &PhotometricScene<'field>, cx: &Cx<'_>) -> Result<Prep
             AngularLaw::Cone { cosine_cutoff } => {
                 hash.update(&[1]); hash_float(&mut hash, *cosine_cutoff);
             }
-            AngularLaw::CosinePower { exponent, cosine_cutoff, .. } if *exponent <= 64.0 && exponent.fract() == 0.0 => {
+            AngularLaw::CosinePower { exponent, cosine_cutoff, .. } if exponent.is_finite() && *exponent >= 0.0 => {
                 hash.update(&[2]); hash_float(&mut hash, *exponent); hash_float(&mut hash, *cosine_cutoff);
             }
             AngularLaw::Table(table) => {
@@ -309,7 +310,7 @@ fn evaluate(scene: &PhotometricScene<'_>, cx: &Cx<'_>, probe: &IlluminanceProbe,
     };
     if !error.is_finite() { return Ok(no_claim(EnclosureUnavailable::ArithmeticRange)); }
     estimate.numerical = NumericalCertificate::enclosure(enclosure.lo(), enclosure.hi());
-    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.probe.v4");
+    let mut hash = DomainHasher::new("org.frankensim.photometry.direct-enclosure.probe.v5");
     hash.update(&model.0);
     for value in [probe.position_m.x, probe.position_m.y, probe.position_m.z, probe.normal.x, probe.normal.y, probe.normal.z] { hash_float(&mut hash, value); }
     cx.checkpoint()?;
@@ -381,9 +382,7 @@ fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3], cx: &Cx<
         AngularLaw::Isotropic => peak,
         AngularLaw::Cone { cosine_cutoff } => cutoff(peak, mu, *cosine_cutoff),
         AngularLaw::CosinePower { exponent, cosine_cutoff, .. } => {
-            let mut power = Interval::point(1.0);
-            let positive_mu = nonnegative(mu);
-            for _ in 0..(*exponent as u32) { power = nonnegative(power * positive_mu); }
+            let Some(power) = cosine_power_range(mu, *exponent) else { return Ok(None); };
             cutoff(nonnegative(peak * power), mu, *cosine_cutoff)
         }
         AngularLaw::Table(table) => angular::table_enclosure(
@@ -392,6 +391,19 @@ fn intensity_bound(source: &PhotometricSource, outgoing: [Interval; 3], cx: &Cx<
     };
     let result = nonnegative(Interval::point(source.emitted_flux_lm) * angular);
     Ok(finite(result).then_some(result))
+}
+
+/// Keep the established small-integer arithmetic exactly. Other admitted real
+/// exponents use bounded-work range reduction, never an exponent-sized loop.
+fn cosine_power_range(mu: Interval, exponent: f64) -> Option<Interval> {
+    let positive_mu = nonnegative(mu);
+    if (0.0..=64.0).contains(&exponent) && exponent.fract() == 0.0 {
+        let mut power = Interval::point(1.0);
+        for _ in 0..(exponent as u32) { power = nonnegative(power * positive_mu); }
+        Some(power)
+    } else {
+        fs_ivl::power::pow_unit(positive_mu, exponent)
+    }
 }
 
 fn cutoff(value: Interval, mu: Interval, boundary: f64) -> Interval {
@@ -420,3 +432,6 @@ fn hash_float(hash: &mut DomainHasher, value: f64) { hash.update(&value.to_bits(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod powers;
