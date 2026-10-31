@@ -10,6 +10,8 @@
 //! operator's uncertainty is correlated throughout its entire trajectory;
 //! conditional watt diagnostics are not final thermal-state error bars.
 
+pub mod refinement;
+
 use super::{CheckedSum, OpticalHeatingError};
 use crate::thermal_surface::{ThermalSurfaceError, planck_radiative_exchange_w_and_w_k};
 use crate::volumes::transport::VolumeTransportError;

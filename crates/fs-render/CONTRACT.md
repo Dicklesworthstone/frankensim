@@ -3732,3 +3732,23 @@ drives prior evolution, so its correlated errors do not become independent
 per-step errors or final temperature confidence intervals. The snapshot remains
 fixed within its declared temperature domains; dynamic optical resampling and
 refractive/polarized exchange are separate constitutive extensions.
+
+`VolumeRadiativeExchange::advance_refined` measures temporal discrepancy for
+that fixed sampled operator. Coarse/fine/finer trajectories all use the original
+native conduction, enthalpy and event owners. Two successive comparisons must
+meet the supplied h/T/radiative-energy tolerances, with actual native substep
+counts increasing on both refinements. A requested maximum dt that changes no
+CFL-limited steps cannot demonstrate convergence. Resolved discrepancies must
+decrease; roundoff only relaxes that ordering check, never the requested error
+allowances. A native-coordinate resolution floor refuses sub-ULP accuracy
+claims, and arbitrary caloric formation energy does not enlarge relative scales.
+
+Shared total substep and source-evaluation limits include discarded trials.
+Radiation accounts are compared as compensated interval increments before
+rounding away small new heat against historic fluence. The returned state is
+the finest actual native trajectory, with its conservation audit, measured
+discrepancies, observed order when resolved, and all-trial work totals. Its
+original continuation budget is restored. This is conditional time-convergence
+evidence; it neither resamples the operator nor certifies spatial, spectral,
+constitutive or Monte Carlo trajectory errors. Independent-operator ensembles
+would be required to assess sampling variability of the thermal trajectory.
