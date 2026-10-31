@@ -256,24 +256,24 @@ plan["pan-pipes/arpeggio"] = dict(family="pan-pipes", kind="arpeggio", title="G 
 
 # Vibrato, on these sung phrases only: the graded straight-tone cards carry none. It is a cricothyroid tension gesture on
 # the fold (`tension_modulation <rate_hz> <amplitude>`: all three fold stiffnesses scaled by 1 + a sin(2 pi r t)). Rate and
-# extent are the means of 50 professional singers: 5.9 Hz, and +-70 cents (half their mean max-min f0 of 139 cents;
+# extent are the means of 50 professional singers: 5.9 Hz, and +-69.5 cents (half their mean max-min f0 of 139 cents;
 # Prame's 1997 mean of 71 cents is quoted in the same paper) from Larrouy-Maestri, Magis and Morsomme 2014, J Voice,
-# doi:10.1016/j.jvoice.2013.10.019. The amplitude is derived, not fitted: f0 goes as sqrt(stiffness), so
-# a = 2 (2^(70/1200) - 1) = 0.082; the emergent extent is measured on each render, not iterated to the target. Measured on
-# the ten vowel cards (music_render at 92c3e3378): +-41 to +-68 cents, mean +-57, under the 70 the amplitude was derived for
-# (the fold's f0 goes as stiffness^0.48, not 0.5, and each vowel's tract loads the fold differently).
+# doi:10.1016/j.jvoice.2013.10.019. The amplitude is derived from the model's own measured exponent, not fitted: the ten
+# phrase cards were rendered at 0.082 (music_render at 1b45708e0), n_i = (2^(E_i/1200) - 1)/0.082 per card, mean n = 0.344
+# with no exclusions, so a = (2^(69.5/1200) - 1)/0.344 = 0.119, rendered once and not iterated. Measured at 0.119: +-71 cents
+# on average, 55 to 89 by vowel, because each vowel's tract loads the fold differently.
 VIBRATO = [
     "# VIBRATO (sung phrases only): tension_modulation <rate_hz> <amplitude>, a cricothyroid gesture on the fold.",
-    "#   5.9 Hz and +-70 cents: the means of 50 professional singers, Larrouy-Maestri, Magis and Morsomme 2014, J Voice,",
-    "#   doi:10.1016/j.jvoice.2013.10.019 (Prame 1997's mean extent, 71 cents, is quoted there). Amplitude a = 2 (2^(70/1200) - 1)",
-    "#   = 0.082 from f0 ~ sqrt(stiffness): derived, not fitted.",
-    "tension_modulation 5.9 0.082",
+    "#   5.9 Hz and +-69.5 cents: the means of 50 professional singers, Larrouy-Maestri, Magis and Morsomme 2014, J Voice,",
+    "#   doi:10.1016/j.jvoice.2013.10.019 (Prame 1997's mean extent, 71 cents, is quoted there). Amplitude a = (2^(69.5/1200) - 1)",
+    "#   / 0.344 = 0.119, from the mean exponent measured on the ten phrase cards at 0.082: derived, not fitted.",
+    "tension_modulation 5.9 0.119",
 ]
 VOICE_HOW = ("Each vowel is its own render (tract shape and fold settings are fixed within a render); consecutive "
              "vowels are joined with 80 ms crossfades, the later vowel entering after its own onset. The fold's "
-             "tension is modulated at 5.9 Hz by +-8.2 %, the vibrato rate and extent (+-70 cents) of 50 professional "
-             "singers (Larrouy-Maestri, Magis and Morsomme 2014). Measured on these renders, the pitch swings by "
-             "+-57 cents on average (41 to 68 by vowel), less than the +-70 the tension swing was derived for. "
+             "tension is modulated at 5.9 Hz by +-11.9 %, derived from the model's own response to give the vibrato "
+             "rate and extent (+-69.5 cents) of 50 professional singers (Larrouy-Maestri, Magis and Morsomme 2014). "
+             "Measured on these renders, the pitch swings by +-71 cents on average (55 to 89 by vowel). "
              "The graded straight-tone notes carry no vibrato.")
 
 
