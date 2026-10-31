@@ -129,8 +129,27 @@ budgeted, cancellable entry points).
    sums use the same error-free expansion as 1D integration, and fixed-slice DCT
    terms apply `2/n` before accumulation so a representable coefficient is not
    rejected merely because its unscaled prefix would overflow.
-8. `FourierSeries` exactly recovers trigonometric fixture modes,
-   differentiates `sin` to `cos`, and uses c₀ for the periodic integral.
+8. `FourierSeries` exactly recovers trigonometric fixture modes and uses c₀
+   for the periodic integral. Calculus acts on the continuous retained
+   polynomial: `differentiate` keeps the highest cosine/sine pair, including
+   the Nyquist sine that is invisible on the original sampling grid. Its
+   coefficients use double weight for interior modes and single weight for
+   the highest mode, so an imaginary highest coefficient is meaningful for
+   off-grid evaluation and subsequent derivatives. This replaces the former
+   odd-derivative collocation convention that discarded the highest mode.
+   `mul` computes the full nonlinear product with a shared real-FFT plan and
+   a power-of-two grid strictly above twice the sum of retained degrees.
+   Input highest-mode coefficients are halved when embedded as interior
+   modes. Strict padding preserves even the product's highest sine; all
+   sum/difference harmonics are retained, with no plateau cutoff. Only exact
+   zeros reduce the input degree, and coefficients above the known product
+   degree are set to zero. Work is O(N log N), storage O(N); constant factors
+   use direct coefficient scaling. Tests cover off-grid Nyquist derivatives
+   and Laplacians, second-harmonic generation without a spurious mean,
+   imaginary highest coefficients, unequal resolutions, the product rule,
+   and continuous Parseval energy. This is algebra of retained interpolants,
+   not a claim that input sampling resolved the original functions; the
+   classic operations do not add a budget or cancellation certificate.
 
 ## Error model
 Structured panics for programmer/modeling errors: non-finite or
@@ -145,8 +164,9 @@ a root query on the identically-zero polynomial (whose root set is a
 continuum), a detected root candidate whose local slope the fixed-grid
 fallback cannot resolve honestly, a physical
 derivative whose coefficient representation is not finite `f64`, malformed
-public `Cheb2` or `FourierSeries` fields, and non-power-of-two Fourier sample
-counts.
+public `Cheb2` or `FourierSeries` fields, non-power-of-two Fourier sample
+counts, an overflowing Fourier product grid size, and non-finite Fourier
+derivative coefficients, product coefficients, or FFT/product intermediates.
 `colleague_roots_budgeted` uses the same numerical path and returns typed
 `Shape`, `Numerical`, or `NonFinite` refusals for these colleague failures;
 the classic convenience API retains its panicking contract.
