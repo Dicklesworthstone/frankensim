@@ -12,6 +12,8 @@ use fs_qty::{DynViscosity, Length, Time};
 /// Original thermal laws in finite gas-wall storage, including latent plateaus.
 mod caloric;
 pub use caloric::{MaterialWallCaloric, WallCaloricConstraint, exchange_cell_with_heat_storage};
+#[cfg(feature = "material")]
+pub(crate) use caloric::exchange_cell_with_heat_storage_and_conductance;
 
 /// Stationary radial wall drag; its lost kinetic energy stays in the gas.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -450,8 +452,10 @@ pub fn exchange_cell(
     Ok(WallUpdate { momentum, energy, contact: updated, report })
 }
 
-/// One safeguarded monotone equation owner for authored and original-source
+/// One safeguarded bracketed equation owner for authored and original-source
 /// storage. A source without an exact tangent uses the same bounded bisection.
+/// State-dependent conductance need not be monotone; the accepted root still
+/// satisfies its original heat equation, without a uniqueness claim.
 fn solve_scalar(
     mut lo: f64,
     mut hi: f64,

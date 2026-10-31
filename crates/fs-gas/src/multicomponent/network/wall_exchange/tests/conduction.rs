@@ -1,7 +1,9 @@
 //! G1 series-resistance heat balance and G3 shared gas/solid material changes.
 use super::*;
 use crate::multicomponent::network::dissipation::tests::law;
-use crate::multicomponent::network::wall_exchange::{CircularLaminarWall, MaterialWallConduction};
+use crate::multicomponent::network::wall_exchange::{
+    CircularLaminarWall, MaterialWallConduction, WallConductionEvaluation,
+};
 use crate::multicomponent::wall_exchange::{MaterialWallCaloric, WallCaloricConstraint};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -258,6 +260,82 @@ fn common_material_capacity_and_conductivity_refresh_without_compounding_resista
         close(report.wall_energy_change_j, -3.0 * q, 3e-10);
         close(report.energy_residual_j, 0.0, 2e-10);
     }
+}
+
+#[test]
+fn implicit_conductivity_and_variable_capacity_share_the_same_endpoint_energy() {
+    let g = gas(1, false, 0.0);
+    for slope in [0.0, 0.1] {
+        let (transport, caloric) = source([0.2, slope], [1.0, 0.2], [1.0, 10.0]);
+        let material = MaterialWallConduction::new(
+            transport, Length::new(0.1), Area::new(0.25),
+        ).unwrap();
+        let make = |evaluation| {
+            let n = network(&g, &[0.0], true);
+            let wall = uniform_operator(&n, caloric.contact(5.0, 0.3, WallDrag::None).unwrap())
+                .with_material_heat_storage(
+                    vec![vec![Some(caloric.clone()); 2]], vec![Some(caloric.clone())], || false,
+                ).unwrap();
+            let wall = bind(wall, &n, &material.clone().with_evaluation(evaluation));
+            (n, wall)
+        };
+        // Manufacture an endpoint through independent exact storage integrals,
+        // then choose its positive physical interval from Fourier's series law.
+        // Hwall(T)=T+0.1T², Cgas=1/2; no fixture prescribes the solver result.
+        let final_tw = 4.6;
+        let heat = 7.5 - final_tw - 0.1 * final_tw * final_tw;
+        let final_tg = 2.0 + heat / 0.5;
+        let final_k = 0.2 + slope * final_tw;
+        let final_g = 1.0 / (1.0 / 0.3 + 0.1 / (0.25 * final_k));
+        let duration = Time::new(heat / (final_g * (final_tw - final_tg)));
+        let (mut n, mut wall) = make(WallConductionEvaluation::ImplicitEndpoint);
+        let initial = n.totals().absolute_energy(&g).unwrap();
+        let report = wall.advance_for(&mut n, duration, controls(), || false).unwrap();
+        for &contact in wall.branch_contacts(0).unwrap().iter().chain(wall.plenum_contacts()) {
+            close(wall_temperature(contact), final_tw, 2e-10);
+            close(conductance(contact), final_g, 2e-11);
+            let WallThermal::Lumped { heat_capacity_j_per_k, .. } = contact.thermal
+            else { panic!("source temperature coordinate expected") };
+            close(heat_capacity_j_per_k, 1.0 + 0.2 * final_tw, 5e-11);
+        }
+        close(g.primitive(n.branches()[0].cell(0).unwrap(), || false).unwrap().temperature,
+            final_tg, 2e-10);
+        close(report.heat_to_gas_j, 3.0 * heat, 3e-10);
+        close(report.wall_energy_change_j, -3.0 * heat, 3e-10);
+        close(n.totals().absolute_energy(&g).unwrap() - initial, 3.0 * heat, 3e-10);
+        close(report.maximum_thermal_residual_j, 0.0, 2e-11);
+        let (mut frozen_n, mut frozen_wall) = make(WallConductionEvaluation::InitialState);
+        let frozen = frozen_wall.advance_for(&mut frozen_n, duration, controls(), || false).unwrap();
+        if slope == 0.0 {
+            close(frozen.heat_to_gas_j, report.heat_to_gas_j, 3e-10);
+        } else {
+            assert!(frozen.heat_to_gas_j > report.heat_to_gas_j + 1e-3,
+                "cooling must update k inside the heat solve, not after it");
+        }
+    }
+}
+
+#[test]
+fn implicit_conductivity_requires_storage_and_preserves_a_disabled_film() {
+    let g = gas(1, false, 0.0);
+    let mut n = network(&g, &[0.0], false);
+    let (transport, caloric) = source([0.2, 0.1], [1.0, 0.2], [1.0, 10.0]);
+    let material = MaterialWallConduction::new(transport, Length::new(0.1), Area::new(0.25))
+        .unwrap().with_evaluation(WallConductionEvaluation::ImplicitEndpoint);
+    assert!(matches!(uniform_operator(&n, lumped()).with_material_conduction(
+        vec![vec![Some(material.clone()); 2]], vec![], || false,
+    ), Err(WallExchangeError::Invalid("implicit wall conductivity requires original caloric storage"))));
+    let zero = caloric.contact(5.0, 0.0, WallDrag::None).unwrap();
+    let wall = uniform_operator(&n, zero).with_material_heat_storage(
+        vec![vec![Some(caloric); 2]], vec![], || false,
+    ).unwrap();
+    let mut wall = bind(wall, &n, &material);
+    let before = fields(&n);
+    let report = wall.advance_for(&mut n, Time::new(1.0), controls(), || false).unwrap();
+    assert_eq!(fields(&n), before);
+    assert_eq!(wall.branch_contacts(0).unwrap(), [zero, zero]);
+    assert_eq!(report.heat_to_gas_j, 0.0);
+    assert_eq!(report.wall_energy_change_j, 0.0);
 }
 
 #[test]

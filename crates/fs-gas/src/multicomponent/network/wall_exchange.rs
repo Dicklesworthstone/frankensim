@@ -31,7 +31,7 @@ use transport::CircularWallTransport;
 #[cfg(feature = "material")]
 mod conduction;
 #[cfg(feature = "material")]
-pub use conduction::{MaterialWallConduction, PhaseWallConductionSource};
+pub use conduction::{MaterialWallConduction, PhaseWallConductionSource, WallConductionEvaluation};
 #[cfg(feature = "material")]
 use conduction::BoundWallConduction;
 
@@ -425,6 +425,20 @@ impl<'law> NetworkWallOperator<'law> {
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<crate::multicomponent::wall_exchange::WallUpdate, WallExchangeError> {
+        #[cfg(feature = "material")]
+        if self.implicit_conduction(index) {
+            let source = self.caloric[index].as_ref().ok_or(
+                WallExchangeError::Invalid("implicit conductivity lost its caloric source"),
+            )?;
+            // Every storage proposal retains this half's original gas film;
+            // the callback composes it with k at that very same proposed state.
+            let mut conductance = |candidate| self.endpoint_conductance(index, candidate);
+            return crate::multicomponent::wall_exchange::
+                exchange_cell_with_heat_storage_and_conductance(
+                    &self.gas, state, volume, duration, contact, source,
+                    Some(&mut conductance), controls, cancelled,
+                );
+        }
         #[cfg(feature = "material")]
         let contact = self.conduction_contact(index, contact)?;
         let update = if let Some(source) = &self.caloric[index] {

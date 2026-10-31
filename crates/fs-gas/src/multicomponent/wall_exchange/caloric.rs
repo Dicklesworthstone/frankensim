@@ -319,12 +319,34 @@ pub fn exchange_cell_with_heat_storage(
     contact: WallContact,
     wall: &MaterialWallCaloric<'_>,
     control: WallControl,
+    cancelled: impl FnMut() -> bool,
+) -> Result<WallUpdate, WallExchangeError> {
+    exchange_cell_with_heat_storage_and_conductance(
+        gas, state, volume_m3, duration, contact, wall, None, control, cancelled,
+    )
+}
+
+/// The same finite-storage owner with an optional source-owned endpoint
+/// conductance. Its callback reads a proposed wall state, whose conductance
+/// field always retains the original film. No candidate is published here.
+/// The bracket uses passive storage limits, not a frozen-flux bound that could
+/// exclude roots when conductivity increases during heating or melting.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn exchange_cell_with_heat_storage_and_conductance(
+    gas: &MixtureGas,
+    state: Cell<'_>,
+    volume_m3: f64,
+    duration: Time,
+    contact: WallContact,
+    wall: &MaterialWallCaloric<'_>,
+    mut conductance: Option<&mut dyn FnMut(WallContact) -> Result<f64, WallExchangeError>>,
+    control: WallControl,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<WallUpdate, WallExchangeError> {
     poll(&mut cancelled)?;
     let contact = wall.bind_contact(contact)?;
     let initial_wall = wall.temperature_k(contact.thermal)?;
-    let conductance_w_per_k = match contact.thermal {
+    let authored_conductance = match contact.thermal {
         WallThermal::Lumped {
             conductance_w_per_k,
             ..
@@ -335,6 +357,18 @@ pub fn exchange_cell_with_heat_storage(
         } => conductance_w_per_k,
         _ => unreachable!("binding admitted finite storage"),
     };
+    let state_dependent = conductance.is_some();
+    let mut conductance_at = |candidate: WallContact| {
+        let value = match &mut conductance {
+            Some(resolve) => resolve(candidate)?,
+            None => authored_conductance,
+        };
+        if !nonnegative(value) {
+            return Err(WallExchangeError::Invalid("material wall endpoint conductance"));
+        }
+        Ok(value)
+    };
+    let conductance_w_per_k = conductance_at(contact)?;
     // Reuse the original radial loss and gas sensible-heating owner exactly.
     let mut update = exchange_cell(
         gas,
@@ -348,7 +382,7 @@ pub fn exchange_cell_with_heat_storage(
         control,
         &mut cancelled,
     )?;
-    update.contact = contact;
+    update.contact = with_conductance(contact, conductance_w_per_k);
     let gas_at = |energy, cancelled: &mut dyn FnMut() -> bool| {
         gas.primitive(
             Cell {
@@ -392,20 +426,21 @@ pub fn exchange_cell_with_heat_storage(
         Ok(change)
     };
     // Source-energy bounds also retain exact latent intervals, whose inventory
-    // is not determined by temperature. Passive gas and held-flux bounds keep
-    // weak exchanges from bisecting a much larger source domain unnecessarily.
+    // is not determined by temperature. A held-flux bound is valid only for
+    // fixed conductance: an endpoint material law can increase that flux.
+    let flux_limit = if state_dependent { f64::INFINITY } else { initial_flux.abs() };
     let (mut low, mut high) = if initial_wall > initial_gas.temperature {
         (
             0.0,
             gas_change_at(initial_wall.min(domain.maximum_temperature))?
                 .min(wall_high)
-                .min(initial_flux),
+                .min(flux_limit),
         )
     } else {
         (
             gas_change_at(initial_wall.max(domain.minimum_temperature))?
                 .max(wall_low)
-                .max(initial_flux),
+                .max(-flux_limit),
             0.0,
         )
     };
@@ -430,12 +465,19 @@ pub fn exchange_cell_with_heat_storage(
             .caloric(state.partial_densities, gas_state.temperature)?
             .1
             * volume_m3;
-        let flux = integrated * (wall_state.temperature_k - gas_state.temperature);
+        let endpoint_integrated = conductance_at(wall_state.contact)? * duration.value();
+        let flux = endpoint_integrated * (wall_state.temperature_k - gas_state.temperature);
         let residual = heat - flux;
-        let slope = wall_state
-            .temperature_slope_k_per_j
-            .map(|wall_slope| 1.0 + integrated * (wall_slope + 1.0 / gas_capacity));
+        // A material source supplies values, not an exact derivative of G.
+        // Do not pass the frozen-G tangent off as the nonlinear Jacobian.
+        let slope = if state_dependent {
+            None
+        } else {
+            wall_state.temperature_slope_k_per_j
+                .map(|wall_slope| 1.0 + integrated * (wall_slope + 1.0 / gas_capacity))
+        };
         if !positive(gas_capacity)
+            || !nonnegative(endpoint_integrated)
             || slope.is_some_and(|slope| !positive(slope))
             || !residual.is_finite()
             || !flux.is_finite()
@@ -454,12 +496,15 @@ pub fn exchange_cell_with_heat_storage(
     }
     let actual_gas = gas_at(energy, &mut cancelled)?;
     let actual_wall = wall.after(contact, -actual_heat)?;
+    let actual_conductance = conductance_at(actual_wall.contact)?;
+    let actual_integrated = actual_conductance * duration.value();
     let wall_change = actual_wall.energy_change_j;
     let energy_residual = actual_heat + wall_change;
     let thermal_residual =
-        actual_heat - integrated * (actual_wall.temperature_k - actual_gas.temperature);
+        actual_heat - actual_integrated * (actual_wall.temperature_k - actual_gas.temperature);
     let tolerance = control.tolerance(actual_heat.abs().max(wall_change.abs()));
-    if !energy_residual.is_finite()
+    if !nonnegative(actual_integrated)
+        || !energy_residual.is_finite()
         || !thermal_residual.is_finite()
         || energy_residual.abs() > tolerance
         || thermal_residual.abs() > tolerance
@@ -469,7 +514,7 @@ pub fn exchange_cell_with_heat_storage(
             thermal_residual_j: thermal_residual,
         });
     }
-    update.contact = actual_wall.contact;
+    update.contact = with_conductance(actual_wall.contact, actual_conductance);
     update.energy = energy;
     update.report.heat_to_gas_j = actual_heat;
     update.report.wall_energy_change_j = wall_change;
@@ -478,4 +523,13 @@ pub fn exchange_cell_with_heat_storage(
     update.report.iterations = iterations;
     poll(&mut cancelled)?;
     Ok(update)
+}
+
+fn with_conductance(mut contact: WallContact, value: f64) -> WallContact {
+    match &mut contact.thermal {
+        WallThermal::Lumped { conductance_w_per_k, .. }
+        | WallThermal::Caloric { conductance_w_per_k, .. } => *conductance_w_per_k = value,
+        _ => unreachable!("binding admitted finite storage"),
+    }
+    contact
 }

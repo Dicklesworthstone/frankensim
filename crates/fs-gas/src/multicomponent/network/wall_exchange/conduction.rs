@@ -19,12 +19,14 @@ pub use phase::PhaseWallConductionSource;
 /// represents ONLY the gas-side film. This adds their resistances in series;
 /// it never adds a second wall mass, heat supply, or caloric law.
 ///
-/// Conductivity is sampled at the actual wall state at the beginning of
-/// each source half and frozen for that half's conservative implicit exchange.
+/// By default conductivity is sampled at the actual wall state at the beginning
+/// of each source half and frozen for that half's conservative implicit exchange.
 /// The final wall state must remain in the original source domain. This
 /// is a first-order local constitutive approximation, not an exact nonlinear
 /// through-wall profile. Refine the interval and wall discretization when its
 /// spatial or temporal temperature variation matters.
+/// [`WallConductionEvaluation::ImplicitEndpoint`] instead closes conductivity
+/// on the proposed caloric wall state inside the same backward-Euler equation.
 ///
 /// The temperature-source constructor admits temperature-coordinate contacts.
 /// The phase-source constructor consumes the same enthalpy chart as the finite
@@ -36,6 +38,19 @@ pub struct MaterialWallConduction {
     length: Length,
     area: Area,
     length_over_area: f64,
+    evaluation: WallConductionEvaluation,
+}
+
+/// State at which the original material conductivity enters the heat equation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WallConductionEvaluation {
+    /// Sample at the start of each source half; retain its constitutive lag.
+    InitialState,
+    /// Resolve k(T(h),phi(h)) at every proposed endpoint using the original
+    /// caloric source and scalar heat solve. Gas film and drag remain frozen.
+    /// All trial states must lie in the selected conductivity source domain.
+    /// Nonlinear conductivity does not imply uniqueness of the admitted root.
+    ImplicitEndpoint,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -79,7 +94,21 @@ impl MaterialWallConduction {
             length,
             area,
             length_over_area,
+            evaluation: WallConductionEvaluation::InitialState,
         })
+    }
+
+    /// Select the constitutive time evaluation without changing material data,
+    /// geometry, gas film, storage or energy ownership. Implicit evaluation
+    /// requires an original material caloric binding when attached to a network.
+    pub fn with_evaluation(mut self, evaluation: WallConductionEvaluation) -> Self {
+        self.evaluation = evaluation;
+        self
+    }
+
+    /// Constitutive time evaluation used in the native heat equation.
+    pub const fn evaluation(&self) -> WallConductionEvaluation {
+        self.evaluation
     }
 
     /// Original prepared temperature-only source, when that form is selected.
@@ -199,6 +228,13 @@ impl NetworkWallOperator<'_> {
         for (index, layer) in branches.into_iter().flatten().chain(plenums).enumerate() {
             poll(&mut cancelled)?;
             if let Some(layer) = layer {
+                if layer.evaluation == WallConductionEvaluation::ImplicitEndpoint
+                    && self.caloric[index].is_none()
+                {
+                    return Err(WallExchangeError::Invalid(
+                        "implicit wall conductivity requires original caloric storage",
+                    ));
+                }
                 let (_, film) = layer.conductance(
                     self.contacts[index].thermal, self.caloric[index].as_ref(),
                 )?;
@@ -272,6 +308,28 @@ impl NetworkWallOperator<'_> {
             set_conductance(&mut contact, combined);
         }
         Ok(contact)
+    }
+
+    pub(super) fn implicit_conduction(&self, index: usize) -> bool {
+        self.conduction.as_ref().and_then(|all| all[index].as_ref())
+            .is_some_and(|binding| {
+                binding.layer.evaluation == WallConductionEvaluation::ImplicitEndpoint
+            })
+    }
+
+    pub(super) fn endpoint_conductance(
+        &self,
+        index: usize,
+        contact: WallContact,
+    ) -> Result<f64, WallExchangeError> {
+        let contact = self.conduction_contact(index, contact)?;
+        match contact.thermal {
+            WallThermal::Lumped { conductance_w_per_k, .. }
+            | WallThermal::Caloric { conductance_w_per_k, .. } => Ok(conductance_w_per_k),
+            _ => Err(WallExchangeError::Invalid(
+                "implicit conductivity requires finite caloric storage",
+            )),
+        }
     }
 
     pub(super) fn admit_conduction_endpoint(

@@ -1,7 +1,7 @@
 //! G1 original latent inventory and G3 phase-source changes in real gas exchange.
 use super::*;
 use crate::multicomponent::network::wall_exchange::{
-    MaterialWallConduction, PhaseWallConductionSource,
+    MaterialWallConduction, PhaseWallConductionSource, WallConductionEvaluation,
 };
 use crate::multicomponent::wall_exchange::MaterialWallCaloric;
 use fs_evidence::ValidityDomain;
@@ -128,6 +128,14 @@ fn wall(
     source: &Arc<PhaseWallConductionSource>,
     h: f64,
 ) -> NetworkWallOperator<'static> {
+    wall_with_evaluation(n, source, h, WallConductionEvaluation::InitialState)
+}
+fn wall_with_evaluation(
+    n: &MixtureNetwork1d,
+    source: &Arc<PhaseWallConductionSource>,
+    h: f64,
+    evaluation: WallConductionEvaluation,
+) -> NetworkWallOperator<'static> {
     let caloric =
         MaterialWallCaloric::from_phase_curve(source.curve().clone(), cell(h), [0.0, 19.0])
             .unwrap();
@@ -138,7 +146,8 @@ fn wall(
         Length::new(0.1),
         Area::new(0.25),
     )
-    .unwrap();
+    .unwrap()
+    .with_evaluation(evaluation);
     uniform_operator(n, contact)
         .with_material_heat_storage(
             n.branches()
@@ -188,6 +197,122 @@ fn hot_network(g: &MixtureGas, two_species: bool) -> MixtureNetwork1d {
     )
     .unwrap();
     MixtureNetwork1d::new(vec![branch], vec![], vec![], || false).unwrap()
+}
+
+#[test]
+fn implicit_phase_conductivity_matches_independent_heat_roots_in_both_directions() {
+    let g = gas(1, false, 0.0);
+    for scale in [1.0, 3.0] {
+        for (initial_h, initial_tg, dt) in [(5.5, 2.0, 2.0), (4.0, 8.0, 0.2)] {
+            let source = source(scale, 1.0, initial_h);
+            let mut n = if initial_tg == 2.0 {
+                network(&g, &[0.0], true)
+            } else {
+                hot_network(&g, false)
+            };
+            let count = if initial_tg == 2.0 { 3.0 } else { 2.0 };
+            let mut wall = wall_with_evaluation(
+                &n, &source, initial_h, WallConductionEvaluation::ImplicitEndpoint,
+            );
+            let initial = n.totals().absolute_energy(&g).unwrap() + count * initial_h;
+            let (mut h, mut tg) = (initial_h, initial_tg);
+            for step in 0..2 {
+                // On the plateau Tw=5, Cgas=1/2, and Gsolid=a-bQ.
+                // Eliminating both storages and the two series resistances
+                // gives -A Q²+B Q-C=0. This stable root is independent of
+                // the production heat-residual/bisection implementation.
+                let a = 2.5 * scale * (0.1 + 0.19 * (h - 4.0));
+                let b = 2.5 * scale * 0.19;
+                let difference = 5.0 - tg;
+                let qa = b * (1.0 + dt * 0.3 / 0.5);
+                let qb = 0.3 + a + dt * 0.3 * (a / 0.5 + b * difference);
+                let qc = dt * 0.3 * a * difference;
+                let heat = 2.0 * qc / (qb + (qb * qb - 4.0 * qa * qc).sqrt());
+                if scale == 1.0 && initial_tg == 8.0 && step == 0 {
+                    let held_flux = dt * combined(0.1) * difference;
+                    assert!(heat.abs() > held_flux.abs(),
+                        "a frozen-flux bracket would exclude this physical root");
+                }
+                h -= heat;
+                tg += heat / 0.5;
+                assert!((4.0..14.0).contains(&h));
+                let report = wall.advance_for(&mut n, Time::new(dt), controls(), || false)
+                    .unwrap();
+                let endpoint_g = combined(scale * (0.1 + 0.19 * (h - 4.0)));
+                for &contact in wall.branch_contacts(0).unwrap().iter()
+                    .chain(wall.plenum_contacts())
+                {
+                    close(energy(contact), h, 5e-10);
+                    let WallThermal::Caloric { conductance_w_per_k, .. } = contact.thermal
+                    else { panic!("original latent inventory required") };
+                    close(conductance_w_per_k, endpoint_g, 5e-11);
+                }
+                close(g.primitive(n.branches()[0].cell(0).unwrap(), || false)
+                    .unwrap().temperature, tg, 1e-9);
+                close(report.heat_to_gas_j, count * heat, 1e-9);
+                close(report.wall_energy_change_j, -count * heat, 1e-9);
+                close(report.maximum_thermal_residual_j, 0.0, 1e-9);
+                close(n.totals().absolute_energy(&g).unwrap() + count * h, initial, 1e-9);
+                assert_eq!(wall.branch_conduction(0, 0).unwrap().evaluation(),
+                    WallConductionEvaluation::ImplicitEndpoint);
+            }
+        }
+    }
+}
+
+#[test]
+fn implicit_phase_source_work_and_late_cancellation_refuse_atomically() {
+    let g = gas(1, false, 0.0);
+    let source = source(1.0, 1.0, 4.0);
+    let make = || {
+        let n = hot_network(&g, false);
+        let wall = wall_with_evaluation(
+            &n, &source, 4.0, WallConductionEvaluation::ImplicitEndpoint,
+        );
+        (n, wall)
+    };
+    let (mut reference, mut reference_wall) = make();
+    let mut polls = 0;
+    let expected = reference_wall.advance_for(&mut reference, Time::new(0.2), controls(), || {
+        polls += 1;
+        false
+    }).unwrap();
+    let (mut n, mut wall) = make();
+    let before = fields(&n);
+    let contacts = wall.branch_contacts(0).unwrap().to_vec();
+    let mut one_iteration = controls();
+    one_iteration.maximum_iterations = 1;
+    assert_eq!(wall.advance_for(&mut n, Time::new(0.2), one_iteration, || false),
+        Err(WallExchangeError::TemperatureIterations));
+    assert_eq!(fields(&n), before);
+    assert_eq!(wall.branch_contacts(0).unwrap(), contacts);
+    assert_eq!(wall.last_report(), None);
+    let mut count = 0;
+    assert_eq!(wall.advance_for(&mut n, Time::new(0.2), controls(), || {
+        count += 1;
+        count == polls
+    }), Err(WallExchangeError::Cancelled));
+    assert_eq!(fields(&n), before);
+    assert_eq!(wall.branch_contacts(0).unwrap(), contacts);
+    assert_eq!(wall.last_report(), None);
+    assert_eq!(wall.advance_for(&mut n, Time::new(0.2), controls(), || false).unwrap(), expected);
+    assert_eq!(fields(&n), fields(&reference));
+    assert_eq!(wall.branch_contacts(0), reference_wall.branch_contacts(0));
+
+    // The card includes a broader alternative claim; implicit evaluation must
+    // still refuse when the originally pinned phase source cannot support it.
+    let narrow = self::source(1.0, 0.001, 4.0);
+    let mut n = hot_network(&g, false);
+    let mut wall = wall_with_evaluation(
+        &n, &narrow, 4.0, WallConductionEvaluation::ImplicitEndpoint,
+    );
+    let before = fields(&n);
+    let contacts = wall.branch_contacts(0).unwrap().to_vec();
+    assert!(matches!(wall.advance_for(&mut n, Time::new(0.2), controls(), || false),
+        Err(WallExchangeError::PhaseConduction(_))));
+    assert_eq!(fields(&n), before);
+    assert_eq!(wall.branch_contacts(0).unwrap(), contacts);
+    assert_eq!(wall.last_report(), None);
 }
 
 #[test]
@@ -424,6 +549,15 @@ fn late_cancellation_preserves_phase_inventory_and_retry_replays_exactly() {
 
 #[test]
 fn phase_conductivity_reaches_native_reaction_rates_and_closed_energy() {
+    for evaluation in [
+        WallConductionEvaluation::InitialState,
+        WallConductionEvaluation::ImplicitEndpoint,
+    ] {
+        reaction_feedback(evaluation);
+    }
+}
+
+fn reaction_feedback(evaluation: WallConductionEvaluation) {
     use crate::chemistry::IsochoricKineticsSolve;
     use crate::multicomponent::network::reactive::{ReactingNetwork1d, ReactiveStepControl};
     use fs_thermochem::kinetics::{
@@ -469,7 +603,7 @@ fn phase_conductivity_reaches_native_reaction_rates_and_closed_energy() {
     for scale in [0.1, 10.0] {
         let source = source(scale, 1.0, 5.0);
         let n = hot_network(&g, true);
-        let mut wall = wall(&n, &source, 5.0);
+        let mut wall = wall_with_evaluation(&n, &source, 5.0, evaluation);
         let initial = n.totals().absolute_energy(&g).unwrap() + 2.0 * 5.0;
         let initial_mass = n.totals().mass();
         let mut flow = ReactingNetwork1d::new(n, mechanism.clone(), chemistry, || false).unwrap();

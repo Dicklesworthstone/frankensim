@@ -14,8 +14,9 @@ transport still supplies the film from the actual gas mixture, density, T and p;
 other contacts retain their originally authored film. The operator preserves
 that separate film so repeated steps do not compound the same solid resistance.
 
-Material k is evaluated at the actual starting wall state of each source
-half, then frozen for the original conservative implicit heat solve. The final
+In the default `WallConductionEvaluation::InitialState` mode, material k is
+evaluated at the actual starting wall state of each source half, then frozen
+for the original conservative implicit heat solve. The final
 wall state must remain inside the original source domain. Each next half reads
 the evolved wall temperature, including the existing reaction/wave composition.
 Finite wall storage remains exclusively with the original contact and optional
@@ -25,6 +26,18 @@ wall temperatures and reports. Source lines, card identity and geometry remain
 inspectable. The prepared temperature-only source refreshes without database
 queries or allocation; phase-source refresh uses the original scalar resolver
 with its selected claim pinned, retaining each query's evidence and conditions.
+
+`MaterialWallConduction::with_evaluation(ImplicitEndpoint)` instead resolves
+the original conductivity at every proposed caloric wall endpoint inside the
+same bounded scalar heat equation. It requires the existing material heat-storage
+binding and supports both temperature-dependent and phase-dependent sources.
+The retained gas film remains separate and frozen over the source half. Candidate
+storage, endpoint conductivity and actual represented heat must satisfy the same
+conservative backward-Euler transaction. Increasing conductivity does not inherit
+the fixed-conductance heat-flux bracket. Without an exact conductivity tangent the
+solver uses bounded bisection; nonlinear conductivity carries no uniqueness claim.
+Every source evaluation in the required heat bracket must be supported. Source,
+work-budget and cancellation refusal preserve all accepted state.
 
 `MaterialWallConduction::from_phase_source` uses `PhaseWallConductionSource`
 and the same `MaterialWallCaloric::from_phase_curve` chart to derive BOTH T(h)
@@ -37,8 +50,10 @@ coordinates, a different chart, source extrapolation or an unavailable pinned
 claim refuse before state publication. Temperature-only sources continue to
 refuse energy-coordinate walls. Inspectors distinguish the two source forms.
 
-This is a fixed-geometry, lumped-wall approximation with first-order
-constitutive lag, not a resolved nonlinear through-wall temperature profile.
+The initial-state mode retains constitutive lag. Implicit endpoint evaluation
+closes that local lag but remains a first-order, fixed-geometry, lumped-wall
+backward-Euler approximation with frozen gas-film/drag coefficients; neither
+mode resolves a through-wall temperature field.
 For centre-temperature storage, the conduction length is the surface-to-centre
 distance. Adiabatic contacts refuse. Original phase-aware spatial and mechanical
 owners remain responsible for moving fronts, wall support, shrinkage and liquid
@@ -1896,10 +1911,11 @@ Developed pipe-wall transport continues to query current gas composition,
 viscosity and conductivity; it replaces only drag/conductance, preserving the
 original wall source and evolving stored energy.
 
-The source step solves one monotone backward-Euler equation in transferred heat:
+The source step solves one bracketed backward-Euler equation in transferred heat:
 `Q = dt G [T_wall(e0-Q/m)-T_gas(E0+Q/V)]`. The original gas calorics recover gas
 temperature and the original wall law supplies T(h/u), including exact latent
-plateaus. The same safeguarded scalar owner uses exact source tangents when
+plateaus. Monotonicity belongs to the fixed-conductance case; a source-dependent
+endpoint conductance makes no uniqueness claim. The same safeguarded scalar owner uses exact source tangents when
 available and bisection otherwise. No apparent capacity or separate latent-heat
 source is added. Actual
 represented gas energy, wall storage and heat-flux residuals must all meet the
@@ -1923,6 +1939,14 @@ and replay, continuing molecular/wave energy conservation, and the original
 borrowed solid material chart in a reacting network with current gas-card losses.
 Native execution remains unverified in the authoring worker: the unchanged
 asupersync dependency was SIGKILLed during code generation under its memory cap.
+
+Four further G1/G3/G4 cases exercise implicit material conductivity against
+independent latent-plateau quadratic roots in both heat directions, a valid root
+beyond the frozen-flux bound, variable-capacity endpoint energy, source-only
+changes, constant-conductance and disabled-film limits, continuation and
+source/work/cancellation refusal. The reacting-network regression runs both time
+evaluations. These new Rust cases remain unexecuted; six changed Rust files
+passed pinned syntax parsing and scoped whitespace checks.
 
 
 ## Pressure-actuated network valves
