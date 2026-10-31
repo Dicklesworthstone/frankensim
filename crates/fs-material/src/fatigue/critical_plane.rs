@@ -30,6 +30,9 @@ pub mod findley;
 /// Shear-mode Fatemi-Socie life on a declared closed mechanical cycle.
 pub mod fatemi_socie;
 
+/// Variable-amplitude finite-plane strain-life accumulation.
+pub mod miner;
+
 mod shear_path;
 
 use super::strain_life::{StrainLifeCurve, StrainLifeMeanStress};

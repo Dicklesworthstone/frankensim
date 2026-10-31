@@ -1,5 +1,30 @@
 # fs-material — CONTRACT
 
+## Variable-amplitude critical-plane strain-life accumulation
+
+`fatigue::critical_plane::miner::CriticalPlaneMiner` projects each accepted
+stress/total-mechanical-strain tensor onto every explicitly declared fixed plane
+and delegates each signed normal history to the existing bounded
+rainflow/Palmgren-Miner strain-life owner. The selected plane maximizes total
+accumulated Miner damage over the complete observation; exact damage ties use
+maximum strain amplitude and then declared plane order. No full tensor history
+is retained.
+
+Uncorrected counting accepts arbitrary finite simultaneous normal stress while
+using the projected strain history. Morrow and Smith-Watson-Topper retain the
+existing paired-history requirement: stress/strain reversals must remain
+coincident, and phase lag or relaxation that would hide stress extrema refuses
+instead of inventing a scalar cycle correction. Pushes and finalization are
+transactional across the whole plane bank. Sample count and samples-times-planes
+projection work are bounded before publication.
+
+This is a finite-plane, variable-amplitude multiaxial fatigue estimate. It does
+not optimize over the continuum sphere, infer extrema between observations,
+model sequence interaction beyond linear Miner summation, establish cyclic
+stabilization, evolve stiffness/cracks, or qualify component life. Calibration
+scope, temperature, process, surface/environment and source evidence retain
+their existing strain-life meaning.
+
 ## Fatemi–Socie shear-strain life on native tensor cycles
 
 `fatigue::critical_plane::fatemi_socie` evaluates the original
