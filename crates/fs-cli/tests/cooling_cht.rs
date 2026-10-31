@@ -991,6 +991,82 @@ mod evolving_materials {
     }
 
     #[test]
+    fn compact_junction_and_source_caloric_storage_share_one_physical_heat_ledger() {
+        // Three unit voxels: original source solid / authored compact junction /
+        // original source liquid. The compact voxel has no source-law material.
+        let input = r#"{
+          "schema":"frankensim.cooling-cht.v1","size_m":[3,1,1],"voxel_m":1,
+          "fluid":{"mode":"temperature-dependent","temperature_axis":"T",
+            "pack":"compact-caloric-fluid.fsmcdpk","viscosity":"dynamic",
+            "state":[{"name":"T","value":"300 K","kind":"absolute-temperature"},
+              {"name":"pressure","value":"100 kPa","kind":"pressure"}]},
+          "fluid_enthalpy":{"basis":"isobaric-cp","pressure_axis":"pressure",
+            "minimum_temperature_k":290,"maximum_temperature_k":350,"maximum_flux_defect_w":1e-10,
+            "transient_controls":{"maximum_passes_per_step":80,"maximum_energy_solves":200,
+              "temperature_tolerance_k":1e-9,"maximum_storage_defect_w":1e-9,
+              "maximum_energy_closure_j":1e-8,"temperature_relaxation":1}},
+          "materials":[{"name":"board","source":{"mode":"temperature-dependent",
+            "temperature_axis":"T","storage_temperature_range_k":[290,350],
+            "pack":"compact-caloric-solid.fsmcdpk",
+            "state":[{"name":"T","value":"300 K","kind":"absolute-temperature"},
+              {"name":"pressure","value":"100 kPa","kind":"pressure"}]}}],
+          "solids":[{"material":"board","min_m":[0,0,0],"max_m":[1,1,1]}],
+          "components":[{"name":"package","min_m":[1,0,0],"max_m":[2,1,1],
+            "board_side":"x-","power_w":1,"heat_capacity_j_k":2,
+            "junction_to_case_k_w":1,"junction_to_board_k_w":1}],
+          "probes":[{"name":"solid","at_m":[0.5,0.5,0.5]},
+            {"name":"junction","at_m":[1.5,0.5,0.5]},
+            {"name":"fluid","at_m":[2.5,0.5,0.5]}],
+          "transient":{"flow":"unsteady","scheme":"bdf2","time_step_s":0.5,"steps":4,
+            "initial_temperature_k":300,
+            "solid_storage":{"temperature_tolerance_k":1e-9,"storage_tolerance_j":1e-9}}
+        }"#;
+        let path = scratch("compact-caloric-storage.json", input);
+        let fluid_path = path.with_file_name("compact-caloric-fluid.fsmcdpk");
+        let solid_path = path.with_file_name("compact-caloric-solid.fsmcdpk");
+        let fluid = pack_with_caloric(true, 0.0, 350.0, 1.0, 0.04);
+        let solid = pack_with_caloric(false, 0.05, 350.0, 1.0, 0.4);
+        std::fs::write(&fluid_path, &fluid).unwrap();
+        std::fs::write(&solid_path, &solid).unwrap();
+        let (code, result, error) = run(&path);
+        assert_eq!(code, 0, "{error}");
+        let probes = result.get("probes").and_then(J::as_array).unwrap();
+        let solid_rise = f(&probes[0], &["temperature_k"]) - 300.0;
+        let junction_rise = f(&probes[1], &["temperature_k"]) - 300.0;
+        let fluid_rise = f(&probes[2], &["temperature_k"]) - 300.0;
+        assert!(junction_rise > solid_rise && solid_rise > 0.0);
+        assert!(junction_rise > fluid_rise && fluid_rise > 0.0);
+        let solid_heat = 4.0 * solid_rise + 0.4 * solid_rise * solid_rise;
+        let junction_heat = 2.0 * junction_rise;
+        let fluid_heat = 2.0 * fluid_rise + 0.02 * fluid_rise * fluid_rise;
+        assert!((solid_heat + junction_heat + fluid_heat - 2.0).abs() < 1e-7);
+        let records = result.path(&["transient", "records"]).and_then(J::as_array).unwrap();
+        assert_eq!(records.len(), 4);
+        for record in records {
+            assert!((f(record, &["source_energy_j"]) - 0.5).abs() < 1e-12);
+            assert!((f(record, &["stored_energy_change_j"]) - 0.5).abs() < 1e-8);
+            assert!(f(record, &["closure_j"]).abs() <= 1e-8);
+        }
+        let feedback = result.get("material_feedback").unwrap();
+        assert_eq!(feedback.str_field("solid_coupling"), Some("joint-implicit-endpoint"));
+        assert_eq!(f(feedback, &["solid_endpoint", "cells"]), 1.0);
+        assert_eq!(f(feedback, &["fluid_endpoint", "cells"]), 1.0);
+        assert_eq!(
+            result.path(&["material_inputs", "solids"]).and_then(J::as_array).unwrap().len(), 1
+        );
+        let sources = feedback.path(&["solid_storage", "sources"]).and_then(J::as_array).unwrap();
+        assert_eq!(sources.len(), 1);
+        assert_eq!(f(&sources[0], &["index"]), 0.0);
+        let solid_records = feedback.path(&["solid_storage", "records"]).and_then(J::as_array).unwrap();
+        let reported_solid: f64 = solid_records.iter()
+            .map(|record| f(record, &["solid_stored_energy_change_j"])).sum();
+        assert!((reported_solid - solid_heat).abs() < 1e-8);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), input);
+        assert_eq!(std::fs::read(&fluid_path).unwrap(), fluid);
+        assert_eq!(std::fs::read(&solid_path).unwrap(), solid);
+    }
+
+    #[test]
     fn exact_isobaric_cp_uses_original_steady_sources_and_refuses_ambiguous_ingress() {
         let bytes = pack_with_cp_slope(true, 0.0, 310.0, 0.01);
         let liquid = CALORIC_LIQUID.replace("PACK", "exact-cp-steady.fsmcdpk");

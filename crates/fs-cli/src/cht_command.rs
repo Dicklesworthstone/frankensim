@@ -1388,20 +1388,23 @@ impl Scene {
                     "temperature-dependent CHT requires a source-backed fluid in temperature-dependent mode",
                 ));
             }
-            if !components.is_empty() {
+            if !components.is_empty() && root.get("transient").is_none() {
                 return Err(bad(
-                    "temperature-dependent CHT does not support compact components",
+                    "steady temperature-dependent CHT does not support compact components",
                 ));
             }
             if root.get("transient").is_some() {
                 if solid_sources.iter().any(material::SolidSource::temperature_dependent) {
-                    if solid_sources.len() != materials.len()
+                    // Component boxes share one trailing hidden material. Their
+                    // authored junction capacity owns storage, not a source law.
+                    let resolved_materials = materials.len() - usize::from(!components.is_empty());
+                    if solid_sources.len() != resolved_materials
                         || solid_sources.iter().enumerate().any(|(index, source)| {
                             source.index != index || !source.temperature_dependent()
                         })
                     {
                         return Err(bad(
-                            "unsteady material CHT with evolving solids requires every solid in temperature-dependent source mode",
+                            "unsteady material CHT with evolving solids requires every resolved solid in temperature-dependent source mode",
                         ));
                     }
                     if solid_sources.iter().any(|source| !source.has_storage_range()) {
@@ -2687,7 +2690,7 @@ fn execute_within_budget(scene: &Scene, json_mode: bool) -> Result<String> {
 pub(super) fn run(args: &[OsString], json_mode: bool) -> CommandOutput {
     if args.len() == 1 && (args[0] == "--help" || args[0] == "-h") {
         let mut help = format!(
-            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid; solids may use fixed storage or\nall evolve with a source storage_temperature_range_k. The latter integrates\noriginal Cp at fixed reference mass and solves endpoint conductivity;\ntransient.solid_storage controls nonlinear acceptance. Fluid-material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
+            "{HELP}\nSource-backed materials: fluid may declare {{mode: \"frozen\", gas: <shared gas record>}}\nor {{mode: \"frozen\", pack, state, viscosity: \"dynamic\"|\"kinematic\"}}.\nA solid material may declare source: {{mode: \"frozen\", pack, state}}.\nUse mode \"temperature-dependent\" on the gas or liquid and every solid\nsource to close steady laminar temperature feedback. For transient runs,\nuse flow \"unsteady\" with evolving fluid; resolved solids may use fixed\nstorage or all evolve with a source storage_temperature_range_k. The latter\nintegrates original Cp at fixed reference mass and solves endpoint conductivity;\ntransient.solid_storage controls nonlinear acceptance. Compact components\nuse their authored heat_capacity_j_k alongside either storage model; their\noccupied voxels require no material source or volumetric capacity. Fluid-material\nfeedback is first order even with BDF2 momentum. Liquids and evolving solids\nrequire temperature_axis; gas uses its original pressure and composition.\nActual fluid density owns buoyancy; no expansion_per_k override is allowed.\nCanonical packs and typed state coordinates are shared with the material\nlibraries; source coefficients cannot be overridden. See docs/COOLING_CHT_MATERIALS.md.\n"
         );
         help.push_str(sgs::HELP);
         return CommandOutput {
