@@ -36,7 +36,7 @@ pub const RADIAL_MARK_ROUGHNESS_SCALE: f64 = 1.25;
 /// normal can never flip below the geometric horizon.
 pub const MAX_NORMAL_PERTURBATION_RAD: f64 = 0.35;
 /// Versioned identity domain for surface-detail parameter sets.
-pub const SURFACE_DETAIL_IDENTITY_DOMAIN: &str = "org.frankensim.fs-render.surface-detail.v1";
+pub const SURFACE_DETAIL_IDENTITY_DOMAIN: &str = "org.frankensim.fs-render.surface-detail.v2";
 
 /// Typed refusals of the surface-detail boundary.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -251,7 +251,7 @@ pub struct ShadingFrame {
     pub shading_normal: Vec3,
     /// First tangent: along the brushing grooves (unit).
     pub tangent: Vec3,
-    /// Second tangent: `geometric_normal x tangent` (unit; right-handed).
+    /// Second tangent: `shading_normal x tangent` (unit; right-handed).
     pub bitangent: Vec3,
     /// Whether this local frame lies inside the optional radial-mark sector.
     /// It remains body-locked with the tangent frame and changes shading only.
@@ -303,19 +303,23 @@ pub fn shading_frame(
         BrushingPattern::Radial => (radial, circular),
         BrushingPattern::Circular => (circular, negate(radial)),
     };
-    // Bounded shading-normal perturbation: tilt toward the bitangent by
-    // the fixed admitted angle. Deterministic (no noise source), bounded
-    // by admission, and exactly the geometric normal at zero detail.
-    let shading_normal = if detail.normal_perturbation_rad == 0.0 {
-        normal
+    // Rotate the complete shading frame about the groove tangent. Tilting
+    // only its normal leaves a skew basis: local/world mappings cease to be
+    // inverses and the VNDF sampler emits non-unit reflected rays with an
+    // incorrect solid-angle density. The geometric normal stays unchanged.
+    let (shading_normal, bitangent) = if detail.normal_perturbation_rad == 0.0 {
+        (normal, bitangent)
     } else {
         let (sine, cosine) = detail.normal_perturbation_rad.sin_cos();
-        normalize(Vec3::new(
+        let shading_normal = normalize(Vec3::new(
             cosine * normal.x + sine * bitangent.x,
             cosine * normal.y + sine * bitangent.y,
             cosine * normal.z + sine * bitangent.z,
         ))
-        .ok_or(SurfaceDetailError::NonFiniteInput)?
+        .ok_or(SurfaceDetailError::NonFiniteInput)?;
+        let bitangent = normalize(cross(shading_normal, tangent))
+            .ok_or(SurfaceDetailError::NonFiniteInput)?;
+        (shading_normal, bitangent)
     };
     Ok(ShadingFrame {
         geometric_normal: normal,
@@ -431,11 +435,11 @@ mod tests {
         let detail = detail();
         let normal = Vec3::new(0.0, 0.0, 1.0);
         let frame = shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), normal).expect("frame");
-        // Right-handedness: tangent x bitangent points along the normal.
+        // The complete shading frame follows the perturbed normal.
         let handed = cross(frame.tangent, frame.bitangent);
         assert!(
-            dot(handed, frame.geometric_normal) > 0.99,
-            "right-handed frame"
+            dot(handed, frame.shading_normal) > 1.0 - 1.0e-12,
+            "right-handed shading frame"
         );
         // Circular brushing at +x: grooves run along +y.
         assert!((frame.tangent.y - 1.0).abs() < 1e-12);
@@ -451,6 +455,43 @@ mod tests {
         // Bounded perturbation: shading normal within the declared cone.
         let cosine = dot(frame.shading_normal, frame.geometric_normal);
         assert!(cosine >= (MAX_NORMAL_PERTURBATION_RAD).cos() - 1e-12);
+    }
+
+    #[test]
+    fn perturbed_shading_frames_remain_orthonormal() {
+        for pattern in [BrushingPattern::Radial, BrushingPattern::Circular] {
+            for angle in [0.0, 0.05, MAX_NORMAL_PERTURBATION_RAD] {
+                let detail = SurfaceDetail::try_new(0.12, 3.0, pattern, angle, None)
+                    .expect("admitted detail");
+                for normal in [
+                    Vec3::new(0.0, 0.0, 1.0),
+                    Vec3::new(0.0, 0.0, -1.0),
+                    normalize(Vec3::new(1.0, 2.0, 3.0)).unwrap(),
+                ] {
+                    let frame =
+                        shading_frame(&detail, Point3::new(0.4, -0.2, 0.3), normal).unwrap();
+                    let axes = [frame.tangent, frame.bitangent, frame.shading_normal];
+                    for (i, a) in axes.iter().enumerate() {
+                        for (j, b) in axes.iter().enumerate() {
+                            let expected = if i == j { 1.0 } else { 0.0 };
+                            assert!(
+                                (dot(*a, *b) - expected).abs() < 1.0e-12,
+                                "skew shading frame at angle {angle}: axes {i}, {j}"
+                            );
+                        }
+                    }
+                    assert!(
+                        dot(cross(frame.tangent, frame.bitangent), frame.shading_normal)
+                            > 1.0 - 1.0e-12
+                    );
+                    assert!(
+                        (dot(frame.geometric_normal, frame.shading_normal) - angle.cos()).abs()
+                            < 1.0e-12,
+                        "frame repair must preserve the authored normal tilt"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

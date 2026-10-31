@@ -19425,6 +19425,81 @@ mod tests {
     }
 
     #[test]
+    fn tilted_brushed_reflection_preserves_unit_rays_and_matching_density() {
+        use crate::surface_detail::{BrushingPattern, MAX_NORMAL_PERTURBATION_RAD, SurfaceDetail};
+
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let mut accepted = 0;
+        for pattern in [BrushingPattern::Circular, BrushingPattern::Radial] {
+            for angle in [0.05, 0.2, MAX_NORMAL_PERTURBATION_RAD] {
+                let detail = SurfaceDetail::try_new(0.12, 3.0, pattern, angle, None).unwrap();
+                let material = Material::BrushedConductor {
+                    optics: ConductorOptics::representative_stainless_steel(),
+                    detail,
+                };
+                let frame =
+                    crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n)
+                        .unwrap();
+                for wo in [
+                    n,
+                    unit(Vec3::new(0.55, 0.35, 0.4)),
+                    unit(Vec3::new(-0.55, -0.35, 0.1)),
+                ] {
+                    let local = brushed_local(&frame, wo);
+                    let round_trip = brushed_world(&frame, local);
+                    assert!((round_trip.x - wo.x).abs() < 1.0e-12);
+                    assert!((round_trip.y - wo.y).abs() < 1.0e-12);
+                    assert!((round_trip.z - wo.z).abs() < 1.0e-12);
+                    for (u1, u2) in [
+                        (0.02, 0.11),
+                        (0.23, 0.47),
+                        (0.5, 0.5),
+                        (0.71, 0.09),
+                        (0.88, 0.93),
+                    ] {
+                        let Some((wi, sampled_pdf)) =
+                            bsdf_sample(&material, n, wo, u1, u2, Some(&frame))
+                        else {
+                            continue;
+                        };
+                        accepted += 1;
+                        assert!((wi.norm() - 1.0).abs() < 3.0e-12);
+                        assert!(n.dot(wi) > 0.0 && frame.shading_normal.dot(wi) > 0.0);
+                        let evaluated_pdf = bsdf_pdf(&material, n, wo, wi, Some(&frame));
+                        assert!(
+                            (evaluated_pdf - sampled_pdf).abs()
+                                <= 4.0e-12 * sampled_pdf.abs().max(1.0),
+                            "tilted brushed reflection density: {sampled_pdf} vs {evaluated_pdf}"
+                        );
+                    }
+                }
+
+                // A geometric-front direction may lie behind the tilted
+                // shading plane. The VNDF sampler cannot return it, so its
+                // competing density in direct-light MIS must be zero.
+                let cosine = n.dot(frame.shading_normal);
+                let toward_geometric = unit(Vec3::new(
+                    n.x - cosine * frame.shading_normal.x,
+                    n.y - cosine * frame.shading_normal.y,
+                    n.z - cosine * frame.shading_normal.z,
+                ));
+                let wi = unit(Vec3::new(
+                    toward_geometric.x - 0.01 * frame.shading_normal.x,
+                    toward_geometric.y - 0.01 * frame.shading_normal.y,
+                    toward_geometric.z - 0.01 * frame.shading_normal.z,
+                ));
+                assert!(n.dot(wi) > 0.0 && frame.shading_normal.dot(wi) < 0.0);
+                assert_eq!(bsdf_pdf(&material, n, n, wi, Some(&frame)), 0.0);
+                assert_eq!(
+                    opaque_bsdf_eval(&material, n, n, wi, 550.0, None, Some(&frame)).unwrap(),
+                    0.0
+                );
+            }
+        }
+        assert!(accepted >= 30, "too few accepted tilted reflections: {accepted}");
+    }
+
+    #[test]
     fn brushed_radial_mark_changes_shading_and_preserves_sample_pdf_agreement() {
         let detail = crate::surface_detail::SurfaceDetail::try_new(
             0.12,
@@ -20668,11 +20743,18 @@ fn bsdf_pdf(
             let m = hsum.scale(1.0 / hn);
             match brushed {
                 Some(frame) => {
+                    let wo_local = brushed_local(frame, wo);
+                    let wi_local = brushed_local(frame, wi);
+                    // The sampler rejects reflections below the shading
+                    // horizon as well as the geometric horizon.
+                    if wo_local[2] <= 0.0 || wi_local[2] <= 0.0 {
+                        return 0.0;
+                    }
                     let (alpha_x, alpha_y) = detail.alpha_pair_for_mark(frame.mark_covered);
                     ggx_vndf_reflection_pdf_aniso(
                         alpha_x,
                         alpha_y,
-                        brushed_local(frame, wo),
+                        wo_local,
                         brushed_local(frame, m),
                     )
                 }

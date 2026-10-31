@@ -2398,8 +2398,13 @@ straight-through or missing refractive transport as total illumination.
 `Material::BrushedConductor` uses its existing body-local tangent frame for
 calibrated point/area connections and BSDF sampling, including rigid placement.
 The original optical table, surface detail and medium-index conventions remain
-authoritative. This does not promote representative optical data or decorative
-normal/mark parameters into measured material claims. Path semantics version 4
+authoritative. Surface-detail identity v2 rotates the bitangent together with
+the perturbed shading normal, keeping local/world reflection frames orthonormal.
+Brushed reflection sampling and its direct-light MIS density both exclude
+directions below either the geometric or shading horizon. Focused regressions
+cover admitted nonzero tilts, unit reflected rays, and matching sample densities.
+This does not promote representative optical data or decorative normal/mark
+parameters into measured material claims. Path semantics version 4
 adds these material paths; previously admitted opaque sample streams remain
 unchanged. Sampling estimates still exclude finite-depth and physical-model
 error, including geometric-optics and surface-model approximations.
