@@ -24,6 +24,8 @@ mod solid;
 mod atmosphere;
 #[path = "moisture/surface.rs"]
 mod surface;
+#[path = "moisture/implicit.rs"]
+mod implicit;
 
 fn qty(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))

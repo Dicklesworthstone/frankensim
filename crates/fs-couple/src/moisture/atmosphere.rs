@@ -447,8 +447,9 @@ impl FiniteMoistureAtmosphere {
 
     /// Solve one interval using endpoint RH in the existing backward-Euler slab
     /// boundary. Optional finite surface exchange is resolved at the same trial
-    /// RH; nonlinear interior diffusivity keeps the original accepted-start
-    /// lagging. No accepted state is changed during trials or endpoint checks.
+    /// RH; interior diffusivity follows the slab's configured accepted-start
+    /// lagging or implicit endpoint scheme. No accepted state is changed during
+    /// trials or endpoint checks.
     pub fn advance(
         &self,
         slab: &MoistureSlab,

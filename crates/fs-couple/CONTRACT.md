@@ -7311,11 +7311,11 @@ end and checks total water change against those signed transfers.
 
 The effective diffusivity is required material data; no wood/material name
 selects a number. Its original claim is pinned and re-evaluated locally.
-Backward Euler uses harmonic interior-face diffusivities evaluated at the
+By default, backward Euler uses harmonic interior-face diffusivities evaluated at the
 accepted start and half-cell resistance at prescribed surfaces. This lagged
 nonlinear coefficient is a first-order approximation, with explicit interval,
 content-increment, true-residual, conservation and work limits. The tridiagonal
-SPD operator uses the original `fs-solver::checked_cg` and original
+SPD operator in that mode uses the original `fs-solver::checked_cg` and original
 `fs-sparse::Precond` interface, not a second linear solver. Its identity
 term and nonnegative graph conductances establish SPD. Source, numerical
 maximum-principle, increment and water balance admissions precede publication.
@@ -7353,6 +7353,35 @@ pack, native modal stiffness/inertia scaling, spatial anisotropic material
 consumption, complete mechanical-source refusal, budgets, quantity-basis
 refusal and cancellation. Native Cargo execution is a separate gate; parsing
 and independent numerical oracles do not establish executed native test results.
+
+### Implicit moisture-dependent diffusivity
+
+`MoistureSlab::with_implicit_diffusivity` selects bounded nonlinear backward
+Euler while retaining the same source, field, fixed dry inventory and material
+identity. Every Picard iteration re-resolves the original pinned diffusivity
+at the proposed local moisture. Harmonic interior face values and half-cell /
+finite-surface series resistance use those coefficients. The native `fs-la`
+tridiagonal owner supplies O(n) factorization/substitution; bounded linear
+defect corrections reuse its factors. The original lagged checked-CG mode
+remains the default.
+
+Acceptance independently recomputes the complete endpoint-dependent operator
+residual and water balance using **endpoint** surface fluxes. A converged
+frozen-coefficient linear solve alone is insufficient. Reports distinguish
+the last linear residual from nonlinear residual, Picard work, total direct
+substitutions and endpoint water balance. Source, maximum-principle, content-
+increment, conservation and cancellation gates still precede publication.
+Explicit nonlinear iteration, relative-residual and relaxation controls never
+silently enlarge the work budget or timestep. Nonconvergence refuses the whole
+candidate. This is first-order time integration, not a temporal error estimate
+or a guarantee that Picard iteration converges for every source law.
+
+Existing finite-atmosphere and mechanical wrappers consume the configured slab
+directly, so there is no second species, sorption, swelling or material owner.
+The original isothermal, homogeneous, dilute-bound-water physical limits
+remain. Authored G1/G3 regressions independently check a nonlinear one-cell
+quadratic, sealed cosine decay on a stiff 256-cell grid with one direct solve,
+the coupled finite-vapor quadratic, replay and transactional work refusal.
 
 ### Source-backed finite surface moisture exchange
 
@@ -7419,7 +7448,7 @@ share the same atmosphere or be sealed.
 
 A bounded scalar solve chooses endpoint RH so endpoint vapor plus endpoint
 bound water equals their initial total. Every trial uses the original slab
-diffusion/source solver with its existing accepted-start diffusivity lag and
+diffusion/source solver with its configured lagged or implicit diffusivity and
 work limits. The accepted vapor mass and unchanged carrier masses determine
 the new mole composition and ideal-gas pressure at the same T and V. The
 original thermochemical gas model then re-resolves caloric, transport and

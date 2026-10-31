@@ -2,9 +2,11 @@
 //!
 //! A homogeneous, isothermal slab stores kg water/kg dry solid in reference
 //! finite volumes. Fick transport uses the selected material diffusivity;
-//! backward Euler uses the existing checked-CG owner. Nonlinear diffusivity is
-//! lagged at the accepted start (first-order accuracy), then re-evaluated at
-//! every proposed endpoint. No clipped water, inferred wood diffusivity,
+//! backward Euler uses the existing checked-CG owner by default. Optional
+//! implicit diffusivity resolves the original source at the nonlinear endpoint
+//! with bounded Picard iteration and the native tridiagonal solver. Otherwise
+//! diffusivity is lagged at the accepted start, then re-evaluated at every
+//! proposed endpoint. No clipped water, inferred wood diffusivity,
 //! instantaneous bulk equilibration or second material evaluator is used.
 //!
 //! Transport uses fixed reference dry-skeleton volumes and dilute bound moisture.
@@ -17,11 +19,13 @@
 
 /// Finite vapor inventory, source sorption and the original diffusion endpoint.
 pub mod atmosphere;
+mod implicit;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
 pub mod solid;
 /// Source-backed finite surface exchange in the dry-basis flux convention.
 pub mod surface;
+pub use implicit::{MoistureNonlinearConfig, MoistureNonlinearReport};
 
 use surface::ResolvedMoistureFace;
 
@@ -66,6 +70,10 @@ pub enum MoistureError {
     Consumer(crate::acoustic_realize::AcousticRealizeError),
     /// Native linear solver did not converge.
     NotConverged(SolveReport),
+    /// Native tridiagonal factorization or substitution refused.
+    Tridiagonal(fs_la::tridiagonal::TridiagonalError),
+    /// Endpoint-dependent diffusion failed its nonlinear residual or water budget.
+    NonlinearNotConverged(MoistureNonlinearReport),
     /// Sum of stored water did not match the two measured boundary transfers.
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
     /// No endpoint is published after cancellation.
@@ -90,7 +98,9 @@ impl From<MaterialError> for MoistureError {
 impl From<fs_solid::linear3::source::SolidMaterialError> for MoistureError {
     fn from(e: fs_solid::linear3::source::SolidMaterialError) -> Self {
         match e {
-            fs_solid::linear3::source::SolidMaterialError::Solid(fs_solid::linear3::TetElasticError::Cancelled) => Self::Cancelled,
+            fs_solid::linear3::source::SolidMaterialError::Solid(
+                fs_solid::linear3::TetElasticError::Cancelled,
+            ) => Self::Cancelled,
             e => Self::SolidMaterial(e),
         }
     }
@@ -154,7 +164,10 @@ impl MoistureFace {
         let value = match self {
             Self::Sealed => return Ok(ResolvedMoistureFace::default()),
             Self::PrescribedDryBasis(value) => *value,
-            Self::SourceSorption { law, relative_humidity } => {
+            Self::SourceSorption {
+                law,
+                relative_humidity,
+            } => {
                 return law.resolve(temperature, *relative_humidity);
             }
             Self::WoodEquilibrium {
@@ -206,7 +219,10 @@ pub struct MoistureSlabGeometry {
 /// Explicit linear work, conservation and step-admission limits.
 #[derive(Clone, Copy, Debug)]
 pub struct MoistureStepConfig {
-    /// Native checked-CG controls, including its total iteration budget.
+    /// Native checked-CG controls for the lagged scheme. In implicit mode,
+    /// tolerance is the true linear residual target, max_iterations bounds
+    /// tridiagonal solves per Picard iteration, and max_corrections bounds
+    /// additional defect solves using the same factorization.
     pub linear: CheckedCgConfig,
     /// Absolute allowed water balance residual [kg].
     pub water_balance_tolerance_kg: f64,
@@ -228,6 +244,7 @@ pub struct MoistureSlab {
     moisture: Vec<f64>,
     time_s: f64,
     identity: ContentHash,
+    implicit_diffusivity: Option<MoistureNonlinearConfig>,
 }
 
 /// Actual source evaluations and the water transferred over one interval.
@@ -252,12 +269,17 @@ pub struct MoistureStepReport {
     pub stored_water_kg: [f64; 2],
     /// Stored change minus external transfer [kg].
     pub water_balance_residual_kg: f64,
-    /// Complete accepted-start material evaluations used by the lagged operator.
+    /// Complete accepted-start material evaluations. The default scheme uses
+    /// these coefficients; implicit mode uses the accepted endpoint sources.
     pub transport_start: Vec<ResolvedMaterialStatePoint>,
     /// All endpoint sources re-admitted before publication.
     pub transport_end: Vec<ResolvedMaterialStatePoint>,
     /// Original true-residual solver report.
     pub linear: SolveReport,
+    /// Endpoint nonlinear residual/work, or None for accepted-start lagging.
+    /// `linear` describes the last frozen-coefficient solve; this report tests
+    /// the complete endpoint-dependent equations independently of that solve.
+    pub nonlinear: Option<MoistureNonlinearReport>,
 }
 
 impl MoistureSlab {
@@ -411,6 +433,7 @@ impl MoistureSlab {
             moisture: initial_moisture,
             time_s: 0.0,
             identity: hash.finalize(),
+            implicit_diffusivity: None,
         };
         if !positive(slab.wet_mass_kg()) || !slab.water_mass_kg().is_finite() {
             return Err(MoistureError::Invalid(
@@ -457,6 +480,19 @@ impl MoistureSlab {
         &self.reference
     }
 
+    /// Resolve moisture-dependent diffusivity at each backward-Euler endpoint.
+    /// The choice propagates through existing finite-atmosphere, plate and solid
+    /// advances because they all consume this same slab. It changes numerical
+    /// integration, not the material/geometry identity or accepted physical state.
+    pub fn with_implicit_diffusivity(
+        mut self,
+        config: MoistureNonlinearConfig,
+    ) -> Result<Self, MoistureError> {
+        config.validate()?;
+        self.implicit_diffusivity = Some(config);
+        Ok(self)
+    }
+
     fn point_at(&self, moisture: f64) -> Result<QueryPoint, MoistureError> {
         self.transport
             .query()
@@ -481,8 +517,9 @@ impl MoistureSlab {
 
     /// Propose one conservative interval without mutating the accepted slab.
     /// Face values are constant over this interval; cut intervals at RH events.
-    /// Interior face diffusivity is the harmonic mean of the two accepted-start
-    /// values. The boundary lies half a cell from its cell center; optional
+    /// Interior face diffusivity is the harmonic mean of adjacent cell values,
+    /// at the accepted start by default or endpoint in implicit mode. The
+    /// boundary lies half a cell from its cell center; optional
     /// finite surface exchange adds its resistance in series. Numerical
     /// coefficients are refreshed on EVERY call; no stale material operator is reused.
     pub fn advance(
@@ -500,7 +537,10 @@ impl MoistureSlab {
             .find(|(name, _)| name == "temperature")
             .expect("admitted temperature")
             .1;
-        let boundary = [faces[0].resolve(temperature)?, faces[1].resolve(temperature)?];
+        let boundary = [
+            faces[0].resolve(temperature)?,
+            faces[1].resolve(temperature)?,
+        ];
         self.advance_resolved(dt_s, boundary, config, cx)
     }
 
@@ -535,7 +575,118 @@ impl MoistureSlab {
                 .at_query_point(&self.card, &self.point_at(m)?)?;
         }
         let start = self.transport_states(&self.moisture, cx)?;
-        let d: Vec<_> = start
+        let (solution, endpoint, coupling, nonlinear) =
+            if let Some(controls) = self.implicit_diffusivity {
+                self.solve_implicit(dt_s, &faces, &start, config, controls, cx)?
+            } else {
+                let (operator, rhs, coupling) = self.transport_system(dt_s, &faces, &start, cx)?;
+                let solution = checked_cg(&operator, &operator, &rhs, config.linear, |_| poll(cx))
+                    .map_err(|e| match e {
+                        CheckedCgError::Interrupted(error) => error,
+                        CheckedCgError::InvalidInput(what) => MoistureError::Invalid(what),
+                    })?;
+                if !solution.report.converged_euclidean() {
+                    return Err(MoistureError::NotConverged(solution.report));
+                }
+                let endpoint = self.transport_states(&solution.x, cx)?;
+                (solution, endpoint, coupling, None)
+            };
+        let n = self.moisture.len();
+        let lower = self
+            .moisture
+            .iter()
+            .copied()
+            .chain(surface.into_iter().flatten())
+            .fold(f64::INFINITY, f64::min);
+        let upper = self
+            .moisture
+            .iter()
+            .copied()
+            .chain(surface.into_iter().flatten())
+            .fold(0.0, f64::max);
+        let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
+        for (&old, &new) in self.moisture.iter().zip(&solution.x) {
+            if !new.is_finite()
+                || new < 0.0
+                || new > self.geometry.maximum_moisture
+                || new < lower - roundoff
+                || new > upper + roundoff
+                || (new - old).abs() > config.maximum_content_increment
+            {
+                return Err(MoistureError::Invalid(
+                    "candidate violates moisture maximum principle, domain or increment bound",
+                ));
+            }
+        }
+        let mut actual_surface = [None, None];
+        for (side, i) in [0, n - 1].into_iter().enumerate() {
+            poll(cx)?;
+            if let Some(equilibrium) = surface[side] {
+                let fraction = coupling[side].1;
+                let value = if fraction == 1.0 {
+                    equilibrium
+                } else {
+                    fraction.mul_add(equilibrium - solution.x[i], solution.x[i])
+                };
+                // The real surface, not just the reservoir and cell center,
+                // must be inside the original transport source domain.
+                self.transport
+                    .at_query_point(&self.card, &self.point_at(value)?)?;
+                actual_surface[side] = Some(value);
+            }
+        }
+        let transfer = self.boundary_transfer(&solution.x, &faces, &coupling);
+        let water_before = self.water_mass_kg();
+        let water_after: f64 = solution
+            .x
+            .iter()
+            .map(|m| self.dry_mass_per_cell_kg * m)
+            .sum();
+        if !positive(self.dry_mass_kg() + water_after) {
+            return Err(MoistureError::Invalid(
+                "proposed wet inventory is unrepresentable",
+            ));
+        }
+        let residual = water_after - water_before - transfer[0] - transfer[1];
+        if !residual.is_finite() || residual.abs() > config.water_balance_tolerance_kg {
+            return Err(MoistureError::MassBalance {
+                residual_kg: residual,
+                tolerance_kg: config.water_balance_tolerance_kg,
+            });
+        }
+        let [left, right] = faces;
+        let report = MoistureStepReport {
+            interval_s: [self.time_s, end],
+            boundary_water_kg: transfer,
+            surface_moisture: actual_surface,
+            reservoir_moisture: surface,
+            surface_sorption: [left.sorption, right.sorption],
+            surface_transfer: [left.transfer, right.transfer],
+            stored_water_kg: [water_before, water_after],
+            water_balance_residual_kg: residual,
+            transport_start: start,
+            transport_end: endpoint,
+            linear: solution.report,
+            nonlinear,
+        };
+        let mut next = self.clone();
+        next.time_s = end;
+        next.moisture = solution.x;
+        poll(cx)?;
+        Ok((next, report))
+    }
+
+    /// One common finite-volume operator for both coefficient time levels.
+    fn transport_system(
+        &self,
+        dt_s: f64,
+        faces: &[ResolvedMoistureFace; 2],
+        states: &[ResolvedMaterialStatePoint],
+        cx: &Cx<'_>,
+    ) -> Result<(DiffusionStep, Vec<f64>, [(f64, f64); 2]), MoistureError> {
+        poll(cx)?;
+        let surface = [faces[0].equilibrium, faces[1].equilibrium];
+        let d: Vec<_> = states
             .iter()
             .map(|s| {
                 s.property(&self.diffusivity_property)
@@ -581,110 +732,34 @@ impl MoistureSlab {
             || operator.off.iter().any(|v| !positive(*v))
             || rhs.iter().any(|v| !v.is_finite())
             || boundary.iter().any(|v| !v.is_finite())
-            || (0..2).any(|side| surface[side].is_some()
-                && faces[side].coefficient_m_s != Some(0.0)
-                && !positive(boundary[side]))
+            || (0..2).any(|side| {
+                surface[side].is_some()
+                    && faces[side].coefficient_m_s != Some(0.0)
+                    && !positive(boundary[side])
+            })
         {
             return Err(MoistureError::Invalid(
                 "diffusion coefficients overflow or underflow",
             ));
         }
-        let solution = checked_cg(&operator, &operator, &rhs, config.linear, |_| poll(cx))
-            .map_err(|e| match e {
-                CheckedCgError::Interrupted(error) => error,
-                CheckedCgError::InvalidInput(what) => MoistureError::Invalid(what),
-            })?;
-        if !solution.report.converged_euclidean() {
-            return Err(MoistureError::NotConverged(solution.report));
-        }
-        let lower = self
-            .moisture
-            .iter()
-            .copied()
-            .chain(surface.into_iter().flatten())
-            .fold(f64::INFINITY, f64::min);
-        let upper = self
-            .moisture
-            .iter()
-            .copied()
-            .chain(surface.into_iter().flatten())
-            .fold(0.0, f64::max);
-        let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
-        for (&old, &new) in self.moisture.iter().zip(&solution.x) {
-            if !new.is_finite()
-                || new < 0.0
-                || new > self.geometry.maximum_moisture
-                || new < lower - roundoff
-                || new > upper + roundoff
-                || (new - old).abs() > config.maximum_content_increment
-            {
-                return Err(MoistureError::Invalid(
-                    "candidate violates moisture maximum principle, domain or increment bound",
-                ));
-            }
-        }
-        let endpoint = self.transport_states(&solution.x, cx)?;
-        let mut actual_surface = [None, None];
-        for (side, i) in [0, n - 1].into_iter().enumerate() {
-            poll(cx)?;
-            if let Some(equilibrium) = surface[side] {
-                let fraction = coupling[side].1;
-                let value = if fraction == 1.0 {
-                    equilibrium
-                } else {
-                    fraction.mul_add(equilibrium - solution.x[i], solution.x[i])
-                };
-                // The real surface, not just the reservoir and cell center,
-                // must be inside the original transport source domain.
-                self.transport.at_query_point(&self.card, &self.point_at(value)?)?;
-                actual_surface[side] = Some(value);
-            }
-        }
-        let transfer = [
+        Ok((operator, rhs, coupling))
+    }
+
+    fn boundary_transfer(
+        &self,
+        moisture: &[f64],
+        faces: &[ResolvedMoistureFace; 2],
+        coupling: &[(f64, f64); 2],
+    ) -> [f64; 2] {
+        let n = moisture.len();
+        [
             self.dry_mass_per_cell_kg
-                * boundary[0]
-                * (surface[0].unwrap_or(solution.x[0]) - solution.x[0]),
+                * coupling[0].0
+                * (faces[0].equilibrium.unwrap_or(moisture[0]) - moisture[0]),
             self.dry_mass_per_cell_kg
-                * boundary[1]
-                * (surface[1].unwrap_or(solution.x[n - 1]) - solution.x[n - 1]),
-        ];
-        let water_before = self.water_mass_kg();
-        let water_after: f64 = solution
-            .x
-            .iter()
-            .map(|m| self.dry_mass_per_cell_kg * m)
-            .sum();
-        if !positive(self.dry_mass_kg() + water_after) {
-            return Err(MoistureError::Invalid(
-                "proposed wet inventory is unrepresentable",
-            ));
-        }
-        let residual = water_after - water_before - transfer[0] - transfer[1];
-        if !residual.is_finite() || residual.abs() > config.water_balance_tolerance_kg {
-            return Err(MoistureError::MassBalance {
-                residual_kg: residual,
-                tolerance_kg: config.water_balance_tolerance_kg,
-            });
-        }
-        let [left, right] = faces;
-        let report = MoistureStepReport {
-            interval_s: [self.time_s, end],
-            boundary_water_kg: transfer,
-            surface_moisture: actual_surface,
-            reservoir_moisture: surface,
-            surface_sorption: [left.sorption, right.sorption],
-            surface_transfer: [left.transfer, right.transfer],
-            stored_water_kg: [water_before, water_after],
-            water_balance_residual_kg: residual,
-            transport_start: start,
-            transport_end: endpoint,
-            linear: solution.report,
-        };
-        let mut next = self.clone();
-        next.time_s = end;
-        next.moisture = solution.x;
-        poll(cx)?;
-        Ok((next, report))
+                * coupling[1].0
+                * (faces[1].equilibrium.unwrap_or(moisture[n - 1]) - moisture[n - 1]),
+        ]
     }
 }
 
@@ -713,4 +788,3 @@ impl Precond for DiffusionStep {
         }
     }
 }
-
