@@ -112,6 +112,42 @@ impl VoceJ2 {
         }
     }
 
+    /// Admit a committed history at this law's actual temperature and yield
+    /// radius. A thermal trial may subsequently soften that radius and yield.
+    pub fn validate_committed_history(
+        &self,
+        strain: &Voigt,
+        state: &J2State,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), EnergyError> {
+        if self.saturation_pa == 0.0 {
+            return self
+                .backbone
+                .validate_committed_history(strain, state, yield_tolerance_pa);
+        }
+        if !yield_tolerance_pa.is_finite() || yield_tolerance_pa <= 0.0 {
+            return Err(EnergyError::Invalid(
+                "yield allowance must be finite and positive",
+            ));
+        }
+        self.backbone.validate_overstress_history(strain, state)?;
+        let elastic = core::array::from_fn(|i| strain[i] - state.plastic_strain[i]);
+        let stress = self.backbone.elastic.stress(&elastic, &());
+        let residual = self.yield_function_with_state(&stress, state);
+        if !residual.is_finite() {
+            return Err(EnergyError::Invalid(
+                "committed Voce stress is unrepresentable",
+            ));
+        }
+        if residual > yield_tolerance_pa {
+            return Err(EnergyError::YieldResidual {
+                residual_pa: residual,
+                tolerance_pa: yield_tolerance_pa,
+            });
+        }
+        Ok(())
+    }
+
     /// Shared scalar consistency solve. The tensor owner supplies 3 mu; the
     /// exact axial restriction supplies E. This is an increment, not a new
     /// accumulated history. NaN identifies an unrepresentable raw response.
@@ -211,6 +247,16 @@ impl VoceJ2 {
     // Integral_0^alpha Q (1-exp(-b p)) dp. The series preserves small-strain
     // storage when subtracting alpha and (1-exp(-b alpha))/b would cancel.
     pub(super) fn saturation_storage(&self, alpha: f64) -> f64 {
+        self.saturation_storage_scaled(alpha, self.saturation_pa)
+    }
+
+    // d psi_Voce/dQ at fixed b and retained alpha, including Q=0. Do not
+    // divide stored energy by Q: an affine thermal path can end at zero Q.
+    pub(super) fn saturation_storage_per_pa(&self, alpha: f64) -> f64 {
+        self.saturation_storage_scaled(alpha, 1.0)
+    }
+
+    fn saturation_storage_scaled(&self, alpha: f64, saturation_pa: f64) -> f64 {
         let x = self.rate_per_strain * alpha;
         if x < 0.1 {
             let ratio = -1.0 / 362880.0 + x / 3628800.0;
@@ -221,9 +267,9 @@ impl VoceJ2 {
             let ratio = 1.0 / 24.0 + x * ratio;
             let ratio = -1.0 / 6.0 + x * ratio;
             let ratio = 0.5 + x * ratio;
-            (self.saturation_pa * self.rate_per_strain) * alpha * (alpha * ratio)
+            (saturation_pa * self.rate_per_strain) * alpha * (alpha * ratio)
         } else {
-            self.saturation_pa * (alpha * (1.0 + det::expm1(-x) / x))
+            saturation_pa * (alpha * (1.0 + det::expm1(-x) / x))
         }
     }
 

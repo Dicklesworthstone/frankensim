@@ -6,6 +6,9 @@
 //! energetic H_iso(T)/H_k(T), optional sourced isotropic expansion, and a strictly
 //! increasing single-solid caloric chart. Yield stress, Cp and expansion may be
 //! piecewise linear.
+//! Explicit Voce hardening adds affine Q(T) and a fixed positive b to this same
+//! retained history. Its recoverable saturation energy and entropy enter the
+//! reversible account; saturation storage is never deposited as plastic heat.
 //! Under these fixed-reference-density assumptions, stress-free caloric enthalpy
 //! is the caloric internal-energy chart. Coefficient work and temperature derivatives
 //! of elastic/hardening free energy enter the same reversible heat/storage account.
@@ -25,6 +28,8 @@
 
 mod expansion;
 pub use expansion::{ThermalJ2, ThermoplasticIncrement};
+mod voce;
+use voce::VoceSelection;
 
 use super::J2State;
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
@@ -167,6 +172,7 @@ pub struct ThermoplasticSource<'a> {
     maximum_youngs_modulus_pa: f64,
     reference_temperature_k: f64,
     overstress: Option<OverstressSelection>,
+    voce: Option<VoceSelection>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -563,6 +569,7 @@ impl<'a> ThermoplasticSource<'a> {
             maximum_youngs_modulus_pa,
             reference_temperature_k: state.temperature_k(),
             overstress: None,
+            voce: None,
         };
         // Affine extrema occur at the span ends; the native owner checks the
         // elastic tensor, hardening conversion and return-map denominator there.
@@ -597,6 +604,11 @@ impl<'a> ThermoplasticSource<'a> {
             OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_EXPONENT_PROPERTY};
         if self.overstress.is_some() {
             return Err(FeedbackError::Invalid("an overstress law is already selected"));
+        }
+        if self.voce.is_some() {
+            return Err(FeedbackError::Invalid(
+                "combined Voce saturation and overstress require a shared return map",
+            ));
         }
         let mut roles = vec![(OVERSTRESS_VISCOSITY_PROPERTY, OVERSTRESS_VISCOSITY_DIMS)];
         if model == OverstressSelection::PowerLaw {
@@ -658,6 +670,9 @@ impl<'a> ThermoplasticSource<'a> {
         -> Result<(), EnergyError> {
         if self.overstress.is_some() {
             source.law().validate_overstress_history(mechanical_strain, history)
+        } else if let Some(law) = self.voce_law::<Infallible>(source)
+            .map_err(|_| EnergyError::Invalid("invalid retained Voce source"))? {
+            law.validate_committed_history(mechanical_strain, history, tolerance_pa)
         } else {
             source.law().validate_committed_history(mechanical_strain, history, tolerance_pa)
         }
@@ -771,6 +786,7 @@ impl<'a> ThermoplasticSource<'a> {
                 "pinned coefficients left the admitted affine thermal free-energy model",
             ));
         }
+        self.voce_law::<E>(&source)?;
         Ok(source)
     }
 }

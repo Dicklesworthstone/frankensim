@@ -7616,3 +7616,12 @@ than inventing trace gas. D and S do not specify sorbed caloric storage or heat
 of sorption: gas-side energy checks are not a whole-membrane energy certificate.
 Mixed-gas competition, adiabatic evolution, swelling and nonlinear sorption need
 their own constitutive and energy closures.
+
+
+## Source-bound thermal Voce hardening
+
+`ThermoplasticSource::with_voce_hardening` and `CaloricPoint::with_voce_hardening` explicitly select source-pinned energetic Voce saturation on the existing fully solid caloric/expansion owner. Q(T) >= 0 must be globally affine and b > 0 fixed over the complete source line, including internal knots and surface crossings. Existing affine E/H_iso/H_k and native J2State remain; endpoint stress, consistent tangent, retained history and physical/numerical work delegate to VoceJ2.
+
+With g(alpha) = alpha - (1 - exp(-b alpha))/b, additional free energy is Q g, entropy is -Q' g, and frozen-history coefficient work is (Q1 - Q0) g(alpha0). These enter the existing reversible heat and delta(T s) accounts. Neither saturation storage nor backward-Euler loss becomes physical heat. An exactly zero-Q endpoint retains its thermal entropy through a stable unit-Q shape; unselected and identically zero-Q paths preserve original arithmetic. Affine Q and fixed b add no frozen-history heat-capacity derivative.
+
+Kinked/negative Q, varying b, tangent-only inference and simultaneous existing overstress selection refuse. Feedback proposals retain the same old history and caloric chart; only balanced endpoint candidates publish. Focused regressions cover the full tangent, loaded heating, coefficient work and entropy, simultaneous thermal expansion/moduli changes, source support/pins, zero-Q limits, and retry/cancellation boundaries. These are small-strain, affine-coefficient verification results, not empirical thermal calibration or a Chaboche thermal-history extension.

@@ -16,6 +16,9 @@
 //! Selected linear or power-law overstress uses endpoint-temperature kinetics
 //! and actual dt in the original return map and physical heat. Its coefficients
 //! store no free energy and add no entropy term.
+//! Explicit Voce saturation adds Q(T) g(p) to free energy and -Q' g(p) to
+//! entropy, with affine Q and fixed b. Its convex numerical remainder is kept
+//! in the original native mechanical account and is never converted to heat.
 
 use super::*;
 use crate::tensor::{contract, trace};
@@ -29,11 +32,18 @@ pub struct ThermalJ2 {
     source: ResolvedJ2Plasticity,
     expansion_strain: f64,
     rate: Option<super::super::rate::OverstressJ2>,
+    voce: Option<super::super::voce::VoceJ2>,
 }
 impl ThermalJ2 {
     /// Complete original property bundle at this law's temperature.
     pub const fn resolved(&self) -> &ResolvedJ2Plasticity {
         &self.source
+    }
+
+    /// Selected nonlinear hardening at this actual temperature, when present.
+    /// The complete source receipts remain in `resolved().material()`.
+    pub const fn voce_law(&self) -> Option<&super::super::voce::VoceJ2> {
+        self.voce.as_ref()
     }
 
     fn mechanical_strain(&self, strain: &Voigt) -> Voigt {
@@ -49,28 +59,35 @@ impl SmallStrainLaw for ThermalJ2 {
         let strain = self.mechanical_strain(strain);
         match &self.rate {
             Some(rate) => rate.stress(&strain, state),
-            None => self.source.stress(&strain, state),
+            None => self.voce.as_ref().map_or_else(
+                || self.source.stress(&strain, state), |law| law.stress(&strain, state)),
         }
     }
     fn tangent(&self, strain: &Voigt, state: &J2State) -> Tangent6 {
         let strain = self.mechanical_strain(strain);
         match &self.rate {
             Some(rate) => rate.tangent(&strain, state),
-            None => self.source.tangent(&strain, state),
+            None => self.voce.as_ref().map_or_else(
+                || self.source.tangent(&strain, state), |law| law.tangent(&strain, state)),
         }
     }
     fn update_state(&self, strain: &Voigt, state: &J2State) -> J2State {
         let strain = self.mechanical_strain(strain);
         match &self.rate {
             Some(rate) => rate.update_state(&strain, state),
-            None => self.source.update_state(&strain, state),
+            None => self.voce.as_ref().map_or_else(
+                || self.source.update_state(&strain, state), |law| law.update_state(&strain, state)),
         }
     }
     fn admissibility(&self) -> MaterialAdmissibility {
-        self.rate.as_ref().map_or_else(|| self.source.admissibility(), SmallStrainLaw::admissibility)
+        self.rate.as_ref().map_or_else(
+            || self.voce.as_ref().map_or_else(|| self.source.admissibility(), SmallStrainLaw::admissibility),
+            SmallStrainLaw::admissibility)
     }
     fn card(&self) -> ModelCard {
-        self.rate.as_ref().map_or_else(|| self.source.card(), SmallStrainLaw::card)
+        self.rate.as_ref().map_or_else(
+            || self.voce.as_ref().map_or_else(|| self.source.card(), SmallStrainLaw::card),
+            SmallStrainLaw::card)
     }
 }
 
@@ -80,7 +97,8 @@ pub struct ThermoplasticIncrement {
     /// Native mechanical strain eps-integral(alpha dT) and endpoint-modulus
     /// J2 work/storage. Both native energy endpoints use the NEW moduli.
     pub mechanical: EnergyIncrement,
-    /// Frozen old strain/history free-energy change from sourced E(T)/H_iso(T)/H_k(T).
+    /// Frozen old strain/history free-energy change from sourced E(T), H_iso(T),
+    /// H_k(T) and explicitly selected Voce Q(T).
     /// Adding this to the native stored change gives the actual two-temperature
     /// free-energy change [J/m3]. This is neither plastic nor numerical loss.
     pub coefficient_storage_change_j_m3: f64,
@@ -169,6 +187,7 @@ impl ThermoplasticSource<'_> {
         -> Result<(EquilibriumPhaseState, ThermalJ2), FeedbackError> {
         let (state, source) = self.resolve_enthalpy(specific_enthalpy_j_kg)?;
         let rate = self.overstress_law(&source, duration_s)?;
+        let voce = self.voce_law(&source)?;
         let expansion_strain =
             self.expansion_strain_between(self.reference_temperature_k, state.temperature_k())?;
         Ok((
@@ -177,6 +196,7 @@ impl ThermoplasticSource<'_> {
                 source,
                 expansion_strain,
                 rate,
+                voce,
             },
         ))
     }
@@ -253,15 +273,22 @@ impl ThermoplasticSource<'_> {
         let source = self.resolve_temperature(temperature_k)?;
         let old_mechanical = self.mechanical_strain_at(old_temperature_k, old_strain)?;
         let mechanical_strain = self.mechanical_strain_at(temperature_k, strain)?;
+        let voce = self.voce_law(&source)?;
         let mechanical = match self.overstress_law(&source, duration_s)? {
             Some(rate) => rate.advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
-            None => source.law().advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
+            None => match &voce {
+                Some(law) => law.advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
+                None => source.law().advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
+            },
         }.map_err(FeedbackError::Mechanical)?;
         let old_elastic = core::array::from_fn(|i| old_mechanical[i] - old_state.plastic_strain[i]);
         let variable_moduli = self.youngs_temperature_slope_pa_k != 0.0
             || self.hardening_temperature_slope_pa_k != 0.0
             || self.kinematic_hardening_temperature_slope_pa_k != 0.0;
-        let old_source = if variable_moduli || !self.expansion_knots.is_empty() {
+        let saturation_slope = self.voce.map_or(0.0,
+            |selection| selection.saturation_temperature_slope_pa_k);
+        let variable_storage = variable_moduli || saturation_slope != 0.0;
+        let old_source = if variable_storage || !self.expansion_knots.is_empty() {
             Some(self.resolve_temperature(old_temperature_k)?)
         } else {
             None
@@ -285,7 +312,7 @@ impl ThermoplasticSource<'_> {
         };
         let mut old_entropy = product(old_alpha, trace(&old_stress))?;
         let mut new_entropy = product(new_alpha, trace(&mechanical.stress_pa))?;
-        let coefficient_storage_change_j_m3 = if variable_moduli {
+        let mut coefficient_storage_change_j_m3 = if variable_moduli {
             let youngs = source.law().elastic.youngs;
             // Fixed nu makes C(T)=E(T)*C_unit. Native initial/final elastic
             // energies therefore give the exact tensor contraction with C'.
@@ -343,10 +370,25 @@ impl ThermoplasticSource<'_> {
         } else {
             0.0
         };
+        if saturation_slope != 0.0 {
+            use crate::plastic::voce::source::VOCE_SATURATION_INCREMENT_PROPERTY;
+            let law = voce.as_ref().expect("selected thermal saturation has a native law");
+            // These derivatives are evaluated at fixed plastic strain/history.
+            // The unit-Q shape is stable and remains defined when Q(T1)=0.
+            let old_shape = finite(law.saturation_storage_per_pa(old_state.alpha))?;
+            let new_shape = finite(law.saturation_storage_per_pa(mechanical.state.alpha))?;
+            old_entropy = finite(old_entropy - product(saturation_slope, old_shape)?)?;
+            new_entropy = finite(new_entropy - product(saturation_slope, new_shape)?)?;
+            let old_saturation = old_law.material()
+                .property(VOCE_SATURATION_INCREMENT_PROPERTY)
+                .expect("the original pinned bundle retains Voce Q").value_si();
+            coefficient_storage_change_j_m3 = finite(coefficient_storage_change_j_m3
+                + product(law.saturation_pa() - old_saturation, old_shape)?)?;
+        }
         let thermoelastic_storage_change_j_m3 = finite(
             product(temperature_k, new_entropy)? - product(old_temperature_k, old_entropy)?,
         )?;
-        let reversible_heat_j_m3 = if self.expansion_knots.is_empty() && !variable_moduli {
+        let reversible_heat_j_m3 = if self.expansion_knots.is_empty() && !variable_storage {
             // Keep the original constant-coefficient reduction and arithmetic.
             product(-old_temperature_k, finite(new_entropy - old_entropy)?)?
         } else {
