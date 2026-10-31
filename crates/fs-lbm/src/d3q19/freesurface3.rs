@@ -45,6 +45,7 @@ use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
+mod pressure;
 mod curvature;
 mod forcing;
 mod geometry;
@@ -184,6 +185,14 @@ pub enum FreeSurfaceError3 {
         /// Failed admission condition.
         reason: &'static str,
     },
+    /// An imposed gas pressure or its combined capillary reconstruction is
+    /// outside the declared weak-compressibility domain.
+    InvalidGasPressure {
+        /// Liquid interface cell, if the refusal concerns a sampled pressure.
+        coordinates: Option<[usize; 3]>,
+        /// Failed pressure admission condition.
+        reason: &'static str,
+    },
     /// A bounded companion transport could not retain the native mass routes.
     Transport(&'static str),
     /// Cancellation was observed before physical state publication.
@@ -215,6 +224,10 @@ impl core::fmt::Display for FreeSurfaceError3 {
                     "free-surface initial state at {coordinates:?} refused: {reason}"
                 )
             }
+            FreeSurfaceError3::InvalidGasPressure {
+                coordinates,
+                reason,
+            } => write!(f, "free-surface gas pressure at {coordinates:?} refused: {reason}"),
             FreeSurfaceError3::Transport(reason) => {
                 write!(f, "free-surface companion transport refused: {reason}")
             }
@@ -896,8 +909,8 @@ impl FreeSurface3 {
         Ok(())
     }
 
-    /// Reference density for gas reconstruction: `1 + σκ/cs²` (2-D port;
-    /// σ = 0 short-circuits to exactly 1).
+    /// Capillary reference density before any imposed external gas load:
+    /// `1 + σκ/cs²` (2-D port; σ = 0 short-circuits to exactly 1).
     fn reference_density(&self, key: u64, lane: usize) -> f64 {
         let sigma = self
             .local_sigma
@@ -973,7 +986,7 @@ impl FreeSurface3 {
     /// conversion counters. Once publication begins its conversion cascade
     /// finishes; a later cancellation request is observed by the next step.
     pub fn step_with_gate(&mut self, gate: &CancelGate) -> Result<(), FreeSurfaceError3> {
-        self.step_inner(gate, None, None)
+        self.step_inner(gate, None, None, None)
     }
 
     fn step_inner(
@@ -981,6 +994,7 @@ impl FreeSurface3 {
         gate: &CancelGate,
         mut transport: Option<&mut MassTransport3>,
         local_tau: Option<&BTreeMap<(u64, usize), f64>>,
+        gas_pressure: Option<&pressure::GasPressure3<'_>>,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
         if let Some(field) = &self.local_sigma {
@@ -1132,9 +1146,13 @@ impl FreeSurface3 {
                             let src_key = self.grid.active_keys()[src_slot];
                             match self.tiles[&src_key].cells[src_lane] {
                                 Cell3::Gas => {
-                                    let eq = gas_equilibrium.get_or_insert_with(|| {
-                                        equilibrium3(self.reference_density(key, lane), u_pre)
-                                    });
+                                    if gas_equilibrium.is_none() {
+                                        let density = self.loaded_reference_density(
+                                            key, lane, gas_pressure,
+                                        )?;
+                                        gas_equilibrium = Some(equilibrium3(density, u_pre));
+                                    }
+                                    let eq = gas_equilibrium.as_ref().expect("reconstructed gas boundary");
                                     let value = eq[q] + eq[OPP3[q]] - post[&key][lane][OPP3[q]];
                                     if self.local_force.is_some() {
                                         value

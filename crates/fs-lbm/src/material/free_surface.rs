@@ -22,6 +22,7 @@ use crate::{CS2, ScalingPlan};
 
 mod initial;
 pub use initial::MaterialFreeSurfaceInitialCell3;
+mod pressure;
 /// Geometric, moment-preserving ingress of an already-liquid tetrahedral body.
 pub mod transfer;
 /// Conservative moving-liquid enthalpy and source-temperature viscosity.
@@ -44,6 +45,7 @@ pub struct MaterialFreeSurfaceScaling<'a> {
     timestep_s: f64,
     velocity_scale: f64,
     pressure_unit_pa: f64,
+    reference_pressure_pa: Option<f64>,
     mass_unit_kg: f64,
     surface_tension_lattice: f64,
     planar_wetting: Option<(PlanarWall3, &'a ResolvedLiquidWettingState)>,
@@ -78,8 +80,8 @@ pub struct MaterialFreeSurfaceSample3 {
     pub density_kg_m3: f64,
     /// Guo-corrected liquid velocity [m/s].
     pub velocity_m_s: [f64; 3],
-    /// Incompressible pressure perturbation relative to the imposed gas-side
-    /// reference [Pa], not absolute pressure or a physical acoustic EOS.
+    /// Incompressible pressure perturbation relative to the fixed density-one
+    /// reference [Pa], not the local imposed gas pressure or a physical EOS.
     pub pressure_perturbation_pa: f64,
 }
 
@@ -169,6 +171,7 @@ pub fn plan_free_surface_from_material(
         timestep_s,
         velocity_scale,
         pressure_unit_pa,
+        reference_pressure_pa: None,
         mass_unit_kg,
         surface_tension_lattice,
         planar_wetting: None,

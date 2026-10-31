@@ -2191,15 +2191,32 @@ so `simple_flow` -> `solve_energy` / `march_energy` is the conjugate chain.
 
 - Faces touching a solid voxel are blocked; a blocked transverse neighbour
   is a no-slip wall half a cell away (staircase). Domain faces are
-  `FvBoundary::{Wall { velocity }, Symmetry, Inlet { velocity }, Outlet}`;
+  `FvBoundary::{Wall { velocity }, Symmetry, Inlet { velocity }, Outlet,
+  Pressure { pressure_pa }}`;
   an outlet face is a momentum unknown whose outside twin mirrors the inside
-  cell (zero normal gradient) and carries the ghost pressure `-p_inside`, so
-  the face holds pressure zero and the pressure correction uses the matching
+  cell (zero normal gradient) and carries the ghost pressure
+  `2 p_boundary - p_inside`, so the face holds its declared static pressure
+  and the pressure correction uses the matching
   linearization `u' = 2 d p'_inside`. The steady state is one fixed point of
   the discrete equations, independent of the relaxation, also for
   undeveloped (even partly reversed) outflow. (The first version
   re-extrapolated outlet velocities each iteration and stalled at a 3e-4
   mass residual on the heatsink, whose outflow is not developed.)
+- `Pressure` holds a finite signed static gauge pressure [Pa]; `Outlet` retains
+  exactly zero pressure. All openings and reported cell pressures share the
+  caller's reference (the removed reference hydrostatic state in Boussinesq
+  runs). This incompressible load is not absolute gas pressure and does not
+  update density or a material EOS. Opening velocities are solved in either
+  direction, with zero incoming tangential momentum. The existing energy owner
+  supplies backflow temperature/enthalpy; no reservoir thermal state is inferred
+  from pressure. Momentum is iterated relative to one fixed numerical datum and
+  that datum is restored on public pressure output, so common pressure offsets
+  do not contaminate small pressure-gradient residuals. Native material momentum
+  checkpoints retain the datum. Face fans retain their ambient-zero reference.
+  Nonfinite pressure and unrepresentable pressure differences refuse at admission.
+  Focused G1/G3 `pressure_opening` tests cover planar Poiseuille refinement,
+  pressure datum/offset invariance, reversed flow on all axes, source-viscosity
+  scaling, the existing backflow heat transport, and transient start-up.
 - Momentum uses power-law (or upwind) coefficients with `a_P / alpha`
   under-relaxation (alpha in (0, 1); SIMPLEC's `d` degenerates at 1). Closed
   components of the pressure correction are pinned.
@@ -2890,6 +2907,29 @@ fluid/thermal state publication. The focused G0/G1 tests check independent
 wave dispersion, dx^(3/2) and material scaling, positive-pressure refusal,
 zero-tension behavior and unchanged state after rejected coefficient updates.
 These checks do not establish measured capillary-wave convergence.
+
+### Prescribed gas pressure on the native free surface
+
+`FreeSurface3::step_with_gas_pressure` adds an explicitly supplied gas-pressure
+perturbation to the original capillary anti-population reconstruction:
+`rho_boundary = 1 + (p_gas_gauge + sigma*kappa)/cs²`. One callback sample per
+exposed liquid cell supplies every missing gas population at that cell. It is
+sampled anew each step, including newly exposed interfaces; no stale map or
+second momentum integrator is retained. Zero load preserves ordinary evolution.
+The combined density excursion must fit a finite caller bound in (0,1).
+Pressure refusal and observed cancellation precede population/mass publication.
+
+`MaterialFreeSurfaceScaling::with_pressure_reference` fixes the absolute Pascal
+datum before constructing a trajectory. Its material-bound `step_with_gas_pressure`
+accepts absolute pressures at physical cell centers and lowers only their
+difference from that datum through the original rho0*(dx/dt)² scale.
+`absolute_pressure_si` and the existing perturbation samples share this datum.
+The load reuses original source viscosity, capillarity and mass-conversion
+routes. It does not evolve an external gas, refresh the frozen liquid source,
+account pressure work, or turn artificial lattice compressibility into a
+physical liquid/gas equation of state. Tests cover actual direction/reversal on
+all axes, pressure-reference invariance, material-density similitude, capillary
+zero-load equivalence, mass preservation and atomic refusal/cancellation.
 
 ### Sourced equilibrium angle at one planar domain wall
 

@@ -22,6 +22,9 @@ use fs_material::liquid_temperature::LiquidViscosityBasis;
 use fs_material::state_point::MaterialPropertySelection;
 use fs_qty::Dims;
 
+#[path = "material_free_surface/gas_pressure.rs"]
+mod gas_pressure;
+
 fn near(actual: f64, expected: f64, tolerance: f64) {
     assert!((actual - expected).abs() <= tolerance * expected.abs().max(1e-30),
         "actual={actual}, expected={expected}");
