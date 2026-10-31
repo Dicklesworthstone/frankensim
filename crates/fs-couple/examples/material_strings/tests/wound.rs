@@ -1,6 +1,7 @@
 //! Material-only winding swaps must change the actual reciprocal pressure path.
 use super::*;
 
+#[path = "wound/stretching_memory.rs"]
 mod stretching_memory;
 
 fn wound_spec() -> input::Spec {

@@ -3,18 +3,43 @@
 use super::*;
 use fs_couple::render::schedule::force::coupled::contact::friction::FrictionDrive;
 
+fn static_claims(source: &ClaimSet) -> ClaimSet {
+    // The fixed Mindlin owner requires genuinely static source coefficients;
+    // the general normal-stop fixture's frequency applicability is not allowed.
+    // Only the native contact's selected static coefficients have no frequency
+    // restriction. Original string viscosity/torsional source bands stay intact.
+    let mut claims = ClaimSet::new();
+    for id in source.observation_ids() {
+        claims.register_observation(source.observation(id).unwrap().clone()).unwrap();
+    }
+    for (_, original) in source.claims_ordered() {
+        let mut claim = original.clone();
+        if matches!(claim.key.name(), "density" | "young_modulus" | "poisson_ratio"
+            | "yield_stress" | ADHESION_ENERGY_PROPERTY | "mu_local") {
+            claim.validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    claims
+}
+fn contact_bulk(path: &str, young: f64) -> NormalizedPack {
+    let original = bulk(path, young);
+    if path == "wire.fsmatpk" || path == "receiver.fsmatpk" {
+        pack_claims(path, static_claims(original.claims()))
+    } else { original }
+}
 fn contact_interface(outer: &str) -> NormalizedInterfacePack {
     let original = interface(outer, "receiver.fsmatpk");
     let mut claims = original.claims_pack().claims().clone();
     claims.insert_claim(claim("mu_local", 0.6, Dims::NONE)).unwrap();
     NormalizedInterfacePack::new(original.card().surface_a().clone(),
         original.card().surface_b().clone(), original.card().context().clone(),
-        pack_claims("mindlin-interface", claims)).unwrap()
+        pack_claims("mindlin-interface", static_claims(&claims))).unwrap()
 }
 fn specification(gate: &CancelGate, outer: &str) -> input::Spec {
     let text = String::from_utf8(spec().bytes).unwrap().replace(
         "friction stribeck 0.8 0.4 0.1 0",
-        "friction contacts 1\nbow-mindlin bow receiver.fsmatpk contact.fsintpk normal.fsmodelpk mu_local 0.0002 4e-8 1e-7 0.1 0.00005 0.00005 0.01 0.02 0.03 512");
+        "friction contacts 1\nbow-mindlin bow receiver.fsmatpk contact.fsintpk normal.fsmodelpk mu_local 0.0002 4e-8 8e-8 0.1 0.00005 0.00005 0.01 0.02 0.03 512");
     let mut input = input::Spec::parse(text.as_bytes()).unwrap();
     input.forces = None;
     input.schedule = GestureSchedule::try_new(700, vec![GestureTrack {
@@ -31,7 +56,7 @@ fn specification(gate: &CancelGate, outer: &str) -> input::Spec {
     input
 }
 fn ready(cx: &Cx<'_>, gate: &CancelGate, young: f64) -> Ready {
-    specification(gate, "wire.fsmatpk").compile(cx, gate, |path| Ok(bulk(path, young))).unwrap()
+    specification(gate, "wire.fsmatpk").compile(cx, gate, |path| Ok(contact_bulk(path, young))).unwrap()
 }
 
 #[test]
@@ -78,7 +103,7 @@ fn reversal_series_drive_and_nonlinear_storage_share_one_loss_and_rollback_accou
                 force_absolute_tolerance: 1e-11, force_relative_tolerance: 1e-10,
             }));
             let bank = input.compile_bank_with_profiles(cx, gate, None, None, false,
-                |path| Ok(bulk(path, 2e11))).unwrap().bank;
+                |path| Ok(contact_bulk(path, 2e11))).unwrap().bank;
             bank.into_parts().1.with_series_compliant_drives(vec![(0, 1e5, 0.02)], gate).unwrap()
         };
         let (mut original, mut replay) = (build(), build());
@@ -119,7 +144,7 @@ fn reversal_series_drive_and_nonlinear_storage_share_one_loss_and_rollback_accou
 fn mismatched_source_and_changing_normal_thermal_or_geometry_inputs_refuse_cold() {
     scoped(|cx, gate| {
         assert!(specification(gate, "wrong-outer.fsmatpk")
-            .compile(cx, gate, |path| Ok(bulk(path, 2e11))).is_err());
+            .compile(cx, gate, |path| Ok(contact_bulk(path, 2e11))).is_err());
         for selection in 0..4 {
             let mut input = specification(gate, "wire.fsmatpk");
             match selection {
@@ -134,7 +159,7 @@ fn mismatched_source_and_changing_normal_thermal_or_geometry_inputs_refuse_cold(
                 _ => input.bow_residual_flexibility = true,
             }
             let mut reads = 0;
-            assert!(input.compile(cx, gate, |path| { reads += 1; Ok(bulk(path, 2e11)) }).is_err());
+            assert!(input.compile(cx, gate, |path| { reads += 1; Ok(contact_bulk(path, 2e11)) }).is_err());
             assert_eq!(reads, 0, "unsupported composition must refuse before constructing the physical bank");
         }
     });

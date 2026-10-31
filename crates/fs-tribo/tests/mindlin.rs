@@ -43,6 +43,44 @@ fn close(actual: f64, expected: f64, tolerance: f64) {
     );
 }
 
+#[test]
+fn returned_traction_satisfies_its_actual_compliant_load_line_after_reversals() {
+    let law = model();
+    let virgin = law.initial_state();
+    let loaded = law.advance(&virgin,
+        &input(&law, 0.7 * law.gross_slip_displacement_m(), 0.0)).unwrap().state;
+    let reversed = law.advance(&loaded,
+        &input(&law, -0.2 * law.gross_slip_displacement_m(), 0.0)).unwrap().state;
+    // The returned effort drives the body, so the original law must agree at
+    // free-C*RETURNED_TRACTION, not merely at the last internal root iterate.
+    for (history, state) in [&virgin, &loaded, &reversed].into_iter().enumerate() {
+        for ratio in [0.1, 1.0, 10.0, 100.0, 10000.0] {
+            let compliance = ratio / law.initial_stiffness_n_per_m();
+            for fraction in [-2.0, -0.7, -0.01, 0.01, 0.31, 1.4] {
+                let free = fraction * law.gross_slip_displacement_m();
+                let mut request = input(&law, free, compliance);
+                request.solve.force_absolute_tolerance_n = 1e-10;
+                request.solve.force_relative_tolerance = 1e-9;
+                let step = law.advance(state, &request).unwrap();
+                let actual = free - compliance * step.traction_n[0];
+                let mut prescribed = request;
+                prescribed.slip_increment_m[0] = actual;
+                prescribed.compliance_m_per_n = 0.0;
+                let checked = law.advance(state, &prescribed).unwrap();
+                let residual = step.traction_n[0] - checked.traction_n[0];
+                let tolerance = request.solve.force_absolute_tolerance_n
+                    + request.solve.force_relative_tolerance
+                        * step.traction_n[0].abs().max(checked.traction_n[0].abs());
+                assert!(residual.abs() <= tolerance,
+                    "history={history}, C*k0={ratio}, free/d={fraction}, residual={residual:e}, tolerance={tolerance:e}");
+                assert!(step.dissipated_j >= 0.0);
+                close(step.closure_residual_j, 0.0,
+                    2e-14 * law.gross_slip_capacity_n() * law.gross_slip_displacement_m());
+            }
+        }
+    }
+}
+
 fn backbone(law: &MindlinDeresiewiczPoint, displacement: f64) -> f64 {
     let fraction = displacement.abs() / law.gross_slip_displacement_m();
     let magnitude = if fraction >= 1.0 {

@@ -21,8 +21,26 @@ fn claim(name: &str, value: f64, dims: Dims) -> PropertyClaim {
         observations: vec![], provenance: provenance() }
 }
 fn pack_claims(name: &str, claims: ClaimSet) -> NormalizedPack {
+    // Compiled fixtures retain the same source-artifact contract as production
+    // packs. Preserve prior observations when a test adds or changes a claim;
+    // only new manufactured literals acquire this pack's explicit test record.
+    let mut observed = ClaimSet::new();
+    for id in claims.observation_ids() {
+        observed.register_observation(claims.observation(id).unwrap().clone()).unwrap();
+    }
+    let literal = observed.register_observation(ObservationDataset {
+        specimen: name.into(), method: "manufactured SI contact-test literals".into(),
+        artifact: fs_blake3::ContentHash([29; 32]),
+        caveats: "synthetic composition fixture; not measured material or instrument data".into(),
+        provenance: provenance(),
+    }).unwrap();
+    for (_, claim) in claims.claims_ordered() {
+        let mut claim = claim.clone();
+        if claim.observations.is_empty() { claim.observations.push(literal); }
+        observed.insert_claim(claim).unwrap();
+    }
     let pack = NormalizedPack::new(name, "synthetic-native-contact-v1",
-        fs_blake3::ContentHash([29; 32]), "CC0-1.0 synthetic data", claims, vec![], vec![]).unwrap();
+        fs_blake3::ContentHash([29; 32]), "CC0-1.0 synthetic data", observed, vec![], vec![]).unwrap();
     NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
 }
 fn bulk(name: &str, receiver_young: f64) -> NormalizedPack {

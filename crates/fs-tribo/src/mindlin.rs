@@ -366,7 +366,7 @@ impl MindlinDeresiewiczPoint {
             return Ok((free, 0));
         }
         let bound = self.capacity_n.min(x.solve.maximum_force_n);
-        let evaluate = |force: f64| -> Result<(f64, f64, f64, f64), TriboError> {
+        let evaluate = |force: f64| -> Result<(f64, f64, f64, f64, f64), TriboError> {
             let increment = free - checked_mul(compliance, force, "mindlin_body_response_m")?;
             finite(increment, "mindlin_resolved_increment_m")?;
             let response = self.response(state, increment, None)?;
@@ -375,13 +375,25 @@ impl MindlinDeresiewiczPoint {
                 x.solve.tolerance(force, response.average_n)?,
                 increment,
                 1.0 + compliance * response.derivative_n_per_m,
+                response.average_n,
             ))
+        };
+        // advance returns the constitutive work-average effort, not this root's
+        // trial force. Applying that returned effort to a compliant body changes
+        // the slip again; the contact tangent can amplify a small root residual
+        // beyond the SAME caller tolerance. Check the effort the body will use
+        // before accepting. Continue the existing safeguarded Newton iteration
+        // when either residual fails; do not change the constitutive work or
+        // tighten/loosen the caller's physical force tolerance by a magic factor.
+        let returned_effort_agrees = |returned: f64| -> Result<bool, TriboError> {
+            let (residual, tolerance, _, _, _) = evaluate(returned)?;
+            Ok(residual.abs() <= tolerance)
         };
         let mut lo = -bound;
         let mut hi = bound;
         for (force, lower) in [(lo, true), (hi, false)] {
-            let (residual, tolerance, increment, _) = evaluate(force)?;
-            if residual.abs() <= tolerance {
+            let (residual, tolerance, increment, _, returned) = evaluate(force)?;
+            if residual.abs() <= tolerance && returned_effort_agrees(returned)? {
                 return Ok((increment, 0));
             }
             if (lower && residual > 0.0) || (!lower && residual < 0.0) {
@@ -397,8 +409,8 @@ impl MindlinDeresiewiczPoint {
         let mut final_residual = 0.0;
         let mut final_tolerance = 0.0;
         for iteration in 1..=x.solve.max_iterations {
-            let (residual, tolerance, increment, derivative) = evaluate(force)?;
-            if residual.abs() <= tolerance {
+            let (residual, tolerance, increment, derivative, returned) = evaluate(force)?;
+            if residual.abs() <= tolerance && returned_effort_agrees(returned)? {
                 return Ok((increment, iteration));
             }
             final_residual = residual;

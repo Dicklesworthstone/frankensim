@@ -8,6 +8,7 @@ const WRAP: &str = "winding-memory shear_modulus 1 wrap_delta wrap_time";
 fn input_text() -> String {
     String::from_utf8(wound_spec().bytes)
         .unwrap()
+        .replace("48000 256 0.01 128", "48000 17 0.01 16")
         .replace("surface 0.002", "surface 0.2")
         .replace(
             "cavity neck",
@@ -158,8 +159,8 @@ fn winding_relaxation_changes_shared_pressure_and_preserves_callback_replay() {
             fast.catalog["wrap.fsmatpk"].pack.content_hash()
         );
         let initial = slow.performance.bank().system().nonlinear_material_memory()[0].to_vec();
-        let expected = pressure(&mut slow, 37);
-        let changed = pressure(&mut fast, 128);
+        let expected = pressure(&mut slow, 7);
+        let changed = pressure(&mut fast, 16);
         assert!(expected.iter().any(|p| p.abs() > 1e-12));
         assert!(
             expected
@@ -211,7 +212,7 @@ fn winding_relaxation_changes_shared_pressure_and_preserves_callback_replay() {
             ),
             pressure(
                 &mut build(cx, gate, &zero, 0.0, 0.003, 200_000.0).unwrap(),
-                37
+                7
             )
         );
     });

@@ -27,9 +27,15 @@ fn shell_rotation_text() -> String {
 fn original_shell_rotation_drives_the_existing_torque_string_body_gas_and_pcm_solve() {
     scoped(|cx,gate| {
         let text = shell_rotation_text();
-        let make = || input::Spec::parse(text.as_bytes()).unwrap().compile_with_body(cx,gate,
-            Some(shell_profile()),|name|Ok(pack_with_shear(name,1.0,1.0,None))).unwrap();
-        let mut connected = make();
+        let make = |connected| {
+            let mut spec = if connected { input::Spec::parse(text.as_bytes()).unwrap() } else { shell_spec() };
+            // Prepare the same transaction once instead of repeating unchanged exponential/Gramian work.
+            spec.prepared_linear = Some(PreparedModalBudget { max_modes:64,
+                max_dense_bytes:268_435_456,max_multiply_terms:1_000_000_000_000 });
+            spec.compile_with_body(cx,gate,Some(shell_profile()),
+                |name|Ok(pack_with_shear(name,1.0,1.0,None))).unwrap()
+        };
+        let mut connected = make(true);
         assert_eq!(connected.rotational_bridge_baselines_m,vec![None]);
         let source = connected.performance.bank().source().bank();
         let input::RotationalBody::Shell(geometry) = &connected.spec.rotational_bridges[0].body
@@ -40,14 +46,14 @@ fn original_shell_rotation_drives_the_existing_torque_string_body_gas_and_pcm_so
         assert_eq!(actual.damping_n_m_s_per_rad,1e-7);
         assert!(source.cylinder_gas_loading().is_some());
         assert!(source.material_cavity().is_some());
-        let mut unconnected = ready(cx,gate,1.0,1.0);
+        let mut unconnected = make(false);
         let original = pressure(&mut unconnected,17);
         let samples = pressure(&mut connected,17);
         assert!(samples.iter().all(|v|v.is_finite()));
         assert!(samples.iter().zip(&original).any(|(a,b)|(a-b).abs()>1e-14));
         let frame = connected.performance.bank().system().last_frame().unwrap();
         assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
-        let mut partitioned = make();
+        let mut partitioned = make(true);
         assert_eq!(pressure(&mut partitioned,37),samples);
     });
 }
