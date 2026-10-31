@@ -1,4 +1,4 @@
-//! Streaming rainflow and stress-life fatigue (life-ladder-gahl, first rung).
+//! Streaming rainflow with stress-life and total mechanical strain-life fatigue.
 //!
 //! This is an empirical Palmgren-Miner baseline, not a constitutive softening
 //! law, a multiaxial failure criterion, or a validated component-life claim.
@@ -15,6 +15,11 @@
 use fs_math::det;
 use std::sync::Arc;
 
+/// Source-backed S-N calibration admission with original material receipts.
+pub mod source;
+/// Bounded Coffin-Manson-Basquin total mechanical strain-life estimates.
+pub mod strain_life;
+
 /// Conditions identifying the supplied empirical calibration. These strings
 /// are caller declarations, not independent verification of the source.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +31,19 @@ pub struct FatigueScope {
     pub environment: String,
     pub load_basis: String,
     pub temperature_k: f64,
+}
+
+impl FatigueScope {
+    fn validate(&self) -> Result<(), FatigueError> {
+        if [&self.source_reference, &self.material, &self.process,
+            &self.surface_and_geometry, &self.environment, &self.load_basis]
+            .iter().any(|s| s.trim().is_empty())
+            || !self.temperature_k.is_finite() || self.temperature_k <= 0.0
+        {
+            return Err(FatigueError::InvalidCalibration("declare the source and all calibration conditions"));
+        }
+        Ok(())
+    }
 }
 
 /// One fully reversed S-N observation: stress AMPLITUDE, not stress range.
@@ -41,6 +59,7 @@ pub struct SnCurve {
     scope: FatigueScope,
     points: Vec<SnPoint>,
     endurance_limit_pa: Option<f64>,
+    source: Option<Arc<source::SnCalibrationSource>>,
 }
 
 /// Named treatment of the cycle's signed mean stress.
@@ -65,10 +84,13 @@ pub enum FatigueError {
     InvalidCalibration(&'static str),
     InvalidLimits,
     InvalidStress { sample: u64 },
+    InvalidStrain { sample: u64 },
     InvalidDirection,
     SampleLimit { limit: u64 },
     ResidueLimit { limit: usize },
     AmplitudeOutsideCurve { amplitude_pa: f64, minimum_pa: f64, maximum_pa: f64 },
+    StrainAmplitudeOutsideCurve { amplitude: f64, minimum: f64, maximum: f64 },
+    LifeOutsideCurve { cycles: f64, minimum: f64, maximum: f64 },
     StaticStrengthExceeded { peak_pa: f64, ultimate_strength_pa: f64 },
     Arithmetic,
     Allocation,
@@ -96,13 +118,7 @@ impl SnCurve {
         points: Vec<SnPoint>,
         endurance_limit_pa: Option<f64>,
     ) -> Result<Self, FatigueError> {
-        if [&scope.source_reference, &scope.material, &scope.process,
-            &scope.surface_and_geometry, &scope.environment, &scope.load_basis]
-            .iter().any(|s| s.trim().is_empty())
-            || !scope.temperature_k.is_finite() || scope.temperature_k <= 0.0
-        {
-            return Err(FatigueError::InvalidCalibration("declare the source and all calibration conditions"));
-        }
+        scope.validate()?;
         if points.len() < 2 || points.iter().any(|p|
             !p.amplitude_pa.is_finite() || p.amplitude_pa <= 0.0
                 || !p.cycles_to_failure.is_finite() || p.cycles_to_failure < 1.0)
@@ -121,12 +137,13 @@ impl SnCurve {
         {
             return Err(FatigueError::InvalidCalibration("endurance limit must be positive and strictly below finite-life data"));
         }
-        Ok(Self { scope, points, endurance_limit_pa })
+        Ok(Self { scope, points, endurance_limit_pa, source: None })
     }
 
     pub fn scope(&self) -> &FatigueScope { &self.scope }
     pub fn points(&self) -> &[SnPoint] { &self.points }
     pub fn endurance_limit_pa(&self) -> Option<f64> { self.endurance_limit_pa }
+    pub fn source(&self) -> Option<&source::SnCalibrationSource> { self.source.as_deref() }
 
     /// `None` means zero amplitude or the explicitly declared endurance regime,
     /// not a demonstrated infinite service life. Everything else needs support
@@ -204,7 +221,7 @@ pub struct FatigueSummary {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-struct TurningPoint { stress: f64 }
+struct TurningPoint { value: f64 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Tally {
@@ -221,29 +238,21 @@ struct Tally {
 pub struct RainflowMiner {
     curve: Arc<SnCurve>,
     correction: MeanStressCorrection,
-    limits: RainflowLimits,
-    residue: Vec<TurningPoint>,
-    pending: Option<TurningPoint>,
-    direction: i8,
-    samples: u64,
-    tally: Tally,
-    finished: bool,
+    history: RainflowHistory,
 }
 
 impl RainflowMiner {
     pub fn new(curve: Arc<SnCurve>, correction: MeanStressCorrection, limits: RainflowLimits) -> Result<Self, FatigueError> {
         correction.validate()?;
-        if limits.maximum_samples == 0 || limits.maximum_residue < 2 { return Err(FatigueError::InvalidLimits); }
-        Ok(Self { curve, correction, limits, residue: Vec::new(), pending: None,
-            direction: 0, samples: 0, tally: Tally::default(), finished: false })
+        Ok(Self { curve, correction, history: RainflowHistory::new(limits)? })
     }
 
     pub fn curve(&self) -> &SnCurve { &self.curve }
-    pub fn pending_reversals(&self) -> usize { self.residue.len() }
+    pub fn pending_reversals(&self) -> usize { self.history.residue.len() }
     pub fn summary(&self) -> FatigueSummary {
-        FatigueSummary { samples: self.samples, full_cycles: self.tally.full,
-            half_cycles: self.tally.half, miner_damage: self.tally.damage,
-            maximum_corrected_amplitude_pa: self.tally.maximum_amplitude, finished: self.finished }
+        FatigueSummary { samples: self.history.samples, full_cycles: self.history.tally.full,
+            half_cycles: self.history.tally.half, miner_damage: self.history.tally.damage,
+            maximum_corrected_amplitude_pa: self.history.tally.maximum_amplitude, finished: self.history.finished }
     }
 
     pub fn push(&mut self, stress_pa: f64) -> Result<(), FatigueError> {
@@ -253,23 +262,90 @@ impl RainflowMiner {
     /// Transactional single sample. Cancellation is polled before acceptance
     /// and at every candidate cycle; existing accepted samples are untouched.
     pub fn push_with_cancel(&mut self, stress_pa: f64, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+        let law = StressLife { curve: &self.curve, correction: self.correction };
+        self.history.push(stress_pa, &law, cancelled)
+    }
+
+    /// Atomic block ingestion; callback size does not change the reduction or
+    /// damage summation order. Do not finish the counter between blocks.
+    pub fn push_block(&mut self, stresses_pa: &[f64], cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+        let law = StressLife { curve: &self.curve, correction: self.correction };
+        self.history.push_block(stresses_pa, &law, cancelled)
+    }
+
+    /// Account for the final endpoint and remaining half cycles ONCE. Repeated
+    /// calls are idempotent. Refusal leaves the still-open counter unchanged.
+    pub fn finish(&mut self) -> Result<FatigueSummary, FatigueError> {
+        self.finish_with_cancel(&mut || false)
+    }
+
+    pub fn finish_with_cancel(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<FatigueSummary, FatigueError> {
+        let law = StressLife { curve: &self.curve, correction: self.correction };
+        self.history.finish(&law, cancelled)?;
+        Ok(self.summary())
+    }
+}
+
+// Scalar counting is independent of the calibrated life law. The private
+// statically dispatched boundary prevents stress and dimensionless strain from
+// acquiring one another's units or mean-correction policy.
+trait CycleLife {
+    fn admit_sample(&self, value: f64, sample: u64) -> Result<(), FatigueError>;
+    /// Life in full cycles and the amplitude retained in this law's own units.
+    fn evaluate_cycle(&self, amplitude: f64, mean: f64) -> Result<(Option<f64>, f64), FatigueError>;
+}
+
+struct StressLife<'a> {
+    curve: &'a SnCurve,
+    correction: MeanStressCorrection,
+}
+impl CycleLife for StressLife<'_> {
+    fn admit_sample(&self, value: f64, sample: u64) -> Result<(), FatigueError> {
+        if !value.is_finite() { return Err(FatigueError::InvalidStress { sample }); }
+        // Constant or unfinished monotone histories need not close any cycle.
+        // Their instantaneous tensile peaks must still pass the strength law.
+        self.correction.corrected_amplitude(0.0, value)?;
+        Ok(())
+    }
+    fn evaluate_cycle(&self, amplitude: f64, mean: f64) -> Result<(Option<f64>, f64), FatigueError> {
+        let corrected = self.correction.corrected_amplitude(amplitude, mean)?;
+        Ok((self.curve.cycles_to_failure(corrected)?, corrected))
+    }
+}
+
+/// One bounded rainflow/history owner for all scalar life laws.
+#[derive(Debug, Clone, PartialEq)]
+struct RainflowHistory {
+    limits: RainflowLimits,
+    residue: Vec<TurningPoint>,
+    pending: Option<TurningPoint>,
+    direction: i8,
+    samples: u64,
+    tally: Tally,
+    finished: bool,
+}
+
+impl RainflowHistory {
+    fn new(limits: RainflowLimits) -> Result<Self, FatigueError> {
+        if limits.maximum_samples == 0 || limits.maximum_residue < 2 { return Err(FatigueError::InvalidLimits); }
+        Ok(Self { limits, residue: Vec::new(), pending: None,
+            direction: 0, samples: 0, tally: Tally::default(), finished: false })
+    }
+
+    fn push(&mut self, value: f64, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
         if self.finished { return Err(FatigueError::AlreadyFinished); }
-        if !stress_pa.is_finite() { return Err(FatigueError::InvalidStress { sample: self.samples }); }
-        if self.samples >= self.limits.maximum_samples {
+        if value.is_finite() && self.samples >= self.limits.maximum_samples {
             return Err(FatigueError::SampleLimit { limit: self.limits.maximum_samples });
         }
-        // A constant or unfinished monotone history need not close any cycle.
-        // Admit its instantaneous tensile peak BEFORE changing accepted state;
-        // otherwise an overload can finish with zero reported fatigue damage.
-        self.correction.corrected_amplitude(0.0, stress_pa)?;
-        let point = TurningPoint { stress: stress_pa };
+        law.admit_sample(value, self.samples)?;
+        let point = TurningPoint { value };
         let mut direction = self.direction;
         if let Some(previous) = self.pending {
-            if point.stress != previous.stress {
-                let next_direction = if point.stress > previous.stress { 1 } else { -1 };
+            if point.value != previous.value {
+                let next_direction = if point.value > previous.value { 1 } else { -1 };
                 if direction == 0 || direction != next_direction {
-                    self.append_reversal(previous, cancelled)?;
+                    self.append_reversal(previous, law, cancelled)?;
                 }
                 direction = next_direction;
             }
@@ -280,37 +356,29 @@ impl RainflowMiner {
         Ok(())
     }
 
-    /// Atomic block ingestion; callback size does not change the reduction or
-    /// damage summation order. Do not finish the counter between blocks.
-    pub fn push_block(&mut self, stresses_pa: &[f64], cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    fn push_block(&mut self, values: &[f64], law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
         if self.finished { return Err(FatigueError::AlreadyFinished); }
-        let count = u64::try_from(stresses_pa.len()).map_err(|_| FatigueError::Arithmetic)?;
+        let count = u64::try_from(values.len()).map_err(|_| FatigueError::Arithmetic)?;
         if count > self.limits.maximum_samples - self.samples {
             return Err(FatigueError::SampleLimit { limit: self.limits.maximum_samples });
         }
         let mut candidate = self.clone();
-        for &stress in stresses_pa { candidate.push_with_cancel(stress, cancelled)?; }
+        for &value in values { candidate.push(value, law, cancelled)?; }
         if cancelled() { return Err(FatigueError::Cancelled); }
         *self = candidate;
         Ok(())
     }
 
-    /// Account for the final endpoint and remaining half cycles ONCE. Repeated
-    /// calls are idempotent. Refusal leaves the still-open counter unchanged.
-    pub fn finish(&mut self) -> Result<FatigueSummary, FatigueError> {
-        self.finish_with_cancel(&mut || false)
-    }
-
-    pub fn finish_with_cancel(&mut self, cancelled: &mut impl FnMut() -> bool) -> Result<FatigueSummary, FatigueError> {
+    fn finish(&mut self, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         if cancelled() { return Err(FatigueError::Cancelled); }
-        if self.finished { return Ok(self.summary()); }
+        if self.finished { return Ok(()); }
         let mut candidate = self.clone();
-        if let Some(last) = candidate.pending { candidate.append_reversal(last, cancelled)?; }
+        if let Some(last) = candidate.pending { candidate.append_reversal(last, law, cancelled)?; }
         let mut tally = candidate.tally;
         for pair in candidate.residue.windows(2) {
             if cancelled() { return Err(FatigueError::Cancelled); }
-            tally = candidate.count_cycle(tally, pair[0], pair[1], false)?;
+            tally = candidate.count_cycle(tally, pair[0], pair[1], false, law)?;
         }
         if cancelled() { return Err(FatigueError::Cancelled); }
         candidate.tally = tally;
@@ -318,19 +386,16 @@ impl RainflowMiner {
         candidate.pending = None;
         candidate.finished = true;
         *self = candidate;
-        Ok(self.summary())
+        Ok(())
     }
 
-    fn count_cycle(&self, mut tally: Tally, a: TurningPoint, b: TurningPoint, full: bool) -> Result<Tally, FatigueError> {
-        if a.stress == b.stress { return Ok(tally); }
-        let amplitude = half_range(a.stress, b.stress)?;
-        let mean = 0.5 * a.stress + 0.5 * b.stress;
-        let corrected = self.correction.corrected_amplitude(amplitude, mean)?;
+    fn count_cycle(&self, mut tally: Tally, a: TurningPoint, b: TurningPoint, full: bool, law: &impl CycleLife) -> Result<Tally, FatigueError> {
+        if a.value == b.value { return Ok(tally); }
+        let amplitude = half_range(a.value, b.value)?;
+        let mean = 0.5 * a.value + 0.5 * b.value;
+        let (life, counted_amplitude) = law.evaluate_cycle(amplitude, mean)?;
         let weight = if full { 1.0 } else { 0.5 };
-        let damage = match self.curve.cycles_to_failure(corrected)? {
-            Some(life) => weight / life,
-            None => 0.0,
-        };
+        let damage = life.map_or(0.0, |life| weight / life);
         let corrected_term = damage - tally.compensation;
         let sum = tally.damage + corrected_term;
         let compensation = (sum - tally.damage) - corrected_term;
@@ -339,14 +404,14 @@ impl RainflowMiner {
         else { tally.half = tally.half.checked_add(1).ok_or(FatigueError::Arithmetic)?; }
         tally.damage = sum;
         tally.compensation = compensation;
-        tally.maximum_amplitude = tally.maximum_amplitude.max(corrected);
+        tally.maximum_amplitude = tally.maximum_amplitude.max(counted_amplitude);
         Ok(tally)
     }
 
     // Preview reductions and damage without mutating the accepted stack. A new
     // extreme can remove arbitrarily many nested pairs, but at most the explicit
     // residue limit. No clone/allocation proportional to trace length is needed.
-    fn append_reversal(&mut self, point: TurningPoint, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
+    fn append_reversal(&mut self, point: TurningPoint, law: &impl CycleLife, cancelled: &mut impl FnMut() -> bool) -> Result<(), FatigueError> {
         let mut keep = self.residue.len();
         let mut start_half = None;
         let mut tally = self.tally;
@@ -354,8 +419,8 @@ impl RainflowMiner {
             if cancelled() { return Err(FatigueError::Cancelled); }
             let a = self.residue[keep - 2];
             let b = self.residue[keep - 1];
-            if half_range(b.stress, point.stress)? < half_range(a.stress, b.stress)? { break; }
-            tally = self.count_cycle(tally, a, b, keep > 2)?;
+            if half_range(b.value, point.value)? < half_range(a.value, b.value)? { break; }
+            tally = self.count_cycle(tally, a, b, keep > 2, law)?;
             if keep == 2 { start_half = Some(b); keep = 0; break; }
             keep -= 2;
         }
@@ -409,6 +474,14 @@ impl NormalStressDirection {
         let stress: f64 = weights.iter().zip(stress_pa).map(|(w, s)| w * s).sum();
         if !stress.is_finite() { return Err(FatigueError::Arithmetic); }
         Ok(stress)
+    }
+
+    /// Signed dimensionless normal strain in the same fixed frame. Input is
+    /// total MECHANICAL strain (elastic plus plastic, excluding thermal strain)
+    /// in tensor-Voigt `[xx, yy, zz, xy, yz, zx]` order. It is not engineering
+    /// shear, Mandel strain, or the nondecreasing equivalent plastic strain.
+    pub fn project_strain(self, mechanical_strain: &[f64; 6]) -> Result<f64, FatigueError> {
+        self.project(mechanical_strain)
     }
 }
 

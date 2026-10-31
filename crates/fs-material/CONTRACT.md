@@ -110,6 +110,50 @@ and reinforced PEEK through the production compiler and this owner.
 
 ## Purpose and layer
 
+### Shared stress-life and total mechanical strain-life fatigue
+
+`fatigue` owns one bounded streaming rainflow reducer for both S-N/Miner
+stress-life and `fatigue::strain_life` Coffin-Manson-Basquin/Miner strain-life.
+Signed physical normal stress and signed total mechanical normal strain are
+different inputs. Tensor shear uses `[xx, yy, zz, xy, yz, zx]`; unsigned von
+Mises stress and accumulated equivalent plastic strain cannot substitute for a
+reversing history. Fixed-plane projection is not a multiaxial failure criterion.
+Counters retain unresolved reversals across blocks, compensate the damage sum,
+check explicit sample/residue limits, and publish samples, blocks and final
+endpoint half cycles transactionally. Finalization is idempotent. The original
+source or calibration remains shared through the immutable curve.
+
+The total-strain law is `epsilon_a = sigma_f'/E*(2*N_f)^b + epsilon_f'*(2*N_f)^c`:
+amplitude is half the signed range, `N_f` is full cycles and `2*N_f` is reversals.
+Both empirical contributions use the supplied calibration and finite life domain;
+a safeguarded deterministic log-life inverse performs bounded work. Zero
+amplitude contributes no damage; positive amplitudes outside the declared
+domain refuse rather than inventing endurance or extrapolation. The explicitly
+selected `Uncorrected` strain-life policy neglects mean stress; strain mean does
+not supply the stress extrema needed by Morrow or Smith-Watson-Topper models.
+The formulation follows the combined relation documented in COMSOL's
+[Strain Life Models](https://doc.comsol.com/6.4/doc/com.comsol.help.fatigue/fatigue_ug_sme.4.21.html).
+
+`fatigue::source::resolve_log_log_sn` admits an original material-card
+`fatigue-stress-amplitude` or `fatigue-stress-range` curve against explicitly
+named cycles-to-failure or reversals-to-failure. The caller deliberately authors
+log-log interpolation between the original observations. Every original knot,
+claim, uncertainty, validity condition, typed query and selection receipt stays
+attached to `SnCurve::source`; a tabulated-only source remains tabulated-only.
+No point is dropped to repair monotonicity, avoid a source conflict or escape a
+validity boundary. The selected source must declare R = -1 and the actual
+absolute temperature. Strength, censored runouts and an unsupported endurance
+limit cannot replace finite-life observations. Applicability labels remain
+caller declarations; material/process/environment equivalence is not inferred.
+
+Focused G0/G1/G3 regressions check analytic strain-life inversion and single-term
+limits, cycle/reversal and range/amplitude conversion, hand-countable damage,
+shared rainflow behavior, chunk/restart equivalence, source conflicts and
+unsupported-domain rollback. These are implementation checks using synthetic
+fixtures. Miner exhaustion is an empirical estimate, not a rupture certificate,
+stiffness degradation, heat source, crack-growth law, validated component life
+or a claim of transferable calibration across temperature or load populations.
+
 Layer **L3** (FLUX support). Runtime deps: `std`, fs-ad (dual-number
 energy derivatives), fs-blake3 (typed content identities), fs-evidence
 (model cards, Evidence, and V&V artifacts), fs-matdb (immutable material and
