@@ -5,11 +5,14 @@
 //! owns rupture, transported liquid content and reformation. The binding never
 //! substitutes a pressure clamp, a gas EOS or a duplicate thermal integrator.
 //!
-//! This is a prescribed-configuration film step. A mechanical solver must use
-//! the returned pressure forces inside its own coupled solve before committing
+//! The film binding below is a prescribed-configuration step. A mechanical
+//! solver must use the returned pressure forces inside its own coupled solve before committing
 //! a candidate. Endpoint forces are not time-integrated mechanical work. The
 //! isothermal, negligible-void-mass film approximation does not infer latent
 //! heat from changing empty volume or deposit such energy into a thermal body.
+//! The separate water-cell owner evolves finite mass and internal energy with
+//! actual IF97 phase inventories; the duct and bubble owners retain their own
+//! explicitly declared isothermal or frozen-material approximations.
 
 #[cfg(feature = "cavitation")]
 pub mod bubble;
@@ -21,6 +24,10 @@ pub mod bubbly;
 /// Event-resolved pure-vapor cavities on the original liquid duct state.
 #[cfg(feature = "cavitation")]
 pub mod duct;
+
+/// Finite water mass and internal energy with native IF97 flashing/condensation.
+/// This thermal inventory uses existing material owners without a bubble solver.
+pub mod water_cell;
 
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState};

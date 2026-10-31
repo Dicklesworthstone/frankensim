@@ -149,6 +149,20 @@ impl IsochoricWaterState {
     pub const fn law(&self) -> &IsochoricWater {
         &self.chart
     }
+    /// Original retained single-phase IF97 source; no re-evaluation or fit.
+    pub const fn single_phase_source(&self) -> Option<If97State> {
+        match self.point.source {
+            Source::Single(state) => Some(state),
+            Source::Mixture { .. } => None,
+        }
+    }
+    /// Original retained coexistence endpoints, including exact saturation ends.
+    pub const fn saturation_pair(&self) -> Option<If97SaturationPair> {
+        match self.point.source {
+            Source::Mixture { pair, .. } => Some(pair),
+            Source::Single(_) => None,
+        }
+    }
     pub fn temperature_k(self) -> f64 {
         self.point.source.temperature()
     }

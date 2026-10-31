@@ -1,5 +1,40 @@
 # CONTRACT: fs-couple
 
+## Finite water mass, phase inventory and thermal cavitation
+
+`cavitation::water_cell::EquilibriumWaterCell` evolves total water mass and
+internal energy in a rigid volume. The original `IsochoricWater` owner recovers
+temperature, pressure and finite liquid/vapor inventories from `V/M` and `U/M`
+using the retained IF97 Region 1, 2 or 4 state. Conserved energy is never
+replaced by an approximate source inverse. Phase reconstruction, source energy
+and volume defects, and the accepted first-law residual have separate budgets.
+
+Incoming and outgoing `WaterParcel` values retain original IF97 enthalpy and
+entropy. Flow work is included once through enthalpy; rigid-boundary work is
+zero and no additional latent-heat source is invented. `transfer_water` prepares
+both finite cells, checks total mass/energy and cancellation, and publishes both
+or neither. Withdrawal uses the initial well-mixed donor state, an explicit
+first-order partition requiring interval refinement. Gross opposing flows count
+against the exchange cap. Hydraulic flow direction and amount remain the
+caller’s responsibility; the cell is not a momentum, valve or choking solver.
+
+`water_cell::acoustics::FrozenWaterCellAcoustics` borrows one accepted snapshot
+and reads its exact retained IF97 endpoints. Its existing `FluidAcoustics`
+implementation feeds native ducts through single-phase response or the original
+Wood compliance with mass-to-volume conversion. Acoustic perturbations freeze
+phase masses and assume common pressure/velocity, adiabatic individual phases
+and long wavelengths. They do not use an equilibrated boiling sound speed or
+infer a resonant bubble radius from vapor volume.
+
+Eight native regressions exercise withdrawal-induced vapor, refill condensation,
+conservative two-cell transfer, late cancellation, nonaccumulating inverse error,
+original phase acoustics and actual phase-change feedback into duct propagation.
+The thermal source domain remains 273.16..=623.15 K with explicit pressure and
+iteration bounds. Finite-rate nucleation, metastability, noncondensable gas,
+interface energy and resolved thermal gradients are outside this closure.
+Heat-boundary temperature is unspecified, so the raw entropy remainder is not
+certified entropy production.
+
 ## Resonant dilute bubbly-liquid propagation
 
 The opt-in `cavitation::bubbly::DiluteBubblyLiquid` binds the original
