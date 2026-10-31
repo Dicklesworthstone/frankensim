@@ -1,5 +1,6 @@
 //! Whole-string observations enter the same reciprocal renderer without an
-//! invented bulk material, winding construction, or intrinsic damping law.
+//! invented bulk material, winding construction, or intrinsic damping law. A
+//! damping law exists only as the source's own rows, selected by name.
 use super::*;
 use fs_couple::material_assembly::measured_string::ResolvedMeasuredStringSpecimen;
 
@@ -11,7 +12,7 @@ pub(super) fn resolve(
     gate: &CancelGate,
 ) -> Result<MaterialStringSource> {
     poll(gate)?;
-    let input::WireSection::Measured { axes, properties, length } = &wire.section else {
+    let input::WireSection::Measured { axes, properties, loss, length } = &wire.section else {
         return Err("measured resolution requires a measured section".into());
     };
     let StringPrestress::FixedTension(tension) = wire.prestress else {
@@ -25,7 +26,7 @@ pub(super) fn resolve(
         || spec.longitudinal_waves.is_some()
         || spec.geometric_stretching.is_some()
     {
-        return Err("measured whole strings supply transverse mass and bending stiffness, not torsion, thermal, axial, or intrinsic-loss laws".into());
+        return Err("measured whole strings supply transverse mass and bending stiffness, not torsion, thermal, axial, or intrinsic-loss laws from outside their own source rows".into());
     }
     load_pack(&wire.pack, catalog, loader)?;
     let card = &catalog[&wire.pack].card;
@@ -38,17 +39,20 @@ pub(super) fn resolve(
         axes: axes.to_vec(),
     }
     .query_point(card)?;
-    let measurements = resolve_material_state_point(
-        card,
-        &query,
-        &properties.requirements()?,
-        Pick::SingleClaimOnly,
-    )?;
+    let mut requirements = properties.requirements()?;
+    if let Some(loss) = loss {
+        requirements.extend(loss.requirements()?);
+    }
+    let measurements = resolve_material_state_point(card, &query, &requirements, Pick::SingleClaimOnly)?;
     let specimen = ResolvedMeasuredStringSpecimen::try_new(
         wire.bending_modes,
         &measurements,
         properties.clone(),
     )?;
+    let specimen = match loss {
+        None => specimen,
+        Some(loss) => specimen.with_loss_factors(loss.clone())?,
+    };
     // A speaking-length source measured nut to saddle: bind it there, on this string's own span and bridge station.
     let measured_length = specimen.string().length_m;
     let specimen = match length {

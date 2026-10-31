@@ -152,6 +152,18 @@ fn a_tension_loss_factor_refuses_because_no_layer_owns_its_heat() {
         assert_eq!(runtime.states(), base.states());
     });
 }
+#[test]
+fn a_bending_loss_factor_refuses_because_no_layer_owns_its_heat() {
+    with_cx(|cx, _| {
+        let sources = Sources::new(4e-5);
+        for eta in [2e-2, f64::NAN] {
+            let lossy = PrestressedString { bending_loss_factor: Some(eta), ..template() };
+            assert!(matches!(sources.runtime_with(cx, lossy).0,
+                Err(ConcentricStringError::Invalid("a layered thermoelastic string has no owner for bending-factor heat"))),
+                "eta_B {eta} was admitted");
+        }
+    });
+}
 fn scalar(value: f64, dims: Dims) -> PropertyValue { PropertyValue::Scalar { value, dims } }
 fn point(t: f64) -> QueryPoint { QueryPoint::new().with("T", t).unwrap().with("omega", 1.0).unwrap() }
 fn caloric(card: &MaterialCard) -> ResolvedHeatCapacityCurve {
@@ -166,7 +178,7 @@ fn template() -> PrestressedString {
         axial_stiffness_n: 0.0, width_m: 0.001, n_modes: 2, damping_ratio: 0.0,
         rayleigh: None, bending_stiffness_n_m2: 0.0, kelvin_voigt_bending: None,
         relaxation_bending: None, polarization_detune: 0.0, moving_end: false,
-        tension_loss_factor: None }
+        tension_loss_factor: None, bending_loss_factor: None }
 }
 fn controls() -> ConcentricStringThermalSolve {
     ConcentricStringThermalSolve { maximum_cells: 2, maximum_thermal_trials: 256,

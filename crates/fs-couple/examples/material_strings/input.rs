@@ -7,7 +7,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::cavity::ShellCavityMolec
 use fs_scenario::gesture::GestureValue;
 use fs_couple::bowed_string::runtime::reciprocal::bank::polarization::{TransverseDirection, TransverseDirections};
 use fs_scenario::acoustic::BendingRelaxationProperties;
-use fs_couple::material_assembly::measured_string::MeasuredStringProperties;
+use fs_couple::material_assembly::measured_string::{MeasuredStringLossProperties, MeasuredStringProperties};
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::rayleigh::PlateRayleighOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBemOptions;
 use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::ShellObserverOptions;
@@ -118,7 +118,9 @@ pub enum WireSection {
     Homogeneous,
     /// Whole-assembly measurements with an explicit elastic-only assumption.
     /// Coordinates belong to the measurement, independently of body/gas state.
-    Measured { axes: Vec<(String, f64)>, properties: MeasuredStringProperties, length: MeasuredLength },
+    /// `loss` names the source's own loss-factor rows; `None` is the explicit `no-intrinsic-loss` limitation.
+    Measured { axes: Vec<(String, f64)>, properties: MeasuredStringProperties,
+        loss: Option<MeasuredStringLossProperties>, length: MeasuredLength },
     Bonded { core_radius_m: f64, sleeves: Vec<WireLayer> },
     CloseWound { core_radius_m: f64, pack: String, wire_radius_m: f64, pitch_m: f64 },
 }
@@ -1419,16 +1421,22 @@ impl<'a> Reader<'a> {
                     linear_density: row.label()?, bending_stiffness: row.label()?,
                 };
                 properties.requirements()?;
-                if row.word()? != "no-intrinsic-loss" {
-                    return Err("measured strings require explicit no-intrinsic-loss; assembly measurements do not identify a damping law".into());
-                }
+                let loss = match row.word()? {
+                    "no-intrinsic-loss" => None,
+                    "loss-factors" => {
+                        let loss = MeasuredStringLossProperties { friction: row.label()?, bending: row.label()? };
+                        loss.requirements()?;
+                        Some(loss)
+                    }
+                    _ => return Err("measured strings require explicit no-intrinsic-loss or loss-factors ETA_F ETA_B; assembly measurements do not identify a damping law".into()),
+                };
                 let length = match row.words.next() {
                     None | Some("test-span") => MeasuredLength::TestSpan,
                     Some("speaking-length") => MeasuredLength::Speaking,
                     Some(_) => return Err("a measured length is test-span (the default) or speaking-length".into()),
                 };
                 row.end()?;
-                Ok(WireSection::Measured { axes, properties, length })
+                Ok(WireSection::Measured { axes, properties, loss, length })
             }
             "close-wound" => {
                 let core_radius_m = row.positive()?;

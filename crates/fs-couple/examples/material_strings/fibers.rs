@@ -336,7 +336,7 @@ impl Input {
             axial_stiffness_n: 1.0, width_m: 1.0, n_modes: self.transverse_modes,
             damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
             kelvin_voigt_bending: None, relaxation_bending: None,
-            polarization_detune: 0.0, moving_end: false, tension_loss_factor: None,
+            polarization_detune: 0.0, moving_end: false, tension_loss_factor: None, bending_loss_factor: None,
         };
         let fiber = if let Some(reference) = self.thermal_reference_kelvin {
             let StringPrestress::FixedExtension { stress_free_length_m, linear_strain_limit } = self.prestress else {

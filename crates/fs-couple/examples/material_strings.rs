@@ -115,7 +115,7 @@ fn template(w:&input::Wire) -> PrestressedString {
     PrestressedString { length_m:w.length,tension_n:tension,lin_density_kg_m:1.0,axial_stiffness_n:1.0,
         width_m:1.0,n_modes:w.bending_modes,damping_ratio:0.0,rayleigh:None,bending_stiffness_n_m2:0.0,
         kelvin_voigt_bending:None,relaxation_bending:None,polarization_detune:0.0,moving_end:false,
-        tension_loss_factor:w.tension_loss.as_ref().map(|row|row.eta_f) }
+        tension_loss_factor:w.tension_loss.as_ref().map(|row|row.eta_f),bending_loss_factor:None }
 }
 // The retained pack includes normalization/uncertainty/rights metadata. Its ID
 // labels source identity, not a new assertion about chemistry or measured quality.

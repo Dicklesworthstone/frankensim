@@ -10,6 +10,8 @@
 //! The admitted law is a frozen, uniform scalar Euler--Bernoulli string with
 //! measured fixed tension and pinned ends. It does not infer intrinsic loss
 //! from a mean Q, reconstruct a winding, or supply shear/axial/thermal response.
+//! Intrinsic loss exists only as source rows selected by name, through
+//! [`ResolvedMeasuredStringSpecimen::with_loss_factors`].
 //! Gas drag and reciprocal supports remain independent physical consumers.
 //! Adding independent fluid inertia requires source-qualified dry structural
 //! coefficients: effective mass or stiffness inferred from in-air modes is
@@ -78,9 +80,48 @@ impl MeasuredStringProperties {
     }
 }
 
+/// Source rows of one string's two constant loss factors.
+///
+/// Woodhouse, Plucked guitar transients, Acta Acustica united with Acustica 90
+/// (2004) 945-965, eq. (8), fits a string's loss factor as
+/// `[T (eta_F + eta_A / omega) + B eta_B k²] / [T + B k²]`. These selectors name
+/// the dimensionless friction and bending factors. Its `eta_A` has no role: the
+/// renderer computes air drag from the diameter and the declared gas, so adding
+/// a fitted air term would count air twice, and the paper calls that term's form
+/// and origin open to question. The computed drag does not reproduce it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MeasuredStringLossProperties {
+    /// Dimensionless tension loss factor `eta_F`.
+    pub friction: String,
+    /// Dimensionless bending loss factor `eta_B`.
+    pub bending: String,
+}
+
+impl MeasuredStringLossProperties {
+    /// The exact source query for the two factors, friction then bending.
+    pub fn requirements(&self) -> Result<Vec<ScalarPropertyRequirement>, MaterialStatePointError> {
+        if self.friction == self.bending {
+            return Err(MaterialStatePointError::InvalidDerived {
+                quantity: "measured string loss roles must select distinct physical properties",
+            });
+        }
+        [&self.friction, &self.bending]
+            .into_iter()
+            .map(|name| {
+                ScalarPropertyRequirement::try_new(
+                    name,
+                    Dims::NONE,
+                    ScalarAdmissibility::StrictlyPositive,
+                )
+            })
+            .collect()
+    }
+}
+
 /// One measured uniform string at its actual source conditions and tension.
 /// Missing internal loss is an explicit model limitation, never a zero-valued
-/// material claim. The owning source variant refuses unsupported extra laws.
+/// material claim, until [`Self::with_loss_factors`] selects source rows.
+/// The owning source variant refuses unsupported extra laws.
 #[derive(Clone, Debug)]
 pub struct ResolvedMeasuredStringSpecimen {
     measurements: ResolvedMaterialStatePoint,
@@ -88,6 +129,7 @@ pub struct ResolvedMeasuredStringSpecimen {
     string: PrestressedString,
     omega_band_rad_s: Option<(f64, f64)>,
     speaking_length_m: Option<f64>,
+    loss_properties: Option<MeasuredStringLossProperties>,
 }
 
 impl ResolvedMeasuredStringSpecimen {
@@ -114,34 +156,9 @@ impl ResolvedMeasuredStringSpecimen {
         let mut values = [0.0; 5];
         let mut band: Option<(f64, f64)> = None;
         for (index, (name, dims)) in properties.roles().into_iter().enumerate() {
-            let property = measurements.property(name).ok_or_else(|| {
-                invalid("measured string is missing an explicitly selected source property")
-            })?;
-            let value = property.value_si();
-            if property.requirement().quantity() != QuantitySpec::dimensional(dims)
-                || !value.is_finite()
-                || value <= 0.0
-                || !property.source_axes().is_empty()
-                || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
-            {
-                return Err(invalid(
-                    "measured string needs positive dimension-only SI scalars with validity-wide constant support",
-                ));
-            }
-            if let Some(next) = property.angular_frequency_band_rad_s().map_err(|_| {
-                invalid("measured string has invalid frequency applicability semantics")
-            })? {
-                band = Some(band.map_or(next, |old| (old.0.max(next.0), old.1.min(next.1))));
-            }
-            values[index] = value;
+            values[index] = source_scalar(measurements, name, dims, &mut band)?;
         }
-        if band.is_some_and(|(low, high)| {
-            !low.is_finite() || !high.is_finite() || low < 0.0 || high <= low
-        }) {
-            return Err(invalid(
-                "measured string source frequency domains have no nonempty intersection",
-            ));
-        }
+        admit_band(band)?;
         let [
             length_m,
             width_m,
@@ -166,6 +183,7 @@ impl ResolvedMeasuredStringSpecimen {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         };
         if !positive(0.5 * width_m) || !positive(lin_density_kg_m * length_m) {
             return Err(invalid(
@@ -178,16 +196,9 @@ impl ResolvedMeasuredStringSpecimen {
             string,
             omega_band_rad_s: band,
             speaking_length_m: None,
+            loss_properties: None,
         };
-        for mode in 1..=n_modes {
-            result.admit_angular_frequency(fs_nlmodal::prestressed_beam_omega(
-                length_m,
-                tension_n,
-                lin_density_kg_m,
-                bending_stiffness_n_m2,
-                mode,
-            ))?;
-        }
+        result.admit_retained_modes()?;
         Ok(result)
     }
 
@@ -220,15 +231,33 @@ impl ResolvedMeasuredStringSpecimen {
         }
         self.string.length_m = span_m;
         self.speaking_length_m = Some(measured);
-        for mode in 1..=self.string.n_modes {
-            self.admit_angular_frequency(fs_nlmodal::prestressed_beam_omega(
-                span_m,
-                self.string.tension_n,
-                self.string.lin_density_kg_m,
-                self.string.bending_stiffness_n_m2,
-                mode,
-            ))?;
+        self.admit_retained_modes()?;
+        Ok(self)
+    }
+
+    /// Bind the string's own loss factors from rows of this measured source.
+    ///
+    /// The rows must already be resolved in this specimen's state point, so they carry the same receipts, and meet
+    /// the same admission as every other role. Each factor's stated frequency band narrows the specimen's, and
+    /// every retained mode is re-admitted against it.
+    pub fn with_loss_factors(
+        mut self,
+        loss: MeasuredStringLossProperties,
+    ) -> Result<Self, AcousticRealizeError> {
+        if self.loss_properties.is_some() {
+            return Err(invalid("measured string loss factors are already bound"));
         }
+        loss.requirements()
+            .map_err(|_| invalid("invalid measured string loss selectors"))?;
+        let friction =
+            source_scalar(&self.measurements, &loss.friction, Dims::NONE, &mut self.omega_band_rad_s)?;
+        let bending =
+            source_scalar(&self.measurements, &loss.bending, Dims::NONE, &mut self.omega_band_rad_s)?;
+        admit_band(self.omega_band_rad_s)?;
+        self.string.tension_loss_factor = Some(friction);
+        self.string.bending_loss_factor = Some(bending);
+        self.loss_properties = Some(loss);
+        self.admit_retained_modes()?;
         Ok(self)
     }
 
@@ -236,6 +265,12 @@ impl ResolvedMeasuredStringSpecimen {
     #[must_use]
     pub const fn speaking_length_m(&self) -> Option<f64> {
         self.speaking_length_m
+    }
+
+    /// The selected loss rows; `None` is the explicit no-intrinsic-loss limitation.
+    #[must_use]
+    pub const fn loss_properties(&self) -> Option<&MeasuredStringLossProperties> {
+        self.loss_properties.as_ref()
     }
 
     /// Original uniform continuum, with no manufactured constitutive coefficients.
@@ -281,6 +316,60 @@ impl ResolvedMeasuredStringSpecimen {
         }
         Ok(())
     }
+
+    fn admit_retained_modes(&self) -> Result<(), AcousticRealizeError> {
+        for mode in 1..=self.string.n_modes {
+            self.admit_angular_frequency(fs_nlmodal::prestressed_beam_omega(
+                self.string.length_m,
+                self.string.tension_n,
+                self.string.lin_density_kg_m,
+                self.string.bending_stiffness_n_m2,
+                mode,
+            ))?;
+        }
+        Ok(())
+    }
+}
+
+/// One source role's value, narrowing `band` by the frequency domain it states.
+fn source_scalar(
+    measurements: &ResolvedMaterialStatePoint,
+    name: &str,
+    dims: Dims,
+    band: &mut Option<(f64, f64)>,
+) -> Result<f64, AcousticRealizeError> {
+    let property = measurements
+        .property(name)
+        .ok_or_else(|| invalid("measured string is missing an explicitly selected source property"))?;
+    let value = property.value_si();
+    if property.requirement().quantity() != QuantitySpec::dimensional(dims)
+        || !value.is_finite()
+        || value <= 0.0
+        || !property.source_axes().is_empty()
+        || property.answer().receipt.decision != EvaluationDecision::ConstantWithinValidity
+    {
+        return Err(invalid(
+            "measured string needs positive dimension-only SI scalars with validity-wide constant support",
+        ));
+    }
+    if let Some(next) = property
+        .angular_frequency_band_rad_s()
+        .map_err(|_| invalid("measured string has invalid frequency applicability semantics"))?
+    {
+        *band = Some(band.map_or(next, |old| (old.0.max(next.0), old.1.min(next.1))));
+    }
+    Ok(value)
+}
+
+fn admit_band(band: Option<(f64, f64)>) -> Result<(), AcousticRealizeError> {
+    if band.is_some_and(|(low, high)| {
+        !low.is_finite() || !high.is_finite() || low < 0.0 || high <= low
+    }) {
+        return Err(invalid(
+            "measured string source frequency domains have no nonempty intersection",
+        ));
+    }
+    Ok(())
 }
 
 fn positive(value: f64) -> bool {

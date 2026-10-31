@@ -141,6 +141,7 @@ fn g1_g3_sourced_music_wire_reaches_stiff_string() {
         polarization_detune: 0.0,
         moving_end: false,
         tension_loss_factor: None,
+        bending_loss_factor: None,
     };
     let string = with_uniform_circular_material_and_prestress(
         template,

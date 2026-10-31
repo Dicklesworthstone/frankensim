@@ -421,6 +421,7 @@ fn specimen(source: &ResolvedMaterialStatePoint) -> ResolvedStringSpecimen {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         },
         0.0003,
         source,

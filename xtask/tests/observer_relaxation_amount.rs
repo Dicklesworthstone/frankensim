@@ -247,6 +247,7 @@ fn fixture(range_m: f64) -> AcousticAssembly {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         }),
         duct: None,
         pluck: Some(Pluck {

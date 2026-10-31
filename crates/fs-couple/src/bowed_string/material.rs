@@ -32,8 +32,9 @@ fn invalid(what: &'static str) -> AcousticRealizeError {
 impl BowedStringCard {
     /// Lower direct whole-string measurements through the original transverse
     /// dispersion, cylinder resistance and time-domain admission. Intrinsic
-    /// material loss remains absent, explicitly unmeasured; no Q is converted
-    /// into a viscosity, torsional law or invented homogeneous solid.
+    /// material loss is absent, explicitly unmeasured, unless the specimen
+    /// selected its source's own loss factors; no Q is converted into a
+    /// viscosity, torsional law or invented homogeneous solid.
     pub fn from_measured_string_specimen(
         cx: &Cx<'_>,
         specimen: &crate::material_assembly::measured_string::ResolvedMeasuredStringSpecimen,

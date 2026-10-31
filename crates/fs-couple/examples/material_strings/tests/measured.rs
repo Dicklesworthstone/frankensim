@@ -3,10 +3,28 @@
 //! the documented user workflow compiles the original cited TSV, without a new importer.
 use super::*;
 use fs_couple::material_assembly::measured_string::{
-    MeasuredStringProperties, ResolvedMeasuredStringSpecimen,
+    MeasuredStringLossProperties, MeasuredStringProperties, ResolvedMeasuredStringSpecimen,
 };
 
 const PREPARED: &str = "prepared-linear 64 67108864 200000000000";
+const FRICTION: &str = "loss_coefficient_friction_fixture";
+const BENDING: &str = "loss_coefficient_bending_fixture";
+const AIR: &str = "loss_coefficient_air_fixture";
+/// Eq. (8)'s friction and bending terms of Woodhouse 2004, p. 956, as zeta = eta / 2,
+/// for this fixture's T, mu and EI with eta_F 2e-5 and eta_B 0.02, modes 1 to 4 of
+/// each span. Worked from the printed form by a separate script, not by this crate.
+const LAW_0_7_M: [f64; 4] = [
+    1.052_421_479_942_407_79e-5,
+    1.209_652_915_817_314_69e-5,
+    1.471_595_347_701_406_16e-5,
+    1.838_084_015_348_785_03e-5,
+];
+const LAW_0_875_M: [f64; 4] = [
+    1.033_550_380_950_752_54e-5,
+    1.134_188_004_107_344_04e-5,
+    1.301_872_324_000_466_94e-5,
+    1.536_535_810_214_646_96e-5,
+];
 
 fn text() -> String {
     include_str!("../measured-cello-g.material-strings")
@@ -49,6 +67,24 @@ fn measured_pack(mass_factor: f64) -> NormalizedPack {
         claims
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(requirement.name(), dims),
+                value: PropertyValue::Scalar { value, dims },
+                validity: ValidityDomain::unconstrained().with("temperature_known", 0.0, 0.0),
+                uncertainty: UncertaintyModel::Unstated,
+                interpolation: InterpolationPolicy::ConstantWithinValidity,
+                observations: vec![observation.clone()],
+                provenance: provenance.clone(),
+            })
+            .unwrap();
+    }
+    // Selected only by `loss-factors`. The air row's unit keeps it out of both roles.
+    for (name, value, dims) in [
+        (FRICTION, 2e-5, Dims::NONE),
+        (BENDING, 0.02, Dims::NONE),
+        (AIR, 1.2, Dims([0, 0, -1, 0, 0, 0])),
+    ] {
+        claims
+            .insert_claim(PropertyClaim {
+                key: PropertyKey::new(name, dims),
                 value: PropertyValue::Scalar { value, dims },
                 validity: ValidityDomain::unconstrained().with("temperature_known", 0.0, 0.0),
                 uncertainty: UncertaintyModel::Unstated,
@@ -280,6 +316,99 @@ fn a_speaking_length_source_binds_nut_to_bridge_and_a_test_span_source_never_doe
         let invalid = text().replace("no-intrinsic-loss", &format!("no-intrinsic-loss {token}"));
         assert!(input::Spec::parse(invalid.as_bytes()).is_err(), "accepted {token}");
     }
+}
+
+fn with_loss(card: &str) -> String {
+    card.replace("no-intrinsic-loss", &format!("loss-factors {FRICTION} {BENDING}"))
+}
+
+#[test]
+fn loss_factors_add_the_printed_law_to_every_card_and_leave_the_computed_drag_alone() {
+    let parse = |card: &str| input::Spec::parse(card.as_bytes()).unwrap();
+    let speaking = text()
+        .replace("0.7 0.000575", "0.875 0.000575")
+        .replace("no-intrinsic-loss", "no-intrinsic-loss speaking-length");
+    scoped(|cx, gate| {
+        for (card, law) in [(text(), LAW_0_7_M), (speaking, LAW_0_875_M)] {
+            let plain = ready(cx, gate, parse(&card), 1.0).unwrap();
+            let mut bound = ready(cx, gate, parse(&with_loss(&card)), 1.0).unwrap();
+            let (a, b) = (plain.performance.bank(), bound.performance.bank());
+            assert_eq!(a.cards().len(), b.cards().len());
+            for (a, b) in a.cards().iter().zip(b.cards()) {
+                assert!(!a.zetas.is_empty() && a.zetas.len() == b.zetas.len());
+                // Polarizations repeat the same four modes.
+                assert_eq!(a.zetas.len() % law.len(), 0);
+                for (index, (a, b)) in a.zetas.iter().zip(&b.zetas).enumerate() {
+                    let expected = law[index % law.len()];
+                    assert!(*a > 0.0, "the computed drag is still there");
+                    let added = b - a;
+                    assert!(
+                        (added / expected - 1.0).abs() < 1e-9,
+                        "mode index {index}: added {added:e} vs {expected:e}"
+                    );
+                }
+            }
+            let source = specimen(&b.source().bank().strings()[0].source);
+            assert_eq!(
+                source.loss_properties(),
+                Some(&MeasuredStringLossProperties { friction: FRICTION.into(), bending: BENDING.into() })
+            );
+            assert_eq!(source.measurements().properties().len(), 7);
+            // Both rows stay on the receipts; eta_A is never read.
+            assert!(source.measurements().property(FRICTION).is_some());
+            assert!(source.measurements().property(BENDING).is_some());
+            assert!(source.measurements().property(AIR).is_none());
+            let p = pressure(&mut bound, 64);
+            assert!(p.iter().all(|value| value.is_finite()) && p.iter().any(|value| value.abs() > 1e-15));
+        }
+        // Planted negative: the card without the selection reaches no rows and adds nothing.
+        let plain = ready(cx, gate, parse(&text()), 1.0).unwrap();
+        let source = specimen(&plain.performance.bank().source().bank().strings()[0].source);
+        assert!(source.loss_properties().is_none());
+        assert_eq!(source.string().tension_loss_factor, None);
+        assert_eq!(source.string().bending_loss_factor, None);
+        for absent in [FRICTION, BENDING, AIR] {
+            assert!(source.measurements().property(absent).is_none(), "{absent}");
+        }
+    });
+}
+
+#[test]
+fn a_loss_selection_refuses_every_row_it_cannot_own() {
+    let original = text();
+    for selection in [
+        "loss-factors".to_owned(),
+        format!("loss-factors {FRICTION}"),
+        format!("loss-factors {FRICTION} {FRICTION}"),
+        format!("loss-factors {FRICTION} {BENDING} extra"),
+        format!("loss-factor {FRICTION} {BENDING}"),
+    ] {
+        let invalid = original.replace("no-intrinsic-loss", &selection);
+        assert!(input::Spec::parse(invalid.as_bytes()).is_err(), "accepted {selection}");
+    }
+    // A loss factor does not open the door to the other bending laws.
+    let invalid = with_loss(&original).replace(PREPARED, &format!("bending-loss kelvin-voigt\n{PREPARED}"));
+    let error = input::Spec::parse(invalid.as_bytes()).err().unwrap().to_string();
+    assert!(error.contains("measured whole strings do not supply an intrinsic bending-loss law"), "{error}");
+    scoped(|cx, gate| {
+        for invalid in [
+            original.replace("no-intrinsic-loss", &format!("loss-factors {AIR} {BENDING}")),
+            original.replace("no-intrinsic-loss", &format!("loss-factors {FRICTION} {AIR}")),
+            original.replace("no-intrinsic-loss", &format!("loss-factors not_in_this_source {BENDING}")),
+            original.replace(
+                "no-intrinsic-loss",
+                &format!("loss-factors {FRICTION} mean_quality_factor_first_30_modes_absent"),
+            ),
+        ] {
+            let spec = input::Spec::parse(invalid.as_bytes()).unwrap();
+            assert!(ready(cx, gate, spec, 1.0).is_err(), "accepted {invalid}");
+        }
+        let doubled = with_loss(&original)
+            .replace(PREPARED, &format!("tension-loss lampis-2024-dominant-cello-g\n{PREPARED}"));
+        let spec = input::Spec::parse(doubled.as_bytes()).unwrap();
+        let error = ready(cx, gate, spec, 1.0).err().unwrap().to_string();
+        assert!(error.contains("measured whole strings"), "{error}");
+    });
 }
 
 #[test]

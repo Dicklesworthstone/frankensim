@@ -129,7 +129,7 @@ explicit setup and are checked by the native measured-string owner.
 The section record is one line:
 
 ```text
-section measured AXIS_COUNT AXIS VALUE ... LENGTH_PROPERTY DIAMETER_PROPERTY TENSION_PROPERTY LINEAR_DENSITY_PROPERTY BENDING_STIFFNESS_PROPERTY no-intrinsic-loss [test-span|speaking-length]
+section measured AXIS_COUNT AXIS VALUE ... LENGTH_PROPERTY DIAMETER_PROPERTY TENSION_PROPERTY LINEAR_DENSITY_PROPERTY BENDING_STIFFNESS_PROPERTY (no-intrinsic-loss | loss-factors ETA_F_PROPERTY ETA_B_PROPERTY) [test-span|speaking-length]
 ```
 
 For this source the coordinate is `temperature_known 0`. It means the
@@ -202,6 +202,23 @@ does not convert that mean into viscosity or silently apply a tension-loss
 table. The laboratory model still dissipates energy through its declared gas
 and support/body laws. Its decay is not a validated reproduction of the
 measured string's decay.
+
+`loss-factors ETA_F_PROPERTY ETA_B_PROPERTY` is for a source that prints a
+string's own loss law. It selects two dimensionless rows of the same source,
+under the same admission and receipts as the other roles, for the friction and
+bending terms of Woodhouse, Plucked guitar transients, Acta Acustica united with
+Acustica 90 (2004), eq. (8): each mode gains
+`zeta = (T eta_F + EI eta_B k^2) / (2 (T + EI k^2))`, booked as material heat.
+Both factors are constant in frequency. `eta_B` is not a Kelvin-Voigt viscosity,
+whose loss factor grows with frequency, so `bending-loss` and `tension-loss`
+records still refuse on a measured string.
+
+The same equation's `eta_A / omega` term has no role here. The renderer already
+computes air drag from the diameter and the declared gas, and adding a fitted
+air term would count air twice. The two are not the same quantity: the paper
+calls that term's form and origin open to question, and on its E2 string it is
+2.7 to 12 times the computed drag, so no diameter reproduces it. That remainder
+stays unmodelled and is stated in the instrument's `unknowns.tsv`.
 
 A full cello additionally needs sourced body and bridge geometry/materials,
 cavity and radiation data, support and contact laws, appropriate resolution,

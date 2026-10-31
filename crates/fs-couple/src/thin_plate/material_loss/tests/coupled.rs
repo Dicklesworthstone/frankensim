@@ -39,6 +39,7 @@ fn build(cx: &Cx<'_>, gate: &CancelGate, eta: f64) -> ReciprocalStringBank {
             width_m: 0.01, n_modes, damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
             kelvin_voigt_bending: None, relaxation_bending: None, polarization_detune: 0.0, moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         }, 0.0003, &material(200e9, Some(10.0), 100_000.0)).unwrap().with_kelvin_voigt_bending_loss().unwrap()
     )).collect();
     let gas = GasState::try_new(&GasSpec::dry_air_ussa1976(), 293.15, 101_325.0).unwrap();

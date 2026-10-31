@@ -85,7 +85,7 @@ fn build(cx:&Cx<'_>,gate:&CancelGate,b:SharedMaterialPlateChartBody,selected:boo
         PrestressedString {length_m:0.5,tension_n:20.0,lin_density_kg_m:1.0,axial_stiffness_n:1.0,width_m:1.0,
             n_modes,damping_ratio:0.0,rayleigh:None,bending_stiffness_n_m2:0.0,kelvin_voigt_bending:None,
             relaxation_bending:None,polarization_detune:0.0,moving_end:false,
-            tension_loss_factor:None},0.0003,&state(1.0,None)).unwrap()
+            tension_loss_factor:None,bending_loss_factor:None},0.0003,&state(1.0,None)).unwrap()
         .with_kelvin_voigt_bending_loss().unwrap())).to_vec();
     let gas=GasState::try_new(&GasSpec::dry_air_ussa1976(),293.15,101325.0).unwrap();
     let cavity=Some(MaterialBodyCavity {cavity:HelmholtzModalCavity::new(HelmholtzCavity {

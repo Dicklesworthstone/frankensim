@@ -1713,7 +1713,15 @@ fn intrinsic_mode_loss_parts(
             what: "relaxation bending cannot be combined with other internal/Rayleigh losses",
         });
     }
+    if string.bending_loss_factor.is_some()
+        && (string.kelvin_voigt_bending.is_some() || string.relaxation_bending.is_some())
+    {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "a bending loss factor cannot be combined with another bending loss law",
+        });
+    }
     let tension = tension_loss_zeta(string, omega, wave_number)?;
+    let factor_bending = bending_loss_zeta(string, omega, wave_number)?;
     let material_bending = string
         .kelvin_voigt_bending
         .map(|law| {
@@ -1779,10 +1787,10 @@ fn intrinsic_mode_loss_parts(
     // A caller-authored modal ratio is an explicit reduced model. Elastic EI
     // supplies storage, not an additional dissipation law, and one ratio does
     // not identify a relaxation spectrum. Physical bending loss must select
-    // the Kelvin-Voigt or causal memory path above.
+    // the Kelvin-Voigt or causal memory path above, or a constant loss factor.
     Ok(StringModeLossParts {
         authored: string.damping_ratio,
-        material: tension,
+        material: tension + factor_bending,
         ..StringModeLossParts::default()
     })
 }
@@ -1821,6 +1829,47 @@ fn tension_loss_zeta(
     if !zeta.is_finite() || zeta < 0.0 {
         return Err(AcousticRealizeError::InvalidDescription {
             what: "tension loss damping is unrepresentable",
+        });
+    }
+    Ok(zeta)
+}
+
+/// Modal damping ratio of the bending stiffness's constant loss factor eta_B.
+///
+/// The bending term of Woodhouse, Plucked guitar transients, Acta Acustica
+/// united with Acustica 90 (2004) 945-965, eq. (8): a complex flexural rigidity
+/// EI (1 + i eta_B) loses eta_B of bending's share of the mode's stiffness per
+/// radian, so zeta = eta_B EI k⁴ / (2 mu omega²) at the mode's own admitted
+/// frequency, held as a modal viscous rate like eta_F. With
+/// mu omega² = T k² + EI k⁴ this and [`tension_loss_zeta`] are that equation's
+/// friction and bending terms over its one denominator. eta_B is constant in
+/// frequency: Kelvin-Voigt's viscosity has a loss factor that grows with omega
+/// and is a different law. It is material heat. `None` contributes nothing.
+/// An authored ratio or Rayleigh pair is already a complete reduced loss, so it
+/// cannot be combined with a physical eta_B.
+fn bending_loss_zeta(
+    string: &PrestressedString,
+    omega: f64,
+    wave_number: f64,
+) -> Result<f64, AcousticRealizeError> {
+    let Some(eta) = string.bending_loss_factor else {
+        return Ok(0.0);
+    };
+    if !eta.is_finite() || eta < 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "bending loss factor must be finite and nonnegative",
+        });
+    }
+    if string.rayleigh.is_some() || string.damping_ratio != 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "bending loss factor cannot be combined with authored internal/Rayleigh loss",
+        });
+    }
+    let zeta = 0.5 * eta * string.bending_stiffness_n_m2 * wave_number.powi(4)
+        / (string.lin_density_kg_m * omega * omega);
+    if !zeta.is_finite() || zeta < 0.0 {
+        return Err(AcousticRealizeError::InvalidDescription {
+            what: "bending loss damping is unrepresentable",
         });
     }
     Ok(zeta)
@@ -2492,6 +2541,7 @@ mod moving_end_dispersion_tests {
             polarization_detune: 0.0,
             moving_end: true,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         };
         for tension in [70.0, 1.0e-300, 0.0] {
             string.tension_n = tension;
@@ -2811,7 +2861,8 @@ pub struct MaterialStringFrame {
 /// Losses during one sample, excluding parameter work and diagnostic radiation.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct StringDissipation {
-    /// Kelvin-Voigt bending dissipation inside the solid [J].
+    /// Dissipation inside the solid: Kelvin-Voigt bending and the constant
+    /// tension and bending loss factors [J].
     pub material_heat_j: f64,
     /// Energy removed by the admitted oscillating-cylinder air resistance [J].
     /// It leaves the solid; this reduced law does not resolve its fluid heating.
@@ -5701,6 +5752,7 @@ mod string_observer_tests {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let mut member = linear_string_member(&string, None, None, &gas, 1.0, 8_000, 1.0).unwrap();
@@ -5739,6 +5791,7 @@ mod string_observer_tests {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         };
         let gas = gas_state(AmbientGas::sea_level()).unwrap();
         let mut member = kc_string_member(&string, None, None, &[], &gas, 1.0, 1.0).unwrap();
@@ -5920,6 +5973,7 @@ mod string_observer_tests {
                 polarization_detune: 0.0,
                 moving_end: true,
                 tension_loss_factor: None,
+                bending_loss_factor: None,
             };
             let mut render = |string: &PrestressedString| {
                 realize_dirac_join(
@@ -6385,6 +6439,7 @@ mod arbitrary_gas_realization_tests {
                 damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0,
                 kelvin_voigt_bending: None, relaxation_bending: None,
                 polarization_detune: 0.0, moving_end: false, tension_loss_factor: None,
+                bending_loss_factor: None,
             }),
             duct: None,
             pluck: Some(Pluck { station_frac: 0.25, height_m: 1.0e-4 }),
@@ -6517,6 +6572,7 @@ mod tension_loss_tests {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor,
+            bending_loss_factor: None,
         }
     }
 
@@ -6615,6 +6671,202 @@ mod tension_loss_tests {
                 ..reduced
             };
             assert!(mode_zeta(&without, omega, wave_number, &gas).is_ok());
+        }
+    }
+}
+
+#[cfg(test)]
+mod bending_loss_tests {
+    use super::*;
+    use core::f64::consts::{PI, TAU};
+    use fs_scenario::acoustic::{BendingRelaxationBranch, KelvinVoigtBending, PronyBending};
+
+    /// Woodhouse 2004 Table I, the E2 string, on the guitar's 0.68 m pinned span.
+    fn e2(eta_f: Option<f64>, eta_b: Option<f64>) -> PrestressedString {
+        PrestressedString {
+            length_m: 0.68,
+            tension_n: 71.6,
+            lin_density_kg_m: 0.00624,
+            axial_stiffness_n: 0.0,
+            width_m: 0.001118,
+            n_modes: 24,
+            damping_ratio: 0.0,
+            rayleigh: None,
+            bending_stiffness_n_m2: 57.0e-6,
+            kelvin_voigt_bending: None,
+            relaxation_bending: None,
+            polarization_detune: 0.0,
+            moving_end: false,
+            tension_loss_factor: eta_f,
+            bending_loss_factor: eta_b,
+        }
+    }
+
+    /// (mode, omega, zeta_F, zeta_B) of Woodhouse's eq. (8), p. 956, as zeta = eta / 2.
+    /// Worked from the printed form in 50-digit decimal by a separate script, not
+    /// by this crate, for eta_F 2e-5 and eta_B 0.02.
+    const E2_LAW: [(usize, f64, f64, f64); 3] = [
+        (1, 4.948_902_138_948_980_65e2, 9.999_830_083_179_121_68e-6, 1.699_168_208_783_223_04e-7),
+        (12, 5.945_893_126_065_888_00e3, 9.975_591_286_343_197_58e-6, 2.440_871_365_680_241_96e-5),
+        (24, 1.193_524_631_775_046_69e4, 9.903_074_890_545_638_05e-6, 9.692_510_945_436_195_23e-5),
+    ];
+
+    fn wave_number(string: &PrestressedString, j: usize) -> f64 {
+        j as f64 * PI / string.length_m
+    }
+
+    #[test]
+    fn bending_loss_is_eq_8s_term_and_moves_nothing_else() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let (plain, friction) = (e2(None, None), e2(Some(2.0e-5), None));
+        let (both, zero) = (e2(Some(2.0e-5), Some(0.02)), e2(None, Some(0.0)));
+        for (j, omega, zeta_f, zeta_b) in E2_LAW {
+            let (actual, k) = (string_mode_omega(&both, j), wave_number(&both, j));
+            assert!((actual / omega - 1.0).abs() < 1.0e-14, "mode {j}: omega {actual:e}");
+            let parts = |string: &PrestressedString| mode_loss_parts(string, actual, k, &gas).unwrap();
+            let (base, tension, full) = (parts(&plain), parts(&friction), parts(&both));
+            assert!((tension.material / zeta_f - 1.0).abs() < 1.0e-13, "mode {j}");
+            assert!((full.material / (zeta_f + zeta_b) - 1.0).abs() < 1.0e-13, "mode {j}");
+            // The air stays the one computed term: this law adds nothing to it.
+            assert_eq!(full.air.to_bits(), base.air.to_bits());
+            assert_eq!(full.authored.to_bits(), base.authored.to_bits());
+            // A zero factor is the absent one, bit for bit.
+            assert_eq!(parts(&zero).total().to_bits(), base.total().to_bits());
+        }
+    }
+
+    #[test]
+    fn a_kelvin_voigt_viscosity_matched_at_one_mode_is_not_this_law_at_another() {
+        // Planted negative. The viscosity that equals eta_B at mode 12 has a loss
+        // factor growing with omega, so it overshoots mode 24 by the frequency ratio.
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let (_, omega_12, _, zeta_12) = E2_LAW[1];
+        let (_, omega_24, _, zeta_24) = E2_LAW[2];
+        let viscous = PrestressedString {
+            kelvin_voigt_bending: Some(KelvinVoigtBending {
+                viscous_stiffness_n_m2_s: 0.02 * 57.0e-6 / omega_12,
+                omega_band_rad_s: (0.0, 1.0e6),
+                material_state_identity: None,
+            }),
+            ..e2(None, None)
+        };
+        let rate = |j, omega| mode_loss_parts(&viscous, omega, wave_number(&viscous, j), &gas).unwrap().material;
+        assert!((rate(12, omega_12) / zeta_12 - 1.0).abs() < 1.0e-12);
+        let overshoot = rate(24, omega_24) / zeta_24;
+        assert!((overshoot / (omega_24 / omega_12) - 1.0).abs() < 1.0e-12, "overshoot {overshoot}");
+        assert!(overshoot > 1.9);
+    }
+
+    #[test]
+    fn bending_loss_refuses_other_bending_laws_reduced_losses_and_nonphysical_factors() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let refused = |string: &PrestressedString, expected: &str| {
+            let (omega, k) = (string_mode_omega(string, 3), wave_number(string, 3));
+            match mode_zeta(string, omega, k, &gas) {
+                Err(AcousticRealizeError::InvalidDescription { what }) => assert_eq!(what, expected),
+                other => panic!("admitted or misreported {other:?}, wanted {expected}"),
+            }
+        };
+        let kelvin_voigt = Some(KelvinVoigtBending {
+            viscous_stiffness_n_m2_s: 2.0e-8,
+            omega_band_rad_s: (0.0, 1.0e6),
+            material_state_identity: None,
+        });
+        let prony = Some(PronyBending {
+            branches: vec![BendingRelaxationBranch {
+                relaxing_stiffness_n_m2: 1.0e-6,
+                relaxation_time_s: 1.0e-3,
+            }],
+            omega_band_rad_s: (0.0, 1.0e6),
+            material_state_identity: None,
+            source_properties: None,
+        });
+        // Two bending laws would book one stiffness's loss twice, whatever the factor.
+        for eta in [0.02, 0.0] {
+            let other = "a bending loss factor cannot be combined with another bending loss law";
+            refused(&PrestressedString { kelvin_voigt_bending: kelvin_voigt, ..e2(None, Some(eta)) }, other);
+            refused(&PrestressedString { relaxation_bending: prony.clone(), ..e2(None, Some(eta)) }, other);
+        }
+        let reduced = "bending loss factor cannot be combined with authored internal/Rayleigh loss";
+        refused(&PrestressedString { damping_ratio: 1.0e-3, ..e2(None, Some(0.02)) }, reduced);
+        let rayleigh = Some(RayleighParams { alpha_per_s: 1.0, beta_s: 0.0 });
+        refused(&PrestressedString { rayleigh, ..e2(None, Some(0.02)) }, reduced);
+        for bad in [f64::NAN, f64::INFINITY, -1.0e-6] {
+            refused(&e2(None, Some(bad)), "bending loss factor must be finite and nonnegative");
+        }
+    }
+
+    #[test]
+    fn the_bending_term_is_booked_as_material_heat_and_the_ledger_fails_without_it() {
+        let gas = gas_state(AmbientGas::sea_level()).unwrap();
+        let (lossy, omitted) = (e2(Some(2.0e-5), Some(0.02)), e2(Some(2.0e-5), None));
+        let quiet = vec![0.0; lossy.n_modes];
+        // The same admitted frequencies, booked as if the bending term did not exist.
+        let without_term: Vec<_> = (1..=lossy.n_modes)
+            .map(|k| {
+                mode_loss_parts(&omitted, string_mode_omega(&lossy, k), wave_number(&lossy, k), &gas)
+                    .unwrap()
+            })
+            .collect();
+        let (rate, samples) = (48_000_u32, 9_600_u32);
+        let time = f64::from(samples) / f64::from(rate);
+        for (j, omega, zeta_f, zeta_b) in E2_LAW {
+            // The drag's printed form, written out here rather than called.
+            let radius = 0.5 * lossy.width_m;
+            let resistance = TAU
+                * gas.dynamic_viscosity
+                * (1.0 + radius * det::sqrt(2.0 * gas.density * omega / gas.dynamic_viscosity));
+            let zeta_air = resistance / (2.0 * lossy.lin_density_kg_m * omega);
+            let zeta = zeta_f + zeta_b + zeta_air;
+
+            let mut member = linear_string_member(&lossy, None, None, &gas, 1.0, rate, 1.0).unwrap();
+            let mut states = member.model.states().to_vec();
+            let start = 1.0e-3;
+            states[j - 1].displacement_m_sqrt_kg = start;
+            member.model.restore_states(&states).unwrap();
+            let initial = 0.5 * omega * omega * start * start;
+
+            let (mut heat, mut air, mut heat_without, mut air_without) = (0.0, 0.0, 0.0, 0.0);
+            let mut energy = initial;
+            for _ in 0..samples {
+                let frame = member.model.step(&quiet).unwrap();
+                let booked = partition_string_dissipation(&frame, &member.loss_parts).unwrap();
+                assert_eq!(booked.authored_loss_j, 0.0);
+                heat += booked.material_heat_j;
+                air += booked.air_loss_j;
+                let short = partition_string_dissipation(&frame, &without_term).unwrap();
+                heat_without += short.material_heat_j;
+                air_without += short.air_loss_j;
+                energy = frame.total_modal_energy_j;
+            }
+
+            // The motion itself carries the term: exact free decay at the full rate.
+            let damped = omega * det::sqrt(1.0 - zeta * zeta);
+            let decay = det::exp(-zeta * omega * time);
+            let (sine, cosine) = (det::sin(damped * time), det::cos(damped * time));
+            let displacement = start * decay * (cosine + zeta * omega / damped * sine);
+            let velocity = -start * decay * omega * omega / damped * sine;
+            let expected = 0.5 * velocity * velocity + 0.5 * omega * omega * displacement * displacement;
+            assert!((energy / expected - 1.0).abs() < 1.0e-8, "mode {j}: {energy:e} vs {expected:e}");
+            let drop = initial - energy;
+            assert!(drop > 0.0, "mode {j} lost nothing");
+
+            // Sources and sinks: the drop must equal the booked heat plus the air's
+            // share taken from the constants above, not from the booking under test.
+            let air_share = zeta_air / zeta;
+            let residual = (heat + drop * air_share - drop) / drop;
+            assert!(residual.abs() < 1.0e-9, "mode {j}: ledger open by {residual:e}");
+            assert!((air / drop / air_share - 1.0).abs() < 1.0e-9, "mode {j}");
+
+            // Planted negative: left out of the booking, the same ledger stays open
+            // by the term's whole share of the heat.
+            let short = (heat_without + drop * air_share - drop) / drop;
+            let share_lost = (zeta_f + zeta_b) / zeta - zeta_f / (zeta_f + zeta_air);
+            assert!((short / -share_lost - 1.0).abs() < 1.0e-9, "mode {j}: {short:e}");
+            assert!(short.abs() > 1.0e-3, "mode {j}: omission is invisible at {short:e}");
+            // Comparing the booking only with itself cannot see that: the shares
+            // always sum to one, so the omitted term moves into air and still closes.
+            assert!(((heat_without + air_without) / drop - 1.0).abs() < 1.0e-9, "mode {j}");
         }
     }
 }

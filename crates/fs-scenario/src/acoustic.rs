@@ -73,6 +73,11 @@ pub struct PrestressedString {
     /// Fractional loss factor `eta_F` of the tension (the string's own
     /// construction, not its bending law). `None` is no tension loss term.
     pub tension_loss_factor: Option<f64>,
+    /// Fractional loss factor `eta_B` of the bending stiffness: a complex
+    /// `E I (1 + i eta_B)` with `eta_B` constant in frequency, not a viscosity.
+    /// `None` is no such term. Exclusive with Kelvin–Voigt, Prony, Rayleigh and
+    /// authored internal loss.
+    pub bending_loss_factor: Option<f64>,
 }
 
 /// Uniform Kelvin–Voigt bending: moment `M = EI curvature + eta I curvature_dot`.

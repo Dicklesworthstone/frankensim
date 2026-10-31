@@ -581,6 +581,9 @@ fn bind_string<E>(template: &PrestressedString, source: &ConcentricThermoelastic
     if template.tension_loss_factor.is_some_and(|eta| eta != 0.0) {
         return Err(invalid("a layered thermoelastic string has no owner for tension-loss heat"));
     }
+    if template.bending_loss_factor.is_some_and(|eta| eta != 0.0) {
+        return Err(invalid("a layered thermoelastic string has no owner for bending-factor heat"));
+    }
     let section = source.section.section().clone()
         .with_kelvin_voigt_bending(KELVIN_VOIGT_BENDING_VISCOSITY_PROPERTY)?;
     let force: f64 = source.layers.iter().map(|l| l.young_modulus_pa*l.area_m2*l.elastic_strain).sum();

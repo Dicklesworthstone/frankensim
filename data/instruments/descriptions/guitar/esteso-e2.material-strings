@@ -5,7 +5,7 @@ gas mixture 293.15 101325 mole 2 N2 0.7905 O2 0.2095
 body guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk 0.47 0.37 0.0025 128 1.0
 strings 1
 string wound-basses.fsmatpk 0.680 0.000559 tension 71.6 96 0 0.9558823529411764 100000 0
-section measured 1 temperature_known 0 scale_length diameter_ej46_stand_in_e2 tension_e2 linear_density_e2 bending_stiffness_e2 no-intrinsic-loss speaking-length
+section measured 1 temperature_known 0 scale_length diameter_ej46_stand_in_e2 tension_e2 linear_density_e2 bending_stiffness_e2 loss-factors loss_coefficient_friction_e2 loss_coefficient_bending_e2 speaking-length
 polarizations two 0.7071067811865476 0.7071067811865476 1 0
 translational-bridges 1
 translational-bridge 0 0.9558823529411764 0 1 12 86 0 -1 0 100000 0 0

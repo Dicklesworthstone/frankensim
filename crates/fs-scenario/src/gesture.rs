@@ -1363,6 +1363,7 @@ mod gesture_tests {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         };
         // Length side: the fret shortens the SPEAKING length.
         let speaking = if *engaged {

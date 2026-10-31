@@ -350,6 +350,7 @@ fn string(frequency_hz: f64) -> fs_scenario::PrestressedString {
         polarization_detune: 0.0,
         moving_end: true,
         tension_loss_factor: None,
+        bending_loss_factor: None,
     }
 }
 

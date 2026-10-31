@@ -40,7 +40,7 @@ pub fn template(n_modes: usize) -> PrestressedString {
     PrestressedString { length_m: 0.5, tension_n: 20.0, lin_density_kg_m: 1.0, axial_stiffness_n: 1.0, width_m: 1.0,
         n_modes, damping_ratio: 0.0, rayleigh: None, bending_stiffness_n_m2: 0.0, kelvin_voigt_bending: None,
         relaxation_bending: None, polarization_detune: 0.0, moving_end: false,
-        tension_loss_factor: None }
+        tension_loss_factor: None, bending_loss_factor: None }
 }
 pub fn source(rho: f64, young: f64, modes: usize) -> MaterialStringSource {
     MaterialStringSource::Homogeneous(with_uniform_circular_material_state(template(modes), 0.0003, &material(rho, young))

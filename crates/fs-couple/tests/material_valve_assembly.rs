@@ -396,6 +396,7 @@ fn checked_reed_composes_with_independent_source_bound_string() {
             polarization_detune: 0.0,
             moving_end: false,
             tension_loss_factor: None,
+            bending_loss_factor: None,
         });
         let snapshot = template.clone();
         let result = compile_pressure_loaded_reed_assembly(
