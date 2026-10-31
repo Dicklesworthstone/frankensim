@@ -940,7 +940,20 @@ fn g1_complete_coolant_keeps_nonlinear_field_numerical_loss_out_of_heat() {
                 }
                 assert_eq!(accepted.cells(), &before);
                 assert_eq!(magnetic.potential_wb(), old_field);
-                assert!(std::ptr::eq(next.field().problem(), state.problem()));
+                // A magnetic-temperature refresh rebuilds the material operator
+                // while retaining the same physical geometry and topology.
+                assert_eq!(
+                    next.field().problem().positions_m(),
+                    state.problem().positions_m()
+                );
+                assert_eq!(
+                    next.field().problem().mesh().tets,
+                    state.problem().mesh().tets
+                );
+                assert_eq!(
+                    next.field().problem().mesh().edges,
+                    state.problem().mesh().edges
+                );
                 result = [
                     next.thermal().temperature_k(BODY).unwrap(),
                     next.field().potential_wb()[diagonal],
