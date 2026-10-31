@@ -20,3 +20,5 @@ pub use interface::{
     spectral_fresnel_dielectric_polarized,
 };
 pub mod transport;
+/// Native geometry traversal, explicit boundary media and polarized receivers.
+pub mod scene;
