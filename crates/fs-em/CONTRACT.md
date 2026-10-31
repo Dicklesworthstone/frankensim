@@ -1,5 +1,57 @@
 # fs-em contract
 
+## Bias-dependent winding impedance with resolved eddy currents
+
+`planar::eddy::harmonic::PlanarHarmonicWindings` prepares frequency-domain
+small-signal responses from an admitted `PlanarIncrementalWindingBasis`.
+The original DC operating point, signed distributed winding profiles, complete
+nonlinear differential magnetic Hessian, source temperature, geometry, remanence
+and boundary trace remain authoritative. Both longitudinal `dH/dB` and transverse
+`H/B` enter the field tangent. Phasors are peaks with `exp(-i omega t)`, matching
+`fs-phs::harmonic`; inductive impedance therefore has negative imaginary part.
+
+Every unit winding solves `(K_t - i omega C_sigma) a_j = f_j`. `C_sigma` is the
+existing consistent P1 conductivity mass minus each isolated region's weighted
+mean projection. It enforces zero integrated axial current independently in
+each floating conductor, with original topology/material admission. The sparse
+Hessian and matrix-free regional projection feed the existing real-equivalent
+block and cancellable FGMRES owners. The original diffusion/storage Jacobi
+preconditioner is reused on both real components, with explicit restart, cycle,
+field-payload and Krylov-storage limits. Full-mesh operator buffers are reused;
+no dense field matrix is formed. Conductor-free frequencies reuse DC derivative
+fields only after their true residual passes the current AC allowances.
+
+Original source-paired linkage gives the complete reciprocal terminal matrix
+`Z = R_copper - i omega (F^T a + L_end)` and effective inductance `-Im(Z)/omega`.
+Every active stranded triangle binds its complete original conductor source;
+its resistance integrates `rho J_unit^2` over the actual extruded volume.
+Stranded and resolved eddy cells must be disjoint. Explicit end/leakage storage
+is retained; end resistance is not inferred. Resolved core/shield eddy currents
+produce actual frequency-dependent loss and inductance. Stranded-copper skin
+and proximity redistribution, fitted hysteresis loss and full-wave effects are
+outside this reduction.
+
+Acceptance audits complex reciprocity and the COMPLETE mutual power identity
+`Z_ij = R_ij + omega^2 a_i* C_sigma a_j - i omega a_i* K_t a_j`, including
+declared end storage. Arbitrary phase-shifted terminal currents reuse the unit
+fields, then independently reconstruct original-cell B, projected E, J and exact
+P1 cycle-mean Joule power. Real terminal power equals spatial copper plus eddy
+heat; reactive power equals `-2 omega` times mean quadratic perturbation storage.
+DC copper heat is separate. A caller-declared cell-diameter/skin-depth maximum
+uses the larger local incremental permeability, including the transverse
+direction. This spatial admission bound is not an error certificate.
+
+`tests/winding_harmonic.rs` compares native responses with independently soluble
+field modes across DC bias, frequency, conductivity and extrusion depth. It
+covers signed mutual coupling, phase-dependent power, floating-current
+neutrality, original heat sources, end storage, the no-eddy limit, affine bias
+and gauge invariance, transverse tangent/skin depth, double-counting/topology
+refusal, work budgets, nonconvergence and cancellation. Manufactured sources
+exercise the implementation; they do not validate an empirical material/device.
+Native test execution remains a separate requirement where workspace dependency
+repositories are available. Finite-amplitude nonlinear cycles, material/geometry
+evolution and causal transient realization of the terminal matrix are not claimed.
+
 ## Ionized-gas current and Joule heating
 
 `PlanarConduction` accepts the sealed `PlanarOhmicResponse` material response,

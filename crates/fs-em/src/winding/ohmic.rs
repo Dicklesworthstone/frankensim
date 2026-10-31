@@ -212,7 +212,7 @@ fn bind(
 // Shared by constant-inductance and nonlinear-field circuits. Only magnetic
 // source admission differs; spatial ownership, source continuity and rho*J^2
 // resistance are computed once here.
-pub(super) fn bind_sources(
+pub(crate) fn bind_sources(
     mesh: &fs_rep_mesh::TriComplex2,
     profiles: &[Vec<f64>],
     mut sources: Vec<WindingConductor>,
