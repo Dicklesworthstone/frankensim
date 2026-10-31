@@ -57,7 +57,11 @@ fn airlight_reference(phase: &PhaseFunction, absorption: f64, scattering: f64) -
                         (1.0 - g * g) / (4.0 * PI * (1.0 + g * g - 2.0 * g * cosine).powf(1.5))
                     }
                     PhaseFunction::Rayleigh => 3.0 * (1.0 + cosine * cosine) / (16.0 * PI),
-                    PhaseFunction::Tabulated(_) => unreachable!("analytic reference fixtures only"),
+                    PhaseFunction::Tabulated(_)
+                    | PhaseFunction::RayleighDepolarized { .. }
+                    | PhaseFunction::SpectralTable(_) => {
+                        unreachable!("analytic reference fixtures only")
+                    }
                 };
                 let s = c + b * theta.tan();
                 let r = b / theta.cos();

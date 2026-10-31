@@ -16,10 +16,9 @@ pub use execution::{
 };
 
 /// Bit-affecting physical free-flight, phase and survival-aware MIS semantics.
-// v5 adds normalized tabulated reciprocal phase functions with their exact
-// piecewise-linear angular CDF. Existing analytic laws, hash tags and random
-// streams remain unchanged; shared tables are borrowed at path vertices.
-pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 5;
+// v6 carries wavelength-dependent phase responses through the full packet
+// proposal and every direct-light technique. Achromatic streams are unchanged.
+pub const SCATTERING_TRACER_SEMANTICS_VERSION: u32 = 6;
 
 /// Progressive film bound to one immutable participating-medium snapshot.
 ///
@@ -83,7 +82,7 @@ impl ScatteringFilm {
 /// Render coupled surface and multiple-scattering transport through a physical grid.
 ///
 /// Density is kg/m³, mass absorption/scattering are m²/kg and world distances
-/// are metres. The medium has index one and one reciprocal phase law. Camera,
+/// are metres. The medium has index one and one reciprocal spectral phase law. Camera,
 /// reflected, scattered and shadow rays all read the same borrowed field.
 /// The grid is the ambient index-one medium: closed dielectric interiors
 /// displace it and retain their own homogeneous spectral absorption. Refraction
@@ -404,8 +403,8 @@ pub(super) fn direct_contribution(
         return Err(TracerError::ThermalSurfaceMediumUnsupported);
     }
     let transmittance = medium.transmittance(cx, point, direction, distance, wavelengths)?;
-    let phase_value = phase.eval_cos(incoming_travel.dot(direction))?;
-    let competing_pdf = phase_value * medium.escape_probability(&transmittance);
+    let phase_value = phase.eval_packet(wavelengths, incoming_travel.dot(direction))?;
+    let competing_pdf = phase_value.pdf * medium.escape_probability(&transmittance);
     let weight = if depth + 1 == settings.max_depth {
         1.0
     } else {
@@ -425,7 +424,7 @@ pub(super) fn direct_contribution(
             LightSample::Rectangle(light) => light.emission.0.eval(wavelength) * light.emission.1,
             LightSample::Environment(light) => light.emission.0.eval(wavelength) * light.emission.1,
         };
-        result[lane] = phase_value * emitted * transmittance[lane] / pdf * weight;
+        result[lane] = phase_value.value[lane] * emitted * transmittance[lane] / pdf * weight;
         if !result[lane].is_finite() || result[lane] < 0.0 {
             return Err(TracerError::InvalidInput);
         }

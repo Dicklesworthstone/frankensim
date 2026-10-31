@@ -2090,7 +2090,8 @@ direction's PDF. The immutable table is shared through `Arc`; native phase
 sampling and point/finite-source/thermal NEE borrow it without per-vertex clones
 or allocation. Native medium identities include the normalized PDF and represented
 CDF. Existing analytic phase arithmetic, random addresses and identity bytes
-remain unchanged. Native scattering semantics is version 5.
+remain unchanged. Native scattering semantics is version 6 after the spectral
+angular-law extension below.
 `PhaseFunction`, `HomogeneousMedium` and `PhotometricMedium` are now `Clone`
 rather than `Copy`; clone an owned medium explicitly when constructing two scenes.
 
@@ -2103,6 +2104,53 @@ unbounded; normalizing a table cannot strengthen `NoClaim` or turn sampling
 standard error into a total error bound. Focused tests use independent linear-law
 moments/CDFs, HG refinement, gray and two-layer spectral single-scattering
 integrals, finite-panel solid-angle integration, and progressive image/lux replay.
+
+### Spectral angular transport and physical particle scattering
+
+`PhaseFunction::spectral_table` admits 2--16 visible wavelength knots covering
+380--780 nm. Each interval is the convex mixture of two admitted normalized
+angular laws. Packet continuation samples the uniform mixture of all lane laws
+and multiplies each lane by its own phase response divided by that complete
+mixture PDF. Rectangle/environment, finite photometric and thermal-source NEE
+use the same proposal for MIS, while physical responses remain wavelength
+resolved. No phase table is cloned or allocated at a path vertex. Achromatic
+laws retain their previous direction/PDF arithmetic. The gray deterministic
+photometry owner explicitly refuses spectral phase tables.
+
+`PhaseFunction::rayleigh_depolarized` implements the normalized scalar molecular
+phase for the stated unpolarized 90-degree depolarization convention; zero
+depolarization retains the existing Rayleigh law. `MassScatteringSpectrum::rayleigh`
+evaluates the exact declared inverse-fourth-power wavelength law, rather than
+a linear interpolation between its visible endpoints. Extinction admission and
+the volume contraction enclosure include these coefficient and angular laws.
+
+`volumes::transport::scattering::mie::MieSphere` computes passive homogeneous,
+nonmagnetic sphere cross sections, particle-mass coefficients, asymmetry and
+the retained unpolarized Mie angular law. Its admitted domain is
+`1e-4 <= 2*pi*n_host*r/lambda_vacuum <= 128` and `|m*x| <= 512`, with a real
+nonabsorbing host. Downward logarithmic-derivative recurrence is checked from
+two starts; small real arguments use a convergent Riccati--Bessel series.
+Exact index matching retains zero scattering. Recurrence, multipole and angular
+work have explicit budgets and preparation polls cancellation.
+
+`MieSolution::phase_table` adaptively prepares the native matched angular sampler
+and reports observed normalization, moment and interpolation discrepancies.
+`MieSphere::visible_spectrum` prepares native absorption, scattering and spectral
+phase owners and compares the retained wavelength interpolation with fresh
+midpoint solves. These diagnostics are sampled numerical evidence, not continuous
+error bounds; insufficient angular resolution refuses. Grid density means
+dispersed particle mass per mixture volume. A nonunit host requires independently
+matching dielectric-interior ray ownership. The model does not claim polarized
+transport, particle interactions, nonspherical particles, measured material
+dispersion, or a general aerosol distribution. A constant-index visible spectrum
+does not acquire material dispersion from wavelength sampling alone.
+
+Tests include published complex Mie coefficients and efficiencies, Rayleigh
+size/wavelength limits, passive energy balance, index matching, angular
+normalization and first moments through size parameter 128, spectral refinement,
+per-lane phase moments, disjoint angular support, and achromatic replay. Native
+path regressions additionally exercise wavelength-resolved single-scattering
+integrals and a conservative multiple-scattering environment furnace.
 
 ### Calibrated spectral fixture paths
 

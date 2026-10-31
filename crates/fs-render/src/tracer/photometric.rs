@@ -726,7 +726,9 @@ pub(super) fn volume_contribution(
     rng: &PathRng,
     depth: u32,
 ) -> Result<[f64; PACKET], TracerError> {
-    let response = |towards_source, _| Ok(phase.eval_cos(incoming_travel.dot(towards_source))?);
+    let response = |towards_source, wavelength| {
+        Ok(phase.eval_at(wavelength, incoming_travel.dot(towards_source))?)
+    };
     match fixtures.point_sampling {
         PointFixtureSampling::All => contribution(
             scene,
@@ -749,7 +751,11 @@ pub(super) fn volume_contribution(
             rng,
             depth,
             connections_per_vertex,
-            |towards_source| Ok(phase.eval_cos(incoming_travel.dot(towards_source))?),
+            |towards_source| {
+                Ok(phase
+                    .eval_packet(wavelengths, incoming_travel.dot(towards_source))?
+                    .pdf)
+            },
             response,
         ),
     }

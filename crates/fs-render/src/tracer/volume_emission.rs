@@ -93,9 +93,13 @@ impl Receiver<'_> {
         }
     }
 
-    /// Cache wavelength-independent work once per connection. For a phase
-    /// vertex this is also its response; rough glass has native spectral PDFs.
-    fn common_pdf(&self, direction: Vec3) -> Result<Option<f64>, TracerError> {
+    /// Cache the actual shared proposal once per connection. Phase responses
+    /// can vary spectrally even though the packet has one mixture PDF.
+    fn common_pdf(
+        &self,
+        direction: Vec3,
+        wavelengths: &[f64; PACKET],
+    ) -> Result<Option<f64>, TracerError> {
         match self {
             Self::Surface {
                 material,
@@ -113,7 +117,11 @@ impl Receiver<'_> {
             Self::Phase {
                 phase,
                 incoming_travel,
-            } => Ok(Some(phase.eval_cos(incoming_travel.dot(direction))?)),
+            } => Ok(Some(
+                phase
+                    .eval_packet(wavelengths, incoming_travel.dot(direction))?
+                    .pdf,
+            )),
             Self::Dielectric { .. } => Ok(None),
         }
     }
@@ -172,10 +180,13 @@ impl Receiver<'_> {
                     evaluation.pdf,
                 ))
             }
-            Self::Phase { .. } => {
-                let value = common_pdf.ok_or(TracerError::InvalidInput)?;
-                Ok((value, value))
-            }
+            Self::Phase {
+                phase,
+                incoming_travel,
+            } => Ok((
+                phase.eval_at(wavelength, incoming_travel.dot(direction))?,
+                common_pdf.ok_or(TracerError::InvalidInput)?,
+            )),
         }
     }
 }
@@ -279,7 +290,7 @@ pub(super) fn direct_contribution(
     if !receiver.admits(direction) {
         return Ok(result);
     }
-    let common_pdf = receiver.common_pdf(direction)?;
+    let common_pdf = receiver.common_pdf(direction, wavelengths)?;
     if common_pdf.is_some_and(|pdf| !pdf.is_finite() || pdf < 0.0) {
         return Err(TracerError::InvalidInput);
     }
@@ -569,7 +580,7 @@ mod tests {
                 brushed: None,
                 incident_glass,
             };
-            let common_pdf = receiver.common_pdf(normal).unwrap();
+            let common_pdf = receiver.common_pdf(normal, &[550.0; PACKET]).unwrap();
             let (response, _) = receiver.evaluation(normal, 550.0, common_pdf).unwrap();
             let nk = optics.complex_ior(550.0).unwrap();
             let fresnel = ((nk.eta() - index).powi(2) + nk.k().powi(2))

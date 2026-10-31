@@ -13783,9 +13783,15 @@ fn trace_path_with_regions<'scene>(
                     break;
                 }
                 let (u1, u2) = rng.path_pair(path_sobol, depth, 1);
-                let sampled_phase = phase.sample(direction, u1, u2)?;
+                let sampled_phase = phase.sample_packet(&lambdas, direction, u1, u2)?;
                 let next_direction = sampled_phase.direction;
                 let pdf = sampled_phase.pdf;
+                for (value, weight) in throughput.iter_mut().zip(sampled_phase.weight) {
+                    *value *= weight;
+                    if !value.is_finite() {
+                        return Err(TracerError::InvalidInput);
+                    }
+                }
                 previous_bsdf = Some(PreviousBsdf {
                     #[cfg(feature = "volumes")]
                     volume_emission_competitor: has_volume_source_nee,

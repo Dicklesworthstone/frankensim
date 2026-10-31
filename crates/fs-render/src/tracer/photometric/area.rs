@@ -522,7 +522,7 @@ impl<'a> AreaLighting<'a> {
         if luminance == 0.0 {
             return Ok(result);
         }
-        let opaque_pdf = receiver.opaque_pdf(direction)?;
+        let opaque_pdf = receiver.opaque_pdf(direction, wavelengths)?;
         if !opaque_pdf.is_finite() || opaque_pdf < 0.0 {
             return Err(TracerError::InvalidInput);
         }
@@ -818,7 +818,7 @@ impl Receiver<'_> {
 
     /// Opaque, phase and probe densities are shared by the packet. Dielectric
     /// response evaluation supplies its wavelength-dependent density instead.
-    fn opaque_pdf(self, direction: Vec3) -> Result<f64, TracerError> {
+    fn opaque_pdf(self, direction: Vec3, wavelengths: &[f64; PACKET]) -> Result<f64, TracerError> {
         match self {
             Self::Surface {
                 material,
@@ -834,7 +834,9 @@ impl Receiver<'_> {
             Self::Phase {
                 phase,
                 incoming_travel,
-            } => Ok(phase.eval_cos(incoming_travel.dot(direction))?),
+            } => Ok(phase
+                .eval_packet(wavelengths, incoming_travel.dot(direction))?
+                .pdf),
             Self::Probe { normal } => Ok(normal.dot(direction).max(0.0) / PI),
         }
     }
@@ -892,7 +894,10 @@ impl Receiver<'_> {
             Self::Phase {
                 phase,
                 incoming_travel,
-            } => Ok((phase.eval_cos(incoming_travel.dot(direction))?, opaque_pdf)),
+            } => Ok((
+                phase.eval_at(wavelength, incoming_travel.dot(direction))?,
+                opaque_pdf,
+            )),
             Self::Probe { normal } => Ok((normal.dot(direction).max(0.0), opaque_pdf)),
         }
     }

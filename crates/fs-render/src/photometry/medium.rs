@@ -65,6 +65,10 @@ impl HomogeneousMedium {
         {
             return Err(MediumError::Asymmetry);
         }
+        if matches!(phase, PhaseFunction::SpectralTable(_)) {
+            return Err(MediumError::SpectralPhase);
+        }
+        phase.eval_cos(0.0).map_err(|_| MediumError::Phase)?;
         Ok(Self {
             absorption_per_m,
             scattering_per_m,
@@ -138,10 +142,11 @@ impl HomogeneousMedium {
             // the azimuthal 1/(2π) to obtain the solid-angle phase density.
             PhaseFunction::HenyeyGreenstein { g } => volumes::hg_pdf_cos(*g, cosine) / (2.0 * PI),
             PhaseFunction::Rayleigh => 3.0 * (1.0 + cosine * cosine) / (16.0 * PI),
-            PhaseFunction::Tabulated(_) => self
+            PhaseFunction::Tabulated(_) | PhaseFunction::RayleighDepolarized { .. } => self
                 .phase
                 .eval_cos(cosine)
                 .map_err(|_| MediumError::ScatteringCosine)?,
+            PhaseFunction::SpectralTable(_) => return Err(MediumError::SpectralPhase),
         })
     }
 }
@@ -157,6 +162,11 @@ pub enum MediumError {
     ExtinctionOverflow,
     /// Henyey–Greenstein asymmetry must be finite and strictly between −1 and 1.
     Asymmetry,
+    /// The molecular depolarization or other angular law is invalid.
+    Phase,
+    /// Photometric gray integration cannot erase a spectral angular law;
+    /// supply it to the full spectral path renderer instead.
+    SpectralPhase,
     /// Distance must be finite and nonnegative, in metres.
     Distance,
     /// The scattering cosine is nonfinite or outside the unit-vector domain.

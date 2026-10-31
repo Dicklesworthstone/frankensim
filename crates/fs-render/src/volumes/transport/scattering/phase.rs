@@ -7,6 +7,10 @@ use fs_math::det;
 
 mod table;
 pub use table::{MAX_PHASE_KNOTS, TabulatedPhase};
+mod spectral;
+pub use spectral::{
+    MAX_PHASE_WAVELENGTHS, PhasePacketEvaluation, PhasePacketSample, SpectralPhaseTable,
+};
 
 const INV_FOUR_PI: f64 = 1.0 / (4.0 * core::f64::consts::PI);
 
@@ -24,8 +28,17 @@ pub enum PhaseFunction {
     },
     /// Unpolarized Rayleigh law `3 (1 + cos²(theta)) / (16 pi)`.
     Rayleigh,
+    /// Molecular Rayleigh law with an explicit unpolarized 90-degree
+    /// depolarization ratio, `I_parallel / I_perpendicular`.
+    RayleighDepolarized {
+        /// Finite ratio in `[0, 6/7)`; zero is the ordinary Rayleigh law.
+        depolarization: f64,
+    },
     /// Reciprocal, azimuthally symmetric tabulated law with a matched sampler.
     Tabulated(TabulatedPhase),
+    /// Convex interpolation of normalized angular laws at vacuum wavelengths.
+    /// Use the wavelength/packet methods; gray evaluation refuses this law.
+    SpectralTable(SpectralPhaseTable),
 }
 
 /// An importance-sampled unit travel direction and its solid-angle density.
@@ -50,9 +63,27 @@ impl PhaseFunction {
         TabulatedPhase::try_new(knots).map(Self::Tabulated)
     }
 
+    /// Molecular depolarization, using the same ratio as the King correction
+    /// `(6 + 3 delta)/(6 - 7 delta)` to the total scattering cross section.
+    /// This scalar law describes initially unpolarized light, not Stokes transport.
+    pub fn rayleigh_depolarized(depolarization: f64) -> Result<Self, VolumeTransportError> {
+        let result = Self::RayleighDepolarized { depolarization };
+        result.validate()?;
+        Ok(if depolarization == 0.0 {
+            Self::Rayleigh
+        } else {
+            result
+        })
+    }
+
     pub(super) fn validate(&self) -> Result<(), VolumeTransportError> {
         if let Self::HenyeyGreenstein { g } = self
             && (!g.is_finite() || g.abs() >= 1.0)
+        {
+            return Err(VolumeTransportError::Phase);
+        }
+        if let Self::RayleighDepolarized { depolarization } = self
+            && (!depolarization.is_finite() || !(0.0..6.0 / 7.0).contains(depolarization))
         {
             return Err(VolumeTransportError::Phase);
         }
@@ -69,6 +100,14 @@ impl PhaseFunction {
             Self::Rayleigh => hash.update(&[2]),
             Self::Tabulated(table) => {
                 hash.update(&[3]);
+                table.hash_into(hash);
+            }
+            Self::RayleighDepolarized { depolarization } => {
+                hash.update(&[4]);
+                hash.update(&depolarization.to_bits().to_le_bytes());
+            }
+            Self::SpectralTable(table) => {
+                hash.update(&[5]);
                 table.hash_into(hash);
             }
         }
@@ -96,7 +135,11 @@ impl PhaseFunction {
                 (1.0 - a) * (1.0 + a) * INV_FOUR_PI / (denominator * det::sqrt(denominator))
             }
             Self::Rayleigh => 0.75 * INV_FOUR_PI * (1.0 + c * c),
+            Self::RayleighDepolarized { depolarization: d } => {
+                1.5 * INV_FOUR_PI * ((1.0 + d) + (1.0 - d) * c * c) / (2.0 + d)
+            }
             Self::Tabulated(table) => table.eval_clamped(c),
+            Self::SpectralTable(_) => return Err(VolumeTransportError::Wavelength),
         })
     }
 
@@ -129,15 +172,19 @@ impl PhaseFunction {
                 let c = 1.0 - 2.0 * q * q * (1.0 - u) * (1.0 + a * u);
                 if *g < 0.0 { -c } else { c }
             }
-            Self::Rayleigh => {
-                // Invert c³+3c=8u-4 using 2*sinh(asinh(4u-2)/3).
-                // Deterministic expm1 avoids Cardano cancellation near zero.
-                let r = 4.0f64.mul_add(u_cos, -2.0);
-                let t = det::ln(r.abs() + det::sqrt(r * r + 1.0)) / 3.0;
-                let e = det::expm1(t);
-                (e * (2.0 + e) / (1.0 + e)).copysign(r)
+            Self::Rayleigh => rayleigh_cosine(u_cos),
+            Self::RayleighDepolarized { depolarization: d } => {
+                // Exact normalized Rayleigh/isotropic mixture. Conditional
+                // remapping reuses the cosine variate without an extra stream.
+                let isotropic = 3.0 * d / (2.0 + d);
+                if u_cos < isotropic {
+                    2.0 * (u_cos / isotropic) - 1.0
+                } else {
+                    rayleigh_cosine((u_cos - isotropic) / (1.0 - isotropic))
+                }
             }
             Self::Tabulated(table) => table.sample_cosine(u_cos)?,
+            Self::SpectralTable(_) => return Err(VolumeTransportError::Wavelength),
         }
         .clamp(-1.0, 1.0);
         let sine = det::sqrt(((1.0 - cosine) * (1.0 + cosine)).max(0.0));
@@ -182,4 +229,13 @@ impl PhaseFunction {
         }
         Ok(PhaseSample { direction, pdf })
     }
+}
+
+fn rayleigh_cosine(u_cos: f64) -> f64 {
+    // Invert c³+3c=8u-4 using 2*sinh(asinh(4u-2)/3).
+    // Deterministic expm1 avoids Cardano cancellation near zero.
+    let r = 4.0f64.mul_add(u_cos, -2.0);
+    let t = det::ln(r.abs() + det::sqrt(r * r + 1.0)) / 3.0;
+    let e = det::expm1(t);
+    (e * (2.0 + e) / (1.0 + e)).copysign(r)
 }

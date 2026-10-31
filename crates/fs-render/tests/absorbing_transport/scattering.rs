@@ -225,6 +225,85 @@ fn g1_multiple_spectral_scattering_conserves_uniform_environment_radiance() {
 }
 
 #[test]
+fn g1_spectral_phase_direct_light_matches_wavelength_resolved_source_integrals() {
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let (scene, (emission, scale)) = backlit_slab();
+        let medium = physical_grid(
+            cx,
+            &density,
+            [-2.0, -2.0, 0.0],
+            [4.0, 4.0, 1.0],
+            0.3,
+            0.7,
+            PhaseFunction::spectral_table(&[
+                (380.0, PhaseFunction::henyey_greenstein(0.6).unwrap()),
+                (780.0, PhaseFunction::henyey_greenstein(-0.6).unwrap()),
+            ])
+            .unwrap(),
+        );
+        // Linearity of the transport integral in the angular law supplies
+        // an independent reference at EVERY wavelength, not a gray average.
+        let blue = single_scatter_integral(0.3, 0.7, 0.6);
+        let red = single_scatter_integral(0.3, 0.7, -0.6);
+        let expected = xyz_of_spectrum(|lambda| {
+            let t = (lambda - 380.0) / 400.0;
+            emission.eval(lambda) * scale * ((1.0 - t) * blue + t * red)
+        });
+        let mut settings = settings(DirectStrategy::NeeOnly);
+        settings.max_depth = 1;
+        settings.spp = 16_384;
+        let film = render_scattering(&scene, &medium, cx, &settings).unwrap();
+        assert_mean(&film, expected, 0.018);
+        for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+            settings.strategy = strategy;
+            assert_eq!(
+                render_scattering(&scene, &medium, cx, &settings).unwrap(),
+                film
+            );
+        }
+    });
+}
+
+#[test]
+fn g1_spectral_phase_multiple_scattering_preserves_the_environment_furnace() {
+    with_cx(|cx, _| {
+        let density = [1.0];
+        let medium = physical_grid(
+            cx,
+            &density,
+            [-1.0; 3],
+            [2.0; 3],
+            0.0,
+            0.4,
+            PhaseFunction::spectral_table(&[
+                (380.0, PhaseFunction::henyey_greenstein(0.65).unwrap()),
+                (780.0, PhaseFunction::henyey_greenstein(-0.6).unwrap()),
+            ])
+            .unwrap(),
+        );
+        let (mut scene, (emission, scale)) = environment_scene();
+        scene.camera.eye = Point3::new(0.0, 0.0, 0.0);
+        let expected = xyz_of_spectrum(|lambda| emission.eval(lambda) * scale);
+        for strategy in [
+            DirectStrategy::BsdfOnly,
+            DirectStrategy::NeeOnly,
+            DirectStrategy::Mis,
+            DirectStrategy::PowerMis,
+        ] {
+            let mut settings = settings(strategy);
+            settings.max_depth = 32;
+            settings.spp = 32_768;
+            assert_mean(
+                &render_scattering(&scene, &medium, cx, &settings).unwrap(),
+                expected,
+                0.035,
+            );
+        }
+    });
+}
+
+#[test]
 fn g3_zero_scattering_reuses_absorption_and_vacuum_exactly() {
     with_cx(|cx, _| {
         let density = [1.0];

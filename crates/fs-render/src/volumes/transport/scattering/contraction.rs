@@ -4,7 +4,8 @@
 //! free flights, phase sampling, geometry, input calibration or spectral error.
 
 use super::{
-    MassAbsorptionSpectrum, PhaseFunction, ScatteringGrid, VolumeTransportError, checkpoint,
+    MassAbsorptionSpectrum, MassScatteringSpectrum, PhaseFunction, ScatteringGrid,
+    VolumeTransportError, checkpoint,
 };
 use fs_exec::Cx;
 use fs_ivl::Interval;
@@ -30,7 +31,7 @@ impl ScatteringGrid<'_> {
         if !self.has_scattering() {
             return Ok(Some(0.0));
         }
-        let albedo = max_albedo_upper(&self.absorption.absorption, &self.scattering.0);
+        let albedo = max_albedo_upper(&self.absorption.absorption, &self.scattering);
         if albedo >= 1.0 {
             return Ok(None);
         }
@@ -45,18 +46,26 @@ impl ScatteringGrid<'_> {
 
 fn max_albedo_upper(
     absorption: &MassAbsorptionSpectrum,
-    scattering: &MassAbsorptionSpectrum,
+    scattering: &MassScatteringSpectrum,
 ) -> f64 {
     let mut maximum = 0.0_f64;
     // Between successive knots in the combined tables, s/(a+s) is a ratio
     // of affine functions. Its derivative has constant sign wherever the
-    // denominator is positive, so extrema occur at the combined knots.
+    // denominator is positive, so extrema occur at the combined knots. For
+    // Rayleigh s=K/lambda^4 and a=A+B*lambda, stationary a/s has derivative
+    // lambda^3*(4A+5B*lambda)/K. Any stationary point in a>=0 is a maximum
+    // of a/s and therefore a minimum of albedo: endpoints still suffice.
     for &(wavelength, _) in absorption.knots[..absorption.count]
         .iter()
-        .chain(scattering.knots[..scattering.count].iter())
+        .chain(scattering.knots().iter())
     {
         let a = coefficient_enclosure(absorption, wavelength);
-        let s = coefficient_enclosure(scattering, wavelength);
+        let mut s = coefficient_enclosure(&scattering.spectrum, wavelength);
+        if let Some(reference) = scattering.rayleigh_reference_nm {
+            let ratio = Interval::point(reference) / Interval::point(wavelength);
+            let square = ratio * ratio;
+            s = s * square * square;
+        }
         if s.hi() == 0.0 {
             // Includes an exact zero-extinction knot. Adjacent positive
             // endpoints also cover the limiting albedo on either side.
@@ -129,9 +138,31 @@ fn phase_integral_upper(
                 / Interval::point(3.0))
             .hi()
         }
+        PhaseFunction::RayleighDepolarized { depolarization } => {
+            let d = Interval::point(*depolarization);
+            let amplitude = Interval::point(1.5 * (1.0 / (4.0 * core::f64::consts::PI)));
+            (amplitude
+                * Interval::point(4.0)
+                * pi_enclosure()
+                * ((Interval::point(1.0) + d) + (Interval::point(1.0) - d) / Interval::point(3.0))
+                / (Interval::point(2.0) + d))
+                .hi()
+        }
         PhaseFunction::Tabulated(table) => {
             return tabulated_phase_integral_upper(table.knots_per_sr(), cx)
                 .map(|upper| upper.map(|value| value.max(1.0)));
+        }
+        PhaseFunction::SpectralTable(table) => {
+            // Convex spectral interpolation cannot exceed the largest
+            // endpoint phase integral. No wavelength sampling is used here.
+            let mut maximum = 1.0_f64;
+            for (_, phase) in table.knots() {
+                let Some(bound) = phase_integral_upper(phase, cx)? else {
+                    return Ok(None);
+                };
+                maximum = maximum.max(bound);
+            }
+            maximum
         }
     };
     // Do not turn downward normalization roundoff into physical absorption.
@@ -199,7 +230,7 @@ mod tests {
         let absorption =
             MassAbsorptionSpectrum::table(&[(380.0, 4.0), (480.0, 1.0), (780.0, 4.0)]).unwrap();
         let scattering =
-            MassAbsorptionSpectrum::table(&[(380.0, 1.0), (580.0, 5.0), (780.0, 1.0)]).unwrap();
+            MassScatteringSpectrum::table(&[(380.0, 1.0), (580.0, 5.0), (780.0, 1.0)]).unwrap();
         // At 480 nm, s=3 and a=1, so omega=3/4. At the scattering-only
         // knot 580 nm, a=2 and omega=5/7; endpoints have omega=1/5.
         encloses_tightly(max_albedo_upper(&absorption, &scattering), 0.75);
@@ -210,10 +241,11 @@ mod tests {
         let absorption =
             MassAbsorptionSpectrum::table(&[(380.0, 1.0), (580.0, 0.0), (780.0, 2.0)]).unwrap();
         let scattering =
-            MassAbsorptionSpectrum::table(&[(380.0, 3.0), (580.0, 0.0), (780.0, 6.0)]).unwrap();
+            MassScatteringSpectrum::table(&[(380.0, 3.0), (580.0, 0.0), (780.0, 6.0)]).unwrap();
         encloses_tightly(max_albedo_upper(&absorption, &scattering), 0.75);
         let tiny = MassAbsorptionSpectrum::constant(f64::from_bits(1)).unwrap();
-        assert!(max_albedo_upper(&tiny, &tiny) >= 0.5);
+        let tiny_scattering = MassScatteringSpectrum::constant(f64::from_bits(1)).unwrap();
+        assert!(max_albedo_upper(&tiny, &tiny_scattering) >= 0.5);
     }
 
     #[test]
@@ -222,6 +254,12 @@ mod tests {
             for phase in [
                 PhaseFunction::Isotropic,
                 PhaseFunction::Rayleigh,
+                PhaseFunction::rayleigh_depolarized(0.03).unwrap(),
+                PhaseFunction::spectral_table(&[
+                    (380.0, PhaseFunction::Rayleigh),
+                    (780.0, PhaseFunction::henyey_greenstein(0.8).unwrap()),
+                ])
+                .unwrap(),
                 PhaseFunction::henyey_greenstein(0.8).unwrap(),
                 PhaseFunction::henyey_greenstein(-fs_math::next_down(1.0)).unwrap(),
                 PhaseFunction::tabulated(&[
@@ -236,6 +274,25 @@ mod tests {
                 encloses_tightly(phase_integral_upper(&phase, cx).unwrap().unwrap(), 1.0);
             }
         });
+    }
+
+    #[test]
+    fn rayleigh_albedo_envelope_covers_nonmonotone_absorption_ratios() {
+        for coefficients in [[5.0, 0.1], [0.1, 5.0], [1.0, 1.0]] {
+            let absorption = MassAbsorptionSpectrum::table(&[
+                (380.0, coefficients[0]),
+                (780.0, coefficients[1]),
+            ])
+            .unwrap();
+            let scattering = MassScatteringSpectrum::rayleigh(550.0, 1.0).unwrap();
+            let bound = max_albedo_upper(&absorption, &scattering);
+            for i in 0..=1000 {
+                let wavelength = 380.0 + 0.4 * f64::from(i);
+                let s = scattering.at(wavelength).unwrap();
+                let a = absorption.at(wavelength).unwrap();
+                assert!(bound >= s / (a + s));
+            }
+        }
     }
 
     #[test]

@@ -29,19 +29,32 @@ use fs_math::det;
 #[cfg(feature = "photometry")]
 mod contraction;
 mod phase;
-pub use phase::{MAX_PHASE_KNOTS, PhaseFunction, PhaseSample, TabulatedPhase};
+pub use phase::{
+    MAX_PHASE_KNOTS, MAX_PHASE_WAVELENGTHS, PhaseFunction, PhasePacketEvaluation,
+    PhasePacketSample, PhaseSample, SpectralPhaseTable, TabulatedPhase,
+};
+/// Physical homogeneous-sphere cross sections and resolved angular scattering.
+pub mod mie;
 
 /// Visible-band mass scattering coefficient in m²/kg, independently specified
 /// from absorption. The interpolation and admitted wavelength band are the
 /// same as [`MassAbsorptionSpectrum`].
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct MassScatteringSpectrum(MassAbsorptionSpectrum);
+pub struct MassScatteringSpectrum {
+    // Tabulated native coefficients, or the exact power-law value at its
+    // reference wavelength (retained in both slots for canonical hashing).
+    spectrum: MassAbsorptionSpectrum,
+    rayleigh_reference_nm: Option<f64>,
+}
 
 impl MassScatteringSpectrum {
     /// Wavelength-independent scattering over 380–780 nm.
     pub fn constant(value_m2_kg: f64) -> Result<Self, VolumeTransportError> {
         MassAbsorptionSpectrum::constant(value_m2_kg)
-            .map(Self)
+            .map(|spectrum| Self {
+                spectrum,
+                rayleigh_reference_nm: None,
+            })
             .map_err(|_| VolumeTransportError::ScatteringSpectrum)
     }
 
@@ -49,13 +62,50 @@ impl MassScatteringSpectrum {
     /// knots with endpoints exactly 380 and 780 nm.
     pub fn table(knots: &[(f64, f64)]) -> Result<Self, VolumeTransportError> {
         MassAbsorptionSpectrum::table(knots)
-            .map(Self)
+            .map(|spectrum| Self {
+                spectrum,
+                rayleigh_reference_nm: None,
+            })
             .map_err(|_| VolumeTransportError::ScatteringSpectrum)
     }
 
     /// Evaluate the admitted coefficient without wavelength extrapolation.
     pub fn at(&self, wavelength_nm: f64) -> Result<f64, VolumeTransportError> {
-        self.0.at(wavelength_nm)
+        let value = self.spectrum.at(wavelength_nm)?;
+        let Some(reference) = self.rayleigh_reference_nm else {
+            return Ok(value);
+        };
+        let ratio = reference / wavelength_nm;
+        let square = ratio * ratio;
+        let result = value * square * square;
+        if !result.is_finite() || (value > 0.0 && result == 0.0) {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
+        Ok(result)
+    }
+
+    /// Exact `kappa(reference) * (reference / lambda)^4` molecular Rayleigh
+    /// spectrum, without piecewise-linear wavelength bias. The reference must
+    /// be in the visible band. Refractivity and depolarization are assumed
+    /// wavelength independent; this is not a dispersion or resonance model.
+    pub fn rayleigh(reference_nm: f64, value_m2_kg: f64) -> Result<Self, VolumeTransportError> {
+        if !reference_nm.is_finite()
+            || !(crate::spectral::LAMBDA_MIN..=crate::spectral::LAMBDA_MAX).contains(&reference_nm)
+        {
+            return Err(VolumeTransportError::Wavelength);
+        }
+        let result = Self {
+            spectrum: MassAbsorptionSpectrum::constant(value_m2_kg)
+                .map_err(|_| VolumeTransportError::ScatteringSpectrum)?,
+            rayleigh_reference_nm: Some(reference_nm),
+        };
+        result.at(crate::spectral::LAMBDA_MIN)?;
+        result.at(crate::spectral::LAMBDA_MAX)?;
+        Ok(result)
+    }
+
+    fn knots(&self) -> &[(f64, f64)] {
+        &self.spectrum.knots[..self.spectrum.count]
     }
 }
 
@@ -110,21 +160,19 @@ impl<'a> ScatteringGrid<'a> {
     ) -> Result<Self, VolumeTransportError> {
         checkpoint(cx)?;
         phase.validate()?;
-        // A sum of piecewise-linear spectra attains its extrema at their
-        // combined knots; check that every extinction is representable once.
+        // A sum of affine absorption and either affine scattering or positive
+        // lambda^-4 scattering is convex on every combined interval. Its
+        // maximum is at an endpoint: validate extinction once at those knots.
         for &(wavelength, _) in absorption.absorption.knots[..absorption.absorption.count]
             .iter()
-            .chain(scattering.0.knots[..scattering.0.count].iter())
+            .chain(scattering.knots().iter())
         {
             if !(absorption.absorption.at(wavelength)? + scattering.at(wavelength)?).is_finite() {
                 return Err(VolumeTransportError::Unrepresentable);
             }
         }
         let mut has_scattering = false;
-        if scattering.0.knots[..scattering.0.count]
-            .iter()
-            .any(|(_, k)| *k > 0.0)
-        {
+        if scattering.knots().iter().any(|(_, k)| *k > 0.0) {
             for chunk in absorption.grid.data.chunks(1024) {
                 checkpoint(cx)?;
                 if chunk.iter().any(|density| *density > 0.0) {
@@ -135,10 +183,14 @@ impl<'a> ScatteringGrid<'a> {
         }
         let mut hash = DomainHasher::new("org.frankensim.render.scattering-grid.v1");
         hash.update(absorption.content_identity().as_bytes());
-        hash.update(&(scattering.0.count as u64).to_le_bytes());
-        for &(wavelength, coefficient) in &scattering.0.knots[..scattering.0.count] {
+        hash.update(&(scattering.spectrum.count as u64).to_le_bytes());
+        for &(wavelength, coefficient) in scattering.knots() {
             hash.update(&wavelength.to_bits().to_le_bytes());
             hash.update(&coefficient.to_bits().to_le_bytes());
+        }
+        if let Some(reference) = scattering.rayleigh_reference_nm {
+            hash.update(b"rayleigh-power-four");
+            hash.update(&reference.to_bits().to_le_bytes());
         }
         phase.hash_into(&mut hash);
         checkpoint(cx)?;
@@ -181,7 +233,7 @@ impl<'a> ScatteringGrid<'a> {
         self.absorption.has_thermal_emission()
     }
 
-    /// The wavelength-independent, reciprocal angular scattering law.
+    /// The reciprocal angular scattering law, including any wavelength knots.
     #[must_use]
     pub fn phase(&self) -> PhaseFunction {
         self.phase.clone()
