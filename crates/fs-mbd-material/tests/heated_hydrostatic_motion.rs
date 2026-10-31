@@ -398,3 +398,6 @@ fn restart_and_late_refusals_preserve_one_accepted_thermal_mechanical_history() 
     close(limited.thermal().energy_j(), 0.);
     assert_eq!(limited.state(), body.state());
 }
+
+#[path = "heated_hydrostatic_motion/observers.rs"]
+mod observers;

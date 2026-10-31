@@ -74,6 +74,66 @@ impl<'a> HeatedRigidBody<'a> {
         config: StepConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<(Self, HeatedHydrostaticAudit), HeatedMotionError> {
+        let observer = self.hydrostatic_observer(medium, envelope, &mut checkpoint)?;
+        let load_before = observer.load(&mut checkpoint)?;
+        let (thermal, observer, thermal_audit) =
+            self.thermal
+                .advance_observed(&observer, target_s, config, &mut checkpoint)?;
+        self.accept_hydrostatic(
+            load_before,
+            thermal,
+            observer,
+            thermal_audit,
+            &mut checkpoint,
+        )
+    }
+
+    /// Compose an existing heat or transport owner with the SAME buoyant body.
+    ///
+    /// Both observers receive the original thermal events and actual accepted
+    /// substeps, including their timestep bounds and generated source rates.
+    /// Generated heat is included once in the original thermal audit; the
+    /// added owner's own source/transfer accounts are returned in its accepted
+    /// state. Pressure configuration work remains separate from caloric heat.
+    ///
+    /// This retains all restrictions of `advance_hydrostatic`. Added transport
+    /// uses the original thermal geometry unless its own owner states otherwise.
+    /// The observer must be rollback-safe under Clone and must not duplicate
+    /// an existing physical source or transfer. Any source, hydrostatic,
+    /// thermal, work-budget or cancellation failure returns neither history.
+    pub fn advance_hydrostatic_with<O: DepositionObserver, M: HydrostaticReservoir + ?Sized>(
+        &self,
+        observer: &O,
+        medium: &M,
+        envelope: &[ThermalDisplacementRegion],
+        target_s: f64,
+        config: StepConfig,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, O, HeatedHydrostaticAudit), ObserverCouplingError<O::Error, HeatedMotionError>>
+    {
+        let motion = self
+            .hydrostatic_observer(medium, envelope, &mut checkpoint)
+            .map_err(ObserverCouplingError::Second)?;
+        let load_before = motion
+            .load(&mut checkpoint)
+            .map_err(ObserverCouplingError::Second)?;
+        let pair = CoupledObservers::new(observer.clone(), motion);
+        let (thermal, pair, audit) =
+            self.thermal
+                .advance_observed(&pair, target_s, config, &mut checkpoint)?;
+        let (observer, motion) = pair.into_parts();
+        let (next, audit) = self
+            .accept_hydrostatic(load_before, thermal, motion, audit, &mut checkpoint)
+            .map_err(ObserverCouplingError::Second)?;
+        Ok((next, observer, audit))
+    }
+
+    fn hydrostatic_observer<'m, M: HydrostaticReservoir + ?Sized>(
+        &self,
+        medium: &'m M,
+        envelope: &'m [ThermalDisplacementRegion],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<HydrostaticExpansion<'a, 'm, M>, HeatedMotionError> {
         checkpoint()?;
         if medium.gravity() != self.motion.integrator.gravity() {
             return Err(HeatedMotionError::Invalid(
@@ -107,17 +167,23 @@ impl<'a> HeatedRigidBody<'a> {
             return Err(HeatedMotionError::Invalid("empty displacement envelope"));
         }
         parts.sort_by_key(|&(index, _)| index);
-        let observer = HydrostaticExpansion {
+        Ok(HydrostaticExpansion {
             motion: self.motion.clone(),
             medium,
             parts,
             displacement_work_j: 0.0,
-        };
-        let load_before = observer.load(&mut checkpoint)?;
-        let (thermal, observer, thermal_audit) =
-            self.thermal
-                .advance_observed(&observer, target_s, config, &mut checkpoint)?;
-        let load_after = observer.load(&mut checkpoint)?;
+        })
+    }
+
+    fn accept_hydrostatic<M: HydrostaticReservoir + ?Sized>(
+        &self,
+        load_before: HydrostaticLoad,
+        thermal: DepositionSimulation<'a>,
+        observer: HydrostaticExpansion<'a, '_, M>,
+        thermal_audit: EnergyAudit,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, HeatedHydrostaticAudit), HeatedMotionError> {
+        let load_after = observer.load(checkpoint)?;
         let work = observer.motion.work;
         let displacement_parameter_work_j = observer.displacement_work_j;
         let next = Self {
