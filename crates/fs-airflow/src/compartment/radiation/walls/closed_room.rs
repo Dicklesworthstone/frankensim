@@ -11,8 +11,11 @@
 //! Acceptance advances gas with the EXACT heat vector in the returned wall
 //! report. A second endpoint evaluation gates the remaining power and gas/wall
 //! temperature mismatch. Combined energy is measured, never redistributed.
-//! Failed probes and cancellation mutate only numerical scratch. No timestep
-//! changes, mass transport, vents, reactions or volatile release are admitted.
+//! Failed probes and cancellation mutate only numerical scratch. The split
+//! entry point applies the same heat operator to transported or reacted gas
+//! inside the original network pressure solve, preserving its physical clock.
+//! Neither entry performs mass transport, chemistry or volatile release itself.
+//! No timestep changes occur inside this thermal solve.
 //! This is a first-order endpoint heat coupling using the original gas owner's
 //! pressure-work convention, not an unconditional stability/convergence theorem.
 
@@ -89,7 +92,9 @@ pub struct ClosedRoomWallReport {
     pub combined_energy_residual_j: f64,
 }
 
-/// Install both owners together. Neither accepted input was mutated by the call.
+/// Install both owners together. Neither input was mutated by the call.
+/// For split coupling this gas belongs to the enclosing unpublished source trial;
+/// publish walls only with its accepted network pressure candidate.
 pub struct ClosedRoomWallCandidate<'m, 's> {
     pub room: TwoZone,
     pub walls: EnclosureWallCandidate<'m, 's>,
@@ -109,7 +114,7 @@ pub enum ClosedRoomWallError {
 }
 impl core::fmt::Display for ClosedRoomWallError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "closed gas/wall endpoint radiation: {self:?}")
+        write!(f, "gas/wall endpoint radiation: {self:?}")
     }
 }
 impl std::error::Error for ClosedRoomWallError {}
@@ -190,10 +195,76 @@ pub fn candidate_closed_room_walls<'m, 's>(
     initial_gas_power: Option<[Power; 2]>,
     controls: ClosedRoomWallSolve,
     work: &mut ClosedRoomWallWorkspace,
+    wall_candidate: impl FnMut(
+        &TwoZone,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<EnclosureWallCandidate<'m, 's>, EnclosureWallError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ClosedRoomWallCandidate<'m, 's>, ClosedRoomWallError> {
+    candidate_heat_walls(
+        room,
+        duration,
+        initial_gas_power,
+        controls,
+        work,
+        wall_candidate,
+        false,
+        cancelled,
+    )
+}
+
+/// Apply endpoint gas/wall heat feedback inside an already-timed source trial.
+///
+/// The supplied gas has already undergone transport (and, if selected, chemistry)
+/// for `duration`. Its clock is preserved by the original `TwoZone::apply_split`.
+/// Accepted walls must start exactly one `duration` before this gas clock. Every
+/// wall trial must start from those SAME walls and use its supplied endpoint gas
+/// for opacity, paths and convection, through `candidate_walls`.
+///
+/// Use inside `ZoneNetwork::step_with_pressure_sources`: replace only the trial
+/// room, add the returned wall report's gas heat once to `additional`, and return
+/// the walls as the candidate payload. The enclosing pressure solve then sees
+/// radiative cooling/heating as well as transport and any preceding chemistry.
+/// Its accepted payload alone may be installed. Donor states in vent fluxes keep
+/// that owner's frozen-start approximation; chemistry is not solved simultaneously
+/// with this thermal endpoint operator. The composition remains first order.
+#[allow(clippy::too_many_arguments)]
+pub fn candidate_split_room_walls<'m, 's>(
+    room: &TwoZone,
+    duration: Time,
+    initial_gas_power: Option<[Power; 2]>,
+    controls: ClosedRoomWallSolve,
+    work: &mut ClosedRoomWallWorkspace,
+    wall_candidate: impl FnMut(
+        &TwoZone,
+        &mut dyn FnMut() -> bool,
+    ) -> Result<EnclosureWallCandidate<'m, 's>, EnclosureWallError>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ClosedRoomWallCandidate<'m, 's>, ClosedRoomWallError> {
+    candidate_heat_walls(
+        room,
+        duration,
+        initial_gas_power,
+        controls,
+        work,
+        wall_candidate,
+        true,
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_heat_walls<'m, 's>(
+    room: &TwoZone,
+    duration: Time,
+    initial_gas_power: Option<[Power; 2]>,
+    controls: ClosedRoomWallSolve,
+    work: &mut ClosedRoomWallWorkspace,
     mut wall_candidate: impl FnMut(
         &TwoZone,
         &mut dyn FnMut() -> bool,
     ) -> Result<EnclosureWallCandidate<'m, 's>, EnclosureWallError>,
+    split: bool,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ClosedRoomWallCandidate<'m, 's>, ClosedRoomWallError> {
     check(&mut cancelled)?;
@@ -208,7 +279,7 @@ pub fn candidate_closed_room_walls<'m, 's>(
         || !positive(controls.combined_energy_tolerance_j)
     {
         return Err(ClosedRoomWallError::Invalid(
-            "closed-room axes, duration or solve controls",
+            "gas/wall axes, duration or solve controls",
         ));
     }
     let initial = initial_gas_power
@@ -237,7 +308,11 @@ pub fn candidate_closed_room_walls<'m, 's>(
         for (rate, p) in rates.iter_mut().zip(power) {
             rate.add_heat(Power::new(p))?;
         }
-        let gas_step = next.advance(duration, rates, controls.gas, &mut *cancel)?;
+        let gas_step = if split {
+            next.apply_split(duration, rates, controls.gas, &mut *cancel)?
+        } else {
+            next.advance(duration, rates, controls.gas, &mut *cancel)?
+        };
         let walls = wall_candidate(&next, cancel)?;
         successful_trial_work.wall_evaluations += walls.report.work.wall_evaluations;
         successful_trial_work.radiation_evaluations += walls.report.work.radiation_evaluations;
@@ -252,7 +327,7 @@ pub fn candidate_closed_room_walls<'m, 's>(
                 .any(|wall| wall.wall.time() != next.time())
         {
             return Err(ClosedRoomWallError::Invalid(
-                "wall candidates must share the exact closed gas interval without volatile export",
+                "wall candidates must share the exact gas endpoint and duration without volatile export",
             ));
         }
         let mut residual = [0.0; 2];

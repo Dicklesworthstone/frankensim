@@ -1903,6 +1903,24 @@ radiation/convection with a separately reduced scalar energy equation; G3 tests
 two-layer pressure/geometry feedback and time refinement; G4 tests cancellation,
 work budgets and incompatible clocks.
 
+`radiation::walls::closed_room::candidate_split_room_walls` applies that same
+endpoint thermal operator to an unpublished transported gas candidate through
+the original `TwoZone::apply_split`, preserving its clock. Inside
+`ZoneNetwork::step_with_pressure_sources`, the returned gas heat enters the
+additional source account once and the matching walls are installed only with
+the accepted pressure candidate. Radiative cooling/heating therefore changes
+vent pressure and flow within that solve. Ambient species and physical stream
+enthalpy remain external; internal gas/wall heat cancels in the combined
+storage balance. Every trial recomputes opacity, paths and convection from its
+actual gas endpoint. Donor vent temperature, composition and interface retain
+the existing frozen-start approximation. This is first-order transport/thermal
+composition; it does not assert simultaneous chemistry or radiative transfer
+through an unrepresented opening. `radiating_compartment ventilated` exercises
+the original vent-pressure, species, caloric and finite-wall owners together.
+Focused tests independently reconstruct vent flow at the radiatively cooled
+accepted pressure, check external physical enthalpy and combined storage, and
+check retry/cancellation without publishing a rejected gas or wall candidate.
+
 ### Conservative solid-to-gas volatile transfer
 
 `compartment::pyrolysis::VolatileMixture` binds an explicit volatile mass

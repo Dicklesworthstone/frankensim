@@ -1,13 +1,13 @@
 //! Finite hot gas cooling into finite walls with implicit radiation feedback.
 //!
 //! cargo run --release -p fs-airflow --features compartment-fire \
-//!   --example radiating_compartment -- [gray|spectral|implicit] [end_s=10] [max_dt_s=0.1]
+//!   --example radiating_compartment -- [gray|spectral|implicit|ventilated] [end_s=10] [max_dt_s=0.1]
 //!
 //! The original NASA air, TwoZone, ZoneNetwork, Wall1d, material-card emissivity
 //! and participating enclosure owners perform the calculation. In `gray` and
 //! `spectral` modes gas temperatures are frozen per source candidate; wall storage and radiation are
 //! solved together. Accepted gas and wall clocks advance together. No external
-//! heat enters this closed example, so their combined physical energy is fixed.
+//! heat enters the closed modes, so their combined physical energy is fixed.
 //!
 //! Optical coefficients are EXPLICITLY AUTHORED coupling inputs, not measured
 //! nitrogen/oxygen spectroscopy. Spectral mode uses those same constant bands
@@ -17,6 +17,8 @@
 //! example, not a validated fire or cooling experiment or soot-yield closure.
 //! `implicit` closes gas and wall endpoint feedback with gray optics, rebuilding
 //! paths and convective contacts from each gas trial without shortening a step.
+//! `ventilated` applies that heat operator inside the original vent-pressure
+//! solve; ambient mass and physical enthalpy have their own external accounts.
 //! All modes retain first-order thermal integration.
 
 #[path = "compartment_fire/air.rs"]
@@ -25,8 +27,11 @@ mod air;
 use fs_airflow::compartment::radiation::spectral::{SpectralBand, SpectralOptics, SpectralSolve};
 use fs_airflow::compartment::radiation::walls::closed_room::{
     ClosedRoomWallSolve, ClosedRoomWallWorkspace, candidate_closed_room_walls,
+    candidate_split_room_walls,
 };
-use fs_airflow::compartment::radiation::walls::{EnclosureWallSolve, WallOptics};
+use fs_airflow::compartment::radiation::walls::{
+    EnclosureWallSolve, EnclosureWallWork, WallOptics,
+};
 use fs_airflow::compartment::radiation::{
     AbsorptionCoefficient, LayerAbsorption, OpticalPath, OpticalSegment, ParticipatingEnclosure,
     RadiationError, RadiationSolve,
@@ -35,7 +40,8 @@ use fs_airflow::compartment::wall::{
     GasContact, HeatTransferCoefficient, SpecificEnthalpy, ThermalConductivity, Wall1d,
     WallBoundary, WallGeometry,
 };
-use fs_airflow::compartment::{Ambient, NetworkControl, Room, ZoneNetwork};
+use fs_airflow::compartment::{Ambient, Endpoint, NetworkControl, Room, WallVent, ZoneNetwork};
+use fs_airflow::stratified::{DischargeCoefficient, WallOpening};
 use fs_conduction::radiation::{
     EMISSIVITY_DIMS, SURFACE_EMISSIVITY_PROPERTY, SurfaceEmissivity, ViewFactorMatrix,
 };
@@ -140,7 +146,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         .is_some_and(|a| matches!(a.as_str(), "-h" | "--help"))
     {
         println!(
-            "radiating_compartment [gray|spectral|implicit] [end_s=10] [max_dt_s=0.1]\nOriginal two-layer NASA air and two finite walls; explicit authored opacity and normal-chord geometry.\nSpectral mode resolves the same constant opacity over 1e-7..1e-3 m as a finite-window gray-limit reference.\nImplicit mode solves gas/wall endpoint heat feedback with gray optics and supports requested timesteps up to 300 s.\nNo external heat, combustion, measured air spectroscopy or experimental-validation claim."
+            "radiating_compartment [gray|spectral|implicit|ventilated] [end_s=10] [max_dt_s=0.1]\nOriginal two-layer NASA air and two finite walls; explicit authored opacity and normal-chord geometry.\nSpectral mode resolves the same constant opacity over 1e-7..1e-3 m as a finite-window gray-limit reference.\nImplicit mode solves gas/wall endpoint heat feedback with gray optics and supports requested timesteps up to 300 s.\nVentilated mode places endpoint heat feedback inside the vent-pressure solve with a 0.01 m wide, 2 m tall opening to 300 K air; mass and physical enthalpy exchange are counted explicitly.\nNo external heater, combustion, measured air spectroscopy or experimental-validation claim."
         );
         return Ok(());
     }
@@ -148,8 +154,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         return Err("expected at most mode, end time and maximum timestep".into());
     }
     let mode = args.first().map(String::as_str).unwrap_or("spectral");
-    if !matches!(mode, "gray" | "spectral" | "implicit") {
-        return Err("mode must be gray, spectral or implicit".into());
+    if !matches!(mode, "gray" | "spectral" | "implicit" | "ventilated") {
+        return Err("mode must be gray, spectral, implicit or ventilated".into());
     }
     let end = args
         .get(1)
@@ -192,7 +198,20 @@ fn main() -> Result<(), Box<dyn Error>> {
             temperature: Temperature::new(300.0),
             mass_fractions: fractions,
         },
-        vec![],
+        if mode == "ventilated" {
+            vec![WallVent {
+                left: Endpoint::Room(0),
+                right: Endpoint::Ambient,
+                opening: WallOpening::new(
+                    Length::new(0.0),
+                    Length::new(2.0),
+                    Length::new(0.01),
+                    DischargeCoefficient::sharp_edged()?,
+                )?,
+            }]
+        } else {
+            vec![]
+        },
         vec![],
         Acceleration::new(9.81),
         || false,
@@ -253,6 +272,8 @@ fn main() -> Result<(), Box<dyn Error>> {
         .into_iter()
         .map(|l| network.rooms()[0].gas.layer(l).species_masses().to_vec())
         .collect();
+    let mut ambient_species = vec![0.0; initial_species[0].len()];
+    let mut ambient_energy = 0.0;
     let network_controls = NetworkControl {
         minimum_step_s: 1e-6,
         ..NetworkControl::default()
@@ -338,6 +359,90 @@ fn main() -> Result<(), Box<dyn Error>> {
             let counts = result.report.successful_trial_work;
             accepted_room = result.room;
             (result.walls, 0, counts)
+        } else if mode == "ventilated" {
+            let mut pressure_trial_work = EnclosureWallWork::default();
+            let (network_report, (), (candidate, endpoint_report)) = network
+                .step_with_pressure_sources(
+                    Time::new(dt),
+                    network_controls,
+                    |_, _, _, _| Ok(()),
+                    |rooms, attempted, _, additional, cancel| {
+                        let result = candidate_split_room_walls(
+                            &rooms[0].gas,
+                            attempted,
+                            Some(previous_gas_power),
+                            ClosedRoomWallSolve::default(),
+                            &mut ClosedRoomWallWorkspace::new(&rooms[0].gas)?,
+                            |endpoint, cancel| {
+                                make_enclosure(endpoint)?.candidate_walls(
+                                    &walls,
+                                    attempted,
+                                    &[
+                                        boundary(endpoint, Layer::Lower),
+                                        boundary(endpoint, Layer::Upper),
+                                    ],
+                                    [
+                                        endpoint.layer(Layer::Lower).temperature(),
+                                        endpoint.layer(Layer::Upper).temperature(),
+                                    ],
+                                    optics,
+                                    |i, t| {
+                                        SurfaceEmissivity::from_card(
+                                            names[i],
+                                            &cards[i],
+                                            t.value(),
+                                            SelectionPolicy::SingleClaimOnly,
+                                        )
+                                    },
+                                    Some(&previous_power),
+                                    EnclosureWallSolve::default(),
+                                    &mut work,
+                                    cancel,
+                                )
+                            },
+                            &mut *cancel,
+                        )?;
+                        for power in result.walls.report.gas_heat_power {
+                            additional.add_heat(power)?;
+                        }
+                        let counts = result.report.successful_trial_work;
+                        pressure_trial_work.wall_evaluations += counts.wall_evaluations;
+                        pressure_trial_work.radiation_evaluations += counts.radiation_evaluations;
+                        pressure_trial_work.wavelength_evaluations += counts.wavelength_evaluations;
+                        pressure_trial_work.spectral_factorizations +=
+                            counts.spectral_factorizations;
+                        rooms[0].gas = result.room;
+                        Ok((result.walls, result.report))
+                    },
+                    || false,
+                )?;
+            accepted_room = network.rooms()[0].gas.clone();
+            previous_gas_power = candidate.report.gas_heat_power;
+            maximum_power_residual = endpoint_report
+                .endpoint_power_residual_w
+                .into_iter()
+                .map(f64::abs)
+                .fold(maximum_power_residual, f64::max);
+            maximum_temperature_residual = maximum_temperature_residual
+                .max(endpoint_report.maximum_gas_temperature_residual_k)
+                .max(endpoint_report.maximum_wall_temperature_residual_k);
+            // The network external account includes internal gas/wall heat.
+            // Remove it once to isolate actual ambient enthalpy for the combined balance.
+            ambient_energy += network_report.external_physical_energy_j
+                - network_report.elapsed.value()
+                    * candidate
+                        .report
+                        .gas_heat_power
+                        .iter()
+                        .map(|p| p.value())
+                        .sum::<f64>();
+            for (total, supplied) in ambient_species
+                .iter_mut()
+                .zip(network_report.external_species_change_kg)
+            {
+                *total += supplied;
+            }
+            (candidate, network_report.halvings, pressure_trial_work)
         } else {
             let enclosure = make_enclosure(&accepted_room)?;
             let (network_report, candidate) = network.step_with_sources(
@@ -389,7 +494,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         }
         let energy = room.physical_internal_energy().value()
             + walls.iter().map(|w| w.simulation().energy_j()).sum::<f64>();
-        let defect = energy - initial_energy;
+        let defect = energy - initial_energy - ambient_energy;
         maximum_energy_residual = maximum_energy_residual.max(defect.abs());
         maximum_power_residual = maximum_power_residual.max(report.maximum_power_residual_w);
         maximum_temperature_residual =
@@ -399,7 +504,11 @@ fn main() -> Result<(), Box<dyn Error>> {
                 format!("combined gas/wall physical-energy balance refused: {defect:e} J").into(),
             );
         }
-        for (i, layer) in [Layer::Lower, Layer::Upper].into_iter().enumerate() {
+        for (i, layer) in [Layer::Lower, Layer::Upper]
+            .into_iter()
+            .enumerate()
+            .filter(|_| mode != "ventilated")
+        {
             if room
                 .layer(layer)
                 .species_masses()
@@ -408,6 +517,13 @@ fn main() -> Result<(), Box<dyn Error>> {
                 .any(|(a, b)| (a - b).abs() > 1e-10)
             {
                 return Err("closed example changed species inventories".into());
+            }
+        }
+        for (i, supplied) in ambient_species.iter().enumerate() {
+            let retained = room.layer(Layer::Lower).species_masses()[i]
+                + room.layer(Layer::Upper).species_masses()[i];
+            if (retained - initial_species[0][i] - initial_species[1][i] - supplied).abs() > 1e-9 {
+                return Err("original gas species and ambient transfer do not balance".into());
             }
         }
         steps += 1;

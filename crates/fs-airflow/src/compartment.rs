@@ -198,6 +198,8 @@ pub enum NetworkError {
     Radiation(radiation::RadiationError),
     /// Coupled participating radiation and finite-wall endpoints refused.
     RadiatingWalls(radiation::walls::EnclosureWallError),
+    /// Finite gas/wall endpoint feedback refused inside a source trial.
+    RadiatingRoom(radiation::walls::closed_room::ClosedRoomWallError),
     /// Condensed-fuel release refused its original gas source or transfer balance.
     Pyrolysis(pyrolysis::VolatileGasError),
     /// An original fan source, operating point or applicability gate refused.
@@ -272,6 +274,15 @@ impl From<radiation::walls::EnclosureWallError> for NetworkError {
         match e {
             radiation::walls::EnclosureWallError::Cancelled => Self::Cancelled,
             other => Self::RadiatingWalls(other),
+        }
+    }
+}
+impl From<radiation::walls::closed_room::ClosedRoomWallError> for NetworkError {
+    fn from(e: radiation::walls::closed_room::ClosedRoomWallError) -> Self {
+        use radiation::walls::closed_room::ClosedRoomWallError;
+        match e {
+            ClosedRoomWallError::Cancelled => Self::Cancelled,
+            other => Self::RadiatingRoom(other),
         }
     }
 }

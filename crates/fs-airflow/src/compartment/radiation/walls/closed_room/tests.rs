@@ -1,6 +1,9 @@
 use super::*;
 use crate::compartment::radiation::walls::closed_room::*;
+use crate::compartment::{Endpoint, WallVent};
+use crate::stratified::{self, DischargeCoefficient, TwoLayerColumn, WallOpening};
 use fs_gas::multicomponent::compartment::{LayerRates, ZoneSolve};
+use fs_qty::MassFlowRate;
 
 fn room(temperatures: [f64; 2], interface: f64) -> TwoZone {
     let (gas, fractions) = air::source().unwrap();
@@ -50,49 +53,77 @@ fn run(
     controls: ClosedRoomWallSolve,
     cancel: impl FnMut() -> bool,
 ) -> Result<ClosedRoomWallCandidate<'static, 'static>, ClosedRoomWallError> {
+    run_mode(original, walls, dt, kappa, h, controls, false, cancel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_mode(
+    original: &TwoZone,
+    walls: &[Wall1d<'static>; 2],
+    dt: f64,
+    kappa: [f64; 2],
+    h: f64,
+    controls: ClosedRoomWallSolve,
+    split: bool,
+    cancel: impl FnMut() -> bool,
+) -> Result<ClosedRoomWallCandidate<'static, 'static>, ClosedRoomWallError> {
     let mut optical_work = model(original).wall_workspace(walls).unwrap();
     let absorption = absorption(kappa);
-    candidate_closed_room_walls(
-        original,
-        Time::new(dt),
-        None,
-        controls,
-        &mut ClosedRoomWallWorkspace::new(original).unwrap(),
-        |endpoint, cancelled| {
-            let boundaries = [0, 1].map(|_| {
-                let mut b = insulated();
-                b.gas[0] = GasContact {
-                    area: Area::new(if endpoint.layer(Layer::Lower).mass_kg() > 0.0 {
-                        1.0
-                    } else {
-                        0.0
-                    }),
-                    temperature: endpoint.layer(Layer::Lower).temperature(),
-                    htc: HeatTransferCoefficient::new(h),
-                };
-                b
-            });
-            model(endpoint).candidate_walls(
-                walls,
-                Time::new(dt),
-                &boundaries,
-                [
-                    endpoint.layer(Layer::Lower).temperature(),
-                    endpoint.layer(Layer::Upper).temperature(),
-                ],
-                WallOptics::Gray {
-                    absorption: &absorption,
-                    solve: RadiationSolve::default(),
-                },
-                |_, t| Ok(emissivity(1.0, t)),
-                None,
-                EnclosureWallSolve::default(),
-                &mut optical_work,
-                cancelled,
-            )
-        },
-        cancel,
-    )
+    let mut gas_work = ClosedRoomWallWorkspace::new(original).unwrap();
+    let evaluate = |endpoint: &TwoZone, cancelled: &mut dyn FnMut() -> bool| {
+        let boundaries = [0, 1].map(|_| {
+            let mut b = insulated();
+            b.gas[0] = GasContact {
+                area: Area::new(if endpoint.layer(Layer::Lower).mass_kg() > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }),
+                temperature: endpoint.layer(Layer::Lower).temperature(),
+                htc: HeatTransferCoefficient::new(h),
+            };
+            b
+        });
+        model(endpoint).candidate_walls(
+            walls,
+            Time::new(dt),
+            &boundaries,
+            [
+                endpoint.layer(Layer::Lower).temperature(),
+                endpoint.layer(Layer::Upper).temperature(),
+            ],
+            WallOptics::Gray {
+                absorption: &absorption,
+                solve: RadiationSolve::default(),
+            },
+            |_, t| Ok(emissivity(1.0, t)),
+            None,
+            EnclosureWallSolve::default(),
+            &mut optical_work,
+            cancelled,
+        )
+    };
+    if split {
+        candidate_split_room_walls(
+            original,
+            Time::new(dt),
+            None,
+            controls,
+            &mut gas_work,
+            evaluate,
+            cancel,
+        )
+    } else {
+        candidate_closed_room_walls(
+            original,
+            Time::new(dt),
+            None,
+            controls,
+            &mut gas_work,
+            evaluate,
+            cancel,
+        )
+    }
 }
 
 // Independent scalar backward-Euler energy equation, using the original
@@ -267,6 +298,277 @@ fn g3_two_layer_pressure_work_and_geometry_feedback_refine_at_fixed_inventory() 
         .collect();
     assert!(errors[1] < 0.75 * errors[0], "refinement errors {errors:?}");
     assert!(errors[2] < 0.75 * errors[1], "refinement errors {errors:?}");
+}
+
+fn network_with_opening(original: &TwoZone, width: f64) -> (ZoneNetwork, WallOpening) {
+    let opening = WallOpening::new(
+        Length::new(0.0),
+        Length::new(1.0),
+        Length::new(width),
+        DischargeCoefficient::sharp_edged().unwrap(),
+    )
+    .unwrap();
+    let state = original.layer(Layer::Lower);
+    let fractions = state
+        .species_masses()
+        .iter()
+        .map(|m| m / state.mass_kg())
+        .collect();
+    let network = ZoneNetwork::new(
+        vec![Room {
+            gas: original.clone(),
+            floor_elevation: Length::new(0.0),
+        }],
+        Ambient {
+            pressure: Pressure::new(101325.0),
+            reference_height: Length::new(0.0),
+            temperature: Temperature::new(300.0),
+            mass_fractions: fractions,
+        },
+        vec![WallVent {
+            left: Endpoint::Room(0),
+            right: Endpoint::Ambient,
+            opening: opening.clone(),
+        }],
+        vec![],
+        Acceleration::new(0.0),
+        || false,
+    )
+    .unwrap();
+    (network, opening)
+}
+
+fn apply_thermal(
+    rooms: &mut [Room],
+    duration: Time,
+    walls: &[Wall1d<'static>; 2],
+    additional: &mut LayerRates,
+    cancelled: &mut dyn FnMut() -> bool,
+) -> Result<
+    (
+        EnclosureWallCandidate<'static, 'static>,
+        ClosedRoomWallReport,
+    ),
+    NetworkError,
+> {
+    let result = run_mode(
+        &rooms[0].gas,
+        walls,
+        duration.value(),
+        [0.7, 0.0],
+        0.0,
+        ClosedRoomWallSolve::default(),
+        true,
+        cancelled,
+    )?;
+    for power in result.walls.report.gas_heat_power {
+        additional.add_heat(power)?;
+    }
+    rooms[0].gas = result.room;
+    Ok((result.walls, result.report))
+}
+
+#[test]
+fn g1_source_inclusive_network_recovers_sealed_implicit_radiation() {
+    let original = room([900.0, 300.0], 1.0);
+    let (mut network, _) = network_with_opening(&original, 0.0);
+    let walls = [wall(300.0, 1.0, 1), wall(300.0, 1.0, 1)];
+    let dt = 300.0;
+    let (balance, (), (candidate, endpoint)) = network
+        .step_with_pressure_sources(
+            Time::new(dt),
+            NetworkControl {
+                maximum_halvings: 0,
+                ..NetworkControl::default()
+            },
+            |_, _, _, _| Ok(()),
+            |rooms, duration, _, additional, cancel| {
+                apply_thermal(rooms, duration, &walls, additional, cancel)
+            },
+            || false,
+        )
+        .unwrap();
+    let (temperature, face, _) = single_layer_oracle(&original, dt, 0.7, 0.0);
+    close(
+        network.rooms()[0]
+            .gas
+            .layer(Layer::Lower)
+            .temperature()
+            .value(),
+        temperature,
+        3e-6,
+    );
+    for w in &candidate.walls {
+        close(w.report.surface_temperatures[0].value(), face, 3e-6);
+        assert_eq!(w.wall.time(), network.rooms()[0].gas.time());
+    }
+    assert_eq!(network.rooms()[0].gas.time(), Time::new(dt));
+    assert_eq!(balance.halvings, 0);
+    assert_eq!(balance.maximum_split_pressure_change_pa, 0.0);
+    assert!(balance.maximum_pressure_residual_pa <= 1e-5);
+    assert!(endpoint.combined_energy_residual_j.abs() < 1e-4);
+}
+
+#[test]
+fn g1_vent_transfer_uses_radiatively_cooled_pressure_and_closes_physical_energy() {
+    let original = room([900.0, 300.0], 1.0);
+    let (mut network, opening) = network_with_opening(&original, 0.03);
+    let walls = [wall(300.0, 1.0, 1), wall(300.0, 1.0, 1)];
+    let (balance, (), (candidate, _)) = network
+        .step_with_pressure_sources(
+            Time::new(0.05),
+            NetworkControl {
+                maximum_halvings: 0,
+                ..NetworkControl::default()
+            },
+            |_, _, _, _| Ok(()),
+            |rooms, duration, _, additional, cancel| {
+                apply_thermal(rooms, duration, &walls, additional, cancel)
+            },
+            || false,
+        )
+        .unwrap();
+    let endpoint = &network.rooms()[0].gas;
+    assert!(endpoint.pressure().value() < network.ambient().pressure.value());
+    assert!(endpoint.layer(Layer::Lower).temperature().value() < 900.0);
+    assert!(endpoint.layer(Layer::Lower).mass_kg() > original.layer(Layer::Lower).mass_kg());
+    assert_eq!(endpoint.time(), balance.elapsed);
+    assert!(
+        candidate
+            .walls
+            .iter()
+            .all(|w| w.wall.time() == endpoint.time())
+    );
+    assert_eq!(balance.maximum_split_pressure_change_pa, 0.0);
+    assert!(balance.maximum_pressure_residual_pa <= 1e-5);
+
+    // Independently reconstruct opening transfer at the accepted cooled pressure,
+    // using the vent owner's declared frozen-start donor temperatures. At start
+    // both pressures are equal and gravity is zero: omitting radiation from the
+    // pressure equation would predict exactly zero vent mass transfer.
+    let initial_density = original.layer(Layer::Lower).density_kg_m3().unwrap();
+    let inside_density =
+        initial_density * endpoint.pressure().value() / original.pressure().value();
+    let outside_density = initial_density * 900.0 / 300.0;
+    let inside = TwoLayerColumn::new(
+        Length::new(0.0),
+        endpoint.pressure(),
+        Length::new(1.0),
+        Density::new(inside_density),
+        Density::new(inside_density),
+    )
+    .unwrap();
+    let outside = TwoLayerColumn::new(
+        Length::new(0.0),
+        network.ambient().pressure,
+        Length::new(0.0),
+        Density::new(outside_density),
+        Density::new(outside_density),
+    )
+    .unwrap();
+    let flow =
+        stratified::wall_vent_flow(&opening, inside, outside, Acceleration::new(0.0), || false)
+            .unwrap();
+    let incoming: f64 = -flow
+        .slabs()
+        .iter()
+        .map(|s| s.mass_rate.value())
+        .sum::<f64>();
+    let dt = balance.elapsed.value();
+    close(
+        endpoint.layer(Layer::Lower).mass_kg() - original.layer(Layer::Lower).mass_kg(),
+        dt * incoming,
+        2e-9,
+    );
+    let carried = original
+        .inflow(
+            MassFlowRate::new(incoming),
+            &network.ambient().mass_fractions,
+            network.ambient().temperature,
+        )
+        .unwrap();
+    let physical_ambient = dt
+        * (carried.referenced_energy_w
+            + carried
+                .species_kg_s
+                .iter()
+                .zip(original.gas().energy_references())
+                .map(|(m, e)| m * e)
+                .sum::<f64>());
+    let heat = dt
+        * candidate
+            .report
+            .gas_heat_power
+            .iter()
+            .map(|p| p.value())
+            .sum::<f64>();
+    close(
+        balance.external_physical_energy_j - heat,
+        physical_ambient,
+        1e-3,
+    );
+    let combined = endpoint.physical_internal_energy().value()
+        - original.physical_internal_energy().value()
+        + candidate.report.wall_storage_change.value()
+        - physical_ambient;
+    assert!(combined.abs() < 1e-3, "combined energy {combined:e}");
+    assert!(balance.physical_energy_residual_j.abs() < 1e-4);
+    assert!(balance.species_residual_kg.iter().all(|v| v.abs() < 1e-12));
+}
+
+#[test]
+fn g4_pressure_trials_retry_and_cancel_without_publishing_gas_or_walls() {
+    use std::cell::Cell;
+    let original = room([900.0, 300.0], 1.0);
+    let walls = [wall(300.0, 1.0, 1), wall(300.0, 1.0, 1)];
+    let (mut network, _) = network_with_opening(&original, 0.03);
+    let before = network.rooms().to_vec();
+    let cancel_after_thermal = Cell::new(false);
+    let cancelled = network.step_with_pressure_sources(
+        Time::new(0.08),
+        NetworkControl::default(),
+        |_, _, _, _| Ok(()),
+        |rooms, dt, _, additional, cancel| {
+            let result = apply_thermal(rooms, dt, &walls, additional, cancel)?;
+            cancel_after_thermal.set(true);
+            Ok(result)
+        },
+        || cancel_after_thermal.get(),
+    );
+    assert!(matches!(cancelled, Err(NetworkError::Cancelled)));
+    assert_eq!(network.rooms(), before);
+    assert!(walls.iter().all(|w| w.time() == Time::new(0.0)));
+    let (balance, (), (candidate, _)) = network
+        .step_with_pressure_sources(
+            Time::new(0.08),
+            NetworkControl::default(),
+            |_, _, _, _| Ok(()),
+            |rooms, dt, _, additional, cancel| {
+                let result = apply_thermal(rooms, dt, &walls, additional, cancel)?;
+                if dt.value() > 0.04 {
+                    return Err(NetworkError::Invalid(
+                        "forced rejected thermal source trial",
+                    ));
+                }
+                Ok(result)
+            },
+            || false,
+        )
+        .unwrap();
+    assert_eq!(balance.elapsed, Time::new(0.04));
+    assert_eq!(balance.halvings, 1);
+    assert!(
+        candidate
+            .walls
+            .iter()
+            .all(|w| w.wall.time() == balance.elapsed)
+    );
+    assert_eq!(network.rooms()[0].gas.time(), balance.elapsed);
+    assert!(walls.iter().all(|w| w.time() == Time::new(0.0)));
+    assert_eq!(
+        NetworkError::from(ClosedRoomWallError::Cancelled),
+        NetworkError::Cancelled
+    );
 }
 
 #[test]

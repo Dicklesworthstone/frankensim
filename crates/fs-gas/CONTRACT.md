@@ -1241,6 +1241,15 @@ can copy accepted physical state only when their source and geometry agree.
 Cancellation, negative inventory, unsupported calorics, an out-of-room interface,
 or a bounded solve failure publishes nothing and leaves the clock unchanged.
 
+`TwoZone::apply_split` composes a supplied heat/stream source substep with an
+already timed outer update. It uses the same atomic inventory, caloric,
+pressure and interface-work solve as `advance`, then restores the exact
+original clock after success. Only the enclosing time owner advances the
+physical interval and records those source rates once. A focused regression
+compares its complete physical state and formation-energy-aware stream balance
+with an ordinary source advance while checking the retained clock and atomic
+cancellation. This operation does not add chemistry or a higher-order split.
+
 Seven native tests pass: the constant-Cp CFAST pressure reduction and adiabatic
 interface refinement; independently integrated variable-Cp heating; conservative
 unequal-species enthalpy exchange; formation of an initially absent upper layer;

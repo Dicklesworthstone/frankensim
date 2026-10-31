@@ -290,3 +290,66 @@ fn g0_initialization_refuses_unrepresentable_extensive_inventories() {
     );
     assert!(result.is_err());
 }
+
+#[test]
+fn g1_split_stream_and_heat_preserve_clock_and_original_physical_energy() {
+    let mut zone = room(gas(0.2, true, 30.0), 3.0, 0.4, [2.0, 3.0], [[0.7, 0.3]; 2]);
+    zone.advance(Time::new(0.3), [LayerRates::default(); 2], solve(), || {
+        false
+    })
+    .unwrap();
+    let before = zone.clone();
+    let dt = Time::new(0.1);
+    let mut rates = [LayerRates::default(); 2];
+    rates[0] = zone
+        .inflow(MassFlowRate::new(0.2), &[0.1, 0.9], Temperature::new(4.0))
+        .unwrap();
+    rates[1] = zone
+        .carried_rate(Layer::Upper, MassFlowRate::new(0.1))
+        .unwrap()
+        .opposite();
+    rates[1].add_heat(Power::new(2.0)).unwrap();
+    let mut advanced = before.clone();
+    let reference = advanced.advance(dt, rates, solve(), || false).unwrap();
+    let report = zone.apply_split(dt, rates, solve(), || false).unwrap();
+    assert_eq!(report, reference);
+    assert_eq!(zone.layers, advanced.layers);
+    assert_eq!(zone.pressure(), advanced.pressure());
+    assert_eq!(
+        zone.time().value().to_bits(),
+        before.time().value().to_bits()
+    );
+    let physical_rate: f64 = rates
+        .iter()
+        .map(|rate| {
+            rate.referenced_energy_w
+                + rate
+                    .species_kg_s
+                    .iter()
+                    .zip(zone.gas().energy_references())
+                    .map(|(m, e)| m * e)
+                    .sum::<f64>()
+        })
+        .sum();
+    assert!(
+        (zone.physical_internal_energy().value()
+            - before.physical_internal_energy().value()
+            - dt.value() * physical_rate)
+            .abs()
+            < 1e-9
+    );
+    assert_ne!(zone.interface_height(), before.interface_height());
+    let accepted = zone.clone();
+    let mut drain = rates;
+    drain[0].species_kg_s[0] = -1e6;
+    assert!(matches!(
+        zone.apply_split(dt, drain, solve(), || false),
+        Err(ZoneError::SpeciesDepletion { .. })
+    ));
+    assert_eq!(zone, accepted);
+    assert_eq!(
+        zone.apply_split(dt, rates, solve(), || true),
+        Err(ZoneError::Cancelled)
+    );
+    assert_eq!(zone, accepted);
+}

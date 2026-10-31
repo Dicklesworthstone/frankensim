@@ -442,6 +442,28 @@ impl TwoZone {
             state.temperature(),
         )
     }
+    /// Apply a source substep without counting its duration in the physical clock.
+    ///
+    /// An enclosing transport/time owner must already account for this interval.
+    /// Inventories, calorics and pressure/interface work use the same original
+    /// atomic solve as `advance`; the supplied rates belong in the enclosing
+    /// source account exactly once. No second transport or chemical increment is
+    /// implied. This is operator composition, not a higher-order time method.
+    /// Failure preserves the supplied state. After success only an infallible
+    /// restoration of the exact original clock remains.
+    pub fn apply_split(
+        &mut self,
+        duration: Time,
+        rates: [LayerRates; 2],
+        controls: ZoneSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ZoneStepReport, ZoneError> {
+        let physical_time = self.time;
+        let report = self.advance(duration, rates, controls, cancelled)?;
+        self.time = physical_time;
+        Ok(report)
+    }
+
     /// Advance one exact supplied-source duration atomically. An external driver
     /// must recompute its rates when retrying a shorter interval.
     pub fn advance(

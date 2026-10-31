@@ -19,9 +19,11 @@ cargo run --release -p fs-airflow --features compartment-fire \
   --example radiating_compartment -- spectral 10 0.05
 cargo run --release -p fs-airflow --features compartment-fire \
   --example radiating_compartment -- implicit 10 2
+cargo run --release -p fs-airflow --features compartment-fire \
+  --example radiating_compartment -- ventilated 2 0.1
 ```
 
-Arguments are mode (`gray`, `spectral` or `implicit`), end time [s] and maximum
+Arguments are mode (`gray`, `spectral`, `implicit` or `ventilated`), end time [s] and maximum
 timestep [s]. Defaults are `spectral 10 0.1`. End time must be 0.001..300 s,
 maximum timestep 0.001..0.5 s (up to 300 s for `implicit`), and work is bounded by
 50,000 steps. CSV goes to stdout; model attribution and accumulated numerical
@@ -48,6 +50,36 @@ mismatch and combined energy remain separately checked. It does not accept
 ventilation, mass transfer or pyrolysis streams. Reported implicit work counts
 sum successful inner candidate trials, including discarded derivatives and
 backtracks; failed inner calls do not return work counts.
+
+### Radiation coupled to ventilation pressure
+
+`ventilated` adds a 0.01 m wide, 2 m tall opening to a 300 K ambient reservoir
+at 101,325 Pa. It uses the original stratified opening transport and solves
+pressure against **transport followed by implicit gas/wall heat exchange**.
+Consequently radiative cooling changes the opening flow in the same accepted
+step, and the thermal operator receives the actual transported gas inventory.
+Every pressure/Jacobian/backtracking trial starts from accepted gas and walls;
+only its converged wall payload is installed. Whole-network retries recompute
+both transport and thermal feedback at the shorter attempted interval.
+
+The `candidate_split_room_walls` entry point shares the closed-room heat solver
+and uses original `TwoZone::apply_split` to retain the already-advanced physical
+clock. Its callback still rebuilds paths and convective temperatures at every
+gas endpoint. The pressure-source callback adds the returned gas heat exactly
+once to the network's `additional` account. For the combined gas/wall balance,
+that internal heat is removed once from the network's external-energy total,
+leaving actual ambient physical enthalpy. Canonical species transfer is checked
+against the retained inventories. The gas and returned walls have identical
+accepted clocks, including after a duration retry.
+
+The existing pressure owner freezes donor temperature, composition and interface
+geometry in vent fluxes at the start of each attempted interval. This is a
+first-order transport/thermal composition, not fully implicit thermochemistry.
+The source callback can follow an original reaction `apply_split`; this example
+does not introduce a chemical or pyrolysis source. A preceding reaction must
+retain its own original species/physical-energy account without adding its
+heat release again. Reported ventilated work includes successful inner thermal
+trials across discarded pressure probes and retries.
 
 ## Original owners and coupling API
 
@@ -114,6 +146,8 @@ remain separate diagnostics from wall/radiation nonlinear residuals.
 | Interior convection coefficient | 8 W/(m² K) |
 | Lower / upper absorption coefficient | 0.2 /m / 0.7 /m |
 | External convection / irradiation | Zero |
+| `ventilated` opening width / height | 0.01 m / 2 m |
+| `ventilated` ambient pressure / temperature | 101,325 Pa / 300 K |
 
 The floor contacts only the lower gas and the ceiling only the upper gas.
 Wall calorics use T = 300 + h/1000 [K], admitted over 200..1200 K; the authored
@@ -126,10 +160,12 @@ NASA TP-2002-211556, as distributed in
 or refitting is used.
 
 Optical geometry is one reciprocal normal chord between infinite parallel
-plates. Segment lengths are regenerated from the accepted gas interface and
-room height before each interval, then held during that interval and its
-retries. This is an authored angular approximation, not exact hemispherical
-slab transport or an automatically generated finite-room enclosure.
+plates. In `gray` and `spectral`, segment lengths are regenerated from the
+accepted interface before an interval and held during its retries. `implicit`
+and `ventilated` rebuild them from every thermal endpoint. This is an authored
+angular approximation, not exact hemispherical slab transport or an automatically
+generated finite-room enclosure. The ventilation example retains that two-patch
+optical model; direct radiation escaping through the opening is not represented.
 
 The absorption coefficients are numerical inputs, **not measured N2/O2
 spectroscopy**. Spectral mode uses one constant-opacity band with those same
