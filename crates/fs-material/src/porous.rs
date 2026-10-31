@@ -54,6 +54,8 @@ use crate::MaterialError;
 /// Resolve the existing rigid-frame law in a shared, changing fluid state.
 pub mod gas;
 pub use gas::{PorousFluidLaw, PorousFluidResponse};
+/// Coherent rigid-backed porous/fluid multilayers and oblique reflection.
+pub mod layers;
 /// Typed intrinsic permeability and conservative, compressible Darcy barriers.
 pub mod permeability;
 /// Explicit saturation-dependent gas mobility and pore diffusivity.

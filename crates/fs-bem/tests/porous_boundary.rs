@@ -156,3 +156,147 @@ fn unsupported_sources_geometry_and_incidence_refuse() {
     let surface = SpherePanels::icosphere(0.1, 0).unwrap();
     assert!(boundary.solve_radiation(&surface, &[], Formulation::BurtonMiller).is_err());
 }
+
+#[test]
+fn layer_boundary_reduces_to_single_porous_coating_in_its_original_fluid() {
+    use fs_bem::helmholtz::bc::PorousLayersBoundary;
+    use fs_material::porous::layers::{Layer, RigidBackedLayers};
+
+    let law = law();
+    for fluid in [
+        fluid(1.2, 340.0, 1.81e-5),
+        fluid(1000.0, 1400.0, 1e-3),
+    ] {
+        let layers = [Layer::Porous { law: &law, thickness_m: 0.06 }];
+        let stack = RigidBackedLayers::new(&fluid, TAU * 500.0, &layers).unwrap();
+        let layered = PorousLayersBoundary::new(&stack).unwrap();
+        let single = PorousRigidBoundary::new(&law, &fluid, TAU * 500.0, 0.06).unwrap();
+        let scale = single.normalized_admittance().abs().max(1.0);
+        assert!((layered.normalized_admittance() - single.normalized_admittance()).abs()
+            < 1e-12 * scale);
+        assert!(std::ptr::eq(layered.layers(), &stack));
+        assert_eq!(*layered.layers().fluid(), fluid);
+        assert_eq!(layered.medium(), single.medium());
+        assert_eq!(layered.wavenumber_rad_m(), single.wavenumber_rad_m());
+        let beta = layered.normalized_admittance();
+        let reflection = (C64::ONE - beta) / (C64::ONE + beta);
+        assert!((reflection - stack.reflection(1.0).unwrap().pressure_reflection.conj()).abs()
+            < 1e-12);
+    }
+}
+
+#[test]
+fn porous_gap_stack_drives_dense_and_iterative_robin_owners_with_physical_work() {
+    use fs_bem::helmholtz::bc::PorousLayersBoundary;
+    use fs_bem::helmholtz::{IterativeOptions, Preconditioner};
+    use fs_exec::CancelGate;
+    use fs_material::porous::layers::{Layer, RigidBackedLayers};
+
+    let law = law();
+    let fluid = fluid(1.2, 340.0, 1.81e-5);
+    let layers = [
+        Layer::Porous { law: &law, thickness_m: 0.03 },
+        Layer::FluidGap { thickness_m: 0.05 },
+    ];
+    let stack = RigidBackedLayers::new(&fluid, TAU * 150.0, &layers).unwrap();
+    let boundary = PorousLayersBoundary::new(&stack).unwrap();
+    let normal = stack.reflection(1.0).unwrap();
+    let beta = boundary.normalized_admittance();
+    // Independent conventional cos/sin transfer matrices for the porous
+    // slab and fluid gap, evaluated in the BEM exp(-i omega t) convention.
+    let expected_beta = C64::new(0.027714988312696837, -0.25759369018286377);
+    let expected_reflection = C64::new(0.831032207187226, 0.45894275013679325);
+    assert!((beta - expected_beta).abs() < 1e-12);
+    assert!((beta - normal.normalized_surface_admittance().unwrap().conj()).abs() < 1e-13);
+    assert!(beta.re > 0.0);
+    assert!((beta - normal.normalized_surface_admittance().unwrap()).abs() > 0.01);
+    let reflected = (C64::ONE - beta) / (C64::ONE + beta);
+    assert!((reflected - expected_reflection).abs() < 1e-12);
+    assert!((reflected - normal.pressure_reflection.conj()).abs() < 1e-12);
+    assert!((1.0 - reflected.norm_sq() - normal.absorbed_fraction).abs() < 1e-12);
+
+    let surface = SpherePanels::icosphere(0.5, 1).unwrap();
+    let incident = PlaneWave {
+        direction: [0.0, 0.0, 1.0],
+        amplitude_pa: C64::new(0.8, 0.2),
+    };
+    let solved = boundary.solve_scattering(&surface, incident, Formulation::BurtonMiller).unwrap();
+    let surface_work: f64 = solved.scattered.pressure.iter()
+        .zip(&solved.incident_pressure_pa).zip(surface.areas())
+        .map(|((&scattered, &incident), &area)| {
+            0.5 * (scattered + incident).norm_sq() * area * beta.re / 408.0
+        }).sum();
+    assert!(surface_work > 0.0);
+    assert!((solved.absorbed_power_w - surface_work).abs() < 1e-12 * surface_work);
+    assert!(!solved.declared_active);
+
+    let drive = vec![C64::from_re(0.01); surface.areas().len()];
+    let radiation = boundary.solve_radiation(&surface, &drive, Formulation::BurtonMiller).unwrap();
+    for ((&pressure, &velocity), &driving) in radiation.radiation.pressure.iter()
+        .zip(&radiation.radiation.velocity).zip(&drive) {
+        assert!((velocity + (beta * pressure).scale(1.0 / 408.0) - driving).abs() < 1e-12);
+    }
+    let balance = radiation.driving_power_w
+        - radiation.absorbed_power_w - radiation.radiation.radiated_power;
+    assert!(radiation.absorbed_power_w > 0.0);
+    assert!(balance.abs() < 1e-10 * radiation.driving_power_w.abs().max(1e-30));
+
+    // One FMM leaf evaluates every pair directly; this isolates the adapter's
+    // iterative Robin integration from interpolation-order error.
+    let options = IterativeOptions {
+        tol: 1e-10,
+        restart: 40,
+        max_iters: 100,
+        leaf_capacity: 128,
+        precond: Preconditioner::NearFieldBlockJacobi { max_block_panels: 80 },
+        ..IterativeOptions::default()
+    };
+    let (iterative, report, _) = boundary.solve_scattering_iterative(
+        &surface, incident, Formulation::BurtonMiller, &options,
+        &CancelGate::new_clock_free(),
+    ).unwrap();
+    assert!(report.rel_residual < 1e-9);
+    let error: f64 = iterative.scattered.pressure.iter().zip(&solved.scattered.pressure)
+        .map(|(&actual, &expected)| (actual - expected).norm_sq()).sum();
+    let norm: f64 = solved.scattered.pressure.iter().map(|p| p.norm_sq()).sum();
+    assert!(error < 1e-14 * norm);
+    assert!((iterative.absorbed_power_w - surface_work).abs() < 1e-7 * surface_work);
+}
+
+#[test]
+fn empty_layer_boundary_is_rigid_and_keeps_iterative_cancellation() {
+    use fs_bem::helmholtz::bc::PorousLayersBoundary;
+    use fs_bem::helmholtz::{IterativeError, IterativeOptions};
+    use fs_exec::CancelGate;
+    use fs_material::porous::layers::RigidBackedLayers;
+
+    let fluid = fluid(1.7, 290.0, 2.1e-5);
+    let stack = RigidBackedLayers::new(&fluid, TAU * 150.0, &[]).unwrap();
+    let boundary = PorousLayersBoundary::new(&stack).unwrap();
+    assert_eq!(boundary.normalized_admittance(), C64::ZERO);
+    assert_eq!(boundary.medium().density, 1.7);
+    assert_eq!(boundary.medium().sound_speed, 290.0);
+    assert_eq!(boundary.wavenumber_rad_m(), TAU * 150.0 / 290.0);
+
+    let surface = SpherePanels::icosphere(0.5, 1).unwrap();
+    let incident = PlaneWave {
+        direction: [0.0, 0.0, 1.0],
+        amplitude_pa: C64::ONE,
+    };
+    let solved = boundary.solve_scattering(&surface, incident, Formulation::BurtonMiller).unwrap();
+    let rigid = bc::solve_scattering_bc(
+        &surface, boundary.wavenumber_rad_m(), boundary.medium(),
+        Admittance::Rigid, incident, Formulation::BurtonMiller,
+    ).unwrap();
+    assert_eq!(solved.scattered.pressure, rigid.scattered.pressure);
+    assert_eq!(solved.absorbed_power_w, 0.0);
+
+    let gate = CancelGate::new_clock_free();
+    gate.request();
+    assert!(matches!(
+        boundary.solve_scattering_iterative(
+            &surface, incident, Formulation::BurtonMiller, &IterativeOptions::default(), &gate,
+        ),
+        Err(IterativeError::Cancelled { matvecs: 0 })
+    ));
+}

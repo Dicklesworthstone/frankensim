@@ -332,6 +332,127 @@ impl<'a> PorousRigidBoundary<'a> {
     }
 }
 
+/// A rigid-backed porous/fluid-gap stack used as a local Robin boundary.
+///
+/// The prepared material owner retains all source laws and the one coherent
+/// exterior-fluid snapshot. Its extended-reaction response is sampled only
+/// at normal incidence: this adapter applies that fixed admittance locally
+/// on every panel. It does not resolve lateral propagation within the stack,
+/// backing curvature, frame motion or exterior viscothermal attenuation.
+///
+/// Material phasors use exp(+i omega t); BEM uses exp(-i omega t), hence the
+/// normalized admittance is conjugated. A pressure-node pole that cannot be
+/// represented by finite Robin data is explicitly refused by the material
+/// conversion, even though its pressure reflection remains well-defined.
+#[derive(Clone, Copy)]
+pub struct PorousLayersBoundary<'stack, 'source> {
+    layers: &'stack fs_material::porous::layers::RigidBackedLayers<'source>,
+    medium: Medium,
+    k: f64,
+    beta: C64,
+}
+
+impl<'stack, 'source> PorousLayersBoundary<'stack, 'source> {
+    /// Use the prepared stack without resampling or replacing its fluid.
+    pub fn new(
+        layers: &'stack fs_material::porous::layers::RigidBackedLayers<'source>,
+    ) -> Result<Self, fs_material::MaterialError> {
+        let beta = layers.reflection(1.0)?.normalized_surface_admittance()?.conj();
+        let acoustic = layers.fluid().acoustic();
+        let medium = Medium {
+            density: acoustic.density_kg_m3(),
+            sound_speed: acoustic.sound_speed_m_s(),
+        };
+        let k = layers.exterior_wavenumber_rad_m();
+        if !k.is_finite() || k <= 0.0 || !finite(beta) || beta.re < 0.0 {
+            return Err(fs_material::MaterialError::State {
+                what: "porous-layer BEM boundary needs finite passive admittance and positive wavenumber"
+                    .into(),
+            });
+        }
+        Ok(Self { layers, medium, k, beta })
+    }
+
+    /// Original ordered stack, source laws and coherent fluid state.
+    pub const fn layers(&self) -> &'stack fs_material::porous::layers::RigidBackedLayers<'source> {
+        self.layers
+    }
+
+    /// Exterior acoustic coefficients from the prepared stack's fluid.
+    pub const fn medium(&self) -> Medium {
+        self.medium
+    }
+
+    /// Exterior wavenumber at the prepared material query frequency [rad/m].
+    pub const fn wavenumber_rad_m(&self) -> f64 {
+        self.k
+    }
+
+    /// Normal-incidence exp(-i omega t) coefficient for local Robin rows.
+    /// This value also supports mixed rigid/coated panel assignments.
+    pub const fn normalized_admittance(&self) -> C64 {
+        self.beta
+    }
+
+    /// Uniform stack through the existing dense closed-surface radiation owner.
+    pub fn solve_radiation(
+        &self,
+        surface: &SpherePanels,
+        drive_velocity: &[C64],
+        formulation: Formulation,
+    ) -> Result<BoundarySolution, HelmholtzError> {
+        admit_resolution(surface, self.k)?;
+        let beta = vec![self.beta; surface.areas().len()];
+        solve_radiation_bc(
+            surface, self.k, self.medium,
+            SurfaceBc {
+                drive_velocity,
+                admittance: Admittance::Local { beta: &beta, declared_active: false },
+            },
+            formulation,
+        )
+    }
+
+    /// Uniform stack through the existing dense plane-wave scattering owner.
+    pub fn solve_scattering(
+        &self,
+        surface: &SpherePanels,
+        incident: PlaneWave,
+        formulation: Formulation,
+    ) -> Result<ScatteringSolution, HelmholtzError> {
+        admit_resolution(surface, self.k)?;
+        let beta = vec![self.beta; surface.areas().len()];
+        solve_scattering_bc(
+            surface, self.k, self.medium,
+            Admittance::Local { beta: &beta, declared_active: false },
+            incident, formulation,
+        )
+    }
+
+    /// The same local stack through the original bounded FMM/GMRES owner.
+    pub fn solve_scattering_iterative(
+        &self,
+        surface: &SpherePanels,
+        incident: PlaneWave,
+        formulation: Formulation,
+        options: &IterativeOptions,
+        gate: &CancelGate,
+    ) -> Result<
+        (ScatteringSolution, fs_solver::krylov::SolveReport, ResourceReceipt),
+        IterativeError,
+    > {
+        if gate.is_requested() {
+            return Err(IterativeError::Cancelled { matvecs: 0 });
+        }
+        let beta = vec![self.beta; surface.areas().len()];
+        solve_scattering_bc_iterative(
+            surface, self.k, self.medium,
+            Admittance::Local { beta: &beta, declared_active: false },
+            incident, formulation, options, gate,
+        )
+    }
+}
+
 /// Drive velocity [m/s] and the frequency/space-dependent boundary law.
 #[derive(Clone, Copy)]
 pub struct SurfaceBc<'a> {

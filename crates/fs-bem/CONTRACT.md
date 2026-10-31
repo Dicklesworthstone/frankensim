@@ -1347,3 +1347,17 @@ independent high-precision phase/absorption references, oblique normal-power
 balance, shared-fluid substitution, original Robin solve equality, total-wall
 work and invalid source support. Authored Rust tests require native execution;
 the test definitions alone establish no passing numerical qualification.
+
+`helmholtz::bc::PorousLayersBoundary` borrows a prepared
+`fs_material::porous::layers::RigidBackedLayers` and carries its original
+porous source laws, layer order and coherent exterior fluid through those same
+dense radiation/scattering and iterative scattering routes. The adapter takes
+the stack's **normal-incidence** normalized admittance and conjugates it for
+the BEM phasor convention; all panel rows then use that fixed locally reacting
+coefficient. The material owner's angle-dependent, extended-reaction stack
+reflection remains a separate diagnostic, not a nonlocal BEM boundary model.
+Empty stacks reduce to rigid walls. A finite pressure reflection at a pressure
+node does not imply a representable finite Robin admittance: this conversion
+explicitly refuses such a pole. The porous-boundary tests also cover the
+single-layer reduction, porous/air-gap phase and wall work, dense/iterative
+agreement and original-fluid propagation.

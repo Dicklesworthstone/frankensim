@@ -6666,3 +6666,28 @@ and cancellation return no candidate. Zero volume change is an exact identity
 after control validation. Focused regression sources include an independent
 75-digit dense-gas entropy oracle, pressure quadrature, the dilute gamma limit,
 large reference shifts, heating at the accepted density and atomic refusal.
+
+
+## Coherent porous and fluid-gap reflection
+
+`porous::layers::RigidBackedLayers` retains the original porous laws and fluid
+source, evaluates that fluid exactly once per prepared frequency, and composes
+up to 64 ordered rigid-backed layers. Every porous response retains the original
+frequency support and fluid-dependent JCA(L) density/bulk law. Lossless gaps use
+that same fluid's density and sound speed; no new attenuation preset is supplied.
+
+Tangential wavenumber and pressure/normal velocity continuity give exact planar
+extended-reaction reflection within the admitted equivalent-fluid model.
+Attenuating-wave transfer and homogeneous state normalization preserve thick
+absorbers, thin loss, grazing phase and impedance poles without growing matrices.
+Angle queries allocate nothing. Absorbed power is the actual normalized surface
+work, not a cancellation-prone subtraction from unit reflected power; values are
+not clipped. All-gap stacks retain exactly zero dissipative work.
+
+Finite normalized admittance is a separate fallible view, with exp(+i omega t)
+convention and no area factor. A local Helmholtz boundary explicitly chooses the
+normal-incidence view and converts the phasor convention once. This does not
+supply a nonlocal finite-panel operator, Biot frame motion or gap wall losses.
+The focused `porous_layers` regression source covers original-owner equivalence,
+independent transfer matrices, coherent source sampling, layer order/subdivision,
+lossless resonances, thick/grazing limits and sub-roundoff absorption.
