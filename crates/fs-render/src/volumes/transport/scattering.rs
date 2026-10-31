@@ -33,6 +33,8 @@ pub use phase::{
     MAX_PHASE_KNOTS, MAX_PHASE_WAVELENGTHS, PhaseFunction, PhasePacketEvaluation,
     PhasePacketSample, PhaseSample, SpectralPhaseTable, TabulatedPhase,
 };
+/// Incident power absorbed after any number of native scattering events.
+pub mod deposition;
 /// Physical homogeneous-sphere cross sections and resolved angular scattering.
 pub mod mie;
 
@@ -144,6 +146,8 @@ impl MassScatteringSpectrum {
 /// A sampled interaction in the physical medium, before any surface endpoint.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ScatteringEvent {
+    /// X-major index of the original density cell containing this collision.
+    pub cell_index: usize,
     /// World-space point in metres, computed from the rebased grid entry.
     pub position: Point3,
     /// Physical distance from the requested segment origin, in metres.
@@ -489,6 +493,37 @@ impl<'a> ScatteringGrid<'a> {
             return Err(VolumeTransportError::Sample);
         }
         let (absorption, scattering, extinction) = self.coefficients(wavelengths_nm)?;
+        self.sample_segment_prepared(
+            cx,
+            origin,
+            direction,
+            max_distance_m,
+            wavelengths_nm,
+            u_lane,
+            u_distance,
+            (&absorption, &scattering, &extinction),
+            true,
+        )
+    }
+
+    // Reuse the exact free-flight kernel for source-power histories. Their
+    // coefficients are prepared once, and incident heating must not include
+    // the medium's independent LTE source or spend work integrating it.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn sample_segment_prepared<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        direction: Vec3,
+        max_distance_m: f64,
+        wavelengths_nm: &[f64; N],
+        u_lane: f64,
+        u_distance: f64,
+        coefficients: (&[f64; N], &[f64; N], &[f64; N]),
+        include_emission: bool,
+    ) -> Result<FreeFlightSample<N>, VolumeTransportError> {
+        checkpoint(cx)?;
+        let (absorption, scattering, extinction) = coefficients;
         if !self.has_scattering {
             let result =
                 self.absorption
@@ -558,27 +593,34 @@ impl<'a> ScatteringGrid<'a> {
                     return Err(VolumeTransportError::Unrepresentable);
                 }
                 result.event = Some(ScatteringEvent {
+                    cell_index: segment.cell,
                     position,
                     distance_m,
                 });
                 result.escape_probability = 0.0;
-                if !self.has_thermal_emission() {
+                if !include_emission || !self.has_thermal_emission() {
                     return Ok(result);
                 }
             }
             if result.event.is_none() {
                 remaining_tau -= tau[hero];
             }
-            self.integrate_source_cell(
-                segment.cell,
-                &tau,
-                &absorption,
-                &extinction,
-                wavelengths_nm,
-                &mut depth,
-                &mut source_cache,
-                &mut result.emission_w_m2_sr_nm,
-            )?;
+            if include_emission {
+                self.integrate_source_cell(
+                    segment.cell,
+                    &tau,
+                    absorption,
+                    extinction,
+                    wavelengths_nm,
+                    &mut depth,
+                    &mut source_cache,
+                    &mut result.emission_w_m2_sr_nm,
+                )?;
+            } else {
+                for lane in 0..N {
+                    depth[lane] += tau[lane];
+                }
+            }
         }
         if result.event.is_none() {
             let minimum = depth.into_iter().fold(f64::INFINITY, f64::min);

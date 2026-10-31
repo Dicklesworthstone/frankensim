@@ -1629,6 +1629,58 @@ closed-form nonlinear Beer-heating trajectory and its refinement order, dynamic
 two-cell shielding, native latent/event/split behavior, infrared source support,
 initially transparent cells and transactional refusal.
 
+### Multiple-scattering absorbed power
+
+`ScatteringGrid::deposit_multiple_scattering_power` follows the same native
+exact-cell extinction free flights and wavelength-resolved phase laws through
+the full open, index-one grid. Independent monochromatic source histories use
+implicit capture: each collision deposits only its true absorption fraction
+and continues its scattering fraction. Absorption-only lanes reuse the exact
+directed-beam path. Source powers are already quadrature-weighted watts; LTE
+emission is independent and is neither credited nor debited by this operation.
+
+Every history retains ballistic escape, diffuse escape, cell-resolved absorbed
+power and unresolved radiation. Collision caps and below-representable packet
+splits retain the surviving packet in the unresolved account, including a
+separate count of precision-limited histories. No roulette or hidden power
+cutoff is used. Segment-work and distinct absorbing-cell limits are explicit;
+hard work/storage exhaustion, cancellation or invalid arithmetic returns no
+partial report. Sparse cell storage is bounded by the declared output count;
+source/lane/history counter streams and ordered reductions are deterministic
+independently of hash-table iteration and worker identity.
+
+Compensated survival updates retain cumulative absorption at near-unit albedo;
+absorption-dominant splits preserve their small tails through direct coefficient
+ratios. Scaled Welford moments avoid squaring raw SI powers. Repeat visits to a cell
+are summed within each history before calculating its variance, and total
+absorption uses complete history sums rather than incorrectly summing cell
+variances. Retained standard errors are fixed-sample estimates, not confidence
+intervals, optional-stopping guarantees or certified bounds. Unobserved rare
+events can have zero empirical error. Mean unresolved power estimates the
+omitted radiative tail; its own sampling error is retained.
+
+Under `optical-heating`, `volumes::heating::scattering::ScatteringHeating`
+maps only the absorbed estimates to the original enthalpy observer protocol.
+Admission requires explicit allowances for unresolved power, total sampling
+error, and receiving-cell sampling error. Many-to-one optical/thermal mappings
+conservatively sum the contributing optical-cell standard errors, retaining
+possible spatial covariance. Native accepted time integrates radiation and
+heat together; fixed-field sampling errors scale linearly with duration across
+substeps. Authored heat sources remain additive and absorbed power enters the
+native energy audit once. Mapping, source admission and advance refusals
+publish neither heat nor radiation accounts. This model does not include
+reflecting/refracting grid boundaries, surfaces, fluorescence, moving geometry,
+temperature feedback or net thermal radiation exchange.
+
+G1 tests compare exact Beer transport and heterogeneous spectral
+first-collision expectations. A G2 reference independently samples analog
+absorption in a homogeneous cube, with separate ray/box geometry and HG
+sampling, for backward, isotropic and forward phase laws. G0/G3/G4/G5 tests
+cover repeated-visit covariance, high-albedo truncation, precision-limited
+tails, source replay and bounded refusal. Native thermal integration tests
+cover actual enthalpy/temperature rise, many-to-one uncertainty admission,
+pure scattering without heat, accepted-time error propagation and rollback.
+
 ## No-claim boundaries (volumes)
 
 - FrankenVDB tile-maxima majorants: no fvdb crate exists in-workspace;

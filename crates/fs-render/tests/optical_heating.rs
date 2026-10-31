@@ -1,5 +1,8 @@
 //! Incident optical absorption reaches the original conservative enthalpy cells.
 
+#[path = "optical_heating/scattering.rs"]
+mod scattering;
+
 #[path = "optical_heating/feedback.rs"]
 mod feedback;
 

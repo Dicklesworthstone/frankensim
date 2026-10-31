@@ -19,6 +19,9 @@ use fs_thermal::enthalpy::{
 };
 use std::collections::BTreeMap;
 
+/// Native thermal input from spatial absorption after multiple scattering.
+pub mod scattering;
+
 /// Temperature-dependent absorption on the original conservative thermal cells.
 pub mod feedback;
 
