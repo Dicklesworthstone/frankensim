@@ -26,6 +26,7 @@
 use crate::normal_patch::PointNormalPort;
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
+use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint};
 use fs_material::liquid::surface::adhesion::YoungDupreLaw;
 use fs_material::liquid::surface::{ResolvedLiquidSurfaceState, ResolvedLiquidWettingState};
 use fs_material::state_point::MaterialStatePointError;
@@ -220,8 +221,8 @@ impl BridgeStep {
     }
 }
 
-/// Original liquid and both ordered substrate/liquid states, never refreshed or
-/// copied per sample. All geometric evaluations and transitions allocate nothing.
+/// Original liquid and both ordered substrate/liquid states. Ordinary geometric
+/// evaluations allocate nothing; explicit source refreshes retain accepted history.
 #[derive(Clone, Debug)]
 pub struct SourcePlanarCapillaryBridge {
     liquid: ResolvedLiquidSurfaceState,
@@ -230,6 +231,40 @@ pub struct SourcePlanarCapillaryBridge {
     geometry: geometry::Geometry,
     limits: BridgeLimits,
     identity: ContentHash,
+}
+
+/// Source-preserving parameter change at one accepted gap and topology.
+/// The old bridge remains untouched until its consumer accepts this candidate.
+#[derive(Clone, Debug)]
+pub struct PlanarBridgeSourceRefresh {
+    source: SourcePlanarCapillaryBridge,
+    previous: BridgeState,
+    state: BridgeState,
+    parameter_work_j: f64,
+}
+impl PlanarBridgeSourceRefresh {
+    /// Complete successor source with the original selected claims.
+    #[must_use]
+    pub const fn source(&self) -> &SourcePlanarCapillaryBridge {
+        &self.source
+    }
+    /// Exact predecessor required by a continuing mechanical consumer.
+    #[must_use]
+    pub const fn previous_state(&self) -> BridgeState {
+        self.previous
+    }
+    /// Same gap and attached/detached branch, bound to the refreshed source.
+    #[must_use]
+    pub const fn state(&self) -> BridgeState {
+        self.state
+    }
+    /// Signed change of the surface free-energy store at fixed mechanical gap.
+    /// This is an explicit parameter account, not heat or a thermodynamic
+    /// internal-energy balance. Positive values enter this surface store.
+    #[must_use]
+    pub const fn parameter_work_j(&self) -> f64 {
+        self.parameter_work_j
+    }
 }
 impl SourcePlanarCapillaryBridge {
     /// Bind the original liquid and both ordered surface systems at one frozen
@@ -358,6 +393,82 @@ impl SourcePlanarCapillaryBridge {
     #[must_use]
     pub const fn formation_gap_m(&self) -> f64 {
         self.geometry.formation_gap
+    }
+
+    /// Refresh all original liquid and wetting claims at a complete endpoint.
+    ///
+    /// Volume, width, gap, limits and branch history remain unchanged. Density
+    /// must remain bitwise equal, so a closed fixed-volume bridge cannot gain
+    /// or lose liquid mass. Direct Young angles and adhesion-derived angles
+    /// both use their existing source owner and the same refreshed liquid.
+    /// A branch which would require rupture or coalescence refuses; this is
+    /// never an instruction to reinitialize the liquid on another branch.
+    ///
+    /// The returned free-energy parameter work is separate from plate work and
+    /// irreversible release. This endpoint operation does not integrate heat,
+    /// entropy, source-path validity or transient contact-line relaxation.
+    /// It applies to externally prescribed source changes in this quasistatic
+    /// model; a thermal trajectory must supply those additional physical laws.
+    /// No old source, state or consumer is mutated on any refusal.
+    pub fn refresh_at_query_point(
+        &self,
+        previous: BridgeState,
+        material: &MaterialCard,
+        interfaces: [&InterfaceSystemCard; 2],
+        point: &QueryPoint,
+        gate: &CancelGate,
+    ) -> Result<PlanarBridgeSourceRefresh, BridgeError> {
+        poll(gate)?;
+        let before = self.evaluate(previous)?;
+        let liquid = ResolvedLiquidSurfaceState::try_from_material(
+            self.liquid.material().at_query_point(material, point)?,
+            self.liquid.viscosity_basis(),
+            self.liquid.capillarity(),
+        )?;
+        if liquid.density_kg_m3().to_bits() != self.liquid.density_kg_m3().to_bits() {
+            return Err(BridgeError::Invalid {
+                field: "fixed-volume source refresh must preserve liquid density and mass",
+            });
+        }
+        let wetting = [
+            self.wetting[0].at_query_point_with_liquid(interfaces[0], point, &liquid)?,
+            self.wetting[1].at_query_point_with_liquid(interfaces[1], point, &liquid)?,
+        ];
+        let source = Self::new(
+            liquid,
+            wetting,
+            self.geometry.volume,
+            self.geometry.width,
+            self.limits,
+        )?;
+        if previous.attached && previous.gap_m >= source.rupture_gap_m()
+            || !previous.attached && previous.gap_m <= source.formation_gap_m()
+        {
+            return Err(BridgeError::Invalid {
+                field: "source refresh requires a separate liquid topology event",
+            });
+        }
+        let state = BridgeState {
+            identity: source.identity,
+            ..previous
+        };
+        let after = source.evaluate(state)?;
+        let parameter_work_j = finite(
+            after.surface_free_energy_j - before.surface_free_energy_j,
+            "surface source parameter work",
+        )?;
+        limit(
+            parameter_work_j.abs(),
+            self.limits.maximum_abs_step_work_j,
+            "absolute surface source parameter work",
+        )?;
+        poll(gate)?;
+        Ok(PlanarBridgeSourceRefresh {
+            source,
+            previous,
+            state,
+            parameter_work_j,
+        })
     }
 
     /// Select an explicit initial branch. Its energy is an initial condition,

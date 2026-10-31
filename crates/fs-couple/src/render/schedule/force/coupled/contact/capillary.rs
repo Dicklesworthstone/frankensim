@@ -46,7 +46,7 @@ use fs_contact::capillary_bridge::load_line::{
     BridgeLoadLineConfig, BridgeLoadLineError, PlanarBridgeLoadLine,
 };
 use fs_contact::capillary_bridge::{
-    BridgeError, BridgeState, BridgeStep, SourcePlanarCapillaryBridge,
+    BridgeError, BridgeState, BridgeStep, PlanarBridgeSourceRefresh, SourcePlanarCapillaryBridge,
 };
 use fs_exec::CancelGate;
 use fs_matdb::MaterialStateId;
@@ -268,6 +268,50 @@ pub struct CapillaryModalSystem<'a, L: NativeCapillaryModel<'a> = PlanarBridgeLo
     last: Option<CapillaryModalFrame<L::Step>>,
 }
 impl<'a> CapillaryModalSystem<'a> {
+    /// Adopt an explicit material endpoint without resetting body or liquid history.
+    ///
+    /// The candidate must start at this exact accepted bridge state and original
+    /// source. All native coordinates, connections, clocks, gap and work columns
+    /// remain unchanged. The last rendered frame remains a historical sample;
+    /// this parameter event does not emit a new acoustic observation.
+    ///
+    /// Returns signed surface free-energy parameter work [J]. The caller must
+    /// retain it separately from subsequent mechanical work, dissipation and
+    /// heat; there is no implicit thermal recipient or cumulative heat ledger.
+    /// Source, energy or cancellation refusal leaves the complete owner unchanged.
+    pub fn apply_source_refresh(
+        &mut self,
+        refresh: &'a PlanarBridgeSourceRefresh,
+        gate: &CancelGate,
+    ) -> Result<f64, CapillaryModalError> {
+        poll(Some(gate))?;
+        if refresh.previous_state() != self.state {
+            return Err(BridgeError::StateMismatch.into());
+        }
+        self.source.evaluate(refresh.previous_state())?;
+        let source = refresh.source();
+        let state = refresh.state();
+        let profile = source.evaluate(state)?;
+        if state.gap_m() != self.gap_m {
+            return Err(BridgeError::StateMismatch.into());
+        }
+        let load_line = PlanarBridgeLoadLine::new(
+            source,
+            self.load_line.compliance_m_per_n(),
+            self.load_line.config(),
+        )?;
+        limit(
+            "native/capillary energy magnitude after source refresh",
+            finite(self.network.total_energy_j()? + profile.surface_free_energy_j)?.abs(),
+            self.network.config.maximum_total_energy_j,
+        )?;
+        poll(Some(gate))?;
+        self.source = source;
+        self.state = state;
+        self.load_line = load_line;
+        Ok(refresh.parameter_work_j())
+    }
+
     /// Attach an explicit bridge state to the current sample-zero configuration.
     /// Its gap is the current physical separation even if initial modal q!=0.
     /// Ordered substrate identities must match the two original wetting cards.

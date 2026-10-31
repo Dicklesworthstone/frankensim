@@ -43,6 +43,10 @@ fn sources(
     temperature: f64,
     young: bool,
 ) -> (ResolvedLiquidSurfaceState, [ResolvedLiquidWettingState; 2]) {
+    let (material, interfaces) = source_cards(theta, sigma, young);
+    resolved_sources(&material, &interfaces, temperature, young)
+}
+fn source_cards(theta: f64, sigma: f64, young: bool) -> (MaterialCard, [InterfaceSystemCard; 2]) {
     let mut claims = ClaimSet::new();
     for (name, value, dims) in [
         ("density", 1000.0, Density::DIMS),
@@ -58,17 +62,7 @@ fn sources(
         revision: 0,
     };
     let card = MaterialCard::assemble(id("bridge liquid", "liquid"), claims, vec![]).unwrap();
-    let point = QueryPoint::new().with("T", temperature).unwrap();
-    let selection = MaterialPropertySelection::SingleClaimOnly;
-    let liquid = resolve_liquid_surface_state(
-        &card,
-        &point,
-        LiquidViscosityBasis::Dynamic,
-        LiquidCapillarity::Sourced,
-        selection.clone(),
-    )
-    .unwrap();
-    let wetting = std::array::from_fn(|i| {
+    let interfaces = std::array::from_fn(|i| {
         let mut claims = ClaimSet::new();
         let (name, value, dims) = if young {
             (
@@ -80,7 +74,7 @@ fn sources(
             (EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, theta, Dims::NONE)
         };
         claims.insert_claim(claim(name, value, dims)).unwrap();
-        let interface = InterfaceSystemCard::assemble(
+        InterfaceSystemCard::assemble(
             SurfaceSpec {
                 material: id(&format!("plate {i}"), "solid"),
                 texture_frame: format!("plate {i}"),
@@ -98,11 +92,31 @@ fn sources(
             claims,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+    });
+    (card, interfaces)
+}
+fn resolved_sources(
+    card: &MaterialCard,
+    interfaces: &[InterfaceSystemCard; 2],
+    temperature: f64,
+    young: bool,
+) -> (ResolvedLiquidSurfaceState, [ResolvedLiquidWettingState; 2]) {
+    let point = QueryPoint::new().with("T", temperature).unwrap();
+    let selection = MaterialPropertySelection::SingleClaimOnly;
+    let liquid = resolve_liquid_surface_state(
+        card,
+        &point,
+        LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Sourced,
+        selection.clone(),
+    )
+    .unwrap();
+    let wetting = std::array::from_fn(|i| {
         if young {
-            resolve_young_dupre_wetting(&interface, &liquid, selection.clone()).unwrap()
+            resolve_young_dupre_wetting(&interfaces[i], &liquid, selection.clone()).unwrap()
         } else {
-            resolve_liquid_wetting_state(&interface, &point, selection.clone()).unwrap()
+            resolve_liquid_wetting_state(&interfaces[i], &point, selection.clone()).unwrap()
         }
     });
     (liquid, wetting)
@@ -362,5 +376,137 @@ fn native_refusal_keeps_body_bridge_and_observation_for_identical_retry() {
     assert_eq!(
         owner.step(&[0.0; 2], 0.0).unwrap(),
         reference.step(&[0.0; 2], 0.0).unwrap()
+    );
+}
+
+#[test]
+fn material_source_refresh_preserves_moving_native_history_and_changes_subsequent_force() {
+    let (original, surfaces) = source_cards(PI / 3.0, 0.05, true);
+    let curves = |original: &ClaimSet| {
+        let mut claims = ClaimSet::new();
+        for (_, original) in original.claims_ordered() {
+            let mut changed = original.clone();
+            if matches!(
+                original.key.name(),
+                SURFACE_TENSION_PROPERTY | EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY
+            ) {
+                let PropertyValue::Scalar { value, dims } = original.value else {
+                    unreachable!()
+                };
+                changed.value = PropertyValue::Curve {
+                    abscissa: "T".into(),
+                    abscissa_dims: fs_qty::Temperature::DIMS,
+                    knots: vec![(300.0, value), (320.0, 0.8 * value)],
+                    dims,
+                };
+                changed.interpolation = InterpolationPolicy::LinearInside;
+            }
+            claims.insert_claim(changed).unwrap();
+        }
+        claims
+    };
+    let material =
+        MaterialCard::assemble(original.id().clone(), curves(original.claims()), vec![]).unwrap();
+    let surfaces = surfaces.map(|card| {
+        InterfaceSystemCard::assemble(
+            card.surface_a().clone(),
+            card.surface_b().clone(),
+            card.context().clone(),
+            curves(card.claims()),
+            vec![],
+        )
+        .unwrap()
+    });
+    let (liquid, wetting) = resolved_sources(&material, &surfaces, 300.0, true);
+    let source =
+        SourcePlanarCapillaryBridge::new(liquid, wetting, VOLUME, WIDTH, limits()).unwrap();
+    let gap = 0.5 * (source.formation_gap_m() + source.rupture_gap_m());
+    let initial_state = source.initialize(gap, true).unwrap();
+    let gate = CancelGate::new_clock_free();
+    let build = || {
+        CapillaryModalSystem::new(
+            network(true),
+            &source,
+            assigned(&source),
+            initial_state,
+            column(),
+            config(),
+            &gate,
+        )
+        .unwrap()
+    };
+    let mut owner = build();
+    let mut control = build();
+    owner.step(&[0.0; 2], 0.0).unwrap();
+    control.step(&[0.0; 2], 0.0).unwrap();
+    let state = owner.state();
+    let gap = owner.gap_m();
+    let before_energy = owner.total_energy_j().unwrap();
+    let frame = *owner.last_frame().unwrap();
+    let bodies = owner
+        .components()
+        .iter()
+        .map(|m| m.states().to_vec())
+        .collect::<Vec<_>>();
+    let query = QueryPoint::new().with("T", 320.0).unwrap();
+    let stale = source
+        .refresh_at_query_point(initial_state, &material, surfaces.each_ref(), &query, &gate)
+        .unwrap();
+    let refresh = source
+        .refresh_at_query_point(state, &material, surfaces.each_ref(), &query, &gate)
+        .unwrap();
+    assert!(owner.apply_source_refresh(&stale, &gate).is_err());
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(owner.apply_source_refresh(&refresh, &cancelled).is_err());
+    assert_eq!(owner.state(), state);
+    assert_eq!(owner.total_energy_j().unwrap(), before_energy);
+    assert_eq!(owner.samples_rendered(), 1);
+    assert_eq!(owner.last_frame(), Some(&frame));
+    assert_eq!(
+        owner
+            .components()
+            .iter()
+            .map(|m| m.states().to_vec())
+            .collect::<Vec<_>>(),
+        bodies
+    );
+
+    let parameter_work = owner.apply_source_refresh(&refresh, &gate).unwrap();
+    assert_eq!(parameter_work, refresh.parameter_work_j());
+    close(
+        owner.total_energy_j().unwrap() - before_energy,
+        parameter_work,
+        1e-21,
+    );
+    assert_eq!(owner.samples_rendered(), 1);
+    assert_eq!(owner.gap_m(), gap);
+    assert_eq!(owner.state(), refresh.state());
+    assert_eq!(owner.last_frame(), Some(&frame));
+    assert_eq!(
+        owner
+            .components()
+            .iter()
+            .map(|m| m.states().to_vec())
+            .collect::<Vec<_>>(),
+        bodies
+    );
+    assert!(owner.apply_source_refresh(&refresh, &gate).is_err());
+    let changed = *owner.step(&[0.0; 2], 0.0).unwrap();
+    let frozen = *control.step(&[0.0; 2], 0.0).unwrap();
+    assert!(changed.applied_mean_force_n.abs() < frozen.applied_mean_force_n.abs());
+    assert_ne!(
+        owner.components()[0].states(),
+        control.components()[0].states()
+    );
+    let mut exported = changed.network_dissipation_j + changed.topology_release_j;
+    for _ in 0..20 {
+        let next = *owner.step(&[0.0; 2], 0.0).unwrap();
+        exported += next.network_dissipation_j + next.topology_release_j;
+    }
+    close(
+        owner.total_energy_j().unwrap() + exported,
+        before_energy + parameter_work,
+        1e-15,
     );
 }

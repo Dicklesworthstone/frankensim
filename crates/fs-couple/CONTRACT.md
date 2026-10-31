@@ -13269,6 +13269,18 @@ planar quasistatic model with its own rate/geometry screens; native body
 inertia does not add resolved liquid inertia, 3-D end curvature or pinch-off.
 No topology release is automatically deposited as heat.
 
+The planar owner's `apply_source_refresh` accepts the original bridge's
+immutable material-refresh candidate only against its exact current
+predecessor. It retains native mode states, all connections, time/sample
+count, mechanical gap and work column, rebuilding only the sourced load line.
+An independent combined-energy limit and final cancellation check precede
+publication. Returned signed surface-free-energy parameter work must be
+retained by the caller separately from mechanical work and heat; the latest
+rendered frame remains its historical sample. A native moving-body regression
+checks source-force feedback without reset, complete energy accounting with
+that parameter term, stale-candidate and cancellation refusal, and unchanged
+body/observation history on both refusal and successful source adoption.
+
 ## Objective cohesive transport and finite-rotation work
 
 `cohesive_contact::objective::ObjectiveCohesivePoint` retains the original

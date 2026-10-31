@@ -1278,6 +1278,21 @@ Monotone-gap proposals integrate connected-branch work analytically and return i
 
 ## Capillary mechanical load line
 
+`SourcePlanarCapillaryBridge::refresh_at_query_point` supplies an explicit
+source-preserving endpoint update on the accepted gap and attached/detached
+branch. The same complete liquid and ordered-interface bundles refresh with
+their original pinned claims, including direct or adhesion-derived wetting.
+Volume, width and limits stay fixed; density changes refuse to conserve closed
+liquid mass, and a new source requiring rupture or coalescence refuses instead
+of resetting branch history. The immutable candidate exposes the exact
+predecessor and signed surface-free-energy parameter work. This account is
+separate from plate work and irreversible release: it is neither deposited heat
+nor a complete thermal internal-energy/entropy balance. Only endpoint support
+is checked; continuous thermal paths and contact-line relaxation need their
+own physical owner. Focused source tests cover force and wetting changes,
+both branches, claim retention, reversible parameter work, and mass, topology,
+source, domain and cancellation refusal.
+
 `capillary_bridge::load_line::PlanarBridgeLoadLine` borrows the original sourced bridge and the caller's complete projected held-force compliance. It solves `gap = free_gap + compliance * mean_force` with the original analytic connected-path force, including rupture and coalescence. `BridgeStep` now provides the exact derivative of that mean force with respect to the endpoint gap; it is distinct from the endpoint-force tangent and stays factored at short connected intervals. The solver allocates nothing and uses bounded damped Newton continuation from accepted geometry, with original source, rate, geometry and energy admission on every proposal. A caller-selected positive compatibility-slope margin refuses unresolved attractive branches for timestep refinement; this local solve does not certify global root uniqueness or trajectory accuracy.
 
 No proposal publishes accepted history. Native mechanics must independently reevaluate actual endpoint motion and the complete work account. Four focused source tests extend the six original bridge groups: independent mean-force derivatives on each topology branch; 700 exact held-force two-body steps with conserved momentum and kinetic/surface/release energy through rupture; prescribed and compliant coalescence; and source, range, budget, unstable-slope and cancellation refusal/replay.

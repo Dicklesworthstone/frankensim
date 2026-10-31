@@ -50,6 +50,10 @@ fn sources(
     temperature: f64,
     young: bool,
 ) -> (ResolvedLiquidSurfaceState, [ResolvedLiquidWettingState; 2]) {
+    let (material, interfaces) = source_cards(theta, sigma, young);
+    resolved_sources(&material, &interfaces, temperature, young)
+}
+fn source_cards(theta: f64, sigma: f64, young: bool) -> (MaterialCard, [InterfaceSystemCard; 2]) {
     let mut claims = ClaimSet::new();
     for (name, value, dims) in [
         ("density", 1000.0, Density::DIMS),
@@ -65,17 +69,7 @@ fn sources(
         revision: 0,
     };
     let card = MaterialCard::assemble(id("bridge liquid", "liquid"), claims, vec![]).unwrap();
-    let point = QueryPoint::new().with("T", temperature).unwrap();
-    let selection = MaterialPropertySelection::SingleClaimOnly;
-    let liquid = resolve_liquid_surface_state(
-        &card,
-        &point,
-        LiquidViscosityBasis::Dynamic,
-        LiquidCapillarity::Sourced,
-        selection.clone(),
-    )
-    .unwrap();
-    let wetting = std::array::from_fn(|i| {
+    let interfaces = std::array::from_fn(|i| {
         let mut claims = ClaimSet::new();
         let (name, value, dims) = if young {
             (
@@ -87,7 +81,7 @@ fn sources(
             (EQUILIBRIUM_CONTACT_ANGLE_PROPERTY, theta, Dims::NONE)
         };
         claims.insert_claim(claim(name, value, dims)).unwrap();
-        let interface = InterfaceSystemCard::assemble(
+        InterfaceSystemCard::assemble(
             SurfaceSpec {
                 material: id(&format!("plate {i}"), "solid"),
                 texture_frame: format!("plate {i}"),
@@ -105,14 +99,83 @@ fn sources(
             claims,
             vec![],
         )
-        .unwrap();
+        .unwrap()
+    });
+    (card, interfaces)
+}
+fn resolved_sources(
+    card: &MaterialCard,
+    interfaces: &[InterfaceSystemCard; 2],
+    temperature: f64,
+    young: bool,
+) -> (ResolvedLiquidSurfaceState, [ResolvedLiquidWettingState; 2]) {
+    let point = QueryPoint::new().with("T", temperature).unwrap();
+    let selection = MaterialPropertySelection::SingleClaimOnly;
+    let liquid = resolve_liquid_surface_state(
+        card,
+        &point,
+        LiquidViscosityBasis::Dynamic,
+        LiquidCapillarity::Sourced,
+        selection.clone(),
+    )
+    .unwrap();
+    let wetting = std::array::from_fn(|i| {
         if young {
-            resolve_young_dupre_wetting(&interface, &liquid, selection.clone()).unwrap()
+            resolve_young_dupre_wetting(&interfaces[i], &liquid, selection.clone()).unwrap()
         } else {
-            resolve_liquid_wetting_state(&interface, &point, selection.clone()).unwrap()
+            resolve_liquid_wetting_state(&interfaces[i], &point, selection.clone()).unwrap()
         }
     });
     (liquid, wetting)
+}
+
+fn temperature_cards(
+    young: bool,
+    density_factor: f64,
+    angle_factor: f64,
+) -> (MaterialCard, [InterfaceSystemCard; 2]) {
+    let (card, interfaces) = source_cards(0.7, 0.05, young);
+    let curves = |original: &ClaimSet| {
+        let mut claims = ClaimSet::new();
+        for (_, original) in original.claims_ordered() {
+            let factor = match original.key.name() {
+                "density" => density_factor,
+                DYNAMIC_VISCOSITY_PROPERTY => 2.0,
+                SURFACE_TENSION_PROPERTY => 0.8,
+                EQUILIBRIUM_CONTACT_ANGLE_PROPERTY => angle_factor,
+                EQUILIBRIUM_WORK_OF_ADHESION_PROPERTY => {
+                    0.8 * (1.0 + (0.7 * angle_factor).cos()) / (1.0 + 0.7_f64.cos())
+                }
+                _ => unreachable!(),
+            };
+            let mut changed = original.clone();
+            let PropertyValue::Scalar { value, dims } = original.value else {
+                unreachable!()
+            };
+            changed.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: fs_qty::Temperature::DIMS,
+                knots: vec![(300.0, value), (320.0, factor * value)],
+                dims,
+            };
+            changed.interpolation = InterpolationPolicy::LinearInside;
+            claims.insert_claim(changed).unwrap();
+        }
+        claims
+    };
+    let material =
+        MaterialCard::assemble(card.id().clone(), curves(card.claims()), vec![]).unwrap();
+    let interfaces = interfaces.map(|card| {
+        InterfaceSystemCard::assemble(
+            card.surface_a().clone(),
+            card.surface_b().clone(),
+            card.context().clone(),
+            curves(card.claims()),
+            vec![],
+        )
+        .unwrap()
+    });
+    (material, interfaces)
 }
 fn limits() -> BridgeLimits {
     BridgeLimits {
@@ -543,4 +606,223 @@ fn g1_original_adhesion_and_liquid_sources_are_retained_without_sample_copies() 
             surface_addresses
         );
     }
+}
+
+#[test]
+fn g1_source_refresh_changes_surface_force_and_accounts_parameter_work_on_both_branches() {
+    let gate = CancelGate::new_clock_free();
+    for young in [false, true] {
+        let (material, interfaces) = temperature_cards(young, 1.0, 1.0);
+        let (liquid, wetting) = resolved_sources(&material, &interfaces, 300.0, young);
+        let source =
+            SourcePlanarCapillaryBridge::new(liquid, wetting, VOLUME, WIDTH, limits()).unwrap();
+        for attached in [true, false] {
+            let gap = if attached {
+                0.8 * source.formation_gap_m()
+            } else {
+                1.2 * source.rupture_gap_m()
+            };
+            let state = source.initialize(gap, attached).unwrap();
+            let before = source.evaluate(state).unwrap();
+            let refresh = source
+                .refresh_at_query_point(
+                    state,
+                    &material,
+                    interfaces.each_ref(),
+                    &QueryPoint::new().with("T", 320.0).unwrap(),
+                    &gate,
+                )
+                .unwrap();
+            let after = refresh.source().evaluate(refresh.state()).unwrap();
+            assert_eq!(refresh.previous_state(), state);
+            assert_eq!(refresh.state().gap_m(), gap);
+            assert_eq!(refresh.state().attached(), attached);
+            assert_eq!(after.liquid_volume_m3, before.liquid_volume_m3);
+            assert_eq!(
+                refresh.source().liquid().density_kg_m3(),
+                source.liquid().density_kg_m3()
+            );
+            near(
+                after.normal_force_n,
+                0.8 * before.normal_force_n,
+                2e-14,
+                1e-8,
+            );
+            near(
+                after.surface_free_energy_j,
+                0.8 * before.surface_free_energy_j,
+                2e-14,
+                1e-10,
+            );
+            near(
+                refresh.parameter_work_j(),
+                -0.2 * before.surface_free_energy_j,
+                2e-14,
+                1e-10,
+            );
+            assert_eq!(refresh.source().liquid().dynamic_viscosity_pa_s(), 2e-3);
+            assert_ne!(refresh.source().identity(), source.identity());
+            for (old, new) in source
+                .liquid()
+                .material()
+                .properties()
+                .iter()
+                .zip(refresh.source().liquid().material().properties())
+            {
+                assert_eq!(old.answer().receipt.selected, new.answer().receipt.selected);
+            }
+            for wall in refresh.source().wetting() {
+                assert_eq!(
+                    wall.resolved().query_point(),
+                    refresh.source().liquid().material().query_point()
+                );
+            }
+            let held = refresh
+                .source()
+                .advance(refresh.state(), gap, 1.0, &gate)
+                .unwrap();
+            assert_eq!(held.work_on_liquid_j, 0.0);
+            assert_eq!(held.irreversible_release_j, 0.0);
+            let back = refresh
+                .source()
+                .refresh_at_query_point(
+                    refresh.state(),
+                    &material,
+                    interfaces.each_ref(),
+                    &QueryPoint::new().with("T", 300.0).unwrap(),
+                    &gate,
+                )
+                .unwrap();
+            assert_eq!(back.state().gap_m(), state.gap_m());
+            assert_eq!(back.state().attached(), state.attached());
+            assert_eq!(back.source().evaluate(back.state()).unwrap(), before);
+            assert_eq!(back.parameter_work_j(), -refresh.parameter_work_j());
+            assert_eq!(source.evaluate(state).unwrap(), before);
+        }
+    }
+}
+
+#[test]
+fn g3_source_refresh_resolves_wetting_and_refuses_mass_topology_source_or_domain_substitution() {
+    let gate = CancelGate::new_clock_free();
+    for young in [false, true] {
+        let (material, interfaces) = temperature_cards(young, 1.0, 2.0);
+        let build = |temperature| {
+            let (liquid, wetting) = resolved_sources(&material, &interfaces, temperature, young);
+            SourcePlanarCapillaryBridge::new(liquid, wetting, VOLUME, WIDTH, limits()).unwrap()
+        };
+        let cold = build(300.0);
+        let hot = build(320.0);
+        let gap = 0.5 * cold.formation_gap_m().min(hot.formation_gap_m());
+        let state = cold.initialize(gap, true).unwrap();
+        let hot_point = QueryPoint::new().with("T", 320.0).unwrap();
+        let refresh = cold
+            .refresh_at_query_point(state, &material, interfaces.each_ref(), &hot_point, &gate)
+            .unwrap();
+        assert_eq!(
+            refresh.source().evaluate(refresh.state()).unwrap(),
+            hot.evaluate(hot.initialize(gap, true).unwrap()).unwrap()
+        );
+        assert!(
+            refresh.source().wetting()[0].contact_angle_radians()
+                > cold.wetting()[0].contact_angle_radians()
+        );
+
+        let (large, small, to) = if cold.rupture_gap_m() > hot.rupture_gap_m() {
+            (&cold, &hot, 320.0)
+        } else {
+            (&hot, &cold, 300.0)
+        };
+        let state = large
+            .initialize(0.5 * (large.rupture_gap_m() + small.rupture_gap_m()), true)
+            .unwrap();
+        assert!(
+            large
+                .refresh_at_query_point(
+                    state,
+                    &material,
+                    interfaces.each_ref(),
+                    &QueryPoint::new().with("T", to).unwrap(),
+                    &gate
+                )
+                .is_err()
+        );
+        let (small, large, to) = if cold.formation_gap_m() < hot.formation_gap_m() {
+            (&cold, &hot, 320.0)
+        } else {
+            (&hot, &cold, 300.0)
+        };
+        let state = small
+            .initialize(
+                0.5 * (small.formation_gap_m() + large.formation_gap_m()),
+                false,
+            )
+            .unwrap();
+        assert!(
+            small
+                .refresh_at_query_point(
+                    state,
+                    &material,
+                    interfaces.each_ref(),
+                    &QueryPoint::new().with("T", to).unwrap(),
+                    &gate
+                )
+                .is_err()
+        );
+    }
+
+    let (material, interfaces) = temperature_cards(false, 0.99, 1.0);
+    let (liquid, wetting) = resolved_sources(&material, &interfaces, 300.0, false);
+    let source =
+        SourcePlanarCapillaryBridge::new(liquid, wetting, VOLUME, WIDTH, limits()).unwrap();
+    let state = source
+        .initialize(0.8 * source.formation_gap_m(), true)
+        .unwrap();
+    let before = source.evaluate(state).unwrap();
+    assert!(matches!(
+        source.refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &QueryPoint::new().with("T", 320.0).unwrap(),
+            &gate
+        ),
+        Err(BridgeError::Invalid { .. })
+    ));
+    assert!(
+        source
+            .refresh_at_query_point(
+                state,
+                &material,
+                interfaces.each_ref(),
+                &QueryPoint::new().with("T", 350.0).unwrap(),
+                &gate
+            )
+            .is_err()
+    );
+    let (other, _) = source_cards(0.7, 0.05, false);
+    assert!(
+        source
+            .refresh_at_query_point(
+                state,
+                &other,
+                interfaces.each_ref(),
+                &QueryPoint::new().with("T", 300.0).unwrap(),
+                &gate
+            )
+            .is_err()
+    );
+    let cancelled = CancelGate::new_clock_free();
+    cancelled.request();
+    assert!(matches!(
+        source.refresh_at_query_point(
+            state,
+            &material,
+            interfaces.each_ref(),
+            &QueryPoint::new().with("T", 300.0).unwrap(),
+            &cancelled
+        ),
+        Err(BridgeError::Cancelled)
+    ));
+    assert_eq!(source.evaluate(state).unwrap(), before);
 }
