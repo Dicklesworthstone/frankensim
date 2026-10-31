@@ -1,5 +1,7 @@
 //! Actual material queries and native circuit dynamics; synthetic constitutive
 //! data exercises the mathematical coupling, not an experimental material fit.
+#[path = "electrical_contacts/source.rs"]
+mod contact_source;
 use fs_couple::material_circuit::conductivity::{
     ConductionAxis, ConductionCoordinate, ConductivitySolve, ConductorResponse,
 };
@@ -466,4 +468,127 @@ fn source_domain_nonconvergence_identity_and_late_cancellation_preserve_original
         Err(MaterialCircuitError::Conductor(_))
     ));
     assert_eq!(limited_circuit, saved);
+}
+
+#[test]
+fn nonlinear_bulk_and_series_contacts_use_distinct_voltage_drops_and_heat() {
+    let slope = 0.2;
+    let source = card(slope, false, 8.0, 16.0);
+    let mut charges = Vec::new();
+    for resistance in [0.0, 0.5, 2.0] {
+        let interface = contact_source::card(&source, &source, resistance, 0.0);
+        let contact = contact_source::contact(7, 1, &interface, 1.0);
+        for sign in [-1.0, 1.0] {
+            let circuit = circuit(&source, sign * 2.0)
+                .rebind_contacts_candidate(vec![contact.clone()], &[]).unwrap();
+            let saved = circuit.clone();
+            let candidate = circuit.conductivity_with_contacts_candidate(
+                circuit.resistors().to_vec(), vec![contact.clone()], &bindings(&source),
+                &[], DT, controls(), solve(), || false,
+            ).unwrap();
+            // V0 = E + (Rc + dt/(2C)) I, I = (1 + slope E) E.
+            // This analytic quadratic uses BULK E, not the whole branch drop.
+            let series = resistance + DT / (2.0 * CAPACITANCE);
+            let a = series * slope;
+            let b = 1.0 + series;
+            let field = 4.0 / (b + (b * b + 8.0 * a).sqrt());
+            let current = (1.0 + slope * field) * field;
+            let report = candidate.step();
+            let bulk = &report.electrical.resistors[0];
+            let surface = &report.electrical.contacts[0];
+            near(bulk.voltage_v, sign * field, 4e-11);
+            near(bulk.current_a, sign * current, 4e-11);
+            near(surface.voltage_v, sign * current * resistance, 4e-11);
+            near(surface.heat_j, DT * current * current * resistance, 4e-11);
+            near(bulk.heat_j, DT * field * current, 4e-11);
+            near(report.evaluated[0].point.electric_field_v_m, sign * field, 4e-11);
+            near(report.evaluated[0].conductor.material().query().axes()["gradient"], field, 4e-11);
+            near(report.electrical.heat_j, bulk.heat_j + surface.heat_j, 4e-11);
+            near(report.electrical.stored_after_j + report.electrical.heat_j, 1.0, 4e-11);
+            near(candidate.circuit().charges_c()[0], sign * (1.0 - DT * current), 4e-11);
+            assert_eq!(surface.contact, contact);
+            assert_eq!(circuit, saved);
+            if sign > 0.0 { charges.push(candidate.circuit().charges_c()[0]); }
+            let next = candidate.circuit();
+            let continued = next.conductivity_with_contacts_candidate(
+                next.resistors().to_vec(), next.contacts().to_vec(), &bindings(&source),
+                &[], DT, controls(), solve(), || false,
+            ).unwrap();
+            assert!(continued.circuit().charges_c()[0].abs() < next.charges_c()[0].abs());
+        }
+    }
+    assert!(charges.windows(2).all(|pair| pair[1] > pair[0]));
+}
+
+#[test]
+fn contact_nonlinear_closure_preserves_native_constant_limit_and_refuses_unowned_changes() {
+    use fs_couple::material_circuit::contacts::SeriesElectricalContact;
+    let source = card(0.0, false, 8.0, 16.0);
+    let interface = contact_source::card(&source, &source, 0.5, 0.0);
+    let contact = contact_source::contact(7, 1, &interface, 1.0);
+    let circuit = circuit(&source, 2.0)
+        .rebind_contacts_candidate(vec![contact.clone()], &[]).unwrap();
+    let native = circuit.step_with_contacts_candidate(circuit.resistors().to_vec(),
+        vec![contact.clone()], &[], DT, controls(), || false).unwrap();
+    let run = |contacts, cancel: &mut dyn FnMut() -> bool| circuit.conductivity_with_contacts_candidate(
+        circuit.resistors().to_vec(), contacts, &bindings(&source), &[], DT,
+        controls(), solve(), cancel,
+    );
+    let candidate = run(vec![contact.clone()], &mut || false).unwrap();
+    assert_eq!(candidate.circuit().charges_c(), native.circuit().charges_c());
+    assert_eq!(candidate.step().electrical.resistors, native.step().resistors);
+    assert_eq!(candidate.step().electrical.contacts, native.step().contacts);
+    assert_eq!(candidate.step().iterations, 1);
+    let other_interface = contact_source::card(&source, &source, 0.7, 0.0);
+    for contacts in [
+        vec![],
+        vec![contact.clone(), contact.clone()],
+        vec![contact_source::contact(7, 1, &other_interface, 1.0)],
+        vec![SeriesElectricalContact::new(7, 1, contact.source().clone(), 2.0).unwrap()],
+    ] {
+        assert!(run(contacts, &mut || false).is_err());
+    }
+    let mut polls = 0;
+    run(vec![contact.clone()], &mut || { polls += 1; false }).unwrap();
+    let mut count = 0;
+    assert!(matches!(run(vec![contact], &mut || { count += 1; count == polls }),
+        Err(MaterialCircuitError::Cancelled)));
+    assert_eq!(circuit.charges_c(), &[1.0]);
+}
+
+#[test]
+fn contact_electrical_response_and_applicability_cannot_be_frozen_in_bulk_iteration() {
+    use fs_couple::material_circuit::contacts::SeriesElectricalContact;
+    use fs_matdb::InterfaceSystemCard;
+    use fs_material::electrical_interface::{
+        ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, resolve_electrical_interface_state,
+    };
+    let source = card(0.2, false, 8.0, 16.0);
+    let template = contact_source::card(&source, &source, 0.5, 0.0);
+    for dims in [E, J, Dims([2, 1, -3, 0, -1, 0]), Dims([0, 0, 0, 0, 1, 0])] {
+        for response in [false, true] {
+            let mut claim = template.claims_for(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)[0].1.clone();
+            claim.validity = ValidityDomain::unconstrained()
+                .with_quantity("drive", QuantitySpec::dimensional(dims), 0.0, 10.0);
+            let units = claim.key.quantity().dims();
+            claim.value = if response { PropertyValue::Curve {
+                abscissa: "drive".into(), abscissa_dims: dims,
+                knots: vec![(0.0, 0.5), (10.0, 1.0)], dims: units,
+            }} else { PropertyValue::Scalar { value: 0.5, dims: units } };
+            claim.interpolation = if response { InterpolationPolicy::LinearInside }
+                else { InterpolationPolicy::ConstantWithinValidity };
+            let mut claims = ClaimSet::new();
+            claims.insert_claim(claim).unwrap();
+            let interface = InterfaceSystemCard::assemble(template.surface_a().clone(),
+                template.surface_b().clone(), template.context().clone(), claims, vec![]).unwrap();
+            let point = QueryPoint::new().with_quantity("drive", QuantitySpec::dimensional(dims), 0.0).unwrap();
+            let contact = SeriesElectricalContact::new(7, 1, resolve_electrical_interface_state(
+                &interface, &point, MaterialPropertySelection::SingleClaimOnly).unwrap(), 1.0).unwrap();
+            let circuit = circuit(&source, 2.0).rebind_contacts_candidate(vec![contact.clone()], &[]).unwrap();
+            assert!(matches!(circuit.conductivity_with_contacts_candidate(
+                circuit.resistors().to_vec(), vec![contact], &bindings(&source), &[], DT,
+                controls(), solve(), || false,
+            ), Err(MaterialCircuitError::Invalid("contact electrical operating coordinates require their own nonlinear closure"))));
+        }
+    }
 }

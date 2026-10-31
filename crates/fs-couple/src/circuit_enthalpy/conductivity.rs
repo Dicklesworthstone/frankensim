@@ -9,6 +9,7 @@ use super::*;
 use crate::material_circuit::conductivity::{
     ConductivitySolve, ConductorResponse, MaterialConductivityCandidate, MaterialConductivityStep,
 };
+use super::contacts::{ContactHeatCells, ContactThermalCoefficients, ContactThermalSample};
 
 /// Original nonlinear electrical response and shared local/global heat account.
 pub type ConductivityEnthalpyReport<S> = CircuitEnthalpyReport<S, MaterialConductivityStep>;
@@ -147,6 +148,120 @@ pub fn step_candidate_with_transport<'m, S, E>(
     ) -> Result<StepCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    coupled_with_contacts_candidate(
+        thermal, target_s, input, responses, &[], controls, conductivity,
+        initial_energy_increments_j,
+        |state| resolve(state).map(|bulk| ContactThermalCoefficients {
+            bulk, contacts: Vec::new(),
+        }),
+        transport, cancelled,
+    )
+}
+
+/// Close nonlinear bulk conduction, source-refreshed contact drops and finite
+/// heat together. Contact Joule heat enters both original bodies through the
+/// explicitly authored partitions; bulk losses keep their original destinations.
+///
+/// `resolve` supplies complete bulk and contact bundles at the SAME proposed
+/// thermal state. The inner native circuit/source closure uses the actual bulk
+/// voltage, excluding series contact drops. Contact sources may respond to the
+/// supplied temperature/phase, but their electrical operating coordinates require
+/// a separate interface closure and are refused. Every residual evaluation and
+/// final admission restarts from the same accepted physical histories.
+#[allow(clippy::too_many_arguments)]
+pub fn step_with_contacts_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: CircuitEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>],
+    contact_cells: &[ContactHeatCells],
+    controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConductivityEnthalpyCandidate<'m, ContactThermalSample<S>>, CircuitEnthalpyError<E>> {
+    step_with_contacts_candidate_with_transport(
+        thermal, target_s, input, responses, contact_cells, controls, conductivity,
+        initial_energy_increments_j, resolve, |_, _, transport| Ok(transport), cancelled,
+    )
+}
+
+/// The same contact/bulk closure with thermal transport refreshed at the solved
+/// electrical operating point. `transport` has [`step_candidate_with_transport`]'s
+/// semantics: it replaces original thermal coefficients and independent powers,
+/// never deposits Joule heat or advances state. Explicit contact partitions are
+/// retained with the accepted material observations.
+#[allow(clippy::too_many_arguments)]
+pub fn step_with_contacts_candidate_with_transport<'m, S, E>(
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: CircuitEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>],
+    contact_cells: &[ContactHeatCells],
+    controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
+    transport: impl Fn(
+        &DepositionSimulation<'m>,
+        &MaterialConductivityStep,
+        StepCoefficients<S>,
+    ) -> Result<StepCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConductivityEnthalpyCandidate<'m, ContactThermalSample<S>>, CircuitEnthalpyError<E>> {
+    coupled_with_contacts_candidate(
+        thermal, target_s, input, responses, contact_cells, controls, conductivity,
+        initial_energy_increments_j,
+        |state| resolve(state).map(|resolved| {
+            let bulk = resolved.bulk;
+            ContactThermalCoefficients {
+                contacts: resolved.contacts,
+                bulk: CircuitThermalCoefficients {
+                    resistors: bulk.resistors,
+                    sources_w: bulk.sources_w,
+                    conductances_w_k: bulk.conductances_w_k,
+                    source: ContactThermalSample {
+                        material: bulk.source,
+                        destinations: contact_cells.to_vec(),
+                    },
+                },
+            }
+        }),
+        |state, electrical, coefficients| {
+            let destinations = coefficients.payload.destinations;
+            transport(state, electrical, StepCoefficients {
+                sources_w: coefficients.sources_w,
+                conductances_w_k: coefficients.conductances_w_k,
+                payload: coefficients.payload.material,
+            }).map(|transport| StepCoefficients {
+                sources_w: transport.sources_w,
+                conductances_w_k: transport.conductances_w_k,
+                payload: ContactThermalSample { material: transport.payload, destinations },
+            })
+        },
+        cancelled,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_with_contacts_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: CircuitEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>],
+    contact_cells: &[ContactHeatCells],
+    controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
+    transport: impl Fn(
+        &DepositionSimulation<'m>,
+        &MaterialConductivityStep,
+        StepCoefficients<S>,
+    ) -> Result<StepCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     // Validate the authored policy before the outer work budget narrows it.
     conductivity.validate()?;
     let cancel = RefCell::new(cancelled);
@@ -154,19 +269,21 @@ pub fn step_candidate_with_transport<'m, S, E>(
         thermal,
         target_s,
         input,
-        &[],
+        contact_cells,
         controls,
         initial_energy_increments_j,
         |state, remaining| {
-            let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+            let resolved = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+            let coefficients = resolved.bulk;
             let bounded = ConductivitySolve {
                 maximum_iterations: conductivity.maximum_iterations.min(remaining),
                 ..conductivity
             };
             let circuit = input
                 .circuit
-                .conductivity_with_materials_candidate(
+                .conductivity_with_contacts_candidate(
                     coefficients.resistors,
+                    resolved.contacts,
                     responses,
                     input.ports,
                     target_s - thermal.time_s(),

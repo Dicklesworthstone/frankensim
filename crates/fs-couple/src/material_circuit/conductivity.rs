@@ -7,8 +7,10 @@
 
 use fs_matdb::MaterialCard;
 use fs_material::conductor::{ConductorError, ResolvedConductor};
+use fs_material::electrical_interface::ELECTRICAL_CONTACT_RESISTANCE_PROPERTY;
 use fs_qty::{Dims, QuantitySpec};
 
+use super::contacts::SeriesElectricalContact;
 use super::{
     MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError, MaterialCircuitSolve,
     MaterialCircuitStep, MaterialResistor, ResistorHeat, poll,
@@ -177,11 +179,6 @@ fn admit<'a, 'b>(
             "every original resistor needs one conductivity response",
         ));
     }
-    if !circuit.contacts().is_empty() {
-        return Err(invalid(
-            "field-dependent bulk conduction requires separately coupled contact refresh",
-        ));
-    }
     let mut ordered: Vec<_> = sources.iter().collect();
     ordered.sort_by_key(|binding| binding.branch);
     for ((binding, original), seed) in ordered.iter().zip(circuit.resistors()).zip(seeds) {
@@ -278,6 +275,56 @@ fn admit<'a, 'b>(
         }
     }
     Ok(ordered)
+}
+
+// Contact snapshots are held throughout the electrical iteration. Their outer
+// physical owner may refresh temperatures/phase, but cannot freeze an electric
+// operating coordinate that changes with the current being solved here.
+fn admit_contacts(
+    circuit: &MaterialCircuit,
+    contacts: &[SeriesElectricalContact],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(), MaterialCircuitError> {
+    if contacts.len() != circuit.contacts().len() {
+        return Err(invalid("every original contact needs one refreshed source"));
+    }
+    for contact in contacts {
+        poll(cancelled)?;
+        let original = circuit.contacts().iter().find(|old| old.id() == contact.id())
+            .ok_or_else(|| invalid("unbound conductivity contact"))?;
+        let before = original.source().resolved();
+        let after = contact.source().resolved();
+        if contact.branch() != original.branch()
+            || contact.area_m2().to_bits() != original.area_m2().to_bits()
+            || before.card_identity() != after.card_identity()
+            || before.surface_materials() != after.surface_materials()
+            || before.axis_quantities() != after.axis_quantities()
+            || before.query_point().len() != after.query_point().len()
+            || before.query_point().iter().zip(after.query_point())
+                .any(|((a, _), (b, _))| a != b)
+            || before.properties().len() != after.properties().len()
+            || before.properties().iter().zip(after.properties()).any(|(a, b)| {
+                a.requirement() != b.requirement()
+                    || a.answer().receipt.selected != b.answer().receipt.selected
+            })
+        {
+            return Err(invalid("conductivity contact refresh changed its original source or geometry"));
+        }
+        let property = after.property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
+            .ok_or_else(|| invalid("contact resistance source is absent"))?;
+        let electrical = |dims: Dims| [
+            ConductionCoordinate::ElectricField.dimensions(),
+            ConductionCoordinate::CurrentDensity.dimensions(),
+            Dims([2, 1, -3, 0, -1, 0]), // voltage jump
+            Dims([0, 0, 0, 0, 1, 0]), // terminal current
+        ].contains(&dims);
+        if property.source_axes().iter().any(|(_, dims)| electrical(*dims))
+            || after.axis_quantities().values().any(|quantity| electrical(quantity.dims()))
+        {
+            return Err(invalid("contact electrical operating coordinates require their own nonlinear closure"));
+        }
+    }
+    Ok(())
 }
 
 fn refresh(
@@ -466,6 +513,42 @@ impl MaterialCircuit {
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
         let trial = solve_native(self, seeds, sources, controls, solve,
             |applied, check| self.step_candidate(applied, inputs, dt, controls, check), cancelled)?;
+        let (circuit, electrical) = trial.candidate.into_parts();
+        Ok(MaterialConductivityCandidate { circuit, step: MaterialConductivityStep {
+            electrical, evaluated: trial.evaluated, iterations: trial.iterations,
+            source_evaluations: trial.source_evaluations } })
+    }
+
+    /// Close nonlinear BULK conduction with explicit same-context series contacts.
+    ///
+    /// The original descriptor solves the sum of bulk and contact drops. Its
+    /// bulk-only voltage feeds `E=V_bulk/L`; contact loss is retained separately
+    /// and never enters the bulk constitutive power residual or heat twice.
+    /// An outer thermal owner supplies fresh contact and bulk sources at each
+    /// proposed temperature/phase state. Each inner trial restarts from the
+    /// same accepted charge/flux and holds those contact snapshots fixed.
+    ///
+    /// Complete contact source selections, ordered surfaces, coordinate meanings,
+    /// branch identities and areas must remain unchanged. Electrical-field,
+    /// voltage/current dependent contacts need their own nonlinear closure and
+    /// refuse; no interface storage, arcing or geometry evolution is inferred.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conductivity_with_contacts_candidate(
+        &self,
+        seeds: Vec<MaterialResistor>,
+        contacts: Vec<SeriesElectricalContact>,
+        sources: &[ConductorResponse<'_>],
+        inputs: &[f64],
+        dt: f64,
+        controls: MaterialCircuitSolve,
+        solve: ConductivitySolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
+        poll(&mut cancelled)?;
+        admit_contacts(self, &contacts, &mut cancelled)?;
+        let trial = solve_native(self, seeds, sources, controls, solve,
+            |applied, check| self.step_with_contacts_candidate(
+                applied, contacts.clone(), inputs, dt, controls, check), cancelled)?;
         let (circuit, electrical) = trial.candidate.into_parts();
         Ok(MaterialConductivityCandidate { circuit, step: MaterialConductivityStep {
             electrical, evaluated: trial.evaluated, iterations: trial.iterations,

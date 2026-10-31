@@ -2,6 +2,8 @@
 //! The authored curves and surfaces below are synthetic numerical fixtures.
 #[path = "circuit_enthalpy_conductivity/motion.rs"]
 mod motion;
+#[path = "circuit_enthalpy_conductivity/contacts.rs"]
+mod contacts;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 
