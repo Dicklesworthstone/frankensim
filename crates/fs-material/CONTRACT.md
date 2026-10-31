@@ -1,5 +1,40 @@
 # fs-material — CONTRACT
 
+## Shear-path Findley fatigue on declared elastic stress windows
+
+`fatigue::critical_plane::findley` evaluates the original Findley parameter
+`P = tau_a + k * sigma_n,max` on explicitly declared candidate planes. The
+shear amplitude is the radius of the minimum enclosing circle of the sampled
+two-dimensional shear-vector trajectory on each plane. Retaining both shear
+components distinguishes rotating shear from constant shear, including a
+rotating path whose unsigned shear magnitude never changes. Plane selection
+maximizes the combined Findley parameter, with deterministic tie handling.
+
+The result is a nonnegative usage factor relative to an explicitly supplied
+Findley limit factor. It is an empirical limit comparison, not a cycles-to-failure
+estimate, Miner damage, a crack-growth rate or a certified endurance claim.
+The full tensor stress window must close within declared stress tolerances and
+contain actual cyclic variation. Candidate-plane and time resolution remain
+explicit numerical limitations; finite plane sampling cannot certify the
+continuum maximum. Sample, plane, projection-work and circle-work limits bound
+the calculation, and cancellation/refusal leaves accepted observations intact.
+
+`findley::source::resolve_findley` resolves the distinct original sensitivity
+and limit-factor properties from one immutable material card. Their selected
+claims retain source receipts, uncertainty, observations and validity domains;
+both parameters must belong to the same declared fit and observation population.
+Each must admit the actual semantic absolute temperature in kelvin. Fixed
+scalars and source-supported temperature curves are admitted without inferring
+fatigue parameters from static strength or a single axial S-N datum. The
+calibration exposes its original card, material state and typed query for native
+consumer binding. Scope labels declare applicability; they do not prove transfer
+to another geometry, process, environment or load history.
+
+The shear-path convention follows the
+[COMSOL critical-plane methods reference](https://doc.comsol.com/6.3/doc/com.comsol.help.fatigue/fatigue_ug_sme.4.18.html).
+The numerical tests use analytical synthetic histories and do not constitute
+experimental calibration or validation of a material.
+
 The constitutive-law and authority-separated identifiability kernel: materials
 as mathematical objects — calibration domains, CONSISTENT tangent operators,
 thermodynamic guardrails, hysteresis, uncertainty — plus source-closed,

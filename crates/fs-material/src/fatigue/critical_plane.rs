@@ -25,6 +25,8 @@
 //! without changing any sample. The result is a finite-plane model estimate,
 //! not a certified optimum over the sphere or a component-life qualification.
 
+pub mod findley;
+
 use super::strain_life::{StrainLifeCurve, StrainLifeMeanStress};
 use super::{FatigueError, NormalStressDirection, half_range};
 use fs_math::det;
