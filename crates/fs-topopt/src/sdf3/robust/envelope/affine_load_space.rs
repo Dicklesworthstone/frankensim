@@ -6,17 +6,17 @@
 //! A selected hard-case witness is useful evidence but is not a differentiable
 //! objective. Only a numerically separated regular maximizer gets a gradient.
 pub mod design;
+mod grid;
+pub mod refinement;
+pub use grid::AffineLoadSpaceGrid3;
 
 use super::super::RobustOptions3;
-use crate::sdf3::{CutDensityStudy3, Sdf3Elasticity, checked_solve_preconditioned, failure};
+use crate::sdf3::{CutDensityStudy3, Sdf3Elasticity, failure};
 use crate::{EvaluationStop, SolveControl, SolveWork};
 use fs_ascent::quadratic_ball::{
     MAX_QUADRATIC_BALL_DIMENSION, QuadraticBallMaximum, QuadraticBallOptions,
-    maximize_quadratic_ball,
 };
-use std::ops::ControlFlow;
-
-const RECIPROCITY_TOLERANCE: f64 = 1e-9;
+use grid::{finite, normalize};
 
 /// Fixed finite-dimensional uncertainty policy. Basis columns carry physical
 /// amplitudes and correlations; they are not independent load probabilities.
@@ -129,97 +129,6 @@ pub struct AffineLoadSpaceEvaluation3 {
     /// Actual physical work of the returned witness, before normalization.
     pub worst_compliance: f64,
     pub work: SolveWork,
-}
-
-fn finite(value: f64, stage: &'static str) -> Result<f64, EvaluationStop> {
-    if value.is_finite() {
-        Ok(value)
-    } else {
-        Err(failure(stage))
-    }
-}
-
-// Keep the physical value until division so normalization cannot silently
-// erase a nonzero work or sensitivity. Overflow and underflow both refuse.
-fn normalize(value: f64, reference: f64, stage: &'static str) -> Result<f64, EvaluationStop> {
-    let normalized = value / reference;
-    if normalized.is_finite() && (value == 0.0 || normalized != 0.0) {
-        Ok(normalized)
-    } else {
-        Err(failure(stage))
-    }
-}
-
-// Raw basis forces are allowed to carry entries at strong clamps. Both the
-// actual solves and every reported work/combination use the same masked space.
-fn force_work(
-    force: &[f64],
-    displacement: &[f64],
-    fixed: &[bool],
-    control: &mut SolveControl<'_>,
-) -> Result<f64, EvaluationStop> {
-    let mut value = 0.0;
-    for (d, (&f, &u)) in force.iter().zip(displacement).enumerate() {
-        if d % 256 == 0 {
-            control.checkpoint("sdf3-affine-load-space-work")?;
-        }
-        if !fixed[d / 3] {
-            value += f * u;
-        }
-    }
-    finite(value, "sdf3-affine-load-space-work")
-}
-
-fn relative_difference(a: f64, b: f64, scale: f64) -> f64 {
-    if scale == 0.0 {
-        0.0
-    } else {
-        (a / scale - b / scale).abs()
-    }
-}
-
-fn has_force(force: &[f64], fixed: &[bool]) -> bool {
-    force
-        .iter()
-        .enumerate()
-        .any(|(d, &f)| !fixed[d / 3] && f != 0.0)
-}
-
-fn witness_residual(
-    op: &impl fs_solver::LinearOp,
-    force: &[f64],
-    displacement: &[f64],
-    control: &mut SolveControl<'_>,
-) -> Result<f64, EvaluationStop> {
-    control.checkpoint("sdf3-affine-load-space-witness-residual")?;
-    let mut applied = vec![0.0; force.len()];
-    op.apply(displacement, &mut applied);
-    let scale = force.iter().map(|f| f.abs()).fold(0.0_f64, f64::max);
-    let mut nr = 0.0;
-    let mut nb = 0.0;
-    for (i, (&f, &a)) in force.iter().zip(&applied).enumerate() {
-        if i % 256 == 0 {
-            control.checkpoint("sdf3-affine-load-space-witness-residual")?;
-        }
-        if !a.is_finite() || (scale == 0.0 && a != 0.0) {
-            return Err(failure("sdf3-affine-load-space-witness-residual"));
-        }
-        if scale != 0.0 {
-            let b = f / scale;
-            let r = b - a / scale;
-            nr += r * r;
-            nb += b * b;
-        }
-    }
-    let residual = if scale == 0.0 {
-        0.0
-    } else {
-        fs_math::det::sqrt(nr / nb)
-    };
-    if !residual.is_finite() || residual > 1e-9 {
-        return Err(failure("sdf3-affine-load-space-witness-residual"));
-    }
-    Ok(residual)
 }
 
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
@@ -343,146 +252,30 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let prepared = self.operator.prepare_elasticity(control)?;
             let body = self.material_body_force(&eroded.projected, control)?;
             let offset_force = self.external_force(dead_offset, body.as_deref(), control)?;
-            let offset_displacement = checked_solve_preconditioned(
+            let AffineLoadSpaceGrid3 {
+                gram,
+                linear,
+                offset,
+                oracle,
+                maximum,
+                reciprocity_defect,
+                witness_relative_defect,
+                witness_relative_residual,
+                offset_force,
+                offset_displacement,
+                basis_displacements,
+                worst_coefficients,
+                worst_force,
+                worst_displacement,
+                worst_compliance,
+            } = grid::evaluate_grid(
                 &self.operator,
                 &prepared,
-                &offset_force,
-                1e-11,
-                "sdf3-affine-load-space-offset",
+                offset_force,
+                basis,
+                policy,
                 control,
             )?;
-            let mut basis_displacements = Vec::with_capacity(m);
-            for force in basis {
-                let rhs = self.external_force(force, None, control)?;
-                basis_displacements.push(checked_solve_preconditioned(
-                    &self.operator,
-                    &prepared,
-                    &rhs,
-                    1e-11,
-                    "sdf3-affine-load-space-basis",
-                    control,
-                )?);
-            }
-            let fixed = self.operator.fixed();
-            let offset = normalize(
-                force_work(&offset_force, &offset_displacement, fixed, control)?,
-                policy.reference,
-                "sdf3-affine-load-space-offset-work",
-            )?;
-            if offset < 0.0 || (offset == 0.0 && has_force(&offset_force, fixed)) {
-                return Err(failure("sdf3-affine-load-space-offset-work"));
-            }
-            let mut gram = vec![0.0; m * m];
-            for i in 0..m {
-                for j in 0..m {
-                    gram[i * m + j] = normalize(
-                        force_work(basis[i], &basis_displacements[j], fixed, control)?,
-                        policy.reference,
-                        "sdf3-affine-load-space-gram",
-                    )?;
-                }
-            }
-            if (0..m).any(|i| {
-                gram[i * m + i] < 0.0 || (gram[i * m + i] == 0.0 && has_force(basis[i], fixed))
-            }) {
-                return Err(failure("sdf3-affine-load-space-gram"));
-            }
-            let scale = gram.iter().map(|g| g.abs()).fold(0.0_f64, f64::max);
-            let mut reciprocity_defect = 0.0_f64;
-            for i in 0..m {
-                for j in i + 1..m {
-                    let (a, b) = (gram[i * m + j], gram[j * m + i]);
-                    reciprocity_defect = reciprocity_defect.max(relative_difference(a, b, scale));
-                    let mean = 0.5 * a + 0.5 * b;
-                    gram[i * m + j] = mean;
-                    gram[j * m + i] = mean;
-                }
-            }
-            let mut linear = Vec::with_capacity(m);
-            for i in 0..m {
-                let a = normalize(
-                    force_work(basis[i], &offset_displacement, fixed, control)?,
-                    policy.reference,
-                    "sdf3-affine-load-space-linear",
-                )?;
-                let b = normalize(
-                    force_work(&offset_force, &basis_displacements[i], fixed, control)?,
-                    policy.reference,
-                    "sdf3-affine-load-space-linear",
-                )?;
-                // The energy Cauchy scale remains meaningful when the actual
-                // cross term is zero or nearly cancels by orthogonality.
-                let cross_scale = finite(
-                    (fs_math::det::sqrt(offset) * fs_math::det::sqrt(gram[i * m + i]))
-                        .max(a.abs())
-                        .max(b.abs()),
-                    "sdf3-affine-load-space-linear-scale",
-                )?;
-                reciprocity_defect = reciprocity_defect.max(relative_difference(a, b, cross_scale));
-                linear.push(0.5 * a + 0.5 * b);
-            }
-            if !reciprocity_defect.is_finite() || reciprocity_defect > RECIPROCITY_TOLERANCE {
-                return Err(failure("sdf3-affine-load-space-reciprocity"));
-            }
-            let mut stopped = None;
-            let oracle = maximize_quadratic_ball(&gram, &linear, policy.oracle_options, || {
-                match control.checkpoint("sdf3-affine-load-space-oracle") {
-                    Ok(()) => ControlFlow::Continue(()),
-                    Err(stop) => {
-                        stopped = Some(stop);
-                        ControlFlow::Break(())
-                    }
-                }
-            });
-            if let Some(stop) = stopped {
-                return Err(stop);
-            }
-            let oracle = oracle.map_err(|_| failure("sdf3-affine-load-space-oracle"))?;
-            let maximum = finite(offset + oracle.value, "sdf3-affine-load-space-maximum")?;
-            if maximum < 0.0 {
-                return Err(failure("sdf3-affine-load-space-maximum"));
-            }
-            let worst_coefficients = oracle.coefficients.clone();
-            let mut worst_force = offset_force.clone();
-            let mut worst_displacement = offset_displacement.clone();
-            for d in 0..n {
-                if d % 256 == 0 {
-                    control.checkpoint("sdf3-affine-load-space-witness")?;
-                }
-                if fixed[d / 3] {
-                    worst_force[d] = 0.0;
-                    worst_displacement[d] = 0.0;
-                    continue;
-                }
-                for i in 0..m {
-                    worst_force[d] += worst_coefficients[i] * basis[i][d];
-                    worst_displacement[d] += worst_coefficients[i] * basis_displacements[i][d];
-                }
-                if !worst_force[d].is_finite() || !worst_displacement[d].is_finite() {
-                    return Err(failure("sdf3-affine-load-space-witness"));
-                }
-            }
-            let worst_compliance = force_work(&worst_force, &worst_displacement, fixed, control)?;
-            let actual = normalize(
-                worst_compliance,
-                policy.reference,
-                "sdf3-affine-load-space-witness-work",
-            )?;
-            let witness_scale = maximum
-                .abs()
-                .max(actual.abs())
-                .max(offset.abs())
-                .max(oracle.value.abs());
-            let witness_relative_defect = relative_difference(maximum, actual, witness_scale);
-            if worst_compliance < 0.0
-                || (actual == 0.0 && has_force(&worst_force, fixed))
-                || !witness_relative_defect.is_finite()
-                || witness_relative_defect > (8.0 * m as f64 + 4.0) * RECIPROCITY_TOLERANCE
-            {
-                return Err(failure("sdf3-affine-load-space-witness-work"));
-            }
-            let witness_relative_residual =
-                witness_residual(&self.operator, &worst_force, &worst_displacement, control)?;
             let gradient = if oracle.gradient_admissible() {
                 // Danskin's derivative holds for the resolved unique maximizer.
                 // No derivative of its coefficients or the iterative solves.

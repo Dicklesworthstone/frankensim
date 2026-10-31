@@ -58,6 +58,35 @@ pub(crate) fn add_force(
     Ok(())
 }
 
+// One reduced-force convention for studies and explicitly installed grid
+// assessments. The material term is present only when its caller supplies it.
+pub(crate) fn external_force(
+    operator: &impl Sdf3Elasticity,
+    force: &[f64],
+    body: Option<&[f64]>,
+    control: &mut SolveControl<'_>,
+) -> Result<Vec<f64>, EvaluationStop> {
+    if force.len() != operator.n() || body.is_some_and(|b| b.len() != force.len()) {
+        return Err(failure("sdf3-external-force-shape"));
+    }
+    let mut rhs = Vec::with_capacity(force.len());
+    for (i, &f) in force.iter().enumerate() {
+        if i % 192 == 0 {
+            control.checkpoint("sdf3-external-force")?;
+        }
+        let value = if operator.fixed()[i / 3] {
+            0.0
+        } else {
+            f + body.map_or(0.0, |b| b[i])
+        };
+        if !value.is_finite() {
+            return Err(failure("sdf3-external-force-overflow"));
+        }
+        rhs.push(value);
+    }
+    Ok(rhs)
+}
+
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// Add one fixed reference-configuration acceleration to EVERY independent
     /// experiment in this study. Prepare it with the native operator's
@@ -100,8 +129,9 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// A failed or cancelled rebuild leaves the source study intact.
     ///
     /// This supports gravity and spatially varying fixed acceleration, not
-    /// follower loads. Zero-centered spectral load envelopes still require a
-    /// separate affine uncertainty formulation when this common load is present.
+    /// follower loads. Continuous uncertainty around this common load uses
+    /// [`Self::evaluate_robust_affine_load_space`]; its grid-enrichment assessment
+    /// rebuilds this same native acceleration map on the fine operator.
     pub fn with_material_acceleration(
         mut self,
         acceleration: impl Fn([f64; 3]) -> [f64; 3] + Send + Sync + 'static,
@@ -216,25 +246,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         body: Option<&[f64]>,
         control: &mut SolveControl<'_>,
     ) -> Result<Vec<f64>, EvaluationStop> {
-        if force.len() != self.operator.n() || body.is_some_and(|b| b.len() != force.len()) {
-            return Err(failure("sdf3-external-force-shape"));
-        }
-        let mut rhs = Vec::with_capacity(force.len());
-        for (i, &f) in force.iter().enumerate() {
-            if i % 192 == 0 {
-                control.checkpoint("sdf3-external-force")?;
-            }
-            let value = if self.operator.fixed()[i / 3] {
-                0.0
-            } else {
-                f + body.map_or(0.0, |b| b[i])
-            };
-            if !value.is_finite() {
-                return Err(failure("sdf3-external-force-overflow"));
-            }
-            rhs.push(value);
-        }
-        Ok(rhs)
+        external_force(&self.operator, force, body, control)
     }
 
     // Add dJ/df * df/drho_bar before the projection/filter transpose. The

@@ -317,13 +317,48 @@ feasibility uses the actual cap, independently of AL stopping tolerances, and
 `recheck_best` recomputes the complete envelope without advancing the optimizer.
 No monotonic feasibility restoration is assumed for design-dependent gravity.
 
+`estimate_affine_load_space_enrichment` independently recomputes the full
+affine load model and maximizer on an actual enriched adaptive grid. The same
+grid evaluator serves fixed-grid optimization and enrichment; fine stiffness
+scales and physical occupancy inherit the coarse eroded fields through the
+checked parent map. Pure dead/basis reference laws are reintegrated on each
+grid, and the retained acceleration recipe prepares the fine native body map.
+The fine operator's existing solve wrapper owns its selected preconditioner
+and setup accounting. No refiltering, nodal-force prolongation, or second
+elasticity/uncertainty implementation is introduced.
+
+The assessment reconstructs both grids' fields at the coarse maximizing
+coefficients and again at the fine maximizing coefficients. Both fixed-load
+comparisons use the existing self-weight-aware native DWR estimator with total
+force as the compliance goal and zero affine goal offset. The change caused
+by selecting a different adverse load is reported separately and checked in
+the two-grid compliance identity. Hard-case witnesses remain valid here;
+smooth design gradients are unnecessary for this assessment. Cell markers
+describe these frozen loads and do not become a full-envelope error bound.
+
+The whole-set change observation includes every affine term:
+`||G_f-G_c||_F + 2*||h_f-h_c||_2 + |c_f-c_c|`. In exact arithmetic this bounds
+the normalized quadratic change for every coefficient in the unit ball; its
+floating-point evaluation is numerical evidence, not an interval enclosure.
+It detects a changed adverse direction even when grid maxima happen to agree.
+All returned outcomes preserve the source study, and incomplete grid families
+are never published as a usable assessment.
+`stable_and_feasible` explicitly interprets the reference as a compliance cap:
+both grids must satisfy it in normalized and physical units, and the whole
+model change must meet its separate tolerance. That tolerance never waives
+physical cap excess.
+
 `material_affine_load_space_sdf3` exercises native force balance and load-space
 sampling, full-chain compliance/volume derivatives, hard-case refusal and an
 actual minimum-kg constrained run with fresh feasible-point reassessment.
+Its adaptive regression introduces a coarse-unresolved spatial load and checks
+the changed fine adversary, inherited material/body force, both DWR identities,
+signed switching, source rollback and the direct-solve work bound. It also
+assesses hard-case witnesses without a design gradient.
 These APIs cover fixed geometry, homogeneous supports, fixed dead loads and
 reference acceleration. Numerical load optimality evidence is not an interval
-enclosure, a continuum guarantee, a global design optimum, or an adaptive
-refinement/restart contract for this new design owner.
+enclosure, a continuum guarantee, a global design optimum, or an automatic
+refinement/reoptimization or serialized restart contract for this design owner.
 
 ## 3-D cut-cell continuation
 

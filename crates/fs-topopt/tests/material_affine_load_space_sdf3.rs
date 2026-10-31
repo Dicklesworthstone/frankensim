@@ -3,7 +3,12 @@ use std::ops::ControlFlow;
 
 use fs_ascent::quadratic_ball::QuadraticBallBranch;
 use fs_blake3::ContentHash;
-use fs_cutfem::elastic3::{CutElasticity3, ElasticMaterialField3};
+use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
+use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
+use fs_cutfem::elastic3::adaptive::enrichment::precondition::AdaptiveSolveSpace3;
+use fs_cutfem::elastic3::surface::ReferenceLoad3;
+use fs_cutfem::elastic3::{CutElasticity3, ElasticMaterialField3, ElasticityError3};
+use fs_cutfem::octree3::Octree3;
 use fs_cutfem::quad3::{QuadratureControl3, QuadratureOptions3};
 use fs_cutfem::{CutSdf3, HeightAxis, HexCell};
 use fs_ivl::Interval;
@@ -14,6 +19,7 @@ use fs_topopt::sdf3::robust::RobustOptions3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::design::{
     AffineLoadSpaceDesign3, AffineLoadSpaceDesignGoal3, AffineLoadSpaceDesignOptions3,
 };
+use fs_topopt::sdf3::robust::envelope::affine_load_space::refinement::AffineLoadSpaceRefinementOptions3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     AffineLoadSpace3, AffineLoadSpaceEvaluation3,
 };
@@ -39,6 +45,14 @@ fn poll() -> ControlFlow<()> {
 fn acceleration(p: [f64; 3]) -> [f64; 3] {
     [0.0, -0.003 * (1.0 + p[0]), -0.004]
 }
+fn native_material(cell: HexCell) -> Result<ElasticAcousticState, ElasticityError3> {
+    let id = if cell.lo()[0] < 0.5 { 2 } else { 8 };
+    let tensor = std::array::from_fn(|i| std::array::from_fn(|j| if i == j { 10.0 } else { 0.0 }));
+    Ok(
+        ElasticAcousticState::try_new_mandel(tensor, f64::from(id), ContentHash([id; 32]), 0.25)
+            .unwrap(),
+    )
+}
 fn operator() -> CutElasticity3 {
     let mut callback = |_| poll();
     let mut q = QuadratureControl3::new(
@@ -50,24 +64,11 @@ fn operator() -> CutElasticity3 {
         &mut callback,
     )
     .unwrap();
-    let field =
-        |cell: HexCell| {
-            let id = if cell.lo()[0] < 0.5 { 2 } else { 8 };
-            let tensor =
-                std::array::from_fn(|i| std::array::from_fn(|j| if i == j { 10.0 } else { 0.0 }));
-            Ok(ElasticAcousticState::try_new_mandel(
-                tensor,
-                f64::from(id),
-                ContentHash([id; 32]),
-                0.25,
-            )
-            .unwrap())
-        };
     CutElasticity3::build_with_material_field(
         HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
         [2; 3],
         &Top,
-        ElasticMaterialField3::ByCell(&field),
+        ElasticMaterialField3::ByCell(&native_material),
         &|p| p[0] == 0.0,
         Default::default(),
         &mut q,
@@ -449,4 +450,284 @@ fn minimum_native_mass_under_the_affine_compliance_cap_rechecks_the_actual_endpo
     audit(&rechecked.evaluation, &dead, &basis);
     drop(session);
     assert_eq!(s.operator().scales(), scales);
+}
+
+fn adaptive_operator(level: u8) -> AdaptiveSolveSpace3 {
+    let tree = Octree3::uniform(level, 4, 4096).unwrap();
+    let mut callback = |_| poll();
+    let mut q = QuadratureControl3::new(
+        QuadratureOptions3 {
+            depth: 1,
+            root_relative_tolerance: 1e-12,
+            ..Default::default()
+        },
+        &mut callback,
+    )
+    .unwrap();
+    let native = AdaptiveElasticity3::build_with_material_field(
+        HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
+        &tree,
+        &Top,
+        ElasticMaterialField3::ByCell(&native_material),
+        &|p| p[0] == 0.0,
+        Default::default(),
+        &mut q,
+    )
+    .unwrap();
+    AdaptiveSolveSpace3::jacobi(native, 100_000_000)
+}
+fn refinement_dead(_: [f64; 3]) -> [f64; 3] {
+    [0.0002, -0.0001, -0.0003]
+}
+fn refinement_first(_: [f64; 3]) -> [f64; 3] {
+    [0.0, -0.001, 0.0]
+}
+fn refinement_second(p: [f64; 3]) -> [f64; 3] {
+    // P2 has zero moments against the coarse Q1 functions on each y-half.
+    // Its genuinely new fine-grid loading must participate in remaximization.
+    let t = if p[1] < 0.5 {
+        4.0 * p[1] - 1.0
+    } else {
+        4.0 * p[1] - 3.0
+    };
+    [0.0, 0.0, 0.0002 + 0.08 * (3.0 * t * t - 1.0) / 2.0]
+}
+fn combine(offset: &[f64], columns: &[Vec<f64>], coefficients: &[f64]) -> Vec<f64> {
+    (0..offset.len())
+        .map(|d| {
+            offset[d]
+                + columns
+                    .iter()
+                    .zip(coefficients)
+                    .map(|(column, a)| column[d] * a)
+                    .sum::<f64>()
+        })
+        .collect()
+}
+
+#[test]
+fn affine_refinement_remaximizes_native_loads_and_decomposes_regular_and_hard_witnesses() {
+    for self_weight in [true, false] {
+        let mut source = CutDensityStudy3::new(
+            adaptive_operator(1),
+            0.15,
+            SimpParams {
+                beta: 2.0,
+                penal: 3.0,
+                e_min: 0.03,
+                eta: 0.5,
+            },
+        )
+        .with_material_acceleration(
+            move |p| {
+                if self_weight {
+                    acceleration(p)
+                } else {
+                    [0.0; 3]
+                }
+            },
+            100_000,
+            poll,
+        )
+        .unwrap();
+        let mut regions = vec![PhysicalRegion3::Design; source.cells()];
+        regions[0] = PhysicalRegion3::Solid;
+        let last = regions.len() - 1;
+        regions[last] = PhysicalRegion3::Void;
+        source = source.with_physical_regions(regions).unwrap();
+        let rho: Vec<_> = (0..source.cells()).map(|i| 0.5 + 0.03 * i as f64).collect();
+        let dead = if self_weight {
+            ReferenceLoad3::body(&refinement_dead)
+        } else {
+            ReferenceLoad3::default()
+        };
+        let laws = [
+            ReferenceLoad3::body(&refinement_first),
+            ReferenceLoad3::body(&refinement_second),
+        ];
+        let scales = source.operator().elasticity().scales().to_vec();
+        let fingerprint = source.material_body_load_fingerprint();
+        let mut callback = |_| poll();
+        let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+        let before = control.work();
+        let report = source
+            .estimate_affine_load_space_enrichment(
+                adaptive_operator(2),
+                &rho,
+                dead,
+                &laws,
+                RobustOptions3::default(),
+                &policy(),
+                AffineLoadSpaceRefinementOptions3::default(),
+                &mut control,
+            )
+            .unwrap();
+        // One forward filter and at most m+1 primal solves per grid. Frozen
+        // directions use the retained basis fields, with no extra adjoints.
+        assert!(report.work.linear_solves - before.linear_solves <= 1 + 2 * (laws.len() + 1));
+        assert_eq!(source.operator().elasticity().scales(), scales);
+        assert_eq!(source.material_body_load_fingerprint(), fingerprint);
+        if !self_weight {
+            assert_eq!(report.coarse.oracle.branch, QuadraticBallBranch::HardCase);
+            assert_eq!(report.fine.oracle.branch, QuadraticBallBranch::HardCase);
+            assert!(!report.coarse.oracle.gradient_admissible());
+            assert!(!report.fine.oracle.gradient_admissible());
+        }
+
+        let mut fine = adaptive_operator(2);
+        let parents = AdaptiveTransfer3::new(
+            source.operator().elasticity(),
+            fine.elasticity(),
+            2_000_000,
+            poll,
+        )
+        .unwrap()
+        .parents()
+        .to_vec();
+        assert_eq!(
+            report.fine_eroded_rho,
+            parents
+                .iter()
+                .map(|&i| report.coarse_eroded_rho[i])
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            report.fine_eroded_scales,
+            parents
+                .iter()
+                .map(|&i| report.coarse_eroded_scales[i])
+                .collect::<Vec<_>>()
+        );
+        assert!(report.fine_eroded_rho.contains(&0.0));
+        assert!(report.fine_eroded_rho.contains(&1.0));
+        fine.set_scales(&report.fine_eroded_scales).unwrap();
+        let native = fine.elasticity();
+        let body = native
+            .prepare_material_body_load(
+                &|p| {
+                    if self_weight {
+                        acceleration(p)
+                    } else {
+                        [0.0; 3]
+                    }
+                },
+                100_000,
+                poll,
+            )
+            .unwrap();
+        let body_force = body.load(&report.fine_eroded_rho, poll).unwrap();
+        let fixed = native.reference_load(dead, poll).unwrap();
+        let fine_offset: Vec<_> = fixed.iter().zip(body_force).map(|(f, b)| f + b).collect();
+        close_vector(&fine_offset, &report.fine.offset_force);
+        let fine_basis: Vec<_> = laws
+            .iter()
+            .map(|&law| native.reference_load(law, poll).unwrap())
+            .collect();
+        let fine_force = combine(&fine_offset, &fine_basis, &report.fine.worst_coefficients);
+        close_vector(&fine_force, &report.fine.worst_force);
+        assert!(
+            native
+                .field_residual(&report.fine.worst_displacement, &fine_force, poll)
+                .unwrap()
+                < 1e-8
+        );
+        if self_weight {
+            let omitted = combine(&fixed, &fine_basis, &report.fine.worst_coefficients);
+            assert!(
+                native
+                    .field_residual(&report.fine.worst_displacement, &omitted, poll)
+                    .unwrap()
+                    > 1e-6
+            );
+        }
+
+        // A=Jc(ac), B=Jf(ac), C=Jc(af), D=Jf(af), all in physical units.
+        let a = dot(
+            &report.coarse.worst_force,
+            &report.coarse.worst_displacement,
+        );
+        let old_fine_force = combine(&fine_offset, &fine_basis, &report.coarse.worst_coefficients);
+        let old_fine_u = combine(
+            &report.fine.offset_displacement,
+            &report.fine.basis_displacements,
+            &report.coarse.worst_coefficients,
+        );
+        assert!(
+            native
+                .field_residual(&old_fine_u, &old_fine_force, poll)
+                .unwrap()
+                < 1e-8
+        );
+        let b = dot(&old_fine_force, &old_fine_u);
+        let coarse_basis: Vec<_> = laws
+            .iter()
+            .map(|&law| {
+                source
+                    .operator()
+                    .elasticity()
+                    .reference_load(law, poll)
+                    .unwrap()
+            })
+            .collect();
+        let new_coarse_force = combine(
+            &report.coarse.offset_force,
+            &coarse_basis,
+            &report.fine.worst_coefficients,
+        );
+        let new_coarse_u = combine(
+            &report.coarse.offset_displacement,
+            &report.coarse.basis_displacements,
+            &report.fine.worst_coefficients,
+        );
+        let c = dot(&new_coarse_force, &new_coarse_u);
+        let d = dot(&fine_force, &report.fine.worst_displacement);
+        let reference = policy().reference();
+        close(a, report.coarse.worst_compliance, 1e-9);
+        close(d, report.fine.worst_compliance, 1e-9);
+        // This deliberately unresolved load is more adverse on the fine grid
+        // than the old direction. Checking only that old direction cannot pass.
+        assert!((d - b) / reference > 1e-8);
+        assert!(report.fine.maximum > b / reference + 1e-8);
+        close(report.fine_switch_correction, (d - b) / reference, 1e-8);
+        close(report.coarse_switch_correction, (a - c) / reference, 1e-8);
+        for (witness, coarse, fine) in
+            [(&report.coarse_witness, a, b), (&report.fine_witness, c, d)]
+        {
+            close(witness.coarse_value, coarse, 1e-8);
+            close(witness.fine_value, fine, 1e-8);
+            close(witness.correction(), fine - coarse, 1e-8);
+            close(
+                witness.cells.values().map(|cell| cell.signed_dwr).sum(),
+                witness.dwr,
+                1e-8,
+            );
+            assert!(witness.identity_relative_defect < 1e-8);
+        }
+        let symmetric = 0.5
+            * (report.coarse_witness.correction() + report.fine_witness.correction())
+            / reference
+            + 0.5 * (report.fine_switch_correction - report.coarse_switch_correction);
+        close(report.correction(), symmetric, 1e-10);
+        close(report.correction(), (d - a) / reference, 1e-8);
+        close(report.normalized_witness_change, (d - a) / reference, 1e-10);
+        close(
+            report.normalized_maximum_change,
+            report.fine.maximum - report.coarse.maximum,
+            1e-10,
+        );
+        close(report.normalized_maximum_change, report.correction(), 1e-8);
+        assert!(
+            report.normalized_maximum_change.abs() <= report.normalized_model_change * (1.0 + 1e-8)
+        );
+        assert!(report.identity_relative_defect < 1e-8);
+        assert!(report.marking_mass.values().sum::<f64>() > 0.0);
+        for (&leaf, &mass) in &report.marking_mass {
+            assert!(source.operator().elasticity().leaves().contains(&leaf));
+            let expected = 0.5
+                * (report.coarse_witness.cells[&leaf].marking_mass
+                    + report.fine_witness.cells[&leaf].marking_mass)
+                / reference;
+            close(mass, expected, 1e-10);
+        }
+    }
 }
