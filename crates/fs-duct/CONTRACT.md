@@ -1678,6 +1678,57 @@ temperature-dependent heat capacities, shock heating and bidirectional
 reflections are evolved together. No separate instrument-specific gas law is
 introduced.
 
+### Sounding bores: radius steps, wall memory and a radiating end
+
+`nonlinear::bore::NonlinearBore` keeps one `Euler1d` field of the original
+NASA-9 source and adds what a played bore needs:
+
+- **Mesh.** Equal axial cells over the whole `Duct` (cylinders, cones and
+  profiles; tone holes refuse). A face within a quarter cell of a radius step is
+  moved a quarter cell off it; two steps inside one cell refuse. Cell volumes are
+  the exact piecewise volumes; an optional compact inlet volume (a cup) is added
+  to the first cell. The step's wall force enters through the same
+  quasi-one-dimensional `p dA` source as a taper; no evanescent step modes are
+  resolved (as in the plane-wave transfer-matrix chain).
+- **Wall memory.** Per distinct cell radius, the `fs_phs::ZkDiffusiveBasis`
+  binding of the gas's own density, viscosity, gamma and Prandtl number on a
+  declared band and error: viscous drag plus series arms on the momentum,
+  shunt arms on the pressure. Each cell's arms advance between accepted steps
+  by the exact propagator `exp(G dt)` of a symmetric negative-semidefinite
+  generator, held in the generator's eigen-coordinates (fs-la cyclic Jacobi,
+  residual-checked): a step replaces the mean coordinate along one row of the
+  eigenbasis and decays each coordinate by `exp(lambda dt) <= 1`, so it is
+  contractive and costs O(arms) per cell. Only dissipated arm energy heats the
+  gas (the arms store the boundary-layer kinetic energy); thermal exchange
+  changes pressure at fixed density. The update is transactional
+  (`apply_cell_sources`).
+- **Radiating end.** A rigid piston in an infinite baffle. Its exact impulse
+  response `rho c/S [delta(t) - (4/(pi T)) sqrt(1-(t/T)^2)]`, `T = 2a/c`
+  (Stepanishen 1971), is product-integrated against the piecewise-linear end
+  flow (hat weights, which sum to one: `Z(0) = 0`) and solved implicitly with the
+  interior's end wave at both RK stages. Inflow carries the room's entropy along
+  the source's wave curve. The end runs on one declared fixed step and refuses
+  any other `dt`; a field whose CFL bound cannot take the step refuses rather than
+  shortening it.
+- **Driven end.** A caller-owned `PortStage` closure (fs-couple's lip).
+
+Not claimed: flare or radial modes at the bell, an unflanged lip, moving or
+vibrating walls, wall heat conduction beyond the Zwikker-Kosten layer, tone
+holes.
+
+Tests (`nonlinear::bore::tests`): the piston weights sum to one and reproduce
+`1 - J1(2ka)/ka + i H1(2ka)/ka` within `(omega dt)^2/6 + 1e-11`; step meshes
+keep exact volume and move faces off steps; wall propagators equal an
+independent Taylor exponential of their generator within 1e-13, square to the
+doubled step and never grow energy; a step the field cannot take refuses by
+name; `g3`: a small-amplitude bore (48 wall poles, 20-8000 Hz, 1 %) reproduces the
+transfer-matrix input impedance (Bessel loss, the same piston load) on the
+first six peaks within 10 cents and 1.5 dB, measured +0.17 to +1.69 cents and -0.27 to -0.65 dB (wall
+admitted at 6.2e-4 complex, 7.3e-4 loss); `g2`: a 2 kPa,
+1 kHz sinusoid steepens to the lossless shock distance `rho c^3/(beta omega p)`
+within 5 %, measured 3.2394 m against
+3.2317 m (+0.24 %).
+
 ### Conservative molecular transport in nonlinear bores
 
 `NonlinearDuct::with_molecular_transport(law, cancelled)` attaches the original

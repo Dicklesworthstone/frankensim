@@ -17,13 +17,17 @@ use core::fmt;
 
 use crate::{Duct, DuctError, RadiusProfile, Segment};
 pub use fs_gas::dynamics::{
-    Boundaries, Boundary, CaloricDomain, FrozenGas, StepControl, StepReport,
+    Boundaries, Boundary, CaloricDomain, EndWave, FaceFlux, FrozenGas, PortStage, Primitive,
+    StepControl, StepReport,
 };
 use fs_gas::dynamics::{Conserved, Error as GasError, Euler1d, Mesh1d};
 use fs_qty::Time;
 
 /// Source-owned molecular stress, heat and species transport in a nonlinear bore.
 pub mod transport;
+
+/// A sounding bore: radius steps, Zwikker-Kosten wall memory and a radiating end.
+pub mod bore;
 
 /// Explicit allocation bound for this geometric image; excess requests refuse.
 pub const MAX_NONLINEAR_DUCT_CELLS: usize = fs_gas::dynamics::MAX_EULER_CELLS;

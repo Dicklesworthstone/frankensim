@@ -92,6 +92,8 @@ rod-dynamics = []
 # Spatial shock loads are explicit opt-in compositions of the original gas owners.
 experimental-shock-loading = ["dep:fs-gas"]
 experimental-compressible = ["experimental-shock-loading", "dep:fs-flux"]
+# The lip on the shared nonlinear Euler bore (fs-duct's image of fs-gas).
+nonlinear-brass = ["dep:fs-gas", "fs-duct/nonlinear-euler"]
 
 [[example]]
 name = "rod_motion"

@@ -322,6 +322,46 @@ not add species advection or chemistry/flow splitting to that field. Neither
 path supplies diffusion flames, generic third-body/falloff mechanisms, spray,
 knock, real-gas phases, moving volumes or a validated ignition model.
 
+### Caller-owned end ports and local cell sources
+
+`Euler1d::step_with_ports(max, controls, ports, cancelled)` advances a
+non-periodic interval whose end fluxes are owned by the caller. The SSP-RK2
+predictor offers stage 0 at `t^n` and the corrector stage 1 at `t^n + dt`, each
+as a `PortStage { stage, time, dt, left, right }` holding the end cells'
+conserved and primitive states; the closure returns `[Option<FaceFlux>; 2]`
+(`None` keeps the declared boundary). A returned flux is the whole end
+exchange: the accepted report's boundary changes are `dt * area * flux`. A
+refusing port refuses the step (subject to the declared halvings) and leaves
+field and time unchanged; periodic intervals refuse ports.
+
+The relations a port needs are public and source-owned:
+
+- `FrozenGas::end_wave(interior, normal, pressure, cancelled)` returns the end
+  state reached from `interior` along its outgoing wave curve (isentrope in
+  expansion, Hugoniot in compression), its velocity derivative with respect to
+  the end pressure and its signal speed. Its weak limit is `du = -n dp/(rho c)`
+  and it stops gas at the wall solver's pressure.
+- `FrozenGas::nozzle_exit(donor, back, cancelled)` is the steady isentropic
+  exit of a stagnation donor into a back pressure, with choking; its
+  incompressible limit is Bernoulli and its stagnation enthalpy is the donor's.
+- `stagnation_enthalpy(T)`, `face_flux(face, signal)` and
+  `inflow_flux(face, T0, signal)` (energy flux = mass flux times the donor's
+  stagnation enthalpy) close a face from one state.
+
+`Euler1d::apply_cell_sources(update, cancelled)` replaces every cell average
+through a caller-owned local update between accepted steps (wall friction, wall
+heat exchange). Every candidate is decoded through the original caloric law
+before any is published; one refusal leaves the whole field unchanged. Time
+does not advance.
+
+Tests (`dynamics::evolve::port_tests`, 6): wall ports reproduce reflecting ends
+bit for bit with ordered stages; an injecting port is the whole end exchange and
+conserves mass to 1e-15 and energy to 1e-14 relative; refusal and periodic
+refusal; the end wave's acoustic limit and wall pressure (1e-9); the nozzle's
+Bernoulli limit (1e-4 at a 1e-4 pressure drop) and face-flux consistency with
+the Riemann interface; transactional and exact cell sources. Measured on trj
+lane t, log 20261030T190307Z (61 `dynamics` tests pass).
+
 ### Material cards in the shared molecular transport law
 
 With both `material` and `experimental-euler` enabled,

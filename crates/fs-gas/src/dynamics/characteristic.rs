@@ -113,6 +113,108 @@ impl FrozenGas {
     }
 }
 
+/// The interior side of one classical pressure wave at a duct end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct EndWave {
+    /// State between the wave and the contact. Its velocity is along the
+    /// increasing duct coordinate, like every other primitive.
+    pub primitive: Primitive,
+    /// Derivative of that velocity with respect to the end pressure [m/(s Pa)].
+    pub velocity_per_pressure: f64,
+    /// Largest characteristic or shock speed the wave involves [m/s].
+    pub signal_speed: f64,
+}
+
+impl FrozenGas {
+    /// The state an interior trace reaches when a duct end imposes
+    /// `end_pressure`: this source's shock Hugoniot for compression, its
+    /// isentropic fan for expansion. This is the interior's half of an end
+    /// Riemann problem; a caller-owned port supplies the other relation
+    /// between end pressure and end velocity. `outward_normal` is -1 at a left
+    /// end and +1 at a right end. No gamma-law replacement is used.
+    pub fn end_wave(
+        &self,
+        interior: Primitive,
+        outward_normal: f64,
+        end_pressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<EndWave, Error> {
+        poll(&mut cancelled)?;
+        if !matches!(outward_normal, -1.0 | 1.0) {
+            return Err(Error::Invalid("end wave outward normal"));
+        }
+        let inside = Primitive {
+            velocity: outward_normal * interior.velocity,
+            ..interior
+        };
+        let wave =
+            wave::pressure_wave(self, inside, end_pressure, &mut cancelled).map_err(wave_error)?;
+        Ok(EndWave {
+            primitive: Primitive {
+                velocity: outward_normal * wave.primitive.velocity,
+                ..wave.primitive
+            },
+            velocity_per_pressure: -outward_normal * wave.derivative,
+            signal_speed: wave.signal_speed,
+        })
+    }
+
+    /// Isentropic discharge of stationary stagnation gas `donor` through a
+    /// converging throat into `backpressure`, along this source's isentrope.
+    /// Returns the throat state, whose velocity is the positive exit speed,
+    /// and whether the throat is sonic (choked).
+    pub fn nozzle_exit(
+        &self,
+        donor: Primitive,
+        backpressure: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(Primitive, bool), Error> {
+        shared::nozzle::state(self, donor, backpressure, &mut cancelled).map_err(wave_error)
+    }
+
+    /// Referenced specific stagnation enthalpy [J/kg] of gas at rest at
+    /// `temperature`: the energy each kilogram entering from rest carries.
+    pub fn stagnation_enthalpy(&self, temperature: f64) -> Result<f64, Error> {
+        let enthalpy = self.sensible(temperature)? + self.gas_constant() * temperature;
+        if !enthalpy.is_finite() {
+            return Err(Error::Invalid("unrepresentable stagnation enthalpy"));
+        }
+        Ok(enthalpy)
+    }
+
+    /// Euler flux through a stationary face that carries `face`, oriented
+    /// along the increasing duct coordinate. `signal_speed` is raised to the
+    /// face's own `|u| + c` when smaller.
+    pub fn face_flux(&self, face: Primitive, signal_speed: f64) -> Result<FaceFlux, Error> {
+        let q = self.conserved(face.density, face.velocity, face.pressure)?;
+        checked_flux(
+            q.momentum,
+            q.momentum * face.velocity + face.pressure,
+            (q.energy + face.pressure) * face.velocity,
+            signal_speed.max(face.velocity.abs() + face.sound_speed),
+        )
+    }
+
+    /// Flux of gas that entered from rest at `stagnation_temperature` and
+    /// crosses a stationary face with density, velocity and pressure `face`.
+    /// Energy is the mass flux times the stagnation enthalpy, exactly once.
+    pub fn inflow_flux(
+        &self,
+        face: Primitive,
+        stagnation_temperature: f64,
+        signal_speed: f64,
+    ) -> Result<FaceFlux, Error> {
+        let enthalpy = self.stagnation_enthalpy(stagnation_temperature)?;
+        let mass = face.density * face.velocity;
+        checked_flux(
+            mass,
+            mass * face.velocity + face.pressure,
+            mass * enthalpy,
+            signal_speed.max(face.velocity.abs() + face.sound_speed),
+        )
+    }
+}
+
 fn wave_error(error: WallError<Error>) -> Error {
     match error {
         WallError::Source(error) => error,

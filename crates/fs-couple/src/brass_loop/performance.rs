@@ -14,7 +14,7 @@
 //! ```text
 //! frankensim-lip-performance-v1
 //! # comment lines and blank lines are ignored
-//! audio <rate_hz> <samples>                  mechanics clock == output clock
+//! audio <rate_hz> <samples>                  output clock (also the mechanics clock of the lines)
 //! full_scale_pa <pa>
 //! ambient moist_air <temperature_k> <pressure_pa> <relative_humidity>
 //! ambient mixture <temperature_k> <pressure_pa> <mole|mass> <count> <species fraction>...
@@ -30,6 +30,7 @@
 //! cone <inlet_radius_m> <outlet_radius_m> <length_m>
 //! bessel <inlet_radius_m> <outlet_radius_m> <length_m> <flare> <pieces>
 //! bore_source <free text to end of line>     required provenance sentence
+//! bore nonlinear <max_cell_m> <mechanics_per_output> <gas_steps_per_mechanics> <wall_poles> <wall_band_lo_hz> <wall_band_hi_hz> <wall_tolerance>
 //! microphone <x_m> <y_m> <z_m> <radial_rings> <angular_points> <max_frequency_hz>
 //! schedule
 //! <canonical GestureSchedule bytes: blowing-pressure, optional pre-stress>
@@ -47,6 +48,16 @@
 //! end radii lie exactly on that curve (the piecewise-conic image every
 //! transfer-matrix brass model uses; `pieces` is the refinement axis).
 //!
+//! The optional `bore nonlinear` record replaces the lines with the shared
+//! nonlinear gas bore ([`super::nonlinear`], the `nonlinear-brass` feature):
+//! the ambient gas's own NASA-9 laws evolve in cells no longer than
+//! `max_cell_m`, with Zwikker-Kosten wall memory admitted on the stated band
+//! and tolerance and a baffled-piston bell. It needs an `ambient
+//! thermochemical` record and its packs. The mechanics clock is
+//! `mechanics_per_output` (1..=16) times the output clock, each mechanics
+//! sample taking `gas_steps_per_mechanics` fixed gas steps; the microphone
+//! receives every mechanics sample's bell volume flow.
+//!
 //! Limits, not hidden: one held bore (no valve or slide motion), a plane-mode
 //! mouth-flow transfer, a baffled-disk radiation integral, and the fs-duct
 //! flanged-radiation ceiling (`ka <= 20` at the Nyquist frequency of the
@@ -55,12 +66,15 @@
 use fs_blake3::{ContentHash, hash_domain};
 use fs_duct::{Duct, LossModel, Segment, Termination};
 use fs_material::gas::GasState;
-use fs_material::gas_species::input::{GasRecord, ThermochemicalSources, read_gas_record};
+use fs_material::gas_species::input::{
+    GasRecord, ThermochemicalSources, read_frozen_thermochemical_model, read_gas_record,
+};
+use fs_material::thermochemical_gas::ThermochemicalGasModel;
 use fs_math::det;
 use fs_scenario::gesture::{GestureSchedule, GestureTarget};
 use fs_vfit::discretize::DelayedFilter;
 
-use super::{BrassControl, BrassVoice, LipIsland};
+use super::{BrassBlockDiag, BrassControl, BrassVoice, LipIsland};
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::driving_point::LineLadder;
 use crate::driving_point::outlet::mouth_flow_line;
@@ -94,6 +108,26 @@ struct LipCore {
     face_area_m2: f64,
 }
 
+/// A `bore nonlinear` record: how the shared nonlinear gas bore is cut,
+/// clocked and walled.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct NonlinearBoreRecord {
+    /// Largest axial gas cell [m].
+    pub maximum_cell_m: f64,
+    /// Mechanics (microphone) samples per output sample, 1..=16.
+    pub mechanics_per_output: u32,
+    /// Fixed gas steps per mechanics sample.
+    pub gas_steps_per_mechanics: u32,
+    /// Zwikker-Kosten diffusive poles per wall field.
+    pub wall_poles: usize,
+    /// Band on which the wall memory is admitted [Hz].
+    pub wall_band_hz: [f64; 2],
+    /// Largest sampled relative error of either wall operator on that band.
+    pub wall_tolerance: f64,
+}
+
+const NONLINEAR_FEATURE: &str = "bore nonlinear needs fs-couple's nonlinear-brass feature (build music_render with --features nonlinear-brass)";
+
 /// A parsed, validated, not yet realized performance.
 #[derive(Debug, Clone)]
 pub struct LipDescription {
@@ -115,6 +149,7 @@ pub struct LipDescription {
     schedule: GestureSchedule,
     blow_track: String,
     tension_track: Option<String>,
+    nonlinear: Option<(NonlinearBoreRecord, ThermochemicalGasModel)>,
 }
 
 struct Fields<'a> {
@@ -321,6 +356,8 @@ impl LipDescription {
         let mut modes: Option<(usize, usize)> = None;
         let mut microphone: Option<CircularOutletReceiver> = None;
         let mut mouth_flow_tail_tol: Option<f64> = None;
+        let mut nonlinear: Option<NonlinearBoreRecord> = None;
+        let mut ambient_words = None;
         let mut segments: Vec<Segment> = Vec::new();
         for (index, raw) in lines {
             let line = index + 1;
@@ -359,6 +396,7 @@ impl LipDescription {
                     if f.words.clone().next() == Some("moist_air") {
                         f.words.next();
                     }
+                    ambient_words = Some(f.words.clone());
                     let record = read_gas_record(&mut f.words, None, sources)
                         .map_err(|e| format!("line {line}: ambient gas refused: {e}"))?;
                     once(&mut gas, record, &f)?;
@@ -456,6 +494,31 @@ impl LipDescription {
                         .map_err(|e| format!("line {line}: bessel: {e}"))?;
                     f.finish()?;
                 }
+                "bore" => {
+                    if f.word()? != "nonlinear" {
+                        return f.err("expected nonlinear");
+                    }
+                    let maximum_cell_m = f.positive()?;
+                    let mechanics_per_output = f.count(16)? as u32;
+                    let gas_steps_per_mechanics = f.count(64)? as u32;
+                    let wall_poles = f.count(64)? as usize;
+                    let wall_band_hz = [f.positive()?, f.positive()?];
+                    let wall_tolerance = f.positive()?;
+                    if wall_band_hz[0] >= wall_band_hz[1] || wall_tolerance >= 1.0 {
+                        return f
+                            .err("needs a rising wall band and a relative wall tolerance below 1");
+                    }
+                    let record = NonlinearBoreRecord {
+                        maximum_cell_m,
+                        mechanics_per_output,
+                        gas_steps_per_mechanics,
+                        wall_poles,
+                        wall_band_hz,
+                        wall_tolerance,
+                    };
+                    once(&mut nonlinear, record, &f)?;
+                    f.finish()?;
+                }
                 "mouth_flow_tail_tol" => {
                     let value = f.positive()?;
                     if value >= 1.0 {
@@ -525,6 +588,38 @@ impl LipDescription {
         }
         let blow_track =
             blow_track.ok_or_else(|| "a blowing-pressure track is required".to_string())?;
+        let nonlinear = match nonlinear {
+            None => None,
+            Some(_) if !cfg!(feature = "nonlinear-brass") => return Err(NONLINEAR_FEATURE.into()),
+            // Its bell is a rigid piston in an infinite baffle, nothing else.
+            Some(_) if termination != Some(Termination::FlangedOpen) => {
+                return Err(
+                    "bore nonlinear radiates as a baffled piston: it needs termination flanged"
+                        .into(),
+                );
+            }
+            Some(record) => {
+                // The bore evolves the ambient gas's own laws, never a snapshot.
+                let model = match (ambient_words, sources) {
+                    (Some(mut words), Some(sources))
+                        if words.clone().next() == Some("thermochemical") =>
+                    {
+                        read_frozen_thermochemical_model(&mut words, sources)
+                            .map_err(|e| {
+                                format!("bore nonlinear: ambient gas source refused: {e}")
+                            })?
+                            .0
+                    }
+                    _ => {
+                        return Err(
+                            "bore nonlinear evolves the ambient gas's own NASA-9 laws: it needs an ambient thermochemical record and its packs"
+                                .into(),
+                        );
+                    }
+                };
+                Some((record, model))
+            }
+        };
         let control_rate = u64::from(schedule.control_rate_hz);
         if control_rate == 0 || control_rate > u64::from(rate_hz) {
             return Err(
@@ -562,7 +657,15 @@ impl LipDescription {
             schedule,
             blow_track,
             tension_track,
+            nonlinear,
         })
+    }
+
+    /// The `bore nonlinear` record and the ambient source model it evolves,
+    /// when the file declares one.
+    #[must_use]
+    pub const fn nonlinear_bore(&self) -> Option<&(NonlinearBoreRecord, ThermochemicalGasModel)> {
+        self.nonlinear.as_ref()
     }
 
     /// The exact shared state used by the lip, bore, mouth-flow and receiver.
@@ -644,14 +747,30 @@ impl LipDescription {
         })
     }
 
-    /// Realize the bore line, the mouth-flow line and the microphone.
+    /// Realize the bore (the lines, or the nonlinear gas bore when the file
+    /// declares one) and the microphone.
     ///
     /// # Errors
     /// Any owner's refusal: the multimodal bank (passivity, ladder
-    /// convergence, radiation `ka` ceiling), the mouth-flow ladder or the
+    /// convergence, radiation `ka` ceiling), the mouth-flow ladder, the
+    /// nonlinear bore (gas source, mesh, wall binding, clock) or the
     /// receiver's resolved-band admission.
     pub fn build(&self) -> Result<LipPerformance, String> {
         let gas = self.ambient_gas();
+        let mouth_radius_m = self
+            .duct
+            .segments
+            .last()
+            .map(Segment::outlet_radius)
+            .ok_or_else(|| "empty bore".to_string())?;
+        let medium = RayleighMedium {
+            density: gas.density,
+            sound_speed: gas.sound_speed,
+        };
+        #[cfg(feature = "nonlinear-brass")]
+        if let Some((record, model)) = &self.nonlinear {
+            return self.build_nonlinear(*record, model, mouth_radius_m, medium);
+        }
         let config = MmLineConfig {
             sample_rate_hz: self.rate_hz,
             n_modes: self.modes,
@@ -687,16 +806,6 @@ impl LipDescription {
             },
         )
         .map_err(|e| format!("mouth-flow line refused: {e}"))?;
-        let mouth_radius_m = self
-            .duct
-            .segments
-            .last()
-            .map(Segment::outlet_radius)
-            .ok_or_else(|| "empty bore".to_string())?;
-        let medium = RayleighMedium {
-            density: gas.density,
-            sound_speed: gas.sound_speed,
-        };
         let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
             mouth_radius_m,
             self.rate_hz,
@@ -704,6 +813,112 @@ impl LipDescription {
             self.microphone,
             medium,
         )?;
+        let bore = LipBoreInfo::Linear(LinearBoreInfo {
+            line,
+            mouth_flow_taps: mouth_receipt.n_fft,
+            mouth_flow_rungs: mouth_receipt.rungs.len(),
+            mouth_flow_tail_tol: self.mouth_flow_tail_tol,
+            mouth_flow_ladder: mouth_receipt
+                .rungs
+                .iter()
+                .map(|r| (r.n_fft, r.tail_energy, r.tap_change))
+                .collect(),
+        });
+        Ok(self.performance(
+            mouth_radius_m,
+            bore,
+            Engine::Linear { voice, mouth },
+            receiver,
+            1,
+        ))
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    fn build_nonlinear(
+        &self,
+        record: NonlinearBoreRecord,
+        model: &ThermochemicalGasModel,
+        mouth_radius_m: f64,
+        medium: RayleighMedium,
+    ) -> Result<LipPerformance, String> {
+        use super::nonlinear::{NonlinearClock, NonlinearLip};
+        use fs_duct::nonlinear::bore::{WallGas, WallMemory};
+        use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
+        use fs_qty::Temperature;
+        let gas = self.ambient_gas();
+        let [lowest, highest] = room_region(model.thermodynamics(), gas.temperature)?;
+        let source = FrozenGas::new(
+            model.thermodynamics().clone(),
+            CaloricDomain::new(Temperature::new(lowest), Temperature::new(highest)),
+            || false,
+        )
+        .map_err(|e| format!("nonlinear bore gas refused: {e}"))?;
+        let clock = NonlinearClock {
+            maximum_cell_m: record.maximum_cell_m,
+            output_rate_hz: self.rate_hz,
+            mechanics_per_output: record.mechanics_per_output,
+            gas_steps_per_mechanics: record.gas_steps_per_mechanics,
+            wall: WallMemory {
+                poles: record.wall_poles,
+                band_hz: record.wall_band_hz,
+                maximum_relative_error: record.wall_tolerance,
+            },
+        };
+        let wall_gas = WallGas {
+            density_kg_m3: gas.density,
+            dynamic_viscosity_pa_s: gas.dynamic_viscosity,
+            gamma: gas.gamma,
+            prandtl: gas.prandtl,
+        };
+        let lip = NonlinearLip::new(
+            &self.duct,
+            source,
+            gas.temperature,
+            gas.pressure,
+            wall_gas,
+            self.lip.clone(),
+            self.cup_volume_m3,
+            clock,
+        )?;
+        let receiver = BaffledPressure::circular_outlet_multirate_differentiating(
+            mouth_radius_m,
+            clock.mechanics_rate_hz(),
+            self.rate_hz,
+            self.microphone,
+            medium,
+        )?;
+        let wall = lip
+            .wall_receipt()
+            .ok_or_else(|| "the nonlinear bore bound no wall memory".to_string())?;
+        let bore = LipBoreInfo::Nonlinear(NonlinearBoreInfo {
+            record,
+            mechanics_rate_hz: clock.mechanics_rate_hz(),
+            gas_step_s: clock.gas_step_s(),
+            cells: lip.bore().centers_m().len(),
+            radiation_taps: lip.bore().radiation_taps(),
+            wall_distinct_radii: wall.distinct_radii,
+            wall_maximum_arms: wall.maximum_arms,
+            wall_maximum_complex_error: wall.maximum_complex_error,
+            wall_maximum_loss_error: wall.maximum_loss_error,
+        });
+        Ok(self.performance(
+            mouth_radius_m,
+            bore,
+            Engine::Nonlinear(Box::new(lip)),
+            receiver,
+            record.mechanics_per_output as usize,
+        ))
+    }
+
+    fn performance(
+        &self,
+        mouth_radius_m: f64,
+        bore: LipBoreInfo,
+        engine: Engine,
+        receiver: BaffledPressure,
+        ratio: usize,
+    ) -> LipPerformance {
+        let gas = self.ambient_gas();
         let info = LipInfo {
             input_hash: self.input_hash,
             sample_rate_hz: self.rate_hz,
@@ -719,22 +934,13 @@ impl LipDescription {
             gas_temperature_k: gas.temperature,
             sound_speed_m_s: gas.sound_speed,
             microphone: self.microphone,
-            line,
-            mouth_flow_taps: mouth_receipt.n_fft,
-            mouth_flow_rungs: mouth_receipt.rungs.len(),
-            mouth_flow_tail_tol: self.mouth_flow_tail_tol,
-            mouth_flow_ladder: mouth_receipt
-                .rungs
-                .iter()
-                .map(|r| (r.n_fft, r.tail_energy, r.tap_change))
-                .collect(),
+            bore,
             control_rate_hz: self.schedule.control_rate_hz,
             has_lip_tension_track: self.tension_track.is_some(),
         };
-        Ok(LipPerformance {
+        LipPerformance {
             info,
-            voice,
-            mouth,
+            engine,
             receiver,
             schedule: self.schedule.clone(),
             blow_track: self.blow_track.clone(),
@@ -745,12 +951,58 @@ impl LipDescription {
             poisoned: false,
             mouthpiece: vec![0.0; MAX_BLOCK],
             outgoing: vec![0.0; MAX_BLOCK],
-            trace: [0.0],
+            trace: vec![0.0; MAX_BLOCK * ratio],
+            ratio,
             window_len: u64::from(self.rate_hz / 10).max(1),
             acc: Vec::new(),
             tap: None,
-        })
+        }
     }
+}
+
+/// The temperatures the nonlinear field may reach: for every species, the
+/// NASA-9 region that holds the room. The packs state no caloric continuity
+/// across their region boundaries, so a state that would cross one refuses
+/// instead. A bound shared with the next region belongs to that region.
+#[cfg(feature = "nonlinear-brass")]
+fn room_region(
+    source: &fs_thermochem::mixture::FrozenIdealGasMixtureModelV1,
+    room_k: f64,
+) -> Result<[f64; 2], String> {
+    let mut domain = [0.0_f64, f64::INFINITY];
+    for component in source.components() {
+        let regions = component.regions();
+        let shared = |index: usize, maximum: f64| {
+            regions
+                .get(index + 1)
+                .is_some_and(|next| next.temperature_min().value().to_bits() == maximum.to_bits())
+        };
+        let (index, region) = regions
+            .iter()
+            .enumerate()
+            .find(|(index, region)| {
+                let (minimum, maximum) = (
+                    region.temperature_min().value(),
+                    region.temperature_max().value(),
+                );
+                room_k >= minimum
+                    && (room_k < maximum || (!shared(*index, maximum) && room_k <= maximum))
+            })
+            .ok_or_else(|| {
+                format!(
+                    "bore nonlinear: the room ({room_k} K) lies outside every NASA-9 region of {}",
+                    component.species()
+                )
+            })?;
+        let maximum = region.temperature_max().value();
+        domain[0] = domain[0].max(region.temperature_min().value());
+        domain[1] = domain[1].min(if shared(index, maximum) {
+            maximum.next_down()
+        } else {
+            maximum
+        });
+    }
+    Ok(domain)
 }
 
 /// What a realized performance reports about itself.
@@ -784,6 +1036,26 @@ pub struct LipInfo {
     pub sound_speed_m_s: f64,
     /// The declared microphone.
     pub microphone: CircularOutletReceiver,
+    /// How the bore was realized, with its receipts.
+    pub bore: LipBoreInfo,
+    /// Control clock of the pressure phrase [Hz].
+    pub control_rate_hz: u32,
+    /// Whether a pre-stress (lip tension) track drives the lip.
+    pub has_lip_tension_track: bool,
+}
+
+/// The realized bore of a performance.
+#[derive(Debug, Clone)]
+pub enum LipBoreInfo {
+    /// The multimodal reflectance line and the plane-mode mouth-flow line.
+    Linear(LinearBoreInfo),
+    /// The shared nonlinear gas bore.
+    Nonlinear(NonlinearBoreInfo),
+}
+
+/// Receipts of the linear lines.
+#[derive(Debug, Clone)]
+pub struct LinearBoreInfo {
     /// Realization receipt of the multimodal reflectance line.
     pub line: MmComboReceipt,
     /// Taps of the mouth-flow line.
@@ -795,10 +1067,29 @@ pub struct LipInfo {
     pub mouth_flow_tail_tol: f64,
     /// Every mouth-flow rung: `(taps, tail energy, tap change vs the previous rung)`.
     pub mouth_flow_ladder: Vec<(usize, f64, f64)>,
-    /// Control clock of the pressure phrase [Hz].
-    pub control_rate_hz: u32,
-    /// Whether a pre-stress (lip tension) track drives the lip.
-    pub has_lip_tension_track: bool,
+}
+
+/// Receipts of the nonlinear gas bore.
+#[derive(Debug, Clone, Copy)]
+pub struct NonlinearBoreInfo {
+    /// The declared record.
+    pub record: NonlinearBoreRecord,
+    /// Mechanics (microphone) clock [Hz].
+    pub mechanics_rate_hz: u32,
+    /// Fixed gas step [s].
+    pub gas_step_s: f64,
+    /// Gas cells.
+    pub cells: usize,
+    /// Past bell flows the piston radiation convolves.
+    pub radiation_taps: usize,
+    /// Distinct wall radii bound.
+    pub wall_distinct_radii: usize,
+    /// Largest viscous or thermal arm count in any cell.
+    pub wall_maximum_arms: usize,
+    /// Worst sampled complex error of the wall operators on the band.
+    pub wall_maximum_complex_error: f64,
+    /// Worst sampled error of their dissipative parts.
+    pub wall_maximum_loss_error: f64,
 }
 
 /// The passive bore's response at one frequency, at its input plane (the mouthpiece cup rim).
@@ -880,12 +1171,38 @@ impl WindowAcc {
     }
 }
 
+enum Engine {
+    Linear {
+        voice: BrassVoice,
+        mouth: DelayedFilter,
+    },
+    #[cfg(feature = "nonlinear-brass")]
+    Nonlinear(Box<super::nonlinear::NonlinearLip>),
+}
+
+impl Engine {
+    fn apply(&mut self, control: BrassControl) -> Result<(), String> {
+        match self {
+            Self::Linear { voice, .. } => voice.apply(control).map_err(|e| e.to_string()),
+            #[cfg(feature = "nonlinear-brass")]
+            Self::Nonlinear(lip) => lip.apply(control),
+        }
+    }
+
+    fn diagnostics(&self) -> &[BrassBlockDiag] {
+        match self {
+            Self::Linear { voice, .. } => voice.diagnostics(),
+            #[cfg(feature = "nonlinear-brass")]
+            Self::Nonlinear(lip) => lip.diagnostics(),
+        }
+    }
+}
+
 /// A realized performance: the lip, the bore and the microphone, advanced
 /// together on one physical clock.
 pub struct LipPerformance {
     info: LipInfo,
-    voice: BrassVoice,
-    mouth: DelayedFilter,
+    engine: Engine,
     receiver: BaffledPressure,
     schedule: GestureSchedule,
     blow_track: String,
@@ -896,7 +1213,8 @@ pub struct LipPerformance {
     poisoned: bool,
     mouthpiece: Vec<f64>,
     outgoing: Vec<f64>,
-    trace: [f64; 1],
+    trace: Vec<f64>,
+    ratio: usize,
     window_len: u64,
     acc: Vec<WindowAcc>,
     tap: Option<Vec<f64>>,
@@ -922,8 +1240,8 @@ impl LipPerformance {
 
     /// The loop's per-chunk diagnostics (lock estimate, gap and power ledger).
     #[must_use]
-    pub fn diagnostics(&self) -> &[super::BrassBlockDiag] {
-        self.voice.diagnostics()
+    pub fn diagnostics(&self) -> &[BrassBlockDiag] {
+        self.engine.diagnostics()
     }
 
     /// Start recording the pressure at the mouthpiece (the internal pressure the
@@ -969,7 +1287,7 @@ impl LipPerformance {
             .sample(&self.blow_track, tick)
             .map_err(|e| format!("pressure schedule refused: {e:?}"))?;
         if pressure != self.applied_pressure {
-            self.voice
+            self.engine
                 .apply(BrassControl::SetBlowingPressure(pressure))
                 .map_err(|e| format!("blowing pressure refused: {e}"))?;
             self.applied_pressure = pressure;
@@ -980,7 +1298,7 @@ impl LipPerformance {
                 .sample(track, tick)
                 .map_err(|e| format!("lip tension schedule refused: {e:?}"))?;
             if tension != self.applied_tension {
-                self.voice
+                self.engine
                     .apply(BrassControl::SetLipTension(tension))
                     .map_err(|e| format!("lip tension refused: {e}"))?;
                 self.applied_tension = tension;
@@ -1003,10 +1321,17 @@ impl LipPerformance {
                 .min(output.len() - done)
                 .min(MAX_BLOCK)
                 .max(1);
-            self.voice
-                .step_block_outgoing(&mut self.mouthpiece[..chunk], &mut self.outgoing[..chunk])
-                .map_err(|e| format!("brass loop refused: {e}"))?;
-            let diag = self.voice.diagnostics().last().cloned();
+            match &mut self.engine {
+                Engine::Linear { voice, .. } => voice
+                    .step_block_outgoing(&mut self.mouthpiece[..chunk], &mut self.outgoing[..chunk])
+                    .map_err(|e| format!("brass loop refused: {e}"))?,
+                #[cfg(feature = "nonlinear-brass")]
+                Engine::Nonlinear(lip) => lip.step_block(
+                    &mut self.mouthpiece[..chunk],
+                    &mut self.trace[..chunk * self.ratio],
+                )?,
+            }
+            let diag = self.engine.diagnostics().last().cloned();
             let window = usize::try_from(n / self.window_len).unwrap_or(usize::MAX);
             while self.acc.len() <= window {
                 self.acc.push(WindowAcc::new());
@@ -1030,12 +1355,17 @@ impl LipPerformance {
                 acc.gap_mean_sum += d.gap_mean_m;
             }
             for i in 0..chunk {
-                let flow = self
-                    .mouth
-                    .push(self.outgoing[i])
-                    .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
-                self.trace[0] = flow;
-                output[done + i] = self.receiver.step_trace(&self.trace)?;
+                let frame = match &mut self.engine {
+                    Engine::Linear { mouth, .. } => {
+                        self.trace[0] = mouth
+                            .push(self.outgoing[i])
+                            .map_err(|e| format!("mouth-flow line refused: {e:?}"))?;
+                        &self.trace[..self.ratio]
+                    }
+                    #[cfg(feature = "nonlinear-brass")]
+                    Engine::Nonlinear(_) => &self.trace[i * self.ratio..(i + 1) * self.ratio],
+                };
+                output[done + i] = self.receiver.step_trace(frame)?;
             }
             done += chunk;
         }
@@ -1346,6 +1676,16 @@ mod tests {
                 "only appear once",
             ),
             ("bessel 0.01 0.02 0.1 1 0\n", "outside its admitted range"),
+            ("bore linear 0.0024\n", "expected nonlinear"),
+            (
+                "bore nonlinear 0.0024 17 1 24 20 8000 1e-2\n",
+                "outside its admitted range",
+            ),
+            (
+                "bore nonlinear 0.0024 16 1 24 8000 20 1e-2\n",
+                "rising wall band",
+            ),
+            ("bore nonlinear 0.0024 16 1 24 20 8000 1\n", "below 1"),
         ] {
             let error = LipDescription::from_bytes(fixture(extra).as_bytes()).expect_err(extra);
             assert!(error.contains(needle), "{extra:?} -> {error}");
@@ -1427,7 +1767,10 @@ mod tests {
         let description = LipDescription::from_bytes(fixture("").as_bytes()).expect("parses");
         let mut performance = description.build().expect("builds");
         assert_eq!(performance.info().samples, 2400);
-        assert!(performance.info().mouth_flow_taps >= 256);
+        let LipBoreInfo::Linear(lines) = &performance.info().bore else {
+            panic!("a file without a bore record realizes the lines");
+        };
+        assert!(lines.mouth_flow_taps >= 256);
         assert!(performance.validate_sample_rate(48_000).is_err());
         assert!(performance.validate_sample_rate(24_000).is_ok());
         assert!(performance.validate_sample_count(2401).is_err());
@@ -1438,5 +1781,377 @@ mod tests {
         }
         assert_eq!(performance.samples_rendered(), 2400);
         assert!(performance.block(&mut block).is_err());
+    }
+
+    const NONLINEAR_RECORD: &str = "bore nonlinear 0.0024 16 1 64 20 8000 1e-2\n";
+    #[cfg(feature = "nonlinear-brass")]
+    const SPECIMEN: &str = "thermochemical 293.15 101325 mole 1 specimen-gas 1";
+
+    #[cfg(not(feature = "nonlinear-brass"))]
+    #[test]
+    fn a_nonlinear_bore_is_refused_by_name_without_its_feature() {
+        let error = LipDescription::from_bytes(fixture(NONLINEAR_RECORD).as_bytes())
+            .expect_err("no nonlinear bore in this build");
+        assert!(error.contains("nonlinear-brass"), "{error}");
+    }
+
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn a_nonlinear_bore_evolves_only_a_source_backed_ambient_gas_through_a_flanged_bell() {
+        let error = LipDescription::from_bytes(fixture(NONLINEAR_RECORD).as_bytes())
+            .expect_err("a snapshot gas cannot evolve");
+        assert!(error.contains("ambient thermochemical"), "{error}");
+        let unflanged =
+            fixture(NONLINEAR_RECORD).replace("termination flanged", "termination unflanged");
+        let error = LipDescription::from_bytes(unflanged.as_bytes())
+            .expect_err("the nonlinear bell is a baffled piston");
+        assert!(error.contains("termination flanged"), "{error}");
+    }
+
+    /// One NASA-9 species: each region is (lowest K, highest K, a0..=a8).
+    #[cfg(feature = "nonlinear-brass")]
+    fn nasa9_species(
+        name: &str,
+        molar_mass: f64,
+        reference_pressure: f64,
+        elemental_reference: &str,
+        regions: &[(f64, f64, [f64; 9])],
+        source: &str,
+    ) -> fs_thermochem::Nasa9StandardStateModelV1 {
+        use fs_evidence::ValidityDomain;
+        use fs_matdb::{
+            ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance,
+        };
+        use fs_qty::{MolarMass, Pressure};
+        use fs_thermochem::{
+            ElementalReferenceIdV1, NASA9_LAW_ID_V1, NASA9_LAW_VERSION_V1,
+            NASA9_STATE_SCHEMA_VERSION_V1, Nasa9RegionV1, Nasa9StandardStateModelV1,
+            ReferenceEquationOfStateV1, SpeciesId, StandardStateConventionV1, StandardStatePhaseV1,
+            required_nasa9_parameter_dims,
+        };
+        let regions = regions
+            .iter()
+            .map(|&(low, high, a)| {
+                let mut parameters = std::collections::BTreeMap::new();
+                for ((name, dims), value) in
+                    required_nasa9_parameter_dims().into_iter().take(9).zip(a)
+                {
+                    parameters.insert(name.to_owned(), LawParameter { value, dims });
+                }
+                parameters.insert(
+                    "reference_pressure".into(),
+                    LawParameter {
+                        value: reference_pressure,
+                        dims: Pressure::DIMS,
+                    },
+                );
+                Nasa9RegionV1::from_card(ConstitutiveModelCard {
+                    law: LawId(NASA9_LAW_ID_V1.into()),
+                    law_version: NASA9_LAW_VERSION_V1,
+                    parameters,
+                    state_schema_version: NASA9_STATE_SCHEMA_VERSION_V1,
+                    initial_state: InitialStatePolicy::ZeroInternalState,
+                    validity: ValidityDomain::unconstrained().with("T", low, high),
+                    sources: Vec::new(),
+                    provenance: Provenance {
+                        source: source.into(),
+                        license: "test fixture".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap()
+            })
+            .collect();
+        Nasa9StandardStateModelV1::new(
+            SpeciesId::new(name).unwrap(),
+            MolarMass::new(molar_mass),
+            StandardStateConventionV1::new(
+                StandardStatePhaseV1::Gas,
+                ReferenceEquationOfStateV1::IdealGas,
+                Pressure::new(reference_pressure),
+                ElementalReferenceIdV1::new(elemental_reference).unwrap(),
+            )
+            .unwrap(),
+            regions,
+        )
+        .unwrap()
+    }
+
+    /// A data/matdb/seed-v1 species: molar mass, reference pressure and
+    /// elemental reference from species.tsv; every region's bounds and
+    /// coefficients from the McBride nasa9.tsv.
+    #[cfg(feature = "nonlinear-brass")]
+    fn seed_species(species: &str, nasa9: &str) -> fs_thermochem::Nasa9StandardStateModelV1 {
+        let row: Vec<&str> = species
+            .lines()
+            .find(|line| line.starts_with("species\t"))
+            .unwrap()
+            .split('\t')
+            .collect();
+        assert_eq!(
+            (row[3], row[4], row[5], row[7]),
+            ("g/mol", "gas", "ideal-gas", "kPa"),
+            "{row:?}"
+        );
+        let reference_pressure = row[6].parse::<f64>().unwrap() * 1e3;
+        let mut regions: Vec<(String, f64, f64, [f64; 9])> = Vec::new();
+        for line in nasa9.lines() {
+            let fields: Vec<&str> = line.split('\t').collect();
+            match fields.first() {
+                Some(&"region") => {
+                    assert_eq!((fields[5], fields[7]), ("K", "Pa"), "{line}");
+                    assert_eq!(fields[6].parse::<f64>().unwrap(), reference_pressure);
+                    regions.push((
+                        fields[2].to_owned(),
+                        fields[3].parse().unwrap(),
+                        fields[4].parse().unwrap(),
+                        [f64::NAN; 9],
+                    ));
+                }
+                Some(&"coefficient") => {
+                    let region = regions.iter_mut().find(|r| r.0 == fields[2]).unwrap();
+                    let index: usize = fields[3].strip_prefix('a').unwrap().parse().unwrap();
+                    region.3[index] = fields[4].parse().unwrap();
+                }
+                _ => {}
+            }
+        }
+        let regions: Vec<_> = regions
+            .into_iter()
+            .map(|(_, low, high, a)| {
+                assert!(a.iter().all(|c| c.is_finite()), "{a:?}");
+                (low, high, a)
+            })
+            .collect();
+        nasa9_species(
+            row[1],
+            row[2].parse::<f64>().unwrap() * 1e-3,
+            reference_pressure,
+            row[8],
+            &regions,
+            "McBride, Zehe and Gordon (2002), NASA/TP-2002-211556 (data/matdb/seed-v1)",
+        )
+    }
+
+    // A species split at 1000 K, like every McBride (2002) air pack: the field
+    // keeps to the room's region, which the source admits; the old fixed
+    // 200-1000 K domain crossed the shared bound and refused.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn the_nonlinear_field_keeps_to_the_nasa9_region_that_holds_the_room() {
+        use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
+        use fs_qty::Temperature;
+        use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+        use fs_thermochem::{Composition, CompositionBasis};
+        let mut a = [0.0; 9];
+        a[2] = 3.5;
+        let source = FrozenIdealGasMixtureModelV1::new(
+            vec![nasa9_species(
+                "split-gas",
+                0.029,
+                1.0e5,
+                "split-fixture",
+                &[(200.0, 1000.0, a), (1000.0, 6000.0, a)],
+                "two-region test fixture, not data",
+            )],
+            Composition::new(CompositionBasis::MoleFraction, vec![1.0]).unwrap(),
+        )
+        .unwrap();
+        let crossing = FrozenGas::new(
+            source.clone(),
+            CaloricDomain::new(Temperature::new(200.0), Temperature::new(1000.0)),
+            || false,
+        )
+        .expect_err("1000 K belongs to the upper region");
+        assert!(
+            format!("{crossing}").contains("caloric continuity"),
+            "{crossing}"
+        );
+        let [low, high] = room_region(&source, 293.15).unwrap();
+        assert_eq!(low, 200.0);
+        assert!(high < 1000.0 && high == 1000.0_f64.next_down(), "{high}");
+        FrozenGas::new(
+            source.clone(),
+            CaloricDomain::new(Temperature::new(low), Temperature::new(high)),
+            || false,
+        )
+        .unwrap();
+        // A hot room is held in the upper region; a room off the source refuses.
+        assert_eq!(room_region(&source, 1200.0).unwrap(), [1000.0, 6000.0]);
+        let error = room_region(&source, 150.0).unwrap_err();
+        assert!(error.contains("outside every NASA-9 region"), "{error}");
+    }
+
+    // The air the trumpet A/B renders breathe: the McBride (2002) N2, O2, Ar
+    // and CO2 tables of data/matdb/seed-v1, each split at 1000 K with no
+    // stated caloric continuity. The old fixed 200-1000 K domain refused this
+    // air by name; the room's region admits it, a room state round-trips at
+    // the ideal-gas sound speed of dry air, and a state above the region
+    // refuses rather than extrapolating. The sound-speed bound (0.5 m/s about
+    // Cramer's 343.2 m/s for dry air at 20 C, JASA 93 (1993) 2510) was fixed
+    // before the first run.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn the_nonlinear_field_admits_the_mcbride_air_in_the_rooms_region() {
+        use fs_duct::nonlinear::{CaloricDomain, FrozenGas};
+        use fs_qty::Temperature;
+        use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
+        use fs_thermochem::{Composition, CompositionBasis};
+        macro_rules! seed {
+            ($name:literal) => {
+                seed_species(
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../data/matdb/seed-v1/",
+                        $name,
+                        "/species.tsv"
+                    )),
+                    include_str!(concat!(
+                        env!("CARGO_MANIFEST_DIR"),
+                        "/../../data/matdb/seed-v1/",
+                        $name,
+                        "-nasa9-mcbride2002/nasa9.tsv"
+                    )),
+                )
+            };
+        }
+        let air = vec![
+            seed!("nitrogen"),
+            seed!("oxygen"),
+            seed!("argon"),
+            seed!("carbon-dioxide"),
+        ];
+        for species in &air {
+            let regions = species.regions();
+            assert_eq!(regions.len(), 2, "{:?}", species.species());
+            assert_eq!(regions[0].temperature_max().value(), 1000.0);
+            assert_eq!(regions[1].temperature_min().value(), 1000.0);
+            assert!(species.caloric_reference().is_none());
+        }
+        // Dry air by mole: N2 78.084, O2 20.946, Ar 0.934, CO2 0.036 %.
+        let source = FrozenIdealGasMixtureModelV1::new(
+            air,
+            Composition::new(
+                CompositionBasis::MoleFraction,
+                vec![0.78084, 0.20946, 0.00934, 0.00036],
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let crossing = FrozenGas::new(
+            source.clone(),
+            CaloricDomain::new(Temperature::new(200.0), Temperature::new(1000.0)),
+            || false,
+        )
+        .expect_err("the McBride air states no continuity at 1000 K");
+        assert!(
+            format!("{crossing}").contains("caloric continuity"),
+            "{crossing}"
+        );
+        let [low, high] = room_region(&source, 293.15).unwrap();
+        assert_eq!([low, high], [200.0, 1000.0_f64.next_down()]);
+        let gas = FrozenGas::new(
+            source,
+            CaloricDomain::new(Temperature::new(low), Temperature::new(high)),
+            || false,
+        )
+        .unwrap();
+        let r = gas.gas_constant();
+        let room = gas
+            .conserved(101_325.0 / (r * 293.15), 0.0, 101_325.0)
+            .unwrap();
+        let state = gas.primitive(room, || false).unwrap();
+        println!(
+            "mcbride air: R {r:.4} J/(kg K), T {:.9} K, c {:.4} m/s",
+            state.temperature, state.sound_speed
+        );
+        assert!((state.temperature - 293.15).abs() <= 1e-9, "{state:?}");
+        assert!((state.sound_speed - 343.2).abs() <= 0.5, "{state:?}");
+        let hot = gas
+            .conserved(101_325.0 / (r * 1200.0), 0.0, 101_325.0)
+            .expect_err("1200 K lies above the room's region");
+        assert!(
+            format!("{hot}").contains("outside declared interval"),
+            "{hot}"
+        );
+    }
+
+    // The same lip, bore, gas and steady blow through both bore engines: the
+    // nonlinear bore must speak in the regime the linear loop finds. The
+    // tolerance (3 % on the playing frequency) was fixed before the first run.
+    #[cfg(feature = "nonlinear-brass")]
+    #[test]
+    fn the_lip_speaks_on_the_nonlinear_bore_in_the_linear_loops_regime() {
+        use fs_material::gas_species::input::ThermochemicalPhase;
+        const STEADY: &str = "frankensim-gesture-schedule-v1\n\
+            control_rate_hz\t700\n\
+            tracks\t1\n\
+            track\tblow\tblowing-pressure\n\
+            initial\tpressure-pa\t0e0\n\
+            events\t1\n\
+            event\t0e0\t1e-2\tpressure-pa\t3e3\n";
+        let packs = gas_test_support::packs("specimen-gas", 0.029, 3.5, 200.0);
+        let bindings = [packs.binding()];
+        let sources = ThermochemicalSources {
+            species: &bindings,
+            water_species: None,
+            phase: ThermochemicalPhase::FrozenGas,
+        };
+        let text = |extra: &str| {
+            fixture(extra)
+                .replace("moist_air 293.15 101325 0", SPECIMEN)
+                .replace("audio 24000 2400", "audio 24000 4800")
+                .replace(SCHEDULE, STEADY)
+        };
+        let render = |text: String| {
+            let description =
+                LipDescription::from_bytes_with_gas_sources(text.as_bytes(), Some(&sources))
+                    .unwrap();
+            let mut performance = description.build().unwrap();
+            performance.record_mouthpiece();
+            let started = std::time::Instant::now();
+            let mut radiated = vec![0.0; 4800];
+            for block in radiated.chunks_mut(600) {
+                performance.block(block).unwrap();
+            }
+            let seconds = started.elapsed().as_secs_f64();
+            // The last 0.1 s: AC level and the playing frequency from the
+            // interpolated first and last rising mean crossings.
+            let tail = &performance.mouthpiece_pressure()[2400..];
+            let mean = tail.iter().sum::<f64>() / tail.len() as f64;
+            let rms = (tail.iter().map(|p| (p - mean) * (p - mean)).sum::<f64>()
+                / tail.len() as f64)
+                .sqrt();
+            let rising: Vec<f64> = tail
+                .windows(2)
+                .enumerate()
+                .filter(|(_, w)| w[0] < mean && w[1] >= mean)
+                .map(|(i, w)| i as f64 + (mean - w[0]) / (w[1] - w[0]))
+                .collect();
+            let frequency = match rising.as_slice() {
+                [first, .., last] => (rising.len() - 1) as f64 * 24_000.0 / (last - first),
+                _ => 0.0,
+            };
+            let level = radiated.iter().map(|p| p * p).sum::<f64>().sqrt();
+            assert!(radiated.iter().all(|p| p.is_finite()) && level > 0.0);
+            (performance.info().bore.clone(), rms, frequency, seconds)
+        };
+        let (_, rms_linear, f_linear, s_linear) = render(text(""));
+        let (bore, rms_nonlinear, f_nonlinear, s_nonlinear) = render(text(NONLINEAR_RECORD));
+        let LipBoreInfo::Nonlinear(receipt) = bore else {
+            panic!("the record realizes the nonlinear bore");
+        };
+        println!(
+            "lip regime: linear {f_linear:.2} Hz rms {rms_linear:.1} Pa ({s_linear:.1} s) | nonlinear {f_nonlinear:.2} Hz rms {rms_nonlinear:.1} Pa ({s_nonlinear:.1} s) | {receipt:?}"
+        );
+        assert!(
+            rms_linear > 150.0,
+            "the linear loop must speak: {rms_linear} Pa"
+        );
+        assert!(
+            rms_nonlinear > 150.0,
+            "the nonlinear loop must speak: {rms_nonlinear} Pa"
+        );
+        assert!((f_nonlinear / f_linear - 1.0).abs() <= 0.03);
     }
 }

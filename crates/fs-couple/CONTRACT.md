@@ -3544,6 +3544,56 @@ None.
   the lock estimate, gap statistics, blow/bore work, and the lip
   island's supply defect.
 
+- `brass_loop::nonlinear` (feature `nonlinear-brass`, bead frankensim-giuhr,
+  IRP M2.3-W2a): the same lip island on the shared nonlinear Euler bore
+  (`fs_duct::nonlinear::bore`). The mouth is a stagnation reservoir at room
+  temperature and room pressure plus the blow. Forward flow leaves it through
+  the source's isentropic nozzle at the face pressure; reverse flow leaves the
+  bore's static end state into the mouth. The face pressure solves continuity
+  between the metered lip flow and the bore's own end wave (a strictly
+  monotone residual, bracketed between the closed-end pressure and the mouth
+  pressure, Illinois false position to 1e-12 of the bracket). Inflow energy is
+  mass flux times the mouth's stagnation enthalpy. The lip advances once per
+  gas step by its exact zero-order-hold split under the face pressure. The bell
+  flow is averaged per mechanics sample and observed by the multirate baffled
+  receiver.
+  - **Lip file:** `bore nonlinear <max_cell_m> <mechanics_per_output<=16>
+    <gas_steps_per_mechanics<=64> <wall_poles> <band_lo_hz> <band_hi_hz>
+    <wall_error<1>`. It needs `ambient thermochemical ...` with its source packs
+    (the bore evolves the ambient gas's own NASA-9 laws) and `termination
+    flanged` (its bell is a baffled piston). The feature is off by default:
+    a default `music_render` refuses the record by name (tested in a
+    default-feature build) and never falls back to the linear bore. Build:
+    `cargo build --release -p fs-couple --bin music_render --features
+    nonlinear-brass`.
+    The wall memory is admitted per radius by `fs_phs::ZkDiffusiveBasis` on the
+    declared band: on 20-8000 Hz at 1 %, 24 poles resolve radii up to about
+    6 mm and 64 (the fs-phs cap) up to about 35 mm; a 61 mm trumpet bell needs
+    a declared error of 7e-2 at 64 poles.
+  - **Limits:** inflow mixes out at the mouth temperature; reverse flow
+    uses the static end state as donor; the cup is a lumped volume on the first
+    cell; valves refuse. The field keeps to the NASA-9 region that holds the
+    room for every species (the McBride air packs split at 1000 K and state no
+    caloric continuity across it); a state that would leave it refuses. A test
+    builds that air from the data/matdb/seed-v1 McBride tables: the old fixed
+    200-1000 K domain refuses it, the room's region admits it, and a room state
+    round-trips at 343.24 m/s.
+  - **Linear limit** (GO condition, mail 9115): a 1e-8 m^3/s pulse into the
+    fixture bore reproduces the multimodal input impedance the linear
+    `MmLineBank` is realized from (Bessel loss, flanged end). The first six
+    peaks: within 10 cents, 1.5 dB and 10 % in Q (tolerances fixed before the
+    run). Measured with 64 poles on 20-8000 Hz (wall
+    error 4.9e-3 complex, 6.0e-3 loss): -0.82 to +2.12 cents, -0.10 to -0.25 dB,
+    Q -0.6 to -1.8 %.
+  - **Cost** (ts1 at load ~100, trumpet Bb4, 4 s at 32 kHz): the linear loop
+    takes 132-135 s per audio second, the nonlinear bore about 7000 s, about
+    80 % of it in the four-species NASA-9 mixture caloric law (the wall update
+    is 8 %). The next lever, fewer caloric-law evaluations per gas step, is the
+    fs-gas/fs-thermochem owner's call and is not done. The fixed-lip-input
+    trumpet A/B against UIowa is recorded on bead frankensim-giuhr; the graded
+    trumpet cards stay on the linear bore until that A/B shows the nonlinear
+    bore helps on the origin grader.
+
 - `flue_loop` module (bead 3ez8g.10.3): the composed flue playing loop
   — no `Flute` type. `FlueVoice` = the jet-drive island x the wind
   line. NO CARD -> REFUSE: the island is parameterized only from a jet

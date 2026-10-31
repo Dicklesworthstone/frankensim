@@ -39,6 +39,10 @@ use fs_duct::Duct;
 /// File-driven lip-valve performances observed at a baffled microphone.
 pub mod performance;
 
+/// The lip on the shared nonlinear gas bore (the `nonlinear-brass` feature).
+#[cfg(feature = "nonlinear-brass")]
+pub mod nonlinear;
+
 /// The lip island's reduced parameters plus their provenance labels.
 #[derive(Debug, Clone)]
 pub struct LipIsland {
@@ -371,22 +375,9 @@ impl BrassVoice {
             *slot = p_now;
         }
         let n = out.len() as f64;
-        // Zero-crossing lock estimate against the block mean (the
-        // mouthpiece pressure rides a DC operating point).
-        let mean = out.iter().sum::<f64>() / n;
-        let mut crossings_ac = 0usize;
-        let mut prev = out[0] - mean;
-        for &p in &out[1..] {
-            let v = p - mean;
-            if prev < 0.0 && v >= 0.0 {
-                crossings_ac += 1;
-            }
-            prev = v;
-        }
-        let lock_hz = crossings_ac as f64 / (n * dt);
         self.diags.push(BrassBlockDiag {
             block: self.block_index,
-            lock_hz,
+            lock_hz: zero_crossing_lock_hz(out, dt),
             gap_min_m: gap_min,
             gap_mean_m: gap_acc / n,
             gap_max_m: gap_max,
@@ -397,6 +388,23 @@ impl BrassVoice {
         self.block_index += 1;
         Ok(())
     }
+}
+
+// Zero-crossing lock estimate against the block mean (the mouthpiece
+// pressure rides a DC operating point).
+fn zero_crossing_lock_hz(out: &[f64], dt: f64) -> f64 {
+    let n = out.len() as f64;
+    let mean = out.iter().sum::<f64>() / n;
+    let mut crossings_ac = 0usize;
+    let mut prev = out[0] - mean;
+    for &p in &out[1..] {
+        let v = p - mean;
+        if prev < 0.0 && v >= 0.0 {
+            crossings_ac += 1;
+        }
+        prev = v;
+    }
+    crossings_ac as f64 / (n * dt)
 }
 
 fn prepare_lip(sys: &PortHamiltonian) -> Result<LinearSplit, MmLineError> {

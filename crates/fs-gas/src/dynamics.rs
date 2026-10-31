@@ -17,8 +17,11 @@ mod geometry;
 pub mod network;
 pub(crate) mod wall;
 
+pub use characteristic::EndWave;
 pub use eos::{CaloricDomain, FrozenGas};
-pub use evolve::{Boundaries, Boundary, Euler1d, Reconstruction, StepControl, StepReport, Totals};
+pub use evolve::{
+    Boundaries, Boundary, Euler1d, PortStage, Reconstruction, StepControl, StepReport, Totals,
+};
 pub use flux::{
     FaceFlux, NormalConserved, NormalFaceFlux, NormalPrimitive, SpatialConserved, SpatialFaceFlux,
     SpatialPrimitive,

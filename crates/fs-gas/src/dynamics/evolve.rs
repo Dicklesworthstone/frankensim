@@ -117,6 +117,27 @@ pub struct StepReport {
     pub conservation_residual: Totals,
 }
 
+/// One SSP RK stage's end cells, offered to caller-owned end ports.
+///
+/// Boundary cells of a non-periodic interval are never reconstructed, so each
+/// trace is exactly its cell average, resolved through the original source.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PortStage {
+    /// 0: the predictor, on the accepted field at the step's start time;
+    /// 1: the corrector, on the predicted field at the step's end time.
+    pub stage: usize,
+    /// Physical time the offered field represents [s].
+    pub time: f64,
+    /// Trial step duration [s]. A halved retry offers a smaller value.
+    pub dt: f64,
+    /// Cell at the smallest coordinate and its resolved primitive.
+    pub left: (Conserved, Primitive),
+    /// Cell at the largest coordinate and its resolved primitive.
+    pub right: (Conserved, Primitive),
+}
+
+type NoPorts = fn(&PortStage) -> Result<[Option<FaceFlux>; 2], Error>;
+
 pub(super) struct Workspace {
     pub(super) primitive: Vec<Primitive>,
     pub(super) slopes: Vec<[f64; 3]>,
@@ -264,8 +285,73 @@ impl Euler1d {
         &mut self,
         maximum_duration: Time,
         controls: StepControl,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<StepReport, Error> {
+        self.advance(maximum_duration, controls, None::<&mut NoPorts>, cancelled)
+    }
+
+    /// [`Self::step`] whose end faces may be supplied by caller-owned ports.
+    ///
+    /// `ports` is called once per RK stage, before that stage's fluxes, with
+    /// both end cells. Each `Some` flux replaces that end's declared boundary
+    /// for the stage; `None` keeps it. Fluxes are per unit face area, along the
+    /// increasing coordinate, like every interior face. The accepted step's end
+    /// exchange is the stage average reported in [`StepReport`]. A port error
+    /// is a refusal of the trial: it is retried like any other and, when the
+    /// retries are exhausted, leaves the field and time unchanged. A port that
+    /// keeps its own memory must therefore commit it only after acceptance.
+    pub fn step_with_ports(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut ports: impl FnMut(&PortStage) -> Result<[Option<FaceFlux>; 2], Error>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error> {
+        if self.boundaries == Boundaries::Periodic {
+            return Err(Error::Invalid("end ports need a non-periodic interval"));
+        }
+        self.advance(maximum_duration, controls, Some(&mut ports), cancelled)
+    }
+
+    /// Replace every cell average through a local, caller-owned source update
+    /// between accepted steps (wall friction, wall heat exchange).
+    ///
+    /// `update(cell, average, primitive)` returns the new average. Every
+    /// candidate is resolved through the original caloric law before any is
+    /// published; a refusal or cancellation leaves the field unchanged. Time
+    /// does not advance: the caller owns the duration the sources represent.
+    pub fn apply_cell_sources(
+        &mut self,
+        mut update: impl FnMut(usize, Conserved, Primitive) -> Result<Conserved, Error>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<(), Error> {
+        poll(&mut cancelled)?;
+        for (i, &q) in self.states.iter().enumerate() {
+            let p = self
+                .gas
+                .decode(q, Some(self.work.primitive[i].temperature), &mut cancelled)?;
+            let next = update(i, q, p)?;
+            if !self.gas.admissible_state(next) {
+                return Err(Error::Invalid("cell source left the source domain"));
+            }
+            self.work.primitive[i] = self.gas.decode(next, Some(p.temperature), &mut cancelled)?;
+            self.work.candidate[i] = next;
+        }
+        poll(&mut cancelled)?;
+        core::mem::swap(&mut self.states, &mut self.work.candidate);
+        Ok(())
+    }
+
+    fn advance<P>(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        mut ports: Option<&mut P>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<StepReport, Error>
+    where
+        P: FnMut(&PortStage) -> Result<[Option<FaceFlux>; 2], Error>,
+    {
         poll(&mut cancelled)?;
         if !positive(maximum_duration.value())
             || !positive(controls.cfl)
@@ -314,10 +400,11 @@ impl Euler1d {
                 &self.states,
                 &self.mesh,
                 self.boundaries,
-                dt,
+                [self.time, dt],
                 controls.cfl,
                 reconstruction,
                 &mut self.work,
+                ports.as_deref_mut(),
                 &mut cancelled,
             ) {
                 Ok((a, b)) => {
@@ -404,17 +491,30 @@ pub(super) struct Stage {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn attempt(
+fn attempt<P>(
     gas: &FrozenGas,
     states: &[Conserved],
     mesh: &Mesh1d,
     boundaries: Boundaries,
-    dt: f64,
+    [time, dt]: [f64; 2],
     cfl: f64,
     reconstruction: Reconstruction,
     work: &mut Workspace,
+    mut ports: Option<&mut P>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(Stage, Stage), Error> {
+) -> Result<(Stage, Stage), Error>
+where
+    P: FnMut(&PortStage) -> Result<[Option<FaceFlux>; 2], Error>,
+{
+    let ends = offer(
+        gas,
+        states,
+        [time, dt],
+        0,
+        &work.primitive,
+        ports.as_deref_mut(),
+        cancelled,
+    )?;
     let a = operator(
         gas,
         states,
@@ -424,7 +524,7 @@ fn attempt(
         &mut work.primitive,
         &mut work.slopes,
         &mut work.faces,
-        [None; 2],
+        ends,
         cancelled,
     )?;
     if a.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
@@ -440,6 +540,15 @@ fn attempt(
             return Err(Error::Invalid("first RK stage outside source domain"));
         }
     }
+    let ends = offer(
+        gas,
+        &work.stage,
+        [time + dt, dt],
+        1,
+        &work.primitive,
+        ports,
+        cancelled,
+    )?;
     let b = operator(
         gas,
         &work.stage,
@@ -449,7 +558,7 @@ fn attempt(
         &mut work.primitive,
         &mut work.slopes,
         &mut work.faces,
-        [None; 2],
+        ends,
         cancelled,
     )?;
     if b.signal_rate * dt > cfl * (1.0 + 64.0 * f64::EPSILON) {
@@ -472,6 +581,46 @@ fn attempt(
         work.candidate[i] = candidate;
     }
     Ok((a, b))
+}
+
+// The same guess the stage operator uses, so an offered trace is the exact
+// average and primitive that operator would pair with a declared boundary.
+fn offer<P>(
+    gas: &FrozenGas,
+    states: &[Conserved],
+    [time, dt]: [f64; 2],
+    stage: usize,
+    primitive: &[Primitive],
+    ports: Option<&mut P>,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<[Option<FaceFlux>; 2], Error>
+where
+    P: FnMut(&PortStage) -> Result<[Option<FaceFlux>; 2], Error>,
+{
+    let Some(port) = ports else {
+        return Ok([None; 2]);
+    };
+    let n = states.len();
+    let left = gas.decode(states[0], Some(primitive[0].temperature), cancelled)?;
+    let right = gas.decode(states[n - 1], Some(primitive[n - 1].temperature), cancelled)?;
+    poll(cancelled)?;
+    let ends = port(&PortStage {
+        stage,
+        time,
+        dt,
+        left: (states[0], left),
+        right: (states[n - 1], right),
+    })?;
+    for flux in ends.iter().flatten() {
+        if ![flux.mass, flux.momentum, flux.energy]
+            .iter()
+            .all(|x| x.is_finite())
+            || !positive(flux.signal_speed)
+        {
+            return Err(Error::Invalid("end port flux or signal speed"));
+        }
+    }
+    Ok(ends)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -724,3 +873,7 @@ fn validate_reservoirs(
     }
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "port_tests.rs"]
+mod port_tests;

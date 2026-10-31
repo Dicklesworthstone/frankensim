@@ -8,7 +8,9 @@ use std::io::{BufWriter, Read, Seek, SeekFrom, Write};
 use std::path::Path;
 
 use fs_blake3::DomainHasher;
-use fs_couple::brass_loop::performance::{LipDescription, LipInfo, MAX_LIP_PERFORMANCE_BYTES};
+use fs_couple::brass_loop::performance::{
+    LipBoreInfo, LipDescription, LipInfo, MAX_LIP_PERFORMANCE_BYTES,
+};
 use fs_couple::pcm_wav::observation::PressureRenderer;
 use fs_couple::pcm_wav::stream::{MAX_PCM16_WAV_SAMPLES, Pcm16WavStream};
 use fs_material::gas_species::input::ThermochemicalSources;
@@ -165,30 +167,70 @@ fn number(x: f64) -> String {
     }
 }
 
-fn input_json(i: &LipInfo) -> String {
-    let ladder = i
-        .mouth_flow_ladder
-        .iter()
-        .map(|(taps, tail, change)| {
+// The bore engine's receipts and the scope of what it claims.
+fn bore_json(bore: &LipBoreInfo) -> String {
+    match bore {
+        LipBoreInfo::Linear(lines) => {
+            let ladder = lines
+                .mouth_flow_ladder
+                .iter()
+                .map(|(taps, tail, change)| {
+                    format!(
+                        "{{\"taps\":{taps},\"tail_energy\":{},\"tap_change\":{}}}",
+                        number(*tail),
+                        number(*change)
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            let line = &lines.line;
             format!(
-                "{{\"taps\":{taps},\"tail_energy\":{},\"tap_change\":{}}}",
-                number(*tail),
-                number(*change)
+                "\"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{}}},\
+                 \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}]}},\
+                 \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-mode multimodal reflectance line; plane-mode mouth-flow transfer; baffled-disk Rayleigh radiation at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; the declared band is the resolved band of the radiation quadrature and the clock's flanged-radiation ceiling\"",
+                line.n_fft,
+                number(line.round_trip_samples),
+                number(line.peak_reflectance),
+                line.rungs_tried,
+                number(line.tail_energy),
+                number(line.peak_shift_cents),
+                lines.mouth_flow_taps,
+                lines.mouth_flow_rungs,
+                number(lines.mouth_flow_tail_tol),
+                ladder,
             )
-        })
-        .collect::<Vec<_>>()
-        .join(",");
+        }
+        LipBoreInfo::Nonlinear(n) => format!(
+            "\"nonlinear_bore\":{{\"maximum_cell_m\":{},\"cells\":{},\"mechanics_rate_hz\":{},\"gas_steps_per_mechanics\":{},\"gas_step_s\":{},\"radiation_taps\":{},\
+             \"wall\":{{\"poles\":{},\"band_hz\":[{},{}],\"tolerance\":{},\"distinct_radii\":{},\"maximum_arms\":{},\"maximum_complex_error\":{},\"maximum_loss_error\":{}}}}},\
+             \"model_scope\":\"one held bore; 1-DOF outward-striking lip island metering an isentropic compressible lip jet that mixes out at the cup face; conservative nonlinear Euler gas of the ambient NASA-9 mixture on the declared cells (steepening and shocks resolved by those cells); Zwikker-Kosten wall memory admitted on its declared band; rigid baffled-piston bell radiation; baffled-disk Rayleigh radiation of the bell volume flow at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no transverse duct modes\"",
+            number(n.record.maximum_cell_m),
+            n.cells,
+            n.mechanics_rate_hz,
+            n.record.gas_steps_per_mechanics,
+            number(n.gas_step_s),
+            n.radiation_taps,
+            n.record.wall_poles,
+            number(n.record.wall_band_hz[0]),
+            number(n.record.wall_band_hz[1]),
+            number(n.record.wall_tolerance),
+            n.wall_distinct_radii,
+            n.wall_maximum_arms,
+            number(n.wall_maximum_complex_error),
+            number(n.wall_maximum_loss_error),
+        ),
+    }
+}
+
+fn input_json(i: &LipInfo) -> String {
     let lip = &i.lip;
     let mic = &i.microphone;
-    let line = &i.line;
     format!(
         "\"lip_input\":{{\"schema\":\"{}\",\"blake3\":\"{}\",\"bore\":{{\"segments\":{},\"length_m\":{},\"mouth_radius_m\":{},\"gas_temperature_k\":{},\"sound_speed_m_s\":{},\"source\":{}}},\
          \"lip\":{{\"mass_kg\":{},\"stiffness_n_m\":{},\"damping_n_s_m\":{},\"width_m\":{},\"rest_gap_m\":{},\"face_area_m2\":{},\"source\":{}}},\
          \"cup_volume_m3\":{},\"control_rate_hz\":{},\"lip_tension_track\":{},\
-         \"reflectance_line\":{{\"taps\":{},\"round_trip_samples\":{},\"peak_reflectance\":{},\"rungs_tried\":{},\"tail_energy\":{},\"peak_shift_cents\":{}}},\
-         \"mouth_flow_line\":{{\"taps\":{},\"rungs\":{},\"tail_tol\":{},\"ladder\":[{}]}},\
          \"microphone\":{{\"position_m\":[{},{},{}],\"radial_rings\":{},\"angular_points\":{},\"resolved_band_hz\":{}}},\
-         \"model_scope\":\"one held bore; 1-DOF outward-striking lip island; plane-mode multimodal reflectance line; plane-mode mouth-flow transfer; baffled-disk Rayleigh radiation at the declared point; no valve or slide motion, no bore wall vibration, no breath heating, no nonlinear propagation; the declared band is the resolved band of the radiation quadrature and the clock's flanged-radiation ceiling\"}}",
+         {}}}",
         fs_couple::brass_loop::performance::LIP_PERFORMANCE_SCHEMA,
         i.input_hash.to_hex(),
         i.segments,
@@ -207,22 +249,13 @@ fn input_json(i: &LipInfo) -> String {
         number(i.cup_volume_m3),
         i.control_rate_hz,
         i.has_lip_tension_track,
-        line.n_fft,
-        number(line.round_trip_samples),
-        number(line.peak_reflectance),
-        line.rungs_tried,
-        number(line.tail_energy),
-        number(line.peak_shift_cents),
-        i.mouth_flow_taps,
-        i.mouth_flow_rungs,
-        number(i.mouth_flow_tail_tol),
-        ladder,
         number(mic.position_m[0]),
         number(mic.position_m[1]),
         number(mic.position_m[2]),
         mic.radial_rings,
         mic.angular_points,
         number(mic.maximum_frequency_hz),
+        bore_json(&i.bore),
     )
 }
 
@@ -301,6 +334,10 @@ pub(super) fn run_with_gas_sources(
         info.full_scale_pa,
     )?;
     let wav_hash = rendered.hash.to_hex();
+    let (mechanics_rate_hz, ratio) = match &info.bore {
+        LipBoreInfo::Linear(_) => (info.sample_rate_hz, 1),
+        LipBoreInfo::Nonlinear(n) => (n.mechanics_rate_hz, n.record.mechanics_per_output),
+    };
     let windows_json = performance
         .windows()
         .iter()
@@ -328,7 +365,7 @@ pub(super) fn run_with_gas_sources(
          \"wav_blake3\":\"{wav_hash}\",\
          \"encoder\":\"fs_couple::pcm_wav (mono PCM16, never peak-normalized)\",{},\
          \"lip_windows_0p1s\":[{}],\
-         \"observation\":{{\"mechanics_sample_rate_hz\":{},\"output_sample_rate_hz\":{},\"ratio\":1,\
+         \"observation\":{{\"mechanics_sample_rate_hz\":{mechanics_rate_hz},\"output_sample_rate_hz\":{},\"ratio\":{ratio},\
          \"filter\":\"none: the baffled receiver differentiates and delays the mouth flow of every mechanical sample\",\
          \"resampled\":false,\"declared_band_hz\":{}}}{gas_sources}}}",
         info.sample_rate_hz,
@@ -338,7 +375,6 @@ pub(super) fn run_with_gas_sources(
         rendered.rms_pa,
         input_json(&info),
         windows_json,
-        info.sample_rate_hz,
         info.sample_rate_hz,
         number(info.microphone.maximum_frequency_hz),
     );
