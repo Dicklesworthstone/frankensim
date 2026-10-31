@@ -15,6 +15,10 @@
 /// Original smooth mechanical owners and their complete momentum/work account.
 pub mod free;
 
+use super::mixed::FiniteSolidMixedContact;
+use super::scene::{
+    FiniteSolidSphereScene, FiniteSolidSphereSceneError, FiniteSolidSphereSceneKey,
+};
 use super::surface::{
     FiniteSolidContactSurface, FiniteSolidSphere, FiniteSolidSurfaceControls,
     FiniteSolidSurfaceError,
@@ -94,6 +98,8 @@ pub struct FiniteSolidSphereTrajectoryStep {
     pub elapsed_s: f64,
     /// Largest actual activation gap; witnesses have never been moved together.
     pub maximum_contact_gap_m: f64,
+    /// Original scene features in the same order as the submitted contact rows.
+    pub contact_keys: Vec<FiniteSolidSphereSceneKey>,
     pub impact: Option<FiniteSolidRigidContactReport>,
     pub free: FreeFlightReport,
     pub path: FiniteSolidSpherePathReport,
@@ -139,12 +145,19 @@ pub enum FiniteSolidSpherePathRefusal {
         fraction_start: f64,
         fraction_end: f64,
     },
+    PossibleSpherePair {
+        first: u64,
+        second: u64,
+        fraction_start: f64,
+        fraction_end: f64,
+    },
 }
 impl FiniteSolidSpherePathRefusal {
     fn start(self) -> f64 {
         match self {
             Self::PossibleContact { fraction_start, .. }
-            | Self::PossibleElementCollapse { fraction_start, .. } => fraction_start,
+            | Self::PossibleElementCollapse { fraction_start, .. }
+            | Self::PossibleSpherePair { fraction_start, .. } => fraction_start,
         }
     }
 }
@@ -154,9 +167,10 @@ impl FiniteSolidSpherePathRefusal {
 pub enum FiniteSolidSphereTrajectoryError {
     Invalid(&'static str),
     Surface(FiniteSolidSurfaceError),
+    Scene(FiniteSolidSphereSceneError),
     Query(TriangleQueryError),
-    /// Mixed rigid/rigid plus rigid/solid complementarity needs a larger shared
-    /// mobility assembly. Such an encounter is refused, never solved pairwise.
+    /// The legacy surface-only entry point has no explicit sphere-pair laws.
+    /// Use `mixed_sphere_trajectory_candidate` for a complete declared scene.
     UnsupportedSpherePair {
         first: u64,
         second: u64,
@@ -185,6 +199,11 @@ pub enum FiniteSolidSphereTrajectoryError {
 impl From<FiniteSolidSurfaceError> for FiniteSolidSphereTrajectoryError {
     fn from(e: FiniteSolidSurfaceError) -> Self {
         Self::Surface(e)
+    }
+}
+impl From<FiniteSolidSphereSceneError> for FiniteSolidSphereTrajectoryError {
+    fn from(e: FiniteSolidSphereSceneError) -> Self {
+        Self::Scene(e)
     }
 }
 impl From<TriangleQueryError> for FiniteSolidSphereTrajectoryError {
@@ -216,8 +235,9 @@ impl<'a> FiniteSolidBody<'a> {
     /// friction and normal law. The rigid inertia remains its full native tensor.
     /// Offset sphere geometry is supported by discrete `sphere_contacts`, but
     /// rotation makes its centre path curved and is refused by this straight
-    /// interpolation driver. Rigid/rigid encounters are also detected and refused
-    /// until the shared simultaneous assembly includes their rows.
+    /// interpolation driver. This surface-only compatibility entry point has no
+    /// sphere-pair laws and refuses rigid/rigid encounters. The mixed entry point
+    /// below resolves both kinds together through the same trajectory owner.
     ///
     /// An impact acts at the actual current configuration within the positive
     /// activation distance. Native smooth motion then advances both owners.
@@ -256,6 +276,89 @@ impl<'a> FiniteSolidBody<'a> {
         (Self, Vec<RigidBodyState>, FiniteSolidSphereTrajectoryReport),
         FiniteSolidSphereTrajectoryError,
     > {
+        self.sphere_trajectory_with(
+            surface,
+            None,
+            bodies,
+            properties,
+            spheres,
+            nodal_forces_n,
+            body_force_n_m3,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    /// Advance automatically detected rigid/rigid AND rigid/solid impacts.
+    ///
+    /// Every active row enters one simultaneous solve, including cross-coupling
+    /// through a body shared by both interfaces. The prepared scene owns explicit
+    /// pair laws and stable feature identities. Original full rigid inertia and
+    /// consistent solid mass remain in force. All admission, refinement, native
+    /// free flight and whole-trajectory audits are shared with the surface lane.
+    /// This transient lane retains that lane's declared straight-path/spatial
+    /// activation scope; sustained loaded contact requires the force/contact
+    /// split rather than repeatedly applying gravity after an impact.
+    #[allow(clippy::too_many_arguments)]
+    pub fn mixed_sphere_trajectory_candidate(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: &FiniteSolidSphereScene,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidSphereTrajectoryReport),
+        FiniteSolidSphereTrajectoryError,
+    > {
+        self.sphere_trajectory_with(
+            surface,
+            Some(scene),
+            bodies,
+            properties,
+            scene.spheres(),
+            nodal_forces_n,
+            body_force_n_m3,
+            wrenches,
+            gravity,
+            duration_s,
+            origin_m,
+            controls,
+            cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    fn sphere_trajectory_with(
+        &self,
+        surface: &FiniteSolidContactSurface,
+        scene: Option<&FiniteSolidSphereScene>,
+        bodies: &[RigidBodyState],
+        properties: &[MassProperties],
+        spheres: &[FiniteSolidSphere],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        wrenches: &[Wrench],
+        gravity: Gravity,
+        duration_s: f64,
+        origin_m: [f64; 3],
+        controls: FiniteSolidSphereTrajectoryControls,
+        cx: &Cx<'_>,
+    ) -> Result<
+        (Self, Vec<RigidBodyState>, FiniteSolidSphereTrajectoryReport),
+        FiniteSolidSphereTrajectoryError,
+    > {
         poll(cx)?;
         validate(bodies, properties, spheres, wrenches, duration_s, controls)?;
         let start_time = self.native_state().t;
@@ -266,9 +369,15 @@ impl<'a> FiniteSolidBody<'a> {
         let mut sphere_order = spheres.to_vec();
         sphere_order.sort_unstable_by_key(|s| s.id);
         // Initial admission precedes any candidate mechanical work.
-        surface
-            .sphere_separations(self, bodies, &sphere_order, controls.surface, cx)?
-            .admitted_contacts()?;
+        current_contacts(
+            surface,
+            scene,
+            self,
+            bodies,
+            &sphere_order,
+            controls.surface,
+            cx,
+        )?;
         let mut solid = self.clone();
         let mut rigid = bodies.to_vec();
         let mut report = empty_report(duration_s);
@@ -279,18 +388,19 @@ impl<'a> FiniteSolidBody<'a> {
             if report.steps.len() == controls.maximum_steps {
                 return Err(FiniteSolidSphereTrajectoryError::StepBudget { elapsed_s: elapsed });
             }
-            let geometry =
-                surface.sphere_separations(&solid, &rigid, &sphere_order, controls.surface, cx)?;
-            let contacts = geometry.admitted_contacts()?;
-            let maximum_gap = geometry
-                .contacts
-                .iter()
-                .map(|w| w.gap_m)
-                .fold(0.0, f64::max);
+            let (contacts, contact_keys, maximum_gap) = current_contacts(
+                surface,
+                scene,
+                &solid,
+                &rigid,
+                &sphere_order,
+                controls.surface,
+                cx,
+            )?;
             let (post_solid, post_rigid, impact) = if contacts.is_empty() {
                 (solid.clone(), rigid.clone(), None)
             } else {
-                let (s, r, impact) = solid.rigid_contact_candidate(
+                let (s, r, impact) = solid.mixed_contact_candidate(
                     &rigid,
                     properties,
                     &contacts,
@@ -338,21 +448,22 @@ impl<'a> FiniteSolidBody<'a> {
                     &post_rigid,
                     &rigid_candidate,
                     &sphere_order,
+                    scene.is_some(),
                     controls,
                     cx,
                 )? {
                     Ok(path) => {
                         // Recheck actual reconstructed material witnesses, not
                         // just the coordinate interpolation's analytic support.
-                        surface
-                            .sphere_separations(
-                                &candidate,
-                                &rigid_candidate,
-                                &sphere_order,
-                                controls.surface,
-                                cx,
-                            )?
-                            .admitted_contacts()?;
+                        current_contacts(
+                            surface,
+                            scene,
+                            &candidate,
+                            &rigid_candidate,
+                            &sphere_order,
+                            controls.surface,
+                            cx,
+                        )?;
                         break (candidate, rigid_candidate, free, path);
                     }
                     Err(refusal) => {
@@ -385,6 +496,7 @@ impl<'a> FiniteSolidBody<'a> {
             report.steps.push(FiniteSolidSphereTrajectoryStep {
                 elapsed_s: elapsed,
                 maximum_contact_gap_m: maximum_gap,
+                contact_keys,
                 impact,
                 free,
                 path,
@@ -436,6 +548,46 @@ impl<'a> FiniteSolidBody<'a> {
     }
 }
 
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
+fn current_contacts(
+    surface: &FiniteSolidContactSurface,
+    scene: Option<&FiniteSolidSphereScene>,
+    solid: &FiniteSolidBody<'_>,
+    bodies: &[RigidBodyState],
+    spheres: &[FiniteSolidSphere],
+    controls: FiniteSolidSurfaceControls,
+    cx: &Cx<'_>,
+) -> Result<
+    (
+        Vec<FiniteSolidMixedContact>,
+        Vec<FiniteSolidSphereSceneKey>,
+        f64,
+    ),
+    FiniteSolidSphereTrajectoryError,
+> {
+    if let Some(scene) = scene {
+        let query = scene.contacts(surface, solid, bodies, controls, cx)?;
+        return Ok((query.contacts, query.keys, query.maximum_contact_gap_m));
+    }
+    let query = surface.sphere_separations(solid, bodies, spheres, controls, cx)?;
+    let contacts = query
+        .admitted_contacts()?
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    let keys = query
+        .contacts
+        .iter()
+        .map(|w| FiniteSolidSphereSceneKey::Solid {
+            sphere: w.sphere_id,
+            contact_id: w.contact.id,
+            face: w.face,
+        })
+        .collect();
+    let gap = query.contacts.iter().map(|w| w.gap_m).fold(0.0, f64::max);
+    Ok((contacts, keys, gap))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn admit_path(
     surface: &FiniteSolidContactSurface,
@@ -444,6 +596,7 @@ fn admit_path(
     rigid_before: &[RigidBodyState],
     rigid_after: &[RigidBodyState],
     spheres: &[FiniteSolidSphere],
+    allow_sphere_pairs: bool,
     controls: FiniteSolidSphereTrajectoryControls,
     cx: &Cx<'_>,
 ) -> Result<
@@ -503,12 +656,28 @@ fn admit_path(
                 cx,
             )?;
             report.interval_windows += pair.examined_windows;
-            if let LinearSweepVerdict::PossibleContact { fraction_start, .. } = pair.verdict {
-                return Err(FiniteSolidSphereTrajectoryError::UnsupportedSpherePair {
-                    first: a.id,
-                    second: b.id,
-                    fraction: fraction_start,
-                });
+            match pair.verdict {
+                LinearSweepVerdict::PossibleContact {
+                    fraction_start,
+                    fraction_end,
+                } => {
+                    if allow_sphere_pairs {
+                        return Ok(Err(FiniteSolidSpherePathRefusal::PossibleSpherePair {
+                            first: a.id,
+                            second: b.id,
+                            fraction_start,
+                            fraction_end,
+                        }));
+                    }
+                    return Err(FiniteSolidSphereTrajectoryError::UnsupportedSpherePair {
+                        first: a.id,
+                        second: b.id,
+                        fraction: fraction_start,
+                    });
+                }
+                LinearSweepVerdict::Clear { minimum_clearance } => {
+                    report.minimum_clearance_m = report.minimum_clearance_m.min(minimum_clearance);
+                }
             }
         }
     }
@@ -704,11 +873,25 @@ fn accumulate(
             .add(i.angular_momentum_residual_kg_m2_s);
         r.support_impulse_kg_m_s = r.support_impulse_kg_m_s.add(support);
         r.support_angular_impulse_kg_m2_s = r.support_angular_impulse_kg_m2_s.add(moment);
-        r.accumulated_linear_residual_kg_m_s += norm(i.linear_momentum_residual_kg_m_s);
-        r.accumulated_angular_residual_kg_m2_s += norm(i.angular_momentum_residual_kg_m2_s);
-        r.accumulated_energy_residual_j +=
-            i.work_energy_residual_j.abs() + i.dissipation_residual_j.abs();
+        let (linear, angular, energy) = impact_residuals(i);
+        r.accumulated_linear_residual_kg_m_s += linear;
+        r.accumulated_angular_residual_kg_m2_s += angular;
+        r.accumulated_energy_residual_j += energy;
     }
+}
+
+/// Include both native representability errors and the complete event's
+/// geometry/law residuals. In particular, real finite-gap tangential couples
+/// must not cancel between accepted events or hide behind exact native updates.
+fn impact_residuals(i: &FiniteSolidRigidContactReport) -> (f64, f64, f64) {
+    (
+        i.absolute_linear_residual_kg_m_s + norm(i.linear_momentum_residual_kg_m_s),
+        i.absolute_angular_residual_kg_m2_s + norm(i.angular_momentum_residual_kg_m2_s),
+        i.absolute_work_residual_j
+            + i.work_energy_residual_j.abs()
+            + i.dissipation_residual_j.abs()
+            + (i.relative_impulse_work_j - i.contact.relative_work).abs(),
+    )
 }
 
 fn finish(r: &mut FiniteSolidSphereTrajectoryReport) {

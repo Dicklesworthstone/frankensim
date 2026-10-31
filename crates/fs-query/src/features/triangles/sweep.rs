@@ -62,10 +62,35 @@ pub fn linear_sphere_triangle(
     controls: LinearSweepControls,
     cx: &Cx<'_>,
 ) -> Result<LinearSweepReport, TriangleQueryError> {
+    linear_sphere_triangle_with_radii(
+        center_start,
+        center_end,
+        [radius, 0.0],
+        triangle_start,
+        triangle_end,
+        controls,
+        cx,
+    )
+}
+
+// The interval fast path uses an enclosing support radius. The exact cold
+// path retains each ORIGINAL radius, so upward rounding of a radius sum cannot
+// turn an actual touching sphere pair into an artificial overlap.
+fn linear_sphere_triangle_with_radii(
+    center_start: [f64; 3],
+    center_end: [f64; 3],
+    radii: [f64; 2],
+    triangle_start: [[f64; 3]; 3],
+    triangle_end: [[f64; 3]; 3],
+    controls: LinearSweepControls,
+    cx: &Cx<'_>,
+) -> Result<LinearSweepReport, TriangleQueryError> {
     super::poll(cx)?;
     validate(controls)?;
-    if !radius.is_finite()
-        || radius <= 0.0
+    if !radii[0].is_finite()
+        || radii[0] <= 0.0
+        || !radii[1].is_finite()
+        || radii[1] < 0.0
         || center_start
             .into_iter()
             .chain(center_end)
@@ -76,6 +101,14 @@ pub fn linear_sphere_triangle(
         return Err(TriangleQueryError::Invalid(
             "finite coordinates and positive sphere radius required",
         ));
+    }
+    let radius = if radii[1] == 0.0 {
+        radii[0]
+    } else {
+        (Interval::point(radii[0]) + Interval::point(radii[1])).hi()
+    };
+    if !radius.is_finite() {
+        return Err(TriangleQueryError::NumericalRange);
     }
     let mut pending = vec![(0.0_f64, 1.0_f64)];
     let mut examined = 0;
@@ -149,7 +182,7 @@ pub fn linear_sphere_triangle(
             && exact_axis_separation(
                 center_start,
                 center_end,
-                radius,
+                radii,
                 triangle_start,
                 triangle_end,
             )
@@ -183,9 +216,10 @@ pub fn linear_sphere_triangle(
 }
 
 /// Prove separation of two declared straight sphere-centre trajectories.
-/// The radius sum is rounded upward; a possible window is never a floating
-/// point near-miss admitted as clear. This uses the same separating-plane
-/// authority as sphere/triangle paths, with a point as the second convex set.
+/// The fast radius sum is rounded upward; exact axis-aligned separation uses
+/// both ORIGINAL radii, admitting real touching/receding paths without allowing
+/// penetration. This uses the same separating-plane authority as sphere/triangle
+/// paths, with a point as the second convex set.
 #[allow(clippy::too_many_arguments)]
 pub fn linear_spheres(
     first_start: [f64; 3],
@@ -206,14 +240,10 @@ pub fn linear_spheres(
             "two positive finite sphere radii required",
         ));
     }
-    let sum = (Interval::point(first_radius) + Interval::point(second_radius)).hi();
-    if !sum.is_finite() {
-        return Err(TriangleQueryError::NumericalRange);
-    }
-    linear_sphere_triangle(
+    linear_sphere_triangle_with_radii(
         first_start,
         first_end,
-        sum,
+        [first_radius, second_radius],
         [second_start; 3],
         [second_end; 3],
         controls,
@@ -369,13 +399,13 @@ fn affine_hull(a: Interval, b: Interval, lo: f64, hi: f64) -> Interval {
 fn exact_axis_separation(
     c0: [f64; 3],
     c1: [f64; 3],
-    radius: f64,
+    radii: [f64; 2],
     a: [[f64; 3]; 3],
     b: [[f64; 3]; 3],
 ) -> bool {
     // The cold linear expansion tail never multiplies and cannot underflow.
     // This finite range preflight also keeps every intermediate sum finite.
-    if radius > f64::MAX / 16.0
+    if radii.into_iter().any(|radius| radius > f64::MAX / 16.0)
         || c0
             .into_iter()
             .chain(c1)
@@ -395,7 +425,12 @@ fn exact_axis_separation(
                             *x = -*x;
                         }
                     }
-                    expansion_sign(&fast_expansion_sum_zeroelim(&difference, &[-radius])) >= 0
+                    for radius in radii {
+                        if radius != 0.0 {
+                            difference = fast_expansion_sum_zeroelim(&difference, &[-radius]);
+                        }
+                    }
+                    expansion_sign(&difference) >= 0
                 })
             });
             if separated {
@@ -551,10 +586,14 @@ mod tests {
                 cx,
             )
             .unwrap();
-            assert!(matches!(
+            // Exact constant y separation proves nonpenetration even though
+            // the trajectories touch at their interior closest approach.
+            assert_eq!(
                 grazing.verdict,
-                LinearSweepVerdict::PossibleContact { .. }
-            ));
+                LinearSweepVerdict::Clear {
+                    minimum_clearance: 0.0
+                }
+            );
             let clear = linear_spheres(
                 [-1.0, 0.5, 0.0],
                 [1.0, 0.5, 0.0],
@@ -567,6 +606,81 @@ mod tests {
             )
             .unwrap();
             assert!(matches!(clear.verdict, LinearSweepVerdict::Clear { .. }));
+        });
+    }
+
+    #[test]
+    fn sphere_pair_exact_touch_and_recession_keep_original_radii() {
+        run(|_, cx| {
+            for second_end in [[1.0, 0.0, 0.0], [2.0, 0.0, 0.0]] {
+                let touching = linear_spheres(
+                    [0.0; 3],
+                    [0.0; 3],
+                    0.5,
+                    [1.0, 0.0, 0.0],
+                    second_end,
+                    0.5,
+                    LinearSweepControls {
+                        maximum_windows: 1,
+                        ..Default::default()
+                    },
+                    cx,
+                )
+                .unwrap();
+                assert_eq!(touching.examined_windows, 1);
+                assert_eq!(
+                    touching.verdict,
+                    LinearSweepVerdict::Clear {
+                        minimum_clearance: 0.0
+                    }
+                );
+            }
+            let penetrating = linear_spheres(
+                [0.0; 3],
+                [0.0; 3],
+                0.5,
+                [1.0_f64.next_down(), 0.0, 0.0],
+                [2.0, 0.0, 0.0],
+                0.5,
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+            assert!(matches!(
+                penetrating.verdict,
+                LinearSweepVerdict::PossibleContact {
+                    fraction_start: 0.0,
+                    ..
+                }
+            ));
+        });
+    }
+
+    #[test]
+    fn rounded_radius_sum_cannot_hide_real_pair_overlap() {
+        run(|_, cx| {
+            // As exact binary64 inputs, 0.1 + 0.2 is greater than 0.3.
+            // Compare both original radii through expansions, never an epsilon
+            // or an assumed exactness of the rounded radius sum.
+            for (separation, clear) in [(0.3, false), (0.1 + 0.2, true)] {
+                let report = linear_spheres(
+                    [0.0; 3],
+                    [0.0; 3],
+                    0.1,
+                    [separation, 0.0, 0.0],
+                    [separation, 0.0, 0.0],
+                    0.2,
+                    Default::default(),
+                    cx,
+                )
+                .unwrap();
+                assert_eq!(
+                    matches!(report.verdict, LinearSweepVerdict::Clear { .. }),
+                    clear,
+                    "separation={separation:.17}: {:?}",
+                    report.verdict,
+                );
+            }
         });
     }
     #[test]

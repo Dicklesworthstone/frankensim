@@ -12,7 +12,7 @@
 //! Positive activation gaps are an explicitly reported spatial resolution.
 //! Impact/contact loss stays unallocated, and force splitting work is not heat.
 
-use super::spheres::ContactSphere;
+use super::spheres::{ContactSphere, SphereContactError, sphere_pair_witness};
 use super::step::{
     RigidContactPath, RigidContactStepControls, RigidContactStepError, RigidContactStepReport,
     step_rigid_frictional_contacts,
@@ -183,6 +183,7 @@ pub enum SphereSceneError {
     Invalid(&'static str),
     MissingLaw(SphereSceneContactKey),
     Dynamics(DynamicsError),
+    SphereGeometry(SphereContactError),
     Impact(RigidFrictionalImpactError),
     Geometry(SphereScenePathError),
     Step(RigidContactStepError<SphereScenePathError>),
@@ -195,6 +196,11 @@ pub enum SphereSceneError {
 impl From<DynamicsError> for SphereSceneError {
     fn from(e: DynamicsError) -> Self {
         Self::Dynamics(e)
+    }
+}
+impl From<SphereContactError> for SphereSceneError {
+    fn from(e: SphereContactError) -> Self {
+        Self::SphereGeometry(e)
     }
 }
 impl From<RigidFrictionalImpactError> for SphereSceneError {
@@ -652,33 +658,25 @@ fn detected_contacts(
             first: pair.id_a,
             second: pair.id_b,
         };
-        let relative = bodies[a]
-            .pose()
-            .position_world()
-            .sub(bodies[b].pose().position_world());
-        let gap = checked_gap(
-            relative.stable_norm("scene sphere distance")?
-                - (spheres[a].radius_m + spheres[b].radius_m),
-            key,
+        let witness = sphere_pair_witness(
+            a,
+            bodies[a],
+            spheres[a].radius_m,
+            b,
+            bodies[b],
+            spheres[b].radius_m,
         )?;
+        let gap = checked_gap(witness.centre_gap_m, key)?;
         if gap > c.activation_gap_m {
             continue;
         }
-        let normal = relative.normalized("scene sphere normal")?;
-        let point = RigidImpactPoint {
-            body: a,
-            arm_body: bodies[a]
-                .pose()
-                .orientation()
-                .rotate_world_to_body(normal.scale(-spheres[a].radius_m)),
-        };
-        let opposite = RigidImpactPoint {
-            body: b,
-            arm_body: bodies[b]
-                .pose()
-                .orientation()
-                .rotate_world_to_body(normal.scale(spheres[b].radius_m)),
-        };
+        let gap = checked_gap(witness.material_gap_m, key)?;
+        if gap > c.activation_gap_m {
+            continue;
+        }
+        let normal = witness.normal_world;
+        let point = witness.first;
+        let opposite = witness.second;
         let va = bodies[a]
             .point_kinematics(properties[a], point.arm_body)?
             .point_velocity_world;

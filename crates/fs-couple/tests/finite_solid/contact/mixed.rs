@@ -360,3 +360,212 @@ fn mixed_self_contacts_and_finite_gap_couples_refuse_without_publishing() {
         assert_eq!(solid.native_state(), &original);
     });
 }
+
+#[test]
+fn full_tensor_mixed_event_matches_independent_world_velocity_operator() {
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let solid = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[0.0; 3]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let point = FiniteSolidPoint::new(0, [0.0, 0.25, 0.25, 0.5]).unwrap();
+        let x = vec(solid.point_position_m(point, cx).unwrap());
+        let orientations = [
+            UnitQuaternion::from_axis_angle(Vec3::new(1.0, -2.0, 1.0), 0.4).unwrap(),
+            UnitQuaternion::from_axis_angle(Vec3::new(2.0, 1.0, -1.0), -0.7).unwrap(),
+        ];
+        let principals = [
+            UnitQuaternion::from_axis_angle(Vec3::new(1.0, 2.0, 3.0), 0.6).unwrap(),
+            UnitQuaternion::from_axis_angle(Vec3::new(-1.0, 1.0, 2.0), 0.3).unwrap(),
+        ];
+        let diagonals = [Vec3::new(0.3, 0.4, 0.5), Vec3::new(0.6, 0.8, 0.9)];
+        let properties = [0, 1].map(|i| {
+            MassProperties::from_principal_frame(2.0, Vec3::ZERO, diagonals[i], principals[i])
+                .unwrap()
+        });
+        let arms = [
+            Vec3::new(0.125, -0.25, 0.375),
+            Vec3::new(-0.25, 0.125, 0.25),
+            Vec3::new(0.2, 0.1, -0.125),
+        ];
+        let world_arms = [
+            orientations[0].rotate_body_to_world(arms[0]),
+            orientations[0].rotate_body_to_world(arms[1]),
+            orientations[1].rotate_body_to_world(arms[2]),
+        ];
+        // A declared dyadic activation gap keeps rotation/reconstruction
+        // roundoff from accidentally making this tensor fixture penetrating.
+        // It does not change either point's velocity/mobility oracle.
+        let gap = 1.0 / 1_099_511_627_776.0;
+        let separation = Vec3::new(0.0, 0.0, gap);
+        let positions = [
+            x.sub(world_arms[0]).add(separation),
+            x.sub(world_arms[0])
+                .add(world_arms[1])
+                .sub(world_arms[2])
+                .add(separation.scale(2.0)),
+        ];
+        let axes = [
+            Vec3::new(0.0, 0.0, 1.0),
+            Vec3::new(1.0, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+        ];
+        // Independent world-coordinate virtual impulse construction. No native
+        // contact mobility or angular-velocity routine supplies this oracle.
+        let inverse_world = |body: usize, torque: Vec3| {
+            let principal = principals[body]
+                .rotate_world_to_body(orientations[body].rotate_world_to_body(torque));
+            orientations[body].rotate_body_to_world(principals[body].rotate_body_to_world(
+                Vec3::new(
+                    principal.x / diagonals[body].x,
+                    principal.y / diagonals[body].y,
+                    principal.z / diagonals[body].z,
+                ),
+            ))
+        };
+        let mut matrix = [0.0; 36];
+        for column in 0..6 {
+            let j = axes[column % 3];
+            let (forces, moments, solid_velocity) = if column < 3 {
+                (
+                    [j, Vec3::ZERO],
+                    [world_arms[0].cross(j), Vec3::ZERO],
+                    j.scale(-3.5),
+                )
+            } else {
+                (
+                    [j.scale(-1.0), j],
+                    [world_arms[1].cross(j.scale(-1.0)), world_arms[2].cross(j)],
+                    Vec3::ZERO,
+                )
+            };
+            let angular = [inverse_world(0, moments[0]), inverse_world(1, moments[1])];
+            let wall_velocity = forces[0]
+                .scale(0.5)
+                .add(angular[0].cross(world_arms[0]))
+                .sub(solid_velocity);
+            let pair_velocity = forces[1]
+                .scale(0.5)
+                .add(angular[1].cross(world_arms[2]))
+                .sub(forces[0].scale(0.5).add(angular[0].cross(world_arms[1])));
+            for axis in 0..3 {
+                matrix[axis * 6 + column] = axes[axis].dot(wall_velocity);
+                matrix[(axis + 3) * 6 + column] = axes[axis].dot(pair_velocity);
+            }
+        }
+        // Prescribe an interior sticking impulse and construct incoming point
+        // velocities -WJ. The known answer requires no second contact solver.
+        let expected = [1.0, 0.05, -0.03, 0.8, -0.04, 0.02];
+        let incoming: [f64; 6] = std::array::from_fn(|row| {
+            -(0..6)
+                .map(|column| matrix[6 * row + column] * expected[column])
+                .sum::<f64>()
+        });
+        assert!(incoming[0] < 0.0 && incoming[3] < 0.0);
+        let expand = |offset: usize| {
+            axes[0]
+                .scale(incoming[offset])
+                .add(axes[1].scale(incoming[offset + 1]))
+                .add(axes[2].scale(incoming[offset + 2]))
+        };
+        let velocities = [expand(0), expand(0).add(expand(3))];
+        let bodies = [0, 1].map(|i| {
+            RigidBodyState::new(
+                Pose::new(positions[i], orientations[i]).unwrap(),
+                velocities[i].scale(2.0),
+                Vec3::ZERO,
+            )
+            .unwrap()
+        });
+        let mut wall = witness(10, 0, point);
+        wall.arm_body_m = arms[0];
+        let pair = rigid_pair(
+            20,
+            RigidImpactPoint {
+                body: 1,
+                arm_body: arms[2],
+            },
+            RigidImpactPoint {
+                body: 0,
+                arm_body: arms[1],
+            },
+        );
+        let contacts = [FiniteSolidMixedContact::from(wall), pair].map(|mut c| {
+            c.activation_tolerance_m = 2.0 * gap;
+            c.with_friction(EllipticFriction {
+                coefficients_mu: [0.8, 0.4],
+                principal_axis: [0.6, 0.8],
+            })
+        });
+        let (_, rigid, report) = solid
+            .mixed_elliptic_contact_candidate(
+                &bodies,
+                &properties,
+                &contacts,
+                [0.75, -1.25, 0.5],
+                Default::default(),
+                cx,
+            )
+            .unwrap();
+        for row in 0..6 {
+            near(
+                report.contact.impulses[row / 3][row % 3],
+                expected[row],
+                2e-8,
+            );
+            near(
+                report.contact.relative_velocities_after[row / 3][row % 3],
+                0.0,
+                2e-8,
+            );
+            for column in 0..6 {
+                near(
+                    report.contact_mobility_per_kg[6 * row + column],
+                    matrix[6 * row + column],
+                    2e-11,
+                );
+            }
+        }
+        let impulses = [
+            Vec3::new(expected[1], expected[2], expected[0]),
+            Vec3::new(expected[4], expected[5], expected[3]),
+        ];
+        same(
+            rigid[0].linear_momentum_world(),
+            bodies[0]
+                .linear_momentum_world()
+                .add(impulses[0])
+                .sub(impulses[1]),
+            2e-8,
+        );
+        same(
+            rigid[1].linear_momentum_world(),
+            bodies[1].linear_momentum_world().add(impulses[1]),
+            2e-8,
+        );
+        same(
+            rigid[0].angular_momentum_body(),
+            arms[0]
+                .cross(orientations[0].rotate_world_to_body(impulses[0]))
+                .sub(arms[1].cross(orientations[0].rotate_world_to_body(impulses[1]))),
+            2e-8,
+        );
+        same(
+            rigid[1].angular_momentum_body(),
+            arms[2].cross(orientations[1].rotate_world_to_body(impulses[1])),
+            2e-8,
+        );
+        near(
+            report.kinetic_change_j,
+            0.5 * (0..6).map(|i| incoming[i] * expected[i]).sum::<f64>(),
+            2e-8,
+        );
+        audit(&report);
+    });
+}

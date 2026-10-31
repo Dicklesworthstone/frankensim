@@ -36,6 +36,89 @@ pub struct SpherePairLaw {
     pub restitution: f64,
 }
 
+/// Actual opposing material points on two COM-centred native spheres.
+///
+/// The centre-distance gap and the reconstructed material-point gap are both
+/// retained. Their floating-point roundoff can differ; neither is projected,
+/// clamped or silently accepted by this geometry operation. Contact/path owners
+/// must admit both gaps before applying a law. The normal points second to first.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SpherePairWitness {
+    pub first: RigidImpactPoint,
+    pub second: RigidImpactPoint,
+    pub normal_world: Vec3,
+    pub tangent_world: Vec3,
+    pub first_point_world: Vec3,
+    pub second_point_world: Vec3,
+    pub centre_gap_m: f64,
+    pub material_gap_m: f64,
+}
+
+/// Reusable sphere geometry for the original rigid and coupled scene owners.
+/// Body indices identify the supplied states in the caller's native body array.
+/// This returns signed separations, including penetration, without any response.
+pub fn sphere_pair_witness(
+    first_index: usize,
+    first: RigidBodyState,
+    first_radius_m: f64,
+    second_index: usize,
+    second: RigidBodyState,
+    second_radius_m: f64,
+) -> Result<SpherePairWitness, SphereContactError> {
+    if first_index == second_index
+        || [first_radius_m, second_radius_m]
+            .iter()
+            .any(|r| !r.is_finite() || *r <= 0.0)
+        || !(first_radius_m + second_radius_m).is_finite()
+    {
+        return Err(SphereContactError::Invalid(
+            "distinct bodies and positive finite sphere radii required",
+        ));
+    }
+    let relative = first
+        .pose()
+        .position_world()
+        .sub(second.pose().position_world());
+    let centre_gap_m =
+        relative.stable_norm("sphere separation")? - (first_radius_m + second_radius_m);
+    let normal_world = relative.normalized("sphere contact normal")?;
+    let a = RigidImpactPoint {
+        body: first_index,
+        arm_body: first
+            .pose()
+            .orientation()
+            .rotate_world_to_body(normal_world.scale(-first_radius_m)),
+    };
+    let b = RigidImpactPoint {
+        body: second_index,
+        arm_body: second
+            .pose()
+            .orientation()
+            .rotate_world_to_body(normal_world.scale(second_radius_m)),
+    };
+    let first_point_world = first.pose().point_world_from_body(a.arm_body)?;
+    let second_point_world = second.pose().point_world_from_body(b.arm_body)?;
+    let material_gap_m = first_point_world.sub(second_point_world).dot(normal_world);
+    if !centre_gap_m.is_finite() || !material_gap_m.is_finite() {
+        return Err(SphereContactError::Unresolved("sphere witness range"));
+    }
+    let axis = if normal_world.x.abs() < 0.8 {
+        Vec3::new(1.0, 0.0, 0.0)
+    } else {
+        Vec3::new(0.0, 1.0, 0.0)
+    };
+    Ok(SpherePairWitness {
+        first: a,
+        second: b,
+        normal_world,
+        tangent_world: normal_world.cross(axis),
+        first_point_world,
+        second_point_world,
+        centre_gap_m,
+        material_gap_m,
+    })
+}
+
 /// Bounded event work and independent native-physics gates.
 #[derive(Clone, Copy, Debug)]
 pub struct SphereContactControls {
@@ -698,35 +781,21 @@ fn contacts(
         if gap > controls.event_gap_tolerance_m {
             continue;
         }
-        let n = r.normalized("sphere contact normal")?;
-        let a = RigidImpactPoint {
-            body: p.a,
-            arm_body: bodies[p.a]
-                .pose()
-                .orientation()
-                .rotate_world_to_body(n.scale(-spheres[p.a].radius_m)),
-        };
-        let b = RigidImpactPoint {
-            body: p.b,
-            arm_body: bodies[p.b]
-                .pose()
-                .orientation()
-                .rotate_world_to_body(n.scale(spheres[p.b].radius_m)),
-        };
-        let pa = bodies[p.a].pose().point_world_from_body(a.arm_body)?;
-        let pb = bodies[p.b].pose().point_world_from_body(b.arm_body)?;
-        nonnegative &= pa.sub(pb).dot(n) >= 0.0;
-        let axis = if n.x.abs() < 0.8 {
-            Vec3::new(1.0, 0.0, 0.0)
-        } else {
-            Vec3::new(0.0, 1.0, 0.0)
-        };
+        let witness = sphere_pair_witness(
+            p.a,
+            bodies[p.a],
+            spheres[p.a].radius_m,
+            p.b,
+            bodies[p.b],
+            spheres[p.b].radius_m,
+        )?;
+        nonnegative &= witness.material_gap_m >= 0.0;
         result.push(RigidFrictionalContact {
             id: index as u64,
-            point: a,
-            other: RigidImpactCounterpart::Body(b),
-            normal_world: n,
-            tangent_world: n.cross(axis),
+            point: witness.first,
+            other: RigidImpactCounterpart::Body(witness.second),
+            normal_world: witness.normal_world,
+            tangent_world: witness.tangent_world,
             activation_tolerance_m: controls.event_gap_tolerance_m,
             friction_coefficient: p.law.friction_coefficient,
             normal_law: NormalVelocityLaw::NewtonRestitution {

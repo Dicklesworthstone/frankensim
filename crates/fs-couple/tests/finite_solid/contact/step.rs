@@ -1,6 +1,8 @@
 //! G1/G3 automatic contact trajectories on actual native mechanical states.
 #[path = "step/free.rs"]
 mod free;
+#[path = "step/scene.rs"]
+mod scene;
 
 use super::*;
 use fs_couple::finite_solid::contact::step::*;

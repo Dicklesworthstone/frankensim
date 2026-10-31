@@ -1,5 +1,34 @@
 # CONTRACT: fs-couple
 
+## Automatic complete mixed sphere-contact trajectories
+
+`finite_solid::contact::scene::FiniteSolidSphereScene` binds one COM-centred
+sphere per native rigid body and one explicit source-resolved law per canonical
+sphere pair. Pair laws are never inferred by mixing each sphere's solid-interface
+coefficient. Original closed outward AABB broad-phase bounds prune rigid pairs;
+original current-triangle BVH witnesses supply the solid contacts. Both analytic
+centre gaps and actual reconstructed material gaps must be nonnegative. Even
+surface IDs and odd canonical pair IDs retain disjoint, input-order-independent
+feature identity within the fixed prepared scene.
+
+`mixed_sphere_trajectory_candidate` passes every detected rigid/rigid and
+rigid/solid row into the same simultaneous response, then uses the original solid
+and full-inertia rigid smooth owners. Whole affine paths check every rigid pair,
+swept triangle candidate and original tetrahedron orientation. An unresolved
+possible encounter shortens and recomputes original native motion; endpoints are
+never projected. The surface-only compatibility entry still refuses rigid pairs
+because its API supplies no pair law. This is transient event refinement with
+explicit positive activation distance, not sustained contact or true-flow CCD.
+
+The original rigid sphere geometry now has one reusable paired-material witness.
+The shared interval sphere-pair path retains both original radii in its exact
+axis-separation fallback: real touching/receding pairs can be admitted while even
+one representable step of penetration refuses. Native local residuals and whole
+event finite-gap angular/work defects accumulate without cross-event cancellation.
+Independent fixtures cover elastic pair trajectories, simultaneous solid-supported
+chains, full rotated inertia matrices and original source-history routing. Native
+compilation/execution is still required; source/format checks alone are not proof.
+
 ## Simultaneous mixed rigid and finite-solid impacts
 
 `finite_solid::contact::mixed` assembles rigid/rigid and rigid/solid rows in one

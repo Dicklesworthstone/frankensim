@@ -499,6 +499,177 @@ fn active_source_order_includes_separating_contacts_and_skips_inactive_history()
 }
 
 #[test]
+fn mixed_sources_keep_original_histories_across_both_contact_kinds() {
+    use fs_couple::finite_solid::contact::mixed::*;
+    with_cx(|_, cx| {
+        let material = bind(&source_card(6.0, 1.0, false, false));
+        let solid = FiniteSolidBody::new(
+            problem(&material, &[], &[]),
+            &[[0.0; 3]; 4],
+            &[[0.0; 3]; 4],
+            0.0,
+            Default::default(),
+            cx,
+        )
+        .unwrap();
+        let original = solid.native_state().clone();
+        let material_point = FiniteSolidPoint::new(0, [0.0, 0.25, 0.25, 0.5]).unwrap();
+        let x = solid.point_position_m(material_point, cx).unwrap();
+        let bodies = [
+            body_at(x, Vec3::ZERO, Vec3::new(3.0, 0.0, -1.0)),
+            body_at(x, Vec3::ZERO, Vec3::new(5.0, 0.0, -2.0)),
+            body_at([x[0], x[1], x[2] + 1.0], Vec3::ZERO, Vec3::ZERO),
+        ];
+        let wall = FiniteSolidMixedContact::from(witness(10, 0, material_point).with_friction(()));
+        let pair = FiniteSolidMixedContact {
+            id: 20,
+            point: RigidImpactPoint {
+                body: 1,
+                arm_body: Vec3::ZERO,
+            },
+            counterpart: FiniteSolidContactCounterpart::Rigid(RigidImpactPoint {
+                body: 0,
+                arm_body: Vec3::ZERO,
+            }),
+            normal_world: Vec3::new(0.0, 0.0, 1.0),
+            tangent_world: Vec3::new(1.0, 0.0, 0.0),
+            activation_tolerance_m: 0.0,
+            friction_coefficient: (),
+            normal_law: NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 },
+        };
+        let inactive = FiniteSolidMixedContact {
+            id: 5,
+            point: RigidImpactPoint {
+                body: 2,
+                arm_body: Vec3::ZERO,
+            },
+            ..pair
+        };
+        // Opposite principal-axis orientations describe the same ellipse but
+        // retain distinct source/texture histories, exposing swapped indices.
+        let (_, wall_law) = source([1.0, 0.0]);
+        let (_, pair_law) = source([-1.0, 0.0]);
+        let histories = [
+            pair_law.initial_state(),
+            wall_law.initial_state(),
+            pair_law.initial_state(),
+        ];
+        let accepted = histories.clone();
+        let bindings =
+            [&pair_law, &wall_law, &pair_law].map(|law| SourceFiniteSolidMixedContactBinding {
+                law,
+                coefficient_role: SourceImpulseCoefficientRole::Kinetic,
+            });
+        let contacts = [pair, wall, inactive];
+        let mut calls = Vec::new();
+        let (next, rigid, report) = solid
+            .mixed_source_elliptic_contact_candidate(
+                &bodies,
+                &[properties(); 3],
+                &contacts,
+                &histories,
+                &bindings,
+                [0.5, -0.25, 1.0],
+                Default::default(),
+                |history, k| {
+                    calls.push((k.contact_id, k.original_index));
+                    assert_eq!(history, &accepted[k.original_index]);
+                    same(k.first_point_world, vec(x), 1e-14);
+                    same(k.second_point_world, vec(x), 1e-14);
+                    near(
+                        k.relative_velocity_m_s[1],
+                        if k.original_index == 1 { 3.0 } else { 2.0 },
+                        1e-14,
+                    );
+                    Ok::<_, &'static str>(conditions(if k.original_index == 1 {
+                        300.0
+                    } else {
+                        310.0
+                    }))
+                },
+                cx,
+            )
+            .unwrap();
+        assert_eq!(calls, [(10, 1), (20, 0)]);
+        assert_eq!(report.mechanical.contact_ids, vec![5, 10, 20]);
+        assert_eq!(report.sources.len(), 2);
+        // Active normal block [[4,-1/2],[-1/2,1]], with rhs (1,1),
+        // gives (2/5,6/5). Actual source speeds 3 and 2 select mu=.35,.30.
+        let impulses = &report.mechanical.contact.impulses;
+        assert_eq!(impulses[0], [0.0; 3]);
+        near(impulses[1][0], 0.4, 2e-9);
+        near(impulses[1][1], -0.14, 2e-9);
+        near(impulses[2][0], 1.2, 2e-9);
+        near(impulses[2][1], -0.36, 2e-9);
+        for receipt in &report.sources {
+            let index = receipt.kinematics.original_index;
+            assert_eq!(receipt.kinematics.contact_id, contacts[index].id);
+            near(
+                receipt.sample.queried_speed_m_s,
+                if index == 1 { 3.0 } else { 2.0 },
+                1e-14,
+            );
+            near(
+                receipt.sample.coefficients_mu[0],
+                if index == 1 { 0.35 } else { 0.30 },
+                1e-14,
+            );
+            near(
+                receipt.sample.coefficients_mu[1],
+                if index == 1 { 0.40 } else { 0.50 },
+                1e-14,
+            );
+            assert_eq!(
+                receipt.sample.state.constitutive_state().principal_axis(),
+                accepted[index].constitutive_state().principal_axis()
+            );
+            assert_eq!(receipt.sample.state.constitutive_state().slip_m(), [0.0; 2]);
+            for source in receipt.sample.state.friction_sources() {
+                assert_eq!(source.state_coordinate("path"), Some(0.25));
+            }
+        }
+        assert_ne!(next.native_state().v, original.v);
+        assert_eq!(rigid[2], bodies[2]);
+        assert_eq!(histories, accepted);
+        assert_eq!(solid.native_state(), &original);
+        audit(&report.mechanical);
+
+        // The canonical second query fails after the first candidate source was
+        // sampled. The error still identifies the original caller index and
+        // neither mechanics nor accepted source state is published.
+        let result = solid.mixed_source_elliptic_contact_candidate(
+            &bodies,
+            &[properties(); 3],
+            &contacts,
+            &histories,
+            &bindings,
+            [0.0; 3],
+            Default::default(),
+            |_, k| {
+                if k.contact_id == 20 {
+                    Err("pair source boundary")
+                } else {
+                    Ok(conditions(300.0))
+                }
+            },
+            cx,
+        );
+        assert!(matches!(
+            result,
+            Err(FiniteSolidMixedContactError::Contact(
+                SourceFiniteSolidMixedContactFailure::Conditions {
+                    contact_id: 20,
+                    original_index: 0,
+                    error: "pair source boundary",
+                }
+            ))
+        ));
+        assert_eq!(solid.native_state(), &original);
+        assert_eq!(histories, accepted);
+    });
+}
+
+#[test]
 fn source_domain_and_late_angular_failures_preserve_all_accepted_states() {
     with_cx(|gate, cx| {
         let material = bind(&source_card(6.0, 1.0, false, false));

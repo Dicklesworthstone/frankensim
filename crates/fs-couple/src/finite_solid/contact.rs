@@ -21,6 +21,9 @@ pub mod elliptic;
 /// Mixed rigid/rigid and rigid/finite-solid events through one mechanical core.
 pub mod mixed;
 
+/// Automatic current witnesses and candidate paths for mixed sphere scenes.
+pub mod scene;
+
 /// Current finite-solid surface witnesses for native rigid contact.
 pub mod surface;
 
