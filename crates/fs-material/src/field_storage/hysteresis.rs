@@ -31,6 +31,8 @@ use std::sync::Arc;
 pub mod vector;
 /// Original material-card coefficients for the same magnetic memory owner.
 pub mod source;
+/// One magnetic history shared by multiple windings with physical leakage.
+pub mod shared;
 
 /// One polarization contribution; the sum of saturation values is the total
 /// saturation polarization. No normalization or hidden branch weight is used.
@@ -269,28 +271,49 @@ impl ScalarHysteresis {
         previous: &MagneticHysteresisState,
         flux_density_t: f64,
     ) -> Result<HysteresisStep, FieldStorageError> {
+        self.candidate_linear_flux(previous, flux_density_t, 0.0)
+    }
+
+    // The same constitutive inverse with an external positive linear load line:
+    // B(H, old_memory) + field_coefficient*H = target. The additional term is
+    // never added to material storage or fitted polarization. Shared winding
+    // leakage supplies it; only the final original candidate owns core memory.
+    fn candidate_linear_flux(
+        &self,
+        previous: &MagneticHysteresisState,
+        target: f64,
+        field_coefficient: f64,
+    ) -> Result<HysteresisStep, FieldStorageError> {
         self.admit(previous)?;
-        if !flux_density_t.is_finite() {
-            return Err(invalid("magnetic flux density must be finite"));
+        if !target.is_finite() || !field_coefficient.is_finite() || field_coefficient < 0.0 {
+            return Err(invalid("finite magnetic target and nonnegative load-line coefficient required"));
         }
-        if flux_density_t == previous.flux_density_t {
+        if target == previous.flux_density_t + field_coefficient * previous.field_a_m {
             return self.candidate_field(previous, previous.field_a_m);
         }
+        let response = |h: f64| {
+            let (b, slope, scale) = self.response(previous, h);
+            let added = field_coefficient * h;
+            (b + added, slope + field_coefficient, scale + added.abs())
+        };
         let mut lo = -self.parameters.field_limit_a_m;
         let mut hi = self.parameters.field_limit_a_m;
-        let b_lo = self.response(previous, lo).0;
-        let b_hi = self.response(previous, hi).0;
-        if flux_density_t < b_lo || flux_density_t > b_hi {
+        let b_lo = response(lo).0;
+        let b_hi = response(hi).0;
+        if !b_lo.is_finite() || !b_hi.is_finite() || target < b_lo || target > b_hi {
             return Err(invalid(
                 "magnetic flux requires a field outside the hysteresis domain",
             ));
         }
         let mut h = previous.field_a_m;
         for _ in 0..96 {
-            let (b, slope, scale) = self.response(previous, h);
-            let residual = b - flux_density_t;
+            let (b, slope, scale) = response(h);
+            if !b.is_finite() || !positive(slope) || !scale.is_finite() {
+                return Err(invalid("magnetic load-line response is unrepresentable"));
+            }
+            let residual = b - target;
             if residual == 0.0
-                || residual.abs() <= 32.0 * f64::EPSILON * (scale + flux_density_t.abs())
+                || residual.abs() <= 32.0 * f64::EPSILON * scale + 32.0 * f64::EPSILON * target.abs()
             {
                 return self.candidate_field(previous, h);
             }

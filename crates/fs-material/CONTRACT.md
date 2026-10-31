@@ -9,6 +9,43 @@ Ambition tags: elastic/hyperelastic/J2/RC-fiber laws + calibration [S];
 multi-case identifiability authority schema [F]. Ogden and tension-only
 HGO/GOH are [S] constitutive laws; specimen/tissue calibration is separate.
 
+## One magnetic history shared by multiple windings
+
+`field_storage::hysteresis::shared::SharedHystereticCore` couples one original
+`UniformHystereticCore` to one through sixteen physical windings. Each winding
+declares its signed turns ratio to the reference core and positive physical
+leakage inductance. Total linkage is `lambda_i = D_i i_i + r_i lambda_ref`;
+the common magnetomotive balance is `I_ref = sum(r_i i_i)`. Eliminating these
+currents gives a positive linear load line on the original scalar material
+inverse. No independent winding histories, guessed coupling coefficient,
+numerical leakage, or fitted core-loss resistance is introduced.
+
+The source-owned polarizations, reversible core energy and irreversible
+pinning heat occur once. A candidate integrates the exact piecewise-linear
+material path along a straight chord in all total linkages. Its work-conjugate
+mean winding currents use integration by parts, retaining pinning and saturation
+crossings where endpoint current averages would give incorrect work. Independently
+checked winding work equals the stable change of leakage and core energy plus
+the original pinning heat. A zero common drive advances only the leakage modes.
+The full row-major active-set inductance matrix is `D + L_ref r r^T`, including
+signed mutual entries and the original one-sided tangent at thresholds.
+
+All candidates retain the original winding geometry and accepted core memory.
+Prepared remanence must come from an explicit core history with compatible total
+linkages; a source query can refresh only the original admitted constant fit.
+Incomplete/nonfinite states, incompatible magnetic balance, unsupported source
+conditions and unrepresentable work refuse without changing accepted state.
+Geometry and constitutive coefficients remain fixed. Core reversals require
+separate increments; the result is a rate-independent path law, not a complex
+AC hysteresis model or a thermal/motion integrator. Copper and eddy-current heat
+belong to their existing circuit/field owners and must not duplicate pinning heat.
+
+Focused authored-fixture tests independently integrate exact active-set spans,
+checking multiple winding polarities/orderings, threshold crossings, reversal,
+prepared remanence, differential leakage modes, full inductance and unchanged
+state on refusal. These verify the declared constitutive construction, not
+experimental material qualification.
+
 ## Layer-resolved thermal expansion of elastic laminates
 
 `laminate::thermal::PreparedLaminateThermal` shares the original immutable
