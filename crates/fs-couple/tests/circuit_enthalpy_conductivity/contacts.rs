@@ -3,7 +3,11 @@
 use super::*;
 use fs_couple::circuit_enthalpy::contacts::{ContactHeatCells, ContactThermalCoefficients};
 use fs_couple::circuit_enthalpy::conductivity::step_with_contacts_candidate;
+use fs_couple::circuit_enthalpy::conductivity::step_with_contact_response_candidate;
 use fs_couple::material_circuit::contacts::SeriesElectricalContact;
+use fs_couple::material_circuit::conductivity::contact::{
+    ContactAxis, ContactCoordinate, ContactDirection, ContactResponse,
+};
 
 #[path = "../electrical_contacts/source.rs"]
 mod source;
@@ -34,8 +38,8 @@ fn contact_coefficients(
 }
 
 // Independent reduction of two backward-Euler heat equations and midpoint RC.
-// R_a=1+beta E_a, R_c=scale(1+gamma(T_a-300)), C=1, Cp=(1,2), R_b=3.
-fn reference(beta: f64, scale: f64, gamma: f64, conductance: f64, dt: f64)
+// R_a=1+beta E_a, R_c=scale(1+gamma(T_a-300)+delta V_c), C=1, Cp=(1,2), R_b=3.
+fn reference(beta: f64, scale: f64, gamma: f64, delta: f64, conductance: f64, dt: f64)
     -> (f64, f64, f64)
 {
     let q = dt * conductance;
@@ -45,7 +49,8 @@ fn reference(beta: f64, scale: f64, gamma: f64, conductance: f64, dt: f64)
         let heat = dt * current * current;
         let base_ta = heat * ((2.0 + q) * ra + q * 3.0) / determinant;
         let contact_ta = heat * ((2.0 + q) * PARTITION + q * (1.0 - PARTITION)) / determinant;
-        let rc = scale * (1.0 + gamma * base_ta) / (1.0 - scale * gamma * contact_ta);
+        let rc = scale * (1.0 + gamma * base_ta)
+            / (1.0 - scale * gamma * contact_ta - scale * delta * current);
         let ta = base_ta + contact_ta * rc;
         let tb = (heat * (3.0 + (1.0 - PARTITION) * rc) + q * ta) / (2.0 + q);
         (ra, rc, ta, tb)
@@ -110,7 +115,7 @@ fn g1_nonlinear_bulk_and_contact_heat_share_the_actual_thermal_endpoint() {
             assert_eq!(report.source.destinations, ROUTES);
             assert!(report.electrical.iterations > 1);
             if n == 1 {
-                let expected = reference(beta, scale, gamma, 1.0, dt);
+                let expected = reference(beta, scale, gamma, 0.0, 1.0, dt);
                 near(result.circuit().charges_c()[0], expected.0);
                 near(ta, expected.1);
                 near(tb, expected.2);
@@ -122,6 +127,114 @@ fn g1_nonlinear_bulk_and_contact_heat_share_the_actual_thermal_endpoint() {
         }
     }
     assert!(charges[1] > charges[0], "source-only contact change alters actual discharge");
+}
+
+#[test]
+fn g1_contact_voltage_temperature_and_bulk_field_share_one_finite_heat_trajectory() {
+    let beta = 0.05;
+    let gamma = 0.001;
+    let scale = 1.2;
+    let dt = 0.2;
+    let voltage = Dims([2, 1, -3, 0, -1, 0]);
+    let axes = [ContactAxis { name: "contact_voltage", coordinate: ContactCoordinate::VoltageMagnitude }];
+    let mut endpoints = Vec::new();
+    for delta in [0.0, 0.03] {
+        let (a, ca) = field_material(beta, 2000.0);
+        let (b, cb) = common::material(3.0, 2.0, 0.0);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let mut thermal = initial(&curves, 1.0, None);
+        let interface = source::response_card(&cards[0], &cards[1], "contact_voltage", voltage,
+            scale, gamma, delta, 10.0);
+        let mut electrical = circuit(&cards).rebind_contacts_candidate(vec![
+            source::response_contact(7, 1, &interface, 1.0, "contact_voltage", voltage),
+        ], &[]).unwrap();
+        let contact_responses = [ContactResponse { id: 7, card: &interface,
+            direction: ContactDirection::AlongBranch, axes: &axes }];
+        let total0 = 50.0 + thermal.energy_j();
+        for n in 1..=3 {
+            let result = step_with_contact_response_candidate(
+                &thermal, f64::from(n) * dt, common::input(&electrical), &responses(&cards),
+                Some(&contact_responses), &ROUTES, config(), conductivity_controls(), &[0.0; 2],
+                |state| contact_coefficients(state, &electrical, &cards, &curves, &interface),
+                |_, _, transport| Ok(transport), || false,
+            ).unwrap();
+            let report = result.report();
+            let native = &report.electrical.electrical;
+            let source = &report.electrical.evaluated_contacts[0];
+            let contact = &native.contacts[0];
+            let ta = result.thermal().temperature_k(CellId(30)).unwrap();
+            let tb = result.thermal().temperature_k(CellId(10)).unwrap();
+            near(source.contact.resistance_ohm(), scale * (1.0 + gamma * (ta - 300.0)
+                + delta * contact.voltage_v.abs()));
+            near(source.contact.source().resolved().state_coordinate("Ta").unwrap(), ta);
+            near(source.contact.source().resolved().state_coordinate("Tb").unwrap(), tb);
+            near(source.contact.source().resolved().state_coordinate("contact_voltage").unwrap(), contact.voltage_v.abs());
+            let heat_a = result.thermal().cells()[&CellId(30)].specific_h_j_kg
+                - thermal.cells()[&CellId(30)].specific_h_j_kg;
+            let heat_b = result.thermal().cells()[&CellId(10)].specific_h_j_kg
+                - thermal.cells()[&CellId(10)].specific_h_j_kg;
+            let transfer = dt * (tb - ta);
+            near(heat_a, native.resistors[0].heat_j + PARTITION * contact.heat_j + transfer);
+            near(heat_b, native.resistors[1].heat_j + (1.0 - PARTITION) * contact.heat_j - transfer);
+            near(native.stored_after_j + result.thermal().energy_j(), total0);
+            near(report.deposited_joule_j, native.heat_j);
+            assert_eq!(report.source.destinations, ROUTES);
+            if n == 1 {
+                let expected = reference(beta, scale, gamma, delta, 1.0, dt);
+                near(result.circuit().charges_c()[0], expected.0);
+                near(ta, expected.1);
+                near(tb, expected.2);
+                endpoints.push(result.circuit().charges_c()[0]);
+            }
+            let (next_thermal, next_electrical, _) = result.into_parts();
+            thermal = next_thermal;
+            electrical = next_electrical;
+        }
+    }
+    assert!(endpoints[1] > endpoints[0]);
+}
+
+#[test]
+fn g4_contact_operating_point_refusal_preserves_electrical_and_thermal_history() {
+    let (a, ca) = field_material(0.05, 2000.0);
+    let (b, cb) = common::material(3.0, 2.0, 0.0);
+    let cards = [a, b];
+    let curves = [ca, cb];
+    let thermal = initial(&curves, 1.0, None);
+    let voltage = Dims([2, 1, -3, 0, -1, 0]);
+    let axes = [ContactAxis { name: "V", coordinate: ContactCoordinate::VoltageMagnitude }];
+    for limit in [0.01, 10.0] {
+        let interface = source::response_card(&cards[0], &cards[1], "V", voltage,
+            1.2, 0.001, 0.03, limit);
+        let electrical = circuit(&cards).rebind_contacts_candidate(vec![
+            source::response_contact(7, 1, &interface, 1.0, "V", voltage),
+        ], &[]).unwrap();
+        let saved = electrical.clone();
+        let cells = thermal.cells().clone();
+        let contact_responses = [ContactResponse { id: 7, card: &interface,
+            direction: ContactDirection::AlongBranch, axes: &axes }];
+        let run = |controls, cancel: &mut dyn FnMut() -> bool| step_with_contact_response_candidate(
+            &thermal, 0.2, common::input(&electrical), &responses(&cards), Some(&contact_responses),
+            &ROUTES, controls, conductivity_controls(), &[0.0; 2],
+            |state| contact_coefficients(state, &electrical, &cards, &curves, &interface),
+            |_, _, transport| Ok(transport), cancel,
+        );
+        if limit < 1.0 { assert!(run(config(), &mut || false).is_err()); }
+        else {
+            assert!(matches!(run(fs_couple::circuit_enthalpy::CircuitEnthalpySolve {
+                maximum_circuit_trials: 1, ..config()
+            }, &mut || false), Err(CircuitEnthalpyError::CircuitBudget)));
+            let mut polls = 0;
+            run(config(), &mut || { polls += 1; false }).unwrap();
+            let mut count = 0;
+            assert!(matches!(run(config(), &mut || { count += 1; count == polls }),
+                Err(CircuitEnthalpyError::Cancelled)));
+        }
+        assert_eq!(electrical, saved);
+        assert_eq!(thermal.cells(), &cells);
+        assert_eq!(thermal.time_s(), 0.0);
+    }
 }
 
 #[test]

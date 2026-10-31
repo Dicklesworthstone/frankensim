@@ -7,14 +7,16 @@
 
 use fs_matdb::MaterialCard;
 use fs_material::conductor::{ConductorError, ResolvedConductor};
-use fs_material::electrical_interface::ELECTRICAL_CONTACT_RESISTANCE_PROPERTY;
 use fs_qty::{Dims, QuantitySpec};
 
-use super::contacts::SeriesElectricalContact;
+use super::contacts::{ContactHeat, SeriesElectricalContact};
 use super::{
     MaterialCircuit, MaterialCircuitCandidate, MaterialCircuitError, MaterialCircuitSolve,
     MaterialCircuitStep, MaterialResistor, ResistorHeat, poll,
 };
+
+pub mod contact;
+use contact::{ContactConductivitySample, ContactResponse};
 
 /// Work cap on complete circuit/source evaluations in one proposed time step.
 pub const MAX_CONDUCTIVITY_ITERATIONS: usize = 128;
@@ -134,6 +136,9 @@ pub struct MaterialConductivityStep {
     /// Source responses at that step's solved fields, in original branch order.
     /// Their difference from applied coefficients is bounded, never hidden.
     pub evaluated: Vec<ConductivitySample>,
+    /// Complete interface bundles evaluated at each actual contact drop/current.
+    /// Empty when contacts have no electrical response binding.
+    pub evaluated_contacts: Vec<ContactConductivitySample>,
     /// All circuit trials, including discarded constitutive iterates.
     pub iterations: usize,
     /// Operating-field bundle refreshes; excludes the one seed-admission replay
@@ -277,12 +282,12 @@ fn admit<'a, 'b>(
     Ok(ordered)
 }
 
-// Contact snapshots are held throughout the electrical iteration. Their outer
-// physical owner may refresh temperatures/phase, but cannot freeze an electric
-// operating coordinate that changes with the current being solved here.
+// The outer owner may refresh thermal context, but contact identity, geometry,
+// coordinate meanings and every selected property remain the original bundle.
 fn admit_contacts(
     circuit: &MaterialCircuit,
     contacts: &[SeriesElectricalContact],
+    electrical_response: bool,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), MaterialCircuitError> {
     if contacts.len() != circuit.contacts().len() {
@@ -310,17 +315,9 @@ fn admit_contacts(
         {
             return Err(invalid("conductivity contact refresh changed its original source or geometry"));
         }
-        let property = after.property(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY)
-            .ok_or_else(|| invalid("contact resistance source is absent"))?;
-        let electrical = |dims: Dims| [
-            ConductionCoordinate::ElectricField.dimensions(),
-            ConductionCoordinate::CurrentDensity.dimensions(),
-            Dims([2, 1, -3, 0, -1, 0]), // voltage jump
-            Dims([0, 0, 0, 0, 1, 0]), // terminal current
-        ].contains(&dims);
-        if property.source_axes().iter().any(|(_, dims)| electrical(*dims))
-            || after.axis_quantities().values().any(|quantity| electrical(quantity.dims()))
-        {
+        if !electrical_response && (after.properties().iter().any(|property|
+            property.source_axes().iter().any(|(_, dims)| contact::electrical(*dims)))
+            || after.axis_quantities().values().any(|quantity| contact::electrical(quantity.dims()))) {
             return Err(invalid("contact electrical operating coordinates require their own nonlinear closure"));
         }
     }
@@ -350,13 +347,16 @@ fn refresh(
 // this seam cannot manufacture a circuit, force, heat or accepted history.
 pub(super) trait ConductivityDriver {
     fn resistor_heats(&self) -> &[ResistorHeat];
+    fn contact_heats(&self) -> &[ContactHeat] { &[] }
 }
 impl ConductivityDriver for MaterialCircuitCandidate {
     fn resistor_heats(&self) -> &[ResistorHeat] { &self.step().resistors }
+    fn contact_heats(&self) -> &[ContactHeat] { &self.step().contacts }
 }
 pub(super) struct ConductivityTrial<D> {
     pub candidate: D,
     pub evaluated: Vec<ConductivitySample>,
+    pub evaluated_contacts: Vec<ContactConductivitySample>,
     pub iterations: usize,
     pub source_evaluations: usize,
 }
@@ -366,9 +366,11 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
     circuit: &MaterialCircuit,
     mut seeds: Vec<MaterialResistor>,
     sources: &[ConductorResponse<'_>],
+    mut contacts: Vec<SeriesElectricalContact>,
+    contact_sources: Option<&[ContactResponse<'_>]>,
     controls: MaterialCircuitSolve,
     solve: ConductivitySolve,
-    mut native: impl FnMut(Vec<MaterialResistor>, &mut C)
+    mut native: impl FnMut(Vec<MaterialResistor>, Vec<SeriesElectricalContact>, &mut C)
         -> Result<D, MaterialCircuitError>,
     mut cancelled: C,
 ) -> Result<ConductivityTrial<D>, MaterialCircuitError> {
@@ -381,12 +383,20 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
     }
     seeds.sort_by_key(|seed| seed.branch);
     let bindings = admit(circuit, &seeds, sources, &mut cancelled)?;
+    super::contacts::admit(&mut contacts)?;
+    admit_contacts(circuit, &contacts, contact_sources.is_some(), &mut cancelled)?;
+    let contact_bindings = contact::admit(circuit, &contacts, contact_sources, &mut cancelled)?;
     let mut applied = seeds.clone();
+    let mut applied_contacts = contacts.clone();
     let mut maximum_resistance_defect = 0.0_f64;
     let mut maximum_power_defect = 0.0_f64;
     for iterations in 1..=solve.maximum_iterations {
         poll(&mut cancelled)?;
-        let candidate = native(applied, &mut cancelled)?;
+        let candidate = native(applied, applied_contacts, &mut cancelled)?;
+        if candidate.resistor_heats().len() != seeds.len()
+            || candidate.contact_heats().len() != contacts.len() {
+            return Err(invalid("native conductivity trial lost a bulk or contact loss"));
+        }
         let mut evaluated = Vec::with_capacity(bindings.len());
         let mut next = Vec::with_capacity(bindings.len());
         let mut converged = true;
@@ -434,12 +444,34 @@ pub(super) fn solve_native<D: ConductivityDriver, C: FnMut() -> bool>(
             evaluated.push(ConductivitySample { point, conductor, resistance_defect_ohm,
                 voltage_defect_v, power_defect_w });
         }
+        let mut evaluated_contacts = Vec::with_capacity(contact_bindings.len());
+        let mut next_contacts = if contact_bindings.is_empty() { contacts.clone() }
+            else { Vec::with_capacity(contacts.len()) };
+        for ((heat, original), binding) in candidate.contact_heats().iter()
+            .zip(&contacts).zip(&contact_bindings) {
+            poll(&mut cancelled)?;
+            let sample = contact::evaluate(original, binding, heat)?;
+            let actual = sample.contact.resistance_ohm();
+            let used = heat.contact.resistance_ohm();
+            let tolerance = solve.absolute_resistance_tolerance_ohm
+                + solve.relative_resistance_tolerance * actual.max(used);
+            if !tolerance.is_finite() {
+                return Err(invalid("contact constitutive tolerance is unrepresentable"));
+            }
+            maximum_resistance_defect = maximum_resistance_defect.max(sample.resistance_defect_ohm.abs());
+            maximum_power_defect = maximum_power_defect.max(sample.power_defect_w.abs());
+            converged &= sample.resistance_defect_ohm.abs() <= tolerance
+                && sample.power_defect_w.abs() <= controls.power_tolerance_w;
+            next_contacts.push(sample.contact.clone());
+            evaluated_contacts.push(sample);
+        }
         poll(&mut cancelled)?;
         if converged {
-            return Ok(ConductivityTrial { candidate, evaluated, iterations,
-                source_evaluations: iterations * bindings.len() });
+            return Ok(ConductivityTrial { candidate, evaluated, evaluated_contacts, iterations,
+                source_evaluations: iterations * (bindings.len() + contact_bindings.len()) });
         }
         applied = next;
+        applied_contacts = next_contacts;
     }
     Err(MaterialCircuitError::ConductivityConvergence {
         iterations: solve.maximum_iterations,
@@ -511,11 +543,12 @@ impl MaterialCircuit {
         solve: ConductivitySolve,
         cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
-        let trial = solve_native(self, seeds, sources, controls, solve,
-            |applied, check| self.step_candidate(applied, inputs, dt, controls, check), cancelled)?;
+        let trial = solve_native(self, seeds, sources, Vec::new(), None, controls, solve,
+            |applied, _, check| self.step_candidate(applied, inputs, dt, controls, check), cancelled)?;
         let (circuit, electrical) = trial.candidate.into_parts();
         Ok(MaterialConductivityCandidate { circuit, step: MaterialConductivityStep {
-            electrical, evaluated: trial.evaluated, iterations: trial.iterations,
+            electrical, evaluated: trial.evaluated, evaluated_contacts: trial.evaluated_contacts,
+            iterations: trial.iterations,
             source_evaluations: trial.source_evaluations } })
     }
 
@@ -542,16 +575,45 @@ impl MaterialCircuit {
         dt: f64,
         controls: MaterialCircuitSolve,
         solve: ConductivitySolve,
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
-        poll(&mut cancelled)?;
-        admit_contacts(self, &contacts, &mut cancelled)?;
-        let trial = solve_native(self, seeds, sources, controls, solve,
-            |applied, check| self.step_with_contacts_candidate(
-                applied, contacts.clone(), inputs, dt, controls, check), cancelled)?;
+        self.conductivity_with_contact_response_candidate(seeds, contacts, sources,
+            None, inputs, dt, controls, solve, cancelled)
+    }
+
+    /// Jointly close bulk E/J and every contact's own voltage/current response.
+    ///
+    /// Each interface binding declares its ordered-surface direction and typed
+    /// voltage, current or current-density axes. Complete pinned interface
+    /// bundles are refreshed at the SAME native midpoint as bulk materials.
+    /// Both coefficient and constitutive-power residuals must converge. Native
+    /// contact heat is deposited once; evaluated-source defects are not heat.
+    ///
+    /// `None` holds electrically independent contacts fixed. `Some` requires
+    /// exactly one original-card binding per contact, including fixed laws.
+    /// The zero-thickness contact owns no electric field, capacitance, carrier
+    /// storage, breakdown, switching history or geometrical evolution. Strong
+    /// nonlinearity can refuse the bounded fixed-point iteration atomically.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conductivity_with_contact_response_candidate(
+        &self,
+        seeds: Vec<MaterialResistor>,
+        contacts: Vec<SeriesElectricalContact>,
+        sources: &[ConductorResponse<'_>],
+        contact_sources: Option<&[ContactResponse<'_>]>,
+        inputs: &[f64],
+        dt: f64,
+        controls: MaterialCircuitSolve,
+        solve: ConductivitySolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaterialConductivityCandidate, MaterialCircuitError> {
+        let trial = solve_native(self, seeds, sources, contacts, contact_sources, controls, solve,
+            |applied, interfaces, check| self.step_with_contacts_candidate(
+                applied, interfaces, inputs, dt, controls, check), cancelled)?;
         let (circuit, electrical) = trial.candidate.into_parts();
         Ok(MaterialConductivityCandidate { circuit, step: MaterialConductivityStep {
-            electrical, evaluated: trial.evaluated, iterations: trial.iterations,
+            electrical, evaluated: trial.evaluated, evaluated_contacts: trial.evaluated_contacts,
+            iterations: trial.iterations,
             source_evaluations: trial.source_evaluations } })
     }
 }

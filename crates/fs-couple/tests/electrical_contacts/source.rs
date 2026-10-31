@@ -29,6 +29,42 @@ pub fn contact(id:u64,branch:usize,card:&InterfaceSystemCard,area:f64) -> Series
     SeriesElectricalContact::new(id,branch,resolve_electrical_interface_state(card,&point(),
         MaterialPropertySelection::SingleClaimOnly).unwrap(),area).unwrap()
 }
+
+/// Manufactured R'' = r [1 + gamma (Ta - 300) + beta * drive].
+/// A true two-coordinate surface exercises coupled temperature/electrical queries.
+#[allow(clippy::too_many_arguments)]
+pub fn response_card(a: &MaterialCard, b: &MaterialCard, axis: &str, axis_dims: Dims,
+    r: f64, gamma: f64, beta: f64, limit: f64) -> InterfaceSystemCard {
+    let template = card(a, b, r, 0.0);
+    let dims = ELECTRICAL_CONTACT_RESISTANCE_DIMS;
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, dims),
+        value: PropertyValue::Surface2D {
+            axes: ["Ta".into(), axis.into()], axis_dims: [Temperature::DIMS, axis_dims],
+            samples: [[200.0, -limit], [500.0, -limit], [500.0, limit], [200.0, limit]]
+                .into_iter().map(|[t, drive]| ([t, drive], r * (1.0 + gamma * (t - 300.0) + beta * drive))).collect(),
+            triangles: vec![[0, 1, 2], [0, 2, 3]], dims,
+        },
+        validity: ValidityDomain::unconstrained().with("Ta", 200.0, 500.0)
+            .with("Tb", 200.0, 500.0).with("pressure", 100000.0, 100000.0)
+            .with_quantity(axis, fs_qty::QuantitySpec::dimensional(axis_dims), -limit, limit),
+        uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![], provenance: Provenance {
+            source: "synthetic joint electrical/thermal contact surface".into(),
+            license: "CC0-1.0".into(), artifact: None,
+        },
+    }).unwrap();
+    InterfaceSystemCard::assemble(template.surface_a().clone(), template.surface_b().clone(),
+        template.context().clone(), claims, vec![]).unwrap()
+}
+
+pub fn response_contact(id: u64, branch: usize, card: &InterfaceSystemCard, area: f64,
+    axis: &str, dims: Dims) -> SeriesElectricalContact {
+    let point = point().with_quantity(axis, fs_qty::QuantitySpec::dimensional(dims), 0.0).unwrap();
+    SeriesElectricalContact::new(id, branch, resolve_electrical_interface_state(card, &point,
+        MaterialPropertySelection::SingleClaimOnly).unwrap(), area).unwrap()
+}
 pub fn scalar_card(property:&str,dims:Dims,value:f64) -> MaterialCard {
     let mut claims=ClaimSet::new();
     claims.insert_claim(PropertyClaim {key:PropertyKey::new(property,dims),value:PropertyValue::Scalar {value,dims},

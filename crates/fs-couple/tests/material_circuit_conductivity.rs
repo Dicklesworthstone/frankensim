@@ -2,6 +2,8 @@
 //! data exercises the mathematical coupling, not an experimental material fit.
 #[path = "electrical_contacts/source.rs"]
 mod contact_source;
+#[path = "material_circuit_conductivity/contact_response.rs"]
+mod contact_response;
 use fs_couple::material_circuit::conductivity::{
     ConductionAxis, ConductionCoordinate, ConductivitySolve, ConductorResponse,
 };

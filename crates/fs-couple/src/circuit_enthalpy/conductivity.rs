@@ -9,6 +9,7 @@ use super::*;
 use crate::material_circuit::conductivity::{
     ConductivitySolve, ConductorResponse, MaterialConductivityCandidate, MaterialConductivityStep,
 };
+use crate::material_circuit::conductivity::contact::ContactResponse;
 use super::contacts::{ContactHeatCells, ContactThermalCoefficients, ContactThermalSample};
 
 /// Original nonlinear electrical response and shared local/global heat account.
@@ -149,7 +150,7 @@ pub fn step_candidate_with_transport<'m, S, E>(
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     coupled_with_contacts_candidate(
-        thermal, target_s, input, responses, &[], controls, conductivity,
+        thermal, target_s, input, responses, None, &[], controls, conductivity,
         initial_energy_increments_j,
         |state| resolve(state).map(|bulk| ContactThermalCoefficients {
             bulk, contacts: Vec::new(),
@@ -210,8 +211,50 @@ pub fn step_with_contacts_candidate_with_transport<'m, S, E>(
     ) -> Result<StepCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<ConductivityEnthalpyCandidate<'m, ContactThermalSample<S>>, CircuitEnthalpyError<E>> {
+    step_with_contact_response_candidate(
+        thermal, target_s, input, responses, None, contact_cells, controls,
+        conductivity, initial_energy_increments_j, resolve, transport, cancelled,
+    )
+}
+
+/// Close contact voltage/current response, nonlinear bulk conduction and finite
+/// thermal storage in one transaction. `contact_responses` binds every original
+/// interface card and its explicit ordered-surface electrical axes. The same
+/// native midpoint supplies bulk E/J and individual contact V/I/J; thermal seed
+/// temperatures stay fixed throughout that inner constitutive iteration.
+///
+/// Source temperature and operating-point effects need not be separable: each
+/// complete interface bundle is re-evaluated at both sets of coordinates.
+/// `transport` may refresh thermal coefficients from the admitted operating
+/// point, with the same semantics as [`step_candidate_with_transport`]. Every
+/// native bulk/contact loss reaches its authored heat destination exactly once.
+/// The original outer circuit budget counts every inner native solve, including
+/// failed stencils and final admission. No candidate advances accepted history.
+///
+/// This retains fixed geometry, instantaneous passive scalar interface response,
+/// zero contact storage and the endpoint-thermal/midpoint-electrical time model.
+/// It adds no contact thickness/field, switching, breakdown or convergence claim.
+#[allow(clippy::too_many_arguments)]
+pub fn step_with_contact_response_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>,
+    target_s: f64,
+    input: CircuitEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>],
+    contact_responses: Option<&[ContactResponse<'_>]>,
+    contact_cells: &[ContactHeatCells],
+    controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve,
+    initial_energy_increments_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
+    transport: impl Fn(
+        &DepositionSimulation<'m>,
+        &MaterialConductivityStep,
+        StepCoefficients<S>,
+    ) -> Result<StepCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ConductivityEnthalpyCandidate<'m, ContactThermalSample<S>>, CircuitEnthalpyError<E>> {
     coupled_with_contacts_candidate(
-        thermal, target_s, input, responses, contact_cells, controls, conductivity,
+        thermal, target_s, input, responses, contact_responses, contact_cells, controls, conductivity,
         initial_energy_increments_j,
         |state| resolve(state).map(|resolved| {
             let bulk = resolved.bulk;
@@ -250,6 +293,7 @@ fn coupled_with_contacts_candidate<'m, S, E>(
     target_s: f64,
     input: CircuitEnthalpyInput<'_>,
     responses: &[ConductorResponse<'_>],
+    contact_responses: Option<&[ContactResponse<'_>]>,
     contact_cells: &[ContactHeatCells],
     controls: CircuitEnthalpySolve,
     conductivity: ConductivitySolve,
@@ -281,10 +325,11 @@ fn coupled_with_contacts_candidate<'m, S, E>(
             };
             let circuit = input
                 .circuit
-                .conductivity_with_contacts_candidate(
+                .conductivity_with_contact_response_candidate(
                     coefficients.resistors,
                     resolved.contacts,
                     responses,
+                    contact_responses,
                     input.ports,
                     target_s - thermal.time_s(),
                     controls.circuit,

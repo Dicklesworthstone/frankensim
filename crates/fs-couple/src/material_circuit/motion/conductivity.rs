@@ -78,8 +78,8 @@ impl MaterialFieldMotion {
         input: FieldMotionInput<'_>, controls: MaterialCircuitSolve,
         solve: ConductivitySolve, cancelled: impl FnMut() -> bool,
     ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
-        let trial = solve_native(self.circuit(), seeds, sources, controls, solve,
-            |applied, check| self.step_candidate(applied, input, controls, check), cancelled)?;
+        let trial = solve_native(self.circuit(), seeds, sources, Vec::new(), None, controls, solve,
+            |applied, _, check| self.step_candidate(applied, input, controls, check), cancelled)?;
         let (motion, field) = trial.candidate.into_parts();
         Ok(FieldConductivityCandidate { motion, step: FieldConductivityStep { field,
             evaluated: trial.evaluated, iterations: trial.iterations,
