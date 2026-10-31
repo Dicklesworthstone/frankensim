@@ -295,5 +295,9 @@ fn distance_limit(
     finish(cx, result)
 }
 
+/// Spectral receiving power and ideal analyzer readouts on native CIE bins.
+#[cfg(feature = "photometry")]
+pub mod measurement;
+
 #[cfg(test)]
 mod tests;
