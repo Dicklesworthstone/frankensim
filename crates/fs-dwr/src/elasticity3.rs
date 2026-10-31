@@ -17,6 +17,8 @@ use fs_cutfem::octree3::Octant3;
 
 pub mod reaction;
 pub mod response;
+mod material;
+pub use material::MaterialBodyLoads3;
 use response::EquilibriumLoad3;
 
 /// Externally solved homogeneous master fields, checked against actual operators.
@@ -143,7 +145,7 @@ pub fn estimate_reference_goal3(transfer: &AdaptiveTransfer3<'_>, load: Referenc
     admit_transfer3(transfer, options, &mut checkpoint)?;
     let qc = transfer.coarse().reference_load(goal, &mut checkpoint)?;
     let qf = transfer.fine().reference_load(goal, &mut checkpoint)?;
-    estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed: None },
+    estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed: None }, None,
         &qc, &qf, fields, options, &mut checkpoint)
 }
 
@@ -161,7 +163,7 @@ pub fn estimate_motion_goal3(transfer: &AdaptiveTransfer3<'_>, load: ReferenceLo
     admit_transfer3(transfer, options, &mut checkpoint)?;
     let qc = transfer.coarse().reference_load(goal, &mut checkpoint)?;
     let qf = transfer.fine().reference_load(goal, &mut checkpoint)?;
-    estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed },
+    estimate_vectors3(transfer, EquilibriumLoad3 { external: load, prescribed }, None,
         &qc, &qf, fields, options, &mut checkpoint)
 }
 
@@ -188,12 +190,15 @@ fn admit_transfer3(transfer: &AdaptiveTransfer3<'_>, options: GoalOptions3,
 // at their own solved fields. No caller-supplied residuals or substituted K.
 #[allow(clippy::too_many_arguments)]
 fn estimate_vectors3(transfer: &AdaptiveTransfer3<'_>, load: EquilibriumLoad3<'_>,
+    body: Option<MaterialBodyLoads3<'_>>,
     qc: &[f64], qf: &[f64], fields: GoalFields3<'_>, options: GoalOptions3,
     mut checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<GoalEstimate3, GoalError3> {
     admit_transfer3(transfer, options, checkpoint)?;
+    if let Some(body) = body { body.admit(transfer, checkpoint)?; }
     let (coarse, fine) = (transfer.coarse(), transfer.fine());
-    let bc = load.assemble(coarse, &mut *checkpoint)?;
-    let bf = load.assemble(fine, &mut *checkpoint)?;
+    let mut bc = load.assemble(coarse, &mut *checkpoint)?;
+    let mut bf = load.assemble(fine, &mut *checkpoint)?;
+    if let Some(body) = body { body.add_forces(&mut bc, &mut bf, checkpoint)?; }
     let mut residuals = [0.0; 4];
     for (i, (name, op, x, b)) in [
         ("coarse-primal", coarse, fields.coarse_primal, bc.as_slice()),
@@ -210,9 +215,14 @@ fn estimate_vectors3(transfer: &AdaptiveTransfer3<'_>, load: EquilibriumLoad3<'_
     let t = transfer.prolongate(fields.coarse_adjoint, &mut checkpoint)?;
     let weight: Vec<_> = fields.fine_adjoint.iter().zip(&t).map(|(z, t)| z - t).collect();
     let error: Vec<_> = fields.fine_primal.iter().zip(&v).map(|(u, v)| u - v).collect();
-    let local = load.residuals(fine, &v, &weight, checkpoint)?;
-    let consistency = load.residuals(fine, &v, &t, checkpoint)?;
-    let primal_defect = load.residuals(fine, fields.fine_primal, fields.fine_adjoint, checkpoint)?;
+    let mut local = load.residuals(fine, &v, &weight, checkpoint)?;
+    let mut consistency = load.residuals(fine, &v, &t, checkpoint)?;
+    let mut primal_defect = load.residuals(fine, fields.fine_primal, fields.fine_adjoint, checkpoint)?;
+    if let Some(body) = body {
+        body.add_fine_work(&mut local, &weight, checkpoint)?;
+        body.add_fine_work(&mut consistency, &t, checkpoint)?;
+        body.add_fine_work(&mut primal_defect, fields.fine_adjoint, checkpoint)?;
+    }
     // The zero-load residual is exactly -a(z_f,error); use the same physical
     // bilinear owner rather than acquiring another solver-layer dependency.
     let adjoint_form = fine.cell_reference_residuals(fields.fine_adjoint, &error,

@@ -151,7 +151,7 @@ pub fn estimate_response_goal3(transfer: &AdaptiveTransfer3<'_>, load: Equilibri
     let fine = linearize_responses3(transfer.fine(), observations, fields.fine_primal, max_observations, &mut checkpoint)?;
     let v = transfer.prolongate(fields.coarse_primal, &mut checkpoint)?;
     let projected = linearize_responses3(transfer.fine(), observations, &v, max_observations, &mut checkpoint)?;
-    let linearized = estimate_vectors3(transfer, load, &coarse.adjoint_rhs, &fine.adjoint_rhs, fields, options, &mut checkpoint)?;
+    let linearized = estimate_vectors3(transfer, load, None, &coarse.adjoint_rhs, &fine.adjoint_rhs, fields, options, &mut checkpoint)?;
     let mut cells: BTreeMap<_,_> = linearized.cells.iter().map(|(&c,r)| (c,ResponseGoalCell3 {
         linear_dwr: r.signed_dwr, quadratic_remainder: 0.0, marking_mass: r.marking_mass,
     })).collect();

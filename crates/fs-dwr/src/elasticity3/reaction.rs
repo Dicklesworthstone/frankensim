@@ -4,6 +4,7 @@
 //! Never discard c_f-c_c or use the imposed primal motion as adjoint data.
 use super::*;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
+pub use super::MaterialBodyLoads3;
 
 /// A common reference observation, optionally plus a support-force/moment mode.
 /// The reaction mode and imposed motion must be density-independent pure laws.
@@ -79,7 +80,41 @@ pub fn estimate_affine_motion_goal3(transfer: &AdaptiveTransfer3<'_>, load: Equi
     admit_transfer3(transfer, options, &mut checkpoint)?;
     let coarse = assemble_affine_motion_goal3(transfer.coarse(), goal, load.prescribed, &mut checkpoint)?;
     let fine = assemble_affine_motion_goal3(transfer.fine(), goal, load.prescribed, &mut checkpoint)?;
-    let linearized = estimate_vectors3(transfer, load, &coarse.gradient, &fine.gradient,
+    estimate_affine_assembled_goal3(transfer, load, None, &coarse, &fine, fields, options, checkpoint)
+}
+
+/// Two-grid affine goal from the actual assembled gradients and offsets.
+///
+/// `body` adds each native `B*rho` to the primal RHS and `rho*(B^T test)` to
+/// the SAME cell residuals used for marking and algebraic-defect accounting.
+/// Both stencil bindings and exact physical occupancy inheritance are checked
+/// before any reference-load callback. Stiffness inheritance is checked as in
+/// the reference-law entry point. All four fields pass actual residual gates.
+///
+/// Goal forms must describe the caller's same physical quantity on each grid.
+/// For homogeneous compliance, their gradients are the TOTAL external forces
+/// (dead load plus material body force), offsets are zero, and the primal is
+/// also the adjoint. This retains body-force differences in goal transfer.
+/// For reactions, use `assemble_affine_motion_goal3` unchanged: body loading
+/// affects equilibrium, not the reaction's gradient or prescribed-motion offset.
+/// A nonzero prescribed motion generally makes compliance non-self-adjoint.
+///
+/// No field solve occurs. The full affine offset transfer remains separate,
+/// and neither the discrete identity nor its markers certify continuum error
+/// or equivalence of independently authored acceleration/observation laws.
+#[allow(clippy::too_many_arguments)]
+pub fn estimate_affine_assembled_goal3(transfer: &AdaptiveTransfer3<'_>, load: EquilibriumLoad3<'_>,
+    body: Option<MaterialBodyLoads3<'_>>, coarse: &AffineGoalForm3, fine: &AffineGoalForm3,
+    fields: GoalFields3<'_>, options: GoalOptions3,
+    mut checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<AffineGoalEstimate3, GoalError3> {
+    admit_transfer3(transfer, options, &mut checkpoint)?;
+    for (op, form) in [(transfer.coarse(), coarse), (transfer.fine(), fine)] {
+        if form.gradient.len() != 3*op.nodes().len() || !form.offset.is_finite()
+            || form.gradient.iter().any(|v| !v.is_finite()) {
+            return Err(GoalError3::Invalid("invalid assembled affine goal"));
+        }
+    }
+    let linearized = estimate_vectors3(transfer, load, body, &coarse.gradient, &fine.gradient,
         fields, options, &mut checkpoint)?;
     let mut report = AffineGoalEstimate3 {
         coarse_value: linearized.coarse_value + coarse.offset,

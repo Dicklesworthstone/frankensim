@@ -230,6 +230,27 @@ The feature-gated `fs-topopt/tests/marquee.rs` integration owns the two-cycle
 estimate/refine/graded-re-solve composition so this L3 crate does not depend
 upward on the L4 policy owner.
 
+## Native material body loads in 3-D two-grid goals
+
+`elasticity3::reaction::estimate_affine_assembled_goal3` accepts the actual
+coarse/fine affine goal forms and an optional `MaterialBodyLoads3`. Each native
+stencil must belong to its supplied operator, and the fine physical occupancy
+must exactly inherit its coarse parent. The native transfer independently
+requires the full reference material to be parent-inherited. Refiltered probe
+occupancy is refused before reference-load callbacks or field admission.
+
+Body forces enter the actual primal right-hand sides as `B*rho`. Their fine
+cell work `rho[cell]*(B^T test)[cell]` augments the existing weak residual before
+absolute-value marking, including the coarse-space and finite-solve terms.
+For compliance, callers supply total-force goal vectors on both grids, so body
+force differences remain in goal transfer. Reaction goals retain their native
+gradient and separate prescribed-motion offset transfer. The same four actual
+field-residual gates and complete two-grid identity apply; no solver, quadrature
+engine or continuum-error claim is added. Preparing both stencils from the same
+reference acceleration and supplying the same physical goal remain caller
+obligations. `tests/material_goal3.rs` covers native localization, total-force
+compliance, affine offsets, and refusal of noninherited occupancy.
+
 ## No-claim boundaries
 
 - p-enrichment EXECUTION (local high-order spaces await dcng/FEEC-p;

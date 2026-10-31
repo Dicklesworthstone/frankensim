@@ -1472,6 +1472,7 @@ dependencies = [
 name = "fs-dwr"
 version = "0.0.1"
 dependencies = [
+ "fs-blake3",
  "fs-cutfem",
  "fs-ivl",
  "fs-material",
