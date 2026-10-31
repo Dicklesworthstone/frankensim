@@ -112,7 +112,7 @@ fn with_source_registry<T, E: From<GasInputError>>(
     }
     let water = water_species.map(|name| SpeciesId::new(name)
         .map_err(|_| GasInputError::Input("invalid explicit water species identity"))).transpose()?;
-    if phase == ThermochemicalPhase::LiquidWaterLimit && water.is_none() {
+    if phase != ThermochemicalPhase::FrozenGas && water.is_none() {
         return Err(GasInputError::Input("liquid-water admission requires an explicit water identity").into());
     }
     let mut loaded = Vec::with_capacity(sources.len());

@@ -28,6 +28,10 @@ pub enum ThermochemicalPhase {
     /// A record excluding the explicitly identified water species is known dry;
     /// its own thermodynamic and transport source domains still apply.
     LiquidWaterLimit,
+    /// Enforce the finite-condensation owner's original IAPWS saturation curve.
+    /// Its near-atmospheric liquid-water domain and small reconstruction-roundoff
+    /// allowance are explicit; this phase check does not remove excess vapor.
+    LiquidWaterIapwsLimit,
 }
 
 /// Already-loaded, explicitly associated artifacts. This L3 adapter opens no
@@ -230,9 +234,10 @@ pub fn read_gas_record(
             // has that canonical identity: the record is dry, not unknown.
             // Do not add a zero-fraction species or query an irrelevant water
             // saturation window. All selected source domains remain enforced.
-            ThermochemicalPhase::LiquidWaterLimit
+            ThermochemicalPhase::LiquidWaterLimit | ThermochemicalPhase::LiquidWaterIapwsLimit
                 if sources.water_species.is_some() && model.water_species().is_none() => model.evaluate(&point),
             ThermochemicalPhase::LiquidWaterLimit => model.evaluate_with_liquid_water_limit(&point),
+            ThermochemicalPhase::LiquidWaterIapwsLimit => model.evaluate_with_iapws_liquid_water_limit(&point),
         }
         .map_err(GasInputError::Material)?;
         GasRecord::Thermochemical(resolved)

@@ -242,6 +242,39 @@ impl ThermochemicalGasModel {
         self.evaluate(point)
     }
 
+    /// Admit the SAME IAPWS saturation reference used by finite condensation.
+    ///
+    /// This explicit policy preserves the legacy Buck policy unchanged. It
+    /// admits the condensation owner's 273.16--323.15 K, 20--200 kPa ideal-gas
+    /// domain, with no enhancement/fugacity or liquid-pressure correction.
+    /// Only 256 machine epsilons of pressure-reconstruction roundoff are
+    /// allowed; physically supersaturated primitives still refuse. This is a
+    /// phase check, not a sink: no water or latent heat disappears here.
+    pub fn evaluate_with_iapws_liquid_water_limit(
+        &self,
+        point: &QueryPoint,
+    ) -> Result<ResolvedThermochemicalGasState, MaterialError> {
+        use crate::phase::condensation::{MINIMUM_TEMPERATURE_K, MAXIMUM_TEMPERATURE_K,
+            MINIMUM_PRESSURE_PA, MAXIMUM_PRESSURE_PA};
+        let (temperature, pressure) = coordinates(point)?;
+        let water = self.water_component
+            .ok_or_else(|| invalid("IAPWS liquid-water admission needs an explicit water species"))?;
+        if !(MINIMUM_TEMPERATURE_K..=MAXIMUM_TEMPERATURE_K).contains(&temperature.value())
+            || !(MINIMUM_PRESSURE_PA..=MAXIMUM_PRESSURE_PA).contains(&pressure.value())
+            || (self.thermodynamics.components()[water].molar_mass().value()
+                / 0.018_015_268 - 1.0).abs() > 1.0e-5
+        {
+            return Err(invalid("IAPWS moist-gas phase check requires ordinary H2O, 273.16..=323.15 K and 20..=200 kPa"));
+        }
+        let saturation = fs_thermochem::water::SaturatedWaterState::at_temperature(temperature)
+            .map_err(|error| failure("IAPWS saturation", error))?.pressure().value();
+        let partial = self.thermodynamics.mole_composition().fractions()[water] * pressure.value();
+        if partial - saturation > 256.0 * f64::EPSILON * saturation {
+            return Err(invalid("supersaturated thermochemical gas needs condensation physics"));
+        }
+        self.evaluate(point)
+    }
+
     /// Resolve ALL physical coefficients at one common typed temperature/pressure.
     /// Other source conditions remain in `point` and are never invented here.
     /// Transport cards supply `dynamic_viscosity` and `thermal_conductivity`;

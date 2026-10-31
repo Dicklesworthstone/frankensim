@@ -20,6 +20,8 @@ pub mod transport;
 pub mod melting;
 /// Source-backed liquid/vapor coexistence and isobaric heat with expansion work.
 pub mod vaporization;
+/// Conservative liquid-water condensation in a finite mixed-gas inventory.
+pub mod condensation;
 /// IF97 liquid heating, boiling and superheated steam with explicit source seams.
 pub mod water;
 /// Fixed-mass calorimetry with explicit constant-pressure boundary work.

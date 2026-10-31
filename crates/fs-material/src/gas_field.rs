@@ -69,12 +69,16 @@ fn resolve_primitive(
         .map_err(|error| invalid(format!("gas field temperature: {error}")))?;
     match phase {
         ThermochemicalPhase::FrozenGas => model.evaluate(&point),
-        ThermochemicalPhase::LiquidWaterLimit => {
+        ThermochemicalPhase::LiquidWaterLimit | ThermochemicalPhase::LiquidWaterIapwsLimit => {
             if source.water_species().is_none() {
                 return Err(invalid("liquid-water field admission needs an explicit source water species"));
             }
             if model.water_species().is_some() {
-                model.evaluate_with_liquid_water_limit(&point)
+                if phase == ThermochemicalPhase::LiquidWaterIapwsLimit {
+                    model.evaluate_with_iapws_liquid_water_limit(&point)
+                } else {
+                    model.evaluate_with_liquid_water_limit(&point)
+                }
             } else {
                 // Explicit zero water preserves the source identity and is unsaturated.
                 model.evaluate(&point)
@@ -279,3 +283,5 @@ impl AxialGasField {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod condensation_tests;

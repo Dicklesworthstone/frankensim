@@ -5850,6 +5850,48 @@ intervals; sampled endpoints alone do not establish admission. The original
 isotropic arithmetic is retained. This is smooth affine-source, fixed-frame,
 fully solid small-strain thermomechanics, without phase evolution or plasticity.
 
+### Finite mixed-gas condensation and re-evaporation
+
+`phase::condensation::{WaterCondensationModel, WetGasParcel}` retains one
+source-backed NASA-9 gas, its canonical species inventories and a finite
+liquid-water store. At prescribed temperature and fixed gas volume, the
+original IAPWS saturation pressure determines the vapor capacity through
+water's **partial** pressure. Condensation retains the removed water as liquid;
+re-evaporation cannot exceed that liquid inventory. Noncondensing species,
+gas volume, auxiliary material coordinates and original source packs survive.
+The original gas owner re-resolves density, pressure, sound speed and transport.
+Positive phase inventories and their transferred increments must remain
+representable; a large film cannot hide a lost transfer in its mass tolerance.
+
+The caller explicitly identifies water and chooses a reference temperature
+aligning NASA water-vapor enthalpy with the IAPWS vapor datum once. H2O molar
+mass must agree within 10 ppm. Liquid enthalpy and internal energy carry the
+same constant shift. The combined internal-energy increment cancels formation
+references analytically before evaluating sensible and latent contributions;
+the reported latent enthalpy is a diagnostic, never an additional heat source.
+A heat-transfer consumer must solve this combined increment against actual
+net heat before publishing gas, liquid and thermal partners together.
+
+This approximation admits 273.16--323.15 K and 20--200 kPa total pressure.
+Liquid properties use the saturated-liquid approximation, with no gas-volume
+displacement, humid-air fugacity/enhancement/Poynting/Henry correction, ice,
+nucleation kinetics or interface transport. No measured error bound or full
+humid-air thermodynamic-equilibrium certification is asserted. Tests in
+`phase/condensation/tests.rs` cover G0 water/carrier/energy conservation and
+finite-film exhaustion, G3 invariance to large formation-reference changes,
+G4 cancellation/source/domain and unrepresentable-inventory refusal, and G5
+repeated deterministic cycles.
+
+`ThermochemicalPhase::LiquidWaterIapwsLimit` carries that same saturation
+reference through thermochemical records and `AxialGasField`. The legacy
+`LiquidWaterLimit` retains Buck unchanged. The IAPWS policy accepts only its
+declared near-atmospheric domain and 256 machine epsilons of partial-pressure
+reconstruction roundoff; real excess water and unsupported liquid phases
+refuse. It is admission, not phase conversion. Interpolation between admitted
+stations is rechecked and can still refuse supersaturation; no implicit clamp
+discards water or latent energy. `gas_field/condensation_tests.rs` exercises a
+real wet-parcel endpoint through the shared field and those refusal boundaries.
+
 ## Dilute aqueous osmosis and selective membrane transport
 
 `osmosis` owns one shared isothermal constitutive law for independent dissolved

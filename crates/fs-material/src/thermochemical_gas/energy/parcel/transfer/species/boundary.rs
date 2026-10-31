@@ -248,6 +248,43 @@ impl ThermochemicalGasModel {
 }
 
 impl ClosedGasParcel {
+    // Phase-equilibrium trials know T already. Reuse the SAME source admission,
+    // species composition and parcel owner without an unnecessary caloric root.
+    // The conservative mass is retained explicitly rather than recovered as rho*V.
+    pub(crate) fn at_species_inventory_temperature(
+        &self,
+        catalog: &ThermochemicalGasModel,
+        masses: &std::collections::BTreeMap<SpeciesId, f64>,
+        temperature_k: f64,
+    ) -> Result<Self, GasEnergyError> {
+        admit_catalog(self, catalog)?;
+        if !positive(temperature_k)
+            || masses.keys().any(|id| !catalog.thermodynamics().components()
+                .iter().any(|species| species.species() == id))
+        {
+            return Err(invalid("phase endpoint needs a positive temperature and original species"));
+        }
+        let model = model_for_inventory(catalog, masses)?;
+        let mass: f64 = masses.values().sum();
+        let properties = model.thermodynamics().evaluate_properties(
+            Temperature::new(temperature_k), fs_qty::Pressure::new(self.state().state().pressure),
+        )
+            .map_err(source_error)?;
+        let pressure = (mass / self.volume_m3())
+            * properties.mass_specific_gas_constant().value() * temperature_k;
+        if !positive(mass) || !positive(pressure) {
+            return Err(invalid("phase endpoint mass or pressure is unrepresentable"));
+        }
+        let point = super::super::updated_point(self.point(), temperature_k, pressure)?;
+        let state = model.evaluate(&point)?;
+        let mut parcel = self.parcel.clone();
+        parcel.model = model;
+        parcel.point = point;
+        parcel.state = state;
+        parcel.mass_kg = mass;
+        Ok(Self::from_isochoric(parcel))
+    }
+
     /// Actual species inventory from the original mixture composition and mass.
     /// An absent active species has exactly zero mass, including after depletion.
     pub fn species_mass_kg(&self, id: &SpeciesId) -> Result<f64, GasEnergyError> {
