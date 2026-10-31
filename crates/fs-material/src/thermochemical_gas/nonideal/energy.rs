@@ -41,8 +41,21 @@ impl RealGasEnergySolution {
 struct CaloricSample {
     internal_energy_j_kg: f64,
     residual_energy_j_kg: f64,
+    residual_entropy_j_kg_k: f64,
     cv_j_kg_k: f64,
     pressure_pa: f64,
+}
+
+// Thermodynamic identity S^R = (H^R - G^R)/T at the same T/p/composition.
+// Reuse the source root and its already evaluated U^R, without repeating the
+// departure logarithm or introducing another EOS/reference entropy formula.
+fn residual_entropy(
+    root: &fs_thermochem::eos::peng_robinson::PengRobinsonPhaseRootV1,
+    temperature: f64, molar_mass: f64, residual_energy_j_kg: f64,
+) -> f64 {
+    residual_energy_j_kg / temperature
+        + fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K / molar_mass
+            * (root.compressibility_factor() - 1.0 - root.residual_gibbs_over_rt())
 }
 
 impl ThermochemicalPengRobinsonModel {
@@ -55,14 +68,16 @@ impl ThermochemicalPengRobinsonModel {
             .map_err(|error| failure("real-gas reference calorics", error))?;
         let molar_mass = properties.molar_mass().value();
         let residual_energy_j_kg = direct.root().residual_internal_energy_j_mol() / molar_mass;
+        let residual_entropy_j_kg_k = residual_entropy(direct.root(), t, molar_mass, residual_energy_j_kg);
         let internal_energy_j_kg = properties.u().value() / molar_mass + residual_energy_j_kg;
         let cv_j_kg_k = properties.mass_specific_cv().value()
             + direct.root().residual_cv_j_mol_k() / molar_mass;
         if !internal_energy_j_kg.is_finite() || !residual_energy_j_kg.is_finite()
+            || !residual_entropy_j_kg_k.is_finite()
             || !positive(cv_j_kg_k) {
             return Err(GasEnergyError::Invalid("finite real-gas energy and positive complete Cv required"));
         }
-        Ok(CaloricSample { internal_energy_j_kg, residual_energy_j_kg, cv_j_kg_k,
+        Ok(CaloricSample { internal_energy_j_kg, residual_energy_j_kg, residual_entropy_j_kg_k, cv_j_kg_k,
             pressure_pa: direct.pressure().value() })
     }
 

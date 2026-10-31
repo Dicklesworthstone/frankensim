@@ -25,7 +25,7 @@ pub struct GasEntropySolve {
     pub maximum_iterations: usize,
 }
 impl GasEntropySolve {
-    pub(super) fn validate(self) -> Result<(), GasEntropyError> {
+    pub(in crate::thermochemical_gas) fn validate(self) -> Result<(), GasEntropyError> {
         // The producing source laws own the temperature domain, as in the
         // shared energy inversion; neither operation substitutes an air fit.
         if !positive(self.minimum_temperature_k) || !positive(self.maximum_temperature_k)
@@ -62,7 +62,7 @@ impl std::error::Error for GasEntropyError {}
 impl From<MaterialError> for GasEntropyError {
     fn from(error: MaterialError) -> Self { Self::Material(error) }
 }
-fn map_root(error: root::Error<GasEntropyError>) -> GasEntropyError {
+pub(in crate::thermochemical_gas) fn map_root(error: root::Error<GasEntropyError>) -> GasEntropyError {
     match error {
         root::Error::Evaluation(e) => e,
         root::Error::Invalid(s) => GasEntropyError::Invalid(s),
@@ -76,7 +76,7 @@ fn map_root(error: root::Error<GasEntropyError>) -> GasEntropyError {
     }
 }
 // The shared coordinate/poll helpers cannot perform an energy inversion.
-pub(super) fn map_context(error: GasEnergyError) -> GasEntropyError {
+pub(in crate::thermochemical_gas) fn map_context(error: GasEnergyError) -> GasEntropyError {
     match error {
         GasEnergyError::Material(e) => GasEntropyError::Material(e),
         GasEnergyError::Cancelled => GasEntropyError::Cancelled,

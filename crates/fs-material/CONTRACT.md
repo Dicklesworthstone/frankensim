@@ -6597,3 +6597,33 @@ Focused kernel tests cover independent quadratic balances, extreme numerical
 scales and tensor-direction admission. Original-owner regression sources cover
 layer pressures, mass/drag work, zero-beta behavior, actual speed admission,
 source support, confinement, seals and unsupported combined-law refusal.
+
+
+## Reversible volume work on source-bound real gas
+
+`IsochoricRealGasParcel::at_volume_isentropic` constructs an immutable reversible
+adiabatic endpoint on the existing frozen-composition NASA/Peng--Robinson storage
+owner. Exact mass, source/composition identity and extra query axes are retained.
+The candidate density is `mass / requested_volume`; later `add_heat` remains
+isochoric at that new volume.
+
+The original safeguarded entropy root uses complete `Cv/T`. Source NASA relative
+entropy cancels reference constants, and PR residual entropy follows
+`S^R = (H^R - G^R)/T`. Returned `GasVolumeStep` work is minus accurate source-law
+`m Delta u`, including departure changes without subtracting large absolute
+formation energies. `work/Delta V` is the work-conjugate secant pressure; the
+resolved material pressure is the endpoint pressure.
+
+Every evaluated density/temperature retains the original positive-pressure,
+covolume, mechanical-stability and complete-Cv admission. Final material resolution
+also enforces original transport support. The caller owns applicability of a
+continuous reversible homogeneous single-phase path: local stability does not
+prove global phase equilibrium or exclude coexistence. Latent heat, phase
+conversion, piston dynamics and an independent mechanical-work certificate are
+outside this operation.
+
+Invalid or unrepresented geometry, unbracketed or exhausted roots, source refusals
+and cancellation return no candidate. Zero volume change is an exact identity
+after control validation. Focused regression sources include an independent
+75-digit dense-gas entropy oracle, pressure quadrature, the dilute gamma limit,
+large reference shifts, heating at the accepted density and atomic refusal.

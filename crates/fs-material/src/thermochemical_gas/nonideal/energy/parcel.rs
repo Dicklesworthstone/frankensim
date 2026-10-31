@@ -1,9 +1,13 @@
-//! Closed rigid-vessel heating with one source-bound real-gas equation of state.
+//! Closed real-gas storage with one source-bound equation of state.
 //!
-//! Mass and volume are fixed. Heat changes internal energy; the original NASA
+//! Mass is fixed, and heating holds the current volume. The original NASA
 //! reference calorics and Peng--Robinson departures determine temperature,
 //! pressure and every published material view together. This is a homogeneous
 //! frozen-composition branch, not an equilibrium flash or a vessel-wall model.
+//! An opt-in immutable isentropic volume candidate uses this same storage and
+//! source owner; heating the returned parcel then holds its new volume fixed.
+
+mod volume;
 
 use super::super::{ResolvedThermochemicalRealGasState, ThermochemicalPengRobinsonModel};
 use crate::thermochemical_gas::energy::{
@@ -13,12 +17,14 @@ use crate::thermochemical_gas::positive;
 use fs_matdb::QueryPoint;
 use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 
-/// A fixed-mass, fixed-volume parcel retaining its real-gas material source.
+/// A fixed-mass parcel retaining its real-gas material source and held geometry.
 ///
 /// The initial PT phase choice selects the starting density. Subsequent heat
 /// updates keep that density and follow the mechanically and calorically stable
 /// homogeneous branch admitted by the caller's temperature bracket. A locally
 /// stable state may be metastable; no phase amounts or reaction are inferred.
+/// `at_volume_isentropic` constructs a separate admitted parcel at a new volume;
+/// it does not mutate this parcel or change the fixed-volume heating contract.
 #[derive(Clone, Debug, PartialEq)]
 pub struct IsochoricRealGasParcel {
     model: ThermochemicalPengRobinsonModel,
@@ -71,7 +77,9 @@ impl IsochoricRealGasParcel {
     pub const fn state(&self) -> &ResolvedThermochemicalRealGasState {
         &self.state
     }
-    /// Conserved density [kg/m3], retained without repeated mass/volume rounding.
+    /// Current held density [kg/m3], retained without repeated mass/volume rounding.
+    /// Heating conserves it; an isentropic volume candidate derives its new value
+    /// from the same conserved mass and its explicitly requested volume.
     #[must_use]
     pub const fn density_kg_m3(&self) -> f64 {
         self.density_kg_m3
@@ -81,7 +89,7 @@ impl IsochoricRealGasParcel {
     pub const fn mass_kg(&self) -> f64 {
         self.mass_kg
     }
-    /// Fixed vessel volume [m3].
+    /// Current held volume [m3], fixed during every `add_heat` operation.
     #[must_use]
     pub const fn volume_m3(&self) -> f64 {
         self.volume_m3
