@@ -125,6 +125,55 @@ pub fn segment_wave<M: FluidAcoustics + ?Sized>(
     Ok(wave_from_state(&state, radius, omega)?)
 }
 
+/// Homogeneous bulk dispersion supplied by an original constitutive owner.
+///
+/// The supplied `wavenumber` uses exp(-i omega t), with positive real part and
+/// nonnegative imaginary part. The same material density fixes the momentum
+/// relation `z = rho * omega / k`; callers cannot independently choose an
+/// inconsistent pressure/velocity impedance. This does not add wall diffusion
+/// or a damping fit. The constitutive caller owns the frequency, amplitude and
+/// homogenization limits of its complex bulk response.
+pub fn segment_wave_with_wavenumber<M: FluidAcoustics + ?Sized>(
+    material: &M,
+    radius: f64,
+    omega: f64,
+    wavenumber: C64,
+) -> Result<SegmentWave, FluidDuctError> {
+    let state = material.acoustic_state()?;
+    Ok(wave_from_wavenumber(&state, radius, omega, wavenumber)?)
+}
+
+fn wave_from_wavenumber(
+    state: &FluidAcousticState,
+    radius: f64,
+    omega: f64,
+    wavenumber: C64,
+) -> Result<SegmentWave, DuctError> {
+    let original = wave_from_state(state, radius, omega)?;
+    if wavenumber == original.wavenumber {
+        return Ok(original);
+    }
+    if !positive(wavenumber.re) || !wavenumber.im.is_finite() || wavenumber.im < 0.0 {
+        return Err(bad("bulk wavenumber must be finite, forward and passive"));
+    }
+    let area = core::f64::consts::PI * radius * radius;
+    let specific = (C64::from_re(omega) / wavenumber).scale(state.density_kg_m3());
+    let characteristic = specific.scale(1.0 / area);
+    if !positive(specific.re)
+        || !specific.im.is_finite()
+        || !positive(characteristic.re)
+        || !characteristic.im.is_finite()
+    {
+        return Err(bad("dispersive fluid impedance must be finite and passive"));
+    }
+    Ok(SegmentWave {
+        wavenumber,
+        characteristic_impedance: characteristic,
+        specific_impedance: specific,
+        shear_number: f64::INFINITY,
+    })
+}
+
 /// Full Bessel or first-order wide-tube wall diffusion from one coherent
 /// material state. Cp/Cv is the actual caloric ratio, including for a liquid;
 /// no relation between that ratio, pressure and sound speed is imposed.
@@ -236,6 +285,40 @@ pub fn duct_chain<M: FluidAcoustics + ?Sized>(
     )?)
 }
 
+/// Propagate an admitted homogeneous complex bulk response through the native
+/// cylinder, cone, smooth-profile and stable scattering owners.
+///
+/// Density and the positive real port reference come from `material`; the
+/// response owner supplies `wavenumber` and owns its physical applicability.
+/// A rigid cone retains its exact spherical-wave basis because the bulk wave
+/// is independent of radius, even when it attenuates. Compliant walls retain
+/// their original slicing rule. No gas-only radiation boundary is inferred.
+#[allow(clippy::too_many_arguments)]
+pub fn duct_chain_with_wavenumber<M: FluidAcoustics + ?Sized>(
+    duct: &Duct,
+    material: &M,
+    omega: f64,
+    wavenumber: C64,
+    wall: WallModel<'_>,
+    cone_slices: ConeSlices,
+    options: ComposeOptions,
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedChain, FluidDuctError> {
+    admit_geometry(duct, options, &mut cancelled)?;
+    let state = material.acoustic_state()?;
+    Ok(chain_from_waves(
+        duct,
+        &state,
+        omega,
+        wall,
+        cone_slices,
+        options,
+        true,
+        &mut cancelled,
+        &mut |radius| wave_from_wavenumber(&state, radius, omega, wavenumber),
+    )?)
+}
+
 /// The same geometry and stable composer with material-driven viscosity and
 /// heat diffusion. Lossy cones use the caller's `cone_slices` even with rigid
 /// walls, because boundary-layer response varies with local radius. Profiles
@@ -296,7 +379,7 @@ fn chain_from_waves(
     wall: WallModel<'_>,
     cone_slices: ConeSlices,
     options: ComposeOptions,
-    lossless_bulk: bool,
+    radius_independent_bulk: bool,
     cancelled: &mut impl FnMut() -> bool,
     wave_at: &mut impl FnMut(f64) -> Result<SegmentWave, DuctError>,
 ) -> Result<PreparedChain, DuctError> {
@@ -360,7 +443,7 @@ fn chain_from_waves_at_reference(
                 inlet_radius,
                 outlet_radius,
                 length,
-            } if !lossless_bulk || !wall.is_rigid() => {
+            } if !radius_independent_bulk || !wall.is_rigid() => {
                 let count = cone_slices.count(inlet_radius, outlet_radius)?;
                 admit_blocks(blocks.len(), count, options.maximum_blocks)?;
                 let dx = length / count as f64;

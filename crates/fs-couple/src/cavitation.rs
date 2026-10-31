@@ -14,6 +14,10 @@
 #[cfg(feature = "cavitation")]
 pub mod bubble;
 
+/// Resonant coherent propagation from the native compressible bubble model.
+#[cfg(feature = "cavitation")]
+pub mod bubbly;
+
 /// Event-resolved pure-vapor cavities on the original liquid duct state.
 #[cfg(feature = "cavitation")]
 pub mod duct;
