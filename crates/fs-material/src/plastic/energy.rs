@@ -252,7 +252,7 @@ impl J2Plasticity {
         Ok(())
     }
 
-    fn admit_energy_strain(&self, strain: &Voigt) -> Result<(), EnergyError> {
+    pub(super) fn admit_energy_strain(&self, strain: &Voigt) -> Result<(), EnergyError> {
         if strain.iter().any(|x| !x.is_finite())
             || norm(strain)? > self.elastic.strain_limit.min(0.05) {
             return Err(EnergyError::Invalid("tensor strain exceeds the declared small-strain bound"));
@@ -263,6 +263,14 @@ impl J2Plasticity {
     fn admit_energy_history(&self, strain: &Voigt, state: &J2State)
         -> Result<Voigt, EnergyError> {
         self.admit_energy_strain(strain)?;
+        self.validate_plastic_history(state)?;
+        let e = subtract(strain, &state.plastic_strain);
+        self.admit_energy_strain(&e)?;
+        Ok(e)
+    }
+
+    pub(super) fn validate_plastic_history(&self, state: &J2State)
+        -> Result<(), EnergyError> {
         if !state.alpha.is_finite() || state.alpha < 0.0
             || state.plastic_strain.iter().any(|x| !x.is_finite()) {
             return Err(EnergyError::Invalid("plastic history must be finite with nonnegative accumulated strain"));
@@ -274,12 +282,10 @@ impl J2Plasticity {
             || det::sqrt(2.0 / 3.0) * plastic_norm > state.alpha + roundoff {
             return Err(EnergyError::Invalid("plastic strain violates the deviatoric or accumulated-history bound"));
         }
-        let e = subtract(strain, &state.plastic_strain);
-        self.admit_energy_strain(&e)?;
-        Ok(e)
+        Ok(())
     }
 
-    fn energy_of(&self, elastic_strain: &Voigt, alpha: f64, plastic_strain: &Voigt)
+    pub(super) fn energy_of(&self, elastic_strain: &Voigt, alpha: f64, plastic_strain: &Voigt)
         -> Result<StoredEnergy, EnergyError> {
         let stress = self.elastic.stress(elastic_strain, &());
         let elastic_j_m3 = product(0.5, finite(contract(elastic_strain, &stress))?)?;

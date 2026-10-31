@@ -6736,3 +6736,45 @@ supply a nonlocal finite-panel operator, Biot frame motion or gap wall losses.
 The focused `porous_layers` regression source covers original-owner equivalence,
 independent transfer matrices, coherent source sampling, layer order/subdivision,
 lossless resonances, thick/grazing limits and sub-roundoff absorption.
+
+## Native Chaboche cyclic hardening and source binding
+
+`plastic::chaboche::ChabocheJ2<N>` retains up to eight independent tensor
+backstresses over the original Voce and optional linear Prager law. Each
+explicit branch follows `dX_i = (2/3) C_i d(epsilon_p) - gamma_i X_i d(alpha)`
+with finite nonnegative C_i and gamma_i. Backward Euler eliminates each branch
+as `X_i,new = (X_i,old + (2/3) C_i delta_epsilon_p)/(1+gamma_i delta_alpha)`.
+The bounded scalar consistency solve updates its flow direction as the plastic
+increment changes; the exact tensor tangent includes that direction derivative
+and is generally nonsymmetric. A symmetric linear solver cannot assume otherwise
+from the isotropic elasticity. Trial responses keep incoming history unchanged.
+
+For each active branch, recoverable storage is `3 X_i:X_i/(4 C_i)`. Its physical
+dynamic-recovery dissipation is `3 gamma_i delta_alpha X_i,new:X_i,new/(2 C_i)`;
+this is already included once in the physical total alongside
+`sigma_y delta_alpha`. The separate backward-Euler term
+`3 delta_X_i:delta_X_i/(4 C_i)`, elastic/linear hardening remainders and the
+convex Voce remainder remain numerical loss. Neither stored hardening energy
+nor numerical loss is relabeled as heat. The energy API checks endpoint yield
+and work balance with explicit physical-unit tolerances. A heat-conversion
+fraction or thermal evolution requires a separate declared coupling.
+
+`plastic::chaboche::axial::UniaxialChaboche` restricts this same consistency
+equation to free-sided axial stress by replacing the elastic correction 3 mu
+with E. It preserves every backstress, lateral elastic contraction and plastic
+incompressibility; the reconstructed full tensor must satisfy the declared
+small-strain ceiling, never exceeding 0.05. Zero recovery gives an additional
+linear kinematic branch; absent branches recover the original native Voce law.
+
+`plastic::chaboche::source` binds one independently sourced branch C/gamma and
+retains the complete original Voce material bundle, quantities and claim-use
+receipts, including unrelated physics roles. Both coefficients are mandatory
+even when explicitly zero. A monotonic total-strain tangent cannot identify
+nonlinear recovery. Wrong units, missing or ambiguous data, extrapolation and
+evolving strain/stress/history/rate/frequency coefficient coordinates refuse.
+Supported temperature curves may resolve at a fixed external state; every
+coefficient remains fixed throughout the load path. Re-resolution does not
+transfer history or establish a temperature-dependent energy law. Static
+recovery, time-dependent creep, finite strain, damage and experimentally
+calibrated ratcheting or fatigue life remain outside this implementation.
+

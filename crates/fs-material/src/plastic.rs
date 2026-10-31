@@ -15,6 +15,8 @@ pub mod rate;
 pub mod reduction;
 /// Saturating isotropic hardening on the original native J2 history and flow.
 pub mod voce;
+/// Independent Armstrong-Frederick/Chaboche backstresses with dynamic recovery.
+pub mod chaboche;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};

@@ -210,7 +210,7 @@ impl VoceJ2 {
 
     // Integral_0^alpha Q (1-exp(-b p)) dp. The series preserves small-strain
     // storage when subtracting alpha and (1-exp(-b alpha))/b would cancel.
-    fn saturation_storage(&self, alpha: f64) -> f64 {
+    pub(super) fn saturation_storage(&self, alpha: f64) -> f64 {
         let x = self.rate_per_strain * alpha;
         if x < 0.1 {
             let ratio = -1.0 / 362880.0 + x / 3628800.0;
@@ -230,7 +230,7 @@ impl VoceJ2 {
     // R(alpha_1) delta_alpha - Integral_alpha_0^alpha_1 R(p) dp >= 0.
     // Evaluating this convex remainder directly avoids subtracting two almost
     // equal hardening work/storage terms on small increments.
-    fn saturation_numerical_loss(&self, alpha: f64, delta: f64) -> f64 {
+    pub(super) fn saturation_numerical_loss(&self, alpha: f64, delta: f64) -> f64 {
         if delta == 0.0 {
             return 0.0;
         }
