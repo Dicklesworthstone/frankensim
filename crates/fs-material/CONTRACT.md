@@ -7115,6 +7115,38 @@ and audit exactly. Five regression sources cover an independent nonlinear
 thermal-network solution, opposing phase transfers, birth/covering timing,
 retry/cancellation/zero-heat behavior, and complete-clock time refinement.
 
+### Condensate onset and complete dry-out at a prescribed wall
+
+`evaporation::gas::wall_film` admits an explicitly fully wetting, locally planar
+film in thermal equilibrium with a prescribed wall temperature. Its
+`GasWallFilmInventory` distinguishes `Dry` from a positive `Wet` inventory:
+a dry surface carries no liquid temperature, heat capacity or hidden seed mass.
+The interface temperature comes from the supplied liquid enthalpy on its original
+chart. A supersaturated gas can create a film from exactly zero mass; an
+undersaturated dry surface cannot supply vapor. This is a declared wetting
+closure, not a prediction of heterogeneous nucleation or a contact-angle model.
+
+The original Stefan law, species identity, caloric alignment and finite-gas
+reconstruction remain authoritative. Evaporation stops at the exact inventory
+exhaustion time of the frozen rate, records that time, and returns `Dry` without
+an artificial residual film. The complete requested interval remains the shared
+clock; phase flux is zero after that event. Vapor-donor, source-domain,
+temperature-departure and final equilibrium checks still refuse oversized
+intervals. The existing positive-film owner retains its stricter withdrawal
+limit and unchanged semantics.
+
+The wall supplies both film sensible storage and the difference between carried
+vapor enthalpy and retained liquid enthalpy. Incoming vapor retains its upstream
+gas enthalpy; outgoing vapor uses the interface temperature. Original NASA
+increments and the admitted phase-source remainder determine this heat before
+large formation references can cancel it. The reported wall heat closes gas
+internal energy plus film enthalpy, including film birth and complete exhaustion;
+latent heat is a diagnostic part of that transfer, never a second source. A
+finite wall must debit this same heat through its own thermal owner. Gas volume
+and surface area remain fixed. The frozen-rate/time-equilibrated closure requires
+physical timestep refinement and does not include film drainage, liquid motion,
+boiling, ice, gas momentum or liquid displacement work.
+
 ### Reciprocal sensible heat through the gas film
 
 `evaporation::gas::advance_surface_with_gas_and_heat` adds a caller-supplied

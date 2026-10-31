@@ -25,6 +25,8 @@ pub mod chamber;
 pub mod heat;
 /// Original heat transport and finite humidity feedback on one physical clock.
 pub mod timeline;
+/// Fully-wetting wall films with dry onset and complete finite-inventory dry-out.
+pub mod wall_film;
 pub use heat::{
     GasEvaporationHeatCandidate, GasFilmHeatSolve, GasFilmHeatStep,
     advance_surface_with_gas_and_heat, advance_surface_with_gas_and_heat_mass_selection,
@@ -288,6 +290,60 @@ pub fn advance_surface_with_gas<'catalog, L: EvaporationLaw + ?Sized>(
     )
 }
 
+/// Original phase/gas source admission shared by free and wall-bound films.
+struct GasLiquidSource {
+    phase: fs_thermal::evaporation::EvaporationProperties,
+    molecular_mass: f64,
+    alignment: f64,
+}
+
+fn admit_liquid_source<L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    catalog: &ThermochemicalGasModel,
+    surface_t: f64,
+    liquid_h: f64,
+    controls: GasEvaporationSolve,
+) -> Result<GasLiquidSource, GasEvaporationError> {
+    use GasEvaporationError as Error;
+    if !liquid_h.is_finite() || !binding.liquid_enthalpy_offset_j_kg.is_finite() {
+        return Err(Error::Invalid(
+            "finite original liquid caloric datum required",
+        ));
+    }
+    let phase = properties(law, surface_t)?;
+    let original_species = catalog
+        .thermodynamics()
+        .components()
+        .iter()
+        .find(|source| source.species() == &binding.species)
+        .ok_or(Error::Invalid(
+            "evaporating species requires its complete original gas source",
+        ))?;
+    let molecular_mass = original_species.molar_mass().value();
+    if !positive(molecular_mass)
+        || (phase.molar_mass_kg_mol / molecular_mass - 1.0).abs() > 64.0 * f64::EPSILON
+    {
+        return Err(Error::Invalid(
+            "phase and original gas species molar masses disagree",
+        ));
+    }
+    let vapor_h = catalog.species_specific_enthalpy_j_kg(&binding.species, surface_t)?;
+    let alignment = compatibility(
+        vapor_h,
+        liquid_h,
+        binding.liquid_enthalpy_offset_j_kg,
+        phase.latent_heat_j_kg,
+        surface_t,
+        controls.latent_compatibility_tolerance_j_kg,
+    )?;
+    Ok(GasLiquidSource {
+        phase,
+        molecular_mass,
+        alignment,
+    })
+}
+
 /// Prepared entirely against one original gas state. The chamber and legacy
 /// single-surface paths share this rate, liquid-caloric and source-alignment owner.
 struct PreparedGasLiquidSurface {
@@ -343,32 +399,17 @@ fn prepare_surface<L: EvaporationLaw + ?Sized>(
         mass_transfer_coefficient_m_s,
     };
     let flux = surface_flux(law, surface_t, film)?;
-    let phase = properties(law, surface_t)?;
-    let original_species = catalog
-        .thermodynamics()
-        .components()
-        .iter()
-        .find(|source| source.species() == &binding.species)
-        .ok_or(Error::Invalid(
-            "evaporating species requires its complete original gas source",
-        ))?;
-    let molecular_mass = original_species.molar_mass().value();
-    if !positive(molecular_mass)
-        || (phase.molar_mass_kg_mol / molecular_mass - 1.0).abs() > 64.0 * f64::EPSILON
-    {
-        return Err(Error::Invalid(
-            "phase and original gas species molar masses disagree",
-        ));
-    }
-    let vapor_h = catalog.species_specific_enthalpy_j_kg(&binding.species, surface_t)?;
-    let alignment = compatibility(
-        vapor_h,
-        liquid.specific_enthalpy_j_kg,
-        binding.liquid_enthalpy_offset_j_kg,
-        phase.latent_heat_j_kg,
+    let source = admit_liquid_source(
+        law,
+        binding,
+        catalog,
         surface_t,
-        controls.latent_compatibility_tolerance_j_kg,
+        liquid.specific_enthalpy_j_kg,
+        controls,
     )?;
+    let phase = source.phase;
+    let molecular_mass = source.molecular_mass;
+    let alignment = source.alignment;
     let exposure = liquid.area_m2 * duration_s;
     let requested_dm = exposure * flux.mass_flux_kg_m2_s;
     if !nonnegative(exposure)
@@ -520,14 +561,39 @@ fn check_surface_endpoint<L: EvaporationLaw + ?Sized>(
     duration_s: f64,
     controls: GasEvaporationSolve,
 ) -> Result<f64, GasEvaporationError> {
+    check_interface_endpoint(
+        law,
+        binding,
+        prepared.surface_temperature_k[1],
+        prepared.gas_temperature_k,
+        prepared.dm,
+        gas,
+        mass_transfer_coefficient_m_s,
+        duration_s,
+        controls,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn check_interface_endpoint<L: EvaporationLaw + ?Sized>(
+    law: &L,
+    binding: &GasLiquidBinding,
+    surface_temperature_k: f64,
+    initial_gas_temperature_k: f64,
+    transferred_mass_kg: f64,
+    gas: &ClosedGasParcel,
+    mass_transfer_coefficient_m_s: f64,
+    duration_s: f64,
+    controls: GasEvaporationSolve,
+) -> Result<f64, GasEvaporationError> {
     let final_gas_t = gas.state().state().temperature;
     let final_pressure = gas.species_partial_pressure_pa(&binding.species)?;
-    if (final_gas_t - prepared.gas_temperature_k).abs() > controls.maximum_temperature_increment_k {
+    if (final_gas_t - initial_gas_temperature_k).abs() > controls.maximum_temperature_increment_k {
         return Err(smaller_step(duration_s, "gas temperature departure"));
     }
     let final_flux = surface_flux(
         law,
-        prepared.surface_temperature_k[1],
+        surface_temperature_k,
         GasFilm {
             total_pressure_pa: gas.state().state().pressure,
             vapor_partial_pressure_pa: final_pressure,
@@ -535,8 +601,8 @@ fn check_surface_endpoint<L: EvaporationLaw + ?Sized>(
             mass_transfer_coefficient_m_s,
         },
     )?;
-    if (prepared.dm > 0.0 && final_flux.mass_flux_kg_m2_s < 0.0)
-        || (prepared.dm < 0.0 && final_flux.mass_flux_kg_m2_s > 0.0)
+    if (transferred_mass_kg > 0.0 && final_flux.mass_flux_kg_m2_s < 0.0)
+        || (transferred_mass_kg < 0.0 && final_flux.mass_flux_kg_m2_s > 0.0)
     {
         return Err(smaller_step(
             duration_s,

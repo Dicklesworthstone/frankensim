@@ -102,6 +102,135 @@ fn original_water() -> WaterEvaporation {
 }
 
 #[test]
+fn original_water_forms_on_a_dry_wall_and_returns_completely_to_the_same_finite_gas() {
+    use crate::evaporation::gas::wall_film::{
+        GasWallFilmInventory, GasWallFilmSurface, advance_wall_film_with_gas,
+    };
+    let source = original_gas();
+    let water = original_water();
+    let vapor = SpeciesId::new("H2O").unwrap();
+    let nitrogen = SpeciesId::new("N2").unwrap();
+    let initial = ClosedGasParcel::new(
+        source
+            .with_composition(
+                Composition::new(CompositionBasis::MoleFraction, vec![0.05, 0.95]).unwrap(),
+            )
+            .unwrap(),
+        point(310.0, 100_000.0),
+        0.01,
+    )
+    .unwrap();
+    let saved = initial.clone();
+    let binding = GasLiquidBinding {
+        species: vapor.clone(),
+        liquid_enthalpy_offset_j_kg: source
+            .species_specific_enthalpy_j_kg(&vapor, 300.0)
+            .unwrap()
+            - water.vapor_specific_enthalpy_j_kg(300.0).unwrap(),
+    };
+    let inverse = |h| water.temperature_at_specific_enthalpy_k(h);
+    let surface = |film, temperature| GasWallFilmSurface {
+        law: &water,
+        binding: &binding,
+        film,
+        area_m2: 0.01,
+        interface_liquid_enthalpy_j_kg: water
+            .liquid_state(temperature)
+            .unwrap()
+            .specific_enthalpy_j_kg(),
+        temperature_from_enthalpy: &inverse,
+        mass_transfer_coefficient_m_s: 0.005,
+    };
+    let mut solve = controls();
+    solve.gas.gas.minimum_temperature_k = 280.0;
+    solve.gas.gas.maximum_temperature_k = 340.0;
+    solve.gas.gas.energy_tolerance_j_kg = 1e-6;
+    solve.gas.energy_tolerance_j = 1e-7;
+    solve.maximum_temperature_increment_k = 25.0;
+    // Keep one datum across both wall temperatures. The genuine NASA/IF97
+    // vapor-source discrepancy remains visible and travels with the vapor.
+    solve.latent_compatibility_tolerance_j_kg = 2000.0;
+    let wet = advance_wall_film_with_gas(
+        surface(GasWallFilmInventory::Dry, 300.0),
+        &initial,
+        &source,
+        0.1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    assert!(wet.step().film_formed);
+    assert!(wet.film().mass_kg() > 0.0);
+    assert!(wet.step().transferred_mass_kg < 0.0);
+    assert!(wet.step().wall_heat_into_system_j < 0.0);
+    assert_eq!(wet.step().dry_out_time_s, None);
+    near(
+        wet.step().energy_into_gas_j,
+        wet.step().transferred_mass_kg
+            * source
+                .species_specific_enthalpy_j_kg(&vapor, 310.0)
+                .unwrap(),
+        solve.gas.energy_tolerance_j,
+    );
+    let dry = advance_wall_film_with_gas(
+        surface(wet.film(), 320.0),
+        wet.gas(),
+        &source,
+        0.1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(dry.film(), GasWallFilmInventory::Dry);
+    assert_eq!(dry.film().specific_enthalpy_j_kg(), None);
+    assert_eq!(dry.step().transferred_mass_kg, wet.film().mass_kg());
+    assert!(dry.step().wall_heat_into_system_j > 0.0);
+    let dry_out = dry.step().dry_out_time_s.unwrap();
+    assert!(dry_out > 0.0 && dry_out < dry.step().duration_s);
+    assert_eq!(dry.step().phase_active_duration_s, dry_out);
+    let idle = advance_wall_film_with_gas(
+        surface(dry.film(), 320.0),
+        dry.gas(),
+        &source,
+        0.1,
+        solve,
+        || false,
+    )
+    .unwrap();
+    assert_eq!(idle.film(), GasWallFilmInventory::Dry);
+    assert_eq!(idle.gas(), dry.gas());
+    assert_eq!(idle.step().wall_heat_into_system_j, 0.0);
+    for candidate in [&wet, &dry, &idle] {
+        near(
+            candidate.gas().species_mass_kg(&vapor).unwrap() + candidate.film().mass_kg(),
+            initial.species_mass_kg(&vapor).unwrap(),
+            solve.gas.mass_tolerance_kg,
+        );
+        near(
+            candidate.gas().species_mass_kg(&nitrogen).unwrap(),
+            initial.species_mass_kg(&nitrogen).unwrap(),
+            solve.gas.mass_tolerance_kg,
+        );
+        near(
+            candidate.step().energy_residual_j,
+            0.0,
+            solve.gas.energy_tolerance_j,
+        );
+    }
+    near(
+        wet.step().film_enthalpy_change_j + dry.step().film_enthalpy_change_j,
+        0.0,
+        solve.gas.energy_tolerance_j,
+    );
+    near(
+        wet.step().wall_heat_into_system_j + dry.step().wall_heat_into_system_j,
+        wet.step().gas_internal_energy_change_j + dry.step().gas_internal_energy_change_j,
+        solve.gas.energy_tolerance_j,
+    );
+    assert_eq!(initial, saved);
+}
+
+#[test]
 fn original_if97_water_evaporates_into_finite_nasa_gas_with_one_fixed_datum() {
     let source = original_gas();
     let water = original_water();
