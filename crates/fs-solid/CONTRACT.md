@@ -1,5 +1,39 @@
 # fs-solid CONTRACT
 
+## Findley shear-path fatigue from native elastic and Newmark responses
+
+`fatigue::TetFatiguePath::new_with_findley` and
+`TetTransientRun3::with_fatigue_and_findley` attach Findley gauges alongside
+fixed-plane S-N gauges, or use Findley gauges alone. Both feed the same shared
+observer from the original native tensor stress recovery, including actual
+inertial stress under zero external load and prescribed-support motion.
+Physical tensor shear is retained in the declared mesh frame. The calculation
+does not replace the elastic solve, Newmark step or material constitutive law.
+
+A sourced Findley gauge requires the original immutable resolved material
+bundle, with identity equal to the actual native elastic material identity.
+Its original card, named material state and every calibration query coordinate
+and quantity convention must match. The retained thermal state and fatigue
+calibration must have the same temperature. A label or caller-supplied hash
+alone cannot authorize a source-backed transfer; derived/oriented material
+identities need their own explicit original receipt mapping before admission.
+
+Explicit window closure evaluates the full stress path. A combined endpoint
+advance and closure accepts native mechanics, S-N history and all Findley
+gauges together. Any late failure or cancellation restores every observation
+and leaves native motion unchanged. Ordinary steps append bounded tensor
+samples without cloning the entire preceding Findley history. A restart begins
+at the last actual accepted native stress, preserves S-N and mechanical history,
+and does not reset the global sample budget. Completed Findley usage factors
+are exposed independently from S-N/Miner summaries.
+
+This is fixed-temperature, small-strain elastic fatigue-limit usage on resolved
+closed representative blocks and declared candidate planes. It does not infer
+periodicity for decaying vibration, count multiaxial variable-amplitude cycles,
+predict finite life or couple fatigue to stiffness loss or crack propagation.
+Synthetic native regressions cover rotating shear, unforced vibration,
+source binding, restart and all-gauge rollback against the original solvers.
+
 ## Critical-plane SWT from accepted native J2 cycles
 
 The quasistatic and inertial J2 fatigue owners can carry bounded critical-plane
