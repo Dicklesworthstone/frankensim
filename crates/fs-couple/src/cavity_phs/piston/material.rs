@@ -8,6 +8,8 @@
 pub mod graph;
 /// Continuing pressure work after shared reacting gas and spatial-solid heat.
 pub mod solid;
+/// State-dependent finite-body power retaining original material inertia.
+pub mod power;
 
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonGas, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;

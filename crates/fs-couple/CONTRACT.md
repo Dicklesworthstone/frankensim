@@ -18409,9 +18409,11 @@ introduced.
 
 `MaterialGasPiston<G>` obtains translating mass from the original `ResolvedBody`
 inertia and retains that body together with the original native piston. Its
-thermal candidates preserve both owners and the native port account; they do not
-reconstruct a fresh piston or silently change mechanical mass when a thermal
-body heats or changes phase. Thermal storage may represent a separate wall, and
+thermal and powered candidates preserve both owners and the native port account;
+they do not reconstruct a fresh piston or silently change mechanical mass when a
+thermal body heats or changes phase. Source-bound layer conduction and actual-
+midpoint power therefore continue accepted compression without dropping density
+receipts, resetting motion, or counting source energy twice. Thermal storage may represent a separate wall, and
 its uniform-temperature, fixed-geometry and negligible-deformation-work assumptions
 remain explicit.
 
