@@ -220,6 +220,8 @@ fn geometry_and_band(source: &MaterialStringSource)
             Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
         MaterialStringSource::ConcentricProny { section, .. } =>
             Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
+        MaterialStringSource::ConcentricModalLoss { section, .. } =>
+            Ok((section.elastic().outer_radius_m(), section.omega_band_rad_s())),
     }
 }
 
@@ -228,7 +230,7 @@ impl ReciprocalStringBank {
     ///
     /// Source solid density is untouched. The returned cards carry the actual
     /// transverse inertia (solid plus instantaneous fluid added mass); their
-    /// damping keeps material Kelvin-Voigt loss, the construction's independent
+    /// damping re-evaluates the original material bending law and keeps the independent
     /// tension loss and the collapsed slow fluid tail. Every remaining fluid
     /// contribution is a coupled mass, so it cannot be double-counted as old
     /// per-mode gas resistance. Selected torsion receives its distinct rotary
@@ -308,7 +310,15 @@ impl ReciprocalStringBank {
                 ).map_err(ReciprocalStringError::Material)?;
                 let fluid_tail = 0.5 * flow.low_tail_resistance_per_length_n_s_m2()
                     / card.linear_density_kg_m / omega;
-                let zeta = material + fluid_tail;
+                // Loss-angle/TED is evaluated again at the loaded mode, using
+                // its actual inertia. Keeping the dry sampled zeta would erase
+                // thermal dispersion and give the wrong tension dilution.
+                let modal_rate = member.source.modal_bending_loss().map(|section|
+                    section.damping_rate_per_s(omega, wave_number, card.linear_density_kg_m))
+                    .transpose().map_err(|error| ReciprocalStringError::Material(
+                        crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string())))?
+                    .unwrap_or(0.0);
+                let zeta = material + 0.5 * modal_rate / omega + fluid_tail;
                 if !omega.is_finite() || omega <= 0.0 || omega < lo || omega > hi
                     || !zeta.is_finite() || zeta <= 0.0 {
                     return Err(invalid("fluid-loaded string mode exceeds its original material band or representability"));

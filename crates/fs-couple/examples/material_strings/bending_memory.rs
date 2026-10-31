@@ -46,8 +46,8 @@ impl Input {
                 || selection.layers.len() != layers {
                 return Err("string memory requires distinct strings and exactly one selection per physical layer".into());
             }
-            if matches!(&wire.bending_loss, input::BendingLoss::Prony { .. }) {
-                return Err("one string cannot select both original-specimen Prony loss and additional bending-memory".into());
+            if !matches!(&wire.bending_loss, input::BendingLoss::KelvinVoigt) {
+                return Err("additional bending-memory requires the original Kelvin-Voigt bending selection".into());
             }
             for layer in &selection.layers {
                 if layer.branches.len() > 8 || layer.equilibrium_modulus.is_empty()

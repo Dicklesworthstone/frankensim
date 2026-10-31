@@ -168,3 +168,111 @@ fn g0_missing_wrong_layered_hollow_or_untyped_inputs_refuse() {
     assert!(hollow.with_thermoelastic_bending().is_err());
     assert!(rod(0.0005, state(&full, false)).with_thermoelastic_bending().is_err());
 }
+
+
+// Typed held-moisture curves exercise the same environmental policy as every
+// other section law. These manufactured values are not measured material data.
+fn modal_environment(moisture_value: f64, typed: bool, extra_strain: bool)
+    -> ResolvedMaterialStatePoint
+{
+    use fs_qty::semantic::MoistureBasis;
+    let moisture = QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::Moisture(MoistureBasis::DryMass), ValueForm::Static));
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, dims, value, varying, band) in [
+        ("young_modulus", Pressure::DIMS, METAL[0], false, (50.0, 12000.0)),
+        ("density", Density::DIMS, METAL[2], false, (50.0, 12000.0)),
+        ("linear_thermal_expansion_coefficient", INVERSE_TEMPERATURE_DIMS, METAL[1], true, (50.0, 12000.0)),
+        ("specific_heat_capacity", SPECIFIC_HEAT_CAPACITY_DIMS, METAL[3], false, (100.0, 9000.0)),
+        ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, METAL[4], false, (50.0, 12000.0)),
+        ("excess_loss_tangent", Dims::NONE, 1e-4, true, (200.0, 8000.0)),
+    ] {
+        let mut validity = ValidityDomain::unconstrained()
+            .with_quantity("T", kelvin(), 280.0, 320.0).with("omega", band.0, band.1);
+        validity = if typed { validity.with_quantity("water", moisture, 0.0, 0.2) }
+            else { validity.with("water", 0.0, 0.2) };
+        if extra_strain { validity = validity.with("strain", 0.0, 0.1); }
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: if varying { PropertyValue::Curve {
+                abscissa: "water".into(), abscissa_dims: Dims::NONE,
+                knots: vec![(0.0, value), (0.2, 2.0 * value)], dims,
+            }} else { PropertyValue::Scalar { value, dims } },
+            validity, uncertainty: UncertaintyModel::Unstated,
+            interpolation: if varying { InterpolationPolicy::LinearInside }
+                else { InterpolationPolicy::ConstantWithinValidity },
+            observations: vec![], provenance: Provenance {
+                source: "manufactured modal-loss held environment".into(),
+                license: "CC0-1.0".into(), artifact: None,
+            },
+        }).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(name, dims,
+            ScalarAdmissibility::Finite).unwrap());
+    }
+    let card = MaterialCard::assemble(MaterialStateId { chemistry: "test".into(),
+        phase: "solid".into(), process: "held environment".into(), revision: 0 },
+        claims, vec![]).unwrap();
+    let point = QueryPoint::new().with_quantity("T", kelvin(), T0).unwrap()
+        .with("omega", 1000.0).unwrap();
+    let mut point = if typed { point.with_quantity("water", moisture, moisture_value).unwrap() }
+        else { point.with("water", moisture_value).unwrap() };
+    if extra_strain { point = point.with("strain", 0.01).unwrap(); }
+    resolve_material_state_point(&card, &point, &requirements,
+        MaterialPropertySelection::SingleClaimOnly).unwrap()
+}
+
+#[test]
+fn g1_modal_thermoelastic_loss_retains_excess_support_and_loaded_inertia() {
+    use fs_material::section::modal_loss::ConcentricModalLossSection;
+    let material = modal_environment(0.0, true, false);
+    let elastic = rod(0.0005, material.clone());
+    let thermal = elastic.clone().with_thermoelastic_bending().unwrap();
+    let excess = elastic.clone().with_loss_angle_bending("excess_loss_tangent").unwrap();
+    assert_eq!(thermal.omega_band_rad_s(), (100.0, 9000.0));
+    let only = ConcentricModalLossSection::from_thermoelastic(thermal.clone(), None).unwrap();
+    let loss = ConcentricModalLossSection::from_thermoelastic(
+        thermal.clone(), Some(excess.clone())).unwrap();
+    assert_eq!(loss.omega_band_rad_s(), (200.0, 8000.0));
+    assert_eq!(loss.thermoelastic(), Some(&thermal));
+    assert_eq!(loss.loss_angle(), Some(&excess));
+    assert_eq!(loss.elastic().layers()[0].material, material);
+    let wave: f64 = PI / 0.7;
+    let stiffness = 100.0 * wave.powi(2) + elastic.bending_stiffness_n_m2() * wave.powi(4);
+    for mass in [elastic.line_density_kg_m(), 2.0 * elastic.line_density_kg_m()] {
+        let omega = (stiffness / mass).sqrt();
+        let rate = loss.damping_rate_per_s(omega, wave, mass).unwrap();
+        let h = excess.hysteretic_stiffness_n_m2()
+            + elastic.bending_stiffness_n_m2() * thermal.loss_tangent(omega);
+        near(rate / (2.0 * omega), h * wave.powi(4) / (2.0 * stiffness), 1e-14);
+        let intrinsic = only.damping_rate_per_s(omega, wave, mass).unwrap();
+        near(rate - intrinsic, excess.hysteretic_stiffness_n_m2()
+            * wave.powi(4) / mass / omega, 1e-12);
+    }
+    // A selected excess never disappears just because thermal data go further.
+    assert!(only.hysteretic_stiffness_n_m2(150.0).is_ok());
+    assert!(loss.hysteretic_stiffness_n_m2(150.0).is_err());
+    assert!(only.hysteretic_stiffness_n_m2(9500.0).is_err());
+    let wrong_geometry = rod(0.0006, material)
+        .with_loss_angle_bending("excess_loss_tangent").unwrap();
+    assert!(ConcentricModalLossSection::from_thermoelastic(
+        thermal, Some(wrong_geometry)).is_err());
+}
+
+#[test]
+fn g1_modal_loss_owners_share_held_environment_without_freezing_strain() {
+    let dry = rod(0.0005, modal_environment(0.0, true, false));
+    let wet = rod(0.0005, modal_environment(0.2, true, false));
+    let a = dry.clone().with_thermoelastic_bending().unwrap();
+    let b = wet.clone().with_thermoelastic_bending().unwrap();
+    near(b.law().relaxation_strength(), 4.0 * a.law().relaxation_strength(), 1e-14);
+    assert_eq!(a.base_time_s(), b.base_time_s());
+    let ta = dry.with_loss_angle_bending("excess_loss_tangent").unwrap();
+    let tb = wet.with_loss_angle_bending("excess_loss_tangent").unwrap();
+    near(tb.hysteretic_stiffness_n_m2(), 2.0 * ta.hysteretic_stiffness_n_m2(), 1e-14);
+    for state in [modal_environment(0.1, false, false), modal_environment(0.1, true, true)] {
+        let section = rod(0.0005, state);
+        assert!(section.clone().with_thermoelastic_bending().is_err());
+        assert!(section.with_loss_angle_bending("excess_loss_tangent").is_err());
+    }
+}

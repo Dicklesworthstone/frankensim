@@ -31,8 +31,11 @@ pub struct ConcentricLossAngleSection {
 impl ConcentricElasticSection {
     /// Bind a named dimensionless loss-tangent claim from EVERY layer.
     ///
-    /// Density, E and the loss tangent must be constants or T-only curves at
-    /// fixed positive absolute T. Each loss tangent declares a frequency band;
+    /// Density, E and the loss tangent are evaluated at one held material
+    /// environment under the shared fixed-environment policy. Temperature,
+    /// pressure, composition and moisture stay at their resolved values; no
+    /// strain, stress, field or frequency response is frozen. Each tangent
+    /// declares a frequency band;
     /// all coefficient bands intersect. Explicit zero is lossless, but absent
     /// loss data is an error, never a lossless layer.
     ///
@@ -60,8 +63,8 @@ impl ConcentricElasticSection {
             for key in [DENSITY_PROPERTY, YOUNG_MODULUS_PROPERTY, loss_property] {
                 let coefficient = layer.material.property(key)
                     .ok_or_else(|| invalid("layer bending law needs density, modulus and loss tangent"))?;
-                if !coefficient.is_constant_at_fixed_temperature() {
-                    return Err(invalid("layer bending coefficients must be constants or T-only curves at fixed positive absolute T"));
+                if !coefficient.is_constant_at_fixed_environment() {
+                    return Err(invalid("layer bending coefficients require the original held material environment"));
                 }
                 if let Some((lo, hi)) = coefficient.angular_frequency_band_rad_s()? {
                     band = (band.0.max(lo), band.1.min(hi));

@@ -81,7 +81,10 @@ use fs_exec::{CancelGate,Cx};
 use fs_matdb::{NormalizedPack,NormalizedInterfacePack,MaterialCard,MaterialStateId,QueryPoint};
 use fs_material::gas::GasState;
 use fs_material::state_point::{ResolvedMaterialStatePoint,ScalarPropertyRequirement as Requirement,
-    ScalarAdmissibility as Admit,MaterialPropertySelection as Pick,resolve_material_state_point};
+    ScalarAdmissibility as Admit,MaterialPropertySelection as Pick,resolve_material_state_point,
+    INVERSE_TEMPERATURE_DIMS,LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+    SPECIFIC_HEAT_CAPACITY_DIMS,SPECIFIC_HEAT_CAPACITY_PROPERTY,
+    THERMAL_CONDUCTIVITY_DIMS,THERMAL_CONDUCTIVITY_PROPERTY};
 use fs_qty::{Density,Pressure,DynViscosity,Dims};
 use fs_scenario::{PrestressedString,ThinPlate,HelmholtzCavity,gesture::{GestureSchedule,GestureTarget,GestureValue}};
 use fs_tribo::FrictionLaw;
@@ -129,6 +132,24 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     match loss {
         input::BendingLoss::KelvinVoigt =>
             requirements.push(Requirement::try_new(ETA,DynViscosity::DIMS,Admit::Finite)?),
+        input::BendingLoss::LossAngle { property } => {
+            if body { return Err("string modal loss cannot replace a body constitutive law".into()); }
+            requirements.push(Requirement::try_new(property.as_str(),Dims::NONE,Admit::NonNegative)?);
+        },
+        input::BendingLoss::Thermoelastic { excess_property } => {
+            if body { return Err("string modal loss cannot replace a body constitutive law".into()); }
+            requirements.extend([
+                Requirement::try_new(LINEAR_THERMAL_EXPANSION_COEFFICIENT_PROPERTY,
+                    INVERSE_TEMPERATURE_DIMS,Admit::Finite)?,
+                Requirement::try_new(SPECIFIC_HEAT_CAPACITY_PROPERTY,
+                    SPECIFIC_HEAT_CAPACITY_DIMS,Admit::StrictlyPositive)?,
+                Requirement::try_new(THERMAL_CONDUCTIVITY_PROPERTY,
+                    THERMAL_CONDUCTIVITY_DIMS,Admit::StrictlyPositive)?,
+            ]);
+            if let Some(property) = excess_property {
+                requirements.push(Requirement::try_new(property.as_str(),Dims::NONE,Admit::NonNegative)?);
+            }
+        },
         input::BendingLoss::Prony { properties } => {
             if body { return Err("string memory selection cannot replace a body constitutive law".into()); }
             requirements.push(Requirement::try_new(
@@ -170,6 +191,12 @@ fn resolve(name:&str, catalog:&mut Catalog, loader:&mut impl FnMut(&str)->Result
     if !body {
         for wire in &spec.strings {
             wire.add_torsion_memory_requirements(name,&mut requirements)?;
+        }
+    }
+    for (i, requirement) in requirements.iter().enumerate() {
+        if requirements[..i].iter().any(|prior|
+            prior.name() == requirement.name() && prior.dims() != requirement.dims()) {
+            return Err("selected string source property has incompatible physical quantities".into());
         }
     }
     resolve_properties(name,catalog,loader,spec,&requirements)

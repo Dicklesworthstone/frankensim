@@ -45,6 +45,7 @@ impl LongitudinalMaterialLoss {
                 }]).map_err(|e| ImpactError::Owner(e.to_string()))?,
             MaterialStringSource::Concentric { section, .. } => section.elastic().clone(),
             MaterialStringSource::ConcentricProny { section, .. } => section.elastic().clone(),
+            MaterialStringSource::ConcentricModalLoss { section, .. } => section.elastic().clone(),
             MaterialStringSource::Wound(_) => return Err(invalid("winding axial loss needs its own resolved constitutive model")),
             MaterialStringSource::Measured(_) => return Err(invalid("whole-string measurements contain no axial viscosity law")),
         };

@@ -30,6 +30,7 @@ pub struct ConcentricThermoelasticBending {
     law: ThermoelasticZener,
     base_time_s: f64,
     hysteretic_scale_n_m2: f64,
+    omega_band_rad_s: (f64, f64),
 }
 
 impl ConcentricElasticSection {
@@ -48,14 +49,18 @@ impl ConcentricElasticSection {
         if self.layers().iter().any(|layer| layer.material.identity() != state.identity()) {
             return Err(invalid("thermoelastic bending needs one homogeneous material; layered heat flow is not modelled"));
         }
-        let coefficient = |name: &str, dims| -> Result<f64, MaterialStatePointError> {
+        let mut band = (0.0_f64, f64::MAX);
+        let mut coefficient = |name: &str, dims| -> Result<f64, MaterialStatePointError> {
             let property = state.property(name)
                 .ok_or_else(|| invalid("thermoelastic bending needs density, modulus, expansion, heat capacity and conductivity"))?;
             if property.requirement().quantity().dims() != dims {
                 return Err(invalid("thermoelastic coefficient has the wrong dimensions"));
             }
-            if !property.is_constant_at_fixed_temperature() {
-                return Err(invalid("thermoelastic coefficients must be constants or T-only curves at fixed positive absolute T"));
+            if !property.is_constant_at_fixed_environment() {
+                return Err(invalid("thermoelastic coefficients require the original held material environment"));
+            }
+            if let Some((lo, hi)) = property.angular_frequency_band_rad_s()? {
+                band = (band.0.max(lo), band.1.min(hi));
             }
             Ok(property.value_si())
         };
@@ -74,6 +79,9 @@ impl ConcentricElasticSection {
             conductivity: positive(coefficient(THERMAL_CONDUCTIVITY_PROPERTY, THERMAL_CONDUCTIVITY_DIMS)?, "positive conductivity")?,
             t0: temperature,
         };
+        if !band.0.is_finite() || !band.1.is_finite() || band.0 < 0.0 || band.1 < band.0 {
+            return Err(invalid("thermoelastic coefficient frequency bands do not intersect"));
+        }
         let delta = law.relaxation_strength();
         if !delta.is_finite() || delta < 0.0 {
             return Err(invalid("thermoelastic relaxation strength is unrepresentable"));
@@ -83,7 +91,8 @@ impl ConcentricElasticSection {
         if !hysteretic_scale_n_m2.is_finite() {
             return Err(invalid("thermoelastic hysteretic stiffness is unrepresentable"));
         }
-        Ok(ConcentricThermoelasticBending { elastic: self, law, base_time_s, hysteretic_scale_n_m2 })
+        Ok(ConcentricThermoelasticBending { elastic: self, law, base_time_s,
+            hysteretic_scale_n_m2, omega_band_rad_s: band })
     }
 }
 
@@ -100,7 +109,11 @@ impl ConcentricThermoelasticBending {
     /// `EI Delta` [N m2]: multiplies the series shape to give Im(EI*).
     #[must_use]
     pub const fn hysteretic_scale_n_m2(&self) -> f64 { self.hysteretic_scale_n_m2 }
+    /// Intersection of all selected coefficients' source support [rad/s].
+    #[must_use]
+    pub const fn omega_band_rad_s(&self) -> (f64, f64) { self.omega_band_rad_s }
     /// Thermoelastic bending loss tangent at angular frequency `omega`.
+    /// Consumers must admit their actual frequency against `omega_band_rad_s`.
     #[must_use]
     pub fn loss_tangent(&self, omega: f64) -> f64 {
         self.law.relaxation_strength() * circular_relaxation_shape(omega, self.base_time_s)

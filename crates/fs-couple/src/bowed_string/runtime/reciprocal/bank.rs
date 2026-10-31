@@ -60,6 +60,17 @@ pub enum MaterialStringSource {
         /// Independent support prescription; no hidden pitch normalization.
         prestress: StringPrestress,
     },
+    /// Original section with sourced loss-angle or computed thermal bending loss.
+    /// Each retained mode uses its own frequency, tension dilution and mass.
+    /// No Kelvin-Voigt coefficient or unmeasured excess loss is invented.
+    ConcentricModalLoss {
+        /// Span and modal resolution, without inherited internal damping.
+        template: PrestressedString,
+        /// Original section, selected law owners and intersected source support.
+        section: fs_material::section::modal_loss::ConcentricModalLossSection,
+        /// Applied force or extension, with no implicit pitch normalization.
+        prestress: StringPrestress,
+    },
     /// Perfectly bonded annuli with exclusive per-layer bending memory.
     /// Every source arm survives in the shared exact mechanical owner.
     ConcentricProny {
@@ -86,19 +97,37 @@ impl MaterialStringSource {
                 crate::material_assembly::concentric::with_concentric_kelvin_voigt_section(
                     template.clone(), section, *prestress,
                 ).map_err(ReciprocalStringError::Material),
+            Self::ConcentricModalLoss { template, section, prestress } =>
+                crate::material_assembly::concentric::with_concentric_section(
+                    template.clone(), section.elastic(), *prestress,
+                ).map_err(ReciprocalStringError::Material),
             Self::ConcentricProny { template, section, prestress } =>
                 crate::material_assembly::concentric::with_concentric_prony_section(
                     template.clone(), section, *prestress,
                 ).map_err(ReciprocalStringError::Material),
         }
     }
+    // The original law remains available after wrapping in polarization/torsion
+    // and after gas loading changes the actual transverse inertia/frequencies.
+    fn modal_bending_loss(&self)
+        -> Option<&fs_material::section::modal_loss::ConcentricModalLossSection>
+    {
+        match self {
+            Self::WithPolarizations(p) => p.source().modal_bending_loss(),
+            Self::WithTorsion(t) => t.bending().modal_bending_loss(),
+            Self::ConcentricModalLoss { section, .. } => Some(section),
+            _ => None,
+        }
+    }
+
     fn modes(&self) -> usize {
         match self { Self::WithPolarizations(p) => p.total_modes(),
             Self::WithTorsion(t) => t.total_modes(),
             Self::Homogeneous(s) => s.string().n_modes,
             Self::Measured(s) => s.string().n_modes,
             Self::Wound(s) => s.string().n_modes,
-            Self::Concentric { template, .. } | Self::ConcentricProny { template, .. } => template.n_modes }
+            Self::Concentric { template, .. } | Self::ConcentricProny { template, .. }
+                | Self::ConcentricModalLoss { template, .. } => template.n_modes }
     }
     fn lower(&self, cx: &Cx<'_>, gas: &GasState, rate: u32)
         -> Result<BowedStringCard, ReciprocalStringError>
@@ -114,6 +143,9 @@ impl MaterialStringSource {
             Self::Wound(s) => BowedStringCard::from_wound_material_specimen(cx, s, gas, rate),
             Self::Concentric { template, section, prestress } =>
                 BowedStringCard::from_concentric_material_section(cx, template.clone(), section, *prestress, gas, rate),
+            Self::ConcentricModalLoss { template, section, prestress } =>
+                BowedStringCard::from_concentric_modal_loss_section(
+                    cx, template.clone(), section, *prestress, gas, rate),
             Self::ConcentricProny { .. } =>
                 return Err(invalid("this scalar string-card consumer cannot retain layered bending history")),
         }.map_err(ReciprocalStringError::Material)

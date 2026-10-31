@@ -115,6 +115,12 @@ pub(super) fn string_band(
                 material_band(&layer.material, band)?;
             }
         }
+        MaterialStringSource::ConcentricModalLoss { section, .. } => {
+            intersect(band, section.omega_band_rad_s())?;
+            for layer in section.elastic().layers() {
+                material_band(&layer.material, band)?;
+            }
+        }
     }
     let string = source.resolved_transverse_string()?;
     if let Some(law) = string.kelvin_voigt_bending {

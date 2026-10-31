@@ -333,6 +333,12 @@ pub(super) fn outer_material(
             .last()
             .map(|layer| &layer.material)
             .ok_or_else(|| invalid("material string has no outer surface")),
+        MaterialStringSource::ConcentricModalLoss { section, .. } => section
+            .elastic()
+            .layers()
+            .last()
+            .map(|layer| &layer.material)
+            .ok_or_else(|| invalid("material string has no outer surface")),
     }
 }
 

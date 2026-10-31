@@ -20,6 +20,7 @@ use crate::string_specimen::{ResolvedStringSpecimen, StringPrestress};
 use fs_exec::Cx;
 use fs_material::gas::GasState;
 use fs_material::section::ConcentricKelvinVoigtSection;
+use fs_material::section::modal_loss::ConcentricModalLossSection;
 use fs_scenario::PrestressedString;
 
 fn poll(cx: &Cx<'_>) -> Result<(), AcousticRealizeError> {
@@ -154,6 +155,32 @@ impl BowedStringCard {
         lower(cx, &string, gas, sample_rate_hz)
     }
 
+    /// Lower the original section's intrinsic loss-angle or circular thermal
+    /// loss through the same string modes, gas drag and support prescription.
+    ///
+    /// Each actual mode receives the cycle-equivalent rate from its own
+    /// frequency and mass. Original thermal and optional excess sources remain
+    /// in the section; missing/out-of-band selected loss refuses. No effective
+    /// viscosity is substituted into elastic or viscous support shear.
+    ///
+    /// # Errors
+    /// Inherited internal loss, unsupported geometry/state, source-band or
+    /// time-domain admission failures, inconsistent gas, and cancellation.
+    pub fn from_concentric_modal_loss_section(
+        cx: &Cx<'_>,
+        template: PrestressedString,
+        section: &ConcentricModalLossSection,
+        prestress: StringPrestress,
+        gas: &GasState,
+        sample_rate_hz: u32,
+    ) -> Result<Self, AcousticRealizeError> {
+        poll(cx)?;
+        let string = crate::material_assembly::concentric::with_concentric_section(
+            template, section.elastic(), prestress)?;
+        validate_incremental_string(&string)?;
+        lower_backbone_with_modal_loss(cx, &string, gas, sample_rate_hz, 0.0, Some(section))
+    }
+
     /// Lower a material-swappable layered member into the same bow runtime.
     ///
     /// Every annulus contributes its original density, elastic modulus and
@@ -203,6 +230,13 @@ fn lower_backbone(
     cx: &Cx<'_>, string: &PrestressedString, gas: &GasState, sample_rate_hz: u32,
     viscous_bending_n_m2_s: f64,
 ) -> Result<BowedStringCard, AcousticRealizeError> {
+    lower_backbone_with_modal_loss(cx, string, gas, sample_rate_hz, viscous_bending_n_m2_s, None)
+}
+
+fn lower_backbone_with_modal_loss(
+    cx: &Cx<'_>, string: &PrestressedString, gas: &GasState, sample_rate_hz: u32,
+    viscous_bending_n_m2_s: f64, modal_loss: Option<&ConcentricModalLossSection>,
+) -> Result<BowedStringCard, AcousticRealizeError> {
     poll(cx)?;
     gas.validate_coherence().map_err(|error| AcousticRealizeError::Ambient(error.to_string()))?;
     let mut card = BowedStringCard {
@@ -219,8 +253,12 @@ fn lower_backbone(
     for k in 1..=string.n_modes {
         poll(cx)?;
         let omega = card.mode_omega_rad_s(k);
-        let zeta = mode_zeta(string, omega,
-            k as f64 * core::f64::consts::PI / string.length_m, gas)?;
+        let wave_number = k as f64 * core::f64::consts::PI / string.length_m;
+        let rate = modal_loss.map(|section|
+            section.damping_rate_per_s(omega, wave_number, card.linear_density_kg_m))
+            .transpose().map_err(|error| AcousticRealizeError::Nonlinear(error.to_string()))?
+            .unwrap_or(0.0);
+        let zeta = mode_zeta(string, omega, wave_number, gas)? + 0.5 * rate / omega;
         card.zetas.push(zeta);
         modes.push(ModalAcousticMode {
             angular_frequency_rad_s: omega,

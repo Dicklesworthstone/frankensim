@@ -332,6 +332,41 @@ fn g0_loss_angle_bending_integrates_each_layer_without_averaging() {
     assert_eq!(zero.with_loss_angle_bending(TAN).unwrap().hysteretic_stiffness_n_m2(), 0.0);
 }
 
+// The modal reduction dissipates only the bending part of a tensioned mode.
+// Added fluid mass changes its frequency/rate, not the source H or dry section.
+#[test]
+fn g1_modal_loss_angle_uses_actual_frequency_mass_and_tension_dilution() {
+    use fs_material::section::modal_loss::ConcentricModalLossSection;
+    let original = rod(&[(0.0004, lossy(7850.0, 2.1e11, 1.1e-4, Dims::NONE,
+        Some((50.0, 2.0e4)))),
+        (0.0006, lossy(19300.0, 7.9e10, 5e-3, Dims::NONE, Some((10.0, 1.2e4))))]);
+    let source = original.clone().with_loss_angle_bending(TAN).unwrap();
+    let h = source.hysteretic_stiffness_n_m2();
+    let loss = ConcentricModalLossSection::from_loss_angle(source.clone());
+    assert_eq!(loss.elastic(), &original);
+    assert_eq!(loss.loss_angle(), Some(&source));
+    assert!(loss.thermoelastic().is_none());
+    assert_eq!(loss.omega_band_rad_s(), (50.0, 1.2e4));
+    let wave: f64 = PI / 0.7;
+    let stiffness = 100.0 * wave.powi(2) + original.bending_stiffness_n_m2() * wave.powi(4);
+    let dry_mass = original.line_density_kg_m();
+    let mut dry_rate = 0.0;
+    for added_mass in [0.0, dry_mass] {
+        let mass = dry_mass + added_mass;
+        let omega = (stiffness / mass).sqrt();
+        let rate = loss.damping_rate_per_s(omega, wave, mass).unwrap();
+        near(rate / (2.0 * omega), h * wave.powi(4) / (2.0 * stiffness), 1e-14);
+        if added_mass == 0.0 { dry_rate = rate; }
+        else { near(rate / dry_rate, 1.0 / 2.0_f64.sqrt(), 1e-14); }
+        assert!(rate / (2.0 * omega) < 0.5 * h / original.bending_stiffness_n_m2());
+    }
+    for omega in [0.0, 49.0, 12001.0, f64::NAN] {
+        assert!(loss.damping_rate_per_s(omega, wave, dry_mass).is_err());
+    }
+    assert!(loss.damping_rate_per_s(1000.0, 0.0, dry_mass).is_err());
+    assert!(loss.damping_rate_per_s(1000.0, wave, -dry_mass).is_err());
+}
+
 // Planted negatives: a viscosity in Pa s, a negative tangent, a band-less
 // claim and an absent claim never become a loss tangent.
 #[test]

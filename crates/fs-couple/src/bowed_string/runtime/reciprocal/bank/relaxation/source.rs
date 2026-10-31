@@ -21,7 +21,7 @@ impl MaterialStringSource {
             Self::WithTorsion(t) => t.bending().bending_relaxation(),
             Self::Homogeneous(s) => s.string().relaxation_bending,
             Self::Wound(s) => s.string().relaxation_bending,
-            Self::Concentric { .. } | Self::Measured(_) => None,
+            Self::Concentric { .. } | Self::ConcentricModalLoss { .. } | Self::Measured(_) => None,
             Self::ConcentricProny { section, .. } =>
                 Some(crate::material_assembly::concentric::concentric_prony_bending(section)),
         }

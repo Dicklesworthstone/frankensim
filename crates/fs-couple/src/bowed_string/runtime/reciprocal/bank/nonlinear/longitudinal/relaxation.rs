@@ -200,6 +200,7 @@ pub(in crate::bowed_string::runtime::reciprocal::bank) fn elastic_section(source
             .map_err(|e| ImpactError::Owner(e.to_string())),
         MaterialStringSource::Concentric { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::ConcentricProny { section, .. } => Ok(section.elastic().clone()),
+        MaterialStringSource::ConcentricModalLoss { section, .. } => Ok(section.elastic().clone()),
         MaterialStringSource::Wound(_) => Err(invalid("quasistatic winding spring has no resolved axial material history")),
         MaterialStringSource::Measured(_) => Err(invalid("whole-string bending measurements do not determine an axial material history")),
     }

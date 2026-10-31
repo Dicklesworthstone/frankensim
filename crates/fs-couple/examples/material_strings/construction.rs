@@ -3,6 +3,7 @@
 use super::*;
 use fs_material::section::{ConcentricElasticSection, ConcentricMaterialLayer};
 use fs_material::section::thermal::ConcentricThermoelasticSection;
+use fs_material::section::modal_loss::ConcentricModalLossSection;
 use fs_material::state_point::{IntegratedIsotropicThermalExpansion, integrate_isotropic_thermal_expansion};
 use fs_couple::material_assembly::concentric::with_concentric_thermal_extension;
 use fs_couple::string_specimen::with_uniform_circular_thermal_extension;
@@ -25,6 +26,25 @@ pub(super) fn expansion(name: &str, material: &ResolvedMaterialStatePoint, catal
         &point, &current, Pick::SingleClaimOnly)?)
 }
 
+// Both homogeneous and bonded strings bind the original selected loss owner.
+// Excess is selected explicitly from the SAME section before thermal lowering;
+// no material lookup, missing-loss fallback or viscosity conversion occurs here.
+fn modal_bending_section(elastic: ConcentricElasticSection, loss: &input::BendingLoss)
+    -> Result<ConcentricModalLossSection>
+{
+    match loss {
+        input::BendingLoss::LossAngle { property } => Ok(
+            ConcentricModalLossSection::from_loss_angle(elastic.with_loss_angle_bending(property)?)),
+        input::BendingLoss::Thermoelastic { excess_property } => {
+            let excess = excess_property.as_ref().map(|property|
+                elastic.clone().with_loss_angle_bending(property)).transpose()?;
+            Ok(ConcentricModalLossSection::from_thermoelastic(
+                elastic.with_thermoelastic_bending()?, excess)?)
+        }
+        _ => Err("modal bending requires an explicit loss-angle or thermoelastic selection".into()),
+    }
+}
+
 impl input::Wire {
     pub(super) fn resolve_source(&self, catalog: &mut Catalog,
         loader: &mut impl FnMut(&str) -> Result<MaterialPack>, spec: &input::Spec,
@@ -33,6 +53,11 @@ impl input::Wire {
         poll(gate)?;
         if matches!(&self.section, input::WireSection::Measured { .. }) {
             return measured::resolve(self, catalog, loader, spec, gate);
+        }
+        if matches!(&self.section, input::WireSection::CloseWound { .. })
+            && matches!(&self.bending_loss, input::BendingLoss::LossAngle { .. }
+                | input::BendingLoss::Thermoelastic { .. }) {
+            return Err("close-wound core loss-angle and thermoelastic bending are not supported by the original winding owner".into());
         }
         let thermal = match self.thermal_reference_kelvin {
             Some(reference) => {
@@ -65,6 +90,8 @@ impl input::Wire {
                             branches: properties.iter().map(|p| (p.modulus.clone(), p.relaxation_time.clone())).collect(),
                         },
                     ])?.into(),
+                    input::BendingLoss::LossAngle { .. } | input::BendingLoss::Thermoelastic { .. } =>
+                        return Err("close-wound core requires the original Kelvin-Voigt or Prony bending owner".into()),
                 };
                 // The wrap's spring law needs density and G, not an invented
                 // flexural viscosity or the core's Young modulus.
@@ -96,11 +123,30 @@ impl input::Wire {
                     _ => with_uniform_circular_material_and_constraints(template(self),
                         StringGeometryConstraint::FixedRadius(self.radius), &core, self.prestress)?,
                 } };
-                let specimen = match &self.bending_loss {
-                    input::BendingLoss::KelvinVoigt => specimen.with_kelvin_voigt_bending_loss()?,
-                    input::BendingLoss::Prony { properties } => specimen.with_prony_bending_loss(properties)?,
-                };
-                MaterialStringSource::Homogeneous(specimen)
+                match &self.bending_loss {
+                    input::BendingLoss::KelvinVoigt =>
+                        MaterialStringSource::Homogeneous(specimen.with_kelvin_voigt_bending_loss()?),
+                    input::BendingLoss::Prony { properties } =>
+                        MaterialStringSource::Homogeneous(specimen.with_prony_bending_loss(properties)?),
+                    input::BendingLoss::LossAngle { .. } | input::BendingLoss::Thermoelastic { .. } => {
+                        let elastic = ConcentricElasticSection::try_new(0.0, vec![ConcentricMaterialLayer {
+                            outer_radius_m: specimen.radius_m(), material: specimen.material().clone(),
+                        }])?;
+                        let string = specimen.string();
+                        // Keep the authored extension/tension prescription.
+                        // Nonzero thermal free strain has already been admitted
+                        // by the specimen's original support owner; only that
+                        // path freezes its resultant force for later rebuilds.
+                        // Zero free strain retains ordinary extension arithmetic,
+                        // after validating the complete explicit thermal path.
+                        let prestress = if specimen.thermal_expansion()
+                            .is_some_and(|path| path.free_linear_strain() != 0.0) {
+                            StringPrestress::FixedTension(string.tension_n)
+                        } else { self.prestress };
+                        MaterialStringSource::ConcentricModalLoss { template: string,
+                            section: modal_bending_section(elastic, &self.bending_loss)?, prestress }
+                    }
+                }
             }
             input::WireSection::Bonded { core_radius_m, sleeves } => {
                 let mut layers = Vec::with_capacity(sleeves.len() + 1);
@@ -156,6 +202,9 @@ impl input::Wire {
                         MaterialStringSource::ConcentricProny { template: template(self),
                             section: elastic.with_prony_bending(&bindings)?, prestress }
                     }
+                    input::BendingLoss::LossAngle { .. } | input::BendingLoss::Thermoelastic { .. } =>
+                        MaterialStringSource::ConcentricModalLoss { template: template(self),
+                            section: modal_bending_section(elastic, &self.bending_loss)?, prestress },
                 }
             }
         };

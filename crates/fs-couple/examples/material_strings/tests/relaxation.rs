@@ -267,5 +267,263 @@ fn selected_sources_unsupported_models_and_duplicate_laws_refuse_before_they_can
     });
 }
 
+
+// Native selectors retain the same manufactured material owners used by the
+// piano loss-angle and circular thermoelastic paths. They do not select a
+// viscosity, replace the body, or imply measured instrument qualification.
+const INTRINSIC: &str = "intrinsic_bending_loss";
+const EXPANSION: &str = "linear_thermal_expansion_coefficient";
+const CAPACITY: &str = "specific_heat_capacity";
+const CONDUCTIVITY: &str = "thermal_conductivity";
+
+fn modal_spec(selection: &str) -> input::Spec {
+    let text = String::from_utf8(selected().bytes).unwrap().replace(LOSS, selection);
+    input::Spec::parse(text.as_bytes()).unwrap()
+}
+
+fn modal_pack(name: &str, tangent: f64, tangent_dims: Dims, band: f64,
+    omit: Option<&str>) -> NormalizedPack
+{
+    modal_pack_with_temperature(name, tangent, tangent_dims, band, omit, true)
+}
+
+fn modal_pack_with_temperature(name: &str, tangent: f64, tangent_dims: Dims,
+    band: f64, omit: Option<&str>, typed_temperature: bool) -> NormalizedPack
+{
+    if name != "wire.fsmatpk" {
+        return pack(name, 7800.0, 200_000.0, None);
+    }
+    let base = pack(name, 7800.0, 200_000.0, Some(ETA));
+    let kelvin = fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+        fs_qty::semantic::QuantityKind::AbsoluteTemperature, fs_qty::semantic::ValueForm::Static));
+    let validity = |maximum| {
+        let domain = if typed_temperature {
+            ValidityDomain::unconstrained().with_quantity("T", kelvin, 280.0, 320.0)
+        } else { ValidityDomain::unconstrained().with("T", 280.0, 320.0) };
+        domain.with("omega", 0.0, maximum)
+    };
+    // These manufactured sources declare their own temperature semantics.
+    // Every original wire claim and observation remains present; the native
+    // material query must preserve this declaration rather than invent it.
+    let mut claims = ClaimSet::new();
+    for id in base.claims().observation_ids() {
+        assert_eq!(claims.register_observation(
+            base.claims().observation(id).unwrap().clone()).unwrap(), id);
+    }
+    for (_, original) in base.claims().claims_ordered() {
+        let mut claim = original.clone();
+        claim.validity = validity(200_000.0);
+        claims.insert_claim(claim).unwrap();
+    }
+    for (key, dims, value, maximum) in [
+        (INTRINSIC, tangent_dims, tangent, band),
+        (EXPANSION, fs_material::state_point::INVERSE_TEMPERATURE_DIMS, 12e-6, 200_000.0),
+        (CAPACITY, fs_material::state_point::SPECIFIC_HEAT_CAPACITY_DIMS, 450.0, 150_000.0),
+        (CONDUCTIVITY, fs_material::state_point::THERMAL_CONDUCTIVITY_DIMS, 50.0, 200_000.0),
+    ] {
+        if omit == Some(key) { continue; }
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(key, dims), value: PropertyValue::Scalar { value, dims },
+            validity: validity(maximum),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+            provenance: Provenance { source: "manufactured native intrinsic-loss integration".into(),
+                license: "CC0-1.0".into(), artifact: None },
+        }).unwrap();
+    }
+    let source = NormalizedPack::new(base.pack_id(), "synthetic-intrinsic-loss-v1",
+        base.source_artifact(), base.redistribution_terms(), claims, vec![], vec![]).unwrap();
+    NormalizedPack::from_bytes(&source.to_bytes()).unwrap()
+}
+
+fn modal_source(source: &MaterialStringSource)
+    -> &fs_material::section::modal_loss::ConcentricModalLossSection
+{
+    match source {
+        MaterialStringSource::WithPolarizations(p) => modal_source(p.source()),
+        MaterialStringSource::WithTorsion(t) => modal_source(t.bending()),
+        MaterialStringSource::ConcentricModalLoss { section, .. } => section,
+        _ => panic!("native selection lost its original intrinsic bending law"),
+    }
+}
+
+#[test]
+fn intrinsic_loss_selection_changes_decay_and_pressure_without_viscosity_or_retuning() {
+    scoped(|cx, gate| {
+        let selection = format!("bending-loss loss-angle {INTRINSIC}");
+        let s = modal_spec(&selection);
+        assert!(matches!(&s.strings[0].bending_loss,
+            input::BendingLoss::LossAngle { property } if property == INTRINSIC));
+        let build = |tangent| s.clone().compile(cx, gate, |name|
+            Ok(modal_pack(name, tangent, Dims::NONE, 100_000.0, None))).unwrap();
+        let mut a = build(0.002);
+        let mut b = build(0.02);
+        let law = modal_source(&a.performance.bank().source().bank().strings()[0].source);
+        assert_eq!(law.loss_angle().unwrap().loss_property(), INTRINSIC);
+        assert!(law.thermoelastic().is_none());
+        assert_eq!(law.omega_band_rad_s(), (0.0, 100_000.0));
+        let material = &law.elastic().layers()[0].material;
+        assert!(material.property(ETA).is_none(), "unselected bending viscosity was still required");
+        assert_eq!(material.property(INTRINSIC).unwrap().value_si(), 0.002);
+        let (left, right) = (&a.performance.bank().cards()[0], &b.performance.bank().cards()[0]);
+        assert_eq!(left.viscous_bending_n_m2_s, 0.0);
+        assert_eq!(right.viscous_bending_n_m2_s, 0.0);
+        assert_eq!(left.tension_n, right.tension_n);
+        assert_eq!(left.linear_density_kg_m, right.linear_density_kg_m);
+        assert_eq!(left.bending_stiffness_n_m2, right.bending_stiffness_n_m2);
+        for k in 1..=left.mode_count {
+            assert_eq!(left.mode_omega_rad_s(k), right.mode_omega_rad_s(k));
+            assert!(right.zetas[k - 1] > left.zetas[k - 1]);
+        }
+        assert_eq!(a.spec.bytes, b.spec.bytes);
+        assert_eq!(a.catalog["body.fsmatpk"].pack.content_hash(),
+            b.catalog["body.fsmatpk"].pack.content_hash());
+        let p = pressure(&mut a, 37);
+        let q = pressure(&mut b, 128);
+        assert!(p.iter().any(|p| p.abs() > 1e-12));
+        assert!(p.iter().zip(&q).any(|(p, q)| (p - q).abs() > 1e-12));
+        assert_eq!(p, pressure(&mut build(0.002), 1));
+        for ready in [&a, &b] {
+            let frame = ready.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+    });
+}
+
+#[test]
+fn thermal_and_excess_selectors_keep_original_sources_bands_and_loaded_inertia() {
+    scoped(|cx, gate| {
+        let mut only = modal_spec("bending-loss thermoelastic");
+        let mut excess = modal_spec(&format!("bending-loss thermoelastic excess {INTRINSIC}"));
+        assert!(matches!(&only.strings[0].bending_loss,
+            input::BendingLoss::Thermoelastic { excess_property: None }));
+        assert!(matches!(&excess.strings[0].bending_loss,
+            input::BendingLoss::Thermoelastic { excess_property: Some(property) }
+                if property == INTRINSIC));
+        let resolution = CylinderFlowResolution {
+            minimum_wavenumber_radius: 1e-3, maximum_wavenumber_radius: 30.0, intervals: 2,
+        };
+        only.cylinder_gas_loading = Some(resolution);
+        excess.cylinder_gas_loading = Some(resolution);
+        let build = |s: input::Spec| s.compile(cx, gate, |name|
+            Ok(modal_pack(name, 0.003, Dims::NONE, 100_000.0, None))).unwrap();
+        let a = build(only);
+        let b = build(excess);
+        let thermal_only = modal_source(&a.performance.bank().source().bank().strings()[0].source);
+        let combined = modal_source(&b.performance.bank().source().bank().strings()[0].source);
+        assert!(thermal_only.loss_angle().is_none());
+        assert_eq!(thermal_only.omega_band_rad_s(), (0.0, 150_000.0));
+        assert_eq!(combined.omega_band_rad_s(), (0.0, 100_000.0));
+        assert!(thermal_only.hysteretic_stiffness_n_m2(120_000.0).is_ok());
+        assert!(combined.hysteretic_stiffness_n_m2(120_000.0).is_err(),
+            "selected excess disappeared beyond its source support");
+        let thermal = combined.thermoelastic().unwrap();
+        let loss = combined.loss_angle().unwrap();
+        assert_eq!(loss.elastic(), thermal.elastic());
+        assert_eq!(loss.loss_property(), INTRINSIC);
+        assert_eq!(thermal.law().alpha_t, 12e-6);
+        assert_eq!(thermal.law().cp, 450.0);
+        assert_eq!(thermal.law().conductivity, 50.0);
+        assert_eq!(thermal.law().t0, 293.15);
+        let state = &combined.elastic().layers()[0].material;
+        assert!(state.property(ETA).is_none());
+        let kelvin = fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+            fs_qty::semantic::QuantityKind::AbsoluteTemperature, fs_qty::semantic::ValueForm::Static));
+        assert_eq!(state.axis_quantities().get("T"), Some(&kelvin));
+        let (plain, total) = (&a.performance.bank().cards()[0], &b.performance.bank().cards()[0]);
+        assert!(total.linear_density_kg_m > combined.elastic().line_density_kg_m());
+        assert_eq!(plain.linear_density_kg_m, total.linear_density_kg_m);
+        assert_eq!(total.viscous_bending_n_m2_s, 0.0);
+        for k in 1..=total.mode_count {
+            let omega = total.mode_omega_rad_s(k);
+            assert_eq!(omega, plain.mode_omega_rad_s(k));
+            let wave = k as f64 * core::f64::consts::PI / total.length_m;
+            let expected = 0.5 * loss.hysteretic_stiffness_n_m2() * wave.powi(4)
+                / total.linear_density_kg_m / omega / omega;
+            assert!(((total.zetas[k - 1] - plain.zetas[k - 1]) / expected - 1.0).abs() < 1e-10);
+        }
+    });
+}
+
+#[test]
+fn missing_invalid_or_out_of_band_intrinsic_sources_refuse_without_fallback() {
+    scoped(|cx, gate| {
+        let bare = modal_spec("bending-loss thermoelastic").compile(cx, gate, |name|
+            Ok(modal_pack_with_temperature(name, 0.003, Dims::NONE, 100_000.0, None, false)))
+            .err().expect("bare source temperature must not be relabelled as absolute kelvin");
+        assert!(bare.to_string().contains("absolute-temperature"), "{bare}");
+        for (selection, missing) in [
+            (format!("bending-loss loss-angle {INTRINSIC}"), INTRINSIC),
+            ("bending-loss thermoelastic".into(), EXPANSION),
+            ("bending-loss thermoelastic".into(), CAPACITY),
+            ("bending-loss thermoelastic".into(), CONDUCTIVITY),
+            (format!("bending-loss thermoelastic excess {INTRINSIC}"), INTRINSIC),
+        ] {
+            assert!(modal_spec(&selection).compile(cx, gate, |name|
+                Ok(modal_pack(name, 0.003, Dims::NONE, 100_000.0, Some(missing)))).is_err());
+        }
+        for selection in [
+            format!("bending-loss loss-angle {INTRINSIC}"),
+            format!("bending-loss thermoelastic excess {INTRINSIC}"),
+        ] {
+            for (tangent, dims, band) in [
+                (-0.001, Dims::NONE, 100_000.0),
+                (0.003, DynViscosity::DIMS, 100_000.0),
+                (0.003, Dims::NONE, 1000.0),
+            ] {
+                assert!(modal_spec(&selection).compile(cx, gate, |name|
+                    Ok(modal_pack(name, tangent, dims, band, None))).is_err());
+            }
+        }
+    });
+}
+
+#[test]
+fn malformed_native_loss_and_unsupported_winding_selections_refuse() {
+    let text = String::from_utf8(selected().bytes).unwrap();
+    for invalid in ["bending-loss loss-angle", "bending-loss loss-angle phi ignored",
+        "bending-loss thermoelastic ignored", "bending-loss thermoelastic excess",
+        "bending-loss thermoelastic excess phi ignored"]
+    {
+        assert!(input::Spec::parse(text.replace(LOSS, invalid).as_bytes()).is_err());
+    }
+    let memory = "bending-memory 4 1\nstring-memory 0 1 relaxing_bending_modulus bending_relaxation_time\n";
+    for selection in [
+        format!("bending-loss loss-angle {INTRINSIC}"),
+        "bending-loss thermoelastic".into(),
+        format!("bending-loss thermoelastic excess {INTRINSIC}"),
+    ] {
+        let duplicate = text.replace(LOSS, &selection)
+            .replace("cavity ", &format!("{memory}cavity "));
+        assert!(input::Spec::parse(duplicate.as_bytes()).is_err(),
+            "another bending spectrum must not replace or duplicate selected modal loss");
+    }
+    scoped(|cx, gate| {
+        let mut wound = modal_spec("bending-loss kelvin-voigt");
+        wound.strings[0].twist_modes = 0;
+        wound.strings[0].section = input::WireSection::CloseWound {
+            core_radius_m: 0.0002, pack: "wrap.fsmatpk".into(),
+            wire_radius_m: 0.00005, pitch_m: 0.000101,
+        };
+        assert!(wound.clone().compile(cx, gate, |name|
+            Ok(pack(name, 7800.0, 200_000.0, None))).is_ok(),
+            "comparison winding geometry must be independently admitted");
+        for selection in [
+            input::BendingLoss::LossAngle { property: INTRINSIC.into() },
+            input::BendingLoss::Thermoelastic { excess_property: None },
+            input::BendingLoss::Thermoelastic { excess_property: Some(INTRINSIC.into()) },
+        ] {
+            let mut selected = wound.clone();
+            selected.strings[0].bending_loss = selection;
+            let error = selected.compile(cx, gate, |name|
+                Ok(modal_pack(name, 0.003, Dims::NONE, 100_000.0, None)))
+                .err().expect("a close-wound core needs its own retained loss model");
+            assert!(error.to_string().contains(
+                "modal bending loss requires an original homogeneous or bonded material section"),
+                "{error}");
+        }
+    });
+}
+
 #[path = "relaxation/layered.rs"]
 mod layered;

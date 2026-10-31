@@ -18,6 +18,8 @@
 pub mod axial;
 /// Per-layer sourced loss tangents as hysteretic bending loss.
 pub mod loss_angle;
+/// Retained loss-angle and computed thermal laws at each actual modal frequency.
+pub mod modal_loss;
 /// Per-layer generalized-Maxwell bending spectra without averaged time constants.
 pub mod relaxation;
 /// Axial tensile capacity from per-layer sourced strength limits.

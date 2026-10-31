@@ -56,6 +56,7 @@ pub(super) fn with_section_coefficients(
     let length = positive(input.length_m, "section member length must be finite and positive")?;
     if input.damping_ratio != 0.0 || input.rayleigh.is_some()
         || input.kelvin_voigt_bending.is_some() || input.relaxation_bending.is_some()
+        || input.bending_loss_factor.is_some()
     {
         return Err(invalid("elastic section binding requires explicitly zero internal loss and no inherited loss law"));
     }
@@ -346,12 +347,16 @@ mod viscous_tests {
 
     #[test]
     fn inherited_internal_loss_is_not_silently_mixed_with_new_material_loss() {
-        let mut template = assembly();
-        template.string.as_mut().unwrap().damping_ratio = 0.01;
-        let snapshot = template.clone();
-        assert!(compile_concentric_kelvin_voigt_material_assembly(&template,
-            section(1e7, (1.0, 20000.0)), StringPrestress::FixedTension(10.0),
-            &AcousticMaterialBindings::default()).is_err());
-        assert_eq!(template, snapshot);
+        for (damping, bending_factor) in [(0.01, None), (0.0, Some(0.01))] {
+            let mut template = assembly();
+            let string = template.string.as_mut().unwrap();
+            string.damping_ratio = damping;
+            string.bending_loss_factor = bending_factor;
+            let snapshot = template.clone();
+            assert!(compile_concentric_kelvin_voigt_material_assembly(&template,
+                section(1e7, (1.0, 20000.0)), StringPrestress::FixedTension(10.0),
+                &AcousticMaterialBindings::default()).is_err());
+            assert_eq!(template, snapshot);
+        }
     }
 }

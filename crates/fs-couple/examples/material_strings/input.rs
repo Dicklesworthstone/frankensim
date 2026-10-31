@@ -87,9 +87,21 @@ pub fn tension_loss_rows() -> Result<Vec<TensionLossRow>> {
 pub enum BendingLoss {
     KelvinVoigt,
     Prony { properties: Vec<BendingRelaxationProperties> },
+    LossAngle { property: String },
+    Thermoelastic { excess_property: Option<String> },
 }
 impl BendingLoss {
     fn validate(&self) -> Result<()> {
+        let selected = match self {
+            Self::LossAngle { property } => Some(property),
+            Self::Thermoelastic { excess_property } => excess_property.as_ref(),
+            Self::KelvinVoigt | Self::Prony { .. } => None,
+        };
+        if let Some(property) = selected
+            && (property.is_empty() || property.len() > 256
+                || property.chars().any(|c| c.is_whitespace() || c.is_control())) {
+            return Err("modal bending loss needs a bounded single source-property name".into());
+        }
         let Self::Prony { properties } = self else { return Ok(()); };
         if !(1..=8).contains(&properties.len()) {
             return Err("string Prony bending needs 1..=8 explicit modulus/time pairs".into());
@@ -386,6 +398,15 @@ impl Spec {
                 let mut row = r.row("bending-loss")?;
                 wire.bending_loss = match row.word()? {
                     "kelvin-voigt" => BendingLoss::KelvinVoigt,
+                    "loss-angle" => BendingLoss::LossAngle { property: row.label()? },
+                    "thermoelastic" => {
+                        let excess_property = match row.words.next() {
+                            None => None,
+                            Some("excess") => Some(row.label()?),
+                            _ => return Err("thermoelastic accepts only an optional excess PROPERTY".into()),
+                        };
+                        BendingLoss::Thermoelastic { excess_property }
+                    },
                     "prony" => {
                         let count = row.count(8)?;
                         let mut properties = Vec::with_capacity(count);
@@ -396,7 +417,7 @@ impl Spec {
                         }
                         BendingLoss::Prony { properties }
                     },
-                    _ => return Err("bending-loss must be kelvin-voigt or prony COUNT MODULUS TIME ...".into()),
+                    _ => return Err("bending-loss must be kelvin-voigt, prony COUNT MODULUS TIME ..., loss-angle PROPERTY, or thermoelastic [excess PROPERTY]".into()),
                 };
                 row.end()?;
                 wire.bending_loss.validate()?;
@@ -1265,6 +1286,10 @@ impl Spec {
         let mut states = 0usize;
         for wire in &self.strings {
             wire.bending_loss.validate()?;
+            if matches!(&wire.bending_loss, BendingLoss::LossAngle { .. } | BendingLoss::Thermoelastic { .. })
+                && matches!(&wire.section, WireSection::Measured { .. } | WireSection::CloseWound { .. }) {
+                return Err("modal bending loss requires an original homogeneous or bonded material section".into());
+            }
             if let BendingLoss::Prony { properties } = &wire.bending_loss {
                 let layers = match &wire.section {
                     WireSection::Bonded { sleeves, .. } => sleeves.len() + 1,

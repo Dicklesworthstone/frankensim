@@ -915,6 +915,49 @@ shear histories. Axial relaxation, interlayer slip and measured wound-string
 behavior remain outside their scope. All supplied values
 are synthetic integration data, not measured instrument properties.
 
+### Source-backed modal bending loss
+
+The same section loss-angle and circular thermoelastic owners used by the piano
+can also supply the bowed/plucked string bank. Select one law in the ordinary
+per-string `bending-loss` position:
+
+```text
+bending-loss loss-angle bending_loss_tangent
+bending-loss thermoelastic
+bending-loss thermoelastic excess anelastic_loss_tangent
+```
+
+These are alternative records, not three simultaneous mechanisms. The named
+tangent is a nonnegative dimensionless property of each original material
+state. Homogeneous strings and perfectly bonded concentric layers can select
+loss angle; each layer keeps its own property, radius and source support.
+Thermoelastic bending uses the original homogeneous solid circular section and
+requires `linear_thermal_expansion_coefficient`, `specific_heat_capacity`,
+`thermal_conductivity`, density and Young's modulus, together with exactly one
+semantically typed absolute-temperature axis. Distinct-material layers and
+hollow sections require a different heat-flow law and refuse this selection.
+
+The thermal law computes the circular diffusion response from those properties.
+An optional excess tangent must describe additional anelastic loss from exactly
+the same section and material states. Omitting it leaves that excess unknown;
+it does not establish a complete measured loss model. Neither selection requests
+a Kelvin–Voigt bending viscosity or invents one from a sampled tangent.
+
+The retained mode uses the imaginary bending stiffness `H(omega)` as
+`2*zeta*omega = H(omega)*k^4/(mu*omega)`. Gas loading re-evaluates the selected
+law at the loaded frequency and dynamic line mass. Elastic stiffness, original
+support/thermal prestress, surface material identity, torsion, polarization,
+body coupling and the existing pressure/PCM path remain in their original
+owners. Every retained frequency must stay inside the intersection of all
+selected source bands; selected excess is never dropped to admit a mode.
+
+This is cycle-equivalent modal dissipation evaluated at the retained linear
+modes. It is not a causal broadband thermal or material-history model.
+Close-wound and measured whole-string constructions refuse these selections;
+their independent construction laws are not replaced by a solid-wire analogy.
+A second bending-memory selection on the same string also refuses, preventing
+duplicate bending loss. Torsional and axial laws remain independently selected.
+
 ### Tension loss
 
 A string's construction (its core, winding and their contacts) loses a fraction
