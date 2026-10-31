@@ -24,6 +24,149 @@ fn check_pointwise(receipt: &J) {
     assert_eq!(receipt.get("radiation").unwrap().str_field("spatial_model"), Some("pointwise"));
 }
 
+fn open_pointwise(ambient_k: f64, vacuum: bool) -> (ProjectSpec, CardPackSet) {
+    let (mut spec, cards) = pointwise();
+    let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+    let declaration = setup.enclosure_radiation.as_mut().unwrap();
+    declaration.ambient_temperature = Some(QtyAny::new(ambient_k, dims::TEMPERATURE));
+    declaration.view_factors = vec![vec![0.0, 0.35], vec![0.35, 0.0]];
+    if vacuum {
+        for boundary in &mut setup.boundaries {
+            boundary.condition = ThermalBoundaryCondition::HeatFlux {
+                outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX),
+            };
+        }
+    }
+    (spec, cards)
+}
+
+fn change_environment(spec: &mut ProjectSpec, delta_k: f64) {
+    spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+        .enclosure_radiation.as_mut().unwrap()
+        .ambient_temperature.as_mut().unwrap().value += delta_k;
+}
+
+fn environment_derivative(receipt: &J) -> f64 {
+    let radiation = gradient(receipt).get("radiation").unwrap();
+    assert_eq!(radiation.str_field("method"),
+        Some("complete-pointwise-p1-open-gray-diffuse-enthalpy-tangent"));
+    // One black environment illuminates all surfaces. It is not duplicated
+    // into independent per-patch or convective reservoir controls.
+    for surface in radiation.get("surfaces").unwrap().as_array().unwrap() {
+        assert!(surface.get("reservoir_temperature_k").is_none());
+        assert!(surface.get("dtemperature_dreservoir_temperature_k_per_k").is_none());
+    }
+    close(n(radiation, "parameter_linear_solves"), 0.0, 0.0);
+    close(n(radiation, "parameter_krylov_iterations"), 0.0, 0.0);
+    let bath = radiation.get("black_environment").unwrap();
+    close(n(bath, "temperature_k"), n(receipt.get("radiation").unwrap(),
+        "ambient_temperature_k"), 0.0);
+    n(bath, "dtemperature_dambient_temperature_k_per_k")
+}
+
+#[test]
+fn g1_open_pointwise_vacuum_adjoint_matches_fresh_bath_and_reflective_surface_changes() {
+    for ambient in [280.0, 330.0] {
+        let (spec, cards) = open_pointwise(ambient, true);
+        let (forward, expected) = evaluate(&spec, &cards, None);
+        let (receipt, actual) = evaluate(&spec, &cards, Some(FINAL));
+        assert_eq!(actual, expected, "the reverse must not replace the accepted trajectory");
+        for key in ["energy", "radiation"] {
+            assert_eq!(receipt.get(key), forward.get(key));
+        }
+        check_pointwise(&receipt);
+        let g = gradient(&receipt);
+        close(n(g, "active_ties"), 1.0, 0.0);
+        close(n(g, "revalidated_solid_endpoints"), 6.0, 0.0);
+        assert!(g.get("prescribed_convection").is_none());
+        let derivative = environment_derivative(&receipt);
+        assert!(derivative > 0.0, "warming the shared black bath must warm the body");
+        let vertex = n(g, "active_vertex") as usize;
+        let probe = |delta| {
+            let mut changed = spec.clone();
+            change_environment(&mut changed, delta);
+            evaluate(&changed, &cards, None).1[vertex]
+        };
+        derivative_close(derivative, (probe(0.02) - probe(-0.02)) / 0.04);
+        for (surface, emissivity) in [(0, EPSILON), (1, 0.6)] {
+            let derivative = n(radiation_surface(g, surface), "dtemperature_demissivity_k");
+            assert!(derivative.abs() > 1e-6);
+            derivative_close(derivative,
+                emissivity_difference(&spec, &cards, surface, emissivity));
+        }
+        let radiation = receipt.get("radiation").unwrap();
+        assert_eq!(n(radiation, "radiative_out_w") > 0.0, ambient < INITIAL_K);
+        close(n(radiation, "convective_out_w"), 0.0, 0.0);
+        close(n(radiation, "ambient_absorbed_w"), n(radiation, "radiative_out_w"), 1e-6);
+    }
+}
+
+#[test]
+fn g1_open_pointwise_peak_adjoint_keeps_initial_and_selected_prefix_bath_sensitivity() {
+    let (mut spec, cards) = open_pointwise(280.0, true);
+    time(&mut spec).enthalpy.as_mut().unwrap().materials[0]
+        .initial_specific_enthalpy.value = 600.0;
+    let (receipt, final_field) = evaluate(&spec, &cards, Some(PEAK));
+    let g = gradient(&receipt);
+    close(n(g, "state_index"), 0.0, 0.0);
+    close(n(g, "value_k"), INITIAL_K + 600.0 / CP, 1e-12);
+    assert!(maximum(&final_field) < n(g, "value_k"));
+    close(n(g, "adjoint_krylov_iterations"), 0.0, 0.0);
+    close(environment_derivative(&receipt), 0.0, 0.0);
+    for surface in 0..2 {
+        close(n(radiation_surface(g, surface), "dtemperature_demissivity_k"), 0.0, 0.0);
+    }
+
+    time(&mut spec).enthalpy.as_mut().unwrap().materials[0].initial_specific_enthalpy.value = 0.0;
+    for (index, step) in time(&mut spec).power_schedules[0].steps.iter_mut().enumerate() {
+        step.watts.value = if index == 0 { 200.0 } else { 0.0 };
+    }
+    let (receipt, _) = evaluate(&spec, &cards, Some(PEAK));
+    check_pointwise(&receipt);
+    let g = gradient(&receipt);
+    close(n(g, "time_s"), 0.3, 0.0);
+    close(n(g, "state_index"), 2.0, 0.0);
+    close(n(g, "revalidated_solid_endpoints"), 2.0, 0.0);
+    for interval in g.get("intervals").unwrap().as_array().unwrap() {
+        if n(interval, "start_s") >= 0.3 {
+            close(n(first(interval, "regional_power"), "dtemperature_ddelivered_watts_k_per_w"),
+                0.0, 0.0);
+        }
+    }
+    let probe = |delta| {
+        let mut changed = spec.clone();
+        change_environment(&mut changed, delta);
+        let receipt = evaluate(&changed, &cards, None).0;
+        n(receipt.get("transient").unwrap().get("sampled_peak").unwrap(), "value_k")
+    };
+    derivative_close(environment_derivative(&receipt), (probe(0.02) - probe(-0.02)) / 0.04);
+}
+
+#[test]
+fn g3_open_pointwise_bath_and_convection_controls_preserve_independent_physical_paths() {
+    let (spec, cards) = open_pointwise(325.0, false);
+    let (receipt, _) = evaluate(&spec, &cards, Some(FINAL));
+    check_pointwise(&receipt);
+    let g = gradient(&receipt);
+    let vertex = n(g, "active_vertex") as usize;
+    let bath = environment_derivative(&receipt);
+    let convection = n(first(g.get("prescribed_convection").unwrap(), "boundaries"),
+        "dtemperature_dreference_temperature_k_per_k");
+    assert!(bath > 0.0 && convection > 0.0);
+    // Opposing simultaneous perturbations detect a bath accidentally aliased
+    // to a convection reservoir, and exercise both through one complete dual.
+    let probe = |delta| {
+        let mut changed = spec.clone();
+        change_environment(&mut changed, 2.0 * delta);
+        let ThermalBoundaryCondition::Convection { reference_temperature, .. } =
+            &mut changed.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+                .boundaries[0].condition else { panic!("convection fixture"); };
+        reference_temperature.value -= 3.0 * delta;
+        evaluate(&changed, &cards, None).1[vertex]
+    };
+    derivative_close(2.0 * bath - 3.0 * convection, (probe(0.02) - probe(-0.02)) / 0.04);
+}
+
 #[test]
 fn g1_pointwise_vacuum_enclosure_reverse_preserves_physical_history_and_reflected_controls() {
     let (mut spec, cards) = pointwise();

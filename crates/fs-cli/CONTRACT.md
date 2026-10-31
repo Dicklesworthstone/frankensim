@@ -2615,11 +2615,25 @@ Reports expose physical surface heat, independently evaluated
 Only original convection heats transported air. The environment temperature
 may lie outside the solid emissivity card's support; every radiating solid
 temperature still must satisfy that source's validity. User-supplied view
-factors are not geometric certification. Native open-bath adjoints,
-patch-mean open transients and continuum bounds refuse explicitly.
+factors are not geometric certification. Pointwise total-enthalpy histories
+also expose final-time and selected sampled-peak adjoints through the original
+complete reflected tangent. Absolute per-surface emissivities remain distinct
+even when they share a card; one shared black-environment temperature control
+includes all direct and reflected paths. That control is separate from every
+convection/air reservoir, appears once under `radiation.black_environment`,
+and uses the same accepted physical multiplier as storage, material, contact
+and source controls. The reverse reuses the prepared open radiosity system,
+revalidates each unchanged accepted endpoint and contracts parameter partials
+without an extra parameter solve. Initial peaks have zero future bath
+sensitivity; later peaks reverse only their selected prefix.
+Steady open-bath adjoints, patch-mean open transients and continuum bounds
+still refuse explicitly.
 The existing native tests exercise independent reflected heat equations in
 both directions and real pointwise vacuum histories with original enthalpy
-storage. These numerical checks do not assert measured material validity.
+storage. Native adjoint regressions compare fresh complete trajectories under
+both heating and cooling bath perturbations, independent surface-emissivity
+changes, selected peaks and opposing bath/convection changes. These numerical
+checks do not assert measured material validity.
 
 ### Native closed gray-diffuse enclosure radiation
 

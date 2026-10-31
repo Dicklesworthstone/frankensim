@@ -358,18 +358,28 @@ pub(in crate::solve::transient) fn finish(
         return Err(bad("enthalpy transpose needs a nonzero admitted restart"));
     }
     let pointwise = radiation.filter(|lowering| lowering.is_pointwise());
+    // Retain the original open geometry and prepared radiosity factorization
+    // once for this reverse traversal. The black bath has no solid trace.
+    let open_enclosure = radiation.map(|lowering|
+        lowering.bind_open_enclosure(cx, problem).map_err(lower))
+        .transpose()?.flatten();
     // Pointwise parameters contract the already prepared local/reflected load.
     // The patch-mean enclosure additionally runs its radiosity control transpose.
     let iteration_limit = ends_s.len().checked_mul(linear.max_iterations)
         .and_then(|v| v.checked_mul(if enclosure.is_some() && pointwise.is_none() { 2 } else { 1 }))
         .ok_or_else(|| bad("enthalpy reverse iteration allowance overflows"))?;
-    if radiation.is_some_and(|lowering| lowering.is_enclosure()) != enclosure.is_some() {
+    if radiation.is_some_and(|lowering| lowering.is_enclosure())
+        != (enclosure.is_some() || open_enclosure.is_some())
+        || enclosure.is_some() && open_enclosure.is_some()
+        || open_enclosure.is_some() && pointwise.is_none()
+    {
         return Err(bad("enthalpy adjoint lost its exact bound enclosure model"));
     }
     let radiation_workspace = radiation.map(|lowering| {
         if lowering.is_pointwise() {
             pointwise_storage_bytes(
                 n, problem.mesh.boundary().len(), lowering.surface_count(), ends_s.len(),
+                open_enclosure.is_some(),
             )
         } else {
             radiation_storage_bytes(n, elements, lowering.surface_count())
@@ -494,7 +504,7 @@ pub(in crate::solve::transient) fn finish(
         .map(|model| enclosure::Controls::new(model))
         .transpose()?;
     let mut pointwise_controls = pointwise
-        .map(|lowering| pointwise::Controls::new(lowering, enclosure))
+        .map(|lowering| pointwise::Controls::new(lowering, enclosure, open_enclosure.as_ref()))
         .transpose()?;
     let mut carry = zeros(n)?;
     let mut dual_iterations = 0usize;
@@ -599,7 +609,8 @@ pub(in crate::solve::transient) fn finish(
         let mut step = if let Some(lowering) = pointwise {
             BoundEndpoint::Prescribed(pointwise::linearize(
                 cx, engine, step_problem, interfaces, old_h, dt, endpoint_config,
-                lowering, enclosure, endpoint, physical_tolerance_j, max_radiation_entries, deadline,
+                lowering, enclosure, open_enclosure.as_ref(), endpoint,
+                physical_tolerance_j, max_radiation_entries, deadline,
             )?)
         } else if let Some(model) = enclosure {
             let lowering = radiation.ok_or_else(|| bad("enclosure adjoint lost its controls"))?;

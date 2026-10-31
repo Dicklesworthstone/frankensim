@@ -805,6 +805,7 @@ pub(super) fn solve(
             if lowering.is_pointwise() {
                 adjoint::enthalpy_pointwise_storage_bytes(
                     n, problem.mesh.boundary().len(), lowering.surface_count(), grids.fine.len(),
+                    lowering.open_ambient_temperature_k().is_some(),
                 )
             } else {
                 adjoint::enthalpy_radiation_storage_bytes(n, elements, lowering.surface_count())

@@ -89,8 +89,10 @@ pub(super) fn lower(
         ));
     }
     if declaration.ambient_temperature.is_some() {
-        if spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint")) {
-            return Err(bad("native open-enclosure adjoint controls are not yet wired; the closed-enclosure transpose cannot substitute for the black bath"));
+        if setup.transient.is_none()
+            && spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint"))
+        {
+            return Err(bad("native steady open-enclosure adjoints are not yet wired; select a pointwise total-enthalpy trajectory for the complete black-bath transpose"));
         }
         if setup.transient.is_some()
             && declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
