@@ -27,6 +27,8 @@ use std::collections::BTreeSet;
 mod entropy;
 /// Source-integrated heat exchange between the same finite dry skeletons.
 pub mod conduction;
+/// Source-bound sensible heat between each finite adsorbent and its bound gas.
+pub mod gas_heat;
 
 /// A distinct finite site population exposed to one original gas volume.
 /// Multiple populations may share a volume, but may not alias the same solid.
@@ -99,6 +101,8 @@ pub struct AdsorptionNetworkSolidStep {
     pub solid_energy_change_j: f64,
     /// Signed physical heat received from the other retained finite solids.
     pub conductive_heat_j: f64,
+    /// Signed non-advective heat received from this solid's finite gas volume.
+    pub gas_sensible_heat_j: f64,
     pub energy_residual_j: f64,
     pub thermal_iterations: usize,
 }
@@ -110,6 +114,8 @@ pub struct AdsorptionNetworkStep {
     pub solids: Vec<AdsorptionNetworkSolidStep>,
     /// Original layer/interface sources and the actually applied internal heat.
     pub conduction: Vec<conduction::AdsorbentConductionSample>,
+    /// Explicit sensible heat and pinned sources, separate from species streams.
+    pub gas_heat: Vec<gas_heat::AdsorbentGasHeatSample>,
     pub total_mass_residual_kg: f64,
     pub maximum_species_mass_residual_kg: f64,
     /// Reference-cancelled sum of original gas and finite solid caloric defects.
@@ -158,6 +164,26 @@ pub fn step_candidate_with_conduction(
     bindings:&[AdsorptionNetworkBinding<'_>], catalog:&ThermochemicalGasModel,
     duration_s:f64, endpoints:&BTreeMap<u64,GasEnergySolve>, controls:GasTransportSolve,
     links:&[conduction::AdsorbentConductionLink<'_, '_>],
+    cancelled:impl FnMut()->bool,
+)->NetworkResult<AdsorptionNetworkCandidate> {
+    step_candidate_with_heat(parcels,paths,bindings,catalog,duration_s,endpoints,
+        controls,links,&[],cancelled)
+}
+
+/// Advance skeleton conduction and gas/solid sensible heat together with the
+/// original transport and adsorption snapshot. Each gas heat path debits the
+/// SAME gas inversion and credits the SAME dry+bound inversion once. Source
+/// coefficients see the actual gas/solid temperatures and pressure; endpoint
+/// support, original absolute energy budgets and complete entropy stay active.
+/// Heat is frozen over this interval; its accepted value is not a second
+/// adsorption enthalpy or an unconditional stability/time-accuracy guarantee.
+#[allow(clippy::too_many_arguments)]
+pub fn step_candidate_with_heat(
+    parcels:&BTreeMap<u64,ClosedGasParcel>, paths:GasTransportPaths<'_>,
+    bindings:&[AdsorptionNetworkBinding<'_>], catalog:&ThermochemicalGasModel,
+    duration_s:f64, endpoints:&BTreeMap<u64,GasEnergySolve>, controls:GasTransportSolve,
+    links:&[conduction::AdsorbentConductionLink<'_, '_>],
+    gas_links:&[gas_heat::AdsorbentGasHeatLink<'_>],
     mut cancelled:impl FnMut()->bool,
 )->NetworkResult<AdsorptionNetworkCandidate> {
     poll(&mut cancelled)?;
@@ -185,23 +211,30 @@ pub fn step_candidate_with_conduction(
         entropy_limit=entropy_limit.min(binding.solve.entropy_tolerance_j_k);
     }
     let heat=conduction::sample(&ordered,links,duration_s,&mut cancelled)?;
+    let mut gas_heat=gas_heat::sample(parcels,&ordered,gas_links,duration_s,&mut cancelled)?;
     let sampled=transport::sample_transfers(parcels,paths,duration_s,endpoints,controls,&mut cancelled)?;
     let mut prepared=Vec::with_capacity(bindings.len());
+    let mut heat_rounding=Vec::with_capacity(bindings.len());
     for (&id,&binding) in &ordered {
+        let skeleton=heat.into_solid_j.get(&id).copied().unwrap_or(0.0);
+        let sensible=gas_heat.into_solid_j.get(&id).copied().unwrap_or(0.0);
+        let total=sum([skeleton,sensible])?;
+        heat_rounding.push(sum([total,-skeleton,-sensible])?);
         let proposal=prepare_adsorption(binding.solid,&parcels[&binding.parcel],catalog,
-            duration_s,binding.solve,heat.into_solid_j.get(&id).copied().unwrap_or(0.0),
+            duration_s,binding.solve,total,
             &mut cancelled).map_err(|e|site_error(id,e))?;
         prepared.push((binding,proposal));
     }
     let boundaries:Vec<_>=prepared.iter().map(|(binding,proposal)|SpeciesNetworkBoundary {
         id:binding.id,parcel:binding.parcel,catalog,species:&proposal.boundary }).collect();
-    let gas=gas_network::exchange_candidate_with_boundaries(parcels,&sampled.transfers,&sampled.heat,
-        &boundaries,endpoints,controls.exchange,&mut cancelled)?;
+    let gas=gas_network::exchange_candidate_with_external_heat(parcels,&sampled.transfers,&sampled.heat,
+        &boundaries,&gas_heat.into_gas,endpoints,controls.exchange,&mut cancelled)?;
     sampled.rates.admit_endpoint_driving_forces(gas.parcels(),&mut cancelled)?;
     let mut solid_reports=Vec::with_capacity(prepared.len());
     // Include any representational residual in the antisymmetric link lowering
     // in the one closed-system gate; it is never an external heat supply.
-    let mut defects=vec![gas.step().total_energy_residual_j,heat.balance_residual_j];
+    let mut defects=vec![gas.step().total_energy_residual_j,heat.balance_residual_j,
+        gas_heat.balance_residual_j,sum(heat_rounding)?];
     for (binding,proposal) in &prepared {
         poll(&mut cancelled)?;
         let old=binding.solid; let next=&proposal.next;
@@ -237,9 +270,11 @@ pub fn step_candidate_with_conduction(
             dry_sensible_energy_change_j:proposal.sensible[0],bound_sensible_energy_change_j:proposal.sensible[1],
             solid_energy_change_j:finite(sum(proposal.sensible)?+sum(proposal.binding.iter().copied())?)?,
             conductive_heat_j:heat.into_solid_j.get(&binding.id).copied().unwrap_or(0.0),
+            gas_sensible_heat_j:gas_heat.into_solid_j.get(&binding.id).copied().unwrap_or(0.0),
             energy_residual_j:defect,thermal_iterations:proposal.iterations });
     }
     conduction::admit_endpoint(&prepared,links,&mut cancelled)?;
+    gas_heat::admit_endpoint(gas.parcels(),&prepared,gas_links,&mut gas_heat.samples,&mut cancelled)?;
     let energy_residual=sum(defects)?;
     if energy_residual.abs()>controls.exchange.energy_tolerance_j {
         return Err(Error::Invalid("complete gas/solid energy residual exceeds the single interval budget"));
@@ -254,7 +289,7 @@ pub fn step_candidate_with_conduction(
     let (parcels,exchange)=gas.into_parts();
     let solids=prepared.into_iter().map(|(binding,proposal)|(binding.id,proposal.next)).collect();
     Ok(AdsorptionNetworkCandidate { parcels,solids,step:AdsorptionNetworkStep { duration_s,
-        transport:sampled.rates,exchange,solids:solid_reports,conduction:heat.samples,
+        transport:sampled.rates,exchange,solids:solid_reports,conduction:heat.samples,gas_heat:gas_heat.samples,
         total_mass_residual_kg:mass_residual,
         maximum_species_mass_residual_kg:maximum_species,total_energy_residual_j:energy_residual,
         entropy_change_j_k:entropy } })

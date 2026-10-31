@@ -7739,6 +7739,33 @@ permutation and concentration-reference invariance, adjacent representable
 concentrations, pair/source/zero-log refusal and atomic cancellation. The dense
 ideal-dilute chemical-potential law is not an exact Fick law.
 
+### Finite gas–adsorbent sensible heat on the original pore timeline
+
+`adsorption::competitive::network::step_candidate_with_heat` and
+`AdsorbingPoreDomain::{step_candidate_with_heat,advance_with_heat}` add explicit
+sensible heat between each finite gas and its bound finite adsorbent. A pinned
+nonnegative W/K material source owns exactly typed `gas_temperature`,
+`solid_temperature`, and actual gas `pressure`. Unowned composition or coverage,
+legacy aliases, dynamic response, extrapolation and claim substitution refuse.
+Both actual source endpoints retain their original claim receipts.
+
+Frozen-start `Q=G(Tg−Ts)Δt` enters the original gas inversion through a separate
+heat record and the same dry-plus-bound inversion with equal opposite sign.
+Transported partial enthalpy and adsorption binding energy remain separate.
+Closed finite-system entropy, original absolute species/mass/energy budgets and
+transactional cancellation remain mandatory. The existing bounded pore timeline
+retries typed entropy decrease and accumulates actual directional heat over the
+complete window; accepted temperatures feed subsequent adsorption and porous
+transport. This supplies first-order feedback, not unconditional stability,
+monotonic relaxation or a timestep-error certificate.
+
+The public `adsorbent_gas_heat` integration target checks independent gas Cv and
+dry-plus-bound storage in both directions, actual source refresh and ordering,
+analytic two-body relaxation under temporal refinement, later adsorption and
+porous-flow feedback, bounded entropy retries and atomic source/cancel refusals.
+Its manufactured caloric fixtures establish numerical behavior, not empirical
+conductance or adsorption accuracy.
+
 
 ## Source-bound thermal Voce hardening
 

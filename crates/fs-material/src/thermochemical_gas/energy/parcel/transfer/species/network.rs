@@ -34,6 +34,16 @@ pub struct SpeciesNetworkHeatTransfer {
     pub parcels: [u64; 2],
     pub heat_left_to_right_j: f64,
 }
+/// Explicit non-advective heat from an external finite thermal owner.
+/// The enclosing coupled operator owns the opposite storage and joint entropy;
+/// this record supplies neither species enthalpy nor an implicit thermostat.
+#[derive(Clone, Debug, PartialEq)]
+pub struct SpeciesNetworkExternalHeat {
+    /// Unique physical heat-path identity within this snapshot.
+    pub id: u64,
+    pub parcel: u64,
+    pub heat_into_gas_j: f64,
+}
 /// Absolute local and global limits, independent of formation-energy magnitude.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SpeciesNetworkSolve {
@@ -95,6 +105,9 @@ pub struct SpeciesNetworkStep {
     /// Nonzero combined edges in ascending parcel-pair order; endpoints are
     /// canonical ascending IDs and the retained heat may have either sign.
     pub heat: Vec<SpeciesNetworkHeatTransfer>,
+    /// Nonzero external heat paths in ascending identity order, separate from
+    /// transported species enthalpy and internal gas/gas heat.
+    pub external_heat: Vec<SpeciesNetworkExternalHeat>,
     /// External source streams in owner-ID/species order. Opposite phase
     /// storage must be accounted by the enclosing coupled owner.
     pub boundaries: Vec<SpeciesNetworkBoundaryFlux>,
@@ -272,7 +285,26 @@ pub fn exchange_candidate_with_boundaries(
     controls: SpeciesNetworkSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpeciesNetworkCandidate, Error> {
-    exchange_bounded(parcels, transfers, heat, boundaries, endpoints, controls,
+    exchange_candidate_with_external_heat(parcels, transfers, heat, boundaries, &[],
+        endpoints, controls, cancelled)
+}
+
+/// Add explicitly owned external heat to the SAME original gas inversion as
+/// every internal and external species stream. External heat shares the joint
+/// work bound and does not relax the original withdrawal or energy budgets.
+/// Callers must separately close the opposite finite phase storage and entropy.
+#[allow(clippy::too_many_arguments)]
+pub fn exchange_candidate_with_external_heat(
+    parcels: &BTreeMap<u64, ClosedGasParcel>,
+    transfers: &[SpeciesNetworkTransfer],
+    heat: &[SpeciesNetworkHeatTransfer],
+    boundaries: &[SpeciesNetworkBoundary<'_>],
+    external_heat: &[SpeciesNetworkExternalHeat],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: SpeciesNetworkSolve,
+    cancelled: impl FnMut() -> bool,
+) -> Result<SpeciesNetworkCandidate, Error> {
+    exchange_bounded(parcels, transfers, heat, boundaries, external_heat, endpoints, controls,
         MAX_SNAPSHOT_TRANSFERS, cancelled)
 }
 
@@ -286,7 +318,7 @@ pub(in crate::thermochemical_gas::energy::parcel::transfer) fn exchange_bulk_can
     controls: SpeciesNetworkSolve,
     cancelled: impl FnMut() -> bool,
 ) -> Result<SpeciesNetworkCandidate, Error> {
-    exchange_bounded(parcels, transfers, &[], &[], endpoints, controls,
+    exchange_bounded(parcels, transfers, &[], &[], &[], endpoints, controls,
         MAX_SNAPSHOT_TRANSFERS * super::MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1, cancelled)
 }
 
@@ -296,6 +328,7 @@ fn exchange_bounded(
     transfers: &[SpeciesNetworkTransfer],
     heat: &[SpeciesNetworkHeatTransfer],
     boundaries: &[SpeciesNetworkBoundary<'_>],
+    external_heat: &[SpeciesNetworkExternalHeat],
     endpoints: &BTreeMap<u64, GasEnergySolve>,
     controls: SpeciesNetworkSolve,
     maximum_transfers: usize,
@@ -309,6 +342,7 @@ fn exchange_bounded(
             .len()
             .checked_add(heat.len())
             .and_then(|n| n.checked_add(boundary_work))
+            .and_then(|n| n.checked_add(external_heat.len()))
             .is_none_or(|n| n > maximum_transfers)
         || !parcels.keys().eq(endpoints.keys())
         || !positive(controls.maximum_species_fraction)
@@ -323,6 +357,17 @@ fn exchange_bounded(
     for (&id, solve) in endpoints {
         check(&mut cancelled)?;
         solve.validate().map_err(|e| material(id, e))?;
+    }
+    let mut external_heat_rows = BTreeMap::new();
+    for row in external_heat {
+        check(&mut cancelled)?;
+        if !parcels.contains_key(&row.parcel) || !row.heat_into_gas_j.is_finite()
+            || external_heat_rows.insert(row.id, row).is_some()
+        {
+            return Err(Error::Invalid(
+                "external heat needs unique path identities, existing gas owners and finite energy",
+            ));
+        }
     }
     let mut rows = Vec::with_capacity(transfers.len());
     for row in transfers {
@@ -465,6 +510,15 @@ fn exchange_bounded(
             source_enthalpy_j_kg: h,
             carried_enthalpy_j: carried,
         });
+    }
+    let mut external_heat_fluxes = Vec::with_capacity(external_heat_rows.len());
+    for row in external_heat_rows.into_values() {
+        check(&mut cancelled)?;
+        if row.heat_into_gas_j == 0.0 { continue; }
+        let budget = budgets.entry(row.parcel).or_default();
+        budget.heat.add(row.heat_into_gas_j).map_err(|e| material(row.parcel, e))?;
+        budget.relative_energy.add(row.heat_into_gas_j).map_err(|e| material(row.parcel, e))?;
+        external_heat_fluxes.push(row.clone());
     }
     let mut heat_fluxes = Vec::with_capacity(combined_heat.len());
     for (pair, amount) in combined_heat {
@@ -725,6 +779,7 @@ fn exchange_bounded(
         step: SpeciesNetworkStep {
             fluxes,
             heat: heat_fluxes,
+            external_heat: external_heat_fluxes,
             boundaries: external.fluxes,
             parcels: accounts,
             total_mass_residual_kg: total_mass.value,
