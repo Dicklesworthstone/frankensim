@@ -730,6 +730,11 @@ differentiable lift). Pure Rust throughout.
   finite and nonnegative over the admitted grazing/roughness grid. Homogeneous
   attenuation composes as `T(L1 + L2) = T(L1) T(L2)` to floating-point
   tolerance.
+- Terminal rough-dielectric direct lighting uses unit MIS weight when no BSDF
+  continuation is evaluated. Reflection and transmission agree bitwise with
+  NEE-only for the same samples, including the one-rectangle lighting path.
+  Opaque terminal receivers in dielectric scenes follow the same rule after
+  glass exit; the frozen opaque-only estimator remains separately versioned.
 - The first two smooth-dielectric boundaries encountered along every path
   suffix are evaluated by exact forced Fresnel splitting: reflection and
   transmission suffixes are both traced with their physical spectral weights,

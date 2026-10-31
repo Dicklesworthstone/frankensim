@@ -389,6 +389,64 @@ fn reversed_and_non_lifo_boundaries_refuse_transactionally() {
 }
 
 #[test]
+fn g1_terminal_rough_refraction_and_reflection_keep_the_complete_direct_light() {
+    // At the last vertex only the light-sampling technique is evaluated.
+    // MIS must therefore reduce exactly to NEE, including for the legacy
+    // one-rectangle lighting configuration. An unevaluated BSDF competitor
+    // incorrectly darkens both sides of the interface.
+    with_cx(|cx| {
+        let surface = DielectricSurface::try_rough(0.2).unwrap();
+        let glass = material(1.5, 0.7, surface);
+        for transmission in [true, false] {
+            let emitter_z = if transmission { -0.1 } else { 0.5 };
+            let emitter_x = if transmission { 0.0 } else { 0.2 };
+            let mut scene = scene_with_boundaries(&[(0.0, -0.2, glass, false)], emitter_z, 0.04);
+            // The reflected light is off the primary camera ray, ensuring
+            // this measures the rough interface instead of the emitter.
+            scene.primitives[1].shape = Shape::Mesh(emitter_mesh_at(emitter_x, emitter_z, 0.04));
+            scene.lights[0].corner.x += emitter_x;
+            let reference = render(&scene, cx, &settings(DirectStrategy::NeeOnly, 64, 1)).unwrap();
+            assert!(
+                reference.xyz[0][1] > 0.0,
+                "fixture must receive direct light"
+            );
+            for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                let film = render(&scene, cx, &settings(strategy, 64, 1)).unwrap();
+                assert_film_bits_eq(&film, &reference, "terminal dielectric direct light");
+            }
+        }
+    });
+}
+
+#[test]
+fn g1_terminal_diffuse_receiver_after_glass_keeps_the_complete_direct_light() {
+    with_cx(|cx| {
+        let glass = material(1.5, 0.7, DielectricSurface::SMOOTH);
+        let mut scene = scene_with_boundaries(&[(0.0, -0.2, glass, false)], -0.3, 0.04);
+        // This emitter illuminates the receiver from inside the air gap. It
+        // stays off the primary transmitted ray through the glass slab.
+        scene.primitives[1].shape = Shape::Mesh(emitter_mesh_at(0.3, -0.3, 0.04));
+        scene.lights[0].corner.x += 0.3;
+        scene.primitives.push(Primitive {
+            shape: Shape::Mesh(emitter_mesh_at(0.0, -0.5, 4.0)),
+            material: Material::Lambertian {
+                reflectance: lift_rgb([0.8; 3]),
+            },
+            emission: None,
+        });
+        let reference = render(&scene, cx, &settings(DirectStrategy::NeeOnly, 64, 3)).unwrap();
+        assert!(
+            reference.xyz[0][1] > 0.0,
+            "glass must transmit light to the receiver"
+        );
+        for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+            let film = render(&scene, cx, &settings(strategy, 64, 3)).unwrap();
+            assert_film_bits_eq(&film, &reference, "terminal receiver after glass");
+        }
+    });
+}
+
+#[test]
 fn rough_transmission_nee_is_finite_and_absorbed_inside_glass() {
     let surface = DielectricSurface::try_rough(0.2).expect("rough glass");
     let clear = material(1.5, 0.0, surface);

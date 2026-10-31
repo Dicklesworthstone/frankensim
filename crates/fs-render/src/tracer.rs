@@ -190,7 +190,9 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 
 /// Bit-affecting semantics of the opt-in spectral dielectric path. Existing
 /// opaque materials retain tracer-v1 stream order and image bits.
-pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 14;
+// v15 gives terminal rough-dielectric NEE its complete contribution: no
+// continuation is evaluated there, so there is no competing BSDF technique.
+pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 15;
 
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
@@ -247,6 +249,9 @@ struct CachedAnimatedInstance {
 struct SceneLighting<'scene> {
     stationary: AdmittedLighting<'scene>,
     moving: Option<thermal_lighting::MovingThermalLights<'scene>>,
+    // Prepared once at admission, including glass that a camera path has
+    // already exited when it reaches its terminal opaque receiver.
+    has_dielectric_materials: bool,
 }
 
 impl<'scene> core::ops::Deref for SceneLighting<'scene> {
@@ -262,6 +267,7 @@ impl<'scene> From<AdmittedLighting<'scene>> for SceneLighting<'scene> {
         Self {
             stationary,
             moving: None,
+            has_dielectric_materials: false,
         }
     }
 }
@@ -13355,7 +13361,9 @@ fn trace_path_with_regions(
     #[cfg(feature = "photometry")] fixtures: Option<&photometric::FixtureLighting<'_>>,
     #[cfg(feature = "volumes")] scene_media: Option<&SceneMedia<'_, '_>>,
 ) -> Result<PathTraceSample, TracerError> {
-    let legacy_light_weights = lighting.is_legacy_compatibility_path() && lighting.moving.is_none();
+    let legacy_light_weights = lighting.is_legacy_compatibility_path()
+        && lighting.moving.is_none()
+        && !lighting.has_dielectric_materials;
     // The frozen surface-only estimator predates terminal-vertex NEE weights.
     // Physical media are a new estimator and must not inherit its missing
     // energy when the final vertex has no evaluated BSDF continuation.
@@ -14346,8 +14354,7 @@ fn trace_path_with_regions(
                                             });
                                         let weight = match s.strategy {
                                             DirectStrategy::Mis | DirectStrategy::PowerMis
-                                                if depth + 1 == s.max_depth
-                                                    && !legacy_light_weights =>
+                                                if depth + 1 == s.max_depth =>
                                             {
                                                 1.0
                                             }
@@ -16038,8 +16045,10 @@ fn validate_scene_with_medium_emission<'scene>(
     has_medium_emission: bool,
 ) -> Result<SceneLighting<'scene>, TracerError> {
     let mut thermal_emission = false;
+    let mut has_dielectric_materials = false;
     for primitive in &scene.primitives {
         cx.checkpoint()?;
+        has_dielectric_materials |= matches!(primitive.material, Material::Dielectric { .. });
         if let Some(surface) = primitive.material.thermal_surface() {
             if primitive.emission.is_some() {
                 return Err(TracerError::DuplicateThermalEmission);
@@ -16092,6 +16101,7 @@ fn validate_scene_with_medium_emission<'scene>(
         }
     }
     let mut lighting = SceneLighting::from(lighting);
+    lighting.has_dielectric_materials = has_dielectric_materials;
     if thermal_emission {
         let moving = thermal_lighting::MovingThermalLights::try_new(scene, cx)?;
         if !moving.is_empty() {
