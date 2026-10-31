@@ -10,6 +10,9 @@
 
 mod multiple;
 
+/// A complete field/duct assembly presented at an external acoustic flow port.
+pub mod load;
+
 use super::ThermoviscousInterior;
 use crate::acoustic_realize::AcousticRealizeError;
 use crate::dg_port::{DgPortLoad, sum_terminal_work};

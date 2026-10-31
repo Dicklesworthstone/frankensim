@@ -4,6 +4,7 @@ use super::*;
 mod pressure;
 mod patch;
 mod upstream;
+mod thermoviscous;
 use crate::bernoulli_aperture::performance::ApertureObservation;
 use crate::pcm_wav::observation::PressureRenderer;
 use fs_duct::dg::PortId;

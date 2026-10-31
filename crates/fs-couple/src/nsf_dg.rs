@@ -28,6 +28,8 @@ use fs_material::gas::GasState;
 
 /// Finite physical pressure playback through the shared observer/PCM interface.
 pub mod performance;
+/// Resolved excitation of a complete thermoviscous field and its finite ducts.
+pub mod thermoviscous;
 mod upstream;
 pub use upstream::NsfDgUpstreamFrame;
 mod reservoir;
@@ -95,6 +97,8 @@ pub enum NsfDgError {
     Flow(NsfError),
     /// Original acoustic material, port or step refusal.
     Acoustic(AcousticRealizeError),
+    /// Original complete acoustic field, attached ducts or shared work refusal.
+    Thermoviscous(crate::cavity_modal::interior::thermoviscous::dg::ThermoviscousDgError),
     /// Original finite chamber source law or caloric inversion refusal.
     FiniteReservoir(fs_material::thermochemical_gas::energy::GasEnergyError),
     /// Original generic nonlinear solver refused its configuration or initial residual.
@@ -558,6 +562,34 @@ impl<L: Lattice3<27>> NsfDg<L> {
         let limits = self.limits;
         let side = usize::from(self.high);
         let patch = self.patch_boundaries();
+        let reference = self.reference;
+        let step = self.steps + 1;
+        let load = &mut self.load;
+        let finite = &mut self.finite_reservoir;
+        let frame = solve_characteristic_interval(
+            &mut self.zone, external_boundary, side, patch, reservoir_states,
+            relation, limits, gate,
+            |candidate, incoming, evaluation| accept_candidate(
+                candidate, load, finite, side, relation, reference, limits,
+                incoming, control, evaluation, step, gate,
+            ),
+        )?;
+        self.steps += 1;
+        Ok(frame)
+    }
+}
+
+/// The original safeguarded characteristic solve, shared by acoustic owners.
+/// Acceptance consumes the final private fluid trial in place; no borrowed
+/// trial escapes the iteration and no rejected proposal publishes fluid state.
+#[allow(clippy::too_many_arguments)]
+fn solve_characteristic_interval<L: Lattice3<27>, T>(
+    zone: &mut NsfGrid3<L>, external_boundary: NsfBoundaryDrive, side: usize,
+    patch: [Option<NsfBoundaryDrive>; 2], reservoir_states: &[(usize, NsfOpenState)],
+    relation: DgPortResponse, limits: NsfDgLimits, gate: &CancelGate,
+    mut accept: impl for<'trial> FnMut(NsfCharacteristicTrial<'trial, L>, f64, usize)
+        -> Result<T, NsfDgError>,
+) -> Result<T, NsfDgError> {
         let mut bracket = limits.incoming_bracket_m_s;
         let mut values = [0.0; 2];
         let mut incoming = bracket[0];
@@ -568,7 +600,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             evaluations = evaluation;
             let mut drive = [external_boundary; 2];
             drive[side] = NsfBoundaryDrive::IncomingCharacteristic(incoming);
-            let candidate = preview_interval(&mut self.zone, drive, patch,
+            let candidate = preview_interval(zone, drive, patch,
                 reservoir_states, limits, gate)?;
             let face = coupled_exchange(&candidate, side)?;
             let flow = face.normal_volume_flow_m3_s;
@@ -582,11 +614,7 @@ impl<L: Lattice3<27>> NsfDg<L> {
             let allowance = limits.pressure_absolute_tolerance_pa
                 + limits.pressure_relative_tolerance * scale;
             if residual.abs() <= allowance {
-                let frame = accept_candidate(candidate, &mut self.load, &mut self.finite_reservoir, side, relation,
-                    self.reference, limits, incoming, control,
-                    evaluation, self.steps + 1, gate)?;
-                self.steps += 1;
-                return Ok(frame);
+                return accept(candidate, incoming, evaluation);
             }
             last_residual = residual;
             drop(candidate);
@@ -623,7 +651,6 @@ impl<L: Lattice3<27>> NsfDg<L> {
         }
         Err(NsfDgError::Convergence { residual_pa: last_residual,
             evaluations })
-    }
 }
 
 fn preview_interval<'a, L: Lattice3<27>>(
