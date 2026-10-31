@@ -1008,7 +1008,8 @@ impl FreeSurface3 {
             [-2, 2].into_iter().all(|distance| {
                 let mut p = [cx, cy, cz];
                 p[axis] += distance;
-                self.grid.resolve_source(p[0], p[1], p[2]).is_some()
+                !self.planar_piston_contains(p)
+                    && self.grid.resolve_source(p[0], p[1], p[2]).is_some()
             })
         });
         if wall_free {
@@ -1018,9 +1019,13 @@ impl FreeSurface3 {
                 phi(0, 0, -1) - phi(0, 0, 1),
             ];
             if let Some(kappa) = curvature::height_function(normal, |offset| {
+                let position = [cx + offset[0], cy + offset[1], cz + offset[2]];
+                if self.planar_piston_contains(position) {
+                    return None;
+                }
                 let (slot, sample_lane) =
                     self.grid
-                        .resolve_source(cx + offset[0], cy + offset[1], cz + offset[2])?;
+                        .resolve_source(position[0], position[1], position[2])?;
                 Some(self.fill(self.grid.active_keys()[slot], sample_lane))
             }) {
                 return kappa.clamp(-Self::CURVATURE_LIMIT, Self::CURVATURE_LIMIT);
