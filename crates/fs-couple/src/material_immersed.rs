@@ -1,22 +1,26 @@
-//! One material source for resolved flow and subgrid films around moving spheres.
+//! Source-backed moving spheres and ellipsoids on the native resolved flow.
 //!
 //! The original D3Q19 owner advances populations, poses and momenta together.
 //! This adapter only binds source material, physical units and geometry. Its
-//! native partial-saturation model retains fluid INSIDE each sphere: the sourced
+//! native partial-saturation model retains fluid INSIDE each carrier: the sourced
 //! carrier inertia is explicitly ADDITIONAL to that fluid. It is not an ordinary
 //! displaced-fluid rigid solid, and no density subtraction is inferred here.
 
 use fs_exec::CancelGate;
 use fs_lbm::d3q19::{
-    BodyFrameSampler3, BoundaryGrid3, BoundarySpec3, CollisionError3, FaceBoundary3,
-    MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3, PartialSaturationError3,
-    SphereLubrication3, TILE,
+    BodyFrameSampler3, BodyFrameShape3, BoundaryGrid3, BoundarySpec3, CollisionError3,
+    FaceBoundary3, MovingPartialSaturationBodiesExchange3, MovingPartialSaturationBody3,
+    PartialSaturationError3, SphereLubrication3, TILE,
 };
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_transport::FluidTransport;
 use fs_mbd_material::{MaterialInertiaError, ResolvedBody, VolumeMoments};
 use fs_time::lie::gyrostat::InertiaTensor3;
 use fs_time::{So3, Vec3};
+
+mod ellipsoid;
+use ellipsoid::NativeEllipsoid3;
+pub use ellipsoid::{AdditionalMaterialEllipsoid, RetainedFluidEllipsoids};
 
 /// Source, physical-unit, geometry or native step refusal.
 #[derive(Clone, Debug, PartialEq)]
@@ -29,7 +33,7 @@ pub enum MaterialImmersedError {
     Geometry(MaterialInertiaError),
     /// Original simultaneous flow/body owner refused, including cancellation.
     Native(PartialSaturationError3),
-    /// Original collision owner refused a live uniform transport update.
+    /// Existing collision owner refused a live viscous-relaxation update.
     Relaxation(CollisionError3),
 }
 impl core::fmt::Display for MaterialImmersedError {
@@ -94,7 +98,7 @@ pub struct FilmGeometry {
 }
 
 /// Source-backed additional inertia with the same declared spherical geometry.
-/// This initial lane admits one uniform spherical region per carrier. Moment
+/// This lane admits one uniform spherical region per carrier. Moment
 /// matching is a consistency check, not proof of a source's geometric accuracy.
 #[derive(Clone, Copy, Debug)]
 pub struct AdditionalMaterialSphere<'a> {
@@ -125,8 +129,8 @@ impl<'a> AdditionalMaterialSphere<'a> {
 /// Physical kinematics. Angular momentum belongs to the ADDITIONAL carrier;
 /// resolved interior-fluid momentum remains in the native populations.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct SphereStateSi {
-    /// World center of the spherical region [m].
+pub struct BodyStateSi {
+    /// World center of mass of the source region [m].
     pub center_m: [f64; 3],
     /// Existing proper rotation from body coordinates to world coordinates.
     pub orientation: So3,
@@ -136,20 +140,37 @@ pub struct SphereStateSi {
     pub angular_momentum_body_kg_m2_s: [f64; 3],
 }
 
+/// Backwards-compatible name for the common SI carrier state.
+pub type SphereStateSi = BodyStateSi;
+
+/// Source-backed spheres with the original matched missing-film model.
+pub type RetainedFluidSpheres<'a, F, const N: usize> =
+    RetainedFluidBodies<'a, F, N, AdditionalMaterialSphere<'a>>;
+
+#[derive(Clone, Copy)]
+enum CarrierSurfaces<const N: usize> {
+    Spheres {
+        radii: [f64; N],
+        film: SphereLubrication3,
+    },
+    Ellipsoids([NativeEllipsoid3; N]),
+}
+
 /// Newtonian fluid and sourced carriers on ONE native motion solver.
+/// Construct through [`RetainedFluidSpheres`] or [`RetainedFluidEllipsoids`];
+/// their source geometry selects the supported native surface law.
 ///
 /// The reference density maps to lattice density one. Thus the physical mass
 /// unit is rho*dx^3 and mu_lattice = mu*dt/(rho*dx^2) = nu_lattice. This equality
 /// is derived from the shared snapshot; dynamic and kinematic viscosity are
 /// not interchangeable in general. No separate film-fluid scalar is accepted.
-pub struct RetainedFluidSpheres<'a, F: FluidTransport + ?Sized, const N: usize> {
+pub struct RetainedFluidBodies<'a, F: FluidTransport + ?Sized, const N: usize, S> {
     scaling: MaterialScaling<'a, F>,
-    sources: [AdditionalMaterialSphere<'a>; N],
+    sources: [S; N],
     grid: BoundaryGrid3,
     samplers: [BodyFrameSampler3; N],
     bodies: [MovingPartialSaturationBody3; N],
-    radii: [f64; N],
-    film: SphereLubrication3,
+    surfaces: CarrierSurfaces<N>,
     mass_unit: f64,
     inertia_unit: f64,
     impulse_unit: f64,
@@ -161,15 +182,53 @@ pub struct RetainedFluidSpheres<'a, F: FluidTransport + ?Sized, const N: usize> 
 
 impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F, N> {
     /// Construct a quiescent fluid and its material-derived moving carriers.
-    /// The source stays fixed until an explicit [`Self::rebind_fluid`] call.
-    /// Density and lattice units remain fixed throughout a trajectory; this
-    /// is not a thermal/phase or variable-density FSI closure.
+    /// Density and physical units stay fixed. Transport is held until an
+    /// explicit [`Self::rebind_fluid`]; this is not a thermal/phase or
+    /// variable-density FSI closure.
     pub fn new(
         fluid: &'a F,
         domain: ImmersedDomain,
         sources: [AdditionalMaterialSphere<'a>; N],
         initial: [SphereStateSi; N],
         film: FilmGeometry,
+        gate: &CancelGate,
+    ) -> Result<Self, Error> {
+        Self::new_with_surfaces(
+            fluid,
+            domain,
+            sources,
+            sources.map(|s| s.material),
+            initial,
+            |scaling| {
+                let dx = scaling.cell_size_m();
+                let mut model = SphereLubrication3::new(
+                    scaling.flow().viscosity,
+                    film.cutoff_gap_m / dx,
+                    film.roughness_gap_m / dx,
+                    film.maximum_pairs,
+                )?
+                .with_resistance_mode_limit(film.maximum_resistance_modes)?;
+                if let Some([cutoff, roughness]) = film.tangential_gaps_m {
+                    model = model.with_tangential_pairs(cutoff / dx, roughness / dx)?;
+                }
+                Ok(CarrierSurfaces::Spheres {
+                    radii: sources.map(|s| s.radius_m / dx),
+                    film: model,
+                })
+            },
+            gate,
+        )
+    }
+}
+
+impl<'a, F: FluidTransport + ?Sized, const N: usize, S> RetainedFluidBodies<'a, F, N, S> {
+    fn new_with_surfaces(
+        fluid: &'a F,
+        domain: ImmersedDomain,
+        sources: [S; N],
+        materials: [&ResolvedBody; N],
+        initial: [BodyStateSi; N],
+        build_surfaces: impl FnOnce(&MaterialScaling<'a, F>) -> Result<CarrierSurfaces<N>, Error>,
         gate: &CancelGate,
     ) -> Result<Self, Error> {
         poll(gate)?;
@@ -204,20 +263,11 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
         let impulse_unit = positive(mass_unit * (dx / dt))?;
         let angular_impulse_unit = positive(impulse_unit * dx)?;
         let energy_unit = positive(impulse_unit * (dx / dt))?;
-        let mut model = SphereLubrication3::new(
-            scaling.flow().viscosity,
-            film.cutoff_gap_m / dx,
-            film.roughness_gap_m / dx,
-            film.maximum_pairs,
-        )?
-        .with_resistance_mode_limit(film.maximum_resistance_modes)?;
-        if let Some([cutoff, roughness]) = film.tangential_gaps_m {
-            model = model.with_tangential_pairs(cutoff / dx, roughness / dx)?;
-        }
+        let surfaces = build_surfaces(&scaling)?;
         let mut bodies = Vec::with_capacity(N);
-        for (source, state) in sources.iter().zip(initial) {
+        for (material, state) in materials.iter().zip(initial) {
             poll(gate)?;
-            let mut tensor = source.material.inertia().inertia_com();
+            let mut tensor = material.inertia().inertia_com();
             for entry in &mut tensor.m {
                 *entry = finite(*entry / inertia_unit)?;
             }
@@ -226,7 +276,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
             bodies.push(MovingPartialSaturationBody3 {
                 center: convert(state.center_m, 1.0 / dx)?,
                 orientation: state.orientation,
-                mass: positive(source.material.inertia().mass() / mass_unit)?,
+                mass: positive(material.inertia().mass() / mass_unit)?,
                 inertia,
                 velocity: convert(state.velocity_m_s, dt / dx)?,
                 angular_momentum_body: vector(convert(
@@ -266,8 +316,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
             bodies: bodies
                 .try_into()
                 .map_err(|_| Error::Invalid("body count"))?,
-            radii: sources.map(|s| s.radius_m / dx),
-            film: model,
+            surfaces,
             mass_unit,
             inertia_unit,
             impulse_unit,
@@ -278,14 +327,16 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
         })
     }
 
-    /// Refresh bulk flow and every missing-film resistance from ONE new source.
+    /// Refresh bulk flow and any spherical missing-film resistance from ONE
+    /// new source. Ellipsoids use the resolved-fluid law without a film model.
     ///
     /// The accepted populations, poses, momenta, additional material inertia,
     /// geometric quadrature, film cutoffs and physical clock are preserved
     /// exactly. The next native step uses the new viscosity in both resolved
-    /// flow and all normal/tangential film modes. Density must remain bitwise
-    /// unchanged: replacing its unit conversion would silently change actual
-    /// fluid mass and momentum. The original dx/dt and speed admission remain.
+    /// flow and all enabled normal/tangential film modes. Density must remain
+    /// bitwise unchanged: replacing its unit conversion would silently change
+    /// actual fluid mass and momentum. The original dx/dt and speed admission
+    /// remain.
     ///
     /// This explicit coefficient update can consume an independently evolved
     /// temperature/composition snapshot; it does not itself evolve either or
@@ -312,14 +363,20 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
                 "live fluid density changes require conservative mass and momentum transfer",
             ));
         }
-        let film = self.film.with_dynamic_viscosity(scaling.flow().viscosity)?;
+        let surfaces = match self.surfaces {
+            CarrierSurfaces::Spheres { radii, film } => CarrierSurfaces::Spheres {
+                radii,
+                film: film.with_dynamic_viscosity(scaling.flow().viscosity)?,
+            },
+            CarrierSurfaces::Ellipsoids(shapes) => CarrierSurfaces::Ellipsoids(shapes),
+        };
         poll(gate)?;
         // The native rate owner admits its candidate before mutation. No
         // fallible operation follows this first publication.
         self.grid
             .rebind_shear_relaxation(scaling.flow().tau)
             .map_err(Error::Relaxation)?;
-        self.film = film;
+        self.surfaces = surfaces;
         self.scaling = scaling;
         Ok(())
     }
@@ -329,7 +386,7 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
         &self.scaling
     }
     /// Original source-backed additional carriers, in stable body order.
-    pub const fn sources(&self) -> &[AdditionalMaterialSphere<'a>; N] {
+    pub const fn sources(&self) -> &[S; N] {
         &self.sources
     }
     /// Read-only native fields prevent independent changes to viscosity,
@@ -347,12 +404,12 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
     }
 
     /// Convert one accepted native carrier to physical units without changing it.
-    pub fn state_si(&self, index: usize) -> Result<SphereStateSi, Error> {
+    pub fn state_si(&self, index: usize) -> Result<BodyStateSi, Error> {
         let body = self
             .bodies
             .get(index)
             .ok_or(Error::Invalid("body index out of range"))?;
-        Ok(SphereStateSi {
+        Ok(BodyStateSi {
             center_m: convert(body.center, self.scaling.cell_size_m())?,
             orientation: body.orientation,
             velocity_m_s: convert(
@@ -367,9 +424,11 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
     }
 
     /// Advance one physical dt with held WORLD forces [N] and center couples
-    /// [N m]. Actual evolving midpoint gaps drive the original matched-film
-    /// resistance: the cutoff contribution is subtracted, not a second full
-    /// exterior drag law. All bodies and populations advance simultaneously.
+    /// [N m]. All bodies and populations advance simultaneously, using actual
+    /// rotated midpoint geometry and the full source-derived inertia tensor.
+    /// Sphere assemblies additionally use the original matched missing-film
+    /// resistance at evolving gaps. Ellipsoids use resolved fluid exchange only;
+    /// no spherical curvature or unresolved near-contact law is inferred.
     ///
     /// Returns the unchanged native receipt IN LATTICE UNITS; use the conversion
     /// methods below for momentum/work. Film loss has no finite heat destination
@@ -401,15 +460,27 @@ impl<'a, F: FluidTransport + ?Sized, const N: usize> RetainedFluidSpheres<'a, F,
             }
         }
         let origin = convert(moment_origin_m, 1.0 / self.scaling.cell_size_m())?;
-        let report = self.grid.step_with_lubricated_spheres(
-            &mut self.samplers,
-            self.radii,
-            &mut self.bodies,
-            external,
-            self.film,
-            origin,
-            gate,
-        )?;
+        let report = match &self.surfaces {
+            CarrierSurfaces::Spheres { radii, film } => self.grid.step_with_lubricated_spheres(
+                &mut self.samplers,
+                *radii,
+                &mut self.bodies,
+                external,
+                *film,
+                origin,
+                gate,
+            )?,
+            CarrierSurfaces::Ellipsoids(shapes) => {
+                self.grid.step_with_moving_partial_saturation_bodies(
+                    &mut self.samplers,
+                    core::array::from_fn(|a| &shapes[a] as &dyn BodyFrameShape3),
+                    &mut self.bodies,
+                    external,
+                    origin,
+                    gate,
+                )?
+            }
+        };
         self.accepted_steps = next;
         Ok(report)
     }

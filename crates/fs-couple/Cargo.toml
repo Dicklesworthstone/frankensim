@@ -39,6 +39,7 @@ fs-exec = { path = "../fs-exec" }
 fs-feec = { path = "../fs-feec" }
 fs-fft = { path = "../fs-fft" }
 fs-flux = { path = "../fs-flux", optional = true, default-features = false }
+fs-ga = { path = "../fs-ga" }
 fs-gas = { path = "../fs-gas", optional = true, features = ["experimental-euler"] }
 fs-geom = { path = "../fs-geom" }
 fs-iface = { path = "../fs-iface" }
@@ -73,7 +74,6 @@ fs-vfit = { path = "../fs-vfit" }
 fs-convection = { path = "../fs-convection" }
 fs-modalid = { path = "../fs-modalid" }
 fs-ladder = { path = "../fs-ladder" }
-fs-ga = { path = "../fs-ga" }
 fs-io = { path = "../fs-io" }
 fs-psycho = { path = "../fs-psycho" }
 fs-substrate = { path = "../fs-substrate" }

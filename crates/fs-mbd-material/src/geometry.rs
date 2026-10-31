@@ -41,6 +41,36 @@ impl VolumeMoments {
         ] })
     }
 
+    /// Centered solid ellipsoid with positive semiaxes [m]. Principal volume
+    /// moments are V*(b²+c²)/5 and cyclic permutations. Use `transformed` to
+    /// express the SAME geometry and its complete tensor in another body frame.
+    pub fn ellipsoid(semiaxes_m: Vec3) -> Result<Self, MaterialInertiaError> {
+        let [a, b, c] = [semiaxes_m.x, semiaxes_m.y, semiaxes_m.z];
+        if ![a, b, c].into_iter().all(positive) {
+            return Err(MaterialInertiaError::Invalid(
+                "ellipsoid semiaxes must be finite and positive",
+            ));
+        }
+        let volume = (4.0 * core::f64::consts::PI / 3.0) * a * b * c;
+        Self::new(
+            volume,
+            Vec3::new(0.0, 0.0, 0.0),
+            Mat3 {
+                m: [
+                    (volume / 5.0) * (b * b + c * c),
+                    0.0,
+                    0.0,
+                    0.0,
+                    (volume / 5.0) * (a * a + c * c),
+                    0.0,
+                    0.0,
+                    0.0,
+                    (volume / 5.0) * (a * a + b * b),
+                ],
+            },
+        )
+    }
+
     /// Centered axis-aligned solid cuboid with explicit full side lengths [m].
     pub fn cuboid(sides_m: Vec3) -> Result<Self, MaterialInertiaError> {
         let [x, y, z] = [sides_m.x, sides_m.y, sides_m.z];

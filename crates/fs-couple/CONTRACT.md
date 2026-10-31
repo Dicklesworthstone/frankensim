@@ -16936,3 +16936,19 @@ an eccentric velocity jump with an independent six-by-six spatial-mass solve,
 check clamped/sliding support couples, propagate a reciprocal strike into native
 bending/torsion, and reject sub-resolution parallel kicks while retaining the
 stable energy of a resolved transverse kick against large baseline momentum.
+
+## Source-backed ellipsoidal fluid carriers
+
+`material_immersed::RetainedFluidEllipsoids` binds one centered uniform
+source-resolved region per carrier to `VolumeMoments::ellipsoid` geometry. An
+explicit proper rotation maps principal shape axes into material/body
+coordinates; sampled geometry and the complete source-derived inertia tensor
+use that same rotation. The shared SI owner advances these carriers through the
+existing simultaneous D3Q19 moving-body/full-tensor solver, retaining source
+receipts, atomic refusal and same-density viscosity rebind. This remains
+retained-interior-fluid coupling plus additional carrier inertia. Native
+enclosing-sphere separation and wall/halo admission apply; spherical lubrication
+and a displaced-fluid closure are not inferred. The original sphere API shares
+the same owner and retains its original film path. Tests cover analytical rotated
+inertia, frame-equivalent populations and motion, SI fluid/body angular balance
+including periodic transport, and state preservation under rebind and refusal.
