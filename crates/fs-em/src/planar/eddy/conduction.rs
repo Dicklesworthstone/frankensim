@@ -62,6 +62,39 @@ impl Conduction {
         Some(anchors.into_iter().map(|v| v.unwrap_or(0.0)).collect())
     }
 
+    /// Exact conductivity-weighted means of a cell-local P1 field. Retain a
+    /// regional anchor so a large constant motional field does not lose its
+    /// small spatial correction through cancellation in a raw weighted sum.
+    pub fn mean_offsets(
+        &self,
+        offsets: &[[f64; 3]],
+        check: &dyn Fn() -> bool,
+    ) -> Result<Vec<f64>, ConductionError> {
+        if offsets.len() != self.cells.len() {
+            return Err(ConductionError::Invalid(
+                "complete regional offset field required",
+            ));
+        }
+        let anchors = self
+            .offset_anchors(offsets, check)
+            .ok_or(ConductionError::Cancelled)?;
+        let mut means = vec![0.0; self.regions.len()];
+        for (cell, offset) in self.cells.iter().zip(offsets) {
+            if check() {
+                return Err(ConductionError::Cancelled);
+            }
+            let delta = offset
+                .iter()
+                .map(|&value| (value - anchors[cell.group]) / 3.0)
+                .sum::<f64>();
+            means[cell.group] = finite(cell.sigma_volume.mul_add(delta, means[cell.group]))?;
+        }
+        for ((mean, &weight), &anchor) in means.iter_mut().zip(&self.weights).zip(&anchors) {
+            *mean = finite(*mean / weight + anchor)?;
+        }
+        Ok(means)
+    }
+
     fn means_with_offsets(
         &self,
         x: &[f64],
@@ -132,9 +165,20 @@ impl Conduction {
         dt: f64,
         thickness_m: f64,
         current_tolerance_a: f64,
+        drives: Option<(&[f64], &[f64])>,
         check: &dyn Fn() -> bool,
     ) -> Result<JouleHeat, ConductionError> {
         assert_eq!(offsets.len(), self.cells.len());
+        if let Some((electric, targets)) = drives {
+            if electric.len() != self.regions.len()
+                || targets.len() != self.regions.len()
+                || electric.iter().chain(targets).any(|v| !v.is_finite())
+            {
+                return Err(ConductionError::Invalid(
+                    "complete finite regional electric drives and current targets required",
+                ));
+            }
+        }
         let offset_anchors = self
             .offset_anchors(offsets, check)
             .ok_or(ConductionError::Cancelled)?;
@@ -145,14 +189,15 @@ impl Conduction {
             dt,
             thickness_m,
             current_tolerance_a,
-            None,
+            drives.map(|(_, targets)| targets),
             check,
             |index, cell| {
                 let anchor = rate[self.anchors[cell.group]];
                 std::array::from_fn(|i| {
-                    -(((rate[cell.vertices[i]] - anchor)
-                        + (offsets[index][i] - offset_anchors[cell.group]))
-                        - means[cell.group])
+                    drives.map_or(0.0, |(electric, _)| electric[cell.group])
+                        - (((rate[cell.vertices[i]] - anchor)
+                            + (offsets[index][i] - offset_anchors[cell.group]))
+                            - means[cell.group])
                 })
             },
         )

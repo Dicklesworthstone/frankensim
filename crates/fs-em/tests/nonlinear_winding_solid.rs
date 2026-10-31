@@ -3,6 +3,8 @@
 
 #[path = "nonlinear_winding_circuit/common.rs"]
 mod common;
+#[path = "nonlinear_winding_solid/moving.rs"]
+mod moving;
 #[path = "nonlinear_winding_solid/slabs.rs"]
 mod slabs;
 

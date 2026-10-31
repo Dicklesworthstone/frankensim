@@ -8,7 +8,9 @@
 //! first terminal) and its native conjugate output is the winding voltage V.
 //! An explicitly voltage-input port instead imposes the actual field voltage
 //! and reads the native output -I. Both use the same shared Newton owner and
-//! V = F_new^T delta(A)/dt + L_end delta(I)/dt + R_dc*I. Fixed profiles permit
+//! V = F_new^T delta(A)/dt + L_end delta(I)/dt + R_dc*I + V_motional.
+//! The moving solid owner derives V_motional from the actual Lorentz field;
+//! it is zero for stationary windings. Fixed profiles permit
 //! the equivalent delta(lambda)/dt form. A conductivity refresh changes the
 //! endpoint linkage diagnostic but cannot invent a delta(F)^T A voltage.
 //! Voltage-input ports admit current-driven
@@ -250,6 +252,9 @@ pub struct NonlinearWindingStep<F = NonlinearEddyStep> {
     /// Actual F_new^T delta(A)/dt plus explicit end-inductance voltage [V].
     /// Changing conductivity weights in a stationary field creates no EMF.
     pub inductive_voltage_v: Vec<f64>,
+    /// Solid-winding back-EMF from -integral(J_unit * (v cross B)_z dV),
+    /// including zero-current operation. Zero for the stationary step.
+    pub motional_voltage_v: Vec<f64>,
     /// Actual native voltage minus the field/copper-required voltage [V].
     pub terminal_residual_v: Vec<f64>,
     /// Actual native current minus field current [A]. Exactly zero for
@@ -1096,6 +1101,17 @@ impl<'m> NonlinearWindingCircuit<'m> {
             trials.set(trials.get() + 1);
             let j = impressed(profiles, currents, &mut check)?;
             let field = evaluate_field(currents, &j, &mut check)?;
+            let motional_voltage_v = field
+                .motional_voltage_v
+                .clone()
+                .unwrap_or_else(|| vec![0.0; currents.len()]);
+            if motional_voltage_v.len() != currents.len()
+                || motional_voltage_v.iter().any(|v| !v.is_finite())
+            {
+                return Err(Invalid(
+                    "complete finite winding motional voltages required",
+                ));
+            }
             let potential_increment = field
                 .state
                 .potential_wb_m()
@@ -1142,9 +1158,12 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 .collect::<Result<Vec<_>>>()?;
             let required_voltage = inductive_voltage_v
                 .iter()
+                .zip(&motional_voltage_v)
                 .zip(currents)
                 .zip(&resistance_ohm)
-                .map(|((&voltage, &current), &r)| finite(r.mul_add(current, voltage)))
+                .map(|(((&inductive, &motional), &current), &r)| {
+                    finite(r.mul_add(current, finite(inductive + motional)?))
+                })
                 .collect::<Result<Vec<_>>>()?;
             let input = ports(&self.layout, external_inputs, currents, &required_voltage)?;
             // A voltage trial is a finite-step effort, not an initial voltage
@@ -1205,6 +1224,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 linkage,
                 field_linkage_increments_wb,
                 inductive_voltage_v,
+                motional_voltage_v,
                 voltage,
                 voltage_residual,
                 current_residual,
@@ -1331,6 +1351,14 @@ impl<'m> NonlinearWindingCircuit<'m> {
                 .sum(),
         )?;
         let field_step = &trial.field.account;
+        let motional_work = finite(
+            dt * solver
+                .x
+                .iter()
+                .zip(&trial.motional_voltage_v)
+                .map(|(&current, &voltage)| current * voltage)
+                .sum::<f64>(),
+        )?;
         let circuit_before = finite(dae.system.hamiltonian(&trial.x0))?;
         let circuit_after = finite(dae.system.hamiltonian(&trial.native.x))?;
         let stored_before_j = finite(circuit_before + field_step.stored_before_j + end_before)?;
@@ -1349,9 +1377,16 @@ impl<'m> NonlinearWindingCircuit<'m> {
             trial.native.dissipated - graph_heat,
             trial.native.delta_h - (circuit_after - circuit_before),
             trial.native.balance_residual(),
-            field_work + field_step.uniform_drive_work_j - field_step.supplied_work_j,
+            field_work + field_step.uniform_drive_work_j + field_step.motional_drive_work_j
+                - field_step.supplied_work_j,
+            motional_work - field_step.motional_drive_work_j,
             end_after - end_before + end_numerical - end_work,
-            terminal_work - field_work - end_work - winding_heat - field_step.uniform_drive_work_j,
+            terminal_work
+                - field_work
+                - end_work
+                - winding_heat
+                - field_step.uniform_drive_work_j
+                - motional_work,
             energy_residual_j,
         ];
         if circuit_before < 0.0
@@ -1387,6 +1422,7 @@ impl<'m> NonlinearWindingCircuit<'m> {
             terminal_voltage_v: trial.voltage,
             flux_linkages_wb: [self.flux_linkages_wb.clone(), trial.linkage.clone()],
             inductive_voltage_v: trial.inductive_voltage_v,
+            motional_voltage_v: trial.motional_voltage_v,
             terminal_residual_v: trial.voltage_residual,
             terminal_current_residual_a: trial.current_residual,
             stored_before_j,
@@ -1428,6 +1464,7 @@ struct Trial<'m, F> {
     linkage: Vec<f64>,
     field_linkage_increments_wb: Vec<f64>,
     inductive_voltage_v: Vec<f64>,
+    motional_voltage_v: Vec<f64>,
     voltage: Vec<f64>,
     voltage_residual: Vec<f64>,
     current_residual: Vec<f64>,
@@ -1440,6 +1477,7 @@ struct FieldAccount {
     heat_j: f64,
     supplied_work_j: f64,
     uniform_drive_work_j: f64,
+    motional_drive_work_j: f64,
     numerical_dissipation_j: f64,
     parameter_work_j: f64,
     mechanical_work_j: f64,
@@ -1449,6 +1487,7 @@ struct FieldTrial<'m, F> {
     state: PlanarNonlinearEddy<'m>,
     step: F,
     account: FieldAccount,
+    motional_voltage_v: Option<Vec<f64>>,
 }
 impl<'m> FieldTrial<'m, NonlinearEddyStep> {
     fn stationary(candidate: PlanarNonlinearEddyCandidate<'m>) -> Self {
@@ -1459,6 +1498,7 @@ impl<'m> FieldTrial<'m, NonlinearEddyStep> {
             heat_j: step.heat_j,
             supplied_work_j: step.supplied_work_j,
             uniform_drive_work_j: step.uniform_drive_work_j,
+            motional_drive_work_j: 0.0,
             numerical_dissipation_j: step.numerical_dissipation_j,
             parameter_work_j: step.parameter_work_j,
             mechanical_work_j: 0.0,
@@ -1467,6 +1507,7 @@ impl<'m> FieldTrial<'m, NonlinearEddyStep> {
             state,
             step,
             account,
+            motional_voltage_v: None,
         }
     }
 }

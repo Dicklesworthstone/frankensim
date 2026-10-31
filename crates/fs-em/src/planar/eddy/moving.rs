@@ -415,6 +415,9 @@ pub(super) struct MotionHeat {
     pub(super) cells: Vec<MovingEddyCell>,
     pub(super) heat_j: f64,
     pub(super) mechanical_work_j: f64,
+    pub(super) uniform_drive_work_j: f64,
+    pub(super) motional_drive_work_j: f64,
+    pub(super) region_motional_electric_field_v_m: Vec<(u32, f64)>,
     pub(super) region_currents_a: Vec<(u32, f64)>,
 }
 
@@ -431,6 +434,7 @@ pub(super) fn recover_motion(
     dt: f64,
     thickness_m: f64,
     current_balance_tolerance_a: f64,
+    drives: Option<(&[f64], &[f64])>,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<MotionHeat, EddyError> {
     let mut offsets = vec![[0.0; 3]; conduction.cells.len()];
@@ -450,9 +454,38 @@ pub(super) fn recover_motion(
             dt,
             thickness_m,
             current_balance_tolerance_a,
+            drives,
             &|| (*cancel.borrow_mut())(),
         )?
     };
+    let mut uniform_drive_work_j = 0.0;
+    let mut motional_drive_work_j = 0.0;
+    let mut region_motional_electric_field_v_m = Vec::new();
+    if let Some((electric, currents)) = drives {
+        let means = {
+            let cancel = RefCell::new(&mut *cancelled);
+            conduction.mean_offsets(&offsets, &|| (*cancel.borrow_mut())())?
+        };
+        region_motional_electric_field_v_m.reserve(conduction.regions.len());
+        for (group, (&region, &mean)) in conduction.regions.iter().zip(&means).enumerate() {
+            poll(cancelled)?;
+            let dc =
+                finite(dt * finite(thickness_m * finite(electric[group] * currents[group])?)?)?;
+            if dc < 0.0 {
+                return Err(EddyError::Balance(
+                    "solid DC drive work must be nonnegative",
+                ));
+            }
+            uniform_drive_work_j = finite(uniform_drive_work_j + dc)?;
+            motional_drive_work_j = finite(
+                motional_drive_work_j
+                    + finite(dt * finite(thickness_m * finite(mean * currents[group])?)?)?,
+            )?;
+            // q uses +v.grad(A), while the physical (v cross B)_z is its
+            // negative. The winding back-EMF is -depth*n times this mean.
+            region_motional_electric_field_v_m.push((region, -mean));
+        }
+    }
     let mut mechanical_work_j = 0.0;
     let mut cells = Vec::with_capacity(heat.cells.len());
     for ((source, heat), offsets) in conductors.iter().zip(heat.cells).zip(&offsets) {
@@ -499,6 +532,9 @@ pub(super) fn recover_motion(
         cells,
         heat_j: heat.heat_j,
         mechanical_work_j,
+        uniform_drive_work_j,
+        motional_drive_work_j,
+        region_motional_electric_field_v_m,
         region_currents_a: heat.region_currents_a,
     })
 }
@@ -746,6 +782,7 @@ impl<'m> PlanarEddy<'m> {
             dt,
             self.problem.thickness_m,
             limits.current_balance_tolerance_a,
+            None,
             cancelled,
         )?;
         let supplied_work_j = finite(loads.iter().zip(&increments).map(|(f, d)| f * d).sum())?;

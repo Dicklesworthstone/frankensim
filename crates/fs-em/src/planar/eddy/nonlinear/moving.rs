@@ -6,12 +6,14 @@
 //! backtracking. No tangent permeability replaces the source's stored energy.
 //!
 //! The SAME endpoint current supplies Joule heat and J cross B. Thus
-//! delta psi + Q_Ohmic + W_mechanical + D_BE = W_impressed, where the convex
+//! delta psi + Q_Ohmic + W_mechanical + D_BE = W_source, where the convex
 //! Bregman remainder D_BE is numerical dissipation, never physical heat.
+//! Explicit solid current constraints add uniform DC and motional terminal
+//! work to W_source; actual total J supplies both heat and mechanical work.
 //! The Lorentz/frame convention is that of the parent moving-induction owner.
 
 use super::super::{
-    Conduction, EddyError, admit_algebraic, bind, finite, load,
+    Conduction, EddyConductor, EddyError, admit_algebraic, bind, finite, load,
     moving::{
         Motion, MovingEddyCell, MovingEddyControls, MovingIncrement, MovingJacobi, Scratch,
         admit_controls, recover_motion,
@@ -54,7 +56,17 @@ pub struct NonlinearMovingEddyStep {
     pub stored_after_j: f64,
     pub heat_j: f64,
     pub mechanical_work_j: f64,
+    /// Field-source work plus solid DC and signed motional terminal work.
     pub supplied_work_j: f64,
+    /// Solid uniform-drive DC work, already in supplied_work_j and actual heat.
+    pub uniform_drive_work_j: f64,
+    /// Signed solid-current back-EMF work, already in supplied_work_j. This is
+    /// a mechanical transfer, not an additional physical heat deposition.
+    pub motional_drive_work_j: f64,
+    /// Conductivity-weighted mean (v cross B)_z [V/m], in original region
+    /// order, when explicit current constraints are active. Empty otherwise.
+    /// This includes floating regions so the field's coordinate order is kept.
+    pub region_motional_electric_field_v_m: Vec<(u32, f64)>,
     /// Numerical time-discretization loss; not a thermal credit.
     pub numerical_dissipation_j: f64,
     /// Delta psi + heat + mechanical work + numerical loss - source work.
@@ -233,6 +245,79 @@ impl<'m> PlanarNonlinearEddy<'m> {
         limits: NonlinearMovingEddyControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NonlinearMovingEddyCandidate<'m>, NonlinearEddyError> {
+        self.step_with_eulerian_velocity_and_sources_candidate(
+            target_s,
+            velocity_at_vertices_m_s,
+            self.conductors.clone(),
+            impressed_jz_a_m2,
+            limits,
+            cancelled,
+        )
+    }
+
+    /// Refresh conductivity from the SAME original sources while retaining
+    /// accepted A, geometry and complete magnetic laws. Source identity and
+    /// magnetic compatibility use the original field admission. A thermal
+    /// owner must account for heat and material transport; this operation only
+    /// holds the supplied endpoint conductivity and Eulerian velocity.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_with_eulerian_velocity_and_sources_candidate(
+        &self,
+        target_s: f64,
+        velocity_at_vertices_m_s: &[[f64; 2]],
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        limits: NonlinearMovingEddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearMovingEddyCandidate<'m>, NonlinearEddyError> {
+        self.step_moving(
+            target_s,
+            velocity_at_vertices_m_s,
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            None,
+            cancelled,
+        )
+    }
+
+    /// Winding-owned lowering of conductivity-normalized solid current
+    /// constraints. The original moving residual/operator remains unchanged;
+    /// actual total current determines both heat and Lorentz work.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn step_with_eulerian_velocity_and_region_drives_candidate(
+        &self,
+        target_s: f64,
+        velocity_at_vertices_m_s: &[[f64; 2]],
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        electric_drives_v_m: &[f64],
+        target_currents_a: &[f64],
+        limits: NonlinearMovingEddyControls,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearMovingEddyCandidate<'m>, NonlinearEddyError> {
+        self.step_moving(
+            target_s,
+            velocity_at_vertices_m_s,
+            conductors,
+            impressed_jz_a_m2,
+            limits,
+            Some((electric_drives_v_m, target_currents_a)),
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_moving(
+        &self,
+        target_s: f64,
+        velocity_at_vertices_m_s: &[[f64; 2]],
+        conductors: Vec<EddyConductor>,
+        impressed_jz_a_m2: &[f64],
+        limits: NonlinearMovingEddyControls,
+        drives: Option<(&[f64], &[f64])>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<NonlinearMovingEddyCandidate<'m>, NonlinearEddyError> {
         poll(cancelled)?;
         let dt = target_s - self.time_s;
         if !target_s.is_finite()
@@ -253,14 +338,14 @@ impl<'m> PlanarNonlinearEddy<'m> {
             .filter(|&v| prescribed[v].is_none())
             .collect();
         let restart = admit_controls(limits.moving, free.len(), dt)?;
-        let (_, conduction) = bind(
+        let (conductors, conduction) = bind(
             &*self.problem,
-            self.conductors.clone(),
+            conductors,
             Some(&self.conductors),
             cancelled,
         )?;
-        let mut permeabilities = Vec::with_capacity(self.conductors.len());
-        for cell in &self.conductors {
+        let mut permeabilities = Vec::with_capacity(conductors.len());
+        for cell in &conductors {
             poll(cancelled)?;
             permeabilities.push(maximum_permeability(
                 &self.problem.materials()[cell.triangle],
@@ -411,13 +496,14 @@ impl<'m> PlanarNonlinearEddy<'m> {
             .collect::<Result<Vec<_>, _>>()?;
         let heat = recover_motion(
             &conduction,
-            &self.conductors,
+            &conductors,
             &motion,
             field.magnetic_flux_density_t(),
             &rate,
             dt,
             self.problem.thickness_m(),
             limits.moving.current_balance_tolerance_a,
+            drives,
             cancelled,
         )?;
         let before = self.field(cancelled)?;
@@ -452,7 +538,11 @@ impl<'m> PlanarNonlinearEddy<'m> {
                 parameter_work_j: 0.0,
             });
         }
-        let supplied_work_j = finite(loads.iter().zip(&increments).map(|(a, b)| a * b).sum())?;
+        let supplied_work_j = finite(
+            finite(loads.iter().zip(&increments).map(|(a, b)| a * b).sum())?
+                + heat.uniform_drive_work_j
+                + heat.motional_drive_work_j,
+        )?;
         let energy_residual_j = finite(
             field.energy_j() - self.energy_j
                 + heat.heat_j
@@ -471,6 +561,9 @@ impl<'m> PlanarNonlinearEddy<'m> {
             heat_j: heat.heat_j,
             mechanical_work_j: heat.mechanical_work_j,
             supplied_work_j,
+            uniform_drive_work_j: heat.uniform_drive_work_j,
+            motional_drive_work_j: heat.motional_drive_work_j,
+            region_motional_electric_field_v_m: heat.region_motional_electric_field_v_m,
             numerical_dissipation_j,
             energy_residual_j,
             region_currents_a: heat.region_currents_a,
@@ -478,6 +571,7 @@ impl<'m> PlanarNonlinearEddy<'m> {
             report: report.clone(),
         };
         let mut state = self.clone();
+        state.conductors = conductors;
         state.potential_wb_m = potential;
         state.energy_j = field.energy_j();
         state.impressed_jz_a_m2 = impressed_jz_a_m2.to_vec();

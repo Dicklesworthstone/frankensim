@@ -1,5 +1,46 @@
 # fs-em contract
 
+## Driven solid-winding motional EMF and reciprocal Lorentz work
+
+The nonlinear moving field and native winding circuit now admit driven solid
+sections through their original current-constrained regions. With
+`q = delta(A)/dt + v.grad(A)` and `u = n I/integral(sigma dA)`, the same
+projected conductivity operator solves the magnetic residual and reconstructs
+`E_conductor = u - P_sigma(q)`. Actual total `J = sigma E_conductor` supplies
+both exact P1 Joule heat and `J cross B` work. The conductor-frame heat,
+laboratory electric field and motional electric field remain distinct receipts.
+
+The native terminal law adds the source-derived back-EMF
+`V_motion = depth*n*mean_sigma(v.grad(A))` to direct
+`F_new^T delta(A)/dt`, explicit end-inductance voltage and original DC loss.
+This voltage is computed directly even at zero current. Separate DC and signed
+motional drive work reconcile the complete field source work with the circuit;
+neither creates an extra heat deposit. Negative mechanical work is supplied
+by the imposed-motion owner, while physical Joule heat stays nonnegative.
+
+`step_with_eulerian_velocity_and_sources_candidate` refreshes only original
+conductor/resistor sources, retaining field/circuit history, magnetic laws,
+end storage and topology. Solid profiles follow the refreshed conductivity;
+an unchanged magnetic potential does not acquire artificial transformer EMF.
+The sparse nonlinear operator, nonsymmetric FGMRES solve, true residual,
+Peclet limits and original energy/cancellation gates remain authoritative.
+
+This is prescribed Eulerian motion with invariant material occupancy and
+coefficient fields along the motion. It does not translate finite interfaces,
+move permanent magnetization, or account for thermal advection. Stranded cells
+and fixed-recoil magnets remain stationary. The conductor-frame convention and
+transport restrictions follow the original
+[quasistatic Lorentz formulation](https://doc.comsol.com/6.3/doc/com.comsol.help.acdc/acdc_ug_theory.05.09.html)
+and [Eulerian velocity scope](https://doc.comsol.com/6.4/doc/com.comsol.help.acdc/acdc_ug_magnetic_fields.08.040.html).
+
+Focused G0/G1/G3 fixtures in `tests/nonlinear_winding_solid/moving.rs` cover
+zero-motion equivalence, open-current motional voltage, motor/generator work,
+total spatial heat and force, original conductivity refresh, and unchanged
+histories on source/budget/cancellation refusal. They are authored numerical
+fixtures; native execution and empirical device qualification remain separate.
+
+
+
 ## Causal solid-winding diffusion in native nonlinear circuits
 
 `winding::nonlinear::NonlinearWindingCircuit::new_with_solid_regions` and its
@@ -33,8 +74,8 @@ heat; it is never an additional deposit. Stranded heat remains disjoint, and
 backward-Euler magnetic Bregman loss remains numerical dissipation. Independent
 terminal, field, end-storage and global work gates precede publication. Source,
 topology, budget and cancellation refusals preserve accepted histories.
-Moving driven solids explicitly refuse until a transported regional-current
-constraint exists; this owner admits fixed geometry.
+The stationary entry points retain fixed geometry; the Eulerian moving
+extension above retains explicit material-transport restrictions.
 
 G0/G1/G3 tests in `tests/nonlinear_winding_solid.rs` and its `slabs` module
 compare bipolar diffusion/saturation pulses, native loaded-circuit recurrences,
