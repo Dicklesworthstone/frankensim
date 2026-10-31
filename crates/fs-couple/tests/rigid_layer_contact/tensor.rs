@@ -232,6 +232,94 @@ fn bind(f: &Fixture, angle: f64) -> Result<TensorLayerMaterial<'_>, TensorLayerS
         },
     )
 }
+
+fn young_shear_fixture(specific_heat_capacity: f64) -> Fixture {
+    let original = fixture_with_thermal(false, true, true);
+    let mut claims = ClaimSet::new();
+    for (_, value) in original.card.claims().claims_ordered() {
+        let mut claim = value.clone();
+        if claim.key.name() == "specific_heat_capacity" {
+            claim.value = PropertyValue::Scalar {
+                value: specific_heat_capacity,
+                dims: CP_DIMS,
+            };
+        }
+        claims.insert_claim(claim).unwrap();
+    }
+    for (name, value, slope) in [
+        ("young_modulus", 12.0_f64, -0.012_f64),
+        ("shear_modulus", 4.8, 0.006),
+    ] {
+        let mut claim = original
+            .card
+            .claims()
+            .claims_ordered()
+            .next()
+            .unwrap()
+            .1
+            .clone();
+        claim.key = PropertyKey::new(name, Pressure::DIMS);
+        claim.value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: Temperature::DIMS,
+            knots: [280.0, 300.0, 320.0]
+                .into_iter()
+                .map(|t| (t, slope.mul_add(t - 300.0, value)))
+                .collect(),
+            dims: Pressure::DIMS,
+        };
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claims.insert_claim(claim).unwrap();
+    }
+    let card = MaterialCard::assemble(
+        MaterialStateId {
+            chemistry: "manufactured independent Young/shear tensor".into(),
+            phase: "solid".into(),
+            process: "native shear test".into(),
+            revision: 0,
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let mut selectors = original.material.properties().clone();
+    selectors.elasticity = TensorElasticity::IsotropicYoungShear;
+    let material = ResolvedTensorMaterial::resolve(
+        &card,
+        &point(300.0),
+        selectors,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap()
+    .with_kelvin_viscosity(
+        &card,
+        TensorKelvinViscosityProperties {
+            viscosity_upper: std::array::from_fn(|i| format!("viscosity_{i:02}")),
+        },
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let caloric = ResolvedHeatCapacityCurve::try_new(
+        &card,
+        HeatCapacitySourceQuery {
+            heat_capacity: &PropertyKey::new("specific_heat_capacity", CP_DIMS),
+            density: &PropertyKey::new("density", Density::DIMS),
+            temperature_axis: "T",
+            lower: &point(280.0),
+            upper: &point(320.0),
+            selection: SelectionPolicy::SingleClaimOnly,
+        },
+        SolidLiquidPhase::Solid,
+        -20.0 * specific_heat_capacity,
+        1e-8,
+    )
+    .unwrap();
+    Fixture {
+        card,
+        caloric,
+        material,
+    }
+}
 fn inventory(f: &Fixture) -> DepositionSimulation<'_> {
     let original = thermal();
     let mut events = Vec::new();
@@ -465,17 +553,32 @@ fn assert_tensor_source_run(kelvin: bool) {
 
 #[test]
 fn g1_affine_source_tensors_drive_original_momenta_entropy_memory_and_finite_heat() {
-    let f = fixture_with_thermal(false,true,true);
+    assert_thermal_source_run(false);
+}
+
+#[test]
+fn g1_independent_young_shear_reaches_original_rigid_entropy_memory_and_finite_heat() {
+    assert_thermal_source_run(true);
+}
+
+fn assert_thermal_source_run(young_shear: bool) {
+    let f = if young_shear {
+        young_shear_fixture(1.0)
+    } else {
+        fixture_with_thermal(false, true, true)
+    };
     for angle in [0.4, -0.55] {
-        let material = bind(&f,angle).unwrap();
+        let material = bind(&f, angle).unwrap();
         let mut heat = inventory(&f);
-        let route = ThirdBodyHeatRoute::from_links(&heat,LAYER,[7,8],K,[0.0;2]).unwrap();
-        let (_,law) = material.at_temperature(300.0).unwrap();
-        let mut history = RigidLayerHistory::new(&law,geometry(),0.0).unwrap();
+        let route = ThirdBodyHeatRoute::from_links(&heat, LAYER, [7, 8], K, [0.0; 2]).unwrap();
+        let (_, law) = material.at_temperature(300.0).unwrap();
+        let mut history = RigidLayerHistory::new(&law, geometry(), 0.0).unwrap();
         let mut moving = bodies(false,Vec3::new(0.0,0.08,0.0));
-        let k0 = rotated([[9.0,0.0],[0.0,4.0]],angle);
+        let k0 = if young_shear { [[4.8,0.0],[0.0,4.8]] }
+            else { rotated([[9.0,0.0],[0.0,4.0]],angle) };
         let b0 = rotated([[2.0,1.0],[1.0,1.5]],angle);
-        let dk = k0.map(|row| row.map(|v| -0.0025*v));
+        let dk = if young_shear { [[0.006,0.0],[0.0,0.006]] }
+            else { k0.map(|row| row.map(|v| -0.0025*v)) };
         let db = rotated([[-0.005,0.003],[0.003,0.01]],angle);
         let c0 = rotated([[0.02,-0.01],[-0.01,0.005]],angle);
         for i in 0..2 { for j in 0..2 {
@@ -516,10 +619,13 @@ fn g1_affine_source_tensors_drive_original_momenta_entropy_memory_and_finite_hea
             let b = at(b0,db,temperature);
             let c = c0.map(|row| row.map(|v| v*(1.0+0.025*(temperature-300.0))));
             let tau = 0.2+0.005*(temperature-300.0);
+            let endpoint_slopes = material.thermal_slopes_at_temperature(temperature).unwrap();
             for i in 0..2 { for j in 0..2 {
                 close(candidate.history().law().stiffness_tensor_n_m()[i][j],k[i][j],3e-13);
                 close(candidate.history().law().tensor_relaxation().unwrap()[0]
                     .stiffness.matrix_n_m()[i][j],b[i][j],3e-13);
+                close(endpoint_slopes.equilibrium_n_m_k[i][j],dk[i][j],2e-15);
+                close(endpoint_slopes.relaxation_n_m_k[0][i][j],db[i][j],2e-15);
             }}
             // The first held-force solution is independently inverted at the
             // ORIGINAL endpoint trial temperature, including full cross terms.
@@ -532,7 +638,7 @@ fn g1_affine_source_tensors_drive_original_momenta_entropy_memory_and_finite_hea
                     else {dt*dt*(17.0/6.0)*effective[i][j]/4.0}));
                 let force = solve(a,product(effective,[0.08,0.0]).map(|v| 0.5*dt*v));
                 for i in 0..2 {close(report.mechanical.constitutive.traction_n[i],force[i],3e-9);}
-                assert!(force[1].abs()>0.001);
+                assert!(force[1].abs()> if young_shear {1e-5} else {0.001});
             } else {
                 assert_ne!(account.coefficient_free_energy_change_j,0.0);
             }
@@ -559,11 +665,38 @@ fn g1_affine_source_tensors_drive_original_momenta_entropy_memory_and_finite_hea
             close(report.source.material.state().state_coordinate("T").unwrap(),temperature,1e-14);
             close(report.source.material.kelvin_source().unwrap().state()
                 .state_coordinate("T").unwrap(),temperature,1e-14);
+            if young_shear {
+                assert!(report.source.material.state().property("poisson_ratio").is_none());
+                for (name,value,slope) in [("young_modulus",12.0,-0.012),
+                    ("shear_modulus",4.8,0.006)] {
+                    let source = report.source.material.state().property(name).unwrap();
+                    close(source.value_si(),value+slope*(temperature-300.0),2e-14);
+                    assert_eq!(source.answer().receipt.selected,
+                        f.material.state().property(name).unwrap().answer().receipt.selected);
+                }
+            }
             assert_eq!(history.deformation(),&old_state);
             let (next_bodies,next_history,next_heat,_) = candidate.into_parts();
             moving = next_bodies; history = next_history; heat = next_heat;
         }
     }
+}
+
+#[test]
+fn g4_nonlinear_layer_requires_positive_capacity_over_the_complete_source_strain_domain() {
+    let f = young_shear_fixture(0.001);
+    let before = f.material.clone();
+    assert!(matches!(
+        bind(&f, 0.4),
+        Err(TensorLayerSourceError::Invalid(
+            "tensor layer cannot establish positive total fixed-strain heat capacity over its original domain"
+        ))
+    ));
+    assert_eq!(f.material, before);
+    let sufficient = young_shear_fixture(1.0);
+    let material = bind(&sufficient, 0.4).unwrap();
+    assert!(material.thermal_slopes_at_temperature(321.0).is_err());
+    assert!(material.thermal_slopes_at_temperature(f64::NAN).is_err());
 }
 
 #[test]

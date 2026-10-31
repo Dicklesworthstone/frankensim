@@ -17063,16 +17063,16 @@ change, capillary energy or a new constitutive law.
 
 
 
-## Affine tensor contact storage in the original rigid/finite-heat transaction
+## Source tensor contact storage in the original rigid/finite-heat transaction
 
 `friction_heat::third_body::rigid::tensor::TensorLayerMaterial` now admits the
-original `AffineTensorThermal` potential over the entire receiving caloric
+shared `TensorThermalLaw` potential over the entire receiving caloric
 interval. The original material orientation, fixed contact geometry and
 `sym(tangent tensor normal)/thickness` strain columns project both stored
 stiffness and its complete temperature derivative through the same physical
 volume. Equilibrium laws admit fixed-Poisson affine Young modulus, independent
-affine bulk/shear moduli, and common-scale affine Young/shear or orthotropic
-moduli. The same source-derived stiffness derivative reaches the retained
+affine bulk/shear moduli, independent affine Young/shear sources with rational
+bulk response, and common-scale affine orthotropic moduli. The same source-derived stiffness derivative reaches the retained
 contact storage, entropy and finite-heat residual. Independent affine Maxwell
 cross terms retain their source identities and original branch order.
 
@@ -17080,7 +17080,11 @@ The scalar and tensor adapters share the existing `step_heated_impl` force and
 enthalpy residual. Tensor entropy is evaluated from retained physical equilibrium
 and Maxwell spring strains, so changing rank-deficient arm tensors need no
 invented strain reconstruction. Every trial uses the original endpoint-temperature
-coefficient convention. The caloric exchange is independently computed plastic,
+coefficient convention. Nonlinear sources refresh their derivative at both
+actual endpoint temperatures; scalar and affine tensor paths retain cached
+constant derivatives. `thermal_slopes()` describes the original temperature,
+and `thermal_slopes_at_temperature(T)` supplies an explicit refreshed snapshot.
+The caloric exchange is independently computed plastic,
 Maxwell and Kelvin loss minus coefficient free-energy change minus
 `Delta(T*S)`; total physical storage is `U=Psi+T*S`. Temperature-dependent
 Kelvin viscosity and plastic kinetics add no fictitious mechanical entropy.
@@ -17088,7 +17092,11 @@ Actual rigid force/couple work, momenta, retained strain and finite-cell energy
 are accepted once, with existing cancellation/refusal rollback.
 
 Whole-layer mass and caloric/source identity remain required. The source-bound
-fixed-kinematics law refuses non-affine stored tensors, thermal expansion,
+owner admits positive total caloric plus mechanical heat capacity over every
+caloric segment using the full original three-dimensional strain envelope.
+This sufficient bound can refuse a thermally safe pure-shear projection of a
+strongly curved bulk law; no nonlinear derivative is silently frozen.
+The fixed-kinematics law refuses unsupported stored-tensor paths, thermal expansion,
 changing geometry, phase change and unsupported source intervals. This extends
 the retained contact material law; it does not assert measured rosin parameters
 or instrument sound validation.

@@ -115,7 +115,7 @@ pub struct TensorLayerRelaxationArm {
     pub relaxation_time_s: f64,
 }
 
-/// Complete affine derivatives of the retained equilibrium and Maxwell
+/// Complete temperature derivatives of the retained equilibrium and Maxwell
 /// stiffness tensors [N/(m K)]. Signed cross terms and indefinite derivatives
 /// are physical possibilities; only the actual stored tensors must be PSD.
 /// These numerical inputs do not themselves establish material-source authority.
@@ -210,7 +210,8 @@ impl ThirdBodyLayerContact {
     /// S=-e^T K' e/2-sum(r_j^T K'_j r_j/2), U=Psi+T*S, using the
     /// SAME retained physical spring strains as the tensor force law. Every
     /// branch derivative is required in source order, including a zero slope.
-    /// The coupled owner admits the full affine interval and accounts for both
+    /// The coupled owner admits the full source interval, refreshes nonlinear
+    /// derivatives at this law's temperature, and accounts for both
     /// coefficient work and delta(T*S). Neither Kelvin viscosity nor plastic
     /// kinetics has stored free energy, even when either varies with temperature.
     pub fn tensor_thermodynamics(&self, state: &ThirdBodyLayerState,
