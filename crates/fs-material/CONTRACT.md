@@ -8437,3 +8437,12 @@ reconstruction, which resolves transport and all retained query axes at the
 new temperature and pressure. Three native prepared-branch tests pass,
 including exact numeric/full-state agreement for heating, cooling and zero
 increment, source reuse, invalid domains and cancellation.
+
+
+## Joint multi-branch Chaboche and Perzyna kinetics
+
+plastic::chaboche::rate::ChabocheOverstressJ2<N> integrates the original Chaboche/Voce/Prager history with explicitly timed linear or power-law Perzyna flow. It solves native consistency F(delta_alpha) minus the inverse kinetic stress, retaining the increment-dependent nonproportional direction and every implicit backstress. The added kinetic derivative enters the original generally nonsymmetric tensor tangent. Linear viscosity reuses the native consistency solve with eta/dt added to its scalar correction; nonlinear kinetics use a safeguarded logarithmic bracket with a 96-iteration ceiling. Inverse kinetics are shared with VoceOverstressJ2. Responses use fixed branch arrays without heap allocation.
+
+Physical dissipation contains yield work, viscous overstress work and native dynamic-recovery loss exactly once. Voce, linear and branch storage and all backward-Euler numerical losses retain their original owners. Absent branches reduce exactly to VoceOverstressJ2; exponent one recovers linear kinetics. Unselected native Chaboche and its axial restriction retain their original path. Positive physical duration, admitted kinetics and finite reachable history are required. Static recovery, sub-yield creep, finite deformation and empirical cyclic-rate calibration remain outside this law.
+
+Seven focused regressions check independently prescribed increments and each branch, all 36 tangent entries under nonproportional reversal, complete cyclic energy partitions, exact reductions, analytical nonlinear stress relaxation with time refinement, tiny rate increments and invalid history/kinetics. Existing Chaboche, axial and branch-source regressions protect the unchanged untimed paths.

@@ -30,6 +30,8 @@ use fs_math::det;
 
 /// Exact free-sided axial restriction using the same scalar consistency solve.
 pub mod axial;
+/// Joint linear/power-law kinetics with the native multi-branch history owner.
+pub mod rate;
 /// Fixed-condition source binding with independently selected branch coefficients.
 pub mod source;
 
@@ -460,19 +462,41 @@ impl<const N: usize> ChabocheJ2<N> {
         state: &ChabocheState<N>,
         with_tangent: bool,
     ) -> Result<ChabocheResponse<N>, ChabocheError> {
+        self.response_with_rate(strain, state, with_tangent, None)
+    }
+
+    // The selected rate changes only scalar consistency and its derivative.
+    // Branch transport, tensor correction, tangent and history stay here.
+    fn response_with_rate(
+        &self,
+        strain: &Voigt,
+        state: &ChabocheState<N>,
+        with_tangent: bool,
+        kinetics: Option<&super::rate::VoceOverstressJ2>,
+    ) -> Result<ChabocheResponse<N>, ChabocheError> {
         self.backbone.backbone().admit_energy_strain(strain)?;
         self.backbone
             .backbone()
             .validate_plastic_history(&state.plastic)?;
         self.validate_branches(state)?;
         if self.absent() {
+            let plastic = match kinetics {
+                Some(rate) => rate.update_state(strain, &state.plastic),
+                None => self.backbone.update_state(strain, &state.plastic),
+            };
             let next = ChabocheState {
-                plastic: self.backbone.update_state(strain, &state.plastic),
+                plastic,
                 backstress_pa: state.backstress_pa,
             };
-            let stress_pa = self.backbone.stress(strain, &state.plastic);
+            let stress_pa = match kinetics {
+                Some(rate) => rate.stress(strain, &state.plastic),
+                None => self.backbone.stress(strain, &state.plastic),
+            };
             let tangent_pa = if with_tangent {
-                self.backbone.tangent(strain, &state.plastic)
+                match kinetics {
+                    Some(rate) => rate.tangent(strain, &state.plastic),
+                    None => self.backbone.tangent(strain, &state.plastic),
+                }
             } else {
                 [[0.0; 6]; 6]
             };
@@ -498,7 +522,10 @@ impl<const N: usize> ChabocheJ2<N> {
         let trial_dev = deviator(&elastic_strain);
         let prager = linear.backstress_pa(&state.plastic);
         let trial = core::array::from_fn(|i| 2.0 * mu * trial_dev[i] - prager[i]);
-        let solution = self.solve_increment(&trial, state, 3.0 * mu)?;
+        let solution = match kinetics {
+            Some(rate) => self.solve_rate_increment(&trial, state, 3.0 * mu, rate)?,
+            None => self.solve_increment(&trial, state, 3.0 * mu)?,
+        };
         let next = self.returned_state(state, &solution);
         self.validate_history(strain, &next)?;
         let stress_pa = linear
@@ -536,14 +563,30 @@ impl<const N: usize> ChabocheJ2<N> {
         strain: &Voigt,
         tolerances: EnergyTolerances,
     ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
+        self.advance_with_rate_energy(old_strain, old_state, strain, tolerances, None)
+    }
+
+    fn advance_with_rate_energy(
+        &self,
+        old_strain: &Voigt,
+        old_state: &ChabocheState<N>,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+        kinetics: Option<&super::rate::VoceOverstressJ2>,
+    ) -> Result<ChabocheEnergyIncrement<N>, ChabocheError> {
         self.validate_history(old_strain, old_state)?;
         if self.absent() {
-            let next = self.backbone.advance_with_energy(
-                old_strain,
-                &old_state.plastic,
-                strain,
-                tolerances,
-            )?;
+            let next = match kinetics {
+                Some(rate) => {
+                    rate.advance_with_energy(old_strain, &old_state.plastic, strain, tolerances)?
+                }
+                None => self.backbone.advance_with_energy(
+                    old_strain,
+                    &old_state.plastic,
+                    strain,
+                    tolerances,
+                )?,
+            };
             return Ok(ChabocheEnergyIncrement {
                 strain: next.strain,
                 stress_pa: next.stress_pa,
@@ -564,14 +607,18 @@ impl<const N: usize> ChabocheJ2<N> {
                 "energy and yield allowances must be finite and positive",
             ));
         }
-        let next = self.response_impl(strain, old_state, false)?;
+        let next = self.response_with_rate(strain, old_state, false, kinetics)?;
         let delta = next.state.plastic.alpha - old_state.plastic.alpha;
         if delta < 0.0 || delta == 0.0 && next.state != *old_state {
             return Err(ChabocheError::Invalid(
                 "nonrepresentable accumulated history increment",
             ));
         }
-        let residual = self.yield_function_with_state(&next.stress_pa, &next.state);
+        let mut residual = self.yield_function_with_state(&next.stress_pa, &next.state);
+        let overstress = kinetics.map(|rate| rate.endpoint_overstress(delta));
+        if let Some(viscous) = overstress {
+            residual -= viscous;
+        }
         if !residual.is_finite()
             || residual > tolerances.yield_pa
             || delta > 0.0 && residual.abs() > tolerances.yield_pa
@@ -632,6 +679,9 @@ impl<const N: usize> ChabocheJ2<N> {
             numerical_dissipation_j_m3: numerical_dissipation,
             residual_j_m3: 0.0,
         };
+        if let Some(viscous) = overstress {
+            energy.physical_dissipation_j_m3 += viscous * delta;
+        }
         energy.residual_j_m3 = energy.mechanical_work_j_m3
             - energy.stored_change_j_m3()
             - energy.physical_dissipation_j_m3

@@ -100,7 +100,7 @@ impl VoceOverstressJ2 {
         }
     }
 
-    fn endpoint_overstress(&self, delta: f64) -> f64 {
+    pub(crate) fn endpoint_overstress(&self, delta: f64) -> f64 {
         if delta == 0.0 {
             return 0.0;
         }
@@ -108,6 +108,20 @@ impl VoceOverstressJ2 {
             return self.kinetics.linear.overstress_modulus_pa * delta;
         }
         det::exp(self.log_kinetic_coefficient + det::ln(delta) / self.exponent())
+    }
+
+    // Shared inverse kinetics for the native multi-branch consistency owner.
+    // Logarithmic iterates avoid forming an overflowing stress power.
+    pub(crate) fn overstress_from_log_increment(&self, log_delta: f64) -> f64 {
+        if self.exponent() == 1.0 {
+            self.kinetics.linear.overstress_modulus_pa * det::exp(log_delta)
+        } else {
+            det::exp(self.log_kinetic_coefficient + log_delta / self.exponent())
+        }
+    }
+
+    pub(crate) const fn linear_overstress_modulus_pa(&self) -> f64 {
+        self.kinetics.linear.overstress_modulus_pa
     }
 
     fn plastic_increment(&self, q_trial: f64, alpha: f64) -> f64 {
