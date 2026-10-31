@@ -10,11 +10,11 @@ use fs_matdb::{ClaimSet, InterpolationPolicy, MaterialStateId, PropertyClaim,
     Provenance, SelectionPolicy, UncertaintyModel};
 use fs_qty::Density;
 
-pub(in crate::cavity_phs::piston::thermal) fn point(t: f64) -> QueryPoint {
+pub(in crate::cavity_phs::piston) fn point(t: f64) -> QueryPoint {
     QueryPoint::new().with_quantity("T",semantic(QuantityKind::AbsoluteTemperature),t).unwrap()
         .with("lot",7.0).unwrap().with("melt",0.0).unwrap()
 }
-pub(in crate::cavity_phs::piston::thermal) fn material(
+pub(in crate::cavity_phs::piston) fn material(
     k: Option<f64>,
     typed: bool,
     phase_curve: bool,

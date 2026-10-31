@@ -107,10 +107,12 @@ impl<G: PistonGas> MaterialGasPiston<G> {
     /// Publish both returned endpoints together; neither input is mutated.
     #[allow(clippy::too_many_arguments)]
     pub fn thermal_candidate<S, E>(
-        &self, input: PistonInput, thermal_body: UniformEnthalpyStepInput<'_>,
-        controls: PistonSolve, exchange: HeatExchangeSolve,
-        resolve: impl FnMut(&G::State, EquilibriumPhaseState)
-            -> Result<ConductanceSample<S>, E>,
+        &self,
+        input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve,
+        exchange: HeatExchangeSolve,
+        resolve: impl FnMut(&G::State, EquilibriumPhaseState) -> Result<ConductanceSample<S>, E>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialThermalPistonCandidate<S, G>, ThermalPistonError<E>> {
         let candidate = self.piston.thermal_candidate(input, thermal_body, controls,
@@ -121,6 +123,61 @@ impl<G: PistonGas> MaterialGasPiston<G> {
         };
         if cancelled() { return Err(ThermalPistonError::Cancelled); }
         Ok(candidate)
+    }
+}
+
+impl<G: PistonGas> MaterialGasPiston<G> {
+    /// Use the same source-bound gas/body conduction layers with either native
+    /// gas owner. Gas conductivity belongs to the actual resolved midpoint.
+    pub fn thermal_layers_candidate(
+        &self,
+        input: PistonInput,
+        thermal_body: UniformEnthalpyStepInput<'_>,
+        controls: PistonSolve,
+        exchange: HeatExchangeSolve,
+        layers: MaterialConductionLayers<'_>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        MaterialThermalPistonCandidate<ResolvedMaterialStatePoint, G>,
+        ThermalPistonError<LayerConductionError>,
+    >
+    where
+        G::State: fs_material::fluid_transport::FluidTransport,
+    {
+        self.thermal_candidate(
+            input,
+            thermal_body,
+            controls,
+            exchange,
+            |gas, thermal| layers.resolve(gas, thermal),
+            cancelled,
+        )
+    }
+}
+
+/// Forward the original dynamics owner's schemas, window and accepted audit.
+/// Binding a specimen neither creates another port clock nor resets its history.
+impl<G: PistonGas> fs_ports::PortedModule for MaterialGasPiston<G> {
+    fn port_schemas(&self) -> &[fs_ports::PortSchema] {
+        fs_ports::PortedModule::port_schemas(&self.piston)
+    }
+    fn port_coordinate_charts(&self) -> &[fs_ports::PortCoordinateChart] {
+        fs_ports::PortedModule::port_coordinate_charts(&self.piston)
+    }
+    fn junction_schemas(&self) -> &[fs_ports::JunctionSchema] {
+        fs_ports::PortedModule::junction_schemas(&self.piston)
+    }
+    fn last_window_duration_s(&self) -> Option<f64> {
+        fs_ports::PortedModule::last_window_duration_s(&self.piston)
+    }
+    fn last_window_transfers(&self) -> Option<&[fs_ports::IntegratedWindowTransfer]> {
+        fs_ports::PortedModule::last_window_transfers(&self.piston)
+    }
+    fn last_window_transfer_error(&self) -> Option<&fs_ports::CoupleError> {
+        fs_ports::PortedModule::last_window_transfer_error(&self.piston)
+    }
+    fn audit_last_window(&self) -> Result<fs_ports::ModuleWindowAudit, fs_ports::CoupleError> {
+        fs_ports::PortedModule::audit_last_window(&self.piston)
     }
 }
 
@@ -571,4 +628,3 @@ impl MaterialDoubleActingGasPiston {
 
 #[cfg(test)]
 pub(super) mod tests;
-

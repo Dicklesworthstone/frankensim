@@ -18443,8 +18443,9 @@ acceptance gates and port account. `PistonStep<S>` retains the complete resolved
 midpoint state. Existing ideal defaults retain their original applicability.
 The reciprocal finite-body heat solve, state-dependent body-power solve and
 source-bound translating inertia now accept either gas owner. Specialized
-nozzle, reaction, double-acting and network adapters keep their stated ideal-gas
-applicability.
+reaction, double-acting and network adapters retain their stated gas
+applicability. Explicit real-gas nozzle adapters retain their own source,
+flow-splitting and homogeneous-phase admission contracts.
 
 The gas owner supplies conservative heat/volume candidates, work-conjugate
 midpoint pressure and its discrete endpoint-volume derivative. Actual resolved
@@ -18456,7 +18457,7 @@ and heat must close before final cancellation admission and atomic publication
 of gas, motion and the shared port window.
 
 The PR mode retains the homogeneous frozen-composition source-admitted branch.
-It supplies no phase equilibrium, latent heat, reacting/nozzle exchange,
+It supplies no phase equilibrium, gas latent heat, reacting chemistry,
 friction/contact stops or exact-isentropy/nonnegative-entropy guarantee. Focused
 regression sources cover dense-gas motion and energy accounting, fixed-wall
 heating, real-EOS acoustic admission, and source/cancellation refusal with replay.
@@ -18485,9 +18486,15 @@ thermal and powered candidates preserve both owners and the native port account;
 they do not reconstruct a fresh piston or silently change mechanical mass when a
 thermal body heats or changes phase. Source-bound layer conduction and actual-
 midpoint power therefore continue accepted compression without dropping density
-receipts, resetting motion, or counting source energy twice. Thermal storage may represent a separate wall, and
-its uniform-temperature, fixed-geometry and negligible-deformation-work assumptions
-remain explicit.
+receipts, resetting motion, or counting source energy twice. Thermal storage may
+represent a separate wall, and its uniform-temperature, fixed-geometry and
+negligible-deformation-work assumptions remain explicit.
+
+`MaterialGasPiston::thermal_layers_candidate` connects those original conduction
+layers to the retained material-bound mechanism for either admitted gas owner.
+Its `PortedModule` implementation forwards every schema, coordinate chart,
+junction, accepted window, transfer, observation error and audit to the original
+native piston. It introduces no second port clock or reconstructed exchange.
 
 Focused regression sources cover repeated dense-gas compression with sourced
 finite-wall heat, latent-wall cooling, actual-midpoint state-dependent power,

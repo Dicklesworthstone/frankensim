@@ -251,3 +251,227 @@ mod double_acting {
         assert_ne!(wall.gases()[1].state(), before.gases()[1].state());
     }
 }
+
+mod nonideal {
+    //! Source-bound rigid inertia on the existing manufactured PR gas fixture.
+    //! The native parcel fixture is synthetic; no empirical validation is claimed.
+    use super::body;
+    use crate::cavity_phs::piston::material::MaterialGasPiston;
+    use crate::cavity_phs::piston::nonideal_tests::{controls, drive as native_drive, parcel};
+    use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
+    use crate::cavity_phs::piston::thermal::layers::tests::{
+        material as thermal_material, point as thermal_point,
+    };
+    use crate::cavity_phs::piston::thermal::{HeatExchangeSolve, ThermalPistonError};
+    use crate::cavity_phs::piston::{
+        GasPiston, PistonError, PistonInput, PistonSolve, PistonSupport,
+    };
+    use fs_material::phase::UniformEnthalpyStepInput;
+    use fs_material::state_point::MaterialPropertySelection;
+    use fs_ports::{ModuleWindowAudit, PortedModule};
+
+    fn drive(heat_j: f64) -> PistonInput {
+        // Resolve the faster acoustic/mechanical clock of the lighter specimen.
+        PistonInput {
+            duration_s: 2e-6,
+            ..native_drive(heat_j)
+        }
+    }
+
+    fn same_ports(left: &impl PortedModule, right: &impl PortedModule) {
+        assert_eq!(left.port_schemas(), right.port_schemas());
+        assert_eq!(
+            left.port_coordinate_charts(),
+            right.port_coordinate_charts()
+        );
+        assert_eq!(left.junction_schemas(), right.junction_schemas());
+        assert_eq!(
+            left.last_window_duration_s(),
+            right.last_window_duration_s()
+        );
+        assert_eq!(left.last_window_transfers(), right.last_window_transfers());
+        assert_eq!(
+            left.last_window_transfer_error(),
+            right.last_window_transfer_error()
+        );
+        assert_eq!(
+            left.audit_last_window().unwrap(),
+            right.audit_last_window().unwrap()
+        );
+    }
+
+    #[test]
+    fn real_gas_binding_reuses_the_exact_native_owner_and_canonical_inertia() {
+        let gas = parcel();
+        let specimen = body(8000.0);
+        let mut native =
+            GasPiston::new(gas.clone(), specimen.inertia().mass(), 0.01, -0.03).unwrap();
+        let mut sourced = MaterialGasPiston::new(gas, specimen.clone(), 0.01, -0.03).unwrap();
+        same_ports(&sourced, &native);
+        for heat_j in [25.0, 0.0, -5.0] {
+            let expected = native.step(drive(heat_j), controls(), || false).unwrap();
+            let actual = sourced.step(drive(heat_j), controls(), || false).unwrap();
+            assert_eq!(actual, expected);
+            assert_eq!(sourced.piston(), &native);
+            assert_eq!(sourced.body(), &specimen);
+            assert_eq!(sourced.piston().mass_kg(), specimen.inertia().mass());
+            assert_eq!(
+                sourced.gas().point().axes().get("specimen-lot"),
+                Some(&42.0)
+            );
+            same_ports(&sourced, &native);
+        }
+        assert!(matches!(
+            sourced.audit_last_window().unwrap(),
+            ModuleWindowAudit::Available(_)
+        ));
+    }
+
+    #[test]
+    fn real_gas_fixed_support_and_failed_updates_preserve_the_specimen_and_ports() {
+        let specimen = body(8000.0);
+        let gas = parcel();
+        let mut direct = gas.clone();
+        let mut wall = MaterialGasPiston::new(gas.clone(), specimen.clone(), 0.01, 0.0)
+            .unwrap()
+            .with_fixed_support()
+            .unwrap();
+        let input = PistonInput {
+            duration_s: 0.5,
+            ..drive(200.0)
+        };
+        let fixed = PistonSolve {
+            volume_bracket_m3: [gas.volume_m3(); 2],
+            ..controls()
+        };
+        let step = wall.step(input, fixed, || false).unwrap();
+        direct.add_heat(input.heat_j, fixed.gas, || false).unwrap();
+        assert_eq!(wall.body(), &specimen);
+        assert_eq!(wall.piston().support(), PistonSupport::Fixed);
+        assert_eq!(wall.piston().velocity_m_s(), 0.0);
+        assert_eq!(wall.gas().volume_m3(), gas.volume_m3());
+        assert_eq!(step.support_work_j, 0.0);
+        assert_eq!(step.gas.work_by_gas_j, 0.0);
+        assert!((wall.gas().state().temperature_k() - direct.state().temperature_k()).abs() < 1e-8);
+        same_ports(&wall, wall.piston());
+        let before = wall.clone();
+        assert!(matches!(
+            wall.step(
+                PistonInput {
+                    heat_j: 1e12,
+                    ..input
+                },
+                fixed,
+                || false
+            ),
+            Err(PistonError::Gas(_))
+        ));
+        assert_eq!(wall, before);
+        same_ports(&wall, &before);
+        let mut probe = before.clone();
+        let mut calls = 0;
+        let expected = probe
+            .step(input, fixed, || {
+                calls += 1;
+                false
+            })
+            .unwrap();
+        let mut observed = 0;
+        assert_eq!(
+            wall.step(input, fixed, || {
+                observed += 1;
+                observed == calls
+            }),
+            Err(PistonError::Cancelled)
+        );
+        assert_eq!(wall, before);
+        same_ports(&wall, &before);
+        assert_eq!(wall.step(input, fixed, || false).unwrap(), expected);
+        assert_eq!(wall, probe);
+        same_ports(&wall, &probe);
+    }
+
+    #[test]
+    fn real_gas_thermal_candidate_preserves_body_identity_and_complete_native_history() {
+        let mut wall = MaterialGasPiston::new(parcel(), body(8000.0), 0.01, 0.03).unwrap();
+        wall.step(drive(10.0), controls(), || false).unwrap();
+        let before = wall.clone();
+        let (card, key, caloric) = thermal_material(Some(0.2), true, false);
+        let context = thermal_point(300.0);
+        let curve = caloric.curve();
+        let layers = || MaterialConductionLayers {
+            material: &card,
+            context: &context,
+            temperature_axis: "T",
+            liquid_fraction_axis: None,
+            conductivity: &key,
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            area_m2: 0.02,
+            gas_distance_m: 1e-5,
+            body_distance_m: 1e-4,
+        };
+        let input = drive(5.0);
+        let thermal = UniformEnthalpyStepInput {
+            curve,
+            initial: curve.state_at_specific_enthalpy(150000.0).unwrap(),
+            mass_kg: 0.001,
+            volume_m3: 0.001 / 4000.0,
+            surface_area_m2: 0.02,
+            internal_heat_j: 0.0,
+            duration_s: input.duration_s,
+        };
+        let exchange = HeatExchangeSolve {
+            heat_bracket_j: [-1.0, 1.0],
+            source_tolerance_j: 1e-9,
+            energy_tolerance_j: 1e-6,
+            maximum_iterations: 128,
+        };
+        let native = wall
+            .piston()
+            .thermal_candidate(
+                input,
+                thermal,
+                controls(),
+                exchange,
+                |gas, body| layers().resolve(gas, body),
+                || false,
+            )
+            .unwrap();
+        let mut calls = 0;
+        let candidate = wall
+            .thermal_layers_candidate(input, thermal, controls(), exchange, layers(), || {
+                calls += 1;
+                false
+            })
+            .unwrap();
+        assert_eq!(candidate.piston().piston(), native.piston());
+        assert_eq!(candidate.piston().body(), before.body());
+        assert_eq!(candidate.thermal(), native.thermal());
+        assert_eq!(candidate.step(), native.step());
+        assert!(candidate.step().exchanged_heat_j > 0.0);
+        assert!(candidate.step().total_energy_residual_j.abs() <= exchange.energy_tolerance_j);
+        same_ports(candidate.piston(), native.piston());
+        assert_eq!(wall, before);
+        same_ports(&wall, &before);
+        let mut observed = 0;
+        assert!(matches!(
+            wall.thermal_layers_candidate(input, thermal, controls(), exchange, layers(), || {
+                observed += 1;
+                observed == calls
+            }),
+            Err(ThermalPistonError::Cancelled)
+        ));
+        assert_eq!(wall, before);
+        same_ports(&wall, &before);
+        let (accepted, accepted_thermal, report) = candidate.into_parts();
+        assert_eq!(accepted.body(), before.body());
+        assert_eq!(accepted_thermal.report.card_identity(), card.content_hash());
+        assert_eq!(
+            accepted_thermal.report.query_point().get("T"),
+            Some(&report.thermal_midpoint.temperature_k())
+        );
+        assert_eq!(accepted_thermal.report.query_point().get("lot"), Some(&7.0));
+        assert_eq!(accepted_thermal.external_heat_j, -report.exchanged_heat_j);
+        same_ports(&accepted, native.piston());
+    }
+}

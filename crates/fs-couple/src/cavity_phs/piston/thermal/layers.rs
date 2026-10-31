@@ -159,4 +159,4 @@ impl MaterialConductionLayers<'_> {
 }
 
 #[cfg(test)]
-pub(super) mod tests;
+pub(in crate::cavity_phs::piston) mod tests;
