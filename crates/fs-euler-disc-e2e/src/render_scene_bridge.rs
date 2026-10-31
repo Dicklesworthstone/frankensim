@@ -16,6 +16,7 @@ use fs_geom::{Aabb, Chart, Point3, Vec3};
 use fs_material::state_point::{
     IsotropicElasticStatePoint, IsotropicSolidStatePoint, ResolvedMaterialStatePoint,
     VisibleConductorStatePoint, VisibleDielectricStatePoint, VisibleOpticalStatePoint,
+    VisibleTabulatedDielectricStatePoint,
 };
 use fs_math::det;
 use fs_mbd::{MassProperties, Pose as MbdPose, Vec3 as MbdVec3};
@@ -423,6 +424,47 @@ impl EulerDiscMaterialStateBinding {
         .into();
         let mechanical_state_identity = mechanical.identity();
         let optical_state_identity = optical_resolved.identity();
+        let material_card_identity = mechanical.card_identity();
+        let mut hasher =
+            DomainHasher::new("org.frankensim.euler-disc.resolved-dielectric-material-binding.v1");
+        for identity in [
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+        ] {
+            hasher.update(identity.as_bytes());
+        }
+        hash_material(&mut hasher, appearance);
+        Ok(Self {
+            mechanical_state_identity,
+            optical_state_identity,
+            material_card_identity,
+            surface_state_identity,
+            appearance,
+            identity: hasher.finalize(),
+        })
+    }
+
+    /// Bind sampled dielectric optics to the same accepted material state.
+    /// `None` admits a smooth boundary; table values reach the existing spectral
+    /// tracer without fitting a Cauchy law or lifting an RGB tint.
+    pub fn try_tabulated_dielectric_resolved(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &VisibleTabulatedDielectricStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, EulerSceneError> {
+        let appearance = MaterialOpticalBinding::try_tabulated_dielectric(
+            mechanical,
+            optical,
+            roughness_alpha,
+            surface_state_identity,
+        )?
+        .appearance()
+        .into();
+        let mechanical_state_identity = mechanical.identity();
+        let optical_state_identity = optical.resolved().identity();
         let material_card_identity = mechanical.card_identity();
         let mut hasher =
             DomainHasher::new("org.frankensim.euler-disc.resolved-dielectric-material-binding.v1");

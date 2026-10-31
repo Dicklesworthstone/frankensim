@@ -2,10 +2,10 @@
 //!
 //! Bulk optics and mechanics must come from one immutable card at one query
 //! point. Surface finish is an independent input, not inferred from chemistry.
-//! Conversion retains the existing visible-band conductor, Cauchy or Sellmeier
-//! dispersion and Beer-Lambert absorption models. The separately declared
-//! gray/diffuse thermal binding reuses
-//! a conduction emissivity sample at the same complete accepted material state.
+//! Conversion retains visible-band conductor optics, Cauchy/Sellmeier or
+//! sampled dielectric dispersion, and Beer-Lambert absorption. The gray/diffuse
+//! thermal binding reuses a conduction emissivity sample at the same complete
+//! accepted material state.
 //! Neither binding authenticates measurements or supplies experimental validation.
 
 /// Molecular optics on the original shared gas density and composition.
@@ -18,7 +18,7 @@ use fs_matdb::MaterialCard;
 use fs_material::state_point::{
     MaterialStatePointError, ResolvedMaterialStatePoint, VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM,
     VisibleConductorStatePoint, VisibleDielectricAbsorption, VisibleDielectricStatePoint,
-    VisibleOpticalStatePoint, VisibleSellmeierStatePoint,
+    VisibleOpticalStatePoint, VisibleSellmeierStatePoint, VisibleTabulatedDielectricStatePoint,
 };
 
 use crate::conductor::{
@@ -26,8 +26,8 @@ use crate::conductor::{
     ConductorSurface,
 };
 use crate::dielectric::{
-    BeerLambertAbsorption, CauchyIor, DielectricError, DielectricGlass, DielectricSurface,
-    GlassProvenance, SellmeierIor,
+    BeerLambertAbsorption, CauchyIor, DielectricError, DielectricGlass, DielectricIor,
+    DielectricIorSample, DielectricSurface, GlassProvenance, SellmeierIor, TabulatedIor,
 };
 use crate::thermal_surface::{GrayDiffuseThermalSurface, ThermalSurfaceError};
 use crate::tracer::Material;
@@ -157,7 +157,7 @@ pub enum OpticalAppearance {
         /// Explicit surface finish.
         surface: ConductorSurface,
     },
-    /// Homogeneous dielectric dispersion and Beer-Lambert absorption.
+    /// Homogeneous spectral dispersion and Beer-Lambert absorption.
     Dielectric {
         /// Admitted bulk optical law.
         glass: DielectricGlass,
@@ -205,6 +205,12 @@ impl MaterialOpticalBinding {
                 Self::try_conductor(mechanical, state, roughness_alpha, surface_state_identity)
             }
             VisibleOpticalStatePoint::Dielectric(state) => Self::try_dielectric(
+                mechanical,
+                state,
+                Some(roughness_alpha),
+                surface_state_identity,
+            ),
+            VisibleOpticalStatePoint::TabulatedDielectric(state) => Self::try_tabulated_dielectric(
                 mechanical,
                 state,
                 Some(roughness_alpha),
@@ -277,6 +283,44 @@ impl MaterialOpticalBinding {
         ))
     }
 
+    /// Bind the material's sampled phase index and intensity absorption without
+    /// a Cauchy fit or RGB lifting. Samples use vacuum nanometres and inverse
+    /// metres; `None` selects a smooth boundary. Source claims and the complete
+    /// accepted material state remain identity-bound, independently of finish.
+    pub fn try_tabulated_dielectric(
+        mechanical: &ResolvedMaterialStatePoint,
+        optical: &VisibleTabulatedDielectricStatePoint,
+        roughness_alpha: Option<f64>,
+        surface_state_identity: ContentHash,
+    ) -> Result<Self, MaterialOpticalError> {
+        Self::validate_state(mechanical, optical.resolved(), surface_state_identity)?;
+        let mut indices = [DielectricIorSample::try_new(380.0, 1.0)?; 9];
+        let mut absorption = [(380.0, 0.0); 9];
+        for ((index, coefficient), sample) in indices
+            .iter_mut()
+            .zip(absorption.iter_mut())
+            .zip(optical.samples())
+        {
+            *index = DielectricIorSample::try_new(sample.wavelength_nm, sample.phase_index)?;
+            *coefficient = (sample.wavelength_nm, sample.absorption_per_m);
+        }
+        let glass = DielectricGlass::with_ior(
+            DielectricIor::Tabulated(TabulatedIor::try_new(indices)?),
+            BeerLambertAbsorption::try_from_spectral_extinction(&absorption)?,
+            GlassProvenance::Custom,
+        );
+        let surface = match roughness_alpha {
+            Some(alpha) => DielectricSurface::try_rough(alpha)?,
+            None => DielectricSurface::SMOOTH,
+        };
+        Ok(Self::new(
+            mechanical,
+            optical.resolved(),
+            surface_state_identity,
+            OpticalAppearance::Dielectric { glass, surface },
+        ))
+    }
+
     /// Refresh bulk optics to the new accepted material state while retaining
     /// the original optical family, source claims and independent surface finish.
     /// `optical` must be the exact source state used by this binding. The returned
@@ -314,6 +358,15 @@ impl MaterialOpticalBinding {
                 OpticalAppearance::Dielectric { surface, .. },
                 VisibleOpticalStatePoint::Dielectric(state),
             ) => Self::try_dielectric(
+                accepted,
+                state,
+                surface.roughness_alpha(),
+                self.surface_state_identity,
+            ),
+            (
+                OpticalAppearance::Dielectric { surface, .. },
+                VisibleOpticalStatePoint::TabulatedDielectric(state),
+            ) => Self::try_tabulated_dielectric(
                 accepted,
                 state,
                 surface.roughness_alpha(),

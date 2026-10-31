@@ -324,6 +324,211 @@ fn g0_optical_binding_retains_quantity_meaning_at_identical_numeric_coordinates(
     ));
 }
 
+fn sampled_dielectric_card() -> MaterialCard {
+    use fs_material::state_point::{
+        VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES, VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+        VISIBLE_DIELECTRIC_IOR_PROPERTIES,
+    };
+    let base = card(0.2);
+    let mut claims = base.claims().clone();
+    for index in 0..9 {
+        let eta = 1.6 - index as f64 * 0.01;
+        let absorption = if index == 3 { 50.0 } else { 2.0 };
+        for (name, quantity, cold, hot) in [
+            (
+                VISIBLE_DIELECTRIC_IOR_PROPERTIES[index],
+                QuantitySpec::dimensional(Dims::NONE),
+                eta,
+                eta + 0.1,
+            ),
+            (
+                VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[index],
+                VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+                absorption,
+                2.0 * absorption,
+            ),
+        ] {
+            claims
+                .insert_claim(PropertyClaim {
+                    key: PropertyKey::with_quantity(name, quantity),
+                    value: PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: Temperature::DIMS,
+                        knots: vec![(1200.0, cold), (1800.0, hot)],
+                        dims: quantity.dims(),
+                    },
+                    validity: ValidityDomain::unconstrained().with("T", 1200.0, 1800.0),
+                    uncertainty: UncertaintyModel::Unstated,
+                    interpolation: InterpolationPolicy::LinearInside,
+                    observations: Vec::new(),
+                    provenance: Provenance {
+                        source: "synthetic temperature-dependent dielectric spectrum".into(),
+                        license: "internal-test-use".into(),
+                        artifact: None,
+                    },
+                })
+                .unwrap();
+        }
+    }
+    MaterialCard::supersede(&base, claims, Vec::new()).unwrap()
+}
+
+#[test]
+fn g1_tabulated_material_drives_chromatic_snell_and_spectral_beer_lambert() {
+    use fs_material::state_point::resolve_visible_optical_state_point;
+    use fs_render::dielectric::{DielectricEvent, sample_smooth_dielectric};
+    let source = sampled_dielectric_card();
+    let mut identities = Vec::new();
+    for (temperature, delta_n, absorption_factor) in [(1200.0, 0.0, 1.0), (1800.0, 0.1, 2.0)] {
+        let point = QueryPoint::new().with("T", temperature).unwrap();
+        let optical = resolve_visible_optical_state_point(
+            &source,
+            &point,
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
+        let accepted = state_at(&source, &point);
+        let binding =
+            MaterialOpticalBinding::try_visible(&accepted, &optical, 0.1, ContentHash([74; 32]))
+                .unwrap();
+        identities.push(binding.identity());
+        let Material::Dielectric { glass, .. } = binding.material() else {
+            panic!("sampled material must reach dielectric transport");
+        };
+        for (lambda, index, coefficient) in [
+            (530.0, 1.57, 50.0),
+            (555.0, 1.565, 26.0),
+            (680.0, 1.54, 2.0),
+        ] {
+            let n = index + delta_n;
+            assert!((glass.ior().eval(lambda).unwrap() - n).abs() < 1.0e-14);
+            let refracted = sample_smooth_dielectric(
+                Vec3::new(0.0, 0.0, 1.0),
+                Vec3::new(0.6, 0.0, 0.8),
+                1.0,
+                glass.ior().eval(lambda).unwrap(),
+                0.99,
+            )
+            .unwrap();
+            assert_eq!(refracted.event, DielectricEvent::Transmission);
+            assert!((refracted.direction.x + 0.6 / n).abs() < 1.0e-14);
+            let expected = (-coefficient * absorption_factor * 0.02_f64).exp();
+            assert!(
+                (glass.absorption().transmittance(lambda, 0.02).unwrap() - expected).abs()
+                    < 1.0e-13
+            );
+        }
+        assert_eq!(binding.accepted_state_identity(), accepted.identity());
+    }
+    assert_ne!(identities[0], identities[1]);
+}
+
+#[test]
+fn g0_sampled_dielectric_binding_refuses_stale_state_and_missing_surface() {
+    use fs_material::state_point::resolve_visible_tabulated_dielectric_state_point;
+    let source = sampled_dielectric_card();
+    let point = QueryPoint::new().with("T", 1500.0).unwrap();
+    let optical = resolve_visible_tabulated_dielectric_state_point(
+        &source,
+        &point,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    assert_eq!(
+        MaterialOpticalBinding::try_tabulated_dielectric(
+            &state(&source, 1501.0),
+            &optical,
+            None,
+            ContentHash([74; 32]),
+        )
+        .unwrap_err(),
+        MaterialOpticalError::StateMismatch,
+    );
+    assert_eq!(
+        MaterialOpticalBinding::try_tabulated_dielectric(
+            &state_at(&source, &point),
+            &optical,
+            None,
+            ContentHash([0; 32]),
+        )
+        .unwrap_err(),
+        MaterialOpticalError::MissingSurfaceIdentity,
+    );
+    let binding = MaterialOpticalBinding::try_tabulated_dielectric(
+        &state_at(&source, &point),
+        &optical,
+        None,
+        ContentHash([74; 32]),
+    )
+    .unwrap();
+    let Material::Dielectric { surface, .. } = binding.material() else {
+        panic!("sampled dielectric binding");
+    };
+    assert_eq!(surface, DielectricSurface::SMOOTH);
+}
+
+#[test]
+fn g3_sampled_dielectric_refresh_preserves_family_sources_and_finish() {
+    use fs_material::state_point::{VisibleOpticalStatePoint, resolve_visible_optical_state_point};
+    let source = sampled_dielectric_card();
+    let cold = state(&source, 1200.0);
+    let warm = state(&source, 1800.0);
+    let optical = resolve_visible_optical_state_point(
+        &source,
+        &cold.query(),
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    let VisibleOpticalStatePoint::TabulatedDielectric(sampled) = &optical else {
+        panic!("sampled fixture family");
+    };
+    for alpha in [None, Some(0.2)] {
+        let binding = MaterialOpticalBinding::try_tabulated_dielectric(
+            &cold,
+            sampled,
+            alpha,
+            ContentHash([74; 32]),
+        )
+        .unwrap();
+        let (refreshed, refreshed_optical) =
+            binding.at_material_state(&optical, &source, &warm).unwrap();
+        assert!(matches!(
+            &refreshed_optical,
+            VisibleOpticalStatePoint::TabulatedDielectric(_)
+        ));
+        assert_eq!(refreshed.accepted_state_identity(), warm.identity());
+        assert_ne!(refreshed.identity(), binding.identity());
+        let Material::Dielectric { glass, surface } = refreshed.material() else {
+            panic!("refreshed sampled dielectric material");
+        };
+        assert_eq!(surface.roughness_alpha(), alpha);
+        assert!((glass.ior().eval(530.0).unwrap() - 1.67).abs() < 1.0e-14);
+        assert!(
+            (glass.absorption().transmittance(530.0, 0.02).unwrap() - (-2.0_f64).exp()).abs()
+                < 1.0e-13
+        );
+        for (before, after) in optical
+            .resolved()
+            .properties()
+            .iter()
+            .zip(refreshed_optical.resolved().properties())
+        {
+            assert_eq!(
+                before.answer().receipt.selected,
+                after.answer().receipt.selected
+            );
+        }
+        // The accepted mechanical state can lie beyond optical source support.
+        // Refresh must refuse instead of keeping stale values or changing law.
+        assert!(
+            binding
+                .at_material_state(&optical, &source, &state(&source, 1801.0))
+                .is_err()
+        );
+        assert_eq!(binding.accepted_state_identity(), cold.identity());
+    }
+}
+
 #[test]
 fn g1_spectral_material_absorption_reaches_the_same_accepted_dielectric() {
     use fs_material::state_point::{

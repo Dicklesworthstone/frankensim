@@ -47,6 +47,13 @@ differentiable lift). Pure Rust throughout.
   air-relative catalog data need an explicit conversion/refit before physical
   accuracy is claimed. There is no built-in measured-glass preset or claim for
   anomalous/absorptive resonance, transient propagation or pulse broadening.
+  `TabulatedIor` extends the same phase-law owner with nine ordered absolute
+  index samples spanning exactly 380--780 nm, with gaps at most 100 nm and
+  bounded linear interpolation. Every knot is retained in material identity.
+  Its group-index diagnostic uses the declared interval slope and refuses
+  unequal-slope interior knots, where that interpolant has no derivative.
+  Spectral polarized Fresnel channels and phase-only waveplates accept the
+  same Cauchy, Sellmeier and tabulated laws, converting once per spectral loop.
   Homogeneous Beer-Lambert absorption remains in inverse metres, with
   provenance-bearing representative glass presets, exact unpolarized Fresnel,
   Snell refraction and total internal reflection, plus smooth-delta and
@@ -101,8 +108,15 @@ differentiable lift). Pure Rust throughout.
   scene state. Underlying optical model refusals remain structured errors.
   Binding identities establish replay consistency, not measurement authority;
   conductor source status is `MaterialStateClaims`, preserving query identity
-  without labeling authored or unmeasured inputs as measured. Dielectrics retain
-  native nine-knot intensity absorption with typed power-nepers/metre semantics;
+  without labeling authored or unmeasured inputs as measured.
+  `try_tabulated_dielectric` and the generic family selector additionally bind
+  eighteen material-state-selected visible phase-index/absorption samples to
+  the existing dielectric transport. No Cauchy fit or RGB conversion is used
+  on that path; wavelengths are vacuum nm and intensity absorption is 1/m.
+  State-dependent dispersion and absorption therefore reach Snell refraction
+  and Beer-Lambert attenuation directly, with source identities preserved.
+  Dielectrics retain native nine-knot intensity absorption with typed
+  power-nepers/metre semantics;
   the separately selected legacy RGB schema retains its lifting approximation.
   The material resolver refuses ambiguous or incomplete absorption schemas.
   `MaterialOpticalBinding::at_material_state` refreshes the exact original
@@ -119,7 +133,7 @@ differentiable lift). Pure Rust throughout.
   This optical binding adds no thermal
   emission, birefringence, phase evolution, or measured-spectrum validation.
   Focused G0/G1 regressions in the
-  existing Euler scene-adapter unit seam exercise both generic optical families,
+  existing Euler scene-adapter unit seam exercise the generic optical families,
   minimal string versus disc mechanical requirements, Fresnel and absorption
   formulas, SI conversion, material replacement, and mismatch refusals.
 

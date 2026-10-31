@@ -167,7 +167,22 @@ pub const VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY: QuantitySpec =
 /// Canonical material-card key for the Beer-Lambert reference distance [m].
 pub const VISIBLE_DIELECTRIC_REFERENCE_DISTANCE_M_PROPERTY: &str =
     "optical_transmittance_reference_distance_m";
-
+/// Vacuum wavelengths of the tabulated dielectric material response [nm].
+pub const VISIBLE_DIELECTRIC_WAVELENGTHS_NM: [f64; 9] = VISIBLE_COMPLEX_IOR_WAVELENGTHS_NM;
+/// Absolute phase-index samples for the transmitting dielectric family.
+/// Separate keys prevent a conductor's complex-index table from implicitly
+/// selecting a transparent boundary model.
+pub const VISIBLE_DIELECTRIC_IOR_PROPERTIES: [&str; 9] = [
+    "optical_dielectric_eta_380nm",
+    "optical_dielectric_eta_430nm",
+    "optical_dielectric_eta_480nm",
+    "optical_dielectric_eta_530nm",
+    "optical_dielectric_eta_580nm",
+    "optical_dielectric_eta_630nm",
+    "optical_dielectric_eta_680nm",
+    "optical_dielectric_eta_730nm",
+    "optical_dielectric_eta_780nm",
+];
 const LENGTH_SQUARED_DIMS: Dims = Dims([2, 0, 0, 0, 0, 0]);
 const LENGTH_FOURTH_DIMS: Dims = Dims([4, 0, 0, 0, 0, 0]);
 
@@ -2726,6 +2741,54 @@ pub enum VisibleDielectricAbsorption {
     },
 }
 
+/// One supported sample of a homogeneous transmitting dielectric.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VisibleDielectricSample {
+    /// Vacuum wavelength [nm].
+    pub wavelength_nm: f64,
+    /// Absolute real phase index for Snell refraction and dielectric Fresnel.
+    pub phase_index: f64,
+    /// Nonnegative intensity absorption coefficient in `exp(-sigma_a d)` [1/m].
+    pub absorption_per_m: f64,
+}
+
+/// A material-state-selected phase-index and absorption spectrum.
+///
+/// The nine source-selected knots span 380--780 vacuum nm. Between knots the
+/// renderer linearly interpolates phase index and absorption, not transmission.
+/// This is the geometric-optics, weakly absorbing dielectric model: it does not
+/// infer complex Fresnel, birefringence or thermal emissivity from these inputs.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VisibleTabulatedDielectricStatePoint {
+    resolved: ResolvedMaterialStatePoint,
+    samples: [VisibleDielectricSample; 9],
+}
+
+impl VisibleTabulatedDielectricStatePoint {
+    /// Complete card/state/property-use bundle, including all eighteen samples.
+    #[must_use]
+    pub const fn resolved(&self) -> &ResolvedMaterialStatePoint {
+        &self.resolved
+    }
+
+    /// Exact selected visible samples; no Cauchy fit or RGB lifting is applied.
+    #[must_use]
+    pub const fn samples(&self) -> &[VisibleDielectricSample; 9] {
+        &self.samples
+    }
+
+    /// Refresh every phase-index and absorption sample from its original claim
+    /// at one new complete condition. Source pins, quantity conventions and
+    /// support are retained, and the visible phase-index domain is readmitted.
+    pub fn at_query_point(
+        &self,
+        card: &MaterialCard,
+        point: &QueryPoint,
+    ) -> Result<Self, MaterialStatePointError> {
+        visible_tabulated_dielectric_from_resolved(self.resolved.at_query_point(card, point)?)
+    }
+}
+
 /// Data-selected visible optical constitutive family at one material state.
 ///
 /// Selection depends only on which complete, admissible property schema the
@@ -2739,6 +2802,8 @@ pub enum VisibleOpticalStatePoint {
     /// Homogeneous transmitting response with Cauchy dispersion and
     /// Beer-Lambert absorption.
     Dielectric(VisibleDielectricStatePoint),
+    /// Sampled phase-index dispersion and spectral intensity absorption.
+    TabulatedDielectric(VisibleTabulatedDielectricStatePoint),
     /// Homogeneous transmitting response with source-backed Sellmeier dispersion
     /// and the same Beer-Lambert absorption convention.
     DielectricSellmeier(VisibleSellmeierStatePoint),
@@ -2751,6 +2816,7 @@ impl VisibleOpticalStatePoint {
         match self {
             Self::Conductor(state) => state.resolved(),
             Self::Dielectric(state) => state.resolved(),
+            Self::TabulatedDielectric(state) => state.resolved(),
             Self::DielectricSellmeier(state) => state.resolved(),
         }
     }
@@ -2767,6 +2833,9 @@ impl VisibleOpticalStatePoint {
         match self {
             Self::Conductor(state) => state.at_query_point(card, point).map(Self::Conductor),
             Self::Dielectric(state) => state.at_query_point(card, point).map(Self::Dielectric),
+            Self::TabulatedDielectric(state) => state
+                .at_query_point(card, point)
+                .map(Self::TabulatedDielectric),
             Self::DielectricSellmeier(state) => state
                 .at_query_point(card, point)
                 .map(Self::DielectricSellmeier),
@@ -3030,11 +3099,62 @@ fn visible_dielectric_absorption(
     Ok(absorption)
 }
 
+/// Resolve a tabulated visible dielectric at one exact material state.
+///
+/// Every phase-index and absorption sample must resolve from the same card and
+/// query point. Phase indices outside the renderer's `[1, 3]` domain, negative
+/// absorption, missing samples, wrong quantity kinds and extrapolation refuse.
+/// Absorption uses the same explicit power-neper-per-metre convention as the
+/// Cauchy dielectric's spectral absorption; amplitude coefficients cannot fill it.
+/// This resolver neither fits the spectrum nor promotes source authority.
+pub fn resolve_visible_tabulated_dielectric_state_point(
+    card: &MaterialCard,
+    point: &QueryPoint,
+    selection: MaterialPropertySelection,
+) -> Result<VisibleTabulatedDielectricStatePoint, MaterialStatePointError> {
+    let mut requirements = Vec::with_capacity(18);
+    for name in VISIBLE_DIELECTRIC_IOR_PROPERTIES {
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name,
+            Dims::NONE,
+            ScalarAdmissibility::StrictlyPositive,
+        )?);
+    }
+    append_visible_dielectric_absorption_requirements(&mut requirements, true)?;
+    let resolved = resolve_material_state_point(card, point, &requirements, selection)?;
+    visible_tabulated_dielectric_from_resolved(resolved)
+}
+
+fn visible_tabulated_dielectric_from_resolved(
+    resolved: ResolvedMaterialStatePoint,
+) -> Result<VisibleTabulatedDielectricStatePoint, MaterialStatePointError> {
+    let value = |name: &str| {
+        resolved
+            .property(name)
+            .expect("canonical tabulated-dielectric requirement was resolved")
+            .value_si()
+    };
+    let samples = core::array::from_fn(|index| VisibleDielectricSample {
+        wavelength_nm: VISIBLE_DIELECTRIC_WAVELENGTHS_NM[index],
+        phase_index: value(VISIBLE_DIELECTRIC_IOR_PROPERTIES[index]),
+        absorption_per_m: value(VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[index]),
+    });
+    if samples
+        .iter()
+        .any(|sample| !(1.0..=3.0).contains(&sample.phase_index))
+    {
+        return Err(MaterialStatePointError::InvalidDerived {
+            quantity: "visible_dielectric_phase_index",
+        });
+    }
+    Ok(VisibleTabulatedDielectricStatePoint { resolved, samples })
+}
+
 /// Resolve exactly one visible optical constitutive family from card data.
 ///
 /// This is the generic material-to-rendering ingress. It admits a family only
 /// when every required property resolves at the caller's exact state point.
-/// Partial schemas never receive defaults, and two simultaneously complete
+/// Partial schemas never receive defaults, and multiple simultaneously complete
 /// schemas refuse rather than being selected by material name or call order.
 pub fn resolve_visible_optical_state_point(
     card: &MaterialCard,
@@ -3043,15 +3163,26 @@ pub fn resolve_visible_optical_state_point(
 ) -> Result<VisibleOpticalStatePoint, VisibleOpticalStatePointError> {
     let conductor = resolve_visible_conductor_state_point(card, point, selection.clone());
     let dielectric = resolve_visible_dielectric_state_point(card, point, selection.clone());
+    let tabulated = resolve_visible_tabulated_dielectric_state_point(card, point, selection.clone());
     let sellmeier = resolve_visible_sellmeier_state_point(card, point, selection);
-    match (conductor, dielectric, sellmeier) {
-        (Ok(conductor), Err(_), Err(_)) => Ok(VisibleOpticalStatePoint::Conductor(conductor)),
-        (Err(_), Ok(dielectric), Err(_)) => Ok(VisibleOpticalStatePoint::Dielectric(dielectric)),
-        (Err(_), Err(_), Ok(sellmeier)) => Ok(VisibleOpticalStatePoint::DielectricSellmeier(sellmeier)),
-        (Err(conductor), Err(dielectric), Err(sellmeier)) => {
+    match (conductor, dielectric, tabulated, sellmeier) {
+        (Ok(conductor), Err(_), Err(_), Err(_)) => {
+            Ok(VisibleOpticalStatePoint::Conductor(conductor))
+        }
+        (Err(_), Ok(dielectric), Err(_), Err(_)) => {
+            Ok(VisibleOpticalStatePoint::Dielectric(dielectric))
+        }
+        (Err(_), Err(_), Ok(tabulated), Err(_)) => {
+            Ok(VisibleOpticalStatePoint::TabulatedDielectric(tabulated))
+        }
+        (Err(_), Err(_), Err(_), Ok(sellmeier)) => {
+            Ok(VisibleOpticalStatePoint::DielectricSellmeier(sellmeier))
+        }
+        (Err(conductor), Err(dielectric), Err(tabulated), Err(sellmeier)) => {
             Err(VisibleOpticalStatePointError::NoCompleteFamily {
                 conductor: Box::new(conductor),
                 dielectric: Box::new(dielectric),
+                tabulated_dielectric: Box::new(tabulated),
                 sellmeier: Box::new(sellmeier),
             })
         }
@@ -3305,12 +3436,14 @@ impl std::error::Error for MaterialStatePointError {}
 /// Typed refusal from data-driven visible optical-family selection.
 #[derive(Clone, Debug, PartialEq)]
 pub enum VisibleOpticalStatePointError {
-    /// None of the supported optical property schemas resolved completely.
+    /// No supported optical property schema resolved completely.
     NoCompleteFamily {
         /// Exact refusal from the complex-index conductor schema.
         conductor: Box<MaterialStatePointError>,
         /// Exact refusal from the Cauchy/Beer-Lambert dielectric schema.
         dielectric: Box<MaterialStatePointError>,
+        /// Exact refusal from the sampled phase-index/absorption schema.
+        tabulated_dielectric: Box<MaterialStatePointError>,
         /// Exact refusal from the Sellmeier/Beer-Lambert dielectric schema.
         sellmeier: Box<MaterialStatePointError>,
     },
@@ -4757,6 +4890,51 @@ mod tests {
         .unwrap()
     }
 
+    fn tabulated_optical_card(
+        transform: impl Fn(PropertyClaim) -> Option<PropertyClaim>,
+    ) -> MaterialCard {
+        let mut claims = ClaimSet::new();
+        for index in 0..9 {
+            let n = 1.6 - index as f64 * 0.01;
+            let absorption = if index == 3 { 20.0 } else { 2.0 };
+            for mut property in [
+                claim(
+                    VISIBLE_DIELECTRIC_IOR_PROPERTIES[index],
+                    Dims::NONE,
+                    vec![(250.0, n), (600.0, n + 0.1)],
+                    600.0,
+                ),
+                claim(
+                    VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[index],
+                    VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY.dims(),
+                    vec![(250.0, absorption), (600.0, 2.0 * absorption)],
+                    600.0,
+                ),
+            ] {
+                if VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES.contains(&property.key.name()) {
+                    property.key = PropertyKey::with_quantity(
+                        property.key.name(),
+                        VISIBLE_DIELECTRIC_ABSORPTION_QUANTITY,
+                    );
+                }
+                if let Some(property) = transform(property) {
+                    claims.insert_claim(property).unwrap();
+                }
+            }
+        }
+        MaterialCard::assemble(
+            MaterialStateId {
+                chemistry: "synthetic sampled transmitting material".into(),
+                phase: "solid".into(),
+                process: "synthetic visible spectral fixture".into(),
+                revision: 0,
+            },
+            claims,
+            Vec::new(),
+        )
+        .unwrap()
+    }
+
     fn orthotropic_card(poisson: [f64; 3]) -> MaterialCard {
         let mut claims = ClaimSet::new();
         claims
@@ -5590,6 +5768,129 @@ mod tests {
             ),
             Err(VisibleOpticalStatePointError::AmbiguousFamilies)
         ));
+    }
+
+    #[test]
+    fn g1_tabulated_dielectric_selects_state_dependent_spectra_without_rgb_or_fit() {
+        let card = tabulated_optical_card(Some);
+        let optical = resolve_visible_optical_state_point(
+            &card,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .expect("complete sampled dielectric family");
+        let VisibleOpticalStatePoint::TabulatedDielectric(optical) = optical else {
+            panic!("sampled dielectric keys must not select an opaque conductor");
+        };
+        assert_eq!(optical.resolved().properties().len(), 18);
+        for (index, sample) in optical.samples().iter().enumerate() {
+            assert_eq!(
+                sample.wavelength_nm,
+                VISIBLE_DIELECTRIC_WAVELENGTHS_NM[index]
+            );
+            assert!((sample.phase_index - (1.65 - index as f64 * 0.01)).abs() < 1.0e-14);
+            assert_eq!(sample.absorption_per_m, if index == 3 { 30.0 } else { 3.0 });
+        }
+        for property in optical.resolved().properties() {
+            card.claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+        }
+        assert!(
+            resolve_visible_tabulated_dielectric_state_point(
+                &card,
+                &point(601.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn g0_tabulated_dielectric_refuses_missing_wrong_units_and_nonphysical_samples() {
+        let missing = tabulated_optical_card(|claim| {
+            (claim.key.name() != VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[3]).then_some(claim)
+        });
+        let dimensionless_absorption = tabulated_optical_card(|mut claim| {
+            if claim.key.name() == VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[3] {
+                claim.key = PropertyKey::new(claim.key.name(), Dims::NONE);
+                if let PropertyValue::Curve { dims, .. } = &mut claim.value {
+                    *dims = Dims::NONE;
+                }
+            }
+            Some(claim)
+        });
+        let amplitude_absorption = tabulated_optical_card(|mut claim| {
+            if claim.key.name() == VISIBLE_DIELECTRIC_ABSORPTION_PER_M_PROPERTIES[3] {
+                claim.key = PropertyKey::with_quantity(
+                    claim.key.name(),
+                    QuantitySpec::semantic(SemanticType::new(
+                        QuantityKind::Attenuation(AttenuationConvention::AmplitudeNepersPerMetre),
+                        ValueForm::Static,
+                    )),
+                );
+            }
+            Some(claim)
+        });
+        let invalid_index = tabulated_optical_card(|mut claim| {
+            if claim.key.name() == VISIBLE_DIELECTRIC_IOR_PROPERTIES[3] {
+                if let PropertyValue::Curve { knots, .. } = &mut claim.value {
+                    for (_, value) in knots {
+                        *value = 0.9;
+                    }
+                }
+            }
+            Some(claim)
+        });
+        for card in [
+            missing,
+            dimensionless_absorption,
+            amplitude_absorption,
+            invalid_index,
+        ] {
+            assert!(
+                resolve_visible_tabulated_dielectric_state_point(
+                    &card,
+                    &point(425.0),
+                    MaterialPropertySelection::SingleClaimOnly,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn g0_tabulated_and_cauchy_dielectric_models_require_explicit_selection() {
+        let sampled = tabulated_optical_card(Some);
+        let cauchy = dielectric_optical_card(0.98);
+        let mut claims = sampled.claims().clone();
+        for (_, claim) in cauchy.claims().claims_ordered() {
+            if [
+                VISIBLE_DIELECTRIC_CAUCHY_A_PROPERTY,
+                VISIBLE_DIELECTRIC_CAUCHY_B_M2_PROPERTY,
+                VISIBLE_DIELECTRIC_CAUCHY_C_M4_PROPERTY,
+            ]
+            .contains(&claim.key.name())
+            {
+                claims.insert_claim(claim.clone()).unwrap();
+            }
+        }
+        let card = MaterialCard::supersede(&sampled, claims, Vec::new()).unwrap();
+        assert!(matches!(
+            resolve_visible_optical_state_point(
+                &card,
+                &point(425.0),
+                MaterialPropertySelection::SingleClaimOnly,
+            ),
+            Err(VisibleOpticalStatePointError::AmbiguousFamilies)
+        ));
+        // Explicitly choosing the sampled constitutive family remains valid.
+        resolve_visible_tabulated_dielectric_state_point(
+            &card,
+            &point(425.0),
+            MaterialPropertySelection::SingleClaimOnly,
+        )
+        .unwrap();
     }
 
     #[test]

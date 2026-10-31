@@ -350,6 +350,21 @@ homogenization, the P2 milestone.
   card, state point, selected values, consumer domains, and receipts into one
   identity. It never infers properties from chemistry names or substitutes a
   representative material.
+  `resolve_visible_tabulated_dielectric_state_point` resolves eighteen explicit
+  phase-index and intensity-absorption values at 380, 430, ..., 780 vacuum nm.
+  `optical_dielectric_eta_*` is dimensionless with values in `[1, 3]`;
+  `optical_absorption_per_m_*` has inverse-length dimensions and is nonnegative.
+  These are separate from conductor complex-index `k` and from Cauchy/RGB
+  properties. All knots must be supported at one complete material state;
+  missing knots, wrong units, unsupported states and invalid values refuse.
+  The generic visible optical resolver recognizes this family and refuses
+  simultaneous complete alternative families. Explicit family selection remains
+  available. The renderer interpolates index and absorption between knots without
+  fitting or RGB conversion. Source receipts retain their original authority;
+  the real-index boundary with interior absorption is a weakly absorbing,
+  unpolarized geometric-optics model, not a complex-interface or thermal law.
+  G0/G1 material tests cover state interpolation, all retained source receipts,
+  sample completeness, dimensions, phase-index domain and family ambiguity.
   `ScalarPropertyRequirement::try_with_quantity` carries an exact `QuantitySpec`
   through both bulk and interface queries, including caller-pinned selection.
   The answer retains the same quantity kind and value form. Dimension-only
