@@ -21,6 +21,15 @@
 //! law is not a dispersion model, a resonance model, or a measured error bound.
 //! Depolarization changes the scalar angular law; this module does not transport
 //! Stokes polarization. It supplies no absorption or thermal emission.
+//!
+//! The same molecular references also determine the coherent phase index:
+//! `L = (n²-1)/(n²+2) = rho K`, where
+//! `K = (N_A/M_mix) sum_i x_i L_ref,i/N_ref,i`. Polarizabilities add before
+//! evaluating the phase index; independent scattering cross sections add
+//! separately. The King factor is not a correction to the phase index.
+//! See Shevchenko et al., *Investigation of diffusive and optical properties of
+//! vapour-air mixtures: The benefits of interferometry*, §3.3.1,
+//! <https://doi.org/10.1016/j.ces.2020.116433>.
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_qty::{MolarMass, semantic::Composition};
@@ -33,6 +42,9 @@ use crate::gas_mixture::{MAX_GAS_MIXTURE_COMPONENTS, mix_gas_states};
 pub const AVOGADRO_PER_MOL: f64 = 6.022_140_76e23;
 /// Common reference for the prepared mixture, in vacuum nanometres.
 pub const RAYLEIGH_REFERENCE_NM: f64 = 550.0;
+/// Declared dilute-gas use boundary, shared by reference and local refractivity.
+/// This numerical domain is not an experimental accuracy certificate.
+pub const MAX_DILUTE_REFRACTIVITY: f64 = 0.01;
 
 /// Explicit reference optical data for one species or declared pseudocomponent.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -61,7 +73,7 @@ impl MolecularRayleigh {
         source_identity: ContentHash,
     ) -> Result<Self, GasScatteringError> {
         if !refractivity.is_finite()
-            || !(0.0..=0.01).contains(&refractivity)
+            || !(0.0..=MAX_DILUTE_REFRACTIVITY).contains(&refractivity)
             || !reference_number_density_m3.is_finite()
             || reference_number_density_m3 <= 0.0
             || !depolarization_ratio.is_finite()
@@ -111,6 +123,14 @@ impl MolecularRayleigh {
     #[must_use]
     pub const fn depolarization_ratio(self) -> f64 {
         self.depolarization_ratio
+    }
+
+    /// Molecular Lorentz–Lorenz volume `[(n²-1)/(n²+2)]/N` [m³/molecule].
+    /// It is constant across the visible band in this explicit approximation.
+    #[must_use]
+    pub fn lorentz_lorenz_volume_m3(self) -> f64 {
+        let n2_minus_one = self.refractivity * (2.0 + self.refractivity);
+        (n2_minus_one / (3.0 + n2_minus_one)) / self.reference_number_density_m3
     }
 
     fn hash_into(self, hash: &mut DomainHasher) {
@@ -189,8 +209,9 @@ impl MolecularRayleighMixture {
             .map_err(|_| GasScatteringError::Components)?;
         let mut sigma = 0.0;
         let mut isotropic_sigma = 0.0;
+        let mut refractive_volume = 0.0;
         let mut molar_mass = 0.0;
-        let mut hash = DomainHasher::new("org.frankensim.material.rayleigh-gas.v1");
+        let mut hash = DomainHasher::new("org.frankensim.material.rayleigh-gas.v2");
         hash.update(&(self.specs.len() as u64).to_le_bytes());
         hash.update(&(self.water_component.map_or(u64::MAX, |i| i as u64)).to_le_bytes());
         for (((&fraction, mass), &optical), spec) in mole
@@ -202,6 +223,7 @@ impl MolecularRayleighMixture {
         {
             let weighted = fraction * optical.cross_section_m2(RAYLEIGH_REFERENCE_NM)?;
             sigma += weighted;
+            refractive_volume += fraction * optical.lorentz_lorenz_volume_m3();
             // Depolarized Rayleigh = w_iso * isotropic + (1-w_iso)*Rayleigh.
             // Weight the PHASE by scattering, never average delta directly.
             let delta = optical.depolarization_ratio;
@@ -229,6 +251,11 @@ impl MolecularRayleighMixture {
         let mass_scattering_reference_m2_kg = (sigma / molar_mass) * AVOGADRO_PER_MOL;
         finite_nonnegative(mass_scattering_reference_m2_kg)?;
         if sigma > 0.0 && mass_scattering_reference_m2_kg == 0.0 {
+            return Err(GasScatteringError::Unrepresentable);
+        }
+        let mass_refractivity_m3_kg = (refractive_volume / molar_mass) * AVOGADRO_PER_MOL;
+        finite_nonnegative(mass_refractivity_m3_kg)?;
+        if refractive_volume > 0.0 && mass_refractivity_m3_kg == 0.0 {
             return Err(GasScatteringError::Unrepresentable);
         }
         let isotropic = if sigma == 0.0 {
@@ -261,6 +288,7 @@ impl MolecularRayleighMixture {
             mass_scattering_reference_m2_kg,
             depolarization_ratio,
             molecular_cross_section_reference_m2: sigma,
+            mass_refractivity_m3_kg,
             molar_mass_kg_mol: molar_mass,
             identity: hash.finalize(),
         };
@@ -299,6 +327,7 @@ pub struct RayleighGasState {
     gas: GasState,
     mass_scattering_reference_m2_kg: f64,
     molecular_cross_section_reference_m2: f64,
+    mass_refractivity_m3_kg: f64,
     molar_mass_kg_mol: f64,
     depolarization_ratio: f64,
     identity: ContentHash,
@@ -335,6 +364,68 @@ impl RayleighGasState {
     pub const fn depolarization_ratio(&self) -> f64 {
         self.depolarization_ratio
     }
+
+    /// Prepared `K` in `(n²-1)/(n²+2) = rho K`, in m³/kg.
+    /// Composition and all original optical references are retained in the
+    /// state identity; no measured wavelength dispersion is inferred.
+    #[must_use]
+    pub const fn mass_refractivity_m3_kg(&self) -> f64 {
+        self.mass_refractivity_m3_kg
+    }
+
+    /// Coherent phase index of this exact accepted thermodynamic state.
+    pub fn refractive_index(
+        &self,
+        wavelength_nm: f64,
+    ) -> Result<GasRefractiveIndex, GasScatteringError> {
+        self.refractive_index_at_density(self.gas.density, wavelength_nm)
+    }
+
+    /// Coherent phase index and exact density derivative for a local density
+    /// [kg/m³] with the SAME frozen molecular composition and optical sources.
+    /// This does not accept a new thermodynamic state or extrapolate a measured
+    /// temperature law. A smooth density field may use the derivative to form
+    /// `grad n = (dn/d rho) grad rho`; cell averages provide no such gradient.
+    ///
+    /// Constant molecular polarizability makes phase and group indices equal
+    /// within this model. The original visible-band limit and dilute-use
+    /// policy `0 <= n-1 <= 0.01` apply at every queried point. Vacuum is admitted.
+    pub fn refractive_index_at_density(
+        &self,
+        density_kg_m3: f64,
+        wavelength_nm: f64,
+    ) -> Result<GasRefractiveIndex, GasScatteringError> {
+        wavelength(wavelength_nm)?;
+        if !density_kg_m3.is_finite() || density_kg_m3 < 0.0 {
+            return Err(GasScatteringError::RefractivityDomain);
+        }
+        let lorentz_lorenz = density_kg_m3 * self.mass_refractivity_m3_kg;
+        let max_n2_minus_one = MAX_DILUTE_REFRACTIVITY * (2.0 + MAX_DILUTE_REFRACTIVITY);
+        let limit = max_n2_minus_one / (3.0 + max_n2_minus_one);
+        // One outward ULP admits an exactly-on-limit source after converting
+        // between molecular and mass density. It is only boundary roundoff.
+        if !lorentz_lorenz.is_finite() || lorentz_lorenz > limit.next_up() {
+            return Err(GasScatteringError::RefractivityDomain);
+        }
+        if density_kg_m3 > 0.0 && self.mass_refractivity_m3_kg > 0.0 && lorentz_lorenz == 0.0 {
+            return Err(GasScatteringError::Unrepresentable);
+        }
+        let denominator = 1.0 - lorentz_lorenz;
+        let n2_minus_one = 3.0 * lorentz_lorenz / denominator;
+        let phase_index = fs_math::det::sqrt(1.0 + n2_minus_one);
+        // Rationalization preserves n-1 even when n rounds to exactly one.
+        let refractivity = n2_minus_one / (phase_index + 1.0);
+        let derivative_density_m3_kg =
+            1.5 * self.mass_refractivity_m3_kg / (phase_index * denominator * denominator);
+        if !derivative_density_m3_kg.is_finite() {
+            return Err(GasScatteringError::Unrepresentable);
+        }
+        Ok(GasRefractiveIndex {
+            phase_index,
+            refractivity,
+            derivative_density_m3_kg,
+        })
+    }
     /// Exact inverse-fourth visible-band mass scattering coefficient [m²/kg].
     pub fn mass_scattering_m2_kg(&self, wavelength_nm: f64) -> Result<f64, GasScatteringError> {
         inverse_fourth(
@@ -364,6 +455,17 @@ impl RayleighGasState {
     }
 }
 
+/// Local coherent optics of the declared dilute, constant-polarizability model.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasRefractiveIndex {
+    /// Dimensionless phase index; also the group index in this nondispersive model.
+    pub phase_index: f64,
+    /// `n - 1`, retained without subtractive cancellation for very dilute gas.
+    pub refractivity: f64,
+    /// Exact `dn/d rho` at this density [m³/kg].
+    pub derivative_density_m3_kg: f64,
+}
+
 /// Atomic refusal before a gas/scattering state is published.
 #[derive(Clone, Debug, PartialEq)]
 pub enum GasScatteringError {
@@ -379,6 +481,8 @@ pub enum GasScatteringError {
     Wavelength,
     /// Scattering cosine is outside [-1, 1] or nonfinite.
     Angle,
+    /// Invalid density or local refractivity outside the explicit dilute domain.
+    RefractivityDomain,
     /// A physical coefficient is not representable in finite f64 arithmetic.
     Unrepresentable,
 }

@@ -6144,6 +6144,21 @@ add by number fraction; normalized phases add by scattering weight. The
 prepared coefficient is `N_A * sum(x_i sigma_i) / M_mix` in m²/kg, so the actual
 gas density supplies m^-1 attenuation and responds to pressure and temperature.
 
+The same references also supply coherent refractivity through
+`RayleighGasState::refractive_index[_at_density]`. The prepared Lorentz–Lorenz
+coefficient is `K = (N_A/M_mix) sum_i x_i L_ref,i/N_ref,i` [m³/kg], with
+`L_ref = (n_ref²-1)/(n_ref²+2)`. The local phase index is
+`sqrt((1+2 rho K)/(1-rho K))`; its exact density derivative is returned for
+smooth-field ray bending. Polarizabilities add before this coherent-index
+evaluation, independently of the cross-section sum used for scattering, and
+no King factor changes the phase law. `n-1` is separately retained without
+subtractive cancellation. Vacuum is admitted; negative/nonfinite density and
+local `n-1 > 0.01` refuse before the Lorentz–Lorenz pole. This boundary is an
+explicit dilute-use policy, not measured accuracy. Phase and group indices
+coincide only under the existing constant-polarizability approximation.
+The v2 state identity includes this model's semantics while retaining the
+original sources, composition and accepted gas state.
+
 Preparation is bounded by the original 128-component gas limit; spectral and
 phase evaluation are allocation-free constant work. The exact lambda^-4 law
 assumes constant molecular polarizability on 380–780 nm. No dispersion,
@@ -6158,6 +6173,11 @@ King correction, exact wavelength law, molecular addition, phase normalization,
 mass/mole conversion, pressure/temperature scaling, original-state binding and
 invalid-source/domain refusal. `fs-render::material_state::gas_scattering`
 consumes the same coefficients and phase without a sampled spectral fit.
+Refractivity regressions cover reference recovery, the independent density
+derivative, coherent mixture weighting, pressure/temperature dependence,
+dilute precision, vacuum and domain/pole refusal. The renderer's explicit
+density-and-gradient adapter keeps the original molecular law and snapshot
+identity; it never treats piecewise-constant cell averages as smooth gradients.
 
 ### Finite mixed-gas condensation and re-evaporation
 

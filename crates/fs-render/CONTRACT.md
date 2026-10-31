@@ -2230,6 +2230,21 @@ evaluates the exact declared inverse-fourth-power wavelength law, rather than
 a linear interpolation between its visible endpoints. Extinction admission and
 the volume contraction enclosure include these coefficient and angular laws.
 
+`material_state::gas_scattering::MaterialGasScatteringBinding::bind_refractive_field`
+connects the same accepted molecular optical sources and gas composition to
+`gradient_index` propagation. The caller supplies an immutable smooth physical
+density reconstruction and its actual spatial gradient, with an explicit
+snapshot/reconstruction identity. The material owner evaluates the
+Lorentz--Lorenz mixture index and exact density derivative; the renderer uses
+`grad(n) = (dn/d rho) grad(rho)` without introducing a gas preset or fitting a
+visual effect. Its dilute visible-band domain, constant-polarizability
+approximation and source identities remain attached. Phase and group indices
+coincide under that declared nondispersive model. No cell-average smoothing,
+composition gradient, measured dispersion, or new thermodynamic law is inferred.
+The refractive field has zero true absorption: Rayleigh scattering remains a
+separate owner and is not converted to heating. Combining curved propagation
+with scene scattering/visibility is not claimed by this adapter.
+
 `volumes::transport::scattering::mie::MieSphere` computes passive homogeneous,
 nonmagnetic sphere cross sections, particle-mass coefficients, asymmetry and
 the retained unpolarized Mie angular law. Its admitted domain is

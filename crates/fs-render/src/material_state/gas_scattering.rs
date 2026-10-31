@@ -7,7 +7,10 @@
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
-use fs_material::gas_scattering::{RAYLEIGH_REFERENCE_NM, RayleighGasState};
+use fs_geom::{Point3, Vec3};
+use fs_material::gas_scattering::{GasScatteringError, RAYLEIGH_REFERENCE_NM, RayleighGasState};
+
+use crate::gradient_index::{GradientIndexError, GradientIndexField, GradientIndexSample};
 
 use crate::volumes::VolumeGrid;
 use crate::volumes::transport::scattering::{
@@ -59,6 +62,34 @@ impl MaterialGasScatteringBinding {
     #[must_use]
     pub const fn phase(&self) -> &PhaseFunction {
         &self.phase
+    }
+
+    /// Bind a smooth density reconstruction of this SAME frozen gas composition
+    /// to native curved-ray propagation. `density_field` supplies density in
+    /// kg/m³ and its actual spatial gradient in kg/m⁴; a cell-average grid is
+    /// not automatically a differentiable field. The caller identifies the
+    /// accepted snapshot and reconstruction through `snapshot_identity`.
+    ///
+    /// Molecular refractivity comes from the original optical references,
+    /// not a fitted renderer coefficient. This adapter supplies phase/group
+    /// index and zero true absorption. It does not turn elastic scattering
+    /// into absorption or integrate scattered radiance along the bent path.
+    pub fn bind_refractive_field<'a, F: GasDensityGradientField + ?Sized>(
+        &self,
+        density_field: &'a F,
+        snapshot_identity: ContentHash,
+    ) -> Result<MaterialGasRefractiveField<'a, F>, GasRefractiveFieldError> {
+        if snapshot_identity == ContentHash([0; 32]) {
+            return Err(GasRefractiveFieldError::MissingSnapshotIdentity);
+        }
+        let mut hash = DomainHasher::new("org.frankensim.render.material-gas-refractive-field.v1");
+        hash.update(self.state.content_identity().as_bytes());
+        hash.update(snapshot_identity.as_bytes());
+        Ok(MaterialGasRefractiveField {
+            state: self.state,
+            density_field,
+            identity: hash.finalize(),
+        })
     }
 
     /// Bind an actual homogeneous gas snapshot, borrowing its original density
@@ -113,6 +144,142 @@ impl MaterialGasScatteringBinding {
         })
     }
 }
+
+/// One value and gradient from a caller-owned smooth physical gas snapshot.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasDensityGradientSample {
+    /// Actual nonnegative mass density [kg/m³].
+    pub density_kg_m3: f64,
+    /// Spatial derivative of that same reconstruction [kg/m⁴].
+    pub gradient_kg_m4: Vec3,
+}
+
+/// Explicit reconstruction seam; no finite differences, smoothing, LBM unit
+/// conversion or outside-domain vacuum are inferred by the renderer.
+pub trait GasDensityGradientField {
+    /// Evaluate the immutable snapshot, refusing points outside its support.
+    fn sample_density(
+        &self,
+        position_m: Point3,
+    ) -> Result<GasDensityGradientSample, GradientIndexError>;
+}
+
+impl<F> GasDensityGradientField for F
+where
+    F: Fn(Point3) -> Result<GasDensityGradientSample, GradientIndexError>,
+{
+    fn sample_density(
+        &self,
+        position_m: Point3,
+    ) -> Result<GasDensityGradientSample, GradientIndexError> {
+        self(position_m)
+    }
+}
+
+/// Native GRIN input tied to the original gas sources and one physical snapshot.
+/// The borrowed provider is evaluated without allocations at each ray stage.
+pub struct MaterialGasRefractiveField<'a, F: GasDensityGradientField + ?Sized> {
+    state: RayleighGasState,
+    density_field: &'a F,
+    identity: ContentHash,
+}
+
+impl<F: GasDensityGradientField + ?Sized> MaterialGasRefractiveField<'_, F> {
+    /// Original accepted gas and the exact source-bound molecular optics.
+    #[must_use]
+    pub const fn state(&self) -> &RayleighGasState {
+        &self.state
+    }
+
+    /// Original gas/source identity plus caller-declared snapshot/reconstruction.
+    #[must_use]
+    pub const fn content_identity(&self) -> ContentHash {
+        self.identity
+    }
+
+    /// Evaluate with the original material refusal available to diagnostics.
+    /// The `GradientIndexField` entry point maps a material-domain refusal to
+    /// `OutsideFieldDomain` so the native integrator never extrapolates it.
+    pub fn sample_optics(
+        &self,
+        position_m: Point3,
+        wavelength_nm: f64,
+    ) -> Result<GradientIndexSample, GasRefractiveFieldError> {
+        if ![position_m.x, position_m.y, position_m.z]
+            .iter()
+            .all(|x| x.is_finite())
+        {
+            return Err(GasRefractiveFieldError::Field(
+                GradientIndexError::InvalidSample,
+            ));
+        }
+        let density = self
+            .density_field
+            .sample_density(position_m)
+            .map_err(GasRefractiveFieldError::Field)?;
+        if ![
+            density.gradient_kg_m4.x,
+            density.gradient_kg_m4.y,
+            density.gradient_kg_m4.z,
+        ]
+        .iter()
+        .all(|x| x.is_finite())
+        {
+            return Err(GasRefractiveFieldError::Field(
+                GradientIndexError::InvalidSample,
+            ));
+        }
+        let index = self
+            .state
+            .refractive_index_at_density(density.density_kg_m3, wavelength_nm)
+            .map_err(GasRefractiveFieldError::Gas)?;
+        GradientIndexSample::try_new(
+            index.phase_index,
+            density.gradient_kg_m4.scale(index.derivative_density_m3_kg),
+            0.0,
+            Some(index.phase_index),
+        )
+        .map_err(GasRefractiveFieldError::Field)
+    }
+}
+
+impl<F: GasDensityGradientField + ?Sized> GradientIndexField for MaterialGasRefractiveField<'_, F> {
+    fn sample(
+        &self,
+        position: Point3,
+        wavelength_nm: f64,
+    ) -> Result<GradientIndexSample, GradientIndexError> {
+        self.sample_optics(position, wavelength_nm)
+            .map_err(|error| match error {
+                GasRefractiveFieldError::Field(error) => error,
+                GasRefractiveFieldError::Gas(GasScatteringError::RefractivityDomain) => {
+                    GradientIndexError::OutsideFieldDomain
+                }
+                GasRefractiveFieldError::Gas(_)
+                | GasRefractiveFieldError::MissingSnapshotIdentity => {
+                    GradientIndexError::InvalidSample
+                }
+            })
+    }
+}
+
+/// A missing source/snapshot or an original field/material refusal.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GasRefractiveFieldError {
+    /// The caller did not identify the physical density reconstruction.
+    MissingSnapshotIdentity,
+    /// Original molecular optics refusal, including the dilute-use boundary.
+    Gas(GasScatteringError),
+    /// Original provider or native GRIN admission refusal.
+    Field(GradientIndexError),
+}
+
+impl core::fmt::Display for GasRefractiveFieldError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "material gas refractive field refused: {self:?}")
+    }
+}
+impl core::error::Error for GasRefractiveFieldError {}
 
 /// A borrowed rendering grid retaining its original gas and optical source state.
 pub struct MaterialGasScatteringGrid<'a> {
@@ -277,5 +444,134 @@ mod tests {
                 Err(GasGridBindingError::DensityMismatch { index: 0 })
             ));
         });
+    }
+
+    #[test]
+    fn g1_original_gas_sources_supply_refractive_index_and_density_gradient() {
+        let other_source = binding(100_000.0, 2);
+        let binding = binding(100_000.0, 1);
+        let rho = binding.state().gas().density;
+        let reconstruction = |p: Point3| {
+            Ok(GasDensityGradientSample {
+                density_kg_m3: rho * (1.0 + 0.1 * p.y),
+                gradient_kg_m4: Vec3::new(0.0, 0.1 * rho, 0.0),
+            })
+        };
+        let field = binding
+            .bind_refractive_field(&reconstruction, ContentHash([4; 32]))
+            .unwrap();
+        let p = Point3::new(0.5, 0.0, 0.5);
+        for wavelength in [380.0, 550.0, 780.0] {
+            let sample = field.sample(p, wavelength).unwrap();
+            let original = binding.state().refractive_index(wavelength).unwrap();
+            assert_eq!(sample.phase_index(), original.phase_index);
+            assert_eq!(sample.group_index(), Some(original.phase_index));
+            assert_eq!(sample.absorption_per_m(), 0.0);
+            assert_eq!(
+                sample.phase_gradient_per_m(),
+                Vec3::new(0.0, 0.1 * rho * original.derivative_density_m3_kg, 0.0)
+            );
+            let h = 0.01;
+            let a = field.sample(Point3::new(p.x, -h, p.z), wavelength).unwrap();
+            let b = field.sample(Point3::new(p.x, h, p.z), wavelength).unwrap();
+            let finite_difference = (b.phase_index() - a.phase_index()) / (2.0 * h);
+            assert!((finite_difference / sample.phase_gradient_per_m().y - 1.0).abs() < 1.0e-8);
+        }
+        assert_eq!(field.state(), binding.state());
+        let updated = binding
+            .bind_refractive_field(&reconstruction, ContentHash([5; 32]))
+            .unwrap();
+        assert_ne!(field.content_identity(), updated.content_identity());
+        let changed = other_source
+            .bind_refractive_field(&reconstruction, ContentHash([4; 32]))
+            .unwrap();
+        assert_ne!(field.content_identity(), changed.content_identity());
+    }
+
+    #[test]
+    fn g0_gas_refractive_field_preserves_domain_and_invalid_gradient_refusals() {
+        let binding = binding(100_000.0, 1);
+        let outside = |_p: Point3| Err(GradientIndexError::OutsideFieldDomain);
+        let field = binding
+            .bind_refractive_field(&outside, ContentHash([4; 32]))
+            .unwrap();
+        assert_eq!(
+            field.sample(Point3::new(0.0, 0.0, 0.0), 550.0),
+            Err(GradientIndexError::OutsideFieldDomain)
+        );
+        assert!(matches!(
+            binding.bind_refractive_field(&outside, ContentHash([0; 32])),
+            Err(GasRefractiveFieldError::MissingSnapshotIdentity)
+        ));
+        for (density, gradient, expected) in [
+            (
+                -1.0,
+                Vec3::new(0.0, 0.0, 0.0),
+                GradientIndexError::OutsideFieldDomain,
+            ),
+            (
+                1.0,
+                Vec3::new(f64::NAN, 0.0, 0.0),
+                GradientIndexError::InvalidSample,
+            ),
+            (
+                1.0e20,
+                Vec3::new(0.0, 0.0, 0.0),
+                GradientIndexError::OutsideFieldDomain,
+            ),
+        ] {
+            let invalid = |_p: Point3| {
+                Ok(GasDensityGradientSample {
+                    density_kg_m3: density,
+                    gradient_kg_m4: gradient,
+                })
+            };
+            let field = binding
+                .bind_refractive_field(&invalid, ContentHash([4; 32]))
+                .unwrap();
+            assert_eq!(
+                field.sample(Point3::new(0.0, 0.0, 0.0), 550.0),
+                Err(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn g1_gas_density_gradient_bends_native_ray_and_retains_stratified_invariant() {
+        use crate::charts::Ray;
+        use crate::gradient_index::{GradientIndexOptions, propagate};
+
+        let binding = binding(100_000.0, 1);
+        let rho = binding.state().gas().density;
+        let reconstruction = |p: Point3| {
+            Ok(GasDensityGradientSample {
+                density_kg_m3: rho * (1.0 + 0.2 * p.y),
+                gradient_kg_m4: Vec3::new(0.0, 0.2 * rho, 0.0),
+            })
+        };
+        let field = binding
+            .bind_refractive_field(&reconstruction, ContentHash([4; 32]))
+            .unwrap();
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new(1.0, 0.0, 0.0),
+        };
+        let options = GradientIndexOptions {
+            initial_step_m: 0.05,
+            max_step_m: 0.1,
+            ..Default::default()
+        };
+        let result = propagate(&field, ray, Vec3::new(0.0, 0.0, 1.0), 550.0, 2.0, options).unwrap();
+        assert!(result.ray.origin.y > 1.0e-5 && result.ray.dir.y > 1.0e-5);
+        assert_eq!(result.ray.origin.z, 0.0);
+        // Translational symmetry in x conserves the x optical momentum.
+        let invariant = result.final_sample.phase_index() * result.ray.dir.x;
+        assert!((invariant - result.initial_sample.phase_index()).abs() < 1.0e-10);
+        assert_eq!(
+            result.group_optical_path_length_m,
+            Some(result.optical_path_length_m)
+        );
+        assert_eq!(result.power_transmittance(), 1.0);
+        assert!(result.optical_path_length_m > 2.0);
     }
 }

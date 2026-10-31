@@ -235,3 +235,133 @@ fn g0_invalid_sources_ranges_and_composition_refuse() {
     assert!(valid.evaluate(f64::NAN, 100_000.0).is_err());
     assert!(valid.evaluate(300.0, 0.0).is_err());
 }
+
+#[test]
+fn g1_phase_index_recovers_reference_and_exact_density_derivative() {
+    let state = model(&[1.0], &[optical(0.0003, 0.03, 1)])
+        .evaluate(300.0, 100_000.0)
+        .unwrap();
+    let reference_density = 2.5e25 * state.molar_mass_kg_mol() / AVOGADRO_PER_MOL;
+    let index = state
+        .refractive_index_at_density(reference_density, 550.0)
+        .unwrap();
+    near(index.refractivity, 0.0003);
+    near(index.phase_index, 1.0003);
+    let h = reference_density * 1.0e-4;
+    // Difference refractivity rather than n: the independent numerical
+    // derivative then resolves dilute-gas changes without subtracting ones.
+    let a = state
+        .refractive_index_at_density(reference_density - h, 550.0)
+        .unwrap();
+    let b = state
+        .refractive_index_at_density(reference_density + h, 550.0)
+        .unwrap();
+    let finite_difference = (b.refractivity - a.refractivity) / (2.0 * h);
+    assert!((finite_difference / index.derivative_density_m3_kg - 1.0).abs() < 2.0e-11);
+    for wavelength in [380.0, 417.3, 550.0, 780.0] {
+        assert_eq!(
+            state
+                .refractive_index_at_density(reference_density, wavelength)
+                .unwrap(),
+            index
+        );
+    }
+    assert_eq!(
+        state.refractive_index(550.0).unwrap(),
+        state
+            .refractive_index_at_density(state.gas().density, 550.0)
+            .unwrap()
+    );
+}
+
+#[test]
+fn g3_refractivity_mixes_polarizability_and_follows_accepted_density() {
+    let optics = [optical(0.00015, 0.0, 1), optical(0.0006, 0.3, 2)];
+    let mixture = model(&[0.75, 0.25], &optics);
+    let state = mixture.evaluate(300.0, 100_000.0).unwrap();
+    let reference_density = 2.5e25 * state.molar_mass_kg_mol() / AVOGADRO_PER_MOL;
+    let ll = |r: f64| ((1.0 + r).powi(2) - 1.0) / ((1.0 + r).powi(2) + 2.0);
+    let expected_ll = 0.75 * ll(0.00015) + 0.25 * ll(0.0006);
+    let index = state
+        .refractive_index_at_density(reference_density, 550.0)
+        .unwrap();
+    assert!((ll(index.refractivity) - expected_ll).abs() < 2.0e-16);
+    // The scattering-weighted/King-corrected average is the wrong phase law.
+    let changed_delta = model(
+        &[0.75, 0.25],
+        &[optical(0.00015, 0.7, 1), optical(0.0006, 0.0, 2)],
+    )
+    .evaluate(300.0, 100_000.0)
+    .unwrap();
+    assert_eq!(
+        changed_delta.mass_refractivity_m3_kg(),
+        state.mass_refractivity_m3_kg()
+    );
+    assert_ne!(
+        changed_delta.mass_scattering_reference_m2_kg(),
+        state.mass_scattering_reference_m2_kg()
+    );
+    let pressure = mixture.evaluate(300.0, 200_000.0).unwrap();
+    let warm = mixture.evaluate(600.0, 100_000.0).unwrap();
+    for (other, ratio) in [(pressure, 2.0), (warm, 0.5)] {
+        near(
+            other.mass_refractivity_m3_kg(),
+            state.mass_refractivity_m3_kg(),
+        );
+        near(other.gas().density, ratio * state.gas().density);
+        assert_eq!(
+            other.refractive_index(550.0).unwrap(),
+            state
+                .refractive_index_at_density(other.gas().density, 550.0)
+                .unwrap()
+        );
+    }
+}
+
+#[test]
+fn g0_refractivity_preserves_dilute_limit_and_refuses_pole() {
+    let state = model(&[1.0], &[optical(0.0003, 0.03, 1)])
+        .evaluate(300.0, 100_000.0)
+        .unwrap();
+    let vacuum = state.refractive_index_at_density(0.0, 550.0).unwrap();
+    assert_eq!(vacuum.phase_index, 1.0);
+    assert_eq!(vacuum.refractivity, 0.0);
+    near(
+        vacuum.derivative_density_m3_kg,
+        1.5 * state.mass_refractivity_m3_kg(),
+    );
+    let dilute = state.refractive_index_at_density(1.0e-20, 550.0).unwrap();
+    assert_eq!(dilute.phase_index, 1.0);
+    assert!(dilute.refractivity > 0.0);
+    near(
+        dilute.refractivity,
+        1.5e-20 * state.mass_refractivity_m3_kg(),
+    );
+    for rho in [
+        -1.0,
+        f64::NAN,
+        f64::INFINITY,
+        1.0 / state.mass_refractivity_m3_kg(),
+        0.1 / state.mass_refractivity_m3_kg(),
+    ] {
+        assert_eq!(
+            state.refractive_index_at_density(rho, 550.0),
+            Err(GasScatteringError::RefractivityDomain)
+        );
+    }
+    assert_eq!(
+        state.refractive_index_at_density(1.0, 800.0),
+        Err(GasScatteringError::Wavelength)
+    );
+    let boundary = model(&[1.0], &[optical(MAX_DILUTE_REFRACTIVITY, 0.0, 1)])
+        .evaluate(300.0, 100_000.0)
+        .unwrap();
+    let reference_density = 2.5e25 * boundary.molar_mass_kg_mol() / AVOGADRO_PER_MOL;
+    near(
+        boundary
+            .refractive_index_at_density(reference_density, 550.0)
+            .unwrap()
+            .refractivity,
+        MAX_DILUTE_REFRACTIVITY,
+    );
+}
