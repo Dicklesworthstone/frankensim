@@ -352,6 +352,25 @@ regressions cover an independently manufactured finite-capacity endpoint,
 nonlinear layers driving evaporation/condensation, repeated energy accounting,
 and atomic late-cancellation/root/temperature refusals.
 
+`cavitation::water_cell::volume` supplies sealed prescribed-volume motion on
+the same finite water owner. `propose_volume` and `advance_volume` solve
+`U1-U0=Q-(p0+p1)(V1-V0)/2` through the original IF97 fixed-v source and
+existing bounded scalar solver. The exposed mean absolute pressure supplies
+the identical signed work to an enclosing mechanical solve. No liquid EOS,
+wall inertia, inferred evaporation rate or extra latent heat is introduced.
+A dropped proposal or failed/cancelled solve retains M, U, V and the clock.
+The rigid-volume endpoint is exactly the original heat update.
+
+The original phase masses/volumes, conserved energy, source-image defects and
+raw entropy remain separate. Explicit volume, temperature, time and nonlinear
+work limits admit the uniform quasistatic equilibrium step; they are not
+trajectory-error bounds. Trapezoidal pressure work requires path/phase-crossing
+refinement, and no heat-entropy or wall-momentum closure is inferred.
+Five native tests cover liquid expansion into cavitation and recompression,
+isothermal coexistence with original latent enthalpy and pressure work,
+single-phase adiabatic entropy convergence, the native equilibrium acoustic
+tangent, rigid reduction, deterministic proposals and atomic refusal.
+
 Eight native regressions exercise withdrawal-induced vapor, refill condensation,
 conservative two-cell transfer, late cancellation, nonaccumulating inverse error,
 original phase acoustics and actual phase-change feedback into duct propagation.

@@ -13,6 +13,8 @@
 //! This first-order held-donor partition requires interval refinement. The
 //! caller's hydraulic owner supplies flow amounts/direction; this module is
 //! not a valve, choking or momentum solver.
+//! The separate sealed `volume` extension admits prescribed boundary motion
+//! with reciprocal pressure work on this same conserved inventory.
 //!
 //! Each complete update, including a paired donor/receiver transfer, publishes
 //! only after source recovery, conservation checks and the final cancellation
@@ -39,6 +41,10 @@ pub mod acoustics;
 /// Reciprocal finite-wall heat storage and native conducting-layer feedback.
 #[path = "water_cell/thermal.rs"]
 pub mod thermal;
+
+/// Sealed prescribed-volume pressure work on the same finite water inventory.
+#[path = "water_cell/volume.rs"]
+pub mod volume;
 
 /// Source-inversion work, gross transport and absolute physical budgets.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -282,7 +288,8 @@ pub struct WaterCellStep {
     pub incoming_enthalpy_j: f64,
     pub outgoing: Option<WaterParcel>,
     pub supplied_heat_j: f64,
-    /// Exactly zero for this rigid control volume.
+    /// Positive work done by the water. Zero for rigid-volume stream transport;
+    /// the sealed volume extension uses its exposed mean absolute pressure.
     pub boundary_work_j: f64,
     pub mass_change_kg: f64,
     pub internal_energy_change_j: f64,
@@ -299,7 +306,9 @@ pub struct WaterCellStep {
     pub pressure_iterations: usize,
 }
 
-/// Uniform equilibrium water in one fixed physical volume.
+/// Uniform equilibrium water with finite conserved mass and internal energy.
+/// Stream transport holds volume fixed; the explicit sealed volume extension
+/// changes it with reciprocal pressure work on this same accepted state.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EquilibriumWaterCell {
     controls: WaterCellControls,
