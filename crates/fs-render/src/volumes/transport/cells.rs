@@ -104,6 +104,33 @@ impl<'g, 'a> CellRay<'g, 'a> {
                 floor
             };
             index[a] = cell.clamp(0.0, (grid.dims[a] - 1) as f64) as usize;
+            // Division can round a point on a stored decimal cell face just
+            // below (or above) its integer lattice coordinate. Reconcile the
+            // fast estimate with the SAME face coordinates used by crossing.
+            // Parallel/positive rays own the upper cell; negative rays own
+            // the lower one. A rare mismatch uses a bounded binary search.
+            let past_face = |boundary: usize| {
+                let coordinate = (boundary as f64).mul_add(grid.cell[a], grid.origin[a]);
+                if d[a] < 0.0 {
+                    start[a] > coordinate
+                } else {
+                    start[a] >= coordinate
+                }
+            };
+            if (index[a] > 0 && !past_face(index[a]))
+                || (index[a] + 1 < grid.dims[a] && past_face(index[a] + 1))
+            {
+                let (mut lower, mut upper) = (0, grid.dims[a] - 1);
+                while lower < upper {
+                    let middle = lower + (upper - lower).div_ceil(2);
+                    if past_face(middle) {
+                        lower = middle;
+                    } else {
+                        upper = middle - 1;
+                    }
+                }
+                index[a] = lower;
+            }
         }
         let mut result = Self {
             grid,

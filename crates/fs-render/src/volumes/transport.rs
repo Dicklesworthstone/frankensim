@@ -16,6 +16,8 @@ use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
 mod cells;
+/// Exact per-cell beam absorption and the separate scattered-power balance.
+pub mod deposition;
 /// Physical emitting-cell direction proposals and their solid-angle density.
 pub mod emission;
 /// Spectral free flights and phase functions for physical participating media.
@@ -113,7 +115,12 @@ pub enum VolumeTransportError {
     ScatteringSpectrum,
     /// Invalid phase asymmetry, direction, or scattering angle.
     Phase,
-    /// A free-flight packet is empty or a random variate is outside [0, 1).
+    /// An incident beam-power lane is negative or non-finite.
+    BeamPower {
+        /// Invalid spectral lane index.
+        lane: usize,
+    },
+    /// A spectral packet is empty or a random variate is outside [0, 1).
     Sample,
     /// Wavelength lies outside 380–780 nm.
     Wavelength,

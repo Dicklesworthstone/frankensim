@@ -245,6 +245,39 @@ impl<'a> ScatteringGrid<'a> {
         &self.phase
     }
 
+    /// Resolve a collimated beam's attenuation into spatial absorption and
+    /// scattering, using the exact physical cell crossings.
+    ///
+    /// Inputs are already spectrally weighted watts, with a unit ray direction
+    /// and metre distances. Only `absorbed_power_w` is heat. The scattered
+    /// power leaves this directed beam and must be transported separately;
+    /// this operation does not approximate multiple-scattering heating or
+    /// subtract the medium's independent thermal emission.
+    ///
+    /// `max_deposition_cells` bounds retained cell records in addition to the
+    /// accepted medium's traversal budget. No partial report is returned.
+    #[allow(clippy::too_many_arguments)]
+    pub fn deposit_beam_power<const N: usize>(
+        &self,
+        cx: &Cx<'_>,
+        origin: Point3,
+        unit_direction: Vec3,
+        max_distance_m: f64,
+        wavelengths_nm: &[f64; N],
+        incident_power_w: &[f64; N],
+        max_deposition_cells: usize,
+    ) -> Result<super::deposition::BeamPowerDeposition<N>, VolumeTransportError> {
+        super::deposition::deposit(
+            cx,
+            &self.absorption,
+            (origin, unit_direction, max_distance_m),
+            wavelengths_nm,
+            incident_power_w,
+            max_deposition_cells,
+            Some((&self.scattering, self.identity)),
+        )
+    }
+
     fn coefficients<const N: usize>(
         &self,
         wavelengths: &[f64; N],
