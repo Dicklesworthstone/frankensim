@@ -1,5 +1,5 @@
 use super::*;
-use crate::compartment::radiation::spectral::SpectralBand;
+use crate::compartment::radiation::spectral::{BandSurfaceEmissivity, SpectralBand};
 use crate::compartment::radiation::{AbsorptionCoefficient, OpticalPath, OpticalSegment};
 use crate::compartment::wall::{
     GasContact, HeatTransferCoefficient, SpecificEnthalpy, ThermalConductivity, WallGeometry,
@@ -533,6 +533,66 @@ fn spectral_feedback_retains_original_reports_and_endpoint_checks() {
     {
         assert_eq!(source.temperature_k(), t.value());
     }
+    account(&result);
+}
+
+#[test]
+fn selective_surface_bands_heat_finite_walls_without_dummy_gray_cards() {
+    let model = optics(1.0);
+    let walls = [wall(900.0, 1.0, 1), wall(300.0, 1.0, 1)];
+    let bands = SpectralOptics::new_with_surface_bands(
+        vec![
+            SpectralBand {
+                wavelengths: [Length::new(1e-7), Length::new(5e-6)],
+                absorption: absorption([0.0; 2]),
+            },
+            SpectralBand {
+                wavelengths: [Length::new(5e-6), Length::new(1e-3)],
+                absorption: absorption([0.0; 2]),
+            },
+        ],
+        [None; 2],
+        [[0.9, 0.2], [0.1, 0.8]]
+            .map(|row| {
+                row.map(|value| {
+                    BandSurfaceEmissivity::new(
+                        value,
+                        [Temperature::new(250.0), Temperature::new(2200.0)],
+                        "authored selective opaque surface fixture",
+                    )
+                    .unwrap()
+                })
+                .to_vec()
+            })
+            .to_vec(),
+    )
+    .unwrap();
+    let result = model
+        .candidate_walls(
+            &walls,
+            Time::new(5.0),
+            &[insulated(); 2],
+            [Temperature::new(300.0); 2],
+            WallOptics::Spectral {
+                optics: &bands,
+                solve: SpectralSolve::default(),
+            },
+            |_, _| panic!("band sources must not query an unrelated total emissivity"),
+            None,
+            EnclosureWallSolve::default(),
+            &mut model.wall_workspace(&walls).unwrap(),
+            || false,
+        )
+        .unwrap();
+    let WallRadiation::Spectral(report) = &result.report.radiation else {
+        panic!("spectral result lost");
+    };
+    assert!(report.surface_emissivities.is_empty());
+    assert_eq!(report.optics, bands);
+    assert!(report.surface_heat_power[1].value() > 100.0);
+    assert!(result.report.radiation_surface_temperatures[0].value() < 900.0);
+    assert!(result.report.radiation_surface_temperatures[1].value() > 300.0);
+    assert_eq!(report.gas_heat_power, [Power::new(0.0); 2]);
     account(&result);
 }
 

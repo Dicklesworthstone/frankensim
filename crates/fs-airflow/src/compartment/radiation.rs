@@ -419,7 +419,7 @@ impl ParticipatingEnclosure {
     ) -> Result<RadiationReport, RadiationError> {
         self.admit_state(
             surface_temperatures,
-            emissivities,
+            Some(emissivities),
             gas_temperatures,
             controls,
             work,
@@ -427,8 +427,12 @@ impl ParticipatingEnclosure {
         )?;
         let n = self.geometry.len();
         let m = n + 2;
+        let mut values = [0.0; MAX_RADIATION_SURFACES];
+        for (value, emissivity) in values.iter_mut().zip(emissivities) {
+            *value = emissivity.value();
+        }
         self.prepare_optics(
-            emissivities,
+            &values[..n],
             absorption.each_ref().map(|a| a.coefficient.value()),
             work,
             &mut cancelled,
@@ -456,7 +460,7 @@ impl ParticipatingEnclosure {
             work.emission[i] = emission_difference(t.value(), reference)?;
         }
         let (maximum, balance) =
-            self.solve_emission(emissivities, controls, work, &mut cancelled)?;
+            self.solve_emission(&values[..n], controls, work, &mut cancelled)?;
         let mut radiosity = Vec::with_capacity(n);
         for &delta in &work.radiosity {
             let value = finite(reference_emission + delta)?;
@@ -481,7 +485,7 @@ impl ParticipatingEnclosure {
     fn admit_state(
         &self,
         surface_temperatures: &[Temperature],
-        emissivities: &[SurfaceEmissivity],
+        emissivities: Option<&[SurfaceEmissivity]>,
         gas_temperatures: [Temperature; 2],
         controls: RadiationSolve,
         work: &RadiationWorkspace,
@@ -491,7 +495,7 @@ impl ParticipatingEnclosure {
         let n = self.geometry.len();
         if work.n != n
             || surface_temperatures.len() != n
-            || emissivities.len() != n
+            || emissivities.is_some_and(|e| e.len() != n)
             || !nonnegative(controls.surface_residual_w_m2)
             || !nonnegative(controls.energy_residual_w)
             || surface_temperatures
@@ -503,13 +507,15 @@ impl ParticipatingEnclosure {
                 "radiation temperatures, workspace, sources or controls",
             ));
         }
-        for i in 0..n {
-            if let Some((lo, hi)) = emissivities[i].temperature_validity_k()
-                && !(lo..=hi).contains(&surface_temperatures[i].value())
-            {
-                return Err(RadiationError::Invalid(
-                    "surface temperature is outside original emissivity validity",
-                ));
+        if let Some(emissivities) = emissivities {
+            for i in 0..n {
+                if let Some((lo, hi)) = emissivities[i].temperature_validity_k()
+                    && !(lo..=hi).contains(&surface_temperatures[i].value())
+                {
+                    return Err(RadiationError::Invalid(
+                        "surface temperature is outside original emissivity validity",
+                    ));
+                }
             }
         }
         Ok(())
@@ -519,7 +525,7 @@ impl ParticipatingEnclosure {
     // retained factor can serve many emission spectra when band optics are fixed.
     fn prepare_optics(
         &self,
-        emissivities: &[SurfaceEmissivity],
+        emissivities: &[f64],
         absorption: [f64; 2],
         work: &mut RadiationWorkspace,
         cancelled: &mut impl FnMut() -> bool,
@@ -568,7 +574,7 @@ impl ParticipatingEnclosure {
         work.matrix.fill(0.0);
         for i in 0..n {
             checkpoint(cancelled)?;
-            let e = emissivities[i].value();
+            let e = emissivities[i];
             let reflected_per_area = (1.0 - e) / self.geometry.areas_m2()[i];
             let mut diagonal = e;
             for j in 0..m {
@@ -588,7 +594,7 @@ impl ParticipatingEnclosure {
     // Pair powers are independent of that background at every wavelength.
     fn solve_emission(
         &self,
-        emissivities: &[SurfaceEmissivity],
+        emissivities: &[f64],
         controls: RadiationSolve,
         work: &mut RadiationWorkspace,
         cancelled: &mut impl FnMut() -> bool,
@@ -597,7 +603,7 @@ impl ParticipatingEnclosure {
         let m = n + 2;
         for i in 0..n {
             checkpoint(cancelled)?;
-            let e = emissivities[i].value();
+            let e = emissivities[i];
             let reflected_per_area = (1.0 - e) / self.geometry.areas_m2()[i];
             let mut rhs = e * work.emission[i];
             for j in n..m {
@@ -630,7 +636,7 @@ impl ParticipatingEnclosure {
         }
         let mut maximum = 0.0_f64;
         for i in 0..n {
-            let e = emissivities[i].value();
+            let e = emissivities[i];
             let residual = finite(
                 e * (work.radiosity[i] - work.emission[i])
                     - (1.0 - e) * work.powers[i] / self.geometry.areas_m2()[i],

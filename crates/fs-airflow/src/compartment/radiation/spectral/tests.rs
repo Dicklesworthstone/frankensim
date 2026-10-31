@@ -85,6 +85,14 @@ fn transparent() -> SpectralOptics<'static> {
     )
     .unwrap()
 }
+fn band_emissivity(value: f64) -> BandSurfaceEmissivity {
+    BandSurfaceEmissivity::new(
+        value,
+        [Temperature::new(200.0), Temperature::new(2000.0)],
+        "authored constant spectral-band fixture; no measured-material claim",
+    )
+    .unwrap()
+}
 fn soot() -> RayleighSoot {
     RayleighSoot::new(
         1.75,
@@ -198,6 +206,223 @@ fn g1_planck_shape_and_omitted_tails_match_independent_integrals() {
             total * 3e-13,
         );
     }
+}
+
+#[test]
+fn g1_selective_surfaces_match_independent_planck_exchange_with_unlike_spectra() {
+    let enclosure = plates();
+    let edges = [1e-7, 5e-6, 1e-3];
+    let values = [[0.9, 0.15], [0.2, 0.85]];
+    let optics = SpectralOptics::new_with_surface_bands(
+        (0..2)
+            .map(|i| band(edges[i], edges[i + 1], [0.0; 2]))
+            .collect(),
+        [None; 2],
+        values.map(|row| row.map(band_emissivity).to_vec()).to_vec(),
+    )
+    .unwrap();
+    let mut work = enclosure.spectral_workspace().unwrap();
+    let expected: f64 = (0..2)
+        .map(|i| {
+            let resistance = 1.0 / values[i][0] + 1.0 / values[i][1] - 1.0;
+            1.3 / resistance
+                * simpson(
+                    |s| {
+                        independent_planck_log(s.exp(), 1200.0)
+                            - independent_planck_log(s.exp(), 300.0)
+                    },
+                    edges[i].ln(),
+                    edges[i + 1].ln(),
+                    16_384,
+                )
+        })
+        .sum();
+    for (temperatures, sign) in [([1200.0, 300.0], 1.0), ([300.0, 1200.0], -1.0)] {
+        let report = enclosure
+            .evaluate_spectral(
+                &temperatures.map(Temperature::new),
+                &[],
+                [Temperature::new(500.0); 2],
+                &optics,
+                controls(),
+                &mut work,
+                || false,
+            )
+            .unwrap();
+        close(report.surface_heat_power[1].value(), sign * expected, 2e-7);
+        close(report.surface_heat_power[0].value(), -sign * expected, 2e-7);
+        assert_eq!(report.gas_heat_power, [Power::new(0.0); 2]);
+        assert!(report.surface_emissivities.is_empty());
+        assert_eq!(report.optics, optics);
+        assert_eq!(report.factorizations, 2);
+        conserved(&report);
+    }
+    // A single gray value cannot substitute for selective absorption of the hot
+    // source and emission of the cold surface. This difference is physical, not
+    // a quadrature refinement effect.
+    let gray = enclosure
+        .evaluate_spectral(
+            &[Temperature::new(1200.0), Temperature::new(300.0)],
+            &[emissivity(0.55), emissivity(0.5)],
+            [Temperature::new(500.0); 2],
+            &transparent(),
+            controls(),
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    assert!((gray.surface_heat_power[1].value() - expected).abs() > 1000.0);
+    let equilibrium = enclosure
+        .evaluate_spectral(
+            &[Temperature::new(600.0); 2],
+            &[],
+            [Temperature::new(600.0); 2],
+            &optics,
+            controls(),
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(heat(&equilibrium), [0.0; 4]);
+}
+
+#[test]
+fn g3_constant_surface_bands_recover_gray_surfaces_with_participating_gas_and_soot() {
+    let enclosure = plates();
+    let soot = soot();
+    for population in [
+        None,
+        Some(SootPopulation {
+            model: &soot,
+            volume_fraction: 2e-6,
+        }),
+    ] {
+        let gas_bands = vec![band(1e-7, 5e-6, [0.2, 0.9]), band(5e-6, 1e-3, [0.8, 0.1])];
+        let gray =
+            SpectralOptics::new(gas_bands.clone(), [population, None], "gray fixture").unwrap();
+        let spectral = SpectralOptics::new_with_surface_bands(
+            gas_bands,
+            [population, None],
+            vec![vec![band_emissivity(0.55), band_emissivity(0.8)]; 2],
+        )
+        .unwrap();
+        let mut work = enclosure.spectral_workspace().unwrap();
+        let temperatures = [Temperature::new(900.0), Temperature::new(300.0)];
+        let gas = [Temperature::new(500.0), Temperature::new(700.0)];
+        let expected = enclosure
+            .evaluate_spectral(
+                &temperatures,
+                &[emissivity(0.55), emissivity(0.8)],
+                gas,
+                &gray,
+                controls(),
+                &mut work,
+                || false,
+            )
+            .unwrap();
+        let actual = enclosure
+            .evaluate_spectral(
+                &temperatures,
+                &[],
+                gas,
+                &spectral,
+                controls(),
+                &mut work,
+                || false,
+            )
+            .unwrap();
+        assert_eq!(heat(&actual), heat(&expected));
+        assert_eq!(
+            actual.surface_radiosity_w_m2,
+            expected.surface_radiosity_w_m2
+        );
+        assert_eq!(actual.factorizations, expected.factorizations);
+        conserved(&actual);
+    }
+}
+
+#[test]
+fn spectral_surface_sources_refuse_conflicting_axes_and_out_of_domain_temperatures() {
+    let range = [Temperature::new(200.0), Temperature::new(600.0)];
+    for value in [0.0, -0.1, 1.1, f64::NAN] {
+        assert!(BandSurfaceEmissivity::new(value, range, "source").is_err());
+    }
+    assert!(BandSurfaceEmissivity::new(0.5, range, " ").is_err());
+    assert!(SpectralOptics::new_with_surface_bands(
+        vec![band(1e-7, 1e-3, [0.0; 2])], [None; 2], vec![],
+    ).is_err());
+    let bounded = BandSurfaceEmissivity::new(0.5, range, "bounded spectral source").unwrap();
+    assert_eq!(bounded.value(), 0.5);
+    assert_eq!(bounded.temperature_range(), range);
+    assert_eq!(bounded.source(), "bounded spectral source");
+    let optics = SpectralOptics::new_with_surface_bands(
+        vec![band(1e-7, 1e-3, [0.0; 2])],
+        [None; 2],
+        vec![vec![bounded.clone(); 2]],
+    )
+    .unwrap();
+    let enclosure = plates();
+    let mut work = enclosure.spectral_workspace().unwrap();
+    assert!(matches!(
+        enclosure.evaluate_spectral(
+            &[Temperature::new(900.0), Temperature::new(300.0)],
+            &[],
+            [Temperature::new(500.0); 2],
+            &optics,
+            controls(),
+            &mut work,
+            || false,
+        ),
+        Err(RadiationError::Invalid(
+            "surface temperature is outside spectral emissivity validity"
+        ))
+    ));
+    assert!(matches!(
+        enclosure.evaluate_spectral(
+            &[Temperature::new(500.0); 2],
+            &[emissivity(0.5), emissivity(0.5)],
+            [Temperature::new(500.0); 2],
+            &optics,
+            controls(),
+            &mut work,
+            || false,
+        ),
+        Err(RadiationError::Invalid(
+            "spectral surface bands and gray emissivity cards cannot both own a boundary"
+        ))
+    ));
+    let wrong_axis = SpectralOptics::new_with_surface_bands(
+        optics.bands().to_vec(),
+        [None; 2],
+        vec![vec![bounded; 3]],
+    )
+    .unwrap();
+    assert!(matches!(
+        enclosure.evaluate_spectral(
+            &[Temperature::new(500.0); 2],
+            &[],
+            [Temperature::new(500.0); 2],
+            &wrong_axis,
+            controls(),
+            &mut work,
+            || false,
+        ),
+        Err(RadiationError::Invalid(
+            "spectral surface axis differs from enclosure"
+        ))
+    ));
+    let replay = enclosure
+        .evaluate_spectral(
+            &[Temperature::new(500.0); 2],
+            &[],
+            [Temperature::new(500.0); 2],
+            &optics,
+            controls(),
+            &mut work,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(heat(&replay), [0.0; 4]);
 }
 
 #[test]

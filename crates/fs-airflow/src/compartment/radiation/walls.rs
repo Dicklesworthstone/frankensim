@@ -15,7 +15,9 @@
 //! spectral quadrature residuals; no imbalance is redistributed to a gas layer.
 //! Each returned optical report names the temperatures at which its applied
 //! powers were evaluated, which agree with the returned faces to the declared
-//! tolerance. Material emissivity is resolved at every queried temperature.
+//! tolerance. Gray material emissivity is resolved at every queried temperature;
+//! spectral-band surface inputs instead retain their own source/temperature
+//! domains, which the original spectral owner checks at every trial.
 //!
 //! Gas temperatures, absorption, geometry, convection and external boundaries
 //! are supplied for this interval. The gas itself is not advanced here: use the
@@ -51,7 +53,7 @@ pub enum WallOptics<'a, 's> {
     },
     /// Original finite-window wavelength-dependent solve.
     Spectral {
-        /// Sourced absorption bands and optional original soot populations.
+        /// Sourced absorption bands, optional soot and optional spectral surfaces.
         optics: &'a SpectralOptics<'s>,
         /// Original algebraic, quadrature, coverage and wavelength-work gates.
         solve: SpectralSolve,
@@ -445,8 +447,10 @@ impl ParticipatingEnclosure {
     /// and accepted clock. Nonzero convective contacts must use the supplied
     /// gas temperatures. The emissivity callback resolves the original card at
     /// the requested temperature and must be deterministic for unchanged input.
-    /// It is called for every optical trial, with bounded cancellation between
-    /// surfaces. Opacity/bands, gas temperatures and geometry remain frozen.
+    /// It is called for every gray-surface optical trial, with bounded cancellation
+    /// between surfaces. With explicit spectral surface bands the callback is
+    /// unused; those bands' temperature domains are checked at every trial.
+    /// Opacity/bands, gas temperatures and geometry remain frozen.
     ///
     /// An optional initial power vector is only a nonlinear guess, never a
     /// prescribed extra source. `None` starts from zero radiation. A useful
@@ -940,17 +944,24 @@ fn optical<'s>(
         controls.maximum_radiation_evaluations,
         "radiation",
     )?;
-    let mut emissivities = Vec::with_capacity(temperatures.len());
-    for (surface, &temperature) in temperatures.iter().enumerate() {
-        check(cancelled)?;
-        let value = emissivity(surface, temperature)
-            .map_err(|error| EnclosureWallError::Emissivity { surface, error })?;
-        if value.temperature_k() != temperature.value() {
-            return Err(EnclosureWallError::Invalid(
-                "emissivity callback must query the actual requested temperature",
-            ));
+    let mut emissivities = Vec::new();
+    let band_surfaces = matches!(
+        optics,
+        WallOptics::Spectral { optics, .. } if optics.surface_emissivity_bands().is_some()
+    );
+    if !band_surfaces {
+        emissivities.reserve_exact(temperatures.len());
+        for (surface, &temperature) in temperatures.iter().enumerate() {
+            check(cancelled)?;
+            let value = emissivity(surface, temperature)
+                .map_err(|error| EnclosureWallError::Emissivity { surface, error })?;
+            if value.temperature_k() != temperature.value() {
+                return Err(EnclosureWallError::Invalid(
+                    "emissivity callback must query the actual requested temperature",
+                ));
+            }
+            emissivities.push(value);
         }
-        emissivities.push(value);
     }
     match optics {
         WallOptics::Gray { absorption, solve } => Ok(WallRadiation::Gray(enclosure.evaluate(

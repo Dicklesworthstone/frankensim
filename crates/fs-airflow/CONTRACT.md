@@ -1609,6 +1609,22 @@ emissivity cards, diffuse reflection equations and prepared LU still own the
 transfer. The caller explicitly names the assumption extending those total
 emissivities over wavelength; no molecular coefficients are inferred.
 
+`SpectralOptics::new_with_surface_bands` alternatively accepts independent
+`BandSurfaceEmissivity` sources on the same gas/surface wavelength partition.
+These are spectral properties with explicit temperature domains, not relabeled
+total material emissivities. The opaque diffuse law uses the same band value
+for emission and absorption and its complement for reflection. Every queried
+wall temperature is checked in every band. Supplying gray cards together with
+these sources refuses ambiguous ownership; the retained optical report contains
+the applied spectral sources and an empty gray-card vector. The shared finite
+wall/reactive-surface adapter selects these sources without a dummy gray query.
+Constant band optics still use one LU factorization per band. G1 tests compare
+selective plate exchange against independent Planck integration with unlike
+source temperatures; G3 covers exact gray recovery with gas/soot, equilibrium,
+and conservative finite-wall feedback. The source must justify the constant
+band approximation; perfect reflectors, transmission and directional surface
+optics remain outside this opaque diffuse lane.
+
 Positive 8/16-point Gauss--Legendre integration in log wavelength splits at
 every supplied band boundary, with initial panel widths at most one logarithmic
 unit. Controls bound absolute heat/radiosity error estimates, evaluation count,

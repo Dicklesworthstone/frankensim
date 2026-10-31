@@ -24,8 +24,11 @@
 //! This is a sourced band-absorption approximation, not a molecular line database
 //! or a RADCAL replacement. The caller resolves absorption at the actual gas
 //! composition, pressure and temperature and justifies the band's resolution.
-//! Original total surface emissivities are deliberately treated as gray; that
-//! additional assumption must be named. Optical geometry, omitted wavelengths,
+//! Surfaces use either explicitly gray total emissivities or independent,
+//! source-bounded spectral-band emissivities. At every wavelength an opaque
+//! diffuse surface's absorptivity equals its emissivity (Kirchhoff's law), and
+//! its reflectivity is their complement. Total emissivity is never relabeled
+//! as a measured spectral property. Optical geometry, omitted wavelengths,
 //! band-data error, scattering and particle/gas nonequilibrium remain separate
 //! from the reported quadrature and algebraic errors.
 //! Booking soot emission into a gas layer's thermal account assumes that its
@@ -39,6 +42,7 @@ use super::{
 use fs_conduction::radiation::{STEFAN_BOLTZMANN_W_M2_K4, SurfaceEmissivity};
 use fs_gas::multicomponent::compartment::{Layer, LayerRates, TwoZone};
 use fs_qty::{Length, Power, Temperature};
+use std::sync::Arc;
 
 /// Fixed bound on the source-supplied wavelength bands.
 pub const MAX_SPECTRAL_BANDS: usize = 256;
@@ -64,6 +68,57 @@ pub struct SpectralBand {
     pub absorption: [LayerAbsorption; 2],
 }
 
+/// Source-supplied diffuse, opaque spectral emissivity, constant within one
+/// enclosing wavelength band and the declared surface-temperature range.
+/// This is distinct from a material card's hemispherical TOTAL emissivity.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BandSurfaceEmissivity {
+    value: f64,
+    temperature_range: [Temperature; 2],
+    source: String,
+}
+impl BandSurfaceEmissivity {
+    /// Bind the band value to its measured/model source and temperature domain.
+    /// Strictly positive values retain the original reflection solver's domain;
+    /// perfectly reflecting, disconnected cavities are not admitted here.
+    pub fn new(
+        value: f64,
+        temperature_range: [Temperature; 2],
+        source: impl Into<String>,
+    ) -> Result<Self, RadiationError> {
+        let source = source.into();
+        let [lo, hi] = temperature_range.map(Temperature::value);
+        if !positive(value)
+            || value > 1.0
+            || !positive(lo)
+            || !positive(hi)
+            || lo > hi
+            || source.trim().is_empty()
+        {
+            return Err(RadiationError::Invalid(
+                "sourced band emissivity in (0,1] and a positive temperature domain required",
+            ));
+        }
+        Ok(Self {
+            value,
+            temperature_range,
+            source,
+        })
+    }
+    /// Both emissivity and absorptivity within this opaque diffuse band.
+    pub const fn value(&self) -> f64 {
+        self.value
+    }
+    /// Closed admitted surface-temperature interval.
+    pub const fn temperature_range(&self) -> [Temperature; 2] {
+        self.temperature_range
+    }
+    /// Original spectral source, including the applicability of a constant band.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
 /// Original Rayleigh optical model and actual particulate loading.
 /// The finite wavelength window is declared by the enclosing band's endpoints.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -80,6 +135,9 @@ pub struct SpectralOptics<'a> {
     bands: Vec<SpectralBand>,
     soot: [Option<SootPopulation<'a>>; 2],
     gray_surface_assumption: String,
+    // Immutable source bank is shared by reports and nonlinear wall trials;
+    // copying a report must not reallocate every band's per-surface strings.
+    surface_bands: Option<Arc<[Vec<BandSurfaceEmissivity>]>>,
     varying: bool,
 }
 impl<'a> SpectralOptics<'a> {
@@ -92,13 +150,56 @@ impl<'a> SpectralOptics<'a> {
         gray_surface_assumption: impl Into<String>,
     ) -> Result<Self, RadiationError> {
         let gray_surface_assumption = gray_surface_assumption.into();
-        if bands.is_empty()
-            || bands.len() > MAX_SPECTRAL_BANDS
-            || gray_surface_assumption.trim().is_empty()
-        {
+        if gray_surface_assumption.trim().is_empty() {
             return Err(RadiationError::Invalid(
                 "bounded spectral bands and explicit gray surface assumption required",
             ));
+        }
+        let varying = Self::admit_bands(&bands, &soot)?;
+        Ok(Self {
+            bands,
+            soot,
+            gray_surface_assumption,
+            surface_bands: None,
+            varying,
+        })
+    }
+
+    /// Use genuine spectral surface data instead of extending total emissivity
+    /// over wavelength. The outer vector matches `bands` exactly; every inner
+    /// vector follows the original enclosure surface axis. Gas and surface
+    /// discontinuities must both appear in this common band partition.
+    /// No gray emissivity cards are needed by `evaluate_spectral` in this mode.
+    pub fn new_with_surface_bands(
+        bands: Vec<SpectralBand>,
+        soot: [Option<SootPopulation<'a>>; 2],
+        surface_bands: Vec<Vec<BandSurfaceEmissivity>>,
+    ) -> Result<Self, RadiationError> {
+        let varying = Self::admit_bands(&bands, &soot)?;
+        let n = surface_bands.first().map_or(0, Vec::len);
+        if surface_bands.len() != bands.len()
+            || !(2..=MAX_RADIATION_SURFACES).contains(&n)
+            || surface_bands.iter().any(|row| row.len() != n)
+        {
+            return Err(RadiationError::Invalid(
+                "spectral emissivity bands must match the common band and surface axes",
+            ));
+        }
+        Ok(Self {
+            bands,
+            soot,
+            gray_surface_assumption: String::new(),
+            surface_bands: Some(surface_bands.into()),
+            varying,
+        })
+    }
+
+    fn admit_bands(
+        bands: &[SpectralBand],
+        soot: &[Option<SootPopulation<'_>>; 2],
+    ) -> Result<bool, RadiationError> {
+        if bands.is_empty() || bands.len() > MAX_SPECTRAL_BANDS {
+            return Err(RadiationError::Invalid("bounded spectral bands required"));
         }
         for (i, band) in bands.iter().enumerate() {
             let [a, b] = band.wavelengths.map(Length::value);
@@ -120,12 +221,7 @@ impl<'a> SpectralOptics<'a> {
                 .spectral_coefficient(population.volume_fraction, bands[0].wavelengths[0])?;
             varying |= k.value() > 0.0;
         }
-        Ok(Self {
-            bands,
-            soot,
-            gray_surface_assumption,
-            varying,
-        })
+        Ok(varying)
     }
 
     /// Unmodified original band coefficients and source identities.
@@ -144,8 +240,14 @@ impl<'a> SpectralOptics<'a> {
         ]
     }
     /// Named assumption extending original total emissivities over wavelength.
+    /// Empty when original spectral-band surface inputs replace that assumption.
     pub fn gray_surface_assumption(&self) -> &str {
         &self.gray_surface_assumption
+    }
+
+    /// Original spectral surface inputs in band-then-surface order, if selected.
+    pub fn surface_emissivity_bands(&self) -> Option<&[Vec<BandSurfaceEmissivity>]> {
+        self.surface_bands.as_deref()
     }
 
     fn coefficients(&self, band: usize, wavelength: Length) -> Result<[f64; 2], RadiationError> {
@@ -233,7 +335,8 @@ pub struct SpectralRadiationReport<'a> {
     pub gas_heat_error_estimate_w: [f64; 2],
     /// Estimated absolute quadrature errors for each radiosity [W/m²].
     pub radiosity_error_estimate_w_m2: Vec<f64>,
-    /// Original card-backed values, explicitly treated as gray boundaries.
+    /// Applied original gray cards; empty when `optics` retains the actual
+    /// band-resolved surface inputs instead. No unused gray source is reported.
     pub surface_emissivities: Vec<SurfaceEmissivity>,
     /// Unmodified optical model and assumptions used in this calculation.
     pub optics: SpectralOptics<'a>,
@@ -332,8 +435,10 @@ impl ParticipatingEnclosure {
     }
 
     /// Resolve each node's emission spectrum and wavelength-dependent transfer.
-    /// Original gray wall properties and frozen source bands remain explicit
-    /// assumptions. This call publishes no material/gas state or time-order claim.
+    /// Surface data is either the original gray cards or `optics`' independent
+    /// band sources. Pass an empty gray slice with band sources; supplying both
+    /// refuses ambiguous boundary ownership. This call publishes no state or
+    /// time-order claim.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_spectral<'a>(
         &self,
@@ -345,9 +450,15 @@ impl ParticipatingEnclosure {
         work: &mut SpectralWorkspace,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<SpectralRadiationReport<'a>, RadiationError> {
+        let gray = optics.surface_bands.is_none();
+        if !gray && !emissivities.is_empty() {
+            return Err(RadiationError::Invalid(
+                "spectral surface bands and gray emissivity cards cannot both own a boundary",
+            ));
+        }
         self.admit_state(
             surface_temperatures,
-            emissivities,
+            gray.then_some(emissivities),
             gas_temperatures,
             controls.algebraic,
             &work.radiation,
@@ -363,6 +474,24 @@ impl ParticipatingEnclosure {
         }
         let n = self.geometry().len();
         let m = n + 2;
+        if let Some(bands) = &optics.surface_bands {
+            for band in bands.iter() {
+                checkpoint(&mut cancelled)?;
+                if band.len() != n {
+                    return Err(RadiationError::Invalid(
+                        "spectral surface axis differs from enclosure",
+                    ));
+                }
+                for (source, temperature) in band.iter().zip(surface_temperatures) {
+                    let [lo, hi] = source.temperature_range.map(Temperature::value);
+                    if !(lo..=hi).contains(&temperature.value()) {
+                        return Err(RadiationError::Invalid(
+                            "surface temperature is outside spectral emissivity validity",
+                        ));
+                    }
+                }
+            }
+        }
         let channels = m + n + 1;
         let wavelengths = optics.wavelengths();
         let log_range = finite(wavelengths[1].value().ln() - wavelengths[0].value().ln())?;
@@ -408,24 +537,34 @@ impl ParticipatingEnclosure {
         let mut evaluations = 0;
         let mut factorizations = 0;
         let mut accepted_panels = 0;
-        let mut sample = SpectralSample {
-            enclosure: self,
-            emissivities,
-            optics,
-            temperatures: &temperatures[..m],
-            reference,
-            controls: RadiationSolve {
-                surface_residual_w_m2: controls.algebraic.surface_residual_w_m2 / log_range,
-                energy_residual_w: controls.algebraic.energy_residual_w / log_range,
-            },
-        };
         for (band, source) in optics.bands.iter().enumerate() {
             checkpoint(&mut cancelled)?;
+            let mut values = [0.0; MAX_RADIATION_SURFACES];
+            if let Some(bands) = &optics.surface_bands {
+                for (value, source) in values.iter_mut().zip(&bands[band]) {
+                    *value = source.value;
+                }
+            } else {
+                for (value, source) in values.iter_mut().zip(emissivities) {
+                    *value = source.value();
+                }
+            }
+            let mut sample = SpectralSample {
+                enclosure: self,
+                emissivities: &values[..n],
+                optics,
+                temperatures: &temperatures[..m],
+                reference,
+                controls: RadiationSolve {
+                    surface_residual_w_m2: controls.algebraic.surface_residual_w_m2 / log_range,
+                    energy_residual_w: controls.algebraic.energy_residual_w / log_range,
+                },
+            };
             let begin = source.wavelengths[0].value().ln();
             let end = source.wavelengths[1].value().ln();
             if !optics.varying {
                 self.prepare_optics(
-                    emissivities,
+                    &values[..n],
                     optics.coefficients(band, source.wavelengths[0])?,
                     &mut work.radiation,
                     &mut cancelled,
@@ -548,7 +687,7 @@ impl ParticipatingEnclosure {
 
 struct SpectralSample<'a, 'b> {
     enclosure: &'a ParticipatingEnclosure,
-    emissivities: &'a [SurfaceEmissivity],
+    emissivities: &'a [f64],
     optics: &'a SpectralOptics<'b>,
     temperatures: &'a [f64],
     reference: f64,
