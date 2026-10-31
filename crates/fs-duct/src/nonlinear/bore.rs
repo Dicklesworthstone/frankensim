@@ -206,7 +206,7 @@ impl NonlinearBore {
         )?;
         let outlet_pressure_pa = radiation.commit()?;
         if let Some(walls) = self.walls.as_mut() {
-            walls.apply(&mut self.solver)?;
+            walls.apply(&mut self.solver, &self.gas)?;
         }
         let outlet_mass_flow_kg_s = -report.right_boundary_change.mass / self.step_s;
         Ok(BoreStep {
@@ -741,7 +741,7 @@ impl Walls {
         })
     }
 
-    fn apply(&mut self, solver: &mut Euler1d) -> Result<(), NonlinearDuctError> {
+    fn apply(&mut self, solver: &mut Euler1d, gas: &FrozenGas) -> Result<(), NonlinearDuctError> {
         let stride = self.state_stride;
         let reference = self.reference_pressure;
         let Self {
@@ -770,21 +770,33 @@ impl Walls {
                 let dissipated = 0.5 * q.density * (before - after);
                 let kinetic_change =
                     0.5 * q.density * (velocity * velocity - p.velocity * p.velocity);
-                let gamma = p.sound_speed * p.sound_speed * p.density / p.pressure;
-                let heated = p.pressure + (gamma - 1.0) * dissipated;
-                let moved = q.energy + kinetic_change + dissipated;
+                let moved = Conserved {
+                    density: q.density,
+                    momentum: q.density * velocity,
+                    energy: q.energy + (kinetic_change + dissipated),
+                };
+                // Finite heating follows the original integral of Cv(T),
+                // not a locally frozen gamma. At zero dissipation the old
+                // temperature/pressure remain exact and need no inversion.
+                let heated = if dissipated == 0.0 {
+                    p.pressure
+                } else {
+                    gas.primitive(moved, || false)?.pressure
+                };
                 let thermal = &propagators[thermal_of[i]];
                 let n = thermal.size;
                 let arms = &mut spare_thermal[at..at + n];
                 arms.copy_from_slice(&thermal_state[at..at + n]);
                 let (exchanged, _, _) = thermal.advance(arms, heated - reference);
-                let exchanged = exchanged + reference;
-                // Wall heat exchange changes internal energy at fixed density.
-                Ok(Conserved {
-                    density: q.density,
-                    momentum: q.density * velocity,
-                    energy: moved + (exchanged - heated) / (gamma - 1.0),
-                })
+                // No wall heat exchange must retain the conservative
+                // viscous work exactly, without a caloric round trip.
+                if exchanged == heated - reference {
+                    return Ok(moved);
+                }
+                // The wall memory prescribes a pressure change at fixed
+                // density. Recover its energy through the same NASA-9 owner
+                // as the field, including its original temperature limits.
+                gas.conserved(q.density, velocity, exchanged + reference)
             },
             || false,
         )?;

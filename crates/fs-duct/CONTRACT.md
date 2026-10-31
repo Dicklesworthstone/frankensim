@@ -1786,8 +1786,15 @@ NASA-9 source and adds what a played bore needs:
   eigenbasis and decays each coordinate by `exp(lambda dt) <= 1`, so it is
   contractive and costs O(arms) per cell. Only dissipated arm energy heats the
   gas (the arms store the boundary-layer kinetic energy); thermal exchange
-  changes pressure at fixed density. The update is transactional
-  (`apply_cell_sources`).
+  changes pressure at fixed density. Finite viscous heating and subsequent
+  wall heat exchange use the original NASA-9 caloric inversion and integral
+  of Cv(T), including source-temperature admission; a frozen local gamma is
+  not substituted for either finite energy change. Zero thermal exchange
+  retains the conservative viscous energy transfer without a caloric round
+  trip. The update is transactional (`apply_cell_sources`), including every
+  cell's viscous and thermal histories. The wall propagators themselves retain
+  their declared, fixed linear transport coefficients; this is not a nonlinear
+  radial boundary-layer model.
 - **Radiating end.** A rigid piston in an infinite baffle. Its exact impulse
   response `rho c/S [delta(t) - (4/(pi T)) sqrt(1-(t/T)^2)]`, `T = 2a/c`
   (Stepanishen 1971), is product-integrated against the piecewise-linear end
@@ -1813,7 +1820,10 @@ first six peaks within 10 cents and 1.5 dB, measured +0.17 to +1.69 cents and -0
 admitted at 6.2e-4 complex, 7.3e-4 loss); `g2`: a 2 kPa,
 1 kHz sinusoid steepens to the lossless shock distance `rho c^3/(beta omega p)`
 within 5 %, measured 3.2394 m against
-3.2317 m (+0.24 %).
+3.2317 m (+0.24 %). The caloric wall regressions compare heating and cooling
+against an independent analytic Cv(T) integral, combine viscous heating with
+thermal exchange, preserve total gas energy for pure drag, and refuse an
+out-of-domain thermal endpoint without publishing any cell or wall history.
 
 ### Conservative molecular transport in nonlinear bores
 

@@ -5,7 +5,7 @@ use fs_gas::dynamics::CaloricDomain;
 use fs_matdb::{ConstitutiveModelCard, InitialStatePolicy, LawId, LawParameter, Provenance};
 use fs_material::gas::{GasSpec, GasState};
 use fs_math::c64::C64;
-use fs_qty::{MolarMass, Pressure, Temperature};
+use fs_qty::{Length, MolarMass, Pressure, Temperature};
 use fs_thermochem::mixture::FrozenIdealGasMixtureModelV1;
 use fs_thermochem::{
     Composition, CompositionBasis, ElementalReferenceIdV1, Nasa9RegionV1,
@@ -25,8 +25,14 @@ fn air() -> GasState {
 // and Cp, so the field and the transfer-matrix chain share density, sound
 // speed and gamma. An analytic fixture, not measured gas data.
 fn air_source(state: &GasState) -> FrozenGas {
+    caloric_source(state, 0.0)
+}
+
+// Cp(T)/R = Cp(0)/R + slope*T, with an independently integrable Cv.
+fn caloric_source(state: &GasState, slope: f64) -> FrozenGas {
     let mut a = [0.0; 9];
     a[2] = state.specific_heat_cp / state.specific_gas_constant;
+    a[3] = slope;
     let mut parameters = std::collections::BTreeMap::new();
     for ((name, dims), value) in required_nasa9_parameter_dims().into_iter().take(9).zip(a) {
         parameters.insert(name.to_owned(), LawParameter { value, dims });
@@ -47,7 +53,7 @@ fn air_source(state: &GasState) -> FrozenGas {
         validity: ValidityDomain::unconstrained().with("T", 100.0, 1000.0),
         sources: Vec::new(),
         provenance: Provenance {
-            source: "Manufactured constant-Cp bore test".into(),
+            source: "Manufactured caloric bore test".into(),
             license: "test fixture".into(),
             artifact: None,
         },
@@ -86,6 +92,141 @@ fn wall_gas(state: &GasState) -> WallGas {
         gamma: state.gamma,
         prandtl: state.prandtl,
     }
+}
+
+// A single, exactly soluble thermal arm: gain=rate=1 and exp(-2*dt)=1/5.
+// From zero history its pressure response is 3/5 of the initial perturbation.
+fn caloric_walls(cells: usize, reference_pressure: f64, drag: f64, thermal: bool) -> Walls {
+    let dt = 0.5 * det::ln(5.0);
+    let thermal_arms: &[(f64, f64)] = if thermal { &[(1.0, 1.0)] } else { &[] };
+    Walls {
+        viscous_of: vec![0; cells],
+        thermal_of: vec![1; cells],
+        propagators: vec![
+            Propagator::new(drag, &[], dt).unwrap(),
+            Propagator::new(0.0, thermal_arms, dt).unwrap(),
+        ],
+        viscous_state: vec![0.0; 2 * cells],
+        thermal_state: vec![0.0; 2 * cells],
+        spare_viscous: vec![0.0; 2 * cells],
+        spare_thermal: vec![0.0; 2 * cells],
+        state_stride: 2,
+        reference_pressure,
+        receipt: WallReceipt {
+            distinct_radii: 1,
+            maximum_arms: usize::from(thermal),
+            maximum_complex_error: 0.0,
+            maximum_loss_error: 0.0,
+        },
+    }
+}
+
+fn caloric_field(gas: &FrozenGas, states: Vec<Conserved>) -> Euler1d {
+    Euler1d::new(
+        gas.clone(),
+        Length::new(1.0),
+        1.0,
+        states,
+        Boundaries::Ends {
+            left: Boundary::Reflecting,
+            right: Boundary::Reflecting,
+        },
+        || false,
+    )
+    .unwrap()
+}
+
+#[test]
+fn g1_caloric_wall_heat_matches_the_exact_cv_integral_in_both_directions() {
+    let state = air();
+    let r = state.specific_gas_constant;
+    let cv0 = state.specific_heat_cp - r;
+    let rho = 1.7;
+    for slope in [0.0, 0.003] {
+        let gas = caloric_source(&state, slope);
+        for initial_t in [180.0, 600.0] {
+            let q = gas.conserved(rho, 0.0, rho * r * initial_t).unwrap();
+            let mut solver = caloric_field(&gas, vec![q; 2]);
+            let mut walls = caloric_walls(2, rho * r * 300.0, 0.0, true);
+            walls.apply(&mut solver, &gas).unwrap();
+            let expected_t = 300.0 + 0.6 * (initial_t - 300.0);
+            let expected_heat = rho
+                * (cv0 * (expected_t - initial_t)
+                    + 0.5 * r * slope * (expected_t * expected_t - initial_t * initial_t));
+            let next = solver.states()[0];
+            let p = gas.primitive(next, || false).unwrap();
+            assert_eq!(next.density, q.density);
+            assert_eq!(next.momentum, q.momentum);
+            assert!((p.temperature - expected_t).abs() < 1e-8);
+            assert!((next.energy - q.energy - expected_heat).abs() < 1e-7);
+        }
+    }
+}
+
+#[test]
+fn g1_caloric_wall_viscous_heat_precedes_thermal_exchange_without_frozen_gamma() {
+    let state = air();
+    let r = state.specific_gas_constant;
+    let slope = 0.003;
+    let gas = caloric_source(&state, slope);
+    let (rho, initial_t, initial_u) = (1.7, 450.0, 600.0);
+    let q = gas.conserved(rho, initial_u, rho * r * initial_t).unwrap();
+    let next_u = initial_u / 5.0_f64.sqrt();
+    let dissipated_per_mass = 0.5 * (initial_u * initial_u - next_u * next_u);
+    let cv = state.specific_heat_cp - r + r * slope * initial_t;
+    // Positive quadratic root of integral Cv(T) dT = lost kinetic energy.
+    let delta_t =
+        2.0 * dissipated_per_mass / (cv + (cv * cv + 2.0 * r * slope * dissipated_per_mass).sqrt());
+    let heated_t = initial_t + delta_t;
+    for thermal in [false, true] {
+        let mut solver = caloric_field(&gas, vec![q; 2]);
+        let mut walls = caloric_walls(2, rho * r * 300.0, 1.0, thermal);
+        walls.apply(&mut solver, &gas).unwrap();
+        let expected_t = if thermal {
+            300.0 + 0.6 * (heated_t - 300.0)
+        } else {
+            heated_t
+        };
+        let next = solver.states()[0];
+        let p = gas.primitive(next, || false).unwrap();
+        let expected_heat = rho
+            * ((state.specific_heat_cp - r) * (expected_t - heated_t)
+                + 0.5 * r * slope * (expected_t * expected_t - heated_t * heated_t));
+        assert_eq!(next.density, q.density);
+        assert!((p.velocity - next_u).abs() < 1e-10);
+        assert!((p.temperature - expected_t).abs() < 1e-8);
+        assert!((next.energy - q.energy - expected_heat).abs() < 1e-7);
+        if !thermal {
+            assert_eq!(
+                next.energy, q.energy,
+                "viscous heat is an internal transfer"
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_caloric_wall_domain_refusal_preserves_all_cells_and_memory() {
+    let state = air();
+    let gas = caloric_source(&state, 0.003);
+    let cells: Vec<_> = [300.0, 160.0]
+        .into_iter()
+        .map(|t| {
+            gas.conserved(1.0, 0.0, state.specific_gas_constant * t)
+                .unwrap()
+        })
+        .collect();
+    let mut solver = caloric_field(&gas, cells.clone());
+    // The first cell cools to 180 K; the second would leave the admitted
+    // [100, 1000] K interval at 96 K. Neither cell nor its arms may publish.
+    let mut walls = caloric_walls(2, 0.0, 0.0, true);
+    let viscous_before = walls.viscous_state.clone();
+    let thermal_before = walls.thermal_state.clone();
+    assert!(walls.apply(&mut solver, &gas).is_err());
+    assert_eq!(solver.states(), cells);
+    assert_eq!(solver.time().value(), 0.0);
+    assert_eq!(walls.viscous_state, viscous_before);
+    assert_eq!(walls.thermal_state, thermal_before);
 }
 
 fn j1(x: f64) -> f64 {
