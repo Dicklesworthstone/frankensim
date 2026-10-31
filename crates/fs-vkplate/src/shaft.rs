@@ -287,7 +287,7 @@ impl ShaftStrike {
                 contact.aspect()
             ),
             format!(
-                "stick crush across the grain (Thornton 1997 in mean-pressure form): Hertz until the mean pressure reaches {:.1} MPa, the card's side hardness {hardness:.0} N over the projected area of the {:.2} mm hardness ball, from an approach of {:.2} um ({:.2} N); deeper, that mean pressure on the Hertz area ({:.4e} m^2 per m of approach), half the edge's truncation of the shaft; unloading along Hertz from a permanent set. The card's compression perpendicular to the grain, {:.1} MPa at the proportional limit of a plate-loaded block, is not used",
+                "stick crush across the grain (Thornton 1997 in mean-pressure form): Hertz until the mean pressure reaches {:.1} MPa, the card's side hardness {hardness:.0} N over the projected area of the {:.2} mm hardness ball, from an approach of {:.2} um ({:.2} N); deeper, that mean pressure on the Hertz area ({:.4e} m^2 per m of approach), half the edge's truncation of the shaft; unloading along Hertz from a permanent set. The card's compression perpendicular to the grain, {:.1} MPa at the proportional limit, is not used",
                 crush.pressure * 1e-6,
                 SIDE_HARDNESS_BALL_DIAMETER_M * 1e3,
                 crush.onset(contact.k()) * 1e6,

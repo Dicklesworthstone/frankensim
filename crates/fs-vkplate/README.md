@@ -246,8 +246,7 @@ Its potential only falls as the wood crushes, so the discrete-gradient solve
 stays passive. The Hertz area is half the edge's truncation of the shaft, the
 area the hardness test divides by at depth, so this is the lower of the two
 readings of the same datum. The card's compression perpendicular to the grain,
-a seventh of that pressure, is stated and not used. It is where a
-plate-loaded block begins to crush.
+a seventh of that pressure, is stated and not used.
 
 The shaft's Hunt-Crossley loss is the card route's declared 0.2 s/m. Each hit
 crushes fresh wood. Not modelled: friction along the edge and the stick's
