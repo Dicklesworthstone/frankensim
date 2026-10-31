@@ -170,7 +170,27 @@ impl<'m> TetLoadGeometry3<'m> {
         if let VolumeLoad3::PerElement(v) = body {
             if v.len() != self.tets.len() { return Err(LoadError3::Invalid("one force-density vector per tetrahedron required")); }
         }
-        let mut forces = vec![0.0; full_dofs];
+        let mut forces = self.surface_forces(surfaces, cx)?;
+        if !matches!(body, VolumeLoad3::None) {
+            for (i, tet) in self.tets.iter().enumerate() {
+                poll(cx)?;
+                let density = vector(body_at(i))?;
+                for &node in tet { for c in 0..3 {
+                    let contribution = finite((self.volumes[i] / 4.0) * density[c])?;
+                    forces[3*node+c] = finite(forces[3*node+c] + contribution)?;
+                } }
+            }
+        }
+        self.finish_forces(forces, nodal, cx)
+    }
+
+    // Reference surface integration is shared by force-density and
+    // material-mass acceleration loading; neither duplicates a pressure law.
+    fn surface_forces(&self, surfaces: &[SurfaceLoad3<'_>], cx: &Cx<'_>)
+        -> Result<Vec<f64>, LoadError3> {
+        poll(cx)?;
+        if surfaces.len() > self.faces.len() { return Err(LoadError3::Budget); }
+        let mut forces = vec![0.0; self.nodes.len() * 3];
         let mut used = vec![false; self.faces.len()];
         for row in surfaces {
             poll(cx)?;
@@ -190,17 +210,7 @@ impl<'m> TetLoadGeometry3<'m> {
                 } }
             }
         }
-        if !matches!(body, VolumeLoad3::None) {
-            for (i, tet) in self.tets.iter().enumerate() {
-                poll(cx)?;
-                let density = vector(body_at(i))?;
-                for &node in tet { for c in 0..3 {
-                    let contribution = finite((self.volumes[i] / 4.0) * density[c])?;
-                    forces[3*node+c] = finite(forces[3*node+c] + contribution)?;
-                } }
-            }
-        }
-        self.finish_forces(forces, nodal, cx)
+        Ok(forces)
     }
 
     // Shared nodal superposition and canonical publication for uniform/P1 fields.

@@ -9,6 +9,7 @@
 //! destroys first moments and work against an affine displacement.
 
 use super::*;
+use crate::linear3::{TetMaterialField, p1_tet_mass_scale};
 
 /// P1 surface fields in the canonical node order of each selected `LoadFace3`.
 /// The outer value array follows `faces`; shared vertices need not share values.
@@ -28,6 +29,20 @@ pub enum VolumeField3<'a> {
     PerNode(&'a [[f64; 3]]),
     /// Four vectors per tetrahedron in its original connectivity order.
     /// Separate element samples permit material-interface jumps without averaging.
+    PerElement(&'a [[[f64; 3]; 4]]),
+}
+
+/// Prescribed body acceleration [m/s²] sampled on the reference volume mesh.
+/// The solve material supplies density; values are never force densities.
+/// This is a held dead-load field in the mesh's world axes, not a field that
+/// resamples itself at a deformed position. Nonlinear gravity fields require
+/// spatial refinement of these P1 samples and explicit updates by their owner.
+#[derive(Debug, Clone, Copy)]
+pub enum AccelerationField3<'a> {
+    Uniform([f64; 3]),
+    /// Continuous P1 acceleration, one Cartesian sample per geometry node.
+    PerNode(&'a [[f64; 3]]),
+    /// Four P1 samples per tetrahedron, in its original connectivity order.
     PerElement(&'a [[[f64; 3]; 4]]),
 }
 
@@ -52,6 +67,69 @@ fn scatter<const N: usize>(
 }
 
 impl<'m> TetLoadGeometry3<'m> {
+    // The history endpoint borrows the exact problem supplying these masses.
+    // Apply the full consistent element mass before eliminating any supports:
+    // reduced M_ff*g_f alone would omit M_fc*g_c and all restrained loads.
+    pub(super) fn assemble_acceleration<'g>(
+        &'g self, surfaces: &[SurfaceLoad3<'_>], materials: TetMaterialField<'_>,
+        acceleration: AccelerationField3<'_>, nodal: &[(usize, f64)], cx: &Cx<'_>,
+    ) -> Result<TetLoadCase3<'g, 'm>, LoadError3> {
+        poll(cx)?;
+        if nodal.len() > self.nodes.len() * 3 { return Err(LoadError3::Budget); }
+        if let TetMaterialField::PerElement(values) = materials {
+            if values.len() != self.tets.len() {
+                return Err(LoadError3::Invalid("acceleration needs one material per tetrahedron"));
+            }
+        }
+        match acceleration {
+            AccelerationField3::PerNode(values) if values.len() != self.nodes.len() => {
+                return Err(LoadError3::Invalid("one acceleration vector per mesh node required"));
+            }
+            AccelerationField3::PerElement(values) if values.len() != self.tets.len() => {
+                return Err(LoadError3::Invalid("one four-vector acceleration field per tetrahedron required"));
+            }
+            _ => {}
+        }
+        let mut forces = self.surface_forces(surfaces, cx)?;
+        for (element, &tet) in self.tets.iter().enumerate() {
+            poll(cx)?;
+            let density = match materials {
+                TetMaterialField::Uniform(material) => material.density_kg_m3,
+                TetMaterialField::PerElement(values) => values[element].density_kg_m3,
+            };
+            if !density.is_finite() || density <= 0.0 {
+                return Err(LoadError3::Invalid("positive finite reference density required for acceleration"));
+            }
+            let scale = finite(p1_tet_mass_scale(self.volumes[element], density))?;
+            if scale <= 0.0 {
+                return Err(LoadError3::Invalid("reference mass is unrepresentable"));
+            }
+            if let AccelerationField3::Uniform(value) = acceleration {
+                let value = vector(value)?;
+                let share = finite(5.0 * scale)?;
+                for node in tet { for c in 0..3 {
+                    let dof = 3 * node + c;
+                    forces[dof] = finite(forces[dof] + finite(share * value[c])?)?;
+                } }
+                continue;
+            }
+            let values = match acceleration {
+                AccelerationField3::Uniform(_) => unreachable!("uniform acceleration handled above"),
+                AccelerationField3::PerNode(values) => tet.map(|node| values[node]),
+                AccelerationField3::PerElement(values) => values[element],
+            };
+            for value in values { vector(value)?; }
+            for i in 0..4 { for j in 0..4 {
+                let weight = if i == j { finite(2.0 * scale)? } else { scale };
+                for c in 0..3 {
+                    let dof = 3 * tet[i] + c;
+                    forces[dof] = finite(forces[dof] + finite(weight * values[j][c])?)?;
+                }
+            } }
+        }
+        self.finish_forces(forces, nodal, cx)
+    }
+
     /// Integrate the declared P1 pressure, traction and body fields into the
     /// same `TetLoadCase3` consumed by native equilibrium/stress/reaction recovery.
     /// The interpolation is exactly the supplied affine-element field; no

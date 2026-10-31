@@ -47,7 +47,7 @@ impl<'a> EventLoadHistory3<'a> {
             }
         }
         match history.volume {
-            VolumeHistory3::Fixed(_) => {}
+            VolumeHistory3::Fixed(_) | VolumeHistory3::FixedAcceleration(_) => {}
             VolumeHistory3::ForceDensity(v) | VolumeHistory3::Acceleration(v) => index.vector(v)?,
         }
         for frame in &history.frames.frames {
@@ -122,11 +122,12 @@ impl<'a> EventLoadHistory3<'a> {
             SurfaceHistory3::Pressure { faces, value } => SurfaceHistory3::Pressure { faces, value: pressures[i].as_ref().unwrap_or(value) },
         }).collect();
         let volume_value = match self.history.volume {
-            VolumeHistory3::Fixed(_) => None,
+            VolumeHistory3::Fixed(_) | VolumeHistory3::FixedAcceleration(_) => None,
             VolumeHistory3::ForceDensity(v) | VolumeHistory3::Acceleration(v) => vector_before(v, time)?,
         };
         let volume = match self.history.volume {
             VolumeHistory3::Fixed(v) => VolumeHistory3::Fixed(v),
+            VolumeHistory3::FixedAcceleration(v) => VolumeHistory3::FixedAcceleration(v),
             VolumeHistory3::ForceDensity(v) => VolumeHistory3::ForceDensity(volume_value.as_ref().unwrap_or(v)),
             VolumeHistory3::Acceleration(v) => VolumeHistory3::Acceleration(volume_value.as_ref().unwrap_or(v)),
         };

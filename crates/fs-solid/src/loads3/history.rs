@@ -9,7 +9,7 @@
 //! interfaces. It does not integrate mechanical dynamics or update geometry.
 
 use super::*;
-use crate::linear3::TetMaterialField;
+use super::fields::AccelerationField3;
 use fs_qty::Dims;
 use fs_scenario::{BcKind, BcValue, BoundaryCondition, FrameTree, Physics, TimeSignal};
 use fs_scenario::payload::{OrientationParity, Payload, QuantityContract, VectorPayload};
@@ -50,6 +50,10 @@ pub enum VolumeHistory3<'a> {
     ForceDensity(&'a VectorPayload),
     /// Same acceleration at every element; density comes from the solve material.
     Acceleration(&'a VectorPayload),
+    /// Held uniform or P1 acceleration in reference-mesh world axes. The same
+    /// solve material supplies each element's reference density, including at
+    /// material interfaces. This does not resample a spatial field during motion.
+    FixedAcceleration(AccelerationField3<'a>),
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -151,31 +155,21 @@ impl TetLoadHistory3<'_> {
                 }
             });
         }
-        let mut densities = Vec::new();
-        let body = match self.volume {
-            VolumeHistory3::Fixed(value) => value,
-            VolumeHistory3::ForceDensity(value) => VolumeLoad3::Uniform(
-                sample(value, FORCE_DENSITY_DIMS, self.frames, time_s, cx)?),
+        let case = match self.volume {
+            VolumeHistory3::Fixed(value) => geometry.assemble(
+                &surfaces, value, self.nodal_forces_n, cx)?,
+            VolumeHistory3::ForceDensity(value) => geometry.assemble(&surfaces,
+                VolumeLoad3::Uniform(sample(value, FORCE_DENSITY_DIMS, self.frames, time_s, cx)?),
+                self.nodal_forces_n, cx)?,
             VolumeHistory3::Acceleration(value) => {
                 let acceleration = sample(value, ACCELERATION_DIMS, self.frames, time_s, cx)?;
-                if let TetMaterialField::PerElement(materials) = problem.materials {
-                    if materials.len() != geometry.tets.len() { return Err(LoadHistoryError3::Invalid("acceleration needs one material per element")); }
-                }
-                densities.reserve(geometry.tets.len());
-                for element in 0..geometry.tets.len() {
-                    poll(cx)?;
-                    let rho = match problem.materials {
-                        TetMaterialField::Uniform(m) => m.density_kg_m3,
-                        TetMaterialField::PerElement(m) => m[element].density_kg_m3,
-                    };
-                    if !rho.is_finite() || rho <= 0.0 { return Err(LoadHistoryError3::Invalid("positive finite material density required for acceleration loading")); }
-                    densities.push(vector(acceleration.map(|a| rho*a))?);
-                }
-                VolumeLoad3::PerElement(&densities)
+                geometry.assemble_acceleration(&surfaces, problem.materials,
+                    AccelerationField3::Uniform(acceleration), self.nodal_forces_n, cx)?
             }
+            VolumeHistory3::FixedAcceleration(value) => geometry.assemble_acceleration(
+                &surfaces, problem.materials, value, self.nodal_forces_n, cx)?,
         };
         poll(cx)?;
-        let case = geometry.assemble(&surfaces, body, self.nodal_forces_n, cx)?;
         Ok(TetLoadSample3 { case, problem, time_s })
     }
 }

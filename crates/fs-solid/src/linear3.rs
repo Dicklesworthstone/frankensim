@@ -3067,7 +3067,7 @@ fn element_matrices(
 /// and positive finite density are admitted by the respective assembly owner.
 pub(crate) fn p1_tet_consistent_mass(volume_m3: f64, density_kg_m3: f64) -> [[f64; 12]; 12] {
     let mut me = [[0.0; 12]; 12];
-    let mass_scale = density_kg_m3 * volume_m3 / 20.0;
+    let mass_scale = p1_tet_mass_scale(volume_m3, density_kg_m3);
     for a in 0..4 {
         for b_node in 0..4 {
             let value = mass_scale * if a == b_node { 2.0 } else { 1.0 };
@@ -3077,6 +3077,12 @@ pub(crate) fn p1_tet_consistent_mass(volume_m3: f64, density_kg_m3: f64) -> [[f6
         }
     }
     me
+}
+
+/// Scalar off-diagonal P1 mass entry; diagonal shape weights are twice this.
+/// Shared with matrix-free body-acceleration loads before support elimination.
+pub(crate) fn p1_tet_mass_scale(volume_m3: f64, density_kg_m3: f64) -> f64 {
+    density_kg_m3 * volume_m3 / 20.0
 }
 
 fn strain_displacement_matrix(geometry: &TetGeometry) -> [[f64; 12]; 6] {

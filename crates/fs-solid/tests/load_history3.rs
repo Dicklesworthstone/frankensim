@@ -12,6 +12,7 @@ use fs_scenario::payload::{OrientationParity, OutsideDomainPolicy, Payload, Payl
 use fs_solid::linear3::{TetElasticMaterial, TetLinearElasticProblem, TetMaterialField,
     TetThermalStrainField, TetThermalStrainState};
 use fs_solid::loads3::{SurfaceLoad3, TetLoadGeometry3, VolumeLoad3};
+use fs_solid::loads3::fields::AccelerationField3;
 use fs_solid::loads3::history::{ACCELERATION_DIMS, FORCE_DENSITY_DIMS, TRACTION_DIMS,
     LoadHistoryError3, SurfaceHistory3, TetLoadHistory3, VolumeHistory3};
 
@@ -150,5 +151,117 @@ fn g4_cancelled_history_leaves_sources_reusable() {
             assert!(matches!(history.at(&g, &p, 0.5, &stopped), Err(LoadHistoryError3::Cancelled)));
         });
         close(history.at(&g, &p, 0.5, cx).unwrap().resultant([0.0; 3], cx).unwrap().0[2], -1.5, 1e-12);
+    });
+}
+
+fn force_component(values: &[(usize, f64)], dof: usize) -> f64 {
+    values.binary_search_by_key(&dof, |v| v.0).map_or(0.0, |i| values[i].1)
+}
+
+#[test]
+fn g0_spatial_acceleration_applies_full_consistent_material_mass_before_constraints() {
+    let mesh = block([1; 3], [1.0; 3]);
+    let frames = FrameTree::new();
+    let materials: Vec<_> = (0..mesh.tets.len()).map(|i| material(2.0+i as f64)).collect();
+    let field: Vec<_> = mesh.nodes.iter().map(|p| [-p[0], -2.0*p[1], -3.0*p[2]]).collect();
+    let per_element: Vec<_> = mesh.tets.iter().map(|tet| tet.map(|node| field[node])).collect();
+    let problem = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+        materials: TetMaterialField::PerElement(&materials), fixed_dofs: &[], budget: Default::default() };
+    let history = TetLoadHistory3 { surfaces: &[], nodal_forces_n: &[], frames: &frames,
+        volume: VolumeHistory3::FixedAcceleration(AccelerationField3::PerNode(&field)) };
+    with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, problem.budget, 100, cx).unwrap();
+        let sampled = history.at(&g, &problem, 0.0, cx).unwrap();
+        let assembly = problem.assemble(cx).unwrap();
+        for dof in 0..mesh.nodes.len()*3 {
+            let (columns, values) = assembly.mass.row(dof);
+            let expected: f64 = columns.iter().zip(values)
+                .map(|(&column, value)| value*field[column/3][column%3]).sum();
+            close(force_component(sampled.nodal_forces_n(), dof), expected, 1e-13);
+        }
+        let element_history = TetLoadHistory3 {
+            volume: VolumeHistory3::FixedAcceleration(AccelerationField3::PerElement(&per_element)), ..history
+        };
+        assert_eq!(element_history.at(&g, &problem, 0.0, cx).unwrap().nodal_forces_n(), sampled.nodal_forces_n());
+        // Node zero's acceleration vanishes, yet the consistent off-diagonal
+        // terms carry a finite load there. Supports must retain that load.
+        assert!(force_component(sampled.nodal_forces_n(), 0).abs() > 0.01);
+        let constrained = TetLinearElasticProblem { fixed_dofs: &[0, 1, 2], ..problem };
+        assert_eq!(history.at(&g, &constrained, 0.0, cx).unwrap().nodal_forces_n(), sampled.nodal_forces_n());
+
+        // The very same history reaches the actual sparse inertia owner.
+        let zero = vec![[0.0; 3]; mesh.nodes.len()];
+        let run = history.begin_transient(&g, &problem, None, 0.0, &zero, &zero, Default::default(), cx).unwrap();
+        for (actual, expected) in run.nodal_motion(cx).unwrap()[2].iter().flatten().zip(field.iter().flatten()) {
+            close(*actual, *expected, 1e-9);
+        }
+    });
+}
+
+#[test]
+fn g1_spatial_gravity_preserves_analytic_resultant_moment_and_rotated_support_reactions() {
+    let mesh = block([1; 3], [1.0; 3]); let mat = material(2.0); let thermal = thermal();
+    let frames = FrameTree::new();
+    let fixed: Vec<_> = mesh.nodes.iter().enumerate().filter(|(_, p)| p[0] == 0.0)
+        .flat_map(|(i, _)| [3*i, 3*i+1, 3*i+2]).collect();
+    for turned in [false, true] {
+        let rotate = |v: [f64; 3]| if turned { [-v[1], v[0], v[2]] } else { v };
+        let nodes: Vec<_> = mesh.nodes.iter().copied().map(rotate).collect();
+        // g = -grad(x²/2 + y² + 3z²/2), sampled in the reference frame.
+        let field: Vec<_> = mesh.nodes.iter().map(|p| rotate([-p[0], -2.0*p[1], -3.0*p[2]])).collect();
+        let p = TetLinearElasticProblem { nodes_m: &nodes, tetrahedra: &mesh.tets,
+            materials: TetMaterialField::Uniform(&mat), fixed_dofs: &fixed, budget: Default::default() };
+        let history = TetLoadHistory3 { surfaces: &[], nodal_forces_n: &[], frames: &frames,
+            volume: VolumeHistory3::FixedAcceleration(AccelerationField3::PerNode(&field)) };
+        with_cx(|cx| {
+            let g = TetLoadGeometry3::new(&nodes, &mesh.tets, p.budget, 100, cx).unwrap();
+            let sample = history.at(&g, &p, 0.0, cx).unwrap();
+            let (force, moment) = sample.resultant([0.0; 3], cx).unwrap();
+            for (actual, expected) in force.into_iter().zip(rotate([-1.0, -2.0, -3.0])) { close(actual, expected, 1e-13); }
+            for (actual, expected) in moment.into_iter().zip(rotate([-0.5, 1.0, -0.5])) { close(actual, expected, 1e-13); }
+            let solution = sample.solve(TetThermalStrainField::Uniform(&thermal), Default::default(),
+                ContentHash([9; 32]), 0.01, cx).unwrap();
+            let mut support_moment = [0.0; 3];
+            for (x, r) in nodes.iter().zip(&solution.support_reactions_n) {
+                support_moment[0] += x[1]*r[2] - x[2]*r[1];
+                support_moment[1] += x[2]*r[0] - x[0]*r[2];
+                support_moment[2] += x[0]*r[1] - x[1]*r[0];
+            }
+            for c in 0..3 {
+                close(solution.support_reactions_n.iter().map(|r| r[c]).sum::<f64>() + force[c], 0.0, 1e-6);
+                close(support_moment[c] + moment[c], 0.0, 1e-6);
+            }
+        });
+    }
+}
+
+#[test]
+fn g0_fixed_gravity_shares_uniform_history_and_refuses_malformed_spatial_fields() {
+    let mesh = block([1; 3], [1.0; 3]); let mat = material(2.0); let frames = FrameTree::new();
+    let p = TetLinearElasticProblem { nodes_m: &mesh.nodes, tetrahedra: &mesh.tets,
+        materials: TetMaterialField::Uniform(&mat), fixed_dofs: &[], budget: Default::default() };
+    let acceleration = [1.0, -2.0, -9.80665];
+    let source = vector_source(ACCELERATION_DIMS, WORLD, acceleration, acceleration, OutsideDomainPolicy::Clamp);
+    let history = TetLoadHistory3 { surfaces: &[], nodal_forces_n: &[], frames: &frames,
+        volume: VolumeHistory3::FixedAcceleration(AccelerationField3::Uniform(acceleration)) };
+    with_cx(|cx| {
+        let g = TetLoadGeometry3::new(&mesh.nodes, &mesh.tets, p.budget, 100, cx).unwrap();
+        let expected = history.at(&g, &p, 0.5, cx).unwrap();
+        let typed = TetLoadHistory3 { volume: VolumeHistory3::Acceleration(&source), ..history };
+        assert_eq!(typed.at(&g, &p, 0.5, cx).unwrap().nodal_forces_n(), expected.nodal_forces_n());
+        let zero = TetLoadHistory3 { volume: VolumeHistory3::FixedAcceleration(AccelerationField3::Uniform([0.0; 3])), ..history };
+        assert!(zero.at(&g, &p, 0.5, cx).unwrap().nodal_forces_n().is_empty());
+        let bad_values = vec![[f64::INFINITY; 3]; mesh.nodes.len()];
+        for bad in [AccelerationField3::PerNode(&[]), AccelerationField3::PerElement(&[]),
+            AccelerationField3::Uniform([f64::NAN; 3]), AccelerationField3::PerNode(&bad_values)] {
+            let malformed = TetLoadHistory3 { volume: VolumeHistory3::FixedAcceleration(bad), ..history };
+            assert!(malformed.at(&g, &p, 0.0, cx).is_err());
+        }
+        let invalid_material_count = TetLinearElasticProblem { materials: TetMaterialField::PerElement(&[]), ..p };
+        assert!(history.at(&g, &invalid_material_count, 0.0, cx).is_err());
+        let mut invalid_material = mat.clone(); invalid_material.density_kg_m3 = -1.0;
+        let invalid_density = TetLinearElasticProblem { materials: TetMaterialField::Uniform(&invalid_material), ..p };
+        assert!(history.at(&g, &invalid_density, 0.0, cx).is_err());
+        assert_eq!(history.at(&g, &p, 0.5, cx).unwrap().nodal_forces_n(), expected.nodal_forces_n());
     });
 }

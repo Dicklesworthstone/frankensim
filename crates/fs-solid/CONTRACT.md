@@ -154,6 +154,26 @@ G0/G1 regressions cover combined initial strain and dead force, exact affine
 displacement/stress/energy, fixed-support reactions, empty-load equivalence,
 malformed forces, stale-load refusal, signed coupon loads and strain admission.
 
+## Material-bound spatial gravity loads
+
+`loads3::history::VolumeHistory3::FixedAcceleration` accepts uniform, nodal P1,
+or element-local P1 accelerations through `fields::AccelerationField3`. Values
+are world-frame m/s² on the retained reference mesh. The borrowed solve problem
+supplies the authoritative element density. Full consistent P1 mass acts before
+support elimination, preserving interface density jumps, restrained-node loads,
+resultants and first moments. The same scalar mass kernel supplies the original
+elastic inertia. Typed uniform acceleration histories use this same integration
+owner without allocating a second per-element force-density field.
+
+The accepted sample enters the existing static, stress/reaction, support-history,
+and sparse transient owners. G0/G1/G3 tests in `load_history3` compare against
+full M*g, heterogeneous material mass, an analytic gravitational-potential
+gradient, rotated reactions, initial dynamic acceleration and refusal behavior.
+This is prescribed reference-sampled loading, not self-gravity, follower gravity,
+or an accelerating-coordinate model. An inverse-square field sampled at vertices
+retains P1 spatial approximation error and requires explicit resampling if its
+physical owner changes position or time.
+
 ## Momentum-stable shell integration
 
 `shell_time::step_newmark` solves the effective mass equation for acceleration,
@@ -2588,4 +2608,3 @@ Complete unloading in the native frame iteration retains its independent
 compatibility and relative force checks while admitting a local constitutive
 roundoff floor derived from section tangent and strain. This avoids rejecting
 a physically equilibrated permanent bend solely because endpoint load is zero.
-
