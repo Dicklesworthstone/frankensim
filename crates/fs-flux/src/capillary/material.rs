@@ -6,8 +6,12 @@
 //! remain frozen at the complete admitted source point; neither heat nor a
 //! dynamic contact-line law is inferred from an equilibrium angle.
 
+/// Sourced rate-dependent contact-line friction and advancing/receding pinning.
+pub mod contact_line;
 /// Coupled filling, gas compression and heating through original material owners.
 pub mod sealed;
+
+use contact_line::BoundContactLine;
 
 use fs_material::MaterialError;
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -16,10 +20,11 @@ use fs_material::state_point::MaterialStatePointError;
 
 use super::{
     CircularCapillaryError, CircularMeniscusInput, CircularMeniscusStep,
-    InclinedCircularMeniscusInput, InclinedCircularMeniscusStep,
+    ContactLineCircularMeniscusStep, InclinedCircularMeniscusInput, InclinedCircularMeniscusStep,
     InclinedTwoFluidCircularMeniscusInput, InclinedTwoFluidCircularMeniscusStep,
     TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,
-    step_newtonian_inclined_circular_meniscus, step_newtonian_inclined_two_fluid_circular_meniscus,
+    step_newtonian_contact_line_circular_meniscus, step_newtonian_inclined_circular_meniscus,
+    step_newtonian_inclined_two_fluid_circular_meniscus,
 };
 
 /// Geometry, current meniscus position and prescribed loading, all in SI.
@@ -93,6 +98,7 @@ pub struct MaterialCapillaryTube<'a> {
     wetting: &'a ResolvedLiquidWettingState,
     surface_tension_n_m: f64,
     contact_angle_cosine: f64,
+    contact_line: Option<BoundContactLine<'a>>,
 }
 
 impl<'a> MaterialCapillaryTube<'a> {
@@ -123,6 +129,7 @@ impl<'a> MaterialCapillaryTube<'a> {
             wetting,
             surface_tension_n_m,
             contact_angle_cosine: wetting.contact_angle_radians().cos(),
+            contact_line: None,
         })
     }
 
@@ -153,17 +160,30 @@ impl<'a> MaterialCapillaryTube<'a> {
     /// pressure is uniform and prescribed, and its inertia/resistance are
     /// neglected. Density, hydrostatic feedback and signed transferred mass
     /// all use the same source state. Source coefficients do not evolve as the
-    /// meniscus moves; dynamic wetting, entrance losses and inertia are excluded.
+    /// meniscus moves. An explicitly bound contact-line law adds friction and
+    /// pinning; entrance losses and inertia remain excluded.
     pub fn step_inclined(
         &self,
         input: MaterialMeniscusInput,
         opposing_gravity_m_s2: f64,
     ) -> Result<MaterialMeniscusStep<'a>, MaterialCapillaryError> {
-        let discrete = step_newtonian_inclined_circular_meniscus(InclinedCircularMeniscusInput {
-            meniscus: self.primitive_input(input),
-            density_kg_m3: self.liquid.density_kg_m3(),
-            opposing_gravity_m_s2,
-        })?;
+        let contact_line = self
+            .contact_line_input(input, 0.0, 0.0, opposing_gravity_m_s2)
+            .map(step_newtonian_contact_line_circular_meniscus)
+            .transpose()?;
+        let discrete = if let Some(step) = &contact_line {
+            InclinedCircularMeniscusStep {
+                meniscus: step.meniscus.meniscus.meniscus,
+                gravitational_energy_change_j: step.meniscus.gravitational_storage_change_j,
+                hydrostatic_pressure_pa: step.meniscus.hydrostatic_pressure_pa,
+            }
+        } else {
+            step_newtonian_inclined_circular_meniscus(InclinedCircularMeniscusInput {
+                meniscus: self.primitive_input(input),
+                density_kg_m3: self.liquid.density_kg_m3(),
+                opposing_gravity_m_s2,
+            })?
+        };
         let transferred_mass_kg = signed_mass(
             self.liquid.density_kg_m3(),
             discrete.meniscus.transferred_volume_m3,
@@ -174,6 +194,7 @@ impl<'a> MaterialCapillaryTube<'a> {
             opposing_gravity_m_s2,
             discrete,
             transferred_mass_kg,
+            contact_line,
         })
     }
 
@@ -214,17 +235,31 @@ impl<'a> MaterialCapillaryTube<'a> {
         let displaced_transport = displaced_fluid
             .transport_state()
             .map_err(MaterialCapillaryError::Transport)?;
-        let discrete = step_newtonian_inclined_two_fluid_circular_meniscus(
-            InclinedTwoFluidCircularMeniscusInput {
-                meniscus: TwoFluidCircularMeniscusInput {
-                    meniscus: self.primitive_input(input),
-                    displaced_dynamic_viscosity_pa_s: displaced_transport.dynamic_viscosity_pa_s(),
-                },
-                density_kg_m3: self.liquid.density_kg_m3(),
-                displaced_density_kg_m3: displaced_transport.density_kg_m3(),
+        let contact_line = self
+            .contact_line_input(
+                input,
+                displaced_transport.dynamic_viscosity_pa_s(),
+                displaced_transport.density_kg_m3(),
                 opposing_gravity_m_s2,
-            },
-        )?;
+            )
+            .map(step_newtonian_contact_line_circular_meniscus)
+            .transpose()?;
+        let discrete = if let Some(step) = &contact_line {
+            step.meniscus
+        } else {
+            step_newtonian_inclined_two_fluid_circular_meniscus(
+                InclinedTwoFluidCircularMeniscusInput {
+                    meniscus: TwoFluidCircularMeniscusInput {
+                        meniscus: self.primitive_input(input),
+                        displaced_dynamic_viscosity_pa_s: displaced_transport
+                            .dynamic_viscosity_pa_s(),
+                    },
+                    density_kg_m3: self.liquid.density_kg_m3(),
+                    displaced_density_kg_m3: displaced_transport.density_kg_m3(),
+                    opposing_gravity_m_s2,
+                },
+            )?
+        };
         let volume = discrete.meniscus.meniscus.transferred_volume_m3;
         let transferred_liquid_mass_kg = signed_mass(self.liquid.density_kg_m3(), volume)?;
         let displaced_mass_kg = signed_mass(displaced_transport.density_kg_m3(), volume)?;
@@ -237,6 +272,7 @@ impl<'a> MaterialCapillaryTube<'a> {
             discrete,
             transferred_liquid_mass_kg,
             displaced_mass_kg,
+            contact_line,
         })
     }
 
@@ -262,6 +298,7 @@ pub struct MaterialMeniscusStep<'a> {
     opposing_gravity_m_s2: f64,
     discrete: InclinedCircularMeniscusStep,
     transferred_mass_kg: f64,
+    contact_line: Option<ContactLineCircularMeniscusStep>,
 }
 
 impl<'a> MaterialMeniscusStep<'a> {
@@ -300,6 +337,22 @@ impl<'a> MaterialMeniscusStep<'a> {
     pub const fn transferred_mass_kg(&self) -> f64 {
         self.transferred_mass_kg
     }
+
+    /// Optional dynamic-angle and separately resolved contact-line loss account.
+    #[must_use]
+    pub const fn contact_line(&self) -> Option<&ContactLineCircularMeniscusStep> {
+        self.contact_line.as_ref()
+    }
+
+    /// Bulk, contact-line viscous and pinning dissipation combined [J].
+    #[must_use]
+    pub fn total_dissipation_j(&self) -> f64 {
+        self.contact_line
+            .as_ref()
+            .map_or(self.discrete.meniscus.viscous_dissipation_j, |line| {
+                line.total_dissipation_j
+            })
+    }
 }
 
 /// Accepted two-fluid transport retaining both original constitutive owners.
@@ -312,6 +365,7 @@ pub struct MaterialTwoFluidMeniscusStep<'a, 'd, F: FluidTransport + ?Sized> {
     discrete: InclinedTwoFluidCircularMeniscusStep,
     transferred_liquid_mass_kg: f64,
     displaced_mass_kg: f64,
+    contact_line: Option<ContactLineCircularMeniscusStep>,
 }
 
 impl<'a, 'd, F: FluidTransport + ?Sized> MaterialTwoFluidMeniscusStep<'a, 'd, F> {
@@ -368,6 +422,21 @@ impl<'a, 'd, F: FluidTransport + ?Sized> MaterialTwoFluidMeniscusStep<'a, 'd, F>
     #[must_use]
     pub const fn displaced_mass_kg(&self) -> f64 {
         self.displaced_mass_kg
+    }
+
+    /// Optional dynamic-angle and separately resolved contact-line loss account.
+    #[must_use]
+    pub const fn contact_line(&self) -> Option<&ContactLineCircularMeniscusStep> {
+        self.contact_line.as_ref()
+    }
+
+    /// Both bulk-fluid losses, contact-line viscous loss and pinning loss [J].
+    #[must_use]
+    pub fn total_dissipation_j(&self) -> f64 {
+        self.contact_line.as_ref().map_or(
+            self.discrete.meniscus.meniscus.viscous_dissipation_j,
+            |line| line.total_dissipation_j,
+        )
     }
 }
 

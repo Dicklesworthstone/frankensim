@@ -73,32 +73,9 @@ pub struct InclinedTwoFluidCircularMeniscusStep {
 pub fn step_newtonian_inclined_two_fluid_circular_meniscus(
     input: InclinedTwoFluidCircularMeniscusInput,
 ) -> Result<InclinedTwoFluidCircularMeniscusStep, CircularCapillaryError> {
+    validate_input(input)?;
     let m = input.meniscus.meniscus;
-    validate_circular_meniscus(m)?;
     let mu_d = input.meniscus.displaced_dynamic_viscosity_pa_s;
-    for (field, value) in [
-        ("density_kg_m3", input.density_kg_m3),
-        ("displaced_density_kg_m3", input.displaced_density_kg_m3),
-        ("opposing_gravity_m_s2", input.opposing_gravity_m_s2),
-        ("displaced_dynamic_viscosity_pa_s", mu_d),
-    ] {
-        if !value.is_finite() {
-            return Err(CircularCapillaryError::NonFinite { field });
-        }
-    }
-    if input.density_kg_m3 <= 0.0 {
-        return Err(CircularCapillaryError::NonPositive {
-            field: "density_kg_m3",
-        });
-    }
-    for (field, value) in [
-        ("displaced_density_kg_m3", input.displaced_density_kg_m3),
-        ("displaced_dynamic_viscosity_pa_s", mu_d),
-    ] {
-        if value < 0.0 {
-            return Err(CircularCapillaryError::OutsideDomain { field });
-        }
-    }
     let g = input.opposing_gravity_m_s2;
     if g == 0.0 {
         return Ok(InclinedTwoFluidCircularMeniscusStep {
@@ -145,6 +122,7 @@ pub fn step_newtonian_inclined_two_fluid_circular_meniscus(
         length: m.tube_length_m,
         liquid: m.dynamic_viscosity_pa_s / mu_scale,
         displaced: mu_d / mu_scale,
+        contact_line: 0.0,
         mobility: (m.radius_m / mu_scale) * (m.radius_m / 8.0),
         gravity_slope: (input.density_kg_m3 - input.displaced_density_kg_m3) * g,
         force0: (m.applied_pressure_pa - hydrostatic(m.wet_length_m)) + capillary,
@@ -232,7 +210,7 @@ pub fn step_newtonian_inclined_two_fluid_circular_meniscus(
     let gravity_storage = (law.gravity_slope * mean_length) * volume;
     let gravity_export = outlet_head * volume;
     let dissipation = (0.5 * law.force0 + 0.5 * final_drive) * volume;
-    let (liquid_loss, displaced_loss) = phase_losses(law, length, dissipation)?;
+    let (liquid_loss, displaced_loss, _) = phase_losses(law, length, dissipation)?;
     let final_head = hydrostatic(length);
     if [
         length,
@@ -278,23 +256,56 @@ pub fn step_newtonian_inclined_two_fluid_circular_meniscus(
     })
 }
 
+pub(super) fn validate_input(
+    input: InclinedTwoFluidCircularMeniscusInput,
+) -> Result<(), CircularCapillaryError> {
+    validate_circular_meniscus(input.meniscus.meniscus)?;
+    let mu_d = input.meniscus.displaced_dynamic_viscosity_pa_s;
+    for (field, value) in [
+        ("density_kg_m3", input.density_kg_m3),
+        ("displaced_density_kg_m3", input.displaced_density_kg_m3),
+        ("opposing_gravity_m_s2", input.opposing_gravity_m_s2),
+        ("displaced_dynamic_viscosity_pa_s", mu_d),
+    ] {
+        if !value.is_finite() {
+            return Err(CircularCapillaryError::NonFinite { field });
+        }
+    }
+    if input.density_kg_m3 <= 0.0 {
+        return Err(CircularCapillaryError::NonPositive {
+            field: "density_kg_m3",
+        });
+    }
+    for (field, value) in [
+        ("displaced_density_kg_m3", input.displaced_density_kg_m3),
+        ("displaced_dynamic_viscosity_pa_s", mu_d),
+    ] {
+        if value < 0.0 {
+            return Err(CircularCapillaryError::OutsideDomain { field });
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy)]
-struct Law {
-    initial: f64,
-    length: f64,
-    liquid: f64,
-    displaced: f64,
-    mobility: f64,
-    gravity_slope: f64,
-    force0: f64,
+pub(super) struct Law {
+    pub(super) initial: f64,
+    pub(super) length: f64,
+    pub(super) liquid: f64,
+    pub(super) displaced: f64,
+    /// Constant extra resistance, normalized by the same viscosity scale.
+    pub(super) contact_line: f64,
+    pub(super) mobility: f64,
+    pub(super) gravity_slope: f64,
+    pub(super) force0: f64,
 }
 
 impl Law {
-    fn resistance(self, x: f64) -> f64 {
-        self.liquid.mul_add(x, self.displaced * (self.length - x))
+    pub(super) fn resistance(self, x: f64) -> f64 {
+        self.liquid.mul_add(x, self.displaced * (self.length - x)) + self.contact_line
     }
 
-    fn force(self, delta: f64) -> f64 {
+    pub(super) fn force(self, delta: f64) -> f64 {
         (-self.gravity_slope).mul_add(delta, self.force0)
     }
 
@@ -336,7 +347,7 @@ impl Law {
         }
     }
 
-    fn advance(
+    pub(super) fn advance(
         self,
         duration: f64,
     ) -> Result<(f64, f64, CircularMeniscusEnd), CircularCapillaryError> {
@@ -437,12 +448,16 @@ impl Law {
 
 // Integrate F(u)*R_phase(u)/R_total(u). Three positive quadratic Bernstein
 // weights retain small phase losses without subtracting large antiderivatives.
-fn phase_losses(law: Law, end: f64, total: f64) -> Result<(f64, f64), CircularCapillaryError> {
+pub(super) fn phase_losses(
+    law: Law,
+    end: f64,
+    total: f64,
+) -> Result<(f64, f64, f64), CircularCapillaryError> {
     if total == 0.0 {
-        return Ok((0.0, 0.0));
+        return Ok((0.0, 0.0, 0.0));
     }
-    if law.displaced == 0.0 {
-        return Ok((total, 0.0));
+    if law.displaced == 0.0 && law.contact_line == 0.0 {
+        return Ok((total, 0.0, 0.0));
     }
     let mut resistance = [law.resistance(law.initial), law.resistance(end)];
     let scale = resistance[0].max(resistance[1]);
@@ -490,16 +505,37 @@ fn phase_losses(law: Law, end: f64, total: f64) -> Result<(f64, f64), CircularCa
     };
     let a = integral(liquid);
     let b = integral(displaced);
+    let c = if law.contact_line == 0.0 {
+        0.0
+    } else {
+        integral([law.contact_line / scale; 2])
+    };
     let mean_force = 0.5 * force[0] + 0.5 * force[1];
-    if !a.is_finite() || !b.is_finite() || a < 0.0 || b < 0.0 || mean_force <= 0.0 {
+    if [a, b, c].into_iter().any(|v| !v.is_finite() || v < 0.0) || mean_force <= 0.0 {
         return Err(CircularCapillaryError::NonFiniteResult);
     }
-    if a <= b {
-        let loss = total * (a / mean_force);
-        Ok((loss, total - loss))
+    // Compute small channels directly. Recover the largest by closure so tiny
+    // bulk or line losses are not erased by subtracting two large integrals.
+    if a >= b && a >= c {
+        let displaced_loss = total * (b / mean_force);
+        let line_loss = total * (c / mean_force);
+        Ok((
+            total - displaced_loss - line_loss,
+            displaced_loss,
+            line_loss,
+        ))
+    } else if b >= c {
+        let liquid_loss = total * (a / mean_force);
+        let line_loss = total * (c / mean_force);
+        Ok((liquid_loss, total - liquid_loss - line_loss, line_loss))
     } else {
-        let loss = total * (b / mean_force);
-        Ok((total - loss, loss))
+        let liquid_loss = total * (a / mean_force);
+        let displaced_loss = total * (b / mean_force);
+        Ok((
+            liquid_loss,
+            displaced_loss,
+            total - liquid_loss - displaced_loss,
+        ))
     }
 }
 

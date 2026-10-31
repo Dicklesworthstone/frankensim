@@ -16,6 +16,12 @@ use super::{
 };
 use core::f64::consts::PI;
 
+mod contact_line;
+pub use contact_line::{
+    ContactLineCircularMeniscusInput, ContactLineCircularMeniscusStep, ContactLineMotion,
+    step_newtonian_contact_line_circular_meniscus,
+};
+
 mod gravity;
 pub use gravity::{
     InclinedTwoFluidCircularMeniscusInput, InclinedTwoFluidCircularMeniscusStep,

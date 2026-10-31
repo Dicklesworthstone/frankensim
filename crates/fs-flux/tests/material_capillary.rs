@@ -550,3 +550,6 @@ fn g3_equal_density_two_fluid_rise_retains_outlet_potential_transport() {
 
 #[path = "material_capillary/sealed.rs"]
 mod sealed;
+
+#[path = "material_capillary/contact_line.rs"]
+mod contact_line;

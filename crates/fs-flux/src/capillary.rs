@@ -22,8 +22,10 @@ pub mod material;
 
 mod two_fluid;
 pub use two_fluid::{
+    ContactLineCircularMeniscusInput, ContactLineCircularMeniscusStep, ContactLineMotion,
     InclinedTwoFluidCircularMeniscusInput, InclinedTwoFluidCircularMeniscusStep,
     TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,
+    step_newtonian_contact_line_circular_meniscus,
     step_newtonian_inclined_two_fluid_circular_meniscus,
     step_newtonian_two_fluid_circular_meniscus,
 };
