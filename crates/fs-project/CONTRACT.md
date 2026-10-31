@@ -123,6 +123,15 @@ bindings; it runs no solves and admits no scenarios itself.
   identity. Unknown values, incorrect value types and duplicate keywords
   produce named findings. Actual solver and derivative support is admitted by
   the consuming solve path; project well-formedness does not grant it.
+- `ConductionEnclosure` additionally retains an optional positive kelvin
+  `:ambient-temperature`. Its presence declares one black environment seen
+  through each physical row's deficit `1-sum(F_ij)`, with one to 64 physical
+  patches. Open rows may not exceed one, even within the authored closure
+  tolerance, and at least one row must escape. The environment has no material
+  card, mesh patch or solid storage. Its absence preserves closed exchange and
+  the original canonical spelling. Physical factors and the explicit bath
+  survive both wire formats; execution still checks actual-area reciprocity
+  and admits the supported steady or time-dependent numerical owner.
 
 - `Seeds.root` and canonical `(seeds :root 0x...)` name the root of every
   logical RNG derivation. There is one spelling: the superseded keyword was

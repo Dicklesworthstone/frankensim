@@ -18,8 +18,23 @@ impl<'a> Owner<'a> {
         lowering: &'a radiation::LoweredRadiation,
         enclosure: Option<&'a GrayDiffuseEnclosure>,
     ) -> Result<Self, SolveRefusal> {
-        if !lowering.is_pointwise() || lowering.is_enclosure() != enclosure.is_some() {
+        let ambient_k = lowering.open_ambient_temperature_k();
+        if !lowering.is_pointwise()
+            || lowering.is_enclosure() != (enclosure.is_some() || ambient_k.is_some())
+            || (enclosure.is_some() && ambient_k.is_some())
+        {
             return Err(bad("pointwise radiation lost its exact declared spatial model"));
+        }
+        if let Some(ambient_k) = ambient_k {
+            let model = lowering.bind_open_enclosure(cx, problem).map_err(lower)?
+                .ok_or_else(|| bad("open pointwise radiation lost its black environment"))?;
+            return PointwiseEnclosureRadiation::new_open(
+                cx, problem.mesh, problem.boundary, &model, ambient_k,
+                PointwiseEnclosureTolerance {
+                    absolute_heat_w: lowering.config.balance_tolerance_w,
+                    relative_heat: lowering.config.balance_relative_tolerance,
+                },
+            ).map(Self::Enclosure).map_err(lower);
         }
         match enclosure {
             Some(model) => PointwiseEnclosureRadiation::new(

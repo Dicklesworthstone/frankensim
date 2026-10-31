@@ -20,11 +20,19 @@ use super::{
     SurfaceSource, conduction_error, json_string, num, resolve_emissivity,
 };
 
+mod open;
+pub(super) use open::bind as bind_open;
+
 pub(super) struct LoweredEnclosure {
-    declaration: ConductionEnclosure,
+    pub(super) declaration: ConductionEnclosure,
 }
 
-pub(super) struct EnclosureResult {
+pub(super) enum EnclosureResult {
+    Closed(ClosedEnclosureResult),
+    Open(open::OpenResult),
+}
+
+pub(super) struct ClosedEnclosureResult {
     model: GrayDiffuseEnclosure,
     report: EnclosureReport,
     decomposition_residual_w: f64,
@@ -80,6 +88,16 @@ pub(super) fn lower(
             "ambient-reservoir and closed-enclosure radiation cannot own the same native model",
         ));
     }
+    if declaration.ambient_temperature.is_some() {
+        if spec.outputs.iter().flatten().any(|output| output.name.contains("adjoint")) {
+            return Err(bad("native open-enclosure adjoint controls are not yet wired; the closed-enclosure transpose cannot substitute for the black bath"));
+        }
+        if setup.transient.is_some()
+            && declaration.spatial_model != Some(fs_project::RadiationSpatialModel::Pointwise)
+        {
+            return Err(bad("open-enclosure histories require spatial-model pointwise and total-enthalpy storage so bath heat enters the actual nonlinear endpoint"));
+        }
+    }
     if spec
         .solver
         .as_ref()
@@ -113,8 +131,9 @@ pub(super) fn lower(
             super::super::nominal_adjoint::requested(spec)?;
         }
     }
-    if !(2..=64).contains(&declaration.surfaces.len()) {
-        return Err(bad("a native enclosure needs 2..=64 ordered surfaces"));
+    let minimum = if declaration.ambient_temperature.is_some() { 1 } else { 2 };
+    if !(minimum..=64).contains(&declaration.surfaces.len()) {
+        return Err(bad("a native enclosure needs at most 64 ordered surfaces, at least two when closed or one with an explicit black environment"));
     }
     let mut targets = BTreeSet::new();
     let mut names = BTreeSet::new();
@@ -192,16 +211,11 @@ fn evidence(declaration: &ConductionEnclosure) -> ViewFactorEvidence {
 
 /// Bind by the existing boundary's exact topological faces, never by a second
 /// geometric selector or a user-supplied area. Rebinding happens on every mesh.
-pub(super) fn bind(
+fn bind_surfaces(
     cx: &Cx<'_>,
     problem: ConductionProblem<'_>,
     lowering: &LoweredRadiation,
-) -> Result<GrayDiffuseEnclosure, ConductionError> {
-    let declaration = &lowering
-        .enclosure
-        .as_ref()
-        .ok_or_else(|| physical("missing enclosure lowering"))?
-        .declaration;
+) -> Result<Vec<RadiationSurface>, ConductionError> {
     let mut surfaces = Vec::with_capacity(lowering.surfaces.len());
     for (ordinal, source) in lowering.surfaces.iter().enumerate() {
         poll(cx, ordinal)?;
@@ -234,6 +248,15 @@ pub(super) fn bind(
             source.emissivity.clone(),
         )?);
     }
+    Ok(surfaces)
+}
+
+pub(super) fn bind(
+    cx: &Cx<'_>, problem: ConductionProblem<'_>, lowering: &LoweredRadiation,
+) -> Result<GrayDiffuseEnclosure, ConductionError> {
+    let declaration = &lowering.enclosure.as_ref()
+        .ok_or_else(|| physical("missing enclosure lowering"))?.declaration;
+    let surfaces = bind_surfaces(cx, problem, lowering)?;
     let areas = surfaces.iter().map(RadiationSurface::area_m2).collect();
     let factors = ViewFactorMatrix::admit(
         areas,
@@ -260,6 +283,9 @@ pub(super) fn solve(
         .as_ref()
         .ok_or_else(|| physical("missing enclosure lowering"))?
         .declaration;
+    if declaration.ambient_temperature.is_some() {
+        return open::solve(cx, problem, interfaces, config, lowering);
+    }
     let model = bind(cx, problem, lowering)?;
     let mut solved = solve_with_convective_gray_diffuse_enclosure(
         cx,
@@ -327,24 +353,27 @@ pub(super) fn solve(
         radiation: None,
         pointwise: None,
         combined_boundary: Some(solved.combined_boundary),
-        enclosure: Some(EnclosureResult {
+        enclosure: Some(EnclosureResult::Closed(ClosedEnclosureResult {
             model,
             report: EnclosureReport::Steady(solved.radiation),
             decomposition_residual_w: decomposition,
-        }),
+        })),
     })
 }
 
 impl EnclosureResult {
-    pub(super) fn model(&self) -> &GrayDiffuseEnclosure {
-        &self.model
+    pub(super) fn model(&self) -> Option<&GrayDiffuseEnclosure> {
+        match self {
+            Self::Closed(result) => Some(&result.model),
+            Self::Open(_) => None,
+        }
     }
 
     pub(super) fn from_transient(
         model: GrayDiffuseEnclosure,
         endpoint: &super::EnclosureEndpoint,
     ) -> Self {
-        Self {
+        Self::Closed(ClosedEnclosureResult {
             model,
             report: EnclosureReport::Transient {
                 radiation: endpoint.report.clone(),
@@ -355,13 +384,24 @@ impl EnclosureResult {
                 energy_residual_j: endpoint.physical_energy_residual_j,
             },
             decomposition_residual_w: endpoint.decomposition_residual_w,
-        }
+        })
     }
 
     pub(super) fn receipt(
         &self,
         lowering: &LoweredRadiation,
         convective_out_w: f64,
+    ) -> Result<String, SolveRefusal> {
+        match self {
+            Self::Closed(result) => result.receipt(lowering, convective_out_w),
+            Self::Open(result) => result.receipt(lowering, convective_out_w),
+        }
+    }
+}
+
+impl ClosedEnclosureResult {
+    fn receipt(
+        &self, lowering: &LoweredRadiation, convective_out_w: f64,
     ) -> Result<String, SolveRefusal> {
         let declaration = &lowering
             .enclosure

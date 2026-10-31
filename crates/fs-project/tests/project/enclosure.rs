@@ -12,6 +12,7 @@ fn enclosure_project() -> ProjectSpec {
     };
     setup.enclosure_radiation = Some(ConductionEnclosure {
         spatial_model: None,
+        ambient_temperature: None,
         surfaces: [("sink-finish", "sink-base"), ("cpu-finish", "cpu")]
             .into_iter()
             .map(|(name, target)| EnclosureRadiatingSurface {
@@ -148,6 +149,42 @@ fn g0_enclosure_matrix_shape_source_and_physical_coordinates_are_required() {
             .iter()
             .any(|row| row.code == "project-enclosure-radiation-factor")
     );
+}
+
+#[test]
+fn g0_open_exchange_roundtrips_its_physical_deficits_and_explicit_black_bath() {
+    for count in [1, 2] {
+        let mut spec = enclosure_project();
+        let enclosure = declaration(&mut spec);
+        enclosure.ambient_temperature = Some(kelvin(3.0));
+        enclosure.surfaces.truncate(count);
+        enclosure.view_factors = if count == 1 { vec![vec![0.0]] }
+            else { vec![vec![0.0, 0.3], vec![0.3, 0.0]] };
+        assert!(spec.validate().is_empty(), "{:?}", spec.validate());
+        let text = print_sexpr(&spec).unwrap();
+        assert!(text.contains(":ambient-temperature"));
+        assert_eq!(parse_sexpr(&text).unwrap().spec, spec);
+        assert_eq!(parse_json(&print_json(&spec).unwrap()).unwrap().spec, spec);
+    }
+}
+
+#[test]
+fn g0_open_exchange_refuses_overfull_rows_absent_escape_and_invalid_bath() {
+    let mut spec = enclosure_project();
+    declaration(&mut spec).ambient_temperature = Some(kelvin(300.0));
+    assert!(spec.validate().iter().any(|row| row.code == "project-enclosure-radiation-no-escape"));
+    let enclosure = declaration(&mut spec);
+    enclosure.view_factors = vec![vec![0.0, 1.0 + 1e-10], vec![0.4, 0.0]];
+    enclosure.closure_tolerance = 1e-2;
+    assert!(spec.validate().iter().any(|row| row.code == "project-enclosure-radiation-closure"),
+        "a numerical closure tolerance cannot authorize negative escape");
+    let enclosure = declaration(&mut spec);
+    enclosure.view_factors = vec![vec![0.0, 0.4], vec![0.4, 0.0]];
+    enclosure.ambient_temperature = Some(watts(0.0));
+    let findings = spec.validate();
+    for code in ["project-enclosure-radiation-dims", "project-enclosure-radiation-temperature"] {
+        assert!(findings.iter().any(|row| row.code == code), "{findings:?}");
+    }
 }
 
 #[test]

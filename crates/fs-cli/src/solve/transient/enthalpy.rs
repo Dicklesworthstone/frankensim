@@ -753,7 +753,9 @@ pub(super) fn solve(
                     .and_then(|p| v.checked_add(p))
             })
             .and_then(|v| {
-                lowering.surface_count().checked_mul(lowering.surface_count())
+                let count = lowering.surface_count()
+                    .checked_add(usize::from(lowering.open_ambient_temperature_k().is_some()))?;
+                count.checked_mul(count)
                     .and_then(|entries| entries.checked_mul(128))
                     .and_then(|matrix| v.checked_add(matrix))
             })
@@ -1079,6 +1081,8 @@ pub(super) fn solve(
     };
     let radiation_receipt = if let Some(lowering) = radiation {
         let method = match (lowering.is_pointwise(), lowering.is_enclosure()) {
+            (true, true) if lowering.open_ambient_temperature_k().is_some() =>
+                "implicit-pointwise-p1-open-gray-diffuse-enclosure",
             (true, true) => "implicit-pointwise-p1-closed-gray-diffuse-enclosure",
             (true, false) => "implicit-pointwise-p1-gray-radiation",
             (false, true) => "implicit-closed-gray-diffuse-enclosure",

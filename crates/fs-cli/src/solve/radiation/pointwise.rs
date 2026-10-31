@@ -76,6 +76,9 @@ pub(in crate::solve) fn receipt(
             ("pointwise-p1-gray-surface-to-black-reservoir", report.outward_heat_w, rows, String::new())
         }
         (None, Some(report)) if lowering.is_enclosure() => {
+            if lowering.open_ambient_temperature_k() != report.ambient.as_ref().map(|bath| bath.temperature_k) {
+                return Err(bad("pointwise enclosure report lost its declared black environment"));
+            }
             let rows = report.patches.iter().map(|row| {
                 let source = source(lowering, &row.name)?;
                 Ok(format!(
@@ -86,14 +89,25 @@ pub(in crate::solve) fn receipt(
                     num(row.irradiation_w_m2)?, num(row.outward_heat_w)?,
                 ))
             }).collect::<Result<Vec<_>, SolveRefusal>>()?;
-            let extra = format!(
+            let mut extra = format!(
                 ",\"view_factor_identity\":{},\"radiosity_residual_w_m2\":{},\"absolute_patch_heat_w\":{},\"enclosure_energy_closure_w\":{},\"radiosity_heat_tolerance_w\":{},\"radiosity_relative_heat_tolerance\":{}",
                 json_string(&report.view_factor_identity.to_hex()),
                 num(report.linear_residual_max_w_m2)?, num(report.absolute_patch_heat_w)?,
-                num(report.outward_heat_w)?, num(lowering.config.balance_tolerance_w)?,
+                num(report.system_energy_closure_w)?, num(lowering.config.balance_tolerance_w)?,
                 num(lowering.config.balance_relative_tolerance)?,
             );
-            ("pointwise-p1-closed-gray-diffuse-enclosure", report.outward_heat_w, rows, extra)
+            let model = if let Some(bath) = &report.ambient {
+                extra.push_str(&format!(
+                    ",\"ambient_temperature_k\":{},\"ambient_effective_area_m2\":{},\"ambient_absorbed_w\":{},\"ambient_radiosity_w_m2\":{},\"ambient_irradiation_w_m2\":{}",
+                    num(bath.temperature_k)?, num(bath.effective_area_m2)?,
+                    num(-bath.outward_heat_w)?, num(bath.radiosity_w_m2)?,
+                    num(bath.irradiation_w_m2)?,
+                ));
+                "pointwise-p1-open-gray-diffuse-enclosure"
+            } else {
+                "pointwise-p1-closed-gray-diffuse-enclosure"
+            };
+            (model, report.outward_heat_w, rows, extra)
         }
         _ => return Err(bad("pointwise radiation report differs from its declared model")),
     };
@@ -107,4 +121,4 @@ pub(in crate::solve) fn receipt(
     ))
 }
 
-const SCOPE: &str = "Local P1 fourth-power emission and its analytic tangent enter the same total-enthalpy Newton solve as conduction, contact and latent storage. Positive degree-five surface quadrature retains the actual nodal temperature field. Fixed emissivity comes from the declared source query and every surface node must remain in that claim's temperature support. Ambient surfaces see their declared black reservoir with unit view factor; closed enclosures retain patch-uniform irradiation from the declared reciprocal view factors. Original convection alone heats air; reflected exchange is internal and its actual closure defect remains in the joule balance. Reported mean temperature is an observation, not the emission input. Requested trajectory adjoints separately bind the same complete spatial tangent and reflected transpose, retaining absolute emissivity and ambient-reservoir controls at the fixed source query. No moving visibility, participating medium, emissivity-temperature derivative, continuum bound or experimental validation is inferred.";
+const SCOPE: &str = "Local P1 fourth-power emission and its analytic tangent enter the same total-enthalpy Newton solve as conduction, contact and latent storage. Positive degree-five surface quadrature retains the actual nodal temperature field. Fixed emissivity comes from the declared source query and every surface node must remain in that claim's temperature support. Ambient surfaces see their declared black reservoir with unit view factor; enclosures retain patch-uniform irradiation from the declared reciprocal view factors. Open-enclosure row deficits see one explicit black environment whose independently evaluated power remains outside the solid degrees of freedom and air convection. Physical surface heat enters solid storage once; enclosure_energy_closure_w includes the bath when present. Original convection alone heats air. Reported mean temperature is an observation, not the emission input. Supported closed/ambient trajectory adjoints separately bind the complete spatial tangent and reflected transpose; native open-bath adjoint controls are not yet exposed. No moving visibility, participating medium, emissivity-temperature derivative, continuum bound or experimental validation is inferred.";

@@ -53,6 +53,12 @@ impl LoweredRadiation {
         self.enclosure.is_some()
     }
 
+    pub(super) fn open_ambient_temperature_k(&self) -> Option<f64> {
+        self.enclosure.as_ref()
+            .and_then(|model| model.declaration.ambient_temperature)
+            .map(|temperature| temperature.value)
+    }
+
     pub(super) fn surface_count(&self) -> usize {
         self.surfaces.len()
     }
@@ -64,8 +70,18 @@ impl LoweredRadiation {
         problem: ConductionProblem<'_>,
     ) -> Result<Option<GrayDiffuseEnclosure>, ConductionError> {
         self.enclosure.as_ref()
+            .filter(|model| model.declaration.ambient_temperature.is_none())
             .map(|_| enclosure::bind(cx, problem, self))
             .transpose()
+    }
+
+    pub(super) fn bind_open_enclosure(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+    ) -> Result<Option<fs_conduction::radiation::OpenDiffuseEnclosure>, ConductionError> {
+        self.open_ambient_temperature_k()
+            .map(|_| enclosure::bind_open(cx, problem, self)).transpose()
     }
 
     /// Immutable user-facing identities in the same order as the bound patches.
@@ -299,7 +315,7 @@ impl SolidSolution {
     }
 
     pub(super) fn enclosure_model(&self) -> Option<&GrayDiffuseEnclosure> {
-        self.enclosure.as_ref().map(enclosure::EnclosureResult::model)
+        self.enclosure.as_ref().and_then(enclosure::EnclosureResult::model)
     }
 
     /// Retain the producer's immutable laws, never infer emissivity from a

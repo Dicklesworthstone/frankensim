@@ -86,6 +86,7 @@ fn project(card: &str) -> ProjectSpec {
     setup.adiabatic_remainder = true;
     setup.enclosure_radiation = Some(ConductionEnclosure {
         spatial_model: None,
+        ambient_temperature: None,
         surfaces: ["wall-x", "wall-z"].into_iter().enumerate()
             .map(|(index, target)| EnclosureRadiatingSurface {
                 name: format!("radiator-{index}"), target: target.into(),
@@ -397,6 +398,66 @@ fn g1_pointwise_enclosure_in_vacuum_preserves_authored_flux_and_reference_storag
             close(n(row,"stored_energy_change_j"),
                 n(row,"dt_s") * (n(row,"source_w") - 0.5), 3e-6);
         }
+    }
+}
+
+#[test]
+fn g1_open_pointwise_vacuum_history_couples_real_storage_to_the_black_environment() {
+    let (cards, card) = radiation_product::emissivity_cards(&fixture_cards(), EPSILON);
+    let view = 0.35;
+    for ambient in [280.0_f64, 330.0] {
+        let mut spec = project(&card);
+        let setup = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap();
+        let declaration = setup.enclosure_radiation.as_mut().unwrap();
+        declaration.spatial_model = Some(fs_project::RadiationSpatialModel::Pointwise);
+        declaration.ambient_temperature = Some(QtyAny::new(ambient, dims::TEMPERATURE));
+        declaration.view_factors = vec![vec![0.0, view], vec![view, 0.0]];
+        declaration.max_iterations = 1;
+        for boundary in &mut setup.boundaries {
+            boundary.condition = ThermalBoundaryCondition::HeatFlux {
+                outward_flux: QtyAny::new(0.0, dims::HEAT_FLUX),
+            };
+        }
+        let solved = run(&spec, &cards);
+        let receipt = J::parse(&solved.conduction).unwrap();
+        let radiation = receipt.get("radiation").unwrap();
+        assert_eq!(radiation.str_field("model"), Some("pointwise-p1-open-gray-diffuse-enclosure"));
+        let surfaces = radiation.get("surfaces").unwrap().as_array().unwrap();
+        assert_eq!(surfaces.len(), 2);
+        let delta: Vec<_> = surfaces.iter().map(|surface| {
+            pointwise_emission_oracle(surface) - SIGMA*ambient.powi(4)
+        }).collect();
+        let reflected = (1.0-EPSILON)*view;
+        let j = [
+            EPSILON*(delta[0]+reflected*delta[1])/(1.0-reflected*reflected),
+            EPSILON*(delta[1]+reflected*delta[0])/(1.0-reflected*reflected),
+        ];
+        close(n(&surfaces[0], "outward_heat_w"), 0.5*(j[0]-view*j[1]), 1e-8);
+        close(n(&surfaces[1], "outward_heat_w"), 0.5*(j[1]-view*j[0]), 1e-8);
+        close(n(radiation, "ambient_absorbed_w"), 0.5*(1.0-view)*(j[0]+j[1]), 1e-8);
+        close(n(radiation, "enclosure_energy_closure_w"), 0.0, 1e-6);
+        close(n(radiation, "convective_out_w"), 0.0, 0.0);
+        assert_eq!(n(radiation, "radiative_out_w") > 0.0, ambient < INITIAL_K);
+        let history = receipt.get("transient").unwrap();
+        assert_eq!(history.get("radiation").unwrap().str_field("method"),
+            Some("implicit-pointwise-p1-open-gray-diffuse-enclosure"));
+        let mut fine_radiated = 0.0;
+        for grid in ["coarse", "fine"] {
+            for row in history.get(grid).unwrap().as_array().unwrap() {
+                let exchange = row.get("radiation").unwrap();
+                let heat = n(exchange, "nonlinear_radiative_out_w");
+                let dt = n(row, "dt_s");
+                close(n(exchange, "convective_out_w"), 0.0, 0.0);
+                close(n(row, "stored_energy_change_j"), dt*(n(row, "source_w")-heat), 3e-6);
+                assert!(n(exchange, "physical_residual_j") <= n(exchange, "physical_residual_threshold_j"));
+                if grid == "fine" { fine_radiated += dt*heat; }
+            }
+        }
+        let endpoint = history.get("endpoint").unwrap();
+        let stored: f64 = values(endpoint, "reference_nodal_mass_kg").iter()
+            .zip(values(endpoint, "specific_enthalpy_j_kg")).map(|(mass,h)|mass*h).sum();
+        close(stored, 9.0-fine_radiated, 1e-5);
+        assert!(solved.html.contains("open-gray-diffuse-enclosure"));
     }
 }
 

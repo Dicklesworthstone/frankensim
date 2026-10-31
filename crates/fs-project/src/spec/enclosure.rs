@@ -1,4 +1,4 @@
-//! Declared closed-enclosure irradiation, separate from ambient reservoirs.
+//! Declared reciprocal surface irradiation, with an optional black environment.
 
 use super::{
     BTreeSet, ConductionSetup, QtyAny, RadiationSpatialModel, ThermalBoundaryCondition, Violation,
@@ -40,7 +40,7 @@ pub enum EnclosureViewFactorEvidence {
     },
 }
 
-/// Closed gray-diffuse surface exchange, with no external radiation reservoir.
+/// Gray-diffuse surface exchange, optionally open to one black environment.
 ///
 /// View factors and source evidence are authored inputs. Execution binds every
 /// patch to actual boundary faces and checks area-weighted reciprocity there.
@@ -50,9 +50,13 @@ pub struct ConductionEnclosure {
     /// Explicit emission discretization. Absence retains patch-mean emission;
     /// irradiation still follows the declared fixed patch view factors.
     pub spatial_model: Option<RadiationSpatialModel>,
-    /// Two to 64 uniquely named, nonoverlapping boundary targets.
+    /// Explicit positive black-environment temperature, K. Each physical row's
+    /// deficit sees this reservoir; absence requires closed surface exchange.
+    pub ambient_temperature: Option<QtyAny>,
+    /// Two to 64 patches when closed, or one to 64 when open.
     pub surfaces: Vec<EnclosureRadiatingSurface>,
-    /// Complete square matrix in the exact declared surface order.
+    /// Physical-surface matrix in declaration order. Open rows sum to at most
+    /// one; their deficits are never normalized back onto the solid surfaces.
     pub view_factors: Vec<Vec<f64>>,
     /// Explicit analytic or external-generation origin.
     pub evidence: EnclosureViewFactorEvidence,
@@ -83,13 +87,25 @@ pub(super) fn validate(
         ));
     }
     let n = enclosure.surfaces.len();
-    if !(2..=64).contains(&n) {
+    let minimum = if enclosure.ambient_temperature.is_some() { 1 } else { 2 };
+    if !(minimum..=64).contains(&n) {
         out.push(violation(
             "project-enclosure-radiation-surfaces",
-            format!("closed enclosure has {n} surfaces"),
-            "declare between two and 64 complete boundary patches",
+            format!("enclosure has {n} surfaces; this model requires {minimum}..=64"),
+            "declare complete boundary patches and an explicit black environment for open exchange",
         ));
         return;
+    }
+    if let Some(ambient) = enclosure.ambient_temperature {
+        check_dims(out, "project-enclosure-radiation-dims", "ambient-temperature", ambient,
+            dims::TEMPERATURE);
+        if !ambient.value.is_finite() || ambient.value <= 0.0 {
+            out.push(violation(
+                "project-enclosure-radiation-temperature",
+                "open enclosure ambient temperature is not finite and positive",
+                "declare the black environment's positive absolute temperature in kelvin",
+            ));
+        }
     }
     if enclosure.max_iterations == 0 {
         out.push(violation(
@@ -187,15 +203,29 @@ pub(super) fn validate(
             ));
         }
         let sum: f64 = row.iter().sum();
-        if !sum.is_finite() || (sum - 1.0).abs() > enclosure.closure_tolerance {
+        let invalid_sum = if enclosure.ambient_temperature.is_some() {
+            sum > 1.0
+        } else {
+            (sum - 1.0).abs() > enclosure.closure_tolerance
+        };
+        if !sum.is_finite() || invalid_sum {
             out.push(violation(
                 "project-enclosure-radiation-closure",
                 format!("view-factor row {i} does not close within its declared tolerance"),
-                "close the declared enclosure; an omitted external environment is not an enclosure surface",
+                "closed rows must sum to one; open rows must not exceed one and their deficits see the explicitly declared black environment",
             ));
         }
     }
     let mut names = BTreeSet::new();
+    if enclosure.ambient_temperature.is_some()
+        && !enclosure.view_factors.iter().any(|row| row.iter().sum::<f64>() < 1.0)
+    {
+        out.push(violation(
+            "project-enclosure-radiation-no-escape",
+            "an ambient temperature is declared but no physical surface sees the environment",
+            "retain actual escape factors or omit the environment for closed exchange",
+        ));
+    }
     let mut targets = BTreeSet::new();
     for surface in &enclosure.surfaces {
         if !is_canonical_binding_text(&surface.name)

@@ -75,6 +75,10 @@ pub(super) fn lower(enclosure: &ConductionEnclosure) -> Result<Node, ProjectErro
     if let Some(model) = enclosure.spatial_model {
         declaration.extend([kw("spatial-model"), sym(model.slug())]);
     }
+    if let Some(temperature) = enclosure.ambient_temperature {
+        declaration.push(kw("ambient-temperature"));
+        declaration.push(qty(temperature)?);
+    }
     Ok(list(declaration))
 }
 
@@ -99,6 +103,7 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
         "enclosure-radiation",
         &[
             "spatial-model",
+            "ambient-temperature",
             "surfaces",
             "view-factors",
             "evidence",
@@ -115,8 +120,9 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
         malformed(out, "enclosure-radiation.surfaces must be a surfaces list");
         return None;
     };
-    if !(2..=64).contains(&nodes.len()) {
-        malformed(out, "enclosure-radiation requires two to 64 surfaces");
+    let minimum = if field(&pairs, "ambient-temperature").is_some() { 1 } else { 2 };
+    if !(minimum..=64).contains(&nodes.len()) {
+        malformed(out, "enclosure-radiation requires at most 64 surfaces, at least two when closed or one with an explicit black environment");
         return None;
     }
     let mut surfaces = Vec::with_capacity(nodes.len());
@@ -254,6 +260,8 @@ pub(super) fn read(node: &Node, out: &mut Vec<Violation>) -> Option<ConductionEn
         }
     };
     Some(ConductionEnclosure {
+        ambient_temperature: field(&pairs, "ambient-temperature")
+            .map(|node| expect_qty(Some(node), "enclosure.ambient-temperature", out)),
         spatial_model: read_radiation_spatial_model(
             field(&pairs, "spatial-model"),
             "enclosure.spatial-model",

@@ -39,6 +39,7 @@ fn enclosure_project(card: &str) -> ProjectSpec {
     setup.adiabatic_remainder = true;
     setup.enclosure_radiation = Some(ConductionEnclosure {
         spatial_model: None,
+        ambient_temperature: None,
         surfaces: ["wall-x", "wall-z"]
             .into_iter()
             .enumerate()
@@ -138,6 +139,48 @@ fn g1_g3_native_enclosure_preserves_reflected_exchange_and_original_convection()
         transfer[1] > transfer[0],
         "the physical emissivity card must change exchange"
     );
+}
+
+#[test]
+fn g1_open_native_cavity_preserves_reflection_and_external_bath_heat_in_both_directions() {
+    let epsilon = 0.7;
+    let view = 0.35;
+    let (cards, card) = emissivity_cards(&fixture_cards(), epsilon);
+    for ambient in [280.0_f64, 340.0] {
+        let mut spec = enclosure_project(&card);
+        let declaration = spec.cooling.as_mut().unwrap().conduction.as_mut().unwrap()
+            .enclosure_radiation.as_mut().unwrap();
+        declaration.ambient_temperature = Some(QtyAny::new(ambient, fs_project::spec::dims::TEMPERATURE));
+        declaration.view_factors = vec![vec![0.0, view], vec![view, 0.0]];
+        let (receipt, _, html) = run_enclosure(&spec, &cards);
+        let radiation = receipt.get("radiation").unwrap();
+        assert_eq!(radiation.str_field("model"), Some("open-gray-diffuse-enclosure"));
+        let surfaces = radiation.get("surfaces").unwrap().as_array().unwrap();
+        assert_eq!(surfaces.len(), 2, "the bath is not a third solid surface");
+        let emission = surfaces.iter().map(|surface| {
+            let t = n(surface, "mean_temperature_k");
+            SIGMA * (t - ambient) * (t + ambient) * (t*t + ambient*ambient)
+        }).collect::<Vec<_>>();
+        let reflected = (1.0 - epsilon) * view;
+        let delta_j = [
+            epsilon * (emission[0] + reflected * emission[1]) / (1.0 - reflected*reflected),
+            epsilon * (emission[1] + reflected * emission[0]) / (1.0 - reflected*reflected),
+        ];
+        let heat = [0.5 * (delta_j[0] - view*delta_j[1]), 0.5 * (delta_j[1] - view*delta_j[0])];
+        for i in 0..2 {
+            near(n(&surfaces[i], "nonlinear_heat_w"), heat[i], 1e-6);
+            near(n(&surfaces[i], "ambient_view_factor"), 1.0 - view, 1e-14);
+        }
+        let bath_absorbs = 0.5 * (1.0 - view) * (delta_j[0] + delta_j[1]);
+        assert!(bath_absorbs.abs() > 0.1);
+        assert_eq!(bath_absorbs > 0.0, ambient < 300.0);
+        near(n(radiation, "ambient_absorbed_w"), bath_absorbs, 1e-6);
+        near(n(radiation, "nonlinear_radiative_out_w"), heat.iter().sum(), 1e-6);
+        near(n(radiation, "enclosure_energy_closure_w"), 0.0, 1e-6);
+        near(n(radiation, "convective_out_w") + n(radiation, "radiative_out_w"), 5.0, 1e-5);
+        near(n(radiation, "decomposition_residual_w"), 0.0, 1e-6);
+        assert!(html.contains("open-gray-diffuse-enclosure"));
+    }
 }
 
 #[test]

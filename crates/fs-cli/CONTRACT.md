@@ -2591,6 +2591,36 @@ publication.
   content root after a mid-transaction kill) is owed with the first
   physics-bearing stage.
 
+### Native open gray-diffuse cavity radiation
+
+An `:ambient-temperature` in `:enclosure-radiation` declares one explicit
+black environment. The supplied matrix contains only physical surfaces;
+each row's deficit sees the environment. Binding reuses the original mesh
+trace partition and material emissivity claims, admits actual-area reciprocity,
+and completes the independent bath equation through `OpenDiffuseEnclosure`.
+Rows are not normalized to hide escaped heat and the bath is not a solid node.
+
+Steady patch-mean solves use the shared nonlinear open-enclosure owner and
+retain their original conductive/convective initialization anchor. Explicit
+`:spatial-model pointwise` with total-enthalpy storage uses the existing
+heterogeneous enthalpy Newton solve, including exact local P1 fourth-power
+emission and reflected tangent. Finite storage permits vacuum cooling or
+heating with zero-flux boundaries and no fictitious convection. Prescribed
+Neumann heat, natural/forced convection and radiative environment heat retain
+separate energy ownership. Each accepted transient endpoint is independently
+checked against its original storage and full nonlinear residual.
+
+Reports expose physical surface heat, independently evaluated
+`ambient_absorbed_w`, and `enclosure_energy_closure_w` for surfaces plus bath.
+Only original convection heats transported air. The environment temperature
+may lie outside the solid emissivity card's support; every radiating solid
+temperature still must satisfy that source's validity. User-supplied view
+factors are not geometric certification. Native open-bath adjoints,
+patch-mean open transients and continuum bounds refuse explicitly.
+The existing native tests exercise independent reflected heat equations in
+both directions and real pointwise vacuum histories with original enthalpy
+storage. These numerical checks do not assert measured material validity.
+
 ### Native closed gray-diffuse enclosure radiation
 
 Schema 16 adds optional `:enclosure-radiation (enclosure-radiation ...)` to
