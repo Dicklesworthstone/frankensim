@@ -267,6 +267,44 @@ energy creation. Atomic ownership/cancellation, exact gap admission and row
 caps are also covered. This entry point does not locate collision times or
 provide friction, persistent contact, penetration repair or multi-tree impacts.
 
+### Mechanical travel stops with coupled recoil and support
+
+`partitioned::articulated::stops::step_with_stops` advances the original coupled
+midpoint state through bounded mechanical-stop events. Explicit lower/upper
+travel coordinates, restitution and activation resolutions belong to each
+joint. The shared normal-impact reset receives signed joint-coordinate rows
+and the complete physical dry-plus-fluid mass, so simultaneous impacts retain
+carrier recoil and all other joint responses. Impacts leave configuration and
+aerodynamic memory unchanged; their mechanical loss is reported separately.
+
+The original ballistic query locates closing and departing-return roots of
+each candidate's quadratic joint path. Shortened trials are reintegrated from
+the unchanged state. Only specifically typed native position-limit crossings
+may shorten a refused trial; native limits are never removed or widened. A
+contact state remains on the admissible side within its declared activation
+band. No joint position is snapped to a limit. Smooth-step, minimum-interval,
+attempt and event budgets bound the work and unresolved chatter refuses.
+
+Exactly stationary active stops use the original SPD orthant solver on
+midpoint velocities and the same effective mass as the smooth solve, including
+its implicit spring/damper diagonal. Compressive reactions hold the joint;
+noncompressive reactions release it. Other coordinates retain the full coupled
+response. The reaction receipt corresponds to the velocity increment actually
+accepted by the midpoint owner. Only arithmetic-roundoff residuals may become
+exact zero rates, independently of user tolerances; impact cleanup is checked
+again against complete generalized momentum and energy. All accumulated
+reaction, work and loss outputs must remain finite. Memory advances only with
+accepted smooth time, and a late refusal publishes no partial window.
+
+`articulated_stops` checks independent Schur-inertia rebound and momentum,
+simultaneous two-joint locking, stiff hold/release/recontact, a native-admissible
+wide trial that departs and returns to a stop, and forced simultaneous support
+with one joint releasing while the other retains its coupled reaction. Exact
+memory timing and late atomic refusals are included. These are numerical
+mechanical-stop models: `maximum_step_s` must resolve nonlinear smooth motion
+and forcing. They are not interval-certified CCD of the exact trajectory,
+stop compliance/damage, friction or historical control-mechanics validation.
+
 ## Hydrostatic pressure and material atmosphere loads
 
 `atmosphere::MaterialAirProfile` composes the L2 atmospheric wind with the

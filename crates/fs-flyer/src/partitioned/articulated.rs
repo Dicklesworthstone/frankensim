@@ -5,9 +5,10 @@
 //! moving dry COMs, link orientation, serial-joint coupling and base recoil are
 //! retained. This is a bounded Lie midpoint lane, not the dry owner's separate
 //! momentum-coordinate integrator. General nonlinear energy and momentum
-//! balance converge with timestep refinement. This smooth `step` does not
-//! preserve general invariants exactly or resolve events; the `impact` child
-//! handles caller-located instantaneous normal contacts.
+//! balance converge with timestep refinement. [`step`] owns smooth motion;
+//! [`impact`] supplies simultaneous point-contact resets and [`stops`] supplies
+//! mechanical stop events and unilateral support through the same mass owner.
+//! Exact finite-step conservation and closed-loop constraints are not claimed.
 
 /// Instantaneous simultaneous normal impacts with full dry and fluid inertia.
 #[path = "articulated/impact.rs"]
@@ -15,14 +16,17 @@ pub mod impact;
 
 use super::{MAX_CERT_STATES, MemoryState, refuse};
 use crate::Refusal;
-use crate::addedmass::joint::{admit_fluid, native_index, solve_articulated_with_diagonal};
-use crate::addedmass::{AeroGeneralizedLoads, MAX_CONTROL_COORDS};
+use crate::addedmass::joint::{admit_fluid, native_index};
+use crate::addedmass::{AeroGeneralizedLoads, MAX_CONTROL_COORDS, PreparedArticulatedMass};
 use fs_ga::{Se3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::generalized::{
     GeneralizedError, GeneralizedKinematics, free_floating_terms,
 };
 use fs_mbd::articulated::motion::FreeFloatingMotionState;
-use fs_mbd::articulated::{ArticulatedModel, BaseState, forward_kinematics};
+use fs_mbd::articulated::{ArticulatedError, ArticulatedModel, BaseState, forward_kinematics};
+
+#[path = "articulated/stops.rs"]
+pub mod stops;
 
 /// Link cap for the compact aircraft coupling lane, including fixed links.
 pub const MAX_ARTICULATED_LINKS: usize = 256;
@@ -104,8 +108,20 @@ fn cancelled() -> Refusal {
 }
 
 fn native_error(error: GeneralizedError) -> Refusal {
-    if error == GeneralizedError::Cancelled {
-        cancelled()
+    match error {
+        GeneralizedError::Cancelled => cancelled(),
+        GeneralizedError::Dynamics(error) => dynamics_error(error),
+        other => invalid(other),
+    }
+}
+
+fn dynamics_error(error: ArticulatedError) -> Refusal {
+    if matches!(error, ArticulatedError::JointLimitViolation { .. }) {
+        refuse(
+            "articulated-joint-position-limit",
+            error.to_string(),
+            "shorten the trial interval or resolve the mechanical stop before the native limit",
+        )
     } else {
         invalid(error)
     }
@@ -132,7 +148,7 @@ fn admit_state(model: &ArticulatedModel, state: &FreeFloatingMotionState) -> Res
         &state.joint_position,
         &state.joint_velocity,
     )
-    .map_err(invalid)?;
+    .map_err(dynamics_error)?;
     Ok(())
 }
 
@@ -163,10 +179,47 @@ pub fn step<F>(
     dt_s: f64,
     config: ArticulatedStepConfig<'_>,
     evaluate: F,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedStep, Refusal>
+where
+    F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
+{
+    step_with_velocity_response(
+        model,
+        impedance,
+        state,
+        memory_inputs,
+        t_s,
+        dt_s,
+        config,
+        evaluate,
+        |_, _, _| Ok(true),
+        is_cancelled,
+    )
+}
+
+// Travel-stop support changes the accepted simultaneous velocity response,
+// not the shared geometry, stage loads, memory or Lie midpoint integrator.
+#[allow(clippy::too_many_arguments)]
+fn step_with_velocity_response<F, R>(
+    model: &ArticulatedModel,
+    impedance: &[JointImpedance],
+    state: &ArticulatedState,
+    memory_inputs: &[f64],
+    t_s: f64,
+    dt_s: f64,
+    config: ArticulatedStepConfig<'_>,
+    evaluate: F,
+    mut response: R,
     mut is_cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedStep, Refusal>
 where
     F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
+    R: FnMut(
+        &PreparedArticulatedMass,
+        &mut [f64],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<bool, Refusal>,
 {
     if is_cancelled() {
         return Err(cancelled());
@@ -323,14 +376,26 @@ where
                 - p.stiffness
                     * (state.motion.joint_position[k] - p.rest_position + half * initial[6 + k]);
         }
-        let (base_accel, joint_accel) =
-            solve_articulated_with_diagonal(&dry, &fluid, &control_diagonal)?;
+        let mass = PreparedArticulatedMass::with_control_diagonal(&dry, &fluid, &control_diagonal)?;
+        let rhs: Vec<_> = (0..n)
+            .map(|i| {
+                let applied = if i < 6 {
+                    fluid.q_rigid_nonaccel[i]
+                } else {
+                    fluid.q_control_nonaccel[i - 6]
+                };
+                applied + fluid.q_added_bias[i] - dry.bias[native_index(i)]
+            })
+            .collect();
+        let acceleration = mass.solve(&rhs)?;
+        let mut increment: Vec<_> = acceleration.iter().map(|a| dt_s * a).collect();
+        let response_ready = response(&mass, &mut increment, &mut is_cancelled)?;
         let mut next = [0.0; 6 + MAX_CONTROL_COORDS];
         for i in 0..6 {
-            next[native_index(i)] = dt_s * base_accel[i];
+            next[native_index(i)] = increment[i];
         }
         for k in 0..nc {
-            next[6 + k] = dt_s * joint_accel[k];
+            next[6 + k] = increment[6 + k];
         }
         if !next[..n].iter().all(|x| x.is_finite()) {
             return Err(invalid("unrepresentable coupled velocity increment"));
@@ -346,7 +411,7 @@ where
             };
             residual = residual.max((next[i] - delta[i]).abs() / budget);
         }
-        if residual <= 1.0 {
+        if residual <= 1.0 && response_ready {
             // Publish the candidate whose midpoint was actually evaluated.
             let mut accepted = midpoint;
             accepted.motion.base.world_from_base = pose_at(initial_pose, twist(&um), dt_s)?;
@@ -381,4 +446,3 @@ where
         "reduce the timestep or increase the bounded midpoint iteration budget",
     ))
 }
-
