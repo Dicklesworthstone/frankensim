@@ -24,6 +24,35 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, text: &str, right_loss: f64) -> Ready {
 }
 
 #[test]
+fn assembly_triangle_bridge_keeps_its_component_and_full_moment_through_mortar() {
+    scoped(|cx, gate| {
+        let text = ASSEMBLED.replace("bridge right 4 0 0 1",
+            "bridge-triangle right 0 0.2 0.3 0.5 0 0 1 0.02 0 0");
+        let mut ready = ready(cx, gate, &text, 1.0);
+        let source = ready.performance.bank().source().bank();
+        let body = source.material_shell_assembly().unwrap();
+        let image = source.material_shell_assembly_image().unwrap();
+        assert!(body.force_ports[0].components[0].iter().all(|v|*v == 0.0));
+        let full = &body.force_ports[0].components[1];
+        let mut expected = vec![0.0;54];
+        for (node, weight) in [(0,0.2),(1,0.3),(4,0.5)] {
+            expected[6*node+2] = weight;
+            expected[6*node+4] = -0.02*weight;
+        }
+        assert_eq!(full,&expected);
+        for (mode, &projected) in image.physical_modes()[1].iter().zip(&image.force_ports()[0]) {
+            let direct: f64 = mode.iter().zip(full).map(|(u,f)|u*f).sum();
+            assert!((direct-projected).abs() < 1e-12*direct.abs().max(1.0));
+        }
+        let samples = pressure(&mut ready,17);
+        assert!(samples.iter().all(|v|v.is_finite()));
+        assert!(samples.iter().any(|v|v.abs()>1e-14));
+        let frame = ready.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+#[test]
 fn tied_components_share_modes_original_sources_cavity_and_block_independent_pcm() {
     scoped(|cx, gate| {
         let mut loads = BTreeMap::<String, usize>::new();

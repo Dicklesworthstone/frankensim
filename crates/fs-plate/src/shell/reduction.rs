@@ -317,13 +317,11 @@ impl ShellReduction {
     /// Invalid facet, barycentric location or direction.
     pub fn point_port(&self,triangle:usize,barycentric:[f64;3],direction:[f64;3])->Result<Vec<f64>,PlateError> {
         let tri=self.triangles.get(triangle).ok_or_else(||bad("point port facet out of range"))?;
-        if barycentric.iter().any(|x|!x.is_finite() || *x<0.0)
-            || (barycentric.iter().sum::<f64>()-1.0).abs()>1e-12
-            || direction.iter().any(|v|!v.is_finite()) || (dot(direction,direction)-1.0).abs()>1e-12 {
-            return Err(bad("point port needs barycentric coordinates and a finite unit direction"));
-        }
+        let rows = super::point::triangle_point_rows(barycentric, direction, [[0.0;3];3])
+            .map_err(|e| bad(e.reason()))?;
         Ok((0..self.mode_count()).map(|k| {
-            (0..3).map(|a|barycentric[a]*dot(direction,self.translations[k*self.nodes+tri[a]])).sum()
+            (0..3).map(|a|dot([rows[a][0],rows[a][1],rows[a][2]],
+                self.translations[k*self.nodes+tri[a]])).sum()
         }).collect())
     }
     /// Integrated oriented normal-displacement port [m^2/sqrt(kg)]. Multiplying

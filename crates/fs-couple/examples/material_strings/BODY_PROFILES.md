@@ -565,10 +565,63 @@ and width; z is in metres. Directors and force directions must already be unit
 vectors; the parser does not normalize or smooth them. The shared midsurface and
 director owners check actual geometry, topology and facet alignment. Support
 masks use six global DOFs `(u,v,w,rx,ry,rz)`, with 1 fixed and 0 free.
-Each bridge is a nodal translation along its authored direction and must retain
-an unconstrained translational component. The bridge count equals the actual
+The original `bridge` record is a nodal translation along its authored direction
+and must retain an unconstrained translational component. The bridge count equals the actual
 string count, including unplayed strings. Source bytes, geometry, packs,
 physical eigenvectors and force maps remain attached to the performer.
+
+### Interior and offset bridge attachment points
+
+A bridge may instead name an explicit point inside one original shell triangle:
+
+```text
+bridge-triangle TRIANGLE W0 W1 W2 DX DY DZ RX_M RY_M RZ_M
+```
+
+`W0 W1 W2` are nonnegative barycentric weights in the declared triangle's original
+node order and must sum to one. `DX DY DZ` is the unit force/velocity direction.
+`RX_M RY_M RZ_M` is an authored global Cartesian offset in metres from the
+interpolated midsurface point. It is independent of the normalized x/y body
+coordinates. Zero offset places the contact on the midsurface; zero weights admit
+an edge or a vertex. The input never snaps to the nearest mesh node or invents a
+direction, contact location, thickness, bridge height or material property.
+
+For example, on the synthetic `arched.body` fixture this replaces its last row
+with a point on triangle 10 (nodes 6, 7, 12), displaced 20 mm along global x:
+
+```text
+bridge-triangle 10 0.2 0.3 0.5 0 0 1 0.02 0 0
+```
+
+One unit of force along global z then applies translational weights `0.2, 0.3,
+0.5` and corresponding y moments `-0.004, -0.006, -0.010` N m per newton.
+The same six-DOF rows observe point velocity and return the string's reaction
+force through the original material shell modes, body joints, cavity and
+radiation paths. This is the same P1 interface interpolation used by the shared
+shell point and finite-thickness skin owners. Force, moment and rigid-motion
+virtual work are preserved. It does not reconstruct the element's enriched
+interior field or add an unmodeled bridge's mass, stiffness or compliance.
+
+The complete weighted force/moment row must retain an unconstrained DOF;
+zero-weight free vertices cannot rescue a fully fixed attachment. A contact
+offset can act through a free physical rotation even when its translations are
+fixed. Rotational joints built from two bridge ports use these actual attachment
+positions, including their offsets. Prescribed `port bridge` forces and harmonic
+bridge-response queries use these same maps without a separate excitation path.
+
+For an assembled v4 body, prefix the same fields with its original component name:
+
+```text
+bridge-triangle COMPONENT TRIANGLE W0 W1 W2 DX DY DZ RX_M RY_M RZ_M
+```
+
+The point belongs only to that component; the existing mortar assembly carries
+its loads to connected parts. Nodal and triangle bridge records can be mixed in
+one `bridges` block. The assembly-table converter's legacy x/y `bridge` option
+continues to report its nearest-node snap distance; subelement attachment must
+be declared explicitly in the resulting body profile.
+
+### Shell resource bounds
 
 The file admits at most 3072 nodes and 6144 triangles per component, 16 regions, eight string
 attachments and 256 retained shell modes, within 4 MiB (flat plate profiles keep 64 KiB and 16 modes). `mass` explicitly selects

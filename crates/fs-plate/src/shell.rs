@@ -22,6 +22,8 @@ pub mod survey;
 pub mod reduction;
 /// Original oriented pressure/normal-flow traces on mechanical midsurfaces.
 pub mod pressure;
+/// Shared work-conjugate point/skin rows on original six-DOF shell nodes.
+pub mod point;
 /// Circular prestressed films through the existing DKT/membrane assembly.
 pub mod head;
 /// Bonded 3-D beam reinforcement with reciprocal eccentric stiffness and mass.

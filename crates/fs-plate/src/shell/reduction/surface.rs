@@ -50,9 +50,6 @@ pub(super) fn directors(s: &ShellReduction, h: &[f64]) -> Result<Vec<[f64; 3]>, 
     }
     Ok(out)
 }
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [a[1]*b[2]-a[2]*b[1], a[2]*b[0]-a[0]*b[2], a[0]*b[1]-a[1]*b[0]]
-}
 impl ShellReduction {
     /// Reference skin vertices in ORIGINAL midsurface node order. Both contact
     /// chart queries and the two-sided radiation surface use these same
@@ -89,16 +86,20 @@ impl ShellReduction {
         barycentric: [f64; 3], face: ShellFace, direction: [f64; 3])
         -> Result<ShellSurfacePort, PlateError>
     {
-        // Reuse the existing point-port admission (and its exact base row).
-        let mut weights = self.point_port(triangle, barycentric, direction)?;
+        let tri = *self.triangles.get(triangle)
+            .ok_or_else(|| bad("surface point facet out of range"))?;
         let offsets = directors(self, nodal_thickness_m)?;
-        let tri = self.triangles[triangle];
+        let point_offsets = tri.map(|node| offsets[node].map(|v|v*face.sign()));
+        let rows = super::super::point::triangle_point_rows(barycentric, direction, point_offsets)
+            .map_err(|e| bad(e.reason()))?;
+        let mut weights = vec![0.0; self.mode_count()];
         let mut position_m = [0.0; 3];
         for a in 0..3 {
-            let node = tri[a]; let offset = offsets[node].map(|v| v * face.sign());
+            let node = tri[a]; let offset = point_offsets[a];
             for c in 0..3 { position_m[c] += barycentric[a] * (self.reference_positions[node][c] + offset[c]); }
             for (mode, w) in weights.iter_mut().enumerate() {
-                *w += barycentric[a] * dot(direction, cross(self.rotations[mode*self.nodes+node], offset));
+                *w += dot([rows[a][0],rows[a][1],rows[a][2]], self.translations[mode*self.nodes+node])
+                    + dot([rows[a][3],rows[a][4],rows[a][5]], self.rotations[mode*self.nodes+node]);
             }
         }
         if position_m.iter().chain(weights.iter()).any(|v| !v.is_finite()) {

@@ -17,6 +17,37 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, loss: f64, shear: f64) -> Ready {
 }
 
 #[test]
+fn triangle_bridge_loads_the_same_material_modes_with_its_offset_moment() {
+    scoped(|cx, gate| {
+        let text = shell_text().replace("bridge 12 0 0 1",
+            "bridge-triangle 10 0.2 0.3 0.5 0 0 1 0.02 0 0");
+        let mut ready = shell_spec().compile_with_body(cx, gate,
+            Some(Profile::parse(text.as_bytes()).unwrap()),
+            |name| Ok(pack_with_shear(name, 1.0, 1.0, None))).unwrap();
+        let source = ready.performance.bank().source().bank();
+        let body = source.material_shell().unwrap();
+        let image = source.material_shell_image().unwrap();
+        let full = &body.force_ports[0];
+        let mut expected = vec![0.0; 150];
+        for (node, weight) in [(6,0.2),(7,0.3),(12,0.5)] {
+            expected[6*node+2] = weight;
+            expected[6*node+4] = -0.02*weight;
+        }
+        assert_eq!(full, &expected);
+        for (mode, &projected) in image.physical_modes().iter().zip(&image.force_ports()[0]) {
+            let direct: f64 = mode.iter().zip(full).map(|(u,f)|u*f).sum();
+            assert!((direct-projected).abs() < 1e-12*direct.abs().max(1.0));
+        }
+        assert_eq!(ready.body_profile.as_ref().unwrap().bytes, text.as_bytes());
+        let samples = pressure(&mut ready, 17);
+        assert!(samples.iter().all(|v|v.is_finite()));
+        assert!(samples.iter().any(|v|v.abs()>1e-14));
+        let frame = ready.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+#[test]
 fn response_projection_reuses_playback_body_without_loading_string_sources() {
     scoped(|cx, gate| {
         let profile = shell_profile();

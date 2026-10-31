@@ -20,6 +20,9 @@ mod interfaces;
 mod pressure;
 #[path = "shell/coating.rs"]
 mod coating;
+#[path = "shell/bridge.rs"]
+mod bridge;
+use bridge::Bridge;
 #[path = "shell/assembly.rs"]
 pub(super) mod assembly;
 
@@ -55,11 +58,6 @@ struct RegionInput {
     shear_correction: f64,
     axis1_global: [f64; 3],
     triangles: Vec<usize>,
-}
-#[derive(Clone, Debug)]
-struct Bridge {
-    node: usize,
-    direction: [f64; 3],
 }
 #[derive(Clone, Debug)]
 pub(super) struct Spec {
@@ -193,15 +191,9 @@ impl Spec {
         let n = if assembly_window.is_some() { 0 } else { count(r.row("bridges", 1)?[0], 1, 8)? };
         let mut bridges = Vec::with_capacity(n);
         for _ in 0..n {
-            let v = r.row("bridge", 4)?;
-            let node = index(v[0], nodes.len())?;
-            let direction = unit_direction(&v[1..4])?;
-            if let Some(support) = supports.iter().find(|s| s.node == node) {
-                if !(0..3).any(|i| direction[i] != 0.0 && !support.mask[i]) {
-                    return Err("shell bridge has no unconstrained translational direction".into());
-                }
-            }
-            bridges.push(Bridge { node, direction });
+            let (record, fields) = Bridge::record(r);
+            let v = r.row(record, fields)?;
+            bridges.push(Bridge::read_fields(&v, nodes.len(), &triangles, &supports)?);
         }
         Ok(Self { nodes, triangles, regions, coatings, coating_memory, supports, interfaces, pressure_surfaces, bridges, minimum_facet_dot,
             mass, drilling_alpha, window, projection_work })
@@ -215,6 +207,7 @@ impl Spec {
             return Err(format!("shell body profile admits 1..={MAX_MODES} retained body modes").into());
         }
         self.geometry(spec)?;
+        for bridge in &self.bridges { bridge.position(self, spec)?; }
         if let Some(memory) = &self.coating_memory { memory.preflight(spec)?; }
         self.interfaces.preflight(self, spec)?;
         Ok(())
@@ -274,8 +267,8 @@ impl Spec {
         if p.direction != n.direction {
             return Err("shell chord rotation requires a common physical translation direction".into());
         }
-        let p = self.position(p.node, spec);
-        let n = self.position(n.node, spec);
+        let p = p.position(self, spec)?;
+        let n = n.position(self, spec)?;
         let d = self.bridges[positive].direction;
         bridge_lever(p, n, d)
     }
@@ -321,11 +314,8 @@ impl Spec {
         poll(gate)?;
         self.preflight(spec)?;
         let component = self.resolve_component("body", spec, catalog, loader, gate)?;
-        let force_ports = self.bridges.iter().map(|bridge| {
-            let mut port = vec![0.0; 6 * self.nodes.len()];
-            port[6 * bridge.node..6 * bridge.node + 3].copy_from_slice(&bridge.direction);
-            port
-        }).collect();
+        let force_ports = self.bridges.iter().map(|bridge| bridge.force_port(self.nodes.len()))
+            .collect::<Result<Vec<_>>>()?;
         let body = SharedMaterialShellBody {
             specimen: component.specimen, directors: component.directors,
             constraints: component.constraints, mass: component.mass,

@@ -31,8 +31,7 @@ struct Component {
 #[derive(Clone, Debug)]
 struct AssemblyBridge {
     component: usize,
-    node: usize,
-    direction: [f64; 3],
+    footprint: Bridge,
 }
 
 #[derive(Clone, Debug)]
@@ -175,22 +174,13 @@ impl Spec {
         let n = count(r.row("bridges", 1)?[0], 1, 8)?;
         let mut bridges = Vec::with_capacity(n);
         for _ in 0..n {
-            let v = r.row("bridge", 5)?;
+            let (record, fields) = Bridge::record(&r);
+            let v = r.row(record, fields + 1)?;
             let component = component(&components, v[0])?;
             let shell = &components[component].shell;
-            let node = index(v[1], shell.nodes.len())?;
-            let direction = unit_direction(&v[2..5])?;
-            if shell
-                .supports
-                .iter()
-                .any(|s| s.node == node && !(0..3).any(|i| direction[i] != 0.0 && !s.mask[i]))
-            {
-                return Err("assembly bridge has no unconstrained translational direction".into());
-            }
             bridges.push(AssemblyBridge {
                 component,
-                node,
-                direction,
+                footprint: Bridge::read_fields(&v[1..], shell.nodes.len(), &shell.triangles, &shell.supports)?,
             });
         }
         if r.lines.next().is_some() {
@@ -224,6 +214,9 @@ impl Spec {
                 .shell
                 .interfaces
                 .preflight(&component.shell, spec)?;
+        }
+        for bridge in &self.bridges {
+            bridge.footprint.position(&self.components[bridge.component].shell, spec)?;
         }
         Ok(())
     }
@@ -320,15 +313,15 @@ impl Spec {
             .bridges
             .get(negative)
             .ok_or("unknown negative assembly bridge")?;
-        if p.direction != n.direction {
+        if p.footprint.direction != n.footprint.direction {
             return Err(
                 "assembly chord rotation requires a common physical translation direction".into(),
             );
         }
         bridge_lever(
-            self.components[p.component].shell.position(p.node, spec),
-            self.components[n.component].shell.position(n.node, spec),
-            p.direction,
+            p.footprint.position(&self.components[p.component].shell, spec)?,
+            n.footprint.position(&self.components[n.component].shell, spec)?,
+            p.footprint.direction,
         )
     }
 
@@ -406,11 +399,11 @@ impl Spec {
                     .iter()
                     .map(|c| vec![0.0; 6 * c.shell.nodes.len()])
                     .collect();
-                rows[bridge.component][6 * bridge.node..6 * bridge.node + 3]
-                    .copy_from_slice(&bridge.direction);
-                ShellAssemblyForcePort { components: rows }
+                rows[bridge.component] = bridge.footprint.force_port(
+                    self.components[bridge.component].shell.nodes.len())?;
+                Ok(ShellAssemblyForcePort { components: rows })
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let body = SharedMaterialShellAssemblyBody {
             specimen: MaterialShellAssembly {
                 components,

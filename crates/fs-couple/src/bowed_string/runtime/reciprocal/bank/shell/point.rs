@@ -25,22 +25,8 @@ impl ShellPointGeometry {
     /// Work-conjugate force and moment [d, r cross d]. Its dot product with
     /// [U, Theta] equals d dot (U + Theta cross r).
     pub(crate) fn nodal_row(&self) -> Result<[f64; 6], ReciprocalStringError> {
-        let norm2 = self.direction.iter().map(|x| x * x).sum::<f64>();
-        if !norm2.is_finite()
-            || (norm2 - 1.0).abs() > 1e-12
-            || self.arm_m.iter().any(|x| !x.is_finite())
-        {
-            return Err(invalid(
-                "shell point requires a finite unit direction and finite moment arm",
-            ));
-        }
-        let [x, y, z] = self.direction;
-        let [rx, ry, rz] = self.arm_m;
-        let row = [x, y, z, ry * z - rz * y, rz * x - rx * z, rx * y - ry * x];
-        if row.iter().any(|x| !x.is_finite()) {
-            return Err(invalid("shell point moment arm overflow"));
-        }
-        Ok(row)
+        fs_plate::shell::point::nodal_point_row(self.direction, self.arm_m)
+            .map_err(|e| invalid(e.reason()))
     }
 }
 
