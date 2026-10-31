@@ -636,6 +636,27 @@ impl<'mesh> MeshPlanarPatches<'mesh> {
         self.triangle_patch.get(triangle as usize).copied()
     }
 
+    /// Retained BLAS bounds are sound after preparation validates every leaf.
+    /// Unreferenced authoring vertices do not enlarge the represented surface.
+    /// An empty triangle set with vertices retains a degenerate empty bound;
+    /// a completely empty authoring mesh has no instance placement bound.
+    pub(crate) fn bounds(&self) -> Option<Aabb> {
+        self.mesh.nodes.first().map_or_else(
+            || {
+                self.mesh.vertices.first().map(|&point| Aabb {
+                    min: array_point(point),
+                    max: array_point(point),
+                })
+            },
+            |node| {
+                Some(Aabb {
+                    min: array_point(node.lo),
+                    max: array_point(node.hi),
+                })
+            },
+        )
+    }
+
     /// Accelerated query of the immutable mesh validated during preparation.
     pub fn nearest_surface_with_cx(
         &self,
@@ -648,7 +669,7 @@ impl<'mesh> MeshPlanarPatches<'mesh> {
 
     /// Ball around the rounded surface representative containing only this
     /// planar patch. The caller must additionally exclude other scene objects.
-    pub fn departure_radius(
+    pub(crate) fn departure_radius(
         &self,
         cx: &Cx<'_>,
         witness: &SurfaceWitness,

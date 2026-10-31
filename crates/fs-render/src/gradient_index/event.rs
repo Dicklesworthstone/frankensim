@@ -12,7 +12,10 @@
 //! Geometric clearance and upper proximity are separate obligations. A small
 //! implicit residual alone never becomes a hit. Contacts are resolved to the
 //! caller's metric tolerance with a transverse approach requirement; grazing
-//! ambiguity refuses. The ODE still has local estimates, not a certified global
+//! ambiguity refuses. When a planar patch is supplied, the incidence-scaled
+//! unresolved tail must fit inside its geometric exclusion ball. This also
+//! refuses near-edge approaches whose tangent can leave the finite surface.
+//! The ODE still has local estimates, not a certified global
 //! trajectory enclosure, so these results are numerical contacts, not exact
 //! crossing certificates. The returned ray stays at its integrated position.
 //!
@@ -346,8 +349,21 @@ pub fn propagate_to_boundary_with_control<
                     .ok_or(GradientIndexError::BoundaryResolutionLimit)?;
                 let approach = -side * witness.normal.dot(tangent);
                 if approach >= options.min_approach_cosine {
-                    contact_resolution =
-                        contact_resolution.max(witness.distance_upper_m / approach);
+                    // A small perpendicular gap need not imply contact with
+                    // a finite face: at shallow incidence its tangent may
+                    // leave the patch before reaching the supporting plane.
+                    // The free ball must contain both the current endpoint
+                    // and its unresolved tangent extension. This is a local
+                    // contact admission check, not a curved-tail certificate.
+                    let residual = witness.distance_upper_m / approach;
+                    if let Some(radius) = witness.departure_radius_m
+                        && (distance_upper(point, witness.surface_point) + residual.next_up())
+                            .next_up()
+                            >= radius
+                    {
+                        return Err(GradientIndexError::BoundaryResolutionLimit);
+                    }
+                    contact_resolution = contact_resolution.max(residual);
                     break BoundaryTermination::Surface(witness);
                 }
                 if approach.abs() < options.min_approach_cosine {

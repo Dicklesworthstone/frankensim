@@ -12,6 +12,8 @@ use fs_geom::{Chart, Point3, Vec3};
 
 use crate::charts::{Hit, Ray, TraceAudit, TraceTermination, TriMesh, sphere_trace};
 
+pub mod proximity;
+
 const TRANSFORM_DOMAIN: &str = "org.frankensim.render.rigid-transform.v1";
 const INSTANCE_DOMAIN: &str = "org.frankensim.render.geometry-instance.v1";
 const SCENE_DOMAIN: &str = "org.frankensim.render.instance-scene.v1";

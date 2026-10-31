@@ -295,6 +295,90 @@ fn g0_residual_only_or_grazing_contact_is_not_a_crossing() {
     );
 }
 
+// The plane x=1, truncated at y=0. An interior witness's nearest patch edge
+// is exactly -y away; positive-y rays can miss it at shallow incidence.
+struct HalfPlane;
+impl BoundaryOracle for HalfPlane {
+    fn query(&mut self, point: Point3) -> Result<BoundaryQuery, GradientIndexError> {
+        let surface_point = Point3::new(1.0, point.y.min(0.0), point.z);
+        let gap = point.x - 1.0;
+        Ok(BoundaryQuery {
+            clearance_m: gap.abs().next_down().max(0.0),
+            witness: Some(BoundaryWitness {
+                boundary_id: 0,
+                feature_id: 0,
+                surface_point,
+                normal: Vec3::new(1.0, 0.0, 0.0),
+                distance_upper_m: distance_upper(point, surface_point),
+                side: if gap < 0.0 {
+                    BoundarySide::Negative
+                } else if gap > 0.0 {
+                    BoundarySide::Positive
+                } else {
+                    BoundarySide::OnSurface
+                },
+                departure_radius_m: (point.y < 0.0).then(|| (-point.y).next_down()),
+            }),
+        })
+    }
+}
+
+#[test]
+fn g0_near_edge_tangent_miss_is_not_a_contact() {
+    let glass = glass();
+    let field = HomogeneousIndexField::new(&glass);
+    let ray = Ray {
+        origin: Point3::new(1.0 - 5.0e-8, -2.0e-6, 0.0),
+        dir: Vec3::new(0.01, (1.0_f64 - 0.0001).sqrt(), 0.0),
+    };
+    let plane_arc = (1.0 - ray.origin.x) / ray.dir.x;
+    assert!(ray.origin.y + plane_arc * ray.dir.y > 0.0);
+    assert_eq!(
+        propagate_to_boundary(
+            &field,
+            &mut HalfPlane,
+            ray,
+            axis(),
+            550.0,
+            0.01,
+            None,
+            GradientEventOptions::default(),
+        ),
+        Err(GradientIndexError::BoundaryResolutionLimit)
+    );
+}
+
+#[test]
+fn g1_low_angle_interior_contact_fits_the_planar_patch() {
+    let glass = glass();
+    let field = HomogeneousIndexField::new(&glass);
+    let ray = Ray {
+        origin: Point3::new(1.0 - 2.0e-6, -1.0e-3, 0.0),
+        dir: Vec3::new(0.01, (1.0_f64 - 0.0001).sqrt(), 0.0),
+    };
+    let plane_arc = (1.0 - ray.origin.x) / ray.dir.x;
+    assert!(ray.origin.y + plane_arc * ray.dir.y < 0.0);
+    let result = propagate_to_boundary(
+        &field,
+        &mut HalfPlane,
+        ray,
+        axis(),
+        550.0,
+        0.01,
+        None,
+        GradientEventOptions::default(),
+    )
+    .unwrap();
+    assert!(matches!(
+        result.termination,
+        BoundaryTermination::Surface(_)
+    ));
+    assert!(result.propagation.distance_m > 0.0);
+    assert!(result.propagation.distance_m < plane_arc);
+    assert!(plane_arc - result.propagation.distance_m <= result.contact_resolution_m * 1.00000001);
+    assert!(result.propagation.ray.origin.y < 0.0);
+}
+
 #[test]
 fn g0_departure_requires_resolved_patch_and_field_collar() {
     let glass = glass();

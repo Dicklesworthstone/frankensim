@@ -393,6 +393,21 @@ differentiable lift). Pure Rust throughout.
   placements with a length-framed streaming hash. Material and emission remain
   properties of the tracer `Primitive`, separate from shared geometry and pose.
 
+  `instances::proximity::BoundaryGeometry` prepares a static top-level BVH,
+  shared borrowed mesh patches and interval affine transforms for native
+  curved-path queries. Inverse-transform uncertainty and singular-value
+  enclosures convert local clearance/proximity to world metres; stored
+  binary64 quaternions are not assumed to be exact isometries. Queries keep
+  original object/geometry/frame identities and one cumulative work budget.
+  Resolved contacts exclude other objects and noncoplanar patches; coincident
+  interfaces, unresolved finite edges and features within the contact collar
+  refuse. A planar arrival's incidence-scaled unresolved tail must fit inside
+  its exclusion ball. This prevents finite-detector near misses from becoming
+  surface events. The prepared owner currently admits finite support;
+  exact-distance chart arrivals retain numerical proximity, with no invented
+  planar departure neighborhood. These are separate witnesses, not extensions
+  of the certified straight-ray `InstanceHit` authority.
+
 - `tracer` tile execution (bead `frankensim-h7xu5.5.1`):
   `RenderExecutionConfig` makes logical tile shape, worker ceiling, operation
   memory, scheduling weights, and `RunId` explicit. The
