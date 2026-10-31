@@ -57,6 +57,10 @@ name = "material_sdf3"
 required-features = ["cutfem-marquee"]
 
 [[test]]
+name = "material_refinement_sdf3"
+required-features = ["cutfem-marquee"]
+
+[[test]]
 name = "stress_sdf3"
 required-features = ["cutfem-marquee"]
 

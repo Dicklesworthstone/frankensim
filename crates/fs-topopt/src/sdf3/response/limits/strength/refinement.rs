@@ -174,7 +174,8 @@ impl<O:AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             return Err(ResponseStressRefinementError3::Invalid("retained joint evidence or stress policy mismatch"));
         }
         let response_options=ResponseLimitRefinementOptions3{limits:options.joint.response,
-            numerical:options.numerical,max_transfer_terms:options.max_transfer_terms};
+            numerical:options.numerical,max_transfer_terms:options.max_transfer_terms,
+            ..Default::default()};
         let (response,enriched)=self.estimate_response_limit_enrichment_retaining(enriched,
             &accepted.response,cases,response_options,control)?;
         if response.fine_projected_rho.len()!=enriched.cells() {

@@ -120,6 +120,10 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         source: &ResponseLimitEvaluation3, cases: &[ReferenceResponseLimitCase3<'_>], options: MinimumMaterialOptions3,
         steps: usize, max_transfer_terms: usize, control: &mut SolveControl<'_>) -> Result<MinimumMaterialRefit3<F>, FitError> {
         control.checkpoint("minimum-material-refit-start").map_err(physics)?;
+        if matches!(options.objective, super::super::design::MinimumMaterialObjective3::MassKg { .. })
+            != source.mass_kg.is_some() {
+            return Err(ProjectedAlError::Invalid("refit objective disagrees with the source material inventory"));
+        }
         admit(self, cases, &source.rho, options)?;
         options.optimizer.validate(candidate.cells())?;
         super::super::design::admit_objective(&candidate, options)?;

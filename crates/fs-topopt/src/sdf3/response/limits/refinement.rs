@@ -2,6 +2,8 @@
 //! coarse active aggregate cannot stand in for an individual physical bound.
 //! Every original limit gets its own actual adjoint pair; reaction offsets,
 //! load/goal transfer, and algebraic defects use the existing affine DWR owner.
+//! A selected mass objective adds direct native inventory corrections on that
+//! same parent map, without adding a displacement or inventory adjoint solve.
 use super::*;
 use std::collections::BTreeMap;
 use fs_cutfem::elastic3::surface::ReferenceLoad3;
@@ -12,8 +14,10 @@ use fs_dwr::elasticity3::reaction::{AffineGoalEstimate3, AffineMotionGoal3,
     assemble_affine_motion_goal3, estimate_affine_motion_goal3};
 use fs_dwr::elasticity3::response::EquilibriumLoad3;
 use crate::sdf3_goal::GoalRefinementError3;
+use super::design::MinimumMaterialObjective3;
 
 pub mod adaptive;
+mod inventory;
 mod refit;
 pub use refit::{MinimumMaterialRefit3, ReferenceMinimumMaterialFit3};
 
@@ -52,10 +56,16 @@ pub struct ResponseLimitRefinementOptions3 {
     /// Actual field residual and affine two-grid identity gates.
     pub numerical: GoalOptions3,
     pub max_transfer_terms: usize,
+    /// Same inventory as the retained design. Physical mass requires its
+    /// native material densities; it is never inferred from geometric volume.
+    pub objective: MinimumMaterialObjective3,
+    /// Numerical normalization for the volume objective, as in the optimizer.
+    pub volume_scale: f64,
 }
 impl Default for ResponseLimitRefinementOptions3 {
     fn default() -> Self {
-        Self { limits: ResponseLimitOptions3::default(), numerical: GoalOptions3::default(), max_transfer_terms: 2_000_000 }
+        Self { limits: ResponseLimitOptions3::default(), numerical: GoalOptions3::default(), max_transfer_terms: 2_000_000,
+            objective: MinimumMaterialObjective3::VolumeFraction, volume_scale: 1.0 }
     }
 }
 
@@ -94,10 +104,24 @@ pub struct ResponseLimitRefinement3 {
     /// Parent-inherited projected density integrated against each grid's measures.
     pub coarse_volume_fraction: f64,
     pub fine_volume_fraction: f64,
+    pub objective: MinimumMaterialObjective3,
+    pub volume_scale: f64,
+    /// Actual inventory at the inherited physical design. None in volume mode.
+    pub coarse_mass_kg: Option<f64>,
+    pub fine_mass_kg: Option<f64>,
+    /// Values normalized by the explicitly selected volume or kg scale.
+    pub coarse_objective: f64,
+    pub fine_objective: f64,
+    /// Signed fine-minus-coarse kg correction for each ORIGINAL-grid parent.
+    /// This is a direct inventory quadrature change, not an elasticity DWR
+    /// term or a continuum bound. Empty for the legacy volume objective.
+    pub mass_cell_corrections_kg: BTreeMap<Octant3, f64>,
     /// Parent-inherited projected density in the enriched operator's exact cell order.
     pub fine_projected_rho: Vec<f64>,
-    /// Sum of normalized absolute cell masses over ALL limits, including those
-    /// inactive in the coarse smooth maximum. Bound offsets do not localize.
+    /// Sum of normalized absolute response indicators over ALL limits, including those
+    /// inactive in the coarse smooth maximum. Mass mode also adds each native
+    /// inventory correction's absolute value divided by its explicit kg scale.
+    /// Bound offsets do not localize.
     pub marking_mass: BTreeMap<Octant3, f64>,
     pub work: SolveWork,
 }
@@ -185,6 +209,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         -> Result<(ResponseLimitRefinement3, F), GoalRefinementError3> {
         control.checkpoint("response-limit-goal-start")?;
         admit_reference_limits(self, cases, options.limits).map_err(|_| invalid("invalid reference response-limit family"))?;
+        inventory::admit(&self.operator, &enriched, accepted, options)?;
         if options.max_transfer_terms == 0 || cases.len() != accepted.displacements.len()
             || cases.len() != accepted.measurements.len() || cases.len() != accepted.residuals.len()
             || accepted.rho.len() != self.cells() || accepted.rho.iter().any(|r| !r.is_finite() || !(0.0..=1.0).contains(r))
@@ -202,6 +227,11 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         if design.scales != accepted.scales || design.projected != accepted.projected_rho
             || !matches(design.volume, accepted.volume_fraction, 1.0, tolerance) {
             return Err(invalid("retained response-limit design belongs to another pipeline"));
+        }
+        let (coarse_mass_kg, coarse_objective) = inventory::measure(&self.operator,
+            &design.projected, design.volume, options, control)?;
+        if coarse_mass_kg != accepted.mass_kg {
+            return Err(invalid("retained response-limit mass belongs to another material field"));
         }
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&design.scales)?;
@@ -244,12 +274,24 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 .map(|&p| design.projected[p]).collect();
             let fine_volume = number(volumes.iter().zip(&fine_projected_rho)
                 .map(|(v, r)| (v/total)*r).sum())?;
+            let (fine_mass_kg, fine_objective) = inventory::measure(&enriched,
+                &fine_projected_rho, fine_volume, options, control)?;
+            let mass_cell_corrections_kg = inventory::cell_corrections(&self.operator, &enriched,
+                &design.projected, transfer.parents(), options, control)?;
+            let mut marking_mass = BTreeMap::new();
+            if let MinimumMaterialObjective3::MassKg { scale_kg } = options.objective {
+                for (&leaf, &change) in &mass_cell_corrections_kg {
+                    marking_mass.insert(leaf, inventory::normalized(change.abs(), scale_kg)?);
+                }
+            }
             let pc = self.operator.prepare_elasticity(control)?;
             let pf = enriched.prepare_elasticity(control)?;
             let mut report = ResponseLimitRefinement3 { cases: Vec::with_capacity(cases.len()),
                 coarse_constraint: cg, coarse_worst_residual: cm, fine_constraint: 0.0, fine_worst_residual: 0.0,
                 coarse_volume_fraction: design.volume, fine_volume_fraction: fine_volume,
-                fine_projected_rho, marking_mass: BTreeMap::new(), work: control.work() };
+                objective: options.objective, volume_scale: options.volume_scale,
+                coarse_mass_kg, fine_mass_kg, coarse_objective, fine_objective, mass_cell_corrections_kg,
+                fine_projected_rho, marking_mass, work: control.work() };
             let mut all_fine = Vec::new();
             for (i, case) in cases.iter().enumerate() {
                 let rhs = enriched.adaptive().reference_load_with_motion(case.load, case.prescribed, || poll(control))?;

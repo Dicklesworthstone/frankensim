@@ -27,19 +27,22 @@ pub struct AdaptiveMinimumMaterialOptions3 {
     pub response_tolerance: f64,
     /// Absolute difference in numerical material-volume fraction.
     pub volume_tolerance: f64,
+    /// Additional mass-mode change tolerance, in units of the chosen
+    /// `MassKg::scale_kg`. The geometric volume tolerance remains separate.
+    pub mass_tolerance: f64,
 }
 impl Default for AdaptiveMinimumMaterialOptions3 {
     fn default() -> Self {
         Self { fit: MinimumMaterialOptions3::default(), numerical: GoalOptions3::default(),
             steps_per_grid: 80, max_refinements: 3, max_transfer_terms: 2_000_000,
-            theta: 0.5, max_marks: 8, response_tolerance: 1e-3, volume_tolerance: 1e-4 }
+            theta: 0.5, max_marks: 8, response_tolerance: 1e-3, volume_tolerance: 1e-4, mass_tolerance: 1e-4 }
     }
 }
 impl AdaptiveMinimumMaterialOptions3 {
     fn validate(self) -> Result<(), FitError> {
         if !self.theta.is_finite() || self.theta <= 0.0 || self.theta > 1.0
             || self.max_marks == 0 || self.max_transfer_terms == 0
-            || [self.response_tolerance, self.volume_tolerance].iter().any(|x| !x.is_finite() || *x < 0.0)
+            || [self.response_tolerance, self.volume_tolerance, self.mass_tolerance].iter().any(|x| !x.is_finite() || *x < 0.0)
             || [self.numerical.residual_tolerance, self.numerical.identity_tolerance]
                 .iter().any(|x| !x.is_finite() || *x <= 0.0 || *x >= 1.0) {
             return Err(ProjectedAlError::Invalid("invalid minimum-material adaptive policy"));
@@ -54,6 +57,10 @@ impl AdaptiveMinimumMaterialOptions3 {
 pub struct MinimumMaterialAssessment3 {
     pub response_change: f64,
     pub volume_change: f64,
+    /// Absolute change in the selected, normalized inventory objective.
+    pub objective_change: f64,
+    /// Actual absolute kg change, absent for volume-only design.
+    pub mass_change_kg: Option<f64>,
     /// BOTH the smooth aggregate and every original fine residual pass the
     /// same tolerance used by the minimum-material optimizer's feasible archive.
     pub fine_feasible: bool,
@@ -62,6 +69,10 @@ impl MinimumMaterialAssessment3 {
     fn meets(self, o: AdaptiveMinimumMaterialOptions3) -> bool {
         self.fine_feasible && self.response_change <= o.response_tolerance
             && self.volume_change <= o.volume_tolerance
+            && match o.fit.objective {
+                MinimumMaterialObjective3::VolumeFraction => true,
+                MinimumMaterialObjective3::MassKg { .. } => self.objective_change <= o.mass_tolerance,
+            }
     }
 }
 
@@ -73,19 +84,24 @@ pub enum AdaptiveMinimumMaterialStop3 {
     TwoGridLimitsSatisfied,
     RefinementLimit,
     Paused,
-    /// Failed numerical checks without local residual marks; never a pass.
+    /// Failed numerical checks without local response/inventory marks; never a pass.
     NoRefinementSignal,
     NoFeasibleSource,
     /// The completed candidate has no accepted feasible point. Source retained.
     NoFeasibleCandidate,
 }
 
-/// A completed selective promotion. Volume need not decrease across grids.
+/// A completed selective promotion. Inventory need not decrease across grids.
 #[derive(Debug, Clone)]
 pub struct MinimumMaterialAdaptiveRound3 {
     pub cells: [usize; 2],
     /// Source, freshly solved baseline and selected feasible candidate volumes.
     pub volumes: [f64; 3],
+    /// Source, fresh baseline and selected feasible candidate mass in kg.
+    /// Absent for the volume-only objective.
+    pub masses_kg: Option<[f64; 3]>,
+    /// The same three endpoints in the chosen normalized objective units.
+    pub objectives: [f64; 3],
     pub source_assessment: MinimumMaterialAssessment3,
     pub marking: GoalMarking3,
     /// KKT evidence belongs to the latest AL point, not an earlier incumbent.
@@ -112,7 +128,11 @@ fn on_tree<O: AdaptiveSdf3Elasticity>(tree: &Octree3, op: &O) -> bool {
     !op.adaptive().leaves().is_empty()
         && op.adaptive().leaves().iter().all(|leaf| tree.leaves().contains(leaf))
 }
-fn assessment(e: &ResponseLimitRefinement3, tolerance: f64) -> Result<MinimumMaterialAssessment3, &'static str> {
+fn assessment(e: &ResponseLimitRefinement3, options: AdaptiveMinimumMaterialOptions3)
+    -> Result<MinimumMaterialAssessment3, &'static str> {
+    if e.objective != options.fit.objective || e.volume_scale.to_bits() != options.fit.volume_scale.to_bits() {
+        return Err("refinement inventory policy changed during the campaign");
+    }
     let mut response_change = 0.0_f64;
     for row in &e.cases { for limit in &row.limits {
         let difference = (limit.fine_residual-limit.coarse_residual).abs();
@@ -121,7 +141,28 @@ fn assessment(e: &ResponseLimitRefinement3, tolerance: f64) -> Result<MinimumMat
     } }
     let volume_change = (e.fine_volume_fraction-e.coarse_volume_fraction).abs();
     if !volume_change.is_finite() { return Err("nonfinite material-volume change"); }
-    Ok(MinimumMaterialAssessment3 { response_change, volume_change, fine_feasible: e.fine_feasible(tolerance) })
+    let (mass_change_kg, objective_change) = match options.fit.objective {
+        MinimumMaterialObjective3::VolumeFraction => (None,
+            inventory::normalized(volume_change, options.fit.volume_scale)
+                .map_err(|_| "unrepresentable material-volume change")?),
+        MinimumMaterialObjective3::MassKg { scale_kg } => {
+            let change = (e.fine_mass_kg.ok_or("missing enriched material mass")?
+                - e.coarse_mass_kg.ok_or("missing source material mass")?).abs();
+            (Some(change), inventory::normalized(change, scale_kg)
+                .map_err(|_| "unrepresentable physical mass change")?)
+        },
+    };
+    Ok(MinimumMaterialAssessment3 { response_change, volume_change, objective_change, mass_change_kg,
+        fine_feasible: e.fine_feasible(options.fit.optimizer.tolerance) })
+}
+fn endpoint_objective(e: &ResponseLimitEvaluation3, options: MinimumMaterialOptions3)
+    -> Result<f64, &'static str> {
+    let (value, scale) = match options.objective {
+        MinimumMaterialObjective3::VolumeFraction => (e.volume_fraction, options.volume_scale),
+        MinimumMaterialObjective3::MassKg { scale_kg } =>
+            (e.mass_kg.ok_or("refitted mass objective lost its physical inventory")?, scale_kg),
+    };
+    inventory::normalized(value, scale).map_err(|_| "unrepresentable refitted material objective")
 }
 
 /// Fit -> assess EVERY limit -> mark -> selectively refit, with fixed reference
@@ -134,9 +175,10 @@ fn assessment(e: &ResponseLimitRefinement3, tolerance: f64) -> Result<MinimumMat
 /// bounded geometry control and unchanged geometry/material/support laws. This
 /// owner reconstructs the same filter/SIMP policy. The existing refitter carries
 /// protected solid/void regions through the exact geometric parent map.
-/// The selected volume or mass objective is retained on every refit. This
-/// owner's two-grid stopping tolerances assess responses and geometric volume;
-/// they do not establish convergence of physical mass across discretizations.
+/// The selected volume or mass objective is retained on every probe and refit.
+/// Mass mode checks native kg inventory change and adds its localized cell
+/// corrections to marking. Responses and geometric volume remain independent
+/// stopping criteria; all checks concern this one enriched discretization.
 ///
 /// Complete probes are cached across pauses. A candidate is installed only after
 /// fitting succeeds, a feasible incumbent exists, and the promotion checkpoint
@@ -176,7 +218,7 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
     #[must_use] pub fn probe(&self) -> Option<&ResponseLimitRefinement3> { self.probe.as_ref() }
     #[must_use] pub fn unpromoted(&self) -> Option<&(Octree3, MinimumMaterialRefit3<O>)> { self.unpromoted.as_ref() }
     pub fn assessment(&self) -> Result<Option<MinimumMaterialAssessment3>, &'static str> {
-        self.probe.as_ref().map(|e| assessment(e, self.options.fit.optimizer.tolerance)).transpose()
+        self.probe.as_ref().map(|e| assessment(e, self.options)).transpose()
     }
 
     /// Up to additional_refinements promotions, bounded by the cumulative cap.
@@ -198,7 +240,8 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
                 let op = build(&tree, MinimumMaterialBuild3::Probe).map_err(Error::Build)?;
                 if !on_tree(&tree, &op) { return Err(Error::Invalid("probe factory returned a different background")); }
                 let options = ResponseLimitRefinementOptions3 { limits: self.options.fit.limits,
-                    numerical: self.options.numerical, max_transfer_terms: self.options.max_transfer_terms };
+                    numerical: self.options.numerical, max_transfer_terms: self.options.max_transfer_terms,
+                    objective: self.options.fit.objective, volume_scale: self.options.fit.volume_scale };
                 let probe = self.study.estimate_response_limit_enrichment(op, selected(&self.fit),
                     self.cases, options, control).map_err(Error::Refinement)?;
                 self.probe = Some(probe);
@@ -225,6 +268,17 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
             let Some(best) = next.fit.best_feasible.as_ref() else {
                 self.unpromoted = Some((tree, next)); return Ok(Stop::NoFeasibleCandidate);
             };
+            let masses_kg = match self.options.fit.objective {
+                MinimumMaterialObjective3::VolumeFraction => None,
+                MinimumMaterialObjective3::MassKg { .. } => Some([
+                    self.accepted().mass_kg.ok_or(Error::Invalid("source mass objective lost its inventory"))?,
+                    next.fit.initial.mass_kg.ok_or(Error::Invalid("refit baseline lost its inventory"))?,
+                    best.mass_kg.ok_or(Error::Invalid("refit incumbent lost its inventory"))?,
+                ]),
+            };
+            let objectives = [endpoint_objective(self.accepted(), self.options.fit).map_err(Error::Invalid)?,
+                endpoint_objective(&next.fit.initial, self.options.fit).map_err(Error::Invalid)?,
+                endpoint_objective(best, self.options.fit).map_err(Error::Invalid)?];
             let admission = control.checkpoint("minimum-material-adapt-promote").map_err(Error::Evaluation)
                 .and_then(|()| next.study.operator.set_scales(&best.scales)
                     .map_err(|e| Error::Fit(ProjectedAlError::Evaluation(e.into()))));
@@ -232,6 +286,7 @@ impl<'a, O: AdaptiveSdf3Elasticity> AdaptiveMinimumMaterialStudy3<'a, O> {
             let round = MinimumMaterialAdaptiveRound3 {
                 cells: [self.study.cells(), next.study.cells()],
                 volumes: [self.accepted().volume_fraction, next.fit.initial.volume_fraction, best.volume_fraction],
+                masses_kg, objectives,
                 source_assessment: assessed, marking,
                 optimizer: next.fit.outcome.as_ref().expect("complete fit").clone(),
                 selected_latest: best.rho == next.fit.accepted.rho, work: control.work(),

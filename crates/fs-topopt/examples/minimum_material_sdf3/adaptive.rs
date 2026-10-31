@@ -29,7 +29,8 @@ pub(super) fn run(study:&mut Study, tree:&Octree3, accepted:&ResponseLimitEvalua
     }).collect();
     let probe=tree.refined(study.operator().elasticity().leaves(),||ControlFlow::Continue(()))?;
     let evidence=study.estimate_response_limit_enrichment(build(&probe,geometry)?,accepted,&laws,
-        ResponseLimitRefinementOptions3 {limits:options.limits,..Default::default()},control)?;
+        ResponseLimitRefinementOptions3 {limits:options.limits,objective:options.objective,
+            volume_scale:options.volume_scale,..Default::default()},control)?;
     println!("estimate_case,limit,sense,coarse_value,enriched_value,bound,scale,coarse_residual,enriched_residual,reconstructed_change,reaction_offset_transfer");
     for (i,case) in evidence.cases.iter().enumerate() {for (j,l) in case.limits.iter().enumerate() {
         println!("{i},{j},{:?},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e},{:.17e}",
