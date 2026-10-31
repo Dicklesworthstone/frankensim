@@ -1,5 +1,45 @@
 # CONTRACT: fs-couple
 
+## One shared hysteretic core in a native multiwinding circuit
+
+`material_circuit::hysteretic::shared::SharedHystereticCircuit` connects the
+source-owned `SharedHystereticCore` to multiple original winding branches.
+Selected inductance placeholders become private native current ports; all
+physical leakage and the one common polarization history remain in the material
+owner. Original branch/node identities, external source controls and index gaps,
+resistor heat routes, unrelated R/L/C stores and caller-supplied winding order
+are retained. One bounded native Newton-Krylov solve closes every
+`delta(lambda_i) = dt V_i` through the original `CircuitDae`.
+
+Every trial starts from the same accepted total linkages and common memory.
+The material owner's exact linkage-chord mean currents supply native electrical
+work, admitting pinning and saturation crossings without inconsistent endpoint
+magnetomotive balance. Actual endpoint currents are used for native consistency;
+incompatible ideal-current cutsets refuse without publication. The step reports
+terminal voltages, endpoint and mean currents, complete leakage/core storage,
+and exactly one pinning-heat account. Private-port work cancels the complete
+material work; actual resistor heat remains separate. External supplied work
+closes independently against total stored change and physical heat. Numerical
+residuals are never relabeled as heat.
+
+A monotone common reference flux is required per interval; individual winding
+linkages may move in different directions. Three native start/mid/end voltage
+probes check the sign of `sum((r_i/D_i) V_i)`, whose sign follows the common
+flux rate by the positive load-line tangent. Detectable interior turns return
+`SharedMagneticReversal`; those samples do not certify unresolved oscillations.
+Callers must retain waveform/reversal cuts and refinement. Original constant-fit
+source queries may refresh without changing any history; changing coefficients,
+moving geometry, eddy/excess-loss fits and empirical qualification are not inferred.
+Actual thermal deposition and temperature publication require a thermal owner.
+
+Five authored-source regression groups cover the full native mutual-L linear
+limit with unrelated RLC and nonascending branch order, an independently
+eliminated two-winding RL/pinning-crossing solution, one shared major-loop area
+and remanence, physical polarity reversal, and source-domain/budget/cancellation/
+turning-point refusals with unchanged accepted history. Native test execution
+remains a separate requirement where workspace dependencies are available.
+
+
 ## Shared conservative gravity on deforming solids
 
 `solid_gravity::bind_field` binds the original `fs-mbd::gravity::PointGravityField`

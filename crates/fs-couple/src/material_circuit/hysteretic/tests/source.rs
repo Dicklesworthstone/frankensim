@@ -21,7 +21,7 @@ fn roles() -> HysteresisSources {
     }
 }
 
-fn core_material(
+pub(super) fn core_material(
     pinning: f64,
     upper_temperature: f64,
 ) -> (MaterialCard, ResolvedHeatCapacityCurve) {
@@ -76,7 +76,7 @@ fn core_material(
     (card, curve)
 }
 
-fn sourced_core(card: &MaterialCard) -> UniformHystereticCore {
+pub(super) fn sourced_core(card: &MaterialCard) -> UniformHystereticCore {
     UniformHystereticCore::from_source(
         ResolvedScalarHysteresis::resolve(
             Arc::new(card.clone()),

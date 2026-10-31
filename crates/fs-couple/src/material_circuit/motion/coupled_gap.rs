@@ -16,8 +16,8 @@ use fs_phs::{DescriptorPortHamiltonian, QuadraticStorage, Storage, step_descript
 
 use super::super::contacts::{self, SeriesElectricalContact};
 use super::super::{
-    MAX_MATERIAL_CIRCUIT_BRANCHES, MAX_PORTS, MAX_STATES, account_step, admit_graph,
-    bind_with_mutual, extended, poll, positive,
+    MAX_MATERIAL_CIRCUIT_BRANCHES, MAX_MATERIAL_CIRCUIT_NODES, MAX_PORTS, MAX_STATES,
+    MAX_TRANSFORMERS, account_step, admit_graph, bind_with_mutual, extended, poll, positive,
 };
 use super::{
     AxialSupport, FieldMotionInput, FieldMotionStep, MaterialCircuit, MaterialCircuitError,
@@ -366,7 +366,14 @@ impl CoupledGapMotion {
         support: Option<AxialSupport>,
         initial: CoupledGapInitial,
     ) -> Result<Self, MaterialCircuitError> {
-        admit_graph(&graph)?;
+        // Bound caller topology before cloning, but selected self-L values are
+        // placeholders until the actual common-core coefficients replace them.
+        if graph.node_count > MAX_MATERIAL_CIRCUIT_NODES
+            || graph.branches.len() > MAX_MATERIAL_CIRCUIT_BRANCHES
+            || graph.transformers.len() > MAX_TRANSFORMERS
+        {
+            return Err(invalid("shared-gap circuit exceeds bounded graph capacity"));
+        }
         if !initial.velocity_m_s.is_finite()
             || support
                 .as_ref()
@@ -408,6 +415,7 @@ impl CoupledGapMotion {
         }
         let permeance = gap.secant_permeance(gap.gap_m(), |i| initial.fluxes_wb[flux_slots[i]])?;
         let (graph, mutual) = gap.lower_at_permeance(&graph, permeance)?;
+        admit_graph(&graph)?;
         let circuit = MaterialCircuit::new_with_contacts_and_mutual_inductance(
             graph,
             sources,

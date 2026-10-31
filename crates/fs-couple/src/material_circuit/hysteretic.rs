@@ -19,6 +19,8 @@
 
 /// Distinct core and winding heat on the original finite enthalpy timeline.
 pub mod thermal;
+/// Multiple terminal windings sharing one original core history and loss account.
+pub mod shared;
 
 use super::{
     MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, MaterialCircuitStep,
@@ -62,7 +64,8 @@ pub struct HystereticCircuitSolve {
     pub terminal_voltage_tolerance_v: f64,
     pub energy_tolerance_j: f64,
     pub circuit: MaterialCircuitSolve,
-    /// Shared Newton policy on a scalar linkage-increment residual [Wb].
+    /// Shared Newton policy on linkage-increment residuals [Wb]: one scalar for
+    /// this owner, or one coordinate per winding for the shared-core owner.
     pub newton: NewtonKrylovConfig,
 }
 
@@ -79,6 +82,12 @@ pub enum HystereticCircuitError {
     MagneticReversal {
         linkage_change_wb: f64,
         voltage_start_mid_end_v: [f64; 3],
+    },
+    /// A shared core's load-line drive turns inside an attempted interval.
+    /// Individual winding linkages need not share the core's direction.
+    SharedMagneticReversal {
+        reference_linkage_change_wb: f64,
+        drive_rate_start_mid_end_a_s: [f64; 3],
     },
     Balance(&'static str),
     Cancelled,
