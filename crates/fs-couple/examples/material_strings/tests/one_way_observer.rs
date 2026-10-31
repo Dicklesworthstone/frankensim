@@ -376,7 +376,7 @@ fn capped_skin() -> String {
     own_skin().replace("skin-apertures 0\n", &caps)
 }
 
-fn compiled(text: &str, skin: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
+fn compile(text: &str, skin: &str, cx: &Cx<'_>, gate: &CancelGate) -> Result<Ready> {
     input::Spec::parse(text.as_bytes())
         .unwrap()
         .compile_with_body(cx, gate, Some(profile(skin)), |name| {
@@ -386,7 +386,22 @@ fn compiled(text: &str, skin: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
                 pack(name, 7800.0, 200_000.0, None)
             })
         })
-        .unwrap()
+}
+
+fn compiled(text: &str, skin: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
+    compile(text, skin, cx, gate).unwrap()
+}
+
+// BARE's own 48 kHz clock. The record's sample counts move with the clock: the same 32 ms
+// latency, an FFT ladder at least as long in seconds (8192-65536 at 48 kHz against 1024-8192
+// at 8 kHz), and the replay and frequency budgets grown with the finest FFT.
+fn at48(text: String) -> String {
+    let at8 = "256 4 1024 2048 4096 8192 1e-10 1e-4 65536 65536 ";
+    assert!(text.contains("audio 8000 1024") && text.contains(at8));
+    text.replace("audio 8000 1024", "audio 48000 1024").replace(
+        at8,
+        "1536 4 8192 16384 32768 65536 1e-10 1e-4 524288 524288 ",
+    )
 }
 
 #[test]
@@ -427,19 +442,8 @@ fn harmonic_skin_receiver_retains_the_actual_neck_flow_and_raw_propagation_phase
 #[test]
 fn the_skin_s_own_two_way_load_reacts_on_the_mechanics_its_observer_hears() {
     scoped(|cx, gate| {
-        // BARE's own 48 kHz clock: at source()'s 8 kHz the level-2 load's coupling exceeds the
-        // mechanical clock resolution (its |coupling| sums times dt must stay within 0.25). The
-        // record's sample counts move with the clock: the same 32 ms latency, an FFT ladder at
-        // least as long in seconds (8192-65536 at 48 kHz against 1024-8192 at 8 kHz), and the
-        // replay and frequency budgets grown with the finest FFT.
-        let at48 = |text: String| {
-            let at8 = "256 4 1024 2048 4096 8192 1e-10 1e-4 65536 65536 ";
-            assert!(text.contains("audio 8000 1024") && text.contains(at8));
-            text.replace("audio 8000 1024", "audio 48000 1024").replace(
-                at8,
-                "1536 4 8192 16384 32768 65536 1e-10 1e-4 524288 524288 ",
-            )
-        };
+        // On at48's clock, because the prepared owner below refuses this 400 Hz band at
+        // source()'s 8 kHz: 14.3 cents at the band top, against .40 here and a one-cent line.
         let check = |ready: &mut Ready, mouth_ports: usize| {
             let loading = match &ready.body_radiation {
                 Some(BodyRadiationReport::ShellBem(report)) => report.clone(),
@@ -528,6 +532,24 @@ fn a_prepared_skin_load_charges_its_poles_to_the_prepared_budget_not_the_exact_s
                 });
             assert!(result.is_err());
             assert_eq!(reads > 0, reaches_io, "{owner}");
+        }
+    });
+}
+
+// The band line stands at the bake, wired through the card. Past one cent at its band top a
+// prepared card refuses before any geometry: 1100 Hz at 48 kHz is 2.995 cents, and this 400 Hz
+// band at 8 kHz is 14.3. The exact owner has no such error and never meets this line.
+#[test]
+fn a_prepared_skin_load_past_one_cent_at_its_band_top_refuses_at_the_bake() {
+    const PREPARED: &str = "prepared-linear 512 4294967296 1000000000000000\n";
+    let wide = SKIN_LOAD.replace(" 0.5 400 65 ", " 0.5 1100 65 ");
+    scoped(|cx, gate| {
+        for card in [
+            at48(source(&format!("{PREPARED}{wide}"))),
+            source(&format!("{PREPARED}{SKIN_LOAD}")),
+        ] {
+            let refusal = compile(&card, &own_skin(), cx, gate).err().unwrap().to_string();
+            assert!(refusal.contains("one cent frequency budget"), "{refusal}");
         }
     });
 }

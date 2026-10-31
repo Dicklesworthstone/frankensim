@@ -13,8 +13,9 @@
 //! solution supplies the optional receiver, not a pressure-mean conversion.
 //! These discrete physical identities do not qualify a measured instrument.
 
-use super::super::{ReciprocalStringBank, ReciprocalStringError};
+use super::super::{ModalPreparation, ReciprocalStringBank, ReciprocalStringError};
 use crate::render::plate::impact::radiation::{Model, fit};
+use crate::render::schedule::force::coupled::radiation::prepared_air_band_admits;
 use crate::shear_shell::ResolvedShearShell;
 use crate::cavity_modal::CavityNeckLoss;
 use super::super::multiple::performance::observation::{
@@ -179,6 +180,21 @@ impl ReciprocalStringBank {
         self.with_material_shell_bem_with_angular_refinement(options,0,gate)
     }
 
+    /// The band line of a prepared bank, whose poles exchange across the step
+    /// (`exact::prepared::air`), before any geometry or Helmholtz work. An exact
+    /// owner keeps them inside its exponential and has no such error, and a
+    /// harmonic-only bank never steps.
+    fn admit_prepared_air_band(&self, options: &ShellBemOptions) -> Result<(), ShellBemError> {
+        if matches!(self.source.prepared_linear, ModalPreparation::Prepared(_))
+            && !prepared_air_band_admits(options.maximum_hz, f64::from(self.source.options.sample_rate_hz))
+        {
+            return Err(ShellBemError::Invalid(
+                "a prepared air bank exceeds its one cent frequency budget at this band top on this clock",
+            ));
+        }
+        Ok(())
+    }
+
     /// Independently refine the original outgoing angular Gram quadrature
     /// (0..=2), retaining the same declared geometry, band and work ceilings.
     pub fn with_material_shell_bem_with_angular_refinement(
@@ -225,6 +241,7 @@ impl ReciprocalStringBank {
     ) -> Result<(Model,ShellBemReport),ShellBemError> {
         poll(gate)?;
         options.validate(self.source.options.sample_rate_hz)?;
+        self.admit_prepared_air_band(&options)?;
         // A prepared-linear bank carries the load as its air bank beside the transition.
         if self.system.samples_rendered() != 0 || self.source.body_radiation.is_some() {
             return Err(ShellBemError::Invalid(
@@ -414,6 +431,7 @@ impl ReciprocalStringBank {
     ) -> Result<(Model,ShellBemReport),ShellBemError> {
         poll(gate)?;
         options.validate(self.source.options.sample_rate_hz)?;
+        self.admit_prepared_air_band(&options)?;
         if self.system.samples_rendered() != 0 || self.source.body_radiation.is_some() {
             return Err(ShellBemError::Invalid(
                 "computed skin radiation requires an unstarted bank without a prior exterior load",

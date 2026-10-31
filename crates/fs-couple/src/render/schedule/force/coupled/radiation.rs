@@ -4,6 +4,22 @@ use super::*;
 use crate::render::plate::impact::radiation::Model;
 use fs_math::det;
 
+/// The prepared air bank's frequency budget: one cent as a log ratio, the tree's own phase budget
+/// (`fs_phs::linear_exact`, `MIDPOINT_ONE_CENT_ANGULAR_STEP`).
+const PREPARED_AIR_BAND_BUDGET: f64 = core::f64::consts::LN_2/1200.0;
+
+/// Whether a load whose band tops out at `top_hz` stays inside that budget on this clock: -ln(b cot b) at the band
+/// top, with b = Omega_top dt / 2 (`exact::prepared::air`). No coupling enters it, so the line reads a band, not a model.
+///
+/// This is an undamped frequency bound. Under damping only a first-order law holds, and nothing here bounds a decay.
+/// It can refuse a load whose real error is far smaller, which costs a rate, not a wrong render.
+#[must_use]
+pub(crate) fn prepared_air_band_admits(top_hz: f64, sample_rate_hz: f64) -> bool {
+    let half_step = core::f64::consts::PI*top_hz/sample_rate_hz;
+    half_step > 0.0 && half_step < core::f64::consts::FRAC_PI_2
+        && -det::ln(half_step/det::tan(half_step)) <= PREPARED_AIR_BAND_BUDGET
+}
+
 #[derive(Clone, Debug)]
 pub(super) struct Binding {
     pub(super) model: Model,
@@ -39,7 +55,10 @@ impl CoupledModalSystem {
     /// setup limits, up to 256 poles. A prepared owner keeps the poles as its
     /// air bank beside the transition (`exact::prepared::air`), up to the shared
     /// model's own pole limit, within the prepared byte and work budget.
-    /// A completely zero coupling preserves the original system exactly.
+    /// A model carries no band, so this method applies only the complete
+    /// frequency bound; the prepared bank's band line is the bake's
+    /// (`prepared_air_band_admits`). A completely zero coupling preserves the
+    /// original system exactly.
     pub fn with_radiation_load(mut self, model: &Model, source_modes: &[usize],
         maximum_poles: usize, gate: &CancelGate) -> Result<Self, ModalCouplingError>
     {
@@ -73,9 +92,6 @@ impl CoupledModalSystem {
         let column_max = column_sums.into_iter().fold(0.0_f64, f64::max);
         let coupling_bound = finite(det::sqrt(row_max)*det::sqrt(column_max))?;
         if coupling_bound == 0.0 { return Ok(self); }
-        if row_max.max(column_max)*self.dt > 0.25 {
-            return Err(invalid("acoustic coupling exceeds the declared mechanical clock resolution"));
-        }
         let binding = Binding { model: model.clone(), source_modes: source_modes.to_vec(),
             maximum_poles, mechanical_bound: self.linear_frequency_upper_bound_rad_s,
             coupling_bound, pole_bound };

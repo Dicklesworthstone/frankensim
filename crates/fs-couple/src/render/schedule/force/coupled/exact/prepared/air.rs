@@ -19,6 +19,18 @@
 //!
 //! A pole's state is (q, p) with storage 1/2 ((omega q)^2 + p^2), as on the exact block. Its radiated loss over a step
 //! is its own Van Loan quadratic of 2 zeta omega p^2.
+//!
+//! No coupling limit sits here, because that work cancels at any dt and any L: the step is passive and the exchange
+//! always solves. Passive isn't right, though. Undamped, a mode's frequency misses the continuous one by
+//! |ln(Omega / Omega_d)| <= -ln(b cot b), b = Omega_d dt / 2, with no L in it, and midpoint on everything meets that
+//! bound. Under damping only the first-order law holds, d lambda = ((lambda dt)^2 / 12) d lambda / d mu with mu scaling
+//! L, and nothing bounds a decay. The derivation is on pexfp.278; two of its inequalities are cited from memory and
+//! checked on a grid.
+//!
+//! So `radiation` applies the complete frequency bound, and the shell and skin bakes refuse a prepared bank at one cent
+//! at the declared band top (`radiation::prepared_air_band_admits`). The line needs a band. A load bound through
+//! `with_body_radiation_load`, or a bank converted to prepared after its load is bound, stays under the frequency bound
+//! alone: it isn't covered.
 
 use super::*;
 use fs_la::factor::{Lu, lu};

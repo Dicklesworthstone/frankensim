@@ -10,6 +10,7 @@ use fs_couple::bowed_string::runtime::reciprocal::bank::radiation::bem::ShellBem
 use fs_couple::bowed_string::runtime::reciprocal::plate::MaterialBodyCavity;
 use fs_couple::cavity_modal::{CavityNeckLoss, HelmholtzModalCavity};
 use fs_couple::render::plate::impact::radiation::Model;
+use fs_couple::render::schedule::force::coupled::PreparedModalBudget;
 
 /// The angular level of the tests that load `resolution()`'s whole band. The
 /// owner's chart admits k times the box diagonal up to 4 * 2^level: 630 Hz at
@@ -242,6 +243,33 @@ fn a_skin_on_the_shell_itself_carries_the_shell_load_bit_for_bit() {
                 gate,
             ),
             "farther from its anchored point",
+        );
+    });
+}
+
+// Both exterior routes meet the prepared band line before any geometry: `resolution()`'s 750 Hz
+// is 1.39 cents on this 48 kHz clock. The test above bakes that same band on the exact owner.
+#[test]
+fn a_prepared_bank_refuses_a_band_past_one_cent_on_both_routes() {
+    with_cx(|cx, gate| {
+        let skin = coincident_skin(&closed_body(700.0, gate));
+        let budget = PreparedModalBudget {
+            max_modes: 1024,
+            max_dense_bytes: 1 << 30,
+            max_multiply_terms: 1 << 50,
+        };
+        let prepared = || {
+            closed_bank(cx, gate, 700.0, 101_325.0)
+                .with_prepared_linear_propagation(budget, gate)
+                .unwrap()
+        };
+        refuses(
+            prepared().prepare_material_shell_bem_with_angular_refinement(resolution(), LEVEL, gate),
+            "one cent frequency budget",
+        );
+        refuses(
+            prepared().prepare_material_skin_bem(resolution(), &skin, 0.0, LEVEL, gate),
+            "one cent frequency budget",
         );
     });
 }
