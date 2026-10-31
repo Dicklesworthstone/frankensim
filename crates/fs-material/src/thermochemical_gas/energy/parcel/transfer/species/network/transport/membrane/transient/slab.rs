@@ -74,7 +74,7 @@ impl MembraneDiffusionSolve {
     fn tolerance(self, scale: f64) -> Result<f64, Error> {
         finite(self.absolute_amount_tolerance_mol + self.relative_amount_tolerance * scale)
     }
-    fn validate(self) -> Result<(), Error> {
+    pub(super) fn validate(self) -> Result<(), Error> {
         if !nonnegative(self.absolute_amount_tolerance_mol)
             || !nonnegative(self.relative_amount_tolerance) || self.relative_amount_tolerance >= 1.0
             || (self.absolute_amount_tolerance_mol == 0.0 && self.relative_amount_tolerance == 0.0) {
@@ -240,39 +240,64 @@ pub struct MembraneDiffusionWorkspace {
     upper: Vec<f64>,
     rhs: Vec<f64>,
     solution: Vec<f64>,
-    cached: Option<(Arc<MembraneDiffusion>,u64)>,
+    cached: Option<(Arc<MembraneDiffusion>,u64,Option<[u64;2]>)>,
 }
 impl MembraneDiffusionWorkspace {
     pub fn new(cells:usize)->Result<Self,Error> {
         if cells==0 || cells>MAX_TRANSIENT_MEMBRANE_CELLS {return Err(Error::Invalid("bounded nonempty membrane workspace required"));}
+        Self::with_rows(cells)
+    }
+    fn with_rows(cells:usize)->Result<Self,Error> {
         Ok(Self {linear:TridiagonalWorkspace::new(cells)?,mass:vec![0.0;cells],left:vec![0.0;cells],
             right:vec![0.0;cells],diagonal:vec![0.0;cells],lower:vec![0.0;cells-1],upper:vec![0.0;cells-1],
             rhs:vec![0.0;cells],solution:vec![0.0;cells],cached:None})
     }
     fn factor(&mut self,model:&Arc<MembraneDiffusion>,dt:f64,cancelled:&mut impl FnMut()->bool)->Result<(),Error> {
-        if self.mass.len()!=model.cells.len() {return Err(Error::Invalid("membrane workspace/grid dimensions differ"));}
-        if self.cached.as_ref().is_some_and(|(old,bits)|Arc::ptr_eq(old,model)&&*bits==dt.to_bits()) {return Ok(());}
+        self.factor_with_reservoirs(model,dt,None,cancelled)
+    }
+    /// Reservoir capacities are whole-owner mol/Pa. Dividing by the common
+    /// area puts their two extra rows on the original membrane's per-area basis.
+    fn factor_with_reservoirs(&mut self,model:&Arc<MembraneDiffusion>,dt:f64,
+        capacities:Option<[f64;2]>,cancelled:&mut impl FnMut()->bool)->Result<(),Error>
+    {
+        let n=model.cells.len();let rows=n+if capacities.is_some() {2}else{0};
+        if self.mass.len()!=rows {return Err(Error::Invalid("membrane workspace/grid dimensions differ"));}
+        let capacity_bits=capacities.map(|c|c.map(f64::to_bits));
+        if self.cached.as_ref().is_some_and(|(old,bits,c)|Arc::ptr_eq(old,model)&&*bits==dt.to_bits()&&*c==capacity_bits) {return Ok(());}
         self.cached=None;
-        for (i,cell) in model.cells.iter().enumerate() {
+        let per_area=if let Some(c)=capacities {
+            let c=c.map(|value|value/model.area_m2);
+            if !c.into_iter().all(positive) {return Err(Error::Invalid("reservoir capacity per membrane area is unrepresentable"));}
+            Some(c)
+        }else{None};
+        for i in 0..rows {
             if i%128==0 {poll(cancelled)?;}
-            let l=finite(dt*model.faces[i].permeance)?;
-            let r=finite(dt*model.faces[i+1].permeance)?;
-            if (model.faces[i].permeance>0.0&&l==0.0)||(model.faces[i+1].permeance>0.0&&r==0.0) {
+            let (capacity,g_left,g_right)=match per_area {
+                Some(c) if i==0 => (c[0],0.0,model.faces[0].permeance),
+                Some(c) if i==rows-1 => (c[1],model.faces[n].permeance,0.0),
+                _ => {
+                    let cell=i-usize::from(per_area.is_some());
+                    (model.cells[cell].capacity_mol_m2_pa,model.faces[cell].permeance,model.faces[cell+1].permeance)
+                }
+            };
+            let l=finite(dt*g_left)?;
+            let r=finite(dt*g_right)?;
+            if (g_left>0.0&&l==0.0)||(g_right>0.0&&r==0.0) {
                 return Err(Error::Invalid("integrated membrane face conductance underflowed"));
             }
-            let scale=cell.capacity_mol_m2_pa.max(l).max(r);
-            let (mass,left,right)=(cell.capacity_mol_m2_pa/scale,l/scale,r/scale);
+            let scale=capacity.max(l).max(r);
+            let (mass,left,right)=(capacity/scale,l/scale,r/scale);
             let diagonal=mass+left+right;
             if !positive(mass)||diagonal<=left+right||(l>0.0&&left==0.0)||(r>0.0&&right==0.0) {
                 return Err(Error::Invalid("time step cannot retain positive membrane storage in floating-point arithmetic"));
             }
             self.mass[i]=mass;self.left[i]=left;self.right[i]=right;self.diagonal[i]=diagonal;
             if i>0 {self.lower[i-1]=-left;}
-            if i+1<model.cells.len() {self.upper[i]=-right;}
+            if i+1<rows {self.upper[i]=-right;}
         }
         self.linear.factor(&self.lower,&self.diagonal,&self.upper,&mut *cancelled)?;
         poll(cancelled)?;
-        self.cached=Some((model.clone(),dt.to_bits()));
+        self.cached=Some((model.clone(),dt.to_bits(),capacity_bits));
         Ok(())
     }
 }
@@ -389,14 +414,24 @@ impl MembraneDiffusionState {
             work.rhs[i]=finite(rhs)?;
         }
         work.linear.solve_factored_into(&work.rhs,&mut work.solution,&mut cancelled)?;
-        for (i,&q) in work.solution.iter().enumerate() {
+        self.finish_step(reservoirs,duration_s,&work.solution,controls,&mut cancelled)
+    }
+    /// One owner for sorbed-state admission, face transfer and local/global
+    /// membrane balances, shared by prescribed and finite reservoir solves.
+    fn finish_step(&self,reservoirs:[f64;2],duration_s:f64,solution:&[f64],controls:MembraneDiffusionSolve,
+        mut cancelled:&mut impl FnMut()->bool)->Result<MembraneDiffusionCandidate,Error>
+    {
+        let elapsed_s=self.elapsed_s+duration_s;
+        let n=self.partial_pressures_pa.len();
+        if solution.len()!=n {return Err(Error::Invalid("membrane solution/grid dimensions differ"));}
+        for (i,&q) in solution.iter().enumerate() {
             if i%128==0 {poll(&mut cancelled)?;}
             if !nonnegative(q) {
                 return Err(Error::Invalid("implicit membrane solution lost nonnegative sorbed amount"));
             }
             finite(self.model.layers[self.model.cells[i].layer].solubility.value_si()*q)?;
         }
-        let state=Self {model:self.model.clone(),partial_pressures_pa:work.solution.clone(),elapsed_s};
+        let state=Self {model:self.model.clone(),partial_pressures_pa:solution.to_vec(),elapsed_s};
         let sampled=state.sample_fluxes(reservoirs,&mut cancelled)?;
         let mut face_amount=Vec::with_capacity(n+1);
         for (i,&flux) in sampled.face_molar_fluxes_mol_m2_s.iter().enumerate() {
@@ -411,7 +446,7 @@ impl MembraneDiffusionState {
         for (i,cell) in self.model.cells.iter().enumerate() {
             if i%128==0 {poll(&mut cancelled)?;}
             let delta=finite((cell.capacity_mol_m2_pa*self.model.area_m2)
-                *(work.solution[i]-self.partial_pressures_pa[i]))?;
+                *(solution[i]-self.partial_pressures_pa[i]))?;
             change.add(delta)?;
             let residual=finite(delta-(face_amount[i]-face_amount[i+1]))?;
             let tolerance=controls.tolerance(delta.abs()+face_amount[i].abs()+face_amount[i+1].abs())?;
@@ -435,3 +470,6 @@ impl MembraneDiffusionState {
 #[cfg(test)]
 #[path="slab/tests.rs"]
 mod tests;
+
+/// Sorbed inventory coupled implicitly to two finite isothermal reservoirs.
+pub mod finite;

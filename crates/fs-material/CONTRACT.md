@@ -7219,3 +7219,30 @@ minus outgoing power: sub-roundoff loss is unresolved, and values are not clippe
 The focused regression source covers independent matrices, reciprocity,
 subdivision, critical/TIR phase, matched delays, thick absorption, extreme
 contrast, original-source sampling and admission.
+
+### Finite reservoirs in transient dense membrane transport
+
+`membrane::transient::slab::finite` adds two explicit whole-reservoir molar
+pressure capacities [mol/Pa] to the original sorbed-state finite-volume owner.
+Both boundary pressures and all film cells advance in one tridiagonal
+backward-Euler solve; no prescribed-pressure trial can spend a finite reservoir
+before its depletion is solved. At connected equilibrium, total capacity is
+`C_left + C_right + area*sum(S_i L_i)`, including the actual sorbed inventory.
+
+The fixed-pressure and finite-pressure paths share normalized storage rows,
+the original tridiagonal solver and face/storage reporting. Cached factors bind
+the original immutable grid, both capacities and duration. Each reservoir face
+transfer cancels exactly once against the existing membrane face owner; original
+cell, reservoir and combined amount budgets gate every immutable candidate.
+Exact seals retain separate conserved inventories. Empty numerical reservoirs
+are allowed, while any physical gas adapter must enforce its own EOS domain.
+
+Capacities and temperature are fixed external inputs. This numerical owner
+supplies no EOS, caloric source, gas heat budget, or whole-system energy claim.
+The same spatial/time-refinement obligations as the original transient owner
+apply. Six additional G1/G3 regressions cover independent three-inventory
+transients, first-order time refinement, heterogeneous capacity equilibrium,
+large-reservoir limits, disconnected seals, capacity-cache identity and
+transactional cancellation; all fifteen original/new numerical tests passed
+against the actual coefficient/slab/finite sources and original tridiagonal
+solver in the focused native lane.
