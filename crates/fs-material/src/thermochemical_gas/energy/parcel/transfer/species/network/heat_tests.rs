@@ -134,6 +134,96 @@ fn heat_only_nodes_use_the_original_constant_cv_owner_and_idle_nodes_are_unchang
 }
 
 #[test]
+fn unresolvable_network_heat_is_reported_and_charged_to_original_budgets() {
+    let gas: BTreeMap<u64, ClosedGasParcel> =
+        [(1, parcel(1, 400.0, 0.0)), (2, parcel(2, 400.0, 0.0))].into();
+    let original = gas.clone();
+    let endpoint_controls = endpoints(&gas);
+    let q = 1e-18;
+    let result = exchange_candidate_with_heat(
+        &gas,
+        &[],
+        &[heat(1, 2, q)],
+        &endpoint_controls,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    for (id, sign) in [(1, -1.0), (2, 1.0)] {
+        assert_eq!(
+            result.parcels()[&id].state().state().temperature.to_bits(),
+            gas[&id].state().state().temperature.to_bits()
+        );
+        assert_eq!(account(&result, id).net_additional_heat_j, sign * q);
+        assert_eq!(account(&result, id).energy_change_j, 0.0);
+        // The original nonzero target remains visible, never erased by the
+        // choice of a closest representable temperature.
+        assert_eq!(account(&result, id).energy_residual_j, -sign * q);
+    }
+    assert_eq!(result.step().total_energy_residual_j, 0.0);
+
+    let mut tight_joules = controls();
+    tight_joules.energy_tolerance_j = 0.5 * q;
+    assert!(matches!(
+        exchange_candidate_with_heat(
+            &gas,
+            &[],
+            &[heat(1, 2, q)],
+            &endpoint_controls,
+            tight_joules,
+            || false
+        ),
+        Err(SpeciesNetworkError::Invalid(_))
+    ));
+
+    let mut tight_specific = endpoint_controls.clone();
+    for (&id, control) in &mut tight_specific {
+        control.energy_tolerance_j_kg = 0.5 * q / gas[&id].mass_kg();
+    }
+    assert!(
+        exchange_candidate_with_heat(
+            &gas,
+            &[],
+            &[heat(1, 2, q)],
+            &tight_specific,
+            controls(),
+            || false
+        )
+        .is_err()
+    );
+    let old = &gas[&1];
+    // A prescribed standalone heat increment keeps its stricter nonzero-change
+    // contract; only assembled network targets use the representation budget.
+    assert!(
+        old.model()
+            .reconstruct_density_internal_energy_increment(
+                old.point(),
+                old.mass_kg() / old.volume_m3(),
+                q / old.mass_kg(),
+                endpoint_controls[&1],
+                || false
+            )
+            .is_err()
+    );
+
+    let t = old.state().state().temperature;
+    let represented_heat = old.mass_kg() * CV * (t.next_up() - t) * 128.0;
+    assert!(represented_heat / old.mass_kg() < endpoint_controls[&1].energy_tolerance_j_kg);
+    let changed = exchange_candidate_with_heat(
+        &gas,
+        &[],
+        &[heat(1, 2, represented_heat)],
+        &endpoint_controls,
+        controls(),
+        || false,
+    )
+    .unwrap();
+    assert!(changed.parcels()[&1].state().state().temperature < t);
+    assert!(changed.parcels()[&2].state().state().temperature > t);
+    assert_eq!(gas, original);
+}
+
+#[test]
 fn species_enthalpy_and_additional_heat_share_one_complete_endpoint_energy_target() {
     let gas = gases(0.0);
     let dm = 2e-6;

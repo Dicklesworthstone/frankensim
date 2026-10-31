@@ -169,10 +169,33 @@ pub(super) fn relative_endpoint(
             "network sensible energy increment is unrepresentable",
         ));
     }
+    // Balanced molar counterstreams can leave a tiny sensible target after
+    // their independently rounded mass conversions. Admit the unchanged
+    // temperature only when it is the closest representable original-law
+    // endpoint AND the caller's original specific-energy budget admits it.
+    // The caller still reports/checks actual storage minus thermal_energy;
+    // this never deletes that residual or loosens the standalone heat solver.
+    let mut represented_change = change;
+    if change != 0.0 && change.abs() <= controls.energy_tolerance_j_kg {
+        let temperature = old.state().state().temperature;
+        let neighbor = if change > 0.0 { temperature.next_up() } else { temperature.next_down() };
+        if (controls.minimum_temperature_k..=controls.maximum_temperature_k).contains(&neighbor) {
+            let adjacent_change = model.thermodynamics().specific_internal_energy_change(
+                Temperature::new(temperature), Temperature::new(neighbor),
+            ).map_err(source_error)?.value();
+            if !adjacent_change.is_finite() || adjacent_change == 0.0
+                || adjacent_change.is_sign_positive() != change.is_sign_positive() {
+                return Err(GasEnergyError::Invalid("network neighboring caloric increment is unrepresentable"));
+            }
+            if change.abs() < 0.5 * adjacent_change.abs() {
+                represented_change = 0.0;
+            }
+        }
+    }
     let solved = model.reconstruct_density_internal_energy_increment(
         old.point(),
         mass / old.volume_m3(),
-        change,
+        represented_change,
         controls,
         cancelled,
     )?;
