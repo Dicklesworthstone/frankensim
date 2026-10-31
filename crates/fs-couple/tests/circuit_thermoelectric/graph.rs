@@ -324,6 +324,7 @@ fn graph_endpoint<'m>(
                 equations: &equations,
                 initial_coordinates: &guess,
                 temperatures: &temperatures,
+                liquid_mass_fractions: &[],
                 durations: &[],
                 heat: &heat,
             },

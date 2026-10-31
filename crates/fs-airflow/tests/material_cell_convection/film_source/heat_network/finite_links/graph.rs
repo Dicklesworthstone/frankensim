@@ -132,6 +132,7 @@ impl Feedback {
             equations: &self.equations,
             initial_coordinates: &[0.0],
             temperatures: &self.temperatures,
+            liquid_mass_fractions: &[],
             durations: &[],
             heat: &self.heat,
         }

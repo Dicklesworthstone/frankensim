@@ -21,6 +21,9 @@ use fs_evidence::ValidityDomain;
 use fs_matdb::{LawId, MaterialCard};
 use fs_qty::{Dims, Temperature};
 
+mod phase;
+use phase::PreparedOhmicPhase;
+
 const LAW: &str = "source-bound-uniform-ohmic";
 const CURRENT: Dims = Dims([0, 0, 0, 0, 1, 0]);
 const VOLTAGE: Dims = Dims([2, 1, -3, 0, -1, 0]);
@@ -46,6 +49,7 @@ pub struct MaterialOhmicNode {
     length_m: f64,
     area_m2: f64,
     free_expansion: Option<(PreparedFreeExpansion, usize)>,
+    phase: Option<PreparedOhmicPhase>,
     declaration: NodeDeclaration,
 }
 
@@ -75,8 +79,60 @@ impl MaterialOhmicNode {
         length_m: f64,
         area_m2: f64,
     ) -> Result<Self, ConductorError> {
+        Self::prepare(
+            card,
+            original,
+            temperature_axis,
+            temperature_range_k,
+            None,
+            length_m,
+            area_m2,
+        )
+    }
+
+    /// Bind temperature AND original liquid mass fraction to this same Ohmic
+    /// owner. Inputs append `liquid_mass_fraction_change` after the original
+    /// `[temperature_change, current]`, relative to the accepted source query.
+    /// The original conductor must explicitly own its typed fraction axis.
+    ///
+    /// Constant, linear-curve and canonical triangulated T/f sources retain
+    /// their exact pins and analytic derivatives. Bounds constrain numerical
+    /// coordinates; they do not fill unsupported holes in a source surface.
+    /// Every actual query must remain supported. Geometry stays fixed and no
+    /// phase mixture, density change or latent heat is inferred here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn try_new_with_liquid_mass_fraction(
+        card: &MaterialCard,
+        original: ResolvedConductorState,
+        temperature_axis: &str,
+        temperature_range_k: [f64; 2],
+        liquid_mass_fraction_range: [f64; 2],
+        length_m: f64,
+        area_m2: f64,
+    ) -> Result<Self, ConductorError> {
+        Self::prepare(
+            card,
+            original,
+            temperature_axis,
+            temperature_range_k,
+            Some(liquid_mass_fraction_range),
+            length_m,
+            area_m2,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare(
+        card: &MaterialCard,
+        original: ResolvedConductorState,
+        temperature_axis: &str,
+        temperature_range_k: [f64; 2],
+        phase_range: Option<[f64; 2]>,
+        length_m: f64,
+        area_m2: f64,
+    ) -> Result<Self, ConductorError> {
         let response = ScalarConductorResponse::new(card, original, &[])?;
-        if response.original().liquid_mass_fraction_axis().is_some() {
+        if phase_range.is_none() && response.original().liquid_mass_fraction_axis().is_some() {
             return Err(invalid(
                 "Ohmic graph node does not own phase-fraction evolution",
             ));
@@ -114,92 +170,102 @@ impl MaterialOhmicNode {
             .original()
             .clone()
             .into_uniform_conductor(length_m, area_m2)?;
-        let lower = context
-            .clone()
-            .with(temperature_axis, low)
-            .map_err(|_| invalid("Ohmic lower source coordinate is invalid"))?;
-        let upper = context
-            .with(temperature_axis, high)
-            .map_err(|_| invalid("Ohmic upper source coordinate is invalid"))?;
-        let mut source_line = None;
-        for property in material.properties() {
-            if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
-                return Err(invalid(
-                    "Ohmic graph requires one thermal owner and fixed external source conditions",
-                ));
-            }
-            let selected = property.answer().receipt.selected;
-            let claim = card
-                .claims()
-                .claim(selected)
-                .ok_or_else(|| invalid("Ohmic original source claim is absent"))?;
-            let line = pinned_temperature_line(
-                card,
-                &claim.key,
-                temperature_axis,
-                &lower,
-                &upper,
-                selected,
-            )?;
-            for &(_, value) in &line {
-                let requirement = property.requirement().admissibility();
-                let admitted = value.is_finite()
-                    && match requirement {
-                        ScalarAdmissibility::Finite => true,
-                        ScalarAdmissibility::StrictlyPositive => value > 0.0,
-                        ScalarAdmissibility::NonNegative => value >= 0.0,
-                        ScalarAdmissibility::OpenInterval { lower, upper } => {
-                            lower < value && value < upper
+        let phase = phase_range
+            .map(|range| {
+                PreparedOhmicPhase::new(&response, temperature_axis, temperature_range_k, range)
+            })
+            .transpose()?;
+        let source_line = if phase.is_some() {
+            Vec::new()
+        } else {
+            let lower = context
+                .clone()
+                .with(temperature_axis, low)
+                .map_err(|_| invalid("Ohmic lower source coordinate is invalid"))?;
+            let upper = context
+                .with(temperature_axis, high)
+                .map_err(|_| invalid("Ohmic upper source coordinate is invalid"))?;
+            let mut source_line = None;
+            for property in material.properties() {
+                if !property.has_only_fixed_external_conditions(Some(temperature_axis), false) {
+                    return Err(invalid(
+                        "Ohmic graph requires one thermal owner and fixed external source conditions",
+                    ));
+                }
+                let selected = property.answer().receipt.selected;
+                let claim = card
+                    .claims()
+                    .claim(selected)
+                    .ok_or_else(|| invalid("Ohmic original source claim is absent"))?;
+                let line = pinned_temperature_line(
+                    card,
+                    &claim.key,
+                    temperature_axis,
+                    &lower,
+                    &upper,
+                    selected,
+                )?;
+                for &(_, value) in &line {
+                    let requirement = property.requirement().admissibility();
+                    let admitted = value.is_finite()
+                        && match requirement {
+                            ScalarAdmissibility::Finite => true,
+                            ScalarAdmissibility::StrictlyPositive => value > 0.0,
+                            ScalarAdmissibility::NonNegative => value >= 0.0,
+                            ScalarAdmissibility::OpenInterval { lower, upper } => {
+                                lower < value && value < upper
+                            }
+                        };
+                    if !admitted {
+                        return Err(MaterialStatePointError::OutsideConsumerDomain {
+                            property: claim.key.name().to_owned(),
+                            value,
+                            admissibility: requirement,
                         }
-                    };
-                if !admitted {
-                    return Err(MaterialStatePointError::OutsideConsumerDomain {
-                        property: claim.key.name().to_owned(),
-                        value,
-                        admissibility: requirement,
+                        .into());
                     }
-                    .into());
+                }
+                if &claim.key == response.original().source_key() {
+                    source_line = Some(line);
                 }
             }
-            if &claim.key == response.original().source_key() {
-                source_line = Some(line);
+            let source_line = source_line.ok_or_else(|| invalid("Ohmic source line is absent"))?;
+            if source_line.len() < 2
+                || source_line.first().map(|p| p.0) != Some(low)
+                || source_line.last().map(|p| p.0) != Some(high)
+            {
+                return Err(invalid(
+                    "Ohmic source line does not span the complete thermal range",
+                ));
             }
-        }
-        let source_line = source_line.ok_or_else(|| invalid("Ohmic source line is absent"))?;
-        if source_line.len() < 2
-            || source_line.first().map(|p| p.0) != Some(low)
-            || source_line.last().map(|p| p.0) != Some(high)
-        {
-            return Err(invalid(
-                "Ohmic source line does not span the complete thermal range",
-            ));
-        }
-        for pair in source_line.windows(2) {
-            let width = pair[1].0 - pair[0].0;
-            let slope = (pair[1].1 - pair[0].1) / width;
-            if !width.is_finite() || width <= 0.0 || !slope.is_finite() {
-                return Err(invalid("Ohmic source derivative is unrepresentable"));
+            for pair in source_line.windows(2) {
+                let width = pair[1].0 - pair[0].0;
+                let slope = (pair[1].1 - pair[0].1) / width;
+                if !width.is_finite() || width <= 0.0 || !slope.is_finite() {
+                    return Err(invalid("Ohmic source derivative is unrepresentable"));
+                }
             }
-        }
-        // The original requirement may be more permissive than a conductor's
-        // positive, representable response. Admit native transport at every
-        // extremum of the piecewise-affine source, including reciprocal and
-        // geometry checks; admitting only the original temperature is weaker.
-        for &(temperature, _) in &source_line {
-            let query = material
-                .query()
-                .with(temperature_axis, temperature)
-                .map_err(|_| invalid("Ohmic source knot coordinate is invalid"))?;
-            response
-                .at_query_point(&query)?
-                .into_uniform_conductor(length_m, area_m2)?;
-        }
+            // The original requirement may be more permissive than a conductor's
+            // positive, representable response. Admit native transport at every
+            // extremum of the piecewise-affine source, including reciprocal and
+            // geometry checks; admitting only the original temperature is weaker.
+            for &(temperature, _) in &source_line {
+                let query = material
+                    .query()
+                    .with(temperature_axis, temperature)
+                    .map_err(|_| invalid("Ohmic source knot coordinate is invalid"))?;
+                response
+                    .at_query_point(&query)?
+                    .into_uniform_conductor(length_m, area_m2)?;
+            }
+            source_line
+        };
         let port = |name: &str, dims, parity| Port {
             name: name.into(),
             dims,
             parity,
         };
-        let declaration = NodeDeclaration {
+        let mut declaration = NodeDeclaration {
             law: LawId(LAW.into()),
             law_version: 1,
             role: NodeRole::BulkTransport,
@@ -222,6 +288,19 @@ impl MaterialOhmicNode {
             energy: EnergyBehavior::NonNegativeDissipation,
             tangent_claimed: true,
         };
+        if let Some(phase) = &phase {
+            declaration.law_version = 2;
+            declaration.inputs.push(port(
+                "liquid_mass_fraction_change",
+                Dims::NONE,
+                TimeParity::Even,
+            ));
+            declaration.calibration = declaration.calibration.with(
+                "liquid_mass_fraction_change",
+                phase.range[0] - phase.reference,
+                phase.range[1] - phase.reference,
+            );
+        }
         Ok(Self {
             response,
             temperature_axis: temperature_axis.into(),
@@ -231,6 +310,7 @@ impl MaterialOhmicNode {
             length_m,
             area_m2,
             free_expansion: None,
+            phase,
             declaration,
         })
     }
@@ -265,7 +345,8 @@ impl MaterialOhmicNode {
             .clone()
             .with(&self.temperature_axis, self.temperature_range_k[1])
             .map_err(|_| invalid("Ohmic expansion upper coordinate is invalid"))?;
-        if self.free_expansion.is_some()
+        if self.phase.is_some()
+            || self.free_expansion.is_some()
             || longitudinal_axis >= 3
             || expansion.material_card_identity()
                 != self.response.original().material().card_identity()
@@ -325,6 +406,35 @@ impl MaterialOhmicNode {
     pub const fn temperature_range_k(&self) -> [f64; 2] {
         self.temperature_range_k
     }
+    /// Source fraction defining zero on the optional phase-change graph input.
+    pub fn reference_liquid_mass_fraction(&self) -> Option<f64> {
+        self.phase.as_ref().map(|phase| phase.reference)
+    }
+
+    /// Resolve the same fixed-geometry conductor at actual two-coordinate state.
+    pub fn resolve_at_temperature_and_liquid_mass_fraction(
+        &self,
+        temperature_k: f64,
+        fraction: f64,
+    ) -> Result<ResolvedConductor, ConductorError> {
+        let phase = self
+            .phase
+            .as_ref()
+            .ok_or_else(|| invalid("Ohmic node has no phase owner"))?;
+        phase.admit_fraction(fraction)?;
+        let (length, area, _) = self.geometry_with_slope(temperature_k)?;
+        let query = self
+            .response
+            .original()
+            .material()
+            .query()
+            .with(&self.temperature_axis, temperature_k)
+            .and_then(|q| q.with(&phase.axis, fraction))
+            .map_err(|_| invalid("invalid Ohmic temperature/fraction query"))?;
+        self.response
+            .at_query_point(&query)?
+            .into_uniform_conductor(length, area)
+    }
     /// Physical conductor length at its original reference temperature [m].
     pub const fn length_m(&self) -> f64 {
         self.length_m
@@ -374,6 +484,8 @@ impl MaterialOhmicNode {
         {
             if axis == &self.temperature_axis {
                 temperature = Some(*value);
+            } else if let Some(phase) = self.phase.as_ref().filter(|phase| axis == &phase.axis) {
+                phase.admit_fraction(*value)?;
             } else if value.to_bits() != original.to_bits() {
                 return Err(invalid(
                     "Ohmic prepared geometry must retain every fixed source coordinate",
@@ -390,6 +502,11 @@ impl MaterialOhmicNode {
         &self,
         temperature_k: f64,
     ) -> Result<(ResolvedConductor, f64), ConductorError> {
+        if let Some(phase) = &self.phase {
+            return self
+                .resolve_at_temperature_and_liquid_mass_fraction(temperature_k, phase.reference)
+                .map(|conductor| (conductor, 0.0));
+        }
         let (length_m, area_m2, geometry_slope) = self.geometry_with_slope(temperature_k)?;
         let query = self
             .response
@@ -479,8 +596,12 @@ impl MaterialOhmicNode {
         &self,
         state: &[f64],
         inputs: &[f64],
-    ) -> Result<([f64; 2], [f64; 4]), GraphError> {
-        for (which, expected, found) in [("state", 0, state.len()), ("inputs", 2, inputs.len())] {
+    ) -> Result<([f64; 2], [f64; 6]), GraphError> {
+        let input_count = if self.phase.is_some() { 3 } else { 2 };
+        for (which, expected, found) in [
+            ("state", 0, state.len()),
+            ("inputs", input_count, inputs.len()),
+        ] {
             if expected != found {
                 return Err(GraphError::ArityMismatch {
                     node: LAW.into(),
@@ -494,6 +615,15 @@ impl MaterialOhmicNode {
             return Err(graph_error("Ohmic graph inputs must be finite"));
         }
         let temperature = self.reference_temperature_k + inputs[0];
+        if let Some(phase) = &self.phase {
+            let fraction = phase.reference + inputs[2];
+            let conductor = self
+                .resolve_at_temperature_and_liquid_mass_fraction(temperature, fraction)
+                .map_err(|_| {
+                    graph_error("Ohmic temperature/fraction left original source support")
+                })?;
+            return phase.response_at(&conductor, temperature, fraction, inputs[1]);
+        }
         let (conductor, geometry_slope) =
             self.resolve_with_geometry_slope(temperature).map_err(|_| {
                 graph_error("Ohmic material temperature or source bundle outside original support")
@@ -513,6 +643,8 @@ impl MaterialOhmicNode {
             resistance,
             current * voltage_slope,
             2.0 * voltage,
+            0.0,
+            0.0,
         ];
         if !voltage.is_finite()
             || (current != 0.0 && voltage == 0.0)
@@ -543,7 +675,7 @@ impl LawNode for MaterialOhmicNode {
     fn tangent(&self, state: &[f64], inputs: &[f64]) -> Option<Vec<f64>> {
         self.response_at(state, inputs)
             .ok()
-            .map(|(_, tangent)| tangent.to_vec())
+            .map(|(_, tangent)| tangent[..2 * self.declaration.inputs.len()].to_vec())
     }
 }
 

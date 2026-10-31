@@ -50,6 +50,16 @@ pub struct GraphSpatialTemperature {
     pub coordinate: ThermalCoordinate,
 }
 
+/// Explicit convex sample of ORIGINAL nodal liquid mass fractions. Weights
+/// define this graph observation, not an inferred effective mixture law.
+#[derive(Clone, Debug)]
+pub struct GraphSpatialLiquidMassFraction {
+    pub input: PortKey,
+    pub vertices: Vec<(usize, f64)>,
+    /// Subtracted from actual fraction; zero selects an absolute fraction port.
+    pub reference: f64,
+}
+
 /// A signed watt-valued output deposited through the original P1 source assembler.
 #[derive(Clone, Debug)]
 pub struct GraphSpatialHeatPort {
@@ -71,6 +81,7 @@ pub struct GraphSpatialInput<'a> {
     pub equations: &'a [MaterialEquation],
     pub initial_coordinates: &'a [f64],
     pub temperatures: &'a [GraphSpatialTemperature],
+    pub liquid_mass_fractions: &'a [GraphSpatialLiquidMassFraction],
     /// Unique seconds-valued inputs receiving the original physical duration.
     pub durations: &'a [PortKey],
     pub heat: &'a [GraphSpatialHeatPort],
@@ -244,6 +255,7 @@ pub fn step_candidate(
         || !nonnegative(controls.thermal.energy_tolerance_j)
         || input.unknowns.len() != input.initial_coordinates.len()
         || input.temperatures.len() > controls.graph.maximum_terms
+        || input.liquid_mass_fractions.len() > controls.graph.maximum_terms
         || input.durations.len() > controls.graph.maximum_terms
         || input.heat.len() > controls.graph.maximum_terms
     {
@@ -265,6 +277,13 @@ pub fn step_candidate(
             .checked_add(binding.vertices.len())
             .ok_or(GraphSpatialError::Invalid(
                 "spatial binding extent overflow",
+            ))?;
+    }
+    for binding in input.liquid_mass_fractions {
+        terms = terms
+            .checked_add(binding.vertices.len())
+            .ok_or(GraphSpatialError::Invalid(
+                "spatial fraction binding extent overflow",
             ))?;
     }
     if terms > controls.maximum_binding_terms {
@@ -325,6 +344,42 @@ pub fn step_candidate(
             ));
         }
         weight_sums.push(sum);
+    }
+    let mut phase_weight_sums = Vec::with_capacity(input.liquid_mass_fractions.len());
+    for binding in input.liquid_mass_fractions {
+        poll(cx)?;
+        if !inputs.insert(binding.input.clone())
+            || input.fixed.contains_key(&binding.input)
+            || input.unknowns.iter().any(|u| u.input == binding.input)
+            || input
+                .graph
+                .external_input_dims(&binding.input.0, &binding.input.1)
+                != Some(Dims::NONE)
+            || !binding.reference.is_finite()
+            || !(0.0..=1.0).contains(&binding.reference)
+        {
+            return Err(GraphSpatialError::Invalid(
+                "fraction must uniquely bind an original dimensionless graph input",
+            ));
+        }
+        let mut seen = BTreeSet::new();
+        let mut sum = 0.0;
+        for &(vertex, weight) in &binding.vertices {
+            poll(cx)?;
+            if vertex >= n || !seen.insert(vertex) || !nonnegative(weight) {
+                return Err(GraphSpatialError::Invalid(
+                    "fraction sampling needs distinct original vertices and nonnegative weights",
+                ));
+            }
+            sum += weight;
+        }
+        if !positive(sum) || (sum - 1.0).abs() > 64.0 * f64::EPSILON * binding.vertices.len() as f64
+        {
+            return Err(GraphSpatialError::Invalid(
+                "fraction sampling weights must sum to one",
+            ));
+        }
+        phase_weight_sums.push(sum);
     }
     for duration in input.durations {
         poll(cx)?;
@@ -434,6 +489,21 @@ pub fn step_candidate(
                 return Err(GraphSpatialError::Invalid("nonfinite sampled temperature"));
             }
             fixed.insert(binding.input.clone(), coordinate);
+        }
+        for (binding, &sum) in input.liquid_mass_fractions.iter().zip(&phase_weight_sums) {
+            poll(cx)?;
+            let fraction = binding
+                .vertices
+                .iter()
+                .map(|&(vertex, weight)| weight * phase[vertex])
+                .sum::<f64>()
+                / sum;
+            if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+                return Err(GraphSpatialError::Invalid(
+                    "sampled original fraction outside [0,1]",
+                ));
+            }
+            fixed.insert(binding.input.clone(), fraction - binding.reference);
         }
         let mut graph_controls = controls.graph;
         graph_controls.maximum_evaluations = graph_controls.maximum_evaluations.min(remaining);

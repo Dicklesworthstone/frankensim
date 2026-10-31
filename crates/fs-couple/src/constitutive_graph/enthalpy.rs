@@ -23,6 +23,7 @@ use crate::circuit_enthalpy::contacts::heat::{
 };
 use fs_exec::Cx;
 use fs_material::graph::ConstitutiveGraph;
+use fs_material::phase::EquilibriumEnthalpyPhaseCurve;
 use fs_qty::Dims;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
 use fs_solver::{
@@ -57,6 +58,18 @@ pub struct GraphTemperature {
     pub coordinate: ThermalCoordinate,
 }
 
+/// Actual liquid MASS fraction from the cell's original enthalpy chart.
+#[derive(Clone, Debug)]
+pub struct GraphLiquidMassFraction<'a> {
+    /// Unique original dimensionless input, never a temperature proxy.
+    pub input: PortKey,
+    pub cell: CellId,
+    /// Must be the exact caloric object retained by the finite thermal cell.
+    pub curve: &'a EquilibriumEnthalpyPhaseCurve,
+    /// Subtracted from actual fraction; use zero for an absolute fraction port.
+    pub reference: f64,
+}
+
 /// An original graph heat output and its unique receiving thermal cell.
 #[derive(Clone, Debug)]
 pub struct GraphHeatPort {
@@ -85,6 +98,8 @@ pub struct GraphThermalInput<'a> {
     pub initial_coordinates: &'a [f64],
     /// Unique external inputs driven by the original caloric temperatures.
     pub temperatures: &'a [GraphTemperature],
+    /// Original chart fractions, including evolution at constant temperature.
+    pub liquid_mass_fractions: &'a [GraphLiquidMassFraction<'a>],
     /// Unique seconds-valued external inputs supplied with the ORIGINAL physical
     /// interval duration. History laws therefore see one accepted thermal clock.
     pub durations: &'a [PortKey],
@@ -246,7 +261,12 @@ pub fn step_candidate<'m, S, E>(
     resolve: impl Fn(&DepositionSimulation<'m>) -> Result<StepCoefficients<S>, E>,
 ) -> Result<GraphThermalCandidate<'m, S>, GraphThermalError<E>> {
     resolved_candidate(
-        cx, thermal, target_s, input, controls, initial_energy_increments_j,
+        cx,
+        thermal,
+        target_s,
+        input,
+        controls,
+        initial_energy_increments_j,
         |endpoint| resolve(endpoint).map_err(GraphThermalError::Source),
     )
 }
@@ -261,8 +281,7 @@ fn resolved_candidate<'m, S, E>(
     input: GraphThermalInput<'_>,
     controls: GraphThermalSolve,
     initial_energy_increments_j: &[f64],
-    resolve: impl Fn(&DepositionSimulation<'m>)
-        -> Result<StepCoefficients<S>, GraphThermalError<E>>,
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<StepCoefficients<S>, GraphThermalError<E>>,
 ) -> Result<GraphThermalCandidate<'m, S>, GraphThermalError<E>> {
     let checkpoint = || cx.checkpoint().map_err(|_| DepositionError::Cancelled);
     checkpoint()?;
@@ -281,6 +300,7 @@ fn resolved_candidate<'m, S, E>(
         || !nonnegative(controls.total_tolerance_j)
         || input.unknowns.len() != input.initial_coordinates.len()
         || input.temperatures.len() > controls.graph.maximum_terms
+        || input.liquid_mass_fractions.len() > controls.graph.maximum_terms
         || input.durations.len() > controls.graph.maximum_terms
         || input.heat.len() > controls.graph.maximum_terms
     {
@@ -308,6 +328,30 @@ fn resolved_candidate<'m, S, E>(
         }
     }
     let mut heat_keys = BTreeSet::new();
+    for binding in input.liquid_mass_fractions {
+        checkpoint()?;
+        let cell = thermal
+            .cells()
+            .get(&binding.cell)
+            .ok_or(GraphThermalError::Invalid(
+                "phase graph binding requires an original active cell",
+            ))?;
+        if !temperature_keys.insert(binding.input.clone())
+            || input.fixed.contains_key(&binding.input)
+            || input.unknowns.iter().any(|u| u.input == binding.input)
+            || input
+                .graph
+                .external_input_dims(&binding.input.0, &binding.input.1)
+                != Some(Dims::NONE)
+            || !binding.reference.is_finite()
+            || !(0.0..=1.0).contains(&binding.reference)
+            || !thermal.uses_material_law(cell.material_id, binding.curve)
+        {
+            return Err(GraphThermalError::Invalid(
+                "fraction must uniquely bind the original caloric chart to a dimensionless graph input",
+            ));
+        }
+    }
     for duration in input.durations {
         checkpoint()?;
         if !temperature_keys.insert(duration.clone())
@@ -367,6 +411,19 @@ fn resolved_candidate<'m, S, E>(
                         ));
                     }
                     fixed.insert(binding.input.clone(), value);
+                }
+                for binding in input.liquid_mass_fractions {
+                    checkpoint()?;
+                    let phase = binding
+                        .curve
+                        .values_at_specific_enthalpy(
+                            endpoint.cells()[&binding.cell].specific_h_j_kg,
+                        )
+                        .map_err(|_| GraphThermalError::Thermal(DepositionError::MaterialDomain))?;
+                    fixed.insert(
+                        binding.input.clone(),
+                        phase.liquid_mass_fraction - binding.reference,
+                    );
                 }
                 let mut graph_controls = controls.graph;
                 graph_controls.maximum_evaluations =
@@ -536,7 +593,9 @@ pub fn heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
     initial_energy_increments_j: &[f64],
 ) -> Result<GraphThermalCandidate<'m, A::Sample>, GraphThermalError<A::Error>> {
     cx.checkpoint().map_err(|_| GraphThermalError::Cancelled)?;
-    assembly.prepared_heat_network().thermal_material_network()
+    assembly
+        .prepared_heat_network()
+        .thermal_material_network()
         .map_err(|error| match error {
             HeatNetworkError::Cancelled => GraphThermalError::Cancelled,
             other => GraphThermalError::Source(other.into()),
@@ -549,7 +608,9 @@ pub fn heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
         controls,
         initial_energy_increments_j,
         |endpoint| {
-            let resolved = assembly.resolve_heat(cx, endpoint).map_err(transport_error)?;
+            let resolved = assembly
+                .resolve_heat(cx, endpoint)
+                .map_err(transport_error)?;
             if !resolved.bulk.resistors.is_empty() || !resolved.contacts.is_empty() {
                 return Err(GraphThermalError::Invalid(
                     "material graph heat cannot discard circuit resistor or electrical contact work",
@@ -563,8 +624,8 @@ pub fn heat_assembly_candidate<'m, A: HeatAssembly + ?Sized>(
             })
         },
     )?;
-    let net = (target_s - thermal.time_s())
-        * candidate.report.source.as_ref().radiation_net_power_w();
+    let net =
+        (target_s - thermal.time_s()) * candidate.report.source.as_ref().radiation_net_power_w();
     let residual = candidate.report.thermal.residual_j + net;
     let external = candidate.report.other_external_heat_j - net;
     if !net.is_finite()
@@ -601,9 +662,16 @@ impl PreparedHeatNetwork<'_, '_> {
         input: GraphThermalInput<'_>,
         controls: GraphThermalSolve,
         initial_energy_increments_j: &[f64],
-    ) -> Result<GraphThermalCandidate<'m, HeatNetworkSample>, GraphThermalError<HeatNetworkError>> {
+    ) -> Result<GraphThermalCandidate<'m, HeatNetworkSample>, GraphThermalError<HeatNetworkError>>
+    {
         heat_assembly_candidate(
-            self, cx, thermal, target_s, input, controls, initial_energy_increments_j,
+            self,
+            cx,
+            thermal,
+            target_s,
+            input,
+            controls,
+            initial_energy_increments_j,
         )
     }
 }

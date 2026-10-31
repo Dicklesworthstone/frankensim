@@ -11,7 +11,7 @@ use fs_conduction::{
 };
 use fs_couple::constitutive_graph::spatial::{
     self as spatial_coupling, GraphSpatialError, GraphSpatialHeatPort, GraphSpatialInput,
-    GraphSpatialSolve, GraphSpatialTemperature,
+    GraphSpatialLiquidMassFraction, GraphSpatialSolve, GraphSpatialTemperature,
 };
 use fs_rep_mesh::TetComplex;
 
@@ -92,6 +92,99 @@ fn conductivity(card: &MaterialCard) -> ConductivityModel {
     )
 }
 
+#[test]
+fn original_nodal_latent_fractions_drive_material_transport_at_equal_temperature() {
+    use super::phase::{phase_feedback, phase_graph, phase_material};
+    use fs_material::conductor::ElectricalPropertyBasis;
+    with_cx(|cx, _| {
+        for slope in [2.0, 6.0] {
+            let (card, curve) =
+                phase_material(ElectricalPropertyBasis::Resistivity, slope, true, true);
+            let mesh = mesh(false);
+            let storage = prepare(
+                cx,
+                &mesh,
+                &[ReferenceEnthalpyMaterial {
+                    curve: &curve,
+                    reference_density_kg_m3: 1.0,
+                }],
+                &[0],
+            );
+            let conductivity = ConductivityModel::isotropic(
+                ConductivityTable::from_claims_at_query_points(
+                    card.claims(),
+                    &PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS),
+                    "T",
+                    &[point(300.0), point(600.0)],
+                    SelectionPolicy::SingleClaimOnly,
+                )
+                .unwrap(),
+            );
+            let boundary = ThermalBoundaryBuilder::new(&mesh)
+                .adiabatic_remainder()
+                .finish()
+                .unwrap();
+            let source = ScalarField::Uniform(0.0);
+            let graph = phase_graph(&card, ElectricalPropertyBasis::Resistivity, 1.0);
+            let feedback = phase_feedback(Some(2.0), 0.0);
+            let temperatures = [GraphSpatialTemperature {
+                input: key("resistor", "temperature_change"),
+                vertices: vec![(0, 1.0)],
+                coordinate: ThermalCoordinate::ChangeFrom(400.0),
+            }];
+            let fractions = [GraphSpatialLiquidMassFraction {
+                input: key("resistor", "liquid_mass_fraction_change"),
+                vertices: vec![(0, 0.1), (1, 0.2), (2, 0.3), (3, 0.4)],
+                reference: 0.2,
+            }];
+            let heat = [GraphSpatialHeatPort {
+                output: key("resistor", "heat"),
+                distribution: ScalarField::Uniform(1.0),
+            }];
+            let mut graph_input = input(&graph, &[], &feedback, &temperatures, &heat);
+            graph_input.liquid_mass_fractions = &fractions;
+            let old_h = [10.0, 20.0, 30.0, 40.0];
+            let dt = 0.1;
+            let accepted = spatial_coupling::step_candidate(
+                cx,
+                &storage,
+                problem(&mesh, &boundary, &conductivity, &source),
+                None,
+                &old_h,
+                dt,
+                EnthalpyRadiation::None,
+                graph_input,
+                spatial_controls(),
+                &[0.0; 4],
+            )
+            .unwrap();
+            // Unit tetra m=1/6. Uniform source gives equal h increments; all
+            // temperatures stay 400 K, so native conduction is exactly zero.
+            // The declared fraction sample starts at .3, not mean h/100=.25.
+            let q = dt * 4.0 * (2.0 + 0.3 * slope) / (1.0 - dt * 4.0 * 6.0 * slope / 100.0);
+            let fraction = 0.3 + 6.0 * q / 100.0;
+            for i in 0..4 {
+                close(accepted.specific_enthalpy_j_kg()[i], old_h[i] + 6.0 * q);
+                close(accepted.report().thermal.temperature[i], 400.0);
+                close(
+                    accepted.report().liquid_mass_fraction[i],
+                    (old_h[i] + 6.0 * q) / 100.0,
+                );
+            }
+            close(accepted.report().graph_heat_j, q);
+            close(accepted.report().thermal.stored_energy_change_j, q);
+            close(
+                accepted.graph().external[&key("resistor", "liquid_mass_fraction_change")],
+                fraction - 0.2,
+            );
+            close(
+                accepted.graph().graph.outputs[&key("resistor", "voltage")],
+                2.0 * (2.0 + slope * fraction),
+            );
+        }
+    });
+}
+
 fn problem<'a>(
     mesh: &'a ConductionMesh,
     boundary: &'a ThermalBoundary,
@@ -127,6 +220,7 @@ fn input<'a>(
             &[0.0]
         },
         temperatures,
+        liquid_mass_fractions: &[],
         durations: &feedback.durations,
         heat,
     }

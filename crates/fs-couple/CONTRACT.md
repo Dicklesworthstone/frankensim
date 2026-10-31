@@ -1,5 +1,36 @@
 # CONTRACT: fs-couple
 
+## Original latent fractions in constitutive graph feedback
+
+`constitutive_graph::enthalpy::GraphLiquidMassFraction` binds an original finite
+cell's borrowed caloric chart to a unique dimensionless graph input. Attachment
+checks the actual caloric object, active cell, reference fraction and exclusive
+input ownership. Each endpoint samples that chart at the cell's current
+specific enthalpy, including changing fraction at constant temperature.
+`GraphSpatialLiquidMassFraction` similarly samples the original nodal phase
+values through explicit convex weights. Those weights define an observation;
+they do not infer a material homogenization law or average unlike enthalpies.
+
+Both existing thermal owners feed temperature, fraction and physical duration
+to the same original graph solve. Their existing backward-Euler residual,
+source/heat accounting, committed graph history and thermal inventory remain
+authoritative. Additional heat assemblies still receive the identical endpoint;
+latent storage is already in the caloric chart and is never deposited again.
+Input/source/physical-domain, budget and cancellation refusals publish neither
+history. Existing callers explicitly select empty fraction bindings.
+
+The source-backed Ohmic consumer closes current, voltage and Joule heating on
+these fractions. G1/G3/G4 tests independently eliminate the latent-cell BE
+equation for sourced resistivity and conductivity, exercise data-only curve
+and surface changes and current reversal, compare matching voltage/current
+endpoints, continue the original phase history, preserve the constant-source
+limit, and reject foreign caloric objects and late cancelled proposals. A
+unit-tetra fixture checks original reference masses and P1 heat deposition
+with unequal nodal fractions at equal temperature. Fixed-reference geometry,
+explicit source support and the original first-order discretization remain
+the model scope; no phase kinetics or numerical/experimental accuracy claim
+is inferred from source inspection. Native execution remains unverified here.
+
 ## Finite heat on the shared hysteretic gap trajectory
 
 `shared::motion::thermal::ThermalSharedHystereticGapMotion` uses the existing

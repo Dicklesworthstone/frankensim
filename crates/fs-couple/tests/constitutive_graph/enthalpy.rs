@@ -3,6 +3,8 @@
 mod expansion;
 #[path = "enthalpy/spatial.rs"]
 mod spatial;
+#[path = "enthalpy/phase.rs"]
+mod phase;
 
 use super::*;
 use fs_couple::circuit_enthalpy::contacts::heat::MaterialHeatNetwork;
@@ -225,6 +227,7 @@ impl Feedback {
             equations: &self.equations,
             initial_coordinates: &[0.0],
             temperatures: &self.temperatures,
+            liquid_mass_fractions: &[],
             durations: &self.durations,
             heat: &self.heat,
         }

@@ -1,5 +1,32 @@
 # fs-material — CONTRACT
 
+## Original phase response in the Ohmic constitutive node
+
+`conductor::graph::MaterialOhmicNode::try_new_with_liquid_mass_fraction`
+extends the same native uniform conductor with an explicit original fraction
+axis. Its three graph inputs are temperature change, signed current and liquid
+MASS fraction change, referenced to the original complete material query. The
+two-input constructor and its sensible/free-expansion arithmetic remain intact;
+the three-input declaration uses law version 2 and fixed geometry.
+
+The same pinned source supplies resistance and nonnegative Joule heat. Constant
+scalars, supported linear T/f curves and canonical triangulated T/f surfaces
+provide both analytic derivatives. Conductivity derivatives pass through the
+native reciprocal relation rather than a fitted resistivity curve. Surfaces
+use `fs-matdb::PreparedSurfaceResponse`, retaining original source cells and
+their declared one-sided tangents. Every runtime value still resolves the
+original complete bundle and actual applicability coordinates. Independent
+T/f bounds never imply that an unmeasured source-surface corner or hole is
+supported. Unsupported states return no physical candidate.
+
+This stationary scalar DC law supplies no phase mixing rule, density/geometry
+evolution, phase kinetics, interfacial electrical impedance or additional
+latent heat. The thermal owner supplies actual fraction and caloric storage.
+Native graph/enthalpy regressions exercise scalar/curve/surface source swaps,
+both source bases, both axis orders, latent current/voltage duality, continued
+heating, exact constant-source compatibility and transactional refusal. Source
+and parser checks do not establish native execution or measured qualification.
+
 ## Variable-amplitude critical-plane strain-life accumulation
 
 `fatigue::critical_plane::miner::CriticalPlaneMiner` projects each accepted
