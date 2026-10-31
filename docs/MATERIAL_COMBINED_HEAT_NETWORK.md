@@ -424,6 +424,42 @@ but no temperature-dependent magnetic free energy is inferred. Existing
 fixed solid geometry, source coverage, monotone-linkage cuts and first-order
 thermal coupling still apply.
 
+## Biased magnetostrictive motion with finite material coolant
+
+`ThermalMagnetostrictiveCircuit::step_candidate_with_heat_assembly` connects
+the same complete heat provider to the original biased winding and reciprocal
+rod-motion solve. Cooling changes winding temperature and its source-derived
+resistance, which changes actual current, magnetic linkage and axial motion.
+Every thermal trial starts from the same accepted linkage, extension and
+momentum and resolves the finite coolant at that proposed endpoint.
+
+Use `new_with_link_conductances` to admit links owned by the coolant provider.
+The original material network and initial conductance map must cover native
+links completely and without overlap. Initial values are admission data only;
+a bare step still refuses links without their physical owner. The continued
+assembly must retain the exact original bulk material network.
+
+The existing biased work convention remains essential: the winding receives
+`R(T) * (I_bias + delta_i_mid)^2 * dt`, including DC and cross terms, and
+magnetic/mechanical storage change includes `I_bias * delta_lambda`.
+These contributions are computed by the original driver and deposited once.
+Finite coolant exchange is internal, closed radiation keeps its original
+energy correction, and the full accepted provider sample is retained in
+`report().source`. Typed provider failures, cancellation and work budgets
+preserve both accepted histories.
+
+The focused coolant fixture independently solves the reciprocal midpoint
+current/motion equations and two-body heat balance over continuing intervals.
+It changes only coolant viscosity, coolant heat capacity or the rod card's
+piezomagnetic coefficient, checks actual motion and source identity, and
+exercises initial ownership and later transactional refusal.
+
+The rod's magnetic/mechanical coefficients remain at their independently held
+preparation temperature and DC-biased reference. The finite winding temperature
+does not infer core heating, thermal strain, hysteresis or a temperature-dependent
+magnetostrictive law. Original amplitude bounds, stationary winding geometry
+and first-order coupled thermal accuracy remain authoritative.
+
 ## Energy and scope
 
 The standard circuit/enthalpy report preserves the actual source arithmetic,

@@ -15,6 +15,8 @@ mod thermoelectric;
 mod graph;
 #[path = "finite_links/hysteretic.rs"]
 mod hysteretic;
+#[path = "finite_links/magnetostrictive.rs"]
+mod magnetostrictive;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::links::{
     SourceConvectiveLink, evaluate_source_link_convection,
 };

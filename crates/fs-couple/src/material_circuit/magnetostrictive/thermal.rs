@@ -27,7 +27,7 @@ use crate::circuit_enthalpy::{
         MaterialNetwork, MaterialNetworkError, MaterialNetworkSample, PreparedMaterialNetwork,
     },
 };
-use crate::circuit_enthalpy::contacts::heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork};
+use crate::circuit_enthalpy::contacts::heat::{HeatAssembly, HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork};
 use fs_exec::Cx;
 use crate::magnetostrictive::{MagnetostrictiveCouplingError, MagnetostrictiveRod};
 use crate::material_circuit::MaterialCircuitError;
@@ -37,22 +37,22 @@ use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
 
 #[derive(Debug)]
-pub enum MagnetostrictiveThermalError {
+pub enum MagnetostrictiveThermalError<E = HeatNetworkError> {
     Material(MaterialNetworkError),
     Magnetic(MagnetostrictiveCircuitError),
-    Heat(HeatNetworkError),
+    Heat(E),
 }
-impl core::fmt::Display for MagnetostrictiveThermalError {
+impl<E: core::fmt::Debug> core::fmt::Display for MagnetostrictiveThermalError<E> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "biased magnetostrictive circuit/enthalpy: {self:?}")
     }
 }
-impl std::error::Error for MagnetostrictiveThermalError {}
-type Error = CircuitEnthalpyError<MagnetostrictiveThermalError>;
-fn invalid(message: &'static str) -> Error {
+impl<E: core::fmt::Debug> std::error::Error for MagnetostrictiveThermalError<E> {}
+type Error<E = HeatNetworkError> = CircuitEnthalpyError<MagnetostrictiveThermalError<E>>;
+fn invalid<E>(message: &'static str) -> Error<E> {
     CircuitEnthalpyError::Invalid(message)
 }
-fn material(error: MaterialNetworkError) -> Error {
+fn material<E>(error: MaterialNetworkError) -> Error<E> {
     match error {
         MaterialNetworkError::Thermal(DepositionError::Cancelled) => {
             CircuitEnthalpyError::Cancelled
@@ -60,7 +60,7 @@ fn material(error: MaterialNetworkError) -> Error {
         other => CircuitEnthalpyError::Source(MagnetostrictiveThermalError::Material(other)),
     }
 }
-fn magnetic(error: MagnetostrictiveCircuitError) -> Error {
+fn magnetic<E>(error: MagnetostrictiveCircuitError) -> Error<E> {
     match error {
         MagnetostrictiveCircuitError::Circuit(MaterialCircuitError::Cancelled)
         | MagnetostrictiveCircuitError::Magnetostrictive(
@@ -69,10 +69,10 @@ fn magnetic(error: MagnetostrictiveCircuitError) -> Error {
         other => CircuitEnthalpyError::Source(MagnetostrictiveThermalError::Magnetic(other)),
     }
 }
-fn heat(error: HeatNetworkError) -> Error {
+fn heat<E: From<HeatNetworkError>>(error: HeatNetworkError) -> Error<E> {
     match error {
         HeatNetworkError::Cancelled => CircuitEnthalpyError::Cancelled,
-        other => CircuitEnthalpyError::Source(MagnetostrictiveThermalError::Heat(other)),
+        other => CircuitEnthalpyError::Source(MagnetostrictiveThermalError::Heat(other.into())),
     }
 }
 
@@ -105,6 +105,7 @@ pub struct MagnetostrictiveThermalStep {
 /// no unknown bias currents of other RLC branches are inferred.
 pub struct ThermalMagnetostrictiveCircuit<'n, 'a> {
     circuit: MagnetostrictiveCircuit,
+    network: &'n MaterialNetwork<'a>,
     prepared: Arc<PreparedMaterialNetwork<'n, 'a>>,
     coil_cell: CellId,
     coil: ResolvedConductor,
@@ -130,6 +131,47 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
         thermal: &DepositionSimulation<'_>,
         network: &'n MaterialNetwork<'a>,
         basis: ElectricalPropertyBasis,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::new_with_link_conductances(
+            rod,
+            linkage_increment_wb,
+            extension_m,
+            velocity_m_s,
+            total_voltage_v,
+            thermal,
+            network,
+            basis,
+            &BTreeMap::new(),
+            cancelled,
+        )
+    }
+
+    /// Prepare the same biased actuator while another physical owner supplies
+    /// the remaining native thermal links, such as finite material coolant.
+    ///
+    /// The original material network and this initial conductance map must
+    /// partition all native links exactly. These values admit and resolve only
+    /// the initial state; they are not cached as a future cooling law. Continue
+    /// through `step_candidate_with_heat_assembly` so every trial re-resolves
+    /// its coolant at the actual proposed thermal state. A bare step still
+    /// refuses links that lack their physical owner.
+    ///
+    /// The original stationary winding, whole-cell caloric identity and
+    /// DC-biased rod checks remain. The rod's material coefficients stay at
+    /// their independently held preparation temperature; cooling the winding
+    /// changes current and reciprocal motion without inventing a core thermal law.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_link_conductances(
+        rod: MagnetostrictiveRod,
+        linkage_increment_wb: f64,
+        extension_m: f64,
+        velocity_m_s: f64,
+        total_voltage_v: f64,
+        thermal: &DepositionSimulation<'_>,
+        network: &'n MaterialNetwork<'a>,
+        basis: ElectricalPropertyBasis,
+        initial_link_conductances_w_k: &BTreeMap<u64, f64>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         if cancelled() {
@@ -144,7 +186,12 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
             ));
         }
         let prepared = network
-            .prepare_with_bases(thermal, &[(0, basis)], &mut cancelled)
+            .prepare_with_link_conductances(
+                thermal,
+                &[(0, basis)],
+                initial_link_conductances_w_k,
+                &mut cancelled,
+            )
             .map_err(material)?;
         let coil_cell = network.resistors[0].destination.cell;
         let cell = &thermal.cells()[&coil_cell];
@@ -166,7 +213,11 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
             ));
         }
         let mut initial = prepared
-            .resolve(thermal, &mut cancelled)
+            .resolve_with_link_conductances(
+                thermal,
+                initial_link_conductances_w_k,
+                &mut cancelled,
+            )
             .map_err(material)?;
         let resistor = initial.resistors.remove(0);
         let coil = resistor.conductor.clone();
@@ -212,6 +263,7 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
         }
         Ok(Self {
             circuit,
+            network,
             prepared: Arc::new(prepared),
             coil_cell,
             coil,
@@ -291,36 +343,83 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
         force_increment_n: f64, controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, HeatNetworkSample>, Error> {
+        self.step_candidate_with_heat_assembly(
+            cx,
+            prepared,
+            thermal,
+            target_s,
+            total_voltage_v,
+            force_increment_n,
+            controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    /// Resolve complete material cooling with the original DC-biased winding,
+    /// reciprocal rod motion and finite thermal inventory at one endpoint.
+    ///
+    /// The provider must retain the exact bulk network used at construction.
+    /// Each thermal trial resolves the same proposed temperatures and starts
+    /// from the same accepted linkage, extension and velocity. Actual total
+    /// winding current supplies R(T) I^2 once, including bias and cross terms;
+    /// the original I_bias * delta_lambda storage correction remains unchanged.
+    /// Finite coolant exchange is internal and full accepted source samples
+    /// remain in `report().source`.
+    ///
+    /// Provider refusals retain their typed errors under
+    /// `MagnetostrictiveThermalError::Heat`; native cancellation and work
+    /// budgets retain their classifications. Closed radiation keeps its
+    /// original independent energy gate, and rejected trials publish no state.
+    /// Electrical-contact heat still requires its own circuit work owner.
+    ///
+    /// Use `new_with_link_conductances` to admit additional finite links.
+    /// The held core temperature, fixed biased tangent, stationary winding
+    /// geometry and first-order thermal coupling remain authoritative.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_candidate_with_heat_assembly<'t, A: HeatAssembly + ?Sized>(
+        &self,
+        cx: &Cx<'_>,
+        assembly: &A,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        total_voltage_v: f64,
+        force_increment_n: f64,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, A::Sample>, Error<A::Error>> {
         cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
-        let network = prepared.field_material_network().map_err(heat)?;
-        if network.resistors.len() != 1 || network.resistors[0].destination.branch != 0
+        let prepared = assembly.prepared_heat_network();
+        let network = prepared.field_material_network().map_err(heat::<A::Error>)?;
+        if !std::ptr::eq(network, self.network)
+            || network.resistors.len() != 1 || network.resistors[0].destination.branch != 0
             || network.resistors[0].destination.cell != self.coil_cell {
-            return Err(invalid("complete heat network must retain the original winding branch and receiver"));
+            return Err(invalid("complete heat assembly must retain the original material network, winding branch and receiver"));
         }
         let candidate = self.step_resolved_candidate(thermal, target_s, total_voltage_v,
             force_increment_n, controls, initial_energy_increments_j, |state| {
-                let coefficients = prepared.resolve(cx, state).map_err(heat)?;
+                let coefficients = assembly.resolve_heat(cx, state)
+                    .map_err(|error| error.map_source(MagnetostrictiveThermalError::Heat))?;
                 if !coefficients.contacts.is_empty() {
                     return Err(invalid("biased actuator cannot discard electrical contact heat"));
                 }
                 Ok(coefficients.bulk)
             }, || cx.checkpoint().is_err())?;
         crate::circuit_enthalpy::contacts::heat::closed_balance(target_s - thermal.time_s(),
-            candidate.report.total_energy_residual_j, &candidate.report.source,
-            controls.total_energy_tolerance_j).map_err(heat)?;
+            candidate.report.total_energy_residual_j, candidate.report.source.as_ref(),
+            controls.total_energy_tolerance_j).map_err(heat::<A::Error>)?;
         cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
         Ok(candidate)
     }
 
-    // Both entries retain one biased-work calculation and one enthalpy residual.
+    // Every entry retains one biased-work calculation and one enthalpy residual.
     #[allow(clippy::too_many_arguments)]
-    fn step_resolved_candidate<'t, S>(
+    fn step_resolved_candidate<'t, S, E>(
         &self, thermal: &DepositionSimulation<'t>, target_s: f64, total_voltage_v: f64,
         force_increment_n: f64, controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
-        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error>,
+        resolve: impl Fn(&DepositionSimulation<'t>) -> Result<CircuitThermalCoefficients<S>, Error<E>>,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, S>, Error> {
+    ) -> Result<MagnetostrictiveEnthalpyCandidate<'t, 'n, 'a, S>, Error<E>> {
         let cancel = RefCell::new(cancelled);
         let check = || {
             if (*cancel.borrow_mut())() {
@@ -440,6 +539,7 @@ impl<'n, 'a> ThermalMagnetostrictiveCircuit<'n, 'a> {
                 };
                 let model = Self {
                     circuit,
+                    network: self.network,
                     prepared: Arc::clone(&self.prepared),
                     coil_cell: self.coil_cell,
                     coil,

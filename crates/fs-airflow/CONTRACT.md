@@ -296,6 +296,26 @@ exhaustion and cancellation preserve the accepted states. Magnetic fit
 coefficients remain constant within their admitted thermal interval; the
 integration adds no unmeasured thermal magnetic law.
 
+### Finite coolant in reciprocal magnetostrictive actuation
+
+`ThermalMagnetostrictiveCircuit::step_candidate_with_heat_assembly` uses the
+same complete coolant provider for the original biased winding, rod motion
+and finite thermal residual. Source-only coolant changes alter winding R(T),
+actual current, linkage and motion. `new_with_link_conductances` admits the
+initial finite links with the original complete/disjoint ownership checks;
+each continued trial resolves those links again.
+
+The original total-current Joule heat includes DC and cross terms, and the
+storage account retains `I_bias * delta_lambda`. Neither term is replaced by
+an incremental-only estimate. Finite exchange stays internal, accepted fluid
+samples stay inspectable, and typed failures/cancellation retain both histories.
+The focused fixture checks independent reciprocal current/motion and heat
+balances, material-only substitutions, continued states and refusal.
+
+The core fit stays at its separately held preparation temperature and biased
+reference. This connection changes motion through the actual winding; it adds
+no unsupported core thermal, hysteretic or acoustic law.
+
 ### Complete material heat on the native explicit timeline
 
 `SourceConvectionHeatNetwork::observe_with_links` composes the complete prepared
