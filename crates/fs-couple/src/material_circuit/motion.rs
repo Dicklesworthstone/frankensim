@@ -440,6 +440,7 @@ impl MaterialFieldMotion {
             dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             dae.charge_index.iter().map(|&i| record.x[i]).collect(), input.electrical_ports)?;
         circuit.storage = storage;
+        circuit.magnetic_couplings = self.circuit.magnetic_couplings.clone();
         let model = Self { circuit, body: self.body.clone(), support: self.support.clone(), storage_slot: self.storage_slot,
             coordinate_slot: self.coordinate_slot, gap_limits_m: self.gap_limits_m,
             momentum_kg_m_s: record.x[nd+1] };

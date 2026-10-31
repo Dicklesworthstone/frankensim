@@ -10,6 +10,10 @@ use fs_phs::circuit::{Branch, CircuitGraph, MutualInductance, assemble_circuit_w
 
 use super::{MaterialCircuit, MaterialCircuitError, MaterialResistor, poll};
 
+mod magnetic;
+pub use magnetic::MaterialMagneticCoupling;
+pub(crate) use magnetic::refresh_mutual;
+
 /// The original field-storage source and geometry for one graph branch.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MaterialStorageElement {
@@ -243,6 +247,38 @@ impl MaterialCircuit {
         Ok(circuit)
     }
 
+    /// Bind shared magnetic geometry to the same actual permeability source
+    /// selected by both winding owners: `M = geometry_m * mu + constant_h`.
+    /// Signed geometry follows winding polarity. Each pair must share the same
+    /// immutable card, physical query, quantity convention and selected claim;
+    /// a matching numeric permeability alone cannot establish a shared source.
+    ///
+    /// `held_mutual` supplies disjoint, explicitly constant links. The native
+    /// descriptor admits the complete positive-definite inductance matrix.
+    /// Source/material reconfiguration retains total flux linkage and accounts
+    /// for its full shared-field parameter work in `rebind_storage_candidate`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_magnetic_coupling(
+        graph: CircuitGraph,
+        resistors: Vec<MaterialResistor>,
+        mut storage: Vec<MaterialStorage>,
+        held_mutual: Vec<MutualInductance>,
+        couplings: Vec<MaterialMagneticCoupling>,
+        fluxes_wb: Vec<f64>,
+        charges_c: Vec<f64>,
+        initial_inputs: &[f64],
+    ) -> Result<Self, MaterialCircuitError> {
+        let graph = lower(&graph, &mut storage)?;
+        let couplings = magnetic::canonical_couplings(couplings)?;
+        let mutual = magnetic::complete_mutual(held_mutual, &couplings, &storage)?;
+        let mut circuit = Self::new_with_mutual_inductance(
+            graph, resistors, mutual, fluxes_wb, charges_c, initial_inputs,
+        )?;
+        circuit.storage = storage;
+        circuit.magnetic_couplings = couplings;
+        Ok(circuit)
+    }
+
     /// Source-bound storage, retained unchanged through ordinary circuit steps.
     /// Empty on the original constructor's explicitly authored C/L path.
     pub fn storage(&self) -> &[MaterialStorage] {
@@ -252,8 +288,10 @@ impl MaterialCircuit {
     /// Rebind source-derived C/L at fixed charge and flux linkage, without time
     /// advance. This is an impulse-free parameter change with explicit work:
     /// W = sum(q^2/2 * delta(1/C)) + lambda^T delta(L^-1) lambda / 2.
-    /// Mutual coefficients remain fixed, while native admission rechecks the
-    /// entire new L. Branch work includes the resulting shared-field terms.
+    /// Authored constant mutual coefficients remain fixed. Source-bound links
+    /// refresh from both new winding materials, which must still agree on their
+    /// actual shared source and physical query. Native admission rechecks the
+    /// entire new L. Branch work includes every resulting shared-field term.
     ///
     /// The existing descriptor must admit the SAME coordinates under the new
     /// algebraic constraints. A capacitor clamped by an ideal voltage source,
@@ -288,16 +326,18 @@ impl MaterialCircuit {
         // Storage changes must retain the accepted contact drops and sources.
         let mut storage = storage;
         let graph = lower(&self.graph, &mut storage)?;
+        let mutual = refresh_mutual(&self.mutual, &self.magnetic_couplings, &storage)?;
         let mut candidate = Self::new_with_contacts_and_mutual_inductance(
             graph,
             self.resistors.clone(),
             self.contacts.clone(),
-            self.mutual.clone(),
+            mutual,
             self.fluxes_wb.clone(),
             self.charges_c.clone(),
             inputs,
         )?;
         candidate.storage = storage;
+        candidate.magnetic_couplings = self.magnetic_couplings.clone();
         let (work, total) = if self.mutual.is_empty() { parameter_work(
             &self.graph,
             &self.storage,

@@ -120,6 +120,7 @@ impl MaterialCircuit {
             self.resistors.clone(), contacts, self.mutual.clone(),
             self.fluxes_wb.clone(), self.charges_c.clone(), inputs)?;
         result.storage = self.storage.clone();
+        result.magnetic_couplings = self.magnetic_couplings.clone();
         Ok(result)
     }
 }

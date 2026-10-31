@@ -170,6 +170,7 @@ impl MagnetostrictiveCircuit {
         let circuit = MaterialCircuit {
             graph,
             mutual: Vec::new(),
+            magnetic_couplings: Vec::new(),
             resistors,
             contacts: Vec::new(),
             fluxes_wb,

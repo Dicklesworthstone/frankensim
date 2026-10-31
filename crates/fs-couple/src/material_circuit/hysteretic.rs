@@ -509,6 +509,7 @@ impl HystereticCircuit {
             circuit: MaterialCircuit {
                 graph,
                 mutual: self.circuit.mutual.clone(),
+                magnetic_couplings: self.circuit.magnetic_couplings.clone(),
                 resistors,
                 contacts: vec![],
                 fluxes_wb: next_fluxes,

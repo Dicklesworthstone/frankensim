@@ -116,6 +116,7 @@ impl std::error::Error for MaterialCircuitError {}
 pub struct MaterialCircuit {
     graph: CircuitGraph,
     mutual: Vec<MutualInductance>,
+    magnetic_couplings: Vec<storage::MaterialMagneticCoupling>,
     resistors: Vec<MaterialResistor>,
     contacts: Vec<SeriesElectricalContact>,
     fluxes_wb: Vec<f64>,
@@ -393,7 +394,8 @@ impl MaterialCircuit {
                 return Err(MaterialCircuitError::Invalid("algebraic initialization changed a conserved electrical coordinate"));
             }
         }
-        Ok(Self { graph, mutual, resistors, contacts, fluxes_wb, charges_c, storage: Vec::new() })
+        Ok(Self { graph, mutual, magnetic_couplings: Vec::new(), resistors, contacts,
+            fluxes_wb, charges_c, storage: Vec::new() })
     }
     /// Original graph topology with the last accepted material resistor values.
     pub const fn graph(&self) -> &CircuitGraph { &self.graph }
@@ -401,6 +403,11 @@ impl MaterialCircuit {
     /// resistor/contact/thermal refreshes. Linkage is never divided by self L
     /// alone when these links are present.
     pub fn mutual_inductance(&self) -> &[MutualInductance] { &self.mutual }
+    /// Authored shared magnetic geometry and constant offsets. These bindings
+    /// retain the material source that governs each nonconstant mutual link.
+    pub fn magnetic_couplings(&self) -> &[storage::MaterialMagneticCoupling] {
+        &self.magnetic_couplings
+    }
     /// Original source bindings at construction or the last accepted step midpoint.
     pub fn resistors(&self) -> &[MaterialResistor] { &self.resistors }
     /// Explicit electrical contact sources, in stable ID order.
@@ -467,6 +474,7 @@ impl MaterialCircuit {
         let (heat, contact_heat, heat_j, residual) = account_step(&graph, &resistors,
             &contacts, &dae.node_potential_index, &x0, &record, h0, h1, dt, controls, &mut cancelled)?;
         let next = Self { graph, mutual:self.mutual.clone(), resistors, contacts,
+            magnetic_couplings:self.magnetic_couplings.clone(),
             fluxes_wb:dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             charges_c:dae.charge_index.iter().map(|&i| record.x[i]).collect(),
             storage:self.storage.clone() };

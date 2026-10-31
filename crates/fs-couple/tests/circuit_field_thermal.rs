@@ -5,7 +5,9 @@ use fs_couple::circuit_enthalpy::{
     field_storage::{self, FieldThermalBinding},
     material::{CellResistor, MaterialCell, MaterialNetwork},
 };
-use fs_couple::material_circuit::storage::{MaterialStorage, MaterialStorageElement};
+use fs_couple::material_circuit::storage::{
+    MaterialMagneticCoupling, MaterialStorage, MaterialStorageElement,
+};
 use fs_couple::material_circuit::{MaterialCircuit, MaterialCircuitSolve};
 use fs_evidence::ValidityDomain;
 use fs_matdb::{
@@ -411,6 +413,145 @@ fn mutual_thermal_envelope_capacity_and_shared_owner_refuse_without_mutation() {
         assert_eq!(circuit, saved);
         assert_eq!(thermal.cells(), &thermal_before);
     }
+}
+
+fn source_coupled_initial(
+    material: &MaterialNetwork<'_>, thermal: &DepositionSimulation<'_>, card: &MaterialCard,
+    geometry: f64, constant: f64,
+) -> (MaterialCircuit, Vec<FieldThermalBinding>) {
+    let (base, fields) = coupled_initial(material, thermal, card, geometry + constant);
+    let circuit = MaterialCircuit::new_with_magnetic_coupling(base.graph().clone(),
+        base.resistors().to_vec(), base.storage().to_vec(), vec![],
+        vec![MaterialMagneticCoupling { branches: (0, 2), geometry_m: geometry,
+            constant_h: constant }], base.fluxes_wb().to_vec(), vec![], &[]).unwrap();
+    (circuit, fields)
+}
+
+// Independent common/differential mode thermodynamics. Both eigenvalues now
+// vary with permeability, including M(T)=geometry*mu(T)+constant. No native
+// inverse, source derivative or thermal callback is used by this oracle.
+fn source_mutual_potentials(alpha: f64, geometry: f64, constant: f64,
+    t: f64, flux: [f64; 2]) -> [f64; 3]
+{
+    let mu = 1.0 + alpha * (t - 300.0);
+    let modes = [
+        (flux[0] + flux[1], mu * (1.0 + geometry) + constant, alpha * (1.0 + geometry)),
+        (flux[0] - flux[1], mu * (1.0 - geometry) - constant, alpha * (1.0 - geometry)),
+    ];
+    let mut result = [0.0; 3];
+    for (coordinate, inductance, slope) in modes {
+        result[0] += 0.25 * coordinate * coordinate / inductance;
+        result[1] += 0.25 * slope * (coordinate / inductance).powi(2);
+        result[2] -= 0.5 * t * slope * slope * coordinate * coordinate / inductance.powi(3);
+    }
+    result
+}
+
+#[test]
+fn common_permeability_updates_mutual_storage_entropy_and_finite_heat() {
+    for alpha in [-0.001, 0.001] {
+        // The last two start at M=0 but dM/dT!=0. Their cross entropy must
+        // survive exactly at that zero; there is still one coupled group.
+        for (geometry, constant) in [(0.4, 0.0), (-0.4, 0.0), (0.4, -0.4), (-0.4, 0.4)] {
+            let card = card(true, alpha, 4.0);
+            let caloric = caloric(&card);
+            let thermal = thermal(&caloric, 0.0);
+            let context = point(300.0);
+            let cells = [cell(&card, &caloric, &context)];
+            let resistors = [resistor()];
+            let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+            let (circuit, fields) = source_coupled_initial(&material, &thermal, &card, geometry, constant);
+            let saved = circuit.clone();
+            let dt = 0.2;
+            let endpoint = |t: f64| {
+                let common_l = (1.0 + alpha * (t - 300.0)) * (1.0 + geometry) + constant;
+                let sum = 4.2 * (common_l - dt) / (common_l + dt);
+                [(sum + 3.8) * 0.5, (sum - 3.8) * 0.5]
+            };
+            let potentials = |t, flux| source_mutual_potentials(alpha, geometry, constant, t, flux);
+            let before = potentials(300.0, [4.0, 0.2]);
+            let energy = |t: f64| {
+                let after = potentials(t, endpoint(t));
+                4.0 * (t - 300.0) + after[0] + t * after[1] - before[0] - 300.0 * before[1]
+            };
+            let (mut low, mut high) = (290.0, 340.0);
+            assert!(energy(low) < 0.0 && energy(high) > 0.0);
+            for _ in 0..80 {
+                let middle = f64::midpoint(low, high);
+                if energy(middle) > 0.0 { high = middle; } else { low = middle; }
+            }
+            let expected_t = f64::midpoint(low, high);
+            let expected_flux = endpoint(expected_t);
+            let expected = potentials(expected_t, expected_flux);
+            let next = field_storage::step_candidate(&material, &thermal, dt, &circuit,
+                &[], &fields, &[(1, ElectricalPropertyBasis::Resistivity)],
+                controls(), &[0.0], || false).unwrap();
+            near(next.thermal().temperature_k(CELL).unwrap(), expected_t);
+            for (&actual, expected) in next.circuit().fluxes_wb().iter().zip(expected_flux) { near(actual, expected); }
+            let expected_m = geometry * (1.0 + alpha * (expected_t - 300.0)) + constant;
+            near(next.circuit().mutual_inductance()[0].henries, expected_m);
+            assert_ne!(next.circuit().mutual_inductance(), circuit.mutual_inductance());
+            assert_eq!(next.circuit().magnetic_couplings(), circuit.magnetic_couplings());
+            let source = &next.report().coupled.source;
+            near(source.fields.iter().map(|field| field.state[1].free_energy_j).sum(), expected[0]);
+            near(source.fields.iter().map(|field| field.state[1].entropy_j_k).sum(), expected[1]);
+            near(source.fields.iter().map(|field| field.state[1].heat_capacity_j_k).sum(), expected[2]);
+            near(source.field_internal_energy_j[1], expected[0] + expected_t * expected[1]);
+            near(next.report().total_energy_residual_j, 0.0);
+            near(next.thermal().energy_j() + source.field_internal_energy_j[1],
+                thermal.energy_j() + source.field_internal_energy_j[0]);
+            let common_l = (1.0 + alpha * (expected_t - 300.0)) * (1.0 + geometry) + constant;
+            let voltage = -(4.2 + expected_flux[0] + expected_flux[1]) / (2.0 * common_l);
+            near(next.report().coupled.deposited_joule_j, dt * voltage * voltage);
+            // Individual signed partitions also obey their own derivatives.
+            // The determinant formula is independent of production Q*A code.
+            let psi_branch = |t: f64, slot: usize| {
+                let l = 1.0 + alpha * (t - 300.0);
+                let m = geometry * l + constant;
+                0.5 * expected_flux[slot]
+                    * (l * expected_flux[slot] - m * expected_flux[1 - slot]) / (l * l - m * m)
+            };
+            let h = 0.02;
+            for (slot, field) in source.fields.iter().enumerate() {
+                let (below, at, above) = (psi_branch(expected_t - h, slot),
+                    psi_branch(expected_t, slot), psi_branch(expected_t + h, slot));
+                near(field.state[1].entropy_j_k, -(above - below) / (2.0 * h));
+                near(field.state[1].heat_capacity_j_k, -expected_t * (above - 2.0 * at + below) / (h * h));
+            }
+            assert_eq!(circuit, saved);
+            assert_eq!(thermal.time_s(), 0.0);
+            assert!(matches!(field_storage::step_candidate(&material, &thermal, dt, &circuit,
+                &[], &fields, &[(1, ElectricalPropertyBasis::Resistivity)],
+                controls(), &[0.0], || true), Err(CircuitEnthalpyError::Cancelled)));
+            assert_eq!(circuit, saved);
+            // A different report order must leave the physical endpoint fixed.
+            let mut reversed = fields;
+            reversed.reverse();
+            let replay = field_storage::step_candidate(&material, &thermal, dt, &circuit,
+                &[], &reversed, &[(1, ElectricalPropertyBasis::Resistivity)],
+                controls(), &[0.0], || false).unwrap();
+            near(replay.thermal().temperature_k(CELL).unwrap(), expected_t);
+        }
+    }
+}
+
+#[test]
+fn changing_mutual_inductance_is_admitted_over_the_entire_thermal_envelope() {
+    let card = card(true, 0.004, 1000.0);
+    let caloric = caloric(&card);
+    let thermal = thermal(&caloric, 0.0);
+    let context = point(300.0);
+    let cells = [cell(&card, &caloric, &context)];
+    let resistors = [resistor()];
+    let material = MaterialNetwork { cells: &cells, resistors: &resistors, links: &[] };
+    // M(300)=0 admits the initial state, but at 500 K M=2.4 H > L=1.8 H.
+    let (circuit, fields) = source_coupled_initial(&material, &thermal, &card, 3.0, -3.0);
+    let saved = circuit.clone();
+    let result = field_storage::step_candidate(&material, &thermal, 0.2, &circuit,
+        &[], &fields, &[(1, ElectricalPropertyBasis::Resistivity)], controls(), &[0.0], || false);
+    assert!(matches!(result, Err(CircuitEnthalpyError::Circuit(_))));
+    assert_eq!(circuit, saved);
+    assert_eq!(thermal.time_s(), 0.0);
 }
 
 // Independent closed-form native RC/RL midpoint decay and total-U equation.

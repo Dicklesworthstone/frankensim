@@ -35,6 +35,7 @@ impl<C: PlanarConductorMaterial> ConductionCircuit<C> {
         FieldCircuitView {
             graph: &self.graph,
             mutual: &[],
+            magnetic_couplings: &[],
             storage: &self.storage,
             charges_c: &self.charges_c,
             fluxes_wb: &self.fluxes_wb,

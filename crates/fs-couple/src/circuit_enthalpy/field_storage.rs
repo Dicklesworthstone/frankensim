@@ -11,7 +11,8 @@
 //! globally affine source coefficients and fixed-density solid caloric charts.
 //! Signed mutual inductance is retained when each connected winding group has
 //! one shared material temperature. Its full inverse-L energy supplies entropy
-//! and capacity; the mutual coefficients themselves remain fixed.
+//! and capacity. Mutual coefficients may be held or derive from that same
+//! source-selected permeability through fixed authored magnetic overlap.
 //! It does not model hysteresis, dielectric relaxation, changing field geometry,
 //! phase transitions or spatially resolved magnetic-field reassembly.
 
@@ -25,7 +26,9 @@ use super::{
     DrivenCoefficients, coupled_driver_candidate, finite,
     material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample},
 };
-use crate::material_circuit::storage::{MaterialStorage, MaterialStorageElement};
+use crate::material_circuit::storage::{
+    MaterialMagneticCoupling, MaterialStorage, MaterialStorageElement,
+};
 use crate::material_circuit::{MaterialCircuit, MaterialCircuitStep};
 use fs_material::{
     conductor::ElectricalPropertyBasis,
@@ -46,8 +49,9 @@ use std::{cell::RefCell, collections::BTreeMap};
 /// Every capacitor and inductor requires a binding, including constant laws.
 /// Several field branches may occupy the same whole material cell; its caloric
 /// inventory is counted exactly once. Every mutually coupled winding component
-/// must share that cell and one temperature envelope. Constant signed M and
-/// source-derived affine self L(T) then define one joint magnetic free energy.
+/// must share that cell and one temperature envelope. Affine source-derived
+/// self and mutual L(T) then define one joint magnetic free energy. Explicitly
+/// held mutual coefficients remain supported by the same owner.
 pub struct FieldThermalBinding {
     pub branch: usize,
     pub cell: CellId,
@@ -232,6 +236,7 @@ fn volume(value: &ThermalFieldElement) -> f64 {
 pub(crate) struct FieldCircuitView<'a> {
     pub graph: &'a CircuitGraph,
     pub mutual: &'a [MutualInductance],
+    pub magnetic_couplings: &'a [MaterialMagneticCoupling],
     pub storage: &'a [MaterialStorage],
     pub charges_c: &'a [f64],
     pub fluxes_wb: &'a [f64],
@@ -241,6 +246,7 @@ impl<'a> From<&'a MaterialCircuit> for FieldCircuitView<'a> {
         Self {
             graph: circuit.graph(),
             mutual: circuit.mutual_inductance(),
+            magnetic_couplings: circuit.magnetic_couplings(),
             storage: circuit.storage(),
             charges_c: circuit.charges_c(),
             fluxes_wb: circuit.fluxes_wb(),
@@ -441,7 +447,7 @@ fn admit(
             ));
         }
     }
-    let inverse = mutual.inverse(circuit.graph, cancel)?;
+    let inverse = mutual.inverse(circuit.graph, circuit.mutual, cancel)?;
     let temperatures: Vec<_> = result.iter().map(|value| value.temperature_k).collect();
     let mut states: Vec<_> = result.iter().map(|value| value.state).collect();
     mutual.apply(circuit.graph, bindings, &inverse, &initial, &temperatures, &mut states, cancel)?;
@@ -509,7 +515,7 @@ impl<'a> PreparedFieldThermal<'a> {
             ));
         }
         let endpoints = coordinates(&endpoint)?;
-        self.mutual.check_links(endpoint.mutual)?;
+        self.mutual.check_links(&endpoint)?;
         let initial_coordinates: BTreeMap<_, _> = self.bindings.iter().zip(&self.initial)
             .map(|(binding, initial)| (binding.branch, initial.coordinate)).collect();
         let temperatures: Vec<_> = samples.iter().map(|sample| sample.temperature_k()).collect();
@@ -530,7 +536,7 @@ impl<'a> PreparedFieldThermal<'a> {
                 endpoint_states.push(sample.state(coordinate).map_err(field)?);
             }
         }
-        let inverse = self.mutual.inverse(endpoint.graph, cancel)?;
+        let inverse = self.mutual.inverse(endpoint.graph, endpoint.mutual, cancel)?;
         self.mutual.apply(endpoint.graph, self.bindings, &inverse, &initial_coordinates,
             &temperatures, &mut frozen_states, cancel)?;
         self.mutual.apply(endpoint.graph, self.bindings, &inverse, &endpoints,

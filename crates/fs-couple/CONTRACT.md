@@ -5198,19 +5198,21 @@ contact, conductivity and finite-enthalpy trials use that same full storage
 `lambda^T L^-1 lambda/2`; independently computed branch Joule heat is deposited
 once. Rebinding contacts cannot remove the magnetic coupling.
 
-A source-bound self-inductance update retains total linkage and mutual
-coefficients, readmits the complete matrix, and reports the full change in
-magnetic energy as parameter work. Signed branch contributions
+A source-bound inductance update retains total linkage, readmits the complete
+matrix, and reports the full change in magnetic energy as parameter work.
+Explicitly held mutual coefficients remain fixed; source-governed mutual
+coefficients refresh through the same selected permeability as their windings.
+Signed branch contributions
 `lambda_i*i_i/2` sum to that shared-field energy; they are not independent
 positive stores. The scalar moving-gap adapter refuses motion of a mutually
 coupled winding until a shared geometry-dependent inductance law owns its force
 and work. Fixed mutual coupling elsewhere in a moving-gap circuit is retained.
 
-Coupling values are explicit linear parameters; material names do not infer
-core geometry, temperature-dependent M, saturation, hysteresis or skin/proximity
-effects. The independent-branch thermal field-entropy adapter refuses nonzero
-M until a shared magnetic entropy/capacity law is supplied; ordinary fixed-L/M
-Joule heating and temperature-dependent resistivity remain supported.
+Coupling geometry is explicit; material names do not infer field overlap,
+saturation, hysteresis or skin/proximity effects. The shared-temperature field
+adapter below supplies full mutual magnetic entropy and capacity when one
+caloric cell owns each connected winding group. Ordinary fixed-L/M Joule
+heating and temperature-dependent resistivity remain supported.
 Synthetic G1/G3 regressions compare signed coupled-RL midpoint
 solutions, contact heating, full inverse-matrix parameter work and repeated
 finite-temperature feedback against independent algebraic energy balances.
@@ -7613,7 +7615,12 @@ Focused authored RC/RL fixtures cover both thermal coefficient signs, exact cons
 The same prepared field/enthalpy owner admits signed mutual inductance when
 every connected winding group occupies one whole caloric cell and shares one
 temperature envelope. Self inductances retain their original source-derived
-affine L_i(T); authored mutual entries remain constant. The native scaled SPD
+affine L_i(T). Mutual entries may be held or follow the same source-selected
+permeability through `MaterialMagneticCoupling`: M_ij(T)=G_ij*mu(T)+M_fixed.
+Signed G is authored fixed field-overlap geometry [m], and M_fixed is explicit
+temperature-independent coupling [H]. No winding shape or overlap is inferred
+from a material name. Both winding sources must agree on immutable card,
+actual typed context and selected permeability claim. The native scaled SPD
 inductance owner supplies Q=L^-1. For A=dL/dT and i=Q lambda, the shared field
 uses psi=lambda.i/2, s=i.A.i/2, U=psi+Ts and
 C_lambda=-T (Ai).Q.(Ai). Native electrical effort remains the gradient of psi.
@@ -7631,8 +7638,11 @@ Endpoint SPD admission covers the complete affine matrix interval. An
 endpoint inverse spectral-norm bound supplies a conservative joint capacity
 floor under every declared flux-linkage bound; all groups and independent
 fields share the cell's caloric floor once. The original direct/contact/heat
-and composed thermal adapters use this same admission and account. Different
-temperatures within a mutual group, temperature-varying mutual entries,
+and composed thermal adapters use this same admission and account. The full
+symmetric A=dL/dT includes source-derived off-diagonal entries; its absolute
+row norm bounds the capacity contribution. Source-governed links remain in
+their connected group when M crosses zero, because dM/dT and cross entropy
+can remain nonzero there. Different temperatures within a mutual group,
 non-affine magnetic laws, hysteresis and moving magnetic geometry still need
 their own shared constitutive model. This is an analytic model bound with
 numerical padding, not a validated interval certificate.
@@ -7642,7 +7652,21 @@ signs, both thermal slopes, constant-law recovery, signed branch energy,
 finite-temperature decay, Joule/reversible heat, closed total internal energy,
 entropy increase and binding-order invariance. Envelope loss of SPD, insufficient
 combined capacity and separate thermal ownership refuse without mutation.
-Native execution remains unverified on the resource-saturated shared host.
+
+`MaterialCircuit::new_with_magnetic_coupling` attaches this source model to the
+existing circuit; resistor/contact steps and all shared finite-heat adapters
+retain it. Explicit storage rebinds can replace both winding material sources
+together at fixed linkage and report the full inverse-matrix parameter work.
+Thermal trials additionally retain their original immutable source laws,
+geometry and common caloric owner. Prepared derivative blocks are reused
+across the nonlinear temperature solve; native matrix admission remains the
+only inverse/positive-definiteness implementation.
+
+Additional independent mode oracles cover both mutual slopes, initial M=0 with
+nonzero dM/dT, individual potential derivatives, finite-heat energy roots,
+binding permutation and loss of matrix positivity only at a thermal bound.
+Exact-nightly syntax parsing and independent numerical derivative/energy checks
+are distinct from native execution, which remains unverified on this host.
 
 ### Implicit conservative homogeneous reaction extent
 
