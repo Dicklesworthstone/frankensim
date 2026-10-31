@@ -8,6 +8,8 @@
 pub mod observer;
 /// Source-resolved coolant assemblies for original coupled physics drivers.
 pub mod assembly;
+/// Prescribed fluid reservoirs around a complete heat assembly.
+pub mod composition;
 /// Source-resolved cooling on the shared material-memory/mechanical timeline.
 pub mod relaxation;
 

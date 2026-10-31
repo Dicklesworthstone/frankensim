@@ -3,6 +3,8 @@ use super::*;
 
 #[path = "heat_network/finite_links.rs"]
 mod finite_links;
+#[path = "heat_network/composition.rs"]
+mod composition;
 use fs_airflow::graph::thermal::medium::convection::deposition::source::heat::{
     ConvectionHeatError, SourceConvectionHeatNetwork,
 };
