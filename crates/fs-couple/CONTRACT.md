@@ -16952,3 +16952,45 @@ and a displaced-fluid closure are not inferred. The original sphere API shares
 the same owner and retains its original film path. Tests cover analytical rotated
 inertia, frame-equivalent populations and motion, SI fluid/body angular balance
 including periodic transport, and state preservation under rebind and refusal.
+
+## Native circuit dielectric absorption and polarization heat
+
+`material_circuit::dielectric::DebyeCircuit` replaces one original capacitor
+placeholder with its source-derived C_inf and appends the source's series RC
+polarization arms without changing original branch indices. Explicit original
+capacitor charges/inductor flux linkages and separate polarization charges enter
+the existing `CircuitDae` consistent initialization unchanged. The prepared
+descriptor is shared across candidates; every step delegates to the original
+audited solver rather than adding a dielectric time integrator.
+
+The source-bound polarization charges carry memory, so a released prepolarized
+capacitor recovers terminal voltage from conserved total charge. Native midpoint
+voltage drops independently determine each process's positive heat. That heat
+is already inside total circuit dissipation and is reported separately from
+other authored resistor losses. Both the dielectric's terminal-work/storage/heat
+account and the complete circuit balance must close within explicit absolute
+budgets. Receiving thermal owners must accept the returned heat with the same
+electrical candidate; it is not fabricated bulk conductivity or automatic
+finite-temperature feedback.
+
+Storage increments use compensated charge/flux changes times midpoint efforts,
+including the midpoint rounding correction; endpoint energies remain diagnostics.
+The dielectric checks its own storage/work/heat account, and an independent sum
+across native capacitors and inductors checks the descriptor's cancellation-stable
+storage increment. Small polarization heat and inductor work remain observable
+below the spacing of a large pre-existing electric energy. The bounded
+polarization endpoint buffer is allocated on the stack.
+
+The complete original dielectric material bundle and fixed geometry remain
+attached. Original other R/L/source/transformer branches retain their authored
+values; the ordinary `MaterialCircuit` conductor-only resistor binding is not
+relabelled to accept polarization friction. Nonphysical parameters, bounded
+graph/state overflows, inconsistent ideal-source impulses and cancellation
+refuse before publication. Time accuracy needs relaxation-scale resolution and
+step refinement independently of algebraic energy checks. No switching impulse,
+dielectric heating feedback, variable geometry, saturation or breakdown follows.
+G1/G3/G4 `tests/dielectric_circuit.rs` checks voltage-clamped multipole relaxation,
+open-circuit absorption with charge conservation, second-order refinement,
+current-driven frequency/time agreement and loss, the zero-memory native RLC
+limit, separate load heat, small polarization and inductor work under a large
+held bias, and atomic refusal. All materials are synthetic.

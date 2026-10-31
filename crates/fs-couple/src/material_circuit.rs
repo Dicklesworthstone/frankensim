@@ -22,6 +22,8 @@ pub mod piezoelectric;
 pub mod magnetostrictive;
 /// Voltage-driven magnetic memory and core heating through native circuit ports.
 pub mod hysteretic;
+/// Source-backed dielectric polarization memory on the native circuit solver.
+pub mod dielectric;
 use contacts::{SeriesElectricalContact, ContactHeat};
 
 use fs_material::conductor::{ConductorError, OhmicDrive, ResolvedConductor};
