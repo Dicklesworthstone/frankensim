@@ -19,6 +19,8 @@ use fs_qty::{Density, Dims, Pressure, QuantitySpec};
 
 /// Affine stored-tensor thermodynamics with original material source paths.
 pub mod thermal;
+mod kelvin;
+pub use kelvin::{ResolvedKelvinViscosity, TensorKelvinViscosityProperties};
 
 /// Canonical equilibrium elastic data, before any spatial rotation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -86,6 +88,7 @@ pub struct ResolvedTensorMaterial {
     properties: TensorPronyProperties,
     law: TensorProny,
     density_kg_m3: f64,
+    kelvin: Option<ResolvedKelvinViscosity>,
 }
 
 impl ResolvedTensorMaterial {
@@ -142,6 +145,7 @@ impl ResolvedTensorMaterial {
             properties,
             law,
             density_kg_m3,
+            kelvin: None,
         })
     }
 
@@ -150,14 +154,18 @@ impl ResolvedTensorMaterial {
     /// constitutive history, changes specimen mass, or supplies thermal work.
     /// Those operations belong to the consuming evolution owner.
     pub fn at_query_point(&self, card: &MaterialCard, point: &QueryPoint) -> Result<Self> {
-        Self::from_state(
+        let mut refreshed = Self::from_state(
             self.state.at_query_point(card, point)?,
             self.properties.clone(),
-        )
+        )?;
+        if let Some(kelvin) = &self.kelvin {
+            refreshed = refreshed.bind_kelvin(kelvin.at_query_point(card, point)?)?;
+        }
+        Ok(refreshed)
     }
 
-    /// Admit the bounded thermal model in which ONLY Maxwell relaxation times
-    /// depend on temperature. Stored elastic tensors, strain bounds and reference
+    /// Admit the bounded thermal model in which Maxwell times and Kelvin
+    /// viscosity may depend on temperature. Stored elastic tensors, strain bounds and reference
     /// density must be validity-wide scalar constants, not two equal samples of
     /// a varying law. There is then no mechanical entropy or coefficient-work
     /// contribution: temperature changes the dissipative kinetics only.
@@ -264,6 +272,7 @@ impl ResolvedTensorMaterial {
                 .map_err(|e| invalid(&e.to_string()))?;
             self.at_query_point(card, &point)?;
         }
+        self.admit_kelvin_thermal_interval(card, temperature_axis, interval_k)?;
         Ok(())
     }
 

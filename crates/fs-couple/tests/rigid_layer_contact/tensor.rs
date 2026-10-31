@@ -17,7 +17,8 @@ use fs_material::state_point::{
 use fs_material::visco_tensor::{
     TensorProjectionBudget,
     source::{
-        ResolvedTensorMaterial, TensorBranchProperties, TensorElasticity, TensorPronyProperties,
+        ResolvedTensorMaterial, TensorBranchProperties, TensorElasticity,
+        TensorKelvinViscosityProperties, TensorPronyProperties,
     },
 };
 use fs_qty::{Density, Dims, DynViscosity, Pressure, Temperature, Time};
@@ -36,6 +37,9 @@ struct Fixture {
     material: ResolvedTensorMaterial,
 }
 fn fixture(softening: bool) -> Fixture {
+    fixture_with_kelvin(softening, false)
+}
+fn fixture_with_kelvin(softening: bool, kelvin: bool) -> Fixture {
     let mut claims = ClaimSet::new();
     let mut add = |name: &str, dims: Dims, value: f64, curve: Option<Vec<(f64, f64)>>| {
         let interpolation = if curve.is_some() {
@@ -122,6 +126,27 @@ fn fixture(softening: bool) -> Fixture {
             names.push(name);
         }
     }
+    let viscosity_names: [String; 21] = std::array::from_fn(|i| format!("viscosity_{i:02}"));
+    if kelvin {
+        let factor = [0.0, 0.0, 0.0, 0.2, 0.0, -0.1];
+        let mut entry = 0;
+        for i in 0..6 {
+            for j in i..6 {
+                let value = factor[i] * factor[j];
+                add(
+                    &viscosity_names[entry],
+                    DynViscosity::DIMS,
+                    value,
+                    Some(vec![
+                        (280.0, 0.5 * value),
+                        (300.0, value),
+                        (320.0, 1.5 * value),
+                    ]),
+                );
+                entry += 1;
+            }
+        }
+    }
     let card = MaterialCard::assemble(
         MaterialStateId {
             chemistry: "manufactured tensor".into(),
@@ -133,7 +158,7 @@ fn fixture(softening: bool) -> Fixture {
         vec![],
     )
     .unwrap();
-    let material = ResolvedTensorMaterial::resolve(
+    let mut material = ResolvedTensorMaterial::resolve(
         &card,
         &point(300.0),
         TensorPronyProperties {
@@ -147,6 +172,17 @@ fn fixture(softening: bool) -> Fixture {
         MaterialPropertySelection::SingleClaimOnly,
     )
     .unwrap();
+    if kelvin {
+        material = material
+            .with_kelvin_viscosity(
+                &card,
+                TensorKelvinViscosityProperties {
+                    viscosity_upper: viscosity_names,
+                },
+                MaterialPropertySelection::SingleClaimOnly,
+            )
+            .unwrap();
+    }
     let caloric = ResolvedHeatCapacityCurve::try_new(
         &card,
         HeatCapacitySourceQuery {
@@ -256,7 +292,16 @@ fn solve(a: [[f64; 2]; 2], b: [f64; 2]) -> [f64; 2] {
 
 #[test]
 fn g1_original_tensor_source_changes_actual_face_momenta_memory_and_finite_heat() {
-    let f = fixture(false);
+    assert_tensor_source_run(false);
+}
+
+#[test]
+fn g1_kelvin_source_changes_actual_rigid_momenta_and_heat_at_the_same_trial_temperature() {
+    assert_tensor_source_run(true);
+}
+
+fn assert_tensor_source_run(kelvin: bool) {
+    let f = fixture_with_kelvin(false, kelvin);
     let angle = 0.4;
     let material = bind(&f, angle).unwrap();
     let heat = inventory(&f);
@@ -264,6 +309,7 @@ fn g1_original_tensor_source_changes_actual_face_momenta_memory_and_finite_heat(
     let (_, law) = material.at_temperature(300.0).unwrap();
     let expected_k = rotated([[9.0, 0.0], [0.0, 4.0]], angle);
     let expected_arm = rotated([[2.0, 1.0], [1.0, 0.5]], angle);
+    let expected_c = rotated([[0.02, -0.01], [-0.01, 0.005]], angle);
     for i in 0..2 {
         for j in 0..2 {
             close(law.stiffness_tensor_n_m()[i][j], expected_k[i][j], 2e-13);
@@ -272,6 +318,13 @@ fn g1_original_tensor_source_changes_actual_face_momenta_memory_and_finite_heat(
                 expected_arm[i][j],
                 2e-13,
             );
+            if kelvin {
+                close(
+                    law.tensor_kelvin_viscosity().unwrap().matrix_n_s_m()[i][j],
+                    expected_c[i][j],
+                    2e-15,
+                );
+            }
         }
     }
     let history = RigidLayerHistory::new(&law, geometry(), 0.0).unwrap();
@@ -309,8 +362,14 @@ fn g1_original_tensor_source_changes_actual_face_momenta_memory_and_finite_heat(
     let theta = report.heat.layer_temperature_k - 300.0;
     let tau = 0.2 + 0.005 * theta;
     let w = 1.0 / (1.0 + dt / (2.0 * tau));
-    let effective =
-        std::array::from_fn(|i| std::array::from_fn(|j| expected_k[i][j] + w * expected_arm[i][j]));
+    let viscosity_scale = if kelvin { 1.0 + 0.025 * theta } else { 0.0 };
+    let effective = std::array::from_fn(|i| {
+        std::array::from_fn(|j| {
+            expected_k[i][j]
+                + w * expected_arm[i][j]
+                + 2.0 * viscosity_scale * expected_c[i][j] / dt
+        })
+    });
     let a = std::array::from_fn(|i| {
         std::array::from_fn(|j| {
             if i == j {
@@ -334,9 +393,28 @@ fn g1_original_tensor_source_changes_actual_face_momenta_memory_and_finite_heat(
     ];
     let mid = slip.map(|v| 0.5 * w * v);
     let memory_force = product(expected_arm, mid);
-    let dissipation = dt / tau * (mid[0] * memory_force[0] + mid[1] * memory_force[1]);
+    let viscous_force = product(expected_c, slip).map(|v| viscosity_scale * v / dt);
+    let kelvin_heat = slip[0] * viscous_force[0] + slip[1] * viscous_force[1];
+    let dissipation =
+        dt / tau * (mid[0] * memory_force[0] + mid[1] * memory_force[1]) + kelvin_heat;
     close(report.heat.dissipated_j, dissipation, 3e-10);
     assert!(dissipation > 0.0);
+    if kelvin {
+        assert!(kelvin_heat > 0.0);
+        let source = report.source.material.kelvin_source().unwrap();
+        close(
+            source.state().state_coordinate("T").unwrap(),
+            report.heat.layer_temperature_k,
+            1e-14,
+        );
+        close(
+            report.source.material.law().kv_pa_s().unwrap()[3][3],
+            0.04 * viscosity_scale,
+            1e-15,
+        );
+        assert_eq!(source.state().card_identity(), f.card.content_hash());
+        assert_eq!(source.state().properties().len(), 21);
+    }
     let g = [0.8, 2.0 / 3.0];
     let capacity = CAP[2]
         + dt * g[0] * CAP[0] / (CAP[0] + dt * g[0])

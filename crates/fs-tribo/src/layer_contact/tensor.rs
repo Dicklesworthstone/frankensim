@@ -1,10 +1,12 @@
-//! Full two-axis stored shear response on the original layer law.
+//! Full two-axis recoverable and viscous shear on the original layer law.
 //!
 //! Each equilibrium/Maxwell spring retains its own tensor; different arms
 //! need not share principal directions. The plastic branch is explicitly the
 //! original isotropic Bingham law, not an inferred anisotropic yield surface.
 //! The held-coefficient midpoint balance is unchanged. One bounded scalar
 //! plastic compliance solves the tensor return without dropping cross terms.
+//! Kelvin viscosity acts on the recoverable shear rate in parallel with those
+//! springs, before the series plastic slider. It has no stored state or energy.
 
 use super::*;
 use crate::tangential::transport::{TangentialHistoryRotation, TangentialTransportConfig};
@@ -80,6 +82,32 @@ impl ShearStiffness {
     }
 }
 
+/// Positive-semidefinite Kelvin shear viscosity in N s/m, retaining the original
+/// Gram rows in sqrt(N s/m). This is a rate law, never a stored spring.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ShearViscosity {
+    factor: ShearStiffness,
+}
+impl ShearViscosity {
+    /// At most six physical rows; zero and rank-deficient viscosity are valid.
+    pub fn from_gram_rows(rows: Vec<[f64; 2]>) -> Result<Self, TriboError> {
+        Ok(Self {
+            factor: ShearStiffness::from_gram_rows(rows)?,
+        })
+    }
+    pub const fn matrix_n_s_m(&self) -> [[f64; 2]; 2] {
+        self.factor.matrix
+    }
+    pub fn gram_rows(&self) -> &[[f64; 2]] {
+        &self.factor.rows
+    }
+    fn rotated(&self, rotation: TangentialHistoryRotation) -> Result<Self, TriboError> {
+        Ok(Self {
+            factor: self.factor.rotated(rotation)?,
+        })
+    }
+}
+
 /// One original Maxwell tensor and relaxation time; branch order is retained.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TensorLayerRelaxationArm {
@@ -90,6 +118,7 @@ pub struct TensorLayerRelaxationArm {
 pub(super) struct TensorLayerPotential {
     equilibrium: ShearStiffness,
     pub(super) arms: Vec<TensorLayerRelaxationArm>,
+    viscosity: Option<ShearViscosity>,
 }
 
 /// A joint zero-work re-expression of the constitutive tensors and all history.
@@ -129,8 +158,32 @@ impl ThirdBodyLayerContact {
             temperature_kelvin,
             maximum_elastic_slip_m,
         )?;
-        law.tensor = Some(TensorLayerPotential { equilibrium, arms });
+        law.tensor = Some(TensorLayerPotential {
+            equilibrium,
+            arms,
+            viscosity: None,
+        });
         Ok(law)
+    }
+    /// Add the original Kelvin rate tensor to this tensor material. Its strain
+    /// increment is total shear minus plastic shear; applying it to total slip
+    /// would change the network topology and double count plastic dissipation.
+    pub fn with_kelvin_viscosity(mut self, viscosity: ShearViscosity) -> Result<Self, TriboError> {
+        let tensor = self
+            .tensor
+            .as_mut()
+            .ok_or_else(|| invalid("layer_kelvin_requires_tensor_owner"))?;
+        if tensor.viscosity.is_some() {
+            return Err(invalid("layer_kelvin_already_bound"));
+        }
+        tensor.viscosity = Some(viscosity);
+        Ok(self)
+    }
+    /// Complete rate tensor, absent for a law without Kelvin viscosity.
+    pub fn tensor_kelvin_viscosity(&self) -> Option<&ShearViscosity> {
+        self.tensor
+            .as_ref()
+            .and_then(|value| value.viscosity.as_ref())
     }
     /// Complete equilibrium tensor in the checkpoint's tangent coordinates.
     pub fn stiffness_tensor_n_m(&self) -> [[f64; 2]; 2] {
@@ -232,7 +285,7 @@ impl ThirdBodyLayerContact {
                 stored_energy_residual_j: 0.0,
             });
         }
-        let law = Self::new_tensor(
+        let mut law = Self::new_tensor(
             potential.equilibrium.rotated(rotation)?,
             potential
                 .arms
@@ -249,6 +302,9 @@ impl ThirdBodyLayerContact {
             self.temperature_kelvin,
             self.maximum_elastic_slip_m,
         )?;
+        if let Some(viscosity) = &potential.viscosity {
+            law = law.with_kelvin_viscosity(viscosity.rotated(rotation)?)?;
+        }
         let transformed = ThirdBodyLayerState {
             elastic_slip_m: rotation.apply(state.elastic_slip_m)?,
             plastic_slip_m: rotation.apply(state.plastic_slip_m)?,
@@ -320,9 +376,19 @@ impl ThirdBodyLayerContact {
         }
         nonnegative_finite(plastic_j, "layer_plastic_dissipation_j")?;
         nonnegative_finite(relaxation_j, "layer_relaxation_heat_j")?;
+        let delta = [
+            new.elastic_slip_m[0] - old.elastic_slip_m[0],
+            new.elastic_slip_m[1] - old.elastic_slip_m[1],
+        ];
+        let kelvin_j = potential
+            .viscosity
+            .as_ref()
+            .map_or(0.0, |c| c.factor.quadratic(delta) / dt_s);
+        nonnegative_finite(kelvin_j, "layer_kelvin_heat_j")?;
         Ok(ThirdBodyLayerDissipation {
             plastic_j,
             relaxation_j,
+            kelvin_j,
         })
     }
 
@@ -369,6 +435,15 @@ impl ThirdBodyLayerContact {
                 history[i] = checked_add(history[i], weight * force[i], "layer_history_force_n")?;
             }
             weights.push(weight);
+        }
+        // F = history + (K_eff/2 + C/dt) Delta_e, with
+        // Delta_e = free_slip - (body_compliance + plastic_compliance) F.
+        // Keeping 2*C/dt inside the existing half-stiffness return preserves
+        // all noncommuting tensor cross terms and the same scalar solve.
+        if let Some(c) = &potential.viscosity {
+            if c.factor.matrix.iter().flatten().any(|&v| v != 0.0) {
+                effective = add(effective, c.factor.matrix, 2.0 / input.dt_s)?;
+            }
         }
         let free = apply(effective, input.slip_increment_m);
         let rhs = [history[0] + 0.5 * free[0], history[1] + 0.5 * free[1]];
@@ -454,6 +529,12 @@ impl ThirdBodyLayerContact {
             state.elastic_slip_m[1] + 0.5 * delta[1],
         ];
         let mut midpoint_force = apply(potential.equilibrium.matrix, elastic_mid);
+        if let Some(c) = &potential.viscosity {
+            let viscous_force = apply(c.factor.matrix, delta);
+            for i in 0..2 {
+                midpoint_force[i] += viscous_force[i] / input.dt_s;
+            }
+        }
         for (j, arm) in potential.arms.iter().enumerate() {
             let mid = [
                 weights[j] * (state.relaxation_slip_m[j][0] + 0.5 * delta[0]),
@@ -486,7 +567,11 @@ impl ThirdBodyLayerContact {
         nonnegative_finite(new, "layer_new_energy_j")?;
         let stored_change_j = new - old;
         let loss = self.tensor_dissipation(state, &candidate, input.dt_s)?;
-        let dissipated_j = checked_add(loss.plastic_j, loss.relaxation_j, "layer_dissipated_j")?;
+        let dissipated_j = checked_add(
+            checked_add(loss.plastic_j, loss.relaxation_j, "layer_dissipated_j")?,
+            loss.kelvin_j,
+            "layer_dissipated_j",
+        )?;
         let closure_residual_j = stored_change_j + dissipated_j - dot(force, slip);
         finite(closure_residual_j, "layer_closure_residual_j")?;
         Ok(TangentialStep {

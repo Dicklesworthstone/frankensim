@@ -1,4 +1,5 @@
 //! G0/G3: complete material-card data, source domains and original tensor laws.
+mod kelvin;
 use super::*;
 use crate::state_point::{MaterialPropertySelection, resolve_material_state_point};
 use fs_evidence::ValidityDomain;

@@ -1,5 +1,5 @@
 //! Manufactured tensor materials verify operators, not measured rosin or wood.
-use fs_tribo::layer_contact::tensor::{ShearStiffness, TensorLayerRelaxationArm};
+use fs_tribo::layer_contact::tensor::{ShearStiffness, ShearViscosity, TensorLayerRelaxationArm};
 use fs_tribo::layer_contact::{ThirdBodyLayerContact, ThirdBodyLayerRelaxationArm};
 use fs_tribo::partial_slip::TangentFrame;
 use fs_tribo::tangential::transport::{
@@ -314,4 +314,192 @@ fn g0_invalid_tensor_thermal_law_and_exhausted_return_refuse_without_mutation() 
     )
     .unwrap();
     assert!(kinetics.continue_state(&state).is_ok());
+}
+
+#[test]
+fn g1_kelvin_force_matches_independent_tensor_load_line_and_has_no_storage() {
+    let k = [[800.0, 70.0], [70.0, 500.0]];
+    let c = [[4.0, -2.0], [-2.0, 10.0]];
+    let law = ThirdBodyLayerContact::new_tensor(
+        ShearStiffness::positive_definite(k).unwrap(),
+        vec![],
+        1000.0,
+        1.0,
+        300.0,
+        1.0,
+    )
+    .unwrap()
+    .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![[2.0, -1.0], [0.0, 3.0]]).unwrap())
+    .unwrap();
+    let x = input([0.003, -0.001], 0.001, 0.0002);
+    let a: [[f64; 2]; 2] =
+        core::array::from_fn(|i| core::array::from_fn(|j| 0.5 * k[i][j] + c[i][j] / x.dt_s));
+    let matrix = core::array::from_fn(|i| {
+        core::array::from_fn(|j| (if i == j { 1.0 } else { 0.0 }) + x.compliance_m_per_n * a[i][j])
+    });
+    let expected = solve(matrix, product(a, x.slip_increment_m));
+    let before = law.initial_state();
+    let step = law.advance(&before, &x).unwrap();
+    for i in 0..2 {
+        close(step.traction_n[i], expected[i], 8e-15);
+    }
+    let e = step.state.elastic_slip_m();
+    let ce = product(c, e);
+    let ke = product(k, e);
+    let heat = law.step_dissipation(&before, &step.state, x.dt_s).unwrap();
+    close(heat.kelvin_j, (e[0] * ce[0] + e[1] * ce[1]) / x.dt_s, 1e-17);
+    close(
+        law.stored_energy_j(&step.state),
+        0.5 * (e[0] * ke[0] + e[1] * ke[1]),
+        1e-18,
+    );
+    close(step.dissipated_j, heat.kelvin_j, 1e-18);
+    close(step.closure_residual_j, 0.0, 2e-17);
+}
+
+#[test]
+fn g1_kelvin_uses_recoverable_rate_in_series_with_plastic_flow_and_maxwell_memory() {
+    let rows = vec![[0.18, -0.07], [0.03, 0.12]];
+    let law = model(0.1)
+        .with_kelvin_viscosity(ShearViscosity::from_gram_rows(rows.clone()).unwrap())
+        .unwrap();
+    let mut state = law.initial_state();
+    let (mut work, mut heat, mut topology_difference) = (0.0, 0.0, 0.0);
+    for i in 0..160 {
+        let angle = 0.29 * i as f64;
+        let x = input([0.0005 * angle.cos(), 0.0004 * angle.sin()], 0.0005, 0.0001);
+        let step = law.advance(&state, &x).unwrap();
+        let delta: [f64; 2] =
+            core::array::from_fn(|j| step.state.elastic_slip_m()[j] - state.elastic_slip_m()[j]);
+        let quadratic = |v: [f64; 2]| {
+            rows.iter()
+                .map(|r| (r[0] * v[0] + r[1] * v[1]).powi(2))
+                .sum::<f64>()
+                / x.dt_s
+        };
+        let channels = law.step_dissipation(&state, &step.state, x.dt_s).unwrap();
+        close(channels.kelvin_j, quadratic(delta), 3e-20);
+        close(
+            channels.plastic_j + channels.relaxation_j + channels.kelvin_j,
+            step.dissipated_j,
+            1e-18,
+        );
+        assert!(
+            channels.kelvin_j >= 0.0 && channels.plastic_j >= 0.0 && channels.relaxation_j >= 0.0
+        );
+        topology_difference += (quadratic(step.slip_increment_m) - channels.kelvin_j).abs();
+        work += step.traction_n[0] * step.slip_increment_m[0]
+            + step.traction_n[1] * step.slip_increment_m[1];
+        heat += step.dissipated_j;
+        close(step.closure_residual_j, 0.0, 4e-15);
+        state = step.state;
+    }
+    assert!(
+        topology_difference > 1e-4,
+        "total-slip damping is a different physical network"
+    );
+    close(law.stored_energy_j(&state) + heat, work, 2e-13);
+    // Fixed total shear can still relax through the series slider, so the
+    // recoverable shear rate and its Kelvin heat need not vanish.
+    let hold = law.advance(&state, &input([0.0; 2], 0.0005, 0.0)).unwrap();
+    assert!(
+        law.step_dissipation(&state, &hold.state, 0.0005)
+            .unwrap()
+            .kelvin_j
+            > 0.0
+    );
+}
+
+#[test]
+fn g3_rank_one_kelvin_rotates_with_the_material_and_its_work() {
+    let law = model(0.1)
+        .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![[0.2, -0.1]]).unwrap())
+        .unwrap();
+    let state = law
+        .advance(&law.initial_state(), &input([0.003, 0.001], 0.001, 0.0))
+        .unwrap()
+        .state;
+    let angle = 0.63_f64;
+    let a = TangentFrame::new([0.0, 0.0, 1.0], [1.0, 0.0, 0.0]).unwrap();
+    let b = TangentFrame::new([0.0, 0.0, 1.0], [angle.cos(), angle.sin(), 0.0]).unwrap();
+    let rotation = TangentialHistoryRotation::between(a, b, 0.0).unwrap();
+    let transfer = law
+        .transport_tensor_state(
+            &state,
+            rotation,
+            TangentialTransportConfig {
+                absolute_energy_tolerance_j: 1e-16,
+                relative_energy_tolerance: 1e-13,
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        transfer
+            .law
+            .tensor_kelvin_viscosity()
+            .unwrap()
+            .gram_rows()
+            .len(),
+        1
+    );
+    let slip = [-0.0007, 0.0011];
+    let x = law.advance(&state, &input(slip, 0.001, 0.0001)).unwrap();
+    let y = transfer
+        .law
+        .advance(
+            &transfer.state,
+            &input(rotation.apply(slip).unwrap(), 0.001, 0.0001),
+        )
+        .unwrap();
+    for (expected, actual) in rotation
+        .apply(x.traction_n)
+        .unwrap()
+        .into_iter()
+        .zip(y.traction_n)
+    {
+        close(expected, actual, 4e-12);
+    }
+    let cx = law.step_dissipation(&state, &x.state, 0.001).unwrap();
+    let cy = transfer
+        .law
+        .step_dissipation(&transfer.state, &y.state, 0.001)
+        .unwrap();
+    close(cx.kelvin_j, cy.kelvin_j, 4e-17);
+    close(x.dissipated_j, y.dissipated_j, 4e-15);
+    close(x.stored_change_j, y.stored_change_j, 4e-15);
+}
+
+#[test]
+fn g0_zero_viscosity_preserves_the_existing_return_and_rate_continuation_has_no_coefficient_work() {
+    let original = model(0.1);
+    let zero = original
+        .clone()
+        .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![[0.0; 2]]).unwrap())
+        .unwrap();
+    let x = input([0.003, -0.001], 0.001, 0.0001);
+    let a = original.advance(&original.initial_state(), &x).unwrap();
+    let b = zero.advance(&zero.initial_state(), &x).unwrap();
+    assert_eq!(a.traction_n, b.traction_n);
+    assert_eq!(a.dissipated_j, b.dissipated_j);
+    assert_eq!(a.stored_change_j, b.stored_change_j);
+    let viscous = original
+        .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![[0.2, -0.1]]).unwrap())
+        .unwrap();
+    let continuation = viscous.continue_state_with_work(&a.state).unwrap();
+    assert_eq!(continuation.coefficient_free_energy_change_j, 0.0);
+    assert_eq!(
+        continuation.state.elastic_slip_m(),
+        a.state.elastic_slip_m()
+    );
+    assert_eq!(
+        continuation.state.relaxation_slip_m(),
+        a.state.relaxation_slip_m()
+    );
+    assert!(ShearViscosity::from_gram_rows(vec![[f64::NAN, 0.0]]).is_err());
+    assert!(
+        ThirdBodyLayerContact::new(1.0, 0.1, 1.0, 300.0, 1.0)
+            .unwrap()
+            .with_kelvin_viscosity(ShearViscosity::from_gram_rows(vec![[1.0, 0.0]]).unwrap())
+            .is_err()
+    );
 }

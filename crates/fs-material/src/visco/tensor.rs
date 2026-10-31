@@ -541,6 +541,19 @@ impl TensorProny {
         self.kv_pa_s.as_ref()
     }
 
+    /// Bind a complete Kelvin viscosity tensor in Mandel coordinates [Pa s].
+    /// The existing PSD admission owns its factor; all elastic/memory tensors,
+    /// original strain and frequency limits, and branch order remain unchanged.
+    pub fn with_kelvin_viscosity_mandel(mut self, viscosity: Mandel6) -> Result<Self, ViscoError> {
+        if self.kv_pa_s.is_some() {
+            return Err(ViscoError::Parameters { what: "Kelvin viscosity is already bound" });
+        }
+        let factor = psd_factor(&viscosity)?;
+        self.kv_pa_s = Some(viscosity);
+        self.kv_factor = Some(factor);
+        Ok(self)
+    }
+
     /// Admitted Prony relaxation branches `(C_j, τ_j)`.
     #[must_use]
     pub fn branches(&self) -> &[PronyBranch] {

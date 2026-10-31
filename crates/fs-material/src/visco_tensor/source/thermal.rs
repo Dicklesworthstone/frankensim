@@ -71,6 +71,7 @@ impl AffineTensorThermal {
                 "affine tensor thermodynamics requires a bounded absolute-temperature interval containing the original state",
             ));
         }
+        source.admit_kelvin_thermal_interval(card, temperature_axis, interval_k)?;
         let query = |t| {
             source
                 .state

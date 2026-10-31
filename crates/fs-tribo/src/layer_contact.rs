@@ -42,6 +42,8 @@ pub struct ThirdBodyLayerRelaxationArm {
 pub struct ThirdBodyLayerDissipation {
     pub plastic_j: f64,
     pub relaxation_j: f64,
+    /// Kelvin loss on the recoverable shear strain rate, not plastic slip.
+    pub kelvin_j: f64,
 }
 
 /// Frozen coefficients integrated from layer area and thickness by the source
@@ -315,7 +317,7 @@ impl ThirdBodyLayerContact {
         }
         nonnegative_finite(plastic_j, "layer_plastic_dissipation_j")?;
         nonnegative_finite(relaxation_j, "layer_relaxation_heat_j")?;
-        Ok(ThirdBodyLayerDissipation { plastic_j, relaxation_j })
+        Ok(ThirdBodyLayerDissipation { plastic_j, relaxation_j, kelvin_j: 0.0 })
     }
 }
 

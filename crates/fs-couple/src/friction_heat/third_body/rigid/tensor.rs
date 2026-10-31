@@ -5,7 +5,7 @@
 //! orientation. This is constrained shear kinematics, not plane-stress/normal
 //! contact elimination. Only the already-existing shear wrenches do work here.
 //! Stored tensors are constant throughout the admitted caloric interval;
-//! temperature may change relaxation times and sourced plastic kinetics. The
+//! temperature may change relaxation times, Kelvin viscosity and plastic kinetics. The
 //! original joint rigid/enthalpy residual accepts all bodies/history/cells once.
 
 use super::thermal::RigidLayerThermalTransport;
@@ -23,7 +23,7 @@ use fs_material::visco_tensor::{
 };
 use fs_qty::{DynViscosity, Pressure, Temperature};
 use fs_thermal::enthalpy::ThermalLaw;
-use fs_tribo::layer_contact::tensor::{ShearStiffness, TensorLayerRelaxationArm};
+use fs_tribo::layer_contact::tensor::{ShearStiffness, ShearViscosity, TensorLayerRelaxationArm};
 use std::convert::Infallible;
 
 #[derive(Debug)]
@@ -62,7 +62,7 @@ pub struct TensorLayerMaterial<'a> {
 }
 impl<'a> TensorLayerMaterial<'a> {
     /// Source-bound fully solid, constant-density tensor potential. Stored
-    /// tensor softening, Kelvin viscosity and changing strain maps refuse here;
+    /// tensor softening and changing strain maps refuse here;
     /// they require their complete thermoelastic/work-conjugate extensions.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
@@ -231,11 +231,6 @@ impl<'a> TensorLayerMaterial<'a> {
                 || false,
             )
             .map_err(|_| TensorLayerSourceError::Invalid("tensor shear projection refused"))?;
-        if projected.viscosity_matrix().iter().any(|&v| v != 0.0) {
-            return Err(TensorLayerSourceError::Invalid(
-                "Kelvin viscosity needs its original shear-rate force path",
-            ));
-        }
         let k = projected.equilibrium_stiffness();
         let equilibrium = ShearStiffness::positive_definite([[k[0], k[1]], [k[2], k[3]]])
             .map_err(TensorLayerSourceError::Constitutive)?;
@@ -265,7 +260,7 @@ impl<'a> TensorLayerMaterial<'a> {
         // Frobenius norm of this pure shear is |e|/(sqrt(2)*h), independent
         // of orientation. Plastic slip is not bounded by elastic small strain.
         let slip_limit = core::f64::consts::SQRT_2 * h * material.law().maximum_strain_norm();
-        let law = ThirdBodyLayerContact::new_tensor(
+        let mut law = ThirdBodyLayerContact::new_tensor(
             equilibrium,
             arms,
             yield_force,
@@ -274,6 +269,14 @@ impl<'a> TensorLayerMaterial<'a> {
             slip_limit,
         )
         .map_err(TensorLayerSourceError::Constitutive)?;
+        if let Some(rows) = projected.viscosity_gram_rows() {
+            let viscosity =
+                ShearViscosity::from_gram_rows(rows.iter().map(|row| [row[0], row[1]]).collect())
+                    .map_err(TensorLayerSourceError::Constitutive)?;
+            law = law
+                .with_kelvin_viscosity(viscosity)
+                .map_err(TensorLayerSourceError::Constitutive)?;
+        }
         Ok((TensorLayerSourceState { material, plastic }, law))
     }
     fn admit<E>(

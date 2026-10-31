@@ -42,6 +42,7 @@ pub struct ProjectedTensorProny {
     volume_m3: f64,
     equilibrium: Vec<f64>,
     viscosity: Vec<f64>,
+    viscosity_rows: Option<Vec<Vec<f64>>>,
     branches: Vec<ProjectedPronyBranch>,
     free_strain_mandel: Voigt,
 }
@@ -113,7 +114,7 @@ impl TensorProny {
         }
         poll(&mut cancelled)?;
         Ok(ProjectedTensorProny { model:self.clone(), columns:columns.to_vec(), volume_m3,
-            equilibrium, viscosity, branches, free_strain_mandel: [0.0; 6] })
+            equilibrium, viscosity, viscosity_rows: viscous_rows, branches, free_strain_mandel: [0.0; 6] })
     }
 }
 impl ProjectedTensorProny {
@@ -130,6 +131,10 @@ impl ProjectedTensorProny {
     /// Full symmetric Kelvin damping matrix [N s/m] in the same coordinates.
     /// Absent viscosity is exactly zero; signed cross terms are never dropped.
     pub fn viscosity_matrix(&self) -> &[f64] { &self.viscosity }
+    /// Original projected Kelvin Gram rows, in sqrt(N s/m) for displacement
+    /// coordinates. They retain zero/rank-deficient directions without a second
+    /// factorization or eigenvalue repair by the mechanical consumer.
+    pub fn viscosity_gram_rows(&self) -> Option<&[Vec<f64>]> { self.viscosity_rows.as_deref() }
     /// All volume-scaled memory factors in original material branch order.
     pub fn branches(&self) -> &[ProjectedPronyBranch] { &self.branches }
 

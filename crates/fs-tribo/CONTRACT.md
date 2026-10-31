@@ -1138,12 +1138,23 @@ adapter projects the existing `ResolvedTensorMaterial` through physical
 `sym(t_i tensor n)/h` strain columns and volume `A*h`. It retains original
 material orientation, source receipts, Maxwell order and Gram rows. Existing
 separated face forces/couples drive actual rigid momenta, and independently
-computed plastic/Maxwell loss enters the existing finite layer caloric cell in
+computed plastic/Maxwell/Kelvin loss enters the existing finite layer caloric cell in
 the original joint nonlinear solve. Geometry, material mass, caloric identity,
 temperature and clock must agree. This fixed-geometry rung admits constant
-stored tensors with source-defined temperature-dependent relaxation and plastic
-kinetics. It refuses tensor thermal softening, Kelvin viscosity, phase changes,
+stored tensors with source-defined temperature-dependent relaxation, Kelvin
+viscosity and plastic kinetics. It refuses tensor thermal softening, phase changes,
 normal/bending/torsional response and unowned geometric changes.
+
+`with_kelvin_viscosity` retains the original positive-semidefinite shear-rate
+Gram rows, including zero and rank-deficient tensors. Viscosity acts on the
+recoverable shear rate in parallel with the elastic/Maxwell network and before
+the series plastic slider. Its physical heat is `Delta_e^T C Delta_e / dt`;
+it carries no stored energy and is separate from plastic and Maxwell heat.
+Changing only this dissipative tensor preserves accepted strain/history with
+zero coefficient work. Joint frame transport rotates the rate tensor as well
+as the stored tensors. The original rigid/finite-heat candidate evaluates all
+source coefficients at its same trial layer temperature and accounts for each
+heat channel once.
 
 `tests/tensor_layer.rs` covers independent cross-term equilibrium, the isotropic
 limit, noncommuting and rank-deficient memory, second-order held-strain

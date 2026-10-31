@@ -5693,3 +5693,25 @@ native boundary work and heat. The deformable-cavity owner in fs-couple does so
 using the original tetrahedral pressure footprint and retained Newmark state.
 The source regression checks isothermal volume/pressure, exact mass and context,
 invalid energy/volume and immutable refusal; native execution remains pending.
+
+## Source-bound Kelvin tensor viscosity
+
+`visco_tensor::source::ResolvedTensorMaterial::with_kelvin_viscosity` binds the full
+symmetric Mandel rate tensor from 21 explicit Pa s property names on the same
+card and physical query. Missing entries are not inferred as zero. Original
+claims, external-coordinate meanings and intersected frequency domains remain
+attached through refresh and rotation. The existing tensor law supplies PSD
+admission; projection retains its actual Gram rows for physical rate forces
+and nonnegative heat without refactoring a rounded reduced matrix.
+
+Thermal feedback admits validity-wide constants or piecewise-linear temperature
+curves, checking every knot of their common refinement with a bounded total of
+4096 original knots. The existing material owner's PSD arithmetic policy applies
+at every union knot; convexity of the PSD cone admits the intervening linear
+segments. Endpoint-only sampling, extrapolation and nonlinear coefficient
+interpolation do not establish this admission. Both constant-storage thermal
+relaxation and affine stored-tensor thermal owners retain this rate law. Kelvin
+viscosity contributes no storage or mechanical entropy; its consumer owns the
+actual strain rate and heat. The rigid retained-layer consumer applies it to
+recoverable shear before series plastic flow, at the same trial temperature as
+the other material kinetics.
