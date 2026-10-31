@@ -437,8 +437,8 @@ point sample is not promoted to a law over evolving temperature.
 only supplies a mean temperature when explicitly declared. Each accepted endpoint
 refreshes the original selected claims. The next mechanical interval therefore
 uses the actual heated interface response, including thermally weakened friction.
-Rate, frequency, field, strain and history-dependent responses/applicability
-refuse because this slice has no owner for those evolving coordinates. Coefficient
+The temperature-only constructor refuses rate, frequency, field, strain and
+history-dependent responses/applicability without their evolving owners. Coefficient
 curves and sampled surfaces may use one shared evolving temperature coordinate
 (A, B or declared mean), with additional held pressure/composition coordinates.
 Two evolving source-response temperatures refuse instead of treating point samples
@@ -474,6 +474,53 @@ aligned restart, wrong-body refusal, source-domain refusal and late cancellation
 These are synthetic constitutive fixtures, not measured brake validation. This
 delivery has parser/source-review checks only; execution of these new regressions
 is not claimed without a current-source compile/runtime result.
+
+### Original speed-dependent dry friction on the shared mechanical/heat path
+
+`with_rate_dependent_dry_joint_brakes` binds a `RateDependentDryJointBrake`
+around the same ordered dry brake. Its explicitly typed m/s coordinate follows
+the absolute physical child/parent slip speed; the sign still selects the
+opposing generalized effort. Both friction coefficients retain the original
+selected interface claims and support the entire declared interval from zero
+to `maximum_slip_speed_m_s`. The reference context must declare zero speed.
+Temperature-dependent curves or sampled surfaces keep one shared evolving
+thermal response coordinate, with the existing ordered-body temperatures and
+held preload pressure. Frequency, strain and frictional memory remain unowned.
+
+At each thermal endpoint the native `query_line_typed` owner compiles the exact
+piecewise-affine coefficient lines at that temperature. The union of their
+source breakpoints must satisfy nonnegative `mu_k <= mu_s`, including between
+different static and kinetic source knots. At most 256 combined breakpoints
+are retained. Mechanical stages perform binary search and affine interpolation
+on this cached line without allocation or material-database queries. A speed
+outside the declared source interval refuses; no extrapolation or upper-speed
+clamp changes the law. Ordinary temperature-only brakes keep their existing path.
+
+The native speed-law regularization is preserved: traction uses the source
+coefficient at `max(|v|, v_reg)` and ramps linearly by `|v|/v_reg` below `v_reg`.
+The source interval must include that explicit positive regularization speed.
+`DryBrakeState::rate_response` separately retains the actual speed-conditioned
+material bundle/law and the traction sample speed/law. Thus the reported actual
+material query does not disguise the numerical low-speed regularization.
+Static coefficients provide the admitted capacity bound; this remains sliding
+friction and does not add static sticking, rate-and-state memory or contact onset.
+
+The same traction supplies native ABA generalized effort and integrated power,
+and the original `DissipationStep`/`HeatPartition` deposits that work once into
+the two finite bodies. Their updated caloric temperatures rebuild both complete
+speed lines for the next interval. Continuous original-source temperature paths
+are checked at speed breakpoints and accepted endpoint speeds. The union of old
+and new breakpoints bounds each coefficient's thermal change throughout the
+speed interval. This is the existing first-order thermal split, not proof of
+arbitrary two-dimensional source support from corner samples. Source, rate,
+coefficient-change, energy and cancellation refusal preserve the entire accepted
+mechanical, thermal, material and work history.
+
+`tests/heated_articulated_rate_friction.rs` exercises signed affine-speed rotor
+or slider motion, two-body heat, source-law substitution, thermal feedback,
+endpoint receipts, native constant-law compatibility and transactional refusal.
+These are synthetic constitutive regressions, not measured brake validation.
+Native execution must be reported separately from parsing and source review.
 
 ## Material interface damping and finite-body thermal feedback
 

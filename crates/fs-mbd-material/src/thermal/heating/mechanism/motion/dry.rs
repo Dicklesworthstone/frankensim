@@ -11,6 +11,10 @@
 //! Preload, contact area, lever arm and heat fractions are explicit inputs;
 //! normal compliance, wear, contact detection, directional texture response,
 //! flash temperature and thermal contact conductance need their own owners.
+pub mod rate;
+use rate::{BoundRate, RateBinding};
+pub use rate::{DryBrakeRateState, RateDependentDryJointBrake};
+
 use super::{Error, finite, nonnegative, positive};
 use crate::thermal::heating::{HeatingError, ThermalRegion};
 use fs_contact::interface_binding::{BoundDryInterfaceSystem, bind_dry_interface_system_card};
@@ -77,6 +81,9 @@ pub struct DryBrakeState {
     pub resolved: ResolvedInterfaceStatePoint,
     pub phases: [EquilibriumPhaseState; 2],
     pub law: FrictionLaw,
+    /// Actual speed-conditioned endpoint when an original rate law is bound.
+    /// `resolved` and `law` retain the zero-speed reference at the same T.
+    pub rate_response: Option<DryBrakeRateState>,
     pub pressure_pa: f64,
     pub slip_velocity_m_s: f64,
     /// N m for a revolute joint, N for a prismatic joint.
@@ -95,11 +102,50 @@ pub(super) struct BoundBrake<'a> {
     regions: [ThermalRegion<'a>; 2],
     slip_jacobian: f64,
     response_axis: Option<String>,
+    rate: Option<BoundRate<'a>>,
 }
 
 impl<'a> BoundBrake<'a> {
     pub fn new(
         definition: DryJointBrake<'a>,
+        model: &ArticulatedModel,
+        regions: &[Vec<ThermalRegion<'a>>],
+        thermal: &DepositionSimulation<'_>,
+        velocity: &[f64],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        Self::with_rate(
+            definition, None, model, regions, thermal, velocity, checkpoint,
+        )
+    }
+
+    pub fn new_rate(
+        definition: RateDependentDryJointBrake<'a>,
+        model: &ArticulatedModel,
+        regions: &[Vec<ThermalRegion<'a>>],
+        thermal: &DepositionSimulation<'_>,
+        velocity: &[f64],
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        let binding = RateBinding {
+            axis: definition.slip_speed_axis,
+            maximum_speed: definition.maximum_slip_speed_m_s,
+        };
+        binding.admit(&definition.brake)?;
+        Self::with_rate(
+            definition.brake,
+            Some(binding),
+            model,
+            regions,
+            thermal,
+            velocity,
+            checkpoint,
+        )
+    }
+
+    fn with_rate(
+        definition: DryJointBrake<'a>,
+        rate_binding: Option<RateBinding<'a>>,
         model: &ArticulatedModel,
         regions: &[Vec<ThermalRegion<'a>>],
         thermal: &DepositionSimulation<'_>,
@@ -204,8 +250,11 @@ impl<'a> BoundBrake<'a> {
             &requirements,
             definition.selection.clone(),
         )?;
-        let response_axis = admit_source(&definition, &resolved)?;
+        let response_axis = admit_source(&definition, &resolved, rate_binding)?;
         let law = law(&resolved)?;
+        let rate = rate_binding
+            .map(|binding| BoundRate::compile(binding, &definition, &resolved, checkpoint))
+            .transpose()?;
         let state = DryBrakeState {
             link: definition.link,
             cells: definition.cells,
@@ -213,6 +262,7 @@ impl<'a> BoundBrake<'a> {
             resolved,
             phases,
             law,
+            rate_response: None,
             pressure_pa: pressure,
             slip_velocity_m_s: 0.0,
             resisting_effort: 0.0,
@@ -227,6 +277,7 @@ impl<'a> BoundBrake<'a> {
             regions,
             slip_jacobian,
             response_axis,
+            rate,
         };
         result.support(&result.state.resolved, checkpoint)?;
         result.update_rate(velocity[dof])?;
@@ -237,7 +288,13 @@ impl<'a> BoundBrake<'a> {
     /// Identical traction supplies the ABA effort and the RK heat derivative.
     pub fn response(&self, rate: f64) -> Result<(f64, f64), Error> {
         let slip = finite(self.slip_jacobian * rate)?;
-        let force = self.state.law.regularized_traction_1d(
+        let law = match &self.rate {
+            Some(rate) => {
+                rate.law_at_speed(slip.abs().max(self.definition.limits.regularization_m_s))?
+            }
+            None => self.state.law.clone(),
+        };
+        let force = law.regularized_traction_1d(
             slip,
             self.definition.normal_force_n,
             self.definition.limits.regularization_m_s,
@@ -250,7 +307,7 @@ impl<'a> BoundBrake<'a> {
             ));
         }
         if rate != 0.0
-            && self.state.law.zero_speed_kinetic_coefficient()? > 0.0
+            && law.zero_speed_kinetic_coefficient()? > 0.0
             && (slip == 0.0 || effort == 0.0 || power == 0.0)
         {
             return Err(Error::Invalid("nonzero dry brake response underflow"));
@@ -287,6 +344,23 @@ impl<'a> BoundBrake<'a> {
             .at_query_point(self.definition.point.interface, &point)?;
         self.support(&resolved, checkpoint)?;
         let next_law = law(&resolved)?;
+        let next_rate = self
+            .rate
+            .as_ref()
+            .map(|rate| {
+                rate.at_temperature(
+                    &self.definition,
+                    &self.state.resolved,
+                    &resolved,
+                    self.response_axis.as_deref(),
+                    [
+                        self.state.slip_velocity_m_s.abs(),
+                        (self.slip_jacobian * velocity[self.dof]).abs(),
+                    ],
+                    checkpoint,
+                )
+            })
+            .transpose()?;
         for name in [STATIC_FRICTION_PROPERTY, KINETIC_FRICTION_PROPERTY] {
             let old = self
                 .state
@@ -308,6 +382,7 @@ impl<'a> BoundBrake<'a> {
         self.state.resolved = resolved;
         self.state.phases = phases;
         self.state.law = next_law;
+        self.rate = next_rate;
         self.update_rate(velocity[self.dof])?;
         checkpoint()?;
         Ok(())
@@ -318,6 +393,17 @@ impl<'a> BoundBrake<'a> {
         self.state.slip_velocity_m_s = finite(self.slip_jacobian * rate)?;
         self.state.resisting_effort = effort;
         self.state.dissipated_power_w = power;
+        self.state.rate_response = self
+            .rate
+            .as_ref()
+            .map(|rate| {
+                rate.sample(
+                    &self.definition,
+                    &self.state.resolved,
+                    self.state.slip_velocity_m_s.abs(),
+                )
+            })
+            .transpose()?;
         Ok(())
     }
 
@@ -452,6 +538,7 @@ fn law(resolved: &ResolvedInterfaceStatePoint) -> Result<FrictionLaw, Error> {
 fn admit_source(
     definition: &DryJointBrake<'_>,
     resolved: &ResolvedInterfaceStatePoint,
+    rate: Option<RateBinding<'_>>,
 ) -> Result<Option<String>, Error> {
     let mut response_axis: Option<String> = None;
     for property in resolved.properties() {
@@ -480,6 +567,7 @@ fn admit_source(
         let allowed = |axis: &str, dims: Dims| {
             definition.point.is_response_axis(axis, dims)
                 || axis == definition.pressure_axis && dims == Pressure::DIMS
+                || rate.is_some_and(|rate| rate.axis == axis && dims == fs_qty::Velocity::DIMS)
         };
         for (axis, dims) in property.source_axes() {
             if !allowed(axis, *dims) {

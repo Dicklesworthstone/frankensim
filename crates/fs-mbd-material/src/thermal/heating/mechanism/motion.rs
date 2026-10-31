@@ -29,7 +29,7 @@ use viscous::rheology::RheologicalJournalBearing;
 
 /// Source-bound dry sliding, generalized resisting effort and two-body heating.
 pub mod dry;
-use dry::{BoundBrake, DryBrakeState, DryJointBrake};
+use dry::{BoundBrake, DryBrakeState, DryJointBrake, RateDependentDryJointBrake};
 use fs_tribo::DissipationStep;
 
 /// Material Reynolds pressure, generalized resistance and finite-wall heating.
@@ -389,6 +389,39 @@ impl<'a> HeatedArticulatedMotion<'a> {
     /// Accepted source temperatures, friction response and cumulative heat split.
     pub fn dry_joint_brakes(&self) -> impl ExactSizeIterator<Item = &DryBrakeState> {
         self.motion.brakes.iter().map(|b| &b.state)
+    }
+
+    /// Attach original speed/temperature friction laws to the same ordered
+    /// brakes, mechanical stages and finite-body heat destinations. Source
+    /// lines are compiled at thermal endpoints, never queried in RK stages.
+    pub fn with_rate_dependent_dry_joint_brakes(
+        &self,
+        brakes: Vec<RateDependentDryJointBrake<'a>>,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        checkpoint()?;
+        if !self.motion.brakes.is_empty()
+            || brakes.is_empty()
+            || brakes.len() + self.motion.bearings.len() + self.motion.squeeze.len() > 64
+        {
+            return Err(Error::Invalid(
+                "attach dry brakes once within the 64-interface total budget",
+            ));
+        }
+        let mut candidate = self.clone();
+        for brake in brakes {
+            checkpoint()?;
+            candidate.motion.brakes.push(BoundBrake::new_rate(
+                brake,
+                self.configuration().model(),
+                &self.motion.expansion.regions,
+                &self.thermal,
+                &self.motion.velocity,
+                &mut checkpoint,
+            )?);
+        }
+        checkpoint()?;
+        Ok(candidate)
     }
 
     /// Attach native Reynolds graphs in this mechanism's complete joint order.
