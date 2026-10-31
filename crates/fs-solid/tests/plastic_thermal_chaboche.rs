@@ -13,8 +13,12 @@ use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, Sol
 use fs_material::plastic::chaboche::ChabocheState;
 use fs_material::plastic::chaboche::source::BackstressProperties;
 use fs_material::plastic::energy::EnergyTolerances;
+use fs_material::plastic::rate::{
+    OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_VISCOSITY_DIMS,
+    OVERSTRESS_VISCOSITY_PROPERTY,
+};
 use fs_material::plastic::source::{HardeningPropertyBasis, KINEMATIC_HARDENING_MODULUS_PROPERTY};
-use fs_material::plastic::thermal::chaboche::ThermalChabocheSource;
+use fs_material::plastic::thermal::chaboche::{ThermalChaboche, ThermalChabocheSource};
 use fs_material::plastic::thermal::{SourceQuery, ThermoplasticSource};
 use fs_material::plastic::voce::source::{
     VOCE_SATURATION_INCREMENT_PROPERTY as Q, VOCE_SATURATION_RATE_PROPERTY as B,
@@ -23,6 +27,7 @@ use fs_material::state_point::{
     DENSITY_PROPERTY, MaterialPropertySelection, POISSON_RATIO_PROPERTY, YIELD_STRESS_PROPERTY,
     YOUNG_MODULUS_PROPERTY,
 };
+use fs_material::tensor::contract;
 use fs_qty::{Density, Dims, Pressure, Temperature};
 use fs_solid::linear3::TetAssemblyBudget;
 use fs_solid::plastic3::{
@@ -84,6 +89,10 @@ struct Fixture {
 }
 impl Fixture {
     fn new(variable_branches: bool) -> Self {
+        Self::new_with_rate(variable_branches, None)
+    }
+
+    fn new_with_rate(variable_branches: bool, exponent: Option<f64>) -> Self {
         let mut properties = vec![
             scalar(YOUNG_MODULUS_PROPERTY, Pressure::DIMS, 1.2e9),
             scalar(POISSON_RATIO_PROPERTY, Dims([0; 6]), 0.2),
@@ -95,6 +104,28 @@ impl Fixture {
             scalar(Q, Pressure::DIMS, 6e6),
             scalar(B, Dims([0; 6]), 300.0),
         ];
+        if let Some(exponent) = exponent {
+            let saturation = properties.iter_mut().find(|p| p.key.name() == Q).unwrap();
+            saturation.validity = ValidityDomain::unconstrained().with("T", 280.0, 320.0);
+            saturation.interpolation = InterpolationPolicy::LinearInside;
+            saturation.value = PropertyValue::Curve {
+                abscissa: "T".into(),
+                abscissa_dims: Temperature::DIMS,
+                knots: [280.0, 300.0, 320.0]
+                    .map(|t| (t, 6e6 - 1e5 * (t - 300.0)))
+                    .to_vec(),
+                dims: Pressure::DIMS,
+            };
+            properties.extend([
+                scalar(
+                    OVERSTRESS_VISCOSITY_PROPERTY,
+                    OVERSTRESS_VISCOSITY_DIMS,
+                    1e6,
+                ),
+                scalar(OVERSTRESS_STRESS_SCALE_PROPERTY, Pressure::DIMS, 1e6),
+                scalar(OVERSTRESS_EXPONENT_PROPERTY, Dims([0; 6]), exponent),
+            ]);
+        }
         for (i, names) in schema().iter().enumerate() {
             let c = [4e8, 1e8][i];
             let mut modulus = scalar(&names.modulus, Pressure::DIMS, c);
@@ -146,7 +177,11 @@ impl Fixture {
         Self { card, caloric }
     }
     fn source(&self) -> ThermalChabocheSource<'_, 2> {
-        ThermoplasticSource::try_new(
+        self.source_with_rate(false)
+    }
+
+    fn source_with_rate(&self, kinetic: bool) -> ThermalChabocheSource<'_, 2> {
+        let base = ThermoplasticSource::try_new(
             SourceQuery {
                 card: &self.card,
                 caloric: &self.caloric,
@@ -161,9 +196,15 @@ impl Fixture {
         )
         .unwrap()
         .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
-        .unwrap()
-        .with_chaboche_branches(MaterialPropertySelection::SingleClaimOnly, schema())
-        .unwrap()
+        .unwrap();
+        let base = if kinetic {
+            base.with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly)
+                .unwrap()
+        } else {
+            base
+        };
+        base.with_chaboche_branches(MaterialPropertySelection::SingleClaimOnly, schema())
+            .unwrap()
     }
 }
 fn near(actual: f64, expected: f64, tolerance: f64) {
@@ -203,6 +244,15 @@ fn member_step(
     cx: &Cx<'_>,
 ) -> (Solution, f64) {
     let (_, law) = source.resolve_enthalpy(old_h, new_h).unwrap();
+    member_step_with_law(&law, axial_strain, old, cx)
+}
+
+fn member_step_with_law(
+    law: &ThermalChaboche<2>,
+    axial_strain: f64,
+    old: Option<&Solution>,
+    cx: &Cx<'_>,
+) -> (Solution, f64) {
     assert!(!law.admissibility().tangent_symmetric);
     let (nodes, tets) = member_mesh();
     let mut supports = Vec::new();
@@ -221,7 +271,7 @@ fn member_step(
     let problem = SmallStrainTetProblem {
         nodes_m: &nodes,
         tetrahedra: &tets,
-        laws: SmallStrainLawField::Uniform(&law),
+        laws: SmallStrainLawField::Uniform(law),
         prescribed_m: &supports,
         nodal_forces_n: &[],
         load_path: &[axial_strain],
@@ -365,6 +415,164 @@ fn g1_heated_held_member_changes_tension_shape_and_cyclic_history() {
             "held member: cold={cold_force:.9} N hot={hot_force:.9} N, lateral cold={:.9e} m hot={:.9e} m, reversal={reversal_force:.9} N",
             cold.displacement_m[7][1], hot.displacement_m[7][1]
         );
+    });
+}
+
+#[test]
+fn g1_timed_heating_reversal_and_hold_retain_branches_and_separate_physical_losses() {
+    let fixture = Fixture::new_with_rate(true, Some(3.0));
+    let source = fixture.source_with_rate(true);
+    assert!(source.resolve_enthalpy(0.0, 0.0).is_err());
+    let volume = SIZE.iter().product::<f64>() / 6.0;
+    let hot = 15.0 * CP;
+    let stages = [
+        (0.0, 0.012, 0.001),
+        (hot, 0.012, 0.004),
+        (hot, 0.012, 0.008),
+        (hot, -0.009, 0.003),
+        (hot, -0.009, 0.006),
+    ];
+    with_cx(|cx| {
+        let mut accepted: Option<Solution> = None;
+        let mut old_h = 0.0;
+        let mut old_axial = 0.0;
+        let mut old_force: f64 = 0.0;
+        for (step, (new_h, axial, duration)) in stages.into_iter().enumerate() {
+            let (_, law) = source
+                .resolve_enthalpy_for_step(old_h, new_h, duration)
+                .unwrap();
+            let original = accepted.clone();
+            let (next, force) = member_step_with_law(&law, axial, accepted.as_ref(), cx);
+            let native = law.law();
+            let previous = accepted
+                .as_ref()
+                .map(|s| s.element_states.clone())
+                .unwrap_or_else(|| vec![law.initial_state(); 6]);
+            let mut physical_j = 0.0;
+            let mut viscous_j = 0.0;
+            let mut recovery_j = 0.0;
+            let mut coefficient_j = 0.0;
+            let mut work_j = 0.0;
+            for e in 0..6 {
+                let old_strain = accepted.as_ref().map_or([0.0; 6], |s| s.element_strain[e]);
+                let energy = source
+                    .advance_with_energy_for_step(
+                        old_h,
+                        new_h,
+                        &old_strain,
+                        &previous[e],
+                        &next.element_strain[e],
+                        TOL,
+                        duration,
+                    )
+                    .unwrap();
+                assert_eq!(energy.state, next.element_states[e]);
+                let da = energy.state.plastic.alpha - previous[e].plastic.alpha;
+                assert!(da > 0.0);
+                // Independently evaluate the selected Perzyna flow relation.
+                let overstress = 1e6 * (da / duration).powf(1.0 / 3.0);
+                near(
+                    native.yield_function_with_state(&next.element_stress[e], &energy.state),
+                    overstress,
+                    TOL.yield_pa,
+                );
+                let recovery: f64 = native
+                    .branches()
+                    .iter()
+                    .zip(&energy.state.backstress_pa)
+                    .map(|(branch, x)| {
+                        1.5 * branch.recovery_per_strain() * da * contract(x, x)
+                            / branch.modulus_pa()
+                    })
+                    .sum();
+                near(energy.recovery_dissipation_j_m3, recovery, TOL.energy_j_m3);
+                let account = &energy.thermal;
+                near(
+                    account.mechanical.energy.physical_dissipation_j_m3,
+                    (3e6 + overstress) * da + recovery,
+                    TOL.energy_j_m3,
+                );
+                // Q and both C branches contribute to frozen-history energy;
+                // neither coefficient work nor numerical loss is plastic heat.
+                let old_temperature = 300.0 + old_h / CP;
+                let new_temperature = 300.0 + new_h / CP;
+                let old_alpha = previous[e].plastic.alpha;
+                let voce_shape = old_alpha + (-300.0 * old_alpha).exp_m1() / 300.0;
+                let mut coefficient = -1e5 * (new_temperature - old_temperature) * voce_shape;
+                for branch in 0..2 {
+                    let slope = [-8e6, 2e6][branch];
+                    let c0 = [4e8, 1e8][branch] + slope * (old_temperature - 300.0);
+                    let c1 = [4e8, 1e8][branch] + slope * (new_temperature - 300.0);
+                    let shape =
+                        0.75 * contract(
+                            &previous[e].backstress_pa[branch],
+                            &previous[e].backstress_pa[branch],
+                        ) / (c0 * c0);
+                    coefficient += (c1 - c0) * shape;
+                }
+                near(
+                    account.coefficient_storage_change_j_m3,
+                    coefficient,
+                    TOL.energy_j_m3,
+                );
+                near(
+                    account.mechanical_work_j_m3
+                        - account.stored_change_j_m3()
+                        - account.thermoelastic_storage_change_j_m3
+                        - account.caloric_heat_j_m3()
+                        - account.mechanical.energy.numerical_dissipation_j_m3,
+                    0.0,
+                    TOL.energy_j_m3,
+                );
+                assert!(account.mechanical.energy.numerical_dissipation_j_m3 >= 0.0);
+                physical_j += volume * account.mechanical.energy.physical_dissipation_j_m3;
+                viscous_j += volume * overstress * da;
+                recovery_j += volume * recovery;
+                coefficient_j += volume * coefficient;
+                work_j += volume * account.mechanical_work_j_m3;
+            }
+            assert!(physical_j > 0.0 && viscous_j > 0.0 && recovery_j > 0.0);
+            near(work_j, force * SIZE[0] * (axial - old_axial), 1e-9);
+            if axial == old_axial {
+                assert!(force.abs() < old_force.abs());
+                near(work_j, 0.0, 1e-9);
+            }
+            if step == 1 {
+                assert!(coefficient_j < 0.0);
+                // Identical frozen-history Newton proposals are repeatable;
+                // retrying does not spend another interval of viscous time.
+                let (retry, retry_force) = member_step_with_law(&law, axial, accepted.as_ref(), cx);
+                assert_eq!(retry, next);
+                assert_eq!(retry_force, force);
+                let (_, shorter) = source
+                    .resolve_enthalpy_for_step(old_h, new_h, duration / 10.0)
+                    .unwrap();
+                let (short, short_force) =
+                    member_step_with_law(&shorter, axial, accepted.as_ref(), cx);
+                assert!(force < short_force - 0.1);
+                assert!(
+                    next.element_states[0].plastic.alpha > short.element_states[0].plastic.alpha
+                );
+            }
+            if step == 3 {
+                assert!(old_force > 0.0 && force < 0.0);
+                assert!(
+                    next.element_states[0]
+                        .backstress_pa
+                        .iter()
+                        .all(|x| x[0] < 0.0)
+                );
+            }
+            assert_eq!(accepted, original);
+            println!(
+                "timed cyclic member step={step} dt={duration:.6} s force={force:.9} N alpha={:.9e}, viscous={viscous_j:.9e} J recovery={recovery_j:.9e} J",
+                next.element_states[0].plastic.alpha
+            );
+            accepted = Some(next);
+            old_h = new_h;
+            old_axial = axial;
+            old_force = force;
+        }
     });
 }
 
