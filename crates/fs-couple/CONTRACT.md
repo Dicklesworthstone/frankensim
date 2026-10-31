@@ -1,5 +1,13 @@
 # CONTRACT: fs-couple
 
+## Material-attached directional contact frames
+
+`finite_solid::contact::texture` carries one explicitly selected participating material line with the original rigid orientation R or solid TOTAL deformation gradient F, then projects it into the actual contact plane. Wrong endpoint kinds and unresolved projections refuse. The original solid owner now exposes a sparse prepared deformation-gradient observation using exactly four cached node identities and the same translation-invariant arithmetic and positive-det-F admission as its force/tangent assembly. Coupling reads only twelve native displacement components, including prescribed DOFs, without allocating a full-mesh displacement buffer or evaluating a constitutive law.
+
+This is an orthonormal single-director orientation model: stretching/shearing can turn the director but does not infer strain-dependent friction coefficients, average two surface textures, or transform an ellipse metric. Physical director evolution remains distinct from objective constitutive-history transport. The original mixed solver retains its full inertia, consistent solid mass, physical impulse/work, and angular-momentum gates.
+
+Focused fixtures cover physical quarter-turn anisotropic recoil, full world-rotation covariance, explicit first/second endpoint attachment, affine sheared solid motion with prescribed displacement and large translation, sparse original-node sampling, inversion/degeneracy and cancellation. Pinned rustfmt and scoped whitespace checks passed; these new native fixtures have not been executed because the available environment has no free disk and its native dependency build is memory-blocked. No new native pass or broad contact-bead completion is claimed.
+
 ## Sustained mixed contact through original force and kinetic subflows
 
 `finite_solid::split` supplies the original prepared hyperelastic and held

@@ -450,12 +450,23 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
     }
 
     fn deformation_gradient(element: &Element, u: &[f64]) -> [f64; 9] {
+        Self::deformation_gradient_with(element, |node| {
+            [u[3 * node], u[3 * node + 1], u[3 * node + 2]]
+        })
+    }
+
+    fn deformation_gradient_with(
+        element: &Element,
+        mut displacement_at_node: impl FnMut(usize) -> [f64; 3],
+    ) -> [f64; 9] {
         let mut f = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+        let first = displacement_at_node(element.nodes[0]);
         // Partition of unity removes the common displacement. Form relative
         // motion first so a large rigid translation cannot create strain.
         for (a, &node) in element.nodes.iter().enumerate().skip(1) {
+            let displacement = displacement_at_node(node);
             for i in 0..3 {
-                let ui = u[3 * node + i] - u[3 * element.nodes[0] + i];
+                let ui = displacement[i] - first[i];
                 for j in 0..3 {
                     f[3 * i + j] = ui.mul_add(element.gradients[a][j], f[3 * i + j]);
                 }

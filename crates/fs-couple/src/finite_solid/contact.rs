@@ -31,6 +31,9 @@ pub mod surface;
 /// Configuration-admitted coupled force/contact/trajectory candidates.
 pub mod step;
 
+/// Physical material directions transported by original rigid/solid geometry.
+pub mod texture;
+
 use super::impulse::{FiniteSolidImpulse, FiniteSolidImpulseControls, FiniteSolidPoint};
 use super::{Cx, FiniteSolidBody, FiniteSolidError};
 use fs_contact::frictional_multicontact::{

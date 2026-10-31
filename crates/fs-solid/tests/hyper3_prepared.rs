@@ -105,6 +105,53 @@ fn prepared_evaluations_follow_each_current_stretch_and_exact_native_assembly() 
 }
 
 #[test]
+fn sparse_total_deformation_uses_only_original_nodes_and_admits_native_geometry() {
+    with_cx(|gate, cx| {
+        let law = material();
+        let prepared = problem(&law).prepare(cx).unwrap();
+        let translation = [1_073_741_824.0, -536_870_912.0, 268_435_456.0];
+        let displacement =
+            NODES.map(|x| [translation[0] + 0.5 * x[1], translation[1], translation[2]]);
+        let mut sampled = Vec::new();
+        let f = prepared
+            .deformation_gradient_with(
+                0,
+                |node| {
+                    sampled.push(node);
+                    displacement[node]
+                },
+                cx,
+            )
+            .unwrap();
+        assert_eq!(sampled, TETS[0]);
+        assert_eq!(f, [1.0, 0.5, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0]);
+        assert!(
+            prepared
+                .deformation_gradient_with(1, |_| panic!("missing element must not sample"), cx)
+                .is_err()
+        );
+        assert!(
+            prepared
+                .deformation_gradient_with(0, |_| [f64::NAN, 0.0, 0.0], cx)
+                .is_err()
+        );
+        assert!(matches!(
+            prepared.deformation_gradient_with(0, |node| [-2.0 * NODES[node][0], 0.0, 0.0], cx),
+            Err(HyperTetError::MaterialRefused { element: 0, .. })
+        ));
+        gate.request();
+        assert!(matches!(
+            prepared.deformation_gradient_with(
+                0,
+                |_| panic!("cancelled query must not sample"),
+                cx
+            ),
+            Err(HyperTetError::Cancelled)
+        ));
+    });
+}
+
+#[test]
 fn interval_loads_are_revalidated_and_use_original_reference_volume() {
     with_cx(|_, cx| {
         let law = material();

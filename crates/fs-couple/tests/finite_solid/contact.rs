@@ -7,6 +7,8 @@ mod mixed;
 mod step;
 #[path = "contact/surface.rs"]
 mod surface;
+#[path = "contact/texture.rs"]
+mod texture;
 
 use super::*;
 use fs_contact::frictional_multicontact::NormalVelocityLaw;

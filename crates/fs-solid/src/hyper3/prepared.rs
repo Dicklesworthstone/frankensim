@@ -42,6 +42,52 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
 }
 
 impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
+    /// Current TOTAL P1 deformation gradient of one original element, row-major.
+    ///
+    /// The callback supplies displacement in metres for each of this element's
+    /// four ORIGINAL global node IDs, once each in original local-node order.
+    /// This sparse observation uses the same cached reference gradients and
+    /// translation-invariant arithmetic as native force/energy/tangent assembly;
+    /// it requires no full-mesh displacement buffer or reference preparation.
+    ///
+    /// This admits finite displacement and positive finite det F, not the
+    /// constitutive domain or an elastic/thermal deformation substitution.
+    /// Original material evaluation remains the force/energy owner's work.
+    /// Callback-owned side effects are outside this read-only geometry query.
+    ///
+    /// # Errors
+    /// Missing element, nonfinite displacement, invalid current total F, or
+    /// cancellation before/after the bounded four-node observation.
+    pub fn deformation_gradient_with(
+        &self,
+        element: usize,
+        mut displacement_at_node: impl FnMut(usize) -> [f64; 3],
+        cx: &Cx<'_>,
+    ) -> Result<[f64; 9], HyperTetError> {
+        checkpoint(cx)?;
+        let geometry = self
+            .elements
+            .get(element)
+            .ok_or_else(|| HyperTetError::InvalidInput {
+                what: "deformation element is outside the original prepared mesh".into(),
+            })?;
+        let mut finite = true;
+        let f = HyperTetProblem::<L>::deformation_gradient_with(geometry, |node| {
+            let displacement = displacement_at_node(node);
+            finite &= displacement.iter().all(|value| value.is_finite());
+            displacement
+        });
+        if !finite {
+            return Err(HyperTetError::InvalidInput {
+                what: "finite nodal displacement required for deformation observation".into(),
+            });
+        }
+        HyperTetProblem::<L>::deformation_jacobian(&f)
+            .map_err(|what| HyperTetError::MaterialRefused { element, what })?;
+        checkpoint(cx)?;
+        Ok(f)
+    }
+
     fn evaluate(&self, displacement_m: &[f64], cx: &Cx<'_>) -> Result<Evaluated, HyperTetError> {
         checkpoint(cx)?;
         self.problem.check_len(displacement_m)?;
