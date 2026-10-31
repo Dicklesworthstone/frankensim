@@ -27,8 +27,9 @@ impl MouthPressure {
 impl FlueDgPerformance {
     /// Add the solved mouth flow to this performance's exterior microphone.
     ///
-    /// Width and cut-up come from the actual source, and the complete exterior
-    /// gas comes from its already computed terminal. The original rectangular
+    /// The acoustic rectangle is explicit, or defaults to the source width and
+    /// cut-up. The complete exterior gas comes from the already computed terminal.
+    /// The jet geometry remains independent. The original rectangular
     /// Rayleigh owner retains distance, phase, surface quadrature and numerical
     /// filter delay; no gain or duplicate pressure source is introduced.
     ///
@@ -40,9 +41,6 @@ impl FlueDgPerformance {
     pub fn with_mouth_radiation(mut self, input: FlueMouthRadiation)
         -> Result<Self, GestureCompileError>
     {
-        if input.aperture_size_m.is_some() {
-            return Err(invalid("independent mouth aperture is supported only by the flue network"));
-        }
         if self.poisoned || self.voice.samples_rendered() != 0 || self.mouth.is_some()
             || self.observer_gas.is_some() {
             return Err(invalid("DG mouth observation requires one cold attachment"));
@@ -51,8 +49,9 @@ impl FlueDgPerformance {
             .ok_or_else(|| invalid("DG mouth observation requires the bound baffled outlet microphone"))?;
         let source = self.voice.dg().expect("admitted original DG voice").load()
             .radiation_record().expect("admitted computed DG microphone source");
+        let size = input.size_m(&self.voice.geometry);
         if source.driven_mouth().is_some_and(|mouth|
-            mouth.center_m != input.center_m || mouth.cells != input.cells)
+            mouth.center_m != input.center_m || mouth.cells != input.cells || mouth.size_m != size)
         {
             return Err(invalid("joint DG mouth observation must retain its bound rectangular source"));
         }
@@ -60,7 +59,6 @@ impl FlueDgPerformance {
         if self.voice.gas().pressure.to_bits() != exterior.pressure.to_bits() {
             return Err(invalid("DG mouth and exterior require equal static pressure"));
         }
-        let size = [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m];
         for opening in source.apertures() {
             let dx = ((opening.center_m[0] - input.center_m[0]).abs() - 0.5 * size[0]).max(0.0);
             let dy = ((opening.center_m[1] - input.center_m[1]).abs() - 0.5 * size[1]).max(0.0);
@@ -103,7 +101,7 @@ impl FlueDgPerformance {
         ).map_err(|error| GestureCompileError::Render(RenderError::Voice(error)))?;
         let mut mouth_receiver = if let Some(mouth) = &self.mouth {
             Some(BaffledPressure::rectangular_outlet_multirate_gas_differentiating(
-                [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m],
+                mouth.input.size_m(&self.voice.geometry),
                 self.config.sample_rate_hz, self.config.sample_rate_hz,
                 RectangularOutletReceiver {
                     center_m: mouth.input.center_m, position_m: outlet.config.position_m,
@@ -159,13 +157,13 @@ impl FlueDgPerformance {
         let outlet = self.outlet.as_ref().expect("mouth requires the original outlet observer");
         let source = self.voice.dg().expect("admitted original DG voice").load()
             .radiation_record().expect("admitted computed DG microphone source");
+        let size = mouth.input.size_m(&self.voice.geometry);
         let model = RectangularMouthLoad::new(
-            [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m],
+            size,
             mouth.input.cells, *source.gas_record().state(), self.voice.sample_period_s(),
             outlet.config.maximum_frequency_hz, gate,
         ).map_err(|error| GestureCompileError::Render(source_error(error)))?;
-        self.voice.attach_mouth_radiation(model,
-            [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m])
+        self.voice.attach_mouth_radiation(model, size)
             .map_err(|error| GestureCompileError::Render(source_error(error)))?;
         Ok(self)
     }
@@ -190,7 +188,7 @@ impl FlueDgPerformance {
         let outlet = self.outlet.as_ref().expect("mouth requires the original outlet observer");
         let surface = crate::bernoulli_aperture::radiation::environment::multiport::bake::mixed::DrivenMouthSurface {
             center_m: mouth.input.center_m,
-            size_m: [self.voice.geometry.flue_width_m, self.voice.geometry.cut_up_m],
+            size_m: mouth.input.size_m(&self.voice.geometry),
             cells: mouth.input.cells,
             terminal_radial_rings: outlet.config.radial_rings,
             terminal_angular_points: outlet.config.angular_points,

@@ -212,11 +212,20 @@ to an unused degree-two junction between equal-radius sections:
 
 ```text
 walls COUNT MIN_HZ MAX_HZ
-wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS
-wall NODE orthotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL HOOP_AXIS AXIAL_AXIS LOSS
+wall NODE isotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL LOSS [environment COUNT AXIS VALUE ...]
+wall NODE orthotropic PACK T_K OMEGA_RAD_S THICKNESS_M AXIAL HOOP_AXIS AXIAL_AXIS LOSS [environment COUNT AXIS VALUE ...]
 ```
 
 Supply exactly `COUNT` wall rows. `AXIAL` is `stress-free` or `strain-fixed`.
+The optional suffix, after every field of `LOSS`, uses the same material-state
+admission as plate reeds, moving keys and DG walls. It admits at most eight
+explicit source-qualified pressure, composition, moisture or concentration
+coordinates. For example, `environment 1 moisture_content 0.12` uses the source
+card's declared moisture basis; it does not infer solid water content from gas
+humidity. Temperature and angular frequency retain their original source
+conventions. Density, directional stiffness, viscosity and relaxation are
+resolved together at that held state, retaining the original card and queries.
+Missing, ambiguous, untyped or out-of-domain source states refuse.
 Isotropic loss accepts `elastic`, `kelvin-voigt`, or the existing sourced Maxwell
 spectrum. Orthotropic loss accepts `elastic`,
 `proportional-kelvin-voigt TIME_PROPERTY`, or
@@ -256,8 +265,8 @@ sets independent acoustic aperture dimensions. Both the receiver and a selected
 mouth reaction use this rectangle; the jet's width, height, cut-up, source
 coefficient and convection remain unchanged. Omission uses flue width times
 cut-up, as before. A supplied aperture requires `mouth_radiation`; nonpositive
-or nonfinite dimensions refuse. This row is supported by the network route only;
-the DG extension remains separate. Render metadata reports the resolved dimensions.
+or nonfinite dimensions refuse. Both characteristic and DG routes use this same
+record. Render metadata reports the resolved acoustic dimensions.
 
 The flute cards use 10 by 12 mm from Boehm's mouth-hole dimensions in
 `data/instruments/geometry/flute-boehm-silver-bfoot-boehm1871/dimensions.tsv`.
@@ -563,6 +572,17 @@ and `observation inlet-pressure` or `observation baffled X Y Z RINGS ANGLES FMAX
 followed by the existing canonical `gesture` suffix. Pressure and optional jet-angle tracks retain their existing
 physical units and interpolation. The actual DG inlet supplies mouth bore area,
 density, viscosity and sound speed; there is no second authored inlet medium.
+
+After `observation baffled` and any `observer_gas` row, the DG route accepts the
+same optional `mouth_aperture rectangle WIDTH_M LENGTH_M` immediately before
+`mouth_radiation X_M Y_M WIDTH_CELLS LENGTH_CELLS`. The independently declared
+opening reaches the signed mouth receiver, every exterior-gas path, the selected
+compact self reaction and the full mutual mouth/terminal operator. Rebuilding a
+cold voice from a joint-loaded bore retains that original acoustic rectangle;
+a mismatched mouth receiver refuses. Omitting dimensions retains jet width by
+cut-up. This changes acoustic aperture geometry while preserving the declared
+jet, windway and separation geometry. The existing baffle, compact-band,
+quadrature, source and gas restrictions remain.
 
 Both bore renderers use one source-selection parser and the same `FlueVoice`
 attachments. A developing slit uses its material gas and Shah law at the held

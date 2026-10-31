@@ -7,7 +7,7 @@ use crate::bernoulli_aperture::wall::material::{
 };
 use crate::bernoulli_aperture::wall::material::source::WallConstitutiveSource;
 use crate::material_assembly::MaterialSource;
-use fs_matdb::{NormalizedMaterialCardPack, QueryPoint};
+use fs_matdb::NormalizedMaterialCardPack;
 use fs_material::state_point::{
     MaterialPropertySelection, resolve_material_state_point,
 };
@@ -41,6 +41,7 @@ struct ParsedWall {
     path: String,
     temperature_k: f64,
     angular_frequency_rad_s: f64,
+    environment: Vec<(String, f64)>,
     thickness_m: f64,
     axial: AxialConstraint,
     constitutive: WallConstitutiveSource,
@@ -89,12 +90,16 @@ impl ParsedWalls {
             let constitutive = WallConstitutiveSource::read(orthotropic, &mut row.fields)
                 .map_err(|what| bad(row.line, what))?;
             let source_line = row.line;
+            let environment = crate::material_source::read_fixed_environment(&mut row.fields)
+                .map_err(|source| FlueInputError::MaterialSource {
+                    line: source_line, source: source.to_string(),
+                })?;
             row.end()?;
             if temperature_k <= 0.0 || angular_frequency_rad_s < 0.0 || thickness_m <= 0.0 {
                 return Err(bad(source_line, "wall needs a positive material temperature/thickness and nonnegative angular frequency"));
             }
             assignments.push(ParsedWall { node, line: source_line, path: path.into(),
-                temperature_k, angular_frequency_rad_s, thickness_m, axial, constitutive });
+                temperature_k, angular_frequency_rad_s, environment, thickness_m, axial, constitutive });
         }
         Ok(Some(Self { line, band_hz, assignments }))
     }
@@ -112,8 +117,8 @@ impl ParsedWalls {
         for wall in self.assignments {
             poll(gate)?;
             let pack = sources.load(&wall.path, wall.line, loader, gate)?;
-            let point = QueryPoint::new().with("T", wall.temperature_k)
-                .and_then(|point| point.with("omega", wall.angular_frequency_rad_s))
+            let point = fs_material::state_point::query_at_fixed_environment(
+                pack.card(), wall.temperature_k, wall.angular_frequency_rad_s, &wall.environment)
                 .map_err(|source| FlueInputError::MaterialSource { line: wall.line, source: source.to_string() })?;
             let source = MaterialSource { card: pack.card(), point: &point,
                 selection: MaterialPropertySelection::SingleClaimOnly };

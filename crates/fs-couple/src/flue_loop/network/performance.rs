@@ -92,7 +92,7 @@ pub struct FlueMouthRadiation {
     /// Independent acoustic rectangle width and length [m]. Omission uses
     /// the source's flue width and cut-up, appropriate to a rectangular window.
     /// This changes observation and selected reaction, never jet geometry.
-    /// Only the network route supports this field; the DG route refuses `Some`.
+    /// Both characteristic and DG routes retain this same physical aperture.
     pub aperture_size_m: Option<[f64; 2]>,
     /// Midpoint surface cells along the acoustic rectangle's two dimensions.
     pub cells: [usize; 2],

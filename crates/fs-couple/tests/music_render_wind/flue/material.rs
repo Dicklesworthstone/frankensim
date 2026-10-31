@@ -263,3 +263,75 @@ fn walls_and_reaction_preserve_branched_geometry_section_gases_and_all_outlets()
     let metadata = std::fs::read_to_string(output.with_extension("provenance.json")).unwrap();
     assert!(metadata.contains("\"node\":4,\"original_reflection\":"));
 }
+
+
+#[test]
+fn held_wall_material_state_reaches_jet_feedback_and_microphone_with_the_same_source() {
+    use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind,
+        SemanticType, ValueForm}};
+    let base = pack(1000.0, 1e6, None, 100_000.0);
+    let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "manufactured held-moisture membrane".into(),
+        method: "declared source interpolation".into(), artifact: base.source_artifact(),
+        caveats: "not measured wood, tissue or flute material".into(),
+        provenance: Provenance { source: "manufactured environmental law".into(),
+            license: "CC0-1.0".into(), artifact: None },
+    }).unwrap();
+    let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
+    for (_, original) in base.card().claims().claims_ordered() {
+        let mut claim = original.clone();
+        let PropertyValue::Scalar { value, dims } = claim.value else { unreachable!() };
+        let factor = match claim.key.name() {
+            "density" => 1.2,
+            "young_modulus" | "boundary_modulus" => 0.75,
+            "kelvin_voigt_young_viscosity" => 2.0,
+            "boundary_time" => 1.5,
+            _ => 1.0,
+        };
+        claim.value = PropertyValue::Curve { abscissa: "moisture_content".into(),
+            abscissa_dims: Dims::NONE, knots: vec![(0.0, value), (0.2, factor * value)], dims };
+        claim.validity = ValidityDomain::unconstrained()
+            .with_quantity("T", quantity(QuantityKind::AbsoluteTemperature), 280.0, 330.0)
+            .with_quantity("omega", quantity(QuantityKind::Frequency(FrequencyConvention::Angular)), 0.0, 100_000.0)
+            .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2);
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claim.observations = vec![observation.clone()];
+        claims.insert_claim(claim).unwrap();
+    }
+    let normalized = NormalizedPack::new("held-wall-environment", "manufactured-v1",
+        base.source_artifact(), "CC0-1.0", claims, vec![], vec![]).unwrap();
+    let material = NormalizedMaterialCardPack::new(base.card().id().clone(), normalized).unwrap();
+    let with_state = |text: &str, moisture| text.replace("\nradiation ",
+        &format!(" environment 1 moisture_content {moisture}\nradiation "));
+    let gate = CancelGate::new_clock_free();
+    assert!(FlueFilePerformance::from_bytes_with_sources(source().as_bytes(), 37,
+        &gate, None, |_| Ok(material.clone())).is_err());
+    assert!(FlueFilePerformance::from_bytes_with_sources(
+        with_state(&source(), 0.3).as_bytes(), 37, &gate, None, |_| Ok(material.clone())).is_err());
+    for loss in ["kelvin-voigt", "maxwell 1 0.1 0.2 boundary_modulus boundary_time"] {
+        let text = source().replace("kelvin-voigt", loss);
+        let dry = loaded(&with_state(&text, 0.0), &material, 37);
+        let wet_text = with_state(&text, 0.2);
+        let wet = loaded(&wet_text, &material, 37);
+        assert_eq!(dry.wall_records()[0].pack(), wet.wall_records()[0].pack());
+        assert_eq!(dry.card().content_hash(), wet.card().content_hash());
+        assert_eq!(dry.renderer().voice().gas(), wet.renderer().voice().gas());
+        let original = &dry.renderer().voice().network().unwrap().material_walls()[0];
+        let changed = &wet.renderer().voice().network().unwrap().material_walls()[0];
+        assert_ne!(original.source().material.identity(), changed.source().material.identity());
+        assert_eq!(changed.source().material.query().axes()["moisture_content"], 0.2);
+        assert_eq!(changed.source().material.property("density").unwrap().value_si(), 1200.0);
+        assert_eq!(changed.source().material.property("young_modulus").unwrap().value_si(), 750_000.0);
+        assert_ne!(original.patch(), changed.patch());
+        let reference = trace(dry);
+        let changed = trace(wet);
+        assert_ne!(reference.incoming, changed.incoming, "the wall changes physical jet back-reaction");
+        assert_ne!(reference.pressure, changed.pressure);
+        assert_ne!(reference.maximum_wall_energy, changed.maximum_wall_energy);
+        let mut renderer = loaded(&wet_text, &material, 37).into_renderer();
+        let mut partitioned = vec![0.0; changed.pressure.len()];
+        for block in partitioned.chunks_mut(37) { renderer.block(block).unwrap(); }
+        assert_eq!(partitioned, changed.pressure);
+    }
+}

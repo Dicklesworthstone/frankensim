@@ -60,9 +60,32 @@ fn mouth_records_reuse_explicit_geometry_and_preserve_the_following_record() {
 }
 
 #[test]
+fn independent_acoustic_aperture_uses_the_shared_parser_and_retains_record_boundaries() {
+    let mut rows = Rows {
+        lines: concat!("mouth_aperture rectangle 0.012 0.008\n",
+            "mouth_radiation -0.03 0.01 16 8\n",
+            "mouth_reaction mutual-baffled\nnext-owner-record").lines(),
+        line: 0,
+    };
+    let (mouth, reaction) = read_mouth(&mut rows, true).unwrap();
+    let mouth = mouth.unwrap();
+    assert_eq!(mouth.aperture_size_m, Some([0.012, 0.008]));
+    assert_eq!(mouth.center_m, [-0.03, 0.01]);
+    assert_eq!(mouth.cells, [16, 8]);
+    assert_eq!(reaction, MouthReaction::MutualBaffled);
+    assert_eq!(rows.lines.next(), Some("next-owner-record"));
+}
+
+#[test]
 fn mouth_records_refuse_missing_exterior_missing_rectangle_and_ambiguous_fields() {
     for (text, exterior) in [
         ("mouth_radiation -0.03 0 16 8", false),
+        ("mouth_aperture rectangle 0.012 0.008", true),
+        ("mouth_aperture circle 0.012 0.008\nmouth_radiation -0.03 0 16 8", true),
+        ("mouth_aperture rectangle 0 0.008\nmouth_radiation -0.03 0 16 8", true),
+        ("mouth_aperture rectangle NaN 0.008\nmouth_radiation -0.03 0 16 8", true),
+        ("mouth_aperture rectangle 0.012 0.008 extra\nmouth_radiation -0.03 0 16 8", true),
+        ("mouth_aperture rectangle 0.012 0.008\nmouth_radiation -0.03 0 16 8", false),
         ("mouth_reaction compact-baffled", true),
         ("mouth_reaction mutual-baffled", true),
         ("mouth_radiation -0.03 0 16", true),

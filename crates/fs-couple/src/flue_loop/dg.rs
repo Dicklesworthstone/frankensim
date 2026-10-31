@@ -226,6 +226,8 @@ impl FlueVoice {
     /// participates in the same-step mouth solve through its exact mean port.
     ///
     /// Gas is read from the actual inlet; a conflicting mouth bore area refuses.
+    /// A prebound exterior mouth retains its own acoustic rectangle independently
+    /// of jet width/cut-up; its receiver must match that original rectangle.
     /// Every original acoustic and diffusion mode remains retained. The shared
     /// one-port owner checks the total DOF allowance and mechanical Nyquist band.
     /// step_block keeps its existing launched-wave observation. Inspect
@@ -261,8 +263,7 @@ impl FlueVoice {
             || !(0.0 < source.maximum_jet_mach && source.maximum_jet_mach <= 0.3)
             || source.minimum_jet_speed_m_s > source.maximum_jet_mach * gas.sound_speed
             || !(4..=1_048_576).contains(&source.max_jet_history_samples)
-            || bound_mouth.is_some_and(|mouth| mouth.size_m
-                != [geometry.flue_width_m, geometry.cut_up_m] || geometry.mouth_loss_rel != 0.0)
+            || (bound_mouth.is_some() && geometry.mouth_loss_rel != 0.0)
             || !geometry.bore_area_m2.is_finite()
             || (geometry.bore_area_m2 - area).abs() > 32.0 * f64::EPSILON * area
         {
@@ -309,7 +310,6 @@ impl FlueVoice {
     ) -> Result<(), FlueError> {
         if self.poisoned || self.samples != 0 || self.mouth_radiation.is_some()
             || self.geometry.mouth_loss_rel != 0.0
-            || surface.size_m != [self.geometry.flue_width_m, self.geometry.cut_up_m]
         {
             return Err(invalid("joint mouth requires a cold actual rectangle, zero legacy loss and no independent self load"));
         }
@@ -321,6 +321,9 @@ impl FlueVoice {
         if record.gas_record().state().pressure.to_bits() != self.gas.pressure.to_bits() {
             return Err(invalid("joint mouth and bore require equal static pressure"));
         }
+        // The performance owns the acoustic opening independently of the jet.
+        // The original exterior owner validates its full rectangular geometry
+        // and builds the reciprocal operator before any state is published.
         let candidate = duct.load.clone().with_driven_mouth(surface, rate, gate)
             .map_err(|error| FlueError::Physics(
                 crate::acoustic_realize::AcousticRealizeError::Nonlinear(error.to_string())))?;

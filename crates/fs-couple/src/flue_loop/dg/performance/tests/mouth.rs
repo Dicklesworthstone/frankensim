@@ -8,6 +8,7 @@ fn shared_observer_gas_covers_mouth_and_terminals_without_changing_the_source() 
     let input = baffled_input().replace("observation baffled 0 0 0.2 8 32 2000",
         concat!("observation baffled 0 0 0.2 8 32 2000\n",
             "observer_gas stokes-kirchhoff 4096 1000000 50000000\n",
+            "mouth_aperture rectangle 0.012 0.008\n",
             "mouth_radiation -0.03 0 4 2"));
     let source = FlueDgFilePerformance::from_bytes(input.as_bytes(), 37, &gate).unwrap();
     let renderer = source.renderer();
@@ -20,6 +21,26 @@ fn shared_observer_gas_covers_mouth_and_terminals_without_changing_the_source() 
     assert_eq!(report.additional_latency_samples, mouth_report.additional_latency_samples);
     assert_eq!(renderer.baffled_receiver().unwrap().filter_delay_samples(),
         renderer.mouth_receiver().unwrap().filter_delay_samples());
+    let mouth = renderer.mouth_radiation().unwrap();
+    assert_eq!(mouth.aperture_size_m, Some([0.012, 0.008]));
+    let propagation = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    let receiver = renderer.baffled_receiver_config().unwrap();
+    let rate = source.info().sample_rate_hz;
+    let (mut expected_outlet, mut expected_outlet_report) = load
+        .baffled_receiver_with_gas(rate, receiver, &propagation, &gate).unwrap();
+    let (mut expected_mouth, mut expected_mouth_report) =
+        BaffledPressure::rectangular_outlet_multirate_gas_differentiating(
+            [0.012, 0.008], rate, rate,
+            RectangularOutletReceiver { center_m: mouth.center_m,
+                position_m: receiver.position_m, cells: mouth.cells,
+                maximum_frequency_hz: receiver.maximum_frequency_hz },
+            load.radiation_record().unwrap().gas_record().state(), &propagation,
+            &mut || gate.is_requested(),
+        ).unwrap();
+    let latency = expected_outlet_report.additional_latency_samples
+        .max(expected_mouth_report.additional_latency_samples);
+    expected_outlet.align_gas_latency(&mut expected_outlet_report, latency).unwrap();
+    expected_mouth.align_gas_latency(&mut expected_mouth_report, latency).unwrap();
     let make = |block| {
         let mut config = *renderer.config();
         config.max_block = block;
@@ -34,7 +55,13 @@ fn shared_observer_gas_covers_mouth_and_terminals_without_changing_the_source() 
     let mut authored = source.into_renderer();
     let (mut expected, mut whole, mut changed) = (vec![0.0;512], vec![0.0;512], vec![0.0;512]);
     original.block(&mut expected).unwrap();
-    for block in whole.chunks_mut(37) { authored.block(block).unwrap(); }
+    for pressure in &mut whole {
+        authored.block(core::slice::from_mut(pressure)).unwrap();
+        let frame = authored.voice().dg().unwrap().last_frame().unwrap();
+        let terminal = expected_outlet.step_trace(&[frame.terminal.unwrap().outward_flow_m3_s]).unwrap();
+        let mouth = expected_mouth.step_trace(&[-frame.inlet_flow_m3_s]).unwrap();
+        assert_eq!(*pressure, terminal + mouth);
+    }
     for block in changed.chunks_mut(37) { partitioned.block(block).unwrap(); }
     assert_eq!(whole, changed);
     assert!(whole.iter().zip(&expected).any(|(a,b)| a != b));
@@ -51,7 +78,8 @@ fn material_bound_mouth_reaction_and_signed_radiation_share_the_accepted_dg_step
         .replace("flue 0.010 0.001 0.004 0 0 0.02", "flue 0.010 0.001 0.004 0 0 0")
         .replace("observation baffled 0 0 0.2 8 32 2000", concat!(
             "observation baffled 0 0 0.2 8 32 1000\n",
-            "mouth_radiation -0.03 0 8 4\n",
+            "mouth_aperture rectangle 0.012 0.008\n",
+            "mouth_radiation -0.03 0 16 8\n",
             "mouth_reaction compact-baffled",
         ));
     // One computed outlet fit supplies every replica. Selecting a microphone
@@ -65,16 +93,18 @@ fn material_bound_mouth_reaction_and_signed_radiation_share_the_accepted_dg_step
     let load = renderer.voice().dg().unwrap().load();
     let exterior = *load.radiation_record().unwrap().gas_record().state();
     assert_eq!(mouth.center_m, [-0.03, 0.0]);
-    assert_eq!(mouth.cells, [8, 4]);
+    assert_eq!(mouth.cells, [16, 8]);
+    assert_eq!(mouth.aperture_size_m, Some([0.012, 0.008]));
     assert_ne!(exterior, *renderer.voice().gas());
     let reaction = renderer.voice().mouth_radiation_load().unwrap();
     assert_eq!(*reaction.exterior(), exterior);
-    assert_eq!(reaction.size_m(), [source.geometry().flue_width_m, source.geometry().cut_up_m]);
+    assert_eq!(reaction.size_m(), [0.012, 0.008]);
+    assert_eq!([source.geometry().flue_width_m, source.geometry().cut_up_m], [0.010, 0.004]);
     let mut expected_outlet = load.baffled_receiver(
         source.info().sample_rate_hz, receiver,
     ).unwrap();
     let mut expected_mouth = BaffledPressure::rectangular_outlet_multirate_differentiating(
-        [source.geometry().flue_width_m, source.geometry().cut_up_m],
+        [0.012, 0.008],
         source.info().sample_rate_hz, source.info().sample_rate_hz,
         RectangularOutletReceiver {
             center_m: mouth.center_m, position_m: receiver.position_m,
@@ -102,6 +132,9 @@ fn material_bound_mouth_reaction_and_signed_radiation_share_the_accepted_dg_step
     let mut partitioned = make(37).with_mouth_radiation(mouth).unwrap()
         .with_mouth_reaction(&CancelGate::new_clock_free()).unwrap();
     let mut observation_only = make(512).with_mouth_radiation(mouth).unwrap();
+    let mut default_aperture = make(512).with_mouth_radiation(FlueMouthRadiation {
+        aperture_size_m: None, ..mouth
+    }).unwrap().with_mouth_reaction(&CancelGate::new_clock_free()).unwrap();
     assert!(observation_only.voice().mouth_radiation_load().is_none());
 
     // These are cold source/geometry refusals, reusing the same computed load.
@@ -142,6 +175,11 @@ fn material_bound_mouth_reaction_and_signed_radiation_share_the_accepted_dg_step
     whole.block(&mut together).unwrap();
     for block in chunked.chunks_mut(37) { partitioned.block(block).unwrap(); }
     observation_only.block(&mut unchanged_load).unwrap();
+    let mut default_pressure = vec![0.0; 512];
+    default_aperture.block(&mut default_pressure).unwrap();
+    assert_ne!(reference, default_pressure, "only acoustic aperture dimensions changed");
+    assert_ne!(whole.voice().dg().unwrap().load().state(),
+        default_aperture.voice().dg().unwrap().load().state());
     assert_eq!(reference, together);
     assert_eq!(reference, chunked);
     assert_eq!(single.voice().dg().unwrap().load().state(), whole.voice().dg().unwrap().load().state());
@@ -164,13 +202,16 @@ fn joint_mouth_reaction_reaches_the_source_and_one_shared_physical_microphone() 
     use crate::flue_loop::dg::FlueDgSpec;
     let gate = CancelGate::new_clock_free();
     let text = baffled_input()
-        .replace("flue 0.010 0.001 0.004 0 0 0.02", "flue 0.002 0.0005 0.001 0 0 0");
+        .replace("flue 0.010 0.001 0.004 0 0 0.02", "flue 0.0018 0.0005 0.0009 0 0 0");
     // A small manufactured integration geometry. The original full-band fit,
     // passivity and source limits remain hard gates, pending native execution.
     let source = FlueDgFilePerformance::from_bytes(text.as_bytes(), 512, &gate).unwrap();
     let original = source.renderer();
     let receiver = original.baffled_receiver_config().unwrap();
-    let mouth = FlueMouthRadiation { center_m: [-0.003, 0.0], cells: [8, 8], aperture_size_m: None };
+    let mouth = FlueMouthRadiation { center_m: [-0.003, 0.0], cells: [8, 8],
+        aperture_size_m: Some([0.002, 0.001]) };
+    assert_ne!(mouth.size_m(&source.geometry()),
+        [source.geometry().flue_width_m, source.geometry().cut_up_m]);
     let base = || FlueDgPerformance::with_baffled_outlet(
         replica_voice(&source), original.schedule().clone(), *original.config(), receiver,
     ).unwrap().with_mouth_radiation(mouth).unwrap();
@@ -206,7 +247,7 @@ fn joint_mouth_reaction_reaches_the_source_and_one_shared_physical_microphone() 
     ).unwrap();
     // Reconstructing a voice from the already joint-loaded cold source must
     // retain its physical operator and must not restore legacy mouth inertia.
-    let make = |block| {
+    let make = |block, aperture_size_m| {
         let voice = FlueVoice::from_dg(Some(source.card()), 8.0, 1e-6, source.geometry(),
             FlueDgSpec { load: load.clone(), minimum_jet_speed_m_s: 1.0,
                 maximum_jet_mach: 0.3, max_jet_history_samples: 8192 },
@@ -215,12 +256,13 @@ fn joint_mouth_reaction_reaches_the_source_and_one_shared_physical_microphone() 
         let mut config = *joint.config();
         config.max_block = block;
         FlueDgPerformance::with_baffled_outlet(voice, joint.schedule().clone(), config, receiver)
-            .unwrap().with_mouth_radiation(mouth).unwrap()
+            .unwrap().with_mouth_radiation(FlueMouthRadiation { aperture_size_m, ..mouth })
     };
-    let mut single = make(1);
-    let mut partitioned = make(37);
-    assert!(make(1).with_mouth_reaction(&gate).is_err());
-    assert!(make(1).with_mutual_mouth_reaction(&gate).is_err());
+    let mut single = make(1, mouth.aperture_size_m).unwrap();
+    let mut partitioned = make(37, mouth.aperture_size_m).unwrap();
+    assert!(make(1, None).is_err(), "the receiver cannot silently replace the bound acoustic aperture");
+    assert!(make(1, mouth.aperture_size_m).unwrap().with_mouth_reaction(&gate).is_err());
+    assert!(make(1, mouth.aperture_size_m).unwrap().with_mutual_mouth_reaction(&gate).is_err());
     let mut together = joint;
     let mut expected = Vec::with_capacity(512);
     let mut pressure_peak = 0.0_f64;

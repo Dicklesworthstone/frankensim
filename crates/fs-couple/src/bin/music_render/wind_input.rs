@@ -991,7 +991,7 @@ pub(super) fn flue_dg_provenance(
                         terminal.delay_samples.1, terminal.filter_delay_samples())
                 };
                 let mouth_json = format!(",\"mouth_receiver\":{{\"shape\":\"rectangle\",\"center_m\":[{:e},{:e}],\"size_m\":[{:e},{:e}],\"cells\":[{},{}],\"source\":\"negative accepted DG inlet volume flow\",\"kernel_support_mechanical_samples\":[{},{}],\"filter_delay_mechanical_samples\":{:e},\"reaction_added\":{}}}",
-                    mouth.center_m[0], mouth.center_m[1], geometry.flue_width_m, geometry.cut_up_m,
+                    mouth.center_m[0], mouth.center_m[1], mouth.size_m(&geometry)[0], mouth.size_m(&geometry)[1],
                     mouth.cells[0], mouth.cells[1], microphone.delay_samples.0,
                     microphone.delay_samples.1, microphone.filter_delay_samples(), mouth_reaction.is_some() || mutual_mouth);
                 let reaction_json = if mutual_mouth {

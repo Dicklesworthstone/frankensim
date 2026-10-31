@@ -9,8 +9,10 @@
 //! MAX_PATHS MAX_FILTER_TAPS MAX_KERNEL_TERMS` selects the shared physical
 //! exterior propagation for every observed opening, including the optional
 //! mouth. Omission retains the original lossless receiver.
-//! After a baffled observation, optional `mouth_radiation X Y WIDTH_CELLS
-//! CUT_UP_CELLS` adds the actual rectangular mouth to that same microphone.
+//! After a baffled observation, optional `mouth_aperture rectangle WIDTH_M
+//! LENGTH_M` declares an acoustic opening independently of the jet geometry.
+//! `mouth_radiation X Y WIDTH_CELLS LENGTH_CELLS` adds that mouth to the same
+//! microphone. Omitted aperture dimensions retain flue width by cut-up.
 //! Optional `mouth_reaction none|compact-baffled|mutual-baffled` selects no
 //! replacement, the original compact self reaction, or one complete shared
 //! rectangular-mouth/circular-terminal reaction. The latter includes all
@@ -27,7 +29,7 @@ use crate::dg_port::input::wall::regions::{DgMaterialWallLayout, DgMaterialWallL
 use crate::flue_loop::dg::FlueDgSpec;
 use crate::flue_loop::network::performance::file::{
     FlueInputError, FluePerformanceInfo, MAX_FLUE_PERFORMANCE_BYTES, Rows,
-    held_blowing_pressure,
+    held_blowing_pressure, read_mouth_aperture,
 };
 use crate::flue_loop::network::performance::file::excitation::{FlueFlowInput, FlueJetInput};
 use crate::flue_loop::{FlueGeometry, FlueVoice};
@@ -94,11 +96,12 @@ enum MouthReaction { None, CompactBaffled, MutualBaffled }
 fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
     -> Result<(Option<FlueMouthRadiation>, MouthReaction), FlueDgInputError>
 {
+    let aperture_size_m = read_mouth_aperture(rows)?;
     let mouth = if rows.next_is("mouth_radiation") {
         let mut row = rows.row("mouth_radiation")?;
         let input = FlueMouthRadiation {
             center_m: [row.scalar()?, row.scalar()?],
-            aperture_size_m: None,
+            aperture_size_m,
             cells: [row.number()?, row.number()?],
         };
         row.end()?;
@@ -107,6 +110,9 @@ fn read_mouth(rows: &mut Rows<'_>, exterior: bool)
         }
         Some(input)
     } else { None };
+    if aperture_size_m.is_some() && mouth.is_none() {
+        return Err(bad(rows.line, "mouth_aperture requires mouth_radiation"));
+    }
     let reaction = if rows.next_is("mouth_reaction") {
         let mut row = rows.row("mouth_reaction")?;
         let selected = match row.fields.next() {
