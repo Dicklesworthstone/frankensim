@@ -13817,6 +13817,55 @@ coefficients and applicability must come from the caller's source reduction;
 this API does not automatically derive a hereditary material tensor or add
 finite-wavelength acoustic back-reaction.
 
+## Nonlinear prestressed-film material memory
+
+`MembranePotential::with_proportional_relaxation` adds a supplied uniform
+proportional plane-stress Maxwell spectrum to the original statically
+condensed film stretching. Ratios multiply the complete equilibrium membrane
+tensor, retaining directional and Poisson cross terms. The same scalar
+spectrum applies to every facet. Zero or fully relaxed initial histories lie
+in the original equilibrated strain range; its common branch rates preserve
+that range. This is the restriction that makes the existing cold in-plane
+condensation valid. Heterogeneous spectra and independently prescribed
+in-plane histories require another owner and are not inferred here.
+
+Original fs-la Cholesky factors each positive local energy metric, then its
+Householder QR transforms the complete weighted strain field. Every triangular
+row survives, including zero and weak rows. R^T R is independently checked
+against the original physical Gram; no inverse, eigenvalue/rank cutoff, modal
+loss fit or separate time integrator is introduced. Cached quadratic maps need
+n(n+1)/2 histories per positive source arm, independent of the facet count.
+Full source-arm, setup and joint-state budgets remain binding.
+
+A film retains its law when cloned into an ImpactSystem. Its original fs-phs
+mapped-strain owner evolves all material memories together with mechanics,
+contact and compatible supported-string histories. The native discrete effort
+owns positive arm heat, counted once in total dissipation. Installed tension,
+linear bending, additional physical resistance ports and exterior radiation
+remain distinct. Intrinsic per-mode damping on a hereditary film refuses.
+No material-card claim, automatic heat-cell deposition, live thermal evolution,
+prestress relaxation or heterogeneous in-plane evolution is invented.
+
+Explicit modal-displacement limits bound all quadratic strains and gradients;
+accepted histories obey the corresponding strain envelopes. The complete
+nonlinear tangent bound includes both strain-gradient energy and hereditary
+stress curvature. Source frequency, midpoint clock, dt/tau<=2, original slope,
+energy and cancellation gates remain active. Subsequent radiation attachment
+rechecks the complete source bound; nonlinear gap loading requires a new
+strain/history envelope and refuses through the existing composition gate.
+
+The bounded native proof used actual new source projection, cached maps and
+body-memory composition, original strain energy/tangents, fs-la factors and
+the full fs-phs discrete-gradient owner. Six tests passed, including full-rank
+and singular mixed-pair fields, independent Hessian differences, domain/budget
+refusal and independent Duffing-Maxwell state/heat convergence. At 100/200/400
+steps, normalized errors were 1.06214e-4, 2.65565e-5, 6.63930e-6 for unrelaxed
+history and 1.06077e-4, 2.65222e-5, 6.63074e-6 for relaxed history. These are
+manufactured numerical checks. The existing `membrane_impact` suite now also
+contains physical disk, mixed-pair, acoustic-composition and refusal
+regressions; the full integration suite was not run in this dependency-limited
+session. Mesh/material/acoustic convergence is not established by this slice.
+
 ## Spatial electrothermal field storage and finite frame heat feedback
 
 ### One spatial electrical/thermal state

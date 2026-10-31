@@ -923,3 +923,26 @@ nonmatching eccentric seam. The scope remains moderate-deformation CST/DKT
 membrane prestress with reference-frame linear bending, beams and glue; it does
 not claim nonlinear MITC bending, unilateral contact, assembled tethers, beam
 buckling, tension/downbearing/contact force ledgers or closure of M1.4-W1.
+
+## Complete condensed-film strain coordinates
+
+`MembraneReduction::stretching_strain_gram` and `strain_facets` expose the
+original statically equilibrated quadratic strain columns and area-weighted
+plane-stress metrics. For the complete symmetric modal-pair vector p, the
+same incremental stretching energy is p^T G p/2. Installed tension and linear
+bending remain outside this metric. Projection work is bounded before dense
+allocation, and no weak direction or mixed term is truncated.
+
+A uniform proportional hereditary spectrum can use an energy factor of this
+field without repeating the in-plane solve: every condensed strain column
+is equilibrated against the original in-plane trial space, and a common
+scalar relaxation law with compatible initial history preserves its range.
+This does not authorize heterogeneous spectra, independently evolving tensor
+directions, free in-plane initial strains or time-dependent prestress. The
+coupled impact owner supplies constitutive states, clock/domain admission and
+heat; fs-plate still owns geometry and equilibrium strain energy only.
+
+The inline strain test checks the complete Gram against original positive
+facet energy, including mixed pairs and budget refusal. A bounded native run
+also exercised the unchanged tangent kernels; it does not constitute a new
+full mesh/modal construction qualification.

@@ -131,3 +131,6 @@ fn membrane_admission_keeps_the_original_mode_and_rejects_unphysical_limits() {
     assert!(p.observe(&[]).is_err()); assert!(p.observe(&[f64::NAN]).is_err());
     assert_eq!(p.observe(&[0.0]).unwrap().stretching_energy_j,0.0);
 }
+
+#[path = "membrane_impact/relaxation.rs"]
+mod relaxation;

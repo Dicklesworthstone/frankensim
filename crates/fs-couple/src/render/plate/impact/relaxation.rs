@@ -36,6 +36,7 @@ pub(super) struct Memory {
     rates: Vec<f64>,
     mapped: Vec<MappedRelaxationBranch>,
     supports: Vec<(usize,super::supported::SupportedStrings,usize,usize)>,
+    films: Vec<(usize,super::membrane::MembranePotential,usize,usize)>,
     joint_omega_bound: f64,
 }
 impl Memory {
@@ -91,12 +92,17 @@ impl Memory {
                 .ok_or_else(||invalid("supported material history prefix is incomplete"))?;
             support.admit_memory(*offset,state,memory)?;
         }
+        for (offset,film,start,count) in &self.films {
+            let memory=state.get(self.base_dim+start..self.base_dim+start+count)
+                .ok_or_else(||invalid("film material history prefix is incomplete"))?;
+            film.admit_memory(*offset,state,memory)?;
+        }
         Ok(())
     }
     pub(super) fn admit_radiation(&self,omega:f64,coupling_bound:f64,dt:f64)
         -> Result<Option<f64>,ImpactError>
     {
-        if self.supports.is_empty() {return Ok(None);}
+        if self.supports.is_empty() && self.films.is_empty() {return Ok(None);}
         // In energy-scaled canonical coordinates, the old and acoustic
         // oscillator blocks have norm max(Omega_old,Omega_air). The reciprocal
         // velocity-port skew block adds at most ||L||_2, bounded by the original
@@ -106,6 +112,9 @@ impl Memory {
         fs_phs::linear_exact::admit_midpoint_band(bound,dt).map_err(ImpactError::TimeResolution)?;
         for (_,support,_,_) in &self.supports {
             if let Some(config)=support.memory_configuration() {config.admit_domain(bound,dt)?;}
+        }
+        for (_,film,_,_) in &self.films {
+            if let Some(config)=film.memory_configuration() {config.admit_domain(bound,dt)?;}
         }
         Ok(Some(bound))
     }
@@ -130,8 +139,8 @@ impl ImpactSystem {
     /// Preserve the old linear-memory composition path; the mapped supported
     /// path must not silently reuse authority from its previous operator.
     pub(super) fn require_recomposition_without_mapped_memory(&self)->Result<(),ImpactError> {
-        if self.relaxation.as_ref().is_some_and(|memory|!memory.supports.is_empty()) {
-            return Err(invalid("nonlinear gap loading needs supported hereditary domain recomposition"));
+        if self.relaxation.as_ref().is_some_and(|memory|!memory.supports.is_empty() || !memory.films.is_empty()) {
+            return Err(invalid("nonlinear gap loading needs complete strain/history domain recomposition"));
         }
         Ok(())
     }
@@ -205,16 +214,16 @@ impl ImpactSystem {
         if !energy.is_finite() || energy<0.0 || energy>self.config.maximum_energy_j {
             return Err(invalid("initial material memory exceeds the mechanical energy ceiling"));
         }
-        self.relaxation=Some(Memory {base_dim,rows,rates,mapped:vec![],supports:vec![],joint_omega_bound:0.0});
+        self.relaxation=Some(Memory {base_dim,rows,rates,mapped:vec![],supports:vec![],films:vec![],joint_omega_bound:0.0});
         Ok(self)
     }
 
     /// Called by the original constructor after all body/felt state is known.
-    /// Immutable supported-body data cannot be dropped when composed with an
-    /// impact exciter. Memory remains in the one existing pHS state and ledger.
-    pub(super) fn with_supported_relaxation(mut self,joint_omega_bound:f64)->Result<Self,ImpactError> {
+    /// Immutable supported-string and film data cannot be dropped when composed
+    /// with an impact exciter. Memory remains in the one existing pHS state and ledger.
+    pub(super) fn with_body_relaxation(mut self,joint_omega_bound:f64)->Result<Self,ImpactError> {
         let base_dim=self.x.len();let mut branches=Vec::new();let mut supports=Vec::new();
-        let mut memories=Vec::new();let mut rates=Vec::new();
+        let mut memories=Vec::new();let mut rates=Vec::new();let mut films=Vec::new();
         for (_,offset,support) in &self.supports {
             let Some(config)=support.memory_configuration() else {continue;};
             config.admit_domain(joint_omega_bound,self.config.dt_s)?;
@@ -237,11 +246,32 @@ impl ImpactSystem {
             }
             supports.push((*offset,support.clone(),start,local.len()));branches.extend(local);
         }
-        if branches.is_empty() && supports.iter().all(|(_,s,_,_)|
+        for (_,offset,film) in &self.membranes {
+            let Some(config)=film.memory_configuration() else {continue;};
+            config.admit_domain(joint_omega_bound,self.config.dt_s)?;
+            let local=film.memory_branches(*offset,base_dim)?;
+            let start=branches.len();
+            if start+local.len()>256 || base_dim+start+local.len()>MAX_JOINT_STATES {
+                return Err(invalid("complete film and companion material histories exceed the joint state ceiling"));
+            }
+            for branch in &local {
+                let rate=1.0/branch.relaxation_time_s;
+                let z=match config.initial {
+                    InitialMemory::Relaxed=>det::sqrt(branch.stiffness)*branch.strain.strain(&self.x),
+                    InitialMemory::Unrelaxed=>0.0,
+                };
+                if !rate.is_finite() || rate<=0.0 || !z.is_finite() {
+                    return Err(invalid("film material initial history or rate is unrepresentable"));
+                }
+                memories.push(z);rates.push(rate);
+            }
+            films.push((*offset,film.clone(),start,local.len()));branches.extend(local);
+        }
+        if branches.is_empty() && films.is_empty() && supports.iter().all(|(_,s,_,_)|
             s.memory_configuration().is_none_or(|m|!m.has_source_domain())) {return Ok(self);}
         self.system=self.system.with_mapped_relaxation_branches(branches.clone()).map_err(ImpactError::PreparedSolve)?;
         self.x.extend(memories);
-        let memory=Memory {base_dim,rows:vec![],rates,mapped:branches,supports,joint_omega_bound};
+        let memory=Memory {base_dim,rows:vec![],rates,mapped:branches,supports,films,joint_omega_bound};
         memory.admit_state(&self.x)?;
         let energy=self.stored_energy_j();
         if !energy.is_finite() || energy<0.0 || energy>self.config.maximum_energy_j {

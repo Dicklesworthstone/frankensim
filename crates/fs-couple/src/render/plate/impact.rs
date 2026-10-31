@@ -285,6 +285,15 @@ impl ImpactSystem {
             for &omega in body.potential.omegas() {stiffness_bound=stiffness_bound.max(omega*omega);}
             for (i,s) in body.initial.iter().enumerate() {x[2*(offset+i)]=s.displacement_m_sqrt_kg;x[2*(offset+i)+1]=s.velocity_m_sqrt_kg_per_s;}
             if let BodyPotential::Membrane(film)=&body.potential {
+                if let Some(memory)=film.memory_configuration() {
+                    if body.damping_per_s.iter().any(|d|*d!=0.0) {
+                        return Err(invalid("hereditary films require separate physical damping ports, not intrinsic modal loss"));
+                    }
+                    let linear=film.reduction().omegas().iter().map(|w|w*w).fold(0.0_f64,f64::max);
+                    let complete=linear+memory.stiffness_bound();
+                    if !complete.is_finite() {return Err(invalid("complete film tangent bound overflows"));}
+                    stiffness_bound=stiffness_bound.max(complete);
+                }
                 film.observe_interleaved(&x,offset)?;
                 membranes.push((body_index,offset,film.clone()));
             }
@@ -358,7 +367,7 @@ impl ImpactSystem {
             .map_err(|e|ImpactError::Owner(e.to_string()))?;
         let energy=system.hamiltonian(&x);
         if !energy.is_finite() || energy<0.0 || energy>config.maximum_energy_j {return Err(invalid("initial impact energy exceeds admission"));}
-        Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),gas_film:None}.with_supported_relaxation(stiffness_bound.sqrt())
+        Self{system,x,pads:retained,histories,modes,config,sample:0,membranes,strings,supports,mechanical,contact,contact_loss,material_contacts:Vec::new(),radiation:None,relaxation:None,squeeze_films:Vec::new(),gas_film:None}.with_body_relaxation(stiffness_bound.sqrt())
     }
     /// Accepted mass-normalized q,p; Kelvin coordinates follow the 2*modes prefix.
     #[must_use]

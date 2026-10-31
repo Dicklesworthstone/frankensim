@@ -3,12 +3,16 @@
 //! fs-plate owns the prestressed pencil and statically relaxed von Karman
 //! energy. fs-la factors its cold in-plane problem once. This module admits
 //! that potential to the existing impact host; it adds neither an integrator
-//! nor an amplitude-to-pitch control curve. The caller supplies damping and
-//! launch motion separately through ImpactBody.
+//! nor an amplitude-to-pitch control curve. Uniform proportional material
+//! histories share the original strain energy and impact time owner. Other
+//! damping and launch motion remain explicit in ImpactBody.
 use std::sync::Arc;
 use fs_plate::{ModePair, PlateError, PlateMesh, PlateModel, PlateSection};
 use fs_plate::shell::head::nonlinear::{MembraneReduction, MembraneReductionBudget};
 use super::{ImpactError, MAX_IMPACT_MODES};
+
+mod relaxation;
+pub use relaxation::{MembraneRelaxationBudget, MembraneRelaxationSpectrum};
 
 /// Geometry-owned stretching energy and an explicit small-slope validity limit.
 /// Clones share only immutable reduction data; every dynamic state remains in
@@ -18,6 +22,7 @@ use super::{ImpactError, MAX_IMPACT_MODES};
 pub struct MembranePotential {
     reduction: Arc<MembraneReduction>,
     maximum_slope: f64,
+    memory: Option<Arc<relaxation::FilmMemory>>,
 }
 
 /// Observation of an accepted body state, not a separate audio signal.
@@ -41,7 +46,7 @@ impl MembranePotential {
         {
             return Err(ImpactError::Invalid("membrane impact needs bounded modes and an explicit slope limit in (0,1)"));
         }
-        Ok(Self { reduction: Arc::new(reduction), maximum_slope })
+        Ok(Self { reduction: Arc::new(reduction), maximum_slope, memory: None })
     }
 
     /// Reduce an arbitrary planar film, retaining its actual modes and rim.

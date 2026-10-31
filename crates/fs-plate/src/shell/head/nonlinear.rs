@@ -10,9 +10,12 @@
 //! tensor. It allocates nothing and introduces no new time integrator.
 //!
 //! Scope: moderate slopes, linear plane-stress material, quasi-static in-plane
-//! relaxation. In-plane inertia, wrinkling, slackening and film viscoelasticity
-//! are NOT inferred. Mesh/mode convergence and material calibration still matter.
+//! relaxation. In-plane inertia, wrinkling and slackening are not inferred.
+//! The strain Gram exports this SAME condensed field for uniform proportional
+//! hereditary laws; constitutive histories and time evolution belong to callers.
+//! Mesh/mode convergence and material calibration still matter.
 mod tangent;
+mod strain;
 use crate::{ModePair, PlateError, PlateMesh, PlateModel, PlateSection};
 
 /// Explicit cold-work/storage ceilings, independent of instrument names.
