@@ -553,17 +553,24 @@ fn assert_tensor_source_run(kelvin: bool) {
 
 #[test]
 fn g1_affine_source_tensors_drive_original_momenta_entropy_memory_and_finite_heat() {
-    assert_thermal_source_run(false);
+    assert_thermal_source_run(false, false);
 }
 
 #[test]
 fn g1_independent_young_shear_reaches_original_rigid_entropy_memory_and_finite_heat() {
-    assert_thermal_source_run(true);
+    assert_thermal_source_run(true, false);
 }
 
-fn assert_thermal_source_run(young_shear: bool) {
+#[test]
+fn g1_independent_orthotropic_shear_drives_continuing_rigid_entropy_memory_and_finite_heat() {
+    assert_thermal_source_run(false, true);
+}
+
+fn assert_thermal_source_run(young_shear: bool, independent_orthotropic: bool) {
     let f = if young_shear {
         young_shear_fixture(1.0)
+    } else if independent_orthotropic {
+        fixture_with_kelvin(true, true)
     } else {
         fixture_with_thermal(false, true, true)
     };
@@ -576,10 +583,12 @@ fn assert_thermal_source_run(young_shear: bool) {
         let mut moving = bodies(false,Vec3::new(0.0,0.08,0.0));
         let k0 = if young_shear { [[4.8,0.0],[0.0,4.8]] }
             else { rotated([[9.0,0.0],[0.0,4.0]],angle) };
-        let b0 = rotated([[2.0,1.0],[1.0,1.5]],angle);
+        let b0 = rotated([[2.0,1.0],[1.0,if independent_orthotropic {0.5} else {1.5}]],angle);
         let dk = if young_shear { [[0.006,0.0],[0.0,0.006]] }
+            else if independent_orthotropic { rotated([[-0.01,0.0],[0.0,0.0]],angle) }
             else { k0.map(|row| row.map(|v| -0.0025*v)) };
-        let db = rotated([[-0.005,0.003],[0.003,0.01]],angle);
+        let db = if independent_orthotropic { [[0.0;2];2] }
+            else { rotated([[-0.005,0.003],[0.003,0.01]],angle) };
         let c0 = rotated([[0.02,-0.01],[-0.01,0.005]],angle);
         for i in 0..2 { for j in 0..2 {
             close(material.thermal_slopes().equilibrium_n_m_k[i][j],dk[i][j],2e-15);
@@ -674,6 +683,12 @@ fn assert_thermal_source_run(young_shear: bool) {
                     assert_eq!(source.answer().receipt.selected,
                         f.material.state().property(name).unwrap().answer().receipt.selected);
                 }
+            } else if independent_orthotropic {
+                let name = ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES[0];
+                let source = report.source.material.state().property(name).unwrap();
+                close(source.value_si(),9.0-0.01*(temperature-300.0),2e-14);
+                assert_eq!(source.answer().receipt.selected,
+                    f.material.state().property(name).unwrap().answer().receipt.selected);
             }
             assert_eq!(history.deformation(),&old_state);
             let (next_bodies,next_history,next_heat,_) = candidate.into_parts();
@@ -700,12 +715,21 @@ fn g4_nonlinear_layer_requires_positive_capacity_over_the_complete_source_strain
 }
 
 #[test]
-fn g4_unsupported_equilibrium_path_and_foreign_orientation_refuse_before_native_state_changes() {
+fn g4_independent_equilibrium_path_keeps_source_domain_and_foreign_orientation_refusals() {
     let soft = fixture(true);
-    assert!(bind(&soft, 0.4).is_err());
+    let supported = bind(&soft, 0.4).unwrap();
+    let expected_slope = rotated([[-0.01, 0.0], [0.0, 0.0]], 0.4);
+    for temperature in [280.0, 300.0, 320.0] {
+        let slopes = supported.thermal_slopes_at_temperature(temperature).unwrap();
+        for i in 0..2 { for j in 0..2 {
+            close(slopes.equilibrium_n_m_k[i][j], expected_slope[i][j], 2e-15);
+            close(slopes.relaxation_n_m_k[0][i][j], 0.0, 0.0);
+        }}
+    }
+    assert!(supported.at_temperature(321.0).is_err());
+    assert!(supported.thermal_slopes_at_temperature(321.0).is_err());
     let f = fixture(false);
     let material = bind(&f, 0.4).unwrap();
-    assert!(material.at_temperature(321.0).is_err());
     let heat = inventory(&f);
     let route = ThirdBodyHeatRoute::from_links(&heat, LAYER, [7, 8], K, [0.0; 2]).unwrap();
     let foreign = bind(&f, 0.0).unwrap();

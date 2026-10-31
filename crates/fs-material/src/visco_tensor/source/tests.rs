@@ -965,3 +965,318 @@ fn g3_rational_tensor_law_retains_complete_source_path_admission() {
         assert_eq!(material, before);
     }
 }
+
+fn affine_compliance_fixture(
+    elasticity: TensorElasticity,
+    coefficients: &[(&str, Dims, f64, f64)],
+) -> (MaterialCard, ResolvedTensorMaterial) {
+    let (mut properties, mut claims) = fixture();
+    properties.elasticity = elasticity;
+    claims.retain(|claim| !matches!(claim.key.name(), "young_modulus" | "poisson_ratio"));
+    claims.push(scalar("density", Density::DIMS, 850.0));
+    for &(name, dims, reference, slope) in coefficients {
+        let mut claim = scalar(name, dims, reference);
+        claim.value = PropertyValue::Curve {
+            abscissa: "T".into(),
+            abscissa_dims: fs_qty::Temperature::DIMS,
+            knots: [273.0, 300.0, 373.0]
+                .into_iter()
+                .map(|t| (t, slope.mul_add(t - 300.0, reference)))
+                .collect(),
+            dims,
+        };
+        claim.interpolation = InterpolationPolicy::LinearInside;
+        claims.push(claim);
+    }
+    let card = card(claims);
+    let point = QueryPoint::new()
+        .with("T", 300.0)
+        .unwrap()
+        .with("omega", 100.0)
+        .unwrap();
+    let material = ResolvedTensorMaterial::resolve(
+        &card,
+        &point,
+        properties,
+        MaterialPropertySelection::SingleClaimOnly,
+    )
+    .unwrap();
+    (card, material)
+}
+
+fn orthotropic_thermal_coefficients() -> [(&'static str, Dims, f64, f64); 9] {
+    [
+        ("young_modulus_1", Pressure::DIMS, 12e9, -12e6),
+        ("young_modulus_2", Pressure::DIMS, 8e9, 4e6),
+        ("young_modulus_3", Pressure::DIMS, 5e9, -1e6),
+        ("poisson_ratio_12", Dims::NONE, 0.18, 2e-4),
+        ("poisson_ratio_13", Dims::NONE, 0.12, -1e-4),
+        ("poisson_ratio_23", Dims::NONE, 0.16, 1e-4),
+        ("shear_modulus_12", Pressure::DIMS, 3e9, 1e6),
+        ("shear_modulus_23", Pressure::DIMS, 2e9, -2e6),
+        ("shear_modulus_31", Pressure::DIMS, 1.5e9, 0.5e6),
+    ]
+}
+
+#[test]
+fn g1_affine_orthotropic_engineering_sources_reach_rotated_thermal_curvature() {
+    use crate::visco_tensor::TensorProjectionBudget;
+    let (card, material) = affine_compliance_fixture(
+        TensorElasticity::Orthotropic,
+        &orthotropic_thermal_coefficients(),
+    );
+    let before = material.clone();
+    assert!(thermal::AffineTensorThermal::try_new(&material, &card, "T", [280.0, 360.0]).is_err());
+    let owner = thermal::TensorThermalLaw::try_new(&material, &card, "T", [280.0, 360.0]).unwrap();
+    let identity = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]];
+    let rotation = [[0.8, -0.6, 0.0], [0.48, 0.64, -0.6], [0.36, 0.48, 0.8]];
+    let principal = owner.in_frame(identity).unwrap();
+    let oriented = owner.in_frame(rotation).unwrap();
+    assert!(!oriented.is_affine());
+    let bounds = oriented.equilibrium_bounds.unwrap();
+    let column: [f64; 6] = [1.0, -0.5, 0.25, 0.3, -0.1, 0.2];
+    let strain: [f64; 6] = core::array::from_fn(|i| {
+        0.001
+            * column[i]
+            * if i < 3 {
+                1.0
+            } else {
+                core::f64::consts::SQRT_2
+            }
+    });
+    let volume = 0.01;
+    let source_at = |t| {
+        material
+            .at_query_point(&card, &material.state().query().with("T", t).unwrap())
+            .unwrap()
+    };
+    let native = |t| source_at(t).rotated_law(rotation).unwrap();
+    let quadratic = |matrix: &crate::Tangent6| {
+        (0..6)
+            .map(|i| {
+                (0..6)
+                    .map(|j| strain[i] * matrix[i][j] * strain[j])
+                    .sum::<f64>()
+            })
+            .sum::<f64>()
+    };
+    let energy = |t| 0.5 * volume * quadratic(native(t).equilibrium_mandel());
+    let state_at = |t| {
+        let derivative = oriented.at_temperature(t).unwrap();
+        assert!(std::sync::Arc::ptr_eq(
+            &oriented.branches_pa_k,
+            &derivative.branches_pa_k
+        ));
+        let point = native(t)
+            .project_strain(
+                &[column],
+                volume,
+                TensorProjectionBudget {
+                    max_coordinates: 1,
+                    max_scalar_terms: 256,
+                },
+                || false,
+            )
+            .unwrap();
+        let state = point
+            .thermal_state(&derivative, &[0.001], &[0.0; 6], t, 1e-10, || false)
+            .unwrap();
+        assert!(
+            point
+                .thermal_capacity_bound_j_k2(&derivative, t, [0.0; 6])
+                .unwrap()
+                >= -state.heat_capacity_j_k / t
+        );
+        if t != 300.0 {
+            assert!(
+                point
+                    .thermal_state(&oriented, &[0.001], &[0.0; 6], t, 1e-10, || false)
+                    .is_err()
+            );
+        }
+        state
+    };
+    for t in [280.0, 300.0, 330.0, 360.0] {
+        let derivative = oriented.at_temperature(t).unwrap();
+        let local = principal.at_temperature(t).unwrap();
+        let expected_first = crate::tensor::rotate_mandel(local.equilibrium_pa_k, rotation);
+        let expected_second = crate::tensor::rotate_mandel(local.equilibrium_pa_k2, rotation);
+        let h = 0.1;
+        let cold = native(t - h);
+        let actual = native(t);
+        let warm = native(t + h);
+        for i in 0..6 {
+            for j in 0..6 {
+                let first =
+                    (warm.equilibrium_mandel()[i][j] - cold.equilibrium_mandel()[i][j]) / (2.0 * h);
+                let second = (warm.equilibrium_mandel()[i][j]
+                    - 2.0 * actual.equilibrium_mandel()[i][j]
+                    + cold.equilibrium_mandel()[i][j])
+                    / (h * h);
+                let d = derivative.equilibrium_pa_k[i][j];
+                let dd = derivative.equilibrium_pa_k2[i][j];
+                assert!(
+                    (d - first).abs() <= 5e-6 * d.abs().max(1.0) + 0.01,
+                    "Cprime[{i},{j}] at {t}: {d} != {first}"
+                );
+                assert!(
+                    (dd - second).abs() <= 2e-5 * dd.abs().max(1.0) + 1.0,
+                    "Csecond[{i},{j}] at {t}: {dd} != {second}"
+                );
+                assert!((d - expected_first[i][j]).abs() <= 2e-12 * d.abs().max(1.0));
+                assert!((dd - expected_second[i][j]).abs() <= 2e-12 * dd.abs().max(1.0));
+                assert!(actual.equilibrium_mandel()[i][j].abs() <= bounds.stiffness_norm_pa);
+                assert!(d.abs() <= bounds.slope_norm_pa_k);
+                assert!(dd.abs() <= bounds.curvature_norm_pa_k2);
+            }
+        }
+        let state = state_at(t);
+        assert!((state.free_energy_j - energy(t)).abs() <= 2e-11 * energy(t));
+        let entropy = -(energy(t + h) - energy(t - h)) / (2.0 * h);
+        assert!((state.entropy_j_k - entropy).abs() <= 5e-6 * entropy.abs().max(1e-4));
+        for source in material.state().properties() {
+            assert_eq!(
+                source.answer().receipt.selected,
+                source_at(t)
+                    .state()
+                    .property(source.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+        }
+    }
+    let t = 320.0;
+    let h = 0.01;
+    let difference =
+        (state_at(t + h).internal_energy_j - state_at(t - h).internal_energy_j) / (2.0 * h);
+    let capacity = state_at(t).heat_capacity_j_k;
+    assert!(capacity.abs() > 1e-8);
+    assert!((difference - capacity).abs() <= 2e-6 * capacity.abs());
+    assert_eq!(material, before);
+}
+
+#[test]
+fn g1_affine_young_poisson_sources_retain_both_rational_isotropic_derivatives() {
+    for reference_nu in [0.25, -0.75] {
+        let (card, material) = affine_compliance_fixture(
+            TensorElasticity::Isotropic,
+            &[
+                ("young_modulus", Pressure::DIMS, 12e9, -10e6),
+                ("poisson_ratio", Dims::NONE, reference_nu, 0.001),
+            ],
+        );
+        assert!(
+            thermal::AffineTensorThermal::try_new(&material, &card, "T", [280.0, 360.0]).is_err()
+        );
+        let owner =
+            thermal::TensorThermalLaw::try_new(&material, &card, "T", [280.0, 360.0]).unwrap();
+        let derivative = owner
+            .in_frame([[0.8, -0.6, 0.0], [0.48, 0.64, -0.6], [0.36, 0.48, 0.8]])
+            .unwrap();
+        for t in [280.0, 300.0, 360.0] {
+            let e = 12e9 - 10e6 * (t - 300.0);
+            let nu = reference_nu + 0.001 * (t - 300.0);
+            let bulk_denominator = 1.0 - 2.0 * nu;
+            let shear_denominator = 1.0 + nu;
+            let bulk_cross = -10e6 * bulk_denominator + 2.0 * e * 0.001;
+            let shear_cross = -10e6 * shear_denominator - e * 0.001;
+            let kp = bulk_cross / (3.0 * bulk_denominator * bulk_denominator);
+            let kpp = 4.0 * 0.001 * bulk_cross / (3.0 * bulk_denominator.powi(3));
+            let gp = shear_cross / (2.0 * shear_denominator * shear_denominator);
+            let gpp = -0.001 * shear_cross / shear_denominator.powi(3);
+            let snapshot = derivative.at_temperature(t).unwrap();
+            assert!(!snapshot.is_affine());
+            for (actual, expected) in [
+                (snapshot.equilibrium_pa_k[0][0], kp + 4.0 * gp / 3.0),
+                (snapshot.equilibrium_pa_k[0][1], kp - 2.0 * gp / 3.0),
+                (snapshot.equilibrium_pa_k[4][4], 2.0 * gp),
+                (snapshot.equilibrium_pa_k2[0][0], kpp + 4.0 * gpp / 3.0),
+                (snapshot.equilibrium_pa_k2[0][1], kpp - 2.0 * gpp / 3.0),
+                (snapshot.equilibrium_pa_k2[4][4], 2.0 * gpp),
+            ] {
+                assert!(
+                    (actual - expected).abs() < 2e-11 * expected.abs().max(1.0),
+                    "{actual} != {expected}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn g0_general_compliance_preserves_the_existing_affine_tensor_limit() {
+    let mut coefficients = orthotropic_thermal_coefficients();
+    for coefficient in &mut coefficients {
+        coefficient.3 = if coefficient.1 == Pressure::DIMS {
+            -0.001 * coefficient.2
+        } else {
+            0.0
+        };
+    }
+    let (card, material) = affine_compliance_fixture(TensorElasticity::Orthotropic, &coefficients);
+    let affine =
+        thermal::AffineTensorThermal::try_new(&material, &card, "T", [280.0, 360.0]).unwrap();
+    let general =
+        thermal::TensorThermalLaw::try_new(&material, &card, "T", [280.0, 360.0]).unwrap();
+    let rotation = [[0.8, -0.6, 0.0], [0.48, 0.64, -0.6], [0.36, 0.48, 0.8]];
+    let exact = affine.in_frame(rotation).unwrap();
+    let template = general.in_frame(rotation).unwrap();
+    for t in [280.0, 300.0, 360.0] {
+        let value = template.at_temperature(t).unwrap();
+        assert!(value.is_affine());
+        assert_eq!(value.equilibrium_pa_k, exact.equilibrium_pa_k);
+        assert_eq!(value.equilibrium_pa_k2, [[0.0; 6]; 6]);
+        assert_eq!(value.branches_pa_k, exact.branches_pa_k);
+    }
+}
+
+#[test]
+fn g3_compliance_admission_proves_the_whole_interval_and_exposes_its_conservative_limit() {
+    for interior_failure in [true, false] {
+        let mut coefficients = orthotropic_thermal_coefficients();
+        for (i, coefficient) in coefficients.iter_mut().enumerate() {
+            coefficient.2 = if i < 3 {
+                1e9
+            } else if i < 6 {
+                0.0
+            } else {
+                0.5e9
+            };
+            coefficient.3 = 0.0;
+        }
+        if interior_failure {
+            // On x=(T-280)/80, E2/E1=6-5x and nu12=.3+.5x.
+            // The stability factor 1-nu12^2*E2/E1 is positive at both
+            // endpoints and negative at x=.5. Endpoint SPD alone is insufficient.
+            coefficients[1].2 = 4.75e9;
+            coefficients[1].3 = -62.5e6;
+            coefficients[3].2 = 0.425;
+            coefficients[3].3 = 0.00625;
+        } else {
+            // This path IS SPD: nu12^2+nu13^2<1 everywhere, but its first
+            // row is not diagonally dominant. Document the sufficient proof's
+            // explicit refusal rather than silently certifying it by sampling.
+            coefficients[3].2 = 0.68;
+            coefficients[3].3 = 0.0001;
+            coefficients[4].2 = 0.68;
+        }
+        let (card, material) =
+            affine_compliance_fixture(TensorElasticity::Orthotropic, &coefficients);
+        let before = material.clone();
+        for t in [280.0, 360.0] {
+            material
+                .at_query_point(&card, &material.state().query().with("T", t).unwrap())
+                .unwrap();
+        }
+        let middle =
+            material.at_query_point(&card, &material.state().query().with("T", 320.0).unwrap());
+        assert_eq!(middle.is_err(), interior_failure);
+        assert!(
+            matches!(thermal::TensorThermalLaw::try_new(&material,&card,"T",[280.0,360.0]),
+            Err(TensorSourceError::Invalid(message)) if message.contains("scaled-compliance"))
+        );
+        assert_eq!(material, before);
+    }
+}

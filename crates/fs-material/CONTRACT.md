@@ -6219,13 +6219,21 @@ and memory-preserving temperature continuation.
 
 `visco_tensor::source::thermal::TensorThermalLaw` admits source-derived
 stored tensors over every original selected temperature knot.
-Isotropic E(T) requires fixed Poisson ratio. Independent affine bulk and shear
-sources use the exact Mandel stiffness derivatives: normal diagonal K'+4G'/3,
+The original affine isotropic E(T) path retains fixed Poisson ratio.
+Independent affine bulk and shear sources use exact Mandel stiffness
+derivatives: normal diagonal K'+4G'/3,
 normal cross terms K'-2G'/3, and shear diagonal 2G'. Their derived Young modulus
 and Poisson ratio need not be affine. Independent affine Young/shear sources
 retain K(T)=E(T)G(T)/(3(3G(T)-E(T))) and its exact first and second derivatives.
-Positive E, G and 3G-E across the complete interval remain required. Orthotropic
-Young and shear moduli require one common affine scale with fixed Poisson ratios.
+Positive E, G and 3G-E across the complete interval remain required.
+Independent affine isotropic E/nu and orthotropic E_i/G_ij/major nu_ij sources
+use exact compliance derivatives and inverse derivatives:
+C'=-C S' C and C''=2 C S' C S' C-C S'' C. Normal compliance uses dimensionless
+scaling D=sqrt(E_reference) and fixed-size Cholesky solves. Isotropic interval
+admission uses exact volumetric/deviatoric compliance eigenvalue bounds,
+including auxetic sources. Orthotropic admission uses a sufficient scaled
+Gershgorin bound over every temperature; it can refuse a valid non-dominant
+path. Positive endpoint tensors alone do not establish interior stability.
 Each of the 21 coefficients of every symmetric Maxwell branch may have an independent
 affine slope, including signed cross terms. Positive piecewise-linear
 relaxation times remain supported. Reference density and strain validity
@@ -6235,8 +6243,12 @@ remain fixed.
 consumers retaining one constant derivative still refuse independent Young/shear
 paths. A general derivative snapshot is tied to its resolved temperature and
 must be refreshed before evaluating another endpoint. Rotated branch slopes
-are shared immutably, and rational equilibrium refresh uses fixed-size scalar
-arithmetic without source queries, repeated rotations or branch allocations.
+are shared immutably. Nonlinear equilibrium refresh uses fixed-size ratio
+and matrix arithmetic without source queries or branch allocations. Anisotropic
+paths cache their Mandel rotation once; rotated first/second derivatives and
+frame-invariant operator bounds reach the same projected thermal potential.
+The strict affine source adapter retains its original common-scale admission
+and numerical limits.
 
 `ProjectedTensorProny::thermal_state` evaluates Helmholtz free energy psi,
 entropy S=-psi_T, internal energy U=psi+T*S and mechanical heat capacity

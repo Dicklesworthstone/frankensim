@@ -2,8 +2,8 @@
 //!
 //! At fixed total and viscous strain, psi = (e:Ceq(T):e + sum q:Cj(T):q)/2.
 //! Affine tensors give S = -psi_T and U = psi + T*S, with zero fixed-strain
-//! mechanical heat-capacity contribution. Independently affine E/G also admit
-//! their exact rational bulk response and nonzero mechanical heat capacity.
+//! mechanical heat-capacity contribution. General affine engineering constants
+//! retain exact rational bulk or inverse-compliance response and thermal curvature.
 //! Reference density and geometry remain fixed. Source interpolation is admitted over every
 //! original knot; merely querying two endpoints does not establish this model.
 
@@ -17,8 +17,11 @@ use fs_qty::{
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod compliance;
+use compliance::ComplianceThermal;
+
 /// Symmetric operator-norm bounds over the entire original temperature interval.
-/// Isotropic volumetric/deviatoric eigenspaces make these bounds frame invariant.
+/// Symmetric operator norms remain invariant under the admitted material rotation.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct TensorTemperatureBounds {
     pub(crate) stiffness_norm_pa: f64,
@@ -38,6 +41,7 @@ pub struct TensorTemperatureDerivative {
     pub(crate) resolved_temperature_k: Option<f64>,
     pub(crate) equilibrium_bounds: Option<TensorTemperatureBounds>,
     young_shear: Option<AffineYoungShear>,
+    compliance: Option<ComplianceThermal>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -144,6 +148,7 @@ impl TensorTemperatureDerivative {
             resolved_temperature_k: None,
             equilibrium_bounds: None,
             young_shear: None,
+            compliance: None,
         }
     }
 
@@ -165,14 +170,30 @@ impl TensorTemperatureDerivative {
                 isotropic_mandel(response.bulk_slope_pa_k, response.shear_slope_pa_k);
             result.equilibrium_pa_k2 = isotropic_mandel(response.bulk_curvature_pa_k2, 0.0);
             result.resolved_temperature_k = Some(temperature_k);
+        } else if let Some(model) = self.compliance {
+            let jet = model.principal_jet(temperature_k)?;
+            result.equilibrium_pa_k = model.rotate(jet[1]);
+            result.equilibrium_pa_k2 = model.rotate(jet[2]);
+            if result
+                .equilibrium_pa_k
+                .iter()
+                .flatten()
+                .chain(result.equilibrium_pa_k2.iter().flatten())
+                .any(|v| !v.is_finite())
+            {
+                return Err(TensorSourceError::Invalid(
+                    "rotated thermal compliance derivative overflow".into(),
+                ));
+            }
+            result.resolved_temperature_k = Some(temperature_k);
         }
         Ok(result)
     }
 }
 
 /// Original source selection and complete bounded tensor thermodynamic law.
-/// Stored Maxwell branches remain affine; independent affine Young/shear
-/// equilibrium sources retain their exact rational bulk modulus.
+/// Stored Maxwell branches remain affine; nonlinear equilibrium sources retain
+/// their exact rational bulk or inverse-compliance response.
 #[derive(Clone, Debug)]
 pub struct TensorThermalLaw {
     source: ResolvedTensorMaterial,
@@ -181,8 +202,12 @@ pub struct TensorThermalLaw {
 }
 impl TensorThermalLaw {
     /// Admit independent affine K(T)/G(T), E(T) with fixed isotropic nu,
-    /// independent affine E(T)/G(T), or a common affine scale of all orthotropic
-    /// E/G with fixed Poisson ratios. Each of the 21 coefficients
+    /// independent affine E(T)/G(T), E(T)/nu(T), or independently affine
+    /// orthotropic E/G/major Poisson ratios. Isotropic compliance uses exact
+    /// eigenvalue interval bounds, including auxetic sources. Orthotropic paths
+    /// require a positive scaled diagonal-dominance bound over the whole interval;
+    /// this sufficient proof can refuse valid non-dominant sources. Existing
+    /// affine tensor limits retain their original admission. Each of the 21 coefficients
     /// of every Maxwell branch may have its OWN affine slope, including signed
     /// cross terms. Relaxation times retain positive piecewise-linear support.
     ///
@@ -203,7 +228,7 @@ impl TensorThermalLaw {
         card: &MaterialCard,
         temperature_axis: &str,
         interval_k: [f64; 2],
-        nonlinear_young_shear: bool,
+        nonlinear_equilibrium: bool,
     ) -> Result<Self> {
         let invalid = |s: &str| TensorSourceError::Invalid(s.into());
         let [low, high] = interval_k;
@@ -306,10 +331,27 @@ impl TensorThermalLaw {
             ));
         }
         let mut young_shear = None;
+        let mut compliance = None;
         let mut equilibrium_pa_k2 = [[0.0; 6]; 6];
         let mut equilibrium_bounds = None;
         let equilibrium_pa_k = match source.properties.elasticity {
-            TensorElasticity::IsotropicYoungShear if nonlinear_young_shear => {
+            TensorElasticity::Isotropic | TensorElasticity::Orthotropic
+                if nonlinear_equilibrium && affine_equilibrium_scale(source, &slopes).is_err() =>
+            {
+                let (model, bounds) = ComplianceThermal::admit(source, &slopes, t0, interval_k)?;
+                let reference = model.principal_jet(t0)?;
+                check_affine(
+                    &reference[0],
+                    source.law.equilibrium_mandel(),
+                    &[[0.0; 6]; 6],
+                    0.0,
+                )?;
+                equilibrium_pa_k2 = reference[2];
+                equilibrium_bounds = Some(bounds);
+                compliance = Some(model);
+                reference[1]
+            }
+            TensorElasticity::IsotropicYoungShear if nonlinear_equilibrium => {
                 let young = source.state.property("young_modulus").unwrap().value_si();
                 let shear = source.state.property("shear_modulus").unwrap().value_si();
                 let young_slope = slopes["young_modulus"];
@@ -388,47 +430,7 @@ impl TensorThermalLaw {
                 })
             }
             _ => {
-                let moduli: Vec<&str> = match source.properties.elasticity {
-                    TensorElasticity::Isotropic => {
-                        if !fixed("poisson_ratio") {
-                            return Err(invalid(
-                                "temperature-dependent Poisson ratio requires a different non-affine thermodynamic law",
-                            ));
-                        }
-                        vec!["young_modulus"]
-                    }
-                    TensorElasticity::IsotropicYoungShear => vec!["young_modulus", "shear_modulus"],
-                    TensorElasticity::IsotropicBulkShear => {
-                        unreachable!("bulk/shear handled directly")
-                    }
-                    TensorElasticity::Orthotropic => {
-                        if ORTHOTROPIC_POISSON_RATIO_PROPERTIES
-                            .iter()
-                            .any(|key| !fixed(key))
-                        {
-                            return Err(invalid(
-                                "orthotropic Poisson ratios must stay constant over the complete thermal interval",
-                            ));
-                        }
-                        ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
-                            .into_iter()
-                            .chain(ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES)
-                            .collect()
-                    }
-                };
-                let ratio =
-                    slopes[moduli[0]] / source.state.property(moduli[0]).unwrap().value_si();
-                for name in moduli {
-                    let this = slopes[name] / source.state.property(name).unwrap().value_si();
-                    if !this.is_finite()
-                        || !ratio.is_finite()
-                        || (this - ratio).abs() > 128.0 * f64::EPSILON * this.abs().max(ratio.abs())
-                    {
-                        return Err(invalid(
-                            "selected equilibrium moduli require one common affine scale so the stiffness tensor itself is affine",
-                        ));
-                    }
-                }
+                let ratio = affine_equilibrium_scale(source, &slopes)?;
                 source
                     .law
                     .equilibrium_mandel()
@@ -468,6 +470,13 @@ impl TensorThermalLaw {
                     &[[0.0; 6]; 6],
                     0.0,
                 )?;
+            } else if let Some(model) = compliance {
+                check_affine(
+                    &model.principal_jet(t)?[0],
+                    endpoint.law.equilibrium_mandel(),
+                    &[[0.0; 6]; 6],
+                    0.0,
+                )?;
             } else {
                 check_affine(
                     source.law.equilibrium_mandel(),
@@ -497,9 +506,11 @@ impl TensorThermalLaw {
             interval_k,
         );
         derivative.equilibrium_pa_k2 = equilibrium_pa_k2;
-        derivative.resolved_temperature_k = young_shear.map(|_| t0);
+        derivative.resolved_temperature_k =
+            (young_shear.is_some() || compliance.is_some()).then_some(t0);
         derivative.equilibrium_bounds = equilibrium_bounds;
         derivative.young_shear = young_shear;
+        derivative.compliance = compliance;
         Ok(Self {
             source: source.clone(),
             temperature_axis: temperature_axis.into(),
@@ -518,15 +529,23 @@ impl TensorThermalLaw {
     /// Rotate derivatives through the SAME admitted proper material frame.
     pub fn in_frame(&self, rotation: [[f64; 3]; 3]) -> Result<TensorTemperatureDerivative> {
         self.source.rotated_law(rotation)?;
+        let compliance = self
+            .derivative
+            .compliance
+            .map(|model| model.in_frame(rotation));
         let derivative = TensorTemperatureDerivative {
-            // The rational equilibrium is isotropic, including its thermal
-            // derivatives. Rotate only the original anisotropic branch slopes.
+            // Isotropic derivatives are frame invariant. Anisotropic compliance
+            // snapshots retain the cached Bond map used by every later endpoint.
             equilibrium_pa_k: if self.derivative.young_shear.is_some() {
                 self.derivative.equilibrium_pa_k
+            } else if let Some(model) = compliance {
+                model.rotate(self.derivative.equilibrium_pa_k)
             } else {
                 crate::tensor::rotate_mandel(self.derivative.equilibrium_pa_k, rotation)
             },
-            equilibrium_pa_k2: self.derivative.equilibrium_pa_k2,
+            equilibrium_pa_k2: compliance.map_or(self.derivative.equilibrium_pa_k2, |model| {
+                model.rotate(self.derivative.equilibrium_pa_k2)
+            }),
             branches_pa_k: self
                 .derivative
                 .branches_pa_k
@@ -537,12 +556,14 @@ impl TensorThermalLaw {
             resolved_temperature_k: self.derivative.resolved_temperature_k,
             equilibrium_bounds: self.derivative.equilibrium_bounds,
             young_shear: self.derivative.young_shear,
+            compliance,
         };
         if derivative
             .equilibrium_pa_k
             .iter()
             .flatten()
             .chain(derivative.branches_pa_k.iter().flatten().flatten())
+            .chain(derivative.equilibrium_pa_k2.iter().flatten())
             .any(|v| !v.is_finite())
         {
             return Err(TensorSourceError::Invalid(
@@ -555,7 +576,7 @@ impl TensorThermalLaw {
 
 /// Explicitly affine subset of the shared tensor thermal source owner.
 /// Consumers retaining one constant stiffness derivative must use this
-/// admission; independently varying E/G still refuses here.
+/// admission; non-affine engineering-constant sources still refuse here.
 #[derive(Clone, Debug)]
 pub struct AffineTensorThermal {
     law: TensorThermalLaw,
@@ -587,6 +608,55 @@ impl AffineTensorThermal {
     pub fn in_frame(&self, rotation: [[f64; 3]; 3]) -> Result<TensorTemperatureDerivative> {
         self.law.in_frame(rotation)
     }
+}
+
+fn affine_equilibrium_scale(
+    source: &ResolvedTensorMaterial,
+    slopes: &BTreeMap<String, f64>,
+) -> Result<f64> {
+    let invalid = |s: &str| TensorSourceError::Invalid(s.into());
+    let fixed = |name: &str| slopes.get(name).is_some_and(|s| *s == 0.0);
+    let moduli: Vec<&str> = match source.properties.elasticity {
+        TensorElasticity::Isotropic => {
+            if !fixed("poisson_ratio") {
+                return Err(invalid(
+                    "temperature-dependent Poisson ratio requires a different non-affine thermodynamic law",
+                ));
+            }
+            vec!["young_modulus"]
+        }
+        TensorElasticity::IsotropicYoungShear => vec!["young_modulus", "shear_modulus"],
+        TensorElasticity::IsotropicBulkShear => {
+            unreachable!("bulk/shear handled directly")
+        }
+        TensorElasticity::Orthotropic => {
+            if ORTHOTROPIC_POISSON_RATIO_PROPERTIES
+                .iter()
+                .any(|key| !fixed(key))
+            {
+                return Err(invalid(
+                    "orthotropic Poisson ratios must stay constant over the complete thermal interval",
+                ));
+            }
+            ORTHOTROPIC_YOUNG_MODULUS_PROPERTIES
+                .into_iter()
+                .chain(ORTHOTROPIC_SHEAR_MODULUS_PROPERTIES)
+                .collect()
+        }
+    };
+    let ratio = slopes[moduli[0]] / source.state.property(moduli[0]).unwrap().value_si();
+    for name in moduli {
+        let this = slopes[name] / source.state.property(name).unwrap().value_si();
+        if !this.is_finite()
+            || !ratio.is_finite()
+            || (this - ratio).abs() > 128.0 * f64::EPSILON * this.abs().max(ratio.abs())
+        {
+            return Err(invalid(
+                "selected equilibrium moduli require one common affine scale so the stiffness tensor itself is affine",
+            ));
+        }
+    }
+    Ok(ratio)
 }
 
 fn check_affine(old: &Tangent6, new: &Tangent6, slope: &Tangent6, dt: f64) -> Result<()> {

@@ -16841,8 +16841,9 @@ memory and physical U balance, lossless cooling, full anisotropic rotated
 entropy, orthotropic common-scale admission and non-affine/late refusal.
 
 `TensorSolidHistory::advance_material_thermal_candidate` extends the same
-driver through `TensorThermalLaw`, including independently affine Young/shear
-sources with rational bulk stiffness. One oriented source derivative template
+driver through `TensorThermalLaw`, including independently affine Young/shear,
+Young/Poisson and orthotropic engineering constants with nonlinear stiffness.
+One oriented source derivative template
 per element supplies exact snapshots at the accepted and trial temperatures;
 frozen and evolved states use the same trial snapshot. The shared material
 potential supplies mechanical heat capacity as well as psi, S and U. A
@@ -17255,8 +17256,10 @@ interval. The original material orientation, fixed contact geometry and
 `sym(tangent tensor normal)/thickness` strain columns project both stored
 stiffness and its complete temperature derivative through the same physical
 volume. Equilibrium laws admit fixed-Poisson affine Young modulus, independent
-affine bulk/shear moduli, independent affine Young/shear sources with rational
-bulk response, and common-scale affine orthotropic moduli. The same source-derived stiffness derivative reaches the retained
+affine bulk/shear moduli, independent affine Young/shear and Young/Poisson
+sources, and independently affine orthotropic engineering constants. Shared
+whole-interval compliance admission supplies the original rotated tensor,
+its derivatives and curvature bounds. The same derivative reaches the retained
 contact storage, entropy and finite-heat residual. Independent affine Maxwell
 cross terms retain their source identities and original branch order.
 
