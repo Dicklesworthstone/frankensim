@@ -1,5 +1,8 @@
 //! Original source convection on the complete material-memory trajectory.
 //! This only composes existing source evaluations with the existing joint step.
+/// Pressure-derived flow, convection and hydraulic heat on the same endpoint.
+pub mod pressure;
+
 use super::*;
 use fs_couple::air_path::cylinder::frame::modal::relaxation::temperature::heat::{
     FrameRelaxationThermalSystem, RelaxationHeatReport,

@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 const COOLANT:CellId=CellId(7);
 const PATCHES:[f64;2]=[0.01,0.2];
 #[derive(Clone,Copy)]
-struct Spec { k:f64, cp:f64, mass:f64, powered:bool, reverse:bool, reservoir:bool, circulating:bool }
-fn spec()->Spec {Spec {k:1.0,cp:4000.0,mass:0.02,powered:true,reverse:false,reservoir:false,circulating:false}}
+struct Spec { k:f64, viscosity:f64, cp:f64, mass:f64, powered:bool, reverse:bool, reservoir:bool, circulating:bool }
+fn spec()->Spec {Spec {k:1.0,viscosity:1.0,cp:4000.0,mass:0.02,powered:true,reverse:false,reservoir:false,circulating:false}}
 fn liquid_point(t:f64)->QueryPoint {QueryPoint::new().with_quantity("T",QuantitySpec::dimensional(Temperature::DIMS),t)
     .unwrap().with("p",100000.0).unwrap()}
 fn liquid(s:Spec)->(MaterialCard,ResolvedHeatCapacityCurve) {
@@ -16,7 +16,7 @@ fn liquid(s:Spec)->(MaterialCard,ResolvedHeatCapacityCurve) {
     for (name,dims,value,slope) in [("density",Density::DIMS,1000.0,0.0),
         ("specific_heat_capacity",SPECIFIC_HEAT_CAPACITY_DIMS,s.cp,0.0),
         ("thermal_conductivity",THERMAL_CONDUCTIVITY_DIMS,s.k*0.5,s.k*0.002),
-        ("dynamic_viscosity",DYNAMIC_VISCOSITY_DIMS,0.001,-0.00001)] {
+        ("dynamic_viscosity",DYNAMIC_VISCOSITY_DIMS,s.viscosity*0.001,s.viscosity*(-0.00001))] {
         claims.insert_claim(PropertyClaim {key:PropertyKey::new(name,dims),
             value:PropertyValue::Curve {abscissa:"T".into(),abscissa_dims:Temperature::DIMS,
                 knots:vec![(290.0,value-10.0*slope),(340.0,value+40.0*slope)],dims},
@@ -99,7 +99,7 @@ fn fixture<R>(s:Spec,run:impl FnOnce(&MaterialFluidFrame<'_,FluidTransportState>
     })
 }
 fn h(s:Spec,wall:f64,fluid:f64)->f64 {
-    let d=0.5*(wall+fluid)-300.0;let mu=0.001*(1.0-0.01*d);let k=s.k*(0.5+0.002*d);
+    let d=0.5*(wall+fluid)-300.0;let mu=s.viscosity*0.001*(1.0-0.01*d);let k=s.k*(0.5+0.002*d);
     0.664*(1000.0*0.1/mu).sqrt()*(mu*s.cp/k).cbrt()*k/0.1
 }
 
@@ -210,3 +210,5 @@ fn incomplete_links_and_late_coolant_refusal_preserve_the_whole_finite_inventory
 }
 
 mod advection;
+
+mod pressure;
