@@ -8,9 +8,9 @@
 //! port work and original R produces heat; lambda is the differentiated
 //! constraint reaction, not a stored-energy coordinate.
 use super::{
-    DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, finite,
+    CommonFlowProjection, DenseExponentialBudget, LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, finite,
     positive_heat::PositiveHeat, prepared::PreparedQuadraticFlow,
-    prepared_zoh::energetic_scale_into, product, refuse, split_quadratic,
+    prepared_zoh::energetic_scale_into, refuse, split_quadratic,
 };
 use crate::{
     DescriptorPortHamiltonian, PhsError, PortHamiltonian, PreparedStepRecord, StepRecord,
@@ -47,10 +47,7 @@ struct Core {
     tangent: PortHamiltonian,
     flow: Option<PreparedQuadraticFlow>,
     heat: Option<PositiveHeat>,
-    constraint: Vec<f64>,
-    root_inverse_inertia: f64,
-    reaction_state: Vec<f64>,
-    reaction_input: Vec<f64>,
+    projection: CommonFlowProjection,
     dt: f64,
 }
 
@@ -127,76 +124,22 @@ impl PreparedCommonFlowZoh {
             ));
         }
         let b: Vec<f64> = (0..n).map(|i| original.j[i * n + a]).collect();
-        let constraint: Vec<f64> = (0..n)
-            .map(|j| (0..n).map(|i| b[i] * q[i * n + j]).sum())
-            .collect();
-        let inertia: f64 = b.iter().zip(&constraint).map(|(b, c)| b * c).sum();
-        if !finite(&constraint) || !inertia.is_finite() || inertia <= 0.0 {
-            return Err(refuse(
-                "common-flow constraint requires positive representable effective inverse inertia",
-            ));
-        }
-        let normalized: Vec<f64> = constraint.iter().map(|c| c / inertia).collect();
-        if !finite(&normalized) {
-            return Err(refuse("common-flow constraint scaling is unrepresentable"));
-        }
-        // The original scalar differentiated constraint determines the reaction.
-        // These are exact declared linear maps, never response probes.
-        let reaction_effort: Vec<f64> = (0..n)
-            .map(|j| {
-                -(0..n_diff)
-                    .map(|i| normalized[i] * (original.j[i * n + j] - original.r[i * n + j]))
-                    .sum::<f64>()
-            })
-            .collect();
-        let reaction_state: Vec<f64> = (0..n)
-            .map(|j| (0..n).map(|i| reaction_effort[i] * q[i * n + j]).sum())
-            .collect();
-        let reaction_input: Vec<f64> = (0..m)
-            .map(|p| {
-                -(0..n_diff)
-                    .map(|i| normalized[i] * original.g[i * m + p])
-                    .sum::<f64>()
-            })
-            .collect();
-        let mut projector = vec![0.0; n * n];
-        for i in 0..n_diff {
-            for j in 0..n_diff {
-                projector[i * n + j] = if i == j { 1.0 } else { 0.0 } - b[i] * normalized[j];
-            }
-        }
-        // The multiplier has no evolution or storage in the tangent flow. Its
-        // returned value is reconstructed after the complete physical step.
-        projector[a * n + a] = 1.0;
-        let mut transpose = vec![0.0; n * n];
-        for i in 0..n {
-            for j in 0..n {
-                transpose[i * n + j] = projector[j * n + i];
-            }
-        }
+        let projection = CommonFlowProjection::new(
+            &original, &b, 1, budget.max_modes, &mut || false,
+        ).map_err(|error| match error {
+            crate::PreparedStepError::Solver(error) => error,
+            crate::PreparedStepError::Cancelled => refuse("uncancelled common-flow preparation interrupted"),
+        })?;
         let mut tangent = original.share_storage();
+        let (j, r, g) = projection.structure();
+        tangent.j.copy_from_slice(j);
+        tangent.r.copy_from_slice(r);
+        tangent.g.copy_from_slice(g);
+        // The original algebraic multiplier is reconstructed at the endpoint;
+        // its zero-storage tangent coordinate has exactly zero evolution.
         for i in 0..n {
             tangent.j[i * n + a] = 0.0;
             tangent.j[a * n + i] = 0.0;
-        }
-        tangent.j = product(&product(&projector, &tangent.j, n), &transpose, n);
-        tangent.r = product(&product(&projector, &original.r, n), &transpose, n);
-        // Stamp each analytical skew/symmetric pair from the same contraction,
-        // avoiding unequal roundoff in the two evaluations of one coefficient.
-        for i in 0..n {
-            tangent.j[i * n + i] = 0.0;
-            for j in i + 1..n {
-                tangent.j[j * n + i] = -tangent.j[i * n + j];
-                tangent.r[j * n + i] = tangent.r[i * n + j];
-            }
-            for p in 0..m {
-                tangent.g[i * m + p] = (0..n)
-                    .map(|k| projector[i * n + k] * original.g[k * m + p])
-                    .sum();
-            }
-        }
-        if !finite(&reaction_state) || !finite(&reaction_input) || !finite(&projector) {
-            return Err(refuse("common-flow tangent or reaction is unrepresentable"));
         }
         let split = split_quadratic(&tangent, budget)?;
         let (flow, heat) = if duration == 0.0 {
@@ -251,10 +194,7 @@ impl PreparedCommonFlowZoh {
                 tangent,
                 flow,
                 heat,
-                constraint,
-                root_inverse_inertia: fs_math::det::sqrt(inertia),
-                reaction_state,
-                reaction_input,
+                projection,
                 dt: duration,
             },
             scratch: Scratch::new(n, m),
@@ -327,29 +267,8 @@ impl PreparedCommonFlowZoh {
 }
 
 impl Core {
-    fn constraint(&self, state: &[f64], effort: &mut [f64]) -> Result<(), PhsError> {
-        let mut residual = 0.0;
-        let mut scale = 0.0;
-        for (c, x) in self.constraint.iter().zip(state) {
-            let term = c * x;
-            residual += term;
-            scale += term.abs();
-        }
-        // The prepared flow works in energy coordinates, where roundoff can
-        // transfer from potential/material storage into a small instantaneous
-        // velocity. Cauchy-Schwarz gives |B^T Q dx| <= sqrt(B^T Q B)
-        // ||Q^(1/2) dx||. The original datum-independent energy scale bounds
-        // that coordinate norm even at a common-velocity zero crossing.
-        let energy_scale = energetic_scale_into(&self.tangent, state, effort);
-        scale = scale.max(self.root_inverse_inertia * fs_math::det::sqrt(energy_scale));
-        if !finite(&[residual, scale])
-            || residual.abs() > 64.0 * f64::EPSILON * self.original.n as f64 * scale
-        {
-            return Err(refuse(
-                "common-flow original velocity constraint is incompatible",
-            ));
-        }
-        Ok(())
+    fn constraint(&self, state: &[f64], _effort: &mut [f64]) -> Result<(), PhsError> {
+        self.projection.admit_state(state)
     }
     fn admit(&self, state: &[f64], input: &[f64], effort: &mut [f64]) -> Result<(), PhsError> {
         if state.len() != self.original.n
@@ -364,22 +283,9 @@ impl Core {
         self.constraint(state, effort)
     }
     fn reaction(&self, state: &[f64], input: &[f64]) -> Result<f64, PhsError> {
-        let value = self
-            .reaction_state
-            .iter()
-            .zip(state)
-            .map(|(a, x)| a * x)
-            .sum::<f64>()
-            + self
-                .reaction_input
-                .iter()
-                .zip(input)
-                .map(|(a, u)| a * u)
-                .sum::<f64>();
-        if !value.is_finite() {
-            return Err(refuse("common-flow instantaneous reaction is nonfinite"));
-        }
-        Ok(value)
+        let mut value = [0.0];
+        self.projection.reaction_into(state, input, &mut value)?;
+        Ok(value[0])
     }
     fn evaluate(
         &self,

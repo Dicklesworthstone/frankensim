@@ -1415,3 +1415,40 @@ Unmeshed finite walls and semi-infinite walls refuse. The source adapter
 `prepare_time_with_wall_diffusion` retains the original wall samples and fluid
 calorics. Mean-temperature evolution, lateral wall conduction, changing geometry
 and wall thermoelastic expansion remain outside this fixed-equilibrium model.
+
+
+## Causal connection of complete resolved thermoviscous regions
+
+`PreparedThermoviscousTime::connect` joins two original resolved time owners
+through their retained spatial P1 traction traces. Construction checks coincident
+physical triangulations, opposite normals, both full trace ranks and equality of
+the actual retained spaces at every triangle vertex. The original trace Gram
+and cross-Gram determine C with `psi_left C=psi_right`; equal surface areas
+alone do not establish a connection. Original inward-flow signs give
+`p_left=C lambda`, `p_right=lambda` and
+`C^T Q_left+Q_right=0`.
+
+The shared `CommonFlowProjection` constrains the unchanged block Hamiltonian,
+and the existing `PreparedQuadraticFlow` evolves all original velocity,
+pressure, temperature, molecular, finite-solid and structural coordinates
+together. Unselected original pressure modes and every original structural
+force remain external drives. The existing source/cavity preparation methods
+already return this time owner and inherit the connection directly.
+
+Each region retains its original five physical heat forms. Signed interface
+work is independently integrated from the same instantaneous pressure reaction
+and original flow, including the reaction's held-input term. It is not inferred
+from an energy remainder. Original per-region work balances, internal transfer
+cancellation and the enclosing pair balance are checked separately; initial or
+endpoint constraint inconsistency refuses without changing physical energy.
+The whole coupled state and all observations count against explicit preparation
+limits. Rejected or cancelled steps publish neither region.
+
+This is a fixed-equilibrium Galerkin normal-traction/normal-flow interface with
+insulated thermal cuts and free tangential traction. It does not impose full
+P2 shear/temperature continuity, advect composition, mix gases or certify
+interface-placement/trace-refinement convergence. Complete production and
+unit-test code type-checks with genuine dependencies. Four full-field tests
+cover the original constrained equations, transmission with complete caloric
+fields and independent work, time subdivision, and transactional refusals;
+their native FE execution remains unperformed in this environment.

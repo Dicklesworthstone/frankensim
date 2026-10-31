@@ -33,6 +33,8 @@ mod caloric;
 pub use caloric::ThermoviscousCaloricReservoir;
 mod wall;
 pub use wall::{ConductiveWallTimeLayout, ThermoviscousWallDiscretization};
+mod interface;
+pub use interface::{PreparedThermoviscousTimePair, ThermoviscousTimePairStep};
 const HEAT_CHANNELS: usize = 5;
 
 /// Original-owner refusals; no state is published on failure or cancellation.
@@ -182,6 +184,9 @@ pub struct PreparedThermoviscousTime<'a, 'c> {
     reservoirs: Vec<ThermoviscousCaloricReservoir>,
     reservoir_offsets: Vec<Option<usize>>,
     conductive_wall_fields: wall::WallFields,
+    // Original physical forms, retained for causal multi-region composition.
+    // Never replace these with projected resistance or an energy remainder.
+    heat: [Vec<f64>; HEAT_CHANNELS],
     system: PortHamiltonian,
     flow: PreparedQuadraticFlow,
     mean_state: Vec<f64>,
@@ -475,6 +480,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             reservoirs: reservoirs.to_vec(),
             reservoir_offsets,
             conductive_wall_fields,
+            heat,
             system,
             flow,
             mean_state,
@@ -752,23 +758,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
         poll(cancelled)?;
         let initial_energy_j = self.system.hamiltonian(&x);
         let final_energy_j = self.system.hamiltonian(&candidate.state);
-        // Symmetric bilinear energy difference, avoiding subtraction of large
-        // endpoint energies. It evaluates the original quadratic H, without
-        // changing any entry in its source matrix or in the dynamic operator.
-        let mid: Vec<_> = x
-            .iter()
-            .zip(&candidate.state)
-            .map(|(a, b)| 0.5 * a + 0.5 * b)
-            .collect();
-        let effort = self.system.effort(&mid);
-        let delta: Vec<_> = x.iter().zip(&candidate.state).map(|(a, b)| b - a).collect();
-        let delta_effort = self.system.effort(&delta);
-        let delta_energy_j = delta
-            .iter()
-            .zip(&effort)
-            .zip(mid.iter().zip(&delta_effort))
-            .map(|((d, e), (m, de))| 0.5 * d * e + 0.5 * m * de)
-            .sum();
+        let delta_energy_j = energy_change_j(&self.system, &x, &candidate.state);
         let pressure_work_j = traction_pa
             .iter()
             .enumerate()
@@ -791,31 +781,7 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             molecular_relaxation_heat_j: candidate.integrals[3],
             solid_conductive_heat_j: candidate.integrals[4],
         };
-        let scale = initial_energy_j
-            .abs()
-            .max(final_energy_j.abs())
-            .max(work.supplied_j().abs())
-            .max(work.dissipated_j().abs())
-            .max(f64::MIN_POSITIVE);
-        let tolerance = self.maximum_relative_energy_residual * scale;
-        if [
-            initial_energy_j,
-            final_energy_j,
-            work.balance_residual_j(),
-            scale,
-        ]
-        .iter()
-        .any(|v| !v.is_finite())
-            || candidate.integrals.iter().any(|v| !v.is_finite())
-            || candidate.integrals[..HEAT_CHANNELS]
-                .iter()
-                .any(|v| *v < -tolerance)
-            || work.balance_residual_j().abs() > tolerance
-        {
-            return Err(invalid(
-                "original transient field/structure energy balance refused",
-            ));
-        }
+        admit_work(work, &candidate.integrals, self.maximum_relative_energy_residual)?;
         let means: Vec<_> = candidate.integrals[HEAT_CHANNELS..]
             .iter()
             .map(|v| v / self.duration_s)
@@ -832,6 +798,33 @@ impl<'a, 'c> PreparedThermoviscousTime<'a, 'c> {
             work,
         })
     }
+}
+
+// Symmetric bilinear energy difference, without cancellation of large endpoints.
+fn energy_change_j(system: &PortHamiltonian, initial: &[f64], next: &[f64]) -> f64 {
+    let mid: Vec<_> = initial.iter().zip(next).map(|(a, b)| 0.5 * a + 0.5 * b).collect();
+    let delta: Vec<_> = initial.iter().zip(next).map(|(a, b)| b - a).collect();
+    let effort = system.effort(&mid);
+    let delta_effort = system.effort(&delta);
+    delta.iter().zip(&effort).zip(mid.iter().zip(&delta_effort))
+        .map(|((d, e), (m, de))| 0.5 * d * e + 0.5 * m * de).sum()
+}
+
+fn admit_work(work: ThermoviscousTimeWork, integrals: &[f64], relative: f64)
+    -> Result<(), ThermoviscousTimeError>
+{
+    let scale = work.initial_energy_j.abs().max(work.final_energy_j.abs())
+        .max(work.supplied_j().abs()).max(work.dissipated_j().abs()).max(f64::MIN_POSITIVE);
+    let tolerance = relative * scale;
+    if [work.initial_energy_j, work.final_energy_j, work.balance_residual_j(), scale]
+        .iter().any(|v| !v.is_finite())
+        || integrals.iter().any(|v| !v.is_finite())
+        || integrals[..HEAT_CHANNELS].iter().any(|v| *v < -tolerance)
+        || work.balance_residual_j().abs() > tolerance
+    {
+        return Err(invalid("original transient field/structure energy balance refused"));
+    }
+    Ok(())
 }
 
 // Standard congruence T^T A T; never average or repair the source matrix.

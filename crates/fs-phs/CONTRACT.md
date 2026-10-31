@@ -1117,3 +1117,31 @@ also pass after the shared heat extension. These are bounded numerical checks.
 ## Source-square heat on an unchanged linear trajectory
 
 `linear_exact::PreparedSourceLoss` observes `x'=A*x+B*u` under held inputs and integrates the explicitly supplied positive source square `||S*x(t)||²`. It reuses the existing positive Gauss/QR integration kernel without reconstructing a different generator or advancing physical state. The prepared integral retains the exact generator, input map, source rows and duration. The complete doubled observation dimension is capped at 256 with explicit dense-byte/work admission; no state is truncated. Warm evaluation is a positive quadratic contraction with cancellation checks. Source-row meaning and complete domain energy admission remain the caller's responsibility; no passivity claim for arbitrary A is inferred. `tests/source_loss.rs` contains analytic forced and silent-mode cases, independent nonnormal-trajectory quadrature, and budget/nonfinite/cancellation refusals. These new cases have not yet been executed in the authoring environment because compilation of the unchanged pinned runtime dependency was killed and the shared filesystem filled.
+
+
+## Shared complete common-flow constraint algebra
+
+`linear_exact::CommonFlowProjection` admits multiple independent multiplier
+columns in the original quadratic physical state. For
+`x'=(J-R)Qx+B*lambda+G*u` and `B^T Qx=0`, it solves the complete scaled
+`S=B^T Q B` system, checks its original residual and numerical rank, and forms
+`P=I-B S^-1 B^T Q`. The resulting `P J P^T`, `P R P^T` and `P G`
+retain Q and every state coordinate. Q may have physical zero-storage
+directions; S must be positive definite. The differentiated original constraint
+supplies explicit state/input reaction maps.
+
+The existing single-constraint `PreparedCommonFlowZoh` now consumes this same
+algebra and preserves its original physical heat, source-work and
+allocation-free accepted-step behavior. The shared helper supplies no alternate
+integrator and assigns no physical meaning to observation forms. Consumers
+retain their original resistances and independently integrate heat/work on the
+constrained trajectory. Incompatible initial or endpoint flow refuses without
+projecting the state, resetting history or repairing an energy residual.
+
+Complete dimensions, finite arithmetic, source structure, work bounds and
+cancellation are checked. The new tests exercise two constraints between three
+masses, independent accelerations/reactions/heat, a free zero-storage position,
+nonorthogonal constraint-coordinate invariance and atomic refusal. Complete
+production and unit-test code type-checks with genuine dependencies; three new
+tests also execute in the documented original-source algebra seam, which is
+not full native crate or consumer-runtime qualification.
