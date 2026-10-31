@@ -37,6 +37,8 @@
 //!
 //! Small strain and rotation (no finite-strain plasticity); no implicit clock.
 //! Rate-dependent laws must supply a physical interval for each load increment.
+//! The [`hex`] child supplies a locking-resistant eight-node B-bar alternative
+//! using this same load-path/Newton owner.
 //! Constant-strain tetrahedra (plastic incompressibility locks
 //! P1 tetrahedra in confined flow: limit loads of confined problems are
 //! over-predicted; no mixed/B-bar formulation), dead loads only, no
@@ -59,6 +61,11 @@ use crate::linear3::TetAssemblyBudget;
 pub mod creep;
 /// Inertial increments using the same constitutive assembly and Newton owner.
 pub mod dynamics;
+
+mod increment;
+
+/// Fully integrated eight-node hexahedra with optional volumetric B-bar projection.
+pub mod hex;
 
 /// Fixed-plane strain-life observation of the native cyclic J2 load path.
 pub mod fatigue;
@@ -92,18 +99,18 @@ impl Default for IncrementSettings {
     }
 }
 
-/// Constitutive data over a tetrahedral mesh.
+/// Constitutive data over a continuum mesh.
 ///
 /// Use `Uniform` for one material and `PerElement` for different material
 /// cards or spatially varying states of the same constitutive family. Entries
-/// follow the tetrahedron connectivity order. All coefficients remain fixed
+/// follow the element connectivity order. All coefficients remain fixed
 /// over this problem's load path; each element evolves its own internal state.
 /// Retain source receipts alongside these laws when lowering material cards.
 #[derive(Debug, Clone, Copy)]
 pub enum SmallStrainLawField<'a, L: SmallStrainLaw> {
-    /// One constitutive law for every tetrahedron.
+    /// One constitutive law for every element.
     Uniform(&'a L),
-    /// One constitutive law per tetrahedron, without homogenization.
+    /// One constitutive law per element, without homogenization.
     PerElement(&'a [L]),
 }
 
@@ -190,7 +197,7 @@ pub enum SmallStrainTetError {
     },
     /// A per-element field does not cover exactly the mesh connectivity.
     LawCountMismatch {
-        /// Number of tetrahedra.
+        /// Number of elements.
         expected: usize,
         /// Number of supplied constitutive laws.
         got: usize,
@@ -626,7 +633,6 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         self.solve_candidate(Some((displacement_m, element_states)), None, cx)
     }
 
-    #[allow(clippy::too_many_lines)] // one shared increment / Newton / backtracking loop
     fn solve_candidate(
         &self,
         initial: Option<(&[f64], &[L::State])>,
@@ -638,200 +644,104 @@ impl<L: SmallStrainLaw> SmallStrainTetProblem<'_, L> {
         if let Some((displacement, states)) = initial {
             self.check(displacement, states)?;
         }
-        let dofs = 3 * self.nodes_m.len();
-        let mut is_prescribed = vec![false; dofs];
-        for &(dof, _) in self.prescribed_m {
-            is_prescribed[dof] = true;
-        }
-        let free: Vec<usize> = (0..dofs).filter(|&d| !is_prescribed[d]).collect();
-        let mut row_of = vec![usize::MAX; dofs];
-        for (row, &dof) in free.iter().enumerate() {
-            row_of[dof] = row;
-        }
-        let (mut u, mut states) = match initial {
-            Some((displacement, states)) => (displacement.to_vec(), states.to_vec()),
-            None => (
-                vec![0.0; dofs],
-                (0..elements.len())
-                    .map(|index| self.laws.at(index).initial_state())
-                    .collect(),
-            ),
+        let operator = TetIncrement {
+            problem: self,
+            elements: &elements,
+            inertia,
         };
-        let mut increments = Vec::with_capacity(self.load_path.len());
-        let mut element_stress = Vec::with_capacity(elements.len());
-        for (increment, &load) in self.load_path.iter().enumerate() {
-            let mut f_ext = vec![0.0f64; dofs];
-            for &(dof, value) in self.nodal_forces_n {
-                f_ext[dof] += load * value;
-            }
-            let target: Vec<(usize, f64)> = self
-                .prescribed_m
-                .iter()
-                .map(|&(dof, value)| (dof, load * value))
-                .collect();
-            if f_ext
-                .iter()
-                .chain(target.iter().map(|(_, v)| v))
-                .any(|v| !v.is_finite())
-            {
-                return Err(SmallStrainTetError::InvalidInput {
-                    what: "load factor produces non-finite forces or prescribed displacements"
-                        .into(),
-                });
-            }
-            let scale_rows = if inertia.is_none() {
-                Some(is_prescribed.as_slice())
-            } else {
-                None
-            };
-            let external_free_norm = free.iter().fold(0.0_f64, |n, &d| n.hypot(f_ext[d]));
-            let mut history = Vec::new();
-            let mut fallbacks = 0usize;
-            let mut converged = false;
-            let (mut f_int, initial_scale) =
-                self.internal(&elements, &states, &u, scale_rows, cx)?;
-            let mut static_force_scale = initial_scale.max(external_free_norm);
-            let mut elastic_free_norm = if inertia.is_some() {
-                free.iter().fold(0.0_f64, |n, &d| n.hypot(f_int[d]))
-            } else {
-                0.0
-            };
-            if let Some(inertia) = inertia {
-                inertia.add_force(&u, &mut f_int, cx)?;
-            }
-            for _ in 0..self.settings.max_newton_iterations {
-                checkpoint(cx)?;
-                let residual: Vec<f64> = free.iter().map(|&d| f_int[d] - f_ext[d]).collect();
-                let pending: Vec<(usize, f64)> = target
-                    .iter()
-                    .map(|&(dof, value)| (dof, value - u[dof]))
-                    .collect();
-                let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
-                let scale = if let Some(inertia) = inertia {
-                    inertia.force_scale(&u, &free, elastic_free_norm, external_free_norm, cx)?
-                } else {
-                    static_force_scale.max(f64::MIN_POSITIVE)
-                };
-                let relative = norm(&residual) / scale;
-                history.push(relative);
-                if !pending_any && relative <= self.settings.relative_tolerance {
-                    converged = true;
-                    break;
-                }
-                // A converged iterate needs no new constitutive tangent or
-                // global sparse assembly, including a fully prescribed body.
-                let full = self.tangent(&elements, &states, &u, inertia, cx)?;
-                let mut dp_full = vec![0.0f64; dofs];
-                for &(dof, dp) in &pending {
-                    dp_full[dof] = dp;
-                }
-                let mut coo = Coo::new(free.len(), free.len());
-                let mut rhs: Vec<f64> = residual.iter().map(|r| -r).collect();
-                for (row, &dof) in free.iter().enumerate() {
-                    let (cols, vals) = full.row(dof);
-                    for (&c, &v) in cols.iter().zip(vals) {
-                        if is_prescribed[c] {
-                            rhs[row] = (-v).mul_add(dp_full[c], rhs[row]);
-                        } else {
-                            coo.push(row, row_of[c], v);
-                        }
-                    }
-                }
-                let (direction, fallback) =
-                    self.linear_solve(&coo.assemble(), &rhs, increment, cx)?;
-                fallbacks += usize::from(fallback);
-                let before = norm(&residual);
-                let mut alpha = 1.0f64;
-                let mut accepted = None;
-                for _ in 0..=self.settings.max_backtracks {
-                    let mut trial = u.clone();
-                    for (row, &dof) in free.iter().enumerate() {
-                        trial[dof] = alpha.mul_add(direction[row], trial[dof]);
-                    }
-                    for &(dof, dp) in &pending {
-                        trial[dof] = alpha.mul_add(dp, trial[dof]);
-                    }
-                    let (mut f_trial, trial_scale) =
-                        self.internal(&elements, &states, &trial, scale_rows, cx)?;
-                    let trial_elastic_free_norm = if inertia.is_some() {
-                        free.iter().fold(0.0_f64, |n, &d| n.hypot(f_trial[d]))
-                    } else {
-                        0.0
-                    };
-                    if let Some(inertia) = inertia {
-                        inertia.add_force(&trial, &mut f_trial, cx)?;
-                    }
-                    let after: Vec<f64> = free.iter().map(|&d| f_trial[d] - f_ext[d]).collect();
-                    if pending_any || norm(&after) < before || alpha < 1e-3 {
-                        accepted = Some((trial, f_trial, trial_elastic_free_norm, trial_scale));
-                        break;
-                    }
-                    alpha *= 0.5;
-                }
-                let Some((trial, f_trial, trial_elastic_free_norm, trial_scale)) = accepted else {
-                    return Err(SmallStrainTetError::NewtonStalled { increment, history });
-                };
-                u = trial;
-                f_int = f_trial;
-                elastic_free_norm = trial_elastic_free_norm;
-                // Freeze the largest accepted physical force scale through
-                // unloading; rejected proposals cannot loosen the force gate.
-                static_force_scale = static_force_scale.max(trial_scale);
-            }
-            if !converged {
-                return Err(SmallStrainTetError::NewtonStalled { increment, history });
-            }
-            let mut evolving = 0usize;
-            for (index, element) in elements.iter().enumerate() {
-                let strain = Self::strain(element, &u);
-                let law = self.laws.at(index);
-                if increment + 1 == self.load_path.len() {
-                    // Stress is the converged update from the PREVIOUS history.
-                    // Evaluating it from the newly committed history would
-                    // apply another physical interval for an overstress law.
-                    element_stress.push(law.stress(&strain, &states[index]));
-                }
-                let next = law.update_state(&strain, &states[index]);
-                evolving += usize::from(next != states[index]);
-                states[index] = next;
-            }
-            increments.push(IncrementRecord {
-                load_factor: load,
-                residual_history: history,
-                reactions_n: self
-                    .prescribed_m
-                    .iter()
-                    .map(|&(dof, _)| f_int[dof] - f_ext[dof])
-                    .collect(),
-                evolving_elements: evolving,
-                indefinite_fallbacks: fallbacks,
-            });
-        }
-        let element_strain: Vec<Voigt> = elements.iter().map(|e| Self::strain(e, &u)).collect();
-        checkpoint(cx)?;
+        let result = increment::solve(
+            &operator,
+            increment::IncrementControls {
+                dofs: 3 * self.nodes_m.len(),
+                prescribed_m: self.prescribed_m,
+                nodal_forces_n: self.nodal_forces_n,
+                load_path: self.load_path,
+                settings: self.settings,
+            },
+            initial,
+            inertia,
+            cx,
+        )?;
         Ok(SmallStrainTetSolution {
-            displacement_m: u.as_chunks::<3>().0.to_vec(),
-            element_strain,
-            element_stress,
-            element_states: states,
-            increments,
+            displacement_m: result.displacement_m.as_chunks::<3>().0.to_vec(),
+            element_strain: elements
+                .iter()
+                .map(|e| Self::strain(e, &result.displacement_m))
+                .collect(),
+            element_stress: result.point_stress,
+            element_states: result.point_states,
+            increments: result.increments,
         })
     }
+}
 
-    fn linear_solve(
+struct TetIncrement<'a, 'b, L: SmallStrainLaw> {
+    problem: &'a SmallStrainTetProblem<'b, L>,
+    elements: &'a [Element],
+    inertia: Option<&'a dynamics::Inertia<'a>>,
+}
+
+impl<L: SmallStrainLaw> increment::IncrementOperator for TetIncrement<'_, '_, L> {
+    type State = L::State;
+
+    fn initial_states(&self) -> Vec<Self::State> {
+        (0..self.elements.len())
+            .map(|index| self.problem.laws.at(index).initial_state())
+            .collect()
+    }
+
+    fn internal(
         &self,
-        kff: &Csr,
-        rhs: &[f64],
-        increment: usize,
+        states: &[Self::State],
+        u: &[f64],
+        prescribed: Option<&[bool]>,
         cx: &Cx<'_>,
-    ) -> Result<(Vec<f64>, bool), SmallStrainTetError> {
-        let symmetric = match self.laws {
+    ) -> Result<(Vec<f64>, f64), SmallStrainTetError> {
+        self.problem
+            .internal(self.elements, states, u, prescribed, cx)
+    }
+
+    fn tangent(
+        &self,
+        states: &[Self::State],
+        u: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<Csr, SmallStrainTetError> {
+        self.problem
+            .tangent(self.elements, states, u, self.inertia, cx)
+    }
+
+    fn tangent_symmetric(&self) -> bool {
+        match self.problem.laws {
             SmallStrainLawField::Uniform(law) => law.admissibility().tangent_symmetric,
             SmallStrainLawField::PerElement(laws) => {
                 laws.iter().all(|law| law.admissibility().tangent_symmetric)
             }
-        };
-        solve_increment_linear(kff, rhs, increment, self.settings, symmetric, cx)
+        }
+    }
+
+    fn commit(
+        &self,
+        states: &mut [Self::State],
+        u: &[f64],
+        mut final_stress: Option<&mut Vec<Voigt>>,
+        cx: &Cx<'_>,
+    ) -> Result<usize, SmallStrainTetError> {
+        let mut evolving = 0;
+        for (index, element) in self.elements.iter().enumerate() {
+            if index % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            let strain = SmallStrainTetProblem::<L>::strain(element, u);
+            let law = self.problem.laws.at(index);
+            if let Some(stresses) = &mut final_stress {
+                stresses.push(law.stress(&strain, &states[index]));
+            }
+            let next = law.update_state(&strain, &states[index]);
+            evolving += usize::from(next != states[index]);
+            states[index] = next;
+        }
+        Ok(evolving)
     }
 }
 

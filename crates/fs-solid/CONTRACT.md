@@ -2987,3 +2987,14 @@ coarser meshes. A separate finite-load refusal test exercises an insufficient
 linear allowance. This is a bounded residual correction, not a replacement
 preconditioner or a claim that every ill-conditioned mesh can converge.
 
+
+
+## Eight-node small-strain plasticity with full 3D B-bar
+
+`plastic3::hex::SmallStrainHexProblem<L>` uses the original hexahedral geometry/Jacobian owner, FEEC two-point Gauss rule in each direction, and the shared native continuum increment/Newton solver. Uniform and per-element laws retain eight independent histories per cell. Absolute load paths support force/displacement control, unloading, reversal and continuation. The tetrahedral and inertial paths retain the same force scaling, corrections and old-history endpoint stress semantics after extraction into `plastic3::increment`.
+
+Standard integration uses compatible strain. B-bar replaces only volumetric strain by the reference-volume-weighted element mean, with the full three-dimensional one-third correction. Identical projected B columns enter strain, virtual work and tangent; no material entries are symmetrized. Existing FGMRES handles genuinely nonsymmetric recovery tangents. Deviatoric quadrature remains fully integrated; there is no one-point stiffness or artificial hourglass penalty. Local 24-by-24 matrices accumulate on the stack before sparse insertion; no per-point matrix allocation is introduced.
+
+Explicit node/element/point/free-DOF/matrix-entry/load-step budgets and sampled Jacobian checks precede assembly. Raw compatible strain and rotation are checked independently of projected strain. Histories commit only at converged increments; a refused candidate leaves caller-owned state unchanged. A rate law contributes one physical interval per increment, including endpoint stresses.
+
+Focused verification covers cyclic axial response and permanent set, complete distorted-element nonproportional Chaboche tangent and force equilibrium, distinct point histories, heterogeneous yielding, actual-time overstress, refused-step retry, and geometry/domain/budget admission. The nearly incompressible axially constrained Lamé-cylinder displacement error falls from 98.3257% (standard 2x8x1) to 1.86313% (B-bar 2x8x1) and 0.500276% (B-bar 4x16x1) under the original physical force gate. This is small-strain volumetric-locking mitigation, not a general stable mixed pressure element, global injectivity certificate, finite-strain model, general shear-locking fix or plastic-limit convergence claim.

@@ -93,6 +93,7 @@ pub use mesh2::{Mesh2, Patch};
 pub use plastic2::{
     PlaneAssemblyBudget, SmallStrainPlaneError, SmallStrainPlaneProblem, SmallStrainPlaneSolution,
 };
+pub use plastic3::hex::{HexAssemblyBudget, SmallStrainHexProblem, SmallStrainHexSolution};
 pub use plastic3::{
     IncrementRecord, IncrementSettings, SmallStrainLawField, SmallStrainTetError,
     SmallStrainTetProblem, SmallStrainTetSolution,

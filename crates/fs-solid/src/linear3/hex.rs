@@ -1,4 +1,4 @@
-//! Fully integrated isoparametric HEX20/HEX27. The element-specific pieces are
+//! Isoparametric HEX8 geometry and fully integrated HEX20/HEX27. The element-specific pieces are
 //! shapes, geometry and topology admission; TET10 owns the shared numerical
 //! assembly path in isoparametric.rs. Positive sampled Jacobians do not prove
 //! global injectivity. Materials are constant per element; mass is consistent.
@@ -59,6 +59,22 @@ pub struct HexElasticProblem<'a> {
     pub fixed_dofs: &'a [usize],
     pub budget: TetAssemblyBudget,
     pub quadrature: HexQuadrature,
+}
+
+/// Trilinear shapes and reference gradients on `[-1,1]^3`, using the first
+/// eight canonical [`HEX27_REFERENCE_NODES`] (corners around z-, then z+).
+pub fn hex8_shapes(p: [f64; 3]) -> ([f64; 8], [[f64; 3]; 8]) {
+    let mut n = [0.0; 8];
+    let mut d = [[0.0; 3]; 8];
+    for (a, q) in HEX27_REFERENCE_NODES[..8].iter().enumerate() {
+        let s = q.map(f64::from);
+        let f = core::array::from_fn::<_, 3, _>(|i| 1.0 + s[i] * p[i]);
+        n[a] = f[0] * f[1] * f[2] / 8.0;
+        for i in 0..3 {
+            d[a][i] = s[i] * f[(i + 1) % 3] * f[(i + 2) % 3] / 8.0;
+        }
+    }
+    (n, d)
 }
 
 /// Quadratic serendipity shapes and reference gradients on [-1,1]^3.
@@ -202,6 +218,18 @@ pub fn hex20_point(
     index: usize,
 ) -> Result<HexPoint<20>, TetElasticError> {
     let (n, d) = hex20_shapes(p);
+    point(nodes, n, d, minimum, element, index)
+}
+/// The same positive-Jacobian, relative-coordinate geometry mapping used by
+/// the quadratic hexes, evaluated with eight-node trilinear shapes.
+pub fn hex8_point(
+    nodes: [[f64; 3]; 8],
+    p: [f64; 3],
+    minimum: f64,
+    element: usize,
+    index: usize,
+) -> Result<HexPoint<8>, TetElasticError> {
+    let (n, d) = hex8_shapes(p);
     point(nodes, n, d, minimum, element, index)
 }
 pub fn hex27_point(
