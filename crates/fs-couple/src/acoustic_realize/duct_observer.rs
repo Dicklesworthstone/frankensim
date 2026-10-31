@@ -12,6 +12,7 @@ use super::{
 };
 use crate::air_path::{GasAbsorptionModel, ObserverFilter, ObserverFilterReceipt};
 use crate::driving_point::regional::RegionalDuct;
+use crate::driving_point::regional::material_wall::LocalMaterialWall;
 use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::render::ReedBoreVoice;
 use crate::thin_plate::PlateBank;
@@ -44,6 +45,13 @@ pub struct BaffledDuctObserver<'a> {
     /// the actual last interior region supplies radiation loading and observation.
     /// Its density/speed change the outlet load as well as the microphone.
     pub exterior_gas: Option<GasState>,
+    /// Original material state, thickness, axial restraint and local membrane
+    /// law shared by pressure feedback and terminal flow. Every sampled radius
+    /// and frequency retains that source's admission. The scenario's authored
+    /// `duct.wall` must be absent when this binding is supplied.
+    /// This does not add radiation from the wall or equilibrate its temperature
+    /// with the independently specified interior or exterior gas.
+    pub material_wall: Option<&'a LocalMaterialWall>,
     /// Receiver position and quadrature in the outlet's outward baffle frame.
     /// Its actual range replaces the legacy scalar listener distance.
     pub receiver: CircularOutletReceiver,
@@ -56,6 +64,10 @@ pub struct BaffledDuctObservation {
     pub segment_gases: Vec<GasState>,
     /// Same homogeneous exterior used by the load and the pressure receiver.
     pub exterior_gas: GasState,
+    /// Exact source-backed wall used by both feedback and observation, when
+    /// explicitly selected. The original material identity and loss spectrum
+    /// remain inspectable instead of becoming anonymous wall coefficients.
+    pub material_wall: Option<LocalMaterialWall>,
     /// Original receiver geometry and quadrature, not an output gain.
     pub receiver: CircularOutletReceiver,
     /// Original causal atmospheric law. Its declared excess/realization delay
@@ -119,6 +131,11 @@ pub(super) fn realize(
     if binding.segment_gases.is_some() && options.gas.is_some() {
         return Err(invalid(
             "supply either regional duct gases or the uniform gas option, not both",
+        ));
+    }
+    if binding.material_wall.is_some() && duct.wall.is_some() {
+        return Err(invalid(
+            "supply either a source-bound material wall or an authored duct wall, not both",
         ));
     }
     let physical = physics_duct(duct)?;
@@ -189,8 +206,12 @@ pub(super) fn realize(
         .delay_speed_m_s
         .expect("admitted positive receiver delay");
     let count = sample_count(assembly.sample_rate_hz, assembly.duration_s)?;
-    let wall = wall_pin(duct.wall);
-    let mut voice = ReedBoreVoice::new_with_regional(
+    let authored_wall = wall_pin(duct.wall);
+    let wall = match binding.material_wall {
+        Some(material) => WallModel::Law(material),
+        None => WallModel::from_pin(authored_wall.as_ref()),
+    };
+    let mut voice = ReedBoreVoice::new_with_regional_wall(
         &regional,
         reed,
         Termination::FlangedOpen,
@@ -198,7 +219,7 @@ pub(super) fn realize(
         range_m,
         assembly.sample_rate_hz,
         count,
-        wall.as_ref(),
+        wall,
     )?;
     let line = voice.line_realization().clone();
     let mut microphone = regional
@@ -206,7 +227,7 @@ pub(super) fn realize(
             assembly.sample_rate_hz,
             line.n_fft,
             binding.receiver,
-            WallModel::from_pin(wall.as_ref()),
+            wall,
             delay_speed_m_s,
         )
         .map_err(AcousticRealizeError::DuctObserver)?;
@@ -237,6 +258,7 @@ pub(super) fn realize(
         duct_observer: Some(BaffledDuctObservation {
             segment_gases: gases,
             exterior_gas: exterior,
+            material_wall: binding.material_wall.cloned(),
             receiver: binding.receiver,
             filter,
             axial_delay_samples: receiver.axial_delay_samples,

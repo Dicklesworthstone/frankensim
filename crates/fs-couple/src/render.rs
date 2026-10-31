@@ -411,10 +411,33 @@ impl ReedBoreVoice {
         line_samples: usize,
         wall: Option<&fs_phs::WallPin>,
     ) -> Result<Self, AcousticRealizeError> {
+        Self::new_with_regional_wall(regional, reed, termination, plates,
+            listener_m, sample_rate_hz, line_samples, fs_duct::WallModel::from_pin(wall))
+    }
+
+    /// Bind a shared local wall law to the original regional reed feedback.
+    ///
+    /// A source-resolved material wall supplies the same geometry-dependent
+    /// impedance used by the physical outlet observer. Elastic, viscous and
+    /// hereditary material response remain with the wall owner; neither the
+    /// reed nor this adapter copies coefficients into a second wall model.
+    /// Every sampled radius and frequency must satisfy the original source
+    /// domain. This frozen membrane image does not add exterior wall radiation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_regional_wall<'a>(
+        regional: &crate::driving_point::regional::RegionalDuct,
+        reed: BeatingReed,
+        termination: impl Into<fs_duct::MouthLoad<'a>>,
+        plates: PlateBank,
+        listener_m: f64,
+        sample_rate_hz: u32,
+        line_samples: usize,
+        wall: fs_duct::WallModel<'_>,
+    ) -> Result<Self, AcousticRealizeError> {
         let termination = termination.into();
         Self::with_inlet_line(|| Ok(regional.inlet_radius_m()), regional.inlet_gas(),
             reed, plates, listener_m, sample_rate_hz, |_| {
-                regional.characteristic_line_realized(termination, sample_rate_hz,
+                regional.characteristic_line_with_wall_realized(termination, sample_rate_hz,
                     line_samples, wall, None).map_err(crate::acoustic_realize::map_drive)
             })
     }

@@ -4808,6 +4808,33 @@ Five regression sources cover constant-law parity, analytic nonlinear RC
 discharge, current-density/polarity response, complete temperature refresh and
 atomic refusal. Native execution remains pending.
 
+### Series contacts inside nonlinear material conduction
+
+`MaterialCircuit::conductivity_with_contacts_candidate` composes the original
+nonlinear bulk-source iteration with the native series-contact descriptor.
+Only the recovered bulk voltage enters E=V/L. Individual contact drops and heat
+remain distinct; they neither alter the bulk constitutive residual nor become
+an additional heat debit. Complete interface source selections, ordered surface
+identities, coordinate meanings, branch IDs and physical areas are preserved.
+Voltage/current/field-dependent interface sources and applicability refuse
+because this path owns only the bulk electrical response.
+
+`circuit_enthalpy::conductivity::step_with_contacts_candidate` refreshes both
+bulk and contact sources at every proposed thermal endpoint, then deposits each
+native loss once using the existing bulk destinations and explicit two-sided
+`ContactHeatCells` partition. The transport variant also refreshes E/J-dependent
+thermal coefficients at the solved operating point. Both electrical and thermal
+histories remain uncommitted through iteration, source, budget and cancellation
+checks. Fixed geometry, fixed C/L, zero interface storage and the existing
+endpoint-thermal/midpoint-electrical accuracy restrictions remain in force.
+
+Focused G1/G3 regressions compare independent nonlinear RC/contact equations,
+two finite-body enthalpy equations, data-only contact swaps, both current signs,
+continuing state and the native constant-law limit. G4 regressions exercise
+source/geometry changes, missing heat routes, exhausted work and late cancellation.
+Synthetic fixture equations establish implementation behavior, not measured
+material or device qualification.
+
 ## Joint nonlinear conduction and finite enthalpy
 
 `circuit_enthalpy::conductivity::step_candidate` places the same field/current
@@ -16539,6 +16566,18 @@ Internal bore pressure and the compact jet proxy are not included in microphone
 output. The returned gas is the exterior; `duct_observer` retains interior states,
 receiver geometry and both propagation/filter delay accounts. Solid-reduced reed
 mass, stiffness, area and loss remain those of the existing material compilation.
+
+`BaffledDuctObserver::material_wall` binds the existing source-resolved
+`LocalMaterialWall` directly to BOTH the reed's characteristic feedback and the
+terminal-flow observation. The same density, elasticity, thickness, axial
+restraint, anisotropy and optional Kelvin/Maxwell spectrum are evaluated at each
+actual radius and frequency; no wall coefficients or pressure samples are fitted.
+The observation retains the complete original wall source. Supplying this binding
+beside an authored scenario wall refuses ambiguity. Source frequency support and
+thin-membrane geometry admission remain active. The wall's material temperature
+is independent of the gas states; neither thermal equilibration nor wall radiation
+is inferred. G1/G3 tests compare the independent thin-cylinder reduction, change
+only elastic or relaxation data, and check source/geometry refusal.
 
 This explicit image currently admits unbranched cylinder/cone bores, their local
 wall law, a flanged terminal and the original default characteristic ladder.

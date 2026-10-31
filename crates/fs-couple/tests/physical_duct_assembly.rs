@@ -16,6 +16,67 @@ use fs_scenario::{
     ViscothermalDuct, VolumeVelocityPulse, WaveguideEnd,
 };
 
+use fs_couple::bernoulli_aperture::wall::material::{
+    AxialConstraint, LocalMaterialWall, WallMaterialLoss, relaxation::WallRelaxation,
+};
+use fs_evidence::ValidityDomain;
+use fs_matdb::{
+    ClaimSet, InterpolationPolicy, MaterialCard, MaterialStateId, PropertyClaim,
+    PropertyKey, PropertyValue, Provenance, QueryPoint, UncertaintyModel,
+};
+use fs_material::state_point::{
+    MaterialPropertySelection, ScalarAdmissibility, ScalarPropertyRequirement,
+    resolve_material_state_point,
+};
+use fs_qty::{Density, Dims, Pressure};
+
+fn material_wall(young_pa: f64, relaxation_s: Option<f64>, band_hz: [f64; 2]) -> LocalMaterialWall {
+    let mut properties = vec![
+        ("density", Density::DIMS, 1000.0),
+        ("young_modulus", Pressure::DIMS, young_pa),
+        ("poisson_ratio", Dims([0; 6]), 0.3),
+    ];
+    if let Some(time) = relaxation_s {
+        properties.extend([
+            ("wall_delta_e", Pressure::DIMS, 2e7),
+            ("wall_tau", Dims([0, 0, 1, 0, 0, 0]), time),
+        ]);
+    }
+    let mut claims = ClaimSet::new();
+    let mut requirements = Vec::new();
+    for (name, dims, value) in properties {
+        claims.insert_claim(PropertyClaim {
+            key: PropertyKey::new(name, dims),
+            value: PropertyValue::Scalar { value, dims },
+            validity: ValidityDomain::unconstrained().with("T", 290.0, 310.0)
+                .with("omega", core::f64::consts::TAU * band_hz[0],
+                    core::f64::consts::TAU * band_hz[1]),
+            uncertainty: UncertaintyModel::Unstated,
+            interpolation: InterpolationPolicy::ConstantWithinValidity,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured wall for integration verification, not measured material".into(),
+                license: "CC0-1.0".into(), artifact: None,
+            },
+        }).unwrap();
+        requirements.push(ScalarPropertyRequirement::try_new(
+            name, dims, ScalarAdmissibility::Finite,
+        ).unwrap());
+    }
+    let card = MaterialCard::assemble(MaterialStateId {
+        chemistry: "manufactured wall".into(), phase: "solid".into(),
+        process: "numerical fixture".into(), revision: 0,
+    }, claims, vec![]).unwrap();
+    let source = resolve_material_state_point(&card,
+        &QueryPoint::new().with("T", 300.0).unwrap().with("omega", 1000.0).unwrap(),
+        &requirements, MaterialPropertySelection::SingleClaimOnly).unwrap();
+    let loss = if relaxation_s.is_some() {
+        WallMaterialLoss::Maxwell(WallRelaxation::from_state_point(&source,
+            &[("wall_delta_e".into(), "wall_tau".into())], band_hz, 0.5, 0.5).unwrap())
+    } else { WallMaterialLoss::Elastic };
+    LocalMaterialWall::new(source, 0.00005, AxialConstraint::StressFree, loss, band_hz).unwrap()
+}
+
 fn gas(temperature: f64) -> GasState {
     GasState::try_new(&GasSpec::dry_air_ussa1976(), temperature, 100_000.0).unwrap()
 }
@@ -63,6 +124,7 @@ fn binding(gases: Option<&[GasState]>, exterior: Option<GasState>) -> BaffledDuc
     BaffledDuctObserver {
         segment_gases: gases,
         exterior_gas: exterior,
+        material_wall: None,
         receiver: CircularOutletReceiver {
             position_m: [0.0, 0.0, 0.5],
             radial_rings: 4,
@@ -252,4 +314,88 @@ fn physical_assembly_refuses_incomplete_or_inconsistent_physical_bindings() {
         open_fraction: 1.0,
     });
     assert!(realize_assembly_with_options(&branched, &selected).is_err());
+}
+
+/// G1/G3: the source material's thin-cylinder reduction matches an independently
+/// calculated constant wall, while a data-only stiffness swap changes sound.
+#[test]
+fn material_wall_reaches_feedback_and_physical_observation() {
+    let input = input();
+    let gases = [gas(293.15); 2];
+    let wall = material_wall(3e7, None, [1e-6, 4500.0]);
+    let bound = BaffledDuctObserver { material_wall: Some(&wall),
+        ..binding(Some(&gases), None) };
+    let actual = realize_assembly_with_options(&input, &options(bound)).unwrap();
+    assert_eq!(actual.duct_observer.as_ref().unwrap().material_wall.as_ref(), Some(&wall));
+    assert_eq!(actual.duct_observer.as_ref().unwrap().segment_gases, gases);
+    // Independent membrane limit: sigma = rho*h, K = E*h/r^2 at free axial stress.
+    let mut reference = input.clone();
+    reference.duct.as_mut().unwrap().wall = Some(fs_scenario::acoustic::LocallyReactingWall {
+        surface_density_kg_m2: 1000.0 * 0.00005,
+        stiffness_pa_per_m: 3e7 * 0.00005 / (0.0015_f64 * 0.0015),
+        resistance_pa_s_per_m: 0.0,
+    });
+    let expected = realize_assembly_with_options(&reference,
+        &options(binding(Some(&gases), None))).unwrap();
+    let peak = expected.pressure_pa.iter().map(|p| p.abs()).fold(0.0, f64::max);
+    assert!(peak > 0.0);
+    let error = actual.pressure_pa.iter().zip(&expected.pressure_pa)
+        .map(|(a, b)| (a-b).abs()).fold(0.0, f64::max);
+    assert!(error / peak < 1e-8, "relative pressure discrepancy {}", error / peak);
+    let stiff = material_wall(6e7, None, [1e-6, 4500.0]);
+    let changed = realize_assembly_with_options(&input,
+        &options(BaffledDuctObserver { material_wall: Some(&stiff), ..bound })).unwrap();
+    assert_ne!(actual.pressure_pa, changed.pressure_pa);
+    assert_eq!(actual.gas, changed.gas);
+    assert_ne!(wall.material().identity(), stiff.material().identity());
+}
+
+/// G3/G5: a relaxation-time edit reaches the complete material law; it is not
+/// reduced to the identical equilibrium E/rho or added as an output filter.
+#[test]
+fn material_wall_preserves_hereditary_spectrum_and_independent_gases() {
+    let input = input();
+    let gases = [gas(293.15), gas(305.15)];
+    let exterior = gas(283.15);
+    let fast = material_wall(3e7, Some(0.0003), [1e-6, 4500.0]);
+    let slow = material_wall(3e7, Some(0.003), [1e-6, 4500.0]);
+    let render = |wall: &LocalMaterialWall| {
+        realize_assembly_with_options(&input, &options(BaffledDuctObserver {
+            material_wall: Some(wall), ..binding(Some(&gases), Some(exterior))
+        })).unwrap()
+    };
+    let first = render(&fast);
+    assert_eq!(first, render(&fast));
+    let second = render(&slow);
+    assert_ne!(first.pressure_pa, second.pressure_pa);
+    assert_eq!(first.gas, exterior);
+    let retained = first.duct_observer.unwrap();
+    assert_eq!(retained.segment_gases, gases);
+    assert_eq!(retained.material_wall.as_ref(), Some(&fast));
+    // A wall's original 300 K source is independent of both gas temperatures.
+    assert_eq!(fast.material().query().axes()["T"], 300.0);
+    assert_eq!(retained.exterior_gas, exterior);
+}
+
+/// G0: a material binding cannot silently replace another wall, extrapolate
+/// its frequency support, or bypass thin-wall geometry admission.
+#[test]
+fn material_wall_refuses_conflicting_and_unsupported_bindings() {
+    let mut input = input();
+    let gases = [gas(293.15); 2];
+    let wall = material_wall(3e7, None, [1e-6, 4500.0]);
+    let bound = BaffledDuctObserver { material_wall: Some(&wall),
+        ..binding(Some(&gases), None) };
+    input.duct.as_mut().unwrap().wall = Some(fs_scenario::acoustic::LocallyReactingWall {
+        surface_density_kg_m2: 1.0, stiffness_pa_per_m: 1e8, resistance_pa_s_per_m: 1.0,
+    });
+    assert!(realize_assembly_with_options(&input, &options(bound)).is_err());
+    input.duct.as_mut().unwrap().wall = None;
+    let narrow = material_wall(3e7, None, [1e-6, 1000.0]);
+    assert!(realize_assembly_with_options(&input,
+        &options(BaffledDuctObserver { material_wall: Some(&narrow), ..bound })).is_err());
+    let duct = input.duct.as_mut().unwrap();
+    duct.segments[0].radius_m = 0.0005;
+    duct.segments[0].outlet_radius_m = 0.0005;
+    assert!(realize_assembly_with_options(&input, &options(bound)).is_err());
 }

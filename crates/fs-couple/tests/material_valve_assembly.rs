@@ -214,7 +214,7 @@ fn compiled_material_reed_reaches_the_physical_exterior_microphone() {
         let options = RealizeOptions {
             gas: Some(gas), observer_absorption: Some(GasAbsorptionModel::Lossless),
             baffled_duct: Some(BaffledDuctObserver {
-                segment_gases: None, exterior_gas: Some(exterior),
+                segment_gases: None, exterior_gas: Some(exterior), material_wall: None,
                 receiver: CircularOutletReceiver {
                     position_m: [0.0, 0.0, 0.5], radial_rings: 4, angular_points: 16,
                     maximum_frequency_hz: 1000.0,
