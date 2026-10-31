@@ -17,6 +17,10 @@ mod bulk_optics;
 #[cfg(feature = "volumes")]
 pub mod particle_scattering;
 
+/// Coexisting source-bound gas and particle populations in native transport.
+#[cfg(feature = "volumes")]
+pub mod optical_mixture;
+
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_conduction::radiation::SurfaceEmissivity;
 use fs_matdb::MaterialCard;

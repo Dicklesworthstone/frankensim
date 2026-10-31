@@ -228,6 +228,25 @@ impl MaterialParticleSpectrum {
         &self.spectrum
     }
 
+    /// Original accepted material, optical sources and particle distribution.
+    /// Spectral preparation resolution is retained separately in `spectrum()`.
+    #[must_use]
+    pub const fn binding_identity(&self) -> ContentHash {
+        self.binding_identity
+    }
+
+    /// Original particle bulk density, distinct from dispersed mass per m³.
+    #[must_use]
+    pub const fn particle_density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+
+    /// Unambiguous absolute temperature of the original material endpoint.
+    #[must_use]
+    pub const fn accepted_temperature_k(&self) -> Option<f64> {
+        self.temperature_k
+    }
+
     /// Bind dispersed particle mass in kg/m³ to index-one ambient transport.
     ///
     /// `maximum_volume_fraction` is an explicit caller-selected dilute-model

@@ -2849,6 +2849,63 @@ cell. All declared hosts remain index one. These adapters preserve source and
 state identities and feed the existing native transport; they do not add dense
 particle correlations, a refracting carrier interface, or inferred gas chemistry.
 
+### Coexisting optical constituents
+
+`MassAbsorptionSpectrum::weighted_sum`, `MassScatteringSpectrum::weighted_sum`
+and `ScatteringOptics::weighted_sum` prepare coexisting independent populations.
+Weights are explicit kg of constituent per kg of the density field's reference
+mass; numerical preparation never silently normalizes them. With total mixture
+density, the coefficient is `rho_total * sum(w_i * kappa_i(lambda))`. Sources
+must share exact wavelength endpoints. Active linear spectra retain their exact
+union of knots, up to the native 16-knot capacity; a larger union refuses without
+smoothing or discarding spectral features. Molecular inverse-fourth terms remain
+analytic and combine with the linear contribution in a fixed-size, `Copy`
+spectrum. Coefficient preparation uses fixed-order compensated sums and binds
+the original weights, source identities and analytical references.
+
+`SpectralPhaseMixture` retains each constituent spectrum and original angular
+law. At every requested wavelength its phase is
+`sum(w_i*kappa_s_i*p_i) / sum(w_i*kappa_s_i)`. Averaging refractive indices,
+asymmetry parameters, or already-normalized phase endpoints is not this law.
+The matched sampler conditionally remaps the existing random variates through
+packet-lane, component and constituent-phase selection. Evaluation and MIS use
+the complete packet-mixture PDF. No heap allocation, material solve, angular
+table cloning or additional random draw occurs at a scattering vertex. A lane
+with exactly zero scattering uses an isotropic proposal; its physical collision
+weight remains zero. `OpticalMixtureBudget` limits supplied components, with a
+hard cap of 64 and no nested phase mixtures. Gray-only photometry refuses these
+spectral phases; native spectral transport, tracing and deposition consume them.
+
+The photometric albedo maximum remains at the combined spectral knots: for
+affine absorption `a` and `s = affine + K/lambda^4`, `K >= 0`, the derivative
+numerator obeys `(s' a - s a')' = s'' a >= 0`. Interior stationary points cannot
+be maxima. Outward coefficient intervals include the molecular addend; angular
+integral bounds use the maximum constituent bound under convex mixing.
+
+`MaterialOpticalMixture` borrows the original accepted gas/particle owners and
+the original `fs_qty::Composition` in mass-fraction form. A recipe can contain
+one molecular gas composition and multiple prepared particle materials or size
+distributions. `MaterialOpticalMixtureGrid` binds a recipe palette to borrowed
+TOTAL mass density and original accepted gas cells. Particle volume fractions
+add as `phi = sum(rho_total*w_i/rho_particle_i)`. A present gas occupies the
+remaining volume: `rho_total*w_gas = (1-phi)*rho_gas`, where `rho_gas` is the
+original intrinsic EOS density. Admission checks that relation within the
+documented floating-point allowance and never changes the accepted state.
+Thus source composition, gas pressure/temperature, particle densities and bulk
+mass/volume accounting must agree. The declared particle-volume ceiling applies
+to the sum of all populations, not to each population independently.
+
+Absorption and scattering palettes share the original immutable cell map.
+An optional LTE field must match every constituent's accepted temperature;
+different-temperature sources are not replaced by an averaged temperature.
+Omitting the field explicitly selects nonemitting transport. Only true absorption
+deposits heat. All particle hosts remain index one; volume accounting does not
+establish dense-particle scattering accuracy or add coherent effective indices,
+refracting carrier interfaces, dependent scattering or particle correlations.
+Independent optical-depth, angular-moment, LTE, beam-power and volume/mass
+regressions exercise the existing native owners; they are not experimental
+material qualification or a performance benchmark.
+
 ### Calibrated spectral fixture paths
 
 `PathLuminanceJob` connects the same `PhotometricSource` states to the original
