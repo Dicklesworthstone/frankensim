@@ -83,7 +83,7 @@ pub enum BuildingCvarError {
         /// Original catalog index.
         candidate: usize,
     },
-    /// Candidate changes the common building envelope, floor mass or solve setup.
+    /// Candidate changes the common building envelope, floor mass, gravity or solve setup.
     IncompatibleCandidate {
         /// Original catalog index.
         candidate: usize,
@@ -194,6 +194,7 @@ fn same_problem(a: &BuildingFrame, b: &BuildingFrame) -> bool {
         && a.story_height == b.story_height
         && a.bay_width == b.bay_width
         && a.floor_mass == b.floor_mass
+        && a.gravity_m_s2 == b.gravity_m_s2
         && a.zeta == b.zeta
         && a.sections_per_member == b.sections_per_member
 }
@@ -268,7 +269,7 @@ pub fn building_cvar_mass_min<'a>(
 ///
 /// Candidates must be admitted through BuildingFrame::with_sections. Section
 /// dimensions, column area scale and constituent materials may vary; building
-/// envelope, floor masses, damping ratio and section quadrature must agree.
+/// envelope, floor masses, gravity, damping ratio and section quadrature must agree.
 /// Compare candidates using the same intended inertia formulation and initial
 /// loading/history assumptions.
 ///

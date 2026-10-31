@@ -166,7 +166,7 @@ candidates meeting the declared empirical drift limit. The mass comes from
 including floors and member mass attached to fixed supports. It is not a scale
 proxy or the sum of free-mode effective masses. Equal feasible masses prefer
 the first catalog entry. Every candidate uses the same building envelope,
-floor masses, damping ratio and section quadrature; materials, section geometry
+floor masses, gravity vector, damping ratio and section quadrature; materials, section geometry
 and column area scale may vary.
 
 No size-response monotonicity, continuous optimum or population-risk certificate
@@ -365,6 +365,17 @@ damping, earthquake forcing, kinetic work and full support reactions.
 Floor seismic mass must exclude any member mass supplied here, so that the
 same physical inventory is not counted twice.
 
+`BuildingSpec::gravity_m_s2` declares a finite uniform acceleration in the
+fixed horizontal/vertical building axes. It defaults to `[0, -9.80665]` m/s²;
+zero, weaker, reversed and oblique gravity are admitted without changing the
+mass inventory. Every constructor uses the same mass projection for its actual
+gravity preload, signed tangent modes and retained Newmark load. Fragility
+clones retain that setting. The read-only `gravity_forces_n` reports all applied
+nodal forces and end moments, including loads at supports. Base excitation
+remains horizontal and is separate from this held load. Changing gravity after
+construction requires rebuilding/preloading; no instantaneous environmental
+work or rotating-frame dynamics is inferred.
+
 Consistent member inertia uses the reference Euler–Bernoulli centerline
 interpolation. It retains cross-coordinate inertia but does not claim
 configuration-dependent moving mass or large-rotation inertial completeness.
@@ -372,6 +383,8 @@ The original frame mechanics and model-fragility scope remain unchanged.
 `tests/building_gravity.rs` covers loaded modal shifts, retained gravity at
 rest, a forced full-mass building history and exact zero-member-mass
 compatibility, as well as invalid line-mass refusal.
+It also checks explicit gravity resultant/moment with member and floor mass,
+zero-gravity assembly, oblique/reversed held equilibria and nonfinite refusal.
 
 ## Horizontal participation and gravity-tangent stability
 

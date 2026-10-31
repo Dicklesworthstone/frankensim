@@ -338,6 +338,31 @@ fn recorded_motion(dt: f64, values: &[f64]) -> TimeSignal {
 }
 
 #[test]
+fn catalog_candidates_share_both_gravity_components() {
+    let lunar = BuildingSpec { gravity_m_s2: [0.0, -1.62], ..spec(1.0) };
+    let base = building(lunar, 2400.0);
+    let records = [recorded_motion(0.02, &[0.0; 3])];
+    let same_gravity = [base.clone(), base.clone()];
+    with_cx(false, |cx| {
+        assert!(building_cvar_from_motions(
+            BuildingMotionSource::Records(&records), &same_gravity, controls(), cx,
+        ).is_ok());
+    });
+    for gravity_m_s2 in [[0.0, -9.80665], [0.02, -1.62]] {
+        let changed = building(BuildingSpec { gravity_m_s2, ..lunar }, 2400.0);
+        let catalog = [base.clone(), changed];
+        with_cx(false, |cx| {
+            assert!(matches!(
+                building_cvar_from_motions(
+                    BuildingMotionSource::Records(&records), &catalog, controls(), cx,
+                ),
+                Err(BuildingCvarError::IncompatibleCandidate { candidate: 1 })
+            ));
+        });
+    }
+}
+
+#[test]
 fn realized_ensemble_and_retained_record_suite_have_identical_evaluations() {
     let ensemble = ensemble();
     let catalog = vec![building(spec(1.0), 2400.0), building(spec(1.3), 1800.0)];

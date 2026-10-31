@@ -64,6 +64,11 @@ pub struct BuildingSpec {
     pub bay_width: f64,
     /// Seismic mass per floor (kg), lumped equally at the floor's nodes.
     pub floor_mass: f64,
+    /// Uniform gravity in the fixed building axes `[horizontal, vertical]`
+    /// (m/s²). Positive vertical points up. Zero is legal; the default is
+    /// terrestrial downward gravity. This is a held physical load, not base
+    /// excitation or a change of reference frame.
+    pub gravity_m_s2: [f64; 2],
     /// Column section.
     pub column: RcMember,
     /// Beam section.
@@ -84,6 +89,7 @@ impl Default for BuildingSpec {
             story_height: 3.2,
             bay_width: 6.0,
             floor_mass: 1.2e5,
+            gravity_m_s2: [0.0, -G],
             column: RcMember {
                 depth: 0.5,
                 width: 0.5,
@@ -156,6 +162,7 @@ fn validate_spec(spec: BuildingSpec) -> Result<(), SolidError> {
     if spec.stories == 0
         || spec.bays == 0
         || positive.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        || spec.gravity_m_s2.iter().any(|v| !v.is_finite())
         || [spec.column.steel_area, spec.beam.steel_area]
             .iter()
             .any(|v| !v.is_finite() || *v < 0.0)
@@ -164,7 +171,7 @@ fn validate_spec(spec: BuildingSpec) -> Result<(), SolidError> {
     {
         return Err(SolidError::InvalidInput {
             what: "building spec needs finite positive geometry/mass/scale, nonnegative \
-                   reinforcement, at least one story and bay, and zeta in [0, 1)"
+                   reinforcement, finite gravity, at least one story and bay, and zeta in [0, 1)"
                 .into(),
         });
     }
@@ -312,7 +319,11 @@ impl BuildingFrame {
         }
         // The same reference mass projects floor/member gravity and base forcing.
         let acceleration: Vec<f64> = (0..frame.ndof())
-            .map(|d| if d % 3 == 1 { -G } else { 0.0 })
+            .map(|d| match d % 3 {
+                0 => spec.gravity_m_s2[0],
+                1 => spec.gravity_m_s2[1],
+                _ => 0.0,
+            })
             .collect();
         let gravity = frame.inertial_forces(&acceleration)?;
         frame.static_load(&gravity, 4)?;
@@ -421,6 +432,16 @@ impl BuildingFrame {
         &self.spec
     }
 
+    /// Full held gravity load used by both preload and every time-history
+    /// step. Each node contributes `[Fx, Fy, Mz]` in N, N, N m, including
+    /// supported nodes and consistent member end moments. Node order is
+    /// bottom floor first, then left-to-right within each floor. These are
+    /// applied loads, not support reactions.
+    #[must_use]
+    pub fn gravity_forces_n(&self) -> &[f64] {
+        &self.gravity
+    }
+
     /// Accepted column/beam material sections, with the actual column area
     /// scale and unchanged source identities. None identifies the authored
     /// legacy fixture whose line masses, if any, were supplied independently.
@@ -431,8 +452,9 @@ impl BuildingFrame {
     }
 
     /// Run a horizontal base-acceleration record `ag` sampled every `dt`.
-    /// Retains the floor weight throughout the history. Consumes the
-    /// gravity-loaded state; clone the frame to rerun.
+    /// Retains the configured floor/member gravity throughout the history.
+    /// Base excitation remains horizontal regardless of gravity direction.
+    /// Consumes the gravity-loaded state; clone the frame to rerun.
     ///
     /// # Errors
     /// Solver errors if a step fails to converge (reduce `dt`).
