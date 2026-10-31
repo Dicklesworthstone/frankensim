@@ -1,12 +1,12 @@
 //! Source-declared thermal length ratios enter native force, tangent and motion.
 use super::*;
-use fs_couple::finite_solid::thermal::MeanThermalReference;
+use fs_couple::finite_solid::thermal::{MeanThermalReference, ThermalReference};
 use fs_material::hyper::cards::HyperelasticMaterial;
 use fs_material::state_point::INVERSE_TEMPERATURE_DIMS;
 
 const MEAN: &str = "mean_engineering_thermal_expansion_coefficient";
 
-fn thermal_card(alpha: f64, scale: f64, stress_axis: bool) -> MaterialCard {
+pub(super) fn thermal_card(alpha: f64, scale: f64, stress_axis: bool) -> MaterialCard {
     let base = source_card(6.0, scale, false, false);
     let provenance = base.models()[0].provenance.clone();
     let mut claims = ClaimSet::new();
@@ -54,7 +54,7 @@ fn reference(card: &MaterialCard) -> MeanThermalReference {
     ).unwrap()
 }
 
-fn prepared(card: &MaterialCard) -> FiniteSolidMaterial {
+pub(super) fn prepared(card: &MaterialCard) -> FiniteSolidMaterial {
     FiniteSolidMaterial::resolve_mean_thermal(
         card, 0, reference(card), MaterialPropertySelection::SingleClaimOnly,
     ).unwrap()
@@ -157,6 +157,7 @@ fn g1_free_thermal_expansion_and_large_rotation_are_stress_free_with_original_ma
         let thermal = material.thermal_reference().unwrap();
         assert_eq!(material.density().query(), *thermal.reference_context());
         assert_eq!(material.law().context(), thermal.current_context());
+        let ThermalReference::Mean(thermal) = thermal else { panic!("mean source required") };
         assert_eq!(thermal.source().resolved().card_identity(), card.content_hash());
         assert_ne!(material.density().query(), *material.law().context());
     });
@@ -300,7 +301,7 @@ fn g4_thermal_reference_refuses_foreign_sources_dynamic_axes_and_wrong_temperatu
         // the actual total-volume Jacobian overflows and must still refuse.
         let huge = thermal_card(2.0e101, 1.0e-305, false);
         let material = prepared(&huge);
-        let stretch = 3.0 * material.thermal_reference().unwrap().stretch();
+        let stretch = 3.0 * material.thermal_reference().unwrap().principal_stretches()[0];
         let u: Vec<f64> = NODES.iter().flatten().map(|x| (stretch - 1.0) * x).collect();
         let p = problem(&material, &[], &[]);
         assert!(p.stored_energy_j(&u, cx).is_err());

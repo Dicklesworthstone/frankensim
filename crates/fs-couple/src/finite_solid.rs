@@ -15,8 +15,9 @@
 //! optional held pressure on the current exterior faces,
 //! compressible isothermal hyperelasticity and conforming P1 tetrahedra.
 //! Nonlinear midpoint has a signed energy defect: it is reported and gated,
-//! never converted into physical heat. The optional mean-expansion source path
-//! prepares an isotropic thermal reference at a held temperature per element.
+//! never converted into physical heat. The optional source-expansion paths
+//! prepare isotropic or oriented principal thermal references at a held
+//! temperature per element.
 //! No evolving heat equation, plasticity, contact, moving supports,
 //! fluid feedback, mixed incompressible formulation or continuous-in-time
 //! nonintersection claim is made.
@@ -58,7 +59,7 @@ pub struct FiniteSolidMaterial {
     law: ResolvedHyperelastic,
     density: ResolvedMaterialStatePoint,
     model_index: usize,
-    thermal: Option<thermal::MeanThermalReference>,
+    thermal: Option<thermal::ThermalReference>,
 }
 
 impl FiniteSolidMaterial {
@@ -122,10 +123,9 @@ impl HyperelasticMaterial for FiniteSolidMaterial {
         match &self.thermal {
             None => self.law.law().piola(deformation),
             Some(thermal) => {
-                let p = self.law.law().piola(&thermal.elastic_deformation(deformation))?
-                    .map(|value| thermal.area_ratio() * value);
-                thermal.check_response(p.iter())?;
-                Ok(p)
+                thermal.pullback_piola(
+                    self.law.law().piola(&thermal.elastic_deformation(deformation))?,
+                )
             }
         }
     }
@@ -137,10 +137,9 @@ impl HyperelasticMaterial for FiniteSolidMaterial {
         match &self.thermal {
             None => self.law.law().tangent(deformation),
             Some(thermal) => {
-                let a = self.law.law().tangent(&thermal.elastic_deformation(deformation))?
-                    .map(|row| row.map(|value| thermal.stretch() * value));
-                thermal.check_response(a.iter().flatten())?;
-                Ok(a)
+                thermal.pullback_tangent(
+                    self.law.law().tangent(&thermal.elastic_deformation(deformation))?,
+                )
             }
         }
     }

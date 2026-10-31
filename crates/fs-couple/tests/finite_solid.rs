@@ -2,6 +2,8 @@
 //! These are authored numerical fixtures, not measured material validation.
 #[path = "finite_solid/thermal.rs"]
 mod thermal;
+#[path = "finite_solid/expansion.rs"]
+mod expansion;
 #[path = "finite_solid/pressure.rs"]
 mod pressure;
 #[path = "finite_solid/impulse.rs"]

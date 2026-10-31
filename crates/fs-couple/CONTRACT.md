@@ -10803,19 +10803,48 @@ checks the actual total Jacobian. Density and mass stay at the original
 reference temperature. Uniform and per-element references use the same native
 force, energy, tangent and dynamic operators.
 
-Five new fixtures cover independent energy/stress/tangent formulas, free
+The five original fixtures cover independent energy/stress/tangent formulas, free
 expansion under rigid rotation, source-driven finite motion, heterogeneous
 held temperatures, original mass, and source/domain/Jacobian refusals.
-Source/API review and independent arithmetic were performed; native Rust
-parsing, compilation and execution remain unavailable. These fixtures do not
-supply experimental calibration.
+These authored numerical regression fixtures do not supply experimental
+calibration.
+
+`ExpansionThermalReference` additionally consumes the original
+`fs-material::thermal::transport::expansion::PreparedFreeExpansion` path.
+It retains the source engineering-length convention and exact datum
+normalization `s_i=(1+epsilon_i(T))/(1+epsilon_i(T_ref))`. Isotropic sources
+must be explicitly declared isotropic; directional sources require their
+original principal-frame identity and a proper rotation into a named mesh
+frame. Source and target frames with the same identity require the identity
+map. Unsupported evolving source coordinates, contradictory temperature
+coordinates, foreign material cards and extrapolation refuse.
+
+The directional finite reference is `Fth=Q diag(s_i) Q^T`, `H=Fth^-1` and
+`Jth=product(s_i)`. The native law sees `Fe=F H`; its response per original
+reference volume is `W0=Jth We`, `P0=Jth Pe H^T`, and the exact tangent
+`A0[iJ,kL]=Jth H[Ja] Ae[ia,kb] H[Lb]`. Reference tensors are prepared once,
+the two tangent contractions are separated, and successful mechanical
+evaluation performs no allocation, source lookup, interpolation or inverse.
+Both existing mean and new engineering-curve references retain their scalar
+fast path when explicitly isotropic. `FiniteSolidMaterial::resolve_thermal`
+accepts the explicit `ThermalReference` source variant; the original
+`resolve_mean_thermal` constructor uses that same binding owner. The
+`thermal_reference` accessor now exposes the source variant, with shared
+reference/current contexts, principal stretches and relaxed volume.
+
+The new `tests/finite_solid/expansion.rs` fixtures exercise an independent
+Ogden-invariant energy oracle, all nine Piola components and all 81 tangent
+components, native tetrahedral assembly, rigid rotation of free expansion,
+cooling and negative directional expansion, restraint stress, original mass,
+nonzero source-datum rebasing, isotropic reduction and source/frame refusals.
+They are numerical constitutive checks, not measured material validation.
 
 This is thermal preparation followed by mechanics at held temperature per
 element. It does not evolve a heat/entropy equation or account for work during
-a temperature change. Isotropic reference preparation is supported;
-anisotropic finite thermal mapping, coupled evolving thermomechanics,
-inelasticity and nearly-incompressible stabilization remain open. MR58 and
-MR21 remain open.
+a temperature change. Fixed-principal thermal expansion is independent of
+the native elastic-law symmetry; evolving principal axes, coupled evolving
+finite thermomechanics, inelasticity and nearly-incompressible stabilization
+remain open. MR58 and MR21 remain open.
 
 
 ### Directional dielectric storage through the original phase/heat trajectory
