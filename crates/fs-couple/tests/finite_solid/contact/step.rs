@@ -3,6 +3,8 @@
 mod free;
 #[path = "step/scene.rs"]
 mod scene;
+#[path = "step/sustained.rs"]
+mod sustained;
 
 use super::*;
 use fs_couple::finite_solid::contact::step::*;

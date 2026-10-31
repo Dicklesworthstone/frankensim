@@ -1,5 +1,54 @@
 # CONTRACT: fs-couple
 
+## Sustained mixed contact through original force and kinetic subflows
+
+`finite_solid::split` supplies the original prepared hyperelastic and held
+external forces to the existing consistent-mass impulse owner. After a separately
+admitted mixed contact event, the original generalized-alpha owner advances the
+mass-only kinetic subflow and records its genuine solve/time/history receipt.
+The original mass and force owners recompute smooth endpoint acceleration;
+contact impulses are not disguised as smooth acceleration. An immutable private
+receipt binds the original material, configuration, time, history, loads and
+work, even if a caller edits public diagnostic fields.
+
+`contact::step::sustained::sustained_sphere_trajectory_candidate` composes this
+solid path with native full-inertia rigid force/torque impulses, ONE mixed contact
+solve and original torque-free drift. Incoming pre-force velocities determine
+Newton restitution targets, preventing a held load from creating a fresh bounce
+at an otherwise resting contact. Original current-arm stationary-support moments
+and world orbital/spin momentum are retained. Kick orbital error, kick spin
+error, drift orbital increment and drift spin increment have separate absolute
+bounds before accumulation; neither within-body nor cross-event cancellation
+can hide lost angular transport.
+
+Source, internal-force, support, kinetic and strain transfers remain distinct.
+Source/internal impulse and work decomposition roundoff is explicitly measured.
+Force-displacement work and body-torque kick work use the declared first-order
+convention. Signed and absolute source/elastic/rigid splitting defects remain
+visible; contact-map loss can contain splitting loss and is not friction heat.
+The whole-call absolute defect budget is allocated by interval duration. Excess
+splitting error, unresolved affine geometry, original trial-material refusal or
+rotational nonconvergence can shorten and recompute the complete original map
+from the accepted state. Admitted step sizes are retained, with conservative
+work-margin growth, avoiding repeated rediscovery of a stable contact step.
+
+Whole affine sphere-pair, deforming-triangle and element-orientation admission
+is shared with the transient driver; every negative actual witness gap refuses.
+The automatic scene has held circular coefficients. Directional source-history
+updates remain available through the separate mixed event API. This is a bounded
+FIRST-order split requiring refinement, not general Moreau--Jean, continuous
+forced Euler-top quadrature, true-flow CCD, pressure-aware contact, contact heat
+partition, or guaranteed resolution of grazing/Zeno behavior.
+
+Eight independent fixtures cover finite stretch, original mass/current-arm force
+transfer, immutable continuation and atomic refusal, loaded rest with restitution
+one, a loaded mixed chain, applied torque, and genuinely deforming face recoil.
+The resting fixture checks that the declared splitting loss halves with the step;
+the deforming fixture independently uses the consistent face-mode mass 0.6 kg
+and fixed-apex reaction. Pinned formatting and source/math review passed. Native
+compilation and execution remain unverified because the pinned sparse dependency
+preflight and shared storage/memory constraints block the native test path.
+
 ## Automatic complete mixed sphere-contact trajectories
 
 `finite_solid::contact::scene::FiniteSolidSphereScene` binds one COM-centred

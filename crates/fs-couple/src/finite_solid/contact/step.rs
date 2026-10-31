@@ -7,13 +7,17 @@
 //! window shortens the native step; every retry recomputes the native trajectory.
 //! No endpoint is projected and no sampled gap is called a path certificate.
 //!
-//! This is an event-refined composition for transient impacts, with explicit
-//! positive contact activation distance. It is not a sustained-contact
-//! Moreau--Jean solve, an exact-flow CCD method, or a guarantee against Zeno
-//! behavior. Unresolved contact, geometry or time progress returns no candidate.
+//! The smooth-flight entry points refine transient impacts; the `sustained`
+//! child advances loaded contact with an explicitly first-order force/contact/
+//! kinetic-drift split. Both retain positive contact activation distance and
+//! share the complete affine-path authority. Neither is a general Moreau--Jean
+//! method, exact-flow CCD, or a guarantee against Zeno behavior. Unresolved
+//! contact, geometry or time progress returns no candidate.
 
 /// Original smooth mechanical owners and their complete momentum/work account.
 pub mod free;
+/// Original force/contact/kinetic-drift composition for sustained loaded contact.
+pub mod sustained;
 
 use super::mixed::FiniteSolidMixedContact;
 use super::scene::{
@@ -87,7 +91,7 @@ pub struct FiniteSolidSpherePathReport {
     pub interval_windows: usize,
     pub tetrahedra_checked: usize,
     pub sphere_pairs_checked: usize,
-    /// Lower bound for interval-checked sphere/triangle paths; broad-phase
+    /// Lower bound for interval-checked sphere/triangle and sphere-pair paths; broad-phase
     /// exclusions are clear. Infinity means no exact pair needed checking.
     pub minimum_clearance_m: f64,
 }

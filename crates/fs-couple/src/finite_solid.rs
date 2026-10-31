@@ -18,7 +18,9 @@
 //! never converted into physical heat. The optional source-expansion paths
 //! prepare isotropic or oriented principal thermal references at a held
 //! temperature per element.
-//! The contact child composes frozen-configuration rigid/solid impact events.
+//! The contact child composes simultaneous mixed rigid/solid impact events and
+//! bounded geometry-admitted trajectories, including an explicitly first-order
+//! force/contact/kinetic-drift split for loaded contact.
 //! No evolving heat equation, plasticity, moving supports,
 //! fluid feedback, mixed incompressible formulation or continuous-in-time
 //! nonintersection claim is made.
@@ -29,7 +31,10 @@ pub mod thermal;
 /// Power-conjugate point impulses on the original consistent reference mass.
 pub mod impulse;
 
-/// Simultaneous rigid/solid contact through the original Coulomb solver.
+/// Native force impulses and kinetic subflows for sustained contact composition.
+pub mod split;
+
+/// Simultaneous mixed contact and trajectories through original mechanical owners.
 pub mod contact;
 
 use std::cell::RefCell;
@@ -40,8 +45,8 @@ use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::hyper::Hyperelastic;
 use fs_material::hyper::cards::{HyperelasticMaterial, ResolvedHyperelastic};
 use fs_material::state_point::{
-    DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint,
-    ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+    DENSITY_PROPERTY, MaterialPropertySelection, ResolvedMaterialStatePoint, ScalarAdmissibility,
+    ScalarPropertyRequirement, resolve_material_state_point,
 };
 use fs_qty::Density;
 use fs_solid::hyper3::prepared::PreparedHyperTetProblem;
@@ -78,59 +83,82 @@ impl FiniteSolidMaterial {
         context: &QueryPoint,
         selection: MaterialPropertySelection,
     ) -> Result<Self, FiniteSolidError> {
-        let model = card.models().get(model_index)
-            .ok_or(FiniteSolidError::Invalid("model index is outside the material card"))?;
+        let model = card
+            .models()
+            .get(model_index)
+            .ok_or(FiniteSolidError::Invalid(
+                "model index is outside the material card",
+            ))?;
         let law = ResolvedHyperelastic::try_from_model_card_at(model, context)
             .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
         let requirement = ScalarPropertyRequirement::try_new(
-            DENSITY_PROPERTY, Density::DIMS, ScalarAdmissibility::StrictlyPositive,
-        ).map_err(|error| FiniteSolidError::Source(error.to_string()))?;
-        let density = resolve_material_state_point(
-            card, law.context(), &[requirement], selection,
-        ).map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+            DENSITY_PROPERTY,
+            Density::DIMS,
+            ScalarAdmissibility::StrictlyPositive,
+        )
+        .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
+        let density = resolve_material_state_point(card, law.context(), &[requirement], selection)
+            .map_err(|error| FiniteSolidError::Source(error.to_string()))?;
         if !density.properties()[0].is_static_at_fixed_external_conditions() {
             return Err(FiniteSolidError::Source(
                 "reference density requires validity-wide support at fixed external conditions; evolving mechanical axes are not owned".into(),
             ));
         }
-        Ok(Self { law, density, model_index, thermal: None })
+        Ok(Self {
+            law,
+            density,
+            model_index,
+            thermal: None,
+        })
     }
 
     /// Original admitted constitutive model and exact external context.
-    pub const fn law(&self) -> &ResolvedHyperelastic { &self.law }
+    pub const fn law(&self) -> &ResolvedHyperelastic {
+        &self.law
+    }
 
     /// Source density bundle including card identity, typed query and receipt.
-    pub const fn density(&self) -> &ResolvedMaterialStatePoint { &self.density }
+    pub const fn density(&self) -> &ResolvedMaterialStatePoint {
+        &self.density
+    }
 
     /// Explicit model position in the immutable material card.
-    pub const fn model_index(&self) -> usize { self.model_index }
+    pub const fn model_index(&self) -> usize {
+        self.model_index
+    }
 
     /// Density per reference volume; fixed for this material motion.
-    pub fn reference_density_kg_m3(&self) -> f64 { self.density.properties()[0].value_si() }
+    pub fn reference_density_kg_m3(&self) -> f64 {
+        self.density.properties()[0].value_si()
+    }
 }
 
 impl HyperelasticMaterial for FiniteSolidMaterial {
-    fn hyperelastic(&self) -> &Hyperelastic { self.law.law() }
+    fn hyperelastic(&self) -> &Hyperelastic {
+        self.law.law()
+    }
 
     fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
         match &self.thermal {
             None => self.law.law().energy(deformation),
-            Some(thermal) => thermal.volume_ratio()
-                * self.law.law().energy(&thermal.elastic_deformation(deformation)),
+            Some(thermal) => {
+                thermal.volume_ratio()
+                    * self
+                        .law
+                        .law()
+                        .energy(&thermal.elastic_deformation(deformation))
+            }
         }
     }
 
-    fn first_piola(
-        &self,
-        deformation: &[f64; 9],
-    ) -> Result<[f64; 9], fs_material::MaterialError> {
+    fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], fs_material::MaterialError> {
         match &self.thermal {
             None => self.law.law().piola(deformation),
-            Some(thermal) => {
-                thermal.pullback_piola(
-                    self.law.law().piola(&thermal.elastic_deformation(deformation))?,
-                )
-            }
+            Some(thermal) => thermal.pullback_piola(
+                self.law
+                    .law()
+                    .piola(&thermal.elastic_deformation(deformation))?,
+            ),
         }
     }
 
@@ -140,11 +168,11 @@ impl HyperelasticMaterial for FiniteSolidMaterial {
     ) -> Result<[[f64; 9]; 9], fs_material::MaterialError> {
         match &self.thermal {
             None => self.law.law().tangent(deformation),
-            Some(thermal) => {
-                thermal.pullback_tangent(
-                    self.law.law().tangent(&thermal.elastic_deformation(deformation))?,
-                )
-            }
+            Some(thermal) => thermal.pullback_tangent(
+                self.law
+                    .law()
+                    .tangent(&thermal.elastic_deformation(deformation))?,
+            ),
         }
     }
 }
@@ -220,12 +248,19 @@ impl std::fmt::Display for FiniteSolidError {
             Self::Solid(error) => std::fmt::Display::fmt(error, f),
             Self::Initialization(error) => std::fmt::Display::fmt(error, f),
             Self::Time(error) => std::fmt::Display::fmt(error, f),
-            Self::Energy { defect_j, allowance_j } => write!(
-                f, "FS-COUPLE-FINITE-SOLID-ENERGY: signed defect {defect_j:e} J exceeds {allowance_j:e} J"
+            Self::Energy {
+                defect_j,
+                allowance_j,
+            } => write!(
+                f,
+                "FS-COUPLE-FINITE-SOLID-ENERGY: signed defect {defect_j:e} J exceeds {allowance_j:e} J"
             ),
             Self::ImpulseBalance {
-                linear_residual_kg_m_s, angular_residual_kg_m2_s, work_residual_j,
-            } => write!(f,
+                linear_residual_kg_m_s,
+                angular_residual_kg_m2_s,
+                work_residual_j,
+            } => write!(
+                f,
                 "FS-COUPLE-FINITE-SOLID-IMPULSE: linear residual {linear_residual_kg_m_s:?} kg m/s, angular residual {angular_residual_kg_m2_s:?} kg m2/s, work residual {work_residual_j:e} J"
             ),
         }
@@ -233,13 +268,19 @@ impl std::fmt::Display for FiniteSolidError {
 }
 impl std::error::Error for FiniteSolidError {}
 impl From<HyperTetError> for FiniteSolidError {
-    fn from(error: HyperTetError) -> Self { Self::Solid(error) }
+    fn from(error: HyperTetError) -> Self {
+        Self::Solid(error)
+    }
 }
 impl From<InitialSolveError> for FiniteSolidError {
-    fn from(error: InitialSolveError) -> Self { Self::Initialization(error) }
+    fn from(error: InitialSolveError) -> Self {
+        Self::Initialization(error)
+    }
 }
 impl From<TimeSolveError> for FiniteSolidError {
-    fn from(error: TimeSolveError) -> Self { Self::Time(error) }
+    fn from(error: TimeSolveError) -> Self {
+        Self::Time(error)
+    }
 }
 
 /// Physical work and storage for one accepted candidate.
@@ -296,7 +337,16 @@ impl<'a> FiniteSolidBody<'a> {
         controls: FiniteSolidInitialization,
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidError> {
-        Self::initialize(problem, None, TetPressure::Uniform(0.0), displacement_m, velocity_m_s, time_s, controls, cx)
+        Self::initialize(
+            problem,
+            None,
+            TetPressure::Uniform(0.0),
+            displacement_m,
+            velocity_m_s,
+            time_s,
+            controls,
+            cx,
+        )
     }
 
     /// Bind a prepared exterior and include pressure in the native initial
@@ -319,8 +369,14 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<Self, FiniteSolidError> {
         Self::initialize(
-            problem, Some(surface), pressure_pa.into(), displacement_m, velocity_m_s,
-            time_s, controls, cx,
+            problem,
+            Some(surface),
+            pressure_pa.into(),
+            displacement_m,
+            velocity_m_s,
+            time_s,
+            controls,
+            cx,
         )
     }
 
@@ -340,29 +396,43 @@ impl<'a> FiniteSolidBody<'a> {
             Some(surface) => surface.validate_pressure(pressure, cx)?,
             None => true,
         };
-        if pressure_surface.as_ref().is_some_and(|surface|
-            !surface.matches_reference(problem.nodes_m, problem.tetrahedra)
-        ) {
-            return Err(FiniteSolidError::Invalid("pressure surface does not match the reference mesh"));
+        if pressure_surface
+            .as_ref()
+            .is_some_and(|surface| !surface.matches_reference(problem.nodes_m, problem.tetrahedra))
+        {
+            return Err(FiniteSolidError::Invalid(
+                "pressure surface does not match the reference mesh",
+            ));
         }
         if !time_s.is_finite()
             || displacement_m.len() != problem.nodes_m.len()
             || velocity_m_s.len() != problem.nodes_m.len()
-            || displacement_m.iter().flatten().chain(velocity_m_s.iter().flatten())
+            || displacement_m
+                .iter()
+                .flatten()
+                .chain(velocity_m_s.iter().flatten())
                 .any(|value| !value.is_finite())
             || problem.nodes_m.len() > problem.budget.maximum_nodes
             || problem.tetrahedra.len() > problem.budget.maximum_tetrahedra
         {
-            return Err(FiniteSolidError::Invalid("invalid initial state or mesh budget"));
+            return Err(FiniteSolidError::Invalid(
+                "invalid initial state or mesh budget",
+            ));
         }
-        let dofs = problem.nodes_m.len().checked_mul(3)
+        let dofs = problem
+            .nodes_m
+            .len()
+            .checked_mul(3)
             .ok_or(FiniteSolidError::Invalid("DOF count overflow"))?;
         let prepared = Arc::new(problem.prepare(cx)?);
         let densities: Vec<f64> = match problem.material {
-            HyperelasticLawField::Uniform(material) =>
-                vec![material.reference_density_kg_m3(); problem.tetrahedra.len()],
-            HyperelasticLawField::PerElement(materials) => materials.iter()
-                .map(FiniteSolidMaterial::reference_density_kg_m3).collect(),
+            HyperelasticLawField::Uniform(material) => {
+                vec![material.reference_density_kg_m3(); problem.tetrahedra.len()]
+            }
+            HyperelasticLawField::PerElement(materials) => materials
+                .iter()
+                .map(FiniteSolidMaterial::reference_density_kg_m3)
+                .collect(),
         };
         let mass = problem.reference_mass_matrix(&densities, cx)?;
         let mut fixed = vec![0.0; dofs];
@@ -381,7 +451,9 @@ impl<'a> FiniteSolidBody<'a> {
         }
         let free: Vec<usize> = (0..dofs).filter(|&dof| !is_fixed[dof]).collect();
         if free.is_empty() {
-            return Err(FiniteSolidError::Invalid("dynamic body requires a free DOF"));
+            return Err(FiniteSolidError::Invalid(
+                "dynamic body requires a free DOF",
+            ));
         }
         let free_mass = reduce_matrix(&mass, &free, cx)?;
         if (0..free.len()).any(|row| {
@@ -394,17 +466,24 @@ impl<'a> FiniteSolidBody<'a> {
         }
         let mut reference_mass_kg = 0.0;
         for row in 0..dofs {
-            if row % 4096 == 0 { checkpoint(cx)?; }
-            for value in mass.row(row).1 { reference_mass_kg += value / 3.0; }
+            if row % 4096 == 0 {
+                checkpoint(cx)?;
+            }
+            for value in mass.row(row).1 {
+                reference_mass_kg += value / 3.0;
+            }
         }
         if !reference_mass_kg.is_finite() || reference_mass_kg <= 0.0 {
-            return Err(FiniteSolidError::Invalid("total reference mass is not representable"));
+            return Err(FiniteSolidError::Invalid(
+                "total reference mass is not representable",
+            ));
         }
         prepared.stored_energy_j(&u, cx)?;
-        if let Some(surface) = &pressure_surface { surface.volume_m3(&u, cx)?; }
-        let force = prepared.external_force_n(
-            problem.nodal_forces_n, problem.body_force_n_m3, cx,
-        )?;
+        if let Some(surface) = &pressure_surface {
+            surface.volume_m3(&u, cx)?;
+        }
+        let force =
+            prepared.external_force_n(problem.nodal_forces_n, problem.body_force_n_m3, cx)?;
         let q_free: Vec<f64> = free.iter().map(|&dof| u[dof]).collect();
         let v_free: Vec<f64> = free.iter().map(|&dof| v[dof]).collect();
         let forcing: Vec<f64> = free.iter().map(|&dof| force[dof]).collect();
@@ -413,21 +492,39 @@ impl<'a> FiniteSolidBody<'a> {
         let free_mass = Arc::new(free_mass);
         // Skipping zero-pressure arithmetic preserves the original native
         // state and replay exactly, including the consistent initialization.
-        let pressure = pressure_surface.as_deref().filter(|_| !unloaded)
+        let pressure = pressure_surface
+            .as_deref()
+            .filter(|_| !unloaded)
             .map(|surface| (surface, pressure));
         let operator = DynamicOperator::new(&prepared, &free_mass, &free, &fixed, pressure, cx);
         let preconditioner = MassDiagonal { mass: &free_mass };
         let result = second_order_acceleration(
-            &operator, &q_free, &v_free, &forcing, &preconditioner, controls.solve,
-            controls.maximum_workspace_components, &mut || cx.checkpoint().is_err(),
+            &operator,
+            &q_free,
+            &v_free,
+            &forcing,
+            &preconditioner,
+            controls.solve,
+            controls.maximum_workspace_components,
+            &mut || cx.checkpoint().is_err(),
         );
-        if let Some(error) = operator.error.take() { return Err(error.into()); }
+        if let Some(error) = operator.error.take() {
+            return Err(error.into());
+        }
         let initial = result?;
         drop(operator);
         let state = SecondOrderState::new(time_s, &q_free, &v_free, &initial.value);
         let body = Self {
-            problem, prepared, mass: Arc::new(mass), free_mass, free, fixed,
-            pressure_surface, reference_mass_kg, initialization: initial.report, state,
+            problem,
+            prepared,
+            mass: Arc::new(mass),
+            free_mass,
+            free,
+            fixed,
+            pressure_surface,
+            reference_mass_kg,
+            initialization: initial.report,
+            state,
         };
         body.kinetic_energy_j()?;
         checkpoint(cx)?;
@@ -436,15 +533,28 @@ impl<'a> FiniteSolidBody<'a> {
 
     /// Original geometry, sources and stationary supports. Load fields here
     /// describe initialization; each candidate explicitly supplies held loads.
-    pub const fn problem(&self) -> &HyperTetProblem<'a, FiniteSolidMaterial> { &self.problem }
-    pub const fn native_state(&self) -> &SecondOrderState { &self.state }
-    pub const fn initialization_report(&self) -> &SolveReport { &self.initialization }
-    pub fn free_dofs(&self) -> &[usize] { &self.free }
-    pub const fn reference_mass_kg(&self) -> f64 { self.reference_mass_kg }
+    pub const fn problem(&self) -> &HyperTetProblem<'a, FiniteSolidMaterial> {
+        &self.problem
+    }
+    pub const fn native_state(&self) -> &SecondOrderState {
+        &self.state
+    }
+    pub const fn initialization_report(&self) -> &SolveReport {
+        &self.initialization
+    }
+    pub fn free_dofs(&self) -> &[usize] {
+        &self.free
+    }
+    pub const fn reference_mass_kg(&self) -> f64 {
+        self.reference_mass_kg
+    }
 
     /// Full node-major displacement, including fixed supports.
     pub fn displacement_m(&self) -> Vec<[f64; 3]> {
-        inflate(&self.state.q, &self.free, &self.fixed).as_chunks::<3>().0.to_vec()
+        inflate(&self.state.q, &self.free, &self.fixed)
+            .as_chunks::<3>()
+            .0
+            .to_vec()
     }
     /// Full node-major velocity; fixed supports remain stationary.
     pub fn velocity_m_s(&self) -> Vec<[f64; 3]> {
@@ -460,7 +570,9 @@ impl<'a> FiniteSolidBody<'a> {
         self.free_mass.spmv(&self.state.v, &mut momentum);
         let energy = 0.5 * dot(&self.state.v, &momentum);
         if !energy.is_finite() || energy < 0.0 {
-            return Err(FiniteSolidError::Invalid("kinetic energy is not representable"));
+            return Err(FiniteSolidError::Invalid(
+                "kinetic energy is not representable",
+            ));
         }
         Ok(energy)
     }
@@ -484,7 +596,14 @@ impl<'a> FiniteSolidBody<'a> {
                 "pressure-bound body requires an explicit pressure for each interval",
             ));
         }
-        self.step_with_loads(duration_s, nodal_forces_n, body_force_n_m3, None, controls, cx)
+        self.step_with_loads(
+            duration_s,
+            nodal_forces_n,
+            body_force_n_m3,
+            None,
+            controls,
+            cx,
+        )
     }
 
     /// Advance with signed pressure held on each material face for this interval.
@@ -506,13 +625,23 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
         checkpoint(cx)?;
-        let surface = self.pressure_surface.as_deref().ok_or(FiniteSolidError::Invalid(
-            "pressure must be bound during initial acceleration preparation",
-        ))?;
+        let surface = self
+            .pressure_surface
+            .as_deref()
+            .ok_or(FiniteSolidError::Invalid(
+                "pressure must be bound during initial acceleration preparation",
+            ))?;
         let pressure = pressure_pa.into();
         let unloaded = surface.validate_pressure(pressure, cx)?;
         let pressure = (!unloaded).then_some((surface, pressure));
-        self.step_with_loads(duration_s, nodal_forces_n, body_force_n_m3, pressure, controls, cx)
+        self.step_with_loads(
+            duration_s,
+            nodal_forces_n,
+            body_force_n_m3,
+            pressure,
+            controls,
+            cx,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -526,39 +655,53 @@ impl<'a> FiniteSolidBody<'a> {
         cx: &Cx<'_>,
     ) -> Result<(Self, FiniteSolidStep), FiniteSolidError> {
         checkpoint(cx)?;
-        if !duration_s.is_finite() || duration_s <= 0.0
-            || !controls.energy_tolerance_j.is_finite() || controls.energy_tolerance_j <= 0.0
+        if !duration_s.is_finite()
+            || duration_s <= 0.0
+            || !controls.energy_tolerance_j.is_finite()
+            || controls.energy_tolerance_j <= 0.0
             || controls.solve.max_newton_iterations == 0
             || self.state.steps >= controls.maximum_steps
         {
-            return Err(FiniteSolidError::Invalid("invalid interval, controls or step budget"));
+            return Err(FiniteSolidError::Invalid(
+                "invalid interval, controls or step budget",
+            ));
         }
-        let force = self.prepared.external_force_n(nodal_forces_n, body_force_n_m3, cx)?;
+        let force = self
+            .prepared
+            .external_force_n(nodal_forces_n, body_force_n_m3, cx)?;
         let forcing: Vec<f64> = self.free.iter().map(|&dof| force[dof]).collect();
         let before_u = inflate(&self.state.q, &self.free, &self.fixed);
         let strain_before_j = self.prepared.stored_energy_j(&before_u, cx)?;
         let kinetic_before_j = self.kinetic_energy_j()?;
         let operator = DynamicOperator::new(
-            &self.prepared, &self.free_mass, &self.free, &self.fixed, pressure, cx,
+            &self.prepared,
+            &self.free_mass,
+            &self.free,
+            &self.fixed,
+            pressure,
+            cx,
         );
-        let integrator = OperatorGeneralizedAlpha::new(
-            self.free.len(), duration_s, 1.0, controls.solve,
-        );
+        let integrator =
+            OperatorGeneralizedAlpha::new(self.free.len(), duration_s, 1.0, controls.solve);
         // Immutable matrices are shared; only the physical trajectory is copied.
         let mut candidate = self.clone();
-        let result = integrator.step_controlled(
-            &mut candidate.state, &operator, &forcing, &mut || cx.checkpoint().is_err(),
-        );
-        if let Some(error) = operator.error.take() { return Err(error.into()); }
+        let result =
+            integrator.step_controlled(&mut candidate.state, &operator, &forcing, &mut || {
+                cx.checkpoint().is_err()
+            });
+        if let Some(error) = operator.error.take() {
+            return Err(error.into());
+        }
         let time = result?;
         let after_u = inflate(&candidate.state.q, &self.free, &self.fixed);
         let strain_after_j = self.prepared.stored_energy_j(&after_u, cx)?;
         let kinetic_after_j = candidate.kinetic_energy_j()?;
         let mut source_work_j = 0.0;
-        for (dof, ((before, after), load)) in
-            before_u.iter().zip(&after_u).zip(&force).enumerate()
+        for (dof, ((before, after), load)) in before_u.iter().zip(&after_u).zip(&force).enumerate()
         {
-            if dof % 4096 == 0 { checkpoint(cx)?; }
+            if dof % 4096 == 0 {
+                checkpoint(cx)?;
+            }
             source_work_j = load.mul_add(after - before, source_work_j);
         }
         let pressure_work_j = match pressure {
@@ -569,11 +712,13 @@ impl<'a> FiniteSolidBody<'a> {
             }
             None => 0.0,
         };
-        let integration_defect_j =
-            (kinetic_after_j - kinetic_before_j) + (strain_after_j - strain_before_j)
+        let integration_defect_j = (kinetic_after_j - kinetic_before_j)
+            + (strain_after_j - strain_before_j)
             - source_work_j;
         if !source_work_j.is_finite() || !integration_defect_j.is_finite() {
-            return Err(FiniteSolidError::Invalid("mechanical work is not representable"));
+            return Err(FiniteSolidError::Invalid(
+                "mechanical work is not representable",
+            ));
         }
         if integration_defect_j.abs() > controls.energy_tolerance_j {
             return Err(FiniteSolidError::Energy {
@@ -581,31 +726,57 @@ impl<'a> FiniteSolidBody<'a> {
                 allowance_j: controls.energy_tolerance_j,
             });
         }
-        let midpoint: Vec<f64> = before_u.iter().zip(&after_u)
-            .map(|(before, after)| 0.5 * before + 0.5 * after).collect();
+        let midpoint: Vec<f64> = before_u
+            .iter()
+            .zip(&after_u)
+            .map(|(before, after)| 0.5 * before + 0.5 * after)
+            .collect();
         let mut internal = self.prepared.internal_force(&midpoint, cx)?;
         subtract_pressure_force(&mut internal, &midpoint, pressure, cx)?;
         let mut acceleration = vec![0.0; before_u.len()];
-        for ((&dof, before), after) in
-            self.free.iter().zip(&self.state.v).zip(&candidate.state.v)
-        {
+        for ((&dof, before), after) in self.free.iter().zip(&self.state.v).zip(&candidate.state.v) {
             acceleration[dof] = (after - before) / duration_s;
         }
         let mut inertial = vec![0.0; before_u.len()];
         self.mass.spmv(&acceleration, &mut inertial);
-        if internal.iter().chain(&inertial).any(|value| !value.is_finite()) {
-            return Err(FiniteSolidError::Invalid("midpoint support force is not representable"));
+        if internal
+            .iter()
+            .chain(&inertial)
+            .any(|value| !value.is_finite())
+        {
+            return Err(FiniteSolidError::Invalid(
+                "midpoint support force is not representable",
+            ));
         }
-        let support_reactions_n: Vec<(usize, f64)> = self.problem.prescribed_m.iter()
-            .map(|&(dof, _)| (dof, inertial[dof] + internal[dof] - force[dof])).collect();
-        if support_reactions_n.iter().any(|(_, value)| !value.is_finite()) {
-            return Err(FiniteSolidError::Invalid("support reaction accumulation overflow"));
+        let support_reactions_n: Vec<(usize, f64)> = self
+            .problem
+            .prescribed_m
+            .iter()
+            .map(|&(dof, _)| (dof, inertial[dof] + internal[dof] - force[dof]))
+            .collect();
+        if support_reactions_n
+            .iter()
+            .any(|(_, value)| !value.is_finite())
+        {
+            return Err(FiniteSolidError::Invalid(
+                "support reaction accumulation overflow",
+            ));
         }
         checkpoint(cx)?;
-        Ok((candidate, FiniteSolidStep {
-            time, kinetic_before_j, kinetic_after_j, strain_before_j, strain_after_j,
-            source_work_j, pressure_work_j, integration_defect_j, support_reactions_n,
-        }))
+        Ok((
+            candidate,
+            FiniteSolidStep {
+                time,
+                kinetic_before_j,
+                kinetic_after_j,
+                strain_before_j,
+                strain_after_j,
+                source_work_j,
+                pressure_work_j,
+                integration_defect_j,
+                support_reactions_n,
+            },
+        ))
     }
 }
 
@@ -619,7 +790,9 @@ fn dot(a: &[f64], b: &[f64]) -> f64 {
 
 fn inflate(reduced: &[f64], free: &[usize], fixed: &[f64]) -> Vec<f64> {
     let mut full = fixed.to_vec();
-    for (&dof, &value) in free.iter().zip(reduced) { full[dof] = value; }
+    for (&dof, &value) in free.iter().zip(reduced) {
+        full[dof] = value;
+    }
     full
 }
 
@@ -634,7 +807,9 @@ fn subtract_pressure_force(
     if let Some((surface, pressure_pa)) = pressure {
         let force = surface.force_n(displacement, pressure_pa, cx)?;
         for (dof, (value, load)) in internal.iter_mut().zip(force).enumerate() {
-            if dof % 4096 == 0 { checkpoint(cx)?; }
+            if dof % 4096 == 0 {
+                checkpoint(cx)?;
+            }
             *value -= load;
             if !value.is_finite() {
                 return Err(HyperTetError::InvalidInput {
@@ -649,10 +824,14 @@ fn subtract_pressure_force(
 /// Extract the original native matrix's free/free submatrix in canonical order.
 fn reduce_matrix(full: &Csr, free: &[usize], cx: &Cx<'_>) -> Result<Csr, HyperTetError> {
     let mut row_of = vec![usize::MAX; full.nrows()];
-    for (row, &dof) in free.iter().enumerate() { row_of[dof] = row; }
+    for (row, &dof) in free.iter().enumerate() {
+        row_of[dof] = row;
+    }
     let mut coo = Coo::new(free.len(), free.len());
     for (row, &dof) in free.iter().enumerate() {
-        if row % 4096 == 0 { checkpoint(cx)?; }
+        if row % 4096 == 0 {
+            checkpoint(cx)?;
+        }
         let (columns, values) = full.row(dof);
         for (&column, &value) in columns.iter().zip(values) {
             if !value.is_finite() {
@@ -660,14 +839,18 @@ fn reduce_matrix(full: &Csr, free: &[usize], cx: &Cx<'_>) -> Result<Csr, HyperTe
                     what: "non-finite native matrix entry".into(),
                 });
             }
-            if row_of[column] != usize::MAX { coo.push(row, row_of[column], value); }
+            if row_of[column] != usize::MAX {
+                coo.push(row, row_of[column], value);
+            }
         }
     }
     checkpoint(cx)?;
     Ok(coo.assemble())
 }
 
-struct MassDiagonal<'a> { mass: &'a Csr }
+struct MassDiagonal<'a> {
+    mass: &'a Csr,
+}
 impl FlexiblePreconditioner for MassDiagonal<'_> {
     fn apply(&self, _iteration: usize, residual: &[f64], output: &mut [f64]) {
         for (row, (out, value)) in output.iter_mut().zip(residual).enumerate() {
@@ -700,8 +883,14 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
         cx: &'b Cx<'cx>,
     ) -> Self {
         Self {
-            problem, mass, free, fixed, pressure, cx,
-            tangent: RefCell::new(None), error: RefCell::new(None),
+            problem,
+            mass,
+            free,
+            fixed,
+            pressure,
+            cx,
+            tangent: RefCell::new(None),
+            error: RefCell::new(None),
         }
     }
 
@@ -718,12 +907,17 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
     }
 
     fn refuse(&self, error: HyperTetError, output: &mut [f64]) {
-        if self.error.borrow().is_none() { self.error.replace(Some(error)); }
+        if self.error.borrow().is_none() {
+            self.error.replace(Some(error));
+        }
         output.fill(f64::NAN);
     }
 
     fn ensure_tangent(&self, q: &[f64]) -> Result<(), HyperTetError> {
-        let rebuild = self.tangent.borrow().as_ref()
+        let rebuild = self
+            .tangent
+            .borrow()
+            .as_ref()
             .is_none_or(|(at, _)| at.as_slice() != q);
         if rebuild {
             let displacement = inflate(q, self.free, self.fixed);
@@ -758,9 +952,12 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
 
     fn finite_output(&self, output: &mut [f64]) {
         if output.iter().any(|value| !value.is_finite()) {
-            self.refuse(HyperTetError::InvalidInput {
-                what: "non-finite native dynamic operator output".into(),
-            }, output);
+            self.refuse(
+                HyperTetError::InvalidInput {
+                    what: "non-finite native dynamic operator output".into(),
+                },
+                output,
+            );
         } else if let Err(error) = checkpoint(self.cx) {
             self.refuse(error, output);
         }
@@ -768,44 +965,61 @@ impl<'a, 'b, 'cx> DynamicOperator<'a, 'b, 'cx> {
 }
 
 impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
-    fn dimension(&self) -> usize { self.free.len() }
+    fn dimension(&self) -> usize {
+        self.free.len()
+    }
 
     fn validate_state(&self, q: &[f64], v: &[f64]) -> Result<(), String> {
-        if q.len() != self.free.len() || v.len() != self.free.len()
+        if q.len() != self.free.len()
+            || v.len() != self.free.len()
             || q.iter().chain(v).any(|value| !value.is_finite())
         {
             return Err("finite dimension-matched displacement/velocity required".into());
         }
         let displacement = inflate(q, self.free, self.fixed);
-        self.problem.stored_energy_j(&displacement, self.cx)
+        self.problem
+            .stored_energy_j(&displacement, self.cx)
             .map_err(|error| error.to_string())?;
         if let Some((surface, _)) = self.pressure {
-            surface.volume_m3(&displacement, self.cx).map_err(|error| error.to_string())?;
+            surface
+                .volume_m3(&displacement, self.cx)
+                .map_err(|error| error.to_string())?;
         }
         Ok(())
     }
 
     fn mass_apply(&self, input: &[f64], output: &mut [f64]) {
-        if !self.callback_ready(output) { return; }
+        if !self.callback_ready(output) {
+            return;
+        }
         self.mass.spmv(input, output);
         self.finite_output(output);
     }
 
     fn damping_apply(&self, _input: &[f64], output: &mut [f64]) {
-        if !self.callback_ready(output) { return; }
+        if !self.callback_ready(output) {
+            return;
+        }
         output.fill(0.0);
     }
 
     fn internal_force(&self, q: &[f64], output: &mut [f64]) {
-        if !self.callback_ready(output) { return; }
+        if !self.callback_ready(output) {
+            return;
+        }
         let displacement = inflate(q, self.free, self.fixed);
-        let result = self.problem.internal_force(&displacement, self.cx).and_then(|mut full| {
-            subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
-            Ok(full)
-        });
+        let result = self
+            .problem
+            .internal_force(&displacement, self.cx)
+            .and_then(|mut full| {
+                subtract_pressure_force(&mut full, &displacement, self.pressure, self.cx)?;
+                Ok(full)
+            });
         match result {
             Ok(full) => {
-                for (value, &dof) in output.iter_mut().zip(self.free) { *value = full[dof]; }
+                for (value, &dof) in output.iter_mut().zip(self.free) {
+                    *value = full[dof];
+                }
                 self.finite_output(output);
             }
             Err(error) => self.refuse(error, output),
@@ -813,7 +1027,9 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
     }
 
     fn tangent_apply(&self, q: &[f64], direction: &[f64], output: &mut [f64]) {
-        if !self.callback_ready(output) { return; }
+        if !self.callback_ready(output) {
+            return;
+        }
         if let Err(error) = self.ensure_tangent(q) {
             self.refuse(error, output);
             return;
@@ -835,7 +1051,9 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
         residual: &[f64],
         output: &mut [f64],
     ) {
-        if !self.callback_ready(output) { return; }
+        if !self.callback_ready(output) {
+            return;
+        }
         if let Err(error) = self.ensure_tangent(q) {
             self.refuse(error, output);
             return;
@@ -846,10 +1064,18 @@ impl SecondOrderProblem for DynamicOperator<'_, '_, '_> {
             return;
         };
         for (row, (out, value)) in output.iter_mut().zip(residual).enumerate() {
-            let diagonal = weights.mass.mul_add(
-                self.mass.get(row, row), weights.tangent * matrix.get(row, row),
-            ).abs();
-            *out = if diagonal > 0.0 { value / diagonal } else { *value };
+            let diagonal = weights
+                .mass
+                .mul_add(
+                    self.mass.get(row, row),
+                    weights.tangent * matrix.get(row, row),
+                )
+                .abs();
+            *out = if diagonal > 0.0 {
+                value / diagonal
+            } else {
+                *value
+            };
         }
         self.finite_output(output);
     }

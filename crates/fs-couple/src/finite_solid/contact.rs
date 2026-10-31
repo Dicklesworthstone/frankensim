@@ -10,10 +10,11 @@
 //! and impulse work are checked before returning either candidate. Geometry is
 //! supplied to the core event; neither witness is relocated to hide a couple
 //! from a finite gap. The `surface` owner detects current sphere/solid witnesses;
-//! `step` composes bounded, path-admitted transient trajectories through the
-//! original native integrators. No penetration repair, sustained-contact solve
-//! or impact-loss heat partition is inferred. Material-point weights and rigid
-//! arms remain the original ones.
+//! `scene` combines these with original rigid-pair witnesses. `step` composes
+//! bounded transient trajectories and an explicit first-order force/contact/drift
+//! lane for loaded support, with shared whole affine-path admission. No position
+//! repair, general Moreau--Jean existence or impact-loss heat partition is
+//! inferred. Material-point weights and rigid arms remain the original ones.
 
 /// Directional interface sources through the same coupled mechanical event.
 pub mod elliptic;

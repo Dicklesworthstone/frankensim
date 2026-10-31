@@ -554,8 +554,11 @@ struct PointMobilityRow {
     coefficients: [f64; 12],
 }
 
-struct ImpulseMass<'a> {
-    mass: &'a Csr,
+// Shared zero-resistance operator for instantaneous momentum changes and the
+// original time owner's exact kinetic subflow. It never evaluates a substitute
+// constitutive law or replaces the consistent reference mass.
+pub(super) struct ImpulseMass<'a> {
+    pub(super) mass: &'a Csr,
 }
 impl SecondOrderProblem for ImpulseMass<'_> {
     fn dimension(&self) -> usize {
@@ -594,7 +597,7 @@ fn magnitude(v: [f64; 3]) -> f64 {
     v[0].hypot(v[1]).hypot(v[2])
 }
 
-fn moments(
+pub(super) fn moments(
     positions: &[[f64; 3]],
     momentum: &[f64],
     origin_m: [f64; 3],

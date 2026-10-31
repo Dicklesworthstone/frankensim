@@ -394,7 +394,7 @@ fn angular_average(
         .scale(0.5)
         .add(property.angular_velocity_body_checked(after)?.scale(0.5)))
 }
-fn rotational_change(
+pub(super) fn rotational_change(
     property: MassProperties,
     before: Vec3,
     after: Vec3,
@@ -405,7 +405,7 @@ fn rotational_change(
 /// Polarize q(0,v)q* instead of subtracting two large rotated spins. This uses
 /// actual quaternion components and keeps their representable norm residual;
 /// it neither renormalizes nor assumes the native rotation conserved momentum.
-fn rotation_difference(before: UnitQuaternion, after: UnitQuaternion, v: Vec3) -> Vec3 {
+pub(super) fn rotation_difference(before: UnitQuaternion, after: UnitQuaternion, v: Vec3) -> Vec3 {
     let a = before.components();
     let mut b = after.components();
     if a.iter().zip(b).map(|(a, b)| a * b).sum::<f64>() < 0.0 {
