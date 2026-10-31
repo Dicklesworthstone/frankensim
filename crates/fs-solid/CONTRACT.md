@@ -2918,3 +2918,23 @@ retained nonproportional backstress and exhausted linear-budget refusal.
 These tests do not establish a finite-strain, shear-locking or plastic-collapse
 mesh-convergence claim.
 
+## True-residual correction for confined continuum solves
+
+The shared small-strain symmetric correction checks the actual Euclidean
+residual independently of MINRES's preconditioner-norm recurrence estimate.
+If the estimate stops early but the true residual misses the existing gate,
+the solver may perform one fresh MINRES correction on `b - A x`. Its iteration
+allowance is only the unused part of the original MINRES-path cap; no extra
+allowance is created. Acceptance recomputes `b - A (x + correction)` relative
+to the original right-hand side, retains only a better finite candidate, and
+preserves the original linear gate and physical Newton force tolerance.
+Cancellation or an exhausted allowance returns no accepted material history.
+
+The nearly incompressible B-bar cylinder regression now also resolves a
+12-by-48 mesh: a single bounded correction removes the observed mismatch
+between the MINRES estimate and the independently checked residual. Its
+displacement is compared with the same analytical Lame reference and the two
+coarser meshes. A separate finite-load refusal test exercises an insufficient
+linear allowance. This is a bounded residual correction, not a replacement
+preconditioner or a claim that every ill-conditioned mesh can converge.
+

@@ -74,7 +74,9 @@ pub struct IncrementSettings {
     pub max_backtracks: usize,
     /// Relative residual required of each linear solve.
     pub linear_tolerance: f64,
-    /// Iteration cap of each linear solve.
+    /// Iteration cap per Krylov path. A symmetric correction may try PCG and
+    /// then MINRES; any true-residual MINRES correction shares that path's
+    /// original allowance. The general FGMRES path uses one such allowance.
     pub max_linear_iterations: usize,
 }
 
@@ -915,10 +917,57 @@ pub(crate) fn solve_increment_linear(
     let jacobi = AbsJacobi::new(kff);
     let op = CsrOp::symmetric(kff.clone());
     let mut state = PminresState::new(&op, &jacobi, rhs);
-    let _ = state.run(&op, &jacobi, tol, settings.max_linear_iterations);
-    let rel = true_relative(&state.x);
-    if rel.is_finite() && rel <= 1e3 * tol.max(1e-14) {
-        Ok((state.x.clone(), true))
+    let report = state.run(&op, &jacobi, tol, settings.max_linear_iterations);
+    checkpoint(cx)?;
+    let mut solution = state.x;
+    let mut rel = true_relative(&solution);
+    let gate = 1e3 * tol.max(1e-14);
+    let remaining = settings.max_linear_iterations.saturating_sub(report.iters);
+    // MINRES stops on an M-norm recurrence estimate, which need not meet this
+    // owner's independently recomputed Euclidean gate. On a nearly converged
+    // ill-conditioned system, solve ONE correction equation from the true
+    // residual. Restarting the already-converged recurrence would do no work.
+    // Charge every correction iteration to the SAME MINRES-path allowance.
+    if rel.is_finite()
+        && rel > gate
+        && remaining > 0
+        && solution.iter().all(|value| value.is_finite())
+    {
+        let mut residual = vec![0.0; rhs.len()];
+        kff.spmv(&solution, &mut residual);
+        for (value, &source) in residual.iter_mut().zip(rhs) {
+            *value = source - *value;
+        }
+        checkpoint(cx)?;
+        let mut weighted = vec![0.0; rhs.len()];
+        jacobi.apply(&residual, &mut weighted);
+        let quadratic_form = fs_solver::dot(&residual, &weighted);
+        // A finite Euclidean residual may still underflow in the M-norm.
+        // Refuse normally instead of triggering the constructor's assertion.
+        if quadratic_form.is_finite() && quadratic_form > 0.0 {
+            let mut correction = PminresState::new(&op, &jacobi, &residual);
+            let _ = correction.run(&op, &jacobi, tol, remaining);
+            checkpoint(cx)?;
+            let candidate: Vec<f64> = solution
+                .iter()
+                .zip(&correction.x)
+                .map(|(value, change)| value + change)
+                .collect();
+            // The correction RHS has a different norm. Acceptance must still
+            // use the ORIGINAL rhs, never the correction's residual report.
+            let improved = true_relative(&candidate);
+            if improved.is_finite()
+                && improved < rel
+                && candidate.iter().all(|value| value.is_finite())
+            {
+                solution = candidate;
+                rel = improved;
+            }
+        }
+    }
+    checkpoint(cx)?;
+    if rel.is_finite() && rel <= gate && solution.iter().all(|value| value.is_finite()) {
+        Ok((solution, true))
     } else {
         Err(SmallStrainTetError::LinearSolveFailed {
             increment,

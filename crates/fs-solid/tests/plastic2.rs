@@ -640,9 +640,15 @@ fn bbar_reduces_nearly_incompressible_locking_against_lame_cylinder_solution() {
     let standard = pressure_cylinder(4, 16, Formulation::Standard);
     let coarse = pressure_cylinder(4, 16, Formulation::BBar);
     let fine = pressure_cylinder(8, 32, Formulation::BBar);
+    let finest = pressure_cylinder(12, 48, Formulation::BBar);
     let standard_error = (standard / exact - 1.0).abs();
     let coarse_error = (coarse / exact - 1.0).abs();
     let fine_error = (fine / exact - 1.0).abs();
+    let finest_error = (finest / exact - 1.0).abs();
+    eprintln!(
+        "Lamé cylinder relative displacement errors: standard {standard_error:.9e}, \
+         B-bar 4x16 {coarse_error:.9e}, 8x32 {fine_error:.9e}, 12x48 {finest_error:.9e}"
+    );
     assert!(
         standard_error > 0.2,
         "fixture did not exercise locking: {standard_error}"
@@ -655,6 +661,86 @@ fn bbar_reduces_nearly_incompressible_locking_against_lame_cylinder_solution() {
         fine_error < 0.006 && fine_error < 0.3 * coarse_error,
         "B-bar refinement: coarse {coarse_error}, fine {fine_error}"
     );
+    assert!(
+        finest_error < 0.5 * fine_error,
+        "B-bar further refinement: fine {fine_error}, finest {finest_error}"
+    );
+}
+
+#[test]
+fn exhausted_bbar_linear_budget_refuses_without_changing_committed_history() {
+    let mesh = Mesh2::mapped_quads(3, 2, &|s, t| [s + 0.1 * s * t, t + 0.1 * s * t]);
+    let law = metal();
+    let prescribed: Vec<_> = mesh
+        .nodes
+        .iter()
+        .enumerate()
+        .flat_map(|(n, x)| [(2 * n, 0.004 * x[0]), (2 * n + 1, -0.001 * x[1])])
+        .collect();
+    let mut preload = problem(&mesh, &law, &prescribed, &[1.0]);
+    preload.plane = PlaneKind::Strain;
+    preload.formulation = Formulation::BBar;
+    let loaded = with_cx(|cx| preload.solve(cx)).unwrap();
+    assert!(
+        loaded
+            .quadrature_states
+            .iter()
+            .all(|s| s.history.alpha > 0.0)
+    );
+    let preserved = loaded.clone();
+
+    // Release the interior and right edge after plastic prestraining, retain
+    // the left-edge displacements, and apply a finite eccentric end force.
+    let fixed: Vec<_> = mesh
+        .patch_nodes(fs_solid::Patch::Left)
+        .iter()
+        .flat_map(|&n| [(2 * n, 0.0), (2 * n + 1, -0.001 * mesh.nodes[n][1])])
+        .collect();
+    let tip = *mesh.patch_nodes(fs_solid::Patch::Right).last().unwrap();
+    let forces = [(2 * tip, 0.003), (2 * tip + 1, -0.002)];
+    let mut continuation = problem(&mesh, &law, &fixed, &[1.0]);
+    continuation.plane = PlaneKind::Strain;
+    continuation.formulation = Formulation::BBar;
+    continuation.nodal_forces_n = &forces;
+    continuation.settings.max_linear_iterations = 1;
+    let error = with_cx(|cx| {
+        continuation.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.quadrature_states,
+            cx,
+        )
+    })
+    .unwrap_err();
+    match error {
+        fs_solid::SmallStrainPlaneError::LinearSolveFailed {
+            source:
+                fs_solid::SmallStrainTetError::LinearSolveFailed {
+                    relative_residual, ..
+                },
+            ..
+        } => assert!(
+            relative_residual.is_finite()
+                && relative_residual > 1e3 * continuation.settings.linear_tolerance.max(1e-14),
+            "exhausted solve reported an accepted true residual {relative_residual}"
+        ),
+        other => panic!("expected a linear budget refusal, got {other}"),
+    }
+    assert_eq!(loaded, preserved);
+
+    // The same finite-load continuation is mechanically solvable when its
+    // linear budget is restored; refusal did not contaminate retry history.
+    continuation.settings.max_linear_iterations =
+        IncrementSettings::default().max_linear_iterations;
+    let resumed = with_cx(|cx| {
+        continuation.solve_from(
+            loaded.displacement_m.as_flattened(),
+            &loaded.quadrature_states,
+            cx,
+        )
+    })
+    .unwrap();
+    assert_ne!(resumed.displacement_m, loaded.displacement_m);
+    assert_eq!(loaded, preserved);
 }
 
 #[test]
