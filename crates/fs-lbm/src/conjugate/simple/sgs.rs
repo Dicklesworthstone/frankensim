@@ -225,7 +225,9 @@ impl Solver<'_> {
                     FvBoundary::Wall { velocity } | FvBoundary::Inlet { velocity } => {
                         Sample::Value(velocity[component])
                     }
-                    FvBoundary::Symmetry | FvBoundary::Outlet => Sample::ZeroGradient,
+                    FvBoundary::Symmetry | FvBoundary::Outlet | FvBoundary::Pressure { .. } => {
+                        Sample::ZeroGradient
+                    }
                 },
             ),
         }

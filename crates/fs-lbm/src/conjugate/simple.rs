@@ -17,13 +17,18 @@
 //!
 //! Domain faces are [`FvBoundary`]: `Wall` (no-slip, optionally moving
 //! tangentially), `Symmetry` (free slip), `Inlet` (prescribed velocity) and
-//! `Outlet` (pressure zero, zero normal gradient of velocity). An outlet
+//! `Outlet` (pressure zero) or `Pressure` (prescribed static gauge pressure).
+//! Both openings use zero normal gradient of velocity. An opening
 //! face is a momentum unknown like an interior face: the cell beyond the
 //! boundary mirrors the inside cell's velocities and carries the ghost
-//! pressure `-p_inside`, so the face holds pressure zero, and the pressure
+//! pressure `2 p_boundary - p_inside`, and the pressure
 //! correction uses the same linearization (`u' = 2 d p'_inside`). The steady
 //! state is therefore one fixed point of the discrete equations, independent
 //! of the relaxation, also where the outflow is not fully developed.
+//! Openings pass flow in either direction. Incoming tangential momentum is
+//! zero; heat transport requires its own explicit backflow temperature.
+//! Pressures share one declared gauge (the removed reference hydrostatic
+//! pressure for Boussinesq forcing), not an absolute thermodynamic EOS.
 //!
 //! # Fans and resistances
 //!
@@ -106,6 +111,16 @@ pub enum FvBoundary {
     },
     /// Prescribed (zero) pressure with zero-gradient velocity.
     Outlet,
+    /// Prescribed static gauge pressure with zero-gradient velocity. Flow may
+    /// enter or leave; incoming tangential momentum is zero, as for `Outlet`.
+    /// The thermal owner separately supplies any backflow temperature/enthalpy.
+    Pressure {
+        /// Finite signed pressure [Pa] in the same reference as every other
+        /// opening and the returned cell pressures. With Boussinesq forcing
+        /// this is relative to the removed reference hydrostatic state.
+        /// It is not absolute gas pressure and does not change fluid density.
+        pressure_pa: f64,
+    },
 }
 
 impl FvBoundary {
@@ -113,6 +128,14 @@ impl FvBoundary {
     #[must_use]
     pub const fn wall() -> Self {
         Self::Wall { velocity: [0.0; 3] }
+    }
+
+    fn prescribed_pressure(self) -> Option<f64> {
+        match self {
+            Self::Outlet => Some(0.0),
+            Self::Pressure { pressure_pa } => Some(pressure_pa),
+            _ => None,
+        }
     }
 }
 
@@ -385,6 +408,20 @@ pub struct SimpleConfig {
 }
 
 impl SimpleConfig {
+    // Work on pressure differences so atmospheric-sized common offsets do not
+    // enter the small momentum/correction residuals. A face fan draws from its
+    // declared ambient zero and therefore retains that numerical datum.
+    fn pressure_reference_pa(&self) -> f64 {
+        if self.fan.is_some() {
+            0.0
+        } else {
+            self.faces
+                .iter()
+                .find_map(|face| face.prescribed_pressure())
+                .unwrap_or(0.0)
+        }
+    }
+
     /// Defaults with the given face rules.
     #[must_use]
     pub const fn new(faces: [FvBoundary; 6]) -> Self {
@@ -446,7 +483,9 @@ pub struct FvFlow {
     /// Cell-centred velocity (mean of each cell's two face velocities per
     /// axis), m/s; zero in solids.
     pub velocity_m_s: Vec<[f64; 3]>,
-    /// Cell pressure, Pa (outlet reference zero); zero in solids.
+    /// Cell static gauge pressure [Pa], in the declared opening reference;
+    /// `Outlet` holds zero. Closed components have an arbitrary datum.
+    /// Zero in solids; no absolute thermodynamic pressure is inferred.
     pub pressure_pa: Vec<f64>,
     /// Eddy viscosity per cell, m^2/s (zeros when laminar).
     pub eddy_viscosity_m2_s: Vec<f64>,
@@ -516,9 +555,8 @@ enum Kind {
     Unknown(usize),
     /// Prescribed value (blocked faces carry zero).
     Fixed(f64),
-    /// Outlet face (row index): solved by its own momentum equation with
-    /// zero normal gradient and a ghost pressure `-p_inside`, so the face
-    /// carries the boundary pressure zero.
+    /// Pressure opening (row index): its momentum equation uses zero normal
+    /// gradient and ghost pressure `2 p_boundary - p_inside`.
     Outlet(usize),
 }
 
@@ -556,7 +594,10 @@ pub(super) struct Solver<'a> {
     comps: [Component; 3],
     /// Face velocities per component, m/s.
     vel: [Vec<f64>; 3],
+    /// Iterated pressure differences from `pressure_reference_pa`.
     pressure: Vec<f64>,
+    /// Fixed numerical datum restored only when reporting physical pressure.
+    pressure_reference_pa: f64,
     /// SIMPLEC `d` per face (0 for non-unknown faces until set).
     d: [Vec<f64>; 3],
     /// Krylov iterations spent on momentum and pressure correction.
@@ -603,6 +644,7 @@ pub(super) struct Solver<'a> {
 pub(super) struct MomentumState {
     velocity: [Vec<f64>; 3],
     pressure: Vec<f64>,
+    pressure_reference_pa: f64,
 }
 
 #[cfg(feature = "enthalpy-coupling")]
@@ -750,7 +792,7 @@ impl<'a> Solver<'a> {
                     *slot = match rule {
                         FvBoundary::Wall { .. } | FvBoundary::Symmetry => Kind::Fixed(0.0),
                         FvBoundary::Inlet { velocity } => Kind::Fixed(velocity[axis]),
-                        FvBoundary::Outlet => {
+                        FvBoundary::Outlet | FvBoundary::Pressure { .. } => {
                             unknowns.push(index);
                             Kind::Outlet(unknowns.len() - 1)
                         }
@@ -877,6 +919,7 @@ impl<'a> Solver<'a> {
             comps,
             vel,
             pressure: vec![0.0; domain.cell_count()],
+            pressure_reference_pa: config.pressure_reference_pa(),
             d,
             momentum_krylov: 0,
             pressure_krylov: 0,
@@ -1190,7 +1233,9 @@ impl<'a> Solver<'a> {
         let mean = fan
             .cells
             .iter()
-            .map(|&c| self.pressure[c] * self.domain.face_area(c, axis))
+            .map(|&c| {
+                (self.pressure[c] + self.pressure_reference_pa) * self.domain.face_area(c, axis)
+            })
             .sum::<f64>()
             / fan.area.max(f64::MIN_POSITIVE);
         let mismatch = fan.curve.pressure(fan.flow) - mean;
@@ -1270,6 +1315,7 @@ impl<'a> Solver<'a> {
         MomentumState {
             velocity: self.vel.clone(),
             pressure: self.pressure.clone(),
+            pressure_reference_pa: self.pressure_reference_pa,
         }
     }
 
@@ -1287,6 +1333,18 @@ impl<'a> Solver<'a> {
                 field: "simple.momentum_state",
                 reason: "retained momentum must match the native staggered domain".into(),
             });
+        }
+        finite(
+            "simple.momentum_pressure_reference_pa",
+            state.pressure_reference_pa,
+        )?;
+        for face in self.faces {
+            if let Some(pressure) = face.prescribed_pressure() {
+                finite(
+                    "simple.pressure_difference_pa",
+                    2.0 * (pressure - state.pressure_reference_pa),
+                )?;
+            }
         }
         // Opening a formerly constrained face retains its exact zero speed.
         // Closing one is admissible only if it already satisfies the new
@@ -1306,6 +1364,7 @@ impl<'a> Solver<'a> {
         }
         self.vel.clone_from(&state.velocity);
         self.pressure.clone_from(&state.pressure);
+        self.pressure_reference_pa = state.pressure_reference_pa;
         self.guard_finite()
     }
 
@@ -1351,7 +1410,10 @@ impl<'a> Solver<'a> {
     /// reach an incomplete factorization.
     fn guard_finite(&self) -> Result<(), ChtError> {
         let finite = self.vel.iter().all(|v| v.iter().all(|u| u.is_finite()))
-            && self.pressure.iter().all(|p| p.is_finite());
+            && self
+                .pressure
+                .iter()
+                .all(|p| p.is_finite() && (*p + self.pressure_reference_pa).is_finite());
         if finite {
             Ok(())
         } else {
@@ -1561,7 +1623,7 @@ impl<'a> Solver<'a> {
                                 a_p += coef;
                                 rhs = coef.mul_add(velocity[a], rhs);
                             }
-                            FvBoundary::Outlet => {
+                            FvBoundary::Outlet | FvBoundary::Pressure { .. } => {
                                 rhs += cross_shear;
                                 net_out += edge_flux;
                                 if edge_flux < 0.0 {
@@ -1646,11 +1708,28 @@ impl<'a> Solver<'a> {
                 a_p += stiffness;
                 rhs += (fan.sign * face_area).mul_add(fan.rise, stiffness * u_old);
             }
-            // Interior faces separate two fluid cells; an outlet face sees
-            // the ghost pressure -p_inside (boundary pressure zero).
+            // Opening pressure is imposed at the face, half a cell from its
+            // interior pressure. Subtract the fixed numerical datum before
+            // forming the ghost drop; a common gauge offset cannot drive flow.
             let drop = match comp.kind[index] {
-                Kind::Outlet(_) if f[a] == 0 => -2.0 * self.pressure[cell_of(self.n, plus_cell)],
-                Kind::Outlet(_) => 2.0 * self.pressure[cell_of(self.n, minus_cell)],
+                Kind::Outlet(_) => {
+                    let plus = f[a] != 0;
+                    let boundary = self.faces[2 * a + usize::from(plus)]
+                        .prescribed_pressure()
+                        .expect("pressure-opening topology");
+                    let pressure = boundary - self.pressure_reference_pa;
+                    if pressure == 0.0 {
+                        if plus {
+                            2.0 * self.pressure[cell_of(self.n, minus_cell)]
+                        } else {
+                            -2.0 * self.pressure[cell_of(self.n, plus_cell)]
+                        }
+                    } else if plus {
+                        2.0 * (self.pressure[cell_of(self.n, minus_cell)] - pressure)
+                    } else {
+                        2.0 * (pressure - self.pressure[cell_of(self.n, plus_cell)])
+                    }
+                }
                 _ => {
                     self.pressure[cell_of(self.n, minus_cell)]
                         - self.pressure[cell_of(self.n, plus_cell)]
@@ -1957,7 +2036,19 @@ pub(super) fn admit(
                     });
                 }
             }
+            FvBoundary::Pressure { pressure_pa } => {
+                finite("simple.pressure_pa", pressure_pa)?;
+            }
             FvBoundary::Symmetry | FvBoundary::Outlet => {}
+        }
+    }
+    let reference = config.pressure_reference_pa();
+    for face in config.faces {
+        if let Some(pressure) = face.prescribed_pressure() {
+            finite(
+                "simple.pressure_difference_pa",
+                2.0 * (pressure - reference),
+            )?;
         }
     }
     if let Some(fan) = config.fan
@@ -2049,6 +2140,7 @@ impl Solver<'_> {
         // tolerance).
         self.correct(1e-8, gate)?;
         self.update_sgs(gate)?;
+        self.guard_finite()?;
         Ok(self.finish_projected(fluid, iterations, (mass_residual, momentum_residual)))
     }
 
@@ -2068,6 +2160,9 @@ impl Solver<'_> {
             if !domain.is_fluid(c) {
                 self.pressure[c] = 0.0;
                 continue;
+            }
+            if self.pressure_reference_pa != 0.0 {
+                self.pressure[c] += self.pressure_reference_pa;
             }
             let at = domain.coords(c);
             for a in 0..3 {
@@ -2091,7 +2186,7 @@ impl Solver<'_> {
             match self.faces[face as usize] {
                 FvBoundary::Inlet { .. } => inflow -= net,
                 // Openings pass flow both ways: count each direction.
-                FvBoundary::Outlet => {
+                FvBoundary::Outlet | FvBoundary::Pressure { .. } => {
                     for c in 0..domain.cell_count() {
                         if domain.neighbor(c, face as usize).is_none() && domain.is_fluid(c) {
                             let out = field.outward(domain, c, face as usize);
@@ -2404,3 +2499,7 @@ mod material_viscosity_tests;
 #[cfg(test)]
 #[path = "simple/turbulence_tests.rs"]
 mod turbulence_tests;
+
+#[cfg(test)]
+#[path = "simple/pressure_tests.rs"]
+mod pressure_tests;
