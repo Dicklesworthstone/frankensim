@@ -3106,6 +3106,33 @@ remain visible as unresolved radiation; neither scattering nor an unresolved
 tail is credited as heat. This report does not create a stochastic constituent
 thermal observer or assert net radiative equilibrium.
 
+### Native thermal observer for scattered constituent heat
+
+Under `optical-heating`, `ConstituentScatteringDeposition::into_heating`
+consumes the already sampled constituent report and maps each retained
+`(optical cell, component)` row exactly once to an active native thermal cell.
+It moves the unchanged native `ScatteringPowerDeposition` into the existing
+`ScatteringHeating` observer, so conduction, caloric storage, latent events,
+authored sources, accepted-time energy accounts and rollback retain one owner.
+No photon history is rerun and no escaped or unresolved radiation becomes heat.
+
+Per-recipient heat is the compensated sum of constituent means. Its admission
+error is the conservative sum of every contributing row/lane standard error;
+this deliberately retains correlation between constituent shares of the same
+native cell. The original whole-history total absorption error and unresolved
+radiation thresholds are still checked independently. A sampled absorbing lane
+with no observed native deposition has no numerical constituent error estimate
+and therefore refuses thermal admission instead of silently becoming a zero-
+uncertainty source. The constituent partition residual must fit the same
+roundoff allowance used for the native radiation balance.
+
+The report is consumed at admission so its potentially large sparse stochastic
+state is moved rather than cloned. Different constituents may heat distinct
+thermal cells, and many rows may feed one cell. Fixed-snapshot semantics remain:
+changed optical/material state requires a fresh sampled report and observer.
+This bridge is incident-radiation heating, not an emission debit, confidence
+interval, rare-event guarantee or net radiative-equilibrium solve.
+
 ### Calibrated spectral fixture paths
 
 `PathLuminanceJob` connects the same `PhotometricSource` states to the original

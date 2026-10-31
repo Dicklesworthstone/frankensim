@@ -261,6 +261,188 @@ impl<const N: usize> ScatteringHeating<N> {
         })
     }
 
+
+    /// Build the same native stochastic heating observer after a higher-level
+    /// owner has resolved several physical constituents inside each optical cell.
+    ///
+    /// The original multiple-scattering report remains authoritative for global
+    /// energy balance, unresolved radiation and whole-history sampling error.
+    /// `sources_w` is the complete mean true absorption assigned to active
+    /// thermal cells. `receiving_error_w` is a conservative error sum for those
+    /// exact recipients; it may include several perfectly correlated constituent
+    /// shares from one optical cell. No omitted or escaped radiation becomes heat.
+    pub(crate) fn from_constituent_sources(
+        deposition: ScatteringPowerDeposition<N>,
+        sources_w: BTreeMap<CellId, f64>,
+        receiving_error_w: BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        tolerance: ScatteringHeatingTolerance,
+        mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, OpticalHeatingError> {
+        checkpoint()?;
+        if N == 0
+            || thermal.cells().is_empty()
+            || ![
+                tolerance.power_roundoff_w,
+                tolerance.max_unresolved_w,
+                tolerance.max_total_standard_error_w,
+                tolerance.max_cell_standard_error_w,
+            ]
+            .into_iter()
+            .all(nonnegative)
+        {
+            return Err(invalid(
+                "active thermal cells, nonempty packet and finite nonnegative scattering tolerances required",
+            ));
+        }
+        if sources_w.len() != receiving_error_w.len()
+            || sources_w
+                .keys()
+                .any(|cell| !receiving_error_w.contains_key(cell))
+        {
+            return Err(invalid(
+                "constituent heat and receiving-error maps must have identical recipients",
+            ));
+        }
+        for cell in sources_w.keys() {
+            checkpoint()?;
+            if !thermal.cells().contains_key(cell) {
+                return Err(OpticalHeatingError::InactiveCell(*cell));
+            }
+        }
+        for estimate in [
+            &deposition.ballistic_escape,
+            &deposition.diffuse_escape,
+            &deposition.absorbed,
+            &deposition.unresolved,
+        ] {
+            validate_estimate(estimate)?;
+        }
+        let (lo, hi) = deposition.wavelength_bounds_nm;
+        if !(lo.is_finite() && hi.is_finite() && lo > 0.0 && hi > lo) {
+            return Err(invalid("invalid scattering source spectral domain"));
+        }
+        let mut unresolved = CheckedSum::default();
+        let mut total_absorbed_error = CheckedSum::default();
+        let mut total_unresolved_error = CheckedSum::default();
+        let mut residual_w = [0.0; N];
+        for lane in 0..N {
+            checkpoint()?;
+            let wavelength = deposition.wavelengths_nm[lane];
+            let samples = deposition.sampled_histories[lane];
+            if !wavelength.is_finite()
+                || !(lo..=hi).contains(&wavelength)
+                || !nonnegative(deposition.incident_power_w[lane])
+                || (samples != 0
+                    && (samples < 2 || samples != deposition.config.histories_per_lane))
+                || deposition.precision_limited_histories[lane] > samples
+                || (samples == 0
+                    && (deposition.diffuse_escape.mean_w[lane] != 0.0
+                        || deposition.unresolved.mean_w[lane] != 0.0
+                        || [
+                            &deposition.ballistic_escape,
+                            &deposition.diffuse_escape,
+                            &deposition.absorbed,
+                            &deposition.unresolved,
+                        ]
+                        .iter()
+                        .any(|estimate| estimate.standard_error_w[lane] != 0.0)))
+            {
+                return Err(invalid(
+                    "invalid wavelength, source power or sampling account",
+                ));
+            }
+            let mut balance = CheckedSum::default();
+            balance.add(deposition.incident_power_w[lane])?;
+            for power in [
+                deposition.ballistic_escape.mean_w[lane],
+                deposition.diffuse_escape.mean_w[lane],
+                deposition.absorbed.mean_w[lane],
+                deposition.unresolved.mean_w[lane],
+            ] {
+                balance.add(-power)?;
+            }
+            residual_w[lane] = balance.value()?;
+            if residual_w[lane].abs() > tolerance.power_roundoff_w {
+                return Err(invalid("sampled incident power is not conserved"));
+            }
+            unresolved.add(deposition.unresolved.mean_w[lane])?;
+            total_absorbed_error.add(deposition.absorbed.standard_error_w[lane])?;
+            total_unresolved_error.add(deposition.unresolved.standard_error_w[lane])?;
+        }
+        if unresolved.value()? > tolerance.max_unresolved_w
+            || total_absorbed_error.value()? > tolerance.max_total_standard_error_w
+            || total_unresolved_error.value()? > tolerance.max_total_standard_error_w
+        {
+            return Err(invalid(
+                "scattering truncation or total sampling error exceeds the heating allowance",
+            ));
+        }
+
+        let mut reported = BTreeSet::new();
+        let mut cell_totals = [CheckedSum::default(); N];
+        for cell in &deposition.cells {
+            checkpoint()?;
+            if !reported.insert(cell.cell_index) {
+                return Err(invalid("duplicate cell in multiple-scattering deposition"));
+            }
+            validate_estimate(&cell.absorbed)?;
+            for lane in 0..N {
+                if deposition.sampled_histories[lane] == 0
+                    && cell.absorbed.standard_error_w[lane] != 0.0
+                {
+                    return Err(invalid(
+                        "deterministic cell lane cannot claim a sampling error",
+                    ));
+                }
+                cell_totals[lane].add(cell.absorbed.mean_w[lane])?;
+            }
+        }
+        let mut absorbed = CheckedSum::default();
+        for lane in 0..N {
+            if (cell_totals[lane].value()? - deposition.absorbed.mean_w[lane]).abs()
+                > tolerance.power_roundoff_w
+            {
+                return Err(invalid(
+                    "spatial absorbed powers disagree with the sampled total",
+                ));
+            }
+            absorbed.add(deposition.absorbed.mean_w[lane])?;
+        }
+
+        let mut thermal_input = CheckedSum::default();
+        for (&cell, &power) in &sources_w {
+            checkpoint()?;
+            let error = receiving_error_w[&cell];
+            if !nonnegative(power)
+                || !nonnegative(error)
+                || error > tolerance.max_cell_standard_error_w
+            {
+                return Err(invalid(
+                    "constituent thermal source or receiving-cell sampling error exceeds the heating allowance",
+                ));
+            }
+            thermal_input.add(power)?;
+        }
+        let thermal_input_w = thermal_input.value()?;
+        if (thermal_input_w - absorbed.value()?).abs() > tolerance.power_roundoff_w {
+            return Err(invalid(
+                "mapped constituent thermal source disagrees with sampled absorption",
+            ));
+        }
+        let energy = integrate(&deposition, residual_w, thermal_input_w, 0.0)?;
+        checkpoint()?;
+        Ok(Self {
+            deposition: Arc::new(deposition),
+            sources_w,
+            thermal_input_w,
+            residual_w,
+            time_s: thermal.time_s(),
+            duration: CheckedSum::default(),
+            energy,
+        })
+    }
+
     /// Original field, sampling errors, source stream and radiation accounts.
     pub fn deposition(&self) -> &ScatteringPowerDeposition<N> {
         &self.deposition

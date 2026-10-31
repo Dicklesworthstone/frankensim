@@ -353,3 +353,276 @@ fn g0_constituent_scattering_respects_native_and_partition_budgets_and_cancellat
         ));
     });
 }
+
+#[cfg(feature = "optical-heating")]
+mod thermal_bridge {
+    use super::*;
+    use crate::material_state::optical_mixture::deposition::heating::ConstituentHeatingError;
+    use crate::volumes::heating::OpticalHeatingError;
+    use crate::volumes::heating::scattering::ScatteringHeatingTolerance;
+    use fs_thermal::enthalpy::{
+        Boundary, CellGeometry, CellId, DepositedCell, DepositionBudget, DepositionError,
+        DepositionSimulation, Event, MaterialId, StepConfig, ThermalLaw, TimedEvent,
+    };
+
+    struct ConstantCapacity;
+    impl ThermalLaw for ConstantCapacity {
+        fn temperature_k(&self, h: f64) -> Result<f64, DepositionError> {
+            if h.is_finite() && (0.0..=1e9).contains(&h) {
+                Ok(300.0 + h / 1000.0)
+            } else {
+                Err(DepositionError::MaterialDomain)
+            }
+        }
+        fn maximum_temperature_slope(&self) -> f64 {
+            0.001
+        }
+    }
+    static CAPACITY: ConstantCapacity = ConstantCapacity;
+
+    fn thermal() -> DepositionSimulation<'static> {
+        let events = [CellId(11), CellId(22)]
+            .into_iter()
+            .map(|id| TimedEvent {
+                time_s: 0.0,
+                event: Event::Birth(DepositedCell {
+                    id,
+                    segment_id: id.0,
+                    body_id: id.0,
+                    material_id: MaterialId(1),
+                    mass_kg: 1.0,
+                    specific_h_j_kg: 0.0,
+                    geometry: CellGeometry {
+                        start_m: [0.0; 3],
+                        end_m: [0.0, 0.0, 1.0],
+                        volume_m3: 1e-3,
+                        surface_area_m2: 1.0,
+                    },
+                    boundary: Boundary {
+                        ambient_k: 300.0,
+                        htc_w_m2_k: 0.0,
+                        reservoir: None,
+                        source_w: 0.0,
+                    },
+                }),
+            })
+            .collect();
+        DepositionSimulation::new(
+            events,
+            &[(MaterialId(1), &CAPACITY as &dyn ThermalLaw)],
+            DepositionBudget {
+                max_cells: 2,
+                max_links: 0,
+                max_events: 2,
+                max_substeps: 128,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 0.1,
+                energy_tolerance_j: 1e-12,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0
+    }
+
+    fn tolerance<const N: usize>(
+        report: &crate::material_state::optical_mixture::deposition::scattering::ConstituentScatteringDeposition<N>,
+    ) -> ScatteringHeatingTolerance {
+        let native = report.scattering();
+        let unresolved = native.unresolved.mean_w.iter().sum::<f64>();
+        let total_error = native
+            .absorbed
+            .standard_error_w
+            .iter()
+            .chain(native.unresolved.standard_error_w.iter())
+            .copied()
+            .sum::<f64>();
+        let cell_error = report
+            .cells()
+            .iter()
+            .flat_map(|row| row.standard_error_w().iter().copied().flatten())
+            .sum::<f64>();
+        ScatteringHeatingTolerance {
+            power_roundoff_w: 1e-10,
+            max_unresolved_w: unresolved + 1e-12,
+            max_total_standard_error_w: total_error + 1e-12,
+            max_cell_standard_error_w: cell_error + 1e-12,
+        }
+    }
+
+    #[test]
+    fn g1_scattered_constituent_heat_advances_distinct_native_thermal_cells() {
+        with_cx(|cx, _| {
+            let a = particles(cx, 0, 300.0);
+            let b = particles(cx, 1, 300.0);
+            let components = [
+                MaterialOpticalComponent::Particles(&a),
+                MaterialOpticalComponent::Particles(&b),
+            ];
+            let composition = composition(&[0.3, 0.7]);
+            let recipe =
+                MaterialOpticalMixture::try_new(cx, &components, &composition, mixture_budget())
+                    .unwrap();
+            let density = [0.004, 0.002];
+            let field = MaterialOpticalMixtureGrid::try_new(
+                cx,
+                VolumeGrid::new([1, 1, 2], &density, [0.0; 3], [2.0, 2.0, 0.5]),
+                palette(cx, vec![recipe], &[0, 0]),
+                None,
+                None,
+                0.01,
+                grid_budget(),
+            )
+            .unwrap();
+            let report = field
+                .deposit_multiple_scattering_power_by_component(
+                    cx,
+                    Point3::new(1.0, 1.0, -0.25),
+                    Vec3::new(0.0, 0.0, 1.0),
+                    &[430.0, 650.0],
+                    &[0.01, 0.02],
+                    scattering_config(1024),
+                    ConstituentDepositionBudget {
+                        max_rows: 4,
+                        max_component_evaluations: 8,
+                    },
+                )
+                .unwrap();
+            assert!(report.cells().iter().all(|row| {
+                row.standard_error_w().iter().all(Option::is_some)
+            }));
+            let tol = tolerance(&report);
+            let bindings: Vec<_> = report
+                .cells()
+                .iter()
+                .map(|row| {
+                    (
+                        row.optical_cell_index(),
+                        row.component_index(),
+                        if row.component_index() == 0 {
+                            CellId(11)
+                        } else {
+                            CellId(22)
+                        },
+                    )
+                })
+                .collect();
+            let initial = thermal();
+            let mut heating = report
+                .into_heating(&bindings, &initial, tol, || Ok(()))
+                .unwrap();
+            let source_a = heating.sources_w()[&CellId(11)];
+            let source_b = heating.sources_w()[&CellId(22)];
+            assert!(source_a > 0.0 && source_b > 0.0);
+            let native_absorbed = heating.deposition().absorbed.mean_w.iter().sum::<f64>();
+            close(source_a + source_b, native_absorbed);
+            let (after, _, audit) = initial
+                .advance_observed(
+                    &mut heating,
+                    1.0,
+                    StepConfig {
+                        max_dt_s: 0.1,
+                        energy_tolerance_j: 1e-12,
+                    },
+                    || Ok(()),
+                )
+                .unwrap();
+            close(after.temperature_k(CellId(11)).unwrap(), 300.0 + source_a / 1000.0);
+            close(after.temperature_k(CellId(22)).unwrap(), 300.0 + source_b / 1000.0);
+            close(audit.external_heat_j, source_a + source_b);
+            close(heating.energy().thermal_input_j, source_a + source_b);
+            assert!(heating.energy().diffuse_escape_j.iter().any(|v| *v > 0.0));
+        });
+    }
+
+    #[test]
+    fn g0_unobserved_or_incomplete_constituent_heat_refuses_before_native_advance() {
+        with_cx(|cx, _| {
+            let a = particles(cx, 0, 300.0);
+            let b = particles(cx, 1, 300.0);
+            let components = [
+                MaterialOpticalComponent::Particles(&a),
+                MaterialOpticalComponent::Particles(&b),
+            ];
+            let composition = composition(&[0.4, 0.6]);
+            let recipe =
+                MaterialOpticalMixture::try_new(cx, &components, &composition, mixture_budget())
+                    .unwrap();
+            let wavelengths = [430.0, 760.0];
+            let largest_extinction = wavelengths
+                .iter()
+                .map(|&wavelength| {
+                    recipe.absorption_spectrum().at(wavelength).unwrap()
+                        + recipe
+                            .scattering_optics()
+                            .scattering
+                            .at(wavelength)
+                            .unwrap()
+                })
+                .fold(0.0_f64, f64::max);
+            let density = [0.4 / largest_extinction];
+            let field = MaterialOpticalMixtureGrid::try_new(
+                cx,
+                VolumeGrid::new([1; 3], &density, [0.0; 3], [1.0; 3]),
+                palette(cx, vec![recipe], &[0]),
+                None,
+                None,
+                0.01,
+                grid_budget(),
+            )
+            .unwrap();
+            let initial = thermal();
+            let mut found = false;
+            for seed in 0..64 {
+                let report = field
+                    .deposit_multiple_scattering_power_by_component(
+                        cx,
+                        Point3::new(0.5, 0.5, -0.25),
+                        Vec3::new(0.0, 0.0, 1.0),
+                        &wavelengths,
+                        &[1.0, 1.0],
+                        ScatteringDepositionConfig {
+                            seed,
+                            ..scattering_config(2)
+                        },
+                        partition_budget(),
+                    )
+                    .unwrap();
+                if report
+                    .cells()
+                    .iter()
+                    .any(|row| row.standard_error_w().iter().any(Option::is_none))
+                {
+                    let tol = tolerance(&report);
+                    let bindings: Vec<_> = report
+                        .cells()
+                        .iter()
+                        .map(|row| {
+                            (
+                                row.optical_cell_index(),
+                                row.component_index(),
+                                CellId(11),
+                            )
+                        })
+                        .collect();
+                    assert!(matches!(
+                        report.into_heating(&bindings, &initial, tol, || Ok(())),
+                        Err(ConstituentHeatingError::Heating(
+                            OpticalHeatingError::Invalid(_)
+                        ))
+                    ));
+                    found = true;
+                    break;
+                }
+            }
+            assert!(found);
+            assert_eq!(initial.temperature_k(CellId(11)).unwrap(), 300.0);
+            assert_eq!(initial.temperature_k(CellId(22)).unwrap(), 300.0);
+        });
+    }
+}

@@ -1,5 +1,9 @@
 //! Constituent absorption of the original native multiple-scattering estimates.
 
+#[cfg(feature = "optical-heating")]
+/// Native thermal observer for constituent-resolved scattered absorption.
+pub mod heating;
+
 use super::{
     ConstituentDepositionBudget, MaterialOpticalComponent, MaterialOpticalMixtureError,
     MaterialOpticalMixtureGrid, PositiveSum, VolumeTransportError, absorbed_share, admit_closure,
