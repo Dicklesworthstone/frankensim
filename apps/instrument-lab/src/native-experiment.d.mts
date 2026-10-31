@@ -25,6 +25,8 @@ export interface NativeExperiment {
 }
 export function editableAttachmentText(bytes: Uint8Array): string;
 export function editedAttachmentBytes(original: Uint8Array, text: string): Uint8Array;
+export function prepareNativeTextExperiment(source: string, sources: Readonly<Record<string, string>>,
+  options: NativeWindOptions, readSource: (path: string) => Promise<string>): Promise<NativeExperiment>;
 export function validateSource(bytes: Uint8Array, renderer?: NativeRenderer): Uint8Array;
 export function validateInput(bytes: Uint8Array, bundled?: boolean): NativeExperiment;
 export function serializeNativeExperiment(source: string, attachments: readonly NativeWindAttachment[], options?: NativeWindOptions): string;

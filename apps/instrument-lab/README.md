@@ -121,6 +121,37 @@ Playback never peak-normalizes or retunes the native result. Original model
 limits and missing-source refusals still apply; attaching a pack does not
 qualify an instrument as measured or realistic.
 
+### String starters with their original material sources
+
+The nine **Strings** starters include their original material manifests and
+tables. Required body and stop profiles are loaded and selected with them.
+Configure the existing `xtask matdb-pack` compiler as well as the string renderer:
+
+```sh
+cargo build -p xtask
+node apps/instrument-lab/tools/serve-native-wind.mjs \
+  --strings-engine "$(pwd)/target/release/material_strings" \
+  --material-compiler "$(pwd)/target/debug/xtask"
+```
+
+Choose a string starter, then **Render WAV**. The local service compiles its
+included sources and passes those exact pack files, profiles and performance
+to the native `material_strings` solver. Use **Edit text…** on a material table,
+change a regional atmosphere or a performance gesture, and render again to
+compare the resulting physical pressure. **Save experiment** retains the
+editable originals and their bindings. Loading a different starter replaces the
+complete input set; a failed source load leaves the current experiment intact.
+
+These are the existing native examples: pluck/bow, measured cello-G coefficients,
+nonlinear preload with or without a stop, tensor body memory, plate microphone,
+independent cavity/exterior gases, layered relaxation and material shear contact.
+They retain their original numerical resolutions and stated limitations. The
+Lampis coefficients describe a measured cello string on a manufactured
+laboratory plate; the other bodies and materials are integration fixtures.
+They do not establish complete violin, cello or bass realism. No geometry,
+material coefficient, gas law, tuning adjustment or playback gain is supplied
+by the browser.
+
 ### Heated string with evolving material and finite gas
 
 Select **Heated string — electrical, thermal and finite-gas feedback** and the

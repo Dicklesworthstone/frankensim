@@ -45,7 +45,23 @@ import { createNativeAtmosphereControls } from "./native-atmosphere";
 import { createNativeStringProfiles } from "./native-string-profiles";
 import { createNativeFiniteGasStringControls } from "./native-finite-gas-string";
 import { createNativeComparisonPanel } from "./native-comparison";
-import { MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
+import { MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, prepareNativeTextExperiment, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
+import stringStarterSources from "./native-string-starters.json";
+
+// Bundle the original text assets, loading only those used by the chosen
+// experiment. The native compiler still owns parsing and material resolution.
+const starterSourceFiles = import.meta.glob<string>([
+  "../../../crates/fs-couple/examples/material_strings/*.tsv",
+  "../../../crates/fs-couple/examples/material_strings/*.body",
+  "../../../crates/fs-couple/examples/material_strings/*.stops",
+  "../../../crates/fs-couple/examples/material_modal_valve/tensor-blade*.tsv",
+  "../../../data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/*.tsv",
+], {query: "?raw", import: "default"});
+const stringStarters: Readonly<Record<string, {
+  sources: Readonly<Record<string, string>>;
+  materialManifests: NativeMaterialManifest[];
+  stringProfiles?: NativeStringProfiles;
+}>> = stringStarterSources;
 
 const EXAMPLES = [
   {
@@ -297,7 +313,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: stringExampleSource,
     decimate: false,
-    intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. Attach wire.fsmatpk and body.fsmatpk using the source-pack instructions linked below, or open your own complete material-string performance.",
+    intro: "Starter: one material-derived string, body and cavity, with a physical preload and bow gesture. The original wire and body sources are included and compile when you render. Edit their attached tables or open your own complete material-string performance.",
     help: "The string performer accepts the same full material cards as the reed and wall solvers, along with legacy claim packs. Replace an attached source at its declared path to change the solved material without browser coefficients. Optional profiles add body geometry, fingers/frets and contact heat. This is a numerical integration fixture, not a measured violin, cello or bass.",
   },
   {
@@ -306,7 +322,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: measuredStringSource,
     decimate: false,
-    intro: "Starter: published whole-string mass and bending-stiffness estimates drive a manufactured laboratory plate. Attach cello-g-whole.fsmatpk and body.fsmatpk using the measured-string source recipe, or prepare a complete experiment directly from its original manifests.",
+    intro: "Starter: published whole-string mass and bending-stiffness estimates drive a manufactured laboratory plate. The original Lampis source table, attribution, plate sources and compilation bindings are included. Render with the native material compiler configured, then edit a source table to compare.",
     help: "The measured setup and property selectors describe one published string on a laboratory receiver. Its temperature_known=0 stays independent of body and gas temperature. No intrinsic loss law or reference-fluid inertial correction is inferred; sampled gas resistance remains. A replacement measured source must supply matching length, radius, fixed tension and explicit selectors. This fixture does not establish complete cello acoustics or measured recording accuracy.",
   },
   {
@@ -315,7 +331,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: nonlinearPreloadStringSource,
     decimate: false,
-    intro: "Starter: a force-loaded material string with bonded layers, two transverse planes, torsion, geometric stretching and a coupled body/cavity. Attach wire.fsmatpk, sleeve.fsmatpk and body.fsmatpk from the native string examples. The force is released at sample zero from the solved coupled equilibrium.",
+    intro: "Starter: a force-loaded material string with bonded layers, two transverse planes, torsion, geometric stretching and a coupled body/cavity. Original wire, sleeve and body sources are included. The force is released at sample zero from the solved coupled equilibrium.",
     help: "Change material sources, geometry or the declared preload force. The native solver derives the initial deformation from the same storage law used during playback, retaining the original relaxed material histories. Longitudinal-wave descriptions use this same preload path. This manufactured specimen does not establish measured violin, cello or bass accuracy.",
   },
   {
@@ -324,7 +340,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: stoppedNonlinearStringSource,
     decimate: false,
-    intro: "Starter: a force-loaded layered string equilibrates against the original compliant stop while retaining geometric stretching, torsion, body and cavity motion. Attach wire.fsmatpk, sleeve.fsmatpk, body.fsmatpk and stopped-pluck.stops; select stopped-pluck.stops as the finger/fret/contact profile below.",
+    intro: "Starter: a force-loaded layered string equilibrates against the original compliant stop while retaining geometric stretching, torsion, body and cavity motion. Original wire, sleeve and body sources are included, with stopped-pluck.stops already selected as the contact profile.",
     help: "The native solver balances material, support and normal-contact forces together before releasing the declared load at sample zero. Change material sources or the attached stop profile to change the initial shape and ensuing pressure. The supplied stop is manufactured data; material-stop profiles use source-bound normal contact through the same solver. This is not a measured violin, cello or bass.",
   },
   {
@@ -333,7 +349,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: tensorBodyStringSource,
     decimate: false,
-    intro: "Starter: a material string drives a body with complete three-dimensional tensor relaxation. Build and attach wire.fsmatpk and tensor-blade.fsmatpk using the canonical source recipe, then attach tensor-body.body or the finer tensor-body-shared.body and select it as the Body geometry/material profile below.",
+    intro: "Starter: a material string drives a body with complete three-dimensional tensor relaxation. Original wire and tensor-body material sources are included, with tensor-body.body selected. Replace the profile with the canonical finer tensor-body-shared.body to explore spatial refinement.",
     help: "The native body retains all six source strain histories, including out-of-plane effects and reciprocal string reactions. The shared profile uses exact equal-time history coordinates so its finer mesh fits the same state cap; every original material-point history remains reconstructible. Change branch_33 or relaxation_time in the source and rebuild its pack to compare pressure. This fixed-state manufactured cantilever is not a measured violin, cello or bass. Its 48 kHz clock needs no decimation.",
   },
   {
@@ -342,7 +358,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: observedStringSource,
     decimate: false,
-    intro: "Starter: a plucked material string drives a regional orthotropic plate, with reciprocal acoustic loading and a microphone at its declared position. Attach wire.fsmatpk, directional-body.fsmatpk and orthotropic.body, then select orthotropic.body as the body profile below.",
+    intro: "Starter: a plucked material string drives a regional orthotropic plate, with reciprocal acoustic loading and a microphone at its declared position. Original wire and directional-body sources are included, with orthotropic.body already selected as the body profile.",
     help: "The native observer integrates signed plate motion over source-to-microphone paths through the original gas. Change material sources or atmosphere data and render again. The body uses an infinite baffle and synthetic specimen data; this flat-plate fixture does not represent a complete measured violin, cello or bass.",
   },
   {
@@ -351,7 +367,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: regionalCavityStringSource,
     decimate: false,
-    intro: "Starter: a material string and closed shell with a helium-filled interior and a separately declared exterior atmosphere. Attach wire.fsmatpk, closed-shell.fsmatpk and closed-shell-cavity.body, then select that body profile below.",
+    intro: "Starter: a material string and closed shell with a helium-filled interior and a separately declared exterior atmosphere. Original wire and shell sources are included, with closed-shell-cavity.body selected so both gas regions reach the native coupled solve.",
     help: "cavity_gas supplies the original interior acoustic field; gas supplies the exterior and string drag. Change either atmosphere independently while keeping their static pressures equal, or apply a common pressure with the atmosphere editor. The body profile is required for the cavity declaration. This manufactured shell fixture is not a measured violin, cello or bass.",
   },
   {
@@ -360,7 +376,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: layeredStringSource,
     decimate: false,
-    intro: "Starter: layered strings with independent source relaxation spectra. Attach each original material pack named in the performance. Change layer materials and geometry in the data; the shared constitutive solver retains each layer's history.",
+    intro: "Starter: layered strings with independent source relaxation spectra. Original relaxing-wire and body sources are included. Change their attached tables or the layer geometry in the performance; the shared constitutive solver retains each layer's history.",
     help: "This perfectly bonded concentric-section model retains original per-layer moduli and relaxation times. It does not add sliding helical windings. Keep the stated end-load or displacement comparison and pressure scale when comparing material substitutions.",
   },
   {
@@ -369,7 +385,7 @@ const EXAMPLES = [
     renderer: "strings",
     source: shearStringSource,
     decimate: false,
-    intro: "Starter: a material shear layer drives distributed bow contact on the original string/body/cavity system. Attach wire.fsmatpk, body.fsmatpk and manufactured-shear-layer.fsmatpk from the canonical material-string example.",
+    intro: "Starter: a material shear layer drives distributed bow contact on the original string/body/cavity system. Original wire, body and manufactured shear-layer sources are included; editing the attached material tables changes the native contact law when rendered.",
     help: "Layer shear modulus, yield stress and plastic viscosity control retained elastic/plastic history and the actual pressure output. The native instructions describe geometric stretching, longitudinal waves and optional contact heat. Heat feedback requires the same materials to supply caloric and transport data; this isothermal fixture does not invent them.",
   },
   {
@@ -719,34 +735,56 @@ export function createNativeWindPanel(): HTMLElement {
   check.addEventListener("click", () => void checkConnection());
   source.addEventListener("input", edited);
   open.addEventListener("click", () => file.click());
-  const loadExample = (): void => {
-    source.value = selectedExample.source;
-    loadedSource = selectedExample.source;
-    loadedEditorValue = source.value;
-    sourceName = selectedExample.name.split("/").pop()!;
-    renderer.value = selectedExample.renderer;
-    introduction.textContent = selectedExample.intro;
-    sourceHelp.textContent = selectedExample.help;
-    canonical.href = exampleUrl(selectedExample.name);
-    canonical.hidden = false;
-    attachments = [];
-    decimate.checked = selectedExample.decimate;
-    materials.reset();
-    gas.reset();
-    profiles.reset();
-    finiteGasString.reset();
-    drawAttachments();
-    edited();
-    showResult("Example loaded. Edit the source or render it.");
+  const loadExample = async (example: typeof EXAMPLES[number]): Promise<void> => {
+    if (rendering || loadingFile || editingAttachment || atmosphere.hasDraft()) return;
+    const previousStarter = canonical.hidden ? "" : selectedExample.name;
+    loadingFile = true; controls();
+    showResult("Loading the original performance and its physical sources…");
+    try {
+      const inputs = stringStarters[example.name];
+      const experiment = inputs ? await prepareNativeTextExperiment(example.source, inputs.sources, {
+        renderer: example.renderer as NativeRenderer, decimate: example.decimate,
+        materialManifests: inputs.materialManifests, stringProfiles: inputs.stringProfiles,
+      }, async path => {
+        const read = starterSourceFiles[`../../../${path}`];
+        if (!read) throw new Error(`Original starter source is unavailable: ${path}`);
+        return read();
+      }) : {attachments: [] as NativeWindAttachment[], materialManifests: undefined, stringProfiles: undefined};
+      const nextAttachments = await Promise.all(experiment.attachments.map(async attached => {
+        const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(attached.bytes));
+        const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        return {...attached, sha256};
+      }));
+      // Publish the model only after all original sources, paths and bindings
+      // have loaded. A failed chunk keeps the user's current experiment intact.
+      selectedExample = example;
+      source.value = example.source; loadedSource = example.source; loadedEditorValue = source.value;
+      sourceName = example.name.split("/").pop()!;
+      renderer.value = example.renderer; starter.value = example.name;
+      introduction.textContent = example.intro; sourceHelp.textContent = example.help;
+      canonical.href = exampleUrl(example.name); canonical.hidden = false;
+      attachments = nextAttachments;
+      decimate.checked = example.decimate;
+      materials.load(experiment.materialManifests);
+      gas.reset(); profiles.reset(); finiteGasString.reset();
+      drawAttachments();
+      profiles.load(experiment.stringProfiles);
+      edited();
+      await checkConnection();
+      showResult(inputs
+        ? `${attachments.length} original source files loaded with their material compilation and profile bindings. Edit a table, atmosphere or gesture, then render with the native material compiler configured.`
+        : "Example loaded. Edit the source or render it.");
+    } catch (error) {
+      starter.value = previousStarter;
+      showResult(`Example was not loaded: ${message(error)} Your current sources are unchanged.`, true);
+    } finally { loadingFile = false; controls(); }
   };
-  reset.addEventListener("click", () => { loadExample(); void checkConnection(); });
+  reset.addEventListener("click", () => { void loadExample(selectedExample); });
   starter.addEventListener("change", () => {
     if (rendering || loadingFile) return;
     const selected = EXAMPLES.find((example) => example.name === starter.value);
     if (!selected) return;
-    selectedExample = selected;
-    loadExample();
-    void checkConnection();
+    void loadExample(selected);
   });
   renderer.addEventListener("change", () => {
     if (selectedRenderer() === "finite-gas-string") decimate.checked = false;

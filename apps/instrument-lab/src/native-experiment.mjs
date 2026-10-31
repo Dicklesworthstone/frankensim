@@ -187,6 +187,18 @@ export function editedAttachmentBytes(original, text) {
   return bytes;
 }
 
+/** Gather original text sources before publishing a complete starter experiment. */
+export async function prepareNativeTextExperiment(source, sources, options, readSource) {
+  const attachments = await Promise.all(Object.entries(sources).map(async ([path, original]) => {
+    const text = await readSource(original);
+    if (typeof text !== 'string') throw new NativeWindError(400, `Could not load original source ${original}.`);
+    return {path, bytes:new TextEncoder().encode(text)};
+  }));
+  // Use the identical admission path as opened experiments and HTTP rendering.
+  // A missing source or invalid binding refuses before any caller replaces its model.
+  return validateInput(new TextEncoder().encode(serializeNativeExperiment(source, attachments, options)), true);
+}
+
 /** Transport envelope only: no physics records or material constants are interpreted. */
 export function validateInput(bytes, bundled = false) {
   if (!bundled) return {source:validateSource(bytes), attachments:[], decimate:false};

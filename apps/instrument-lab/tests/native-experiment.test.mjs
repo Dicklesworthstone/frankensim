@@ -1,11 +1,83 @@
 // Exact source-packet round trips, not a surrogate physical model.
 import {test} from 'node:test';
 import assert from 'node:assert/strict';
-import {editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment, validateInput} from '../src/native-experiment.mjs';
+import {readFile} from 'node:fs/promises';
+import {posix} from 'node:path';
+import {editableAttachmentText, editedAttachmentBytes, prepareNativeTextExperiment, serializeNativeExperiment, validateInput,
+  MAX_SOURCE_BYTES, MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES} from '../src/native-experiment.mjs';
+import {renderNativePerformance} from '../src/native-wind-client.mjs';
 import {validateInput as serviceInput} from '../tools/native-wind-protocol.mjs';
 
 const encode = text => new TextEncoder().encode(text);
 const decode = bytes => new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes);
+const root = new URL('../../../', import.meta.url);
+const readOriginal = async path => decode(await readFile(new URL(path, root)));
+
+test('complete canonical string starters reach the native request with original material and profile sources', async () => {
+  const starters = JSON.parse(await readFile(new URL('../src/native-string-starters.json', import.meta.url), 'utf8'));
+  const status = {available:true, renderers:{strings:true}, token:'test-session',
+    maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes:16 * 1024 * 1024,
+    maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
+    maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES,
+    supportsMaterialManifests:true};
+  for (const [name, inputs] of Object.entries(starters)) {
+    const source = await readOriginal('crates/fs-couple/examples/' + name);
+    const options = {renderer:'strings', decimate:false, materialManifests:inputs.materialManifests,
+      stringProfiles:inputs.stringProfiles};
+    const prepared = await prepareNativeTextExperiment(source, inputs.sources, options, readOriginal);
+    const files = new Map(prepared.attachments.map(file => [file.path, decode(file.bytes)]));
+    assert.equal(decode(prepared.source), source, name);
+    for (const [path, original] of Object.entries(inputs.sources))
+      assert.equal(files.get(path), await readOriginal(original), `${name}: ${path}`);
+    for (const binding of prepared.materialManifests) {
+      // Check the original manifest's relative source references; no source
+      // parsing or material coefficients are added to browser production code.
+      const manifest = files.get(binding.manifestPath);
+      for (const row of manifest.split(/\r?\n/).filter(line => line.startsWith('source\t'))) {
+        const sourcePath = posix.join(posix.dirname(binding.manifestPath), row.split('\t')[2]);
+        assert.ok(files.has(sourcePath), `${name}: compiler source ${sourcePath}`);
+      }
+    }
+    const packs = new Set(prepared.materialManifests.map(binding => binding.packPath));
+    for (const text of [source, ...Object.values(inputs.stringProfiles ?? {}).map(path => files.get(path))])
+      for (const pack of text.match(/[^\s]+\.fsmatpk/g) ?? [])
+        assert.ok(packs.has(pack), `${name}: physical source ${pack}`);
+    let submitted;
+    await assert.rejects(renderNativePerformance(source, prepared.attachments, status, prepared, undefined,
+      async (url, request) => {
+        assert.equal(url, '/api/native-wind/render');
+        assert.equal(request.method, 'POST');
+        submitted = serviceInput(encode(request.body), true);
+        // Deliberate native-boundary refusal: this test proves source delivery,
+        // not execution of the physical solver or an artificial sound.
+        return new Response(JSON.stringify({error:'native-boundary witness'}), {
+          status:400, headers:{'Content-Type':'application/json'},
+        });
+      }), /native-boundary witness/);
+    assert.deepEqual(submitted, prepared, name);
+    assert.deepEqual(validateInput(encode(serializeNativeExperiment(source, prepared.attachments, prepared)), true), prepared);
+  }
+});
+
+test('starter source failures cannot return a partial experiment or discard required profile bindings', async () => {
+  const source = 'frankensim-material-strings-v3\n';
+  const options = {renderer:'strings', stringProfiles:{bodyPath:'body.profile'}};
+  const sources = {'wire.tsv':'original-wire', 'body.profile':'original-body'};
+  await assert.rejects(prepareNativeTextExperiment(source, sources, options, async path => {
+    if (path === 'original-body') throw new Error('original source unavailable');
+    return 'original wire';
+  }), /original source unavailable/);
+  await assert.rejects(prepareNativeTextExperiment(source, sources, options, async () => undefined), /Could not load original source/);
+  await assert.rejects(prepareNativeTextExperiment(source, {'wire.tsv':'original-wire'}, options,
+    async () => 'original wire'), /String profiles/);
+  const before = await prepareNativeTextExperiment(source, sources, options, async path => path + '\r\n');
+  const changed = await prepareNativeTextExperiment(source, sources, options,
+    async path => (path === 'original-wire' ? 'changed material table' : path) + '\r\n');
+  assert.equal(decode(before.attachments[0].bytes), 'original-wire\r\n');
+  assert.equal(decode(changed.attachments[0].bytes), 'changed material table\r\n');
+  assert.deepEqual(changed.source, before.source);
+  assert.deepEqual(changed.stringProfiles, before.stringProfiles);
+});
 
 test('complete string experiments retain original moving contact, thermal, material and gas data', () => {
   const source = 'frankensim-material-strings-v3\r\n# µ original specimen\r\naudio 144000 432000 5 128\r\n'

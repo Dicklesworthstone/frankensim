@@ -1,0 +1,127 @@
+{
+  "material_strings/pluck-and-bow.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "body-manifest.tsv": "crates/fs-couple/examples/material_strings/body-manifest.tsv",
+      "body.tsv": "crates/fs-couple/examples/material_strings/body.tsv"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "body.fsmatpk", "manifestPath": "body-manifest.tsv"}
+    ]
+  },
+  "material_strings/measured-cello-g.material-strings": {
+    "sources": {
+      "cello/manifest.tsv": "data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/manifest.tsv",
+      "cello/properties.tsv": "data/matdb/seed-v1/cello-g-strings-whole-lampis-2024/properties.tsv",
+      "body-manifest.tsv": "crates/fs-couple/examples/material_strings/body-manifest.tsv",
+      "body.tsv": "crates/fs-couple/examples/material_strings/body.tsv"
+    },
+    "materialManifests": [
+      {"packPath": "cello-g-whole.fsmatpk", "manifestPath": "cello/manifest.tsv"},
+      {"packPath": "body.fsmatpk", "manifestPath": "body-manifest.tsv"}
+    ]
+  },
+  "material_strings/nonlinear-preload.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "sleeve-manifest.tsv": "crates/fs-couple/examples/material_strings/sleeve-manifest.tsv",
+      "sleeve.tsv": "crates/fs-couple/examples/material_strings/sleeve.tsv",
+      "body-manifest.tsv": "crates/fs-couple/examples/material_strings/body-manifest.tsv",
+      "body.tsv": "crates/fs-couple/examples/material_strings/body.tsv"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "sleeve.fsmatpk", "manifestPath": "sleeve-manifest.tsv"},
+      {"packPath": "body.fsmatpk", "manifestPath": "body-manifest.tsv"}
+    ]
+  },
+  "material_strings/nonlinear-stopped-preload.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "sleeve-manifest.tsv": "crates/fs-couple/examples/material_strings/sleeve-manifest.tsv",
+      "sleeve.tsv": "crates/fs-couple/examples/material_strings/sleeve.tsv",
+      "body-manifest.tsv": "crates/fs-couple/examples/material_strings/body-manifest.tsv",
+      "body.tsv": "crates/fs-couple/examples/material_strings/body.tsv",
+      "stopped-pluck.stops": "crates/fs-couple/examples/material_strings/stopped-pluck.stops"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "sleeve.fsmatpk", "manifestPath": "sleeve-manifest.tsv"},
+      {"packPath": "body.fsmatpk", "manifestPath": "body-manifest.tsv"}
+    ],
+    "stringProfiles": {"stopPath": "stopped-pluck.stops"}
+  },
+  "material_strings/tensor-body.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "tensor-blade-manifest.tsv": "crates/fs-couple/examples/material_modal_valve/tensor-blade-manifest.tsv",
+      "tensor-blade.tsv": "crates/fs-couple/examples/material_modal_valve/tensor-blade.tsv",
+      "tensor-body.body": "crates/fs-couple/examples/material_strings/tensor-body.body"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "tensor-blade.fsmatpk", "manifestPath": "tensor-blade-manifest.tsv"}
+    ],
+    "stringProfiles": {"bodyPath": "tensor-body.body"}
+  },
+  "material_strings/rayleigh-observed.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "directional-body-manifest.tsv": "crates/fs-couple/examples/material_strings/directional-body-manifest.tsv",
+      "directional-body.tsv": "crates/fs-couple/examples/material_strings/directional-body.tsv",
+      "orthotropic.body": "crates/fs-couple/examples/material_strings/orthotropic.body"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "directional-body.fsmatpk", "manifestPath": "directional-body-manifest.tsv"}
+    ],
+    "stringProfiles": {"bodyPath": "orthotropic.body"}
+  },
+  "material_strings/regional-cavity.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "closed-shell-manifest.tsv": "crates/fs-couple/examples/material_strings/closed-shell-manifest.tsv",
+      "closed-shell.tsv": "crates/fs-couple/examples/material_strings/closed-shell.tsv",
+      "closed-shell-cavity.body": "crates/fs-couple/examples/material_strings/closed-shell-cavity.body"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "closed-shell.fsmatpk", "manifestPath": "closed-shell-manifest.tsv"}
+    ],
+    "stringProfiles": {"bodyPath": "closed-shell-cavity.body"}
+  },
+  "material_strings/relaxing-layered-strings.material-strings": {
+    "sources": {
+      "relaxing-wire-manifest.tsv": "crates/fs-couple/examples/material_strings/relaxing-wire-manifest.tsv",
+      "relaxing-wire.tsv": "crates/fs-couple/examples/material_strings/relaxing-wire.tsv",
+      "body-manifest.tsv": "crates/fs-couple/examples/material_strings/body-manifest.tsv",
+      "body.tsv": "crates/fs-couple/examples/material_strings/body.tsv"
+    },
+    "materialManifests": [
+      {"packPath": "relaxing-wire.fsmatpk", "manifestPath": "relaxing-wire-manifest.tsv"},
+      {"packPath": "body.fsmatpk", "manifestPath": "body-manifest.tsv"}
+    ]
+  },
+  "material_strings/shear-layer-bow.material-strings": {
+    "sources": {
+      "wire-manifest.tsv": "crates/fs-couple/examples/material_strings/wire-manifest.tsv",
+      "wire.tsv": "crates/fs-couple/examples/material_strings/wire.tsv",
+      "body-manifest.tsv": "crates/fs-couple/examples/material_strings/body-manifest.tsv",
+      "body.tsv": "crates/fs-couple/examples/material_strings/body.tsv",
+      "manufactured-shear-layer-manifest.tsv": "crates/fs-couple/examples/material_strings/manufactured-shear-layer-manifest.tsv",
+      "manufactured-shear-layer.tsv": "crates/fs-couple/examples/material_strings/manufactured-shear-layer.tsv"
+    },
+    "materialManifests": [
+      {"packPath": "wire.fsmatpk", "manifestPath": "wire-manifest.tsv"},
+      {"packPath": "body.fsmatpk", "manifestPath": "body-manifest.tsv"},
+      {"packPath": "manufactured-shear-layer.fsmatpk", "manifestPath": "manufactured-shear-layer-manifest.tsv"}
+    ]
+  }
+}
