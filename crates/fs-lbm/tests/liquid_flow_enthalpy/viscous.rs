@@ -13,6 +13,8 @@ mod unsteady;
 mod obstacles;
 #[path = "viscous/rheology.rs"]
 mod rheology;
+#[path = "viscous/porous.rs"]
+mod porous;
 
 fn driven_box() -> SimpleConfig {
     let mut faces = [FvBoundary::wall(); 6];

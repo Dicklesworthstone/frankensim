@@ -272,14 +272,34 @@ fn creeping_material_heat(
     controls: ViscousHeatControls,
     gate: &CancelGate,
 ) -> Result<(FvFlow, ViscousPower), ChtError> {
+    creeping_material_heat_with_directional(
+        domain, fluid, viscosity_pa_s, drag_pa_s_m2, None,
+        force_density_n_m3, config, controls, gate,
+    )
+}
+
+/// Grid-axis material drag shares the native force and heat quadrature.
+#[allow(clippy::too_many_arguments)]
+pub(in crate::conjugate) fn creeping_material_heat_with_directional(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    viscosity_pa_s: &[f64],
+    drag_pa_s_m2: Option<&[f64]>,
+    directional_drag_pa_s_m2: Option<&[[f64; 3]]>,
+    force_density_n_m3: Option<&[[f64; 3]]>,
+    config: &SimpleConfig,
+    controls: ViscousHeatControls,
+    gate: &CancelGate,
+) -> Result<(FvFlow, ViscousPower), ChtError> {
     poll(gate)?;
     admit_heating(domain, config, controls)?;
-    let mut solver = material_solver(
+    let mut solver = material_solver_with_directional(
         domain,
         fluid,
         viscosity_pa_s,
         force_density_n_m3,
         drag_pa_s_m2,
+        directional_drag_pa_s_m2,
         config,
         gate,
     )?;
@@ -287,12 +307,13 @@ fn creeping_material_heat(
     let flow = solve_steady(solver, fluid, config, gate)?;
     // Reconstruct only the original coefficient/geometry owner from its public
     // projected field. This is an audit, not another flow solve or projection.
-    let mut sampler = material_solver(
+    let mut sampler = material_solver_with_directional(
         domain,
         fluid,
         viscosity_pa_s,
         force_density_n_m3,
         drag_pa_s_m2,
+        directional_drag_pa_s_m2,
         config,
         gate,
     )?;

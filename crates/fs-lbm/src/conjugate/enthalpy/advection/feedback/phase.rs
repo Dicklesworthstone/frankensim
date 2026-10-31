@@ -217,6 +217,8 @@ where
             buoyancy: None,
             external_force_n_m3: None,
             mushy: Some(law),
+            porous: None,
+            porous_endpoint: Vec::new(),
             phase_conduction: None,
             viscous_heating: None,
             unsteady: None,

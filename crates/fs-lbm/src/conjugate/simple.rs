@@ -2381,6 +2381,42 @@ pub(super) fn material_solver<'a>(
     config: &'a SimpleConfig,
     gate: &CancelGate,
 ) -> Result<Solver<'a>, ChtError> {
+    material_solver_with_directional(
+        domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
+        drag_pa_s_m2, None, config, gate,
+    )
+}
+
+/// Same native momentum owner with explicitly grid-aligned Darcy coefficients.
+#[cfg(feature = "enthalpy-coupling")]
+#[allow(clippy::too_many_arguments)]
+pub(in crate::conjugate) fn simple_flow_with_directional_resistance(
+    domain: &VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    drag_pa_s_m2: &[[f64; 3]],
+    force_density_n_m3: Option<&[[f64; 3]]>,
+    config: &SimpleConfig,
+    gate: &CancelGate,
+) -> Result<FvFlow, ChtError> {
+    let solver = material_solver_with_directional(
+        domain, fluid, dynamic_viscosity_pa_s, force_density_n_m3,
+        None, Some(drag_pa_s_m2), config, gate,
+    )?;
+    solve_steady(solver, fluid, config, gate)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn material_solver_with_directional<'a>(
+    domain: &'a VoxelDomain,
+    fluid: &FluidProperties,
+    dynamic_viscosity_pa_s: &[f64],
+    force_density_n_m3: Option<&[[f64; 3]]>,
+    drag_pa_s_m2: Option<&[f64]>,
+    directional_drag_pa_s_m2: Option<&[[f64; 3]]>,
+    config: &'a SimpleConfig,
+    gate: &CancelGate,
+) -> Result<Solver<'a>, ChtError> {
     poll(gate)?;
     admit(domain, fluid, config)?;
     if dynamic_viscosity_pa_s.len() != domain.cell_count()
@@ -2453,6 +2489,31 @@ pub(super) fn material_solver<'a>(
             for (viscous, _) in &mut solver.porous[c] {
                 *viscous += coefficient;
                 finite("simple.material_darcy_resistance", *viscous)?;
+            }
+        }
+    }
+    if let Some(drag) = directional_drag_pa_s_m2 {
+        if drag.len() != domain.cell_count() {
+            return Err(ChtError::InvalidInput {
+                field: "simple.directional_drag_pa_s_m2",
+                reason: "one grid-axis drag vector per voxel is required".into(),
+            });
+        }
+        if solver.porous.is_empty() {
+            solver.porous = vec![[(0.0, 0.0); 3]; domain.cell_count()];
+        }
+        for (c, coefficients) in drag.iter().enumerate() {
+            if c % 256 == 0 { poll(gate)?; }
+            for (axis, &coefficient) in coefficients.iter().enumerate() {
+                finite("simple.directional_drag_pa_s_m2", coefficient)?;
+                if coefficient < 0.0 || (!domain.is_fluid(c) && coefficient != 0.0) {
+                    return Err(ChtError::InvalidInput {
+                        field: "simple.directional_drag_pa_s_m2",
+                        reason: "grid-axis drag must be nonnegative and zero in solid voxels".into(),
+                    });
+                }
+                solver.porous[c][axis].0 += coefficient;
+                finite("simple.material_darcy_resistance", solver.porous[c][axis].0)?;
             }
         }
     }

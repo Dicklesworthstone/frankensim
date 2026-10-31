@@ -2990,6 +2990,47 @@ source retention and transactional support refusal; native execution remains a
 separate verification requirement.
 
 
+### Source-bound orthotropic porous momentum and heat
+
+`MaterialFlowFeedback::with_porous_materials` binds one original
+`PermeabilityTemperatureLaw` per declared porous fluid voxel. Clear-fluid voxels
+are explicit `None` entries. Each source epoch samples the skeleton's intrinsic
+principal permeability in m2 at the same local caloric temperature used by the
+fluid transport source; all other original material conditions, keys and claim
+receipts stay pinned. The existing `IntrinsicPermeability` owns the material
+frame. Exact signed grid axes and axis permutations are admitted; oblique
+tensors refuse because the native momentum stencil has no cross-axis drag.
+Positive finite permeability is required. Zero permeability needs an exact
+velocity constraint and is not replaced by a large finite resistance.
+
+The actual resolved `mu(T)/K_i(T)` coefficients enter the original MAC momentum
+rows and pressure correction. Any declared scalar mushy resistance adds once
+to each grid axis; its existing API is retained. With an admitted quasisteady
+or unsteady heating mode, the same coefficients feed the existing staggered
+Darcy work quadrature and original thermal storage once. Native transient
+kinetic energy and backward-Euler numerical loss retain their separate
+accounts. Without a heating attachment this binding changes momentum only.
+`MaterialFlowEpoch` exposes source-start skeleton receipts and total sourced
+directional drag; `endpoint_porous_samples` retains accepted endpoint sources.
+
+This closure has a fixed, zero-velocity rigid skeleton and fixed geometry,
+linear Darcy drag and the existing density/caloric limits. Fluid and skeleton
+share the registered local temperature; that caloric chart must represent the
+intended participating heat capacity. No second skeleton heat/mass store,
+deformation, saturation, gas-slip closure or moving-frame work is inferred.
+Bindings attach once before the first advance. Source, frame, coefficient,
+endpoint and cancellation checks remain inside the existing coupled candidate
+transaction, including native momentum, heat, clocks and inner history.
+
+Focused tests in `liquid_flow_enthalpy/viscous/porous.rs` independently reduce
+the four-face MAC equations to check directional drag and heat, signed axis
+permutations, exact compatibility with the scalar native APIs, real
+two-interval `mu(T)/K(T)` feedback, and source-domain refusal with retry.
+The supported-freezing regression also requires the original porous receipts
+to match the final temperature after kinetic capture heat. These numerical
+fixtures are authored regressions, not experimental material validation; native
+execution remains a separate verification requirement.
+
 ### Tetrahedral liquid geometry and momentum enter native VOF
 
 `material::free_surface::transfer` connects the same resolved liquid scaling to

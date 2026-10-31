@@ -249,6 +249,7 @@ where
         next.endpoint = next.sample_materials(&final_thermal, &mut check)?;
         admit_density(&next.endpoint, next.density_kg_m3)?;
         next.mushy_drag(&next.endpoint, &mut check)?;
+        next.check_porous_endpoint(&mut check)?;
         next.check_phase_conduction(&next.endpoint, &mut check)?;
         let final_domain = next
             .momentum_domain(&next.endpoint, &mut check)?

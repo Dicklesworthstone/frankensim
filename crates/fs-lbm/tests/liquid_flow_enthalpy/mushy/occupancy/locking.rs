@@ -3,6 +3,11 @@ use super::*;
 use fs_lbm::conjugate::enthalpy::advection::feedback::locking::{
     StationaryPhaseSupport, SupportedFreezingControls,
 };
+use fs_material::porous::permeability::INTRINSIC_PERMEABILITY_DIMS;
+use fs_material::porous::permeability::temperature::PermeabilityTemperatureLaw;
+use fs_material::state_point::{
+    ScalarAdmissibility, ScalarPropertyRequirement, resolve_material_state_point,
+};
 
 fn capture() -> SupportedFreezingControls {
     SupportedFreezingControls {
@@ -253,6 +258,61 @@ fn supported_cavity_freezes_with_native_kinetic_heat_and_frame_angular_impulse_t
     }
     // Changing only the source viscosity changes the retained motion and heat.
     assert!(energies[1] < energies[0]);
+}
+
+#[test]
+fn porous_receipts_follow_the_final_capture_heated_temperature() {
+    let domain = VoxelDomain::new(2, 2, 1, 1.0).unwrap();
+    let ids = std::array::from_fn::<_, 4, _>(|c| Some(CellId(c as u64)));
+    let gate = CancelGate::new();
+    let config = closed();
+    let fluid_card = source(100.0);
+    let curve = chart(&fluid_card);
+    let law = MushyPhaseLaw::try_new_with_immobile_solid(&curve, 1.0, 1.0, 1.0).unwrap();
+    let original = initial(&domain, &curve, [150.0; 4], [-1000.0; 4], &[]);
+    let support = StationaryPhaseSupport::try_new(
+        &original, &[CellId(0), CellId(1), CellId(2), CellId(3)],
+    ).unwrap();
+    let mut k = scalar("skeleton_k", INTRINSIC_PERMEABILITY_DIMS, 0.5);
+    k.validity = ValidityDomain::unconstrained().with_quantity("T", absolute(), 450.0, 600.0);
+    let key = k.key.clone();
+    let mut claims = ClaimSet::new();
+    claims.insert_claim(k).unwrap();
+    let skeleton = card(claims);
+    let point = QueryPoint::new().with_quantity("T", absolute(), 525.0).unwrap();
+    let material = resolve_material_state_point(
+        &skeleton, &point,
+        &[ScalarPropertyRequirement::try_with_key(&key, ScalarAdmissibility::StrictlyPositive).unwrap()],
+        MaterialPropertySelection::SingleClaimOnly,
+    ).unwrap();
+    let porous = PermeabilityTemperatureLaw::try_new(
+        &skeleton, material, [key.clone(), key.clone(), key],
+        [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]], "T",
+    ).unwrap();
+    let flow = MaterialFlowFeedback::try_new_phase(
+        &original, &domain, input(&ids, &curve), &config, (), &gate, 20, &law,
+        |_, cell: &DepositedCell, _| resolve(&fluid_card, &law, cell.specific_h_j_kg),
+    ).unwrap()
+        .with_porous_materials(vec![Some(porous); 4]).unwrap()
+        .with_unsteady_body_force_heating(forces(100.0), controls()).unwrap();
+    let (moving, history, support, _) = flow.advance_with_supported_freezing(
+        &original, &support, 0.01, step(0.01), capture(), || Ok(()),
+    ).unwrap();
+    let coast = history.with_unsteady_body_force_heating(forces(0.0), controls()).unwrap();
+    let (frozen, history, _, report) = coast.advance_with_supported_freezing(
+        &moving, &support, 0.2, step(0.2), capture(), || Ok(()),
+    ).unwrap();
+    assert!(report.capture_heat_j > 0.0);
+    assert_eq!(report.captured_faces, 4);
+    assert_eq!(history.endpoint_porous_samples().len(), 4);
+    for sample in history.endpoint_porous_samples() {
+        // Exact equality distinguishes final capture heat from the earlier
+        // source/thermal endpoint even when the capture energy is very small.
+        assert_eq!(sample.material.material().query().axes()["T"],
+            frozen.temperature_k(sample.cell).unwrap());
+        assert_eq!(sample.material.material().card_identity(), skeleton.content_hash());
+        assert!(report.cell_capture_heat_j[&sample.cell] > 0.0);
+    }
 }
 
 #[test]

@@ -83,6 +83,7 @@ where
         self.endpoint = self.sample_materials(thermal, &mut || Ok(()))?;
         admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
+        self.check_porous_endpoint(&mut || Ok(()))?;
         self.check_phase_conduction(&self.endpoint, &mut || Ok(()))?;
         Ok(self)
     }

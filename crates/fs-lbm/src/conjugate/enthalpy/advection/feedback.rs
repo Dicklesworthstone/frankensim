@@ -41,6 +41,10 @@ pub mod environment;
 /// Material response to the accepted native symmetric-strain invariant.
 pub mod rheology;
 use rheology::RheologyBinding;
+/// Original porous-skeleton sources on this same flow and heat timeline.
+pub mod porous;
+use porous::PorousFlowSample;
+use fs_material::porous::permeability::temperature::PermeabilityTemperatureLaw;
 
 mod viscous;
 use viscous::ViscousHeating;
@@ -142,6 +146,11 @@ pub struct MaterialFlowEpoch<F, T = FluidTransportState> {
     /// Applied isotropic `mu/K(phi(h))` [Pa s/m2], in native voxel order.
     /// None without an explicitly attached stationary mushy closure.
     pub mushy_drag_pa_s_m2: Option<Vec<f64>>,
+    /// Original skeleton sources sampled at the SAME local caloric temperature.
+    pub porous_samples: Vec<PorousFlowSample>,
+    /// Total grid-axis drag, including any scalar mushy contribution, when a
+    /// sourced skeleton is bound. Do not add mushy_drag_pa_s_m2 a second time.
+    pub directional_drag_pa_s_m2: Option<Vec<[f64; 3]>>,
     /// Molecular heat and independent actuator work at this same source epoch.
     /// Present only after explicit quasisteady closed creeping-flow admission.
     /// Transient heat has a separate endpoint unsteady_mechanical_step receipt.
@@ -201,6 +210,8 @@ pub struct MaterialFlowFeedback<'a, F, R, O, T = FluidTransportState> {
     buoyancy: Option<([f64; 3], fn(&F) -> f64)>,
     external_force_n_m3: Option<Vec<[f64; 3]>>,
     mushy: Option<&'a MushyPhaseLaw<'a>>,
+    porous: Option<Vec<Option<PermeabilityTemperatureLaw<'a>>>>,
+    porous_endpoint: Vec<PorousFlowSample>,
     phase_conduction: Option<PhaseConduction<'a>>,
     viscous_heating: Option<ViscousHeating>,
     unsteady: Option<MaterialMomentum>,
@@ -278,6 +289,8 @@ where
             buoyancy: None,
             external_force_n_m3: None,
             mushy: None,
+            porous: None,
+            porous_endpoint: Vec::new(),
             phase_conduction: None,
             viscous_heating: None,
             unsteady: None,
@@ -837,6 +850,8 @@ where
             None
         };
         let mushy_drag_pa_s_m2 = self.mushy_drag(&samples, check)?;
+        let (porous_samples, directional_drag_pa_s_m2) =
+            self.porous_drag(&samples, mushy_drag_pa_s_m2.as_deref(), check)?;
         let (flow, viscous_power) = if let Some(owner) = &self.unsteady {
             // Thermal CFL and advection use the accepted old momentum. Its
             // native update waits for the accepted-duration hook when heating
@@ -852,7 +867,7 @@ where
                 self.viscous_heating.as_ref().map(|_| {
                     immobile_power(
                         domain,
-                        mushy_drag_pa_s_m2.is_some(),
+                        mushy_drag_pa_s_m2.is_some() || directional_drag_pa_s_m2.is_some(),
                         self.external_force_n_m3.is_some(),
                     )
                 }),
@@ -862,7 +877,12 @@ where
                 .as_ref()
                 .ok_or(invalid("mobile cells lack a transport source"))?;
             if let Some(owner) = &self.viscous_heating {
-                let (flow, power) = if let Some(force) = &self.external_force_n_m3 {
+                let (flow, power) = if let Some(drag) = &directional_drag_pa_s_m2 {
+                    crate::conjugate::simple::viscous_heat::creeping_material_heat_with_directional(
+                        domain, fluid, &viscosities, None, Some(drag),
+                        self.external_force_n_m3.as_deref(), self.config, owner.controls, self.gate,
+                    )?
+                } else if let Some(force) = &self.external_force_n_m3 {
                     creeping_flow_with_body_force_heat(
                         domain,
                         fluid,
@@ -894,6 +914,14 @@ where
                     )?
                 };
                 (flow, Some(power))
+            } else if let Some(drag) = &directional_drag_pa_s_m2 {
+                (
+                    crate::conjugate::simple::simple_flow_with_directional_resistance(
+                        domain, fluid, &viscosities, drag,
+                        buoyancy_force_n_m3.as_deref(), self.config, self.gate,
+                    )?,
+                    None,
+                )
             } else if let Some(drag) = &mushy_drag_pa_s_m2 {
                 (
                     simple_flow_with_material_resistance(
@@ -970,6 +998,8 @@ where
             buoyancy_support_reaction_n_m3,
             external_force_n_m3: self.external_force_n_m3.clone(),
             mushy_drag_pa_s_m2,
+            porous_samples,
+            directional_drag_pa_s_m2,
             viscous_power,
         });
         self.solves += usize::from(native_solve);
@@ -1084,6 +1114,7 @@ where
         self.endpoint = self.sample_materials(thermal, &mut || Ok(()))?;
         admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, &mut || Ok(()))?;
+        self.check_porous_endpoint(&mut || Ok(()))?;
         let domain = self.momentum_domain(&self.endpoint, &mut || Ok(()))?;
         self.check_phase_drives(domain.as_ref().unwrap_or(self.domain), &mut || Ok(()))?;
         self.check_phase_conduction(&self.endpoint, &mut || Ok(()))?;
@@ -1106,6 +1137,7 @@ where
         self.endpoint = self.sample_materials(thermal, check)?;
         admit_density(&self.endpoint, self.density_kg_m3)?;
         self.mushy_drag(&self.endpoint, check)?;
+        self.check_porous_endpoint(check)?;
         let domain = self.momentum_domain(&self.endpoint, check)?;
         self.check_phase_drives(domain.as_ref().unwrap_or(self.domain), check)?;
         self.check_phase_conduction(&self.endpoint, check)?;
@@ -1136,6 +1168,7 @@ where
             self.endpoint = self.sample_materials(thermal, check)?;
             admit_density(&self.endpoint, self.density_kg_m3)?;
             self.mushy_drag(&self.endpoint, check)?;
+            self.check_porous_endpoint(check)?;
             self.check_phase_conduction(&self.endpoint, check)?;
         }
         if let Some(owner) = &mut self.viscous_heating {
