@@ -54,39 +54,9 @@ impl<'a> HeatedArticulated<'a> {
         config: StepConfig,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, HeatingError> {
-        checkpoint()?;
-        if bindings.len() != reference.model().link_count() {
-            return Err(HeatingError::Binding("every mechanical link needs exactly one thermal assignment"));
-        }
-        // Every admitted reference link has at least one mass region. Check the
-        // global lower bound before creating the binding lookup or new cells.
-        if bindings.len() > budget.max_cells {
-            return Err(DepositionError::Budget("heated mechanism initialization").into());
-        }
-        let mut by_name = BTreeMap::new();
-        for binding in bindings {
-            checkpoint()?;
-            if binding.link.trim().is_empty() || binding.link.len() > 128 {
-                return Err(HeatingError::Binding("thermal link names must be nonblank and bounded"));
-            }
-            if by_name.insert(binding.link, binding.regions).is_some() {
-                return Err(HeatingError::Binding("duplicate thermal link assignment"));
-            }
-        }
-        let mut regions = Vec::with_capacity(reference.model().link_count());
-        for (link, body) in reference.model().links().iter().zip(reference.bodies()) {
-            checkpoint()?;
-            let mut assigned = by_name.remove(link.name())
-                .ok_or(HeatingError::Binding("missing or foreign thermal link assignment"))?;
-            if assigned.len() != body.regions().len() {
-                return Err(HeatingError::Binding("every mechanical region needs exactly one thermal cell"));
-            }
-            assigned.sort_by_key(|r| r.key);
-            regions.push(assigned);
-        }
-        let inventories: Vec<_> = reference.bodies().iter()
-            .zip(regions.iter().map(Vec::as_slice)).collect();
-        let thermal = initialize(&inventories, events, budget, config, &mut checkpoint)?;
+        let (thermal, regions) = initialize_articulated(
+            reference, bindings, events, budget, config, &mut checkpoint,
+        )?;
         let configuration =
             configure_mechanism(reference, &regions, &thermal, &[], &mut checkpoint)?;
         checkpoint()?;
@@ -221,4 +191,50 @@ fn configure_mechanism<'a>(
     );
     if let Some(e) = error { return Err(e.into()); }
     Ok(configuration?)
+}
+
+// Shared source-bound reference inventory for expanding and prescribed-rigid
+// consumers. Expansion is a separate owner and is not inferred here.
+pub(crate) fn initialize_articulated<'a>(
+    reference: &'a ResolvedArticulated,
+    bindings: Vec<LinkHeating<'a>>,
+    events: Vec<TimedEvent>,
+    budget: DepositionBudget,
+    config: StepConfig,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<(DepositionSimulation<'a>, Vec<Vec<ThermalRegion<'a>>>), HeatingError> {
+    checkpoint()?;
+    if bindings.len() != reference.model().link_count() {
+        return Err(HeatingError::Binding("every mechanical link needs exactly one thermal assignment"));
+    }
+    // Every admitted reference link has at least one mass region. Check the
+    // global lower bound before creating the binding lookup or new cells.
+    if bindings.len() > budget.max_cells {
+        return Err(DepositionError::Budget("heated mechanism initialization").into());
+    }
+    let mut by_name = BTreeMap::new();
+    for binding in bindings {
+        checkpoint()?;
+        if binding.link.trim().is_empty() || binding.link.len() > 128 {
+            return Err(HeatingError::Binding("thermal link names must be nonblank and bounded"));
+        }
+        if by_name.insert(binding.link, binding.regions).is_some() {
+            return Err(HeatingError::Binding("duplicate thermal link assignment"));
+        }
+    }
+    let mut regions = Vec::with_capacity(reference.model().link_count());
+    for (link, body) in reference.model().links().iter().zip(reference.bodies()) {
+        checkpoint()?;
+        let mut assigned = by_name.remove(link.name())
+            .ok_or(HeatingError::Binding("missing or foreign thermal link assignment"))?;
+        if assigned.len() != body.regions().len() {
+            return Err(HeatingError::Binding("every mechanical region needs exactly one thermal cell"));
+        }
+        assigned.sort_by_key(|r| r.key);
+        regions.push(assigned);
+    }
+    let inventories: Vec<_> = reference.bodies().iter()
+        .zip(regions.iter().map(Vec::as_slice)).collect();
+    let thermal = initialize(&inventories, events, budget, config, checkpoint)?;
+    Ok((thermal, regions))
 }

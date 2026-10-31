@@ -697,10 +697,43 @@ parameter work under a caller budget.
 
 Source frequency applicability remains explicit; unowned gap/strain/rate/field
 restrictions refuse. This is a massless bilateral small-local-rotation layer with
-independent material axes, without debonding, unilateral contact, a heat store or
-automatic thermoelastic feedback. Accepted-sample admission does not enclose the
+independent material axes, without debonding or unilateral contact. The standalone
+binding does not own a heat store; the finite thermal owner below supplies explicit
+temperature feedback. Accepted-sample admission does not enclose the
 continuous trajectory or establish the full excitation/modal bandwidth. Three
 integration tests cover independent surface integrals, native implicit material
 substitutions, frame/work balance, midpoint/endpoint refusal and atomic rebinding.
 Focused formatting and whitespace checks pass; native execution remains unverified
 after a single-threaded metadata-only check was SIGKILLed in unchanged asupersync.
+
+### Finite heat and continuing bushing feedback
+
+`attachments::thermal::HeatedBushings` connects that same implicit motion owner
+to the existing finite enthalpy timeline. Shared articulated initialization checks
+each original material/card, selected density, non-temperature source context,
+initial temperature and reference volume before compiling the fixed mass inventory.
+
+Every actual event/CFL-clipped thermal interval prepares one simultaneous native
+bushing solve. Each binding's accepted midpoint damping loss is partitioned into
+its explicitly named original A/B region cells, checked against the native loss,
+and deposited exactly once. Other axial connections refuse without an explicit
+heat route. The thermal endpoint supplies the actual ordered caloric temperatures
+to `ThermalInterfacePoint`, then all three original stiffness/viscosity pairs
+refresh through `MaterialBushing::rebind_at_state` for the next interval.
+
+Signed elastic storage change at the unchanged endpoint is externally supplied
+parameter work, separately budgeted by the sum of its absolute values. It is
+never deposited as dissipation; no reciprocal thermoelastic law is invented.
+The report separates authored heat from damping transfer and gates total
+kinetic + elastic + caloric energy against external work and heat. Native solver
+defects remain numerical error. Any source, phase, work, energy or cancellation
+failure discards both candidate histories.
+
+This is a first-order thermal/mechanical split on prescribed rigid carrier
+geometry and fixed masses. Fully solid source support, original frequency
+applicability and attachment bounds remain required. Expansion, latent-phase
+mechanics and a time-refinement certificate are not supplied by this owner.
+Two native regression groups cover independent midpoint motion/loss, unequal
+finite heat capacities, external heating, actual paired/mean temperatures,
+all-axis source refresh, nonzero strained-spring parameter work, continuing
+histories and late rollback. Their execution remains unverified in this session.

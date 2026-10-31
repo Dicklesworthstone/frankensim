@@ -8,9 +8,13 @@
 //!
 //! This is a bilateral, massless, small-local-rotation layer approximation.
 //! Common rigid motion can be large. There is no debonding, unilateral contact,
-//! cross-axis constitutive coupling, heat store, or automatic thermal feedback.
+//! cross-axis constitutive coupling. The thermal module explicitly connects
+//! finite caloric storage and temperature feedback on prescribed rigid carriers.
 //! The native bushing owns the work-conjugate finite-rotation force map and
 //! explicit/implicit dynamics. Source rebinding reports its actual storage work.
+
+/// Continuing native motion, finite heat and source-temperature feedback.
+pub mod thermal;
 
 use crate::articulated::ResolvedArticulated;
 use fs_ga::{GaError, Se3, Vec3};

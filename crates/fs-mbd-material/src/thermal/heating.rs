@@ -37,6 +37,7 @@ pub mod motion;
 mod mechanism;
 mod source;
 pub use mechanism::{HeatedArticulated, LinkHeating};
+pub(crate) use mechanism::initialize_articulated;
 pub use mechanism::motion as articulated_motion;
 
 /// Thermal description for one complete material region; no hand-entered mass.
