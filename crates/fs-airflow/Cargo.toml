@@ -34,6 +34,8 @@ fs-ivl = { path = "../fs-ivl" }
 # transfer that replaces the Refine1d demonstrator.
 fs-ladder = { path = "../fs-ladder" }
 fs-math = { path = "../fs-math" }
+# Native energy-audited fluid inertance; no duplicate momentum integrator.
+fs-phs = { path = "../fs-phs" }
 # One resolved medium supplies hydraulics, convection and transported heat.
 fs-material = { path = "../fs-material" }
 fs-qty = { path = "../fs-qty" }
@@ -51,8 +53,6 @@ fs-feec = { path = "../fs-feec" }
 fs-thermochem = { path = "../fs-thermochem" }
 # Reuse the native graph's cell identities and signed mass-flow connections.
 fs-thermal = { path = "../fs-thermal" }
-# Exercise convection on the original coupled electrical/thermal/gas network.
-fs-phs = { path = "../fs-phs" }
 # Test-only authority for the declared base-to-fin bondline cards in the
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }

@@ -18,6 +18,8 @@ pub mod pressure;
 pub mod recirculation;
 /// Joint source-enthalpy storage in the solid and recirculating coolant.
 pub mod stored_solid;
+/// Finite pipe enthalpy and native inertial circulation through rest/reversal.
+pub mod transient;
 
 use fs_convection::{CorrelationId, CorrelationRobinBoundary, NusseltEvaluation, ThermalDirection};
 use fs_exec::Cx;

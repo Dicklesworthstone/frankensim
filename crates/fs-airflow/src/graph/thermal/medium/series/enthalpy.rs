@@ -257,34 +257,41 @@ impl<'a> MaterialFlowPath<'a> {
         let FrozenFlowMedium::Liquid(liquid) = self.medium else {
             return Err(LiquidEnthalpyError::Invalid("a solid-liquid caloric chart cannot represent a gas"));
         };
-        let material = liquid.material();
-        let curve = source.curve();
-        if curve.material_card_identity() != material.card_identity()
-            || curve.knots().iter().any(|k| k.liquid_mass_fraction != 1.0)
-            || curve.knots().windows(2).any(|k| k[1].temperature_k <= k[0].temperature_k)
-        {
-            return Err(LiquidEnthalpyError::Invalid("caloric chart must be fully liquid and belong to the flow material card"));
-        }
-        for receipt in source.receipts() {
-            checkpoint(cx)?;
-            if receipt.property != DENSITY_PROPERTY && receipt.property != SPECIFIC_HEAT_CAPACITY_PROPERTY {
-                return Err(LiquidEnthalpyError::Invalid("caloric chart uses different source property keys"));
-            }
-            let property = material.property(&receipt.property)
-                .ok_or(LiquidEnthalpyError::Invalid("flow material lacks the caloric property"))?;
-            let original = &property.answer().receipt;
-            if receipt.selected != original.selected
-                || receipt.axis_quantities != original.axis_quantities
-                || !receipt.query_point.iter().any(|(name, _)| name.as_str() == axis)
-                || !original.query_point.iter().any(|(name, _)| name.as_str() == axis)
-                || !receipt.query_point.iter().filter(|(name, _)| name.as_str() != axis)
-                    .eq(original.query_point.iter().filter(|(name, _)| name.as_str() != axis))
-            {
-                return Err(LiquidEnthalpyError::Invalid("caloric and transport sources must select identical claims and nonthermal query conditions"));
-            }
-        }
-        Ok(())
+        admit_liquid_caloric_source(cx, liquid, source, axis)
     }
+}
+
+fn admit_liquid_caloric_source(
+    cx: &Cx<'_>, liquid: &fs_material::liquid::ResolvedLiquidState,
+    source: &ResolvedHeatCapacityCurve, axis: &str,
+) -> Result<(), LiquidEnthalpyError> {
+    let material = liquid.material();
+    let curve = source.curve();
+    if curve.material_card_identity() != material.card_identity()
+        || curve.knots().iter().any(|k| k.liquid_mass_fraction != 1.0)
+        || curve.knots().windows(2).any(|k| k[1].temperature_k <= k[0].temperature_k)
+    {
+        return Err(LiquidEnthalpyError::Invalid("caloric chart must be fully liquid and belong to the flow material card"));
+    }
+    for receipt in source.receipts() {
+        checkpoint(cx)?;
+        if receipt.property != DENSITY_PROPERTY && receipt.property != SPECIFIC_HEAT_CAPACITY_PROPERTY {
+            return Err(LiquidEnthalpyError::Invalid("caloric chart uses different source property keys"));
+        }
+        let property = material.property(&receipt.property)
+            .ok_or(LiquidEnthalpyError::Invalid("flow material lacks the caloric property"))?;
+        let original = &property.answer().receipt;
+        if receipt.selected != original.selected
+            || receipt.axis_quantities != original.axis_quantities
+            || !receipt.query_point.iter().any(|(name, _)| name.as_str() == axis)
+            || !original.query_point.iter().any(|(name, _)| name.as_str() == axis)
+            || !receipt.query_point.iter().filter(|(name, _)| name.as_str() != axis)
+                .eq(original.query_point.iter().filter(|(name, _)| name.as_str() != axis))
+        {
+            return Err(LiquidEnthalpyError::Invalid("caloric and transport sources must select identical claims and nonthermal query conditions"));
+        }
+    }
+    Ok(())
 }
 
 fn checkpoint(cx: &Cx<'_>) -> Result<(), LiquidEnthalpyError> {

@@ -1,5 +1,56 @@
 # CONTRACT: fs-airflow
 
+## Finite pipe momentum and thermal inventory
+
+`LiquidHeatPath` remains a quasi-steady, zero-pipe-storage march. The separate
+`feedback::transient::FiniteLiquidLoop` binds actual native thermal cells and
+their original liquid caloric/transport claims to the existing PHS inertance.
+It admits a closed connected path, fixed reference density rho0, V=A*length and
+M=rho0*V. Temperature-dependent source density supplies only gravity; source
+viscosity supplies the existing loss law, with rho0 used for continuity, loss
+inertia and pipe momentum. Every trial enforces the declared density-departure
+limit and original source/Reynolds support, including Reynolds zero.
+
+The original PHS discrete-gradient step advances momentum with
+L=sum(rho0*length/area), H=p²/(2L). The original thermal backward-Euler residual
+and signed upwind `Advected` transfers evolve the same finite pipe enthalpy.
+Newton--Krylov closes their common endpoint; it does not own another physical
+timeline. Heat transport uses the actual PHS step-average volume flow, including
+zero and negative values. Its sign may differ from endpoint velocity during a
+reversing step. Original thermal sources, links and boundaries remain active at
+rest; no singular positive-flow correlation or invented zero-flow film is used.
+
+Acceptance gates original-law impulse, kinetic-work, every-cell thermal and
+total thermal residuals. The PHS coefficient trial is checked again against the
+original nonlinear losses at its actual resulting flow. Source, callback, work,
+solver or cancellation refusal publishes neither thermal state nor momentum.
+Exact original caloric-object binding, geometry, mass and accepted time are
+retained. Pure heat callbacks may be evaluated repeatedly; only their accepted
+payload is returned. A shared budget counts all residual and derivative trials.
+
+This is an explicit low-Eckert Boussinesq model, not a compressible total-energy
+closure. Mechanical and thermal accounts stay separate. Hydraulic loss and
+absolute local density-anomaly gravity exchange are bounded together in watts
+and step joules using max(|Q_old|, |Q_new|, |Q_average|), without cancellation or
+invented pressure-work heating. The original monotone loss law is evaluated at
+that envelope speed with the same endpoint-held source states, also admitting
+its Reynolds support. A symmetric reversal cannot hide omitted work in zero
+average flow. These bounds describe the admitted discrete interval/coefficient
+approximation, not unresolved continuous-time extrema or temporal accuracy.
+Envelope losses stay separate from native signed-average discrete work. The
+native kinetic receipt reports pressure supply, buoyancy work and dissipation;
+the thermal receipt reports only its actual authored heat. A dt*R/L limit at
+most two prevents an unforced midpoint-drag sign flip. Algebraic acceptance
+does not certify time or spatial accuracy, crossing-event timing, boiling,
+turbulence, evolving volume or a wall-film correlation.
+
+Tests in `tests/liquid_pressure/transient.rs` use independent cyclic
+finite-volume formulas and scalar inertance balances for heating from rest,
+finite pipe thermal memory, step-average versus endpoint direction, signed
+reversal, original viscosity response, a symmetric-reversal omitted-work cap,
+and atomic failure/approximation limits.
+
+
 `MaterialFlowPath::march_liquid_enthalpy_with_dissipation` integrates the original
 resistance owner's `dp*Q` as uniformly distributed fluid heat in each region,
 using the existing piecewise caloric exponential march. It requires constant
