@@ -642,6 +642,43 @@ that physical correspondence. Focused tests in `heating_loads` exercise analytic
 off-centre work/momentum, continued heating, source-only density and expansion
 changes, and atomic refusal. Native execution is reported separately.
 
+
+## Conserved finite-bath buoyancy
+
+`hydrostatic::FiniteHydrostaticTank` uses the original non-overlapping
+`DisplacementMesh` tetrahedral clipping and source fluid snapshot to solve
+`A*h - V_sub(h,pose) = V_liquid` for a rectangular tank's free surface.
+Liquid inventory and source-derived mass stay fixed as the body rises, sinks,
+rotates or expands through the existing `HydrostaticReservoir` boundary.
+A bounded safeguarded secant reports its actual volume defect and work count;
+dry/full queries reuse cached complete-mesh moments. No wet-vertex fractions,
+body-density substitutions or implicit overflow sources participate.
+
+The original displaced-volume centroid supplies the force and torque. The
+pressure potential is the finite liquid's gravitational-energy change from
+the empty-tank level,
+`rho*|g|*(integral_sub(h-z)dV - V_sub^2/(2*A))`; adding the infinite-reservoir
+potential again would double count storage. Native endpoint-load Verlet and
+its absolute energy-defect gate therefore include the waterline's response.
+This is instantaneous hydrostatic equilibration: fluid inertia, sloshing,
+hydrodynamic drag, added mass and tank motion are outside this model.
+
+Admission requires one homogeneous incompressible liquid, a stationary
+rectangular tank aligned with gravity, and a caller-admitted non-overlapping
+displacement envelope strictly above the floor and inside the side walls.
+The body's top may emerge above the rim. A bounding footprint preserves
+positive open waterplane area; wall/floor contact, a sealing piston,
+overflow or an unmet volume/evaluation budget refuse without a candidate.
+No normal moving-wall or resolved free-surface capability is implied.
+
+G1/G3/G4 definitions in `tests/hydrostatic/finite_tank.rs` exercise an
+independently integrated bath energy, dry/full/partial displacement, force and
+finite-rotation torque as potential derivatives, arbitrary world frames,
+finite-bath heave on the original time integrator, overflow and cancellation.
+The heave reference is `k=rho*g*a*A/(A-a)`, which differs from the prescribed
+infinite-reservoir stiffness `rho*g*a`. These are code regression definitions,
+not a claim of executed or experimentally validated sloshing dynamics.
+
 ## Buoyancy through gas and layered liquid reservoirs
 
 `hydrostatic::LayeredHydrostaticMedium` accepts an optional upper

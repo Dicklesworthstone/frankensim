@@ -4,6 +4,8 @@ mod common;
 mod motion;
 #[path = "hydrostatic/layered.rs"]
 mod layered;
+#[path = "hydrostatic/finite_tank.rs"]
+mod finite_tank;
 use common::{close, density_card, point};
 use fs_ga::{Se3, So3, So3Tangent, Twist, Vec3};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};

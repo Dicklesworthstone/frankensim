@@ -107,6 +107,9 @@ pub struct DisplacedVolume {
     pub(super) depth_integral_m4: f64,
 }
 impl DisplacedVolume {
+    pub(super) const fn dry() -> Self {
+        Self { volume_m3: 0.0, centroid_body_m: None, depth_integral_m4: 0.0 }
+    }
     /// Immersed volume [m3]; exactly zero for a dry envelope.
     pub const fn volume_m3(&self) -> f64 { self.volume_m3 }
     /// Geometric centroid in the ORIGINAL geometry frame; None when dry.

@@ -12,7 +12,11 @@
 //! In the single-medium model gauge pressure is zero
 //! on the plane; uniform exterior pressure cancels on a closed envelope. No
 //! waves, drag, added mass, flooding, capillarity, compressible stratification
-//! or finite-container reaction is modeled. A gas snapshot is admissible only
+//! or finite-container reaction is modeled by those prescribed reservoirs.
+//! `FiniteHydrostaticTank` instead solves the waterline of a conserved finite
+//! liquid inventory and supplies its gravitational potential to the same
+//! mechanical owner. It remains a quasistatic-pressure model without waves.
+//! A gas snapshot is admissible only
 //! as a caller-chosen local constant-density approximation, not its full EOS.
 //!
 //! Reference: R. Fitzpatrick, Fluid Mechanics, Hydrostatics, sections
@@ -22,6 +26,11 @@
 mod geometry;
 mod layered;
 mod step;
+mod finite_tank;
+pub use finite_tank::{
+    FiniteHydrostaticTank, FiniteTankControls, FiniteTankFill, HydrostaticTankGeometry,
+    MAX_TANK_VOLUME_EVALUATIONS,
+};
 pub use step::{HydrostaticStep, HydrostaticStepControls, HydrostaticStepError};
 pub use geometry::{DisplacedVolume, DisplacementMesh, MAX_DISPLACEMENT_CELLS};
 pub use layered::{HydrostaticLayer, LayeredHydrostaticMedium, MAX_HYDROSTATIC_LAYERS};
@@ -46,6 +55,20 @@ pub enum HydrostaticError {
     Principal(PrincipalFrameError),
     /// The existing rigid-body dynamics owner refused an operation.
     Dynamics(DynamicsError),
+    /// Conserved liquid and displaced volume cannot fit below the finite tank rim.
+    TankOverflow {
+        /// Excess inventory at the highest admitted surface [m3]. No spill is invented.
+        excess_volume_m3: f64,
+    },
+    /// The bounded finite-tank solve did not meet its absolute volume tolerance.
+    TankVolumeNotConverged {
+        /// Best signed residual A*h - V_sub - V_liquid [m3].
+        defect_m3: f64,
+        /// Requested absolute volume allowance [m3].
+        maximum_m3: f64,
+        /// Actual number of height evaluations.
+        evaluations: usize,
+    },
     /// Cancellation observed between bounded cell operations or before return.
     Cancelled,
 }
@@ -211,6 +234,8 @@ impl HydrostaticLoad {
     pub const fn wrench(&self) -> Wrench { self.wrench }
     /// Hydrostatic reservoir displacement potential [J]; zero when dry.
     /// With an overlying fluid, the reference plane fixes a signed datum.
+    /// A finite tank uses the actual liquid's gravitational-energy change
+    /// from its empty-tank level, including the solved waterline rise.
     pub const fn pressure_potential_j(&self) -> f64 { self.pressure_potential_j }
 }
 
