@@ -334,17 +334,24 @@ impl MoistureCartesian {
                     .chain(reservoir.into_iter().flatten())
                     .fold(0.0, f64::max);
                 let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
-                for (&old, &new) in self.moisture.iter().zip(&solution.x) {
+                for (cell, (&old, &new)) in self.moisture.iter().zip(&solution.x).enumerate() {
                     if !new.is_finite()
                         || new < 0.0
                         || new > self.geometry.maximum_moisture
                         || new < lower - roundoff
                         || new > upper + roundoff
-                        || (new - old).abs() > config.maximum_content_increment
                     {
                         return Err(MoistureError::Invalid(
-                            "Cartesian candidate violates maximum principle, domain or increment bound",
+                            "Cartesian candidate violates maximum principle or domain",
                         ));
+                    }
+                    let increment = (new - old).abs();
+                    if increment > config.maximum_content_increment {
+                        return Err(MoistureError::ContentIncrement {
+                            cell,
+                            increment,
+                            maximum: config.maximum_content_increment,
+                        });
                     }
                 }
                 if !positive(self.dry_mass_kg() + water_after) {

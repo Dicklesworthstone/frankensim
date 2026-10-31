@@ -19,6 +19,8 @@
 //! inventory against this same diffusion owner. The plate consumer retains the
 //! fixed geometry and rebuilds actual stiffness AND wet inertia.
 
+/// Whole-duration temporal accuracy around the original conservative endpoints.
+pub mod adaptive;
 /// Finite vapor inventory, source sorption and the original diffusion endpoint.
 pub mod atmosphere;
 mod binding;
@@ -88,6 +90,12 @@ pub enum MoistureError {
         linear_iterations: usize,
         relative_residual: f64,
         water_balance_residual_kg: f64,
+    },
+    /// A valid cell endpoint exceeded the caller's numerical change limit.
+    ContentIncrement {
+        cell: usize,
+        increment: f64,
+        maximum: f64,
     },
     /// Sum of stored water did not match the two measured boundary transfers.
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
@@ -556,17 +564,24 @@ impl MoistureSlab {
             .chain(surface.into_iter().flatten())
             .fold(0.0, f64::max);
         let roundoff = 128.0 * f64::EPSILON * upper.max(1.0);
-        for (&old, &new) in self.moisture.iter().zip(&solution.x) {
+        for (cell, (&old, &new)) in self.moisture.iter().zip(&solution.x).enumerate() {
             if !new.is_finite()
                 || new < 0.0
                 || new > self.geometry.maximum_moisture
                 || new < lower - roundoff
                 || new > upper + roundoff
-                || (new - old).abs() > config.maximum_content_increment
             {
                 return Err(MoistureError::Invalid(
-                    "candidate violates moisture maximum principle, domain or increment bound",
+                    "candidate violates moisture maximum principle or domain",
                 ));
+            }
+            let increment = (new - old).abs();
+            if increment > config.maximum_content_increment {
+                return Err(MoistureError::ContentIncrement {
+                    cell,
+                    increment,
+                    maximum: config.maximum_content_increment,
+                });
             }
         }
         let mut actual_surface = [None, None];

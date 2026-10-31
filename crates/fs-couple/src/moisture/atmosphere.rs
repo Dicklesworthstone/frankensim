@@ -391,7 +391,45 @@ impl FiniteMoistureAtmosphere {
         &self.gas
     }
     pub fn relative_humidity(&self) -> Result<f64, AtmosphereMoistureError> {
-        Ok(self.inventory()?[self.water] / self.saturation_mass_kg)
+        Ok(self.vapor_mass_kg()? / self.saturation_mass_kg)
+    }
+    /// Actual water-vapor inventory in the original gas owner's catalog [kg].
+    pub fn vapor_mass_kg(&self) -> Result<f64, AtmosphereMoistureError> {
+        Ok(self.inventory()?[self.water])
+    }
+
+    pub(super) fn exchange_residuals(
+        &self,
+        next: &Self,
+        water_change: f64,
+    ) -> Result<[f64; 3], AtmosphereMoistureError> {
+        self.exchange_residuals_from(next, &self.inventory()?, &next.inventory()?, water_change)
+    }
+    fn exchange_residuals_from(
+        &self,
+        next: &Self,
+        old: &[f64],
+        new: &[f64],
+        water_change: f64,
+    ) -> Result<[f64; 3], AtmosphereMoistureError> {
+        let water = new[self.water] - old[self.water] + water_change;
+        let carrier = new
+            .iter()
+            .zip(old)
+            .enumerate()
+            .filter(|(i, _)| *i != self.water)
+            .map(|(_, (a, b))| (a - b).abs())
+            .fold(0.0, f64::max);
+        let total = next.gas.mass_kg() - self.gas.mass_kg() + water_change;
+        if new
+            .iter()
+            .zip(old)
+            .enumerate()
+            .any(|(i, (a, b))| i != self.water && *b > 0.0 && !positive(*a))
+        {
+            return Err(invalid("accepted exchange lost a noncondensing species"));
+        }
+        Ok([water, carrier, total])
     }
     /// Actual component masses in the retained catalog's canonical order.
     fn inventory(&self) -> Result<Vec<f64>, AtmosphereMoistureError> {
@@ -787,20 +825,12 @@ impl FiniteMoistureAtmosphere {
             self.endpoint(self.saturation_mass_kg * rh, &old_inventory)?
         };
         let new_inventory = atmosphere.inventory()?;
-        let residual = new_inventory[self.water] - old_inventory[self.water] + water_to_solids_kg;
-        let carrier_residual = new_inventory
-            .iter()
-            .zip(&old_inventory)
-            .enumerate()
-            .filter(|(i, _)| *i != self.water)
-            .map(|(_, (a, b))| (a - b).abs())
-            .fold(0.0, f64::max);
-        let mass_residual = atmosphere.gas.mass_kg() - self.gas.mass_kg() + water_to_solids_kg;
-        let lost_species = new_inventory
-            .iter()
-            .zip(&old_inventory)
-            .enumerate()
-            .any(|(i, (a, b))| i != self.water && *b > 0.0 && !positive(*a));
+        let [residual, carrier_residual, mass_residual] = self.exchange_residuals_from(
+            &atmosphere,
+            &old_inventory,
+            &new_inventory,
+            water_to_solids_kg,
+        )?;
         for error in [residual, carrier_residual, mass_residual] {
             if !error.is_finite() || error.abs() > controls.mass_tolerance_kg {
                 return Err(AtmosphereMoistureError::MassBalance {
@@ -808,9 +838,6 @@ impl FiniteMoistureAtmosphere {
                     tolerance_kg: controls.mass_tolerance_kg,
                 });
             }
-        }
-        if lost_species {
-            return Err(invalid("accepted exchange lost a noncondensing species"));
         }
         let gas_internal_energy_change_j = atmosphere.gas.mass_kg()
             * atmosphere.gas.state().specific_internal_energy_j_kg()

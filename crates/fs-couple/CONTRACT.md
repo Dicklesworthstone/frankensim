@@ -18166,6 +18166,44 @@ desorption with finite/zero surface exchange, and manufactured solution uptake
 and desorption reaching native 3D swelling. These remain numerical/source
 verification fixtures, not experimental moisture-material validation.
 
+### Whole-duration adaptive moisture evolution
+
+`moisture::adaptive` adds `MoistureSlab::advance_adaptive_to` and
+`MoistureCartesian::advance_adaptive_to`, plus corresponding
+`FiniteMoistureAtmosphere` / `FiniteMoistureSolution` slab and Cartesian
+methods. One private controller compares a native full interval with two
+native half intervals and accepts only the two-half endpoint. It independently
+checks every local dry-basis content and, where present, RH/activity and actual
+external water mass. The relative allowance scales changes from the accepted
+state; large static water inventories cannot hide a small unresolved transfer.
+Unequal representable half intervals retain their first-order error factor.
+The estimate is local and asymptotic, not a global accuracy certificate.
+
+Only accepted fine fluxes enter compensated physical-face accounts. A single
+fixed whole-duration tolerance checks original-to-final local bound-water
+change against those transfers and, for finite reservoirs, against external
+water depletion. Finite vapor independently rechecks whole-window total mass
+and each noncondensing carrier with the original gas inventory owner. These
+budgets are never multiplied by the accepted step count. The original native
+step budgets, source admission and source-selected endpoint diffusivity remain
+active at every probe. The temporal work ceiling counts every full/half native
+field or coupled-reservoir call, including rejected/failed probes; the original
+bounded scalar, nonlinear and linear controls also apply within each call.
+Only typed convergence or content-increment refusals and temporal error permit
+shorter retries. Source/domain, conservation and cancellation errors remain
+terminal. No failure returns even a successful internal physical prefix.
+
+Reports retain the complete accepted transfer totals, original/final water and
+RH/activity, work counts, step sizes and the last native source receipt, without
+retaining an unbounded source-state history. Boundaries and source temperature
+stay fixed during a call; environmental changes require explicit interval
+breaks. Native mechanics consume the final spatial field as before. This adds
+neither thermal/sorption energy coupling nor time-varying source extrapolation.
+Authored regressions exercise continuous-time discrete diffusion decay and
+refinement, Cartesian/slab reduction, finite-vapor two-store relaxation,
+constant-activity finite-solution water loss, typed increment refinement,
+domain/cancellation refusal and a late work failure with no partial result.
+
 ## Complete modal reflection admission
 
 MatrixFirLine's wall-normalized pressure waves all use the same positive real

@@ -30,6 +30,8 @@ mod solution;
 mod implicit;
 #[path = "moisture/cartesian.rs"]
 mod cartesian;
+#[path = "moisture/adaptive.rs"]
+mod adaptive;
 
 fn qty(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
@@ -511,4 +513,3 @@ fn cancelled_transport_cannot_publish_a_moisture_or_mechanical_endpoint() {
         assert_eq!(old.moisture(), &[0.1; 4]);
     });
 }
-
