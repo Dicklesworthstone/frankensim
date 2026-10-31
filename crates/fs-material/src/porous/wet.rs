@@ -34,6 +34,8 @@
 //! law's explicit responsibility. No intrinsic permeability is inferred from
 //! porosity or radius; the original skeleton permeability remains independent.
 
+pub mod liquid;
+
 use crate::MaterialError;
 use fs_math::det;
 use std::sync::Arc;

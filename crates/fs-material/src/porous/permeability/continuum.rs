@@ -3,12 +3,14 @@
 //! This view adds no transport law. The consuming hydraulic owner supplies its
 //! actual fluid density and viscosity and retains its source-backed state. The
 //! original rigid skeleton, layer order, tensor axes and source support remain
-//! borrowed here. A single fluid occupies the connected pores: calibrated gas
-//! slip and gas-only relative mobility cannot become liquid properties.
+//! borrowed here. Full single-fluid occupation or an explicitly calibrated frozen
+//! liquid saturation is supported; gas slip and gas-only relative mobility
+//! cannot become liquid properties.
 
 use super::{DarcyGasBarrier, MaterialError, PorousGasSupport, invalid, positive};
+use crate::porous::wet::liquid::WetPoreLiquidState;
 
-/// A checked, borrowed view of the original no-slip, single-fluid pore geometry.
+/// A checked, borrowed view of the original no-slip continuum pore geometry.
 ///
 /// The original gas barrier also owns the fluid-independent intrinsic tensors
 /// and series geometry. This view reuses those exact data without constructing
@@ -19,6 +21,9 @@ use super::{DarcyGasBarrier, MaterialError, PorousGasSupport, invalid, positive}
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ContinuumDarcyGeometry<'a> {
     barrier: &'a DarcyGasBarrier,
+    liquid_states: Option<&'a [WetPoreLiquidState]>,
+    geometric_resistance_per_m: Option<f64>,
+    support: PorousGasSupport,
 }
 
 impl DarcyGasBarrier {
@@ -35,24 +40,100 @@ impl DarcyGasBarrier {
                 "continuum geometry requires intrinsic permeability without gas slip or gas-only wet mobility",
             ));
         }
-        Ok(ContinuumDarcyGeometry { barrier: self })
+        Ok(ContinuumDarcyGeometry {
+            barrier: self,
+            liquid_states: None,
+            geometric_resistance_per_m: self.geometric_resistance_per_m,
+            support: self.support,
+        })
     }
 }
 
 impl<'a> ContinuumDarcyGeometry<'a> {
+    /// Bind one explicitly calibrated liquid state to each original layer.
+    /// The scalar kr_l changes liquid mobility, not intrinsic k or its axes.
+    /// Rebinding starts from the original geometry, so updates never compound.
+    /// No capillary pressure is added to hydraulic drag; this frozen snapshot
+    /// neither solves gas pressure nor advances saturation or liquid storage.
+    ///
+    /// # Errors
+    /// Refuses an incomplete state list, disjoint support, unrepresentable
+    /// positive resistance, or any positive original Forchheimer calibration:
+    /// a fully filled inertial law does not qualify partial-saturation inertia.
+    pub fn with_liquid_states(
+        self,
+        states: &'a [WetPoreLiquidState],
+    ) -> Result<Self, MaterialError> {
+        if states.len() != self.barrier.layers.len() {
+            return Err(invalid(
+                "liquid mobility requires exactly one state per original porous layer",
+            ));
+        }
+        if self.barrier.inertial_geometric_resistance() != 0.0 {
+            return Err(invalid(
+                "original Forchheimer inertia is not calibrated for prescribed liquid saturation",
+            ));
+        }
+        let mut support = self.barrier.support;
+        let mut sealed = self.barrier.geometric_resistance_per_m.is_none();
+        for state in states {
+            let active = state.support().flow_support();
+            support.temperature_k = (
+                support.temperature_k.0.max(active.temperature_k.0),
+                support.temperature_k.1.min(active.temperature_k.1),
+            );
+            support.pressure_pa = (
+                support.pressure_pa.0.max(active.pressure_pa.0),
+                support.pressure_pa.1.min(active.pressure_pa.1),
+            );
+            support.maximum_superficial_speed_m_s = support
+                .maximum_superficial_speed_m_s
+                .min(active.maximum_superficial_speed_m_s);
+            sealed |= state.liquid_relative_permeability() == 0.0;
+        }
+        support.validate()?;
+        let mut resistance = 0.0;
+        if !sealed {
+            for (layer, state) in self.barrier.layers.iter().zip(states) {
+                let intrinsic = self
+                    .barrier
+                    .flow_constraint
+                    .permeability(&layer.permeability, self.barrier.normal)?;
+                let part = (layer.thickness_m / intrinsic) / state.liquid_relative_permeability();
+                if !positive(part) || !positive(resistance + part) {
+                    return Err(invalid(
+                        "positive unsaturated liquid series resistance is unrepresentable",
+                    ));
+                }
+                resistance += part;
+            }
+        }
+        Ok(Self {
+            barrier: self.barrier,
+            liquid_states: Some(states),
+            geometric_resistance_per_m: if sealed { None } else { Some(resistance) },
+            support,
+        })
+    }
+
+    /// Frozen liquid samples with their complete retained calibrations, if any.
+    pub const fn liquid_states(&self) -> Option<&'a [WetPoreLiquidState]> {
+        self.liquid_states
+    }
     /// Original layers, tensor frames, source receipts and declared support.
     pub const fn barrier(&self) -> &'a DarcyGasBarrier {
         self.barrier
     }
 
-    /// Original sum(L/k_effective), in 1/m. None means an exactly sealed layer.
+    /// Sum(L/(k_effective*kr_l)), in 1/m; kr_l=1 without liquid states.
+    /// None means an exactly sealed intrinsic or liquid-mobility layer.
     ///
     /// Divide by the actual superficial flow area for the viscous geometric
     /// coefficient in dp = mu * sum(L/k_effective) * Q/area. The existing fluid
     /// transport and hydraulic owners supply mu and Q; no coefficient is frozen
     /// at the permeability source's original query temperature.
     pub const fn geometric_resistance_per_m(&self) -> Option<f64> {
-        self.barrier.geometric_resistance_per_m
+        self.geometric_resistance_per_m
     }
 
     /// Original calibrated sum(beta_i*L_i), dimensionless, in
@@ -63,9 +144,9 @@ impl<'a> ContinuumDarcyGeometry<'a> {
         self.barrier.inertial_geometric_resistance()
     }
 
-    /// Original model limits intersected with all retained source T/p limits.
+    /// Original source limits intersected with every active liquid calibration.
     pub const fn support(&self) -> PorousGasSupport {
-        self.barrier.support
+        self.support
     }
 
     /// Admit an actual local fluid state and signed superficial velocity.
@@ -85,8 +166,7 @@ impl<'a> ContinuumDarcyGeometry<'a> {
         superficial_speed_m_s: f64,
     ) -> Result<(), MaterialError> {
         self.admit_temperature_speed(temperature_k, superficial_speed_m_s)?;
-        self.barrier
-            .support
+        self.support
             .admit_state(temperature_k, &[left_pressure_pa, right_pressure_pa])
     }
 
@@ -105,10 +185,10 @@ impl<'a> ContinuumDarcyGeometry<'a> {
         temperature_k: f64,
         superficial_speed_m_s: f64,
     ) -> Result<(), MaterialError> {
-        self.barrier.support.admit_state(temperature_k, &[])?;
+        self.support.admit_state(temperature_k, &[])?;
         if !superficial_speed_m_s.is_finite()
-            || superficial_speed_m_s.abs() > self.barrier.support.maximum_superficial_speed_m_s
-            || self.barrier.geometric_resistance_per_m.is_none() && superficial_speed_m_s != 0.0
+            || superficial_speed_m_s.abs() > self.support.maximum_superficial_speed_m_s
+            || self.geometric_resistance_per_m.is_none() && superficial_speed_m_s != 0.0
         {
             return Err(invalid(
                 "continuum Darcy flow exceeds original speed support or crosses a sealed layer",

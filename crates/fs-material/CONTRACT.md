@@ -7895,3 +7895,32 @@ Validation for this increment: 22 actual material tests passed (8 joint axial,
 8 three-dimensional joint, 6 original Norton axial) using the pinned Cargo
 runner and genuine cached dependencies. This focused exact-source material
 assembly is supplementary evidence, not the complete workspace/DSR gate.
+
+### Wetting-liquid retention and relative permeability
+
+`porous::wet::liquid` supplies an explicitly calibrated van Genuchten--Mualem
+wetting-liquid branch. Residual liquid and gas saturations, shape m, nonnegative
+connectivity exponent, pressure scale in Pa, saturation/temperature/absolute
+liquid-pressure/superficial-speed support and provenance are explicit.
+`WetPoreLiquidLaw::sample` evaluates effective saturation, liquid relative
+permeability and Pc=pg-pl; `at_capillary_pressure` inverts the same retention
+branch. Stable logarithmic/expm1 expressions retain small positive dry/wet
+increments. The exact dry endpoint reports zero liquid mobility and
+`LiquidCapillaryPressure::DryLimit`, never a fabricated finite pressure.
+
+`ContinuumDarcyGeometry::with_liquid_states` binds one retained liquid state
+per original ordered layer. It compiles sum(L/(k_effective*kr_l)) while retaining
+the original intrinsic tensors, frames, transverse-flow constraint and source
+bundles. Rebinding always starts from original k and cannot compound old
+relative permeabilities. Original and liquid calibration T/p/speed limits are
+intersected; an intrinsic seal or zero liquid mobility stays exactly sealed.
+Positive Forchheimer inertia refuses this view, including a unit-mobility
+endpoint, because a saturated inertial calibration does not supply a wet one.
+Gas-slip and gas-only saturation calibrations retain their existing refusals.
+
+This is prescribed instantaneous liquid mobility on one fixed constitutive
+branch. It does not solve gas pressure, liquid storage, a wetting front,
+Richards/two-phase dynamics, capillary work or hysteresis. Capillary pressure is
+a phase-pressure relation and must not be added as another hydraulic drag or
+heat source. Synthetic analytic and source-preservation fixtures check the
+equations and coupling; they do not establish a measured material calibration.
