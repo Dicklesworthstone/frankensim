@@ -50,6 +50,7 @@ fn horizontal_orientation_and_negative_expansion_select_actual_cell_heat() {
     for geometry in [
         NaturalConvectionGeometry::HorizontalCylinder,
         NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Up),
+        NaturalConvectionGeometry::Sphere,
     ] {
         let cell = MaterialConvectiveCell {
             law: CellConvectionLaw::Natural {
@@ -250,7 +251,7 @@ fn horizontal_finite_link_exchanges_equal_heat_at_both_actual_endpoints() {
 }
 
 #[test]
-fn horizontal_source_laws_refuse_bulk_properties_before_resolving_any_material() {
+fn film_natural_source_laws_refuse_bulk_properties_before_resolving_any_material() {
     let chart = curve();
     let (card, caloric) = fluid_source_with_expansion(1.0, 0.5);
     let law = liquid_law(&card);
@@ -258,6 +259,7 @@ fn horizontal_source_laws_refuse_bulk_properties_before_resolving_any_material()
     for geometry in [
         NaturalConvectionGeometry::HorizontalCylinder,
         NaturalConvectionGeometry::HorizontalPlate(HorizontalPlateFacing::Down),
+        NaturalConvectionGeometry::Sphere,
     ] {
         let natural = SourceCellConvectionLaw::Natural {
             geometry,
@@ -302,4 +304,153 @@ fn horizontal_source_laws_refuse_bulk_properties_before_resolving_any_material()
         );
         assert_eq!(calls, 0);
     }
+}
+
+#[test]
+fn sphere_without_buoyancy_uses_sourced_film_properties_and_signed_cell_heat() {
+    let chart = curve();
+    let thermal = initial(&chart, [310.0, 290.0], 0.0, 0.0);
+    let diameter = (AREA / core::f64::consts::PI).sqrt();
+    // Distinguish zero gravity from a source's physically zero expansion.
+    for (density_slope, gravity) in [(0.5, 0.0), (0.0, 9.81)] {
+        let card = liquid_card(density_slope, 0.01, 320.0);
+        let law = liquid_law(&card)
+            .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+            .unwrap();
+        let cells = IDS.map(|cell| SourceConvectiveCell {
+            characteristic_length: Length::new(diameter),
+            law: SourceCellConvectionLaw::Natural {
+                geometry: NaturalConvectionGeometry::Sphere,
+                gravity_m_s2: gravity,
+            },
+            ..film(cell)
+        });
+        let sources = evaluate_source_cell_convection(
+            &thermal,
+            &cells,
+            2,
+            |_, t| law.at_temperature(t),
+            || false,
+        )
+        .unwrap();
+        for (source, heat) in sources
+            .materials()
+            .iter()
+            .zip(sources.convection().samples())
+        {
+            let t = 0.5 * heat.wall_temperature_k + 150.0;
+            near(source.property_temperature_k, t, 1e-12);
+            assert_eq!(
+                source.material.material().card_identity(),
+                card.content_hash()
+            );
+            assert_eq!(source.material.material().query().axes()["p"], 100000.0);
+            assert_eq!(
+                source.material.material().query().axes()["solute_mass_fraction"],
+                0.2
+            );
+            let transport = source.thermal.transport();
+            near(
+                transport.density_kg_m3(),
+                1000.0 - density_slope * (t - 300.0),
+                1e-12,
+            );
+            near(
+                transport.specific_heat_j_kg_k(),
+                4000.0 + 2.0 * (t - 300.0),
+                1e-12,
+            );
+            let k = 0.5 + 0.002 * (t - 300.0);
+            near(transport.thermal_conductivity_w_m_k(), k, 1e-14);
+            let evaluation = heat.evaluation.as_ref().unwrap();
+            assert_eq!(evaluation.nusselt.card().id, CorrelationId::ChurchillSphere);
+            assert_eq!(evaluation.nusselt.groups()["Ra"], 0.0);
+            assert_eq!(evaluation.nusselt.evidence().value, 2.0);
+            near(
+                evaluation.coefficient.value.value(),
+                2.0 * k / diameter,
+                1e-12,
+            );
+            near(
+                heat.heat_into_cell_w,
+                AREA * 2.0 * k / diameter * (300.0 - heat.wall_temperature_k),
+                1e-12,
+            );
+            assert!(heat.heat_into_cell_w * (heat.wall_temperature_k - 300.0) < 0.0);
+        }
+    }
+}
+
+#[test]
+fn sphere_conductive_limit_transfers_one_heat_between_original_finite_link_stores() {
+    let chart = curve();
+    let (card, caloric) = fluid_source_with_expansion(1.0, 0.5);
+    let law = liquid_law(&card)
+        .with_density_expansion(Temperature::new(280.0), Temperature::new(320.0))
+        .unwrap();
+    let thermal = pair(&chart, &caloric, false, 0.0);
+    let binding = SourceConvectiveLink {
+        law: SourceCellConvectionLaw::Natural {
+            geometry: NaturalConvectionGeometry::Sphere,
+            gravity_m_s2: 0.0,
+        },
+        ..link()
+    };
+    // Manufacture an exact backward-Euler endpoint from q=0.1 J and the
+    // spherical conduction law. Both caloric stores retain their original Cp.
+    let q = 0.1;
+    let wall = 310.0 - q / (MASS * CP);
+    let fluid = 290.0 + q / (MASS * FLUID_CP);
+    let film = 0.5 * (wall + fluid);
+    let k = 0.5 + 0.002 * (film - 300.0);
+    let conductance = LINK_AREA * 2.0 * k / binding.characteristic_length.value();
+    let dt = q / (conductance * (wall - fluid));
+    let residual = BackwardEulerStep::new(&thermal, dt, || Ok(())).unwrap();
+    let increments: Vec<_> = residual
+        .cell_ids()
+        .iter()
+        .map(|&id| if id == IDS[0] { -q } else { q })
+        .collect();
+    let trial = residual
+        .evaluate(
+            &increments,
+            |state| {
+                let sources = evaluate_source_link_convection(
+                    state,
+                    &[binding],
+                    1,
+                    |_, _, t| law.at_temperature(t),
+                    || false,
+                )?;
+                Ok::<_, SourceCellConvectionError<MaterialStatePointError>>(StepCoefficients {
+                    sources_w: BTreeMap::new(),
+                    conductances_w_k: sources.conductances_w_k().clone(),
+                    payload: sources,
+                })
+            },
+            || Ok(()),
+        )
+        .unwrap();
+    let (next, sources, audit) = trial.accept(1e-8, 1e-8, || Ok(())).unwrap();
+    let sample = &sources.samples()[0];
+    assert_eq!(
+        sample.evaluation.as_ref().unwrap().nusselt.evidence().value,
+        2.0
+    );
+    assert_eq!(
+        sample.material.material().card_identity(),
+        card.content_hash()
+    );
+    near(sample.property_temperature_k, film, 1e-12);
+    near(
+        sample.thermal.transport().specific_heat_j_kg_k(),
+        FLUID_CP,
+        1e-12,
+    );
+    near(sample.conductance_w_k, conductance, 1e-12);
+    near(dt * sample.heat_into_fluid_w, q, 1e-10);
+    near(next.temperature_k(IDS[0]).unwrap(), wall, 1e-12);
+    near(next.temperature_k(IDS[1]).unwrap(), fluid, 1e-12);
+    near(next.energy_j(), thermal.energy_j(), 1e-10);
+    near(audit.external_heat_j, 0.0, 1e-12);
 }

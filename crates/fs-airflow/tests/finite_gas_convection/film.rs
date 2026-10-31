@@ -280,3 +280,107 @@ fn film_source_support_and_wrong_bank_refuse_and_late_cancellation_is_atomic() {
     assert_eq!(zero.conductance_w_k, 0.0);
     assert!(zero.source.interface.evaluation.is_none());
 }
+
+#[test]
+fn sphere_film_conductive_and_buoyant_limits_exchange_signed_heat_with_original_gas_body() {
+    let curve = source::body_curve();
+    // Pure species A has Pr approximately 0.72, inside the sphere's source
+    // domain. The fixture's helium-like mixture need not have Pr >= 0.7.
+    let old = piston(1.0, 400.0, 100000.0);
+    let saved = old.clone();
+    for gravity in [0.0, 9.80665] {
+        for initial_h in [80000.0, 120000.0] {
+            // 380 K and 420 K
+            let mut thermal = body(&curve, initial_h);
+            let diameter = (6.0 * thermal.volume_m3 / core::f64::consts::PI).cbrt();
+            let patch = NaturalGasSurface {
+                geometry: NaturalConvectionGeometry::Sphere,
+                area_m2: core::f64::consts::PI * diameter * diameter,
+                characteristic_length: Length::new(diameter),
+                gravity_m_s2: gravity,
+            };
+            thermal.surface_area_m2 = patch.area_m2;
+            assert!(patch.resolve(old.gas().state(), thermal.initial).is_err());
+            let law = FilmGasSurface {
+                model: old.gas().model(),
+                law: FilmGasHeatLaw::Natural(patch),
+            };
+            let next = law
+                .finite_body_candidate(&old, input(), thermal, controls(), exchange(), || false)
+                .unwrap();
+            let report = next.step();
+            let source = &next.thermal().report;
+            let film = source.property_gas.as_ref().unwrap();
+            let gas = &source.interface.gas;
+            let wall = source.interface.body.temperature_k();
+            let evaluation = source.interface.evaluation.as_ref().unwrap();
+            assert_eq!(evaluation.nusselt.card().id, CorrelationId::ChurchillSphere);
+            assert_eq!(evaluation.transport, film.transport_state().unwrap());
+            assert_eq!(*gas, report.piston.midpoint);
+            near(
+                film.state().temperature,
+                0.5 * (wall + gas.state().temperature),
+                1e-12,
+            );
+            assert_eq!(film.state().pressure, gas.state().pressure);
+            assert_eq!(film.source_packs(), gas.source_packs());
+            assert_eq!(
+                film.thermodynamics().receipt().declared_fraction_bits(),
+                gas.thermodynamics().receipt().declared_fraction_bits()
+            );
+            let conductive_g =
+                2.0 * evaluation.transport.thermal_conductivity_w_m_k() / diameter * patch.area_m2;
+            if gravity == 0.0 {
+                assert_eq!(evaluation.nusselt.groups()["Ra"], 0.0);
+                assert_eq!(evaluation.nusselt.evidence().value, 2.0);
+                near(report.conductance_w_k, conductive_g, 1e-12);
+            } else {
+                assert!(report.conductance_w_k > conductive_g);
+            }
+            near(
+                report.exchanged_heat_j,
+                DT * report.conductance_w_k * (wall - gas.state().temperature),
+                exchange().source_tolerance_j,
+            );
+            assert!(report.exchanged_heat_j * (thermal.initial.temperature_k() - 400.0) > 0.0);
+            let du = old.gas().mass_kg()
+                * (next.piston().gas().state().specific_internal_energy_j_kg()
+                    - old.gas().state().specific_internal_energy_j_kg());
+            let dh = thermal.mass_kg
+                * (next.thermal().state.specific_enthalpy_j_kg()
+                    - thermal.initial.specific_enthalpy_j_kg());
+            let kinetic = 0.5 * old.mass_kg() * next.piston().velocity_m_s().powi(2);
+            let work = input().exterior_pressure_pa
+                * (next.piston().gas().volume_m3() - old.gas().volume_m3());
+            near(du + dh + kinetic + work, 0.0, 1e-7);
+            near(dh + report.exchanged_heat_j, 0.0, 1e-7);
+            assert_eq!(next.piston().gas().mass_kg(), old.gas().mass_kg());
+
+            let equilibrium = law
+                .resolve(old.gas().state(), body(&curve, 100000.0).initial)
+                .unwrap();
+            assert_eq!(equilibrium.conductance_w_k, 0.0);
+            assert!(equilibrium.source.interface.evaluation.is_none());
+        }
+    }
+    assert_eq!(old, saved);
+    // The zero-gravity exception belongs only to the sphere's conductive
+    // limit; it must not invent an intercept for other natural cards.
+    for geometry in [
+        NaturalConvectionGeometry::VerticalPlate,
+        NaturalConvectionGeometry::HorizontalCylinder,
+    ] {
+        let law = FilmGasSurface {
+            model: old.gas().model(),
+            law: FilmGasHeatLaw::Natural(NaturalGasSurface {
+                geometry,
+                gravity_m_s2: 0.0,
+                ..natural_surface()
+            }),
+        };
+        assert!(
+            law.resolve(old.gas().state(), body(&curve, 260000.0).initial)
+                .is_err()
+        );
+    }
+}

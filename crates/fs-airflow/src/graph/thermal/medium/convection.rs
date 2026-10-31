@@ -161,15 +161,15 @@ pub fn evaluate_vertical_plate_from_material<F: FluidTransport + ?Sized>(
 /// snapshot. The signed `beta * (T_wall - T_reference)` selects the horizontal
 /// face's stability; the conductivity used for h belongs to this same snapshot.
 ///
-/// Supply plate height, cylinder diameter, or full horizontal plate area/perimeter
-/// as the characteristic length. Contact-masked exposed area cannot reconstruct
+/// Supply plate height, cylinder/sphere diameter, or full horizontal plate
+/// area/perimeter as the characteristic length. Contact-masked exposed area cannot reconstruct
 /// the planform perimeter. Properties must follow the selected card's declared
 /// film convention; use the source-backed cell or film-gas adapter to re-query
 /// them inside a thermal solve. The reference remains the actual bulk temperature.
 ///
 /// # Errors
 /// Refuses invalid material, geometry, driving inputs and unsupported correlation
-/// ranges. This does not extrapolate a zero-flow or zero-Rayleigh coefficient.
+/// ranges. Only the sphere admits Ra=0 through its sourced conductive limit Nu=2.
 pub fn evaluate_natural_from_material<F: FluidTransport + ?Sized>(
     geometry: NaturalConvectionGeometry,
     fluid: &F,

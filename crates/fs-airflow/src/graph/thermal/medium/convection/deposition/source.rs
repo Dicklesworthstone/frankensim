@@ -33,9 +33,9 @@ pub enum SourceCellConvectionLaw {
     VerticalPlate {
         gravity_m_s2: f64,
     },
-    /// Geometry selects the shared natural-convection card. Horizontal plate
-    /// and cylinder cards require `FilmMean` properties; Rayleigh and heat use
-    /// the full wall/bulk temperature difference. Expansion comes from the
+    /// Geometry selects the shared natural-convection card. Horizontal plate,
+    /// cylinder and sphere cards require `FilmMean` properties; Rayleigh and
+    /// heat use the full wall/bulk temperature difference. Expansion comes from the
     /// same original material source, including its sign.
     Natural {
         geometry: NaturalConvectionGeometry,
@@ -57,14 +57,15 @@ impl SourceCellConvectionLaw {
             self,
             Self::Natural {
                 geometry: NaturalConvectionGeometry::HorizontalCylinder
-                    | NaturalConvectionGeometry::HorizontalPlate(_),
+                    | NaturalConvectionGeometry::HorizontalPlate(_)
+                    | NaturalConvectionGeometry::Sphere,
                 ..
             }
                 | Self::AidingVerticalPlate { .. }
         ) && convention != ConvectionPropertyTemperature::FilmMean
         {
             return Err(ConvectionSourceError::Invalid(
-                "horizontal natural and aiding mixed convection require mean wall/bulk film properties",
+                "horizontal or spherical natural convection and aiding mixed convection require mean wall/bulk film properties",
             ));
         }
         Ok(())

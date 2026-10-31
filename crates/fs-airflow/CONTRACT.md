@@ -135,8 +135,8 @@ temperature never replaces the actual reservoir temperature in buoyancy or
 signed heat flow. Density, heat capacity, conductivity, viscosity and known
 signed isobaric expansion share one checked source state. Natural convection
 requires sourced expansion; forced convection does not invent it when absent.
-The `Natural` horizontal-plate and cylinder laws require `FilmMean` and refuse
-bulk-property substitution before querying sources. Signed expansion and the
+The `Natural` horizontal-plate, cylinder and sphere laws require `FilmMean` and
+refuse bulk-property substitution before querying sources. Signed expansion and the
 full wall/bulk contrast select plate stability; exposed contact-masked area
 does not replace the explicitly authored full-plate `A/P` length. The same law
 resolution applies to reciprocal finite links, so the native thermal owner
@@ -758,8 +758,8 @@ Rayleigh/heat algebra, actual piston/body energy closure and atomic refusal.
 `medium::convection::finite_gas::NaturalGasSurface` evaluates the shared
 natural-convection geometry from the coupling owner's actual gas and body query
 states. Its raw bulk-property entry retains vertical-plate behavior; active
-horizontal plate/cylinder exchange requires `FilmGasSurface`, which evaluates
-the original gas at the actual mean film temperature. The retained ideal-gas
+horizontal plate/cylinder and sphere exchange require `FilmGasSurface`, which
+evaluates the original gas at the actual mean film temperature. The retained ideal-gas
 EOS supplies beta = 1/T at that property state; the same resolved
 thermochemical gas supplies density, Cp, viscosity and conductivity. Pressure
 and composition therefore propagate through Ra, Pr, h and the original signed
@@ -780,6 +780,12 @@ orientation and explicit `A/P` reach the same finite-gas heat residual, while
 film properties leave bulk gas storage, pressure and composition ownership
 unchanged. A focused horizontal-film regression closes the original gas/body
 energy exchange.
+The isolated sphere uses its authored diameter and the same film-source and
+energy owners. Zero gravity or zero sourced expansion reaches its physical
+steady conduction limit `Nu=2`, already included in `h*A`; no parallel
+conductive path is added. The finite-gas zero-gravity exception applies only
+to spheres. Focused sphere tests cover sourced Cp/k/density, both heat
+directions, native finite-link storage and joint gas/body/piston energy.
 Exact equilibrium and zero patch area have zero transfer without a fabricated
 Ra=0 coefficient; every nonzero contrast retains the original correlation
 domain. Tests in `tests/finite_gas_convection/natural.rs` and

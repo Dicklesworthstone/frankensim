@@ -20,7 +20,8 @@ use fs_qty::Temperature;
 /// its temperature contrast; there is no independently resolved film state,
 /// enclosure circulation, neighbouring-wall correction or measured-fidelity
 /// claim. That bulk-property shortcut remains limited to vertical plates;
-/// horizontal plates/cylinders require `FilmGasSurface` and its source bank.
+/// horizontal plates/cylinders and spheres require `FilmGasSurface` and its
+/// source bank.
 /// No flow speed, independent beta or material-name switch is introduced.
 #[derive(Clone, Copy, Debug)]
 pub struct NaturalGasSurface {
@@ -29,10 +30,11 @@ pub struct NaturalGasSurface {
     pub geometry: NaturalConvectionGeometry,
     /// Actual exposed patch area [m2]; zero explicitly isolates this patch.
     pub area_m2: f64,
-    /// Height, cylinder diameter or horizontal plate area/perimeter [m].
+    /// Height, cylinder/sphere diameter or horizontal plate area/perimeter [m].
     pub characteristic_length: Length,
-    /// Positive magnitude of gravitational acceleration [m/s2]. Zero gravity
-    /// requires an independently admitted conduction law, not a Ra=0 fallback.
+    /// Magnitude of gravitational acceleration [m/s2]. The sphere admits zero
+    /// gravity through its sourced Nu=2 conductive limit; other geometries
+    /// require strictly positive gravity and their original Rayleigh ranges.
     pub gravity_m_s2: f64,
 }
 
@@ -43,10 +45,11 @@ impl NaturalGasSurface {
             || !self.characteristic_length.value().is_finite()
             || self.characteristic_length.value() <= 0.0
             || !self.gravity_m_s2.is_finite()
-            || self.gravity_m_s2 <= 0.0
+            || self.gravity_m_s2 < 0.0
+            || (self.gravity_m_s2 == 0.0 && self.geometry != NaturalConvectionGeometry::Sphere)
         {
             return Err(invalid(
-                "finite gas natural convection requires nonnegative area, positive characteristic length and positive gravity",
+                "finite gas natural convection requires nonnegative area, positive characteristic length and positive gravity (a sphere also admits zero gravity)",
             ));
         }
         Ok(())
@@ -94,7 +97,7 @@ impl NaturalGasSurface {
         }
         if self.geometry != NaturalConvectionGeometry::VerticalPlate {
             return Err(invalid(
-                "horizontal natural convection requires source-resolved FilmGasSurface properties",
+                "horizontal and spherical natural convection require source-resolved FilmGasSurface properties",
             ));
         }
         let evaluated = evaluate_natural_from_material(
