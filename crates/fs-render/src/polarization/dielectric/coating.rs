@@ -13,17 +13,14 @@
 //! Transfer/Poynting conventions: S. J. Byrnes, "Multilayer optical
 //! calculations", sections 3, 4.1 and 4.4, <https://arxiv.org/abs/1603.02720>.
 
-use fs_geom::Vec3;
-use fs_math::{c64::C64, det};
-
-use crate::conductor::{CoherentDielectricCoating, coating_propagation};
+use crate::conductor::CoherentDielectricCoating;
 use crate::dielectric::{
-    DielectricError, DielectricEvent, fresnel_dielectric, normalize_admitted, reflect, refract,
-    validate_direction_frame,
+    DielectricCoatingStack, DielectricError, DielectricEvent, fresnel_dielectric,
+    normalize_admitted, reflect, refract, validate_direction_frame,
 };
 use crate::polarization::Mueller;
+use fs_geom::Vec3;
 
-use super::interface::diagonal;
 use super::{
     PolarizedDielectricSample, PolarizedFresnel, fresnel_dielectric_polarized,
     sample_smooth_dielectric_polarized,
@@ -44,121 +41,21 @@ pub fn fresnel_coated_dielectric_polarized(
     wavelength_nm: f64,
     coating: &CoherentDielectricCoating,
 ) -> Result<PolarizedFresnel, DielectricError> {
-    let mut scalar = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+    fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
     let film_eta = coating.ior().eval(wavelength_nm)?;
     if coating.thickness_m() == 0.0 || film_eta == eta_i || film_eta == eta_t {
         return fresnel_dielectric_polarized(incident_cosine, eta_i, eta_t);
     }
-    if incident_cosine <= 0.0 {
-        return Err(DielectricError::InvalidInterface);
-    }
-    let q0 = eta_i * incident_cosine;
-    let film_squared = film_eta * film_eta;
-    let q1_squared = normal_squared(film_eta, eta_i, incident_cosine);
-    let q2 = if scalar.total_internal_reflection {
-        C64::new(
-            0.0,
-            det::sqrt((-normal_squared(eta_t, eta_i, incident_cosine)).max(0.0)),
-        )
-    } else {
-        C64::from_re(eta_t * scalar.transmitted_cosine)
-    };
-    let phase_scale = core::f64::consts::TAU * (coating.thickness_m() * 1e9) / wavelength_nm;
-    // This is the SAME critical-angle-safe bounded propagation used by the
-    // conductor's transparent film. Its evanescent common scale must also be
-    // carried into transmission; it cancels only from reflection.
-    let (cosine, sine_over_q) = coating_propagation(q1_squared, phase_scale);
-    let attenuation = if q1_squared < 0.0 {
-        det::exp(-phase_scale * det::sqrt(-q1_squared))
-    } else {
-        1.0
-    };
-    let propagating = !scalar.total_internal_reflection;
-    let (rs, ts) = amplitudes(
-        q0,
-        q2,
-        cosine,
-        sine_over_q,
-        q1_squared * sine_over_q,
-        attenuation,
-        propagating,
-    )?;
-    // H-dual admittance gives the existing rotating-p basis directly and
-    // stays finite when the exit's normal wave number is exactly zero.
-    let (rp, tp) = if incident_cosine == 1.0 {
-        (-rs, ts)
-    } else {
-        amplitudes(
-            incident_cosine / eta_i,
-            q2.scale(1.0 / (eta_t * eta_t)),
-            cosine,
-            film_squared * sine_over_q,
-            q1_squared * sine_over_q / film_squared,
-            attenuation,
-            propagating,
-        )?
-    };
-    let reflection = matrix(rs, rp);
-    let transmission = matrix(ts, tp);
-    scalar.reflectance = reflection.0[0][0].clamp(0.0, 1.0);
-    Ok(PolarizedFresnel {
-        reflection,
-        transmission,
-        scalar,
-    })
-}
-
-// Preserve grazing c^2 without subtracting two rounded equal squares.
-fn normal_squared(index: f64, incident: f64, cosine: f64) -> f64 {
-    if cosine > 0.5 {
-        index * index - incident * incident * (1.0 - cosine) * (1.0 + cosine)
-    } else {
-        (index - incident) * (index + incident) + (incident * cosine).powi(2)
-    }
-}
-
-fn amplitudes(
-    incident: f64,
-    exit: C64,
-    cosine: f64,
-    upper: f64,
-    lower: f64,
-    attenuation: f64,
-    propagating: bool,
-) -> Result<(C64, C64), DielectricError> {
-    let field = C64::from_re(cosine) - C64::new(0.0, 1.0) * exit.scale(upper);
-    let flux = exit.scale(cosine) - C64::new(0.0, lower);
-    let denominator = field.scale(incident) + flux;
-    let reflected = (field.scale(incident) - flux) / denominator;
-    let transmitted = if propagating {
-        C64::from_re(2.0 * det::sqrt(incident) * det::sqrt(exit.re) * attenuation) / denominator
-    } else {
-        C64::ZERO
-    };
-    let power = reflected.norm_sq() + transmitted.norm_sq();
-    if ![
-        reflected.re,
-        reflected.im,
-        transmitted.re,
-        transmitted.im,
-        power,
-    ]
-    .iter()
-    .all(|v| v.is_finite())
-        || (power - 1.0).abs() > 256.0 * f64::EPSILON
-    {
-        return Err(DielectricError::InvalidInterface);
-    }
-    // Correct only bounded roundoff, jointly in the two Jones amplitudes.
-    // This preserves relative phase and polarization positivity while closing
-    // lossless work, including an interference null or a nearly opaque film.
-    let scale = 1.0 / det::sqrt(power);
-    Ok((reflected.scale(scale), transmitted.scale(scale)))
-}
-
-fn matrix(s: C64, p: C64) -> Mueller {
-    let cross = s * p.conj();
-    diagonal(s.norm_sq(), p.norm_sq(), cross.re, cross.im)
+    // Borrow the original spectral film without fitting or copying its law.
+    // The shared solver owns both explicit scalar R/T and signed Mueller flux,
+    // including the same native exterior critical-angle classification.
+    DielectricCoatingStack::try_new(core::slice::from_ref(coating))?.fresnel_polarized(
+        wavelength_nm,
+        false,
+        incident_cosine,
+        eta_i,
+        eta_t,
+    )
 }
 
 /// Smooth coated-dielectric radiance sample using the original direction

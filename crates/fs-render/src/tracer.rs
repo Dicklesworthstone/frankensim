@@ -55,7 +55,7 @@ use crate::conductor::{
 };
 use crate::dielectric::{
     BeerLambertParameters, DielectricError, DielectricEvent, DielectricGlass, DielectricIor,
-    DielectricSurface, GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric,
+    DielectricSurface, FresnelDielectric, GlassProvenance, evaluate_rough_dielectric, fresnel_dielectric,
     sample_rough_dielectric, sample_smooth_dielectric,
 };
 #[cfg(test)]
@@ -506,6 +506,12 @@ struct BoundaryMedia<'scene> {
     incident: Option<DielectricGlass>,
     transmitted: Option<DielectricGlass>,
     transition: MediumTransition<'scene>,
+}
+
+impl BoundaryMedia<'_> {
+    const fn coating_reversed(&self) -> bool {
+        matches!(self.transition, MediumTransition::Exit { .. })
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -1058,6 +1064,10 @@ impl Material {
                         hasher.update(&[1]);
                         update_material_scalar(&mut hasher, alpha);
                     }
+                }
+                if let Some(coating) = surface.coating() {
+                    hasher.update(b"lossless-dielectric-coating.v1");
+                    hasher.update(coating.content_identity().as_bytes());
                 }
             }
             Self::Conductor { optics, surface } => {
@@ -10886,6 +10896,32 @@ fn deterministic_snell_transmission(
         .dot(travel_direction.scale(-1.0))
         .clamp(0.0, 1.0);
     let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+    deterministic_transmission_direction(normal_toward_incident, travel_direction,
+        eta_i, eta_t, incident_cosine, fresnel)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn deterministic_surface_transmission(
+    normal_toward_incident: Vec3, travel_direction: Vec3, eta_i: f64, eta_t: f64,
+    surface: &DielectricSurface, wavelength_nm: f64, reverse: bool,
+) -> Result<(Vec3, f64), TracerError> {
+    let cosine = normal_toward_incident.dot(travel_direction.scale(-1.0)).clamp(0.0, 1.0);
+    let fresnel = surface.interface(wavelength_nm, reverse)?.fresnel(cosine, eta_i, eta_t)?;
+    deterministic_transmission_direction(normal_toward_incident, travel_direction,
+        eta_i, eta_t, cosine, fresnel)
+}
+
+fn dielectric_surface(scene: &Scene, primitive: usize) -> Result<&DielectricSurface, TracerError> {
+    match scene.primitives.get(primitive).map(|primitive| &primitive.material) {
+        Some(Material::Dielectric { surface, .. }) => Ok(surface),
+        _ => Err(TracerError::InvalidInput),
+    }
+}
+
+fn deterministic_transmission_direction(
+    normal_toward_incident: Vec3, travel_direction: Vec3, eta_i: f64, eta_t: f64,
+    incident_cosine: f64, fresnel: FresnelDielectric,
+) -> Result<(Vec3, f64), TracerError> {
     if fresnel.total_internal_reflection {
         return Err(TracerError::Dielectric(DielectricError::InvalidInterface));
     }
@@ -10902,7 +10938,7 @@ fn deterministic_snell_transmission(
     if normal_toward_incident.dot(direction) >= 0.0 {
         return Err(TracerError::Dielectric(DielectricError::InvalidDirection));
     }
-    Ok((direction, 1.0 - fresnel.reflectance))
+    Ok((direction, fresnel.transmittance))
 }
 
 fn primitive_is_dielectric(scene: &Scene, primitive_index: usize) -> bool {
@@ -11020,11 +11056,12 @@ fn trace_parallel_slab_direct_lane(
         ));
     }
 
-    let (internal_direction, entry_transmission_probability) = deterministic_snell_transmission(
+    let (internal_direction, entry_transmission_probability) = deterministic_surface_transmission(
         entry_frame.geometric,
         geometry.incident_direction,
         1.0,
         eta_glass,
+        dielectric_surface(scene, slab.boundary_primitive)?, wavelength_nm, false,
     )?;
     if !parallel_directions(internal_direction, geometry.internal_direction) {
         return Err(slab_nee_refusal(
@@ -11073,11 +11110,12 @@ fn trace_parallel_slab_direct_lane(
             "connected path observes a nonuniform slab thickness",
         ));
     }
-    let (outgoing_direction, exit_transmission_probability) = deterministic_snell_transmission(
+    let (outgoing_direction, exit_transmission_probability) = deterministic_surface_transmission(
         exit_frame.geometric.scale(-1.0),
         internal_direction,
         eta_glass,
         1.0,
+        dielectric_surface(scene, slab.boundary_primitive)?, wavelength_nm, true,
     )?;
     if !parallel_directions(outgoing_direction, geometry.incident_direction) {
         return Err(slab_nee_refusal(
@@ -11770,11 +11808,12 @@ fn trace_planar_manifold_rectangle_direct_lanes(
             continue;
         }
         let (internal_direction, entry_transmission_probability) =
-            deterministic_snell_transmission(
+            deterministic_surface_transmission(
                 entry_frame.geometric,
                 connection.incident_direction,
                 1.0,
                 eta_glass,
+                dielectric_surface(scene, boundary.boundary_primitive)?, wavelength_nm, false,
             )?;
         if !parallel_directions(internal_direction, connection.internal_direction) {
             continue;
@@ -11806,11 +11845,12 @@ fn trace_planar_manifold_rectangle_direct_lanes(
         {
             continue;
         }
-        let (outgoing_direction, exit_transmission_probability) = deterministic_snell_transmission(
+        let (outgoing_direction, exit_transmission_probability) = deterministic_surface_transmission(
             exit_frame.geometric.scale(-1.0),
             internal_direction,
             eta_glass,
             1.0,
+            dielectric_surface(scene, boundary.boundary_primitive)?, wavelength_nm, true,
         )?;
         if !parallel_directions(outgoing_direction, connection.outgoing_direction) {
             continue;
@@ -11970,11 +12010,12 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let entry_frame = surface_frame(&entry_hit.hit, &entry_ray)?;
-            let (internal_incident, entry_transmission) = deterministic_snell_transmission(
+            let (internal_incident, entry_transmission) = deterministic_surface_transmission(
                 entry_frame.geometric,
                 connection.incident_direction,
                 1.0,
                 eta_glass,
+                dielectric_surface(scene, boundary.boundary_primitive)?, wavelength_nm, false,
             )?;
             if !entry_frame.entering
                 || !parallel_directions(internal_incident, connection.internal_incident_direction)
@@ -12019,7 +12060,8 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
             if !parallel_directions(reflected, connection.internal_reflected_direction) {
                 continue;
             }
-            let reflection_fresnel = fresnel_dielectric(
+            let reflection_fresnel = dielectric_surface(scene, boundary.boundary_primitive)?
+                .interface(wavelength_nm, true)?.fresnel(
                 internal_incident
                     .dot(reflection_frame.geometric)
                     .clamp(0.0, 1.0),
@@ -12047,11 +12089,12 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let exit_frame = surface_frame(&exit_hit.hit, &exit_ray)?;
-            let (outgoing, exit_transmission) = deterministic_snell_transmission(
+            let (outgoing, exit_transmission) = deterministic_surface_transmission(
                 exit_frame.geometric.scale(-1.0),
                 reflected,
                 eta_glass,
                 1.0,
+                dielectric_surface(scene, boundary.boundary_primitive)?, wavelength_nm, true,
             )?;
             if exit_frame.entering
                 || exit_frame.geometric.dot(exit_plane.outward_normal)
@@ -12322,11 +12365,12 @@ fn trace_planar_manifold_environment_direct_lanes(
             continue;
         }
         let (internal_direction, entry_transmission_probability) =
-            deterministic_snell_transmission(
+            deterministic_surface_transmission(
                 entry_frame.geometric,
                 connection.incident_direction,
                 1.0,
                 eta_glass,
+                dielectric_surface(scene, boundary.boundary_primitive)?, wavelength_nm, false,
             )?;
         if !parallel_directions(internal_direction, connection.internal_direction) {
             continue;
@@ -12354,11 +12398,12 @@ fn trace_planar_manifold_environment_direct_lanes(
         {
             continue;
         }
-        let (outgoing_direction, exit_transmission_probability) = deterministic_snell_transmission(
+        let (outgoing_direction, exit_transmission_probability) = deterministic_surface_transmission(
             exit_frame.geometric.scale(-1.0),
             internal_direction,
             eta_glass,
             1.0,
+            dielectric_surface(scene, boundary.boundary_primitive)?, wavelength_nm, true,
         )?;
         if !parallel_directions(outgoing_direction, direct.direction) {
             continue;
@@ -12489,7 +12534,7 @@ fn previous_after_dielectric_sample(
             return Ok(next);
         };
         let eta_glass = glass.ior().eval(wavelength_nm)?;
-        let reflection_probability = fresnel_dielectric(
+        let reflection_probability = surface.interface(wavelength_nm, true)?.fresnel(
             incident_ray.dir.dot(frame.geometric).clamp(0.0, 1.0),
             eta_glass,
             1.0,
@@ -12513,7 +12558,8 @@ fn previous_after_dielectric_sample(
     let eta_i = medium_ior(boundary.incident, wavelength_nm)?;
     let eta_t = medium_ior(boundary.transmitted, wavelength_nm)?;
     let (_, transmission_probability) =
-        deterministic_snell_transmission(frame.oriented, incident_ray.dir, eta_i, eta_t)?;
+        deterministic_surface_transmission(frame.oriented, incident_ray.dir, eta_i, eta_t,
+            &surface, wavelength_nm, !frame.entering)?;
 
     if frame.entering && medium_stack.len() == 0 {
         let Some(source) = previous.filter(|source| {
@@ -12692,12 +12738,14 @@ fn reverse_dielectric_pdf(
     let eta_t = medium_ior(boundary.transmitted, wavelength_nm)?;
     let reflection = normal.dot(wi) > 0.0;
     let evaluation = if reflection {
-        evaluate_rough_dielectric(normal, wi, wo, eta_i, eta_t, alpha)?
+        surface.interface(wavelength_nm, boundary.coating_reversed())?
+            .evaluate_rough(normal, wi, wo, eta_i, eta_t, alpha)?
     } else {
         // Reversing a transmitted edge changes both the incident half-space
         // and the oriented normal. The directions remain surface-to-vertex
         // vectors, so they are swapped without negation.
-        evaluate_rough_dielectric(normal.scale(-1.0), wi, wo, eta_t, eta_i, alpha)?
+        surface.interface(wavelength_nm, !boundary.coating_reversed())?
+            .evaluate_rough(normal.scale(-1.0), wi, wo, eta_t, eta_i, alpha)?
     };
     Ok(evaluation.pdf)
 }
@@ -14278,6 +14326,7 @@ fn trace_path_with_regions<'scene>(
                             outgoing: ray.dir.scale(-1.0),
                             boundary,
                             alpha,
+                            surface,
                             source_side,
                         }),
                     (_, None) => Some(volume_emission::Receiver::Surface {
@@ -14472,7 +14521,7 @@ fn trace_path_with_regions<'scene>(
                                         }
                                         let eta_i = medium_ior(boundary.incident, lambda)?;
                                         let eta_t = medium_ior(boundary.transmitted, lambda)?;
-                                        let evaluation = evaluate_rough_dielectric(
+                                        let evaluation = surface.interface(lambda, boundary.coating_reversed())?.evaluate_rough(
                                             n, wo, wi, eta_i, eta_t, alpha,
                                         )?;
                                         if evaluation.value <= 0.0 {
@@ -15038,11 +15087,13 @@ fn trace_path_with_regions<'scene>(
                     for (lane, &lambda) in lambdas.iter().enumerate() {
                         let eta_i = medium_ior(boundary.incident, lambda)?;
                         let eta_t = medium_ior(boundary.transmitted, lambda)?;
-                        let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+                        let fresnel = surface.interface(lambda, boundary.coating_reversed())?
+                            .fresnel(incident_cosine, eta_i, eta_t)?;
                         reflection_weights[lane] = fresnel.reflectance;
                         if !fresnel.total_internal_reflection {
                             let (direction, transmission_probability) =
-                                deterministic_snell_transmission(n, ray.dir, eta_i, eta_t)?;
+                                deterministic_transmission_direction(n, ray.dir, eta_i, eta_t,
+                                    incident_cosine, fresnel)?;
                             transmission_directions[lane] = Some(direction);
                             let eta_ratio = eta_i / eta_t;
                             transmission_weights[lane] =
@@ -15241,7 +15292,7 @@ fn trace_path_with_regions<'scene>(
                     }
                     break;
                 }
-                if should_split_dispersive_boundary(active_lane, &boundary, &lambdas)? {
+                if should_split_spectral_boundary(active_lane, &surface, &boundary, &lambdas)? {
                     let continuations = sample_dispersive_dielectric_lanes(
                         n,
                         wo,
@@ -15253,8 +15304,9 @@ fn trace_path_with_regions<'scene>(
                         event_sample,
                     )?;
                     // Split before conditioning on any one wavelength's event.
-                    // This is support-complete at exit interfaces where a blue
-                    // lane can undergo TIR while a red lane still transmits.
+                    // This also retains support when an interference null at
+                    // the hero wavelength leaves companion reflection nonzero,
+                    // even with wavelength-independent Snell directions.
                     // Each suffix runs to completion before the next fixed lane,
                     // so at most two states are live. `active_lane` prevents a
                     // child from splitting again.
@@ -15746,6 +15798,18 @@ fn should_split_dispersive_boundary(
     boundary_direction_is_wavelength_dependent(boundary, lambdas)
 }
 
+fn should_split_spectral_boundary(
+    active_lane: Option<usize>,
+    surface: &DielectricSurface,
+    boundary: &BoundaryMedia,
+    lambdas: &[f64],
+) -> Result<bool, TracerError> {
+    Ok(should_split_dispersive_boundary(active_lane, boundary, lambdas)?
+        || (active_lane.is_none()
+            && surface.coating().is_some_and(|coating| coating.periodic().unit_cell()
+                .iter().any(|layer| layer.thickness_m() != 0.0))))
+}
+
 const fn consume_smooth_dielectric_split(remaining: u8) -> Option<u8> {
     if remaining == 0 {
         None
@@ -15810,7 +15874,7 @@ fn sample_dispersive_dielectric_lanes(
         let eta_i = medium_ior(boundary.incident, lambda)?;
         let eta_t = medium_ior(boundary.transmitted, lambda)?;
         let continuation = if let Some(alpha) = surface.roughness_alpha() {
-            sample_rough_dielectric(
+            surface.interface(lambda, boundary.coating_reversed())?.sample_rough(
                 normal,
                 wo,
                 eta_i,
@@ -15828,7 +15892,8 @@ fn sample_dispersive_dielectric_lanes(
                 delta: sample.delta,
             })
         } else {
-            let sample = sample_smooth_dielectric(normal, wo, eta_i, eta_t, event_sample)?;
+            let sample = surface.interface(lambda, boundary.coating_reversed())?
+                .sample_smooth(normal, wo, eta_i, eta_t, event_sample)?;
             Some(DielectricLaneContinuation {
                 direction: sample.direction,
                 event: sample.event,
@@ -15869,7 +15934,7 @@ fn sample_dielectric_path(
     let proposal_eta_i = medium_ior(boundary.incident, proposal_lambda)?;
     let proposal_eta_t = medium_ior(boundary.transmitted, proposal_lambda)?;
     if let Some(alpha) = surface.roughness_alpha() {
-        let Some(sample) = sample_rough_dielectric(
+        let Some(sample) = surface.interface(proposal_lambda, boundary.coating_reversed())?.sample_rough(
             normal,
             wo,
             proposal_eta_i,
@@ -15893,7 +15958,8 @@ fn sample_dielectric_path(
                 let eta_i = medium_ior(boundary.incident, lambda)?;
                 let eta_t = medium_ior(boundary.transmitted, lambda)?;
                 let evaluation =
-                    evaluate_rough_dielectric(normal, wo, sample.direction, eta_i, eta_t, alpha)?;
+                    surface.interface(lambda, boundary.coating_reversed())?
+                        .evaluate_rough(normal, wo, sample.direction, eta_i, eta_t, alpha)?;
                 weights[lane] = evaluation.value * sampled_cosine / sample.pdf;
             }
         }
@@ -15907,7 +15973,8 @@ fn sample_dielectric_path(
     }
 
     let sample =
-        sample_smooth_dielectric(normal, wo, proposal_eta_i, proposal_eta_t, event_sample)?;
+        surface.interface(proposal_lambda, boundary.coating_reversed())?
+            .sample_smooth(normal, wo, proposal_eta_i, proposal_eta_t, event_sample)?;
     let mut weights = [0.0; PACKET];
     // The dielectric sampler has already admitted and normalized this frame.
     // Clamp the independently recomputed cosine so a final binary64 ulp above
@@ -15916,12 +15983,13 @@ fn sample_dielectric_path(
     for (lane, &lambda) in lambdas.iter().enumerate() {
         let eta_i = medium_ior(boundary.incident, lambda)?;
         let eta_t = medium_ior(boundary.transmitted, lambda)?;
-        let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+        let fresnel = surface.interface(lambda, boundary.coating_reversed())?
+            .fresnel(incident_cosine, eta_i, eta_t)?;
         weights[lane] = match sample.event {
             DielectricEvent::Reflection => fresnel.reflectance / sample.probability,
             DielectricEvent::Transmission => {
                 let eta_ratio = eta_i / eta_t;
-                (1.0 - fresnel.reflectance) * eta_ratio * eta_ratio / sample.probability
+                fresnel.transmittance * eta_ratio * eta_ratio / sample.probability
             }
         };
     }
@@ -20479,6 +20547,105 @@ mod tests {
     fn test_oblique_wo() -> Vec3 {
         let raw = Vec3::new(0.6, 0.0, 0.8);
         raw.scale(1.0 / raw.norm())
+    }
+
+    #[test]
+    fn g1_coated_dielectric_packets_connectors_and_reverse_pdf_share_optics() {
+        use crate::conductor::{
+            CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
+        };
+        use crate::dielectric::DielectricCoating;
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.dielectric-coating-transport", b"synthetic"),
+            ConductorDataStatus::Representative,
+        )
+        .unwrap();
+        let coating = DielectricCoating::try_new(
+            CoherentPeriodicCoating::try_new(
+                &[CauchyCoatingLayer::try_new(
+                    CauchyIor::try_constant(1.5).unwrap(), 0.0, 550.0e-9 / 6.0,
+                )
+                .unwrap()],
+                1,
+                source,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let glass = DielectricGlass::new(
+            CauchyIor::try_constant(2.25).unwrap(), BeerLambertAbsorption::CLEAR,
+            GlassProvenance::Custom,
+        );
+        let surface = DielectricSurface::SMOOTH.with_coating(coating);
+        let boundary = test_entry_boundary(&glass);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let wavelengths = [450.0, 550.0, 650.0, 750.0];
+        let sample = sample_dielectric_path(normal, normal, surface, &boundary,
+            &wavelengths, 1, 0.2, 0.7, 0.8).unwrap().unwrap();
+        assert_eq!(sample.event, DielectricEvent::Transmission);
+        assert!(sample.delta);
+        for (lane, wavelength) in wavelengths.into_iter().enumerate() {
+            let response = surface.interface(wavelength, false).unwrap().fresnel(1.0, 1.0, 2.25).unwrap();
+            assert_relative_close(sample.weights[lane], response.transmittance / 2.25_f64.powi(2),
+                3.0e-14, "coherent packet transmission");
+        }
+        let (direction, probability) = deterministic_surface_transmission(normal, normal.scale(-1.0),
+            1.0, 2.25, &surface, 550.0, false).unwrap();
+        assert_eq!(direction, sample.direction);
+        assert_relative_close(probability, 1.0, 3.0e-14, "coated connector probability");
+        let rough = DielectricSurface::try_rough(0.18).unwrap().with_coating(coating);
+        let rough_sample = sample_dielectric_path(normal, test_oblique_wo(), rough, &boundary,
+            &wavelengths, 0, 0.21, 0.67, 0.999).unwrap().unwrap();
+        assert_eq!(rough_sample.event, DielectricEvent::Transmission);
+        let reverse = reverse_dielectric_pdf(normal, test_oblique_wo(), rough_sample.direction,
+            rough, boundary, wavelengths[0]).unwrap();
+        let expected = rough.interface(wavelengths[0], true).unwrap().evaluate_rough(
+            normal.scale(-1.0), rough_sample.direction, test_oblique_wo(), 2.25, 1.0, 0.18,
+        ).unwrap();
+        assert_eq!(reverse, expected.pdf);
+        assert_ne!(Material::Dielectric { glass, surface }.content_identity(),
+            Material::Dielectric { glass, surface: DielectricSurface::SMOOTH }.content_identity());
+    }
+
+    #[test]
+    fn g1_coating_null_splits_packet_before_hero_event_conditioning() {
+        use crate::conductor::{
+            CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
+        };
+        use crate::dielectric::DielectricCoating;
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.coating-null-support", b"synthetic"),
+            ConductorDataStatus::Representative,
+        ).unwrap();
+        // n(500 nm)=1.5 exactly, equal to both bulk media. The film is optically
+        // null only in that lane; the other phase indices and reflections differ.
+        let cell = [CauchyCoatingLayer::try_new(
+            CauchyIor::try_new(1.0, 0.125, 0.0).unwrap(), 0.0, 120.0e-9,
+        ).unwrap()];
+        let surface = DielectricSurface::SMOOTH.with_coating(DielectricCoating::try_new(
+            CoherentPeriodicCoating::try_new(&cell, 1, source).unwrap(),
+        ).unwrap());
+        let glass = DielectricGlass::new(CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
+        let boundary = BoundaryMedia {
+            incident: Some(glass), transmitted: Some(glass),
+            transition: MediumTransition::Enter(MediumEntry { boundary_primitive: 7, glass: &glass }),
+        };
+        let wavelengths = [400.0, 500.0, 600.0, 700.0];
+        assert!(!should_split_dispersive_boundary(None, &boundary, &wavelengths).unwrap());
+        assert!(should_split_spectral_boundary(None, &surface, &boundary, &wavelengths).unwrap());
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let lanes = sample_dispersive_dielectric_lanes(normal, normal, surface, &boundary,
+            &wavelengths, 0.2, 0.7, 0.0).unwrap();
+        assert_eq!(lanes[1].unwrap().event, DielectricEvent::Transmission);
+        for lane in [0, 2, 3] {
+            assert_eq!(lanes[lane].unwrap().event, DielectricEvent::Reflection);
+            assert!(lanes[lane].unwrap().weight > 0.0);
+        }
+        for lane in 0..PACKET {
+            assert!(!should_split_spectral_boundary(Some(lane), &surface, &boundary, &wavelengths).unwrap());
+        }
+        assert_eq!(maximum_spectral_suffixes(false, SMOOTH_DIELECTRIC_SPLIT_BUDGET), 16);
     }
 
     fn assert_relative_close(observed: f64, expected: f64, tolerance: f64, context: &str) {

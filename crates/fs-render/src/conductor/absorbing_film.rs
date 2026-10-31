@@ -217,6 +217,14 @@ pub(super) fn reflection_amplitudes(
 }
 
 pub(super) fn propagation(q_squared: Complex, phase_scale: f64) -> (Complex, Complex) {
+    let (cosine, sine_over_q, _) = propagation_with_scale(q_squared, phase_scale);
+    (cosine, sine_over_q)
+}
+
+pub(super) fn propagation_with_scale(
+    q_squared: Complex,
+    phase_scale: f64,
+) -> (Complex, Complex, f64) {
     let q = super::thin_film::forward_sqrt(q_squared);
     let delta = q * phase_scale;
     if det::hypot(delta.re, delta.im) < 1.0e-4 {
@@ -227,6 +235,7 @@ pub(super) fn propagation(q_squared: Complex, phase_scale: f64) -> (Complex, Com
         return (
             Complex::new(1.0, 0.0) - square * 0.5 + fourth * (1.0 / 24.0),
             (Complex::new(1.0, 0.0) - square * (1.0 / 6.0) + fourth * (1.0 / 120.0)) * phase_scale,
+            0.0,
         );
     }
     let (sine, cosine) = det::sin_cos(delta.re);
@@ -235,6 +244,7 @@ pub(super) fn propagation(q_squared: Complex, phase_scale: f64) -> (Complex, Com
     (
         Complex::new(cosine * half_sum, -sine * half_difference),
         Complex::new(sine * half_sum, cosine * half_difference) / q,
+        delta.im,
     )
 }
 

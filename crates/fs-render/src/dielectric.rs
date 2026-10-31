@@ -12,6 +12,9 @@ use fs_math::det;
 
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, lift_rgb};
 
+mod coating;
+pub use coating::{DielectricCoating, DielectricCoatingStack, DielectricInterface};
+
 const PI: f64 = core::f64::consts::PI;
 const MIN_ROUGHNESS_ALPHA: f64 = 1.0e-4;
 const MAX_ROUGHNESS_ALPHA: f64 = 1.0;
@@ -48,6 +51,13 @@ pub enum DielectricError {
     /// A scalar interface parameter was non-finite or an absolute index was
     /// outside the admitted `[1, 3]` dielectric domain.
     InvalidInterface,
+    /// A transmitting dielectric coating was absorbing or otherwise outside
+    /// the explicitly lossless coherent-stack domain.
+    InvalidCoating,
+    /// A nontrivial coating between exactly equal bulk indices would mix
+    /// continuous rough reflection with delta transmission. This separate
+    /// mixed-measure microfacet model is not admitted by the native sampler.
+    CoatedNullRoughInterface,
 }
 
 impl core::fmt::Display for DielectricError {
@@ -61,6 +71,8 @@ impl core::fmt::Display for DielectricError {
             Self::UndefinedGroupIndex => "group index is undefined at this dielectric table knot",
             Self::InvalidDirection => "invalid dielectric direction frame",
             Self::InvalidInterface => "invalid dielectric interface parameters",
+            Self::InvalidCoating => "invalid lossless dielectric coating",
+            Self::CoatedNullRoughInterface => "rough coated equal-index boundaries require a mixed delta/rough model",
         })
     }
 }
@@ -811,18 +823,21 @@ impl DielectricGlass {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DielectricSurface {
     roughness_alpha: Option<f64>,
+    coating: Option<DielectricCoating>,
 }
 
 impl DielectricSurface {
     /// Ideal smooth (delta) dielectric interface.
     pub const SMOOTH: Self = Self {
         roughness_alpha: None,
+        coating: None,
     };
 
     /// Polished-product-glass starting point (`alpha = 0.06`). This is a
     /// look-development convenience, not a measured surface claim.
     pub const POLISHED: Self = Self {
         roughness_alpha: Some(0.06),
+        coating: None,
     };
 
     /// Construct an isotropic GGX dielectric interface.
@@ -830,6 +845,7 @@ impl DielectricSurface {
         validate_roughness(roughness_alpha)?;
         Ok(Self {
             roughness_alpha: Some(roughness_alpha),
+            coating: None,
         })
     }
 
@@ -844,6 +860,28 @@ impl DielectricSurface {
     pub const fn is_delta(self) -> bool {
         self.roughness_alpha.is_none()
     }
+
+    /// Attach an explicitly source-bound lossless coherent multilayer coating.
+    /// The authored order runs from outside the object into its bulk medium;
+    /// an exiting ray must evaluate the reversed order. Bulk Beer-Lambert
+    /// absorption stays independent and is not applied inside these films.
+    #[must_use]
+    pub const fn with_coating(mut self, coating: DielectricCoating) -> Self {
+        self.coating = Some(coating);
+        self
+    }
+
+    /// Borrow the authored surface coating without copying its unit cell.
+    #[must_use]
+    pub const fn coating(&self) -> Option<&DielectricCoating> { self.coating.as_ref() }
+
+    /// Shared Fresnel/sampling owner for one vacuum wavelength. `reverse` is
+    /// true when incident from the object's interior, including reverse-PDF
+    /// evaluation of a transmitted edge. Roughness remains a separate input.
+    pub fn interface(&self, wavelength_nm: f64, reverse: bool) -> Result<DielectricInterface<'_>, DielectricError> {
+        validate_wavelength(wavelength_nm)?;
+        Ok(DielectricInterface::new(self.coating.as_ref(), wavelength_nm, reverse))
+    }
 }
 
 /// Exact unpolarized Fresnel result for one dielectric interface.
@@ -851,6 +889,10 @@ impl DielectricSurface {
 pub struct FresnelDielectric {
     /// Power reflectance in `[0, 1]`.
     pub reflectance: f64,
+    /// Transmitted normal power flux. For a coherent coating this comes from
+    /// its complex transmitted field, retaining weak transmission even when R
+    /// rounds to one. Uncoated interfaces retain their established `1-R` bits.
+    pub transmittance: f64,
     /// Positive transmitted-angle cosine, or zero under total internal
     /// reflection.
     pub transmitted_cosine: f64,
@@ -872,6 +914,7 @@ pub fn fresnel_dielectric(
     if indices_exactly_equal(eta_i, eta_t) {
         return Ok(FresnelDielectric {
             reflectance: 0.0,
+            transmittance: 1.0,
             transmitted_cosine: incident_cosine,
             total_internal_reflection: false,
         });
@@ -881,6 +924,7 @@ pub fn fresnel_dielectric(
     if sin2_t >= 1.0 {
         return Ok(FresnelDielectric {
             reflectance: 1.0,
+            transmittance: 0.0,
             transmitted_cosine: 0.0,
             total_internal_reflection: true,
         });
@@ -902,6 +946,7 @@ pub fn fresnel_dielectric(
     let reflectance = 0.5 * (parallel * parallel + perpendicular * perpendicular);
     Ok(FresnelDielectric {
         reflectance: reflectance.clamp(0.0, 1.0),
+        transmittance: 1.0 - reflectance.clamp(0.0, 1.0),
         transmitted_cosine,
         total_internal_reflection: false,
     })
@@ -938,6 +983,13 @@ pub fn sample_smooth_dielectric(
     eta_t: f64,
     event_sample: f64,
 ) -> Result<SmoothDielectricSample, DielectricError> {
+    sample_smooth_with_interface(normal, wo, eta_i, eta_t, event_sample, None)
+}
+
+fn sample_smooth_with_interface(
+    normal: Vec3, wo: Vec3, eta_i: f64, eta_t: f64, event_sample: f64,
+    interface: Option<DielectricInterface<'_>>,
+) -> Result<SmoothDielectricSample, DielectricError> {
     validate_direction_frame(normal, wo)?;
     validate_interface_scalar(normal.dot(wo), eta_i, eta_t)?;
     if !event_sample.is_finite() || !(0.0..1.0).contains(&event_sample) {
@@ -945,7 +997,7 @@ pub fn sample_smooth_dielectric(
     }
     let normal = normalize_admitted(normal);
     let wo = normalize_admitted(wo);
-    if indices_exactly_equal(eta_i, eta_t) {
+    if indices_exactly_equal(eta_i, eta_t) && !interface.is_some_and(|value| value.has_contrast(eta_i)) {
         return Ok(SmoothDielectricSample {
             direction: wo.scale(-1.0),
             event: DielectricEvent::Transmission,
@@ -957,14 +1009,17 @@ pub fn sample_smooth_dielectric(
     // is <= 1 by the last ulp. The frame validator already established the
     // geometric domain, so canonicalize that roundoff before Fresnel.
     let incident_cosine = normal.dot(wo).clamp(0.0, 1.0);
-    let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
-    if fresnel.total_internal_reflection || event_sample < fresnel.reflectance {
+    let fresnel = interface_fresnel(interface, incident_cosine, eta_i, eta_t)?;
+    let probabilities = interface_event_probabilities(interface, fresnel);
+    if interface_selects_reflection(interface, fresnel, probabilities, event_sample) {
         let direction = reflect(wo, normal);
         return Ok(SmoothDielectricSample {
             direction,
             event: DielectricEvent::Reflection,
-            probability: fresnel.reflectance,
-            radiance_weight: 1.0,
+            probability: probabilities[0],
+            radiance_weight: if interface.is_some_and(|value| value.is_active()) {
+                fresnel.reflectance / probabilities[0]
+            } else { 1.0 },
         });
     }
     let direction = refract(wo, normal, eta_i, eta_t, fresnel.transmitted_cosine)?;
@@ -972,8 +1027,10 @@ pub fn sample_smooth_dielectric(
     Ok(SmoothDielectricSample {
         direction,
         event: DielectricEvent::Transmission,
-        probability: 1.0 - fresnel.reflectance,
-        radiance_weight: eta_ratio * eta_ratio,
+        probability: probabilities[1],
+        radiance_weight: if interface.is_some_and(|value| value.is_active()) {
+            (fresnel.transmittance / probabilities[1]) * eta_ratio * eta_ratio
+        } else { eta_ratio * eta_ratio },
     })
 }
 
@@ -1020,10 +1077,19 @@ pub fn evaluate_rough_dielectric(
     eta_t: f64,
     roughness_alpha: f64,
 ) -> Result<RoughDielectricEvaluation, DielectricError> {
+    evaluate_rough_with_interface(normal, wo, wi, eta_i, eta_t, roughness_alpha, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn evaluate_rough_with_interface(
+    normal: Vec3, wo: Vec3, wi: Vec3, eta_i: f64, eta_t: f64, roughness_alpha: f64,
+    interface: Option<DielectricInterface<'_>>,
+) -> Result<RoughDielectricEvaluation, DielectricError> {
     validate_direction_frame(normal, wo)?;
     validate_unit(wi)?;
     validate_interface_scalar(normal.dot(wo), eta_i, eta_t)?;
     validate_roughness(roughness_alpha)?;
+    refuse_coated_rough_null(interface, eta_i, eta_t)?;
     let normal = normalize_admitted(normal);
     let wo = normalize_admitted(wo);
     let wi = normalize_admitted(wi);
@@ -1078,7 +1144,8 @@ pub fn evaluate_rough_dielectric(
             event,
         });
     }
-    let fresnel = fresnel_dielectric(wo_dot_m.clamp(0.0, 1.0), eta_i, eta_t)?;
+    let fresnel = interface_fresnel(interface, wo_dot_m.clamp(0.0, 1.0), eta_i, eta_t)?;
+    let probabilities = interface_event_probabilities(interface, fresnel);
     let distribution = ggx_d(roughness_alpha, n_dot_m);
     let geometry = smith_g1(roughness_alpha, cos_o) * smith_g1(roughness_alpha, cos_i.abs());
 
@@ -1092,7 +1159,7 @@ pub fn evaluate_rough_dielectric(
         }
         let value = distribution * geometry * fresnel.reflectance / (4.0 * cos_o * cos_i);
         let visible_normal_pdf = distribution * smith_g1(roughness_alpha, cos_o) * wo_dot_m / cos_o;
-        let pdf = visible_normal_pdf * fresnel.reflectance / (4.0 * wo_dot_m);
+        let pdf = visible_normal_pdf * probabilities[0] / (4.0 * wo_dot_m);
         return finite_evaluation(value, pdf, event);
     }
 
@@ -1120,11 +1187,11 @@ pub fn evaluate_rough_dielectric(
     // eta^2 numerator from `value` is the radiance Jacobian; the sampler PDF
     // retains eta^2, so a smooth-limit slab gains eta_i^2/eta_t^2 on entry and
     // the reciprocal on exit.
-    let value = (1.0 - fresnel.reflectance) * distribution * geometry * (wi_dot_m * wo_dot_m).abs()
+    let value = fresnel.transmittance * distribution * geometry * (wi_dot_m * wo_dot_m).abs()
         / (cos_o * cos_i.abs() * denominator2);
     let jacobian = eta * eta * wi_dot_m.abs() / denominator2;
     let visible_normal_pdf = distribution * smith_g1(roughness_alpha, cos_o) * wo_dot_m / cos_o;
-    let pdf = visible_normal_pdf * (1.0 - fresnel.reflectance) * jacobian;
+    let pdf = visible_normal_pdf * probabilities[1] * jacobian;
     finite_evaluation(value, pdf, event)
 }
 
@@ -1142,9 +1209,20 @@ pub fn sample_rough_dielectric(
     microfacet_v: f64,
     event_sample: f64,
 ) -> Result<Option<RoughDielectricSample>, DielectricError> {
+    sample_rough_with_interface(normal, wo, eta_i, eta_t, roughness_alpha,
+        microfacet_u, microfacet_v, event_sample, None)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn sample_rough_with_interface(
+    normal: Vec3, wo: Vec3, eta_i: f64, eta_t: f64, roughness_alpha: f64,
+    microfacet_u: f64, microfacet_v: f64, event_sample: f64,
+    interface: Option<DielectricInterface<'_>>,
+) -> Result<Option<RoughDielectricSample>, DielectricError> {
     validate_direction_frame(normal, wo)?;
     validate_interface_scalar(normal.dot(wo), eta_i, eta_t)?;
     validate_roughness(roughness_alpha)?;
+    refuse_coated_rough_null(interface, eta_i, eta_t)?;
     for sample in [microfacet_u, microfacet_v, event_sample] {
         if !sample.is_finite() || !(0.0..1.0).contains(&sample) {
             return Err(DielectricError::InvalidInterface);
@@ -1169,9 +1247,10 @@ pub fn sample_rough_dielectric(
     if wo_dot_m <= 0.0 {
         return Ok(None);
     }
-    let fresnel = fresnel_dielectric(wo_dot_m.clamp(0.0, 1.0), eta_i, eta_t)?;
+    let fresnel = interface_fresnel(interface, wo_dot_m.clamp(0.0, 1.0), eta_i, eta_t)?;
+    let probabilities = interface_event_probabilities(interface, fresnel);
     let (direction, event) =
-        if fresnel.total_internal_reflection || event_sample < fresnel.reflectance {
+        if interface_selects_reflection(interface, fresnel, probabilities, event_sample) {
             (reflect(wo, micro_normal), DielectricEvent::Reflection)
         } else {
             (
@@ -1186,7 +1265,7 @@ pub fn sample_rough_dielectric(
         return Ok(None);
     }
     let evaluation =
-        evaluate_rough_dielectric(normal, wo, direction, eta_i, eta_t, roughness_alpha)?;
+        evaluate_rough_with_interface(normal, wo, direction, eta_i, eta_t, roughness_alpha, interface)?;
     if evaluation.pdf <= 0.0 || evaluation.value < 0.0 {
         return Ok(None);
     }
@@ -1202,6 +1281,39 @@ pub fn sample_rough_dielectric(
         radiance_weight,
         delta: false,
     }))
+}
+
+fn interface_fresnel(interface: Option<DielectricInterface<'_>>, cosine: f64,
+    eta_i: f64, eta_t: f64) -> Result<FresnelDielectric, DielectricError> {
+    match interface {
+        Some(interface) => interface.fresnel(cosine, eta_i, eta_t),
+        None => fresnel_dielectric(cosine, eta_i, eta_t),
+    }
+}
+
+fn interface_event_probabilities(interface: Option<DielectricInterface<'_>>,
+    fresnel: FresnelDielectric) -> [f64; 2] {
+    if interface.is_some_and(|value| value.is_active()) {
+        let total = fresnel.reflectance + fresnel.transmittance;
+        [fresnel.reflectance / total, fresnel.transmittance / total]
+    } else { [fresnel.reflectance, fresnel.transmittance] }
+}
+
+fn interface_selects_reflection(interface: Option<DielectricInterface<'_>>,
+    fresnel: FresnelDielectric, probabilities: [f64; 2], sample: f64) -> bool {
+    if fresnel.total_internal_reflection { return true; }
+    if interface.is_some_and(|value| value.is_active()) && probabilities[1] < probabilities[0] {
+        // Keep the smaller channel at the low end of [0,1). Its threshold
+        // survives even when the complementary power rounds exactly to one.
+        sample >= probabilities[1]
+    } else { sample < probabilities[0] }
+}
+
+fn refuse_coated_rough_null(interface: Option<DielectricInterface<'_>>, eta_i: f64,
+    eta_t: f64) -> Result<(), DielectricError> {
+    if indices_exactly_equal(eta_i, eta_t) && interface.is_some_and(|value| value.has_contrast(eta_i)) {
+        Err(DielectricError::CoatedNullRoughInterface)
+    } else { Ok(()) }
 }
 
 fn validate_wavelength(wavelength_nm: f64) -> Result<(), DielectricError> {

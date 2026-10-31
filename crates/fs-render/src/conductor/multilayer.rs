@@ -17,6 +17,7 @@ use crate::dielectric::CauchyIor;
 use crate::polarization::Mueller;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 use fs_blake3::{ContentHash, DomainHasher};
+use fs_math::det;
 
 /// Maximum physical layers, after expanding all repeats. No amplitude-based
 /// truncation is used: even weak returning waves can control a coherent null.
@@ -146,7 +147,7 @@ impl CoherentPeriodicCoating {
         self.source
     }
 
-    pub(super) fn update_identity(&self, hasher: &mut DomainHasher) {
+    pub(crate) fn update_identity(&self, hasher: &mut DomainHasher) {
         hasher.update(b"coherent-periodic-coating.v1");
         hasher.update(&[self.cell_len, self.repetitions]);
         for layer in self.unit_cell() {
@@ -193,6 +194,49 @@ impl CoherentPeriodicCoating {
     }
 
     fn reflection(&self, geometry: Geometry) -> Result<Reflection, ConductorError> {
+        self.response::<false>(geometry, false)
+    }
+
+    pub(crate) fn lossless_transmission(
+        &self,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        exit_eta: f64,
+        cosine: f64,
+        reverse: bool,
+        exit_normal: [f64; 2],
+    ) -> Result<CoherentTransmission, ConductorError> {
+        // The dielectric coating owner admits lossless layers and both real
+        // boundary indices. Keep this refusal as a second internal boundary.
+        if self
+            .unit_cell()
+            .iter()
+            .any(|layer| layer.extinction_k != 0.0)
+            || !exit_eta.is_finite()
+            || !(1.0..=3.0).contains(&exit_eta)
+        {
+            return Err(ConductorError::InvalidSample);
+        }
+        let mut geometry = Geometry::new(
+            wavelength_nm,
+            incident_eta,
+            ComplexIor {
+                eta: exit_eta,
+                k: 0.0,
+            },
+            cosine,
+        )?;
+        geometry.exit_normal = Some(Complex::new(exit_normal[0], exit_normal[1]));
+        Ok(self
+            .response::<true>(geometry, reverse)?
+            .transmission_result())
+    }
+
+    fn response<const TRANSMISSION: bool>(
+        &self,
+        geometry: Geometry,
+        reverse: bool,
+    ) -> Result<Reflection, ConductorError> {
         let mut prepared = [LayerTransfer::IDENTITY; MAX_COHERENT_UNIT_CELL_LAYERS];
         for (slot, layer) in prepared.iter_mut().zip(self.unit_cell()) {
             let ior = ComplexIor {
@@ -201,10 +245,66 @@ impl CoherentPeriodicCoating {
             };
             *slot = LayerTransfer::new(ior, layer.thickness_m, geometry);
         }
-        reflection(geometry, self.layer_count(), |index| {
+        response::<TRANSMISSION>(geometry, self.layer_count(), |index| {
+            let index = if reverse {
+                self.layer_count() - 1 - index
+            } else {
+                index
+            };
             Ok(prepared[index % self.cell_len as usize])
         })
     }
+}
+
+/// Internal phase-preserving result shared with the transmitting-dielectric
+/// owner. Transmission amplitudes are normalized to normal Poynting flux,
+/// including the p-wave magnetic/electric field conversion.
+pub(crate) struct CoherentTransmission {
+    pub(crate) reflected: [[f64; 2]; 2],
+    pub(crate) transmitted: [[f64; 2]; 2],
+    pub(crate) bare_equivalent: bool,
+}
+
+pub(crate) fn lossless_stack_transmission(
+    layers: &[CoherentDielectricCoating],
+    wavelength_nm: f64,
+    incident_eta: f64,
+    exit_eta: f64,
+    cosine: f64,
+    reverse: bool,
+    exit_normal: [f64; 2],
+) -> Result<CoherentTransmission, ConductorError> {
+    if layers.len() > MAX_COHERENT_STACK_LAYERS {
+        return Err(ConductorError::InvalidCoatingStack);
+    }
+    let mut geometry = Geometry::new(
+        wavelength_nm,
+        incident_eta,
+        ComplexIor {
+            eta: exit_eta,
+            k: 0.0,
+        },
+        cosine,
+    )?;
+    geometry.exit_normal = Some(Complex::new(exit_normal[0], exit_normal[1]));
+    Ok(response::<true>(geometry, layers.len(), |index| {
+        let index = if reverse {
+            layers.len() - 1 - index
+        } else {
+            index
+        };
+        let layer = layers[index];
+        let eta = layer
+            .ior()
+            .eval(wavelength_nm)
+            .map_err(|_| ConductorError::InvalidWavelength)?;
+        Ok(LayerTransfer::new(
+            ComplexIor { eta, k: 0.0 },
+            layer.thickness_m(),
+            geometry,
+        ))
+    })?
+    .transmission_result())
 }
 
 /// Borrow one fully declared transparent or absorbing spectral layer. Its
@@ -330,6 +430,9 @@ struct Geometry {
     substrate: ComplexIor,
     cosine: f64,
     transverse_squared: f64,
+    // Transmitting boundaries retain the native Snell/TIR decision: its
+    // ratio-based rounding can differ from n_t²-k_parallel² at criticality.
+    exit_normal: Option<Complex>,
 }
 
 impl Geometry {
@@ -354,6 +457,7 @@ impl Geometry {
             substrate,
             cosine,
             transverse_squared: incident_eta * incident_eta * (1.0 - cosine * cosine),
+            exit_normal: None,
         })
     }
 }
@@ -366,6 +470,7 @@ struct LayerTransfer {
     inactive: bool,
     incident_match: bool,
     substrate_match: bool,
+    propagation_log_scale: f64,
 }
 
 impl LayerTransfer {
@@ -376,6 +481,7 @@ impl LayerTransfer {
         inactive: true,
         incident_match: true,
         substrate_match: true,
+        propagation_log_scale: 0.0,
     };
 
     fn new(ior: ComplexIor, thickness_m: f64, geometry: Geometry) -> Self {
@@ -387,7 +493,8 @@ impl LayerTransfer {
         let n_squared = Complex::new(ior.eta, ior.k).square();
         let q_squared = n_squared - Complex::new(geometry.transverse_squared, 0.0);
         let phase_scale = core::f64::consts::TAU * (thickness_m * 1.0e9) / geometry.wavelength_nm;
-        let (cosine, sine_over_q) = super::absorbing_film::propagation(q_squared, phase_scale);
+        let (cosine, sine_over_q, propagation_log_scale) =
+            super::absorbing_film::propagation_with_scale(q_squared, phase_scale);
         let minus_i = Complex::new(0.0, -1.0);
         Self {
             cosine,
@@ -399,6 +506,7 @@ impl LayerTransfer {
             inactive: false,
             incident_match: ior.k == 0.0 && ior.eta == geometry.incident_eta,
             substrate_match: ior == geometry.substrate,
+            propagation_log_scale,
         }
     }
 }
@@ -406,9 +514,18 @@ impl LayerTransfer {
 struct Reflection {
     amplitudes: [Complex; 2],
     bare_equivalent: bool,
+    transmission: [Complex; 2],
 }
 
 impl Reflection {
+    fn transmission_result(self) -> CoherentTransmission {
+        CoherentTransmission {
+            reflected: self.amplitudes.map(|value| [value.re, value.im]),
+            transmitted: self.transmission.map(|value| [value.re, value.im]),
+            bare_equivalent: self.bare_equivalent,
+        }
+    }
+
     fn reflectance(self, geometry: Geometry) -> Result<f64, ConductorError> {
         if self.bare_equivalent {
             return super::fresnel_conductor(
@@ -429,19 +546,31 @@ impl Reflection {
 fn reflection(
     geometry: Geometry,
     layer_count: usize,
+    layer: impl FnMut(usize) -> Result<LayerTransfer, ConductorError>,
+) -> Result<Reflection, ConductorError> {
+    response::<false>(geometry, layer_count, layer)
+}
+
+fn response<const TRANSMISSION: bool>(
+    geometry: Geometry,
+    layer_count: usize,
     mut layer: impl FnMut(usize) -> Result<LayerTransfer, ConductorError>,
 ) -> Result<Reflection, ConductorError> {
     if geometry.cosine == 0.0 {
         return Ok(Reflection {
             amplitudes: [Complex::new(-1.0, 0.0); 2],
             bare_equivalent: true,
+            transmission: [Complex::new(0.0, 0.0); 2],
         });
     }
     let n_squared = Complex::new(geometry.substrate.eta, geometry.substrate.k).square();
-    let q =
-        super::thin_film::forward_sqrt(n_squared - Complex::new(geometry.transverse_squared, 0.0));
+    let q = geometry.exit_normal.unwrap_or_else(|| {
+        super::thin_film::forward_sqrt(n_squared - Complex::new(geometry.transverse_squared, 0.0))
+    });
     let mut field = [Complex::new(1.0, 0.0); 2];
     let mut flux = [q, q / n_squared];
+    let exit_admittance = [q.re, (q / n_squared).re];
+    let mut logarithmic_scale = [0.0; 2];
     let mut bare_equivalent = true;
     let mut inside_incident = false;
     for index in (0..layer_count).rev() {
@@ -473,9 +602,15 @@ fn reflection(
             // inverted into infinity before normalizing the projective fields.
             field[pol] = Complex::new(next_field.re / scale, next_field.im / scale);
             flux[pol] = Complex::new(next_flux.re / scale, next_flux.im / scale);
+            if TRANSMISSION {
+                // The reflected ratio forgets this common scale; transmitted
+                // flux must retain it. Log scaling also covers thick evanescent
+                // barriers without constructing a growing exponential.
+                logarithmic_scale[pol] += det::ln(scale) + transfer.propagation_log_scale;
+            }
         }
     }
-    if bare_equivalent {
+    if bare_equivalent && !TRANSMISSION {
         return Ok(Reflection {
             amplitudes: super::thin_film::polarization::bare_amplitudes(
                 geometry.incident_eta,
@@ -483,6 +618,7 @@ fn reflection(
                 geometry.cosine,
             ),
             bare_equivalent,
+            transmission: [Complex::new(0.0, 0.0); 2],
         });
     }
     let incident = [
@@ -495,9 +631,25 @@ fn reflection(
     if geometry.cosine == 1.0 {
         amplitudes[1] = Complex::new(-amplitudes[0].re, -amplitudes[0].im);
     }
+    let mut transmission = [Complex::new(0.0, 0.0); 2];
+    if TRANSMISSION {
+        for pol in 0..2 {
+            if exit_admittance[pol] > 0.0 {
+                let numerator = 2.0
+                    * det::sqrt(incident[pol] * exit_admittance[pol])
+                    * det::exp(-logarithmic_scale[pol]);
+                transmission[pol] =
+                    Complex::new(numerator, 0.0) / (field[pol] * incident[pol] + flux[pol]);
+            }
+        }
+        if geometry.cosine == 1.0 {
+            transmission[1] = transmission[0];
+        }
+    }
     Ok(Reflection {
         amplitudes,
         bare_equivalent,
+        transmission,
     })
 }
 

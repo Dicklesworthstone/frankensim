@@ -8,6 +8,7 @@ use crate::polarization::Stokes;
 use crate::polarization::dielectric::transport::{BeamMedium, PolarizationFrame, PolarizedBeam};
 use fs_blake3::ContentHash;
 use fs_geom::Point3;
+use fs_math::det;
 
 fn film(index: f64, thickness: f64) -> CoherentDielectricCoating {
     CoherentDielectricCoating::try_new(
@@ -344,4 +345,42 @@ fn g3_sampled_original_film_law_drives_interference_without_a_dispersion_fit() {
     assert!(fresnel_coated_dielectric_polarized(0.0, 1.0, 1.5, 550.0, &coating).is_err());
     assert!(fresnel_coated_dielectric_polarized(f64::NAN, 1.0, 1.5, 550.0, &coating).is_err());
     assert!(fresnel_coated_dielectric_polarized(0.8, 0.5, 1.5, 550.0, &coating).is_err());
+}
+
+#[test]
+fn g3_original_film_adapter_shares_explicit_transmission_and_native_critical_root() {
+    // Independent quarter-wave antireflection limit. Before the shared-owner
+    // repair scalar T incorrectly retained the bare 0.96 while its matrix had 1.
+    let index = det::sqrt(1.5);
+    let ar = film(index, 550e-9 / (4.0 * index));
+    let response = fresnel_coated_dielectric_polarized(1.0, 1.0, 1.5, 550.0, &ar).unwrap();
+    assert!(response.scalar.reflectance < 1e-28);
+    near(response.scalar.transmittance, 1.0);
+    let coating = film(2.4, 100e-9);
+    let cosine = 0.433_724_397_570_750_8_f64;
+    let (eta_i, eta_t) = (2.048_747_980_327_861, 1.846_015_323_252_327_5);
+    for (cosine, tir) in [
+        (cosine, true),
+        (f64::from_bits(cosine.to_bits() + 3), false),
+    ] {
+        let actual =
+            fresnel_coated_dielectric_polarized(cosine, eta_i, eta_t, 550.0, &coating).unwrap();
+        let expected = DielectricCoatingStack::try_new(core::slice::from_ref(&coating))
+            .unwrap()
+            .fresnel_polarized(550.0, false, cosine, eta_i, eta_t)
+            .unwrap();
+        assert_eq!(actual, expected);
+        assert_eq!(actual.scalar.total_internal_reflection, tir);
+        assert_eq!(actual.scalar.transmittance, actual.transmission.0[0][0]);
+        if actual.scalar.total_internal_reflection {
+            assert_eq!(actual.scalar.transmittance, 0.0);
+        } else {
+            assert!(actual.scalar.transmittance > 0.0);
+        }
+    }
+    let barrier = film(1.0, 1e-5);
+    let weak = fresnel_coated_dielectric_polarized(0.6, 1.5, 1.5, 550.0, &barrier).unwrap();
+    assert_eq!(weak.scalar.reflectance, 1.0);
+    assert!(weak.scalar.transmittance > 0.0 && weak.scalar.transmittance < f64::EPSILON);
+    assert_eq!(weak.scalar.transmittance, weak.transmission.0[0][0]);
 }

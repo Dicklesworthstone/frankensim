@@ -502,6 +502,8 @@ impl PolarizedBeam {
     /// Fresnel Mueller response of the reconstructed microfacet. Thus an
     /// unpolarized input reproduces the native forward-power sample, while
     /// subsequent noncoplanar interactions retain linear/circular polarization.
+    /// For a coated surface, `normal` is the object's outward geometric normal:
+    /// the native source-bound layer order reverses when exiting the object.
     ///
     /// `None` is the native zero-contribution microfacet rejection, not an
     /// error. This keeps the native single-scattering microfacet approximation;
@@ -518,15 +520,27 @@ impl PolarizedBeam {
         }
         let target = target.into();
         let Some(alpha) = surface.roughness_alpha() else {
-            return self.sample_smooth_interface(normal, target, samples[2]).map(Some);
+            if surface.coating().is_none() {
+                return self.sample_smooth_interface(normal, target, samples[2]).map(Some);
+            }
+            let reverse = normal.dot(self.frame.direction) > 0.0;
+            let normal = self.incident_normal(normal)?;
+            let eta_i = self.medium.phase_index_at(self.origin, self.wavelength_nm)?;
+            let eta_t = target.phase_index_at(self.origin, self.wavelength_nm)?;
+            let sample = surface.interface(self.wavelength_nm, reverse)?.sample_smooth_polarized(
+                normal, self.frame.direction.scale(-1.0), eta_i, eta_t, samples[2],
+            )?;
+            return self.scatter_smooth_sample(normal, target, eta_i, eta_t, sample).map(Some);
         };
+        let reverse = normal.dot(self.frame.direction) > 0.0;
         let normal = self.incident_normal(normal)?;
         let wo = self.frame.direction.scale(-1.0);
         let eta_i = self
             .medium
             .phase_index_at(self.origin, self.wavelength_nm)?;
         let eta_t = target.phase_index_at(self.origin, self.wavelength_nm)?;
-        let Some(sample) = sample_rough_dielectric(
+        let interface = surface.interface(self.wavelength_nm, reverse)?;
+        let Some(sample) = interface.sample_rough(
             normal, wo, eta_i, eta_t, alpha, samples[0], samples[1], samples[2],
         )? else { return Ok(None); };
         if sample.delta {
@@ -545,7 +559,7 @@ impl PolarizedBeam {
         let half = Vec3::new(wo.x + ratio * wi.x, wo.y + ratio * wi.y, wo.z + ratio * wi.z);
         let mut micro_normal = unit(half)?;
         if normal.dot(micro_normal) < 0.0 { micro_normal = micro_normal.scale(-1.0); }
-        let fresnel = fresnel_dielectric_polarized(wo.dot(micro_normal).clamp(0.0, 1.0), eta_i, eta_t)?;
+        let fresnel = interface.fresnel_polarized(wo.dot(micro_normal).clamp(0.0, 1.0), eta_i, eta_t)?;
         let matrix = if sample.event == DielectricEvent::Reflection {
             fresnel.reflection
         } else { fresnel.transmission };

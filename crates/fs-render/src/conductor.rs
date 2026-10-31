@@ -15,11 +15,11 @@ use fs_math::det;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN};
 
 mod thin_film;
-pub(crate) use thin_film::propagation as coating_propagation;
 pub use thin_film::{CoherentDielectricCoating, MAX_COHERENT_COATING_THICKNESS_M};
 mod absorbing_film;
 pub use absorbing_film::{CoatingIorSample, CoherentAbsorbingCoating};
 mod multilayer;
+pub(crate) use multilayer::{CoherentTransmission, lossless_stack_transmission};
 pub use multilayer::{
     CauchyCoatingLayer, CoatingLayer, CoherentCoatingStack, CoherentPeriodicCoating,
     MAX_COHERENT_STACK_LAYERS, MAX_COHERENT_UNIT_CELL_LAYERS,

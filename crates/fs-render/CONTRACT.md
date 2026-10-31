@@ -66,6 +66,58 @@ differentiable lift). Pure Rust throughout.
   linear-alpha approximation and weakly absorbing dielectric interface model.
   No RGB fit, opacity floor, or extrapolation is introduced. Thin-path absorbed
   fractions use `expm1`, and material identities retain every admitted knot.
+- **Coherent coatings on transmitting dielectrics:** `DielectricSurface` owns
+  an optional source-bound `DielectricCoating`, separate from homogeneous glass
+  and bulk Beer-Lambert absorption. It admits the existing one-to-four-law
+  Cauchy unit cell and at most 64 expanded physical layers only when every
+  extinction coefficient is exactly zero. Absorbing dielectric films refuse;
+  their loss is never relabeled transmitted power. The borrowed
+  `DielectricCoatingStack` additionally evaluates arbitrary ordered full Cauchy,
+  Sellmeier or tabulated transparent laws without fitting or heap-backed scene
+  materials. Authored order runs outside-to-inside and reverses on exits and
+  reverse transmission proposals. Indices always use vacuum-wavelength phase
+  dispersion. Storage and work stay fixed and bounded, with no per-hit allocation.
+  Both dielectric and conductor films share the same passive boundary-field
+  composition and analytic critical-angle limit. The transmitting branch also
+  retains normalization scales in logarithmic form, so evanescent barriers use
+  decaying exponentials and transmitted complex amplitudes retain their phase.
+  Separate s/p transmitted amplitudes are normalized by outgoing/incident normal
+  Poynting flux before Mueller construction. Per-polarization `R+T=1` is checked;
+  only bounded roundoff is normalized in amplitude space. `FresnelDielectric`
+  exposes explicit transmittance, preserving weak Bragg leakage when reflectance
+  rounds to one. Existing bare-interface arithmetic and identities are retained.
+  Smooth/GGX sampling, hero packet weights and forced splits, forward/reverse
+  BSDF PDFs, bidirectional transport, slab/manifold connectors and direct
+  photometric/thermal/volume-light receivers consume the same coating response.
+  Snell directions, geometric Jacobians, masking and radiance eta factors retain
+  their original owners. Polarized beam traversal uses the same reflected and
+  transmitted Mueller responses and outward-normal layer orientation.
+  A smooth equal-bulk-index coating retains its etalon reflection/transmission;
+  empty, zero-thickness and index-matched coatings retain null limits. A
+  nontrivial rough coating between exactly equal bulk indices explicitly refuses
+  the unsupported mixed continuous-reflection/delta-transmission measure.
+  Exact grazing of a nonzero coating also refuses zero incoming normal power.
+  Film boundaries are isotropic, locally parallel and laterally uniform; the
+  caller declares sufficient coherence across the entire stack. This does not
+  introduce scene-path coherence, film absorption/heating, rough inter-facet
+  multiple scattering or thickness statistics. G0/G1/G3 regressions cover
+  independent complex Airy R/T phases, quarter-wave antireflection, etalons,
+  internal critical/evanescent and terminal-TIR limits, reciprocal flux and
+  polarized power closure, deep Bragg transmission, native sampling/PDF replay,
+  packet/connector consumption and polarized beam transport.
+  At a stochastic nonzero coating, an unsplit spectral packet takes the existing
+  one-time per-wavelength continuation path before conditioning on an event.
+  This retains companion-wavelength reflection/transmission at a hero-lane
+  interference null even when all Snell directions agree. Each child is already
+  monochromatic and cannot split again; the existing sixteen-suffix work bound
+  is unchanged. Forced smooth splits already carry each lane's exact R/T weight.
+  Coated Monte Carlo events place the smaller R/T probability at the low end of
+  the variate, retaining weak transmitted support even when R rounds to one.
+  Smooth weights, GGX PDFs, polarized throughput and importance transport use
+  the same normalized branch probabilities. Uncoated event ordering is unchanged.
+  The exterior longitudinal wave is taken from native Snell/TIR classification,
+  preventing a separate squared-index rounding from inventing a propagating
+  transmitted mode at a native critical ray; internal film roots remain complex.
 - **Dielectric launch media:** camera pupils, cinematic/moving origins, area-only
   photometric probes, and both BDPT endpoints initialize the physical host
   before their first segment. Mesh edge closure/orientation is prepared once;
@@ -3847,8 +3899,11 @@ would be required to assess sampling variability of the thermal trajectory.
 The polarized forward-power path accepts an original
 `CoherentDielectricCoating` on a smooth dielectric boundary. Its admitted
 visible Cauchy, Sellmeier or sampled phase-index law, physical thickness and
-source assertion remain intact. The same bounded single-film propagation used
-by conductor coatings supplies the dielectric reflection and transmission;
+source assertion remain intact. The adapter borrows that film through the shared
+lossless-stack owner used by transmitting multilayers and conductor propagation;
+explicit scalar transmittance, signed Mueller flux and native critical-angle
+classification therefore come from the same coherent solution. There is no
+separate single-film interference solver in this adapter, and
 no synthetic permittivity/permeability or material-name preset is introduced.
 
 `fresnel_coated_dielectric_polarized` retains complex s/p phase in both Mueller
@@ -3877,7 +3932,10 @@ The existing spectral receiver/analyzers consume these path outcomes directly.
 This is a coherent smooth, isotropic, locally parallel film model with both film
 faces collapsed onto the geometric boundary. Film thickness changes optical
 interference; no nanometre displacement, group delay, rough coated interface,
-scene-wide coherent phase or scalar camera-path coating is inferred. Regression
+scene-wide coherent phase is inferred. This borrowed original-film adapter does
+not attach arbitrary full-spectrum films to Copy camera-path materials; those
+materials separately admit the compact source-bound multilayer cells described
+above. Regression
 cases cover independent Airy phase/work, antireflection, reversed media, critical
 and evanescent films, original spectral laws, weak positive branch support, both
 native scene consumers and calibrated detector power/handedness.

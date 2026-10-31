@@ -866,7 +866,7 @@ impl Receiver<'_> {
                         return Ok((0.0, 0.0));
                     };
                     let boundary = boundary.ok_or(TracerError::InvalidInput)?;
-                    let evaluation = evaluate_rough_dielectric(
+                    let evaluation = surface.interface(wavelength, boundary.coating_reversed())?.evaluate_rough(
                         frame.oriented,
                         outgoing,
                         direction,

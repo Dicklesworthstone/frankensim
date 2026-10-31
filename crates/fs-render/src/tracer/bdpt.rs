@@ -473,6 +473,10 @@ fn oriented_normal(vertex: &Vertex, outgoing: Vec3) -> Option<Vec3> {
     })
 }
 
+fn coating_reversed(vertex: &Vertex, outgoing: Vec3) -> Result<bool, TracerError> {
+    Ok(vertex.geometric_normal.ok_or(TracerError::MissingNormal)?.dot(outgoing) < 0.0)
+}
+
 fn surface_scattering(
     scene: &Scene,
     vertex: &Vertex,
@@ -521,7 +525,7 @@ fn surface_scattering(
                 .map(|entry| *entry.glass);
             let eta_i = medium_ior(incident, wavelength_nm)?;
             let eta_t = medium_ior(transmitted, wavelength_nm)?;
-            let evaluation = evaluate_rough_dielectric(
+            let evaluation = surface.interface(wavelength_nm, coating_reversed(vertex, predecessor_direction)?)?.evaluate_rough(
                 normal,
                 predecessor_direction,
                 next_direction,
@@ -583,7 +587,7 @@ fn surface_pdf_solid_angle(
                 .map(|entry| *entry.glass);
             let eta_i = medium_ior(incident, wavelength_nm)?;
             let eta_t = medium_ior(transmitted, wavelength_nm)?;
-            Ok(evaluate_rough_dielectric(
+            Ok(surface.interface(wavelength_nm, coating_reversed(vertex, predecessor_direction)?)?.evaluate_rough(
                 normal,
                 predecessor_direction,
                 next_direction,
@@ -654,7 +658,7 @@ fn sample_surface(
             let eta_i = medium_ior(incident, wavelength_nm)?;
             let eta_t = medium_ior(transmitted, wavelength_nm)?;
             if let Some(alpha) = surface.roughness_alpha() {
-                let Some(sample) = sample_rough_dielectric(
+                let Some(sample) = surface.interface(wavelength_nm, coating_reversed(vertex, wo)?)?.sample_rough(
                     normal, wo, eta_i, eta_t, alpha, random[0], random[1], random[2],
                 )?
                 else {
@@ -683,10 +687,14 @@ fn sample_surface(
                     event: Some(sample.event),
                 }))
             } else {
-                let sample = sample_smooth_dielectric(normal, wo, eta_i, eta_t, random[2])?;
+                let sample = surface.interface(wavelength_nm, coating_reversed(vertex, wo)?)?
+                    .sample_smooth(normal, wo, eta_i, eta_t, random[2])?;
                 let weight = match mode {
                     TransportMode::Radiance => sample.radiance_weight,
-                    TransportMode::Importance => 1.0,
+                    TransportMode::Importance => if sample.event == DielectricEvent::Transmission {
+                        sample.radiance_weight / refractive_transport_factor(
+                            TransportMode::Radiance, eta_i, eta_t).ok_or(TracerError::InvalidInput)?
+                    } else { sample.radiance_weight },
                 };
                 Ok(Some(ScatterSample {
                     direction: sample.direction,
@@ -726,7 +734,8 @@ fn split_smooth_dielectric_surface(
     let eta_i = medium_ior(incident, wavelength_nm)?;
     let eta_t = medium_ior(transmitted, wavelength_nm)?;
     let incident_cosine = admitted_unit_dot(normal, wo).clamp(0.0, 1.0);
-    let fresnel = fresnel_dielectric(incident_cosine, eta_i, eta_t)?;
+    let fresnel = surface.interface(wavelength_nm, coating_reversed(vertex, wo)?)?
+        .fresnel(incident_cosine, eta_i, eta_t)?;
     let (direction, weight) = match event {
         DielectricEvent::Reflection => {
             let weight = fresnel.reflectance;
@@ -737,11 +746,12 @@ fn split_smooth_dielectric_surface(
             (direction, weight)
         }
         DielectricEvent::Transmission => {
-            if fresnel.total_internal_reflection {
+            if fresnel.total_internal_reflection || fresnel.transmittance == 0.0 {
                 return Ok(None);
             }
             let (direction, probability) =
-                deterministic_snell_transmission(normal, wo.scale(-1.0), eta_i, eta_t)?;
+                deterministic_transmission_direction(normal, wo.scale(-1.0), eta_i, eta_t,
+                    incident_cosine, fresnel)?;
             let transport = match mode {
                 TransportMode::Radiance => {
                     refractive_transport_factor(TransportMode::Radiance, eta_i, eta_t)

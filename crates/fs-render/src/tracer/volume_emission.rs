@@ -58,6 +58,7 @@ pub(super) enum Receiver<'a> {
         outgoing: Vec3,
         boundary: BoundaryMedia<'a>,
         alpha: f64,
+        surface: &'a DielectricSurface,
         source_side: SourceSide,
     },
     Phase {
@@ -165,9 +166,10 @@ impl Receiver<'_> {
                 outgoing,
                 boundary,
                 alpha,
+                surface,
                 ..
             } => {
-                let evaluation = evaluate_rough_dielectric(
+                let evaluation = surface.interface(wavelength, boundary.coating_reversed())?.evaluate_rough(
                     frame.oriented,
                     *outgoing,
                     direction,
@@ -383,6 +385,7 @@ mod tests {
     ) -> Receiver<'static> {
         let normal = Vec3::new(0.0, 0.0, 1.0);
         Receiver::Dielectric {
+            surface: &DielectricSurface::POLISHED,
             frame: SurfaceFrame {
                 oriented: normal,
                 geometric: normal,
