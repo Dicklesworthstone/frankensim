@@ -1,5 +1,44 @@
 # CONTRACT: fs-couple
 
+## Event-resolved vapor cavities in liquid ducts
+
+The opt-in `cavitation::duct::CavitatingDuct` retains an original material
+`DgDuct`, its complete native state and wall memories, the material source,
+and one accepted clock. One native endpoint may rupture into an isothermal
+pure-vapor cavity; the other retains its original closed, pressure-release or
+matched boundary. This is liquid-column separation, not an independent
+hydraulic solver or a spherical-bubble approximation.
+
+For original energy coordinates `x`, generator `L` and inflow column `b`,
+`p_abs = p_ref + b^T x`, `x' = L x + b Q`, and `V' = Q`.
+The filled branch has zero inflow. The active cavity uses
+`Q = -(b^T L x)/(b^T b)`, imposing the instantaneous vapor-pressure
+constraint. Original `fs-time` dense events locate pressure-driven rupture
+and volume-driven collapse. Neither liquid state nor volume is reset or
+projected. Small signed localization residuals remain visible under explicit
+pressure, volume and event-time tolerances; finite event scans do not certify
+unresolved tangencies or multiple crossings.
+
+The original duct adopts independently integrated pressure impulse, actual
+`p Q` work and original generator dissipation. Its own trajectory admission
+and the combined storage `H_duct + (p_ref-p_sat) V` must both close before
+publication. Refusal, cancellation and exhausted event/attempt budgets preserve
+the complete accepted liquid/cavity history.
+
+The bounded dense lane admits at most 128 complete coordinates and one endpoint
+port. It checks source/acoustic identity, liquid strain, interface Mach,
+cavity size and available vapor-density data. Cavitation at another native
+liquid node refuses because distributed multiphase physics is not supplied.
+The fixed liquid geometry, negligible vapor mass and equilibrium interface are
+explicit approximations. Trapped gas, capillarity, nucleation delay, moving
+meshes, latent heat and strong-collapse shocks are not inferred.
+
+Focused regression sources compare the filled branch to the original exact
+DG propagator; recover the analytical reservoir/column acceleration and
+collapse time at both endpoint orientations; exercise actual rupture,
+matched-boundary dissipation and combined energy; and check material/domain
+refusal and atomic cancellation/work exhaustion.
+
 ## Shared material cavitation, films and bubble acoustic history
 
 `cavitation::MaterialCavitatingFilm` retains the original `CavitationProperties`

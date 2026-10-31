@@ -14,6 +14,10 @@
 #[cfg(feature = "cavitation")]
 pub mod bubble;
 
+/// Event-resolved pure-vapor cavities on the original liquid duct state.
+#[cfg(feature = "cavitation")]
+pub mod duct;
+
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState};
 use fs_tribo::resistive_film::cavitation::{CavitatingFilm, CavitationLiquid};
