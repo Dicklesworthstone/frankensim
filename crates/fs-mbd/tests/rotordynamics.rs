@@ -285,6 +285,98 @@ fn fixed_coefficient_campbell_samples_preserve_order_and_cancel_without_partial_
 }
 
 #[test]
+fn synchronous_critical_speed_brackets_recover_both_closed_form_gyro_crossings() {
+    // M=I, K=4I, G=0.5J, C=0. Circular branches satisfy
+    // omega^2 +/- 0.5*Omega*omega - 4 = 0.
+    // Setting omega = h*Omega gives exact h-order intersections
+    // Omega=sqrt(4/(h^2 +/- 0.5h)).
+    let model = RotorBearingModel::new(
+        2,
+        &[1.0, 0.0, 0.0, 1.0],
+        &[0.0; 4],
+        &[4.0, 0.0, 0.0, 4.0],
+        &[0.0, -0.5, 0.5, 0.0],
+        || false,
+    )
+    .unwrap();
+
+    for (order, grid) in [
+        (1.0, vec![0.0, 2.0, 4.0]),
+        (2.0, vec![0.0, 1.0, 2.0]),
+    ] {
+        let brackets = model
+            .synchronous_critical_speed_brackets(&grid, order, 1e-10, 64, || false)
+            .unwrap();
+        assert_eq!(brackets.len(), 2, "order {order}: {brackets:?}");
+        let mut exact = [
+            (4.0 / (order * order + 0.5 * order)).sqrt(),
+            (4.0 / (order * order - 0.5 * order)).sqrt(),
+        ];
+        exact.sort_by(f64::total_cmp);
+        for (bracket, expected) in brackets.iter().zip(exact) {
+            assert!(
+                bracket.lower_spin_rad_s <= expected
+                    && bracket.upper_spin_rad_s >= expected,
+                "order {order}: {bracket:?} misses {expected:e}"
+            );
+            assert!(bracket.upper_spin_rad_s - bracket.lower_spin_rad_s <= 1e-10);
+            assert_eq!(bracket.crossing_count, 1);
+            assert_eq!(
+                bracket.upper_modes_below_excitation,
+                bracket.lower_modes_below_excitation + 1
+            );
+            assert!(bracket.bisections <= 36);
+        }
+    }
+
+    // Reversing the gyroscopic sign swaps circular branches but not the
+    // unlabeled set of synchronous critical speeds.
+    let reversed = RotorBearingModel::new(
+        2,
+        &[1.0, 0.0, 0.0, 1.0],
+        &[0.0; 4],
+        &[4.0, 0.0, 0.0, 4.0],
+        &[0.0, 0.5, -0.5, 0.0],
+        || false,
+    )
+    .unwrap();
+    let a = model
+        .synchronous_critical_speed_brackets(&[0.0, 2.0, 4.0], 1.0, 1e-10, 64, || false)
+        .unwrap();
+    let b = reversed
+        .synchronous_critical_speed_brackets(&[0.0, 2.0, 4.0], 1.0, 1e-10, 64, || false)
+        .unwrap();
+    for (x, y) in a.iter().zip(&b) {
+        assert!((x.lower_spin_rad_s - y.lower_spin_rad_s).abs() <= 1e-10);
+        assert!((x.upper_spin_rad_s - y.upper_spin_rad_s).abs() <= 1e-10);
+    }
+}
+
+#[test]
+fn synchronous_critical_speed_search_requires_resolved_nonnegative_grid_and_is_atomic() {
+    let model = isotropic(1.0, 0.05, 4.0, 0.4);
+    assert!(model
+        .synchronous_critical_speed_brackets(&[0.0, 1.0], 1.0, 1e-6, 20, || false)
+        .unwrap()
+        .is_empty());
+    for speeds in [&[-1.0, 1.0][..], &[1.0, 1.0][..], &[1.0, 0.0][..], &[0.0][..]] {
+        assert!(model
+            .synchronous_critical_speed_brackets(speeds, 1.0, 1e-6, 20, || false)
+            .is_err());
+    }
+    assert!(model
+        .synchronous_critical_speed_brackets(&[0.0, 1.0], 0.0, 1e-6, 20, || false)
+        .is_err());
+    assert!(model
+        .synchronous_critical_speed_brackets(&[0.0, 1.0], 1.0, 0.0, 20, || false)
+        .is_err());
+    assert!(matches!(
+        model.synchronous_critical_speed_brackets(&[0.0, 1.0], 1.0, 1e-6, 20, || true),
+        Err(RotorError::Cancelled)
+    ));
+}
+
+#[test]
 fn stability_transition_bracket_matches_exact_cross_coupled_marginal_speed() {
     // K = k I + q J and G = g J. In the +i circular subspace:
     // s^2 + (c + i Omega g)s + (k + i q)=0.
