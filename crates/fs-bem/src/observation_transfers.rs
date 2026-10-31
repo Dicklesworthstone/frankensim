@@ -23,6 +23,10 @@ mod reciprocal;
 pub use reciprocal::ReciprocalBemObservation;
 mod scattering;
 pub use scattering::{PointSourceSpec, ScatteringObservation};
+mod wall;
+pub use wall::{
+    BoundaryObservationBake, LocalBoundary, LocalBoundaryObservation, LocalWall, LowerBandWindow,
+};
 
 /// Largest admitted DFT/CQ size. Work budgets may be stricter.
 pub const MAX_OBSERVATION_FFT: usize = 65_536;
@@ -95,6 +99,8 @@ pub struct TransferDeclaration {
 pub enum TransferError {
     Invalid(&'static str),
     Helmholtz(HelmholtzError),
+    Material(fs_material::MaterialError),
+    Mechanical(fs_phs::PhsError),
     Fir(FirError),
     Cap { requested: usize, cap: usize },
     NotConverged { tail: f64, wrap: f64, dtft: f64 },
@@ -103,6 +109,16 @@ pub enum TransferError {
 impl From<HelmholtzError> for TransferError {
     fn from(e: HelmholtzError) -> Self {
         Self::Helmholtz(e)
+    }
+}
+impl From<fs_material::MaterialError> for TransferError {
+    fn from(error: fs_material::MaterialError) -> Self {
+        Self::Material(error)
+    }
+}
+impl From<fs_phs::PhsError> for TransferError {
+    fn from(error: fs_phs::PhsError) -> Self {
+        Self::Mechanical(error)
     }
 }
 impl From<FirError> for TransferError {
@@ -354,8 +370,15 @@ fn observation_taper(f_hz: f64, pass_hz: f64, stop_hz: f64) -> f64 {
     }
     let x = (f_hz - pass_hz) / (stop_hz - pass_hz);
     // Evaluate the upper half by symmetry to avoid cancellation near x=1.
-    let low = |t: f64| t.powi(5) * (126.0 + t * (-420.0 + t * (540.0 + t * (-315.0 + 70.0 * t))));
-    if x <= 0.5 { 1.0 - low(x) } else { low(1.0 - x) }
+    if x <= 0.5 {
+        1.0 - observation_transition_low(x)
+    } else {
+        observation_transition_low(1.0 - x)
+    }
+}
+
+fn observation_transition_low(t: f64) -> f64 {
+    t.powi(5) * (126.0 + t * (-420.0 + t * (540.0 + t * (-315.0 + 70.0 * t))))
 }
 
 /// Channel ranges of the physical quantities, in kernel order p, dp/dx, dp/dy,
@@ -372,6 +395,7 @@ fn dtft_change(
     a: &[FirKernel],
     b: &[FirKernel],
     decl: &TransferDeclaration,
+    lower_pass_hz: f64,
 ) -> Result<f64, TransferError> {
     let mut largest = 0.0_f64;
     for range in quantities(a.len().min(b.len())) {
@@ -379,8 +403,17 @@ fn dtft_change(
         let mut scale = 0.0_f64;
         for (a, b) in a[range.clone()].iter().zip(&b[range]) {
             for i in 0..127 {
-                let w = core::f64::consts::TAU * decl.pass_band_upper_hz * (i as f64 + 0.371)
-                    / (127.0 * decl.fs_hz);
+                let w = if lower_pass_hz == 0.0 {
+                    // Preserve the historical full-band arithmetic exactly.
+                    core::f64::consts::TAU * decl.pass_band_upper_hz * (i as f64 + 0.371)
+                        / (127.0 * decl.fs_hz)
+                } else {
+                    core::f64::consts::TAU
+                        * (lower_pass_hz
+                            + (decl.pass_band_upper_hz - lower_pass_hz) * (i as f64 + 0.371)
+                                / 127.0)
+                        / decl.fs_hz
+                };
                 let av = a.transfer_at(w)?;
                 let bv = b.transfer_at(w)?;
                 scale = scale
@@ -421,6 +454,22 @@ fn dtft_change(
 pub fn bake_observation_transfers(
     mut solve_at: impl FnMut(f64) -> Result<Vec<C64>, HelmholtzError>,
     decl: &TransferDeclaration,
+    cancelled: impl FnMut() -> bool,
+) -> Result<ObservationTransferBake, TransferError> {
+    bake_observation_transfers_with_errors(
+        |omega| solve_at(omega).map_err(Into::into),
+        decl,
+        0.0,
+        cancelled,
+    )
+}
+
+// The same numerical owner, allowing native constitutive refusals to retain
+// their types. The wall adapter admits its explicit nonzero passband first.
+fn bake_observation_transfers_with_errors(
+    mut solve_at: impl FnMut(f64) -> Result<Vec<C64>, TransferError>,
+    decl: &TransferDeclaration,
+    lower_pass_hz: f64,
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ObservationTransferBake, TransferError> {
     let channels = decl.admit_work()?;
@@ -534,7 +583,7 @@ pub fn bake_observation_transfers(
         }
         let change = previous
             .as_ref()
-            .map(|old| dtft_change(old, &kernels, decl))
+            .map(|old| dtft_change(old, &kernels, decl, lower_pass_hz))
             .transpose()?;
         ladder.push(LadderRung {
             n_fft: n,
@@ -603,7 +652,13 @@ impl<'a> BemObservation<'a> {
         minimum_clearance_m: f64,
     ) -> Result<Self, TransferError> {
         Self::new_admitted(
-            surface, medium, sources, traces, receivers, minimum_clearance_m, false,
+            surface,
+            medium,
+            sources,
+            traces,
+            receivers,
+            minimum_clearance_m,
+            false,
         )
     }
 
@@ -701,11 +756,19 @@ impl<'a> BemObservation<'a> {
             helmholtz::PanelRule::TriangleNear { max_pairs: 0 }
                 | helmholtz::PanelRule::Triangle { max_pairs: 0 }
         ) {
-            return Err(TransferError::Invalid("empty observation boundary quadrature allowance"));
+            return Err(TransferError::Invalid(
+                "empty observation boundary quadrature allowance",
+            ));
         }
         let policy = GeometryPolicy::new(surface)?;
         let mut owner = Self::new_admitted(
-            surface, medium, sources, traces, receivers, minimum_clearance_m, true,
+            surface,
+            medium,
+            sources,
+            traces,
+            receivers,
+            minimum_clearance_m,
+            true,
         )?;
         owner.policy = Some(policy);
         owner.panel_rule = panel_rule;

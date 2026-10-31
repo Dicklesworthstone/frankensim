@@ -32,13 +32,13 @@ pub struct PointSourceSpec {
 /// A complete source-to-receiver pressure/gradient observation of diffraction
 /// around fixed, closed rigid bodies. No in-loop impedance is inferred.
 pub struct ScatteringObservation<'a> {
-    surface: &'a SpherePanels,
+    pub(super) surface: &'a SpherePanels,
     receiver_geometry: Geometry<'a>,
-    medium: Medium,
+    pub(super) medium: Medium,
     point_sources: Vec<PointSourceSpec>,
     sources: Vec<SourceId>,
-    receivers: Vec<ReceiverSpec>,
-    highest_omega: f64,
+    pub(super) receivers: Vec<ReceiverSpec>,
+    pub(super) highest_omega: f64,
     minimum_clearance_m: f64,
     quadrature: Options,
     delays_s: Vec<f64>,
@@ -207,6 +207,15 @@ impl<'a> ScatteringObservation<'a> {
     pub fn frequency_sample(
         &self,
         omega: f64,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<C64>, HelmholtzError> {
+        self.frequency_sample_with_admittance(omega, Admittance::Rigid, cancelled)
+    }
+
+    pub(super) fn frequency_sample_with_admittance(
+        &self,
+        omega: f64,
+        admittance: Admittance<'_>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Vec<C64>, HelmholtzError> {
         if cancelled() {
@@ -240,7 +249,7 @@ impl<'a> ScatteringObservation<'a> {
             self.surface,
             k,
             self.medium,
-            Admittance::Rigid,
+            admittance,
             &fields,
             self.minimum_clearance_m,
             helmholtz::Formulation::BurtonMiller,
@@ -405,8 +414,14 @@ mod tests {
             (row[0] - direct.pressure_pa).abs() > 1e-3 * direct.pressure_pa.abs(),
             "the finite obstacle must alter the physical field"
         );
+        // Central parity shares vector quadrature; scalar displacement remains
+        // the independent gradient check with its own admitted refinement.
+        let central = solution
+            .total_pressure_velocity_at(&[point], 1e-3, Options::default())
+            .unwrap();
+        assert!((row[0] - central.scalar.pressure[0]).abs() < 1e-12 * row[0].abs());
         let h = 2e-5;
-        let mut points = vec![point];
+        let mut points = Vec::with_capacity(6);
         for axis in 0..3 {
             let mut plus = point;
             let mut minus = point;
@@ -417,10 +432,9 @@ mod tests {
         let pressure = solution
             .total_pressure_at(&points, 1e-3, Options::default())
             .unwrap();
-        assert!((row[0] - pressure.pressure[0]).abs() < 1e-12 * row[0].abs());
         for axis in 0..3 {
             let gradient =
-                (pressure.pressure[1 + 2 * axis] - pressure.pressure[2 + 2 * axis]).scale(0.5 / h);
+                (pressure.pressure[2 * axis] - pressure.pressure[1 + 2 * axis]).scale(0.5 / h);
             assert!(
                 (row[axis + 1] - gradient).abs() < 2e-5 * gradient.abs(),
                 "axis {axis}: {:?} vs {gradient:?}",

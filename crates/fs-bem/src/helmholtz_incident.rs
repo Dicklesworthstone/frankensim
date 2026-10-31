@@ -305,6 +305,110 @@ impl ScatteredField<'_, '_> {
         Ok(observation)
     }
 
+    /// Co-located total pressure [Pa] and particle velocity [m/s]. The same
+    /// adaptive Green quadrature resolves pressure and all three derivatives;
+    /// the exact coherent incident field is added to both quantities.
+    ///
+    /// Returned discrepancies cover only the scattered-field quadrature.
+    /// They do not bound spatial discretization, incident-source error or
+    /// floating-point cancellation between incident and scattered waves.
+    pub fn total_pressure_velocity_at(
+        &self,
+        points_m: &[[f64; 3]],
+        minimum_receiver_clearance_m: f64,
+        options: near_field::Options,
+    ) -> Result<near_field::VectorObservation, HelmholtzError> {
+        let trace = &self.solution.scattered;
+        if points_m.is_empty() || points_m.len() > near_field::MAX_RECEIVERS {
+            return Err(bad(
+                "total vector receiver array exceeds the near-field cardinality limit",
+            ));
+        }
+        let incident: Vec<_> = points_m
+            .iter()
+            .map(|&point| self.incident.sample(trace.k, trace.medium, point))
+            .collect::<Result<_, _>>()?;
+        let geometry =
+            near_field::Geometry::new(self.surface, points_m, minimum_receiver_clearance_m)?;
+        let mut observation = geometry
+            .prepare_velocity(trace.k, trace.medium, options)?
+            .evaluate_velocity(trace)?;
+        for ((pressure, velocity), source) in observation
+            .scalar
+            .pressure
+            .iter_mut()
+            .zip(&mut observation.particle_velocity_m_s)
+            .zip(incident)
+        {
+            *pressure = *pressure + source.pressure_pa;
+            for (value, direct) in velocity.iter_mut().zip(source.velocity_m_s) {
+                *value = *value + direct;
+            }
+            if !finite(*pressure) || velocity.iter().any(|&value| !finite(value)) {
+                return Err(bad(
+                    "total scattering receiver pressure or velocity overflow",
+                ));
+            }
+        }
+        Ok(observation)
+    }
+
+    /// Ideal first-order microphones observing the total diffracted field.
+    /// Each receiver declares its own pressure fraction and front axis.
+    /// The existing pressure/velocity projection retains reactive proximity
+    /// response and wave interference; it assumes no plane-wave relation
+    /// between local pressure and velocity.
+    ///
+    /// Outputs and propagated quadrature discrepancies are Pa-equivalent.
+    /// There is no diaphragm, calibration or probe-backreaction model.
+    pub fn total_first_order_at(
+        &self,
+        points_m: &[[f64; 3]],
+        receivers: &[near_field::FirstOrder],
+        minimum_receiver_clearance_m: f64,
+        options: near_field::Options,
+    ) -> Result<near_field::Observation, HelmholtzError> {
+        if receivers.len() != points_m.len() {
+            return Err(HelmholtzError::ShapeMismatch {
+                what: "one first-order microphone law per receiver point",
+            });
+        }
+        if receivers
+            .iter()
+            .all(|receiver| receiver.pressure_fraction() == 1.0)
+        {
+            // Omnidirectional arrays need no derivative rows and retain the
+            // original pressure-only quadrature and arithmetic exactly.
+            return self.total_pressure_at(points_m, minimum_receiver_clearance_m, options);
+        }
+        let field =
+            self.total_pressure_velocity_at(points_m, minimum_receiver_clearance_m, options)?;
+        let medium = self.solution.scattered.medium;
+        let rho_c = medium.density * medium.sound_speed;
+        let mut observation = field.scalar;
+        for (index, &receiver) in receivers.iter().enumerate() {
+            observation.pressure[index] = receiver.observe(
+                observation.pressure[index],
+                field.particle_velocity_m_s[index],
+                medium,
+            )?;
+            let alpha = receiver.pressure_fraction();
+            let axial_error: f64 = receiver
+                .front_axis()
+                .iter()
+                .zip(field.quadrature_error_estimate_m_s[index])
+                .map(|(axis, error)| axis.abs() * error)
+                .sum();
+            let error = alpha * observation.quadrature_error_estimate_pa[index]
+                + (1.0 - alpha) * rho_c * axial_error;
+            if !error.is_finite() {
+                return Err(bad("total first-order receiver discrepancy overflow"));
+            }
+            observation.quadrature_error_estimate_pa[index] = error;
+        }
+        Ok(observation)
+    }
+
     /// Outgoing incident+scattered amplitude F [Pa*m], with p~F exp(ikr)/r.
     /// A plane wave has no outgoing 1/r total far field and is refused here.
     pub fn total_far_field(&self, direction: [f64; 3]) -> Result<C64, HelmholtzError> {
@@ -542,6 +646,124 @@ mod tests {
         assert!((flux - C64::ONE).abs() < 2e-14, "outward flux: {flux:?}");
         let pressure_over_flow = low.pressure_pa / sources[0].volume_velocity_m3_s;
         assert!(pressure_over_flow.im < 0.0);
+    }
+
+    /// G1/G3: total velocity and directional microphone response agree with
+    /// an independent physical displacement of the total pressure receiver.
+    /// The incident mixture contains both spherical and plane-wave phases.
+    #[test]
+    fn total_vector_and_first_order_receivers_follow_pressure_gradient() {
+        let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+        let medium = Medium::air();
+        let omega = 2.0 * PI * 700.0;
+        let k = omega / medium.sound_speed;
+        let point_source = source([0.02, 0.01, 0.09]);
+        let sources = [
+            IncidentSource::Monopole(point_source),
+            IncidentSource::PlaneWave(PlaneWave {
+                direction: [0.0, 0.0, -1.0],
+                amplitude_pa: C64::new(0.2, 0.1),
+            }),
+        ];
+        let incident = IncidentField::Sources(&sources);
+        let field = solve_scattering(
+            &surface,
+            k,
+            medium,
+            Admittance::Rigid,
+            incident,
+            1e-3,
+            Formulation::BurtonMiller,
+        )
+        .unwrap();
+        let point = [-0.03, 0.02, -0.08];
+        let options = near_field::Options {
+            relative_tolerance: 1e-9,
+            ..near_field::Options::default()
+        };
+        let vector = field
+            .total_pressure_velocity_at(&[point], 1e-3, options)
+            .unwrap();
+        let h = 2e-6;
+        let mut displaced = vec![point];
+        for axis in 0..3 {
+            let mut plus = point;
+            let mut minus = point;
+            plus[axis] += h;
+            minus[axis] -= h;
+            displaced.extend([plus, minus]);
+        }
+        let pressure = field
+            .total_pressure_at(&displaced, 1e-3, options)
+            .unwrap()
+            .pressure;
+        let momentum = C64::new(0.0, omega * medium.density);
+        let gradient: [C64; 3] = std::array::from_fn(|axis| {
+            (pressure[1 + 2 * axis] - pressure[2 + 2 * axis]).scale(0.5 / h)
+        });
+        assert!((vector.scalar.pressure[0] - pressure[0]).abs() < 2e-8 * pressure[0].abs());
+        for axis in 0..3 {
+            assert!(
+                (momentum * vector.particle_velocity_m_s[0][axis] - gradient[axis]).abs()
+                    < 5e-5 * gradient[axis].abs(),
+                "Euler pressure-gradient relation failed on axis {axis}"
+            );
+        }
+        let direct = incident.pressure_velocity_at(k, medium, point).unwrap();
+        let scattered_velocity: f64 = (0..3)
+            .map(|axis| {
+                (vector.particle_velocity_m_s[0][axis] - direct.velocity_m_s[axis]).norm_sq()
+            })
+            .sum();
+        assert!(
+            scattered_velocity
+                > 1e-8 * direct.velocity_m_s.iter().map(|v| v.norm_sq()).sum::<f64>(),
+            "the obstacle must alter the total vector field"
+        );
+
+        let microphones = [1.0, 0.5, 0.0]
+            .map(|alpha| near_field::FirstOrder::new(alpha, [0.0, 0.0, 1.0]).unwrap());
+        let omni = field
+            .total_first_order_at(
+                &[point],
+                &[near_field::FirstOrder::default()],
+                1e-3,
+                options,
+            )
+            .unwrap();
+        same_bits(&omni.pressure, &pressure[..1]);
+        let observed = field
+            .total_first_order_at(&[point; 3], &microphones, 1e-3, options)
+            .unwrap();
+        for (index, alpha) in [1.0, 0.5, 0.0].into_iter().enumerate() {
+            let expected = pressure[0].scale(alpha)
+                - (gradient[2] / momentum)
+                    .scale((1.0 - alpha) * medium.density * medium.sound_speed);
+            assert!(
+                (observed.pressure[index] - expected).abs() < 5e-5 * expected.abs(),
+                "total microphone response must use actual local velocity"
+            );
+            assert!(observed.quadrature_error_estimate_pa[index].is_finite());
+            assert!(observed.quadrature_error_estimate_pa[index] >= 0.0);
+        }
+        assert!(
+            field
+                .total_pressure_velocity_at(&[point_source.position_m], 1e-3, options)
+                .is_err()
+        );
+        assert!(
+            field
+                .total_pressure_velocity_at(
+                    &vec![point; near_field::MAX_RECEIVERS + 1],
+                    1e-3,
+                    options,
+                )
+                .is_err()
+        );
+        assert!(matches!(
+            field.total_first_order_at(&[point], &[], 1e-3, options),
+            Err(HelmholtzError::ShapeMismatch { .. })
+        ));
     }
 
     #[test]

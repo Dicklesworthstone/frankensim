@@ -1222,6 +1222,16 @@ The inline dense-versus-iterative Robin-source check uses an 80-panel direct
 near tree and a 1e-8 pressure agreement band, plus immediate cancellation.
 It verifies adapter equivalence, not a new FMM truncation-accuracy claim.
 
+`ScatteredField::total_pressure_velocity_at` observes coherent incident plus
+scattered pressure and particle velocity through the original adaptive vector
+receiver. `total_first_order_at` applies the existing ideal first-order
+microphone responses to that total field, retaining pressure-equivalent units.
+The reported discrepancies cover receiver quadrature only; they do not bound
+source, material or BEM discretization error. Receivers are ideal and have no
+calibration or backreaction. The original 64-receiver and quadrature-work caps
+remain, and a focused regression checks the Euler gradient by displaced total
+pressure along with omni, cardioid and figure-eight responses.
+
 Inline tests in `helmholtz_incident.rs` cover G0 Euler-gradient consistency
 (2e-9 relative) and outward low-frequency volume flux, exterior/singularity
 refusals, G5 bitwise batch/individual and historical plane-wave equivalence,
@@ -1266,6 +1276,57 @@ and an actual four-rung BEM-to-FIR bake/replay with complex transfer error
 below 2e-4. This qualifies only the declared discrete stationary observer:
 it supplies no source loading, moving geometry, finite-aperture equivalence,
 spatial convergence certificate, or measured instrument/head/room response.
+
+### Material and compliant patches in the observation pipeline
+
+`observation_transfers::LocalBoundary` assigns a finite table of passive laws
+to physical boundary panels. `LocalWall::Mechanical` evaluates the original
+`fs_phs::WallPin` specific impedance with its native exp(-i omega t) convention;
+`LocalWall::PorousRigid` uses `PorousRigidBoundary` and its existing single
+conversion from JCA(L). Both preserve complex phase and SI specific impedance,
+without a panel-area factor. Each distinct law is evaluated once per frequency,
+then expanded to its declared patches. The table admits at most 256 laws and
+the original dense panel ceiling. The complete constitutive state, including
+porous source support and the original fluid bulk modulus, binds its hash.
+Porous saturating-fluid density and sound speed must match the exterior medium.
+
+`LocalBoundaryObservation::for_scattering` extends the existing prescribed
+point-flow observer with these walls; `for_surface` consumes the original
+finite structural-velocity or unit-aperture-flow traces. The original prepared
+Robin owner resolves all patches and closed components together, reusing one
+boundary factorization and adaptive pressure/velocity receiver preparation per
+frequency across all sources. Each panel with nonzero prescribed source drive
+must be explicitly rigid: placing a passive shunt there would change that
+source's actual prescribed velocity or volume flow. The surface adapter admits
+the existing centroid owner and refuses routed/triangle-ruled owners rather
+than silently changing their discretization. It produces stationary observer
+transfers; it does not supply a new in-loop load or moving-frame constitutive law.
+
+`physical_frequency_sample` retains unwindowed material physics and propagates
+native material/mechanical errors. A declared band containing a lossless wall's
+zero-impedance resonance refuses before sampling; no admittance is clipped.
+Source cards with a positive lower frequency require an explicit
+`LowerBandWindow`. Its C4 lower stop/pass transition is bound into the operator
+hash and retained by `BoundaryObservationBake`, alongside the original upper
+band transfer and boundary hash. `band_limited_frequency_sample` is exactly
+zero in the declared lower stop region and does not query unsupported material
+frequencies there; it still checks cancellation and the declared upper band.
+The lower stop must cover every selected material's unsupported lower range,
+and the upper band must remain within their common source support. This is an
+explicit band-limited reconstruction, never a full-band material extrapolation.
+
+The existing FIR owner retains its reconstruction latency, four-or-more-rung
+ladder, 1e-10-or-stricter tail/wrap gates and 1e-4-or-stricter inter-rung DTFT
+gate. Windowed DTFT checks span the actual unity passband. Every rung must
+resolve at least four unity-passband bins and four bin intervals across each
+transition, preventing an empty/narrow sampled band from appearing converged.
+These are necessary resolution checks, not bounds for unsampled resonances.
+Original full-band bake signatures and arithmetic remain unchanged. Focused
+tests cover constitutive phase/units, state and patch identity, rigid parity,
+total Robin pressure gradients, passive work, preserved finite-aperture flow,
+source-support and cancellation refusals, and porous BEM-to-FIR playback.
+Authored tests require native execution; source review and formatting alone
+establish no passing numerical or experimental qualification.
 
 ## Reciprocal complete source loads and matched receiver transfers
 
