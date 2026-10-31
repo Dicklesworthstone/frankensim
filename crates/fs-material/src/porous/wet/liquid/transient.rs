@@ -7,14 +7,20 @@
 //! p_l = p_g - Pc(S_l). Darcy face flux uses harmonic hydraulic mobility
 //! k*kr/mu and an explicit signed body-force pressure gradient.
 //!
-//! The scheme is deliberately first-order explicit finite volume. It preserves
-//! liquid volume exactly up to floating-point reduction, never clips saturation,
-//! never opens a dry seal with an epsilon, and refuses a step that leaves any
-//! constitutive/source domain. Adaptive stepping and a fully implicit Richards
-//! solve are separate numerical owners.
+//! Explicit and fully implicit backward-Euler candidates share the same source
+//! samples, half-cell series resistances and conservative face-flux owner.
+//! Neither clips saturation or opens a dry seal with an epsilon. Temperature
+//! and gas pressure remain prescribed; no coupled gas or caloric solve is added.
 
-use super::{LiquidCapillaryPressure, WetPoreLiquidLaw, WetPoreLiquidState, fraction, invalid, positive};
+use super::{
+    LiquidCapillaryPressure, WetPoreLiquidLaw, WetPoreLiquidState, fraction, invalid, positive,
+};
 use crate::MaterialError;
+
+mod implicit;
+pub use implicit::{
+    LiquidSaturationImplicitControls, LiquidSaturationImplicitError, LiquidSaturationImplicitReport,
+};
 
 /// One rigid finite volume of porous material, per unit transverse area.
 #[derive(Clone, Debug, PartialEq)]
@@ -32,6 +38,7 @@ impl LiquidSaturationCell {
             || self.porosity > 1.0
             || !self.intrinsic_permeability_m2.is_finite()
             || self.intrinsic_permeability_m2 < 0.0
+            || !positive(self.capacity_m())
         {
             return Err(invalid(
                 "transient liquid cell needs positive thickness, porosity in (0,1], and nonnegative intrinsic permeability",
@@ -44,7 +51,7 @@ impl LiquidSaturationCell {
     }
 }
 
-/// Prescribed thermohydraulic coordinates held over one explicit step.
+/// Prescribed thermohydraulic coordinates held over one physical interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct LiquidSaturationStepInput {
     pub duration_s: f64,
@@ -97,8 +104,12 @@ pub struct LiquidSaturationCandidate {
     step: LiquidSaturationStep,
 }
 impl LiquidSaturationCandidate {
-    pub const fn state(&self) -> &LiquidSaturationColumn { &self.state }
-    pub const fn step(&self) -> &LiquidSaturationStep { &self.step }
+    pub const fn state(&self) -> &LiquidSaturationColumn {
+        &self.state
+    }
+    pub const fn step(&self) -> &LiquidSaturationStep {
+        &self.step
+    }
     pub fn into_parts(self) -> (LiquidSaturationColumn, LiquidSaturationStep) {
         (self.state, self.step)
     }
@@ -132,14 +143,27 @@ impl LiquidSaturationColumn {
             }
             states.push(cell.law.sample(s)?);
         }
-        Ok(Self { cells, saturations, states, elapsed_s: 0.0 })
+        Ok(Self {
+            cells,
+            saturations,
+            states,
+            elapsed_s: 0.0,
+        })
     }
 
-    pub fn cells(&self) -> &[LiquidSaturationCell] { &self.cells }
-    pub fn saturations(&self) -> &[f64] { &self.saturations }
+    pub fn cells(&self) -> &[LiquidSaturationCell] {
+        &self.cells
+    }
+    pub fn saturations(&self) -> &[f64] {
+        &self.saturations
+    }
     /// Cached constitutive states for allocation-free hydraulic rebinding.
-    pub fn states(&self) -> &[WetPoreLiquidState] { &self.states }
-    pub const fn elapsed_s(&self) -> f64 { self.elapsed_s }
+    pub fn states(&self) -> &[WetPoreLiquidState] {
+        &self.states
+    }
+    pub const fn elapsed_s(&self) -> f64 {
+        self.elapsed_s
+    }
 
     /// Compatibility copy of the cached material states.
     pub fn liquid_states(&self) -> Result<Vec<WetPoreLiquidState>, MaterialError> {
@@ -170,69 +194,20 @@ impl LiquidSaturationColumn {
         if cancelled() {
             return Err(invalid("transient liquid saturation step cancelled"));
         }
+        let elapsed_s = self.elapsed_s + input.duration_s;
+        if !elapsed_s.is_finite() || elapsed_s <= self.elapsed_s {
+            return Err(invalid("transient liquid time must advance representably"));
+        }
         let n = self.cells.len();
-        let before_states = &self.states;
-        let before_pressures = pressures(before_states, input.gas_pressure_pa)?;
-        let mut mobility = Vec::with_capacity(n);
-        for (i, ((cell, state), pressure)) in self
-            .cells
-            .iter()
-            .zip(before_states)
-            .zip(&before_pressures)
-            .enumerate()
-        {
-            if i % 128 == 0 && cancelled() {
-                return Err(invalid("transient liquid saturation step cancelled"));
+        let flow = hydraulics(&self.cells, &self.states, input, || {
+            if cancelled() {
+                Err(invalid("transient liquid saturation step cancelled"))
+            } else {
+                Ok(())
             }
-            let kr = state.liquid_relative_permeability();
-            let value = (cell.intrinsic_permeability_m2 * kr) / input.dynamic_viscosity_pa_s;
-            if !value.is_finite() || value < 0.0 {
-                return Err(invalid("transient liquid hydraulic mobility is unrepresentable"));
-            }
-            if value > 0.0 {
-                let p = pressure.ok_or_else(|| invalid(
-                    "mobile liquid state requires finite capillary/liquid pressure",
-                ))?;
-                admit_state(state, input.temperature_k, p, 0.0)?;
-            }
-            mobility.push(value);
-        }
-
-        let mut faces = vec![0.0; n + 1];
-        if mobility[0] > 0.0 {
-            let p0 = before_pressures[0].ok_or_else(|| invalid("missing mobile left-cell liquid pressure"))?;
-            faces[0] = face_flux(
-                mobility[0],
-                input.boundary_liquid_pressure_pa[0],
-                p0,
-                0.5 * self.cells[0].thickness_m,
-                input.body_force_pressure_gradient_pa_m,
-            )?;
-        }
-        for i in 0..n - 1 {
-            let m = harmonic(mobility[i], mobility[i + 1])?;
-            if m > 0.0 {
-                let left = before_pressures[i].ok_or_else(|| invalid("missing mobile left liquid pressure"))?;
-                let right = before_pressures[i + 1].ok_or_else(|| invalid("missing mobile right liquid pressure"))?;
-                faces[i + 1] = face_flux(
-                    m,
-                    left,
-                    right,
-                    0.5 * (self.cells[i].thickness_m + self.cells[i + 1].thickness_m),
-                    input.body_force_pressure_gradient_pa_m,
-                )?;
-            }
-        }
-        if mobility[n - 1] > 0.0 {
-            let pn = before_pressures[n - 1].ok_or_else(|| invalid("missing mobile right-cell liquid pressure"))?;
-            faces[n] = face_flux(
-                mobility[n - 1],
-                pn,
-                input.boundary_liquid_pressure_pa[1],
-                0.5 * self.cells[n - 1].thickness_m,
-                input.body_force_pressure_gradient_pa_m,
-            )?;
-        }
+        })?;
+        let before_pressures = flow.pressures;
+        let faces = flow.faces;
 
         let mut next_saturation = Vec::with_capacity(n);
         for i in 0..n {
@@ -255,17 +230,15 @@ impl LiquidSaturationColumn {
             cells: self.cells.clone(),
             saturations: next_saturation,
             states: after_states,
-            elapsed_s: self.elapsed_s + input.duration_s,
+            elapsed_s,
         };
-        if !next.elapsed_s.is_finite() {
-            return Err(invalid("transient liquid time is unrepresentable"));
-        }
         let after_pressures = pressures(&next.states, input.gas_pressure_pa)?;
         for i in 0..n {
             let state = &next.states[i];
             let speed = faces[i].abs().max(faces[i + 1].abs());
             if state.liquid_relative_permeability() > 0.0 {
-                let p = after_pressures[i].ok_or_else(|| invalid("accepted mobile liquid pressure is missing"))?;
+                let p = after_pressures[i]
+                    .ok_or_else(|| invalid("accepted mobile liquid pressure is missing"))?;
                 admit_state(state, input.temperature_k, p, speed)?;
             } else if speed != 0.0 {
                 return Err(invalid("nonzero liquid flux crosses an accepted dry seal"));
@@ -276,7 +249,9 @@ impl LiquidSaturationColumn {
         let boundary = input.duration_s * (faces[0] - faces[n]);
         let residual = (after - before) - boundary;
         if !residual.is_finite() {
-            return Err(invalid("transient liquid volume balance is unrepresentable"));
+            return Err(invalid(
+                "transient liquid volume balance is unrepresentable",
+            ));
         }
         if cancelled() {
             return Err(invalid("transient liquid saturation step cancelled"));
@@ -328,7 +303,9 @@ fn pressures(
             LiquidCapillaryPressure::Finite(pc) => {
                 let p = gas_pressure_pa - pc;
                 if !positive(p) {
-                    Err(invalid("capillary pressure exceeds prescribed gas pressure"))
+                    Err(invalid(
+                        "capillary pressure exceeds prescribed gas pressure",
+                    ))
                 } else {
                     Ok(Some(p))
                 }
@@ -338,12 +315,143 @@ fn pressures(
         .collect()
 }
 
-fn harmonic(a: f64, b: f64) -> Result<f64, MaterialError> {
+/// Half-cell resistances in series, including unequal widths. The returned
+/// resistance fractions also differentiate this exact mobility in the implicit
+/// owner. A zero intrinsic/relative mobility remains an exact seal.
+fn interface_mobility(
+    a: f64,
+    b: f64,
+    left_half: f64,
+    right_half: f64,
+) -> Result<(f64, [f64; 2]), MaterialError> {
     if a == 0.0 || b == 0.0 {
-        return Ok(0.0);
+        return Ok((0.0, [0.0; 2]));
     }
-    let h = 2.0 / (1.0 / a + 1.0 / b);
-    if positive(h) { Ok(h) } else { Err(invalid("harmonic liquid mobility is unrepresentable")) }
+    let distance = left_half + right_half;
+    if !positive(left_half) || !positive(right_half) || !positive(distance) {
+        return Err(invalid("liquid face distance is unrepresentable"));
+    }
+    let left = left_half / distance;
+    let right = right_half / distance;
+    let (mobility, shares) = if a <= b {
+        let other = right * (a / b);
+        let denominator = left + other;
+        (a / denominator, [left / denominator, other / denominator])
+    } else {
+        let other = left * (b / a);
+        let denominator = other + right;
+        (b / denominator, [other / denominator, right / denominator])
+    };
+    if !positive(mobility)
+        || shares
+            .iter()
+            .any(|s| !s.is_finite() || *s < 0.0 || *s > 1.0)
+    {
+        return Err(invalid("series liquid mobility is unrepresentable"));
+    }
+    Ok((mobility, shares))
+}
+
+struct Hydraulics {
+    pressures: Vec<Option<f64>>,
+    mobility: Vec<f64>,
+    faces: Vec<f64>,
+}
+
+/// One original source/flux owner for both coefficient time levels. The generic
+/// error channel retains the caller's typed cancellation without inspecting text.
+fn hydraulics<E: From<MaterialError>>(
+    cells: &[LiquidSaturationCell],
+    states: &[WetPoreLiquidState],
+    input: LiquidSaturationStepInput,
+    mut checkpoint: impl FnMut() -> Result<(), E>,
+) -> Result<Hydraulics, E> {
+    checkpoint()?;
+    let n = cells.len();
+    let pressures = pressures(states, input.gas_pressure_pa)?;
+    let mut mobility = Vec::with_capacity(n);
+    for (i, (cell, state)) in cells.iter().zip(states).enumerate() {
+        if i % 128 == 0 {
+            checkpoint()?;
+        }
+        let support = state.support();
+        if input.temperature_k < support.temperature_k.0
+            || input.temperature_k > support.temperature_k.1
+        {
+            return Err(
+                invalid("transient liquid temperature lies outside calibration support").into(),
+            );
+        }
+        let value = cell.intrinsic_permeability_m2 * state.liquid_relative_permeability()
+            / input.dynamic_viscosity_pa_s;
+        if !value.is_finite()
+            || value < 0.0
+            || (value == 0.0
+                && cell.intrinsic_permeability_m2 > 0.0
+                && state.liquid_relative_permeability() > 0.0)
+        {
+            return Err(invalid("transient liquid hydraulic mobility is unrepresentable").into());
+        }
+        if let Some(p) = pressures[i] {
+            admit_state(state, input.temperature_k, p, 0.0)?;
+        } else if value != 0.0 {
+            return Err(invalid("mobile liquid requires a finite liquid pressure").into());
+        }
+        mobility.push(value);
+    }
+    let mut faces = vec![0.0; n + 1];
+    if mobility[0] > 0.0 {
+        faces[0] = face_flux(
+            mobility[0],
+            input.boundary_liquid_pressure_pa[0],
+            pressures[0].expect("admitted mobile pressure"),
+            0.5 * cells[0].thickness_m,
+            input.body_force_pressure_gradient_pa_m,
+        )?;
+    }
+    for i in 0..n - 1 {
+        if i % 128 == 0 {
+            checkpoint()?;
+        }
+        let left = 0.5 * cells[i].thickness_m;
+        let right = 0.5 * cells[i + 1].thickness_m;
+        let (m, _) = interface_mobility(mobility[i], mobility[i + 1], left, right)?;
+        if m > 0.0 {
+            faces[i + 1] = face_flux(
+                m,
+                pressures[i].expect("admitted mobile pressure"),
+                pressures[i + 1].expect("admitted mobile pressure"),
+                left + right,
+                input.body_force_pressure_gradient_pa_m,
+            )?;
+        }
+    }
+    if mobility[n - 1] > 0.0 {
+        faces[n] = face_flux(
+            mobility[n - 1],
+            pressures[n - 1].expect("admitted mobile pressure"),
+            input.boundary_liquid_pressure_pa[1],
+            0.5 * cells[n - 1].thickness_m,
+            input.body_force_pressure_gradient_pa_m,
+        )?;
+    }
+    for (i, state) in states.iter().enumerate() {
+        if i % 128 == 0 {
+            checkpoint()?;
+        }
+        let speed = faces[i].abs().max(faces[i + 1].abs());
+        if let Some(p) = pressures[i] {
+            admit_state(state, input.temperature_k, p, speed)?;
+        } else if speed != 0.0 {
+            return Err(invalid("nonzero liquid flux crosses a dry seal").into());
+        }
+    }
+    checkpoint()?;
+    Ok(Hydraulics {
+        pressures,
+        mobility,
+        faces,
+    })
 }
 
 fn face_flux(
@@ -353,9 +461,18 @@ fn face_flux(
     distance_m: f64,
     body_force_pressure_gradient_pa_m: f64,
 ) -> Result<f64, MaterialError> {
+    if !positive(distance_m) {
+        return Err(invalid("liquid face distance is unrepresentable"));
+    }
     let gradient = (right_pressure_pa - left_pressure_pa) / distance_m;
     let q = -mobility_m2_pa_s * (gradient - body_force_pressure_gradient_pa_m);
-    if q.is_finite() { Ok(q) } else { Err(invalid("transient liquid Darcy face flux is unrepresentable")) }
+    if q.is_finite() {
+        Ok(q)
+    } else {
+        Err(invalid(
+            "transient liquid Darcy face flux is unrepresentable",
+        ))
+    }
 }
 
 fn compensated_sum(values: impl Iterator<Item = f64>) -> Result<f64, MaterialError> {
@@ -367,7 +484,11 @@ fn compensated_sum(values: impl Iterator<Item = f64>) -> Result<f64, MaterialErr
         c = (t - sum) - y;
         sum = t;
     }
-    if sum.is_finite() { Ok(sum) } else { Err(invalid("liquid storage sum is unrepresentable")) }
+    if sum.is_finite() {
+        Ok(sum)
+    } else {
+        Err(invalid("liquid storage sum is unrepresentable"))
+    }
 }
 
 #[cfg(test)]
@@ -452,14 +573,19 @@ mod tests {
         let dry = column([0.1, 0.5]);
         let saved = dry.clone();
         let p = pressures(&dry.liquid_states().unwrap(), 150_000.0).unwrap()[1].unwrap();
-        let candidate = dry.step_candidate(input([150_000.0, p], 1.0), || false).unwrap();
+        let candidate = dry
+            .step_candidate(input([150_000.0, p], 1.0), || false)
+            .unwrap();
         assert_eq!(candidate.step().face_flux_m_s[0], 0.0);
         assert_eq!(candidate.step().face_flux_m_s[1], 0.0);
         assert_eq!(dry, saved);
 
         let wet = column([0.5, 0.5]);
         let p = pressures(&wet.liquid_states().unwrap(), 150_000.0).unwrap()[0].unwrap();
-        assert!(wet.step_candidate(input([p + 100_000.0, p], 1e9), || false).is_err());
+        assert!(
+            wet.step_candidate(input([p + 100_000.0, p], 1e9), || false)
+                .is_err()
+        );
         assert_eq!(wet.saturations(), &[0.5, 0.5]);
     }
 }

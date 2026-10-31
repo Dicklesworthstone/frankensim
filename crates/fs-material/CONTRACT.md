@@ -8130,12 +8130,46 @@ Positive Forchheimer inertia refuses this view, including a unit-mobility
 endpoint, because a saturated inertial calibration does not supply a wet one.
 Gas-slip and gas-only saturation calibrations retain their existing refusals.
 
-This is prescribed instantaneous liquid mobility on one fixed constitutive
-branch. It does not solve gas pressure, liquid storage, a wetting front,
-Richards/two-phase dynamics, capillary work or hysteresis. Capillary pressure is
+The constitutive and Darcy rebinding interfaces prescribe instantaneous liquid
+mobility on one fixed branch. They do not solve gas pressure, liquid storage,
+a wetting front, Richards/two-phase dynamics, capillary work or hysteresis. Capillary pressure is
 a phase-pressure relation and must not be added as another hydraulic drag or
 heat source. Synthetic analytic and source-preservation fixtures check the
 equations and coupling; they do not establish a measured material calibration.
+
+### Implicit conservative unsaturated-liquid columns
+
+`porous::wet::liquid::transient::LiquidSaturationColumn::step_candidate_implicit`
+advances the existing rigid one-dimensional finite-volume column by backward
+Euler. Each cell retains its original retention calibration, porosity,
+thickness and explicit intrinsic normal permeability. Prescribed gas pressure,
+temperature, viscosity, boundary liquid pressures and signed body-force
+pressure gradient define one physical interval. The explicit and implicit
+owners share the same source-qualified Darcy face flux. Half-cell resistances
+add in series, including unequal widths and permeabilities; an exact dry or
+intrinsic seal has exactly zero connected flux and never acquires an epsilon
+mobility or a fabricated finite dry pressure.
+
+Analytic capillary-pressure and mobility derivatives assemble an O(n)
+tridiagonal Newton direction using the native adjacent-pivot solver. If the
+full mobility tangent loses diffusion signs, a frozen-mobility pressure
+direction supplies the nonlinear correction. Every trial still samples the
+complete original endpoint law and flux. Bounded backtracking admits only
+original saturation, actual liquid-pressure, temperature and superficial-speed
+support; it neither clips states nor widens source domains. Unsupported initial
+coordinates, exhausted supported iteration, entirely unsupported trial steps
+and cancellation remain distinct refusals.
+
+Acceptance independently checks each dimensionless storage/flux equation and
+one fixed original-to-final column liquid-volume budget per transverse area.
+Compensated actual cell changes avoid subtracting large absolute inventories;
+rejected trial fluxes never enter the accepted report. Counts include all
+evaluated and rejected states, linear solves and safeguarded directions.
+Failure preserves the original saturation, material states and clock. The
+endpoint method has no explicit stability timestep restriction, but still
+requires supported convergent states and representable time advancement; it
+does not certify temporal accuracy, introduce hidden substeps, solve gas or
+heat storage, infer fluid density, or add hysteresis or capillary work.
 
 ### Adaptive coupled gas, adsorption and sensible-heat transport
 
