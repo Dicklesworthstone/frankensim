@@ -1,4 +1,4 @@
-//! Scalar incoherent imaging through a uniformly illuminated circular pupil.
+//! Scalar incoherent imaging through uniformly illuminated camera pupils.
 //!
 //! In the focused image plane, `alpha = pi*D/(lambda*q)` and the unit-integral
 //! PSF is `alpha^2/(4*pi) * [2*J1(alpha*r)/(alpha*r)]^2`. Here `q` is image
@@ -25,10 +25,13 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::{det, special::bessel_j1};
 
+mod polygon;
+use polygon::PolygonPupil;
+
 const PI: f64 = core::f64::consts::PI;
 const PROPOSAL_RADIUS: f64 = 2.0;
 
-/// Explicit in-focus scalar-diffraction policy for a circular camera pupil.
+/// Explicit in-focus scalar diffraction for circular and regular bladed pupils.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FocusedDiffraction {
     maximum_defocus_phase_rad: f64,
@@ -56,7 +59,7 @@ impl FocusedDiffraction {
     }
 }
 
-/// One shared geometric ray with wavelength-specific Airy/proposal weights.
+/// One shared geometric ray with wavelength-specific pupil/proposal weights.
 /// These weights multiply incoming spectral radiance before color integration.
 #[derive(Clone, Copy, Debug)]
 pub struct SpectralCameraRay<const N: usize> {
@@ -68,7 +71,7 @@ pub struct SpectralCameraRay<const N: usize> {
 }
 
 impl PhysicalCamera {
-    /// Select in-focus diffraction for a nonzero circular pupil. The rendered
+    /// Select in-focus diffraction for a nonzero circular or bladed pupil. The rendered
     /// raster retains the camera's declared angular field of view. The pupil
     /// sets optical resolution; it is not also sampled for geometric defocus.
     /// A declared physical focal length requires focus beyond that length,
@@ -78,7 +81,7 @@ impl PhysicalCamera {
         mut self,
         policy: FocusedDiffraction,
     ) -> Result<Self, CameraError> {
-        if !matches!(&self.aperture.kind, ApertureKind::Circular { .. }) {
+        if self.aperture.is_pinhole() {
             return Err(CameraError::InvalidDiffraction);
         }
         self.admit_diffraction_projection()?;
@@ -92,17 +95,21 @@ impl PhysicalCamera {
         self.diffraction
     }
 
-    /// Trace one sample of the wavelength-dependent, normalized Airy PSF.
+    /// Trace one sample of the wavelength-dependent, normalized pupil PSF.
     ///
     /// A shared two-dimensional Cauchy proposal has the Airy tail's `r^-3`
     /// decay. It requires two independent unit variates, has no rejection loop
     /// or cutoff, and retains the rings at all wavelengths through separate
-    /// importance weights. The lens and diffraction draws must be independent
+    /// importance weights. Bladed pupils use an analytic polygon Fourier
+    /// transform and an edge-aligned product-Cauchy mixture, retaining their
+    /// directional spikes without a pupil raster or an image convolution.
+    /// The lens and diffraction draws must be independent
     /// of pixel, wavelength, BSDF and shutter draws. Geometric cameras ignore
     /// diffraction samples and wavelengths and return unit weights.
     ///
     /// Wavelengths are in nanometres. Scalar admission requires `lambda/D <=
-    /// 0.01` for every wavelength. Call [`Self::admit_diffraction_depth`] on the
+    /// 0.01` for every wavelength, using the inscribed pupil diameter for a
+    /// regular polygon. Call [`Self::admit_diffraction_depth`] on the
     /// primary visible surface (or infinite environment) before accepting the
     /// path. Primary surfaces must be opaque diffuse: a mirror/refractor's
     /// virtual-image depth is not its first-hit depth. Volumetric primary
@@ -130,29 +137,48 @@ impl PhysicalCamera {
         let (minimum, maximum) = self.diffraction_wavelength_range(wavelengths_nm)?;
         let reference_nm = 0.5 * minimum + 0.5 * maximum;
         let scale = (reference_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
-        let u = diffraction_sample.u();
-        let remainder = 1.0 - u;
-        // Inverse radial CDF: F(r) = 1 - 1/sqrt(1 + (r/s)^2).
-        let radius = PROPOSAL_RADIUS * det::sqrt(u * (2.0 - u)) / remainder;
-        let (sin_phi, cos_phi) = det::sin_cos(2.0 * PI * diffraction_sample.v());
-        let x = x_tan + scale * radius * cos_phi;
-        let y = y_tan + scale * radius * sin_phi;
+        let (x, y, weights) = if let ApertureKind::RegularPolygon { vertices, .. } =
+            &self.aperture.kind
+        {
+            let pupil = PolygonPupil::new(self.aperture.radius_m(), vertices);
+            let (q, proposal) = pupil.sample([diffraction_sample.u(), diffraction_sample.v()]);
+            let mut weights = [0.0; N];
+            for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
+                cx.checkpoint()?;
+                let ratio = reference_nm / wavelength_nm;
+                *weight = ratio * ratio * pupil.density(q.map(|value| ratio * value)) / proposal;
+                if !weight.is_finite() || *weight < 0.0 {
+                    return Err(CameraError::InvalidDiffraction);
+                }
+            }
+            (x_tan + scale * q[0], y_tan + scale * q[1], weights)
+        } else {
+            // Preserve the original circular sampling arithmetic and streams.
+            let u = diffraction_sample.u();
+            let remainder = 1.0 - u;
+            // Inverse radial CDF: F(r) = 1 - 1/sqrt(1 + (r/s)^2).
+            let radius = PROPOSAL_RADIUS * det::sqrt(u * (2.0 - u)) / remainder;
+            let (sin_phi, cos_phi) = det::sin_cos(2.0 * PI * diffraction_sample.v());
+            let x = x_tan + scale * radius * cos_phi;
+            let y = y_tan + scale * radius * sin_phi;
+            let mut weights = [0.0; N];
+            for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
+                let ratio = reference_nm / wavelength_nm;
+                let amplitude = jinc(ratio * radius);
+                // Divide the normalized PSF by q(r) = (1-u)^3/(2*pi*s^2).
+                *weight =
+                    0.5 * PROPOSAL_RADIUS * PROPOSAL_RADIUS * ratio * ratio * amplitude * amplitude
+                        / remainder
+                        / remainder
+                        / remainder;
+                if !weight.is_finite() || *weight < 0.0 {
+                    return Err(CameraError::InvalidDiffraction);
+                }
+            }
+            (x, y, weights)
+        };
         if !scale.is_finite() || scale <= 0.0 || !x.is_finite() || !y.is_finite() {
             return Err(CameraError::InvalidDiffraction);
-        }
-        let mut weights = [0.0; N];
-        for (weight, &wavelength_nm) in weights.iter_mut().zip(wavelengths_nm) {
-            let ratio = reference_nm / wavelength_nm;
-            let amplitude = jinc(ratio * radius);
-            // Divide the normalized PSF by q(r) = (1-u)^3/(2*pi*s^2).
-            *weight =
-                0.5 * PROPOSAL_RADIUS * PROPOSAL_RADIUS * ratio * ratio * amplitude * amplitude
-                    / remainder
-                    / remainder
-                    / remainder;
-            if !weight.is_finite() || *weight < 0.0 {
-                return Err(CameraError::InvalidDiffraction);
-            }
         }
         let ray = Ray {
             origin: self.eye,
@@ -164,6 +190,46 @@ impl PhysicalCamera {
         };
         cx.checkpoint()?;
         Ok(SpectralCameraRay { ray, weights })
+    }
+
+    /// Evaluate the selected focused PSF per unit angular-raster area.
+    ///
+    /// `tangent_offset` is the displacement in the camera's two tangent
+    /// coordinates, and wavelength is in nanometres. The integral over those
+    /// two coordinates is one. The on-axis density is physical pupil area
+    /// divided by wavelength squared; it is not normalized to unit peak.
+    /// This bounded analytic query allocates nothing. The same focus and
+    /// primary-surface conditions as spectral ray generation still apply.
+    pub fn in_focus_diffraction_density(
+        &self,
+        tangent_offset: [f64; 2],
+        wavelength_nm: f64,
+    ) -> Result<f64, CameraError> {
+        if self.diffraction.is_none() || tangent_offset.iter().any(|v| !v.is_finite()) {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        self.diffraction_wavelength_range(&[wavelength_nm])?;
+        let scale = (wavelength_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
+        let q = tangent_offset.map(|value| value / scale);
+        let radius_squared = q[0] * q[0] + q[1] * q[1];
+        if !scale.is_finite() || scale <= 0.0 || !radius_squared.is_finite() {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        let density = match &self.aperture.kind {
+            ApertureKind::Circular { .. } => {
+                let amplitude = jinc(det::sqrt(radius_squared));
+                amplitude * amplitude / (4.0 * PI)
+            }
+            ApertureKind::RegularPolygon { vertices, .. } => {
+                PolygonPupil::new(self.aperture.radius_m(), vertices).density(q)
+            }
+            ApertureKind::Pinhole => return Err(CameraError::InvalidDiffraction),
+        } / scale
+            / scale;
+        if !density.is_finite() || density < 0.0 {
+            return Err(CameraError::InvalidDiffraction);
+        }
+        Ok(density)
     }
 
     /// Admit the actual first visible depth under the declared phase budget.
@@ -204,10 +270,16 @@ impl PhysicalCamera {
         wavelengths_nm: &[f64],
     ) -> Result<(f64, f64), CameraError> {
         self.admit_diffraction_projection()?;
+        let radius_m = match &self.aperture.kind {
+            ApertureKind::RegularPolygon {
+                radius_m, blades, ..
+            } => radius_m * det::cos(PI / f64::from(*blades)),
+            _ => self.aperture.radius_m(),
+        };
         let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
         for &wavelength in wavelengths_nm {
             let lambda_m = wavelength * 1.0e-9;
-            let relative = 0.5 * (lambda_m / self.aperture.radius_m());
+            let relative = 0.5 * (lambda_m / radius_m);
             if !wavelength.is_finite()
                 || wavelength <= 0.0
                 || lambda_m <= 0.0

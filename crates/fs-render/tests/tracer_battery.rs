@@ -1804,7 +1804,8 @@ fn full_path_owen_vs_pixel_owen_equal_spp_logged() {
 }
 
 /// G2/G3: a focused emitter outside the geometrical centre ray contributes
-/// through the Airy pattern; absolute sample chunks still replay bitwise.
+/// through circular and bladed pupil diffraction; absolute sample chunks
+/// still replay bitwise for each physical aperture.
 #[test]
 fn diffraction_render_resolves_light_outside_geometric_image_and_replays() {
     let mut scene = focus_probe_scene(0.0, 1.0e-3);
@@ -1819,50 +1820,68 @@ fn diffraction_render_resolves_light_outside_geometric_image_and_replays() {
         2.0,
         Aperture::try_circular(1.0e-3).unwrap(),
     ));
-    let diffraction = static_cinematic_camera(
-        physical_from_legacy(&scene.camera, 2.0, Aperture::try_circular(1.0e-3).unwrap())
-            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
-            .unwrap(),
-    );
     let settings = motion_settings(1_024);
     let shutter = motion_shutter(0.5, 0.0);
     with_cx(|cx| {
         let ray_image =
             render_cinematic(&scene, &geometric, CutSide::After, cx, &settings, shutter).unwrap();
         assert_eq!(ray_image.xyz[0], [0.0; 3]);
-        let wave_image =
-            render_cinematic(&scene, &diffraction, CutSide::After, cx, &settings, shutter).unwrap();
-        assert!(
-            wave_image.xyz[0]
-                .iter()
-                .all(|value| value.is_finite() && *value > 0.0)
-        );
-        let mut progressive = Film::try_new(1, 1).unwrap();
-        render_cinematic_range(
-            &scene,
-            &diffraction,
-            CutSide::After,
-            cx,
-            &settings,
-            &mut progressive,
-            0,
-            512,
-            shutter,
-        )
-        .unwrap();
-        render_cinematic_range(
-            &scene,
-            &diffraction,
-            CutSide::After,
-            cx,
-            &settings,
-            &mut progressive,
-            512,
-            1024,
-            shutter,
-        )
-        .unwrap();
-        assert_film_bits_eq(&wave_image, &progressive, "diffraction progressive replay");
+        for (name, aperture) in [
+            ("circular", Aperture::try_circular(1.0e-3).unwrap()),
+            (
+                "triangular",
+                Aperture::try_regular_polygon(1.0e-3, 3, 0.37).unwrap(),
+            ),
+            (
+                "square",
+                Aperture::try_regular_polygon(1.0e-3, 4, core::f64::consts::FRAC_PI_4).unwrap(),
+            ),
+        ] {
+            let diffraction = static_cinematic_camera(
+                physical_from_legacy(&scene.camera, 2.0, aperture)
+                    .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+                    .unwrap(),
+            );
+            let wave_image =
+                render_cinematic(&scene, &diffraction, CutSide::After, cx, &settings, shutter)
+                    .unwrap();
+            assert!(
+                wave_image.xyz[0]
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0),
+                "{name} pupil must transport diffracted spectral radiance"
+            );
+            let mut progressive = Film::try_new(1, 1).unwrap();
+            render_cinematic_range(
+                &scene,
+                &diffraction,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut progressive,
+                0,
+                512,
+                shutter,
+            )
+            .unwrap();
+            render_cinematic_range(
+                &scene,
+                &diffraction,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut progressive,
+                512,
+                1024,
+                shutter,
+            )
+            .unwrap();
+            assert_film_bits_eq(
+                &wave_image,
+                &progressive,
+                &format!("{name} diffraction progressive replay"),
+            );
+        }
     });
 }
 

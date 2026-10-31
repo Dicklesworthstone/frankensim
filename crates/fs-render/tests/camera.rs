@@ -1066,7 +1066,7 @@ fn diffraction_refuses_defocus_invalid_pupils_and_nonspectral_paths() {
     assert!(
         axial_camera(Aperture::try_regular_polygon(0.01, 6, 0.0).unwrap(), 2.0)
             .with_in_focus_diffraction(policy)
-            .is_err()
+            .is_ok()
     );
     let camera = diffraction_camera(1.0e-3, 2.0);
     assert!(
@@ -1174,5 +1174,151 @@ fn diffraction_policy_survives_camera_animation() {
                 .admit_diffraction_depth(Some(Point3::new(0.0, 0.0, -2.5)), &[550.0])
                 .is_ok()
         );
+    });
+}
+
+/// A square pupil has a separable sinc² image, not circular Airy rings.
+/// The central density is its actual area/lambda² and scales accordingly.
+#[test]
+fn bladed_diffraction_density_has_physical_area_and_spectral_scaling() {
+    let radius = 0.001;
+    let wavelength_nm = 550.0;
+    let lambda = wavelength_nm * 1.0e-9;
+    let camera = |radius, rotation| {
+        axial_camera(
+            Aperture::try_regular_polygon(radius, 4, rotation).unwrap(),
+            2.0,
+        )
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+        .unwrap()
+    };
+    let square = camera(radius, core::f64::consts::FRAC_PI_4);
+    let peak = square
+        .in_focus_diffraction_density([0.0; 2], wavelength_nm)
+        .unwrap();
+    assert_close(
+        peak,
+        2.0 * radius * radius / (lambda * lambda),
+        1.0e-8,
+        "physical square area",
+    );
+    let first_zero = lambda / (core::f64::consts::SQRT_2 * radius);
+    assert!(
+        square
+            .in_focus_diffraction_density([first_zero, 0.0], wavelength_nm)
+            .unwrap()
+            < 1.0e-20 * peak
+    );
+    let offset = [0.37 * first_zero, -0.61 * first_zero];
+    let density = square
+        .in_focus_diffraction_density(offset, wavelength_nm)
+        .unwrap();
+    let red = square
+        .in_focus_diffraction_density(offset.map(|v| 2.0 * v), 2.0 * wavelength_nm)
+        .unwrap();
+    assert_close(
+        red,
+        density / 4.0,
+        1.0e-12 * peak,
+        "inverse-square spectral density",
+    );
+    let wider = camera(2.0 * radius, core::f64::consts::FRAC_PI_4)
+        .in_focus_diffraction_density(offset.map(|v| 0.5 * v), wavelength_nm)
+        .unwrap();
+    assert_close(
+        wider,
+        4.0 * density,
+        1.0e-12 * peak,
+        "pupil-area density scale",
+    );
+    let rotated = camera(radius, core::f64::consts::FRAC_PI_2);
+    let angle = core::f64::consts::FRAC_PI_4;
+    let rotated_offset = [
+        offset[0] * angle.cos() - offset[1] * angle.sin(),
+        offset[0] * angle.sin() + offset[1] * angle.cos(),
+    ];
+    assert_close(
+        rotated
+            .in_focus_diffraction_density(rotated_offset, wavelength_nm)
+            .unwrap(),
+        density,
+        1.0e-12 * peak,
+        "rotated diffraction spikes",
+    );
+    assert!(
+        axial_camera(pinhole(), 2.0)
+            .in_focus_diffraction_density([0.0; 2], wavelength_nm)
+            .is_err()
+    );
+    assert!(
+        square
+            .in_focus_diffraction_density([f64::NAN, 0.0], wavelength_nm)
+            .is_err()
+    );
+    let small_triangle = axial_camera(Aperture::try_regular_polygon(4.0e-5, 3, 0.0).unwrap(), 2.0)
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+        .unwrap();
+    assert!(
+        small_triangle
+            .in_focus_diffraction_density([0.0; 2], wavelength_nm)
+            .is_err(),
+        "scalar admission must resolve the inscribed pupil diameter"
+    );
+}
+
+#[test]
+fn bladed_diffraction_sampling_rotates_with_the_actual_aperture() {
+    let camera = |rotation| {
+        axial_camera(
+            Aperture::try_regular_polygon(0.001, 7, rotation).unwrap(),
+            2.0,
+        )
+        .with_in_focus_diffraction(FocusedDiffraction::try_new(0.05).unwrap())
+        .unwrap()
+    };
+    let (plain, rotated) = (camera(0.0), camera(0.4));
+    with_cx(|_, cx| {
+        for u in [0.0, 0.137, 0.37, 0.73, 0.999] {
+            let sample = LensSample::try_new(u, 0.31).unwrap();
+            let draw = |camera: &PhysicalCamera| {
+                camera
+                    .generate_spectral_ray_from_tangent_offsets(
+                        cx,
+                        0.0,
+                        0.0,
+                        LensSample::CENTER,
+                        sample,
+                        &[400.0, 550.0, 700.0],
+                    )
+                    .unwrap()
+            };
+            let a = draw(&plain);
+            let b = draw(&rotated);
+            let x = a.ray.dir.x;
+            let y = a.ray.dir.y;
+            assert_close(
+                b.ray.dir.x,
+                x * 0.4_f64.cos() - y * 0.4_f64.sin(),
+                1.0e-12,
+                "rotated sampled x",
+            );
+            assert_close(
+                b.ray.dir.y,
+                x * 0.4_f64.sin() + y * 0.4_f64.cos(),
+                1.0e-12,
+                "rotated sampled y",
+            );
+            assert_close(b.ray.dir.z, a.ray.dir.z, 1.0e-12, "rotated sampled z");
+            if u > 0.0 {
+                for (left, right) in a.weights.into_iter().zip(b.weights) {
+                    assert_close(
+                        left,
+                        right,
+                        1.0e-8 * left.max(1.0),
+                        "rotation-invariant spectral weights",
+                    );
+                }
+            }
+        }
     });
 }

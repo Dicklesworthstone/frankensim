@@ -2,7 +2,7 @@
 //!
 //! The optical model is an ideal thin lens. Focus distance is the positive
 //! axial distance from the lens plane, not distance along each raster ray.
-//! An opt-in circular-pupil diffraction model covers incoherent, paraxial,
+//! Opt-in circular and bladed pupil diffraction covers incoherent, paraxial,
 //! in-focus imaging. Lens distortion, chromatic aberration, rolling shutter,
 //! and autofocus heuristics are outside this contract.
 
@@ -57,7 +57,7 @@ pub enum CameraError {
     InvalidExposureMetadata,
     /// A lens coordinate was outside the half-open unit square.
     InvalidLensSample,
-    /// Diffraction needs a circular pupil, a valid phase budget, and a
+    /// Diffraction needs a circular or bladed pupil, a valid phase budget, and a
     /// supported opaque diffuse primary surface or distant environment.
     InvalidDiffraction,
     /// A diffraction camera requires wavelength-aware ray generation.
@@ -171,8 +171,8 @@ impl CameraError {
         }];
         const DIFFRACTION: &[CameraFix] = &[CameraFix {
             rank: 1,
-            code: "focused_circular_diffraction",
-            message: "use a nonzero circular pupil, spectral rays, and opaque diffuse primary surfaces within the declared focus phase budget",
+            code: "focused_pupil_diffraction",
+            message: "use a nonzero circular or regular bladed pupil, spectral rays, and opaque diffuse primary surfaces within the declared focus phase budget",
         }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {

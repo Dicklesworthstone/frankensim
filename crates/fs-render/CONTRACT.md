@@ -1689,11 +1689,12 @@ Like the pre-existing progressive tracer, it does not yet content-bind the
 scene or full camera content; composition-level artifact identity owns that
 broader provenance closure.
 
-### Focused circular-pupil diffraction
+### Focused pupil diffraction
 
 `PhysicalCamera::with_in_focus_diffraction(FocusedDiffraction)` opts the
-cinematic spectral tracer into scalar, paraxial, incoherent Airy imaging.
-It requires a nonzero circular aperture, `lambda/D <= 0.01`, and an explicit
+cinematic spectral tracer into scalar, paraxial, incoherent pupil imaging.
+It requires a nonzero circular or regular 3–64-blade aperture,
+`lambda/(2*inradius) <= 0.01` (the usual radius for a circle), and an explicit
 maximum pupil-rim defocus phase between zero and 0.1 radians. A physical
 focal-length declaration requires focus beyond that focal length, admitting
 only a positive conjugate image distance. First-hit surfaces must have an
@@ -1708,7 +1709,7 @@ depth claim. Refusals preserve the film transactionally. Camera animation
 retains the policy and render-continuity hashes distinguish it from geometric
 imaging. Existing geometric render bits and random streams are unchanged.
 
-The in-focus image-plane PSF is
+For a circular pupil, the in-focus image-plane PSF is
 `[pi*D/(lambda*q)]^2/(4*pi) * [2*J1(v)/v]^2`,
 `v = pi*D*r/(lambda*q)`, where `q` is the actual image distance. Its integral
 is one, not its peak. Since this camera's raster is angular (`r=q*theta`),
@@ -1718,6 +1719,29 @@ two-variate Cauchy proposal has the same inverse-cubic radial-density tail,
 with no rejection loop, image-space convolution buffer, or ring cutoff.
 Each wavelength receives its own PSF/proposal weight before spectral XYZ
 integration; no wavelength is treated as a representative achromatic blur.
+
+Regular bladed pupils use the analytic Fourier transform of their actual
+polygon edges. With unit-circumradius pupil area `A`, transform `F(q)` and
+`q=2*pi*circumradius*theta/lambda`, the normalized density is
+`abs(F(q))²/(4*pi²*A)`. Edge integrals use sinc limits, compensated sums and
+a second-moment DC limit to avoid removable singularities. This retains
+orientation-dependent diffraction spikes and full tails without a pupil
+raster, FFT aliasing, an image convolution buffer, or per-ray allocation.
+A mixture of blade-aligned product-Cauchy proposals resolves narrow
+inverse-square ridge tails as well as generic inverse-fourth-power tails.
+Quarter-turn-equivalent proposal frames are shared. The full mixture PDF is
+used for every spectral lane; work is bounded by the admitted 64 blades,
+and cancellation is polled between wavelengths. Exact random endpoints use
+nearest open-interval floating-point representatives. The prior circular
+sampler's arithmetic and random domain are retained.
+
+`in_focus_diffraction_density` exposes this same analytic PSF per unit
+angular-raster area. Its central density is actual pupil area divided by
+wavelength squared, and its integral is one. The existing circumradius
+defocus-phase admission remains conservative over the whole polygon pupil.
+The edge-integral derivation follows Gallatin, *J. Math. Phys.* 53, 013509
+(2012), equations (5) and (21),
+<https://tsapps.nist.gov/publication/get_pdf.cfm?pub_id=909668>.
 
 The focused mode traces the optical-centre image and does not additionally
 sample geometric pupil blur. Its phase budget is a model admission condition,
@@ -1736,7 +1760,12 @@ quadrature band), the 0.837784869 central-disk energy (1e-7 absolute), phase
 admission and animation. `tests/tracer_battery.rs` checks actual image
 contributions outside geometrical support, flat-environment conservation
 (4% finite Monte Carlo band), exact progressive replay, and atomic defocus
-refusal. These are numerical model checks, not measured lens validation.
+refusal. Pure polygon-kernel tests compare the independent separable square
+aperture sinc² solution (including zero and edge-parallel limits), verify
+rotation and SI scaling, and integrate all three packet wavelengths with
+fixed Hammersley cubature for 3, 4, 6, 9 and 64 blades (0.4% power band).
+Camera tests bind pupil area, wavelength scaling and sampled orientation to
+that kernel. These are numerical model checks, not measured lens validation.
 
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
