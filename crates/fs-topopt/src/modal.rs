@@ -65,8 +65,11 @@ pub struct EigenfrequencyObjectiveOptions {
     pub solver: MatrixFreeEigenOptions,
     /// Positive smooth-min sharpness, in inverse eigenvalue units.
     pub aggregation_beta: f64,
-    /// Positive full-material mass density. With SI geometry and elasticity,
-    /// this is kg/m^3 and the modal eigenvalues have units s^-2.
+    /// Positive full-material mass density for the legacy elasticity constructor.
+    /// With SI geometry and elasticity this is kg/m^3, giving modes in s^-2.
+    /// A material-bound operator instead uses its own per-cell densities and
+    /// requires this option to remain at its neutral default of 1.0; an
+    /// independent scalar cannot override or double-scale a material field.
     pub reference_density: f64,
 }
 
@@ -221,13 +224,28 @@ pub fn controlled_matrix_free_eigenfrequency_objective(
         || !options.aggregation_beta.is_finite() || options.aggregation_beta <= 0.0 {
         return Err(GeneralizedError::InvalidInput("reference density and aggregation beta must be finite and positive"));
     }
+    if elasticity.material_field().is_some() && options.reference_density != 1.0 {
+        return Err(GeneralizedError::InvalidInput(
+            "assigned materials own physical density; reference_density must remain 1.0",
+        ));
+    }
     let previous_moduli = elasticity.moduli.clone();
     let result = (|| {
         let (filtered, projected, moduli) = pipeline.try_forward(rho, control)
             .map_err(GeneralizedError::Operator)?;
         elasticity.moduli = moduli;
-        let mass: Vec<f64> = projected.iter()
-            .map(|&r| options.reference_density * mass_interp(r)).collect();
+        let reference_densities: Vec<f64> = (0..elasticity.cells())
+            .map(|cell| {
+                elasticity
+                    .material_density_kg_m3(cell)
+                    .unwrap_or(options.reference_density)
+            })
+            .collect();
+        let mass: Vec<f64> = projected
+            .iter()
+            .zip(&reference_densities)
+            .map(|(&r, &density)| density * mass_interp(r))
+            .collect();
         let mut modal = controlled_matrix_free_eigenpairs(elasticity, &mass, options.solver, control)?;
         let (aggregate, weights) = smooth_min(&modal.values, options.aggregation_beta);
         let p = &pipeline.params;
@@ -240,7 +258,7 @@ pub fn controlled_matrix_free_eigenfrequency_objective(
                 let rb = projected[cell].clamp(0.0, 1.0);
                 let stiffness_slope = (1.0 - p.e_min) * p.penal
                     * fs_math::det::pow(rb.max(1e-12), p.penal - 1.0);
-                let mass_slope = options.reference_density * mass_interp_derivative(rb);
+                let mass_slope = reference_densities[cell] * mass_interp_derivative(rb);
                 let derivative = stiffness_slope.mul_add(strain[cell], -lambda * mass_slope * kinetic[cell]);
                 local[cell] = weight.mul_add(derivative, local[cell]);
             }

@@ -25,6 +25,7 @@ fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-rep-mesh = { path = "../fs-rep-mesh" }
 fs-solver = { path = "../fs-solver" }
+fs-solid = { path = "../fs-solid" }
 fs-sparse = { path = "../fs-sparse" }
 fs-spectral = { path = "../fs-spectral" }
 
@@ -186,3 +187,9 @@ required-features = ["newton-design"]
 [[example]]
 name = "response_stress_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[test]]
+name = "material_elasticity"
+
+[[test]]
+name = "material_modal"

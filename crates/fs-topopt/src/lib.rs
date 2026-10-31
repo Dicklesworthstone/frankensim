@@ -54,7 +54,7 @@ pub use control::{EvaluationStop, SolveBudget, SolveControl, SolveProgress, Solv
 pub use eigenfreq::{
     eigenfrequency_objective, eigenvalue_gradient, lowest_eigenpairs, mass_interp, smooth_min,
 };
-pub use elasticity::DensityElasticity;
+pub use elasticity::{DensityElasticity, MaterialElasticityError};
 pub use filter::{DensityFilter, heaviside, heaviside_derivative};
 pub use gradient_check::{
     GradientCheckOptions, GradientDirection, GradientProbe, MultiLoadGradientCheck,

@@ -1,7 +1,7 @@
 //! Density-parameterized vector elasticity: K(ρ̄) = Σ_c E(ρ̄_c)·K_c
-//! with per-cell UNIT-modulus stiffness blocks K_c = |V_c|·B_aᵀCB_b
-//! (fs-material tangent at zero strain, fs-feec barycentric
-//! gradients) kept SEPARATE so the SIMP chain rule is exact:
+//! with per-cell reference-material stiffness blocks K_c = |V_c|·B_aᵀCB_b
+//! (shared solid-material tensors or the legacy fs-material tangent,
+//! fs-feec barycentric gradients) kept separate so the SIMP chain rule is exact:
 //! ∂(Ku)/∂ρ̄_c = E′(ρ̄_c)·K_c·u — the fs-adjoint `DensityPoisson`
 //! pattern lifted to 3 dofs per vertex. Compliance is self-adjoint
 //! (λ = u), so sensitivities cost ZERO extra solves — stated, used,
@@ -11,18 +11,21 @@ use fs_material::{IsotropicElastic, SmallStrainLaw};
 use fs_rep_mesh::TetComplex;
 use fs_solver::LinearOp;
 
+/// Shared source-bound elastic material fields for topology design.
+pub mod material;
 pub mod second_order;
+pub use material::MaterialElasticityError;
 
 /// The density-elasticity problem on a tet complex: per-cell 12×12
-/// unit-modulus stiffness blocks + Dirichlet mask on vector dofs.
+/// reference-material stiffness blocks + Dirichlet mask on vector dofs.
 pub struct DensityElasticity {
-    /// Per-cell 12×12 unit-modulus element stiffness (row-major).
+    /// Per-cell 12×12 reference-material element stiffness (row-major).
     ke: Vec<[f64; 144]>,
     /// Per-cell 12×12 unit-density consistent mass (row-major):
     /// the P1 tet pattern (|V|/20)·(1 + δ_ab) per displacement
     /// component — kept separate like `ke` for exact chain rules.
     me: Vec<[f64; 144]>,
-    /// Per-cell C·B products (6×12 row-major): unit-modulus stress
+    /// Per-cell C·B products (6×12 row-major): reference-material stress
     /// recovery σ = CB·u_local (constant per P1 tet).
     cb: Vec<[f64; 72]>,
     /// Cell → 4 vertex ids.
@@ -31,13 +34,20 @@ pub struct DensityElasticity {
     n: usize,
     /// Free-dof mask (false = Dirichlet-fixed).
     free: Vec<bool>,
-    /// Current SIMP moduli E(ρ̄_c) (set per apply).
+    /// Current per-cell stiffness multipliers (set per apply). In a
+    /// material-bearing model these are dimensionless SIMP weights.
     pub moduli: Vec<f64>,
+    /// Owned native material states; absent in the legacy scalar constructor.
+    materials: Option<material::OwnedMaterialField>,
+    /// Full physical mass of each reference cell, independent of fixed DOFs.
+    reference_cell_masses_kg: Option<Vec<f64>>,
 }
 
 impl DensityElasticity {
     /// Build from a complex, positions, material, and a Dirichlet
     /// predicate over vertex positions (all 3 components fixed).
+    /// This legacy entry supplies stiffness only. Use [`Self::with_material_field`]
+    /// to keep physical density and material identity attached to the operator.
     ///
     /// # Panics
     /// On invalid material parameters.
@@ -60,9 +70,22 @@ impl DensityElasticity {
             for value in &mut row[3..] { *value *= 0.5; }
         }
         let geo = fs_feec::element_geometry(complex, positions);
+        Self::from_engineering_field(complex, positions, &geo, |_| c, fixed)
+    }
+
+    // Both constructors use the same B, stiffness, stress and unit-density
+    // mass assembly. Only the reference constitutive field differs.
+    fn from_engineering_field(
+        complex: &TetComplex,
+        positions: &[[f64; 3]],
+        geo: &fs_feec::ElementGeometry,
+        constitutive: impl Fn(usize) -> [[f64; 6]; 6],
+        fixed: &dyn Fn([f64; 3]) -> bool,
+    ) -> DensityElasticity {
         let mut ke = Vec::with_capacity(complex.tets.len());
         let mut cb = Vec::with_capacity(complex.tets.len());
         for (t, _tet) in complex.tets.iter().enumerate() {
+            let c = constitutive(t);
             let vol = geo.vol_signed[t].abs();
             // Bᵀ rows per node (3×6), from ∇λ_a.
             let bt = |a: usize| -> [[f64; 6]; 3] {
@@ -143,6 +166,8 @@ impl DensityElasticity {
             n,
             free,
             moduli: vec![1.0; complex.tets.len()],
+            materials: None,
+            reference_cell_masses_kg: None,
         }
     }
 
@@ -202,9 +227,9 @@ impl DensityElasticity {
         (kd, md, free_idx)
     }
 
-    /// Per-cell UNIT-MODULUS stress vectors σ = CB·u_local (6 Voigt
-    /// components per cell; multiply by the stress interpolation
-    /// outside) and the von Mises scalar per cell.
+    /// Per-cell reference-material stress vectors σ = CB·u_local (physical
+    /// [xx, yy, zz, xy, yz, zx] components; multiply by the stress interpolation
+    /// outside). Material-bearing tensors retain their full physical scale.
     #[must_use]
     pub fn cell_stress(&self, u: &[f64]) -> Vec<[f64; 6]> {
         let mut out = Vec::with_capacity(self.cb.len());
@@ -261,8 +286,9 @@ impl DensityElasticity {
         self.cell_quadratic(&self.me, u)
     }
 
-    /// Per-cell strain energy density contribution: e_c = uᵀ·K_c·u
-    /// (UNIT modulus — multiply by E′ outside for the chain rule).
+    /// Per-cell reference-material strain-energy quadratic: e_c = uᵀ·K_c·u.
+    /// Multiply by the stiffness-weight derivative outside for the chain rule;
+    /// the physical strain energy is half this quadratic.
     #[must_use]
     pub fn cell_energies(&self, u: &[f64]) -> Vec<f64> {
         self.cell_quadratic(&self.ke, u)
