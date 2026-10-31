@@ -18348,3 +18348,50 @@ Focused synthetic tests independently check source mass/tensor subtraction,
 actual population-plus-excess momentum under gravity, reconstructed dry momentum,
 represented work, rotated ellipsoids, simultaneous sphere-film reciprocity,
 density-preserving source refresh and atomic native/source/cancellation refusals.
+
+## Qualified causal evanescent reflection
+
+`mm_line::evanescent::MatchedEvanescentPorts` now realizes the independently
+matched higher radial ports of a lossless circular guide through physical LC
+storage. For each native radial cutoff `wc`, its source is
+`Z(s) = z0*s/sqrt(s*s + wc*wc)`. A positive spectral quadrature gives a series
+chain of parallel inertance/compliance cells with `L=z0/(N*wc)` and
+`C_j=N*cos(theta_j)^2/(z0*wc)`, `theta_j=(j+1/2)*pi/(2*N)`. Static inertance is
+exact. The original gas, radius, roots, ordered cells and resolution remain
+inspectable; no pole fitting, finite-resistor substitute or gain repair occurs.
+
+The existing `fs-vfit::relaxation::ParallelCellLoad` owns both physical states
+and midpoint stepping. The instantaneous wave closure solves
+`(D+z0)*U = 2*a-history` on the current sample and returns `b=a-z0*U`.
+Its discrete identity is `delta H = dt*(a*a-b*b)/z0` for any representable input
+sequence, in exact arithmetic. Reactive storage can return energy without
+amplitude clipping. All higher modes prepare before any state commits; a late
+mode refusal preserves every accepted state and observation. At most seven
+ports of sixteen cells are retained; sample stepping allocates nothing. The
+affine next-sample response is available to an implicit source junction.
+
+Physical accuracy has an authored band, not an all-frequency claim. Its upper
+frequency must remain below Nyquist and, after the midpoint/Tustin warp, below
+every retained cutoff. For normalized warped frequency `r`, the relative
+impedance quadrature error is `e=2*q^(2*N)/(1+q^(2*N))`,
+`q=(r/(1+sqrt(1-r*r)))^2`. The complex reflection quadrature bound is
+`2*r*e/sqrt(1-r*r)`. The additional time error is the chord length between
+`-exp(-2i*asin(omega/wc))` and its warped-frequency value. Their sum bounds
+complex reflection error throughout the band and must meet the caller's
+budget. These analytic approximation bounds exclude floating-point roundoff.
+The discrete LC model remains passive outside the band, but it does not
+reproduce above-cutoff propagation/radiation or viscothermal loss.
+
+`UniformModalLine` supplies the useful bounded composition: one positive-length
+lossless cylinder, the actual original one-mode `MmLineBank` FIR owner, and
+these independently matched higher ports. The plane response keeps its original
+delay, arithmetic and finite-grid admission receipt. Scalar radiation and strict
+tabulated loads keep their disclosed matched-higher-mode closure. Nonuniform
+geometry, Bessel loss, full flanged modal coupling, closed/pressure-release ends,
+matched plane loads and diagnostic fallback sources refuse explicitly. There is
+no silent replacement in `MatrixFirLine`, no extra processing delay, and no
+claim that this bounded rung completes a general multimodal radiation realizer.
+Regressions compare the native modal authority, separate three-rung quadrature
+and clock ladders, sampled harmonic response, independently reconstructed LC
+storage, wave work, same-sample closure, rollback, and the previously refused
+uniform resistance fixture with bit-identical scalar controls.

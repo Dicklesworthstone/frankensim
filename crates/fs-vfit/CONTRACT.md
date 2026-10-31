@@ -407,3 +407,16 @@ the centre distance instead of the gap for finite pistons, is not caught.
   perceptual metric; a perceptually weighted repair is a follow-up.
 - Discrete-time (z-domain) DIRECT vector fitting is a follow-up; v1
   discretizes the continuous fit.
+
+## Explicit lossless parallel LC storage
+
+`relaxation::ParallelCellSpec::lossless_lc` admits one to sixteen positive finite
+inertance/compliance pairs without a resistor. The existing `ParallelCellLoad`
+owns their states and midpoint update. Absent resistance is represented by
+exactly zero conductance (the inspectable resistance is positive infinity),
+not a large finite resistor; no pole damping is introduced. The existing
+finite-R constructor retains its original refusals. Every cell still satisfies
+the same discrete pressure-flow work identity, with exactly zero resistor loss.
+This supplies physical storage for the source-derived, band-qualified
+evanescent reflection realization in `fs-couple`; midpoint frequency warping
+is an explicit approximation, not an exact-ZOH claim.

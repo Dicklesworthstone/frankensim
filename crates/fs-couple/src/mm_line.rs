@@ -38,6 +38,10 @@ use fs_vfit::discretize::{DelayedFilter, DiscretizeError, reflectance};
 
 mod matrix_admission;
 
+/// Qualified passive causal realization of independently matched, lossless
+/// evanescent ports, including an explicit uniform-cylinder runtime.
+pub mod evanescent;
+
 /// Typed refusals from the multimodal line runtime.
 #[derive(Debug)]
 pub enum MmLineError {

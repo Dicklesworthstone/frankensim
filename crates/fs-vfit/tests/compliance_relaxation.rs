@@ -1,11 +1,48 @@
 //! Independent circuit, scattering and work checks, not material identification.
 use fs_math::c64::C64;
 use fs_vfit::impedance::{ImpedanceState, SeriesImpedanceSpec};
-use fs_vfit::relaxation::{ComplianceRelaxationTerm as RcTerm, ParallelCell, ParallelCellLoad,
+use fs_vfit::relaxation::{ComplianceRelaxationTerm as RcTerm, ParallelCell, ParallelCellLoad, ParallelLcCell,
     ParallelCellSpec, RelaxationImpedance, RelaxationImpedanceSpec, RelaxationTerm, MAX_PARALLEL_CELLS,
     MAX_RELAXATION_BRANCHES};
 use fs_vfit::waveguide::network::{NetworkNode, NetworkSegment, WaveguideNetwork};
 const DT: f64 = 0.02;
+
+#[test]
+fn lossless_lc_cells_have_exact_zero_conductance_and_retain_the_work_identity() {
+    let declared = [ParallelLcCell { inertance_pa_s2_m3: 0.3, compliance_m3_pa: 0.7 },
+        ParallelLcCell { inertance_pa_s2_m3: 0.06, compliance_m3_pa: 0.2 }];
+    let spec = ParallelCellSpec::lossless_lc(&declared).unwrap();
+    assert!(spec.cells().iter().all(|cell| 1.0/cell.resistance_pa_s_m3 == 0.0));
+    let mut load = ParallelCellLoad::new(spec, DT).unwrap();
+    let mut work = 0.0;
+    let mut released = false;
+    for n in 0..3000 {
+        let (direct, history) = load.affine_pressure();
+        let a = if n < 200 { f64::from(n%13)-6.0 } else { 0.0 };
+        let u = (2.0*a-history)/(1.0+direct);
+        let b = a-u;
+        let frame = load.step(u).unwrap();
+        let mut stored = 0.0;
+        for (i, cell) in declared.iter().enumerate() {
+            stored += 0.5*cell.inertance_pa_s2_m3*frame.inductor_flows_m3_s()[i].powi(2)
+                +0.5*cell.compliance_m3_pa*frame.pressures_pa()[i].powi(2);
+        }
+        work += DT*(a*a-b*b);
+        assert_eq!(frame.dissipated_energy_j, 0.0);
+        close(stored, frame.stored_energy_j);
+        close(work, stored);
+        released |= n >= 200 && b != 0.0;
+    }
+    assert!(released);
+    for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        assert!(ParallelCellSpec::lossless_lc(&[ParallelLcCell {
+            inertance_pa_s2_m3: bad, ..declared[0] }]).is_err());
+        assert!(ParallelCellSpec::lossless_lc(&[ParallelLcCell {
+            compliance_m3_pa: bad, ..declared[0] }]).is_err());
+    }
+    assert!(ParallelCellSpec::lossless_lc(&[]).is_err());
+    assert!(ParallelCellSpec::lossless_lc(&[declared[0]; MAX_PARALLEL_CELLS+1]).is_err());
+}
 fn base() -> SeriesImpedanceSpec {
     SeriesImpedanceSpec { resistance_pa_s_m3: 0.4, inertance_pa_s2_m3: 0.3, compliance_m3_pa: Some(0.7) }
 }

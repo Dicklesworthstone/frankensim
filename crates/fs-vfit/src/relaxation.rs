@@ -344,7 +344,9 @@ pub const MAX_PARALLEL_CELLS: usize = 16;
 /// C = 0 is exactly the high-pass term R s/(s + R/L).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct ParallelCell {
-    /// Parallel resistance [Pa s/m^3], positive.
+    /// Parallel resistance [Pa s/m^3], positive and finite for
+    /// [`ParallelCellSpec::new`]. In a [`ParallelCellSpec::lossless_lc`] chain,
+    /// positive infinity represents an absent resistor (exact zero conductance).
     pub resistance_pa_s_m3: f64,
     /// Parallel inertance [Pa s^2/m^3], positive: the cell's static mass.
     pub inertance_pa_s2_m3: f64,
@@ -361,6 +363,16 @@ impl ParallelCell {
     }
 }
 
+/// A parallel inertance and compliance with no resistor. These are physical
+/// lossless elements, not resistors given a large finite value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ParallelLcCell {
+    /// Positive finite inertance [Pa s^2/m^3].
+    pub inertance_pa_s2_m3: f64,
+    /// Positive finite compliance [m^3/Pa].
+    pub compliance_m3_pa: f64,
+}
+
 /// Admitted series chain of parallel cells, in declared order.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ParallelCellSpec {
@@ -369,6 +381,31 @@ pub struct ParallelCellSpec {
 }
 
 impl ParallelCellSpec {
+    /// Declare a series chain of explicitly lossless parallel LC cells.
+    /// The same midpoint owner retains both states and its exact discrete work
+    /// identity; the absent resistors contribute exactly zero conductance/loss.
+    /// No damping is introduced to move the imaginary-axis poles.
+    ///
+    /// # Errors
+    /// No cells, more than sixteen, or nonpositive/nonfinite L or C.
+    pub fn lossless_lc(cells: &[ParallelLcCell]) -> Result<Self, WaveguideError> {
+        if cells.is_empty() || cells.len() > MAX_PARALLEL_CELLS {
+            return Err(WaveguideError("a lossless LC load requires one to sixteen cells"));
+        }
+        let mut out = Self { cells: [ParallelCell::default(); MAX_PARALLEL_CELLS], count: cells.len() };
+        for (slot, cell) in out.cells.iter_mut().zip(cells) {
+            if ![cell.inertance_pa_s2_m3, cell.compliance_m3_pa].iter()
+                .all(|value| value.is_finite() && *value > 0.0)
+            {
+                return Err(WaveguideError("lossless LC cells require positive finite L and C"));
+            }
+            *slot = ParallelCell { resistance_pa_s_m3: f64::INFINITY,
+                inertance_pa_s2_m3: cell.inertance_pa_s2_m3,
+                compliance_m3_pa: cell.compliance_m3_pa };
+        }
+        Ok(out)
+    }
+
     /// Keep the supplied cells and their order; nothing is fitted or merged.
     ///
     /// # Errors
