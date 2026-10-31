@@ -183,6 +183,54 @@ fn an_axis_floor_reflects_bit_for_bit_as_the_floor_height_did() {
 }
 
 #[test]
+fn g3_cavity_port_floor_pressure_matches_direct_plus_image() {
+    // A port is a real radiator: the same rigid floor must reflect it as it
+    // reflects the heads. The second configuration is audible only through
+    // the image because its front opening faces away from the physical mic.
+    for (floor, facing, direct_paths) in [
+        (floor_y(-0.25), 1.0, 1),
+        (floor_z(-0.25), -1.0, 0),
+    ] {
+        let mut ins = Instrument::new(48_000.0);
+        let mut port = Port::new(0.02, 0.001, [0.0; 3], facing);
+        port.x = 1e-7;
+        ins.cavities.push(Cavity { heads: vec![], volume: 0.02, port: Some(port) });
+        let pos = [0.1, 0.25, 0.6];
+        let image = floor.image(pos);
+        let mut reflected = Mic::new(pos);
+        reflected.floor = Some(floor);
+        ins.mics.extend([reflected, Mic::new(pos), Mic::new(image)]);
+        ins.prepare();
+
+        assert_eq!(ins.mics[0].ptaps.len(), direct_paths + 1);
+        assert_eq!(ins.mics[1].ptaps.len(), direct_paths);
+        assert_eq!(ins.mics[2].ptaps.len(), 1);
+        let (_, image_delay, lo, hi) = ins.mics[2].ptaps[0];
+        let distance = image.iter().map(|x| x * x).sum::<f64>().sqrt();
+        assert_eq!(image_delay, (distance / ins.gas.sound_speed * ins.rate).floor() as usize);
+        assert!(((lo + hi) * 2.0 * PI * distance / ins.gas.density - 1.0).abs() < 1e-14);
+        assert!(lo >= 0.0 && hi >= 0.0, "rigid pressure reflection preserves polarity");
+        assert!(ins.mics[0].ring.len() > image_delay + 1);
+
+        let mut sample = [0.0; 3];
+        let mut image_peak = 0.0_f64;
+        let mut total_peak = 0.0_f64;
+        for n in 0..512 {
+            ins.step(&mut sample);
+            let expected = sample[1] + sample[2];
+            assert!((sample[0] - expected).abs() <= 1e-13 * expected.abs().max(1.0),
+                "floor pressure must superpose direct and retarded image: {sample:?}");
+            if n < image_delay {
+                assert_eq!(sample[2], 0.0, "the reflected sound cannot arrive early");
+            }
+            image_peak = image_peak.max(sample[2].abs());
+            total_peak = total_peak.max(sample[0].abs());
+        }
+        assert!(image_peak > 1e-6 && total_peak > 1e-6, "the reflection must be live");
+    }
+}
+
+#[test]
 fn g3_microphone_source_height_matches_rigid_translation() {
     for facing in [1.0, -1.0] {
         let mut ins = Instrument::new(48_000.0);

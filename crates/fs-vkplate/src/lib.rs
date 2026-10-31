@@ -2273,8 +2273,9 @@ pub struct Mic {
     /// ka >> 1 and to a dipole (4/3pi) ka times it for ka << 1 (rigid disc). A first-order
     /// high-pass with tau = 4a/(3 pi c) joins the two limits. None = baffled.
     pub unbaffled: Option<f64>,
-    /// A rigid floor: surfaces facing away from the microphone still reach it by the floor
-    /// reflection (image source; the snare's underside heard by an overhead).
+    /// A rigid floor: head and cavity-port radiation both include the delayed,
+    /// positive-pressure image path. Sources facing away from the microphone
+    /// can still reach it by reflection (the snare's underside heard overhead).
     pub floor: Option<Floor>,
     hp: (f64, f64),
 }
@@ -3057,17 +3058,16 @@ impl Instrument {
         for m in self.mics.iter_mut() {
             m.taps.clear();
             let mut dmax = 0;
+            // One geometric image for every radiator, including cavity ports.
+            // Rigid pressure reflection has gain +1; distance and delay still
+            // belong to each source. Preparing these paths allocates no ray list.
+            let targets = [Some(m.pos), m.floor.map(|floor| floor.image(m.pos))];
             for (bi, b) in self.bodies.iter().enumerate() {
                 if !b.radiates {
                     continue;
                 }
                 let h2 = b.h * b.h;
-                // the direct path, and the floor's image of the microphone when there is a floor
-                let mut targets = vec![m.pos];
-                if let Some(floor) = m.floor {
-                    targets.push(floor.image(m.pos));
-                }
-                for tp in targets {
+                for tp in targets.into_iter().flatten() {
                     for i in 0..b.n {
                         let p = [b.origin[0] + b.xy[i][0], b.origin[1] + b.xy[i][1], b.origin[2] + b.facing * b.rest_z[i]];
                         let d = [tp[0] - p[0], tp[1] - p[1], tp[2] - p[2]];
@@ -3088,17 +3088,19 @@ impl Instrument {
             m.ptaps.clear();
             for (ci, c) in self.cavities.iter().enumerate() {
                 if let Some(q) = &c.port {
-                    let d = [m.pos[0] - q.pos[0], m.pos[1] - q.pos[1], m.pos[2] - q.pos[2]];
-                    if d[2] * q.facing <= 0.0 {
-                        continue;
+                    for tp in targets.into_iter().flatten() {
+                        let d = [tp[0] - q.pos[0], tp[1] - q.pos[1], tp[2] - q.pos[2]];
+                        if d[2] * q.facing <= 0.0 {
+                            continue;
+                        }
+                        let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
+                        let delay = r / self.gas.sound_speed * self.rate;
+                        let di = delay.floor() as usize;
+                        let fr = delay - di as f64;
+                        let wgt = self.gas.density / (2.0 * PI * r);
+                        m.ptaps.push((ci, di, wgt * (1.0 - fr), wgt * fr));
+                        dmax = dmax.max(di + 2);
                     }
-                    let r = (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).sqrt();
-                    let delay = r / self.gas.sound_speed * self.rate;
-                    let di = delay.floor() as usize;
-                    let fr = delay - di as f64;
-                    let wgt = self.gas.density / (2.0 * PI * r);
-                    m.ptaps.push((ci, di, wgt * (1.0 - fr), wgt * fr));
-                    dmax = dmax.max(di + 2);
                 }
             }
             m.ring = vec![0.0; (dmax + 2).next_power_of_two()];
