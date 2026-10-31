@@ -1,4 +1,4 @@
-//! Nonlinear bulk conduction in the original reciprocal field/body descriptor.
+//! Nonlinear bulk/contact conduction in the original reciprocal field/body descriptor.
 //!
 //! Changing conductor material changes discharge, field force and actual motion.
 //! The shared conductivity owner resolves E/J at that SAME descriptor trajectory;
@@ -7,6 +7,8 @@
 use super::{FieldMotionCandidate, FieldMotionInput, FieldMotionStep, MaterialFieldMotion};
 use crate::material_circuit::conductivity::{ConductivityDriver, ConductivitySample,
     ConductivitySolve, ConductorResponse, solve_native};
+use crate::material_circuit::conductivity::contact::{ContactConductivitySample, ContactResponse};
+use crate::material_circuit::contacts::{ContactHeat, SeriesElectricalContact};
 use crate::material_circuit::{MaterialCircuitError, MaterialCircuitSolve, MaterialResistor,
     ResistorHeat};
 
@@ -16,6 +18,9 @@ pub struct FieldConductivityStep {
     pub field: FieldMotionStep,
     /// Complete source evaluations at actual solved branch fields.
     pub evaluated: Vec<ConductivitySample>,
+    /// Complete interface sources at their OWN solved drops and current densities.
+    /// Empty when no electrical operating-response bindings are supplied.
+    pub evaluated_contacts: Vec<ContactConductivitySample>,
     /// All original descriptor solves, including discarded constitutive trials.
     pub iterations: usize,
     /// Original bundle refreshes, excluding the initial seed-admission replay.
@@ -40,6 +45,7 @@ impl FieldConductivityCandidate {
 
 impl ConductivityDriver for FieldMotionCandidate {
     fn resistor_heats(&self) -> &[ResistorHeat] { &self.step().resistors }
+    fn contact_heats(&self) -> &[ContactHeat] { &self.step().contacts }
 }
 
 impl MaterialFieldMotion {
@@ -78,11 +84,59 @@ impl MaterialFieldMotion {
         input: FieldMotionInput<'_>, controls: MaterialCircuitSolve,
         solve: ConductivitySolve, cancelled: impl FnMut() -> bool,
     ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
-        let trial = solve_native(self.circuit(), seeds, sources, Vec::new(), None, controls, solve,
-            |applied, _, check| self.step_candidate(applied, input, controls, check), cancelled)?;
+        self.conductivity_with_contact_response_candidate(seeds, Vec::new(), sources,
+            None, input, controls, solve, cancelled)
+    }
+
+    /// Close bulk E/J response with electrically independent series contacts in
+    /// the SAME reciprocal field/body step. Original contact cards, selected
+    /// claims, areas and branch assignments are retained; their supplied thermal
+    /// context remains fixed within this inner iteration. Operating-dependent
+    /// contacts require [`Self::conductivity_with_contact_response_candidate`].
+    #[allow(clippy::too_many_arguments)]
+    pub fn conductivity_with_contacts_candidate(
+        &self, seeds: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
+        sources: &[ConductorResponse<'_>], input: FieldMotionInput<'_>,
+        controls: MaterialCircuitSolve, solve: ConductivitySolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
+        self.conductivity_with_contact_response_candidate(seeds, contacts, sources,
+            None, input, controls, solve, cancelled)
+    }
+
+    /// Jointly close bulk E/J, individual contact V/I/J and reciprocal field
+    /// motion using the original native descriptor. Every constitutive trial
+    /// restarts from the same accepted charge/flux, gap, momentum and support.
+    /// Contact drops are excluded from bulk field queries. Every contact uses
+    /// its own area and explicitly oriented source coordinates; no branch-wide
+    /// substitute, stationary circuit predictor or mechanical correction is used.
+    ///
+    /// `Some` requires one binding per original interface, including fixed laws.
+    /// `None` admits only electrically independent contact sources. Resistance
+    /// and constitutive-power residuals gate both bulk and contacts. Their native
+    /// losses remain separate and are the only Joule heat; constitutive defects
+    /// do not become heat. Actual material responses remain inspectable.
+    ///
+    /// This heats stationary conductors/interfaces around the moving lossless
+    /// gap. Conductor/contact geometry, field coefficients and body inertia stay
+    /// fixed. Optional support retains its frozen thermal state. Motional
+    /// conductor transport, interface storage, arcing, opening contacts, thermal
+    /// field entropy and live thermoelastic supports need their own owners.
+    #[allow(clippy::too_many_arguments)]
+    pub fn conductivity_with_contact_response_candidate(
+        &self, seeds: Vec<MaterialResistor>, contacts: Vec<SeriesElectricalContact>,
+        sources: &[ConductorResponse<'_>], contact_sources: Option<&[ContactResponse<'_>]>,
+        input: FieldMotionInput<'_>, controls: MaterialCircuitSolve,
+        solve: ConductivitySolve, cancelled: impl FnMut() -> bool,
+    ) -> Result<FieldConductivityCandidate, MaterialCircuitError> {
+        let trial = solve_native(self.circuit(), seeds, sources, contacts, contact_sources,
+            controls, solve, |applied, interfaces, check| {
+                self.step_with_contacts_candidate(applied, interfaces, input, controls, check)
+            }, cancelled)?;
         let (motion, field) = trial.candidate.into_parts();
         Ok(FieldConductivityCandidate { motion, step: FieldConductivityStep { field,
-            evaluated: trial.evaluated, iterations: trial.iterations,
+            evaluated: trial.evaluated, evaluated_contacts: trial.evaluated_contacts,
+            iterations: trial.iterations,
             source_evaluations: trial.source_evaluations } })
     }
 }

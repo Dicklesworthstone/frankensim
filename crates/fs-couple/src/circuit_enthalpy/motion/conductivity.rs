@@ -3,6 +3,7 @@
 
 use super::*;
 use crate::material_circuit::conductivity::{ConductivitySolve, ConductorResponse};
+use crate::material_circuit::conductivity::contact::ContactResponse;
 use crate::material_circuit::motion::conductivity::{FieldConductivityCandidate,
     FieldConductivityStep};
 
@@ -80,17 +81,87 @@ pub fn step_candidate_with_transport<'m, S, E>(
         StepCoefficients<S>) -> Result<StepCoefficients<S>, E>,
     cancelled: impl FnMut() -> bool,
 ) -> Result<FieldConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
+    coupled_candidate(thermal, target_s, input, responses, None, &[], controls,
+        conductivity, guess_j, |state| resolve(state).map(|bulk| ContactThermalCoefficients {
+            bulk, contacts: Vec::new(),
+        }), transport, cancelled)
+}
+
+/// Close source-dependent bulk/contact conduction, reciprocal field motion and
+/// finite heating in the SAME thermal residual. The original motion descriptor
+/// supplies actual bulk E/J and each contact's own V/I/J, together with gap work,
+/// charge/flux and momentum. Complete source bundles refresh at that electrical
+/// operating point and the proposed thermal endpoint; no separability is assumed.
+///
+/// `resolve` supplies every original bulk and contact bundle at the thermal trial.
+/// `contact_responses` declares the original interface cards, ordered-surface
+/// orientation and electrical coordinates; `None` accepts only electrically
+/// independent contacts. Every contact has an explicit A/B heat partition in
+/// `routes`. Those native losses reach the finite cells once, separately from
+/// bulk losses, reciprocal field work and physical storage.
+///
+/// `transport` has [`step_candidate_with_transport`]'s semantics and can consume
+/// the same admitted contact operating point. Every inner descriptor solve counts
+/// against the existing outer work budget, including stencils and final admission.
+/// Source, domain, route, budget or cancellation refusal publishes none of the
+/// electrical, mechanical or thermal histories.
+///
+/// Conductors and contact geometry remain stationary; the field gap and original
+/// guided body evolve. Constant field coefficients, fixed inertia, zero interface
+/// storage, frozen support state and the original endpoint-thermal timing remain
+/// the model limits. This does not add motional conductor heat, opening/arcing,
+/// field entropy, a live thermoelastic support or a convergence guarantee.
+#[allow(clippy::too_many_arguments)]
+pub fn step_with_contact_response_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64, input: FieldMotionEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>], contact_responses: Option<&[ContactResponse<'_>]>,
+    routes: &[ContactHeatCells], controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
+    transport: impl Fn(&DepositionSimulation<'m>, &FieldConductivityStep,
+        StepCoefficients<S>) -> Result<StepCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FieldConductivityEnthalpyCandidate<'m, ContactThermalSample<S>>, CircuitEnthalpyError<E>> {
+    coupled_candidate(thermal, target_s, input, responses, contact_responses, routes,
+        controls, conductivity, guess_j, |state| resolve(state).map(|resolved| {
+            let bulk = resolved.bulk;
+            ContactThermalCoefficients { contacts: resolved.contacts,
+                bulk: CircuitThermalCoefficients { resistors: bulk.resistors,
+                    sources_w: bulk.sources_w, conductances_w_k: bulk.conductances_w_k,
+                    source: ContactThermalSample { material: bulk.source, destinations: routes.to_vec() } } }
+        }), |state, electrical, coefficients| {
+            let destinations = coefficients.payload.destinations;
+            transport(state, electrical, StepCoefficients { sources_w: coefficients.sources_w,
+                conductances_w_k: coefficients.conductances_w_k,
+                payload: coefficients.payload.material }).map(|transport| StepCoefficients {
+                    sources_w: transport.sources_w, conductances_w_k: transport.conductances_w_k,
+                    payload: ContactThermalSample { material: transport.payload, destinations } })
+        }, cancelled)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn coupled_candidate<'m, S, E>(
+    thermal: &DepositionSimulation<'m>, target_s: f64, input: FieldMotionEnthalpyInput<'_>,
+    responses: &[ConductorResponse<'_>], contact_responses: Option<&[ContactResponse<'_>]>,
+    routes: &[ContactHeatCells], controls: CircuitEnthalpySolve,
+    conductivity: ConductivitySolve, guess_j: &[f64],
+    resolve: impl Fn(&DepositionSimulation<'m>) -> Result<ContactThermalCoefficients<S>, E>,
+    transport: impl Fn(&DepositionSimulation<'m>, &FieldConductivityStep,
+        StepCoefficients<S>) -> Result<StepCoefficients<S>, E>,
+    cancelled: impl FnMut() -> bool,
+) -> Result<FieldConductivityEnthalpyCandidate<'m, S>, CircuitEnthalpyError<E>> {
     conductivity.validate()?;
     let cancel = RefCell::new(cancelled);
     let circuit_input = CircuitEnthalpyInput { circuit: input.motion.circuit(),
         ports: input.ports, destinations: input.destinations };
     let (thermal, motion, report) = coupled_driver_candidate(thermal, target_s,
-        circuit_input, &[], controls, guess_j, |state, remaining| {
-            let coefficients = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+        circuit_input, routes, controls, guess_j, |state, remaining| {
+            let resolved = resolve(state).map_err(CircuitEnthalpyError::Source)?;
+            let coefficients = resolved.bulk;
             let bounded = ConductivitySolve {
                 maximum_iterations: conductivity.maximum_iterations.min(remaining), ..conductivity };
-            let circuit = input.motion.conductivity_with_materials_candidate(
-                coefficients.resistors, responses,
+            let circuit = input.motion.conductivity_with_contact_response_candidate(
+                coefficients.resistors, resolved.contacts, responses, contact_responses,
                 FieldMotionInput { electrical_ports: input.ports,
                     external_force_n: input.external_force_n, duration_s: target_s-thermal.time_s() },
                 controls.circuit, bounded, || (*cancel.borrow_mut())()).map_err(|error| match error {
