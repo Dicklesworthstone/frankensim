@@ -1465,6 +1465,29 @@ its prior 872c freeze was four-quadrant, and 8ll9 requires current-tree replay.
 - Trimmed-NURBS awareness rides fs-rep-nurbs trim classification; the
   intersection here treats the full patch (no-claim on trimmed holes).
 
+## Incident optical power and thermal absorption
+
+`AbsorbingGrid::deposit_beam_power` and `ScatteringGrid::deposit_beam_power`
+retain the original exact cell crossings and return directed transmission,
+true absorption and scattering separately, in quadrature-weighted watts per
+spectral lane. The optional `optical-heating` feature maps only the absorbed
+cell powers through `volumes::heating::OpticalHeating` into the existing
+`fs-thermal::enthalpy::DepositionObserver` source hook. Stable, explicit
+cell-index bindings permit aggregation into a resolved thermal control volume;
+missing, duplicate, inactive or nonconservative assignments refuse.
+
+The native `advance_observed` owns caloric storage (including latent heat),
+conduction, sources, event alignment and transactional publication. Absorbed
+power is counted once in its external-heat audit. The optical observer retains
+incident, transmitted, absorbed and scattered joules over those same accepted
+substep durations; cancellation or domain refusal discards both histories.
+Prepared heat rates require no optical traversal during thermal substeps.
+The caller must start from active receiver cells and recompute deposition at
+accepted endpoints when beam powers, optics or geometry change. This fixed
+visible-band incident-beam model does not infer net radiative cooling,
+infrared properties, multiple-scattered reabsorption or material-temperature
+feedback. Scattered power remains radiation and is never converted to heat.
+
 ## No-claim boundaries (volumes)
 
 - FrankenVDB tile-maxima majorants: no fvdb crate exists in-workspace;

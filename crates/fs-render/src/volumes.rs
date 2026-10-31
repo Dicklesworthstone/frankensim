@@ -17,6 +17,10 @@ use fs_rand::StreamKey;
 #[cfg(feature = "tracer")]
 pub mod transport;
 
+/// True incident-beam absorption on the original conservative thermal timeline.
+#[cfg(feature = "optical-heating")]
+pub mod heating;
+
 /// Bit-semantics version for scalar-transfer emission/absorption rendering.
 ///
 /// Bump this when transfer interpolation, stream keying, ray placement, or

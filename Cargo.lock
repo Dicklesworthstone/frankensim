@@ -2505,6 +2505,7 @@ dependencies = [
  "fs-rep-nurbs",
  "fs-solid",
  "fs-substrate",
+ "fs-thermal",
 ]
 
 [[package]]
