@@ -8,6 +8,9 @@ use fs_material::osmosis::{
 };
 use std::sync::Arc;
 
+#[path = "solution/shared.rs"]
+mod shared;
+
 pub(super) const WATER_VOLUME: f64 = 18e-6;
 const WATER_MOLAR_MASS: f64 = 0.018;
 const WATER_DENSITY: f64 = WATER_MOLAR_MASS / WATER_VOLUME;

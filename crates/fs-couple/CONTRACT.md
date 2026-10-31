@@ -17880,6 +17880,44 @@ thermodynamic and original fixed-reference moisture limits remain explicit.
 Mechanical response is one way: elastic work does not feed solvent chemical
 potential, and the route does not claim closed chemo-mechanical energy balance.
 
+### Simultaneous specimens sharing one finite solution
+
+`FiniteMoistureSolution::advance_shared` and `advance_shared_cartesian` couple
+independently sourced slabs or Cartesian specimens to one actual aqueous
+inventory. They reuse the existing `MoistureParticipant`,
+`CartesianMoistureParticipant` and `SharedMoistureSolid` views, re-exported by
+`moisture::solution`. Both single-specimen APIs now delegate to the same shared
+scalar controller. No sequential bath debit or separate activity root is
+introduced per specimen.
+
+Every root trial starts all original fields at one common endpoint activity.
+Each specimen retains its original geometry, dry mass, source diffusivity,
+sorption and optional surface resistance. Stable distinct IDs set evaluation
+and output order; accepted clocks and solution/source temperatures must agree.
+The aggregate cell budget includes sealed specimens, whose internal diffusion
+still advances. One bounded safeguarded solvent-volume solve retains the
+original ideal or nonideal thermodynamic model and every nonvolatile solute
+amount. Rejected trials retain only scalar residuals between root iterations.
+
+Compensated local water changes preserve signed uptake and desorption even
+when their sum is nearly zero. A balanced net bath exchange therefore accepts
+the independently evolved specimen fields instead of treating them as locally
+equilibrated. Pure solvent keeps activity exactly one and debits the sum of
+actual specimen exchanges once. Final incremental and independently accumulated
+stored-water balances must both meet the same fixed coupled tolerance; that
+allowance is not multiplied by participant count. Solution and all native field
+outputs publish atomically after source, inventory, work and cancellation
+checks. The single-field adaptive APIs remain intact; these new simultaneous
+multi-field methods advance one caller-specified physical interval.
+
+Focused authored tests cover manufactured simultaneous uptake/desorption,
+nonzero opposing exchanges at zero net bath depletion, permutation/replay,
+nonideal six-face Cartesian exchange with a sealed diffusing companion,
+pure-solvent and single-participant limits, and late source, cell/root budget,
+duplicate-ID, clock and cancellation refusals. These are numerical/source
+checks, not measured-material calibration or a closed thermal/chemical-work
+balance; the original equal-pressure, negligible-vapor-storage bridge remains.
+
 
 ## Consistent contact mobility on finite solids
 

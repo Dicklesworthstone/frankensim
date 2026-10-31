@@ -8,6 +8,22 @@ use super::{
     *,
 };
 
+/// Compensated signed water inventories, including opposing specimen transfers.
+/// A small net reservoir change must not erase represented local exchanges.
+pub(super) fn water_sum(values: impl IntoIterator<Item = f64>) -> f64 {
+    let (mut sum, mut correction) = (0.0_f64, 0.0_f64);
+    for value in values {
+        let next = sum + value;
+        correction += if sum.abs() >= value.abs() {
+            (sum - next) + value
+        } else {
+            (value - next) + sum
+        };
+        sum = next;
+    }
+    sum + correction
+}
+
 /// Only the two original physical fields implement this private adapter.
 pub(super) trait ReservoirField<const FACES: usize>: Sized {
     type Report;
@@ -43,12 +59,13 @@ pub(super) trait ReservoirField<const FACES: usize>: Sized {
     /// Use represented local changes, not subtraction of large stored totals.
     fn water_change_to(&self, next: &Self) -> f64 {
         let old = self.inventory();
-        next.inventory()
-            .moisture
-            .iter()
-            .zip(old.moisture)
-            .map(|(new, before)| (new - before) * old.dry_mass_per_cell_kg)
-            .sum()
+        water_sum(
+            next.inventory()
+                .moisture
+                .iter()
+                .zip(old.moisture)
+                .map(|(new, before)| (new - before) * old.dry_mass_per_cell_kg),
+        )
     }
 }
 
