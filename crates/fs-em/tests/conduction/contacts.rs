@@ -36,6 +36,25 @@ fn interface_card(
     second: MaterialStateId,
     scale: f64,
 ) -> InterfaceSystemCard {
+    interface_card_with_domain(
+        first,
+        second,
+        scale,
+        ValidityDomain::unconstrained().with_quantity(
+            "normal_pressure",
+            QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static)),
+            1e5,
+            2e5,
+        ),
+    )
+}
+
+fn interface_card_with_domain(
+    first: MaterialStateId,
+    second: MaterialStateId,
+    scale: f64,
+    validity: ValidityDomain,
+) -> InterfaceSystemCard {
     let mut claims = ClaimSet::new();
     claims
         .insert_claim(PropertyClaim {
@@ -49,7 +68,7 @@ fn interface_card(
                 knots: vec![(1e5, 0.5 * scale), (2e5, 0.25 * scale)],
                 dims: ELECTRICAL_CONTACT_RESISTANCE_DIMS,
             },
-            validity: ValidityDomain::unconstrained().with("normal_pressure", 1e5, 2e5),
+            validity,
             interpolation: InterpolationPolicy::LinearInside,
             uncertainty: UncertaintyModel::Unstated,
             observations: vec![],
@@ -321,10 +340,11 @@ fn contacts_refuse_duplicate_nonmatching_perfect_and_unsupported_sources() {
     // The generic resolver can preserve an untyped pressure axis, but a static
     // field consumer cannot infer its physical meaning from its spelling.
     let untyped = resolve_electrical_interface_state(
-        &interface_card(
+        &interface_card_with_domain(
             material.material().material().clone(),
             material.material().material().clone(),
             1.0,
+            ValidityDomain::unconstrained().with("normal_pressure", 1e5, 2e5),
         ),
         &QueryPoint::new().with("normal_pressure", 1e5).unwrap(),
         MaterialPropertySelection::SingleClaimOnly,
