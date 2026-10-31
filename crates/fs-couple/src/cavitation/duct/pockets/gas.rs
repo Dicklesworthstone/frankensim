@@ -67,9 +67,10 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
     }
 
     pub(super) fn has_inventory(&self, index: usize) -> bool {
-        self.sites[index]
-            .gas
-            .is_some_and(TrappedGasPocket::has_inventory)
+        self.sites[index].caloric.is_some()
+            || self.sites[index]
+                .gas
+                .is_some_and(TrappedGasPocket::has_inventory)
     }
 
     pub(super) fn gas_response(
@@ -117,7 +118,7 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         let mut result = [0.0; MAX_DUCT_POCKETS];
         let bulk = self.duct.acoustic_material().adiabatic_bulk_modulus_pa();
         for (i, value) in result[..self.sites.len()].iter_mut().enumerate() {
-            if !self.has_inventory(i) {
+            if self.sites[i].caloric.is_some() || !self.has_inventory(i) {
                 continue;
             }
             let response = self.gas_response(i, volumes[i])?;
@@ -141,10 +142,18 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
         x: &[f64],
         scale: f64,
         volumes: &[f64],
+        thermal: Option<&CaloricStage>,
         work: &mut GasFlowWorkspace,
     ) -> Result<[f64; MAX_DUCT_POCKETS], DuctCavityError> {
         let count = self.sites.len();
-        let stiffness = self.gas_stiffness(volumes)?;
+        let mut stiffness = self.gas_stiffness(volumes)?;
+        if let Some(stage) = thermal {
+            for (i, value) in stiffness[..count].iter_mut().enumerate() {
+                if self.sites[i].caloric.is_some() {
+                    *value = stage.stiffness[i];
+                }
+            }
+        }
         work.matrix.fill(0.0);
         work.rhs.fill(0.0);
         for i in 0..count {
@@ -165,7 +174,8 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuctPockets<F> 
             }
             work.matrix[i * count + i] +=
                 stiffness[i] / self.column_norms[i] / self.column_norms[i];
-            work.rhs[i] = -scale * dot(&self.pressure_rates[i * x.len()..(i + 1) * x.len()], x)
+            work.rhs[i] = (-scale * dot(&self.pressure_rates[i * x.len()..(i + 1) * x.len()], x)
+                + thermal.map_or(0.0, |stage| stage.forcing[i]))
                 / self.column_norms[i];
         }
         work.solver

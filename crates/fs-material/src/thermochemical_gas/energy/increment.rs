@@ -38,6 +38,19 @@ impl GasEnthalpyIncrementSolution {
     pub fn into_state(self) -> ResolvedThermochemicalGasState { self.state }
 }
 
+/// Numeric thermodynamic view on the ORIGINAL prepared caloric branch.
+/// Transport and source receipts are recovered by the ordinary full-state
+/// reconstruction when the enclosing physical candidate is accepted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GasCaloricSample {
+    pub temperature_k: f64,
+    pub pressure_pa: f64,
+    pub cv_j_kg_k: f64,
+    pub energy_change_j_kg: f64,
+    pub residual_j_kg: f64,
+    pub iterations: usize,
+}
+
 /// One stable, continuous NASA-9 branch of an immutable frozen-composition gas.
 ///
 /// Preparation runs the existing bounded source-coefficient analysis once per
@@ -126,6 +139,32 @@ impl GasCaloricBranch<'_> {
     /// Conservative lower bound on mass-specific Cv over the whole branch.
     pub fn minimum_cv_j_kg_k(&self) -> f64 { self.minimum_cv }
 
+    /// Evaluate the SAME density/Delta-u inversion without allocating transport
+    /// receipts at every ODE stage. The original temperature bounds, continuous
+    /// source branch, positive Cv, exact increment and cancellation remain active.
+    /// This numeric view is not a fully resolved transport/material state; use
+    /// the ordinary reconstruction for accepted endpoints and transport queries.
+    pub fn sample_density_internal_energy_increment(
+        &self, context: &QueryPoint, density_kg_m3: f64, change_j_kg: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<GasCaloricSample, GasEnergyError> {
+        let constraint = Constraint::Density(density_kg_m3);
+        let solved = solve_temperature(self, context, constraint, change_j_kg, &mut cancelled)?;
+        let (initial, _) = coordinates(context)?;
+        let change = caloric_change(self.model, initial, solved.temperature_k, constraint)?;
+        let residual = change - change_j_kg;
+        admit_increment(change, change_j_kg, residual, self.controls, solved.iterations)?;
+        poll(&mut cancelled)?;
+        Ok(GasCaloricSample {
+            temperature_k: solved.temperature_k,
+            pressure_pa: solved.sample.pressure_pa,
+            cv_j_kg_k: solved.sample.tangent,
+            energy_change_j_kg: change,
+            residual_j_kg: residual,
+            iterations: solved.iterations,
+        })
+    }
+
     /// Reuse this admitted branch for a frozen-composition density/Delta-u solve.
     /// The reference temperature must lie in the prepared bracket. The returned
     /// state's residual is the direct original-law increment minus the request.
@@ -152,10 +191,10 @@ impl GasCaloricBranch<'_> {
     }
 }
 
-fn solve(
+fn solve_temperature(
     branch: &GasCaloricBranch<'_>, context: &QueryPoint, constraint: Constraint,
     requested: f64, cancelled: &mut impl FnMut() -> bool,
-) -> Result<SolvedIncrement, GasEnergyError> {
+) -> Result<root::Solution, GasEnergyError> {
     let (model, controls) = (branch.model, branch.controls);
     poll(cancelled)?;
     let (initial, pressure) = coordinates(context)?;
@@ -182,14 +221,7 @@ fn solve(
     } else {
         (controls.minimum_temperature_k.max((initial.value() - span).next_down()), initial.value())
     };
-    let change_at = |t| -> Result<f64, GasEnergyError> {
-        let end = Temperature::new(t);
-        let value = match constraint {
-            Constraint::Density(_) => model.thermodynamics().specific_internal_energy_change(initial, end),
-            Constraint::Pressure => model.thermodynamics().specific_enthalpy_change(initial, end),
-        }.map_err(|error| failure("caloric increment", error))?;
-        Ok(value.value())
-    };
+    let change_at = |t| caloric_change(model, initial, t, constraint);
     let evaluate = |t| -> Result<root::Sample, GasEnergyError> {
         let properties = model.thermodynamics().evaluate_properties(Temperature::new(t), pressure)
             .map_err(|error| failure("caloric increment tangent", error))?;
@@ -218,15 +250,22 @@ fn solve(
         root::solve(lo, hi, tolerance,
             controls.maximum_iterations, evaluate, cancelled).map_err(map_root)?
     };
+    Ok(solved)
+}
+
+fn solve(
+    branch: &GasCaloricBranch<'_>, context: &QueryPoint, constraint: Constraint,
+    requested: f64, cancelled: &mut impl FnMut() -> bool,
+) -> Result<SolvedIncrement, GasEnergyError> {
+    let solved = solve_temperature(branch, context, constraint, requested, cancelled)?;
+    let (model, controls) = (branch.model, branch.controls);
+    let (initial, pressure) = coordinates(context)?;
+    let change_at = |t| caloric_change(model, initial, t, constraint);
     poll(cancelled)?;
     let state = model.evaluate(&updated_point(context, solved.temperature_k, solved.sample.pressure_pa)?)?;
     let change = change_at(state.state().temperature)?;
     let residual = change - requested;
-    if !residual.is_finite() || residual.abs() > controls.energy_tolerance_j_kg
-        || (requested != 0.0 && (change == 0.0 || change.is_sign_positive() != requested.is_sign_positive()))
-    {
-        return Err(GasEnergyError::NotConverged { iterations: solved.iterations, residual_j_kg: residual });
-    }
+    admit_increment(change, requested, residual, controls, solved.iterations)?;
     let relative = match constraint {
         Constraint::Density(density) => state.state().density / density - 1.0,
         Constraint::Pressure => state.state().pressure / pressure.value() - 1.0,
@@ -236,6 +275,29 @@ fn solve(
     }
     poll(cancelled)?;
     Ok(SolvedIncrement { state, change, residual, iterations: solved.iterations })
+}
+
+fn caloric_change(
+    model: &ThermochemicalGasModel, initial: Temperature, final_temperature: f64,
+    constraint: Constraint,
+) -> Result<f64, GasEnergyError> {
+    let end = Temperature::new(final_temperature);
+    let value = match constraint {
+        Constraint::Density(_) => model.thermodynamics().specific_internal_energy_change(initial, end),
+        Constraint::Pressure => model.thermodynamics().specific_enthalpy_change(initial, end),
+    }.map_err(|error| failure("caloric increment", error))?;
+    Ok(value.value())
+}
+
+fn admit_increment(
+    change: f64, requested: f64, residual: f64, controls: GasEnergySolve, iterations: usize,
+) -> Result<(), GasEnergyError> {
+    if !residual.is_finite() || residual.abs() > controls.energy_tolerance_j_kg
+        || (requested != 0.0 && (change == 0.0 || change.is_sign_positive() != requested.is_sign_positive()))
+    {
+        return Err(GasEnergyError::NotConverged { iterations, residual_j_kg: residual });
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -111,6 +111,7 @@ impl DuctCavityState {
 #[derive(Clone, Debug, PartialEq)]
 pub enum DuctCavityError {
     Material(MaterialError),
+    Gas(fs_material::thermochemical_gas::energy::GasEnergyError),
     Duct(DuctError),
     Integration(EventError),
     EventSetIntegration(EventSetError),

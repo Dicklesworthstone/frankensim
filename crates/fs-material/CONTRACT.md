@@ -8420,3 +8420,20 @@ ThermoplasticSource::with_chaboche_branches binds one through eight ordered inde
 ThermalChaboche keeps z=3X/(2C) fixed under coefficient change, transports X*=C1 X0/C0 before the unchanged native Chaboche return, and reuses its generally nonsymmetric tangent, physical recovery and numerical accounts. Shared thermal energy adds branch entropy -C' z:z/3 and coefficient storage (C1-C0)z0:z0/3. Thermal rescaling and numerical loss are never physical heat. One resolved old-to-new law represents one accepted physical increment; Newton proposals reuse its frozen old history. Resolve a new law for the next increment or a new-to-new law to inspect accepted state.
 
 Seven synthetic material regressions check complete source support and pins, reversible heating/cooling, all tangent components, combined affine elastic/Prager/Voce/branch coefficients and expansion, cyclic reversal, zero-branch reductions and invalid domains. Native tetrahedral component checks live in fs-solid. Combined Chaboche overstress, changing gamma, active zero-crossing C, nonlinear-temperature branch free energy, finite deformation and empirical thermal-cyclic calibration are outside this scope.
+
+## Prepared numeric gas caloric samples
+
+`GasCaloricBranch::sample_density_internal_energy_increment` exposes
+temperature, pressure, Cv and the original-law energy increment from the SAME
+bounded density/Delta-u inversion used by full material reconstruction.
+The original source/composition borrow, continuous caloric branch, positive
+capacity bounds, residual checks and cancellation are retained. The existing
+temperature solve is factored once; no second EOS or caloric root is supplied.
+
+This numeric stage view avoids rebuilding transport/source receipts during
+each stage of a coupled ODE trajectory. It is not a complete resolved material
+state. Accepted physical endpoints must still use the original full
+reconstruction, which resolves transport and all retained query axes at the
+new temperature and pressure. Three native prepared-branch tests pass,
+including exact numeric/full-state agreement for heating, cooling and zero
+increment, source reuse, invalid domains and cancellation.

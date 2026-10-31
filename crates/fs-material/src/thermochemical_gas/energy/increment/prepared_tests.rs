@@ -54,3 +54,29 @@ fn prepared_admission_is_amortized_without_weakening_cancellation_or_domains() {
     assert!(branch.reconstruct_pressure_enthalpy_increment(&point(1900.0, 100000.0), 0.0, || false).is_err());
     assert!(gas.prepare_caloric_branch(GasEnergySolve { maximum_temperature_k: 2100.0, ..controls() }, || false).is_err());
 }
+
+#[test]
+fn prepared_numeric_density_sample_matches_original_source_and_retains_bounds() {
+    let gas = model(vec![0.75, 0.25], 0.002);
+    let context = point(400.0, 100000.0).with("material-lot", 42.0).unwrap();
+    let density = gas.evaluate(&context).unwrap().state().density;
+    let branch = gas.prepare_caloric_branch(controls(), || false).unwrap();
+    for change in [-10000.0, 0.0, 10000.0] {
+        let numeric = branch.sample_density_internal_energy_increment(
+            &context, density, change, || false).unwrap();
+        let full = branch.reconstruct_density_internal_energy_increment(
+            &context, density, change, || false).unwrap();
+        assert_eq!(numeric.temperature_k, full.state().state().temperature);
+        assert_eq!(numeric.pressure_pa, full.state().state().pressure);
+        assert_eq!(numeric.cv_j_kg_k,
+            full.state().thermodynamics().properties().mass_specific_cv().value());
+        assert_eq!(numeric.residual_j_kg, full.residual_j_kg());
+        assert_eq!(numeric.iterations, full.iterations());
+    }
+    assert!(matches!(branch.sample_density_internal_energy_increment(
+        &context, density, 10000.0, || true), Err(GasEnergyError::Cancelled)));
+    assert!(branch.sample_density_internal_energy_increment(
+        &point(1900.0, 100000.0), density, 0.0, || false).is_err());
+    assert!(branch.sample_density_internal_energy_increment(
+        &context, -density, 0.0, || false).is_err());
+}
