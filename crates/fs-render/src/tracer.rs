@@ -194,6 +194,10 @@ pub const CINEMATIC_CAMERA_TRACER_BIT_SEMANTICS_VERSION: u32 = 1;
 // continuation is evaluated there, so there is no competing BSDF technique.
 pub const DIELECTRIC_TRACER_BIT_SEMANTICS_VERSION: u32 = 15;
 
+/// Radiance-mode shading-normal projection for brushed GGX conductors.
+/// Version 2 removes spurious gain at geometric grazing incidence.
+pub const BRUSHED_CONDUCTOR_BSDF_SEMANTICS_VERSION: u32 = 2;
+
 /// Domain for deterministic identities of complete tracer material values.
 pub const MATERIAL_CONTENT_IDENTITY_DOMAIN: &str = "org.frankensim.render.material.v1";
 
@@ -1067,7 +1071,7 @@ impl Material {
                 // identity binds every shading parameter, so an anisotropy
                 // or spin-mark swap re-keys the material.
                 hasher.update(&[5]);
-                hasher.update(&CONDUCTOR_BSDF_SEMANTICS_VERSION.to_le_bytes());
+                hasher.update(&BRUSHED_CONDUCTOR_BSDF_SEMANTICS_VERSION.to_le_bytes());
                 hasher.update(optics.content_identity().as_bytes());
                 hasher.update(detail.identity().as_bytes());
             }
@@ -19526,6 +19530,107 @@ mod tests {
     }
 
     #[test]
+    fn tilted_brushed_radiance_preserves_the_local_reciprocal_law() {
+        use crate::surface_detail::{BrushingPattern, SurfaceDetail};
+
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let detail =
+            SurfaceDetail::try_new(0.2, 2.0, BrushingPattern::Circular, 0.35, None).unwrap();
+        let material = Material::BrushedConductor {
+            optics: ConductorOptics::representative_stainless_steel(),
+            detail,
+        };
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n)
+                .unwrap();
+        let wi = unit(Vec3::new(-0.4, 0.3, 1.0));
+        for cosine in [0.1_f64, 1.0e-3, 1.0e-6] {
+            let wo = Vec3::new(-(1.0 - cosine * cosine).sqrt(), 0.0, cosine);
+            let forward =
+                opaque_bsdf_eval(&material, n, wo, wi, 550.0, None, Some(&frame)).unwrap();
+            let reverse =
+                opaque_bsdf_eval(&material, n, wi, wo, 550.0, None, Some(&frame)).unwrap();
+            assert!(forward > 0.0 && reverse > 0.0);
+
+            // Remove each radiance projection to recover the same reciprocal
+            // local GGX law. The effective geometric-measure BSDF itself is
+            // non-symmetric; its importance adjoint swaps these arguments.
+            let local_forward = forward * n.dot(wi) / frame.shading_normal.dot(wi);
+            let local_reverse = reverse * n.dot(wo) / frame.shading_normal.dot(wo);
+            assert!(
+                (local_forward - local_reverse).abs()
+                    <= 2.0e-12 * local_forward.abs().max(1.0),
+                "incorrect radiance/adjoint projection: {local_forward} vs {local_reverse}"
+            );
+            assert!(
+                (forward - reverse).abs() > 0.01,
+                "a tilted effective radiance BSDF must retain its non-symmetry"
+            );
+        }
+    }
+
+    #[test]
+    fn tilted_brushed_furnace_stays_passive_at_geometric_grazing() {
+        use crate::surface_detail::{BrushingPattern, SurfaceDetail};
+
+        let n = Vec3::new(0.0, 0.0, 1.0);
+        let detail =
+            SurfaceDetail::try_new(0.2, 2.0, BrushingPattern::Circular, 0.35, None).unwrap();
+        let material = Material::BrushedConductor {
+            optics: ConductorOptics::representative_stainless_steel(),
+            detail,
+        };
+        let frame =
+            crate::surface_detail::shading_frame(&detail, Point3::new(0.5, 0.0, 0.0), n)
+                .unwrap();
+        const SIDE: u32 = 64;
+
+        // Independent uniform-solid-angle quadrature of the analytic
+        // anisotropic GGX law with the real-form conductor Fresnel equations:
+        // 256 cosine bins x 512 azimuth bins, stainless eta=2.718, k=3.948
+        // at 550 nm. These are numerical references, not measured materials.
+        for (cosine, reference) in [
+            (0.1_f64, 0.491_798_510_589_084_64),
+            (1.0e-3, 0.490_279_987_152_601_5),
+            (1.0e-6, 0.490_284_931_380_583_54),
+        ] {
+            let wo = Vec3::new(-(1.0 - cosine * cosine).sqrt(), 0.0, cosine);
+            let mut radiance = 0.0;
+            let mut accepted = 0;
+            for i in 0..SIDE {
+                for j in 0..SIDE {
+                    let u1 = (f64::from(i) + 0.5) / f64::from(SIDE);
+                    let u2 = (f64::from(j) + 0.5) / f64::from(SIDE);
+                    let Some((wi, pdf)) =
+                        bsdf_sample(&material, n, wo, u1, u2, Some(&frame))
+                    else {
+                        continue;
+                    };
+                    accepted += 1;
+                    let value =
+                        opaque_bsdf_eval(&material, n, wo, wi, 550.0, None, Some(&frame))
+                            .unwrap();
+                    let weight = value * n.dot(wi) / pdf;
+                    // For this visible-normal proposal the radiance weight
+                    // reduces to Fresnel * G1(wi), bounded by one. Rejected
+                    // directions contribute zero; do not renormalize them.
+                    assert!(
+                        weight.is_finite() && (0.0..=1.0 + 1.0e-10).contains(&weight),
+                        "passive tilted reflection gained radiance: {weight}"
+                    );
+                    radiance += weight;
+                }
+            }
+            assert!(accepted > 3000);
+            radiance /= f64::from(SIDE * SIDE);
+            assert!(
+                (radiance - reference).abs() < 3.0e-3,
+                "tilted furnace at cosine {cosine}: {radiance} vs {reference}"
+            );
+        }
+    }
+
+    #[test]
     fn brushed_radial_mark_changes_shading_and_preserves_sample_pdf_agreement() {
         let detail = crate::surface_detail::SurfaceDetail::try_new(
             0.12,
@@ -20717,6 +20822,9 @@ fn opaque_bsdf_eval(
         let m_local = brushed_local(frame, microfacet_normal);
         let wo_local = brushed_local(frame, wo);
         let wi_local = brushed_local(frame, wi);
+        if wo_local[2] <= 0.0 || wi_local[2] <= 0.0 {
+            return Ok(0.0);
+        }
         let d = ggx_d_aniso(alpha_x, alpha_y, m_local);
         let g =
             smith_g1_aniso(alpha_x, alpha_y, wo_local) * smith_g1_aniso(alpha_x, alpha_y, wi_local);
@@ -20726,7 +20834,15 @@ fn opaque_bsdf_eval(
             incident_eta,
             wo.dot(microfacet_normal).clamp(0.0, 1.0),
         )?;
-        return Ok(d * g * fresnel / (4.0 * cos_o * cos_i));
+        // All radiance consumers multiply by the GEOMETRIC incoming cosine.
+        // The local GGX law is measured in the shading frame, so its effective
+        // BSDF includes (ns.wi)/(ng.wi). Cancelling ns.wi from the local GGX
+        // denominator leaves ns.wo here, not ng.wo. The latter spuriously
+        // amplifies every sample by (ns.wo)/(ng.wo) near the geometric horizon.
+        // PBRT 3e, section 16.1.3, "Non-symmetry Due to Shading Normals".
+        // This effective radiance BSDF is not its importance adjoint; the
+        // bidirectional owner continues to refuse brushed conductors.
+        return Ok(d * g * fresnel / (4.0 * wo_local[2] * cos_i));
     }
     let Material::Conductor { optics, surface } = mat else {
         // Keep the frozen Lambertian/GGX arithmetic in `bsdf_eval`; merely

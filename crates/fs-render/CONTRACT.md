@@ -2519,6 +2519,18 @@ the perturbed shading normal, keeping local/world reflection frames orthonormal.
 Brushed reflection sampling and its direct-light MIS density both exclude
 directions below either the geometric or shading horizon. Focused regressions
 cover admitted nonzero tilts, unit reflected rays, and matching sample densities.
+Brushed BSDF semantics version 2 applies the radiance projection
+`f_effective = f_shading * |ns.wi| / |ng.wi|`, following PBRT 3e
+§16.1.3, “Non-symmetry Due to Shading Normals.” Native and calibrated
+consumers retain their geometric incoming cosine. This removes artificial
+grazing-view gain while preserving the reciprocal local GGX law; the effective
+radiance BSDF itself is generally non-symmetric. The existing bidirectional
+owner still refuses brushed conductors rather than treating this radiance law
+as its importance adjoint. Furnace regressions cover the bounded reflected
+radiance and an independent angular-quadrature reference. Decorative normal
+mapping remains a shading approximation, not resolved microgeometry.
+The new Rust regressions remain natively unexecuted in the implementation environment.
+Reference: [PBRT, The Path-Space Measurement Equation](https://www.pbr-book.org/3ed-2018/Light_Transport_III_Bidirectional_Methods/The_Path-Space_Measurement_Equation).
 This does not promote representative optical data or decorative normal/mark
 parameters into measured material claims. Path semantics version 4
 adds these material paths; previously admitted opaque sample streams remain
