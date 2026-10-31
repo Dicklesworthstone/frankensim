@@ -97,6 +97,7 @@ impl Frame2d {
     /// returned explicitly in the signed spectrum, not converted to zero.
     #[allow(clippy::too_many_lines)]
     pub fn modal_analysis(&self) -> Result<FrameModalAnalysis, SolidError> {
+        self.require_untimed_materials()?;
         let n = self.ndof();
         let mass = self.reference_mass()?;
         let (t, r) = self.mass_partition(&mass);

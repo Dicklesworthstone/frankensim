@@ -1775,6 +1775,47 @@ The source-bound regression warms an accepted loaded trajectory, preserves
 every pinned claim, and substitutes a material with twice the reference rate;
 the actual bar extension follows the independent accumulated creep law.
 
+### Permanent creep in native fiber members and frames
+
+`FiberLaw::Norton` and `FiberState::Norton` consume the original material
+owner's free-sided axial reduction, with signed permanent strain, accumulated
+creep and optional original source receipts. The existing section integration,
+force-based member compatibility and global frame Newton solver remain shared.
+No effective modulus, alternate beam solver or inferred creep coefficient is
+introduced. Explicit authored reference density in `FiberMaterial::norton`
+does not acquire source authority from the law's separate coefficient receipts.
+
+`Frame2d::solve_creep_step` admits one absolute load endpoint and one common
+positive physical duration across the original Norton fiber points. Section
+Newton, compatibility retries and global backtracking see accepted history;
+the returned frame commits once. Stored forces and `creep_fiber` observations
+do not evaluate another physical interval. `with_creep_laws` refreshes time
+and prescribed temperature while retaining native geometry, history, elastic
+and kinetic parameters, original card/claim identities and nonthermal context.
+
+The existing untimed static, pushover and modal routes, and the inertial
+Newmark route, refuse Norton fibers. They do not own the explicit creep clock
+or its checked work account; an algorithmic creep tangent cannot silently
+become an instantaneous modal stiffness or advance on a mismatched time step.
+
+The checked step integrates each constitutive energy account using its original
+fiber area, Lobatto weight and member length. Applied/support work is checked
+independently against this material work and against storage change plus
+physical creep loss and numerical loss. Force and moment gates use separate SI
+tolerances. Physical heat and point volumes remain available to thermal
+consumers; numerical loss is not heat. Immutable proposals, explicit fiber-work
+budgets and cancellation checks preserve accepted history on refusal.
+
+This path admits stationary inertia, linear geometry and all-Norton sections.
+It bounds nodal rotations, chord displacement and absolute quadrature curvature;
+unsampled spatial extrema require refinement. Corotational geometric work,
+inertia, thermal expansion, reciprocal temperature evolution, other inelastic
+fiber laws and measured-life qualification are outside this checked account.
+`tests/frame_creep.rs` exercises constant-force extension/permanent set,
+held-length tension relaxation, actual cantilever curvature/tip shape under
+sustained moment, source-temperature continuation and atomic refusal/cancellation.
+It also verifies that the untimed and inertial entry points cannot age fibers.
+
 ### Rod couples held in laboratory coordinates
 
 `rod::WorldTipLoad` declares a world-held tip force in newtons and a free couple

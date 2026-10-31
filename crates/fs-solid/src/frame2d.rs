@@ -48,6 +48,9 @@ use crate::SolidError;
 use crate::fiber::{Section, SectionState};
 use fs_material::section::ConcentricElasticSection;
 
+/// Physical-time permanent creep on the original fiber-section frame solver.
+pub mod creep;
+
 mod mass;
 pub use mass::FrameMassFormulation;
 mod modes;
@@ -942,11 +945,20 @@ impl Frame2d {
 
     /// Internal force vector, tangent (dense row-major) and element trials.
     fn assemble(&self, u: &[f64]) -> Result<Assembled, SolidError> {
+        self.assemble_controlled(u, &mut || Ok(()))
+    }
+
+    fn assemble_controlled(
+        &self,
+        u: &[f64],
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+    ) -> Result<Assembled, SolidError> {
         let n = self.ndof();
         let mut f = vec![0.0; n];
         let mut kg = vec![0.0; n * n];
         let mut trials = Vec::with_capacity(self.elements.len());
         for e in &self.elements {
+            checkpoint()?;
             let t = self.element_trial(e, u)?;
             let dofs = [
                 3 * e.i,
@@ -1021,11 +1033,23 @@ impl Frame2d {
         rn: f64,
         residual: impl Fn(&[f64], &Assembled) -> f64,
     ) -> Result<(Vec<f64>, Assembled), SolidError> {
+        self.line_search_controlled(u, du, rn, residual, &mut || Ok(()))
+    }
+
+    fn line_search_controlled(
+        &self,
+        u: &[f64],
+        du: &[f64],
+        rn: f64,
+        residual: impl Fn(&[f64], &Assembled) -> f64,
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+    ) -> Result<(Vec<f64>, Assembled), SolidError> {
         let mut alpha = 1.0f64;
         let mut last_err = None;
         for _ in 0..10 {
+            checkpoint()?;
             let ut: Vec<f64> = u.iter().zip(du).map(|(a, b)| a + alpha * b).collect();
-            match self.assemble(&ut) {
+            match self.assemble_controlled(&ut, checkpoint) {
                 Ok(asm) => {
                     if residual(&ut, &asm) < rn || alpha <= 1.0 / 512.0 {
                         return Ok((ut, asm));
@@ -1049,6 +1073,17 @@ impl Frame2d {
         load: &[f64],
         steps: usize,
     ) -> Result<Vec<StaticStep>, SolidError> {
+        self.require_untimed_materials()?;
+        self.static_load_controlled(load, steps, &mut || Ok(()))
+    }
+
+    fn static_load_controlled(
+        &mut self,
+        load: &[f64],
+        steps: usize,
+        checkpoint: &mut impl FnMut() -> Result<(), SolidError>,
+    ) -> Result<Vec<StaticStep>, SolidError> {
+        checkpoint()?;
         let n = self.ndof();
         if load.len() != n || steps == 0 {
             return Err(SolidError::InvalidInput {
@@ -1058,13 +1093,15 @@ impl Frame2d {
         let pref = load.iter().fold(0.0f64, |m, v| m.max(v.abs())).max(1.0);
         let mut out = Vec::with_capacity(steps);
         for step in 1..=steps {
+            checkpoint()?;
             let lambda = step as f64 / steps as f64;
             let p: Vec<f64> = load.iter().map(|v| lambda * v).collect();
             let mut u = self.u.clone();
             let mut history = Vec::new();
             let mut done = None;
-            let (mut f, mut k, mut trials) = self.assemble(&u)?;
+            let (mut f, mut k, mut trials) = self.assemble_controlled(&u, checkpoint)?;
             for it in 0..60 {
+                checkpoint()?;
                 let r: Vec<f64> = (0..n).map(|d| p[d] - f[d]).collect();
                 let rn = self.free_norm(&r);
                 history.push(rn);
@@ -1085,13 +1122,14 @@ impl Frame2d {
                     let rr: Vec<f64> = (0..n).map(|d| p[d] - a.0[d]).collect();
                     self.free_norm(&rr)
                 };
-                let (ut, asm) = self.line_search(&u, &du, rn, residual)?;
+                let (ut, asm) = self.line_search_controlled(&u, &du, rn, residual, checkpoint)?;
                 u = ut;
                 (f, k, trials) = asm;
             }
             let Some((iterations, trials)) = done else {
                 return Err(SolidError::NewtonStalled { history });
             };
+            checkpoint()?;
             self.u = u;
             self.commit_trials(trials);
             out.push(StaticStep {
@@ -1116,6 +1154,7 @@ impl Frame2d {
         control: usize,
         targets: &[f64],
     ) -> Result<Vec<StaticStep>, SolidError> {
+        self.require_untimed_materials()?;
         let n = self.ndof();
         if pattern.len() != n || control >= n || self.fixed[control] {
             return Err(SolidError::InvalidInput {
@@ -1327,6 +1366,7 @@ impl Frame2d {
         damping: Rayleigh,
         sustained_load: &[f64],
     ) -> Result<DynamicHistory, SolidError> {
+        self.require_untimed_materials()?;
         let n = self.ndof();
         if !(dt.is_finite() && dt > 0.0) {
             return Err(SolidError::InvalidInput {

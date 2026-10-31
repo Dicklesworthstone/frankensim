@@ -13,6 +13,7 @@
 use super::{Fiber, FiberLaw, Section};
 use fs_matdb::{MaterialCard, QueryPoint};
 use fs_material::MaterialError;
+use fs_material::creep::uniaxial::UniaxialNorton;
 use fs_material::fiber::{ManderConcrete, MenegottoPintoSteel};
 use fs_material::plastic::chaboche::axial::UniaxialChaboche;
 use fs_material::plastic::chaboche::source::{ResolvedChabocheJ2, chaboche_requirements};
@@ -136,12 +137,28 @@ impl FiberMaterial {
     /// Explicit authored law and density, without implied source authority.
     pub fn authored(law: FiberLaw, density_kg_m3: f64) -> Result<Self> {
         match law {
+            FiberLaw::Norton(law) => Self::norton(law, density_kg_m3),
             FiberLaw::J2(law) => Self::j2(law, density_kg_m3),
             FiberLaw::Voce(law) => Self::voce(law, density_kg_m3),
             FiberLaw::Chaboche(law) => Self::chaboche(law, density_kg_m3),
             FiberLaw::Concrete(law) => Self::concrete(law, density_kg_m3),
             FiberLaw::Steel(law) => Self::steel(law, density_kg_m3),
         }
+    }
+
+    /// Native axial creep with explicitly authored reference density. A sourced
+    /// law retains its original kinetic/elastic receipts inside `law`; this
+    /// constructor does not promote the separately supplied density to data.
+    pub fn norton(law: UniaxialNorton, density_kg_m3: f64) -> Result<Self> {
+        require(
+            positive(density_kg_m3),
+            "creep fiber density must be finite and positive",
+        )?;
+        Ok(Self {
+            law: FiberLaw::Norton(law),
+            density_kg_m3,
+            source: None,
+        })
     }
 
     /// An authored native J2 law for metal fibers, with explicit reference mass.
