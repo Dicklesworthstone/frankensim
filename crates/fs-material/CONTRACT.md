@@ -7577,3 +7577,42 @@ and coenergy, canonical source/inverse agreement, analytic tangents and the
 low-field limit, signed crossed-knot work, large-bias remainders, surface-slice
 receipts, and source/domain refusals. These authored fixtures establish numeric
 model behavior, not measured dielectric accuracy or floating-point enclosures.
+
+### Finite original gas reservoirs around a transient membrane
+
+`transient::reservoir::IsothermalGasMembrane` couples the original source-bound
+dense laminate to two original `ClosedGasParcel` reservoirs. Both gases must
+contain exactly the membrane's single permeant at the exact held membrane
+temperature. The existing gas catalog join checks caloric, transport, water and
+source-pack identity; matching species names alone do not establish source
+compatibility. The rigid ideal-gas volumes supply whole-reservoir molar pressure
+capacities `V/(R T)` to the same finite-reservoir tridiagonal owner. Reservoir
+pressures and all sorbed cell inventories therefore advance together.
+
+Each accepted end-face transfer enters the original gas species-boundary owner
+in its source-relative enthalpy coordinate. The explicit gas-side thermostat
+heat is `-dm*(R*T/M)`, using the original owner's exact flow-work grouping.
+Formation-reference constants cancel before the sensible-energy reconstruction.
+The original gas owner reconstructs EOS pressure, transport, acoustics and
+source-qualified state; the adapter refuses a changed held temperature. Stream
+enthalpy, external thermostat heat and original gas energy residuals are
+reported separately.
+
+The proposed gases' EOS pressures must agree with the joint diffusion solution
+within the declared equivalent-mass budgets. Only reservoir pressure coordinates
+are then reseeded from those actual gas states; the same membrane inventory is
+moved without duplicating its cell vector. Before returning an immutable
+candidate, the adapter audits actual gas-plus-sorbed mass changes and actual
+before/after total mass, and checks pressure-capacity/mass consistency. Original
+material and ordered-interface claims are requalified across initial, numerical
+final and reconstructed final cell/face pressure ranges. Failure or cancellation
+publishes neither gas nor membrane changes.
+
+This rung is pure-species, fixed-volume, fixed-temperature, linear Henry/Fick
+transport. It reuses the existing factor cache and original gas/source owners.
+The numerical reservoir owner permits empty reservoirs, but this adapter retains
+the original gas owner's positive-density and positive-pressure domain rather
+than inventing trace gas. D and S do not specify sorbed caloric storage or heat
+of sorption: gas-side energy checks are not a whole-membrane energy certificate.
+Mixed-gas competition, adiabatic evolution, swelling and nonlinear sorption need
+their own constitutive and energy closures.

@@ -152,3 +152,6 @@ fn absent_wrong_basis_and_pressure_dependent_sorption_are_not_inferred() {
             &[0.0],[1e5,0.0],||false).is_err());
     }
 }
+
+#[path="tests/reservoir.rs"]
+mod reservoir;

@@ -25,6 +25,8 @@ use fs_matdb::QueryPoint;
 use fs_thermochem::SpeciesId;
 
 pub mod slab;
+/// Finite original gas parcels coupled to sorbed storage at a fixed temperature.
+pub mod reservoir;
 pub use slab::{MembraneDiffusion, MembraneDiffusionLayer, MembraneDiffusionState,
     MembraneDiffusionWorkspace, MembraneDiffusionSolve, MembraneDiffusionFlux,
     MembraneDiffusionStep, MembraneDiffusionCandidate, MembraneDiffusionError,
@@ -220,7 +222,7 @@ impl<'a> ResolvedMembraneDiffusion<'a> {
 }
 
 impl Bindings<'_> {
-    fn admit(&self,samples:[(&MembraneDiffusionState,&[[Option<f64>;2]]);2],
+    fn admit<const N:usize>(&self,samples:[(&MembraneDiffusionState,&[[Option<f64>;2]]);N],
         cancelled:&mut impl FnMut()->bool)->Result<MembraneDiffusionSourceSupport,Error>
     {
         let mut layers=Vec::with_capacity(self.layers.len());
