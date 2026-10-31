@@ -41,7 +41,7 @@ fn spatial(s:&SupportedStrings,state:&[f64])->(f64,Vec<f64>,f64) {
         let k=indices[i] as f64*core::f64::consts::PI;
         let integral=match ends {StringEndMotion::First=>1.0/k,
             StringEndMotion::Second=>-k.cos()/k,StringEndMotion::Both=>(1.0-k.cos())/k};
-        c[i]=mass[i]*length*(2.0/(mass[i]*length)).sqrt()*directions[i]*integral;
+        c[i]=mass[i]*length*(2.0_f64/(mass[i]*length)).sqrt()*directions[i]*integral;
         relative[i]=state[2*i]-c[i]*x;
     }
     let mut energy=0.0;let mut power=0.0;let mut gradient=vec![0.0;state.len()];

@@ -342,7 +342,7 @@ impl<'s, 'm> ThermoelasticCavity<'s, 'm> {
                 combined_residual_j: total,
             };
             poll(cx)?;
-            Ok(Trial { thermal: thermal_next, solid, gas, observer: film.inner, balance })
+            Ok(Trial { thermal: thermal_next, solid, observer: film.inner, gas, balance })
         };
         let problem = FallibleFiniteDifference::new(2, controls.difference_step_j, |x: &[f64]| {
             let candidate = evaluate(x)?;

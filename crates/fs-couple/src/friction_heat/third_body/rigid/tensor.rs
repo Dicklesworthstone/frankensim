@@ -133,7 +133,7 @@ impl<'a> TensorLayerMaterial<'a> {
         ];
         let plastic = resolve_material_state_point(
             card,
-            material.state().query(),
+            &material.state().query(),
             &requirements,
             plastic_selection,
         )
