@@ -31,7 +31,7 @@ use crate::finite_solid::contact::texture::{
     FiniteSolidContactTexture, FiniteSolidContactTextureError,
 };
 use crate::finite_solid::{FiniteSolidBody, FiniteSolidMaterial};
-use fs_contact::frictional_multicontact::NormalVelocityLaw;
+use fs_contact::frictional_multicontact::{FrictionalContactDeterminacy, NormalVelocityLaw};
 use fs_contact::frictional_multicontact::elliptic::EllipticFrictionalContactResult;
 use fs_contact::interface_binding::thermal_friction::elliptic::history::{
     SourcePostcontactMotionControls, SourcePostcontactMotionError, SourcePostcontactMotionReport,
@@ -163,10 +163,45 @@ pub struct FiniteSolidSourceContactMotion {
     pub material_spin_angle_rad: Option<f64>,
 }
 
+/// Whether a per-contact tangential work channel is physically eligible for a
+/// downstream friction-heat owner. This never chooses a heat destination.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FiniteSolidFrictionHeatAuthority {
+    /// The simultaneous contact owner proved unique impulses, the contact stayed
+    /// loaded/nonopening, and its midpoint tangential work is passive.
+    UniqueSustainedImpulse,
+    /// The accepted mobility image is unique but the individual contact impulse
+    /// is only one representative. Per-contact heat allocation would invent a
+    /// load gauge and is therefore withheld.
+    RepresentativeImpulseOnly,
+    /// Rebound, opening or unloaded contact. Any instantaneous impact loss stays
+    /// with the impact owner rather than being reclassified as sustained heat.
+    InstantaneousOrOpening,
+    /// The representative tangential channel performs positive midpoint work.
+    /// Coupling/splitting may transfer energy between normal and tangent modes;
+    /// no friction heat is minted from that representative.
+    NonPassiveTangentialChannel,
+}
+
+/// Mechanical work channels for one original sourced contact. Work is effort
+/// entering the interface, so passive friction has non-positive tangential work.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FiniteSolidSourceContactWork {
+    pub contact_id: u64,
+    pub key: FiniteSolidSphereSceneKey,
+    pub normal_impulse_work_j: f64,
+    pub tangential_impulse_work_j: f64,
+    /// Some only for a unique, sustained, passive tangential channel.
+    /// The value is nonnegative and remains unpartitioned between materials.
+    pub friction_heat_candidate_j: Option<f64>,
+    pub authority: FiniteSolidFrictionHeatAuthority,
+}
+
 #[derive(Clone, Debug)]
 pub struct FiniteSolidSourceTrajectoryEvent {
     pub sources: Vec<SourceFiniteSolidMixedContactReceipt>,
     pub motion: Vec<FiniteSolidSourceContactMotion>,
+    pub work: Vec<FiniteSolidSourceContactWork>,
 }
 
 pub type FiniteSolidSustainedSourceTrajectoryReport = FiniteSolidSustainedTrajectoryReport<
@@ -341,7 +376,9 @@ impl<'a> FiniteSolidBody<'a> {
                     Arc::make_mut(entry).state = receipt.sample.state.clone();
                 }
                 Ok((solid, bodies, report.mechanical, FiniteSolidSourceTrajectoryEvent {
-                    sources: report.sources, motion: Vec::new(),
+                    sources: report.sources,
+                    motion: Vec::new(),
+                    work: Vec::new(),
                 }))
             },
             |context, auxiliary, event| {
@@ -367,11 +404,51 @@ impl<'a> FiniteSolidBody<'a> {
                     let solved_row = mechanical.contact_ids.binary_search(&id)
                         .map_err(|_| F::Invalid("source ID absent from original contact solve"))?;
                     let velocity = mechanical.contact.relative_velocities_after[solved_row];
-                    let loaded = mechanical.contact.impulses[solved_row][0] > 0.0;
+                    let impulse = mechanical.contact.impulses[solved_row];
+                    let incoming = receipt.kinematics.relative_velocity_m_s;
+                    let normal_impulse_work_j =
+                        impulse[0] * (0.5 * incoming[0] + 0.5 * velocity[0]);
+                    let tangential_impulse_work_j =
+                        impulse[1] * (0.5 * incoming[1] + 0.5 * velocity[1])
+                            + impulse[2] * (0.5 * incoming[2] + 0.5 * velocity[2]);
+                    if !normal_impulse_work_j.is_finite() || !tangential_impulse_work_j.is_finite() {
+                        return Err(F::Invalid("unrepresentable sourced contact work channel"));
+                    }
+                    let loaded = impulse[0] > 0.0;
                     // A positive physical restitution target is rebound even
                     // when smaller than the numerical velocity tolerance.
                     let nonopening = matches!(contact.normal_law, NormalVelocityLaw::Target { speed } if speed == 0.0)
                         && velocity[0].abs() <= controls.impact.contact.velocity_tolerance;
+                    let unique_impulse = matches!(
+                        &mechanical.contact.transformed.determinacy,
+                        FrictionalContactDeterminacy::UniqueImpulses
+                    );
+                    let tangential_scale = (impulse[1]
+                        * (0.5 * incoming[1] + 0.5 * velocity[1]))
+                        .abs()
+                        + (impulse[2] * (0.5 * incoming[2] + 0.5 * velocity[2])).abs();
+                    let tangential_allowance = controls.impact.contact.energy_tolerance
+                        + 128.0 * f64::EPSILON * tangential_scale;
+                    let (authority, friction_heat_candidate_j) = if !loaded || !nonopening {
+                        (FiniteSolidFrictionHeatAuthority::InstantaneousOrOpening, None)
+                    } else if !unique_impulse {
+                        (FiniteSolidFrictionHeatAuthority::RepresentativeImpulseOnly, None)
+                    } else if tangential_impulse_work_j > tangential_allowance {
+                        (FiniteSolidFrictionHeatAuthority::NonPassiveTangentialChannel, None)
+                    } else {
+                        (
+                            FiniteSolidFrictionHeatAuthority::UniqueSustainedImpulse,
+                            Some((-tangential_impulse_work_j).max(0.0)),
+                        )
+                    };
+                    event.work.push(FiniteSolidSourceContactWork {
+                        contact_id: id,
+                        key,
+                        normal_impulse_work_j,
+                        tangential_impulse_work_j,
+                        friction_heat_candidate_j,
+                        authority,
+                    });
                     let endpoint_row = context.endpoint_contacts.binary_search_by_key(&id, |c| c.id).ok();
                     let mut motion = None;
                     let mut maximum_clearance_m = None;

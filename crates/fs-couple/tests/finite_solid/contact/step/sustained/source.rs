@@ -110,6 +110,7 @@ fn loaded_sliding_records_postcontact_point_slip_and_original_source_path_once()
             let event = step.event_data.as_ref().unwrap();
             assert_eq!(event.sources.len(), 1);
             assert_eq!(event.motion.len(), 1);
+            assert_eq!(event.work.len(), 1);
             let impact = step.impact.as_ref().unwrap();
             let jn = 2.0 * ACCELERATION * step.duration_s;
             let coefficient = 0.2 + 0.05 * speed;
@@ -124,7 +125,22 @@ fn loaded_sliding_records_postcontact_point_slip_and_original_source_path_once()
             );
             near(impact.contact.impulses[0][0], jn, 2e-9);
             near(impact.contact.impulses[0][1], jt, 2e-9);
-            speed += 1.75 * jt;
+            let after_tangent = speed + 1.75 * jt;
+            let work = &event.work[0];
+            assert_eq!(work.contact_id, event.sources[0].kinematics.contact_id);
+            assert_eq!(work.authority, FiniteSolidFrictionHeatAuthority::UniqueSustainedImpulse);
+            near(
+                work.tangential_impulse_work_j,
+                jt * 0.5 * (speed + after_tangent),
+                2e-10,
+            );
+            near(
+                work.friction_heat_candidate_j.unwrap(),
+                -work.tangential_impulse_work_j,
+                2e-10,
+            );
+            assert!(work.friction_heat_candidate_j.unwrap() > 0.0);
+            speed = after_tangent;
             let travel = speed * step.duration_s;
             distance += travel;
             let motion = event.motion[0].motion.as_ref().unwrap();
@@ -584,6 +600,12 @@ fn loaded_rebound_keeps_instantaneous_source_sample_without_free_flight_travel()
             );
             let event = step.event_data.as_ref().unwrap();
             near(event.sources[0].sample.queried_speed_m_s, 4.0, 2e-10);
+            assert_eq!(event.work.len(), 1);
+            assert_eq!(
+                event.work[0].authority,
+                FiniteSolidFrictionHeatAuthority::InstantaneousOrOpening
+            );
+            assert!(event.work[0].friction_heat_candidate_j.is_none());
             assert!(event.motion[0].motion.is_none());
             assert!(event.motion[0].maximum_clearance_m.is_none());
             let entry = accepted.entries().next().unwrap();
