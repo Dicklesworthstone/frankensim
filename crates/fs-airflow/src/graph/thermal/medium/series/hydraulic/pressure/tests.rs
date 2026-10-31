@@ -108,3 +108,59 @@ fn unsupported_regime_limits_and_cancellation_refuse_without_a_fallback() {
     gate.request();
     assert!(matches!(SeriesPressureFlow::solve(sections(),1000.0,budget(),&gate),Err(SeriesPressureError::Cancelled)));
 }
+
+#[test]
+fn pressure_and_original_convection_share_the_same_material_and_actual_flow() {
+    use crate::graph::thermal::medium::convection::ForcedConvectionSettings;
+    use fs_convection::CorrelationId;
+    use fs_qty::Temperature;
+    let gate=CancelGate::new_clock_free();let mut values=Vec::new();
+    for mu in [0.001,0.004] {
+        let solve=SeriesPressureFlow::solve(vec![PressureSection {
+            resistance:law(4e10,4e8),medium:fluid(1000.0,mu)}],1000.0,budget(),&gate).unwrap();
+        let exchange=solve.forced_convection(0,CorrelationId::FlatPlateLaminarAverage,
+            Length::new(0.1),ForcedConvectionSettings::default()).unwrap();
+        assert!(core::ptr::eq(exchange.flow(),&solve));
+        assert!(core::ptr::eq(exchange.medium(),&solve.sections()[0].medium));
+        assert_eq!(exchange.convection().transport(),&solve.evaluations()[0].transport);
+        near(exchange.speed_m_s(),solve.mass_flow_kg_s()/1000.0/1e-4);
+        let re=1000.0*exchange.speed_m_s()*0.1/mu;
+        let pr=4000.0*mu/0.5;
+        // Independent laminar flat-plate formula, not another property query.
+        let h=0.664*re.sqrt()*pr.powf(1.0/3.0)*0.5/0.1;
+        let actual=exchange.convection().coefficient().value.value();
+        assert!((actual/h-1.0).abs()<1e-10);
+        exchange.convection().robin_boundary(Temperature::new(300.0)).unwrap();
+        let reverse=SeriesPressureFlow::solve(vec![PressureSection {
+            resistance:law(4e10,4e8),medium:fluid(1000.0,mu)}],-1000.0,budget(),&gate).unwrap();
+        let reverse=reverse.forced_convection(0,CorrelationId::FlatPlateLaminarAverage,
+            Length::new(0.1),ForcedConvectionSettings::default()).unwrap();
+        assert_eq!(reverse.speed_m_s(),exchange.speed_m_s());
+        assert_eq!(reverse.convection().coefficient().value.value(),actual);
+        values.push((solve.mass_flow_kg_s(),actual));
+    }
+    assert!(values[1].0<values[0].0);assert_ne!(values[1].1,values[0].1);
+}
+
+#[test]
+fn thermal_lowering_does_not_requery_the_source_and_retains_original_refusals() {
+    use crate::graph::thermal::medium::convection::ForcedConvectionSettings;
+    use fs_convection::CorrelationId;
+    struct Once(std::cell::Cell<usize>);
+    impl FluidTransport for Once {
+        fn transport_state(&self)->core::result::Result<FluidTransportState,MaterialError> {
+            self.0.set(self.0.get()+1);assert_eq!(self.0.get(),1);Ok(fluid(1000.0,0.001))
+        }
+    }
+    let solve=SeriesPressureFlow::solve(vec![PressureSection {resistance:law(4e10,4e8),
+        medium:Once(std::cell::Cell::new(0))}],1000.0,budget(),&CancelGate::new_clock_free()).unwrap();
+    for _ in 0..3 {
+        solve.forced_convection(0,CorrelationId::FlatPlateLaminarAverage,
+            Length::new(0.1),ForcedConvectionSettings::default()).unwrap();
+    }
+    assert_eq!(solve.sections()[0].medium.0.get(),1);
+    assert!(matches!(solve.forced_convection(1,CorrelationId::FlatPlateLaminarAverage,
+        Length::new(0.1),ForcedConvectionSettings::default()),Err(convection::PressureConvectionError::InvalidSection(1))));
+    assert!(solve.forced_convection(0,CorrelationId::FlatPlateLaminarAverage,
+        Length::new(0.0),ForcedConvectionSettings::default()).is_err());
+}

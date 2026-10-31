@@ -12,6 +12,9 @@ use fs_exec::CancelGate;
 use fs_math::det;
 use fs_qty::MassFlowRate;
 
+/// The same solved flow and material snapshot in the existing heat-transfer owner.
+pub mod convection;
+
 /// One physical series section and its ORIGINAL material owner. Geometry does
 /// not absorb viscosity or density; distinct local states retain their receipts.
 #[derive(Clone, Debug, PartialEq)]
