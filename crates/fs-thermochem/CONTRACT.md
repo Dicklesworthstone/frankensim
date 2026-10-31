@@ -1040,6 +1040,19 @@ Unequal molecular masses, coupled
 crossdiffusion and barodiffusion are retained. Exact zero mole fractions are
 admitted without division by x, seeding or flux clipping.
 
+`evaluate_driving_forces` and `evaluate_molar_driving_forces` admit explicit
+source-owned dimensionless thermodynamic forces `d_i [1/m]` and typed total
+molar concentration, using those same friction rows and frame constraints.
+The force sum must close the caller's Gibbs–Duhem budget; incompatible data
+are refused rather than projected. Chemical-potential derivatives, activity
+coefficients, EOS concentration, phase stability, thermal coupling and reciprocal
+energy terms remain the source owner's responsibility. The API does not infer
+any of them. The positive symmetric pair model retains local nonnegative drag
+entropy; it does not establish a complete nonideal or thermodiffusive entropy
+balance without those source closures. Independent fixtures use a stable binary
+regular-solution chemical potential, both reference frames, exact ideal
+composition/pressure reduction, invalid-force refusal and cancellation/reuse.
+
 The maximum is 128 species. Scaled pivot elimination reuses fixed-dimension
 matrix and output buffers. Every original friction row, including the gauge
 row replaced by the chosen frame constraint, and the actual published primary
@@ -1056,8 +1069,8 @@ Seven focused native tests pass: unequal-mass binary analytic flux; independent
 ternary crossdiffusion (including flux at zero own-species gradient);
 manufactured unequal-mass ternary original equations; exact-zero and structural
 species; analytic pressure diffusion; canonicalization/scaling/buffer reuse;
-and maximum-species, invalid-data and late-cancellation behavior. Thermal
-(Soret) diffusion, external species forces, ions, nonideal activities and a
+and maximum-species, invalid-data and late-cancellation behavior. Built-in thermal
+(Soret) coefficients, external species forces, ions, nonideal activities and a
 fully discrete entropy theorem remain outside this algebra. Pair coefficients
 and their thermodynamic-state support remain caller-owned source data.
 Additional focused regressions cover the unequal-mass binary molar Fick limit,

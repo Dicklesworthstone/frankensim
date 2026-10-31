@@ -1,13 +1,14 @@
-//! Neutral ideal-gas Maxwell–Stefan diffusion in explicitly chosen frames.
+//! Maxwell–Stefan friction with explicit driving forces and reference frames.
 //!
 //! With `z_i = j_i/M_i`, solve
 //! `sum_j (x_j z_i - x_i z_j)/D_ij = -c [grad x_i + (x_i-Y_i) grad ln p]`
 //! together with `sum_i M_i z_i = 0` in the mass-averaged frame or
 //! `sum_i z_i = 0` in the molar-averaged frame. This is a coupled friction solve, not
 //! independent Fick laws. It remains regular at exact zero mole fractions;
-//! no division by `x_i` enters the linear system. Temperature specifies total
-//! molar concentration, not a Soret force. Thermal diffusion, external
-//! species forces, ions and nonideal activities are outside this closure.
+//! no division by `x_i` enters the linear system. The ideal-gas entry points use
+//! temperature only for molar concentration. General entry points accept an
+//! explicitly sourced, Gibbs–Duhem-balanced driving vector and concentration;
+//! they do not infer activity, thermal-diffusion or external-force models.
 //!
 //! Primary formulation: COMSOL, *Multicomponent Gas Diffusion: Maxwell–Stefan
 //! Description*, equations 3-75–3-80:
@@ -15,7 +16,7 @@
 //! This L1 module owns constitutive algebra and scratch storage, never evolution.
 
 use crate::{SpeciesId, UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R};
-use fs_qty::{MolarMass, Pressure, Temperature};
+use fs_qty::{AmountConcentration, MolarMass, Pressure, Temperature};
 
 /// Hard species/work bound for the dense constitutive solve.
 pub const MAX_MAXWELL_STEFAN_SPECIES_V1: usize = 128;
@@ -76,6 +77,20 @@ struct Solve {
     absolute_gradient_tolerance_per_m: f64,
     absolute_frame_tolerance: f64,
     frame: Frame,
+}
+
+#[derive(Clone, Copy)]
+enum Driving<'a> {
+    IdealGas {
+        gradients: &'a [f64],
+        temperature: Temperature,
+        pressure: Pressure,
+        log_pressure_gradient_per_m: f64,
+    },
+    Thermodynamic {
+        forces: &'a [f64],
+        concentration: AmountConcentration,
+    },
 }
 
 /// Refusal before a complete borrowed evaluation can be published.
@@ -201,10 +216,12 @@ impl MaxwellStefanV1 {
     ) -> Result<MaxwellStefanEvaluationV1<'a>, MaxwellStefanErrorV1> {
         self.evaluate_in_frame(
             mole_fractions,
-            gradients_per_m,
-            temperature,
-            pressure,
-            log_pressure_gradient_per_m,
+            Driving::IdealGas {
+                gradients: gradients_per_m,
+                temperature,
+                pressure,
+                log_pressure_gradient_per_m,
+            },
             binary_diffusivities_m2_s,
             Solve {
                 relative_tolerance: controls.relative_tolerance,
@@ -225,7 +242,9 @@ impl MaxwellStefanV1 {
     /// scaled solve. Molar flux is the primary rounded output in this frame;
     /// no conversion through a potentially underflowed mass flux is required.
     /// Exact-zero fractions, workspace reuse and cancellation have the same
-    /// contract. Thermal diffusion and nonideal activities remain excluded.
+    /// contract. This ideal-gas entry point does not add thermal forces or
+    /// nonideal activities; use [`Self::evaluate_molar_driving_forces`] with
+    /// an explicit source closure for those forces.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate_molar<'a>(
         &self,
@@ -241,10 +260,91 @@ impl MaxwellStefanV1 {
     ) -> Result<MaxwellStefanMolarEvaluationV1<'a>, MaxwellStefanErrorV1> {
         self.evaluate_in_frame(
             mole_fractions,
-            gradients_per_m,
-            temperature,
-            pressure,
-            log_pressure_gradient_per_m,
+            Driving::IdealGas {
+                gradients: gradients_per_m,
+                temperature,
+                pressure,
+                log_pressure_gradient_per_m,
+            },
+            binary_diffusivities_m2_s,
+            Solve {
+                relative_tolerance: controls.relative_tolerance,
+                absolute_gradient_tolerance_per_m: controls.absolute_gradient_tolerance_per_m,
+                absolute_frame_tolerance: controls.absolute_molar_flux_tolerance_mol_m2_s,
+                frame: Frame::MolarAveraged,
+            },
+            workspace,
+            cancelled,
+        )
+        .map(|evaluation| MaxwellStefanMolarEvaluationV1 { evaluation })
+    }
+
+    /// Solve with source-owned thermodynamic forces `d_i` [1/m] and total molar
+    /// concentration [mol/m³], in the mass-averaged frame.
+    ///
+    /// The original rows are `sum_j (x_j z_i-x_i z_j)/D_ij = -c d_i`.
+    /// Forces must satisfy `sum_i d_i=0` within the supplied row budgets;
+    /// incompatible forces are refused, never silently projected. For chemical
+    /// potentials in J/mol, the thermodynamic part is
+    /// `d_i = x_i/(RT) [grad(mu_i)+s_i grad(T)-(M_i/rho) grad(p)]`.
+    /// An admitted Soret model can add its balanced thermal force to this vector.
+    /// Activity derivatives, EOS concentration, phase stability, coefficient
+    /// validity and reciprocal heat/energy fluxes remain the source/caller's
+    /// responsibility. This algebra alone supplies none of those closures.
+    ///
+    /// Positive symmetric pair diffusivities give nonnegative pair friction.
+    /// For positive fractions its entropy is `-R sum_i z_i d_i/x_i`; interpreting
+    /// that as a complete physical entropy balance requires the caller's
+    /// conjugate heat, chemical and external-force terms.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_driving_forces<'a>(
+        &self,
+        mole_fractions: &[f64],
+        driving_forces_per_m: &[f64],
+        concentration: AmountConcentration,
+        binary_diffusivities_m2_s: &[f64],
+        controls: MaxwellStefanSolveV1,
+        workspace: &'a mut MaxwellStefanWorkspaceV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaxwellStefanEvaluationV1<'a>, MaxwellStefanErrorV1> {
+        self.evaluate_in_frame(
+            mole_fractions,
+            Driving::Thermodynamic {
+                forces: driving_forces_per_m,
+                concentration,
+            },
+            binary_diffusivities_m2_s,
+            Solve {
+                relative_tolerance: controls.relative_tolerance,
+                absolute_gradient_tolerance_per_m: controls.absolute_gradient_tolerance_per_m,
+                absolute_frame_tolerance: controls.absolute_mass_flux_tolerance_kg_m2_s,
+                frame: Frame::MassAveraged,
+            },
+            workspace,
+            cancelled,
+        )
+    }
+
+    /// Source-owned balanced forces with the molar-averaged constraint
+    /// `sum_i z_i=0`. Source and conjugate-energy responsibilities are those of
+    /// [`Self::evaluate_driving_forces`]; this method changes only the frame.
+    #[allow(clippy::too_many_arguments)]
+    pub fn evaluate_molar_driving_forces<'a>(
+        &self,
+        mole_fractions: &[f64],
+        driving_forces_per_m: &[f64],
+        concentration: AmountConcentration,
+        binary_diffusivities_m2_s: &[f64],
+        controls: MaxwellStefanMolarSolveV1,
+        workspace: &'a mut MaxwellStefanWorkspaceV1,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<MaxwellStefanMolarEvaluationV1<'a>, MaxwellStefanErrorV1> {
+        self.evaluate_in_frame(
+            mole_fractions,
+            Driving::Thermodynamic {
+                forces: driving_forces_per_m,
+                concentration,
+            },
             binary_diffusivities_m2_s,
             Solve {
                 relative_tolerance: controls.relative_tolerance,
@@ -262,10 +362,7 @@ impl MaxwellStefanV1 {
     fn evaluate_in_frame<'a>(
         &self,
         mole_fractions: &[f64],
-        gradients_per_m: &[f64],
-        temperature: Temperature,
-        pressure: Pressure,
-        log_pressure_gradient_per_m: f64,
+        driving: Driving<'_>,
         binary_diffusivities_m2_s: &[f64],
         controls: Solve,
         workspace: &'a mut MaxwellStefanWorkspaceV1,
@@ -273,13 +370,30 @@ impl MaxwellStefanV1 {
     ) -> Result<MaxwellStefanEvaluationV1<'a>, MaxwellStefanErrorV1> {
         poll(&mut cancelled)?;
         let n = self.species.len();
+        let (gradients_per_m, concentration) = match driving {
+            Driving::IdealGas {
+                gradients,
+                temperature,
+                pressure,
+                log_pressure_gradient_per_m,
+            } => {
+                if !positive(temperature.value())
+                    || !positive(pressure.value())
+                    || !log_pressure_gradient_per_m.is_finite()
+                {
+                    return Err(MaxwellStefanErrorV1::Invalid("ideal-gas state"));
+                }
+                (gradients, (pressure.value() / R) / temperature.value())
+            }
+            Driving::Thermodynamic {
+                forces,
+                concentration,
+            } => (forces, concentration.value()),
+        };
         if mole_fractions.len() != n
             || gradients_per_m.len() != n
             || binary_diffusivities_m2_s.len() != n * n
             || workspace.right.len() != n
-            || !positive(temperature.value())
-            || !positive(pressure.value())
-            || !log_pressure_gradient_per_m.is_finite()
             || !positive(controls.relative_tolerance)
             || controls.relative_tolerance > 1e-3
             || !positive(controls.absolute_gradient_tolerance_per_m)
@@ -307,14 +421,13 @@ impl MaxwellStefanV1 {
                     + controls.relative_tolerance * gradient_scale
         {
             return Err(MaxwellStefanErrorV1::Invalid(
-                "mole-fraction gradients do not sum to zero",
+                "diffusion gradients or driving forces do not sum to zero",
             ));
         }
         let mean_mass = sum(mole_fractions
             .iter()
             .zip(&self.molar_masses)
             .map(|(x, m)| x * m.value()));
-        let concentration = (pressure.value() / R) / temperature.value();
         if !positive(mean_mass) || !positive(concentration) {
             return Err(MaxwellStefanErrorV1::Arithmetic(
                 "mean molar mass or total concentration",
@@ -341,9 +454,18 @@ impl MaxwellStefanV1 {
         let mut drive_scale = 0.0_f64;
         let mut gauge = 0;
         for i in 0..n {
-            let mass_fraction = (mole_fractions[i] * self.molar_masses[i].value()) / mean_mass;
-            let drive = gradients_per_m[i]
-                + (mole_fractions[i] - mass_fraction) * log_pressure_gradient_per_m;
+            let drive = match driving {
+                Driving::IdealGas {
+                    log_pressure_gradient_per_m,
+                    ..
+                } => {
+                    let mass_fraction =
+                        (mole_fractions[i] * self.molar_masses[i].value()) / mean_mass;
+                    gradients_per_m[i]
+                        + (mole_fractions[i] - mass_fraction) * log_pressure_gradient_per_m
+                }
+                Driving::Thermodynamic { .. } => gradients_per_m[i],
+            };
             if !drive.is_finite() {
                 return Err(MaxwellStefanErrorV1::Arithmetic(
                     "pressure/composition driving force",

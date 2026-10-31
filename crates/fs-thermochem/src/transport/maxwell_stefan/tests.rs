@@ -58,6 +58,201 @@ fn near(actual: f64, expected: f64, relative: f64) {
 }
 
 #[test]
+fn g1_source_owned_regular_solution_force_matches_binary_flux_and_chemical_entropy() {
+    let masses = [0.018, 0.046];
+    let owner = model(&masses);
+    let x = [0.25, 0.75];
+    let dx = 0.2;
+    let chi = 1.5; // Authored dimensionless excess Gibbs energy chi*x1*x2.
+    let temperature = 350.0;
+    let c = 18000.0; // Source concentration, deliberately not ideal-gas p/(RT).
+    let d = matrix(2, 8e-10);
+    let mu_gradient = [
+        R * temperature * (1.0 / x[0] - 2.0 * chi * x[1]) * dx,
+        -R * temperature * (1.0 / x[1] - 2.0 * chi * x[0]) * dx,
+    ];
+    let forces = [
+        x[0] * mu_gradient[0] / (R * temperature),
+        x[1] * mu_gradient[1] / (R * temperature),
+    ];
+    let factor = 1.0 - 2.0 * chi * x[0] * x[1];
+    assert!(factor > 0.0); // This fixture is on the stable mixing branch.
+    let mean_mass = x[0] * masses[0] + x[1] * masses[1];
+    let expected = -c * d[1] * factor * dx * masses[0] * masses[1] / mean_mass;
+    let mut workspace = owner.workspace().unwrap();
+    let result = owner
+        .evaluate_driving_forces(
+            &x,
+            &forces,
+            AmountConcentration::new(c),
+            &d,
+            MaxwellStefanSolveV1::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    near(result.mass_fluxes()[0], expected, 3e-14);
+    near(result.mass_fluxes()[1], -expected, 3e-14);
+    let entropy = -sum(result
+        .molar_fluxes()
+        .iter()
+        .zip(mu_gradient)
+        .map(|(flux, gradient)| flux * gradient / temperature));
+    assert!(entropy > 0.0);
+    near(
+        result.drag_entropy_production_w_m3_k().unwrap(),
+        entropy,
+        4e-14,
+    );
+    let molar = owner
+        .evaluate_molar_driving_forces(
+            &x,
+            &forces,
+            AmountConcentration::new(c),
+            &d,
+            MaxwellStefanMolarSolveV1::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    near(molar.molar_fluxes()[0], -c * d[1] * factor * dx, 3e-14);
+    near(molar.molar_fluxes()[1], c * d[1] * factor * dx, 3e-14);
+    near(
+        molar.drag_entropy_production_w_m3_k().unwrap(),
+        entropy,
+        4e-14,
+    );
+}
+
+#[test]
+fn g3_explicit_forces_reproduce_ideal_pressure_and_composition_in_both_frames() {
+    let owner = model(&[0.002, 0.028, 0.044]);
+    let x = [0.2, 0.3, 0.5];
+    let gradients = [0.1, -0.4, 0.3];
+    let mean = sum(x
+        .iter()
+        .zip(owner.molar_masses())
+        .map(|(x, m)| x * m.value()));
+    let forces: Vec<_> = (0..3)
+        .map(|i| gradients[i] + (x[i] - x[i] * owner.molar_masses()[i].value() / mean) * 0.7)
+        .collect();
+    let binary = [0.0, 0.2, 0.5, 0.2, 0.0, 0.8, 0.5, 0.8, 0.0];
+    // Declare the same rounded source concentration as the ideal entry point;
+    // algebraic p=RT does not make two floating-point divisions exactly one.
+    let concentration = AmountConcentration::new(((R * 500.0) / R) / 500.0);
+    let mut a = owner.workspace().unwrap();
+    let mut b = owner.workspace().unwrap();
+    let ideal = owner
+        .evaluate(
+            &x,
+            &gradients,
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.7,
+            &binary,
+            MaxwellStefanSolveV1::default(),
+            &mut a,
+            || false,
+        )
+        .unwrap();
+    let supplied = owner
+        .evaluate_driving_forces(
+            &x,
+            &forces,
+            concentration,
+            &binary,
+            MaxwellStefanSolveV1::default(),
+            &mut b,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(ideal.mass_fluxes(), supplied.mass_fluxes());
+    assert_eq!(
+        ideal.drag_entropy_production_w_m3_k(),
+        supplied.drag_entropy_production_w_m3_k()
+    );
+    let ideal = owner
+        .evaluate_molar(
+            &x,
+            &gradients,
+            Temperature::new(500.0),
+            Pressure::new(R * 500.0),
+            0.7,
+            &binary,
+            MaxwellStefanMolarSolveV1::default(),
+            &mut a,
+            || false,
+        )
+        .unwrap();
+    let supplied = owner
+        .evaluate_molar_driving_forces(
+            &x,
+            &forces,
+            concentration,
+            &binary,
+            MaxwellStefanMolarSolveV1::default(),
+            &mut b,
+            || false,
+        )
+        .unwrap();
+    assert_eq!(ideal.molar_fluxes(), supplied.molar_fluxes());
+}
+
+#[test]
+fn g0_supplied_force_refuses_incompatible_gibbs_duhem_data_and_reuses_workspace() {
+    let owner = model(&[0.002, 0.028]);
+    let mut workspace = owner.workspace().unwrap();
+    let capacity = workspace.workspace_bytes();
+    let binary = matrix(2, 0.5);
+    for (force, c) in [
+        ([0.2, -0.1], 1.0),
+        ([0.2, -0.2], 0.0),
+        ([f64::NAN, 0.0], 1.0),
+    ] {
+        assert!(
+            owner
+                .evaluate_driving_forces(
+                    &[0.5, 0.5],
+                    &force,
+                    AmountConcentration::new(c),
+                    &binary,
+                    MaxwellStefanSolveV1::default(),
+                    &mut workspace,
+                    || false,
+                )
+                .is_err()
+        );
+    }
+    assert_eq!(
+        owner
+            .evaluate_driving_forces(
+                &[0.5, 0.5],
+                &[0.2, -0.2],
+                AmountConcentration::new(1.0),
+                &binary,
+                MaxwellStefanSolveV1::default(),
+                &mut workspace,
+                || true,
+            )
+            .unwrap_err(),
+        MaxwellStefanErrorV1::Cancelled
+    );
+    let result = owner
+        .evaluate_driving_forces(
+            &[0.5, 0.5],
+            &[0.2, -0.2],
+            AmountConcentration::new(1.0),
+            &binary,
+            MaxwellStefanSolveV1::default(),
+            &mut workspace,
+            || false,
+        )
+        .unwrap();
+    assert!(result.mass_fluxes()[0] < 0.0);
+    assert_eq!(workspace.workspace_bytes(), capacity);
+}
+
+#[test]
 fn g1_binary_unequal_masses_match_analytic_barycentric_flux() {
     let masses = [0.002, 0.028];
     let owner = model(&masses);
