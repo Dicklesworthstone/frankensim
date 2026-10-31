@@ -13,6 +13,10 @@ use core::f64::consts::PI;
 /// Conservative triangle-surface forces with exact endpoint area work.
 pub mod surface;
 
+/// Original-material binding for capillary filling, drainage and rise.
+#[cfg(feature = "continuum")]
+pub mod material;
+
 mod two_fluid;
 pub use two_fluid::{
     TwoFluidCircularMeniscusInput, TwoFluidCircularMeniscusStep,

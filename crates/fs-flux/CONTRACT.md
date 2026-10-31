@@ -1488,3 +1488,66 @@ The oblique diffusion L1 errors on 8³/16³ cells are 6.45856775e-4 and
 1.69469136e-4, respectively, for an observed order of 1.930. Full vector stress
 is checked against independent discrete longitudinal/transverse symbols, and
 the integrated thermal gain equals lost kinetic energy without a heat source.
+
+## Two-fluid capillary displacement
+
+`capillary::step_newtonian_two_fluid_circular_meniscus` adds the displaced
+phase's Poiseuille resistance to the same horizontal rigid-tube model:
+`8 [mu_l x + mu_d (L-x)] dx/dt = R^2 [delta_p + 2 sigma cos(theta)/R]`.
+The affine resistance integrates exactly. A normalized, rationalized quadratic
+inverse avoids subtracting nearly equal roots; inlet/outlet event times are
+checked before evaluating that inverse. The kernel is allocation-free, with
+bounded scalar work and no time-stepping iteration. Zero displaced viscosity
+delegates exactly to the existing Washburn owner; equal viscosities give
+constant speed. Positive displaced viscosity gives finite initial speed,
+without claiming to resolve inertial startup.
+
+The actual signed volume determines pressure work and the change in wetted-wall
+free energy. Positive analytic resistance weights integrate each phase's
+viscous loss over the entire displacement, including drainage. Their sum is
+the primitive's total loss, `pressure_work - wall_surface_energy_change`.
+The translating meniscus has constant area. Formation/exit topology, gravity
+in this two-fluid rung, wetting films, inertia, gas compression and dynamic
+contact angles remain outside its domain. The displaced phase must be
+incompressible or explicitly approximated by uniform frozen gas properties;
+it vents to the specified outlet pressure and is never a trapped gas pocket.
+
+Seven G0/G1/G3 unit tests cover the integrated Poiseuille relation, finite
+startup, equal-viscosity and original-law limits, signed split-step composition,
+end events and independent spatial quadrature of the phase losses. These are
+numerical checks of the reduced model, not experimental validation. The
+two-fluid resistance follows Budaraju et al. (2016),
+<https://doi.org/10.1021/acs.langmuir.6b02788>.
+
+## Material-bound circular capillary transport
+
+`capillary::material::MaterialCapillaryTube` binds the original
+`ResolvedLiquidSurfaceState` and `ResolvedLiquidWettingState` to the existing
+horizontal/inclined meniscus operators. Density, dynamic viscosity, tension
+and equilibrium angle come from those same immutable owners; callers provide
+only geometry, current wet length, pressure, gravity and requested time.
+Admission checks the ordered interface's liquid identity and complete query
+point, refuses neglected capillarity and unowned rheology evolution, and
+retains the exact source owners in every accepted result. A kinematic-viscosity
+source uses its own density to derive dynamic viscosity. Signed liquid mass
+uses that same density; wall energy, gravity work and end-event time remain
+the primitive operator's actual transfers.
+
+The horizontal two-fluid method consumes one checked `FluidTransport`
+evaluation and retains its original owner, both signed mass transfers and the
+two separately integrated viscous losses. The displaced phase has frozen,
+homogeneous properties and vents to a prescribed outlet pressure. Passing a
+gas owner does not activate compressibility, sealed-gas storage or inertia.
+The caller must assign the displaced phase to the fluid pair admitted by the
+tension/wetting sources; this generic transport view cannot establish that
+equivalence. There is no inferred source data, dynamic contact-line law,
+thermal evolution or flow beyond an inlet/outlet event. A raw transport
+fixture remains unsourced. These bounded scalar bindings allocate no memory
+during an accepted step and contain no internal cancellation point.
+
+Focused G0/G1/G3 tests in `tests/material_capillary.rs` exercise manufactured
+Washburn/Jurin motion, physical material swaps, kinematic-viscosity conversion,
+signed mass/energy and end-event accounting, refusal of source mismatches and
+unevolved rheology, and finite displaced-fluid resistance with original-owner
+retention. They establish numerical/source integration, not measured wetting
+accuracy or arbitrary two-phase applicability.

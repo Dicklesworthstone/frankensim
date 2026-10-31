@@ -31,6 +31,12 @@ fs-qty = { path = "../fs-qty", optional = true }
 fs-matdb = { path = "../fs-matdb" }
 fs-evidence = { path = "../fs-evidence" }
 fs-thermochem = { path = "../fs-thermochem" }
+fs-qty = { path = "../fs-qty" }
+
+[[test]]
+name = "material_capillary"
+path = "tests/material_capillary.rs"
+required-features = ["continuum"]
 
 [[test]]
 name = "ale_gcl"
