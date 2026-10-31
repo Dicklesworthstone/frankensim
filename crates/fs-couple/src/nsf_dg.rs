@@ -305,6 +305,19 @@ pub struct NsfDg<L: Lattice3<27>> {
     finite_reservoir: Option<finite_reservoir::FiniteReservoir>,
 }
 
+/// Cold ownership handoff used by higher-level physical couplers.
+///
+/// This deliberately exposes only the original core owners needed to replace
+/// the acoustic load before any step is accepted. Optional upstream loads,
+/// exterior mouth reactions and finite source inventories are not representable
+/// in this handoff and therefore refuse instead of being discarded.
+pub(crate) struct NsfDgColdParts<L: Lattice3<27>> {
+    pub zone: NsfGrid3<L>,
+    pub load: DgPortLoad,
+    pub limits: NsfDgLimits,
+    pub high: bool,
+}
+
 fn poll(gate: &CancelGate) -> Result<(), NsfDgError> {
     if gate.is_requested() { Err(NsfDgError::Cancelled) } else { Ok(()) }
 }
@@ -456,6 +469,24 @@ impl<L: Lattice3<27>> NsfDg<L> {
     pub const fn limits(&self) -> &NsfDgLimits { &self.limits }
     /// Accepted coupled intervals.
     pub const fn accepted_steps(&self) -> u64 { self.steps }
+
+    /// Consume a completely cold direct NSF/DG binding for reuse by a more
+    /// complete acoustic owner. No physical history is reconstructed.
+    ///
+    /// This is intentionally narrower than a generic decompose operation: any
+    /// optional owner whose state could be lost makes the handoff refuse.
+    pub(crate) fn into_cold_parts(self) -> Result<NsfDgColdParts<L>, NsfDgError> {
+        if self.steps != 0 || self.zone.steps() != 0 || self.load.state().step_count() != 0
+            || self.upstream.is_some() || self.reservoir_radiation.is_some()
+            || self.reservoir_radiations.is_some() || self.finite_reservoir.is_some()
+        {
+            return Err(NsfDgError::Input(
+                "cold resolved ownership handoff refuses advanced or optionally attached owners",
+            ));
+        }
+        Ok(NsfDgColdParts { zone: self.zone, load: self.load,
+            limits: self.limits, high: self.high })
+    }
 
     /// Advance the explicitly located source against its retained participants.
     pub fn step_with_drive(&mut self, drive: NsfDgDrive, gate: &CancelGate)

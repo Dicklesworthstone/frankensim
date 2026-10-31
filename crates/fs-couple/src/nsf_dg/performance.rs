@@ -45,6 +45,19 @@ pub fn source_intervals_for(physical_dt_s: f64, output_rate_hz: u32, output_samp
 /// A finite source on the existing pressure, decimation, ensemble and PCM path.
 /// Failed individual physical steps publish neither owner. A failed callback
 /// poisons playback, retaining any already accepted prefix and observer state.
+/// Cold source package for another in-crate physical composition.
+/// The caller receives exact original owners and the complete authored control
+/// history; observer histories are deliberately rebuilt by the new composition.
+pub(crate) struct NsfDgColdPerformance<L: Lattice3<27>> {
+    pub system: super::NsfDgColdParts<L>,
+    pub boundary: Vec<NsfDgDrive>,
+    pub observation: ApertureObservation,
+    pub sample_rate_hz: u32,
+    pub output_samples: u64,
+    pub maximum_block: usize,
+    pub gate: Arc<CancelGate>,
+}
+
 pub struct NsfDgPerformance<L: Lattice3<27>> {
     system: NsfDg<L>,
     boundary: Vec<NsfDgDrive>,
@@ -257,6 +270,28 @@ impl<L: Lattice3<27>> NsfDgPerformance<L> {
         }
         Ok(self)
     }
+    /// Consume an unadvanced resolved performance so another physical owner can
+    /// reuse its exact NSF state, DG inlet, controls and observation clock.
+    ///
+    /// Prepared gas/tile observers are not transferable because they retain
+    /// histories tied to this direct acoustic topology. Callers must attach
+    /// those observers after constructing the replacement topology.
+    pub(crate) fn into_cold_parts(self) -> Result<NsfDgColdPerformance<L>, RenderError> {
+        if self.poisoned || self.output_cursor != 0 || self.last.is_some()
+            || self.observer_gas.is_some() || !self.reservoirs.is_empty()
+        {
+            return Err(sizing(
+                "resolved ownership handoff requires a cold source before material or reservoir observers",
+            ));
+        }
+        let system = self.system.into_cold_parts().map_err(|error|
+            RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))?;
+        Ok(NsfDgColdPerformance { system, boundary: self.boundary,
+            observation: self.observation, sample_rate_hz: self.sample_rate_hz,
+            output_samples: self.output_samples, maximum_block: self.maximum_block,
+            gate: self.gate })
+    }
+
     /// Original exterior material, selected physical law and individual path responses.
     pub fn observer_gas(&self) -> Option<&GasPropagationReport> { self.observer_gas.as_ref() }
 
