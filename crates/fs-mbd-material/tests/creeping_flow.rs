@@ -1,6 +1,8 @@
 //! G1/G3/G4: source swaps -> original inertia -> actual fluid-loaded motion.
 //! Synthetic complete cards test the numerical model, not measured materials.
 mod common;
+#[path = "creeping_flow/unsteady.rs"]
+mod unsteady;
 use common::{close, density_card, point};
 use fs_evidence::ValidityDomain;
 use fs_ga::{Se3, Twist, Vec3};

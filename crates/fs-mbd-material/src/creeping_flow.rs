@@ -28,6 +28,9 @@ use fs_mbd::{
     DynamicsError, Gravity, RigidBodyIntegrator, RigidBodyState, StepReceipt, Vec3, Wrench,
 };
 
+/// Added fluid inertia and causal viscous memory on the same native body.
+pub mod unsteady;
+
 /// Source, geometry, regime, native dynamics or acceptance failure.
 #[derive(Clone, Debug, PartialEq)]
 pub enum CreepingFlowError {
@@ -62,6 +65,8 @@ pub enum CreepingFlowError {
         /// Caller-declared absolute tolerance [J].
         maximum_j: f64,
     },
+    /// Native body plus retained spectral-fluid impulse balance failed.
+    MomentumDefect { residual_ns: Vec3, maximum_ns: f64 },
     /// Cancellation before publication; accepted state remains untouched.
     Cancelled,
 }

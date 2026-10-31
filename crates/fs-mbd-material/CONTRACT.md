@@ -634,6 +634,47 @@ refinement, separate maintained-flow work from heat, and exercise geometry,
 regime and transactional refusals. This is a bounded MR57 capability; it does
 not close the broader exterior/gap-flow bead or claim empirical validation.
 
+## Unsteady buoyant sphere with reciprocal viscous memory
+
+`CreepingSphere::unsteady_motion` releases the original nonrotating material
+sphere from rest in its quiescent fluid. Body mass, displaced-fluid mass,
+dynamic viscosity, geometry, gravity and the existing Reynolds cap retain
+their original owners. The native rigid-body midpoint advances the only body
+trajectory. Its load includes Archimedes force, steady Stokes resistance,
+exact instantaneous added mass `rho*V/2`, and positive spectral Basset branches.
+Each branch exchanges equal/opposite force with the body and retains its own
+momentum and kinetic storage. Algebraic elimination of their common midpoint
+coupling costs O(branches), without a dense solve or growing history buffer.
+
+Branch rates and positive mass/resistance come directly from the square-root
+impedance's spectral integral, without fitted poles. The log-grid and both
+omitted cutoffs are explicit numerical resolution. `impedance_kg_s` exposes
+the actual discrete operator; the omitted-tail bound excludes quadrature and
+time error. Refine all three spectral axes and dt on the intended time window.
+The steady Stokes coefficient and added mass remain exact at every resolution.
+Initial body and fluid momenta are zero. Clones retain all accepted memory;
+resuming never reconstructs it from current body velocity alone.
+
+Each accepted step reports represented fluid storage, viscous heat, native
+body storage, gravity/buoyancy potential and a separate absolute energy defect.
+Generalized body-plus-spectral impulse closes against buoyant weight and the
+eliminated stationary Stokes exterior. These spectral coordinates are not
+pointwise fluid velocities or total finite-domain fluid momentum. Numerical
+residuals are not heat. Source, regime, energy/impulse or cancellation refusal
+returns neither proposed body nor memory history.
+
+This is linear unsteady Stokes flow, not quasi-steady drag with its density
+gate disabled. The diffusion-time restriction is replaced by represented
+fluid inertia/history. It admits rising, neutral and sinking densities under
+the same equations. It does not resolve convection or its late-time Oseen
+correction, spin, compressibility, free surfaces, walls, other particles,
+non-Newtonian transport, thermal evolution or a finite heat destination.
+`tests/creeping_flow/unsteady.rs` supplies G1/G3/G4 analytic impedance and
+inverse-Laplace settling ladders, source-density acceleration/direction,
+native receipt identity, storage/heat closure and restart/late cancellation.
+The primary force-law reference is Candelier et al., JFM 954 (2023), A25,
+equation (1.1), DOI `10.1017/jfm.2022.1015`.
+
 ## Finite-rotation hydrostatic restoring motion
 
 `HydrostaticMedium::step` and `LayeredHydrostaticMedium::step` share one load
