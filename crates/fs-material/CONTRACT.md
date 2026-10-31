@@ -153,6 +153,37 @@ prepared remanence, differential leakage modes, full inductance and unchanged
 state on refusal. These verify the declared constitutive construction, not
 experimental material qualification.
 
+### Source-backed series gaps and reciprocal magnetic work
+
+`SharedHystereticCore::with_gap` extends the fixed-geometry path above with one
+physical series gap. Its original `ResolvedInductor` supplies constant static
+permeability, area, absolute reference turns and preparation separation; each
+accepted state retains the actual gap within caller-declared positive open
+limits. The original medium source/query stays fixed. The common balance is
+`sum(r_i i_i) = I_core + R(g) lambda_ref`, with
+`R(g) = g/(mu A N_ref^2)`. The full mutual tangent includes this reluctance;
+core memory, physical leakage and gap energy remain distinct original stores.
+
+`candidate_linkages_and_gap` advances the total linkage/gap chord without
+advancing any accepted memory. The common flux stays monotone on that chord.
+Original play thresholds partition the path into affine material spans; exact
+linear-over-linear flux moments provide both mean winding currents and mean
+attractive force `-R' mean(lambda_ref^2)/2`. Positive balanced susceptibility
+sums and compensated moment reductions bound work by the original branch count,
+without field sampling or a fitted midpoint force. Electrical work independently
+equals total stored change, one original pinning heat, and work delivered to
+mechanics. Constant-flux chords retain the original polarizations exactly.
+
+Source/geometry mismatches, unresolved thresholds and unrepresentable work
+refuse without publication. Core-temperature queries do not silently change
+the separately retained gap medium. Native mechanics owns inertia, supports
+and trajectory closure; fringing, contact, changing area and thermal expansion
+are outside this uniform-gap reduction. G0/G1 fixtures in
+`tests/shared_hysteretic_gap.rs` compare full linear mutual inductance, fixed-
+linkage virtual work, negative reference polarity, pinning/saturation/reversal
+and exact constant-flux history against independent bisection/quadrature.
+
+
 ## Layer-resolved thermal expansion of elastic laminates
 
 `laminate::thermal::PreparedLaminateThermal` shares the original immutable

@@ -10,8 +10,13 @@
 //! magnetic path along a straight chord in TOTAL winding linkage. Endpoint
 //! current averages alone fail when the common core crosses a pinning or
 //! saturation knee. Reversals of the common drive must be separate increments.
-//! Geometry and material coefficients are fixed; copper/eddy heat and motion
-//! belong to their original circuit/field/mechanical owners.
+//! An optional source-backed series gap adds its actual storage and reciprocal
+//! force. Its displacement can evolve on the same linkage chord; all other
+//! geometry/material coefficients stay fixed. Native mechanics owns motion.
+
+/// Source-backed uniform gap geometry and exact common-flux path moments.
+pub mod gap;
+pub use gap::{SharedHystereticGap, SharedHystereticGapStep};
 
 use super::{
     FieldStorageError, HystereticCoreStep, MagneticHysteresisState, UniformHystereticCore, invalid,
@@ -38,6 +43,7 @@ struct Geometry {
     linkage_per_t: f64,
     current_per_field: f64,
     volume_m3: f64,
+    gap: Option<SharedHystereticGap>,
 }
 
 /// Source-backed reference core and explicit leakage/turns for 1..=16 windings.
@@ -55,6 +61,7 @@ pub struct SharedHystereticState {
     flux_linkages_wb: Vec<f64>,
     currents_a: Vec<f64>,
     stored_energy_j: f64,
+    gap_m: Option<f64>,
 }
 impl SharedHystereticState {
     pub fn flux_linkages_wb(&self) -> &[f64] {
@@ -66,9 +73,13 @@ impl SharedHystereticState {
     pub const fn core_state(&self) -> &MagneticHysteresisState {
         &self.core
     }
-    /// One common core plus all explicit leakage energy [J].
+    /// One common core, all explicit leakage, and any source-backed gap [J].
     pub const fn stored_energy_j(&self) -> f64 {
         self.stored_energy_j
+    }
+    /// Actual pole separation [m]; absent when no physical gap was bound.
+    pub const fn gap_m(&self) -> Option<f64> {
+        self.gap_m
     }
 }
 
@@ -79,11 +90,13 @@ pub struct SharedHystereticStep {
     /// Original core result, retaining exactly one pinning heat/source account.
     pub core: HystereticCoreStep,
     pub mean_currents_a: Vec<f64>,
-    /// Stable change of complete core and leakage energy [J].
+    /// Stable change of complete core, leakage and optional gap energy [J].
     pub stored_change_j: f64,
     pub stored_energy_j: f64,
-    /// Exact monotone-path winding work = stored change + core pinning heat [J].
+    /// Winding work = stored change + pinning heat + delivered mechanical work [J].
     pub magnetic_work_j: f64,
+    /// Source-backed gap storage and reciprocal force/work, if present.
+    pub gap: Option<SharedHystereticGapStep>,
 }
 
 fn finite(value: f64) -> Result<f64, FieldStorageError> {
@@ -136,6 +149,7 @@ impl SharedHystereticCore {
             linkage_per_t: core.linkage_per_t,
             current_per_field: core.current_per_field,
             volume_m3: core.volume_m3,
+            gap: None,
         });
         Ok(Self { core, geometry })
     }
@@ -147,6 +161,39 @@ impl SharedHystereticCore {
         &self.geometry.windings
     }
 
+    /// Add one uniform source-backed gap in series with the existing core.
+    /// The medium uses the SAME absolute reference turns. Its constant source
+    /// permeability and area stay fixed; limits are a positive OPEN interval.
+    /// Bind before preparing history: previous geometry cannot be reinterpreted.
+    pub fn with_gap(
+        self,
+        medium: crate::field_storage::ResolvedInductor,
+        limits_m: [f64; 2],
+    ) -> Result<Self, FieldStorageError> {
+        if self.geometry.gap.is_some() {
+            return Err(invalid("shared magnetic core already has a series gap"));
+        }
+        let gap = SharedHystereticGap::bind(medium, self.core.turns(), limits_m)?;
+        for bound in limits_m {
+            let loading = self.geometry.loading_per_h + gap.reluctance_per_m() * bound;
+            if !positive(loading)
+                || !positive((self.core.current_per_field / self.core.linkage_per_t) / loading)
+            {
+                return Err(invalid("shared series-gap load line is unrepresentable"));
+            }
+        }
+        let mut geometry = (*self.geometry).clone();
+        geometry.gap = Some(gap);
+        Ok(Self {
+            core: self.core,
+            geometry: Arc::new(geometry),
+        })
+    }
+
+    pub fn gap(&self) -> Option<&SharedHystereticGap> {
+        self.geometry.gap.as_ref()
+    }
+
     /// Virgin initialization. Prepared/remanent specimens use state_from_core.
     pub fn initial_state(&self) -> SharedHystereticState {
         SharedHystereticState {
@@ -155,6 +202,7 @@ impl SharedHystereticCore {
             flux_linkages_wb: vec![0.0; self.windings().len()],
             currents_a: vec![0.0; self.windings().len()],
             stored_energy_j: 0.0,
+            gap_m: self.gap().map(|gap| gap.medium().path_length_m()),
         }
     }
 
@@ -166,7 +214,22 @@ impl SharedHystereticCore {
         flux_linkages_wb: Vec<f64>,
     ) -> Result<SharedHystereticState, FieldStorageError> {
         let core = self.core.hold_candidate(&core_state)?;
-        self.state_at(&core, flux_linkages_wb)
+        self.state_at(
+            &core,
+            flux_linkages_wb,
+            self.gap().map(|g| g.medium().path_length_m()),
+        )
+    }
+
+    /// Bind explicitly prepared core memory at an actual admitted pole gap.
+    pub fn state_from_core_with_gap(
+        &self,
+        core_state: MagneticHysteresisState,
+        flux_linkages_wb: Vec<f64>,
+        gap_m: f64,
+    ) -> Result<SharedHystereticState, FieldStorageError> {
+        let core = self.core.hold_candidate(&core_state)?;
+        self.state_at(&core, flux_linkages_wb, Some(gap_m))
     }
 
     /// Recheck the same source coefficients at a new actual query, retaining
@@ -198,12 +261,23 @@ impl SharedHystereticCore {
             ));
         }
         let core = self.core.hold_candidate(state.core_state())?;
+        let reluctance = self.gap_reluctance(state.gap_m)?;
+        let inductance = if reluctance == 0.0 {
+            core.incremental_inductance_h
+        } else {
+            finite(1.0 / (core.incremental_inductance_h.recip() + reluctance))?
+        };
+        if !positive(inductance) {
+            return Err(invalid(
+                "shared series-gap differential inductance underflows",
+            ));
+        }
         let n = self.windings().len();
         let mut matrix = vec![0.0; n * n];
         for (i, a) in self.windings().iter().enumerate() {
             for (j, b) in self.windings()[..=i].iter().enumerate() {
                 let value = finite(
-                    finite(a.turns_ratio * core.incremental_inductance_h)?
+                    finite(a.turns_ratio * inductance)?
                         .mul_add(b.turns_ratio, if i == j { a.leakage_h } else { 0.0 }),
                 )?;
                 if value == 0.0 {
@@ -221,6 +295,16 @@ impl SharedHystereticCore {
         previous: &SharedHystereticState,
         linkages: &[f64],
     ) -> Result<SharedHystereticStep, FieldStorageError> {
+        if self.gap().is_some() {
+            return gap::candidate(
+                self,
+                previous,
+                linkages,
+                previous
+                    .gap_m
+                    .ok_or_else(|| invalid("shared gap history is incomplete"))?,
+            );
+        }
         if previous.geometry != self.geometry
             || linkages.len() != self.windings().len()
             || linkages.iter().any(|x| !x.is_finite())
@@ -254,7 +338,7 @@ impl SharedHystereticCore {
                 self.geometry.load_line_h_m,
             )?)?
         };
-        let state = self.state_at(&core, linkages.to_vec())?;
+        let state = self.state_at(&core, linkages.to_vec(), None)?;
         let delta_core = finite(core.flux_linkage_wb - old_core.flux_linkage_wb)?;
         if delta_drive != 0.0 && delta_core != 0.0 && delta_drive.signum() != delta_core.signum() {
             return Err(invalid(
@@ -327,21 +411,49 @@ impl SharedHystereticCore {
             mean_currents_a,
             stored_change_j,
             magnetic_work_j,
+            gap: None,
         })
+    }
+
+    /// Advance an affine chord in total winding linkages AND physical gap.
+    /// The original common history advances only once. Exact source active-set
+    /// integrals supply winding mean currents and reciprocal mean gap force.
+    pub fn candidate_linkages_and_gap(
+        &self,
+        previous: &SharedHystereticState,
+        linkages: &[f64],
+        gap_m: f64,
+    ) -> Result<SharedHystereticStep, FieldStorageError> {
+        gap::candidate(self, previous, linkages, gap_m)
+    }
+
+    fn gap_reluctance(&self, gap_m: Option<f64>) -> Result<f64, FieldStorageError> {
+        match (self.gap(), gap_m) {
+            (None, None) => Ok(0.0),
+            (Some(gap), Some(position)) => gap.reluctance(position),
+            _ => Err(invalid(
+                "shared magnetic state must retain its physical gap geometry",
+            )),
+        }
     }
 
     fn state_at(
         &self,
         core: &HystereticCoreStep,
         linkages: Vec<f64>,
+        gap_m: Option<f64>,
     ) -> Result<SharedHystereticState, FieldStorageError> {
         if linkages.len() != self.windings().len() || linkages.iter().any(|x| !x.is_finite()) {
             return Err(invalid("complete finite shared winding linkages required"));
         }
         let mut currents = Vec::with_capacity(linkages.len());
         let mut mmf = 0.0;
-        let mut scale = core.current_a.abs();
-        let mut stored_energy_j = core.stored_energy_j;
+        let reluctance = self.gap_reluctance(gap_m)?;
+        let gap_current = finite(reluctance * core.flux_linkage_wb)?;
+        let target_current = finite(core.current_a + gap_current)?;
+        let mut scale = core.current_a.abs() + gap_current.abs();
+        let mut stored_energy_j =
+            finite((0.5 * gap_current).mul_add(core.flux_linkage_wb, core.stored_energy_j))?;
         for (winding, &linkage) in self.windings().iter().zip(&linkages) {
             let current = finite(
                 (-winding.turns_ratio).mul_add(core.flux_linkage_wb, linkage) / winding.leakage_h,
@@ -357,7 +469,7 @@ impl SharedHystereticCore {
         scale = finite(scale + finite(self.geometry.loading_per_h * core.flux_linkage_wb)?.abs())?;
         if !stored_energy_j.is_finite()
             || stored_energy_j < 0.0
-            || (mmf - core.current_a).abs() > 256.0 * f64::EPSILON * scale
+            || (mmf - target_current).abs() > 256.0 * f64::EPSILON * scale
         {
             return Err(invalid(
                 "prepared common core and winding linkages violate magnetic balance",
@@ -369,6 +481,7 @@ impl SharedHystereticCore {
             flux_linkages_wb: linkages,
             currents_a: currents,
             stored_energy_j,
+            gap_m,
         })
     }
 }

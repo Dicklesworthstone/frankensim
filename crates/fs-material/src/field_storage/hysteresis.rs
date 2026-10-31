@@ -389,6 +389,7 @@ fn branch_response(branch: &HysteresisBranch, old: f64, h: f64) -> (f64, f64) {
 pub struct UniformHystereticCore {
     law: ScalarHysteresis,
     source: Option<source::ResolvedScalarHysteresis>,
+    turns: f64,
     linkage_per_t: f64,
     current_per_field: f64,
     volume_m3: f64,
@@ -431,6 +432,7 @@ impl UniformHystereticCore {
         let result = Self {
             law,
             source: None,
+            turns,
             linkage_per_t: turns * area_m2,
             current_per_field: path_length_m / turns,
             volume_m3: area_m2 * path_length_m,
@@ -456,6 +458,12 @@ impl UniformHystereticCore {
     /// Actual fixed magnetic volume [m3], also used by a finite core heat cell.
     pub const fn volume_m3(&self) -> f64 {
         self.volume_m3
+    }
+
+    /// Signed reference winding count retained independently of core area/path.
+    /// A series gap uses this SAME winding identity for its linkage coordinates.
+    pub const fn turns(&self) -> f64 {
+        self.turns
     }
 
     /// Validate retained memory and recover its terminal linkage/current and
