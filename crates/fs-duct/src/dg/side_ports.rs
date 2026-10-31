@@ -25,6 +25,16 @@ pub struct DgSidePort {
     pub downstream_element: usize,
 }
 
+/// Exact geometry of an existing interior face, for ANY native medium.
+/// Areas belong to the two bore traces, not an inferred side aperture.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct DgSidePortGeometry {
+    pub port: DgSidePort,
+    pub station_m: f64,
+    pub upstream_area_m2: f64,
+    pub downstream_area_m2: f64,
+}
+
 /// Geometry and complete local material state at the original junction face.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct DgSidePortSource {
@@ -41,6 +51,21 @@ pub struct DgSidePortSource {
 fn invalid(what: &'static str) -> DuctError { DuctError::BadParameter { what } }
 
 impl<M: DgMedium> DgDuct<M> {
+    /// Original face geometry without imposing a gas-specific material view.
+    /// Both bore areas are retained because a junction may lie at an area step.
+    pub fn side_port_geometry(&self, id: PortId) -> Result<DgSidePortGeometry, DuctError> {
+        let port = *self.side_ports.iter().find(|port| port.id == id)
+            .ok_or_else(|| invalid("DG side-port geometry references an undeclared side port"))?;
+        let downstream = &self.elements[port.downstream_element];
+        let upstream = &self.elements[port.downstream_element - 1];
+        Ok(DgSidePortGeometry {
+            port,
+            station_m: downstream.x_left,
+            upstream_area_m2: upstream.areas[upstream.areas.len() - 1],
+            downstream_area_m2: downstream.areas[0],
+        })
+    }
+
     /// Attach independent held-inflow ports at existing interior faces.
     /// Each port is conjugate to the SAME pressure trace used by the original
     /// alternating through-flow flux. A load consumes the opposite flow sign.

@@ -100,42 +100,56 @@ duct phase/attenuation, and refusal of a rare but overdriven radius class.
 
 ## Event-resolved vapor cavities in liquid ducts
 
-The opt-in `cavitation::duct::CavitatingDuct` retains an original material
-`DgDuct`, its complete native state and wall memories, the material source,
-and one accepted clock. One native endpoint may rupture into an isothermal
-pure-vapor cavity; the other retains its original closed, pressure-release or
-matched boundary. This is liquid-column separation, not an independent
-hydraulic solver or a spherical-bubble approximation.
+The opt-in `cavitation::duct::pockets::CavitatingDuctPockets` retains an original
+material `DgDuct`, its complete native state and wall memories, the material
+source, and one accepted clock. Up to eight declared endpoint/interior ports
+may rupture into discrete isothermal pure-vapor pockets. Native closed,
+pressure-release and matched boundaries remain original. `CavitatingDuct`
+delegates its single-endpoint API to this same solver. An interior station uses
+the original shared pressure and exact flow jump `Q = q_right - q_left`;
+there is no second liquid inertia or invented hydraulic solver.
 
-For original energy coordinates `x`, generator `L` and inflow column `b`,
-`p_abs = p_ref + b^T x`, `x' = L x + b Q`, and `V' = Q`.
-The filled branch has zero inflow. The active cavity uses
-`Q = -(b^T L x)/(b^T b)`, imposing the instantaneous vapor-pressure
-constraint. Original `fs-time` dense events locate pressure-driven rupture
-and volume-driven collapse. Neither liquid state nor volume is reset or
-projected. Small signed localization residuals remain visible under explicit
-pressure, volume and event-time tolerances; finite event scans do not certify
-unresolved tangencies or multiple crossings.
+For original energy coordinates `x`, generator `L` and active inflow columns
+`B_A`, every active pressure is constrained together:
+`(B_A^T B_A) Q_A = -B_A^T L x`, `x' = L x + B_A Q_A`, `V_j' = Q_j`.
+Filled ports have zero inflow. The existing diagonally scaled Cholesky solve
+prepares the joint flow gain. Original mass-map observations and active gains
+are cached; the RHS allocates no workspace. Original `fs-time` multiple dense
+events locate pressure-driven rupture and volume-driven collapse on one
+trajectory. Overlapping root brackets must admit one common contact state;
+a bounded contact-complementarity solve chooses all zero-volume branches
+together. Ambiguous flow and unresolved grazing refuse. Neither liquid state
+nor volume is reset or projected. Small signed localization residuals remain
+visible under explicit pressure, volume and event-time tolerances; finite event
+scans do not certify unresolved tangencies or multiple crossings.
 
-The original duct adopts independently integrated pressure impulse, actual
-`p Q` work and original generator dissipation. Its own trajectory admission
-and the combined storage `H_duct + (p_ref-p_sat) V` must both close before
+The original duct adopts independently integrated pressure impulse and actual
+`p Q` work at every port, plus original generator dissipation. Its own trajectory
+admission and combined storage `H_duct + sum_j (p_ref-p_sat) V_j` close before
 publication. Refusal, cancellation and exhausted event/attempt budgets preserve
 the complete accepted liquid/cavity history.
 
-The bounded dense lane admits at most 128 complete coordinates and one endpoint
-port. It checks source/acoustic identity, liquid strain, interface Mach,
-cavity size and available vapor-density data. Cavitation at another native
-liquid node refuses because distributed multiphase physics is not supplied.
+The bounded dense lane admits at most 128 complete coordinates and eight
+pockets, with every native port explicitly assigned. It checks source/acoustic
+identity, liquid strain, cavity size and available vapor-density data. Interior
+Mach admission uses both original through-flow traces with their respective
+bore areas, not only the net pocket flow. Local volume ceilings are bounded
+against adjacent column spans, with a separate total ceiling. Cavitation at an
+undeclared native liquid node refuses because the finite prescribed pocket
+set does not resolve arbitrary distributed multiphase physics.
 The fixed liquid geometry, negligible vapor mass and equilibrium interface are
 explicit approximations. Trapped gas, capillarity, nucleation delay, moving
 meshes, latent heat and strong-collapse shocks are not inferred.
 
 Focused regression sources compare the filled branch to the original exact
-DG propagator; recover the analytical reservoir/column acceleration and
-collapse time at both endpoint orientations; exercise actual rupture,
-matched-boundary dissipation and combined energy; and check material/domain
-refusal and atomic cancellation/work exhaustion.
+DG propagator; recover analytical reservoir/column acceleration and collapse
+at both endpoint orientations and an interior station; exercise coupled
+end-pocket exchange, simultaneous interior collapse and joint empty-contact
+growth; and check actual rupture, native loss, complete energy, both interface
+Mach limits, and atomic cancellation/event exhaustion. All six single-pocket
+and five multi-pocket tests execute against the same shared implementation.
+The simultaneous-collapse fixture also preserves atomic refusal when the
+subsequent dispersive collision cavitates at an undeclared liquid station.
 
 ## Shared material cavitation, films and bubble acoustic history
 

@@ -98,7 +98,7 @@ pub use compliant_wall::DgCompliantWallHeat;
 mod port_response;
 pub use port_response::{DgMultiportResponse, DgPortResponse};
 mod side_ports;
-pub use side_ports::{DgSidePort, DgSidePortSource, MAX_DG_SIDE_PORTS};
+pub use side_ports::{DgSidePort, DgSidePortGeometry, DgSidePortSource, MAX_DG_SIDE_PORTS};
 mod gas_update;
 pub use gas_update::{DgGasMaterialUpdate, DgMaterialUpdate};
 mod molecular;

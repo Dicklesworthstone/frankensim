@@ -20,16 +20,15 @@
 //! `(p_ref-p_sat) V`, its energy closes without inventing heat from void volume.
 
 use fs_duct::DuctError;
-use fs_duct::dg::continuous::state::DgTrajectoryPort;
 use fs_duct::dg::{DgBoundary, DgDuct, DgFluidMaterial, DgState, DgStepOutput, PortId};
 use fs_material::MaterialError;
 use fs_material::cavitation::{CavitationProperties, CavitationState};
 use fs_material::fluid_acoustics::FluidAcoustics;
-use fs_time::adaptive::events::{
-    EventAdvance, EventDirection, EventError, EventOptions, InitialEvent, rk45_until_event,
-};
-use fs_time::adaptive::{AdaptiveState, AdaptiveStatus, PiController};
-use std::cell::RefCell;
+use fs_time::adaptive::events::EventError;
+use fs_time::adaptive::events::multiple::EventSetError;
+
+/// Simultaneous discrete vapor pockets at original endpoint/interior ports.
+pub mod pockets;
 
 /// Complete original acoustic/wall state retained by this bounded dense lane.
 pub const MAX_CAVITATING_DUCT_DOFS: usize = 128;
@@ -39,12 +38,13 @@ pub const MAX_CAVITATING_DUCT_DOFS: usize = 128;
 pub struct DuctCavityLimits {
     /// Absolute reference for every native DG pressure perturbation [Pa].
     pub reference_pressure_pa: f64,
-    /// Positive cavity-volume ceiling [m³], at most 10% of endpoint area ×
-    /// column length. A smaller ceiling is needed when geometry varies rapidly.
+    /// Total cavity-volume ceiling [m³]. Each station additionally enforces a
+    /// small volume relative to its neighboring liquid-column spans.
     pub maximum_cavity_volume_m3: f64,
     /// Bound on |nodal pressure perturbation|/(rho c²), in (0, 0.1].
     pub maximum_liquid_strain: f64,
-    /// Bound on |cavity inflow|/(endpoint area × liquid c), in (0, 0.1].
+    /// Bound on each actual liquid-interface velocity / c, in (0, 0.1].
+    /// Internal pockets check both native through-flow traces separately.
     pub maximum_interface_mach: f64,
     /// Known saturated rho_v/rho_l must not exceed this bound, in (0, 0.1].
     /// Missing optional vapor density is an explicit dilute-vapor assumption.
@@ -82,6 +82,7 @@ pub struct DuctCavityState {
     time_s: f64,
     volume_m3: f64,
     mode: DuctCavityMode,
+    pockets: Vec<pockets::DuctPocketState>,
 }
 impl DuctCavityState {
     pub const fn duct(&self) -> &DgState {
@@ -99,6 +100,11 @@ impl DuctCavityState {
     pub const fn mode(&self) -> DuctCavityMode {
         self.mode
     }
+    /// Every pocket in the original native port order. The legacy volume/mode
+    /// getters above observe the first pocket; this slice is the multi-pocket view.
+    pub fn pockets(&self) -> &[pockets::DuctPocketState] {
+        &self.pockets
+    }
 }
 
 /// A source/domain/numerical refusal never replaces the accepted history.
@@ -107,6 +113,8 @@ pub enum DuctCavityError {
     Material(MaterialError),
     Duct(DuctError),
     Integration(EventError),
+    EventSetIntegration(EventSetError),
+    ActiveConstraints(&'static str),
     InvalidInput(&'static str),
     OutsideDomain(&'static str),
     RootResolution(&'static str),
@@ -137,6 +145,12 @@ impl From<EventError> for DuctCavityError {
     }
 }
 
+impl From<EventSetError> for DuctCavityError {
+    fn from(value: EventSetError) -> Self {
+        Self::EventSetIntegration(value)
+    }
+}
+
 /// Native port and complete coupled-storage accounting for an accepted step.
 #[derive(Clone, Debug)]
 pub struct DuctCavityStep {
@@ -163,13 +177,7 @@ pub struct DuctCavityStep {
 /// The other endpoint may retain its native closed, matched or pressure-release
 /// condition. The source, every DG coordinate and wall memory remain original.
 pub struct CavitatingDuct<F: CavitationProperties + FluidAcoustics + Clone> {
-    duct: DgDuct<DgFluidMaterial<F>>,
-    material: CavitationState,
-    limits: DuctCavityLimits,
-    port: PortId,
-    port_area_m2: f64,
-    cavity_node: usize,
-    state: DuctCavityState,
+    inner: pockets::CavitatingDuctPockets<F>,
 }
 
 fn positive(value: f64) -> bool {
@@ -225,9 +233,8 @@ impl DuctCavityNumerics {
 }
 
 impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuct<F> {
-    /// Bind an existing native material operator and its OWN initial state.
-    /// A nonempty initial cavity requires p_abs=p_sat to floating-point roundoff;
-    /// a filled endpoint requires p_abs>=p_sat. No pressure is projected.
+    /// Bind one original endpoint cavity. Single and multiple pockets use the
+    /// SAME coupled constraints, dense events, trajectory and native energy adoption.
     pub fn new(
         duct: DgDuct<DgFluidMaterial<F>>,
         initial: DgState,
@@ -235,451 +242,70 @@ impl<F: CavitationProperties + FluidAcoustics + Clone> CavitatingDuct<F> {
         initial_cavity_volume_m3: f64,
         limits: DuctCavityLimits,
     ) -> Result<Self, DuctCavityError> {
-        let material = duct.material().cavitation_state()?;
-        if material.acoustic_state()? != duct.acoustic_material() {
-            return Err(DuctCavityError::InvalidInput(
-                "cavitation and native duct acoustic coefficients must share one material state",
-            ));
-        }
         let view = duct.continuous_operator();
-        let coordinates = view.energy_coordinates(&initial)?;
-        if view.dimension() > MAX_CAVITATING_DUCT_DOFS || view.ports().len() != 1 {
+        if view.ports().len() != 1 {
             return Err(DuctCavityError::InvalidInput(
-                "one original endpoint port and at most 128 complete native coordinates required",
+                "one original endpoint port required by the single-cavity facade",
             ));
         }
-        let (port, column) = &view.ports()[0];
-        let area = if duct.inlet() == DgBoundary::Port(*port) {
-            duct.inlet_area_m2()
-        } else if duct.outlet() == DgBoundary::Port(*port) {
-            duct.outlet_area_m2()
-        } else {
+        let port = view.ports()[0].0;
+        if duct.inlet() != DgBoundary::Port(port) && duct.outlet() != DgBoundary::Port(port) {
             return Err(DuctCavityError::InvalidInput(
-                "a side-port is not an endpoint liquid-column cavity",
-            ));
-        };
-        if !time_s.is_finite()
-            || time_s < 0.0
-            || !initial_cavity_volume_m3.is_finite()
-            || initial_cavity_volume_m3 < 0.0
-            || !limits.reference_pressure_pa.is_finite()
-            || limits.reference_pressure_pa < material.saturation_pressure_pa()
-            || !positive(limits.maximum_cavity_volume_m3)
-            || limits.maximum_cavity_volume_m3 > 0.1 * area * duct.total_length()
-            || initial_cavity_volume_m3 > limits.maximum_cavity_volume_m3
-            || !fraction(limits.maximum_liquid_strain)
-            || !fraction(limits.maximum_interface_mach)
-            || !fraction(limits.maximum_vapor_density_ratio)
-            || coordinates.iter().any(|x| !x.is_finite())
-            || !positive(dot(column, column))
-        {
-            return Err(DuctCavityError::InvalidInput(
-                "invalid liquid cavity clock, reference, volume or physical limits",
+                "use CavitatingDuctPockets for an interior vapor pocket",
             ));
         }
-        if material.saturated_vapor().is_some_and(|v| {
-            v.density_kg_m3() / material.liquid_density_kg_m3() > limits.maximum_vapor_density_ratio
-        }) {
-            return Err(DuctCavityError::OutsideDomain(
-                "vapor mass is not negligible relative to liquid",
-            ));
-        }
-        let pressure = limits.reference_pressure_pa + dot(column, coordinates);
-        let roundoff = 128.0 * f64::EPSILON * limits.reference_pressure_pa.max(1.0);
-        let gap = pressure - material.saturation_pressure_pa();
-        if gap < -roundoff || (initial_cavity_volume_m3 > 0.0 && gap.abs() > roundoff) {
-            return Err(DuctCavityError::InvalidInput(
-                "initial pressure and cavity volume violate complementarity",
-            ));
-        }
-        let mut derivative = vec![0.0; coordinates.len()];
-        multiply(view.generator_per_s(), coordinates, &mut derivative);
-        let mode = if initial_cavity_volume_m3 > 0.0
-            || (gap.abs() <= roundoff && dot(column, &derivative) < 0.0)
-        {
-            DuctCavityMode::VaporCavity
-        } else {
-            DuctCavityMode::LiquidFilled
-        };
-        let port = *port;
-        let cavity_node = if duct.inlet() == DgBoundary::Port(port) {
-            0
-        } else {
-            duct.field_dofs() - 1
-        };
-        if mode == DuctCavityMode::VaporCavity {
-            let inflow = -dot(column, &derivative) / dot(column, column);
-            if !inflow.is_finite()
-                || (inflow / (area * material.liquid_sound_speed_m_s())).abs()
-                    > limits.maximum_interface_mach
-            {
-                return Err(DuctCavityError::OutsideDomain(
-                    "initial interface speed exceeds declared liquid Mach limit",
-                ));
-            }
-        }
-        let model = Self {
-            duct,
-            material,
-            limits,
+        let stations = [pockets::DuctPocket {
             port,
-            port_area_m2: area,
-            cavity_node,
-            state: DuctCavityState {
-                duct: initial,
-                time_s,
-                volume_m3: initial_cavity_volume_m3,
-                mode,
-            },
-        };
-        model.admit_field(
-            model
-                .duct
-                .continuous_operator()
-                .energy_coordinates(&model.state.duct)?,
-            1.0,
-            roundoff,
-            false,
-        )?;
-        Ok(model)
+            initial_volume_m3: initial_cavity_volume_m3,
+            maximum_volume_m3: limits.maximum_cavity_volume_m3,
+        }];
+        Ok(Self {
+            inner: pockets::CavitatingDuctPockets::new(duct, initial, time_s, &stations, limits)?,
+        })
     }
 
     pub const fn duct(&self) -> &DgDuct<DgFluidMaterial<F>> {
-        &self.duct
+        self.inner.duct()
     }
     pub fn source(&self) -> &F {
-        self.duct.material()
+        self.inner.source()
     }
     pub const fn material(&self) -> CavitationState {
-        self.material
+        self.inner.material()
     }
     pub const fn state(&self) -> &DuctCavityState {
-        &self.state
+        self.inner.state()
     }
     pub const fn limits(&self) -> DuctCavityLimits {
-        self.limits
+        self.inner.limits()
     }
 
-    fn admit_field(
-        &self,
-        normalized: &[f64],
-        scale: f64,
-        pressure_tolerance: f64,
-        allow_cavity_overshoot: bool,
-    ) -> Result<(), DuctCavityError> {
-        // Original physical mass maps, including wall-memory ordering. This is
-        // not a reconstructed acoustic state or a second liquid mass operator.
-        let (pressures, _) = self.duct.from_energy_coords(normalized);
-        let bulk = self.duct.acoustic_material().adiabatic_bulk_modulus_pa();
-        if pressures
-            .iter()
-            .any(|p| !p.is_finite() || (p * scale / bulk).abs() > self.limits.maximum_liquid_strain)
-        {
-            return Err(DuctCavityError::OutsideDomain(
-                "native liquid pressure exceeds the declared small-strain limit",
-            ));
-        }
-        if pressures.iter().enumerate().any(|(i, p)| {
-            !(allow_cavity_overshoot && i == self.cavity_node)
-                && self.limits.reference_pressure_pa + p * scale
-                    < self.material.saturation_pressure_pa() - pressure_tolerance
-        }) {
-            return Err(DuctCavityError::OutsideDomain(
-                "another native liquid node reaches vapor pressure; distributed cavitation is outside the endpoint model",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Prepare and atomically adopt one complete coupled interval. Cancellation,
-    /// unresolved roots, work limits, domain failure or energy failure preserve
-    /// the accepted cavity AND the complete native duct history.
+    /// Atomic advancement through the shared multi-pocket trajectory owner.
     pub fn advance<Cancel: FnMut() -> bool>(
         &mut self,
         end_time_s: f64,
         numerics: &DuctCavityNumerics,
         cancelled: &mut Cancel,
     ) -> Result<DuctCavityStep, DuctCavityError> {
-        self.advance_kernel(end_time_s, numerics, cancelled)
-    }
-
-    fn advance_kernel(
-        &mut self,
-        end_time_s: f64,
-        numerics: &DuctCavityNumerics,
-        cancelled: &mut dyn FnMut() -> bool,
-    ) -> Result<DuctCavityStep, DuctCavityError> {
-        numerics.admit()?;
-        if cancelled() {
-            return Err(DuctCavityError::Cancelled);
-        }
-        let dt = end_time_s - self.state.time_s;
-        if !end_time_s.is_finite() || !positive(dt) {
-            return Err(DuctCavityError::InvalidInput(
-                "the physical endpoint must be finite and strictly later",
-            ));
-        }
-        let view = self.duct.continuous_operator();
-        let original = view.energy_coordinates(&self.state.duct)?;
-        let n = original.len();
-        let generator = view.generator_per_s();
-        let column = &view.ports()[0].1;
-        let column_norm = dot(column, column);
-        let vapor = self.material.saturation_pressure_pa();
-        let pressure_scale = self.limits.reference_pressure_pa.max(1.0);
-        let volume_scale = self.limits.maximum_cavity_volume_m3;
-        let energy_scale = (2.0 * self.state.duct.stored_energy_j())
-            .max(pressure_scale * volume_scale)
-            .max(numerics.absolute_energy_tolerance_j);
-        let coordinate_scale = energy_scale.sqrt();
-        let impulse_scale = pressure_scale * dt;
-        let atol = (numerics.absolute_energy_tolerance_j / energy_scale)
-            .min(numerics.absolute_volume_tolerance_m3 / volume_scale)
-            .min(numerics.absolute_pressure_tolerance_pa / pressure_scale);
-        if !positive(energy_scale)
-            || !positive(impulse_scale)
-            || !positive(atol)
-            || numerics.absolute_volume_tolerance_m3 >= volume_scale
-        {
-            return Err(DuctCavityError::InvalidInput(
-                "numerical scales overflow or cannot resolve the admitted cavity",
-            ));
-        }
-        let mut y: Vec<_> = original.iter().map(|x| x / coordinate_scale).collect();
-        y.extend([self.state.volume_m3 / volume_scale, 0.0, 0.0, 0.0]);
-        let mut integration =
-            AdaptiveState::new(self.state.time_s, &y, numerics.maximum_step_s.min(dt));
-        let mut mode = self.state.mode;
-        let mut rupture_events = 0;
-        let mut collapse_events = 0;
-        let mut last_rupture_time_s = None;
-        let mut last_collapse_time_s = None;
-        let options = EventOptions {
-            direction: EventDirection::Falling,
-            initial: InitialEvent::Ignore,
-            max_step: numerics.maximum_step_s,
-            scan_substeps: numerics.event_scan_substeps,
-            time_tolerance: numerics.event_time_tolerance_s,
-            max_iterations: 128,
-        };
-        let pi = PiController::default();
-        while integration.t < end_time_s {
-            if cancelled() {
-                return Err(DuctCavityError::Cancelled);
-            }
-            let attempts = integration
-                .accepted
-                .checked_add(integration.rejected)
-                .ok_or(DuctCavityError::AttemptLimit)?;
-            if attempts >= numerics.maximum_attempts {
-                return Err(DuctCavityError::AttemptLimit);
-            }
-            let failure = RefCell::new(None);
-            let rhs = |_: f64, u: &[f64], out: &mut [f64]| {
-                multiply(generator, &u[..n], &mut out[..n]);
-                let inflow = if mode == DuctCavityMode::VaporCavity {
-                    -coordinate_scale * dot(column, &out[..n]) / column_norm
-                } else {
-                    0.0
-                };
-                let pressure = coordinate_scale * dot(column, &u[..n]);
-                let domain = self
-                    .admit_field(
-                        &u[..n],
-                        coordinate_scale,
-                        numerics.absolute_pressure_tolerance_pa,
-                        mode == DuctCavityMode::LiquidFilled,
-                    )
-                    .and_then(|()| {
-                        if (inflow / (self.port_area_m2 * self.material.liquid_sound_speed_m_s()))
-                            .abs()
-                            > self.limits.maximum_interface_mach
-                        {
-                            return Err(DuctCavityError::OutsideDomain(
-                                "interface speed exceeds declared liquid Mach limit",
-                            ));
-                        }
-                        if u[n] * volume_scale > self.limits.maximum_cavity_volume_m3 {
-                            return Err(DuctCavityError::OutsideDomain(
-                                "cavity exceeds the fixed-column volume limit",
-                            ));
-                        }
-                        if mode == DuctCavityMode::VaporCavity
-                            && (self.limits.reference_pressure_pa + pressure - vapor).abs()
-                                > numerics.absolute_pressure_tolerance_pa
-                        {
-                            return Err(DuctCavityError::RootResolution(
-                                "active pressure is outside the vapor-pressure root tolerance",
-                            ));
-                        }
-                        Ok(())
-                    });
-                if let Err(error) = domain {
-                    if failure.borrow().is_none() {
-                        *failure.borrow_mut() = Some(error);
-                    }
-                    out.fill(f64::NAN);
-                    return;
-                }
-                for (value, b) in out[..n].iter_mut().zip(column) {
-                    *value += b * (inflow / coordinate_scale);
-                }
-                out[n] = inflow / volume_scale;
-                out[n + 1] = pressure / impulse_scale;
-                out[n + 2] = pressure * inflow / energy_scale;
-                out[n + 3] = quadratic_loss(generator, &u[..n]);
-            };
-            let guard = |_: f64, u: &[f64]| {
-                if mode == DuctCavityMode::VaporCavity {
-                    u[n]
-                } else {
-                    (self.limits.reference_pressure_pa + coordinate_scale * dot(column, &u[..n])
-                        - vapor)
-                        / pressure_scale
-                }
-            };
-            let start = integration.t;
-            let result = rk45_until_event(
-                &mut integration,
-                &rhs,
-                &guard,
-                end_time_s,
-                numerics.relative_tolerance,
-                atol,
-                &pi,
-                numerics.maximum_attempts - attempts,
-                &options,
-                &mut || cancelled(),
-            );
-            if let Some(error) = failure.into_inner() {
-                return Err(error);
-            }
-            match result? {
-                EventAdvance::Stopped(report) => match report.status {
-                    AdaptiveStatus::ReachedEnd => break,
-                    AdaptiveStatus::StepLimit => return Err(DuctCavityError::AttemptLimit),
-                    AdaptiveStatus::Cancelled => return Err(DuctCavityError::Cancelled),
-                },
-                EventAdvance::Event(_) => {
-                    if integration.t <= start {
-                        return Err(DuctCavityError::RootResolution(
-                            "a distinct contact time could not be represented",
-                        ));
-                    }
-                    if rupture_events + collapse_events >= numerics.maximum_events {
-                        return Err(DuctCavityError::EventLimit);
-                    }
-                    let mut derivative = vec![0.0; n];
-                    multiply(generator, &integration.u[..n], &mut derivative);
-                    let constrained_flow =
-                        -coordinate_scale * dot(column, &derivative) / column_norm;
-                    if mode == DuctCavityMode::VaporCavity {
-                        if (integration.u[n] * volume_scale).abs()
-                            > numerics.absolute_volume_tolerance_m3
-                            || constrained_flow >= 0.0
-                        {
-                            return Err(DuctCavityError::RootResolution(
-                                "collapse root or direction is unresolved",
-                            ));
-                        }
-                        collapse_events += 1;
-                        last_collapse_time_s = Some(integration.t);
-                        mode = DuctCavityMode::LiquidFilled;
-                    } else {
-                        let gap = self.limits.reference_pressure_pa
-                            + coordinate_scale * dot(column, &integration.u[..n])
-                            - vapor;
-                        if gap.abs() > numerics.absolute_pressure_tolerance_pa
-                            || constrained_flow <= 0.0
-                        {
-                            return Err(DuctCavityError::RootResolution(
-                                "rupture root or direction is unresolved",
-                            ));
-                        }
-                        rupture_events += 1;
-                        last_rupture_time_s = Some(integration.t);
-                        mode = DuctCavityMode::VaporCavity;
-                    }
-                }
-            }
-        }
-        let volume = integration.u[n] * volume_scale;
-        let endpoint: Vec<_> = integration.u[..n]
-            .iter()
-            .map(|x| x * coordinate_scale)
-            .collect();
-        let pressure = self.limits.reference_pressure_pa + dot(column, &endpoint);
-        if volume < -numerics.absolute_volume_tolerance_m3
-            || volume > self.limits.maximum_cavity_volume_m3
-            || (mode == DuctCavityMode::LiquidFilled
-                && (volume.abs() > numerics.absolute_volume_tolerance_m3
-                    || pressure < vapor - numerics.absolute_pressure_tolerance_pa))
-            || (mode == DuctCavityMode::VaporCavity
-                && (pressure - vapor).abs() > numerics.absolute_pressure_tolerance_pa)
-        {
-            return Err(DuctCavityError::RootResolution(
-                "endpoint complementarity is outside numerical root bounds",
-            ));
-        }
-        let loss = integration.u[n + 3] * energy_scale;
-        let receipt = DgTrajectoryPort {
-            id: self.port,
-            pressure_impulse_pa_s: integration.u[n + 1] * impulse_scale,
-            work_into_duct_j: integration.u[n + 2] * energy_scale,
-        };
-        let (candidate, duct_report) = view.candidate_from_trajectory(
-            &self.state.duct,
-            endpoint.clone(),
-            dt,
-            &[receipt],
-            loss,
-            numerics.absolute_energy_tolerance_j,
-            numerics.relative_tolerance,
-        )?;
-        let potential = (self.limits.reference_pressure_pa - vapor) * volume;
-        let before = self.state.duct.stored_energy_j()
-            + (self.limits.reference_pressure_pa - vapor) * self.state.volume_m3;
-        let total = candidate.stored_energy_j() + potential;
-        let residual = total - before + loss;
-        let energy_tolerance = numerics.absolute_energy_tolerance_j
-            + numerics.relative_tolerance * (total.abs() + before.abs() + loss.abs());
-        if !residual.is_finite() || residual.abs() > energy_tolerance {
-            return Err(DuctCavityError::EnergyBalance);
-        }
-        let mut derivative = vec![0.0; n];
-        multiply(generator, &endpoint, &mut derivative);
-        let inflow = if mode == DuctCavityMode::VaporCavity {
-            -dot(column, &derivative) / column_norm
-        } else {
-            0.0
-        };
-        let report = DuctCavityStep {
-            duct: duct_report,
-            mode,
-            end_absolute_pressure_pa: pressure,
-            end_inflow_m3_s: inflow,
-            cavity_volume_m3: volume,
-            displaced_liquid_volume_m3: volume - self.state.volume_m3,
-            cavity_potential_j: potential,
-            total_stored_energy_j: total,
-            energy_balance_residual_j: residual,
-            rupture_events,
-            collapse_events,
-            last_rupture_time_s,
-            last_collapse_time_s,
-            accepted_substeps: integration.accepted,
-            rejected_substeps: integration.rejected,
-        };
-        if cancelled() {
-            return Err(DuctCavityError::Cancelled);
-        }
-        self.state = DuctCavityState {
-            duct: candidate,
-            time_s: end_time_s,
-            volume_m3: volume,
-            mode,
-        };
-        Ok(report)
+        let report = self.inner.advance(end_time_s, numerics, cancelled)?;
+        let pocket = report.pockets[0];
+        Ok(DuctCavityStep {
+            duct: report.duct,
+            mode: pocket.mode,
+            end_absolute_pressure_pa: pocket.end_absolute_pressure_pa,
+            end_inflow_m3_s: pocket.end_inflow_m3_s,
+            cavity_volume_m3: pocket.volume_m3,
+            displaced_liquid_volume_m3: pocket.displaced_liquid_volume_m3,
+            cavity_potential_j: report.cavity_potential_j,
+            total_stored_energy_j: report.total_stored_energy_j,
+            energy_balance_residual_j: report.energy_balance_residual_j,
+            rupture_events: pocket.rupture_events,
+            collapse_events: pocket.collapse_events,
+            last_rupture_time_s: pocket.last_rupture_time_s,
+            last_collapse_time_s: pocket.last_collapse_time_s,
+            accepted_substeps: report.accepted_substeps,
+            rejected_substeps: report.rejected_substeps,
+        })
     }
 }
 

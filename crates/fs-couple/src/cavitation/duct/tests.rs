@@ -260,7 +260,7 @@ fn cancellation_attempt_limit_and_domain_failure_are_atomic() {
         DuctCavityError::AttemptLimit
     );
     assert_eq!(model.state(), &before);
-    model.limits.maximum_cavity_volume_m3 = 1.001e-8;
+    model.inner.limits.maximum_cavity_volume_m3 = 1.001e-8;
     assert!(matches!(
         model.advance(1e-3, &numerics(), &mut || false),
         Err(DuctCavityError::OutsideDomain(_))
