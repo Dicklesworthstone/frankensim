@@ -22,10 +22,12 @@ use fs_thermochem::kinetics::{
 };
 use fs_thermochem::{Nasa9EvaluationReceiptV1, SpeciesId};
 
-mod prepared;
-mod solve;
 /// Source-bound frozen-population electron/heavy energy evolution.
 pub mod energy;
+/// Source-bound two-temperature atomic ionization and three-body recombination.
+pub mod ionization;
+mod prepared;
+mod solve;
 
 pub use prepared::{IsochoricKineticsView, IsochoricReactor};
 

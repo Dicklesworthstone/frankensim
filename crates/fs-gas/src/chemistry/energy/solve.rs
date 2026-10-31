@@ -1,5 +1,56 @@
 use super::*;
 
+/// Original-population sensible energy change and heat capacity for one pool.
+pub(in crate::chemistry) fn source_pool_calorics(
+    initial: &FrozenIonizedGasStateV1,
+    electrons: bool,
+    temperature: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(f64, f64), ElectronHeavyEnergyError> {
+    let t = Temperature::new(temperature);
+    let reference = if electrons {
+        initial.electron_temperature()
+    } else {
+        initial.heavy_temperature()
+    };
+    let mut energy = Sum::default();
+    let mut cv = Sum::default();
+    for (i, (amount, model)) in initial
+        .amounts()
+        .iter()
+        .zip(initial.thermodynamics().models())
+        .enumerate()
+    {
+        if amount.value() == 0.0 || (Some(i) == initial.electron_index()) != electrons {
+            continue;
+        }
+        poll(cancelled)?;
+        let error = |source| ElectronHeavyEnergyError::Species {
+            species: model.species().clone(),
+            source,
+        };
+        let increment = model
+            .molar_internal_energy_change(reference, t)
+            .map_err(error)?
+            .value();
+        let capacity = model.evaluate_properties(t).map_err(error)?.cp().value() - R;
+        energy.add(amount.value() * increment);
+        cv.add(amount.value() * capacity);
+    }
+    let has_electrons = initial
+        .electron_index()
+        .is_some_and(|i| initial.amounts()[i].value() > 0.0);
+    if !energy.value.is_finite()
+        || !cv.value.is_finite()
+        || (cv.value <= 0.0 && (!electrons || has_electrons))
+    {
+        return Err(ElectronHeavyEnergyError::Arithmetic(
+            "source pool sensible energy or heat capacity",
+        ));
+    }
+    Ok((energy.value, cv.value))
+}
+
 #[derive(Clone, Copy)]
 pub(super) struct Point {
     pub time: f64,
@@ -140,48 +191,7 @@ impl<'a> Problem<'a> {
         temperature: f64,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(f64, f64), ElectronHeavyEnergyError> {
-        let t = Temperature::new(temperature);
-        let reference = if pool == 1 {
-            self.initial.electron_temperature()
-        } else {
-            self.initial.heavy_temperature()
-        };
-        let mut energy = Sum::default();
-        let mut cv = Sum::default();
-        for (i, (amount, model)) in self
-            .initial
-            .amounts()
-            .iter()
-            .zip(self.initial.thermodynamics().models())
-            .enumerate()
-        {
-            if amount.value() == 0.0
-                || usize::from(Some(i) == self.initial.electron_index()) != pool
-            {
-                continue;
-            }
-            poll(cancelled)?;
-            let error = |source| ElectronHeavyEnergyError::Species {
-                species: model.species().clone(),
-                source,
-            };
-            let increment = model
-                .molar_internal_energy_change(reference, t)
-                .map_err(error)?
-                .value();
-            let capacity = model.evaluate_properties(t).map_err(error)?.cp().value() - R;
-            energy.add(amount.value() * increment);
-            cv.add(amount.value() * capacity);
-        }
-        if !energy.value.is_finite()
-            || !cv.value.is_finite()
-            || (cv.value <= 0.0 && (pool == 0 || self.has_electrons))
-        {
-            return Err(ElectronHeavyEnergyError::Arithmetic(
-                "source pool sensible energy or heat capacity",
-            ));
-        }
-        Ok((energy.value, cv.value))
+        source_pool_calorics(self.initial, pool == 1, temperature, cancelled)
     }
 
     fn invert(
