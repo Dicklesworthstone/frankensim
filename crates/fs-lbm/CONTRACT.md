@@ -171,6 +171,40 @@ source-solid subtotals and G0/G4 source-domain/cancellation refusal checks.
 These are regression definitions; source inspection and parsing do not establish
 an executed native validation result.
 
+### Compact junctions in source-caloric transient conduction
+
+The source-caloric fluid, source-integral solid, and joint fluid/solid native
+marches accept compact components with an authored positive
+`heat_capacity_j_k`. Each nonlinear trial keeps that capacity in one appended
+junction row of the original backward-Euler solve. Collapsed voxel aliases
+have exactly zero cell capacity and are excluded from source-material queries,
+source-integral storage, and source-solid energy subtotals. Ordinary cells still
+require their original material assignment. The resolved-field operator admits
+omitted material slots only for validated compact aliases; it does not create
+placeholder material laws or relabel the domain.
+
+The total native heat record includes actual fluid and resolved-solid enthalpy
+increments plus exactly one `Cj * delta(Tj)` per junction. Prescribed-cell
+reservoirs still supply their own actual source-law storage jumps. The shared
+source schedule also scales junction power from the authored value each step.
+The source-solid-only record and `solid_energy_j` continue to describe resolved
+source solids, excluding compact storage. Junction temperatures participate in
+the common endpoint temperature-convergence check; positive source secants,
+local enthalpy defects, source support, cancellation and work budgets retain
+their existing admission.
+
+This remains a single isothermal junction with constant authored capacity, not
+a package-internal temperature field or a nonlinear junction enthalpy model.
+The separate radiation geometry still requires declared surface-material
+slots; omitted bulk slots do not supply emissivity or imply radiating compact
+surfaces. No material source, latent heat, or variable mass is inferred.
+
+`tests/material_unsteady_buoyancy/compact_caloric.rs` defines independent G1/G3
+quadratic heating/cooling and reservoir balances, unequal-area alias ownership,
+source-solid subtotals and G0/G4 source-domain/cancellation refusal checks.
+These are regression definitions; source inspection and parsing do not establish
+an executed native validation result.
+
 ### Source calorimetry in native unsteady material convection
 
 `SolidConductivityLaw::with_heat_storage` prepares the original selected Cp(T)
