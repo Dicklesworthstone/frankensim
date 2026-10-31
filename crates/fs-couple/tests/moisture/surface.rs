@@ -64,7 +64,7 @@ fn emission(values: [f64; 2], upper: f64) -> DryBasisSurfaceTransfer {
     DryBasisSurfaceTransfer::new(card, point, MaterialPropertySelection::SingleClaimOnly).unwrap()
 }
 
-fn law(h: [f64; 2]) -> DryBasisSorption {
+pub(super) fn law(h: [f64; 2]) -> DryBasisSorption {
     atmosphere::sorption(0.25)
         .with_surface_transfer(emission(h, 1.0))
         .unwrap()

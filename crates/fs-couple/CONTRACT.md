@@ -17527,6 +17527,50 @@ interpolation filter. It adds no causal vector receiver, measured capsule respon
 molecular absorption, finite-baffle/room scattering or reciprocal radiation load,
 and does not close the wider M2.6-W1 work item.
 
+## Three-dimensional principal-axis moisture transport and swelling
+
+`moisture::cartesian::MoistureCartesian` evolves dry-basis bound moisture on
+actual uniform Cartesian reference volumes. Its three explicitly assigned
+source diffusivities are the diagonal principal values aligned with the named
+grid frame. Repeating a source key explicitly assigns the same value to multiple
+axes; no isotropy or rotated tensor is inferred. The shared slab/grid binding
+admits typed absolute temperature and dry-mass moisture, pins original material
+claims, and obtains dry density only from the reference wet density divided by
+`1 + reference_moisture`. Dry skeleton mass stays fixed.
+
+Every internal face uses a symmetric harmonic series conductance. External
+faces, in -x,+x,-y,+y,-z,+z order, use the original prescribed-moisture, sorption
+and finite surface-emission laws, including half-cell diffusion resistance.
+Each cell stores water once even at edges/corners or when an axis has one cell.
+The seven-point matrix and Jacobi preconditioner require O(N) storage and work
+per application; the original checked-CG owner performs each bounded Picard
+solve. Endpoint source refresh and an independent Euclidean equation residual
+must pass alongside the water budget computed from those same endpoint face
+fluxes. All source/domain, maximum-principle, increment, work and cancellation
+refusals leave the accepted field unchanged. Actual interface moisture is also
+re-admitted by the original source. Reports retain cell and surface source
+states, six physical transfers and native linear/nonlinear work separately.
+
+`MoistureSolid::from_cartesian`, `resolve_cartesian` and `advance_cartesian`
+map each original moisture cell to six conforming tetrahedra in the complete
+3D lattice. They use the existing local elasticity, integrated directional
+swelling, compatible displacement, stress, geometry and prestressed wet-inertia
+owners without averaging through thickness or across width. The grid and solid
+mesh frame must agree. A mechanical refusal discards the combined endpoint.
+
+Focused authored regressions cover a separable three-axis anisotropic Neumann
+eigenmode, all six single-cell boundary transfers, finite-emission and
+impermeable source faces, nonlinear endpoint diffusion
+and bounded refusal, reduction to the original slab, and through-thickness
+uptake driving local native swelling and compatible shape. These are numerical
+and source-contract tests, not measured-wood validation. The time method remains
+first-order backward Euler; CG convergence is not a spatial/time error estimate.
+The spatial owner remains homogeneous, isothermal and fixed-reference, with
+principal axes aligned to the grid. It does not add unlike-material partition
+laws, arbitrary tensor rotation, finite vapor/solution coupling, sorption heat,
+stress-assisted diffusion, hysteresis or finite-deformation transport, and does
+not close the broader MR46 measured-material acceptance item.
+
 ## Complete modal reflection admission
 
 MatrixFirLine's wall-normalized pressure waves all use the same positive real

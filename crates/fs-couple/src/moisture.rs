@@ -11,14 +11,19 @@
 //!
 //! Transport uses fixed reference dry-skeleton volumes and dilute bound moisture.
 //! The solid consumer resolves quasistatic swelling in that reference chart.
-//! Sorption heat, stress-assisted diffusion, free liquid, hysteresis and
-//! transverse transport are not modeled. Ordinary surface conditions are
+//! The slab has no transverse transport; `cartesian` supplies three-dimensional
+//! principal-axis diffusion and the same source-bound native solid mechanics.
+//! Sorption heat, stress-assisted diffusion, free liquid and hysteresis are not
+//! modeled. Ordinary surface conditions are
 //! infinite reservoirs; `atmosphere` instead balances an actual finite vapor
 //! inventory against this same diffusion owner. The plate consumer retains the
 //! fixed geometry and rebuilds actual stiffness AND wet inertia.
 
 /// Finite vapor inventory, source sorption and the original diffusion endpoint.
 pub mod atmosphere;
+mod binding;
+/// Three-dimensional principal-axis transport on actual Cartesian finite volumes.
+pub mod cartesian;
 mod implicit;
 pub mod plate;
 /// Directional swelling, compatible shape, stress and native vibration tangent.
@@ -76,6 +81,13 @@ pub enum MoistureError {
     Tridiagonal(fs_la::tridiagonal::TridiagonalError),
     /// Endpoint-dependent diffusion failed its nonlinear residual or water budget.
     NonlinearNotConverged(MoistureNonlinearReport),
+    /// Spatial endpoint-dependent transport exhausted its explicit work budget.
+    SpatialNotConverged {
+        iterations: usize,
+        linear_iterations: usize,
+        relative_residual: f64,
+        water_balance_residual_kg: f64,
+    },
     /// Sum of stored water did not match the two measured boundary transfers.
     MassBalance { residual_kg: f64, tolerance_kg: f64 },
     /// No endpoint is published after cancellation.
@@ -221,7 +233,8 @@ pub struct MoistureSlabGeometry {
 /// Explicit linear work, conservation and step-admission limits.
 #[derive(Clone, Copy, Debug)]
 pub struct MoistureStepConfig {
-    /// Native checked-CG controls for the lagged scheme. In implicit mode,
+    /// Native checked-CG controls for the lagged slab and Cartesian schemes.
+    /// In the slab's implicit mode,
     /// tolerance is the true linear residual target, max_iterations bounds
     /// tridiagonal solves per Picard iteration, and max_corrections bounds
     /// additional defect solves using the same factorization.
@@ -316,93 +329,17 @@ impl MoistureSlab {
                 "bounded nonempty cells, positive geometry/domain and a distinct diffusivity key required",
             ));
         }
-        if reference_point.axis_quantities().get("temperature")
-            != Some(&quantity(QuantityKind::AbsoluteTemperature))
-            || reference_point.axis_quantities().get("moisture_content")
-                != Some(&quantity(QuantityKind::Moisture(MoistureBasis::DryMass)))
-        {
-            return Err(MoistureError::Invalid(
-                "absolute temperature and dry-mass moisture coordinates required",
-            ));
-        }
-        let temperature = reference_point
-            .axes()
-            .get("temperature")
-            .copied()
-            .unwrap_or(f64::NAN);
-        let reference_content = reference_point
-            .axes()
-            .get("moisture_content")
-            .copied()
-            .unwrap_or(f64::NAN);
-        if reference_point.axes().contains_key("T")
-            || reference_point.axis_quantities().iter().any(|(axis, q)| {
-                (axis != "temperature" && *q == quantity(QuantityKind::AbsoluteTemperature))
-                    || (axis != "moisture_content"
-                        && *q == quantity(QuantityKind::Moisture(MoistureBasis::DryMass)))
-            })
-        {
-            return Err(MoistureError::Invalid(
-                "duplicate physical temperature/moisture coordinates are unsupported",
-            ));
-        }
-        if !positive(temperature)
-            || !reference_content.is_finite()
-            || reference_content < 0.0
-            || reference_content > geometry.maximum_moisture
-            || initial_moisture
-                .iter()
-                .any(|m| !m.is_finite() || *m < 0.0 || *m > geometry.maximum_moisture)
+        if initial_moisture.iter()
+            .any(|m| !m.is_finite() || *m < 0.0 || *m > geometry.maximum_moisture)
         {
             return Err(MoistureError::Invalid(
                 "initial/reference moisture outside declared bound-water domain",
             ));
         }
-        let d = ScalarPropertyRequirement::try_new(
-            diffusivity_property,
-            MOISTURE_DIFFUSIVITY_DIMS,
-            ScalarAdmissibility::StrictlyPositive,
+        let (reference, transport, dry_density_kg_m3) = binding::bind_source(
+            &card, &reference_point, &[diffusivity_property], selection,
+            geometry.maximum_moisture,
         )?;
-        let density = ScalarPropertyRequirement::try_new(
-            "density",
-            Density::DIMS,
-            ScalarAdmissibility::StrictlyPositive,
-        )?;
-        let reference = resolve_material_state_point(
-            &card,
-            &reference_point,
-            &[density, d.clone()],
-            selection,
-        )?;
-        if reference
-            .properties()
-            .iter()
-            .any(|p| !p.is_static_at_fixed_external_conditions())
-        {
-            return Err(MoistureError::Invalid(
-                "transport and reference density need static environmental sources",
-            ));
-        }
-        let selected = reference
-            .property(diffusivity_property)
-            .expect("required diffusivity")
-            .answer()
-            .receipt
-            .selected;
-        let transport = resolve_material_state_point(
-            &card,
-            &reference_point,
-            &[d],
-            MaterialPropertySelection::PinnedByProperty(vec![(
-                diffusivity_property.into(),
-                selected,
-            )]),
-        )?;
-        let dry_density_kg_m3 = reference
-            .property("density")
-            .expect("required density")
-            .value_si()
-            / (1.0 + reference_content);
         let dry_mass_per_cell_kg =
             dry_density_kg_m3 * geometry.cross_section_m2 * (geometry.length_m / n as f64);
         if !positive(dry_density_kg_m3)
@@ -480,6 +417,17 @@ impl MoistureSlab {
     /// Reference material resolution, including the actual reference wet density.
     pub const fn reference(&self) -> &ResolvedMaterialStatePoint {
         &self.reference
+    }
+
+    fn field(&self) -> binding::MoistureField<'_> {
+        binding::MoistureField {
+            card: &self.card,
+            reference: &self.reference,
+            moisture: &self.moisture,
+            dry_mass_per_cell_kg: self.dry_mass_per_cell_kg,
+            time_s: self.time_s,
+            identity: self.identity,
+        }
     }
 
     /// Resolve moisture-dependent diffusivity at each backward-Euler endpoint.

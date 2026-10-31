@@ -1,6 +1,6 @@
 //! Local transported moisture drives actual three-dimensional small-strain shape.
 //!
-//! One reference prism strip per moisture cell is tessellated into six native
+//! One reference prism or Cartesian box per moisture cell is tessellated into six native
 //! tetrahedra. Each cell's selected E/nu or orthotropic tensor and three source
 //! swelling derivatives are evaluated at its own moisture. The original solid
 //! owner computes compatible displacement, constraint reactions, stored elastic
@@ -14,6 +14,9 @@
 //! hysteresis, finite deformation and dynamic mode-state remapping are separate.
 
 use super::*;
+#[path = "solid/cartesian.rs"]
+mod cartesian;
+pub use cartesian::MoistureCartesianSolidStep;
 use fs_material::state_point::{
     IntegratedOrthotropicHygroscopicExpansion, integrate_orthotropic_hygroscopic_expansion,
 };
@@ -223,8 +226,28 @@ impl MoistureSolid {
             }
             reference_cell_volumes_m3.push(volume);
         }
-        let point = slab.reference.query();
-        let elastic = stiffness.resolve(slab.card(), &point, elastic_selection)?;
+        Self::bind_mesh(
+            slab.field(), nodes_m, tetrahedra, reference_cell_volumes_m3,
+            stiffness, elastic_selection, expansion_selection, axes, fixed_dofs, controls, cx,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn bind_mesh(
+        field: binding::MoistureField<'_>,
+        nodes_m: Vec<[f64; 3]>,
+        tetrahedra: Vec<[usize; 4]>,
+        reference_cell_volumes_m3: Vec<f64>,
+        stiffness: SolidStiffnessModel,
+        elastic_selection: MaterialPropertySelection,
+        expansion_selection: MaterialPropertySelection,
+        axes: HygroscopicAxes,
+        fixed_dofs: Vec<usize>,
+        controls: MoistureSolidControls,
+        cx: &Cx<'_>,
+    ) -> Result<Self, MoistureError> {
+        let point = field.reference.query();
+        let elastic = stiffness.resolve(field.card, &point, elastic_selection)?;
         if elastic
             .properties()
             .iter()
@@ -235,7 +258,7 @@ impl MoistureSolid {
             ));
         }
         let expansion = integrate_orthotropic_hygroscopic_expansion(
-            slab.card(),
+            field.card,
             &point,
             &point,
             expansion_selection,
@@ -254,7 +277,7 @@ impl MoistureSolid {
                 .collect(),
         );
         let result = Self {
-            definition: slab.definition_identity(),
+            definition: field.identity,
             nodes_m,
             tetrahedra,
             reference_cell_volumes_m3,
@@ -265,10 +288,11 @@ impl MoistureSolid {
             axes,
             controls,
         };
-        result.resolve(slab, cx)?;
+        result.resolve_field(field, cx)?;
         Ok(result)
     }
-    /// Original reference vertices; each x plane has four yz corners.
+    /// Original reference vertices. Slabs have four yz corners per x plane;
+    /// Cartesian fields use their complete x-fastest lattice of grid corners.
     pub fn reference_nodes_m(&self) -> &[[f64; 3]] {
         &self.nodes_m
     }
@@ -285,32 +309,40 @@ impl MoistureSolid {
         slab: &MoistureSlab,
         cx: &Cx<'_>,
     ) -> Result<MoistureSolidState, MoistureError> {
+        self.resolve_field(slab.field(), cx)
+    }
+
+    fn resolve_field(
+        &self,
+        field: binding::MoistureField<'_>,
+        cx: &Cx<'_>,
+    ) -> Result<MoistureSolidState, MoistureError> {
         poll(cx)?;
-        if slab.definition_identity() != self.definition {
+        if field.identity != self.definition {
             return Err(MoistureError::Invalid(
                 "solid requires its original moisture card, datum and inventory",
             ));
         }
-        let mut elastic = Vec::with_capacity(slab.moisture.len());
-        let mut expansion = Vec::with_capacity(slab.moisture.len());
+        let mut elastic = Vec::with_capacity(field.moisture.len());
+        let mut expansion = Vec::with_capacity(field.moisture.len());
         let mut materials = Vec::with_capacity(self.tetrahedra.len());
         let mut strains = Vec::with_capacity(self.tetrahedra.len());
         let mut element_mass_kg = Vec::with_capacity(self.tetrahedra.len());
-        for (i, &m) in slab.moisture.iter().enumerate() {
+        for (i, &m) in field.moisture.iter().enumerate() {
             poll(cx)?;
-            let point = slab.point_at(m)?;
-            let state = self.elastic.at_query_point(slab.card(), &point)?;
+            let point = field.point_at(m)?;
+            let state = self.elastic.at_query_point(field.card, &point)?;
             let path = integrate_orthotropic_hygroscopic_expansion(
-                slab.card(),
-                &slab.reference.query(),
+                field.card,
+                &field.reference.query(),
                 &point,
                 self.expansion_selection.clone(),
             )?;
-            let mass = slab.dry_mass_per_cell_kg * (1. + m);
+            let mass = field.dry_mass_per_cell_kg * (1. + m);
             let density = mass / self.reference_cell_volumes_m3[i];
             let mut hash =
                 DomainHasher::new("org.frankensim.fs-couple.moisture-solid-local-state.v1");
-            hash.update(slab.definition_identity().as_bytes());
+            hash.update(field.identity.as_bytes());
             hash.update(state.identity().as_bytes());
             hash.update(&(i as u64).to_le_bytes());
             hash.update(&mass.to_bits().to_le_bytes());
@@ -345,9 +377,9 @@ impl MoistureSolid {
             fixed_dofs: &self.fixed_dofs,
             budget: self.controls.assembly,
         };
-        let field = TetEigenstrainField::PerElement(&strains);
+        let eigenstrain = TetEigenstrainField::PerElement(&strains);
         let solution =
-            problem.solve_eigenstrain_displacement(field, self.controls.equilibrium, cx)?;
+            problem.solve_eigenstrain_displacement(eigenstrain, self.controls.equilibrium, cx)?;
         let geometry = problem.update_geometry_from_displacement(
             &solution,
             self.controls.maximum_nodal_displacement_m,
@@ -358,7 +390,7 @@ impl MoistureSolid {
         } else {
             Some(problem.assemble_eigenstrain_tangent(
                 &solution,
-                field,
+                eigenstrain,
                 self.axes.mesh_frame,
                 self.controls.maximum_absolute_mandel_strain,
                 cx,
@@ -368,7 +400,7 @@ impl MoistureSolid {
             Some(t) => t.stress().clone(),
             None => problem.recover_eigenstrain_stress(
                 &solution,
-                field,
+                eigenstrain,
                 self.axes.mesh_frame,
                 self.controls.maximum_absolute_mandel_strain,
                 cx,
@@ -385,7 +417,7 @@ impl MoistureSolid {
             }
             current_density_kg_m3.push(density);
         }
-        let wet_mass_kg = slab.wet_mass_kg();
+        let wet_mass_kg = field.wet_mass_kg();
         let native_mass = tangent.as_ref().map_or_else(
             || element_mass_kg.iter().sum(),
             |t| t.pencil().total_mass_kg,
@@ -399,7 +431,7 @@ impl MoistureSolid {
         }
         poll(cx)?;
         Ok(MoistureSolidState {
-            time_s: slab.time_s(),
+            time_s: field.time_s,
             elastic,
             expansion,
             materials,

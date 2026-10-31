@@ -28,6 +28,8 @@ mod surface;
 mod solution;
 #[path = "moisture/implicit.rs"]
 mod implicit;
+#[path = "moisture/cartesian.rs"]
+mod cartesian;
 
 fn qty(kind: QuantityKind) -> QuantitySpec {
     QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static))
