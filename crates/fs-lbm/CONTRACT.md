@@ -3850,6 +3850,48 @@ closed single-phase Boussinesq/Stokes restrictions and introduces no additional
 solver, state clock or gravitational-potential reservoir. Its actual entry tests
 cover material source identity, bounded support and data-only coupled response.
 
+### Implicit material flow closes on the thermal endpoint
+
+With the existing `implicit-enthalpy-coupling` feature,
+`MaterialFlowFeedback<..., (), ...>::step_implicit` closes one stationary
+Stokes/material/enthalpy interval through the ORIGINAL
+`BackwardEulerStep::evaluate_with_transport` residual and existing
+`NewtonKrylovState`. Unknowns are cell-energy increments in stable CellId order.
+Every trial starts from a clone of the same accepted material blueprint and
+resolves actual h/T, phase/mushy/porous response, optional quasisteady source
+rheology, native flow and physical power. The same endpoint's face mass fluxes
+reach `Advected::endpoint_transport`; directed donor enthalpy is not replaced
+by a symmetric conductance. Assigned fluid-face conductance uses the same
+accepted source samples. The original caloric law retains latent storage.
+
+Native Stokes work is bounded across all Newton, numerical-Jacobian,
+line-search and final acceptance evaluations by the original `max_solves`.
+Caller-declared joule difference scale and nonlinear controls are explicit;
+these are numerical Jacobian actions, not analytic tangents or adjoints.
+Source-domain refusal latches and terminates the nonlinear attempt. No failed
+trial, source, coefficient or diagnostic is published as physical history.
+Local and global native thermal residual gates are independently rechecked.
+
+Only the converged endpoint's molecular/Darcy/Forchheimer heat enters the
+native thermal update, once. The existing physical-power owner integrates the
+matching wall/reservoir/body supply over that same duration. Net open-stream
+enthalpy and independently evaluated authored heat/boundary supply remain
+separate report accounts. Internal transfer cancels. Combined actual storage
+minus these external supplies must also close. Target-time events stay pending;
+events inside the frozen interval refuse through the original thermal owner.
+
+This entry requires the existing Stokes heating mode and an empty wrapped
+observer. Retained momentum, buoyancy and mutable observer histories remain
+outside its domain. It returns an accepted thermal state plus endpoint report,
+not an explicit-start observer history; subsequent calls reuse that thermal
+state and the same material blueprint. No explicit advective/conductive CFL
+is imposed, but time/space/Jacobian/constitutive refinement remains necessary.
+No uniqueness, unconditional nonlinear convergence, inertial/free-surface
+flow, moving skeleton or full melt-shape prediction is claimed. Focused native
+regressions compare analytic thermal/rate-flow roots, pressure-driven donor
+and conductive exchange, latent mobility, constant-source behavior, shared
+work budgets, source refusal and deterministic cancellation/retry.
+
 ### Quasisteady source rheology closes native pressure flow and heat
 
 `MaterialFlowFeedback::with_quasisteady_rheology` and the original pinned

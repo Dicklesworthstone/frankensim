@@ -38,6 +38,10 @@ pub mod mhd;
 /// Finite source-backed gas storage exchanging heat with the same phase/flow cells.
 pub mod environment;
 
+/// Closed endpoint flow/material/heat feedback through the native thermal residual.
+#[cfg(feature = "implicit-enthalpy-coupling")]
+pub mod implicit;
+
 /// Material response to the accepted native symmetric-strain invariant.
 pub mod rheology;
 use rheology::RheologyBinding;
