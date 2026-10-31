@@ -605,11 +605,6 @@ impl<'a> ThermoplasticSource<'a> {
         if self.overstress.is_some() {
             return Err(FeedbackError::Invalid("an overstress law is already selected"));
         }
-        if self.voce.is_some() {
-            return Err(FeedbackError::Invalid(
-                "combined Voce saturation and overstress require a shared return map",
-            ));
-        }
         let mut roles = vec![(OVERSTRESS_VISCOSITY_PROPERTY, OVERSTRESS_VISCOSITY_DIMS)];
         if model == OverstressSelection::PowerLaw {
             roles.push((OVERSTRESS_STRESS_SCALE_PROPERTY, Dims([-1, 1, -2, 0, 0, 0])));

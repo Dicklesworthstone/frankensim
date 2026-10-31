@@ -229,7 +229,8 @@ impl<'a> ThermoplasticSolid<'a> {
     ///
     /// Equilibrium, retained J2 history, reversible coefficient work and physical
     /// heat all use the same material owner and accepted thermal endpoint.
-    /// Combining this law with either overstress model is explicitly refused.
+    /// Either sourced overstress model may be selected before or after Voce;
+    /// the material owner solves their shared return map at the physical dt.
     pub fn with_voce_hardening(
         mut self,
         selections: &[Option<fs_material::state_point::MaterialPropertySelection>],

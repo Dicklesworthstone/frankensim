@@ -23,18 +23,14 @@ impl ThermoplasticSource<'_> {
     /// The extra Helmholtz energy is Q(T) g(alpha), where
     /// g(alpha)=alpha-(1-exp(-b alpha))/b. Its entropy is -Q' g(alpha).
     /// Affine Q and constant b add no frozen-history heat-capacity derivative.
-    /// A tangent-only hardening datum or combined overstress selection refuses.
+    /// A tangent-only hardening datum refuses. Selected overstress kinetics use
+    /// a joint consistency solve with the same saturation energy and history.
     pub fn with_voce_hardening(
         mut self,
         selection: MaterialPropertySelection,
     ) -> Result<Self, FeedbackError> {
         if self.voce.is_some() {
             return Err(FeedbackError::Invalid("Voce hardening is already selected"));
-        }
-        if self.overstress.is_some() {
-            return Err(FeedbackError::Invalid(
-                "combined Voce saturation and overstress require a shared return map",
-            ));
         }
         if self.source.hardening_basis() == HardeningPropertyBasis::UniaxialTangentModulus {
             return Err(FeedbackError::Invalid(

@@ -7998,7 +7998,7 @@ conductance or adsorption accuracy.
 
 With g(alpha) = alpha - (1 - exp(-b alpha))/b, additional free energy is Q g, entropy is -Q' g, and frozen-history coefficient work is (Q1 - Q0) g(alpha0). These enter the existing reversible heat and delta(T s) accounts. Neither saturation storage nor backward-Euler loss becomes physical heat. An exactly zero-Q endpoint retains its thermal entropy through a stable unit-Q shape; unselected and identically zero-Q paths preserve original arithmetic. Affine Q and fixed b add no frozen-history heat-capacity derivative.
 
-Kinked/negative Q, varying b, tangent-only inference and simultaneous existing overstress selection refuse. Feedback proposals retain the same old history and caloric chart; only balanced endpoint candidates publish. Focused regressions cover the full tangent, loaded heating, coefficient work and entropy, simultaneous thermal expansion/moduli changes, source support/pins, zero-Q limits, and retry/cancellation boundaries. These are small-strain, affine-coefficient verification results, not empirical thermal calibration or a Chaboche thermal-history extension.
+Kinked/negative Q, varying b and tangent-only inference refuse. Feedback proposals retain the same old history and caloric chart; only balanced endpoint candidates publish. Focused regressions cover the full tangent, loaded heating, coefficient work and entropy, simultaneous thermal expansion/moduli changes, source support/pins, zero-Q limits, and retry/cancellation boundaries. These are small-strain, affine-coefficient verification results, not empirical thermal calibration or a Chaboche thermal-history extension.
 
 ## Stable vector work for reversible dielectric response
 
@@ -8379,3 +8379,10 @@ physical owners; no generic entropy-production claim is made. Four native
 tests cover independent finite equilibrium/relaxation and thermostat energy,
 carrier-preserving exsolution, small-step/partition identities, and atomic
 source/dilution/film/cancellation refusals.
+
+
+## Thermal Voce with physical overstress kinetics
+
+The original ThermoplasticSource and CaloricPoint now compose selected Voce saturation with linear or power-law Perzyna kinetics in either selection order. Source coefficients remain pinned over the full original caloric interval. Endpoint stress, state and consistent tangent use the joint VoceOverstressJ2 return; actual physical dt is mandatory. The shared thermal first-law account retains Q(T) storage, its coefficient work and entropy alongside positive yield/viscous dissipation. Kinetic coefficients add no recoverable energy or entropy. Numerical integration loss remains separate from heat.
+
+Thermal regressions check independent flow, endpoint free energy and entropy during heated stress relaxation, all tangent components, preserved source receipts, duration refusal and exact zero-Q recovery of both original kinetic laws. The common thermal-account completion also admits separately owned internal-variable entropy and coefficient storage without duplicating expansion or caloric physics.

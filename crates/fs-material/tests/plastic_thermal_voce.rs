@@ -13,7 +13,10 @@ use fs_material::phase::{
 };
 use fs_material::plastic::J2State;
 use fs_material::plastic::energy::EnergyTolerances;
-use fs_material::plastic::rate::{OVERSTRESS_VISCOSITY_DIMS, OVERSTRESS_VISCOSITY_PROPERTY};
+use fs_material::plastic::rate::{
+    OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_VISCOSITY_DIMS,
+    OVERSTRESS_VISCOSITY_PROPERTY, VoceOverstressJ2,
+};
 use fs_material::plastic::source::{HardeningPropertyBasis, KINEMATIC_HARDENING_MODULUS_PROPERTY};
 use fs_material::plastic::thermal::{
     CaloricPoint, FeedbackConfig, FeedbackError, SourceQuery, ThermoplasticSource,
@@ -557,20 +560,234 @@ fn source_admission_checks_internal_breakpoints_and_refuses_unsupported_combinat
             .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
             .is_err()
     );
-    assert!(
-        fixture
-            .voce()
-            .with_linear_overstress(MaterialPropertySelection::SingleClaimOnly)
-            .is_err()
-    );
-    assert!(
-        fixture
-            .source()
+}
+
+fn rate_properties(q: f64, slope: f64) -> Vec<PropertyClaim> {
+    let mut data = properties(q, slope);
+    data.push(scalar(
+        OVERSTRESS_STRESS_SCALE_PROPERTY,
+        Pressure::DIMS,
+        1.5e6,
+    ));
+    data.push(scalar(OVERSTRESS_EXPONENT_PROPERTY, Dims([0; 6]), 3.0));
+    data
+}
+
+fn selected_rate(source: ThermoplasticSource<'_>, power: bool) -> ThermoplasticSource<'_> {
+    if power {
+        source
+            .with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly)
+            .unwrap()
+    } else {
+        source
             .with_linear_overstress(MaterialPropertySelection::SingleClaimOnly)
             .unwrap()
-            .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
-            .is_err()
+    }
+}
+
+#[test]
+fn combined_rate_and_saturation_selection_order_preserves_the_native_response_and_tangent() {
+    let mut data = rate_properties(Q0, DQ);
+    curve(
+        &mut data[9],
+        vec![(280.0, 1.5e6), (300.0, 1e6), (320.0, 0.5e6)],
     );
+    let fixture = Fixture::new(data);
+    let strain = [0.012, -0.006, -0.006, 0.002, 0.001, -0.001];
+    let old = fixture.source().reference().initial_state();
+    let dt = 0.007;
+    for power in [false, true] {
+        let a = selected_rate(fixture.voce(), power);
+        let b = selected_rate(fixture.source(), power)
+            .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
+            .unwrap();
+        let (_, hot_a) = a.resolve_expanded_enthalpy_for_step(h(315.0), dt).unwrap();
+        let (_, hot_b) = b.resolve_expanded_enthalpy_for_step(h(315.0), dt).unwrap();
+        let voce = hot_a.voce_law().unwrap().clone();
+        let eta = 625_000.0;
+        let native = if power {
+            VoceOverstressJ2::new_power_law(voce, eta, 1.5e6, 3.0, dt).unwrap()
+        } else {
+            VoceOverstressJ2::new_linear(voce, eta, dt).unwrap()
+        };
+        assert_eq!(hot_a.stress(&strain, &old), hot_b.stress(&strain, &old));
+        assert_eq!(hot_a.stress(&strain, &old), native.stress(&strain, &old));
+        assert_eq!(
+            hot_a.update_state(&strain, &old),
+            native.update_state(&strain, &old)
+        );
+        assert_eq!(hot_a.tangent(&strain, &old), native.tangent(&strain, &old));
+        for property in hot_a.resolved().material().properties() {
+            fixture
+                .card
+                .claims()
+                .verify_receipt(&property.answer().receipt)
+                .unwrap();
+            assert_eq!(
+                property.answer().receipt.selected,
+                a.reference()
+                    .material()
+                    .property(property.requirement().name())
+                    .unwrap()
+                    .answer()
+                    .receipt
+                    .selected
+            );
+        }
+        let tangent = hot_a.tangent(&strain, &old);
+        for j in 0..6 {
+            let mut plus = strain;
+            let mut minus = strain;
+            plus[j] += 1e-8;
+            minus[j] -= 1e-8;
+            let sp = hot_a.stress(&plus, &old);
+            let sm = hot_a.stress(&minus, &old);
+            for i in 0..6 {
+                near(tangent[i][j], (sp[i] - sm[i]) / 2e-8, 2.0);
+            }
+        }
+        assert!(a.resolve_expanded_enthalpy(h(315.0)).is_err());
+        for invalid_dt in [0.0, -1.0, f64::INFINITY, f64::NAN] {
+            assert!(
+                a.resolve_expanded_enthalpy_for_step(h(315.0), invalid_dt)
+                    .is_err()
+            );
+        }
+    }
+}
+
+#[test]
+fn heated_viscous_saturation_relaxes_with_independent_flow_storage_and_entropy_balance() {
+    let fixture = Fixture::new(rate_properties(Q0, DQ));
+    let strain = [0.012, -0.006, -0.006, 0.002, 0.0, 0.0];
+    for power in [false, true] {
+        let source = selected_rate(fixture.voce(), power);
+        let virgin = source.reference().initial_state();
+        let loaded = source
+            .advance_with_energy_for_step(
+                0.0,
+                0.0,
+                &[0.0; 6],
+                &virgin,
+                &strain,
+                tolerances(),
+                0.0005,
+            )
+            .unwrap();
+        let old = &loaded.mechanical.state;
+        let dt = 0.05;
+        let step = source
+            .advance_with_energy_for_step(0.0, h(315.0), &strain, old, &strain, tolerances(), dt)
+            .unwrap();
+        let new = &step.mechanical.state;
+        let delta = new.alpha - old.alpha;
+        let (_, hot) = source
+            .resolve_expanded_enthalpy_for_step(h(315.0), dt)
+            .unwrap();
+        let saturation = Q0 + DQ * 15.0;
+        let yield_increment = saturation * -(-RATE * new.alpha).exp_m1();
+        let f = hot
+            .resolved()
+            .law()
+            .yield_function_with_state(&step.mechanical.stress_pa, new)
+            - yield_increment;
+        let expected_rate = if power {
+            1.5 * (f / 1.5e6).powi(3)
+        } else {
+            f / 1e6
+        };
+        assert!(delta > 0.0 && f > 0.0);
+        assert!(step.mechanical.stress_pa[0] < loaded.mechanical.stress_pa[0]);
+        near(delta / dt, expected_rate, 1e-10);
+        near(
+            step.mechanical.energy.physical_dissipation_j_m3,
+            (SY + f) * delta,
+            1e-6,
+        );
+        near(
+            step.stored_change_j_m3(),
+            energy(&strain, new, saturation) - energy(&strain, old, Q0),
+            1e-6,
+        );
+        near(
+            step.coefficient_storage_change_j_m3,
+            (saturation - Q0) * shape(old.alpha),
+            1e-7,
+        );
+        near(
+            step.thermoelastic_storage_change_j_m3,
+            -DQ * (315.0 * shape(new.alpha) - 300.0 * shape(old.alpha)),
+            1e-6,
+        );
+        near(step.mechanical_work_j_m3, 0.0, 0.0);
+        near(
+            step.stored_change_j_m3()
+                + step.thermoelastic_storage_change_j_m3
+                + step.caloric_heat_j_m3()
+                + step.mechanical.energy.numerical_dissipation_j_m3,
+            0.0,
+            1e-5,
+        );
+        source
+            .validate_committed_history(hot.resolved(), &strain, new, 1e-3)
+            .unwrap();
+        assert!(step.mechanical.energy.numerical_dissipation_j_m3 >= 0.0);
+    }
+}
+
+#[test]
+fn zero_saturation_preserves_each_original_thermal_rate_law_exactly() {
+    let fixture = Fixture::new(rate_properties(0.0, 0.0));
+    let strain = [0.012, -0.006, -0.006, 0.002, 0.0, 0.0];
+    for power in [false, true] {
+        let original = selected_rate(fixture.source(), power);
+        let selected = selected_rate(fixture.voce(), power);
+        let old = original.reference().initial_state();
+        let a = original
+            .advance_with_energy_for_step(
+                0.0,
+                h(310.0),
+                &[0.0; 6],
+                &old,
+                &strain,
+                tolerances(),
+                0.01,
+            )
+            .unwrap();
+        let b = selected
+            .advance_with_energy_for_step(
+                0.0,
+                h(310.0),
+                &[0.0; 6],
+                &old,
+                &strain,
+                tolerances(),
+                0.01,
+            )
+            .unwrap();
+        assert_eq!(a.mechanical, b.mechanical);
+        assert_eq!(
+            a.coefficient_storage_change_j_m3.to_bits(),
+            b.coefficient_storage_change_j_m3.to_bits()
+        );
+        assert_eq!(
+            a.reversible_heat_j_m3.to_bits(),
+            b.reversible_heat_j_m3.to_bits()
+        );
+        assert_eq!(
+            a.thermoelastic_storage_change_j_m3.to_bits(),
+            b.thermoelastic_storage_change_j_m3.to_bits()
+        );
+        let (_, a) = original
+            .resolve_expanded_enthalpy_for_step(h(310.0), 0.01)
+            .unwrap();
+        let (_, b) = selected
+            .resolve_expanded_enthalpy_for_step(h(310.0), 0.01)
+            .unwrap();
+        assert_eq!(a.stress(&strain, &old), b.stress(&strain, &old));
+        assert_eq!(a.tangent(&strain, &old), b.tangent(&strain, &old));
+        assert_eq!(a.update_state(&strain, &old), b.update_state(&strain, &old));
+    }
 }
 
 fn config() -> FeedbackConfig {

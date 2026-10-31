@@ -1,7 +1,10 @@
 //! G1/G3 heated loaded spatial member with independently sourced Voce softening.
 //! The constitutive and caloric numbers are synthetic numerical fixtures.
 use super::*;
-use fs_material::plastic::rate::{OVERSTRESS_VISCOSITY_DIMS, OVERSTRESS_VISCOSITY_PROPERTY};
+use fs_material::plastic::rate::{
+    OVERSTRESS_EXPONENT_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_VISCOSITY_DIMS,
+    OVERSTRESS_VISCOSITY_PROPERTY,
+};
 use fs_material::plastic::voce::source::{
     VOCE_SATURATION_INCREMENT_PROPERTY as Q, VOCE_SATURATION_RATE_PROPERTY as B,
 };
@@ -14,6 +17,10 @@ const HEAT_PER_VOLUME: f64 = RHO * CP_VALUE * 4.0;
 const STRAIN: f64 = 0.006;
 
 fn fixture(slope: f64) -> Fixture {
+    fixture_with_rate(slope, 1e9, 1.0)
+}
+
+fn fixture_with_rate(slope: f64, viscosity_pa_s: f64, exponent: f64) -> Fixture {
     let original = Fixture::new(CP_VALUE);
     let mut claims = ClaimSet::new();
     for (_, claim) in original.card.claims().claims_ordered() {
@@ -41,8 +48,10 @@ fn fixture(slope: f64) -> Fixture {
         scalar(
             OVERSTRESS_VISCOSITY_PROPERTY,
             OVERSTRESS_VISCOSITY_DIMS,
-            1e9,
+            viscosity_pa_s,
         ),
+        scalar(OVERSTRESS_STRESS_SCALE_PROPERTY, Pressure::DIMS, 1e6),
+        scalar(OVERSTRESS_EXPONENT_PROPERTY, Dims([0; 6]), exponent),
     ] {
         claims.insert_claim(claim).unwrap();
     }
@@ -235,6 +244,211 @@ fn endpoint(old: Reference, slope: f64) -> Reference {
     old.at(0.5 * (lower + upper), STRAIN, slope)
 }
 
+fn viscous_overstress(delta_alpha: f64, viscosity: f64, exponent: f64) -> f64 {
+    1e6 * (viscosity * delta_alpha / (DURATION * 1e6)).powf(1.0 / exponent)
+}
+
+fn viscous_endpoint(old: Reference, slope: f64, viscosity: f64, exponent: f64) -> Reference {
+    // Independent axial flow equation, solved directly in accumulated plastic
+    // strain. The production law instead uses its tensor return and secants.
+    let at = |temperature| {
+        let q = Q0 + slope * (temperature - 300.0);
+        let residual = |alpha: f64| {
+            E * (STRAIN - alpha) - YIELD - H * alpha + q * (-B_VALUE * alpha).exp_m1()
+                - viscous_overstress(alpha - old.alpha, viscosity, exponent)
+        };
+        let (mut lower, mut upper) = (old.alpha, STRAIN);
+        assert!(residual(lower) > 0.0 && residual(upper) < 0.0);
+        for _ in 0..80 {
+            let middle = 0.5 * (lower + upper);
+            if residual(middle) > 0.0 {
+                lower = middle;
+            } else {
+                upper = middle;
+            }
+        }
+        Reference {
+            temperature,
+            strain: STRAIN,
+            alpha: 0.5 * (lower + upper),
+        }
+    };
+    let residual = |temperature| {
+        let new = at(temperature);
+        let da = new.alpha - old.alpha;
+        RHO * CP_VALUE * (temperature - old.temperature)
+            - HEAT_PER_VOLUME
+            - (YIELD + viscous_overstress(da, viscosity, exponent)) * da
+            - reversible(old, new, slope)
+    };
+    let (mut lower, mut upper) = (old.temperature, 320.0);
+    assert!(residual(lower) < 0.0 && residual(upper) > 0.0);
+    for _ in 0..80 {
+        let middle = 0.5 * (lower + upper);
+        if residual(middle) > 0.0 {
+            upper = middle;
+        } else {
+            lower = middle;
+        }
+    }
+    at(0.5 * (lower + upper))
+}
+
+#[test]
+fn heated_member_relaxes_with_joint_voce_kinetics_and_one_physical_clock() {
+    context(|cx| {
+        let (nodes, tetrahedra) = member();
+        let prescribed = grips(&nodes, STRAIN);
+        let selections = vec![Some(MaterialPropertySelection::SingleClaimOnly); 6];
+        let volume = 18.0 * V;
+        let viscosity = 1e6;
+        for exponent in [1.0, 3.0] {
+            let slope = -8e4;
+            let fixture = fixture_with_rate(slope, viscosity, exponent);
+            let mut final_states = Vec::new();
+            // Different thermal substeps and feedback iteration counts must
+            // converge to the same physical interval. They do not age history.
+            for refined in [false, true] {
+                let mut thermal = initial_member(&fixture);
+                let plain = bind(&thermal, &[&fixture; 6], &nodes, &tetrahedra, cx);
+                let mut solid = if refined {
+                    plain
+                        .with_power_law_overstress(&selections, cx)
+                        .unwrap()
+                        .with_voce_hardening(&selections, cx)
+                        .unwrap()
+                } else if exponent == 1.0 {
+                    plain
+                        .with_voce_hardening(&selections, cx)
+                        .unwrap()
+                        .with_linear_overstress(&selections, cx)
+                        .unwrap()
+                } else {
+                    plain
+                        .with_voce_hardening(&selections, cx)
+                        .unwrap()
+                        .with_power_law_overstress(&selections, cx)
+                        .unwrap()
+                };
+                let mut old = Reference {
+                    temperature: 300.0,
+                    strain: 0.0,
+                    alpha: 0.0,
+                };
+                let mut previous_force = f64::INFINITY;
+                for step in 1..=3 {
+                    let mut thermal_settings = thermal_config();
+                    let mut coupling = config();
+                    if refined {
+                        thermal_settings.max_dt_s *= 0.5;
+                        coupling.enthalpy_relaxation = 0.4;
+                    }
+                    let accepted = solid.solution().clone();
+                    let next = solid
+                        .advance(
+                            &thermal,
+                            &(),
+                            step as f64 * DURATION,
+                            &prescribed,
+                            &[],
+                            IncrementSettings::default(),
+                            thermal_settings,
+                            coupling,
+                            cx,
+                        )
+                        .unwrap();
+                    let expected = viscous_endpoint(old, slope, viscosity, exponent);
+                    let da = expected.alpha - old.alpha;
+                    let overstress = viscous_overstress(da, viscosity, exponent);
+                    let force = tension(next.solid(), &prescribed);
+                    close(force, L * L * expected.stress(), 2e-6);
+                    assert!(force < previous_force);
+                    assert!(overstress > 0.0 && da > 0.0);
+                    let solution = next.solid().solution();
+                    let lateral = -0.2 * (STRAIN - expected.alpha) - 0.5 * expected.alpha;
+                    close(solution.displacement_m[7][1], L * lateral, 3e-11);
+                    for element in 0..6 {
+                        close(
+                            next.thermal()
+                                .temperature_k(CellId(100 + element as u64))
+                                .unwrap(),
+                            expected.temperature,
+                            5e-8,
+                        );
+                        close(solution.element_states[element].alpha, expected.alpha, 3e-9);
+                        close(solution.element_stress[element][0], expected.stress(), 3e-3);
+                    }
+                    let report = next.report();
+                    close(
+                        report.physical_heat_j,
+                        volume * (YIELD + overstress) * da,
+                        1e-8,
+                    );
+                    close(
+                        report.coefficient_storage_change_j,
+                        volume * coefficient(old, expected, slope),
+                        1e-8,
+                    );
+                    close(
+                        report.thermoelastic_storage_change_j,
+                        volume * entropy_storage(old, expected, slope),
+                        1e-8,
+                    );
+                    close(
+                        report.reversible_heat_j,
+                        volume * reversible(old, expected, slope),
+                        1e-8,
+                    );
+                    close(
+                        report.stored_mechanical_change_j,
+                        volume * (expected.free_energy(slope) - old.free_energy(slope)),
+                        1e-8,
+                    );
+                    close(
+                        report.mechanical_work_j,
+                        volume * expected.stress() * (expected.strain - old.strain),
+                        1e-8,
+                    );
+                    let de = expected.strain - expected.alpha - old.strain + old.alpha;
+                    let voce_loss = expected.q(slope)
+                        * (-(-B_VALUE * expected.alpha).exp_m1() * da - primitive(expected.alpha)
+                            + primitive(old.alpha));
+                    close(
+                        report.numerical_loss_j,
+                        volume * (0.5 * E * de * de + 0.5 * H * da * da + voce_loss),
+                        1e-8,
+                    );
+                    close(
+                        report.thermal_audit.stored_energy_change_j,
+                        report.external_heat_j + report.physical_heat_j + report.reversible_heat_j,
+                        1e-8,
+                    );
+                    close(report.combined_residual_j, 0.0, coupling.energy_tolerance_j);
+                    assert!(report.physical_heat_j > 0.0 && report.reversible_heat_j < 0.0);
+                    if step > 1 {
+                        assert!(report.coefficient_storage_change_j < 0.0);
+                        close(report.mechanical_work_j, 0.0, 1e-8);
+                    }
+                    assert_eq!(solid.solution(), &accepted);
+                    let (next_thermal, next_solid, _, _) = next.into_parts();
+                    thermal = next_thermal;
+                    solid = next_solid;
+                    old = expected;
+                    previous_force = force;
+                }
+                final_states.push((
+                    thermal.temperature_k(CellId(100)).unwrap(),
+                    solid.solution().element_states[0].alpha,
+                    previous_force,
+                ));
+            }
+            close(final_states[0].0, final_states[1].0, 5e-8);
+            close(final_states[0].1, final_states[1].1, 3e-9);
+            close(final_states[0].2, final_states[1].2, 2e-6);
+        }
+    });
+}
+
 #[test]
 fn heated_loaded_member_softens_moves_and_balances_voce_storage_without_invented_heat() {
     context(|cx| {
@@ -420,7 +634,7 @@ fn heated_loaded_member_softens_moves_and_balances_voce_storage_without_invented
 }
 
 #[test]
-fn per_element_voce_selection_keeps_other_laws_and_refuses_unsupported_combinations() {
+fn per_element_voce_selection_keeps_other_laws_and_combines_overstress_in_either_order() {
     context(|cx| {
         let (nodes, tetrahedra) = member();
         let fixture = fixture(-8e4);
@@ -437,15 +651,23 @@ fn per_element_voce_selection_keeps_other_laws_and_refuses_unsupported_combinati
             assert_eq!(material.material().property(B).is_some(), element == 2);
         }
         assert!(original.clone().with_voce_hardening(&[], cx).is_err());
-        assert!(selected.with_linear_overstress(&selections, cx).is_err());
-        assert!(
-            original
-                .clone()
-                .with_linear_overstress(&selections, cx)
-                .unwrap()
-                .with_voce_hardening(&selections, cx)
-                .is_err()
-        );
+        let voce_then_rate = selected.with_linear_overstress(&selections, cx).unwrap();
+        let rate_then_voce = original
+            .clone()
+            .with_linear_overstress(&selections, cx)
+            .unwrap()
+            .with_voce_hardening(&selections, cx)
+            .unwrap();
+        assert_eq!(voce_then_rate.materials(), rate_then_voce.materials());
+        for (element, material) in voce_then_rate.materials().iter().enumerate() {
+            assert_eq!(
+                material
+                    .material()
+                    .property(OVERSTRESS_VISCOSITY_PROPERTY)
+                    .is_some(),
+                element == 2
+            );
+        }
         assert!(
             original
                 .materials()

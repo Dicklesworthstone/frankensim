@@ -122,6 +122,17 @@ impl ThermoplasticIncrement {
     }
 }
 
+/// Thermal derivatives supplied by a retained internal-variable owner. The
+/// native mechanical increment already contains its storage and dissipation;
+/// only frozen-history coefficient work and entropy are added here.
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct ThermalHistoryContribution {
+    pub(super) old_entropy_j_m3_k: f64,
+    pub(super) new_entropy_j_m3_k: f64,
+    pub(super) coefficient_storage_change_j_m3: f64,
+    pub(super) variable_storage: bool,
+}
+
 impl ThermoplasticSource<'_> {
     /// Sourced expansion coefficient at the reference temperature [1/K].
     /// It is zero when the caller explicitly selects the zero-expansion reduction.
@@ -281,13 +292,40 @@ impl ThermoplasticSource<'_> {
                 None => source.law().advance_with_energy(&old_mechanical, old_state, &mechanical_strain, tolerances),
             },
         }.map_err(FeedbackError::Mechanical)?;
+        let increment = self.finish_increment_at_temperature(
+            old_temperature_k, temperature_k, old_strain, old_state, strain,
+            &source, mechanical, ThermalHistoryContribution::default(), tolerances,
+        )?;
+        Ok((source, increment))
+    }
+
+    /// Finish the shared thermal first-law account for a checked native return.
+    /// All constitutive owners use the same expansion, caloric chart and affine
+    /// elastic/Voce/Prager entropy. Additional histories supply only their own
+    /// coefficient work and entropy through `history`.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn finish_increment_at_temperature<E>(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        old_strain: &Voigt,
+        old_state: &J2State,
+        strain: &Voigt,
+        source: &ResolvedJ2Plasticity,
+        mechanical: EnergyIncrement,
+        history: ThermalHistoryContribution,
+        tolerances: EnergyTolerances,
+    ) -> Result<ThermoplasticIncrement, FeedbackError<E>> {
+        let old_mechanical = self.mechanical_strain_at(old_temperature_k, old_strain)?;
+        let voce = self.voce_law(source)?;
         let old_elastic = core::array::from_fn(|i| old_mechanical[i] - old_state.plastic_strain[i]);
         let variable_moduli = self.youngs_temperature_slope_pa_k != 0.0
             || self.hardening_temperature_slope_pa_k != 0.0
             || self.kinematic_hardening_temperature_slope_pa_k != 0.0;
         let saturation_slope = self.voce.map_or(0.0,
             |selection| selection.saturation_temperature_slope_pa_k);
-        let variable_storage = variable_moduli || saturation_slope != 0.0;
+        let variable_storage = variable_moduli || saturation_slope != 0.0
+            || history.variable_storage;
         let old_source = if variable_storage || !self.expansion_knots.is_empty() {
             Some(self.resolve_temperature(old_temperature_k)?)
         } else {
@@ -295,7 +333,7 @@ impl ThermoplasticSource<'_> {
         };
         // Recover OLD elastic stress at its actual temperature. Refreshing the
         // source must not return-map the committed plastic history a second time.
-        let old_law = old_source.as_ref().unwrap_or(&source);
+        let old_law = old_source.as_ref().unwrap_or(source);
         let old_stress = old_law.law().elastic.stress(&old_elastic, &());
         let delta_strain = core::array::from_fn(|i| strain[i] - old_strain[i]);
         let mechanical_work_j_m3 = finite(contract(&mechanical.stress_pa, &delta_strain))?;
@@ -308,7 +346,7 @@ impl ThermoplasticSource<'_> {
                     .expect("the admitted variable expansion source is present")
                     .value_si()
             };
-            (coefficient(old_law), coefficient(&source))
+            (coefficient(old_law), coefficient(source))
         };
         let mut old_entropy = product(old_alpha, trace(&old_stress))?;
         let mut new_entropy = product(new_alpha, trace(&mechanical.stress_pa))?;
@@ -385,6 +423,12 @@ impl ThermoplasticSource<'_> {
             coefficient_storage_change_j_m3 = finite(coefficient_storage_change_j_m3
                 + product(law.saturation_pa() - old_saturation, old_shape)?)?;
         }
+        if history.variable_storage {
+            old_entropy = finite(old_entropy + history.old_entropy_j_m3_k)?;
+            new_entropy = finite(new_entropy + history.new_entropy_j_m3_k)?;
+            coefficient_storage_change_j_m3 = finite(coefficient_storage_change_j_m3
+                + history.coefficient_storage_change_j_m3)?;
+        }
         let thermoelastic_storage_change_j_m3 = finite(
             product(temperature_k, new_entropy)? - product(old_temperature_k, old_entropy)?,
         )?;
@@ -418,21 +462,18 @@ impl ThermoplasticSource<'_> {
                 tolerance_j_m3: tolerances.energy_j_m3,
             }));
         }
-        Ok((
-            source,
-            ThermoplasticIncrement {
-                mechanical,
-                coefficient_storage_change_j_m3,
-                mechanical_work_j_m3,
-                reversible_heat_j_m3,
-                thermoelastic_storage_change_j_m3,
-            },
-        ))
+        Ok(ThermoplasticIncrement {
+            mechanical,
+            coefficient_storage_change_j_m3,
+            mechanical_work_j_m3,
+            reversible_heat_j_m3,
+            thermoelastic_storage_change_j_m3,
+        })
     }
 
     fn overstress_law<E>(&self, source: &ResolvedJ2Plasticity, duration_s: Option<f64>)
         -> Result<Option<super::super::rate::OverstressJ2>, FeedbackError<E>> {
-        use super::super::rate::{LinearOverstressJ2, PowerLawOverstressJ2, OverstressJ2,
+        use super::super::rate::{LinearOverstressJ2, PowerLawOverstressJ2, VoceOverstressJ2, OverstressJ2,
             OVERSTRESS_VISCOSITY_PROPERTY, OVERSTRESS_STRESS_SCALE_PROPERTY, OVERSTRESS_EXPONENT_PROPERTY};
         let Some(model) = self.overstress else { return Ok(None); };
         let duration_s = duration_s.ok_or(FeedbackError::Invalid(
@@ -440,6 +481,17 @@ impl ThermoplasticSource<'_> {
         let value = |name| source.material().property(name).map(|p| p.value_si())
             .ok_or(FeedbackError::Invalid("resolved source omitted an overstress coefficient"));
         let viscosity = value(OVERSTRESS_VISCOSITY_PROPERTY)?;
+        if let Some(voce) = self.voce_law(source)? {
+            let law = match model {
+                OverstressSelection::Linear =>
+                    VoceOverstressJ2::new_linear(voce, viscosity, duration_s),
+                OverstressSelection::PowerLaw =>
+                    VoceOverstressJ2::new_power_law(voce, viscosity,
+                        value(OVERSTRESS_STRESS_SCALE_PROPERTY)?,
+                        value(OVERSTRESS_EXPONENT_PROPERTY)?, duration_s),
+            }.map_err(|e| FeedbackError::Source(e.into()))?;
+            return Ok(Some(OverstressJ2::Voce(law)));
+        }
         let law = match model {
             OverstressSelection::Linear => OverstressJ2::Linear(
                 LinearOverstressJ2::new(source.law().clone(), viscosity, duration_s)
@@ -452,7 +504,7 @@ impl ThermoplasticSource<'_> {
         Ok(Some(law))
     }
 
-    fn expansion_strain_between<E>(&self, from_k: f64, to_k: f64) -> Result<f64, FeedbackError<E>> {
+    pub(super) fn expansion_strain_between<E>(&self, from_k: f64, to_k: f64) -> Result<f64, FeedbackError<E>> {
         let knots = self.caloric.curve().knots();
         let lower = knots[0].temperature_k;
         let upper = knots[knots.len() - 1].temperature_k;
