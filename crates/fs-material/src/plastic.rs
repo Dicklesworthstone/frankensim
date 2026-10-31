@@ -11,6 +11,8 @@ pub mod energy;
 pub mod thermal;
 /// Linear and power-law overstress on the same return map and physical history.
 pub mod rate;
+/// Exact axial and checked plane-stress reductions with retained native history.
+pub mod reduction;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
