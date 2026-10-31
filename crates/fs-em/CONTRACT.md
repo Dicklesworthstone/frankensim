@@ -171,6 +171,16 @@ Further G1/G3 tests carry an accepted finite-rate ionization endpoint through
 actual neutral-density momentum drag, field current, Joule power and native
 circuit resistance, and vary electron temperature with populations held fixed.
 
+`tests/ionization_feedback.rs` carries separate-temperature monatomic atomic
+ionization through that same path. Original NIST event rates and source-derived
+atomic detailed balance change carrier amounts; native cell-volume Joule powers
+are held explicitly during the chemistry interval. Independent monatomic
+calorics audit electrical work, changing electron heat capacity and chemical
+storage once. Refreshed populations and collision rates then change the native
+current and circuit resistance. This is an ionization substep with a subsequent
+field feedback evaluation, not a continuously fixed-voltage transient or an
+empirically validated discharge; elastic exchange remains its separate owner.
+
 ## Prescribed Eulerian moving-conductor induction
 
 `PlanarEddy::step_with_eulerian_velocity_candidate` continues the original
