@@ -628,9 +628,11 @@ impl SimLoop {
         loads: &crate::aircraft::ForceBuildup,
         alpha: f64,
     ) -> [f64; 2] {
-        let weight = self.design.gross_mass_kg * motion::GRAVITY_MPS2;
-        let fx = loads.force_n[0] + weight * det::sin(alpha);
-        let fz = loads.force_n[2] - weight * det::cos(alpha);
+        let [fx, fz] = crate::aircraft::nongravity_force_xz(
+            [loads.force_n[0], loads.force_n[2]],
+            alpha,
+            self.design.gross_mass_kg,
+        );
         let (s, c) = (det::sin(self.theta), det::cos(self.theta));
         [c * fx + s * fz, s * fx - c * fz]
     }

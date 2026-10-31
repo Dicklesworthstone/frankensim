@@ -834,3 +834,36 @@ The native harness compiles current wing and propulsion sources and the actual
 Newton/FGMRES/Armijo numerics; it omits the solver's two `fs_exec::Cx` convenience
 wrappers and unrelated aircraft surfaces. This does not substitute for a full
 workspace Cargo/clippy/CI gate, which was not run in this environment.
+
+## Gravity in longitudinal perturbations
+
+`longitudinal::linearize` holds pitch fixed while perturbing body air
+velocities. The original `aircraft::force_buildup` retains its level-flight
+trim convention, where pitch equals incidence. Its inserted weight is removed
+before taking velocity derivatives; actual attitude-dependent gravity enters
+only the pitch column. Angle-of-attack changes therefore cannot create
+spurious gravity terms in the speed or incidence derivatives. Aircraft force
+assembly, linearization, airborne motion and rail force projection share the
+same terrestrial gravity constant and weight-removal operation.
+
+The focused G1/G3 checks distinguish incidence from attitude using an exact
+gravity-only manufactured field and compare full native aerodynamic force
+derivatives after changing mass at a fixed operating point. The latter must
+remain mass-independent before division by inertial mass. This corrects the
+linearized poles and all augmented/pilot models consuming that matrix; it does
+not change the underlying aerodynamic solve or the original level-flight trim.
+The historical model still uses uniform standard Earth gravity. Spatial
+planetary gravity is not inferred from this correction.
+
+The focused x86 native sweep passes 27 cases: 11 motion tests, seven V-02a
+tests, seven augmented-spectrum tests, and the actual assistance/pilot flight
+behavior regressions. The original longitudinal source reproduces the previous
+V-02a digest and fails the new mass-scaling regression. Correcting its gravity
+derivatives changes nominal doubling time from 0.6204376902 to 0.6670863177 s;
+all physical acceptance thresholds remain unchanged. Only measured x86 golden
+pins were updated; other ISA pins still require native remeasurement.
+
+This source-selected build uses the original aircraft/wing/propeller and
+Newton/FGMRES numerics, excluding only unrelated module surfaces and the two
+unused solver `Cx` convenience wrappers. It does not establish a full Cargo or
+DSR gate; full-runtime builds were interrupted while compiling asupersync.

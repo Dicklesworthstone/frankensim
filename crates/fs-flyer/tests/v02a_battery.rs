@@ -181,6 +181,40 @@ fn poles_are_deterministic() {
 }
 
 #[test]
+fn velocity_force_derivatives_exclude_gravity_at_fixed_attitude() {
+    // G3: at a fixed geometry, flow and operating point, changing inertial
+    // mass cannot change aerodynamic force derivatives. Gravity varies with
+    // attitude, not with air velocity. The old alpha-dependent weight leaked
+    // into all four velocity derivatives and violates this mass scaling.
+    let design = wright_openloop_v1();
+    let trim = design.trim(RHO, START).unwrap();
+    let nominal = linearize(&design, &trim, RHO).unwrap();
+    let mut heavier = design.clone();
+    heavier.gross_mass_kg *= 1.7;
+    // Deliberately retain the same operating point instead of re-trimming;
+    // only the inertial mass/weight is changed, not aerodynamic state.
+    let changed = linearize(&heavier, &trim, RHO).unwrap();
+    for index in 0..4 {
+        let original_force_derivative = design.gross_mass_kg * nominal.derivatives[index];
+        let changed_force_derivative = heavier.gross_mass_kg * changed.derivatives[index];
+        assert!(
+            (original_force_derivative - changed_force_derivative).abs()
+                < 1e-9 * (1.0 + original_force_derivative.abs()),
+            "velocity derivative {index} contains mass-dependent gravity: \
+             {original_force_derivative} vs {changed_force_derivative}"
+        );
+    }
+    // Gravitational acceleration and its attitude derivative are independent
+    // of body mass, while pitch-rate transport retains the same trim velocity.
+    for row in 0..2 {
+        assert_eq!(nominal.a[row][3], changed.a[row][3]);
+    }
+    let g = 9.80665;
+    assert!((nominal.a[0][3] + g * trim.alpha_rad.cos()).abs() < 1e-13);
+    assert!((nominal.a[1][3] + g * trim.alpha_rad.sin()).abs() < 1e-13);
+}
+
+#[test]
 fn v02a_golden_digest() {
     let d = wright_openloop_v1();
     let t = d.trim(RHO, START).unwrap();
@@ -204,8 +238,18 @@ fn v02a_golden_digest() {
     // Golden bump 2026-10-28: correcting the extra half factor in ordinary
     // disk-induced wash shifts the native trim and its linearized poles;
     // all physical doubling-time gates remain unchanged.
+    // Golden bump 2026-10-31: hold pitch fixed in velocity derivatives;
+    // gravity belongs only in the attitude column. The original source
+    // reproduces the old digest and fails the mass-scaling regression above.
+    // Only x86_64 was measured; other ISA pins await native remeasurement.
+    #[cfg(target_arch = "x86_64")]
+    const EXPECTED_DIGEST: &str =
+        "66b7955e4ff0487adbf13899ad2fe0bd026679b77c7b50211678084333aa5c26";
+    #[cfg(not(target_arch = "x86_64"))]
+    const EXPECTED_DIGEST: &str =
+        "61e99ada8f4afecc337b219955bc557bf22f9a5358f440091e4417f3ee1fae1c";
     assert_eq!(
-        digest, "61e99ada8f4afecc337b219955bc557bf22f9a5358f440091e4417f3ee1fae1c",
+        digest, EXPECTED_DIGEST,
         "V-02a pole golden moved — determinism regression or an \
          intentional model change requiring the golden-bump protocol"
     );

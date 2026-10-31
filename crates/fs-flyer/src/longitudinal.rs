@@ -1,7 +1,9 @@
 //! Longitudinal small-perturbation linearization + the V-02a GATE (bead
 //! wf-root-guzez.5.13.3, E4.6a-iii). Central finite differences of the
 //! FULL force build-up about the fixed-throttle trim give the classical
-//! 4-state body-axes system x = (u, w, q, θ):
+//! 4-state body-axes system x = (u, w, q, θ). Velocity derivatives hold
+//! pitch fixed: remove the build-up's level-flight weight before perturbing
+//! air velocity, then include actual attitude-dependent gravity in the θ column:
 //!
 //!   u̇ = X_u u + X_w w + (X_q − w₀) q − g cosθ₀ θ
 //!   ẇ = Z_u u + Z_w w + (Z_q + u₀) q − g sinθ₀ θ
@@ -20,7 +22,7 @@
 //! tables are transcribed (machine_readable_absence).
 
 use crate::Refusal;
-use crate::aircraft::{OpenLoopDesign, TrimResult};
+use crate::aircraft::{GRAVITY_MPS2, OpenLoopDesign, TrimResult, nongravity_force_xz};
 use fs_math::det;
 
 /// Pitch inertia, Culick/Jex mass-reconstruction class
@@ -102,7 +104,7 @@ pub fn linearize(
         trim.omega_prop_rad_s,
     );
     let (u0, w0) = (v0 * det::cos(a0), v0 * det::sin(a0));
-    let g = 9.80665;
+    let g = GRAVITY_MPS2;
     // Perturb (u, w) via the (V, alpha) map, q directly.
     let du = 0.05f64;
     let dw = 0.05f64;
@@ -113,7 +115,8 @@ pub fn linearize(
         let v = det::sqrt(uu + ww);
         let alpha = det::atan2(w, u);
         let b = design.force_buildup(v, alpha, dc, om, q, rho_kg_m3)?;
-        Ok([b.force_n[0], b.force_n[2], b.moment_y_nm])
+        let force = nongravity_force_xz([b.force_n[0], b.force_n[2]], alpha, m);
+        Ok([force[0], force[1], b.moment_y_nm])
     };
     let fd = |p: [f64; 3], mmm: [f64; 3], h: f64| -> [f64; 3] {
         [

@@ -283,10 +283,16 @@ fn determinism_and_golden() {
     // remeasured here; the aarch64 pin retains its previous measurement
     // and requires a native aarch64 remeasurement for the station and
     // disk-induced-wash corrections. No aarch64 result is inferred from x86.
+    // Golden bump 2026-10-31: the rigid matrix now holds pitch fixed while
+    // varying air velocity, removing spurious gravity derivatives. Only the
+    // x86_64 spectrum was measured; all physical acceptance bands are intact.
     #[cfg(target_arch = "aarch64")]
     const EXPECTED_DIGEST: &str =
         "389e2a7c4f5a97e8c8507e011979571d10cb87d50c3f57d0b06cd38955d29321";
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(target_arch = "x86_64")]
+    const EXPECTED_DIGEST: &str =
+        "dffaed1918e103f5b2804d1e312d3c106d24c0f1e41f3a0c2e5f2b9243a5b742";
+    #[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64")))]
     const EXPECTED_DIGEST: &str =
         "48828f654100a2407311265ac37a06525e09ed8543aaca5737ddf86ed1756dcc";
     assert_eq!(

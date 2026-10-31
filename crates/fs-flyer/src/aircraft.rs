@@ -193,6 +193,27 @@ pub struct ForceBuildup {
     pub torque_imbalance_nm: f64,
 }
 
+/// Standard terrestrial acceleration used by this historical aircraft model.
+pub(crate) const GRAVITY_MPS2: f64 = 9.80665;
+
+/// Remove the level-flight weight inserted by the force assembly.
+///
+/// The assembly uses pitch = incidence only for its trim convention. Dynamic
+/// and linearized consumers must apply gravity at the actual pitch, independent
+/// of air velocity and angle of attack. Keep this operation shared so velocity
+/// derivatives cannot accidentally differentiate the trim-only weight term.
+pub(crate) fn nongravity_force_xz(
+    force_body_n: [f64; 2],
+    incidence_rad: f64,
+    mass_kg: f64,
+) -> [f64; 2] {
+    let weight = mass_kg * GRAVITY_MPS2;
+    [
+        force_body_n[0] + weight * det::sin(incidence_rad),
+        force_body_n[1] - weight * det::cos(incidence_rad),
+    ]
+}
+
 /// Trim result + receipt.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TrimResult {
@@ -670,7 +691,7 @@ impl OpenLoopDesign {
             m_y += t_moment;
         }
         // Gravity in body axes at θ = α (level flight): mg(−sinθ, 0, cosθ).
-        let w = self.gross_mass_kg * 9.80665;
+        let w = self.gross_mass_kg * GRAVITY_MPS2;
         let wx = w * det::sin(alpha_rad);
         let wz = w * det::cos(alpha_rad);
         force[0] -= wx;

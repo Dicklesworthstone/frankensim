@@ -6,7 +6,7 @@
 
 use fs_math::det;
 
-pub(super) const GRAVITY_MPS2: f64 = 9.80665;
+pub(super) use crate::aircraft::GRAVITY_MPS2;
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct LongitudinalMotion {
@@ -115,11 +115,8 @@ pub(super) fn nongravity_acceleration(
     alpha: f64,
     mass_kg: f64,
 ) -> [f64; 2] {
-    let weight = mass_kg * GRAVITY_MPS2;
-    [
-        (force_body_n[0] + weight * det::sin(alpha)) / mass_kg,
-        (force_body_n[1] - weight * det::cos(alpha)) / mass_kg,
-    ]
+    let force = crate::aircraft::nongravity_force_xz(force_body_n, alpha, mass_kg);
+    [force[0] / mass_kg, force[1] / mass_kg]
 }
 
 pub(super) fn world_acceleration(
@@ -251,6 +248,34 @@ mod tests {
                 start.position_m[1] + start.ground_mps[1] * dt - 0.5 * GRAVITY_MPS2 * dt * dt,
                 1e-14,
             );
+        }
+    }
+
+    #[test]
+    fn gravity_has_no_air_velocity_derivative_at_fixed_pitch() {
+        // G1: the gravity-only body acceleration is (-g sin(theta),
+        // g cos(theta)) regardless of airspeed/incidence. This is also the
+        // fixed-pitch convention required by longitudinal linearization.
+        let mass = 287.0;
+        let theta = 0.27;
+        let (u, w) = (12.0, -0.8);
+        let body_acceleration = |u: f64, w: f64| {
+            let alpha = det::atan2(w, u);
+            let weight = mass * GRAVITY_MPS2;
+            let without_weight = nongravity_acceleration(
+                [-weight * det::sin(alpha), weight * det::cos(alpha)],
+                alpha,
+                mass,
+            );
+            [
+                without_weight[0] - GRAVITY_MPS2 * det::sin(theta),
+                without_weight[1] + GRAVITY_MPS2 * det::cos(theta),
+            ]
+        };
+        for (du, dw) in [(0.05, 0.0), (0.0, 0.05)] {
+            let positive = body_acceleration(u + du, w + dw);
+            let negative = body_acceleration(u - du, w - dw);
+            assert_eq!(positive, negative);
         }
     }
 
