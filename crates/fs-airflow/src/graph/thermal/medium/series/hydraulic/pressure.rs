@@ -326,3 +326,6 @@ impl Sum {
 
 #[cfg(test)]
 mod tests;
+
+/// Original fixed-speed pump curves on the same material pressure solver.
+pub mod pump;
