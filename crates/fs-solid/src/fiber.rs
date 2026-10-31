@@ -16,6 +16,9 @@
 use fs_la::batched::{BatchMat, BatchVec, batch_cholesky, batch_cholesky_solve};
 use fs_material::fiber::{ManderConcrete, ManderState, MenegottoPintoSteel, MpState, Uniaxial};
 
+/// Material-bound fiber laws, RC section geometry and coherent member mass.
+pub mod material;
+
 /// A fiber's constitutive card.
 #[derive(Debug, Clone)]
 pub enum FiberLaw {

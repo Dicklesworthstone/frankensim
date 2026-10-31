@@ -1148,6 +1148,20 @@ atomic failure, cancellation/retry, clone identity and fully prescribed limits.
   batched Cholesky with a per-outlier direct fallback, throughput
   measured and ledgered; `rc_section` fixture (confined core +
   unconfined cover + steel layers).
+- `fiber::material`: source-selected or explicitly authored Mander/MP laws
+  share the existing state-point resolver and fiber engine. Every density and
+  constitutive parameter is required; selected source bundles and receipts
+  survive section construction and area scaling. Static source admission
+  refuses unowned strain, stress, rate, frequency or history dependence.
+  Selecting coefficients does not calibrate the cyclic model. `RcSection`
+  partitions four-sided cover, core and two symmetric reinforcement bands;
+  steel displaces concrete in both response and mass. Steel response is lumped
+  at the declared band centroids, so this is smeared reinforcement, not resolved
+  round-bar geometry. Geometry and source bindings stay immutable; consumer
+  clones own independent constitutive histories. Area scaling changes mass and
+  every fiber area together. The legacy `rc_section` remains an authored fixture
+  with its original gross-concrete-plus-rebar convention. Focused G0/G1/G3 tests
+  are in `tests/fiber_material.rs`; no measured-building validation is implied.
 - `beamcol` (bead tfz.14): force-based (Spacone) cantilever element —
   EXACT equilibrium interpolation, five-point Gauss–Lobatto section
   integration (a point AT the hinge), per-section Newton with

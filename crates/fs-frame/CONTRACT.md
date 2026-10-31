@@ -84,6 +84,32 @@ their own battery: fs-truss (layout LP + sizing), fs-solid/fs-material
   energy-balance error. External work includes the retained floor weight;
   an unexcited gravity-loaded building remains at its loaded equilibrium
   (`tests/building_gravity.rs`), preserving its compressive geometric stiffness.
+- `building::BuildingFrame::with_sections(spec, column, beam, formulation)`
+  connects explicit `fs-solid::fiber::material::RcSection` blueprints to the
+  existing distributed-plasticity frame. Concrete and reinforcement material
+  selections determine the section laws and member line masses together.
+  Reinforcement displaces concrete volume. The original section geometry must
+  match the building spec and both supplied sections must be unscaled; the
+  column sizing factor then scales its fiber areas and mass exactly once.
+  Gravity preload, signed modes, damping and earthquake forcing use that same
+  mass operator. Every integration point receives an independent virgin law
+  history. `material_sections()` retains the admitted immutable column/beam
+  blueprints and their source bindings, not evolving integration-point history.
+  Floor mass excludes member mass. This is a fixed-reference mechanical model:
+  it does not infer thermal strain, temperature evolution, confinement
+  calibration, bond slip or failure mechanisms absent from the supplied laws.
+  Selecting source coefficients does not establish experimental validation of
+  the cyclic model. `tests/building_materials.rs` targets independent mass
+  arithmetic, density/stiffness substitutions, scaling/geometry refusals,
+  loaded equilibrium, dynamic energy accounting and deterministic replay.
+- `building::building_fragility_from_frame(ensemble, frame, story, limit,
+  alpha, margin)` clones the same admitted frame state for every fine
+  realization and paired MLMC correction. It preserves material selection,
+  member inertia and starting constitutive state instead of rebuilding the
+  authored fixture. The caller's frame is unchanged even if a realization
+  fails; a fresh `with_sections` model represents the initial gravity-loaded
+  building. The explicit coarse story approximation need not share the fine
+  model's materials for the paired correction to telescope.
 - `building::building_fragility(ensemble, spec, story, limit, alpha,
   margin)`: e-stopped confidence sequence on `P(peak inter-story drift
   ratio > limit)` (stop once the radius is `≤ margin`, after ≥ 8 members),

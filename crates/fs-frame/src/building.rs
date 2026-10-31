@@ -28,6 +28,7 @@
 
 use fs_eproc::GaussianMixtureCs;
 use fs_scenario::ensemble::StochasticEnsemble;
+use fs_solid::fiber::material::RcSection;
 use fs_solid::fiber::rc_section;
 use fs_solid::frame2d::{FrameMassFormulation, FrameModalAnalysis, FrameModeStatus};
 use fs_solid::{Frame2d, Geometry, Rayleigh, SectionModel, SolidError};
@@ -111,6 +112,8 @@ pub struct BuildingFrame {
     modes: FrameModalAnalysis,
     damping: Rayleigh,
     gravity: Vec<f64>,
+    /// Accepted column and beam sections, including their immutable source bindings.
+    material_sections: Option<[RcSection; 2]>,
 }
 
 /// One building time-history record.
@@ -137,6 +140,35 @@ fn scaled(member: RcMember, scale: f64) -> SectionModel {
         f.area *= scale;
     }
     SectionModel::Fiber(s)
+}
+
+fn validate_spec(spec: BuildingSpec) -> Result<(), SolidError> {
+    let positive = [
+        spec.story_height,
+        spec.bay_width,
+        spec.floor_mass,
+        spec.scale,
+        spec.column.depth,
+        spec.column.width,
+        spec.beam.depth,
+        spec.beam.width,
+    ];
+    if spec.stories == 0
+        || spec.bays == 0
+        || positive.iter().any(|v| !v.is_finite() || *v <= 0.0)
+        || [spec.column.steel_area, spec.beam.steel_area]
+            .iter()
+            .any(|v| !v.is_finite() || *v < 0.0)
+        || !spec.zeta.is_finite()
+        || !(0.0..1.0).contains(&spec.zeta)
+    {
+        return Err(SolidError::InvalidInput {
+            what: "building spec needs finite positive geometry/mass/scale, nonnegative \
+                   reinforcement, at least one story and bay, and zeta in [0, 1)"
+                .into(),
+        });
+    }
+    Ok(())
 }
 
 impl BuildingFrame {
@@ -172,17 +204,76 @@ impl BuildingFrame {
                 what: "member line mass must be finite and nonnegative".into(),
             });
         }
-        if spec.stories == 0
-            || spec.bays == 0
-            || !(spec.story_height > 0.0 && spec.bay_width > 0.0 && spec.floor_mass > 0.0)
-            || !(spec.scale > 0.0 && spec.zeta >= 0.0 && spec.zeta < 1.0)
-        {
-            return Err(SolidError::InvalidInput {
-                what: "building spec needs ≥1 story and bay, positive geometry/mass/scale, \
-                       and zeta in [0, 1)"
-                    .into(),
-            });
+        validate_spec(spec)?;
+        Self::assemble(
+            spec,
+            scaled(spec.column, spec.scale),
+            scaled(spec.beam, 1.0),
+            [column_mass_per_length, beam_mass_per_length],
+            mass_formulation,
+            None,
+        )
+    }
+
+    /// Build a nonlinear building from explicit material-bearing RC sections.
+    ///
+    /// The section geometry must match the corresponding member in spec.
+    /// Supply unscaled sections: spec.scale scales column fiber areas and
+    /// column line mass together, exactly once. Beam sections are unscaled.
+    /// Floor mass must exclude member mass. The same material-derived mass
+    /// enters gravity, modal extraction and base-acceleration forcing, while
+    /// each integration point receives its own virgin constitutive history.
+    /// Original source selections remain available through [`Self::material_sections`].
+    /// The legacy [`Self::new`] constructor remains an authored RC fixture.
+    ///
+    /// # Errors
+    /// Invalid or mismatched specifications, already-scaled sections, or a
+    /// failed gravity equilibrium/modal solve. No partially built frame is returned.
+    pub fn with_sections(
+        spec: BuildingSpec,
+        column: RcSection,
+        beam: RcSection,
+        mass_formulation: FrameMassFormulation,
+    ) -> Result<Self, SolidError> {
+        validate_spec(spec)?;
+        for (section, member) in [(&column, spec.column), (&beam, spec.beam)] {
+            let geometry = section.geometry();
+            if section.area_scale() != 1.0
+                || geometry.depth_m != member.depth
+                || geometry.width_m != member.width
+                || geometry.steel_area_per_face_m2 != member.steel_area
+            {
+                return Err(SolidError::InvalidInput {
+                    what: "material sections must be unscaled and match building member geometry"
+                        .into(),
+                });
+            }
         }
+        let column = column
+            .scaled(spec.scale)
+            .map_err(|error| SolidError::InvalidInput {
+                what: format!("column material section: {error}"),
+            })?;
+        let line_mass = [column.line_mass_kg_m(), beam.line_mass_kg_m()];
+        Self::assemble(
+            spec,
+            SectionModel::Fiber(column.section().clone()),
+            SectionModel::Fiber(beam.section().clone()),
+            line_mass,
+            mass_formulation,
+            Some([column, beam]),
+        )
+    }
+
+    #[allow(clippy::needless_range_loop)]
+    fn assemble(
+        spec: BuildingSpec,
+        column_section: SectionModel,
+        beam_section: SectionModel,
+        member_line_mass: [f64; 2],
+        mass_formulation: FrameMassFormulation,
+        material_sections: Option<[RcSection; 2]>,
+    ) -> Result<Self, SolidError> {
         let mut frame = Frame2d::with_mass_formulation(Geometry::Corotational, mass_formulation);
         let mut floors = Vec::with_capacity(spec.stories + 1);
         for s in 0..=spec.stories {
@@ -196,15 +287,15 @@ impl BuildingFrame {
         }
         let np = spec.sections_per_member;
         let node_mass = spec.floor_mass / (spec.bays + 1) as f64;
-        let column = || scaled(spec.column, spec.scale);
-        let beam = || scaled(spec.beam, 1.0);
+        let column = || column_section.clone();
+        let beam = || beam_section.clone();
         for s in 1..=spec.stories {
             for b in 0..=spec.bays {
                 frame.add_element(
                     floors[s - 1][b],
                     floors[s][b],
                     np,
-                    column_mass_per_length,
+                    member_line_mass[0],
                     &column,
                 )?;
                 frame.add_mass(floors[s][b], node_mass);
@@ -214,7 +305,7 @@ impl BuildingFrame {
                     floors[s][b],
                     floors[s][b + 1],
                     np,
-                    beam_mass_per_length,
+                    member_line_mass[1],
                     &beam,
                 )?;
             }
@@ -278,6 +369,7 @@ impl BuildingFrame {
             modes,
             damping,
             gravity,
+            material_sections,
         })
     }
 
@@ -306,6 +398,15 @@ impl BuildingFrame {
     #[must_use]
     pub fn spec(&self) -> &BuildingSpec {
         &self.spec
+    }
+
+    /// Accepted column/beam material sections, with the actual column area
+    /// scale and unchanged source identities. None identifies the authored
+    /// legacy fixture whose line masses, if any, were supplied independently.
+    /// These are immutable virgin blueprints, not integration-point histories.
+    #[must_use]
+    pub fn material_sections(&self) -> Option<&[RcSection; 2]> {
+        self.material_sections.as_ref()
     }
 
     /// Run a horizontal base-acceleration record `ag` sampled every `dt`.
@@ -386,8 +487,36 @@ pub fn building_fragility(
     margin: f64,
 ) -> Result<BuildingFragility, SolidError> {
     assert_ground_motion_ensemble(ensemble);
-    let dt = ensemble.dt.value;
     let base = BuildingFrame::new(spec)?;
+    building_fragility_from_frame(ensemble, &base, story, drift_limit, alpha, margin)
+}
+
+/// Run the building fragility study from one explicitly admitted frame state.
+///
+/// Every ensemble member and every MLMC fine correction starts from a clone
+/// of base, preserving its material selections, mass formulation and initial
+/// constitutive state. The caller's frame is unchanged, including on a failed
+/// history. Pass a freshly gravity-loaded [`BuildingFrame::with_sections`]
+/// result for a study of the initial material-bearing building. The coarse
+/// story model is still an explicit approximation; it need not share the
+/// fine model's material laws for the paired MLMC correction to telescope.
+///
+/// # Errors
+/// Propagates a failed fine-model time history without returning partial results.
+///
+/// # Panics
+/// The ensemble and probability controls have the same admission contract as
+/// [`building_fragility`].
+pub fn building_fragility_from_frame(
+    ensemble: &StochasticEnsemble,
+    base: &BuildingFrame,
+    story: StoryParams,
+    drift_limit: f64,
+    alpha: f64,
+    margin: f64,
+) -> Result<BuildingFragility, SolidError> {
+    assert_ground_motion_ensemble(ensemble);
+    let dt = ensemble.dt.value;
     let mut cs = GaussianMixtureCs::new(0.5, 8.0, alpha);
     let (mut used, mut exceedances, mut stopped_early) = (0u32, 0u32, false);
     let mut peak_drifts = Vec::new();
