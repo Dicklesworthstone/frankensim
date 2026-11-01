@@ -1237,3 +1237,56 @@ checkpoint retry.
 This is linear response in the declared windows. Nonlinear deformation,
 connection/contact branch changes, frequency-dependent loss, omitted-mode
 response and full-body truncation certification remain separate requirements.
+
+## Continuing loads on the original assembled equilibrium
+
+`shell::preload::assembly::continuation::ShellAssemblyLoadPath` prepares the
+original unloaded CST/DKT body once and retains its accepted loaded equilibrium.
+The original elastic reference pencil, reference mass, sparse mortar maps,
+element laws, axial connection maps and reference preconditioner are reused
+across subsequent dead-load changes. Accepted tangents never replace the
+elastic reference, and displaced geometry is never reinterpreted as stress free.
+This is the existing native equilibrium owner, not a modal or parallel solver.
+
+Construction has the original one-shot assembly's arithmetic and load ramp:
+dead forces and complete axial connection potentials grow together from zero.
+Subsequent `advance` calls start at the last accepted physical coordinates and
+interpolate complete old-to-new dead loads through the existing equal-increment
+driver. Tensile and compression-only connection potentials remain fully active
+throughout that continuation. Their original force, material and geometric
+Hessians, slack/separated branches and reciprocal endpoint maps are unchanged.
+No second prestress or connection stiffness is added to the accepted pencil.
+
+Each increment must pass the original finite/moderate-deformation admission,
+unpreconditioned equivalent-force balance and positive tangent-inertia gate.
+The existing residual/Jacobian budget covers the requested load change. Initial
+accepted coordinates must satisfy the supplied new deformation and force gates.
+Complete full-component loads, including loads on eliminated/support rows,
+remain attached to the accepted state; the original work-conjugate tie map owns
+their projection. Failed solves, invalid loads, work exhaustion and cancellation
+return without replacing any accepted load, displacement, tangent or connection
+response. The final cancellation poll occurs after the complete candidate and
+owned load arrays are ready. Identical full load bits skip the solve and retain
+the entire accepted body; its counts remain those of the last actual solve,
+and this no-op does not recertify under newly supplied tolerances.
+The accepted equilibrium's stored energy remains the original shell/beam/glue
+storage; axial connection potential and endpoint forces remain in their original
+tether/strut response records. No load work or connection energy is relabeled
+as structural storage or counted a second time.
+
+Five focused G0/G1/G4 regressions exercise an independent isotropic cubic
+membrane-energy law through loading, reversal and unloading; nonmatching tied
+path partition versus cold equilibrium with original tensile/compressive laws;
+preservation of the full accepted connection tangent on the first continued
+trial; bitwise first-endpoint and unchanged-load equivalence; failure/domain/
+budget isolation; and last-poll cancellation with deterministic retry after
+caller source arrays are changed. Reference mass and maps remain unchanged.
+
+These are quasi-static equilibria under the original CST/DKT moderate-rotation
+approximation. No elapsed-time dynamics, damping loss, quasi-static path-work
+integral, changing material history, changing supports/ties, follower force,
+finite-rotation bending, global stability theorem or unstable-branch continuation
+is supplied. A subsequent vibration calculation remains local to its accepted
+equilibrium and must preserve the chosen axial connection branches. This slice
+does not close the broader assembled-prestress bead or claim a calibrated
+instrument specimen.

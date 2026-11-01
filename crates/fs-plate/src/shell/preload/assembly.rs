@@ -8,7 +8,7 @@
 use super::tethers::{PreparedPoint, PreparedTether, StrutResponse, TetherResponse};
 use super::{
     ComponentTransform, CoordinateRows, Element, Equilibrium, PreloadOptions, PreloadProblem,
-    positive_factor, solve_problem, validate_options,
+    positive_factor, solve_problem_from, validate_options,
 };
 use crate::shell::arching::ReferenceLoadState;
 use crate::shell::junction::{
@@ -19,6 +19,8 @@ use crate::shell::{ShellMesh, ShellModel, ShellSection, ShellSupport};
 use std::cell::Cell;
 use std::sync::Arc;
 
+/// Repeated load changes on the same original reference and accepted body.
+pub mod continuation;
 /// Certified monolithic vibrations and physical ports about this equilibrium.
 pub mod vibration;
 
@@ -274,6 +276,45 @@ pub fn equilibrate_connected_shell_assembly(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<PreloadedConnectedShellAssembly, String> {
     validate_options(options)?;
+    let prepared = prepare_assembly(
+        components,
+        edge_ties,
+        face_ties,
+        tie_budget,
+        tethers,
+        struts,
+        &mut cancelled,
+    )?;
+    let load = prepared
+        .assembly
+        .project_loads(&components.iter().map(|c| c.loads).collect::<Vec<_>>())
+        .map_err(|e| e.to_string())?;
+    prepared.solve(&load, None, None, options, solve, &mut cancelled)
+}
+
+// Geometry, constitutive kernels, reference factor and tie maps are prepared
+// once. Every subsequent trial borrows them and keeps the original reference.
+struct PreparedAssembly {
+    assembly: TiedShellModel,
+    elements: Vec<Element>,
+    transforms: Vec<ComponentTransform>,
+    tethers: Vec<PreparedTether>,
+    tether_count: usize,
+    base: fs_sparse::LdltFactor,
+    scale: Vec<f64>,
+    length: f64,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_assembly(
+    components: &[ShellPreloadComponent<'_>],
+    edge_ties: &[EdgeTie],
+    face_ties: &[FaceTie],
+    tie_budget: TieBudget,
+    tethers: &[AssemblyTether],
+    struts: &[AssemblyStrut],
+    mut cancelled: impl FnMut() -> bool,
+) -> Result<PreparedAssembly, String> {
     if tethers
         .len()
         .checked_add(struts.len())
@@ -383,9 +424,6 @@ pub fn equilibrate_connected_shell_assembly(
             scale[*i] = if full % 6 < 3 { 1. } else { length };
         }
     }
-    let load = assembly
-        .project_loads(&components.iter().map(|c| c.loads).collect::<Vec<_>>())
-        .map_err(|e| e.to_string())?;
     let mut transforms = Vec::with_capacity(components.len());
     let mut elements = Vec::with_capacity(triangle_count);
     for (c, (component, model)) in components.iter().zip(&models).enumerate() {
@@ -426,69 +464,101 @@ pub fn equilibrate_connected_shell_assembly(
         single,
         &mut cancelled,
     )?;
-    let mut problem = PreloadProblem {
-        model: &assembly.model,
+    Ok(PreparedAssembly {
+        assembly,
         elements,
         transforms,
         tethers: prepared_tethers,
+        tether_count: tethers.len(),
         base,
         scale,
-        load,
-        fraction: 0.,
-        options,
-        evaluations: Cell::new(0),
-    };
-    let state = solve_problem(&mut problem, &mut |p, x, limit| {
-        if cancelled() {
-            return Err("assembled shell preload cancelled".into());
-        }
-        let solution = solve(p, x, limit)?;
-        if cancelled() {
-            return Err("assembled shell preload cancelled".into());
-        }
-        Ok(solution)
-    })?;
-    let Equilibrium {
-        u,
-        k,
-        energy,
-        residual_force_n,
-        iterations,
-        evaluations,
-    } = state;
-    let tether_responses = problem
-        .tethers
-        .iter()
-        .take(tethers.len())
-        .map(|t| t.response(&u))
-        .collect::<Result<Vec<_>, _>>()?;
-    let strut_responses = problem
-        .tethers
-        .iter()
-        .skip(tethers.len())
-        .map(|t| t.strut_response(&u))
-        .collect::<Result<Vec<_>, _>>()?;
-    let displacements = assembly.expand_components(&u).map_err(|e| e.to_string())?;
-    if cancelled() {
-        return Err("assembled shell preload cancelled".into());
-    }
-    drop(problem);
-    assembly.model.k = k;
-    let equilibrium = PreloadedShellAssembly {
-        assembly,
-        coordinates: u,
-        displacements,
-        residual_force_n,
-        norm_length_m: length,
-        stored_energy_j: energy,
-        iterations,
-        evaluations,
-    };
-    Ok(PreloadedConnectedShellAssembly {
-        equilibrium,
-        tether_responses,
-        strut_responses,
+        length,
     })
+}
+
+impl PreparedAssembly {
+    #[allow(clippy::too_many_arguments)]
+    fn solve(
+        &self,
+        load: &[f64],
+        load_origin: Option<&[f64]>,
+        initial: Option<&[f64]>,
+        options: PreloadOptions,
+        solve: &mut impl FnMut(
+            &PreloadProblem<'_>,
+            Vec<f64>,
+            usize,
+        ) -> Result<(Vec<f64>, usize), String>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreloadedConnectedShellAssembly, String> {
+        let mut problem = PreloadProblem {
+            model: &self.assembly.model,
+            elements: &self.elements,
+            transforms: &self.transforms,
+            tethers: &self.tethers,
+            base: &self.base,
+            scale: &self.scale,
+            load,
+            load_origin,
+            fraction: 0.,
+            options,
+            evaluations: Cell::new(0),
+        };
+        let state = solve_problem_from(&mut problem, initial, &mut |p, x, limit| {
+            if cancelled() {
+                return Err("assembled shell preload cancelled".into());
+            }
+            let solution = solve(p, x, limit)?;
+            if cancelled() {
+                return Err("assembled shell preload cancelled".into());
+            }
+            Ok(solution)
+        })?;
+        let Equilibrium {
+            u,
+            k,
+            energy,
+            residual_force_n,
+            iterations,
+            evaluations,
+        } = state;
+        let tether_responses = problem
+            .tethers
+            .iter()
+            .take(self.tether_count)
+            .map(|t| t.response(&u))
+            .collect::<Result<Vec<_>, _>>()?;
+        let strut_responses = problem
+            .tethers
+            .iter()
+            .skip(self.tether_count)
+            .map(|t| t.strut_response(&u))
+            .collect::<Result<Vec<_>, _>>()?;
+        let displacements = self
+            .assembly
+            .expand_components(&u)
+            .map_err(|e| e.to_string())?;
+        if cancelled() {
+            return Err("assembled shell preload cancelled".into());
+        }
+        let mut assembly = self.assembly.clone();
+        assembly.model.k = k;
+        let equilibrium = PreloadedShellAssembly {
+            assembly,
+            coordinates: u,
+            displacements,
+            residual_force_n,
+            norm_length_m: self.length,
+            stored_energy_j: energy,
+            iterations,
+            evaluations,
+        };
+        Ok(PreloadedConnectedShellAssembly {
+            equilibrium,
+            tether_responses,
+            strut_responses,
+        })
+    }
 }
 
 fn prepare_connections(

@@ -188,19 +188,22 @@ impl Element {
 /// Invalid trials/evaluation-budget exhaustion return NaNs for solver rejection.
 pub struct PreloadProblem<'a> {
     model: &'a ShellModel,
-    elements: Vec<Element>,
-    transforms: Vec<ComponentTransform>,
-    tethers: Vec<PreparedTether>,
-    base: LdltFactor,
-    scale: Vec<f64>,
-    load: Vec<f64>,
+    elements: &'a [Element],
+    transforms: &'a [ComponentTransform],
+    tethers: &'a [PreparedTether],
+    base: &'a LdltFactor,
+    scale: &'a [f64],
+    load: &'a [f64],
+    // An accepted dead-load origin keeps the original connection potentials
+    // fully active while continuing to `load`; None is the original cold ramp.
+    load_origin: Option<&'a [f64]>,
     fraction: f64,
     options: PreloadOptions,
     evaluations: Cell<usize>,
 }
 impl PreloadProblem<'_> {
     fn physical(&self, x:&[f64]) -> Vec<f64> {
-        x.iter().zip(&self.scale).map(|(x,s)|x/s).collect()
+        x.iter().zip(self.scale).map(|(x,s)|x/s).collect()
     }
     fn admitted(&self, u:&[f64]) -> bool {
         if u.len()!=self.model.free || u.iter().any(|v|!v.is_finite()) { return false; }
@@ -210,7 +213,7 @@ impl PreloadProblem<'_> {
         }
         // Slave rotations are physical rotations too. Checking only retained
         // coordinates would miss amplified/nonmatching mortar combinations.
-        for component in &self.transforms {
+        for component in self.transforms {
             for node in component.dof_map.chunks_exact(6) {
                 let rotation:[f64;3]=std::array::from_fn(|i|node[i+3].map_or(0.,|d|
                     component.rows[d].iter().map(|&(r,w)|w*u[r]).sum()));
@@ -229,7 +232,7 @@ impl PreloadProblem<'_> {
         if !self.admitted(u) || force.len()!=self.model.free { return None; }
         self.model.k.spmv(u,force);
         let mut energy=0.5*u.iter().zip(&*force).map(|(a,b)|a*b).sum::<f64>();
-        for element in &self.elements {
+        for element in self.elements {
             let c=element.correction(u);
             if !c.gradient.is_finite() || c.gradient>self.options.maximum_gradient {return None;}
             energy+=c.energy;
@@ -238,9 +241,20 @@ impl PreloadProblem<'_> {
         (energy.is_finite() && force.iter().all(|v|v.is_finite())).then_some(energy)
     }
     fn applied_load(&self,u:&[f64])->Result<Vec<f64>,String> {
-        let mut load=self.load.clone();
-        for tether in &self.tethers {tether.add_gradient(u,&mut load,-1.)?;}
-        for p in &mut load {*p*=self.fraction;}
+        let mut load=self.load.to_vec();
+        if let Some(origin)=self.load_origin {
+            for (p,old) in load.iter_mut().zip(origin) {
+                // A convex combination also avoids overflowing new-old when
+                // individually finite loads have opposite signs.
+                *p=if self.fraction==1. {*p} else {
+                    (1.-self.fraction)*old+self.fraction*(*p)
+                };
+            }
+            for tether in self.tethers {tether.add_gradient(u,&mut load,-1.)?;}
+        } else {
+            for tether in self.tethers {tether.add_gradient(u,&mut load,-1.)?;}
+            for p in &mut load {*p*=self.fraction;}
+        }
         if load.iter().any(|v|!v.is_finite()) {return Err("nonfinite combined shell load".into());}
         Ok(load)
     }
@@ -248,9 +262,9 @@ impl PreloadProblem<'_> {
         let mut force=vec![0.;self.model.free];
         self.force_energy(u,&mut force).ok_or("equilibrium exceeds finite/moderate-deformation limits")?;
         let load=self.applied_load(u)?;
-        let residual:Vec<_>=force.iter().zip(&load).zip(&self.scale)
+        let residual:Vec<_>=force.iter().zip(&load).zip(self.scale)
             .map(|((f,p),s)|(f-p)/s).collect();
-        let load_norm=norm(&load.iter().zip(&self.scale).map(|(p,s)|p/s).collect::<Vec<_>>());
+        let load_norm=norm(&load.iter().zip(self.scale).map(|(p,s)|p/s).collect::<Vec<_>>());
         let residual=norm(&residual);
         if !residual.is_finite() || residual>1e-8+self.options.relative_force_tolerance*load_norm {
             return Err(format!("shell preload failed physical force balance: {residual} N for {load_norm} N load"));
@@ -263,14 +277,17 @@ impl PreloadProblem<'_> {
             let (columns,values)=self.model.k.row(row);
             for (&col,&value) in columns.iter().zip(values) {k.push(row,col,value);}
         }
-        for element in &self.elements {
+        for element in self.elements {
             let c=element.correction(u);
             if !c.gradient.is_finite() || c.gradient>self.options.maximum_gradient
                 || c.tangent.iter().any(|v|!v.is_finite()) {return Err("invalid equilibrium tangent".into());}
             element.add_tangent(&c.tangent,&mut k);
         }
-        for tether in &self.tethers {tether.add_tangent(u,&mut k,self.fraction)?;}
+        for tether in self.tethers {tether.add_tangent(u,&mut k,self.connection_fraction())?;}
         Ok(k.assemble())
+    }
+    fn connection_fraction(&self)->f64 {
+        if self.load_origin.is_some() {1.} else {self.fraction}
     }
 }
 impl PreloadProblem<'_> {
@@ -284,7 +301,7 @@ impl PreloadProblem<'_> {
         let Ok(load)=self.applied_load(&u) else {out.fill(f64::NAN);return;};
         for (f,load) in out.iter_mut().zip(load) {*f-=load;}
         let value=self.base.solve(out);
-        for ((out,v),scale) in out.iter_mut().zip(value).zip(&self.scale) {*out=v*scale;}
+        for ((out,v),scale) in out.iter_mut().zip(value).zip(self.scale) {*out=v*scale;}
     }
     /// Overwrite the analytic Jacobian action in the scaled solver coordinates.
     pub fn jacobian_apply(&self,x:&[f64],direction:&[f64],out:&mut[f64]) {
@@ -293,7 +310,7 @@ impl PreloadProblem<'_> {
         let u=self.physical(x);let v=self.physical(direction);
         if !self.admitted(&u) {out.fill(f64::NAN);return;}
         self.model.k.spmv(&v,out);
-        for element in &self.elements {
+        for element in self.elements {
             let c=element.correction(&u);
             if !c.gradient.is_finite() || c.gradient>self.options.maximum_gradient {out.fill(f64::NAN);return;}
             for i in 0..9 {for j in 0..9 {
@@ -301,11 +318,11 @@ impl PreloadProblem<'_> {
                     out[a]+=wa*c.tangent[9*i+j]*wb*v[b]));
             }}
         }
-        for tether in &self.tethers {
-            if tether.add_action(&u,&v,out,self.fraction).is_err() {out.fill(f64::NAN);return;}
+        for tether in self.tethers {
+            if tether.add_action(&u,&v,out,self.connection_fraction()).is_err() {out.fill(f64::NAN);return;}
         }
         let value=self.base.solve(out);
-        for ((out,v),scale) in out.iter_mut().zip(value).zip(&self.scale) {*out=v*scale;}
+        for ((out,v),scale) in out.iter_mut().zip(value).zip(self.scale) {*out=v*scale;}
     }
 }
 fn positive_factor(k:&Csr)->Result<LdltFactor,String> {
@@ -342,8 +359,20 @@ struct Equilibrium {
 fn solve_problem(problem:&mut PreloadProblem<'_>,
     solve:&mut impl FnMut(&PreloadProblem<'_>,Vec<f64>,usize)->Result<(Vec<f64>,usize),String>)
     ->Result<Equilibrium,String> {
+    solve_problem_from(problem, None, solve)
+}
+
+fn solve_problem_from(problem:&mut PreloadProblem<'_>, initial:Option<&[f64]>,
+    solve:&mut impl FnMut(&PreloadProblem<'_>,Vec<f64>,usize)->Result<(Vec<f64>,usize),String>)
+    ->Result<Equilibrium,String> {
     let options=problem.options;
-    let mut x=vec![0.;problem.model.free];let mut iterations=0;let mut final_k=None;
+    let mut x=if let Some(u)=initial {
+        if problem.load_origin.is_none() {return Err("continued preload needs its accepted load origin".into());}
+        problem.fraction=0.;
+        problem.check_balance(u)?;
+        u.iter().zip(problem.scale).map(|(u,s)|u*s).collect()
+    } else {vec![0.;problem.model.free]};
+    let mut iterations=0;let mut final_k=None;
     for step in 1..=options.load_steps {
         problem.fraction=step as f64/options.load_steps as f64;
         let (candidate,count)=solve(problem,x,options.max_iterations)
@@ -440,8 +469,8 @@ fn equilibrate_sections<S: Section>(mesh:&ShellMesh,sections:&[S],
     let elements=sections.iter().enumerate().map(|(e,s)|Element::new(mesh,&model,s,e))
         .collect::<Result<Vec<_>,_>>()?;
     let tethers=tethers.iter().map(|t|PreparedTether::new(t,mesh,&model)).collect::<Result<Vec<_>,_>>()?;
-    let mut problem=PreloadProblem {model:&model,elements,transforms:Vec::new(),tethers,base,scale,
-        load,fraction:0.,options,evaluations:Cell::new(0)};
+    let mut problem=PreloadProblem {model:&model,elements:&elements,transforms:&[],tethers:&tethers,base:&base,scale:&scale,
+        load:&load,load_origin:None,fraction:0.,options,evaluations:Cell::new(0)};
     let Equilibrium {u,k,energy,residual_force_n,iterations,evaluations}=solve_problem(&mut problem,solve)?;
     let tether_responses=problem.tethers.iter().map(|t|t.response(&u)).collect::<Result<Vec<_>,_>>()?;
     let displacement=model.dof_map.iter().map(|i|i.map_or(0.,|i|u[i])).collect();
@@ -465,7 +494,7 @@ mod tests {
             p.force_energy(&u,&mut force).ok_or("test trial refused")?;
             for (f,load) in force.iter_mut().zip(p.applied_load(&u)?) {*f-=load;}
             let factor=positive_factor(&p.tangent(&u)?)?;let delta=factor.solve(&force);
-            for ((x,d),s) in x.iter_mut().zip(delta).zip(&p.scale) {*x-=d*s;}
+            for ((x,d),s) in x.iter_mut().zip(delta).zip(p.scale) {*x-=d*s;}
         }
         Err("test Newton did not converge".into())
     }
