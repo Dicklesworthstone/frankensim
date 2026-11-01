@@ -1,28 +1,35 @@
-//! Direct finite-area illuminance with bounded opaque-mesh shadows in vacuum.
+//! Direct finite-area illuminance with bounded mesh shadows and gray extinction.
 //!
 //! Reuse the native emitter preparation and analytical projected-triangle
 //! integral. The original interval visibility hierarchy classifies ALL rays
 //! from a source subtriangle, not a few sampled shadow rays. Clear patches use
 //! the analytical integral, blocked patches are zero, and unresolved patches
 //! retain [0, unoccluded upper]. Bisect the largest uncertain lux contribution
-//! first. A work/depth limit returns the remaining enclosure, never a fabricated
-//! tolerance pass. No source, primitive, material or path estimator is modified.
+//! first. Optional homogeneous absorption and out-scattering use the original
+//! `HomogeneousMedium`; interval transmission over each entire patch is refined
+//! together with penumbrae. A work/depth limit retains the current enclosure,
+//! never a fabricated tolerance pass. No source, primitive, material or path estimator is modified.
 //!
 //! This encloses selected-source DIRECT emission only. Opaque static meshes and
 //! rigid instances may occlude one another, including faces of folded sources.
-//! Reflection, refraction, haze, projector optics, calibration and physical mesh
-//! fidelity remain outside the model. As in the existing direct connector, the
+//! Reflection, refraction, in-scattering, heterogeneous/spectral media, projector
+//! optics, calibration and physical mesh fidelity remain outside the model.
+//! As in the existing direct connector, the
 //! source endpoint and a declared receiver-end distance are excluded. The
 //! physical effect of that exclusion and total physical error remain unknown.
 
 use super::*;
 use crate::photometry::PhotometryError;
+use crate::photometry::medium::HomogeneousMedium;
 use crate::photometry::source::validation::{EnclosureUnavailable, visibility::{Visibility, VisibilityIndex}};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
+mod attenuation;
+use attenuation::PreparedAttenuation;
+
 /// Version of adaptive patch partitioning, shadow predicates and output scope.
-pub const AREA_OCCLUSION_SEMANTICS_VERSION: u32 = 1;
+pub const AREA_OCCLUSION_SEMANTICS_VERSION: u32 = 2;
 /// Hard ceiling on patch evaluations and reserved frontier slots per receiver.
 pub const MAX_AREA_SHADOW_PATCHES: usize = 262_144;
 
@@ -96,14 +103,14 @@ pub enum AreaOcclusionTermination {
     ResolutionLimit,
 }
 
-/// Complete direct-area result including unresolved shadow uncertainty.
+/// Complete direct-area result including shadow and extinction-integration uncertainty.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct OccludedAreaIlluminance {
     /// Deterministic interval midpoint, not a sampled/path-tracer estimate.
     pub lux: f64,
-    /// Selected-source direct vacuum illuminance with the declared mesh shadows.
+    /// Selected-source direct illuminance with declared mesh shadows and extinction.
     pub numerical: NumericalCertificate,
-    /// Outward midpoint error, INCLUDING remaining penumbra ambiguity, in lux.
+    /// Outward midpoint error, including penumbra and extinction variation, in lux.
     pub numerical_error_bound_lux: f64,
     /// Requested numerical accuracy, kept separate from achieved accuracy.
     pub requested_error_lux: f64,
@@ -115,16 +122,23 @@ pub struct OccludedAreaIlluminance {
     pub uncertain_visibility_patches: usize,
     /// Final leaf patches using a geometric fallback for the angular integral.
     pub coarse_integral_patches: usize,
-    /// Selected-source model, original occluders, probe, and endpoint convention.
+    /// Final nonzero leaf patches with a non-singleton transmission range.
+    /// This counts integration/numerical variation, not uncertain physical inputs.
+    pub varying_transmittance_patches: usize,
+    /// Retained homogeneous absorption coefficient, in inverse metres.
+    pub absorption_per_m: f64,
+    /// Retained homogeneous out-scattering coefficient, in inverse metres.
+    pub scattering_per_m: f64,
+    /// Selected sources, original occluders, extinction, probe and endpoint convention.
     /// This is not authenticated calibration evidence.
     pub numerical_model_identity: ContentHash,
     /// Unknown calibration, physical geometry and omitted-transport error.
     pub total_error_bound_lux: Option<f64>,
 }
 impl OccludedAreaIlluminance {
-    /// CSV labels its direct/vacuum scope and actual numerical termination.
+    /// CSV labels its direct vacuum/gray-medium scope and actual termination.
     pub fn write_csv_header(writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(b"index,scope,lux,numerical_lower_lux,numerical_upper_lux,numerical_error_bound_lux,requested_error_lux,termination,evaluated_patches,uncertain_visibility_patches,coarse_integral_patches,numerical_model_identity,total_physical_error_bound_lux,version\n")
+        writer.write_all(b"index,scope,lux,numerical_lower_lux,numerical_upper_lux,numerical_error_bound_lux,requested_error_lux,termination,evaluated_patches,uncertain_visibility_patches,coarse_integral_patches,numerical_model_identity,absorption_per_m,scattering_per_m,varying_transmittance_patches,total_physical_error_bound_lux,version\n")
     }
     /// Missing total error remains unknown; I/O failures propagate.
     pub fn write_csv_row(self, index: usize, writer: &mut impl Write) -> io::Result<()> {
@@ -133,10 +147,16 @@ impl OccludedAreaIlluminance {
             AreaOcclusionTermination::PatchBudget => "patch-budget",
             AreaOcclusionTermination::ResolutionLimit => "resolution-limit",
         };
-        writeln!(writer, "{index},opaque-mesh-vacuum-direct-area,{},{},{},{},{},{reason},{},{},{},{},unknown,{AREA_OCCLUSION_SEMANTICS_VERSION}",
+        let scope = if self.absorption_per_m == 0.0 && self.scattering_per_m == 0.0 {
+            "opaque-mesh-vacuum-direct-area"
+        } else {
+            "opaque-mesh-homogeneous-gray-direct-area"
+        };
+        writeln!(writer, "{index},{scope},{},{},{},{},{},{reason},{},{},{},{},{},{},{},unknown,{AREA_OCCLUSION_SEMANTICS_VERSION}",
             self.lux, self.numerical.lo, self.numerical.hi, self.numerical_error_bound_lux,
             self.requested_error_lux, self.evaluated_patches, self.uncertain_visibility_patches,
-            self.coarse_integral_patches, self.numerical_model_identity)
+            self.coarse_integral_patches, self.numerical_model_identity, self.absorption_per_m,
+            self.scattering_per_m, self.varying_transmittance_patches)
     }
 }
 
@@ -146,6 +166,7 @@ pub struct OccludedAreaReference<'scene> {
     sources: UnoccludedAreaReference,
     primitives: &'scene [Primitive],
     visibility: VisibilityIndex,
+    attenuation: PreparedAttenuation,
     identity: ContentHash,
 }
 impl<'scene> OccludedAreaReference<'scene> {
@@ -164,13 +185,26 @@ impl<'scene> OccludedAreaReference<'scene> {
             }
         }
         let sources = UnoccludedAreaReference::new(primitives, sources, preparation, cx)?;
-        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.v1");
+        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.v2");
         hash.update(&AREA_OCCLUSION_SEMANTICS_VERSION.to_le_bytes());
+        hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&sources.identity.0);
         let visibility = VisibilityIndex::prepare(primitives, &mut hash, cx)?
             .map_err(AreaOcclusionError::GeometryUnavailable)?;
         cx.checkpoint()?;
-        Ok(Self { sources, primitives, visibility, identity: hash.finalize() })
+        Ok(Self { sources, primitives, visibility, attenuation: PreparedAttenuation::vacuum(), identity: hash.finalize() })
+    }
+
+    /// Replace vacuum (or a previous medium) with the original homogeneous gray
+    /// medium's immutable absorption/out-scattering coefficients. This does not
+    /// rebuild geometry, modify the medium, or evaluate its phase law: scattered
+    /// radiance INTO the receiver is explicitly omitted, not certified as zero.
+    /// Coefficients are exact retained model inputs, not calibrated quantities.
+    /// Spatially/spectrally varying media require their native transport instead.
+    #[must_use]
+    pub fn with_homogeneous_medium(mut self, medium: &HomogeneousMedium) -> Self {
+        self.attenuation = PreparedAttenuation::new(medium);
+        self
     }
 
     /// Bound one receiver. Progressive jobs reuse the bounded frontier allocation.
@@ -195,10 +229,11 @@ impl<'scene> OccludedAreaReference<'scene> {
         let mut evaluations = 0;
         let mut uncertain = 0;
         let mut coarse = 0;
+        let mut varying = 0;
         for (root, face) in self.sources.faces.iter().enumerate() {
             cx.checkpoint()?;
             let mut patch = Patch { root, vertices: face.vertices, area: face.area,
-                depth: 0, range: zero(), uncertain: false, coarse: false, order: evaluations };
+                depth: 0, range: zero(), uncertain: false, coarse: false, varying: false, order: evaluations };
             if face.luminance.hi() > 0.0 {
                 // Establish source-plane separation ONCE for the original face.
                 // Its exact subdivisions stay in that plane, including the
@@ -217,6 +252,7 @@ impl<'scene> OccludedAreaReference<'scene> {
             if !finite(raw) { return Err(AreaReferenceError::NumericalRange.into()); }
             uncertain += usize::from(patch.uncertain);
             coarse += usize::from(patch.coarse);
+            varying += usize::from(patch.varying);
             work.retain(patch, budget);
         }
         let mut enclosed = raw;
@@ -240,22 +276,28 @@ impl<'scene> OccludedAreaReference<'scene> {
             enclosed = enclosed.intersect(raw).ok_or(AreaReferenceError::NumericalRange)?;
             uncertain -= usize::from(parent.uncertain);
             coarse -= usize::from(parent.coarse);
+            varying -= usize::from(parent.varying);
             for child in children {
                 uncertain += usize::from(child.uncertain);
                 coarse += usize::from(child.coarse);
+                varying += usize::from(child.varying);
                 work.retain(child, budget);
             }
         };
         let (lux, error) = midpoint_and_error(enclosed);
         if !error.is_finite() { return Err(AreaReferenceError::NumericalRange.into()); }
-        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.probe.v1");
+        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.probe.v2");
         hash.update(&self.identity.0);
+        self.attenuation.hash_into(&mut hash);
         for value in [p.x, p.y, p.z, n.x, n.y, n.z, budget.ray_epsilon_m] { hash_float(&mut hash, value); }
         cx.checkpoint()?;
         Ok(OccludedAreaIlluminance { lux, numerical: NumericalCertificate::enclosure(enclosed.lo(), enclosed.hi()),
             numerical_error_bound_lux: error, requested_error_lux: budget.absolute_error_lux,
             termination, evaluated_patches: evaluations, uncertain_visibility_patches: uncertain,
-            coarse_integral_patches: coarse, numerical_model_identity: hash.finalize(), total_error_bound_lux: None })
+            coarse_integral_patches: coarse, varying_transmittance_patches: varying,
+            absorption_per_m: self.attenuation.absorption_per_m(),
+            scattering_per_m: self.attenuation.scattering_per_m(),
+            numerical_model_identity: hash.finalize(), total_error_bound_lux: None })
     }
 
     fn evaluate_patch(
@@ -280,7 +322,19 @@ impl<'scene> OccludedAreaReference<'scene> {
         };
         let state = self.visibility.visibility_from_face(self.primitives, patch.vertices, receiver, end, face.origin_face, cx)?;
         if state == Visibility::Blocked { return Ok(()); }
-        let value = nonnegative(mul(face.luminance, factor));
+        let unattenuated = nonnegative(mul(face.luminance, factor));
+        // Never shorten extinction by the visibility-only receiver exclusion.
+        // A scalar centre-ray transmission is NOT an enclosure of a finite patch.
+        let value = if self.attenuation.is_vacuum() {
+            // Retain the original vacuum arithmetic and refinement sequence.
+            unattenuated
+        } else {
+            let transmission = self.attenuation.patch_transmittance(
+                vectors, face.perpendicular, distance,
+            ).ok_or(AreaReferenceError::NumericalRange)?;
+            patch.varying = transmission.lo() < transmission.hi() && unattenuated.hi() > 0.0;
+            nonnegative(mul(unattenuated, transmission))
+        };
         if !finite(value) { return Err(AreaReferenceError::NumericalRange.into()); }
         patch.uncertain = state == Visibility::Uncertain && value.hi() > 0.0;
         patch.coarse = coarse;
@@ -310,6 +364,7 @@ struct Patch {
     depth: u32,
     uncertain: bool,
     coarse: bool,
+    varying: bool,
     order: usize,
 }
 impl Patch {
@@ -325,7 +380,7 @@ impl Patch {
         let midpoint = std::array::from_fn(|i| add(mul(point(0.5), self.vertices[a][i]), mul(point(0.5), self.vertices[b][i])));
         let triangles = [[self.vertices[a], midpoint, self.vertices[c]], [midpoint, self.vertices[b], self.vertices[c]]];
         std::array::from_fn(|i| Self { vertices: triangles[i], area: mul(self.area, point(0.5)),
-            depth: self.depth+1, range: zero(), uncertain: false, coarse: false, order: order+i, ..self })
+            depth: self.depth+1, range: zero(), uncertain: false, coarse: false, varying: false, order: order+i, ..self })
     }
 }
 impl PartialEq for Patch { fn eq(&self, other: &Self) -> bool { self.cmp(other) == Ordering::Equal } }
@@ -354,7 +409,7 @@ impl Workspace {
         Ok(Self { frontier })
     }
     fn retain(&mut self, patch: Patch, budget: AreaOcclusionBudget) {
-        if (patch.uncertain || patch.coarse) && patch.depth < budget.max_depth && patch.range.hi() > patch.range.lo() {
+        if (patch.uncertain || patch.coarse || patch.varying) && patch.depth < budget.max_depth && patch.range.hi() > patch.range.lo() {
             self.frontier.push(patch);
         }
     }
