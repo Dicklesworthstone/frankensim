@@ -19,6 +19,8 @@
 use core::fmt;
 use fs_math::det;
 
+/// Explicit threshold-free Norton creep on the shared finite return owner.
+pub mod creep;
 /// Explicit-time Perzyna kinetics on this same finite return and tangent owner.
 pub mod rate;
 /// Strict, explicit model-card binding for this exact Kirchhoff-yield law.
@@ -180,10 +182,34 @@ impl FiniteJ2 {
         parameters: FiniteJ2Parameters,
         limits: FiniteJ2Limits,
     ) -> Result<Self, FiniteJ2Error> {
+        Self::new_backbone(parameters, limits, false)
+    }
+
+    /// Only explicitly selected creep may use the zero-radius, zero-hardening
+    /// backbone. The ordinary plastic constructor continues to require yield.
+    pub(super) fn new_creep_backbone(
+        parameters: FiniteJ2Parameters,
+        limits: FiniteJ2Limits,
+    ) -> Result<Self, FiniteJ2Error> {
+        if parameters.yield_stress_pa != 0.0 || parameters.hardening_modulus_pa != 0.0 {
+            return Err(FiniteJ2Error::Parameters(
+                "Norton creep requires exactly zero yield and hardening storage",
+            ));
+        }
+        Self::new_backbone(parameters, limits, true)
+    }
+
+    fn new_backbone(
+        parameters: FiniteJ2Parameters,
+        limits: FiniteJ2Limits,
+        creep: bool,
+    ) -> Result<Self, FiniteJ2Error> {
         let p = &parameters;
-        if [p.shear_modulus_pa, p.bulk_modulus_pa, p.yield_stress_pa]
+        if [p.shear_modulus_pa, p.bulk_modulus_pa]
             .iter()
             .any(|v| !v.is_finite() || *v <= 0.0)
+            || !p.yield_stress_pa.is_finite()
+            || (!creep && p.yield_stress_pa <= 0.0)
             || !p.hardening_modulus_pa.is_finite()
             || p.hardening_modulus_pa < 0.0
             || !(3.0 * p.shear_modulus_pa + p.hardening_modulus_pa).is_finite()
@@ -390,9 +416,15 @@ impl FiniteJ2 {
         // a stress-scale roundoff residual at yield. Do not turn an exact hold
         // or rigid rotation into a fictitious retained plastic increment.
         // This numerical zero band is not a user-supplied overstress law.
+        // Explicit threshold-free creep resolves every positive trial stress;
+        // a flow increment below retained-history resolution refuses below.
         let yield_roundoff =
             64.0 * f64::EPSILON * (2.0 * p.shear_modulus_pa).max(q_trial).max(radius_old);
-        let plastic = excess > yield_roundoff;
+        let plastic = if radius_old == 0.0 && kinetics.is_some() {
+            q_trial > 0.0
+        } else {
+            excess > yield_roundoff
+        };
         let denominator = 3.0 * p.shear_modulus_pa + p.hardening_modulus_pa;
         let flow = if plastic {
             kinetics
@@ -425,6 +457,15 @@ impl FiniteJ2 {
             (self.yield_radius(alpha) + flow.overstress_pa) / q_trial
         } else if plastic {
             self.yield_radius(alpha) / q_trial
+        } else if radius_old == 0.0
+            && let Some(law) = kinetics
+            && law.parameters().exponent == 1.0
+        {
+            // Threshold-free linear creep has a relaxed shear tangent even at
+            // exactly zero stress. The zero-flow history remains untouched;
+            // this scale differentiates the same smooth Maxwell limit there.
+            let modulus = law.parameters().viscosity_pa_s / law.duration_s();
+            modulus / (denominator + modulus)
         } else {
             1.0
         };
