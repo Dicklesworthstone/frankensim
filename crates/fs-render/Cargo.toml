@@ -124,6 +124,10 @@ required-features = ["optical-heating"]
 name = "distributed_optical_heating"
 required-features = ["optical-heating"]
 
+[[example]]
+name = "phase_change_optical_heating"
+required-features = ["optical-heating", "material-state"]
+
 [[test]]
 name = "dielectric_battery"
 required-features = ["tracer"]

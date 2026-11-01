@@ -8860,3 +8860,18 @@ The strict two-phase public APIs retain their existing contract. Both APIs share
 The shared owner admits the complete original caloric source interval, demands a representable increasing enthalpy bracket, checks sampled monotonicity, and accepts only the specified enthalpy residual together with its temperature safeguard. Absolute targets whose floating-point spacing cannot resolve tolerance refuse with guidance to use increments. Publication retains the original source receipts and polls cancellation after all closure calculations. Work receipts distinguish observed PT selections from the sum of original screening work and conservative nested-flash EOS ceilings.
 
 The existing `nonideal_flash` integration target checks independent 50-digit binary liquid/vapor and coexistence oracles; heating and cooling across both phase boundaries; the original EOS identity h-u=p/rho; exact fixed points and large species datum invariance; mandatory refusal of unresolved/negative-witness splits and pure-fluid amount ambiguity; total work, source support and final cancellation. The feature infers no mixed Cp, acoustic relaxation, transport, reactor, flow-rate or process entropy law.
+
+### Original phase-chart identity in native enthalpy consumers
+
+The `ThermalLaw` adapter for `EquilibriumEnthalpyPhaseCurve` exposes the original
+curve identity through `caloric_identity`. It is the same identity already
+binding the material card, enthalpy datum, phase knots and retained caloric source
+receipts. Optical laws indexed by native enthalpy can therefore verify that their
+declared caloric reference is the actual registered thermal owner, including on
+isothermal latent plateaus. This adds no duplicate phase inversion or latent heat.
+It does not authenticate caller-authored optical data or infer a phase mixing law.
+
+The `fs-render` example `phase_change_optical_heating` uses this adapter directly
+for illumination, infrared exchange and phase observations during heating and
+convective refreezing of one synthetic specimen. The original chart supplies
+temperature and liquid mass fraction throughout both directions of the cycle.

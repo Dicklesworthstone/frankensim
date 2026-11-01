@@ -4431,3 +4431,15 @@ checks, not experimental validation. Linear interpolation of supplied effective
 coefficients does not establish a universal solid/liquid optical mixing law.
 Fixed density, geometry, phase functions and spectral quadrature remain explicit
 inputs; this extension adds no deformation, phase kinetics or hysteresis.
+
+`phase_change_optical_heating` exercises this path with the original
+`fs-material::phase::EquilibriumEnthalpyPhaseCurve`: a synthetic 1 g specimen,
+a sharp 350 K fusion plateau, independently authored visible/infrared spectra,
+continuous 40 W illumination and an explicit convection event that refreezes
+the specimen. The original native timeline and optical energy histories remain
+continuous. Output includes actual liquid mass fraction, enthalpy, temperature,
+absorption and separate optical/convection energy accounts. The example checks
+conservation and traversal of both the melting and freezing plateaus. Geometry
+and density are fixed, data are synthetic, and infrared quadrature covers only
+6–18 micrometres. Run it with
+`cargo run -p fs-render --example phase_change_optical_heating --no-default-features --features optical-heating,material-state`.

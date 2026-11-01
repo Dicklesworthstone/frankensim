@@ -67,6 +67,10 @@ impl ThermalLaw for IsobaricWaterVaporization {
 }
 
 impl ThermalLaw for EquilibriumEnthalpyPhaseCurve {
+    fn caloric_identity(&self) -> Option<[u8; 32]> {
+        Some(*self.identity().as_bytes())
+    }
+
     fn temperature_k(&self, specific_h_j_kg: f64) -> Result<f64, DepositionError> {
         self.temperature_at_specific_enthalpy(specific_h_j_kg)
             .map_err(|_| DepositionError::MaterialDomain)
