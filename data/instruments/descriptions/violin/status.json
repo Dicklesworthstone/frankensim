@@ -3,7 +3,7 @@
  "family": "violin",
  "title": "Violin",
  "reference_instrument": "Violin (University of Iowa MIS)",
- "summary": "Four material strings on the il Cannone body: Dominant string sections from Pickering's measurements, each with two polarisations, its twist and its afterlength, coupled through the bridge to a shell assembly of the Guarneri il Cannone's measured geometry with spruce and maple data and its enclosed air, bowed open by a point bow. Each open string is tuned to equal temperament from the instrument's own pulse response. The body's modes stop at 5 kHz on an unconverged mesh, the radiated pressure is a compact approximation, the strings' transverse internal loss is unknown and entered as zero, and the bow keeps an authored Stribeck law, so this is a sourced assembly, not a converged violin.",
+ "summary": "Four material strings on the il Cannone body: Dominant string sections from Pickering's measurements, each with two polarisations, its twist and its afterlength, coupled through the bridge to a shell assembly of the Guarneri il Cannone's measured geometry with spruce and maple data and its enclosed air, bowed open by a point bow. Each open string is tuned to equal temperament from the instrument's own pulse response. Bowed, the open strings sound within 4 cents of it: G3 +0.3, D4 +2.8, A4 +3.5 and E5 -1.2 cents. The body's modes stop at 5 kHz on an unconverged mesh, the radiated pressure is a compact approximation, the strings' transverse internal loss is unknown and entered as zero, and the bow keeps an authored Stribeck law, so this is a sourced assembly, not a converged violin.",
  "physics_present": [
   "fs-couple material_strings: four strings from compiled Dominant section packs (Pickering 1985), over the full span including afterlength, with the pack's bending and twisting stiffness, two transverse polarisations, twist modes carrying Pickering's measured torsional loss, and air drag and loading from the declared gas",
   "residual flexibility (c6854036b): each string's bridge and fixed stops see the exact static compliance of the string's bending modes left out of its retained set",
@@ -11,6 +11,7 @@
   "each string drives its own point on the bridge along the bowing direction; the other three strings stay coupled in the reciprocal assembly while one is bowed",
   "the enclosed air as a uniform-pressure cavity with a flanged circular neck standing for the f-holes, as the shell assembler prints them, coupled to the shell's signed volume",
   "a point bow at one tenth of the speaking length from the bridge, with the bow speed, force and articulation of the open-string cards and the solver's Stribeck friction",
+  "the stick rule of f8ae88277: a stuck bow is held on the string's end slip speed with its creep projected out, the work the stick constraint does is booked in the energy balance and printed for each note, and the route is checked against Schelleng's bowing window on an ideal string",
   "open strings tuned to equal temperament (A4 = 440 Hz) by a tension factor per string read from the assembled instrument's own pulse response, never from a recording",
   "dry air (N2 0.8, O2 0.2) at 293.15 K and 101325 Pa as one gas state for string loading, cavity and pressure output"
  ],
@@ -20,7 +21,6 @@
   "the strings' transverse internal loss: Pickering measured none, so the bending loss and the tension loss (eta_F) are stated unknowns, both entered as zero, and a string loses transverse energy only to air drag and its supports; measured wound violin and cello strings lose much more at high frequency, and the bowed slip regime depends on it (pexfp.299)",
   "the string-to-bridge joint: an authored spring and dashpot per string (200000 N/m, 0.1 N s/m), not the contact mechanics of the bridge notch",
   "a measured rosin law: the bow's Stribeck coefficients (0.8 static, 0.4 kinetic, 0.1 m/s) are authored, not measured; no thermal third body, no hair ribbon, no bow noise",
-  "a sound stick rule at the bow: the step-averaged sticking now rendered carries an undamped alternation of the friction force from sample to sample that can fire slips early; its replacement is in progress (pexfp.299)",
   "the bow port's residual flexibility: the stops carry it, the bow contact does not yet (pexfp.299); only open strings are graded",
   "a single co-characterised instrument: il Cannone's geometry is combined with independently sourced wood and string data, and the strings' speaking length is the generic rung's, not il Cannone's own",
   "player variation: constant bow speed and force, so the onset and the sustained part are cleaner than a player's"
@@ -28,6 +28,7 @@
  "blocked": null,
  "beads": [
   "pexfp.298",
-  "pexfp.299"
+  "pexfp.299",
+  "pexfp.377"
  ]
 }
