@@ -154,9 +154,25 @@ fn direction_crossing_work_limits_and_late_cancellation_refuse_atomically() {
     let donor = parcel(m.clone(), 5.0e6, 0.01);
     let receiver = parcel(m, 4.9e6, 0.02);
     assert!(donor.nozzle_flow_to(5.1e6, nozzle(), controls(), || false).is_err());
-    assert!(donor
+    // The engine's own flow here is 2.4506e-3 kg/s (the incompressible estimate Cd*A*sqrt(2*rho*dp) gives 2.476e-3), which is
+    // 0.51 % of the 0.4789 kg donor per second. The donor and receiver pressures cross after about 1.76 s (margins measured
+    // with the same transferred mass: +4.3e4 Pa at 1 s, -1.4e4 Pa at 2 s, -1.3e5 Pa at 4 s). One second is therefore a
+    // legitimate step, and four seconds cross.
+    let (step, _) = donor
         .through_nozzle_to(&receiver, nozzle(), 1.0, controls(), || false)
-        .is_err());
+        .ok().expect("a one-second step does not cross");
+    assert!(step.donor().state().pressure_pa() > step.receiver().state().pressure_pa());
+    let crossed = donor
+        .through_nozzle_to(&receiver, nozzle(), 4.0, controls(), || false)
+        .err().expect("four seconds cross pressure equilibrium");
+    assert!(format!("{crossed:?}").contains("crosses pressure equilibrium"), "{crossed:?}");
+    // The donor-inventory limit alone: the SAME uncrossed one-second step with a limit below its 0.51 %.
+    let mut tight = controls();
+    tight.maximum_donor_fraction = 1e-3;
+    let drained = donor
+        .through_nozzle_to(&receiver, nozzle(), 1.0, tight, || false)
+        .err().expect("a one-second step exceeds a 0.1 % donor limit");
+    assert!(format!("{drained:?}").contains("exceeds donor inventory"), "{drained:?}");
 
     let mut polls = 0;
     donor.nozzle_flow_to(4.8e6, nozzle(), controls(), || {
