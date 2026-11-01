@@ -9040,3 +9040,42 @@ boundaries, source datum invariance, small signed entropy changes, exact rest,
 physical/source/work refusals, and final cancellation/replay. Source and tests
 passed Rustfmt parsing. Native compilation and execution remain pending because
 the shared build filesystem is full; the new suite is not claimed green.
+
+## Entropy/volume closure through the original mixture equilibrium
+
+`thermochemical_gas::nonideal::flash::equilibrium::entropy::volume` recovers
+pressure, temperature and phase amounts from specific entropy and specific
+volume at conserved complete feed composition. The increment API integrates
+original NASA entropy before phase mixing/departure differences, preserving
+independent species reference-datum invariance. It reports separately integrated
+Delta h and Delta u; these are thermodynamic changes, not an independent process
+work quadrature. Zero Delta s supplies a reversible adiabatic endpoint.
+
+The original safeguarded pressure bracket now serves both U,V and S,V closures.
+Each trial pressure uses the original bounded caloric temperature root and
+screened PT phase law. The original U,V coordinate and energy tolerances remain
+owned by its existing adapter. No mixed heat capacity, gamma, kinetic phase
+rule or new generic nonlinear solver is introduced. Every sampled phase must
+pass both original stationary searches and any required composition split;
+finite phase evidence is not a global equilibrium or unrestricted uniqueness
+certificate.
+
+One original reference sample is retained across all pressure trials. Full
+material receipts are rebuilt only for the accepted endpoint. Explicit pressure
+and temperature brackets, entropy/volume residuals, a pressure correction or
+bracket safeguard, per-pressure PT limits and whole-call pressure/PT ceilings
+bound the solve. Work accounting includes reference and endpoint selections,
+and per-pressure refusals retain the whole-call PT count. Small requested entropy
+or volume changes reserve residual resolution against their magnitude. At zero
+entropy increment and identical volume, an in-bracket reference returns exactly
+after one PT selection and no pressure inversion. Cancellation and refusal
+publish no partial endpoint.
+
+Six focused regressions recover independent liquid/coexistence/vapor states,
+the independently solved binary isentropic expansion and reverse compression,
+phase-boundary changes under large independent species datums, exact rest and
+whole-call budget boundaries, invalid/source/bracket refusals, and final
+cancellation/replay. They also check Delta h - Delta u against the actual change
+in p*v. Rustfmt parsing passed. Native compilation/execution is pending while
+the restored dependency graph is checked; no new executed-test result is claimed
+by this entry.

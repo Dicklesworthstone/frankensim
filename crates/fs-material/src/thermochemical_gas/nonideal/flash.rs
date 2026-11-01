@@ -53,9 +53,9 @@ pub enum ThermochemicalFlashError {
     OutsideVolumeBracket,
     /// The pressure interval cannot resolve both conserved coordinates.
     UnresolvedPressure,
-    /// The caller's bounded number of pressure/enthalpy inversions was exhausted.
+    /// The caller's bounded number of pressure/caloric inversions was exhausted.
     PressureWorkLimit {
-        /// Number of attempted pressure/enthalpy inversions.
+        /// Number of attempted pressure/caloric inversions.
         pressure_evaluations: usize,
     },
 }

@@ -19,6 +19,9 @@ use fs_thermochem::eos::peng_robinson::{
     stability::PengRobinsonStabilityOptionsV1,
 };
 
+/// Entropy and volume closure for reversible compression and expansion.
+pub mod volume;
+
 /// Shared hard ceiling on original PT selections in a single caloric inversion.
 pub const MAX_ENTROPY_FLASH_EVALUATIONS: usize = MAX_ENTHALPY_FLASH_EVALUATIONS;
 
@@ -60,6 +63,19 @@ impl PhaseEntropyControls {
             temperature_tolerance_k: self.temperature_tolerance_k,
             maximum_pt_evaluations: self.maximum_pt_evaluations,
         }
+    }
+
+    fn increment_root_controls(self, change: f64) -> Result<CaloricRootControls, E> {
+        let mut scalar = self.root_controls();
+        if change != 0.0 {
+            scalar.residual_tolerance = scalar.residual_tolerance.min(0.25 * change.abs());
+            if !positive(scalar.residual_tolerance) {
+                return Err(E::Invalid(
+                    "entropy increment cannot resolve a positive tolerance",
+                ));
+            }
+        }
+        Ok(scalar)
     }
 
     /// The exact bounded phase policy used for the reference and every trial.
@@ -213,15 +229,7 @@ impl ThermochemicalPengRobinsonModel {
                 "finite entropy increment and positive reference pressure required",
             ));
         }
-        let mut scalar = controls.root_controls();
-        if change_j_kg_k != 0.0 {
-            scalar.residual_tolerance = scalar.residual_tolerance.min(0.25 * change_j_kg_k.abs());
-            if !positive(scalar.residual_tolerance) {
-                return Err(E::Invalid(
-                    "entropy increment cannot resolve a positive tolerance",
-                ));
-            }
-        }
+        let scalar = controls.increment_root_controls(change_j_kg_k)?;
         let mut work = EnthalpyWork::default();
         let initial = self.bounded_caloric_sample(
             initial_temperature,

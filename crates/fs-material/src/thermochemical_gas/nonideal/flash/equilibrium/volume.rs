@@ -14,7 +14,9 @@ use crate::thermochemical_gas::nonideal::flash::{
     failure, poll, positive,
 };
 use fs_qty::{Pressure, Temperature};
-use fs_thermochem::eos::peng_robinson::phase_screen::PengRobinsonPhaseScreenV1;
+use fs_thermochem::eos::peng_robinson::phase_screen::{
+    PengRobinsonPhaseScreenOptionsV1, PengRobinsonPhaseScreenV1,
+};
 
 /// Maximum pressure inversions in one conserved-energy/volume solve.
 pub const MAX_ENERGY_VOLUME_PRESSURE_EVALUATIONS: usize = 128;
@@ -149,7 +151,7 @@ impl PhaseEnergyVolumeSolution {
     }
 }
 
-type Sample = CaloricSample<PengRobinsonPhaseScreenV1>;
+pub(super) type Sample = CaloricSample<PengRobinsonPhaseScreenV1>;
 
 enum EnergyTarget {
     Absolute(f64),
@@ -180,16 +182,27 @@ impl EnergyTarget {
 }
 
 #[derive(Default)]
-struct Work {
-    pressure: usize,
-    pt: usize,
-    eos_bound: usize,
+pub(super) struct Work {
+    pub pressure: usize,
+    pub pt: usize,
+    pub eos_bound: usize,
 }
-struct PressureSample {
-    sample: Sample,
-    energy_coordinate: f64,
-    volume_residual: f64,
-    entropy_change: Option<f64>,
+pub(super) struct PressureSample {
+    pub sample: Sample,
+    // The public owner retains either internal-energy or entropy units.
+    pub coordinate: f64,
+    pub volume_residual: f64,
+    pub entropy_change: Option<f64>,
+}
+
+// One pressure bracket engine serves both original U,V and S,V constraints.
+// Each physical owner supplies and independently checks its caloric coordinate.
+pub(super) struct VolumeRootControls {
+    pub pressure_bracket: [Pressure; 2],
+    pub volume_tolerance: f64,
+    pub pressure_tolerance: f64,
+    pub coordinate_target: f64,
+    pub coordinate_tolerance: f64,
 }
 
 impl ThermochemicalPengRobinsonModel {
@@ -299,23 +312,37 @@ impl ThermochemicalPengRobinsonModel {
         work: &mut Work,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<Sample, E> {
+        self.volume_caloric_sample(
+            temperature,
+            pressure,
+            controls.phase.phase_options(),
+            controls.maximum_pt_evaluations,
+            work,
+            cancelled,
+        )
+    }
+
+    pub(super) fn volume_caloric_sample(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+        phase_options: PengRobinsonPhaseScreenOptionsV1,
+        maximum_pt_evaluations: usize,
+        work: &mut Work,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Sample, E> {
         poll(cancelled)?;
-        if work.pt >= controls.maximum_pt_evaluations {
+        if work.pt >= maximum_pt_evaluations {
             return Err(E::WorkLimit {
                 flash_evaluations: work.pt,
             });
         }
         work.pt += 1;
-        let sample = self.caloric_phase_sample(
-            temperature,
-            pressure,
-            controls.phase.phase_options(),
-            cancelled,
-        )?;
+        let sample = self.caloric_phase_sample(temperature, pressure, phase_options, cancelled)?;
         work.eos_bound = work
             .eos_bound
             .checked_add(sample.eos_evaluation_upper_bound)
-            .ok_or(E::Invalid("energy/volume EOS work accounting overflow"))?;
+            .ok_or(E::Invalid("caloric/volume EOS work accounting overflow"))?;
         Ok(sample)
     }
 
@@ -416,7 +443,7 @@ impl ThermochemicalPengRobinsonModel {
         }
         Ok(PressureSample {
             sample: outcome.sample,
-            energy_coordinate,
+            coordinate: energy_coordinate,
             volume_residual: actual_volume - volume,
             entropy_change: outcome.entropy_change_j_kg_k,
         })
@@ -433,10 +460,10 @@ impl ThermochemicalPengRobinsonModel {
         poll(cancelled)?;
         Ok(PhaseEnergyVolumeSolution {
             state,
-            energy_residual_j_kg: accepted.energy_coordinate - target.requested(),
+            energy_residual_j_kg: accepted.coordinate - target.requested(),
             volume_residual_m3_kg: accepted.volume_residual,
             accepted_increment_j_kg: matches!(target, EnergyTarget::Increment { .. })
-                .then_some(accepted.energy_coordinate),
+                .then_some(accepted.coordinate),
             entropy_change_j_kg_k: accepted.entropy_change,
             pressure_evaluations: work.pressure,
             pt_evaluations: work.pt,
@@ -466,7 +493,7 @@ impl ThermochemicalPengRobinsonModel {
                 return self.finish_energy_volume(
                     PressureSample {
                         sample: initial.clone(),
-                        energy_coordinate: 0.0,
+                        coordinate: 0.0,
                         volume_residual: 0.0,
                         entropy_change: Some(0.0),
                     },
@@ -484,76 +511,78 @@ impl ThermochemicalPengRobinsonModel {
         if !positive(volume_tolerance) {
             return Err(E::Invalid("energy/volume closure tolerance underflow"));
         }
-        let mut lower = self.energy_volume_pressure(
-            controls.pressure_bracket[0].value(),
-            volume,
-            &target,
-            controls,
-            energy_tolerance,
-            &mut work,
+        let accepted = solve_volume_bracket(
+            VolumeRootControls {
+                pressure_bracket: controls.pressure_bracket,
+                volume_tolerance,
+                pressure_tolerance: controls.pressure_tolerance_pa,
+                coordinate_target: target.requested(),
+                coordinate_tolerance: energy_tolerance,
+            },
+            &mut |pressure, cancelled| {
+                self.energy_volume_pressure(
+                    pressure,
+                    volume,
+                    &target,
+                    controls,
+                    energy_tolerance,
+                    &mut work,
+                    cancelled,
+                )
+            },
             cancelled,
         )?;
-        let mut upper = self.energy_volume_pressure(
-            controls.pressure_bracket[1].value(),
-            volume,
-            &target,
-            controls,
-            energy_tolerance,
-            &mut work,
-            cancelled,
-        )?;
-        if lower.volume_residual < 0.0 || upper.volume_residual > 0.0 {
-            return Err(E::OutsideVolumeBracket);
+        self.finish_energy_volume(accepted, &target, work, cancelled)
+    }
+}
+
+pub(super) fn solve_volume_bracket<C: FnMut() -> bool>(
+    controls: VolumeRootControls,
+    evaluate: &mut impl FnMut(f64, &mut C) -> Result<PressureSample, E>,
+    cancelled: &mut C,
+) -> Result<PressureSample, E> {
+    let mut lower = evaluate(controls.pressure_bracket[0].value(), cancelled)?;
+    let mut upper = evaluate(controls.pressure_bracket[1].value(), cancelled)?;
+    if lower.volume_residual < 0.0 || upper.volume_residual > 0.0 {
+        return Err(E::OutsideVolumeBracket);
+    }
+    let mut last_pressure = f64::NAN;
+    let mut last_step = f64::INFINITY;
+    let mut iteration = 0;
+    loop {
+        poll(cancelled)?;
+        let lo = lower.sample.pressure.value();
+        let hi = upper.sample.pressure.value();
+        let lower_best = lower.volume_residual.abs() <= upper.volume_residual.abs();
+        let best = if lower_best { &lower } else { &upper };
+        let best_pressure = best.sample.pressure.value();
+        let coordinate_residual = best.coordinate - controls.coordinate_target;
+        if best.volume_residual.abs() <= controls.volume_tolerance
+            && coordinate_residual.abs() <= controls.coordinate_tolerance
+            && (best.volume_residual == 0.0
+                || hi - lo <= controls.pressure_tolerance
+                || best_pressure == last_pressure && last_step <= controls.pressure_tolerance)
+        {
+            return Ok(if lower_best { lower } else { upper });
         }
-        let mut last_pressure = f64::NAN;
-        let mut last_step = f64::INFINITY;
-        let mut iteration = 0;
-        loop {
-            poll(cancelled)?;
-            let lo = lower.sample.pressure.value();
-            let hi = upper.sample.pressure.value();
-            let lower_best = lower.volume_residual.abs() <= upper.volume_residual.abs();
-            let best = if lower_best { &lower } else { &upper };
-            let best_pressure = best.sample.pressure.value();
-            let energy_residual = best.energy_coordinate - target.requested();
-            if best.volume_residual.abs() <= volume_tolerance
-                && energy_residual.abs() <= energy_tolerance
-                && (best.volume_residual == 0.0
-                    || hi - lo <= controls.pressure_tolerance_pa
-                    || best_pressure == last_pressure
-                        && last_step <= controls.pressure_tolerance_pa)
-            {
-                let accepted = if lower_best { lower } else { upper };
-                return self.finish_energy_volume(accepted, &target, work, cancelled);
-            }
-            let fraction = lower.volume_residual / (lower.volume_residual - upper.volume_residual);
-            let secant = lo + fraction * (hi - lo);
-            let pressure = if iteration % 4 != 3 && secant.is_finite() && secant > lo && secant < hi
-            {
-                secant
-            } else {
-                lo + 0.5 * (hi - lo)
-            };
-            if pressure <= lo || pressure >= hi {
-                return Err(E::UnresolvedPressure);
-            }
-            last_pressure = pressure;
-            last_step = (pressure - best_pressure).abs();
-            let candidate = self.energy_volume_pressure(
-                pressure,
-                volume,
-                &target,
-                controls,
-                energy_tolerance,
-                &mut work,
-                cancelled,
-            )?;
-            if candidate.volume_residual >= 0.0 {
-                lower = candidate;
-            } else {
-                upper = candidate;
-            }
-            iteration += 1;
+        let fraction = lower.volume_residual / (lower.volume_residual - upper.volume_residual);
+        let secant = lo + fraction * (hi - lo);
+        let pressure = if iteration % 4 != 3 && secant.is_finite() && secant > lo && secant < hi {
+            secant
+        } else {
+            lo + 0.5 * (hi - lo)
+        };
+        if pressure <= lo || pressure >= hi {
+            return Err(E::UnresolvedPressure);
         }
+        last_pressure = pressure;
+        last_step = (pressure - best_pressure).abs();
+        let candidate = evaluate(pressure, cancelled)?;
+        if candidate.volume_residual >= 0.0 {
+            lower = candidate;
+        } else {
+            upper = candidate;
+        }
+        iteration += 1;
     }
 }
