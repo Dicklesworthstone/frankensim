@@ -8392,6 +8392,25 @@ the final candidate retains current source support and the final native step
 receipt. Source queries and immutable native candidates still allocate; the
 prepared numerical factor caches do not imply an allocation-free advance.
 
+`new_with_surfaces` admits independently authored exterior molar interface
+permeance [mol/(m2 s Pa)] through the existing `InterfaceSystemCard`. Left order
+is gas to polymer; right is polymer to gas. Finite-gas attachment checks the
+exterior against the original species transport material. Surface and adjacent
+half-cell resistances share the original scaled series calculation and native
+tridiagonal owner. `None` selects perfect Henry contact; zero surface permeance
+seals exactly. No extra gas-film volume, sorbed storage or caloric law is inferred.
+
+Gas and polymer traces remain distinct. Original polymer D/S support follows its
+actual side; original interface support covers both sides. Mixture polymer traces
+sum species Henry pressures while exterior gas traces use actual EOS totals.
+Coincident surface and bulk seals refuse source qualification when their
+intervening trace is undetermined. Original source selections, fixed species/mass
+budgets, isothermal thermostat accounts and transactional adaptive advancement
+remain native. Pure-gas evidence does not acquire mixed-gas kinetic authority.
+Public surface fixtures check an independent series-resistance steady flux and
+finite relaxation mode, selective mixture evolution, actual two-sided source
+domains, exact seals, ordered identities and cancellation.
+
 ### Original-material liquid retention calibration
 
 `WetPoreLiquidLaw::from_material` selects residual liquid/gas pore-volume

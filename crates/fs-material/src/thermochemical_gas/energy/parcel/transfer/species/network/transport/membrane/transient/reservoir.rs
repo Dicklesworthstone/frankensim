@@ -166,6 +166,7 @@ impl<'a> IsothermalGasMembrane<'a> {
             }
         }
         let catalog=Arc::new(catalog(&gases[0],&gases[1])?);
+        membrane.bindings.admit_gas_surfaces(&catalog)?;
         let source=&catalog.thermodynamics().components()[0];
         let molar_mass_kg_mol=source.molar_mass().value();
         let molar_enthalpy_j_mol=source.evaluate_properties(Temperature::new(membrane.temperature_k()))

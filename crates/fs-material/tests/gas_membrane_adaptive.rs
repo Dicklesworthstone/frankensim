@@ -668,3 +668,6 @@ fn selective_loading_hits_original_total_pressure_support_without_partial_public
     assert_eq!(warm.finite_state(&id("B")).unwrap(), &saved_b);
     assert_eq!(warm.elapsed_s(), 0.005);
 }
+
+#[path = "gas_membrane_adaptive/surface.rs"]
+mod surface;

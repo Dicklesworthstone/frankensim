@@ -25,6 +25,7 @@ use fs_matdb::QueryPoint;
 use fs_thermochem::SpeciesId;
 
 pub mod slab;
+mod surface;
 /// Finite original gas parcels coupled to sorbed storage at a fixed temperature.
 pub mod reservoir;
 /// Independent source-qualified species permeation between finite gas mixtures.
@@ -90,6 +91,7 @@ struct Bindings<'a> {
     temperature_k:f64,
     layers:Vec<LayerBinding<'a>>,
     interfaces:Vec<Option<InterfaceBinding<'a>>>,
+    surfaces:[Option<InterfaceBinding<'a>>;2],
 }
 
 /// Exact original-claim receipts at minimum and maximum actual Henry pressure.
@@ -100,6 +102,9 @@ struct Bindings<'a> {
 pub struct MembraneDiffusionSourceSupport {
     pub layers:Vec<[ResolvedMaterialStatePoint;2]>,
     pub interfaces:Vec<Option<[ResolvedInterfaceStatePoint;2]>>,
+    /// Exterior [left,right] source support, including both actual gas and
+    /// polymer traces. None denotes the perfect-contact physical limit.
+    pub surfaces:[Option<[ResolvedInterfaceStatePoint;2]>;2],
 }
 
 #[derive(Clone,Debug)]
@@ -134,10 +139,23 @@ impl<'a> ResolvedMembraneDiffusion<'a> {
     /// actual initial faces, including a degassed film's inlet boundary jump.
     pub fn new(temperature_k:f64,area_m2:f64,layers:&[MembraneDiffusionLayerSource<'a>],
         interfaces:&[Option<MembraneInterfaceMaterial<'a>>],initial_partial_pressures_pa:&[f64],
+        initial_reservoirs_pa:[f64;2],cancelled:impl FnMut()->bool)->Result<Self,Error>
+    {
+        Self::new_with_surfaces(temperature_k,area_m2,layers,interfaces,&[None,None],
+            initial_partial_pressures_pa,initial_reservoirs_pa,cancelled)
+    }
+    /// Actual ordered gas/polymer surface transfer on each exterior. Left
+    /// ordering is gas -> polymer; right is polymer -> gas. The interface card
+    /// must name its adjacent original polymer, and finite-gas attachment also
+    /// checks the exterior identity against the original species transport card.
+    /// None is perfect contact; an explicit zero permeance seals that surface.
+    pub fn new_with_surfaces(temperature_k:f64,area_m2:f64,layers:&[MembraneDiffusionLayerSource<'a>],
+        interfaces:&[Option<MembraneInterfaceMaterial<'a>>],
+        surfaces:&[Option<MembraneInterfaceMaterial<'a>>;2],initial_partial_pressures_pa:&[f64],
         initial_reservoirs_pa:[f64;2],mut cancelled:impl FnMut()->bool)->Result<Self,Error>
     {
-        let (bindings,state)=Self::resolve_parts(temperature_k,area_m2,layers,interfaces,
-            initial_partial_pressures_pa,&mut cancelled)?;
+        let (bindings,state)=Self::resolve_parts_with_surfaces(temperature_k,area_m2,layers,interfaces,
+            surfaces,initial_partial_pressures_pa,&mut cancelled)?;
         let flux=state.sample_fluxes(initial_reservoirs_pa,&mut cancelled)?;
         let sample=(&state,flux.face_partial_pressures_pa.as_slice());
         let support=bindings.admit([sample,sample],&mut cancelled)?;
@@ -148,6 +166,14 @@ impl<'a> ResolvedMembraneDiffusion<'a> {
     // pressure coordinate used to qualify this particular consumer.
     fn resolve_parts(temperature_k:f64,area_m2:f64,layers:&[MembraneDiffusionLayerSource<'a>],
         interfaces:&[Option<MembraneInterfaceMaterial<'a>>],initial_partial_pressures_pa:&[f64],
+        cancelled:impl FnMut()->bool)->Result<(Arc<Bindings<'a>>,MembraneDiffusionState),Error>
+    {
+        Self::resolve_parts_with_surfaces(temperature_k,area_m2,layers,interfaces,&[None,None],
+            initial_partial_pressures_pa,cancelled)
+    }
+    fn resolve_parts_with_surfaces(temperature_k:f64,area_m2:f64,layers:&[MembraneDiffusionLayerSource<'a>],
+        interfaces:&[Option<MembraneInterfaceMaterial<'a>>],
+        surfaces:&[Option<MembraneInterfaceMaterial<'a>>;2],initial_partial_pressures_pa:&[f64],
         mut cancelled:impl FnMut()->bool)->Result<(Arc<Bindings<'a>>,MembraneDiffusionState),Error>
     {
         poll(&mut cancelled)?;
@@ -205,9 +231,10 @@ impl<'a> ResolvedMembraneDiffusion<'a> {
             permeances.push(Some(MolarPermeance::try_new(property.value_si()).map_err(GasEnergyError::from)?));
             bound_interfaces.push(Some(InterfaceBinding {binding:binding.clone(),original}));
         }
-        let model=MembraneDiffusion::new(area_m2,&coefficients,&permeances,&mut cancelled)?;
+        let (surfaces,surface_permeances)=surface::resolve(&species,temperature_k,layers,surfaces,&mut cancelled)?;
+        let model=MembraneDiffusion::new_with_surfaces(area_m2,&coefficients,&permeances,surface_permeances,&mut cancelled)?;
         let state=model.initial_state(initial_partial_pressures_pa,&mut cancelled)?;
-        let bindings=Arc::new(Bindings {species,temperature_k,layers:bound_layers,interfaces:bound_interfaces});
+        let bindings=Arc::new(Bindings {species,temperature_k,layers:bound_layers,interfaces:bound_interfaces,surfaces});
         poll(&mut cancelled)?;Ok((bindings,state))
     }
     pub fn species(&self)->&SpeciesId {&self.bindings.species}
@@ -288,8 +315,9 @@ impl Bindings<'_> {
                 &updated_point(binding.binding.context,self.temperature_k,hi)?).map_err(source_error)?};
             interfaces.push(Some([low,high]));
         }
+        let surfaces=self.admit_surfaces(samples,cancelled)?;
         poll(cancelled)?;
-        Ok(MembraneDiffusionSourceSupport {layers,interfaces})
+        Ok(MembraneDiffusionSourceSupport {layers,interfaces,surfaces})
     }
 }
 

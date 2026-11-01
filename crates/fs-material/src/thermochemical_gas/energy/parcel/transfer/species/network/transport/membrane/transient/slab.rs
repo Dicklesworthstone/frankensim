@@ -3,7 +3,7 @@
 //! One permeant obeys c = S q, P = D S and S dq/dt = div(P grad q).
 //! q is the gas-equivalent Henry pressure, not polymer stress or pore gas.
 //! Finite-volume capacities are S dx; face conductances include both half-cell
-//! resistances and any authored interlayer permeance. Backward Euler gives a
+//! resistances and authored interlayer or exterior surface permeance. Backward Euler gives a
 //! positive M-matrix for every representable positive time step. The original
 //! tridiagonal solver owns elimination; this module checks original cell and
 //! whole-membrane amount balances before returning a candidate.
@@ -144,8 +144,18 @@ impl MembraneDiffusion {
     /// None between two layers means equilibrium contact. Some(0) is an exact
     /// interlayer seal, with finite inventories retained on both sides.
     pub fn new(area_m2: f64, layers: &[MembraneDiffusionLayer],
-        interfaces: &[Option<MolarPermeance>], mut cancelled: impl FnMut() -> bool)
+        interfaces: &[Option<MolarPermeance>], cancelled: impl FnMut() -> bool)
         -> Result<Self, Error>
+    {
+        Self::new_with_surfaces(area_m2,layers,interfaces,[None,None],cancelled)
+    }
+    /// Exterior [left,right] molar pressure-based transfer coefficients.
+    /// None is perfect gas/polymer equilibrium; Some(0) is an exact surface
+    /// seal. The surface and adjacent half-cell act in series, without adding
+    /// a fictitious gas film volume, storage capacity or caloric law.
+    pub fn new_with_surfaces(area_m2: f64, layers: &[MembraneDiffusionLayer],
+        interfaces: &[Option<MolarPermeance>], surfaces: [Option<MolarPermeance>;2],
+        mut cancelled: impl FnMut() -> bool) -> Result<Self,Error>
     {
         poll(&mut cancelled)?;
         if !positive(area_m2) || layers.is_empty() || layers.len() > MAX_TRANSIENT_MEMBRANE_LAYERS
@@ -178,8 +188,11 @@ impl MembraneDiffusion {
             layer_ranges.push(start..cells.len());
         }
         let mut faces = Vec::with_capacity(count+1);
-        faces.push(Face { permeance:cells[0].half_permeance, left_half:0.0,
-            right_half:cells[0].half_permeance, interface:None });
+        let half=cells[0].half_permeance;
+        let surface=surfaces[0].map(MolarPermeance::value_si);
+        let permeance=match surface {Some(g)=>series(&[g,half])?,None=>half};
+        faces.push(Face { permeance, left_half:f64::INFINITY,
+            right_half:half, interface:surface });
         for i in 1..count {
             if i % 128 == 0 { poll(&mut cancelled)?; }
             let (a,b) = (cells[i-1],cells[i]);
@@ -192,7 +205,9 @@ impl MembraneDiffusion {
             faces.push(Face {permeance,left_half:a.half_permeance,right_half:b.half_permeance,interface});
         }
         let half = cells[count-1].half_permeance;
-        faces.push(Face {permeance:half,left_half:half,right_half:0.0,interface:None});
+        let surface=surfaces[1].map(MolarPermeance::value_si);
+        let permeance=match surface {Some(g)=>series(&[half,g])?,None=>half};
+        faces.push(Face {permeance,left_half:half,right_half:f64::INFINITY,interface:surface});
         poll(&mut cancelled)?;
         Ok(Self {area_m2,layers:layers.to_vec(),layer_ranges,cells,faces})
     }
@@ -200,6 +215,11 @@ impl MembraneDiffusion {
     pub fn layers(&self) -> &[MembraneDiffusionLayer] { &self.layers }
     pub fn layer_cell_ranges(&self) -> &[std::ops::Range<usize>] { &self.layer_ranges }
     pub fn cell_count(&self) -> usize { self.cells.len() }
+    /// Original surface coefficients [mol/(m2 s Pa)], distinct from the
+    /// combined half-cell face permeances. None is perfect equilibrium.
+    pub fn surface_permeances_mol_m2_s_pa(&self)->[Option<f64>;2] {
+        [self.faces[0].interface,self.faces[self.cells.len()].interface]
+    }
     pub fn face_permeances(&self) -> impl ExactSizeIterator<Item=f64> + '_ {
         self.faces.iter().map(|face|face.permeance)
     }
@@ -385,7 +405,8 @@ impl MembraneDiffusionState {
                 return Err(Error::Invalid("membrane molar flux underflowed"));
             }
             fluxes.push(flux);
-            traces.push(if i==0 {[Some(reservoirs[0]);2]}else if i==n {[Some(reservoirs[1]);2]}
+            traces.push(if i==0&&face.interface.is_none() {[Some(reservoirs[0]);2]}
+                else if i==n&&face.interface.is_none() {[Some(reservoirs[1]);2]}
                 else {face.traces(left,right)});
         }
         poll(&mut cancelled)?;

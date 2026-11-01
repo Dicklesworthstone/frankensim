@@ -140,7 +140,7 @@ fn admit_bindings(bindings:&Bindings<'_>)->Result<(),Error> {
                 .ok_or(Error::Invalid("mixture channel lost its original D or S claim"))?)?;
         }
     }
-    for interface in bindings.interfaces.iter().flatten() {
+    for interface in bindings.interfaces.iter().chain(bindings.surfaces.iter()).flatten() {
         admit_independent(interface.original.property(super::MOLAR_INTERFACE_PERMEANCE_PROPERTY)
             .ok_or(Error::Invalid("mixture channel lost its original interface claim"))?)?;
     }
@@ -176,11 +176,18 @@ impl PressureSample {
             let [left,right]=row;
             [known[i][0].then_some(left.value),known[i][1].then_some(right.value)]
         }).collect();
-        // The exterior half-cell contact is Dirichlet on both traces, including
-        // a sealed D=0 channel. Keep the original EOS total exactly at a source
-        // boundary instead of perturbing it by summing rounded mole fractions.
-        faces[0]=[Some(boundary_totals[0]);2];
-        faces[count]=[Some(boundary_totals[1]);2];
+        // Only the GAS trace is the original EOS total when an exterior
+        // surface has finite resistance. Preserve the distinct summed polymer
+        // trace, including an unknown trace behind coincident seals. Perfect
+        // contact on every species retains the exact original EOS on both sides.
+        faces[0][0]=Some(boundary_totals[0]);
+        faces[count][1]=Some(boundary_totals[1]);
+        if states.iter().all(|s|s.membrane().model().surface_permeances_mol_m2_s_pa()[0].is_none()) {
+            faces[0][1]=Some(boundary_totals[0]);
+        }
+        if states.iter().all(|s|s.membrane().model().surface_permeances_mol_m2_s_pa()[1].is_none()) {
+            faces[count][0]=Some(boundary_totals[1]);
+        }
         Ok(Self {cells:cells.into_iter().map(|sum|sum.value).collect(),faces})
     }
 }
@@ -188,9 +195,30 @@ impl PressureSample {
 impl<'a> IsothermalGasMembraneMixture<'a> {
     pub fn new(temperature_k:f64,area_m2:f64,sources:&[MembraneMixtureChannelSource<'a>],
         gases:[ClosedGasParcel;2],controls:IsothermalGasMembraneSolve,
+        cancelled:impl FnMut()->bool)->Result<Self,Error>
+    {
+        Self::new_impl(temperature_k,area_m2,sources,None,gases,controls,cancelled)
+    }
+    /// Each authored channel has explicit [left,right] exterior interfaces.
+    /// Ordered cards name its original gas transport material and adjacent
+    /// polymer. Independent mixed-gas validity must be supplied by those claims;
+    /// no surface coefficient or competitive sorption law is inferred.
+    pub fn new_with_surfaces(temperature_k:f64,area_m2:f64,sources:&[MembraneMixtureChannelSource<'a>],
+        surfaces:&[[Option<MembraneInterfaceMaterial<'a>>;2]],
+        gases:[ClosedGasParcel;2],controls:IsothermalGasMembraneSolve,
+        cancelled:impl FnMut()->bool)->Result<Self,Error>
+    {
+        Self::new_impl(temperature_k,area_m2,sources,Some(surfaces),gases,controls,cancelled)
+    }
+    fn new_impl(temperature_k:f64,area_m2:f64,sources:&[MembraneMixtureChannelSource<'a>],
+        surfaces:Option<&[[Option<MembraneInterfaceMaterial<'a>>;2]]>,
+        gases:[ClosedGasParcel;2],controls:IsothermalGasMembraneSolve,
         mut cancelled:impl FnMut()->bool)->Result<Self,Error>
     {
         poll(&mut cancelled)?;controls.validate(temperature_k)?;
+        if surfaces.is_some_and(|s|s.len()!=sources.len()) {
+            return Err(Error::Invalid("one pair of exterior surface slots is required per authored species channel"));
+        }
         if !positive(temperature_k)||sources.is_empty()||sources.len()>MAX_FROZEN_IDEAL_GAS_COMPONENTS_V1
             ||gases.iter().any(|gas|gas.state().state().temperature!=temperature_k) {
             return Err(Error::Invalid("bounded mixture channels and both original gases must share one exact positive held temperature"));
@@ -203,11 +231,17 @@ impl<'a> IsothermalGasMembraneMixture<'a> {
         let capacities=[MolarPressureCapacity::try_new(gases[0].volume_m3()/rt)?,
             MolarPressureCapacity::try_new(gases[1].volume_m3()/rt)?];
         let mut channels=Vec::with_capacity(sources.len());
-        for source in sources {
+        for (i,source) in sources.iter().enumerate() {
             poll(&mut cancelled)?;
-            let (bindings,state)=ResolvedMembraneDiffusion::resolve_parts(temperature_k,area_m2,
-                &source.layers,&source.interfaces,&source.initial_partial_pressures_pa,&mut cancelled)?;
+            let (bindings,state)=if let Some(surfaces)=surfaces {
+                ResolvedMembraneDiffusion::resolve_parts_with_surfaces(temperature_k,area_m2,
+                    &source.layers,&source.interfaces,&surfaces[i],&source.initial_partial_pressures_pa,&mut cancelled)?
+            }else {
+                ResolvedMembraneDiffusion::resolve_parts(temperature_k,area_m2,
+                    &source.layers,&source.interfaces,&source.initial_partial_pressures_pa,&mut cancelled)?
+            };
             admit_bindings(&bindings)?;
+            bindings.admit_gas_surfaces(&catalog)?;
             let gas_source=catalog.thermodynamics().components().iter()
                 .find(|law|law.species()==&bindings.species)
                 .ok_or(Error::Invalid("membrane species is absent from the original gas catalog"))?;
