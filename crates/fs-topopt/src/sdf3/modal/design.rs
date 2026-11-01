@@ -34,6 +34,19 @@ pub enum Sdf3EigenfrequencyGoal3 {
     },
 }
 
+// The kg formulation does not use volume_scale; keep identity consistent
+// with admission and optimization rather than interpreting that unused field.
+pub(super) fn same_goal(a: Sdf3EigenfrequencyGoal3, b: Sdf3EigenfrequencyGoal3) -> bool {
+    match (a, b) {
+        (Sdf3EigenfrequencyGoal3::MinimumMaterial {
+            objective: MinimumMaterialObjective3::MassKg { scale_kg: x }, ..
+        }, Sdf3EigenfrequencyGoal3::MinimumMaterial {
+            objective: MinimumMaterialObjective3::MassKg { scale_kg: y }, ..
+        }) => x == y,
+        _ => a == b,
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Sdf3EigenfrequencyDesignOptions3 {
     pub frequency: Sdf3EigenfrequencyOptions3,
@@ -98,7 +111,7 @@ pub struct Sdf3EigenfrequencyDesignIteration3 {
     pub feasible: bool,
 }
 
-fn normalized(value: f64, scale: f64) -> Result<f64, MatrixFreeEigenError> {
+pub(super) fn normalized(value: f64, scale: f64) -> Result<f64, MatrixFreeEigenError> {
     let result = value / scale;
     if result.is_finite() && (value == 0.0 || result != 0.0) {
         Ok(result)
@@ -151,7 +164,7 @@ fn optimization_sample(
     })
 }
 
-fn physical_feasible(
+pub(super) fn physical_feasible(
     e: &Sdf3EigenfrequencyEvaluation3,
     goal: Sdf3EigenfrequencyGoal3,
     options: Sdf3EigenfrequencyDesignOptions3,
@@ -188,7 +201,7 @@ fn row(
     }
 }
 
-fn admit<O: Sdf3Elasticity>(
+pub(super) fn admit<O: Sdf3Elasticity>(
     study: &CutDensityStudy3<O>, rho: &[f64], goal: Sdf3EigenfrequencyGoal3,
     options: Sdf3EigenfrequencyDesignOptions3,
 ) -> Result<(), ProjectedAlError<MatrixFreeEigenError>> {
@@ -431,6 +444,8 @@ impl<'a, 'callback, O: Sdf3Elasticity> Sdf3EigenfrequencyDesign3<'a, 'callback, 
     /// Freshly solve the complete selected modal cluster at the retained best
     /// feasible design. The existing optimizer state and history remain intact.
     pub fn recheck_best(&mut self) -> Result<Option<Sdf3EigenfrequencyDesignPoint3>, MatrixFreeEigenError> {
+        self.control.checkpoint("sdf3-modal-design-recheck")
+            .map_err(GeneralizedError::Operator)?;
         let Some(best) = &self.best else { return Ok(None); };
         let evaluation = self.study.evaluate_eigenfrequency(
             self.mass, &best.rho, self.options.frequency, self.control)?;

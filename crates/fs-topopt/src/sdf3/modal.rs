@@ -8,6 +8,7 @@
 
 pub mod design;
 pub mod refinement;
+pub mod refit;
 
 use fs_cutfem::elastic3::mass::MaterialMass3;
 use fs_sparse::precond::Precond;

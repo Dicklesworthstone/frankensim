@@ -304,6 +304,23 @@ Dörfler selector to their absolute cell values. These marks are a diagnostic
 heuristic, not a certified DWR correction or eigenvalue error bound. Both
 operators restore incoming scales on success and every returned error.
 
+`CutDensityStudy3::solve_eigenfrequency_design` and
+`refit_eigenfrequency_design` provide one owned fitting path for initial and
+refined grids. A refit transfers raw controls and protected physical labels,
+retains the physical filter radius and SIMP/projection parameters, reconstructs
+optional material acceleration, and prepares consistent inertia from the new
+native operator. Neither eigenvectors nor optimizer state transfer. The source
+study stays unchanged, including when the new grid fails its gradient gate,
+optimization allowance or fresh physical recheck.
+
+The result retains the initial, accepted, best feasible and freshly rechecked
+points separately, with original goal, policy and consumed-work binding.
+Promotion requires the original frequency or volume bounds independently of
+optimizer tolerance. A refined design can be initially infeasible; the shared
+AL owner handles that problem directly, without assuming that adding material
+always raises frequency. Objective improvement is meaningful against the new
+grid's own initial design, rather than across different discretizations.
+
 ## Native material body loads on raw-SDF designs
 
 Prepare an acceleration load with the native Cartesian or adaptive operator's
