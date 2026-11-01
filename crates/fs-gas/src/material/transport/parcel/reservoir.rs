@@ -7,6 +7,9 @@
 //! This is a first-order, zero-barycentric-velocity candidate, with no invented
 //! finite bath capacity, bulk-flow law or independent caloric reconstruction.
 
+/// Bounded whole-window advancement with explicit held-bath stream accuracy.
+pub mod adaptive;
+
 use super::*;
 use fs_matdb::QueryPoint;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::network::{

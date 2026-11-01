@@ -9,6 +9,8 @@ mod closed_window;
 mod network;
 #[path = "material_parcel_transport/reservoir.rs"]
 mod reservoir;
+#[path = "material_parcel_transport/reservoir_adaptive.rs"]
+mod reservoir_adaptive;
 #[path = "material_parcel_transport/reservoir_window.rs"]
 mod reservoir_window;
 

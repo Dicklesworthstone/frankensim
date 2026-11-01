@@ -5,16 +5,15 @@
 
 use super::{
     ClosedGasParcel, GasEnergySolve, GasTransportError, GasTransportPaths, MAX_SNAPSHOT_PARCELS,
-    MAX_SNAPSHOT_TRANSFERS, ParcelMolecularCandidate, ParcelMolecularError, ParcelMolecularLink,
-    ParcelMolecularSolve, ParcelMolecularStep, ParcelMolecularTransport, SpeciesId, TransportLaw,
-    positive,
+    MAX_SNAPSHOT_TRANSFERS, ParcelMolecularError, ParcelMolecularLink, ParcelMolecularSolve,
+    ParcelMolecularStep, ParcelMolecularTransport, SpeciesId, TransportLaw, positive,
 };
 use fs_material::thermochemical_gas::energy::GasEnergyError;
 use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::network::snapshot::SnapshotNozzleError;
 use fs_material::thermochemical_gas::energy::parcel::transfer::species::{
     diffusion::network::DiffusionNetworkError,
     network::{
-        SpeciesNetworkError,
+        SpeciesNetworkError, SpeciesNetworkStep,
         transport::{
             GasTransportWindowAudit, audit_closed_window, membrane::MembraneNetworkError,
             porous::PorousNetworkError,
@@ -109,6 +108,12 @@ pub enum ParcelMolecularAdvanceError {
         step_s: f64,
         error_ratios: [f64; 2],
     },
+    /// Directional species and additional-heat streams exceed local accuracy.
+    StreamAccuracy {
+        time_s: f64,
+        step_s: f64,
+        error_ratios: [f64; 2],
+    },
     TimeResolution {
         time_s: f64,
         target_s: f64,
@@ -129,11 +134,18 @@ impl core::fmt::Display for ParcelMolecularAdvanceError {
 impl std::error::Error for ParcelMolecularAdvanceError {}
 use ParcelMolecularAdvanceError as Error;
 
-fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
+pub(super) fn poll(cancelled: &mut impl FnMut() -> bool) -> Result<(), Error> {
     if cancelled() {
         Err(Error::Cancelled)
     } else {
         Ok(())
+    }
+}
+pub(super) fn window_error(error: GasTransportError) -> Error {
+    if error == GasTransportError::Cancelled {
+        Error::Cancelled
+    } else {
+        Error::Window(error)
     }
 }
 fn physical_error(error: ParcelMolecularError, time_s: f64, step_s: f64) -> Error {
@@ -151,6 +163,7 @@ fn retryable(error: &Error) -> bool {
     matches!(
         error,
         Error::Accuracy { .. }
+            | Error::StreamAccuracy { .. }
             | Error::Physical {
                 error: ParcelMolecularError::Transport(
                     GasTransportError::Exchange(SpeciesNetworkError::Withdrawal { .. })
@@ -174,12 +187,12 @@ fn retryable(error: &Error) -> bool {
 }
 
 #[derive(Default)]
-struct Sum {
+pub(super) struct Sum {
     value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, term: f64) -> Result<(), Error> {
+    pub(super) fn add(&mut self, term: f64) -> Result<(), Error> {
         let (value, lost) = fs_math::eft::two_sum(self.value, term);
         self.value = value;
         self.correction += lost;
@@ -194,23 +207,22 @@ impl Sum {
             ))
         }
     }
-    fn total(&self) -> f64 {
+    pub(super) fn total(&self) -> f64 {
         self.value + self.correction
     }
 }
 #[derive(Default)]
-struct Accepted {
+pub(super) struct Accepted {
     energy: Sum,
     transfers: BTreeMap<(u64, u64, SpeciesId), [Sum; 2]>,
     heat: BTreeMap<[u64; 2], [Sum; 2]>,
 }
 impl Accepted {
-    fn record(
+    pub(super) fn record_native(
         &mut self,
-        step: &ParcelMolecularStep,
+        native: &SpeciesNetworkStep,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(), Error> {
-        let native = &step.transport.exchange;
         self.energy.add(native.total_energy_residual_j)?;
         for row in &native.fluxes {
             poll(cancelled)?;
@@ -244,6 +256,42 @@ impl Accepted {
                 .add(row.heat_left_to_right_j.abs())?;
         }
         Ok(())
+    }
+
+    pub(super) fn entry_count(&self) -> usize {
+        self.transfers.len() + self.heat.len()
+    }
+
+    pub(super) fn into_parts(
+        self,
+    ) -> (
+        f64,
+        Vec<ParcelMolecularIntegratedTransfer>,
+        Vec<ParcelMolecularIntegratedHeat>,
+    ) {
+        let transfers = self
+            .transfers
+            .into_iter()
+            .map(
+                |((donor, receiver, species), sums)| ParcelMolecularIntegratedTransfer {
+                    donor,
+                    receiver,
+                    species,
+                    mass_kg: sums[0].total(),
+                    carried_enthalpy_j: sums[1].total(),
+                },
+            )
+            .collect();
+        let heat = self
+            .heat
+            .into_iter()
+            .map(|(parcels, sums)| ParcelMolecularIntegratedHeat {
+                parcels,
+                left_to_right_j: sums[0].total(),
+                right_to_left_j: sums[1].total(),
+            })
+            .collect();
+        (self.energy.total(), transfers, heat)
     }
 }
 
@@ -320,7 +368,7 @@ fn errors(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn probe<C: FnMut() -> bool>(
+fn probe<S, C: FnMut() -> bool>(
     state: &BTreeMap<u64, ClosedGasParcel>,
     time_s: f64,
     dt: f64,
@@ -331,9 +379,9 @@ fn probe<C: FnMut() -> bool>(
         &BTreeMap<u64, ClosedGasParcel>,
         f64,
         &mut C,
-    ) -> Result<ParcelMolecularCandidate, ParcelMolecularError>,
+    ) -> Result<(BTreeMap<u64, ClosedGasParcel>, S), ParcelMolecularError>,
     cancelled: &mut C,
-) -> Result<ParcelMolecularCandidate, Error> {
+) -> Result<(BTreeMap<u64, ClosedGasParcel>, S), Error> {
     poll(cancelled)?;
     if *evaluations == maximum {
         return Err(Error::WorkLimit {
@@ -346,15 +394,216 @@ fn probe<C: FnMut() -> bool>(
     step(state, dt, cancelled).map_err(|e| physical_error(e, time_s, dt))
 }
 
+/// The shared clock owns probes and acceptance, but no boundary physics.
+pub(super) struct TemporalRun<S> {
+    pub parcels: BTreeMap<u64, ClosedGasParcel>,
+    pub accepted_intervals: usize,
+    pub rejected_intervals: usize,
+    pub evaluations: usize,
+    pub minimum_accepted_substep_s: f64,
+    pub maximum_accepted_substep_s: f64,
+    pub maximum_accepted_error_ratios: [f64; 4],
+    pub suggested_step_s: f64,
+    pub last_substep: S,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn run<S, C: FnMut() -> bool>(
+    original: &BTreeMap<u64, ClosedGasParcel>,
+    interval_s: [f64; 2],
+    endpoints: &BTreeMap<u64, GasEnergySolve>,
+    controls: ParcelMolecularAdvanceControls,
+    step: &mut impl FnMut(
+        &BTreeMap<u64, ClosedGasParcel>,
+        f64,
+        &mut C,
+    ) -> Result<(BTreeMap<u64, ClosedGasParcel>, S), ParcelMolecularError>,
+    accept: &mut impl FnMut(&S, &mut C) -> Result<(), Error>,
+    compare_streams: &mut impl FnMut(&S, &S, &S, &mut C) -> Result<[f64; 2], Error>,
+    cancelled: &mut C,
+) -> Result<TemporalRun<S>, Error> {
+    poll(cancelled)?;
+    let [start, target] = interval_s;
+    if !interval_s.iter().all(|t| t.is_finite())
+        || !positive(target - start)
+        || ![
+            controls.minimum_step_s,
+            controls.maximum_step_s,
+            controls.species_tolerance_kg,
+            controls.temperature_tolerance_k,
+        ]
+        .iter()
+        .all(|v| positive(*v))
+        || controls.minimum_step_s > controls.maximum_step_s
+        || !(3..=100_000).contains(&controls.maximum_evaluations)
+        || !controls.relative_tolerance.is_finite()
+        || !(0.0..1.0).contains(&controls.relative_tolerance)
+        || original.is_empty()
+        || original.len() > MAX_SNAPSHOT_PARCELS
+        || !original.keys().eq(endpoints.keys())
+    {
+        return Err(Error::Invalid(
+            "forward interval, bounded graph/work, exact endpoint map and positive accuracy scales required",
+        ));
+    }
+    for (&id, solve) in endpoints {
+        poll(cancelled)?;
+        solve.validate().map_err(|error| {
+            physical_error(
+                ParcelMolecularError::Transport(GasTransportError::Exchange(
+                    SpeciesNetworkError::Parcel { id, error },
+                )),
+                start,
+                0.0,
+            )
+        })?;
+        if !(solve.minimum_temperature_k..=solve.maximum_temperature_k)
+            .contains(&original[&id].state().state().temperature)
+        {
+            return Err(Error::Invalid(
+                "original gas temperature outside endpoint caloric bracket",
+            ));
+        }
+    }
+    let mut state = original.clone();
+    let (mut time, mut ceiling) = (start, controls.maximum_step_s);
+    let (mut accepted, mut rejected, mut evaluations) = (0, 0, 0);
+    let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
+    let mut maxima = [0.0_f64; 4];
+    let mut last = None;
+    while time < target {
+        poll(cancelled)?;
+        let mut end = if ceiling >= target - time {
+            target
+        } else {
+            time + ceiling
+        };
+        // Coalesce only an adjacent representable final tail BEFORE either
+        // physical trajectory is sampled; never snap an already solved clock.
+        if end < target && end.next_up() == target {
+            end = target;
+        }
+        let span = end - time;
+        let middle = time + 0.5 * span;
+        let (h1, h2) = (middle - time, end - middle);
+        if !(time < middle && middle < end && end <= target) || h1 + h2 != span {
+            return Err(Error::TimeResolution {
+                time_s: time,
+                target_s: end,
+            });
+        }
+        let attempted = (|| {
+            let coarse = probe(
+                &state,
+                time,
+                span,
+                accepted,
+                &mut evaluations,
+                controls.maximum_evaluations,
+                step,
+                cancelled,
+            )?;
+            let first = probe(
+                &state,
+                time,
+                h1,
+                accepted,
+                &mut evaluations,
+                controls.maximum_evaluations,
+                step,
+                cancelled,
+            )?;
+            let second = probe(
+                &first.0,
+                middle,
+                h2,
+                accepted,
+                &mut evaluations,
+                controls.maximum_evaluations,
+                step,
+                cancelled,
+            )?;
+            let state_ratios = errors(&state, &coarse.0, &second.0, controls, cancelled)
+                .map_err(|e| physical_error(e, time, span))?;
+            let streams = compare_streams(&coarse.1, &first.1, &second.1, cancelled)?;
+            let mut ratios = [state_ratios[0], state_ratios[1], streams[0], streams[1]];
+            // Existing pore-controller convention for unequal represented halves.
+            let (u, v) = (h1 / span, h2 / span);
+            let factor = (u * u + v * v) / (2.0 * u * v);
+            for ratio in &mut ratios {
+                *ratio *= factor;
+            }
+            if ratios[..2].iter().any(|r| !r.is_finite() || *r > 1.0) {
+                return Err(Error::Accuracy {
+                    time_s: time,
+                    step_s: span,
+                    error_ratios: [ratios[0], ratios[1]],
+                });
+            }
+            if ratios[2..].iter().any(|r| !r.is_finite() || *r > 1.0) {
+                return Err(Error::StreamAccuracy {
+                    time_s: time,
+                    step_s: span,
+                    error_ratios: [ratios[2], ratios[3]],
+                });
+            }
+            Ok((first, second, ratios))
+        })();
+        match attempted {
+            Ok((first, second, ratios)) => {
+                accept(&first.1, cancelled)?;
+                accept(&second.1, cancelled)?;
+                let (next, report) = second;
+                state = next;
+                last = Some(report);
+                accepted += 1;
+                minimum = minimum.min(h1.min(h2));
+                maximum = maximum.max(h1.max(h2));
+                for (max, ratio) in maxima.iter_mut().zip(ratios) {
+                    *max = max.max(ratio);
+                }
+                time = end;
+                ceiling = if ratios.iter().all(|r| *r <= 0.25) {
+                    span + span.min(controls.maximum_step_s - span)
+                } else {
+                    span
+                };
+                ceiling = ceiling.clamp(controls.minimum_step_s, controls.maximum_step_s);
+            }
+            Err(error) => {
+                let smaller = (0.5 * span).max(controls.minimum_step_s);
+                if retryable(&error) && smaller < span {
+                    rejected += 1;
+                    ceiling = smaller;
+                } else {
+                    return Err(error);
+                }
+            }
+        }
+    }
+    poll(cancelled)?;
+    Ok(TemporalRun {
+        parcels: state,
+        accepted_intervals: accepted,
+        rejected_intervals: rejected,
+        evaluations,
+        minimum_accepted_substep_s: minimum,
+        maximum_accepted_substep_s: maximum,
+        maximum_accepted_error_ratios: maxima,
+        suggested_step_s: ceiling,
+        last_substep: last.ok_or(Error::Invalid("whole gas window accepted no interval"))?,
+    })
+}
+
 impl<L: TransportLaw> ParcelMolecularTransport<L> {
     /// Complete a positive represented interval with original full/fine probes.
     /// Fixed faces, native paths and source context apply throughout this window.
     ///
     /// Only typed withdrawal, pressure-order, entropy or caloric bracket/root
     /// timestep refusals and local error excess may halve the comparison span.
-    /// Actual material/source-domain refusals remain hard. Every probe retains the native source
-    /// requalification and physical gates; only accepted fine steps enter reports.
-    /// The original-to-final audit and accumulated native residual use the same
+    /// Actual material/source-domain refusals remain hard. Every probe retains
+    /// native source qualification and physical gates; only accepted fine steps
+    /// enter reports. Original-to-final and accumulated energy checks use fixed
     /// absolute physical budgets without scaling by the number of substeps.
     #[allow(clippy::too_many_arguments)]
     pub fn advance_candidate<C: FnMut() -> bool>(
@@ -368,175 +617,30 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
         controls: ParcelMolecularAdvanceControls,
         mut cancelled: C,
     ) -> Result<ParcelMolecularAdvanceCandidate, Error> {
-        poll(&mut cancelled)?;
-        let [start, target] = interval_s;
-        if !interval_s.iter().all(|t| t.is_finite())
-            || !positive(target - start)
-            || ![
-                controls.minimum_step_s,
-                controls.maximum_step_s,
-                controls.species_tolerance_kg,
-                controls.temperature_tolerance_k,
-            ]
-            .iter()
-            .all(|v| positive(*v))
-            || controls.minimum_step_s > controls.maximum_step_s
-            || !(3..=100_000).contains(&controls.maximum_evaluations)
-            || !controls.relative_tolerance.is_finite()
-            || !(0.0..1.0).contains(&controls.relative_tolerance)
-            || original.is_empty()
-            || original.len() > MAX_SNAPSHOT_PARCELS
-            || !original.keys().eq(endpoints.keys())
-        {
-            return Err(Error::Invalid(
-                "forward interval, bounded graph/work, exact endpoint map and positive accuracy scales required",
-            ));
-        }
-        for (&id, solve) in endpoints {
-            poll(&mut cancelled)?;
-            solve.validate().map_err(|error| {
-                physical_error(
-                    ParcelMolecularError::Transport(GasTransportError::Exchange(
-                        SpeciesNetworkError::Parcel { id, error },
-                    )),
-                    start,
-                    0.0,
-                )
-            })?;
-            if !(solve.minimum_temperature_k..=solve.maximum_temperature_k)
-                .contains(&original[&id].state().state().temperature)
-            {
-                return Err(Error::Invalid(
-                    "original gas temperature outside endpoint caloric bracket",
-                ));
-            }
-        }
-        let mut step = |state: &BTreeMap<u64, ClosedGasParcel>, dt, cancelled: &mut C| {
-            self.step_candidate(state, links, paths, dt, endpoints, physical, cancelled)
-        };
-        let mut state = original.clone();
-        let (mut time, mut ceiling) = (start, controls.maximum_step_s);
-        let (mut accepted, mut rejected, mut evaluations) = (0, 0, 0);
-        let (mut minimum, mut maximum) = (f64::INFINITY, 0.0_f64);
-        let mut maxima = [0.0_f64; 2];
         let mut ledger = Accepted::default();
-        let mut last = None;
-        while time < target {
-            poll(&mut cancelled)?;
-            let mut end = if ceiling >= target - time {
-                target
-            } else {
-                time + ceiling
-            };
-            // Coalesce only an adjacent representable final tail BEFORE either
-            // physical trajectory is sampled; never snap an already solved clock.
-            if end < target && end.next_up() == target {
-                end = target;
-            }
-            let span = end - time;
-            let middle = time + 0.5 * span;
-            let (h1, h2) = (middle - time, end - middle);
-            if !(time < middle && middle < end && end <= target) || h1 + h2 != span {
-                return Err(Error::TimeResolution {
-                    time_s: time,
-                    target_s: end,
-                });
-            }
-            let attempted = (|| {
-                let coarse = probe(
-                    &state,
-                    time,
-                    span,
-                    accepted,
-                    &mut evaluations,
-                    controls.maximum_evaluations,
-                    &mut step,
-                    &mut cancelled,
-                )?;
-                let first = probe(
-                    &state,
-                    time,
-                    h1,
-                    accepted,
-                    &mut evaluations,
-                    controls.maximum_evaluations,
-                    &mut step,
-                    &mut cancelled,
-                )?;
-                let second = probe(
-                    first.parcels(),
-                    middle,
-                    h2,
-                    accepted,
-                    &mut evaluations,
-                    controls.maximum_evaluations,
-                    &mut step,
-                    &mut cancelled,
-                )?;
-                let mut ratios = errors(
-                    &state,
-                    coarse.parcels(),
-                    second.parcels(),
-                    controls,
-                    &mut cancelled,
-                )
-                .map_err(|e| physical_error(e, time, span))?;
-                // Existing pore-controller convention for unequal represented halves.
-                let (u, v) = (h1 / span, h2 / span);
-                let factor = (u * u + v * v) / (2.0 * u * v);
-                for ratio in &mut ratios {
-                    *ratio *= factor;
-                }
-                if ratios.iter().any(|r| !r.is_finite() || *r > 1.0) {
-                    return Err(Error::Accuracy {
-                        time_s: time,
-                        step_s: span,
-                        error_ratios: ratios,
-                    });
-                }
-                Ok((first, second, ratios))
-            })();
-            match attempted {
-                Ok((first, second, ratios)) => {
-                    ledger.record(first.step(), &mut cancelled)?;
-                    ledger.record(second.step(), &mut cancelled)?;
-                    let (next, report) = second.into_parts();
-                    state = next;
-                    last = Some(report);
-                    accepted += 1;
-                    minimum = minimum.min(h1.min(h2));
-                    maximum = maximum.max(h1.max(h2));
-                    for (max, ratio) in maxima.iter_mut().zip(ratios) {
-                        *max = max.max(ratio);
-                    }
-                    time = end;
-                    ceiling = if ratios.iter().all(|r| *r <= 0.25) {
-                        span + span.min(controls.maximum_step_s - span)
-                    } else {
-                        span
-                    };
-                    ceiling = ceiling.clamp(controls.minimum_step_s, controls.maximum_step_s);
-                }
-                Err(error) => {
-                    let smaller = (0.5 * span).max(controls.minimum_step_s);
-                    if retryable(&error) && smaller < span {
-                        rejected += 1;
-                        ceiling = smaller;
-                    } else {
-                        return Err(error);
-                    }
-                }
-            }
-        }
-        let window = audit_closed_window(original, &state, physical.physical, &mut cancelled)
-            .map_err(|e| {
-                if e == GasTransportError::Cancelled {
-                    Error::Cancelled
-                } else {
-                    Error::Window(e)
-                }
-            })?;
-        let energy = ledger.energy.total();
+        let temporal = run(
+            original,
+            interval_s,
+            endpoints,
+            controls,
+            &mut |state, dt, cancel: &mut C| {
+                self.step_candidate(state, links, paths, dt, endpoints, physical, cancel)
+                    .map(|candidate| candidate.into_parts())
+            },
+            &mut |step: &ParcelMolecularStep, cancel: &mut C| {
+                ledger.record_native(&step.transport.exchange, cancel)
+            },
+            &mut |_, _, _, _| Ok([0.0; 2]),
+            &mut cancelled,
+        )?;
+        let window = audit_closed_window(
+            original,
+            &temporal.parcels,
+            physical.physical,
+            &mut cancelled,
+        )
+        .map_err(window_error)?;
+        let (energy, transfers, heat) = ledger.into_parts();
         if energy.abs() > physical.physical.exchange.energy_tolerance_j {
             return Err(Error::Invalid(
                 "accepted native residuals exceeded the fixed whole-window energy budget",
@@ -544,43 +648,25 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
         }
         poll(&mut cancelled)?;
         Ok(ParcelMolecularAdvanceCandidate {
-            parcels: state,
+            parcels: temporal.parcels,
             report: ParcelMolecularAdvanceReport {
                 interval_s,
-                accepted_intervals: accepted,
-                accepted_substeps: 2 * accepted,
-                rejected_intervals: rejected,
-                evaluations,
-                minimum_accepted_substep_s: minimum,
-                maximum_accepted_substep_s: maximum,
-                maximum_accepted_error_ratios: maxima,
-                suggested_step_s: ceiling,
+                accepted_intervals: temporal.accepted_intervals,
+                accepted_substeps: 2 * temporal.accepted_intervals,
+                rejected_intervals: temporal.rejected_intervals,
+                evaluations: temporal.evaluations,
+                minimum_accepted_substep_s: temporal.minimum_accepted_substep_s,
+                maximum_accepted_substep_s: temporal.maximum_accepted_substep_s,
+                maximum_accepted_error_ratios: [
+                    temporal.maximum_accepted_error_ratios[0],
+                    temporal.maximum_accepted_error_ratios[1],
+                ],
+                suggested_step_s: temporal.suggested_step_s,
                 accumulated_energy_residual_j: energy,
                 window,
-                transfers: ledger
-                    .transfers
-                    .into_iter()
-                    .map(
-                        |((donor, receiver, species), sums)| ParcelMolecularIntegratedTransfer {
-                            donor,
-                            receiver,
-                            species,
-                            mass_kg: sums[0].total(),
-                            carried_enthalpy_j: sums[1].total(),
-                        },
-                    )
-                    .collect(),
-                heat: ledger
-                    .heat
-                    .into_iter()
-                    .map(|(parcels, sums)| ParcelMolecularIntegratedHeat {
-                        parcels,
-                        left_to_right_j: sums[0].total(),
-                        right_to_left_j: sums[1].total(),
-                    })
-                    .collect(),
-                last_substep: last
-                    .ok_or(Error::Invalid("whole gas window accepted no interval"))?,
+                transfers,
+                heat,
+                last_substep: temporal.last_substep,
             },
         })
     }

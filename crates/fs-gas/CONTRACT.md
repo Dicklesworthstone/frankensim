@@ -1184,6 +1184,31 @@ fixtures cover independent two-cell/bath Fourier balances, simultaneous binary
 species/Dufour increments, closed/open parity, shared gross withdrawal, joint
 work/identity limits and late source/cancellation atomicity.
 
+`advance_network_candidate` and `advance_network_to` evolve that simultaneous
+network across a complete represented time interval. They share the existing
+full-step/two-half-step controller with closed molecular transport. The fine
+trajectory alone enters accepted states and accounts; no extrapolated state or
+rejected probe enters a physical ledger. Local error scales separately bound
+each species inventory, temperature, directional species stream and additional
+heat stream, so throughflow and reversals cannot hide behind a small net change.
+The stream-relative allowance scales transported amounts, not carrier inventory.
+
+Accepted bath streams retain compensated signed sums and separate gross inward
+and outward totals. The final original-to-final audit uses unchanged original
+bath models, partial enthalpies/entropies and integrated reduced heat; changing
+per-step relative caloric charts are not integrated as external energy. Internal
+streams cancel at this boundary. Accumulated native caloric defects and actual
+endpoint mass/species/energy/entropy each keep one fixed whole-window budget.
+Retained accounts share the native work bound, and graph size is admitted before
+allocating the held-bath map. Typed physical/time-error refusals refine the step;
+source-domain failures and cancellation remain terminal and atomic with the
+caller clock. These are local temporal estimates, not certified global errors.
+Public fixtures compare two independent thermal modes and a direct bath-heat
+integral, isolate stream accuracy from state accuracy, retain balanced-bath gross
+species/heat and mixing entropy, and check face-order, work, source, cancellation
+and representable-clock behavior. Finite reservoir depletion and native bulk or
+dusty-gas path composition remain outside this continuum-plus-held-bath API.
+
 
 ## Reacting Navier-Stokes composition with original-source molecular transport
 
