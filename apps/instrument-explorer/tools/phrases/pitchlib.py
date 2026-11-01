@@ -90,7 +90,8 @@ def f0_samples(x, sr):
     # So the spectrum decides, by harmonic contrast: how far the spectrum at h*f (h = 1..8) stands above the spectrum
     # midway between them. The answer is the lowest candidate with at least 70 % of the best contrast. A subharmonic
     # f/k of a real tone has peaks at only every k-th slot, so its contrast is about 1/k of the true one; a low note
-    # with a weak fundamental (a bowed bass 26-39 dB down on its body-boosted 5th harmonic) keeps its full contrast.
+    # with a weak fundamental (a bowed bass 26-39 dB down on its body-boosted 5th harmonic) keeps its full contrast,
+    # and own_ladder (below) keeps it past the subharmonic test.
     # Before scoring, any candidate whose lines all sit at multiples of k is lifted to k times itself (lift below):
     # when every candidate's contrast is small, 1/k of it is not small enough to lose.
     nfft = 1 << (2 * len(x) - 1).bit_length()  # a power of two: an odd length can cost 50 times as much
@@ -209,11 +210,29 @@ def f0_samples(x, sr):
     scored = {j: contrast(sr / j) for j in real if sr / j >= 30}
     top = max(scored.values()) if scored else 0.0
 
+    def own_ladder(f, k):
+        """f is the fundamental of a complete ladder, not a weak series under a tone at k f: every slot h = 1..8 off the
+        multiples of k carries a real line (peaked), and the strongest line on a multiple of k has both its neighbouring
+        slots within 20 dB of it. A tone at k f stands 20 dB or more over the slots on both sides of it; a low note with
+        one body-boosted harmonic has the boost's skirt instead (a bowed bass A1: h1 39 dB under h5, h4 and h6 19 and
+        16 dB under it, a line at every slot between). The weaker neighbour decides, not the mean of the two, so that
+        one stray line beside a tone's strongest line does not make a skirt of it."""
+        lines = peaked(f)
+        if not all(h in lines for h in range(1, 9) if h % k and (h + 0.5) * f < sr / 2):
+            return False
+        on = [h for h in lines if h % k == 0 and (h + 1.5) * f < sr / 2]
+        if not on:
+            return False
+        hb = max(on, key=lambda h: level_at(h * f, 0.01))
+        return level_at(hb * f, 0.01) - min(level_at((hb - 1) * f, 0.01), level_at((hb + 1) * f, 0.01)) < 20
+
     def subharmonic(j):
         """j is k times the period of another candidate and its slots off the multiples of k sit 20 dB or more under
         the slots on them: a weak series at f/k (a real cello B2 carried one 26-39 dB down, and its contrast alone
-        was 79 % of the true pitch's). A low note's weak fundamental does not trip this: its other odd slots, the
-        body-boosted 3rd and 5th among them, are strong."""
+        was 79 % of the true pitch's). A low note's weak fundamental does not trip this when its other odd slots, the
+        body-boosted 3rd and 5th among them, are strong, nor when it is its own complete ladder (own_ladder: a bowed
+        bass A1 or E1 with the fundamental 39 dB under the boosted 5th or 7th harmonic, whose average gap to the
+        slots off the multiples of 5 or 7 is 24-26 dB)."""
         f = sr / j
         for j2 in scored:
             k = round(j / j2)
@@ -221,7 +240,7 @@ def f0_samples(x, sr):
                 continue
             on = [level_at(h * f, 0.01) for h in range(1, 9) if h % k == 0 and (h + 0.5) * f < sr / 2]
             off = [level_at(h * f, 0.01) for h in range(1, 9) if h % k and (h + 0.5) * f < sr / 2]
-            if on and off and np.mean(on) - np.mean(off) >= 20:
+            if on and off and np.mean(on) - np.mean(off) >= 20 and not own_ladder(f, k):
                 return True
         return False
 
