@@ -1,7 +1,18 @@
 //! Simultaneous prescribed- or contact-loaded friction on ONE mechanical network.
 //!
-//! Every port sees d_i = u_i dt - b_i^T delta_q = d_free_i - sum_j S_ij F_j.
-//! The full S includes all body, spring and dashpot reactions. Bounded nonlinear
+//! Every plain or contact-loaded port solves its branch on its END slip speed,
+//! e_i = u_i - b_i^T v_end = e_free_i - sum_j Y_ij F_j, with Y_ij = b_i^T v(b_j)
+//! the end mobility (MagentaBadger 8060). The line belongs to the bank: a series
+//! drive, a material shear layer, a Mindlin contact or a bound bow residual on
+//! any port keeps every port on the displacement line d_i = u_i dt - b_i^T delta_q = d_free_i - sum_j
+//! S_ij F_j, so no joint solve mixes the two, and a dry port in such a bank keeps
+//! that line's period-2 traction alternation. Both maps include all body, spring
+//! and dashpot reactions, and every port's work is F_i d_i on its actual
+//! displacement.
+//! An endpoint port's interior stuck step targets end slip -D_i, the actual
+//! slip its stuck run has accumulated since the entry step, as the single port
+//! does (MagentaBadger 8297).
+//! Bounded nonlinear
 //! coordinate sweeps reuse the original scalar stick/slip solver, then check
 //! ALL laws on the same endpoint before publishing a single mechanical step.
 //! No sequential voice advancement, averaged material law or delayed reaction.
@@ -11,12 +22,12 @@
 //! Normal loads are prescribed by default. Explicit contact bindings instead
 //! use the simultaneously solved compliant reaction, including automatic release
 //! on separation. Surface speeds remain prescribed; no bow-hair model is inferred.
-//! Sticking is step-averaged. Nonmonotone laws can have several
+//! Nonmonotone laws can have several
 //! roots or fail to converge; order-independent/global convergence, continuous
 //! no-slip and alias-free or experimentally validated sound are not claimed.
 
 use super::*;
-use super::super::network_response;
+use super::super::{network_response, network_velocity_response};
 use crate::modal_acoustic_time::ModalAcousticState;
 
 /// Compliant obstacles in the same joint solve as prescribed or contact-loaded friction.
@@ -68,10 +79,16 @@ pub struct FrictionPortFrame {
     pub traction_n: f64,
     /// Actual surface-minus-attachment displacement over the step [m].
     pub slip_distance_m: f64,
+    /// Actual end slip speed u - b^T v_end [m/s] on an endpoint port; `None`
+    /// on a series-drive or shear-layer port, which keeps the displacement line.
+    pub end_slip_speed_m_s: Option<f64>,
     /// Work supplied by this prescribed moving surface, F*u*dt [J].
     pub drive_work_j: f64,
     /// Nonnegative dissipation [J]: dry sliding work or physical layer plastic loss.
     pub dissipation_j: f64,
+    /// F*d not certified as kinetic loss, as in the single owner's frame.
+    /// Signed: positive absorbs, negative injects [J]. Zero on a layer port.
+    pub declared_slip_work_j: f64,
     /// Physical loss in this port's series-drive dashpot [J], separately from
     /// interface loss. Already included in `friction_dissipation_j`.
     pub series_drive_dissipation_j: f64,
@@ -89,11 +106,33 @@ pub struct FrictionPortFrame {
 }
 impl Default for FrictionPortFrame {
     fn default() -> Self {
-        Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, drive_work_j: 0.0,
-            dissipation_j: 0.0, series_drive_dissipation_j: 0.0,
+        Self { normal_force_n: 0.0, traction_n: 0.0, slip_distance_m: 0.0, end_slip_speed_m_s: None,
+            drive_work_j: 0.0, dissipation_j: 0.0, declared_slip_work_j: 0.0, series_drive_dissipation_j: 0.0,
             constitutive_residual_n: 0.0, regime: ModalFrictionRegime::Released,
             roots: None, shear_layer: None, mindlin: None }
     }
+}
+
+/// One port's slip work over the accepted samples so far [J]: the stick
+/// constraint's numerical dissipation as a render receipt declares it
+/// (MagentaBadger 8297, 8306). A stuck step is an entry step when the port's
+/// previous accepted step did not stick, and interior otherwise. Passivity is
+/// the interior sum; positions 2 and 3 of a stuck run are kept beside it
+/// because they precede the creep correction and may inject on their own.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct StickConstraintWork {
+    /// Work supplied by the moving surface, F*u*dt [J].
+    pub drive_j: f64,
+    /// Declared slip work on stuck entry steps [J]; positive absorbs.
+    pub entry_j: f64,
+    /// Declared slip work on interior stuck steps [J]; positive absorbs.
+    pub interior_j: f64,
+    /// The part of `interior_j` on each stuck run's second step [J].
+    pub pos2_j: f64,
+    /// The part of `interior_j` on each stuck run's third step [J].
+    pub pos3_j: f64,
+    /// Declared slip work on sliding steps, F*d < 0 [J].
+    pub sliding_j: f64,
 }
 
 /// One accepted clock and energy balance, not a sum of separately stepped voices.
@@ -113,6 +152,8 @@ pub struct MultiFrictionFrame {
     pub network_dissipation_j: f64,
     /// Sum of physical dry/layer losses and any series-drive dashpot loss [J].
     pub friction_dissipation_j: f64,
+    /// Sum of the ports' signed declared slip work [J]; positive absorbs.
+    pub declared_slip_work_j: f64,
     /// Reversible material shear-layer storage, separate from network storage [J].
     pub shear_layer_energy_j: f64,
     /// Reversible Hertz--Mindlin tangential storage, separate from layer/network [J].
@@ -135,7 +176,7 @@ pub struct MultiFrictionFrame {
     /// NUMERICAL loss of their step-held response, dF G dF / 2 [J]. This is
     /// separate from physical friction and material dissipation.
     pub friction_residual_loss_j: f64,
-    /// Change of ALL storage + all losses - external and surface work [J].
+    /// Change of ALL storage + all losses + declared slip work - external and surface work [J].
     pub energy_residual_j: f64,
     /// Original network's energy allowance, scaled by absolute surface work.
     pub energy_tolerance_j: f64,
@@ -167,7 +208,10 @@ pub struct MultiFrictionModalSystem {
     core: FrictionModalSystem,
     points: Vec<Point>,
     config: MultiFrictionConfig,
+    // Port maps, row-major: held displacement S_ij = b_i^T dq(b_j), and the
+    // endpoint line Y_ij dt = b_i^T v(b_j) dt that plain ports stick on.
     compliance: Vec<f64>,
+    endpoint: Vec<f64>,
     free_delta: Vec<f64>,
     free_slip: Vec<f64>,
     tractions: Vec<f64>,
@@ -179,6 +223,12 @@ pub struct MultiFrictionModalSystem {
     staged_branches: Vec<ContactBranch>,
     load_lines: Vec<Option<StribeckLoadLine>>,
     port_roots: Vec<Option<FrictionRoots>>,
+    // Each endpoint port's actual slip since its stuck run's entry step [m],
+    // committed and staged like the branches.
+    creeps: Vec<f64>,
+    staged_creeps: Vec<f64>,
+    // The bank's line for this step, set at each step entry from what is bound.
+    endpoint_line: bool,
     staged_ports: Vec<FrictionPortFrame>,
     frame: MultiFrictionFrame,
     accepted: bool,
@@ -202,6 +252,10 @@ pub struct MultiFrictionModalSystem {
     active_set_budget: usize,
     // Accepted steps solved again after a stop's actual-endpoint miss.
     obstacle_resolves: usize,
+    // Each port's accepted slip work by its step's place in a stuck run, and
+    // the length of the run its last accepted step belongs to (0: not stuck).
+    stick_work: Vec<StickConstraintWork>,
+    stuck_runs: Vec<usize>,
 }
 impl FrictionModalSystem {
     /// Add prescribed friction contacts without resetting the original network.
@@ -285,36 +339,38 @@ impl MultiFrictionModalSystem {
             let column = scalar::admit_port(&core.network, &port, config)?;
             points.push(Point { port, config, column });
         }
-        let mut compliance = vec![0.0; p*p];
-        if !core.network.is_harmonic_only() {
-            for j in 0..p {
-                let response = network_response(&core.network, &points[j].column, gate)?;
-                for i in 0..p { compliance[i*p+j] = dot(&points[i].column, &response)?; }
-                if compliance[j*p+j] <= 0.0 {
-                    return Err(invalid("each friction port needs positive network compliance").into());
-                }
-            }
-        }
+        let columns: Vec<&[f64]> = points.iter().map(|point| point.column.as_slice()).collect();
+        // Analysis keeps its ports but never consumes either held-step map.
+        let (compliance, endpoint) = if core.network.is_harmonic_only() {
+            (vec![0.0; p*p], vec![0.0; p*p])
+        } else {
+            port_maps(&core.network, &columns, gate,
+                "each friction port needs positive network compliance and endpoint mobility")?
+        };
         poll(Some(gate))?;
         let mut branches = vec![ContactBranch::Fresh; p];
         branches[0] = core.branch;
-        Ok(Self { core, points, config, compliance, free_delta: vec![0.0; n],
+        Ok(Self { core, points, config, compliance, endpoint, free_delta: vec![0.0; n],
             free_slip: vec![0.0; p], tractions: vec![0.0; p],
             regimes: vec![ModalFrictionRegime::Released; p], iterations: vec![0; p],
             staged_branches: branches.clone(), branches,
             load_lines: vec![None; p], port_roots: vec![None; p],
+            creeps: vec![0.0; p], staged_creeps: vec![0.0; p],
             staged_ports: vec![FrictionPortFrame::default(); p],
             frame: MultiFrictionFrame { ports: vec![FrictionPortFrame::default(); p], ..MultiFrictionFrame::default() },
             accepted: false, interfaces: vec![None; p-1], endpoint_controls: None,
             obstacles: None, contact_loads: vec![None; p],
             series_drives: vec![None; p], staged_stretch: vec![0.0; p],
-            friction_residual: None,
+            friction_residual: None, endpoint_line: true,
             shear_layers: vec![None; p], mindlin_contacts: vec![None; p],
-            active_set_budget: 4 * p + 16, obstacle_resolves: 0 })
+            active_set_budget: 4 * p + 16, obstacle_resolves: 0,
+            stick_work: vec![StickConstraintWork::default(); p], stuck_runs: vec![0; p] })
     }
     /// Accepted steps whose stop missed at its actual endpoint and was solved
     /// again with headroom, then passed the unchanged tolerance.
     #[must_use] pub fn obstacle_resolves(&self) -> usize { self.obstacle_resolves }
+    /// Each port's slip work over the accepted samples, in port order.
+    #[must_use] pub fn stick_constraint_work(&self) -> &[StickConstraintWork] { &self.stick_work }
     /// Accepted components in their original basis and order.
     #[must_use] pub fn components(&self) -> &[ModalAcousticTimeModel] { self.core.components() }
     /// Original constitutive parameters, retained through the joint friction solve.
@@ -532,16 +588,23 @@ impl MultiFrictionModalSystem {
             && self.friction_residual.is_none() {
             let f = *self.core.step_inner(external, drives[0], gate)?;
             // A later endpoint-bound step uses the joint owner. Preserve the
-            // same accepted nonmonotone contact branch across both routes.
+            // same accepted nonmonotone contact branch, and the stuck run's
+            // slip since entry, across both routes.
             self.branches[0] = self.core.branch;
-            self.frame.ports[0] = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
+            self.creeps[0] = self.core.creep_m;
+            let port = FrictionPortFrame { normal_force_n: drives[0].normal_force_n, traction_n: f.traction_n, slip_distance_m: f.slip_distance_m,
+                end_slip_speed_m_s: Some(f.end_slip_speed_m_s),
                 drive_work_j: f.drive_work_j, dissipation_j: f.friction_dissipation_j,
-                series_drive_dissipation_j: 0.0,
-                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots, shear_layer: None, mindlin: None };
+                declared_slip_work_j: f.declared_slip_work_j, series_drive_dissipation_j: 0.0,
+                constitutive_residual_n: f.constitutive_residual_n, regime: f.regime, roots: f.roots,
+                shear_layer: None, mindlin: None };
+            book_stick_work(&mut self.stick_work, &mut self.stuck_runs, std::slice::from_ref(&port));
+            self.frame.ports[0] = port;
             self.frame.sample = f.sample; self.frame.observer_pressure_pa = f.observer_pressure_pa;
             self.frame.network_energy_j = f.network_energy_j; self.frame.external_work_j = f.external_work_j;
             self.frame.drive_work_j = f.drive_work_j; self.frame.network_dissipation_j = f.network_dissipation_j;
             self.frame.friction_dissipation_j = f.friction_dissipation_j;
+            self.frame.declared_slip_work_j = f.declared_slip_work_j;
             self.frame.energy_residual_j = f.energy_residual_j; self.frame.energy_tolerance_j = f.energy_tolerance_j;
             self.frame.nonlinear = self.core.nonlinear_frame().copied().map(|f| f.diagnostics());
             self.frame.sweeps = 1; self.accepted = true;
@@ -575,6 +638,9 @@ impl MultiFrictionModalSystem {
         contact_patch_motion: bool, gate: Option<&CancelGate>) -> Result<(), ModalFrictionError> {
         if let Some(state) = &mut self.core.nonlinear { state.discard_staged_history_heat(); }
         poll(gate)?;
+        self.endpoint_line = self.series_drives.iter().all(Option::is_none)
+            && self.shear_layers.iter().all(Option::is_none)
+            && self.mindlin_contacts.iter().all(Option::is_none) && self.friction_residual.is_none();
         if self.friction_residual.is_some() { self.admit_friction_residual()?; }
         if let Some(offsets) = obstacle_offsets {
             let obstacles = self.obstacles.as_ref()
@@ -618,7 +684,11 @@ impl MultiFrictionModalSystem {
             if let Some(state)=&mut self.core.nonlinear {state.publish_histories();}
         }
         self.branches.copy_from_slice(&self.staged_branches);
+        self.creeps.copy_from_slice(&self.staged_creeps);
         self.core.branch = self.branches[0];
+        // The single-port route continues this stuck run, or starts a new one, from here.
+        self.core.creep_m = self.creeps[0];
+        self.core.stuck = self.staged_ports[0].regime == ModalFrictionRegime::Sticking;
         for (drive, &stretch) in self.series_drives.iter_mut().zip(&self.staged_stretch) {
             if let Some(drive) = drive { drive.commit(stretch); }
         }
@@ -627,6 +697,7 @@ impl MultiFrictionModalSystem {
         for contact in self.mindlin_contacts.iter_mut().flatten() { contact.publish(); }
         if let Some(obstacles) = &mut self.obstacles { obstacles.publish(); }
         self.obstacle_resolves += accepted.obstacle_resolves;
+        book_stick_work(&mut self.stick_work, &mut self.stuck_runs, &self.staged_ports);
         // Reuse the accepted port allocation through repeated constitutive
         // trials. No fallible work follows mechanical publication.
         std::mem::swap(&mut accepted.ports, &mut self.frame.ports);
@@ -634,6 +705,19 @@ impl MultiFrictionModalSystem {
         self.frame = accepted;
         self.accepted = true;
         &self.frame
+    }
+
+    // Port i's row of the bank's line: how every port's held force moves its slip.
+    fn line(&self, i: usize) -> &[f64] {
+        let p = self.points.len();
+        if self.endpoint_line { &self.endpoint[i*p..(i+1)*p] } else { &self.compliance[i*p..(i+1)*p] }
+    }
+    // Port i's line is measured from its target: end slip -D_i on an interior
+    // stuck step of an endpoint bank (the accepted step before it stuck), zero
+    // otherwise. Sliding sees the same line.
+    fn creep(&self, i: usize) -> f64 {
+        let held = self.accepted && self.frame.ports[i].regime == ModalFrictionRegime::Sticking;
+        if held && self.endpoint_line { self.creeps[i] } else { 0.0 }
     }
 
     // Stribeck and hyperbolic ports take the branch-continuation owner on
@@ -690,8 +774,8 @@ impl MultiFrictionModalSystem {
     }
 
     /// Active-set rescue for a step the Gauss-Seidel sweep cannot converge
-    /// (frankensim-o7qbp). Builds the effective load line (bare compliance plus
-    /// each port's series/hair compliance on the diagonal; free slip plus each
+    /// (frankensim-o7qbp). Builds the effective load line (the bank's line rows,
+    /// plus each port's series/hair compliance on the diagonal; free slip plus each
     /// port's stored-stretch shift), solves a consistent stick/slip partition
     /// directly, and on success overwrites the held tractions and regimes with
     /// it. Returns whether a consistent partition was adopted.
@@ -720,10 +804,8 @@ impl MultiFrictionModalSystem {
             return Err(ModalFrictionError::ActiveSetDeclined { cause: Box::new(cause) });
         }
         let dt = self.sample_period_s();
-        let mut a = self.compliance.clone();
-        if let Some(residual) = &self.friction_residual {
-            for (a, g) in a.iter_mut().zip(residual.compliance()) { *a = finite(*a + g)?; }
-        }
+        let mut a = Vec::with_capacity(p*p);
+        for i in 0..p { for j in 0..p { a.push(self.friction_compliance(i, j)?); } }
         let mut f = vec![0.0; p];
         let mut normal = vec![0.0; p];
         for i in 0..p {
@@ -811,8 +893,14 @@ impl MultiFrictionModalSystem {
             obstacles.prepare(&self.core.network.old_q, &self.free_delta, obstacle_offsets, gate)?;
         }
         for i in 0..p {
-            self.free_slip[i] = finite(finite(drives[i].speed_m_s*self.sample_period_s())?
-                - dot(&self.points[i].column, &self.free_delta)?)?;
+            self.free_slip[i] = if self.endpoint_line {
+                finite(finite(finite(drives[i].speed_m_s
+                    - dot(&self.points[i].column, &self.core.network.free_velocity)?)?*self.sample_period_s())?
+                    + self.creep(i))?
+            } else {
+                finite(finite(drives[i].speed_m_s*self.sample_period_s())?
+                    - dot(&self.points[i].column, &self.free_delta)?)?
+            };
             if let Some(residual) = &self.friction_residual {
                 self.free_slip[i] = finite(self.free_slip[i] + residual.old_displacement(i)?)?;
             }
@@ -829,7 +917,7 @@ impl MultiFrictionModalSystem {
                 poll(gate)?;
                 let mut free = self.free_slip[i];
                 for j in 0..p { if j != i { free = finite(free - self.friction_compliance(i,j)?*self.tractions[j])?; } }
-                if let Some(obstacles) = &self.obstacles { free = finite(free + obstacles.slip_shift(i)?)?; }
+                if let Some(obstacles) = &self.obstacles { free = finite(free + obstacles.slip_shift(i, self.endpoint_line)?)?; }
                 if let Some(series) = self.series_drives[i] { free = finite(free + series.free_slip_shift_m(self.sample_period_s()))?; }
                 let drive = self.contact_loaded_drive(i, drives[i])?;
                 let (force, regime, iterations, roots) = self.solve_point(i, free, drive.normal_force_n, gate)?;
@@ -843,11 +931,11 @@ impl MultiFrictionModalSystem {
                 .map(ModalFrictionError::Network);
             for i in 0..p {
                 poll(gate)?;
-                let mut slip = finite(self.free_slip[i] - dot(&self.compliance[i*p..(i+1)*p], &self.tractions)?)?;
+                let mut slip = finite(self.free_slip[i] - dot(self.line(i), &self.tractions)?)?;
                 if let Some(residual) = &self.friction_residual {
                     slip = finite(slip - residual.displacement(i, &self.tractions)?)?;
                 }
-                if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i)?)?; }
+                if let Some(obstacles) = &self.obstacles { slip = finite(slip + obstacles.slip_shift(i, self.endpoint_line)?)?; }
                 if let Some(series) = self.series_drives[i] {
                     let eta = series.staged_stretch_m(self.tractions[i], self.sample_period_s());
                     slip = finite(slip - (eta - series.stretch_m()))?;
@@ -861,7 +949,7 @@ impl MultiFrictionModalSystem {
                         self.points[i].config, self.iterations[i])
                 } else {
                     scalar::check(&self.points[i].port.law, self.points[i].config,
-                        self.sample_period_s(), drive, self.tractions[i], slip, self.regimes[i], self.iterations[i]).map(|_| ())
+                        self.sample_period_s(), drive, self.tractions[i], slip, slip, self.regimes[i], self.iterations[i]).map(|_| ())
                 };
                 if let Err(error) = checked {
                     if failure.is_none() { failure = Some(error); }
@@ -904,6 +992,7 @@ impl MultiFrictionModalSystem {
             _ => (0.0, 0.0),
         };
         let (mut loss, mut work, mut absolute_work) = (0.0, 0.0, 0.0);
+        let (mut declared, mut absolute_declared) = (0.0, 0.0);
         for i in 0..p {
             poll(gate)?;
             let distance = finite(drives[i].speed_m_s*self.sample_period_s())?;
@@ -920,21 +1009,32 @@ impl MultiFrictionModalSystem {
             }
             let drive = self.contact_loaded_drive(i, drives[i])?;
             let dt = self.sample_period_s();
-            let (dissipation, residual, shear_layer, mindlin) = if let Some(layer) = &mut self.shear_layers[i] {
+            let end_slip = if self.endpoint_line {
+                Some(scalar::endpoint_slip(&self.points[i].column, &self.core.network.candidates, drive, dt)?)
+            } else { None };
+            let creep = self.creep(i);
+            let line_slip = match end_slip { Some(e) => finite(e+creep)?, None => slip };
+            let (dissipation, port_declared, residual, shear_layer, mindlin) = if let Some(layer) = &mut self.shear_layers[i] {
                 let (frame, residual) = layer.stage(slip, self.tractions[i], drive.normal_force_n, dt,
                     self.points[i].config, self.iterations[i])?;
                 self.regimes[i] = ModalFrictionRegime::Shearing { plastic_flow: frame.plastic_flow };
-                (frame.dissipated_j, residual, Some(frame), None)
+                (frame.dissipated_j, 0.0, residual, Some(frame), None)
             } else if let Some(contact) = &mut self.mindlin_contacts[i] {
                 let (frame, residual) = contact.stage(slip, self.tractions[i], drive.normal_force_n, dt,
                     self.points[i].config, self.iterations[i])?;
                 self.regimes[i] = ModalFrictionRegime::Microslip;
-                (frame.dissipated_j, residual, None, Some(frame))
+                (frame.dissipated_j, 0.0, residual, None, Some(frame))
             } else {
-                let (loss, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
-                    dt, drive, self.tractions[i], slip, self.regimes[i], self.iterations[i])?;
-                (loss, residual, None, None)
+                let (loss, port_declared, residual) = scalar::check(&self.points[i].port.law, self.points[i].config,
+                    dt, drive, self.tractions[i], line_slip, slip, self.regimes[i], self.iterations[i])?;
+                (loss, port_declared, residual, None, None)
             };
+            // An entry step starts the run's account at zero: its own slip is
+            // the slide's remainder, not creep.
+            let held = self.accepted && self.frame.ports[i].regime == ModalFrictionRegime::Sticking;
+            self.staged_creeps[i] = if end_slip.is_some() && held && self.regimes[i] == ModalFrictionRegime::Sticking {
+                finite(creep+slip)?
+            } else { 0.0 };
             // A contact-loaded law has no known load until the JOINT solve.
             // Validate all three slip rates with that same held reaction before
             // any candidate, observer, normal offset or clock is published.
@@ -946,9 +1046,12 @@ impl MultiFrictionModalSystem {
             let supply = finite(self.tractions[i]*distance)?;
             loss = finite(loss+dissipation+hair_loss)?; work = finite(work+supply)?;
             absolute_work = finite(absolute_work+supply.abs())?;
+            declared = finite(declared+port_declared)?;
+            absolute_declared = finite(absolute_declared+port_declared.abs())?;
             self.staged_ports[i] = FrictionPortFrame { normal_force_n: drive.normal_force_n,
                 traction_n: self.tractions[i], slip_distance_m: slip,
-                drive_work_j: supply, dissipation_j: dissipation,
+                end_slip_speed_m_s: end_slip.map(|e| finite(e/dt)).transpose()?,
+                drive_work_j: supply, dissipation_j: dissipation, declared_slip_work_j: port_declared,
                 series_drive_dissipation_j: hair_loss, constitutive_residual_n: residual,
                 regime: self.regimes[i], roots: self.port_roots[i], shear_layer, mindlin };
         }
@@ -981,13 +1084,13 @@ impl MultiFrictionModalSystem {
         let network_loss = finite(staged.total_dissipation_j())?;
         let external_work = dot(external, &self.core.network.free_delta)?;
         let residual = if residual_bound {
-            finite((after-before)+network_loss+loss+obstacle_loss+residual_loss-external_work-work-obstacle_work)?
+            finite((after-before)+network_loss+loss+declared+obstacle_loss+residual_loss-external_work-work-obstacle_work)?
         } else if self.obstacles.is_some() {
-            finite((after-before)+network_loss+loss+obstacle_loss-external_work-work-obstacle_work)?
-        } else { finite((after-before)+network_loss+loss-external_work-work)? };
+            finite((after-before)+network_loss+loss+declared+obstacle_loss-external_work-work-obstacle_work)?
+        } else { finite((after-before)+network_loss+loss+declared-external_work-work)? };
         let residual = if self.friction_residual.is_some() { finite(residual+friction_residual_loss)? }
             else { residual };
-        let scale = before.max(after).max(network_loss).max(loss).max(obstacle_loss)
+        let scale = before.max(after).max(network_loss).max(loss).max(absolute_declared).max(obstacle_loss)
             .max(external_work.abs()).max(absolute_work).max(absolute_obstacle_work);
         if self.obstacles.is_some() || self.shear_layers.iter().any(Option::is_some)
             || self.mindlin_contacts.iter().any(Option::is_some)
@@ -1004,8 +1107,8 @@ impl MultiFrictionModalSystem {
             sample: staged.sample, observer_pressure_pa: pressure,
             network_energy_j: network_energy, external_work_j: external_work,
             drive_work_j: work, network_dissipation_j: network_loss,
-            friction_dissipation_j: loss, shear_layer_energy_j: shear_layer_energy,
-            mindlin_energy_j: mindlin_energy, energy_residual_j: residual,
+            friction_dissipation_j: loss, declared_slip_work_j: declared,
+            shear_layer_energy_j: shear_layer_energy, mindlin_energy_j: mindlin_energy, energy_residual_j: residual,
             obstacle_energy_j: obstacle_energy, obstacle_dissipation_j: obstacle_loss,
             obstacle_work_j: obstacle_work, obstacle_residual_energy_j: residual_energy,
             obstacle_residual_loss_j: residual_loss, energy_tolerance_j: tolerance, sweeps,
@@ -1014,6 +1117,48 @@ impl MultiFrictionModalSystem {
             active_set_rescues: rescues, obstacle_resolves: 0,
             nonlinear: None, ports: Vec::new(),
         })
+    }
+}
+
+// Both port maps over the SAME admitted network, every cross-term included:
+// held displacement S_ij = b_i^T dq(b_j) and the endpoint line Y_ij dt.
+fn port_maps(network: &CoupledModalSystem, columns: &[&[f64]], gate: &CancelGate, refusal: &'static str)
+    -> Result<(Vec<f64>, Vec<f64>), ModalFrictionError>
+{
+    let p = columns.len();
+    let (mut compliance, mut endpoint) = (vec![0.0; p*p], vec![0.0; p*p]);
+    for j in 0..p {
+        let response = network_response(network, columns[j], gate)?;
+        let velocity = network_velocity_response(network, columns[j], gate)?;
+        for i in 0..p {
+            compliance[i*p+j] = dot(columns[i], &response)?;
+            endpoint[i*p+j] = finite(dot(columns[i], &velocity)?*network.dt)?;
+        }
+        if compliance[j*p+j] <= 0.0 || endpoint[j*p+j] <= 0.0 { return Err(invalid(refusal).into()); }
+    }
+    Ok((compliance, endpoint))
+}
+
+// Book an accepted step's ports by their place in each port's stuck run: the
+// first stuck step is the entry, every later one interior.
+fn book_stick_work(work: &mut [StickConstraintWork], runs: &mut [usize], accepted: &[FrictionPortFrame]) {
+    for ((work, run), port) in work.iter_mut().zip(runs).zip(accepted) {
+        work.drive_j += port.drive_work_j;
+        let declared = port.declared_slip_work_j;
+        if port.regime != ModalFrictionRegime::Sticking {
+            *run = 0;
+            work.sliding_j += declared;
+            continue;
+        }
+        *run += 1;
+        match *run {
+            1 => work.entry_j += declared,
+            position => {
+                work.interior_j += declared;
+                if position == 2 { work.pos2_j += declared; }
+                if position == 3 { work.pos3_j += declared; }
+            },
+        }
     }
 }
 

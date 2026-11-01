@@ -100,7 +100,7 @@ fn moving_attachment_and_support_close_actual_work_and_endpoint_pressure() {
         }).sum::<f64>();
         assert!((frame.observer_pressure_pa-pressure).abs() < 1e-10);
         supply += external_work+bow_work+actuator_work;
-        loss += frame.network_dissipation_j+frame.friction_dissipation_j+contact.dissipation_j;
+        loss += frame.network_dissipation_j+frame.friction_dissipation_j+frame.declared_slip_work_j+contact.dissipation_j;
         assert!((system.total_energy_j().unwrap()-initial+loss-supply).abs() < 1e-9);
         assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
         assert_eq!(system.obstacle_normal_column(0).unwrap(), &next_map);

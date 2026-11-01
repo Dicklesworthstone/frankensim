@@ -57,7 +57,7 @@ fn drive(speed_m_s: f64, normal_force_n: f64) -> FrictionDrive {
 }
 
 #[test]
-fn sticking_solves_displacement_constraint_and_connected_body_reacts_back() {
+fn sticking_solves_endpoint_constraint_and_connected_body_reacts_back() {
     let mut linked = system(true);
     let mut isolated = system(false);
     let d = drive(0.001, 1.0);
@@ -67,10 +67,14 @@ fn sticking_solves_displacement_constraint_and_connected_body_reacts_back() {
     assert_eq!(other.regime, ModalFrictionRegime::Sticking);
     assert!(actual.traction_n > other.traction_n + 1e-7, "receiver must feed back into the traction solve");
     assert!(linked.components()[1].states()[0].displacement_m_sqrt_kg > 0.0);
-    let moved = attachment(0).shapes[0] * linked.components()[0].states()[0].displacement_m_sqrt_kg;
-    assert!((moved-d.speed_m_s/48000.0).abs() < 1e-13);
+    // A stuck entry step pins the END slip speed (MagentaBadger 8060): the
+    // contact point leaves the step moving with the surface.
+    let end = attachment(0).shapes[0] * linked.components()[0].states()[0].velocity_m_sqrt_kg_per_s;
+    assert!((end-d.speed_m_s).abs()/48000.0 < 1e-13);
+    assert!(actual.end_slip_speed_m_s.abs()/48000.0 < 1e-13);
     assert!(actual.traction_n.abs() <= 0.8);
     assert_eq!(actual.friction_dissipation_j, 0.0);
+    assert_eq!(actual.declared_slip_work_j, actual.traction_n*actual.slip_distance_m);
     assert!(actual.energy_residual_j.abs() <= actual.energy_tolerance_j);
 }
 
@@ -108,21 +112,29 @@ fn stribeck_reversals_follow_owner_law_and_close_actual_drive_work() {
     let mut loss = 0.0;
     let mut positive = false;
     let mut negative = false;
+    // The slip a stuck run has accumulated since its entry step: a step after
+    // a stuck one measures its line, and the law's speed, from end slip -D (8297).
+    let (mut held, mut creep) = (false, 0.0);
     for step in 0..400 {
         let speed = if step < 200 { 0.3 } else { -0.3 };
         let f = *s.step(&[0.02, -0.03], drive(speed, 1.0)).unwrap();
         work += f.external_work_j + f.drive_work_j;
-        loss += f.network_dissipation_j + f.friction_dissipation_j;
+        loss += f.network_dissipation_j + f.friction_dissipation_j + f.declared_slip_work_j;
         assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
         assert!(f.friction_dissipation_j >= 0.0);
+        let shift = if held { creep } else { 0.0 };
         if f.regime == ModalFrictionRegime::Sliding {
-            let v = f.slip_distance_m / s.sample_period_s();
+            let v = f.end_slip_speed_m_s + shift / s.sample_period_s();
             let expected = law().kinetic_coefficient(v.abs()).unwrap()*v.signum();
             assert!((f.traction_n-expected).abs() < 1e-9);
-            assert!((f.friction_dissipation_j-f.traction_n*f.slip_distance_m).abs() < 1e-15);
+            // F d along F is kinetic loss; against F it is declared.
+            let w = f.traction_n*f.slip_distance_m;
+            assert_eq!((f.friction_dissipation_j, f.declared_slip_work_j), if w < 0.0 { (0.0, w) } else { (w, 0.0) });
             positive |= f.traction_n > 0.0;
             negative |= f.traction_n < 0.0;
         }
+        creep = if f.regime == ModalFrictionRegime::Sticking && held { shift + f.slip_distance_m } else { 0.0 };
+        held = f.regime == ModalFrictionRegime::Sticking;
     }
     assert!(positive && negative);
     assert!(s.components()[1].states()[0].displacement_m_sqrt_kg.abs() > 1e-10);

@@ -88,7 +88,7 @@ fn normal_support_press_and_release_solve_load_and_close_laboratory_work() {
             balance += frame.external_work_j - support.inertial_coordinate_work_j
                 + support.support_work_j + frame.obstacle_work_j
                 - support.normal_attachment_work_j - normal.contact_translation_work_j
-                - frame.network_dissipation_j - frame.friction_dissipation_j
+                - frame.network_dissipation_j - frame.friction_dissipation_j - frame.declared_slip_work_j
                 - frame.obstacle_dissipation_j - frame.obstacle_residual_loss_j;
             assert!((support.laboratory_mechanical_energy_j - balance).abs() < 2e-9);
             for offset in actual.bank().system().obstacle_offsets_m().unwrap() {
@@ -275,6 +275,7 @@ fn accelerating_hair_transports_the_normal_basis_and_closes_laboratory_work() {
                 - support.normal_attachment_work_j
                 - frame.network_dissipation_j
                 - frame.friction_dissipation_j
+                - frame.declared_slip_work_j
                 - frame.obstacle_dissipation_j
                 - frame.obstacle_residual_loss_j;
             assert!((support.laboratory_mechanical_energy_j - balance).abs() < 2e-9);

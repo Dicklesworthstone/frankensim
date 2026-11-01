@@ -102,7 +102,7 @@ fn g1_nonlinear_strain_loss_closes_joint_contact_work_and_endpoint_pressure() {
             -viscosity*rate*q[i])).sum::<f64>();
         assert!((frame.observer_pressure_pa-expected_pressure).abs()<1e-9);
         supplied += frame.external_work_j+frame.drive_work_j;
-        dissipated += frame.network_dissipation_j+frame.friction_dissipation_j;
+        dissipated += frame.network_dissipation_j+frame.friction_dissipation_j+frame.declared_slip_work_j;
         constitutive += actual;
         assert!((system.total_energy_j().unwrap()-initial+dissipated-supplied).abs()<1e-9);
     }
@@ -150,7 +150,7 @@ fn simultaneous_bow_pressure_uses_endpoint_gradient_and_original_external_work()
         assert!((frame.external_work_j - external_work).abs() < 1e-18);
         assert!((frame.nonlinear.unwrap().nonlinear_energy_j - Quartic(1e12).hamiltonian(&q)).abs() < 1e-15);
         work += frame.external_work_j + frame.drive_work_j;
-        loss += frame.network_dissipation_j + frame.friction_dissipation_j;
+        loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j;
         assert!((system.total_energy_j().unwrap() - initial + loss - work).abs() < 1e-9);
     }
 }

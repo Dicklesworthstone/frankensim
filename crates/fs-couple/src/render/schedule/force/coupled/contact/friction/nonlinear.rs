@@ -170,6 +170,8 @@ pub(super) struct NonlinearTrialWork {
     pub absolute_drive_work_j: f64,
     pub network_dissipation_j: f64,
     pub friction_dissipation_j: f64,
+    /// Signed F*d of the endpoint stick rule not certified as kinetic loss.
+    pub declared_slip_work_j: f64,
     pub internal_storage: Option<NonlinearInternalStorage>,
     pub contacts: Option<NonlinearContactWork>,
 }
@@ -220,6 +222,7 @@ impl NonlinearTrial for SingleTrial<'_> {
             absolute_drive_work_j: frame.drive_work_j.abs(),
             network_dissipation_j: frame.network_dissipation_j,
             friction_dissipation_j: frame.friction_dissipation_j,
+            declared_slip_work_j: frame.declared_slip_work_j,
             internal_storage: None,
             contacts: None,
         })
@@ -639,10 +642,11 @@ impl NonlinearFrictionState {
             };
             let balance = if let Some(contact) = frame.contacts {
                 finite(total_after - total_before + network_dissipation
-                    + frame.friction_dissipation_j + contact.dissipation_j
+                    + frame.friction_dissipation_j + frame.declared_slip_work_j + contact.dissipation_j
                     - external_work - frame.drive_work_j - contact.work_j)?
             } else { finite(
                 total_after - total_before + network_dissipation + frame.friction_dissipation_j
+                    + frame.declared_slip_work_j
                     - external_work
                     - frame.drive_work_j,
             )? };
@@ -650,6 +654,7 @@ impl NonlinearFrictionState {
                 .max(total_after)
                 .max(network_dissipation)
                 .max(frame.friction_dissipation_j)
+                .max(frame.declared_slip_work_j.abs())
                 .max(external_work.abs())
                 .max(frame.absolute_drive_work_j);
             if let Some(contact) = frame.contacts {

@@ -311,7 +311,7 @@ fn moving_normal_contact_and_material_stretching_reach_the_original_pressure_wri
             if normal.normal_force_n == 0.0 { separated += 1; assert_eq!(frame.ports[0].traction_n, 0.0); }
             else { active += 1; }
             work += frame.external_work_j + frame.drive_work_j + frame.obstacle_work_j;
-            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.obstacle_dissipation_j;
+            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j + frame.obstacle_dissipation_j;
             assert!((system.total_energy_j().unwrap() + loss - work).abs() < 1e-10);
             assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
             stretch = stretch.max(frame.nonlinear.unwrap().nonlinear_energy_j);

@@ -108,7 +108,7 @@ fn resolved_surface_returns_opposite_impulse_without_an_actuator() {
         assert_eq!(frame.drive_work_j, 0.0);
         assert_eq!(frame.ports[0].regime, ModalFrictionRegime::Sliding);
         assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
-        dissipation += frame.friction_dissipation_j;
+        dissipation += frame.friction_dissipation_j + frame.declared_slip_work_j;
     }
     assert!(dissipation > 0.0);
     assert!((bank.total_energy_j().unwrap()+dissipation-initial_energy).abs() < 1e-12);
@@ -179,20 +179,21 @@ fn single_port_is_exactly_the_original_even_after_prior_vibration() {
 
 #[test]
 fn both_sticking_ports_recover_independently_manufactured_joint_reactions() {
-    // Manufacture the target displacement with the existing bilateral stepper,
-    // independently of the new cross-port/root assembly.
+    // Manufacture the target end velocities with the existing bilateral
+    // stepper, independently of the new cross-port/root assembly: a stuck
+    // entry step pins each contact's end slip speed (MagentaBadger 8060).
     let forces = [0.2, -0.15];
     let mut oracle = network(true, 0.0);
     oracle.step(&[forces[0]*attachment(0).shapes[0], forces[1]*attachment(1).shapes[0]]).unwrap();
     let target: Vec<_> = oracle.components().iter().enumerate().map(|(i, m)| {
-        drive(attachment(i).shapes[0]*m.states()[0].displacement_m_sqrt_kg*48000.0, 1.0)
+        drive(attachment(i).shapes[0]*m.states()[0].velocity_m_sqrt_kg_per_s, 1.0)
     }).collect();
     let mut actual = joint(true);
     let f = actual.step(&[0.0; 2], &target).unwrap().clone();
     for (point, force) in f.ports.iter().zip(forces) {
         assert_eq!(point.regime, ModalFrictionRegime::Sticking);
         assert!((point.traction_n-force).abs() < 1e-10);
-        assert!(point.slip_distance_m.abs() <= config().sticking_tolerance_m);
+        assert!(point.end_slip_speed_m_s.unwrap().abs()/48000.0 <= config().sticking_tolerance_m);
         assert_eq!(point.dissipation_j, 0.0);
     }
     assert!(f.sweeps > 1, "independent one-pass forces are not simultaneous sticking");
@@ -209,14 +210,18 @@ fn second_contact_changes_the_first_reaction_through_the_same_body() {
     assert_eq!(a.ports[1].regime, ModalFrictionRegime::Released);
     // At zero initial state the linked bodies, spring and dashpot propagate as
     // one exact block. The required sticking tractions are therefore the held
-    // forces that put both contact points at their drive distances after one
-    // step, independently of the friction solver. The physical two-body
-    // responses, m_i x_i'' = -m_i w_i^2 x_i -+ link + F_i, are integrated from
-    // rest with fine RK4 for unit held forces. The original 1 N load caps
-    // static friction at 0.8 N, below the second body's required ~0.960 N:
-    // that case must slide.
+    // forces that put both contact points at their drive speeds at the end of
+    // one step (the endpoint stick, MagentaBadger 8060), independently of the
+    // friction solver. The physical two-body responses,
+    // m_i x_i'' = -m_i w_i^2 x_i -+ link + F_i, are integrated from rest with
+    // fine RK4 for unit held forces. A held force F brings a body of mass m
+    // from rest to speed F dt/m, but only to distance F dt^2/(2m), so the end
+    // speed u needs m u/dt where the old distance u dt needed 2 m u/dt: the
+    // second body's ~0.96 N becomes ~0.48 N. The loads halve with it, 1/2 N to
+    // 0.5/1 N, keeping the pair: a 0.5 N load caps static friction at 0.4 N,
+    // below ~0.48 N, so that case must slide; 1 N (0.8 N) sticks.
     let dt: f64 = 1.0 / 48000.0;
-    let distance = 0.001 * dt;
+    let speed = 0.001;
     let (mass, omega, k, c) = ([0.002, 0.01], [800.0, 1100.0], 1e4, 0.2);
     let response = |force: [f64; 2]| -> [f64; 2] {
         let rate = |s: [f64; 4]| {
@@ -236,15 +241,15 @@ fn second_contact_changes_the_first_reaction_through_the_same_body() {
             let k4 = rate(add(s, k3, h));
             s = std::array::from_fn(|i| s[i] + h / 6.0 * (k1[i] + 2.0 * k2[i] + 2.0 * k3[i] + k4[i]));
         }
-        [s[0], s[2]]
+        [s[1], s[3]]
     };
     let (unit0, unit1) = (response([1.0, 0.0]), response([0.0, 1.0]));
-    // Solve F0*unit0 + F1*unit1 = (distance, -distance) for F1.
+    // Solve F0*unit0 + F1*unit1 = (speed, -speed) for F1.
     let determinant = unit0[0] * unit1[1] - unit1[0] * unit0[1];
-    let required_second = (unit0[0] * (-distance) - unit0[1] * distance) / determinant;
-    assert!(required_second.abs() > 0.8 && required_second.abs() < 1.6);
-    for (normal, regime) in [(1.0, ModalFrictionRegime::Sliding),
-        (2.0, ModalFrictionRegime::Sticking)] {
+    let required_second = (unit0[0] * (-speed) - unit0[1] * speed) / determinant;
+    assert!(required_second.abs() > 0.4 && required_second.abs() < 0.8);
+    for (normal, regime) in [(0.5, ModalFrictionRegime::Sliding),
+        (1.0, ModalFrictionRegime::Sticking)] {
         let mut stopped = joint(true);
         let b = stopped.step(&[0.0; 2], &[drive(0.001, 1.0), drive(-0.001, normal)]).unwrap().clone();
         assert!((a.ports[0].traction_n-b.ports[0].traction_n).abs() > 1e-6);
@@ -254,12 +259,12 @@ fn second_contact_changes_the_first_reaction_through_the_same_body() {
         if regime == ModalFrictionRegime::Sticking {
             assert!((point.traction_n-required_second).abs() < 1e-10,
                 "{} vs {required_second}", point.traction_n);
-            assert!(point.slip_distance_m.abs() <= config().sticking_tolerance_m);
+            assert!(point.end_slip_speed_m_s.unwrap().abs()*dt <= config().sticking_tolerance_m);
             assert_eq!(point.dissipation_j, 0.0);
         } else {
-            assert!(point.slip_distance_m < 0.0 && point.traction_n < 0.0);
-            let speed = point.slip_distance_m / dt;
-            let expected = -law().kinetic_coefficient(speed.abs()).unwrap() * normal;
+            let slip = point.end_slip_speed_m_s.unwrap();
+            assert!(slip < 0.0 && point.slip_distance_m < 0.0 && point.traction_n < 0.0);
+            let expected = -law().kinetic_coefficient(slip.abs()).unwrap() * normal;
             assert!((point.traction_n-expected).abs() < 1e-9);
             assert!(point.dissipation_j > 0.0);
         }
@@ -272,23 +277,31 @@ fn reversals_and_independent_release_close_each_law_and_the_combined_work() {
     let mut s = joint(true);
     let (mut work, mut loss) = (0.0, 0.0);
     let mut sliding = [false; 2];
+    // Each port's slip since its stuck run's entry step: a step after a stuck
+    // one measures its line, and the law's speed, from end slip -D (8297).
+    let (mut held, mut creep) = ([false; 2], [0.0; 2]);
     for sample in 0..512 {
         let ds = [drive(if sample < 256 { 0.3 } else { -0.3 }, 1.0),
             drive(-0.2, if sample < 384 { 0.7 } else { 0.0 })];
         let f = s.step(&[0.02, -0.03], &ds).unwrap().clone();
         work += f.external_work_j+f.drive_work_j;
-        loss += f.network_dissipation_j+f.friction_dissipation_j;
+        loss += f.network_dissipation_j+f.friction_dissipation_j+f.declared_slip_work_j;
         assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
         for (i, point) in f.ports.iter().enumerate() {
             assert!(point.dissipation_j >= 0.0);
             assert_eq!(point.drive_work_j, point.traction_n*(ds[i].speed_m_s*s.sample_period_s()));
+            let shift = if held[i] { creep[i] } else { 0.0 };
             if point.regime == ModalFrictionRegime::Sliding {
                 sliding[i] = true;
-                let slip = point.slip_distance_m/s.sample_period_s();
+                let slip = point.end_slip_speed_m_s.unwrap()+shift/s.sample_period_s();
                 let expected = law().kinetic_coefficient(slip.abs()).unwrap()*ds[i].normal_force_n*slip.signum();
                 assert!((point.traction_n-expected).abs() < 1e-9);
-                assert_eq!(point.dissipation_j, point.traction_n*point.slip_distance_m);
+                // F d along F is kinetic loss; against F it is declared.
+                let w = point.traction_n*point.slip_distance_m;
+                assert_eq!((point.dissipation_j, point.declared_slip_work_j), if w < 0.0 { (0.0, w) } else { (w, 0.0) });
             }
+            creep[i] = if point.regime == ModalFrictionRegime::Sticking && held[i] { shift+point.slip_distance_m } else { 0.0 };
+            held[i] = point.regime == ModalFrictionRegime::Sticking;
         }
     }
     assert!(sliding.into_iter().all(|x| x));

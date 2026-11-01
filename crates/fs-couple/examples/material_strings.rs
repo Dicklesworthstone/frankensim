@@ -1154,6 +1154,15 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
         summary.clipped_samples,summary.full_scale_pa);
     // Steps whose stop missed its tolerance at the actual endpoint and passed it after a headroom re-solve.
     eprintln!("obstacle_resolves={}",ready.performance.bank().system().obstacle_resolves());
+    // The stick constraint's numerical dissipation on each driven port (MagentaBadger 8297, 8306): the interior sum
+    // must absorb, and is flagged when it injects or exceeds the entry steps' work. Positions 2 and 3 of the stuck
+    // runs, inside interior_J, precede the creep correction and are printed so a growth in them shows.
+    for (port,work) in ready.performance.bank().system().stick_constraint_work().iter().enumerate() {
+        if work.drive_j==0.0 { continue; }
+        let flag=if work.interior_j<0.0 { "injects" } else if work.interior_j>work.entry_j { "exceeds_entry" } else { "none" };
+        eprintln!("stick_constraint_work port={port}; drive_J={:e}; entry_J={:e}; interior_J={:e}; pos2_J={:e}; pos3_J={:e}; sliding_J={:e}; interior_fraction={:e}; flag={flag}; entry is a stuck step after a non-stuck one, interior every later stuck step (pos2_J and pos3_J are inside it); positive absorbs",
+            work.drive_j,work.entry_j,work.interior_j,work.pos2_j,work.pos3_j,work.sliding_j,work.interior_j/work.drive_j);
+    }
     Ok(())
 }
 

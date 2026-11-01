@@ -257,7 +257,10 @@ fn its_twin_stays_passive_and_rings_within_the_frequency_bound_of_the_exact_owne
 // One contact held around the twin's air-loaded response, sticking and sliding. Every step's own audit closes, and so does
 // the whole run, summed apart from those audits. A sticking step holds only if the compliance carries the air: numpy gives
 // 2.55e-11 m of slip with the bare compliance against this port's 1e-12 m, and 2770 sticking steps of 9600 with the right
-// one, 1.904e-5 J of drive work and 1.764e-5 J of friction loss.
+// one, 1.904e-5 J of drive work and 1.764e-5 J of friction loss. Those numbers are for the held-displacement line. On the
+// endpoint line with its creep correction (pexfp.299, MagentaBadger 8297), a stuck step pins the end slip plus the run's
+// accumulated creep within the tolerance, and its own step displacement is booked as declared slip work. That gives 7575
+// sticking and 2025 sliding steps, 1.968e-5 J of drive work, 1.804e-5 J of friction loss and 5.22e-7 J of declared work.
 #[test]
 fn a_contact_held_around_the_twin_sticks_slides_and_closes_its_energy_over_every_step() {
     let gate = CancelGate::new_clock_free();
@@ -265,7 +268,7 @@ fn a_contact_held_around_the_twin_sticks_slides_and_closes_its_energy_over_every
         .with_radiation_load(&ring_air(TWIN, 0.05), &[0], 1, &gate).unwrap();
     let drive = FrictionDrive { speed_m_s: 5e-5, normal_force_n: 10.0 };
     let start = owner.total_energy_j().unwrap();
-    let (mut stuck, mut slid, mut supplied, mut friction_loss, mut air_loss) = (0, 0, 0.0, 0.0, 0.0);
+    let (mut stuck, mut slid, mut supplied, mut friction_loss, mut declared, mut air_loss) = (0, 0, 0.0, 0.0, 0.0, 0.0);
     for _ in 0..9600 {
         let frame = *owner.step(&[0.0], drive).unwrap();
         assert!(frame.traction_n != 0.0);
@@ -277,10 +280,12 @@ fn a_contact_held_around_the_twin_sticks_slides_and_closes_its_energy_over_every
         }
         supplied += frame.external_work_j+frame.drive_work_j;
         friction_loss += frame.friction_dissipation_j;
+        // The stick constraint's declared work is a loss term of the frame's identity, beside the friction loss (8297).
+        declared += frame.declared_slip_work_j;
         air_loss += frame.network_dissipation_j;
     }
-    let gap = owner.total_energy_j().unwrap()+friction_loss+air_loss-supplied-start;
-    eprintln!("{stuck} sticking, {slid} sliding, drive {supplied:.4e} J, friction {friction_loss:.4e} J, air {air_loss:.4e} J, gap {gap:.2e} J");
+    let gap = owner.total_energy_j().unwrap()+friction_loss+declared+air_loss-supplied-start;
+    eprintln!("{stuck} sticking, {slid} sliding, drive {supplied:.4e} J, friction {friction_loss:.4e} J, declared {declared:.4e} J, air {air_loss:.4e} J, gap {gap:.2e} J");
     assert!(stuck > 0 && slid > 0 && air_loss > 0.0);
     assert!(gap.abs() <= 1e-11*supplied, "{gap:e} of {supplied:e}");
 }

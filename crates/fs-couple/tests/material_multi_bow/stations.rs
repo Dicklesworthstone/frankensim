@@ -185,7 +185,9 @@ fn midpoint_material_maps_match_an_independent_sine_reference_and_close_physical
             }
             assert_eq!(frame.obstacle_work_j, 0.0);
             total_work += frame.external_work_j + frame.drive_work_j;
-            total_loss += frame.network_dissipation_j + frame.friction_dissipation_j;
+            total_loss += frame.network_dissipation_j
+                + frame.friction_dissipation_j
+                + frame.declared_slip_work_j;
             near(frame.network_energy_j + total_loss, total_work);
             previous = end;
         }
@@ -802,6 +804,7 @@ fn migrating_bows_and_independent_stops_share_work_clock_and_callback_state() {
             work += frame.external_work_j + frame.drive_work_j + migration + support;
             loss += frame.network_dissipation_j
                 + frame.friction_dissipation_j
+                + frame.declared_slip_work_j
                 + frame.obstacle_dissipation_j;
             assert!((direct.system().total_energy_j().unwrap() + loss - work).abs() < 1e-10);
             migration_work += migration.abs();

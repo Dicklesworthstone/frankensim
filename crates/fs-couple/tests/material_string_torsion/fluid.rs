@@ -151,7 +151,7 @@ fn viscous_memory_receives_energy_and_changes_actual_body_pressure_at_equal_dens
             let fb = *b.step(&zero, drive).unwrap();
             pressure_difference = pressure_difference.max((fa.observer_pressure_pa - fb.observer_pressure_pa).abs());
             work += fa.drive_work_j + fa.external_work_j;
-            loss += fa.network_dissipation_j + fa.friction_dissipation_j;
+            loss += fa.network_dissipation_j + fa.friction_dissipation_j + fa.declared_slip_work_j;
             memory_energy = memory_energy.max(a.system().components()[2].states().iter()
                 .map(|s| 0.5*s.velocity_m_sqrt_kg_per_s.powi(2)).sum::<f64>());
             assert!(fa.energy_residual_j.abs() <= fa.energy_tolerance_j);

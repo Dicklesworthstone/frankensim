@@ -260,6 +260,8 @@ pub struct CoupledModalSystem {
     linear_frequency_upper_bound_rad_s: f64,
     old_q: Vec<f64>,
     free_delta: Vec<f64>,
+    // End velocities of the same free prediction: the endpoint contact line's free slip.
+    free_velocity: Vec<f64>,
     forces: Vec<f64>,
     reactions: Vec<f64>,
     frame: CoupledModalFrame,
@@ -482,7 +484,7 @@ impl CoupledModalSystem {
             plane_stress_material_points: Vec::new(),
             radiation: None, radiation_state: Vec::new(), candidate_radiation_state: Vec::new(),
             config, dt, linear_frequency_upper_bound_rad_s,
-            old_q: vec![0.0; count], free_delta: vec![0.0; count],
+            old_q: vec![0.0; count], free_delta: vec![0.0; count], free_velocity: vec![0.0; count],
             forces: vec![0.0; count],
             reactions: vec![0.0; links],
             staged_frame: frame.clone(),
@@ -708,6 +710,7 @@ impl CoupledModalSystem {
             for k in 0..self.mode_count() {
                 self.old_q[k] = x[2 * k];
                 self.free_delta[k] = finite(end[2 * k] - x[2 * k])?;
+                self.free_velocity[k] = finite(end[2 * k + 1])?;
             }
         } else {
             let mut k = 0;
@@ -715,12 +718,9 @@ impl CoupledModalSystem {
                 poll(gate)?;
                 for (mode, state) in model.states().iter().enumerate() {
                     self.old_q[k] = state.displacement_m_sqrt_kg;
-                    self.free_delta[k] = finite(
-                        model
-                            .advance_exact_zoh_step(mode, *state, external[k])
-                            .displacement_m_sqrt_kg
-                            - self.old_q[k],
-                    )?;
+                    let end = model.advance_exact_zoh_step(mode, *state, external[k]);
+                    self.free_delta[k] = finite(end.displacement_m_sqrt_kg - self.old_q[k])?;
+                    self.free_velocity[k] = finite(end.velocity_m_sqrt_kg_per_s)?;
                     k += 1;
                 }
             }
@@ -753,6 +753,37 @@ impl CoupledModalSystem {
                         * model
                             .advance_exact_zoh_step(mode, ModalAcousticState::default(), 1.0)
                             .displacement_m_sqrt_kg,
+                )?);
+                k += 1;
+            }
+        }
+        Ok(result)
+    }
+
+    // End velocities of the SAME held-force step from rest, for the endpoint contact line.
+    fn linear_velocity_response(
+        &self,
+        column: &[f64],
+        gate: &CancelGate,
+    ) -> Result<Vec<f64>, ModalCouplingError> {
+        poll(Some(gate))?;
+        self.require_time_domain()?;
+        if let Some(exact) = &self.exact {
+            return exact.velocity_response(column, self.dt);
+        }
+        if column.len() != self.mode_count() {
+            return Err(invalid("response column must match every original mode"));
+        }
+        let mut result = Vec::with_capacity(column.len());
+        let mut k = 0;
+        for model in &self.models {
+            poll(Some(gate))?;
+            for mode in 0..model.modes().len() {
+                result.push(finite(
+                    column[k]
+                        * model
+                            .advance_exact_zoh_step(mode, ModalAcousticState::default(), 1.0)
+                            .velocity_m_sqrt_kg_per_s,
                 )?);
                 k += 1;
             }

@@ -94,7 +94,8 @@ fn moving_finger_keeps_shared_strain_actual_bow_load_and_full_source_history() {
                         .map(|(b,s)| b*s.displacement_m_sqrt_kg).sum::<f64>();
                 assert!((contacts[1].stored_energy_j-2500.0*closure.max(0.0).powi(2)).abs() < 1e-14);
                 work[index] += frame.external_work_j+frame.drive_work_j+normal_work+migration;
-                loss[index] += frame.network_dissipation_j+frame.friction_dissipation_j+frame.obstacle_dissipation_j;
+                loss[index] += frame.network_dissipation_j+frame.friction_dissipation_j+frame.declared_slip_work_j
+                    +frame.obstacle_dissipation_j;
                 assert!((bank.system().total_energy_j().unwrap()+loss[index]-work[index]).abs() < 1e-9);
                 assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
             }

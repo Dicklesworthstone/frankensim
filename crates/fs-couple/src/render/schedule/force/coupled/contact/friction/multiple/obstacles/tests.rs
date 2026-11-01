@@ -433,7 +433,8 @@ fn a_stop_with_no_friction_coupling_leaves_the_step_to_the_rescue() {
 fn any_non_zero_stop_coupling_still_declines_the_rescue() {
     // The smallest positive double: any tolerance on the zero would admit it.
     let planted = f64::from_bits(1);
-    let plants: [fn(&mut ObstacleSet, f64); 2] = [|stops, c| stops.nt[0] = c, |stops, c| stops.tn[0] = c];
+    let plants: [fn(&mut ObstacleSet, f64); 3] = [|stops, c| stops.nt[0] = c, |stops, c| stops.tn[0] = c,
+        |stops, c| stops.tn_end[0] = c];
     for plant in plants {
         let mut bank = decoupled_stop_bank(false);
         plant(bank.obstacles.as_mut().unwrap(), planted);

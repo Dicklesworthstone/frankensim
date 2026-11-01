@@ -270,7 +270,11 @@ fn sticking_constrains_surface_motion_not_transverse_centre_motion_and_release_k
         let mut bank=raw(cx,gate,source(80e9,1000.0).with_torsion("G","eta_s",3).unwrap(),options()).unwrap();
         let zero=vec![0.0;bank.system().mode_count()]; let phi=bank.system().port().left.shapes.clone();
         let mut twist_distance=0.0_f64;
-        for _ in 0..32 {
+        // The slip the stuck run has accumulated since its entry step, D: the
+        // entry step pins the surface's end slip at zero, and every later one
+        // at -D/dt (MagentaBadger 8060, 8297).
+        let mut creep=0.0_f64;
+        for step in 0..32 {
             let before=bank.system().components()[0].states().to_vec();
             let f=*bank.step(&zero,FrictionDrive{speed_m_s:0.01,normal_force_n:1.0}).unwrap();
             assert_eq!(f.regime,ModalFrictionRegime::Sticking);
@@ -278,7 +282,9 @@ fn sticking_constrains_surface_motion_not_transverse_centre_motion_and_release_k
             let delta:Vec<_>=after.iter().zip(&before).map(|(a,b)|a.displacement_m_sqrt_kg-b.displacement_m_sqrt_kg).collect();
             let centre:f64=phi[..4].iter().zip(&delta).map(|(p,d)|p*d).sum();
             let twist:f64=phi[4..].iter().zip(&delta[4..]).map(|(p,d)|p*d).sum();
-            assert!((centre+twist-0.01/48_000.0).abs()<1e-12);
+            let end:f64=phi.iter().zip(after).map(|(p,s)|p*s.velocity_m_sqrt_kg_per_s).sum();
+            assert!(((0.01-end)/48_000.0+creep).abs()<1e-12,"step {step}");
+            if step>0 { creep+=0.01/48_000.0-(centre+twist); }
             assert!(f.energy_residual_j.abs()<=f.energy_tolerance_j);
             twist_distance=twist_distance.max(twist.abs());
         }

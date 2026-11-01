@@ -3,16 +3,22 @@
 //!
 //! Two light attachments, each a single mode driven at constant speed into
 //! stick-slip, are bowed jointly. Before every accepted step the test rebuilds
-//! each port's load line from the network's own prediction, including the
-//! cross-port reaction committed in the same step, and checks that the frame's
+//! each port's endpoint load line (MagentaBadger 8060) from the network's own
+//! prediction, including the
+//! cross-port reaction committed in the same step and an interior stuck step's
+//! accumulated slip (8297), and checks that the frame's
 //! disclosed root count and committed index match an independent dense scan of
 //! that line. Three-root steps must be taken stuck while sticking and on the
-//! high branch while sliding, for both Stribeck and hyperbolic laws.
+//! high branch while sliding, for both Stribeck and hyperbolic laws. The
+//! receipt's stick-work totals must equal the frames' declared slip work booked
+//! by each step's place in its stuck run.
 
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget};
 use crate::render::schedule::force::coupled::{CoupledModalSystem, ModalCouplingConfig};
 use fs_math::c64::C64;
+#[path = "../../../../../../../../../fs-contact/tests/source_point/common.rs"]
+mod point_fixture;
 
 fn budgets() -> ModalCouplingConfig {
     ModalCouplingConfig {
@@ -143,8 +149,10 @@ fn exercise(law: FrictionLaw) -> [usize; 2] {
     ];
     let static_mu = law.static_coefficient().unwrap();
     let mut three_root = [0_usize; 2];
+    let mut booked = [StickConstraintWork::default(); 2];
+    let (mut run, mut later) = ([0_usize; 2], [0_usize; 2]);
     for _ in 0..4_000 {
-        // Recompute each port's held-force load line from the prediction plus
+        // Recompute each port's endpoint load line from the prediction plus
         // the cross-port reaction committed in this same step.
         system
             .core
@@ -153,15 +161,44 @@ fn exercise(law: FrictionLaw) -> [usize; 2] {
             .unwrap();
         let mut free = [0.0_f64; 2];
         for i in 0..2 {
-            free[i] = drives[i].speed_m_s * system.sample_period_s()
-                - dot(&system.points[i].column, &system.core.network.free_delta).unwrap();
+            // An interior stuck step's line is shifted by its run's accumulated slip (8297).
+            free[i] = (drives[i].speed_m_s
+                - dot(&system.points[i].column, &system.core.network.free_velocity).unwrap())
+                * system.sample_period_s()
+                + system.creep(i);
         }
         let frame = system.step(&[0.0, 0.0], &drives).unwrap().clone();
+        // The receipt books each port's declared slip work by its place in the stuck run.
+        for i in 0..2 {
+            let port = &frame.ports[i];
+            let declared = port.declared_slip_work_j;
+            booked[i].drive_j += port.drive_work_j;
+            if port.regime != ModalFrictionRegime::Sticking {
+                run[i] = 0;
+                booked[i].sliding_j += declared;
+                continue;
+            }
+            run[i] += 1;
+            if run[i] == 1 {
+                booked[i].entry_j += declared;
+            } else {
+                booked[i].interior_j += declared;
+                if run[i] == 2 {
+                    booked[i].pos2_j += declared;
+                }
+                if run[i] == 3 {
+                    booked[i].pos3_j += declared;
+                }
+                if run[i] > 3 {
+                    later[i] += 1;
+                }
+            }
+        }
         let p = 2;
         for i in 0..2 {
-            let m = system.compliance[i * p + i] / system.sample_period_s();
+            let m = system.endpoint[i * p + i] / system.sample_period_s();
             // The same step's cross-port reaction shifts this port's free slip.
-            let v_free = (free[i] - system.compliance[i * p + (1 - i)] * system.tractions[1 - i])
+            let v_free = (free[i] - system.endpoint[i * p + (1 - i)] * system.tractions[1 - i])
                 / system.sample_period_s();
             let port = &frame.ports[i];
             let roots = port
@@ -202,6 +239,18 @@ fn exercise(law: FrictionLaw) -> [usize; 2] {
                 three_root[i] += 1;
             }
         }
+    }
+    assert_eq!(system.stick_constraint_work(), booked.as_slice());
+    for (work, later) in booked.iter().zip(later) {
+        // Every booked position occurred, so the comparison is not vacuous.
+        assert!(
+            work.drive_j > 0.0
+                && work.entry_j != 0.0
+                && work.pos2_j != 0.0
+                && work.pos3_j != 0.0
+                && later > 0,
+            "{work:?}, {later} later stuck steps"
+        );
     }
     three_root
 }
@@ -500,4 +549,107 @@ fn g4_series_drive_binding_refusals() {
             .with_series_compliant_drives(vec![(0, 1.0e5, 1.0)], &gate)
             .is_err()
     );
+}
+
+#[test]
+fn g4b_a_series_drive_on_one_port_keeps_the_whole_bank_on_the_displacement_line() {
+    // Nothing mixes. The dry port beside the hair takes origin's line with it:
+    // it carries no end slip, and its stuck steps close the step's displacement,
+    // which a plain bank's endpoint stick does not.
+    let gate = CancelGate::new_clock_free();
+    let tolerance = config().sticking_tolerance_m;
+    let mut plain = system(stribeck());
+    let mut hair = system(stribeck())
+        .with_series_compliant_drives(vec![(0, 1.0e5, 1.0)], &gate)
+        .unwrap();
+    let (mut plain_moved, mut hair_stuck) = (0, 0);
+    for _ in 0..2_000 {
+        let frame = plain.step(&[0.0, 0.0], &two_drives()).unwrap().clone();
+        assert!(frame.ports.iter().all(|port| port.end_slip_speed_m_s.is_some()));
+        let dry = &frame.ports[1];
+        if dry.regime == ModalFrictionRegime::Sticking && dry.slip_distance_m.abs() > tolerance {
+            plain_moved += 1;
+        }
+        let frame = hair.step(&[0.0, 0.0], &two_drives()).unwrap().clone();
+        assert!(frame.ports.iter().all(|port| port.end_slip_speed_m_s.is_none()));
+        let dry = &frame.ports[1];
+        if dry.regime == ModalFrictionRegime::Sticking {
+            hair_stuck += 1;
+            assert!(dry.slip_distance_m.abs() <= tolerance);
+        }
+    }
+    assert!(plain_moved > 0 && hair_stuck > 0, "plain moved {plain_moved}, hair stuck {hair_stuck}");
+}
+
+/// fs-contact's own Mindlin source (tests/source_mindlin.rs): the point-contact
+/// cards plus an ordered-interface Coulomb claim, resolved at 20 um indentation.
+fn mindlin_source() -> fs_contact::interface_binding::mindlin::SourceMindlinContact {
+    use fs_contact::interface_binding::*;
+    use fs_contact::normal_patch::source::{PointContactGeometry, SourcePointContact};
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::{InterfaceSystemCard, InterpolationPolicy, PropertyClaim, PropertyKey,
+        PropertyValue, Provenance, UncertaintyModel};
+    use fs_material::state_point::{MaterialPropertySelection, ScalarAdmissibility,
+        ScalarPropertyRequirement, resolve_interface_state_point, resolve_isotropic_solid_state_point};
+    use fs_qty::Dims;
+    const MU: &str = "local-coulomb-coefficient";
+    let a = point_fixture::solid("Mindlin-A", 1000.0, 1e7);
+    let b = point_fixture::solid("Mindlin-B", 2000.0, 2e7);
+    let original = point_fixture::bind(&a, &b, None, 0.0);
+    let card = original.normal_state().elastic().interface().card();
+    let mut claims = card.claims().clone();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(MU, Dims::NONE),
+        value: PropertyValue::Scalar { value: 0.6, dims: Dims::NONE },
+        validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::ConstantWithinValidity,
+        observations: vec![],
+        provenance: Provenance { source: "synthetic ordered-interface coefficient".into(),
+            license: "CC0-1.0".into(), artifact: None },
+    }).unwrap();
+    let card = InterfaceSystemCard::assemble(card.surface_a().clone(), card.surface_b().clone(),
+        card.context().clone(), claims, card.models().to_vec()).unwrap();
+    let point = point_fixture::query();
+    let selection = MaterialPropertySelection::SingleClaimOnly;
+    let sa = resolve_isotropic_solid_state_point(&a, &point, selection.clone()).unwrap();
+    let sb = resolve_isotropic_solid_state_point(&b, &point, selection.clone()).unwrap();
+    let dry = bind_dry_interface_system_card(&card, fs_tribo::InputAuthority::SyntheticFixture).unwrap();
+    let elastic = bind_isotropic_elastic_interface(&dry, &sa, &sb).unwrap();
+    let interface = resolve_interface_state_point(&card, &point, &[ScalarPropertyRequirement::try_new(
+        ADHESION_ENERGY_PROPERTY, ADHESION_ENERGY_DIMS, ScalarAdmissibility::NonNegative).unwrap()],
+        selection.clone()).unwrap();
+    let state = bind_normal_interface_state(&elastic, &interface).unwrap();
+    let model = bind_normal_contact_model(&state, NormalContactModelSelection::SingleSupported).unwrap();
+    let normal = SourcePointContact::new(model,
+        PointContactGeometry::SpherePlane { effective_radius_m: 0.1 }, point_fixture::envelope()).unwrap();
+    fs_contact::interface_binding::mindlin::SourceMindlinContact::resolve(normal, 2e-5,
+        ScalarPropertyRequirement::try_new(MU, Dims::NONE, ScalarAdmissibility::NonNegative).unwrap(),
+        selection, 64).unwrap()
+}
+
+#[test]
+fn g4c_a_mindlin_contact_on_one_port_keeps_the_whole_bank_on_the_displacement_line() {
+    // MagentaBadger 10663: a Mindlin contact on any port keeps the bank on the
+    // displacement line, as a shear layer does. The same two ports without it
+    // take the endpoint line. The cost: the dry port beside the contact keeps
+    // that line's period-2 traction alternation.
+    let gate = CancelGate::new_clock_free();
+    let mut plain = system(stribeck());
+    let mut contact = system(stribeck())
+        .with_material_mindlin_contacts(vec![(0, mindlin_source())], &gate)
+        .unwrap();
+    // The Mindlin port prescribes no normal load: its Hertz preload is the
+    // source's own. The dry port is driven as in g4b.
+    let drives = [
+        FrictionDrive { speed_m_s: 1e-3, normal_force_n: 0.0 },
+        two_drives()[1],
+    ];
+    for _ in 0..32 {
+        let frame = plain.step(&[0.0, 0.0], &drives).unwrap();
+        assert!(frame.ports.iter().all(|port| port.end_slip_speed_m_s.is_some()));
+        let frame = contact.step(&[0.0, 0.0], &drives).unwrap();
+        assert!(frame.ports[0].mindlin.is_some());
+        assert!(frame.ports.iter().all(|port| port.end_slip_speed_m_s.is_none()));
+    }
 }

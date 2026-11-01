@@ -27,6 +27,7 @@ impl NonlinearTrial for MultipleTrial<'_> {
             absolute_drive_work_j,
             network_dissipation_j: frame.network_dissipation_j,
             friction_dissipation_j: frame.friction_dissipation_j,
+            declared_slip_work_j: frame.declared_slip_work_j,
             internal_storage: self.initial_internal_energy_j.map(|before_energy_j| {
                 let series_energy: f64 = self.inner.series_drives.iter()
                     .zip(&self.inner.staged_stretch)

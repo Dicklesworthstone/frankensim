@@ -63,20 +63,21 @@ impl MultiFrictionModalSystem {
             }
             port.right = Some(attachment.surface);
         }
-        let (points, compliance) = self.prepare_surface_maps(ports, gate)?;
+        let (points, compliance, endpoint) = self.prepare_surface_maps(ports, gate)?;
         self.points = points;
         self.compliance = compliance;
+        self.endpoint = endpoint;
         // The one-port fast path must use exactly the same new physical map.
         self.core.port = self.points[0].port.clone();
         self.core.column = self.points[0].column.clone();
-        self.core.compliance = self.compliance[0];
+        self.core.compliance = self.endpoint[0];
         Ok(self)
     }
 
     // Shared by cold surface binding and live held-map changes. No mechanical,
     // interface or constitutive history is rebuilt by geometric preparation.
     pub(super) fn prepare_surface_maps(&self, ports: Vec<ModalFrictionPort>, gate: &CancelGate)
-        -> Result<(Vec<Point>, Vec<f64>), ModalFrictionError>
+        -> Result<(Vec<Point>, Vec<f64>, Vec<f64>), ModalFrictionError>
     {
         if self.friction_residual.is_some() {
             return Err(invalid("friction residual compliance requires its original fixed attachment maps").into());
@@ -93,22 +94,12 @@ impl MultiFrictionModalSystem {
         // The original p,n,k setup bound still applies: no modes or ports are
         // added. Recompute every cross-term; diagonal-only updates would leave
         // contacts sharing the receiving body mechanically disconnected.
-        let mut compliance = vec![0.0; p * p];
-        for j in 0..p {
-            let response = network_response(&self.core.network, &columns[j], gate)?;
-            for i in 0..p {
-                compliance[i * p + j] = dot(&columns[i], &response)?;
-            }
-            if compliance[j * p + j] <= 0.0 {
-                return Err(invalid(
-                    "each two-sided friction port needs positive network compliance",
-                )
-                .into());
-            }
-        }
+        let slices: Vec<&[f64]> = columns.iter().map(Vec::as_slice).collect();
+        let (compliance, endpoint) = port_maps(&self.core.network, &slices, gate,
+            "each two-sided friction port needs positive network compliance and endpoint mobility")?;
         poll(Some(gate))?;
         let points = self.points.iter().zip(ports).zip(columns)
             .map(|((old, port), column)| Point { port, column, config: old.config }).collect();
-        Ok((points, compliance))
+        Ok((points, compliance, endpoint))
     }
 }

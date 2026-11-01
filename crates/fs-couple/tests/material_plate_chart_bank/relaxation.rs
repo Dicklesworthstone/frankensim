@@ -332,7 +332,7 @@ fn gas_rebuild_and_axial_append_preserve_body_memory_in_either_attachment_order(
                 assert!(fa.energy_residual_j.abs() <= fa.energy_tolerance_j);
                 pressure = pressure.max(fa.observer_pressure_pa.abs());
                 work += fa.external_work_j + fa.drive_work_j;
-                loss += fa.network_dissipation_j + fa.friction_dissipation_j;
+                loss += fa.network_dissipation_j + fa.friction_dissipation_j + fa.declared_slip_work_j;
                 assert_same_body_and_memory(&a, &b);
             }
             assert!(pressure > 0.0);

@@ -137,7 +137,8 @@ fn moving_loaded_bow_keeps_the_material_basis_and_accounts_for_normal_patch_work
             assert_eq!(bank.stop_station_fractions(),Some([station].as_slice()));
             if contact.normal_force_n==0.0 {released=true;assert_eq!(frame.ports[0].traction_n,0.0);}
             supply+=frame.external_work_j+frame.drive_work_j+actuator_work;
-            loss+=frame.network_dissipation_j+frame.friction_dissipation_j+contact.dissipation_j;
+            loss+=frame.network_dissipation_j+frame.friction_dissipation_j+frame.declared_slip_work_j
+                +contact.dissipation_j;
             tolerance+=frame.energy_tolerance_j;
             assert!((bank.system().total_energy_j().unwrap()-initial+loss-supply).abs()<=tolerance);
             assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);

@@ -337,16 +337,27 @@ impl ExactNetwork {
     }
 
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
+        self.end_response(column, dt, false)
+    }
+
+    /// Every mode's end velocity per unit held force along `column`, air-loaded like `response`.
+    pub(super) fn velocity_response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
+        self.end_response(column, dt, true)
+    }
+
+    fn end_response(&self, column: &[f64], dt: f64, velocity: bool) -> Result<Vec<f64>, ModalCouplingError> {
         if column.len() != self.count {
             return Err(invalid("complete contact force column"));
         }
         if let Some(prepared) = &self.prepared {
-            return prepared.response(column, dt);
+            return if velocity { prepared.velocity_response(column, dt) } else { prepared.response(column, dt) };
         }
         let mut response = vec![0.0; self.count];
         for (indices, block) in &self.blocks {
             let local_column: Vec<_> = indices.iter().map(|&i| column[i]).collect();
-            for (&i, value) in indices.iter().zip(block.response(&local_column, dt)?) {
+            let local = if velocity { block.velocity_response(&local_column, dt)? }
+                else { block.response(&local_column, dt)? };
+            for (&i, value) in indices.iter().zip(local) {
                 response[i] = value;
             }
         }
@@ -674,6 +685,15 @@ impl ExactBlock {
     }
 
     pub(super) fn response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
+        self.end_response(column, dt, 0)
+    }
+
+    pub(super) fn velocity_response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
+        self.end_response(column, dt, 1)
+    }
+
+    // Slot 0 reads every mode's end displacement, slot 1 its end velocity.
+    fn end_response(&self, column: &[f64], dt: f64, slot: usize) -> Result<Vec<f64>, ModalCouplingError> {
         // A derivative with respect to held force has zero initial state and
         // zero rest load. No finite-difference material or trajectory probes.
         let rec = step_render_cached(
@@ -685,7 +705,7 @@ impl ExactBlock {
             &self.heat,
         )
         .map_err(ModalCouplingError::Propagation)?;
-        Ok(rec.x[..2 * self.rest_force.len()].chunks_exact(2).map(|s| s[0]).collect())
+        Ok(rec.x[..2 * self.rest_force.len()].chunks_exact(2).map(|s| s[slot]).collect())
     }
 
     fn losses(

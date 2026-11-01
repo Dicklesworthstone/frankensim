@@ -110,7 +110,7 @@ fn single_contact_commits_history_once_and_rolls_back_a_late_bad_heat_receipt() 
         assert_eq!(actual.last_frame(),control.last_frame());
         assert_eq!(memory(&actual),memory(&control));
         work+=frame.external_work_j+frame.drive_work_j;
-        loss+=frame.network_dissipation_j+frame.friction_dissipation_j;
+        loss+=frame.network_dissipation_j+frame.friction_dissipation_j+frame.declared_slip_work_j;
         assert!((actual.total_energy_j().unwrap()-initial+loss-work).abs()<1e-9);
     }
     let q=states(&actual);let z=memory(&actual);let last=actual.last_frame().cloned();
@@ -143,7 +143,7 @@ fn simultaneous_contacts_preserve_one_history_through_repeated_trials_and_failur
         assert_eq!(actual.last_frame(),control.last_frame());
         assert_eq!(joint_memory(&actual),joint_memory(&control));
         work+=frame.external_work_j+frame.drive_work_j;
-        loss+=frame.network_dissipation_j+frame.friction_dissipation_j;
+        loss+=frame.network_dissipation_j+frame.friction_dissipation_j+frame.declared_slip_work_j;
         assert!((actual.total_energy_j().unwrap()-initial+loss-work).abs()<1e-9);
     }
     let q=all_states(&actual);let z=joint_memory(&actual);let last=actual.last_frame().cloned();

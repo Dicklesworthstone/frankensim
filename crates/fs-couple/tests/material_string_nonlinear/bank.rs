@@ -226,7 +226,7 @@ fn joint_bow_stretching_and_fluid_memory_retain_all_coordinates_and_close_work()
                 .step_under_gate(&zero, if k < 192 { active() } else { released() }, gate)
                 .unwrap();
             work += frame.drive_work_j + frame.external_work_j;
-            loss += frame.network_dissipation_j + frame.friction_dissipation_j;
+            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j;
             let nonlinear = bank.system().nonlinear_frame().unwrap();
             assert!(nonlinear.reaction_residual <= nonlinear.reaction_tolerance);
             assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);

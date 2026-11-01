@@ -62,7 +62,7 @@ fn both_bows_share_source_strain_body_torsion_fluid_and_actual_work() {
             }
             assert_eq!(frame.drive_work_j, frame.ports.iter().map(|p| p.drive_work_j).sum::<f64>());
             work += frame.external_work_j + frame.drive_work_j;
-            loss += frame.network_dissipation_j + frame.friction_dissipation_j;
+            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j;
             assert!((bank.system().total_energy_j().unwrap() + loss - work).abs() < 1e-9);
             let mut geometric_energy = 0.0;
             for string in 0..2 {
@@ -204,7 +204,8 @@ fn material_stretching_normal_bow_reaction_and_translating_support_share_one_ban
                 assert_eq!(frame.obstacle_work_j, contact.actuator_work_j);
                 assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
                 work[index] += frame.external_work_j + frame.drive_work_j + frame.obstacle_work_j;
-                loss[index] += frame.network_dissipation_j + frame.friction_dissipation_j + frame.obstacle_dissipation_j;
+                loss[index] += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j
+                    + frame.obstacle_dissipation_j;
                 assert!((bank.system().total_energy_j().unwrap() + loss[index] - work[index]).abs() < 1e-9);
                 assert!((bank.system().total_energy_j().unwrap() - frame.network_energy_j - frame.obstacle_energy_j).abs() < 1e-13);
                 let card = &bank.cards()[0]; let q = bank.system().components()[0].states();

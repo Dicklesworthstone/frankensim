@@ -102,22 +102,45 @@ pub(super) fn solve(law: &FrictionLaw, config: ModalFrictionConfig, compliance: 
     Err(ModalCouplingError::ContactSolve { residual_n: residual, tolerance_n: tolerance, iterations: used }.into())
 }
 
+/// The actual endpoint slip of an accepted candidate, as a distance:
+/// (u - b^T v_end) dt, with v_end the candidate's end velocities.
+pub(super) fn endpoint_slip(column: &[f64], models: &[ModalAcousticTimeModel], drive: FrictionDrive, dt: f64)
+    -> Result<f64, ModalCouplingError>
+{
+    let mut velocity = 0.0;
+    let mut index = 0;
+    for model in models {
+        for state in model.states() {
+            velocity = finite(velocity + column[index] * state.velocity_m_sqrt_kg_per_s)?;
+            index += 1;
+        }
+    }
+    finite(finite(drive.speed_m_s - velocity)? * dt)
+}
+
+/// The accepted step's work and branch check (MagentaBadger 8060). The branch
+/// is checked on `line_slip`, the slip of the line it was solved on: the end
+/// slip for the endpoint line. The work is F d on the actual step displacement
+/// `distance`, returned with the kinetic residual as (loss, declared, residual):
+/// a sliding step with d along F returns it as loss; a sticking step, and a
+/// sliding step whose d runs against F, return it signed as declared work.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
-    drive: FrictionDrive, traction: f64, slip: f64, regime: ModalFrictionRegime,
-    iterations: usize) -> Result<(f64, f64), ModalFrictionError>
+    drive: FrictionDrive, traction: f64, line_slip: f64, distance: f64, regime: ModalFrictionRegime,
+    iterations: usize) -> Result<(f64, f64, f64), ModalFrictionError>
 {
-    let speed = finite(slip/dt)?;
+    let speed = finite(line_slip/dt)?;
     let mut constitutive_residual_n = 0.0;
-    let loss = match regime {
+    let work = finite(traction*distance)?;
+    let (loss, stuck) = match regime {
         ModalFrictionRegime::Shearing { .. } | ModalFrictionRegime::Microslip => return Err(invalid("material shear must be checked by its stateful constitutive owner").into()),
-        ModalFrictionRegime::Released => 0.0,
+        ModalFrictionRegime::Released => (0.0, 0.0),
         ModalFrictionRegime::Sticking => {
-            if slip.abs() > config.sticking_tolerance_m {
-                return Err(ModalFrictionError::Sticking { residual_m: slip,
+            if line_slip.abs() > config.sticking_tolerance_m {
+                return Err(ModalFrictionError::Sticking { residual_m: line_slip,
                     tolerance_m: config.sticking_tolerance_m });
             }
-            0.0
+            (0.0, work)
         }
         ModalFrictionRegime::Sliding => {
             limit("friction slip speed", speed.abs(), config.maximum_slip_speed_m_s)?;
@@ -134,10 +157,10 @@ pub(super) fn check(law: &FrictionLaw, config: ModalFrictionConfig, dt: f64,
             }
             // Applied traction, not a nearby law value: this closes the
             // actual discrete work exchanged with the original stepper.
-            finite(traction*slip)?
+            if work < 0.0 { (0.0, work) } else { (work, 0.0) }
         }
     };
-    Ok((loss, constitutive_residual_n))
+    Ok((loss, stuck, constitutive_residual_n))
 }
 
 #[cfg(test)]

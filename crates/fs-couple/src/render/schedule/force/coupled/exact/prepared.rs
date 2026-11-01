@@ -542,6 +542,19 @@ impl PreparedNetwork {
         Ok(response)
     }
 
+    /// Every mode's end velocity per unit held force along `column`, at rest. With air, the exchange force is the one the
+    /// ports' own end displacements drive in `response`, acting through the transition's velocity rows.
+    pub(super) fn velocity_response(&self, column: &[f64], dt: f64) -> Result<Vec<f64>, ModalCouplingError> {
+        let z = self.state_input(&vec![0.0; 2 * self.count + self.material_couplings.len()], column, dt)?;
+        let end = apply(&self.transition, &z)?;
+        let mut response = (0..self.count).map(|i| finite(end[2 * i + 1])).collect::<Result<Vec<_>, _>>()?;
+        if let Some(air) = &self.air {
+            let displacement = (0..self.count).map(|i| finite(end[2 * i] / self.weights[i])).collect::<Result<Vec<_>, _>>()?;
+            air.load_velocity_response(&displacement, &mut response)?;
+        }
+        Ok(response)
+    }
+
     /// Original component and pre-summed connection loss, plus material heat.
     /// The number of dense forms is independent of the number of links/arms;
     /// each link's own form is evaluated only when its ledger is requested.

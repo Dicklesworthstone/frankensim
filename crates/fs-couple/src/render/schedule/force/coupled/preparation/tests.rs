@@ -274,3 +274,14 @@ fn harmonic_only_friction_ports_keep_pressure_without_preparing_compliance() {
     assert!(multiple.step(&[0.1, 0.0], &[drive, drive]).is_err());
     assert_eq!(multiple.samples_rendered(), 0);
 }
+
+#[test]
+fn harmonic_only_network_has_no_held_step_response_on_either_line() {
+    // Analysis has no held step, so a harmonic-only port can only be built on
+    // the skipped maps above, never on a response of either line.
+    let gate = CancelGate::new_clock_free();
+    let analysis = network(ModalPreparation::HarmonicOnly(budget(32 * 1024)), &gate).unwrap();
+    let column = vec![0.0; analysis.mode_count()];
+    assert!(analysis.linear_response(&column, &gate).is_err());
+    assert!(analysis.linear_velocity_response(&column, &gate).is_err());
+}

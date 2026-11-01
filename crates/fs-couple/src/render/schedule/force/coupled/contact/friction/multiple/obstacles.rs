@@ -321,7 +321,9 @@ pub(in super::super) struct ObstacleSet {
     points: Vec<NormalPoint>,
     limits: FrictionObstacleConfig,
     // Both mixed directions are evaluated; do not assume numerical symmetry.
-    nn: Vec<f64>, nt: Vec<f64>, tn: Vec<f64>,
+    // tn_end is tn's endpoint-line twin, b_i^T v(n_j) dt, for ports that stick
+    // on their end velocity (8060).
+    nn: Vec<f64>, nt: Vec<f64>, tn: Vec<f64>, tn_end: Vec<f64>,
     reactions: Vec<f64>, friction_ports: usize,
     staged: Vec<FrictionObstacleFrame>, accepted: Vec<FrictionObstacleFrame>,
     motion: Option<motion::MotionState>,
@@ -471,17 +473,23 @@ impl ObstacleSet {
             points.push(point);
         }
         let mut nn = vec![0.0; q*q]; let mut nt = vec![0.0; q*p]; let mut tn = vec![0.0; p*q];
+        let mut tn_end = vec![0.0; p*q];
         for j in 0..q {
             let response = network_response(network, &points[j].column, gate)?;
+            let velocity = network_velocity_response(network, &points[j].column, gate)?;
             for i in 0..q { poll(Some(gate))?; nn[i*q+j] = dot(&points[i].column, &response)?; }
-            for i in 0..p { poll(Some(gate))?; tn[i*q+j] = dot(&system.points[i].column, &response)?; }
+            for i in 0..p {
+                poll(Some(gate))?;
+                tn[i*q+j] = dot(&system.points[i].column, &response)?;
+                tn_end[i*q+j] = finite(dot(&system.points[i].column, &velocity)?*network.dt)?;
+            }
             if nn[j*q+j] <= 0.0 { return Err(invalid("normal obstacle needs positive network compliance")); }
         }
         for j in 0..p {
             let response = network_response(network, &system.points[j].column, gate)?;
             for i in 0..q { poll(Some(gate))?; nt[i*p+j] = dot(&points[i].column, &response)?; }
         }
-        Ok(Self { points, limits, nn, nt, tn, reactions: vec![0.0; q], friction_ports: p,
+        Ok(Self { points, limits, nn, nt, tn, tn_end, reactions: vec![0.0; q], friction_ports: p,
             staged: vec![FrictionObstacleFrame::default(); q], accepted: vec![FrictionObstacleFrame::default(); q],
             motion: None, geometry: None, absolute_work_j: 0.0, headroom: false, endpoint_missed: false,
             residual: None })
@@ -626,13 +634,16 @@ impl ObstacleSet {
         }
         Ok(())
     }
-    pub(super) fn slip_shift(&self, port: usize) -> Result<f64, ModalCouplingError> {
-        let q = self.points.len(); dot(&self.tn[port*q..(port+1)*q], &self.reactions)
+    // The held reactions' shift of a port's free slip, on that port's own line.
+    pub(super) fn slip_shift(&self, port: usize, endpoint: bool) -> Result<f64, ModalCouplingError> {
+        let q = self.points.len();
+        let map = if endpoint { &self.tn_end } else { &self.tn };
+        dot(&map[port*q..(port+1)*q], &self.reactions)
     }
     // True only when every friction/stop map entry is exactly zero, with no
     // tolerance: the stops then neither feel the friction nor shift its slip.
     pub(super) fn friction_decoupled(&self) -> bool {
-        self.nt.iter().chain(&self.tn).all(|&coupling| coupling == 0.0)
+        self.nt.iter().chain(&self.tn).chain(&self.tn_end).all(|&coupling| coupling == 0.0)
     }
     pub(super) fn check_prediction(&self, friction: &[f64], dt: f64, gate: Option<&CancelGate>)
         -> Result<(), ModalCouplingError>

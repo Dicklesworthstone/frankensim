@@ -58,6 +58,8 @@ pub(super) struct PreparedAir {
     port_rows: Vec<f64>,
     /// End displacement of every mode per unit held force on each port, count x ports.
     port_response: Vec<f64>,
+    /// End velocity of every mode per unit held force on each port, count x ports.
+    port_velocity_response: Vec<f64>,
     /// L^T D L, ports x ports.
     exchange: Vec<f64>,
     /// I + L^T D L B / dt^2.
@@ -134,9 +136,11 @@ impl PreparedAir {
             port_rows.extend_from_slice(&transition[2 * mode * d..(2 * mode + 1) * d]);
         }
         let mut port_response = vec![0.0; count * ports];
+        let mut port_velocity_response = vec![0.0; count * ports];
         for i in 0..count {
             for (k, &mode) in sources.iter().enumerate() {
                 port_response[i * ports + k] = finite(transition[2 * i * d + 2 * count + memory + mode] / weights[i])?;
+                port_velocity_response[i * ports + k] = finite(transition[(2 * i + 1) * d + 2 * count + memory + mode])?;
             }
         }
         // D: each pole's displacement per unit held drive over the step.
@@ -160,7 +164,7 @@ impl PreparedAir {
         }
         let factor = lu(&operator, ports).map_err(|_| invalid("prepared air exchange operator is singular"))?;
         poll(Some(gate))?;
-        Ok(Self { sources, coupling, poles, port_rows, port_response, exchange, factor, dt })
+        Ok(Self { sources, coupling, poles, port_rows, port_response, port_velocity_response, exchange, factor, dt })
     }
 
     pub(super) fn sources(&self) -> &[usize] { &self.sources }
@@ -226,6 +230,18 @@ impl PreparedAir {
         let dq_ports: Vec<_> = self.sources.iter().map(|&mode| response[mode]).collect();
         let force = self.exchange_force(&dq_ports, &vec![0.0; self.poles.len()])?;
         for (value, row) in response.iter_mut().zip(self.port_response.chunks_exact(ports)) {
+            *value = finite(*value + row.iter().zip(&force).fold(0.0, |s, (a, b)| s + a * b))?;
+        }
+        Ok(())
+    }
+
+    /// The same air-loaded part for end velocities: `displacement` holds every mode's end displacement for the held force,
+    /// whose ports drive the SAME exchange as `load_response`; `velocity` gains that force through the velocity rows.
+    pub(super) fn load_velocity_response(&self, displacement: &[f64], velocity: &mut [f64]) -> Result<(), ModalCouplingError> {
+        let ports = self.sources.len();
+        let dq_ports: Vec<_> = self.sources.iter().map(|&mode| displacement[mode]).collect();
+        let force = self.exchange_force(&dq_ports, &vec![0.0; self.poles.len()])?;
+        for (value, row) in velocity.iter_mut().zip(self.port_velocity_response.chunks_exact(ports)) {
             *value = finite(*value + row.iter().zip(&force).fold(0.0, |s, (a, b)| s + a * b))?;
         }
         Ok(())

@@ -334,7 +334,7 @@ fn g3_stribeck_load_line_uses_each_trial_temperature_and_keeps_the_original_bran
         "temperature must change over multiple original mechanical trials"
     );
     let accepted_law = stribeck(result.heat.interface_temperature_k);
-    let speed = (result.mechanical.slip_distance_m / DT).abs();
+    let speed = result.mechanical.end_slip_speed_m_s.abs();
     close(
         -result.mechanical.traction_n,
         accepted_law.kinetic_coefficient(speed).unwrap(),

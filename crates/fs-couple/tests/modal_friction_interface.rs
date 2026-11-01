@@ -70,12 +70,15 @@ fn actual_average_slip_cannot_bypass_a_positive_source_speed_floor() {
     let narrow=binding(law(),(1.0,1e6),(0.001,1.0));
     let mut actual=bound(0.0,narrow);
     let mut expected=raw(0.0,law());
-    // An external load supplies the large inertial force. Friction can stick:
-    // v0=0, prescribed u=.01, v1=.02, hence both endpoint slips are .01,
-    // while the work-conjugate average slip is ZERO and outside this card.
+    // An external load supplies the large inertial force: v0=0, prescribed
+    // u=.01, free v1=.02. Holding the end would take 480 N, so friction slides
+    // with both endpoint slips near .01, inside this card, while the
+    // work-conjugate average slip is near F dt/2 and below its floor.
     let d=drive(0.01,1.0);
     let f=*expected.step(&[960.0],d).unwrap();
-    assert_eq!(f.regime,ModalFrictionRegime::Sticking);
+    assert_eq!(f.regime,ModalFrictionRegime::Sliding);
+    assert!((0.001..=1.0).contains(&f.end_slip_speed_m_s.abs()));
+    assert!((f.slip_distance_m/expected.sample_period_s()).abs()<0.001);
     assert!(matches!(actual.step(&[960.0],d),Err(ModalFrictionError::Law(TriboError::OutsideApplicability {field:"slip_speed_mps",..}))));
     assert_eq!(actual.samples_rendered(),0);
     assert_eq!(actual.components()[0].states()[0],ModalAcousticState::default());

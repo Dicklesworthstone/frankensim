@@ -247,6 +247,42 @@ fn the_air_loaded_prediction_and_response_compose_to_the_step() {
     }
 }
 
+// The endpoint line's response on a network with material memory and air: a step under an extra force f along a column
+// ends at the free prediction's velocities plus f times the response. A velocity row read away from the `memory` offset
+// would take a memory input's column, and the step would not compose.
+#[test]
+fn the_velocity_response_composes_to_the_step_with_material_memory_and_air() {
+    let gate = CancelGate::new_clock_free();
+    let branch = fs_phs::RelaxationBranch { projection: vec![1.0, 0.0, -0.6, 0.0],
+        stiffness: 8e5, relaxation_time_s: 0.001 };
+    let attach = |system: CoupledModalSystem| system.with_material_relaxation(
+        vec![branch.clone()], Some(vec![0.012]), &gate).unwrap();
+    let mut system = attach(loaded(48_000, true, true));
+    for _ in 0..40 {
+        system.step(&[0.002, -0.001]).unwrap();
+    }
+    assert!(system.material_memory().iter().all(|&z| z != 0.0));
+    assert!(system.radiation_state().iter().all(|&x| x != 0.0));
+    let external = [0.003, -0.001];
+    let exact = system.exact.as_ref().unwrap();
+    let (fast, x) = exact.predict(&system.models, &system.material_memory, &system.radiation_state, &external,
+        system.dt, false).unwrap();
+    let column = [0.7, -0.4];
+    let response = system.linear_velocity_response(&column, &gate).unwrap();
+    let unloaded = attach(mechanics(48_000, true, true)).linear_velocity_response(&column, &gate).unwrap();
+    assert!(response.iter().zip(&unloaded).all(|(a, b)| a != b));
+    let force = 0.05;
+    let forced: Vec<_> = external.iter().zip(&column).map(|(e, c)| e + force * c).collect();
+    system.step(&forced).unwrap();
+    let after = flatten(&system.models);
+    for k in 0..2 {
+        let v = 2 * k + 1;
+        let (moved, free, extra) = (after[v] - x[v], fast[v] - x[v], force * response[k]);
+        let scale = moved.abs().max(free.abs()).max(extra.abs());
+        assert!((moved - free - extra).abs() <= 1e-11 * scale, "mode {k}: {moved:e} != {free:e} + {extra:e}");
+    }
+}
+
 // A constant-loss link and the air together: every step's energy closes, the per-port ledger sums to the connection
 // loss with a clean audit, and anchoring before or after the air steps identically.
 #[test]

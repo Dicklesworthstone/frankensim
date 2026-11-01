@@ -106,10 +106,11 @@ impl MultiFrictionModalSystem {
         let ports = geometry.into_iter().zip(&self.points).map(|(map, old)| ModalFrictionPort {
             left: map.left, right: map.right, law: old.port.law.clone(),
         }).collect();
-        let (points, compliance) = self.prepare_surface_maps(ports, gate)?;
+        let (points, compliance, endpoint) = self.prepare_surface_maps(ports, gate)?;
         poll(Some(gate))?;
         self.points = points;
         self.compliance = compliance;
+        self.endpoint = endpoint;
         self.core.port = self.points[0].port.clone();
         self.core.column = self.points[0].column.clone();
         self.core.compliance = self.compliance[0];
@@ -131,11 +132,12 @@ impl MultiFrictionModalSystem {
         }
         Ok(())
     }
+    // Port i's row of its own line, with the omitted modes when they are bound.
     pub(super) fn friction_compliance(&self, i: usize, j: usize) -> Result<f64, ModalCouplingError> {
-        let index = i*self.port_count()+j;
+        let line = self.line(i)[j];
         match &self.friction_residual {
-            Some(residual) => finite(self.compliance[index]+residual.compliance[index]),
-            None => Ok(self.compliance[index]),
+            Some(residual) => finite(line+residual.compliance[i*self.port_count()+j]),
+            None => Ok(line),
         }
     }
 }

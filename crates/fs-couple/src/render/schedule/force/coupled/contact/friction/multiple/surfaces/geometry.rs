@@ -256,22 +256,23 @@ impl MultiFrictionModalSystem {
             };
             ports.push(port);
         }
-        let (points, compliance) = self.prepare_surface_maps(ports, gate)?;
+        let (points, compliance, endpoint) = self.prepare_surface_maps(ports, gate)?;
         poll(Some(gate))?;
         let normal_snapshot = match &mut self.obstacles {
             Some(set) => set.stage_friction_geometry(&self.core.network, &points, gate)?,
             None => None,
         };
-        Ok(Some((points, compliance, normal_snapshot)))
+        Ok(Some((points, compliance, endpoint, normal_snapshot)))
         })()?;
-        let Some((points, compliance, normal_snapshot)) = prepared else { return run(self); };
+        let Some((points, compliance, endpoint, normal_snapshot)) = prepared else { return run(self); };
         // All fallible geometry preparation precedes these swaps. The existing
         // coupled owner is atomic on failure; restore its port caches too.
         let core_port = std::mem::replace(&mut self.core.port, points[0].port.clone());
         let core_column = std::mem::replace(&mut self.core.column, points[0].column.clone());
-        let core_compliance = std::mem::replace(&mut self.core.compliance, compliance[0]);
+        let core_compliance = std::mem::replace(&mut self.core.compliance, endpoint[0]);
         let points = std::mem::replace(&mut self.points, points);
         let compliance = std::mem::replace(&mut self.compliance, compliance);
+        let endpoint = std::mem::replace(&mut self.endpoint, endpoint);
         let result = run(self);
         if result.is_err() {
             self.core.port = core_port;
@@ -279,6 +280,7 @@ impl MultiFrictionModalSystem {
             self.core.compliance = core_compliance;
             self.points = points;
             self.compliance = compliance;
+            self.endpoint = endpoint;
             if let Some(set) = &mut self.obstacles { set.restore_friction_geometry(normal_snapshot); }
         }
         result

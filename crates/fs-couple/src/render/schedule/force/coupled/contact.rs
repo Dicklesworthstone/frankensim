@@ -368,6 +368,30 @@ fn effective_compliance(network: &CoupledModalSystem, column: &[f64], gate: &Can
     Ok(s)
 }
 
+// The endpoint line Y dt, with Y = b^T v(b) the end velocity of the attachment
+// per unit held force over one step of the SAME admitted network. In distance
+// units, so (u - b^T v_free) dt - Y dt F is the step's end slip times dt.
+fn endpoint_compliance(network: &CoupledModalSystem, column: &[f64], gate: &CancelGate)
+    -> Result<f64, ModalCouplingError>
+{
+    let y = dot(column, &network_velocity_response(network, column, gate)?)?;
+    if y <= 0.0 { return Err(invalid("contact attachment needs positive representable endpoint mobility")); }
+    finite(y * network.dt)
+}
+
+// Full end-velocity response to a unit attachment load. Cross-contact
+// endpoint mobility is b_i^T velocity_response(b_j).
+fn network_velocity_response(
+    network: &CoupledModalSystem,
+    column: &[f64],
+    gate: &CancelGate,
+) -> Result<Vec<f64>, ModalCouplingError> {
+    poll(Some(gate))?;
+    let response = network.linear_velocity_response(column, gate)?;
+    poll(Some(gate))?;
+    Ok(response)
+}
+
 // Full displacement response of the existing bilateral network to a unit
 // attachment load. Cross-contact compliance is b_i^T response(b_j).
 fn network_response(

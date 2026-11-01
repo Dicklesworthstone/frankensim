@@ -26,6 +26,9 @@
 //! Effective load line (per port i): `slip_i = f[i] - sum_j a[i*p+j] * t[j]`,
 //! where `a` already carries each port's series (bow-hair) compliance on its
 //! diagonal and `f` already carries each port's stored-stretch free-slip shift.
+//! Every row is on the bank's one line: the endpoint line (end slip speed times
+//! dt, MagentaBadger 8060), or the displacement line for a bank with a series
+//! drive, a shear layer or a bound bow residual on any port.
 
 use super::*;
 

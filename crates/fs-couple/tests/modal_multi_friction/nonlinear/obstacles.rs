@@ -151,7 +151,8 @@ fn quartic_fixed_and_moving_stops_close_physical_work_and_endpoint_pressure() {
                 - OMEGA[i].powi(2) * q[i] - BETA * (q[0]*q[0] + q[1]*q[1]) * q[i])).sum::<f64>();
             assert!((frame.observer_pressure_pa - pressure).abs() < 1e-9);
             supply += external_work + bow_work + support_work;
-            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.obstacle_dissipation_j;
+            loss += frame.network_dissipation_j + frame.friction_dissipation_j + frame.declared_slip_work_j
+                + frame.obstacle_dissipation_j;
             contact_loss += frame.obstacle_dissipation_j;
             assert!((system.total_energy_j().unwrap() - initial + loss - supply).abs() < 1e-9);
             assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);

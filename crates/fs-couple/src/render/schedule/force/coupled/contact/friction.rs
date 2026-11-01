@@ -2,14 +2,29 @@
 //!
 //! The attachment coordinate is x=B^T q (left minus optional right). A held
 //! traction F acts through B; the prescribed surface advances by u*dt. The
-//! SAME displacement increment defines slip and work: d=u*dt-B^T delta_q.
-//! Sticking solves d=0 inside the static cone. Sliding solves F=mu(|d|/dt) N
-//! with the sign of d, using fs-tribo's kinetic law, not a velocity regularizer.
+//! branch is solved on the step's END slip speed e=u-B^T v_end: sticking
+//! solves e=0 inside the static cone, and sliding solves F=mu(|e|) N with the
+//! sign of e, using fs-tribo's kinetic law, not a velocity regularizer. The
+//! held-force to end-velocity map has no sampling zero, so its inverse carries
+//! no undamped traction mode. Step-averaged sticking (d=0 below) inverted the
+//! force-to-displacement map, whose sampling zero near z=-1 left every stuck
+//! run an undamped period-2 traction alternation (MagentaBadger 8060).
+//! A stuck contact is a displacement constraint too. End velocity alone lets
+//! the held force's intra-step response creep the contact while it sticks,
+//! and that creep against the rising force injects energy. So an interior
+//! stuck step (the accepted step before it also stuck) targets end slip -D,
+//! where D is the actual slip its run has accumulated since the entry step:
+//! the whole accumulated slip is projected out in one step, with no chosen
+//! gain (MagentaBadger 8297). The entry step keeps the slide's remainder.
+//! Work stays on the actual displacement increment d=u*dt-B^T delta_q. F*d is
+//! friction loss on a sliding step with d along F; every other F*d is booked,
+//! signed, as declared slip work in the step's energy identity.
+//! An adhesive junction keeps the held displacement line: its own check and
+//! its source laws are stated on the step's displacement.
 //! The network supplies its complete bilateral held-force response, so every
 //! connected body reacts back during this solve. Its original time stepper,
 //! component/connection limits and state transaction remain in charge.
 //!
-//! This is step-averaged sticking, not an exact endpoint velocity constraint.
 //! One tangential coordinate and a prescribed nonnegative normal load are
 //! supported. Where a Stribeck or hyperbolic law meets the load line more than
 //! once, the contact keeps the branch it occupies (McIntyre, Schumacher &
@@ -23,7 +38,7 @@ use fs_exec::CancelGate;
 use fs_tribo::{FrictionLaw, TriboError};
 use crate::modal_acoustic_time::ModalAcousticTimeModel;
 use crate::stribeck_friction::{ContactBranch, ImplicitFrictionError, StribeckLoadLine};
-use super::effective_compliance;
+use super::{effective_compliance, endpoint_compliance};
 use super::super::{CoupledModalSystem, MaterialRelaxationObservation, ModalAttachment, ModalCouplingError,
     dot, finite, invalid, limit, poll};
 
@@ -56,13 +71,14 @@ pub struct ModalFrictionConfig {
     pub max_iterations: usize,
     /// Maximum absolute accepted tangential traction [N].
     pub maximum_force_n: f64,
-    /// Maximum absolute accepted step-averaged slip speed [m/s].
+    /// Maximum absolute accepted end slip speed [m/s].
     pub maximum_slip_speed_m_s: f64,
     /// Absolute force-law residual tolerance [N].
     pub force_absolute_tolerance_n: f64,
     /// Relative force-law residual tolerance, in (0,1).
     pub force_relative_tolerance: f64,
-    /// Absolute displacement mismatch allowed on the sticking branch [m].
+    /// Absolute end slip allowed on the sticking branch, as speed times dt and
+    /// measured from the step's target (minus its run's accumulated slip) [m].
     pub sticking_tolerance_m: f64,
 }
 
@@ -71,9 +87,9 @@ pub struct ModalFrictionConfig {
 pub enum ModalFrictionRegime {
     /// The dry normal load or adhesive real area was zero; the network still evolves.
     Released,
-    /// The displacement constraint is satisfied within its declared tolerance.
+    /// The end-slip constraint is satisfied within its declared tolerance.
     Sticking,
-    /// The fs-tribo kinetic law is satisfied at actual step-averaged slip.
+    /// The fs-tribo kinetic law is satisfied at the actual end slip speed.
     Sliding,
     /// An explicitly bound material layer carries reversible elastic shear.
     /// Finite elastic relative motion is permitted even without plastic flow.
@@ -86,7 +102,7 @@ pub enum ModalFrictionRegime {
     Microslip,
 }
 
-/// Network, constitutive and step-averaged sticking failures stay distinct.
+/// Network, constitutive and endpoint sticking failures stay distinct.
 #[derive(Debug)]
 pub enum ModalFrictionError {
     /// An original numerical owner or whole-system budget refused the trial.
@@ -97,7 +113,7 @@ pub enum ModalFrictionError {
     AdhesiveSource(fs_contact::interface_binding::adhesive_shear::AdhesiveShearError),
     /// Original selected thermal friction claims or owned coordinates refused.
     ThermalSource(fs_contact::interface_binding::thermal_friction::SourceThermalCoulombError),
-    /// Actual endpoint displacements failed the sticking constraint.
+    /// The slip of the contact's own line, as distance, failed the sticking constraint.
     Sticking { /// Signed mismatch [m].
         residual_m: f64, /// Explicit tolerance [m].
         tolerance_m: f64 },
@@ -194,16 +210,23 @@ pub struct FrictionModalFrame {
     pub drive_work_j: f64,
     /// Original component, bilateral-dashpot and material-relaxation loss [J].
     pub network_dissipation_j: f64,
-    /// Nonnegative F*d on sliding; zero for sticking/released [J].
+    /// Nonnegative F*d on sliding with d along F; zero otherwise [J].
     pub friction_dissipation_j: f64,
-    /// Storage change + losses - external and surface work [J].
+    /// F*d not certified as kinetic loss: every sticking step's, and a sliding
+    /// step's whose d runs against F. Signed: positive absorbs, negative
+    /// injects [J].
+    pub declared_slip_work_j: f64,
+    /// Storage change + losses + declared slip work - external and surface work [J].
     pub energy_residual_j: f64,
     /// Original network's scaled energy tolerance [J].
     pub energy_tolerance_j: f64,
     /// Signed traction on the positive attachment [N].
     pub traction_n: f64,
-    /// Actual u*dt - B^T delta_q [m], including sticking roundoff.
+    /// Actual u*dt - B^T delta_q [m]: the displacement F works through.
     pub slip_distance_m: f64,
+    /// Actual end slip speed u - B^T v_end [m/s]. The branch's line is measured
+    /// from the step's target, so an interior stuck step holds this at -D/dt.
+    pub end_slip_speed_m_s: f64,
     /// Actual signed kinetic residual [N]; zero on other branches.
     pub constitutive_residual_n: f64,
     /// Resolved branch for this step.
@@ -237,6 +260,8 @@ pub struct FrictionModalSystem {
     config: ModalFrictionConfig,
     column: Vec<f64>,
     compliance: f64,
+    // The held displacement line b^T q(b) of the same network, for an adhesive junction.
+    displacement_compliance: f64,
     forces: Vec<f64>,
     last: Option<FrictionModalFrame>,
     acceleration_pressure: Option<Vec<f64>>,
@@ -248,6 +273,13 @@ pub struct FrictionModalSystem {
     branch: ContactBranch,
     staged_branch: ContactBranch,
     load_line: Option<StribeckLoadLine>,
+    // Actual slip of the current stuck run since its entry step [m], committed
+    // and staged like the branch: the next interior stuck step's target.
+    creep_m: f64,
+    staged_creep_m: f64,
+    // Whether the last accepted step stuck, on this route or the joint owner's
+    // (which keeps it current): only a stuck predecessor makes an interior step.
+    stuck: bool,
 }
 
 impl FrictionModalSystem {
@@ -258,36 +290,38 @@ impl FrictionModalSystem {
     {
         poll(Some(gate))?;
         let column = scalar::admit_port(&network, &port, config)?;
-        let compliance = construction_compliance(&network, &column, gate)?;
+        let (compliance, displacement_compliance) = construction_compliance(&network, &column, gate)?;
         poll(Some(gate))?;
         Ok(Self { forces: vec![0.0; network.mode_count()], network, port,
-            config, column, compliance, last: None, acceleration_pressure: None, interface: None, adhesive: None, nonlinear: None,
-            branch: ContactBranch::Fresh, staged_branch: ContactBranch::Fresh, load_line: None })
+            config, column, compliance, displacement_compliance, last: None, acceleration_pressure: None, interface: None,
+            adhesive: None, nonlinear: None,
+            branch: ContactBranch::Fresh, staged_branch: ContactBranch::Fresh, load_line: None,
+            creep_m: 0.0, staged_creep_m: 0.0, stuck: false })
     }
 
     /// Explicitly prepare the SAME full linear operator before playback.
-    /// Refresh its exact held-force compliance; preserve the original friction
+    /// Refresh its endpoint held-force line; preserve the original friction
     /// law, material interface, pressure weights and component initial states.
     pub fn with_prepared_linear_propagation(
         mut self, budget: super::super::PreparedModalBudget, gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_prepared_linear_propagation(budget, gate)?;
         self.validate_material_history_band()?;
-        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
+        (self.compliance, self.displacement_compliance) = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
     }
 
     /// Bind constant-loss dashpots to the prepared coupled owner before playback
     /// ([`CoupledModalSystem::with_constant_loss_connections`]) and refresh its
-    /// exact held-force compliance. The friction law, material interface,
+    /// endpoint held-force line. The friction law, material interface,
     /// pressure weights and initial states are unchanged.
     pub fn with_constant_loss_connections(
         mut self, constant_loss: &[super::super::ConstantLossConnection], gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_constant_loss_connections(constant_loss, gate)?;
         self.validate_material_history_band()?;
-        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
+        (self.compliance, self.displacement_compliance) = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
     }
@@ -307,7 +341,7 @@ impl FrictionModalSystem {
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_material_relaxation(branches, initial_memory, gate)?;
         self.validate_material_history_band()?;
-        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
+        (self.compliance, self.displacement_compliance) = construction_compliance(&self.network, &self.column, gate)?;
         limit("complete initial material/nonlinear energy", self.total_energy_j()?,
             self.network.config.maximum_total_energy_j)?;
         poll(Some(gate))?;
@@ -316,14 +350,14 @@ impl FrictionModalSystem {
 
     /// Compose additional material participants in the same force response.
     /// Preserve existing history, interfaces, nonlinear storage and observers;
-    /// refresh the bow compliance after the complete exact operator changes.
+    /// refresh the bow's endpoint line after the complete exact operator changes.
     pub fn with_additional_material_relaxation(
         mut self, branches: Vec<fs_phs::RelaxationBranch>, initial_memory: Option<Vec<f64>>,
         gate: &CancelGate,
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_additional_material_relaxation(branches, initial_memory, gate)?;
         self.validate_material_history_band()?;
-        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
+        (self.compliance, self.displacement_compliance) = construction_compliance(&self.network, &self.column, gate)?;
         limit("complete initial material/nonlinear energy", self.total_energy_j()?,
             self.network.config.maximum_total_energy_j)?;
         poll(Some(gate))?;
@@ -364,7 +398,7 @@ impl FrictionModalSystem {
         self.network.material_relaxation_observation(branches, maximum_work, gate)
     }
     /// Attach the SAME passive exterior load to the original held-force network
-    /// and refresh the bow compliance including all acoustic reactions. Existing
+    /// and refresh the bow's endpoint line including all acoustic reactions. Existing
     /// nonlinear potentials, source interfaces and pressure maps are retained.
     pub fn with_radiation_load(mut self,
         model: &crate::render::plate::impact::radiation::Model,
@@ -372,7 +406,7 @@ impl FrictionModalSystem {
     ) -> Result<Self, ModalFrictionError> {
         self.network = self.network.with_radiation_load(model, source_modes, maximum_poles, gate)?;
         self.validate_material_history_band()?;
-        self.compliance = construction_compliance(&self.network, &self.column, gate)?;
+        (self.compliance, self.displacement_compliance) = construction_compliance(&self.network, &self.column, gate)?;
         poll(Some(gate))?;
         Ok(self)
     }
@@ -505,6 +539,8 @@ impl FrictionModalSystem {
         self.network.staged_frame.observer_pressure_pa = accepted.observer_pressure_pa;
         self.network.publish_staged();
         self.branch = self.staged_branch;
+        self.creep_m = self.staged_creep_m;
+        self.stuck = accepted.regime == ModalFrictionRegime::Sticking;
         if let (Some(state), Some(frame)) = (&mut self.nonlinear, nonlinear_frame) {
             state.publish(frame);
         }
@@ -523,9 +559,16 @@ impl FrictionModalSystem {
         interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.models, drive)?;
         let before = self.network.total_energy_j()?;
         self.network.prepare_prediction(external, gate)?;
-        let free_increment=dot(&self.column,&self.network.free_delta)?;
+        let free_speed = finite(drive.speed_m_s-dot(&self.column, &self.network.free_velocity)?)?;
         let drive_distance = finite(drive.speed_m_s*self.network.dt)?;
-        let free_slip = finite(drive_distance-free_increment)?;
+        // The line is measured from the step's target: end slip -D on an
+        // interior stuck step, zero otherwise. Sliding sees the same line.
+        // An adhesive junction stays on its displacement line, with no target.
+        let held = self.stuck && self.adhesive.is_none();
+        let creep = if held { self.creep_m } else { 0.0 };
+        let free_slip = if self.adhesive.is_some() {
+            finite(drive_distance-dot(&self.column, &self.network.free_delta)?)?
+        } else { finite(finite(free_speed*self.network.dt)?+creep)? };
         let (traction, regime, iterations, roots) = self.solve_contact(free_slip, drive.normal_force_n, gate)?;
         self.forces.copy_from_slice(external);
         if traction != 0.0 {
@@ -533,11 +576,17 @@ impl FrictionModalSystem {
         }
         self.network.stage_inner(&self.forces, gate)?;
         let slip = finite(drive_distance-dot(&self.column, &self.network.free_delta)?)?;
-        let (loss, constitutive_residual_n) = if let Some(binding) = &self.adhesive {
-            binding.check(self.config, self.network.dt, traction, slip, regime, iterations)?
+        let end_slip = scalar::endpoint_slip(&self.column, &self.network.candidates, drive, self.network.dt)?;
+        let (loss, declared, constitutive_residual_n) = if let Some(binding) = &self.adhesive {
+            let (loss, residual) = binding.check(self.config, self.network.dt, traction, slip, regime, iterations)?;
+            (loss, 0.0, residual)
         } else { scalar::check(
-            &self.port.law, self.config, self.network.dt, drive, traction, slip, regime, iterations,
+            &self.port.law, self.config, self.network.dt, drive, traction, finite(end_slip+creep)?, slip, regime,
+            iterations,
         )? };
+        // An entry step starts the run's account at zero: its own slip is the
+        // slide's remainder, not creep.
+        self.staged_creep_m = if regime == ModalFrictionRegime::Sticking && held { finite(creep+slip)? } else { 0.0 };
         interface::check_average(self.interface.as_ref(), drive, slip, self.network.dt)?;
         interface::check_endpoint(self.interface.as_ref(), &self.column, &self.network.candidates, drive)?;
         let observer_pressure_pa = self.staged_observer_pressure(gate)?;
@@ -546,8 +595,9 @@ impl FrictionModalSystem {
         let network_loss = finite(frame.total_dissipation_j())?;
         let external_work = dot(external, &self.network.free_delta)?;
         let drive_work = finite(traction*drive_distance)?;
-        let residual = finite((after-before)+network_loss+loss-external_work-drive_work)?;
-        let scale = before.max(after).max(network_loss).max(loss).max(external_work.abs()).max(drive_work.abs());
+        let residual = finite((after-before)+network_loss+loss+declared-external_work-drive_work)?;
+        let scale = before.max(after).max(network_loss).max(loss).max(declared.abs())
+            .max(external_work.abs()).max(drive_work.abs());
         let tolerance = finite(self.network.config.energy_absolute_tolerance_j
             +self.network.config.energy_relative_tolerance*scale)?;
         if loss < 0.0 || residual.abs() > tolerance {
@@ -557,15 +607,17 @@ impl FrictionModalSystem {
             sample: frame.sample, observer_pressure_pa,
             network_energy_j: after, external_work_j: external_work, drive_work_j: drive_work,
             network_dissipation_j: network_loss, friction_dissipation_j: loss,
+            declared_slip_work_j: declared,
             energy_residual_j: residual, energy_tolerance_j: tolerance, traction_n: traction,
-            slip_distance_m: slip, constitutive_residual_n, regime, iterations, roots,
+            slip_distance_m: slip, end_slip_speed_m_s: finite(end_slip/self.network.dt)?,
+            constitutive_residual_n, regime, iterations, roots,
         };
         poll(gate)?;
         Ok(accepted)
     }
 
     // Stribeck and hyperbolic laws take the branch-continuation owner on the
-    // same held-force load line, v = v_free - (c/dt) F with v_free = free_slip/dt,
+    // same endpoint load line, v = v_free - (c/dt) F with v_free = free_slip/dt,
     // starting from the branch the contact occupies. Every other law, and a
     // released contact, keeps the scalar bisection unchanged.
     fn solve_contact(&mut self, free_slip: f64, normal: f64, gate: Option<&CancelGate>)
@@ -578,7 +630,7 @@ impl FrictionModalSystem {
                 return Err(invalid("held adhesive input must match the current repulsive normal load").into());
             }
             if !continued || contact.area_m2() == 0.0 {
-                let (traction, regime, iterations) = binding.solve(self.config, self.compliance,
+                let (traction, regime, iterations) = binding.solve(self.config, self.displacement_compliance,
                     self.network.dt, free_slip, normal, gate)?;
                 self.staged_branch = ContactBranch::Fresh;
                 return Ok((traction, regime, iterations, None));
@@ -589,7 +641,8 @@ impl FrictionModalSystem {
             return Ok((traction, regime, iterations, None));
         }
         poll(gate)?;
-        let mobility = finite(self.compliance/self.network.dt)?;
+        let compliance = if self.adhesive.is_some() { self.displacement_compliance } else { self.compliance };
+        let mobility = finite(compliance/self.network.dt)?;
         let refusal = |error: ImplicitFrictionError<TriboError>| -> ModalFrictionError { match error {
             ImplicitFrictionError::Constitutive(cause) => cause.into(),
             ImplicitFrictionError::InvalidInput(what) => invalid(what).into(),
@@ -616,12 +669,13 @@ impl FrictionModalSystem {
 // Analysis retains the original port/law but never consumes its held-step
 // compliance. Every prediction and advancing path checks construction purpose
 // before the private zero placeholder can participate in a contact solve.
+// Returns the endpoint line, then the held displacement line.
 fn construction_compliance(
     network: &CoupledModalSystem, column: &[f64], gate: &CancelGate,
-) -> Result<f64, ModalCouplingError> {
+) -> Result<(f64, f64), ModalCouplingError> {
     poll(Some(gate))?;
-    if network.is_harmonic_only() { return Ok(0.0); }
-    effective_compliance(network, column, gate)
+    if network.is_harmonic_only() { return Ok((0.0, 0.0)); }
+    Ok((endpoint_compliance(network, column, gate)?, effective_compliance(network, column, gate)?))
 }
 
 // Optional physical acceleration readout; it does not replace mechanical evolution.

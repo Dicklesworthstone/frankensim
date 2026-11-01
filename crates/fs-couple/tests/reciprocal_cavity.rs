@@ -139,7 +139,8 @@ fn cavity_geometry_changes_string_motion_and_pressure_and_survives_bow_release()
             let fb = *b.system_mut().step(&zeros, input).unwrap();
             for (i, f) in [fa, fb].iter().enumerate() {
                 assert!(f.energy_residual_j.abs() <= f.energy_tolerance_j);
-                work_minus_loss[i] += f.drive_work_j - f.network_dissipation_j - f.friction_dissipation_j;
+                work_minus_loss[i] += f.drive_work_j - f.network_dissipation_j - f.friction_dissipation_j
+                    - f.declared_slip_work_j;
             }
             pressure_difference += (fa.observer_pressure_pa - fb.observer_pressure_pa).abs();
             motion_difference += (a.system().components()[0].states()[0].displacement_m_sqrt_kg

@@ -1,9 +1,10 @@
 //! Branch continuation in the coupled set-valued friction owner (IRP pexfp.152).
 //!
 //! A light attachment on one mode is driven at constant speed into stick-slip.
-//! Before each accepted step the test recomputes the held-force load line from
-//! the network's own prediction: `v_free = (u dt - B^T dq_free)/dt` and
-//! `m = c/dt`. An independent dense scan of `g(v) = v - v_free + m N mu(v)`,
+//! Before each accepted step the test recomputes the endpoint load line from
+//! the network's own prediction: `v_free = u - B^T v_end_free` and `m = c/dt`,
+//! the end mobility (MagentaBadger 8060), plus `D/dt` on an interior stuck
+//! step (8297). An independent dense scan of `g(v) = v - v_free + m N mu(v)`,
 //! plus the static cone, gives the intersections. The frame must disclose
 //! that count, its committed traction must be the selected intersection, and
 //! three-root steps must be taken stuck while sticking and on the high branch
@@ -25,10 +26,12 @@ fn system(law: FrictionLaw) -> FrictionModalSystem {
         solve_relative_tolerance: 1e-11, energy_absolute_tolerance_j: 1e-12, energy_relative_tolerance: 1e-8 };
     let gate = CancelGate::new_clock_free();
     let network = CoupledModalSystem::new(vec![model], vec![], config, &gate).unwrap();
-    // 1/sqrt(1e-4 kg): a light attachment, so the per-step mobility is large
-    // enough for a three-root window at a 1 N load.
+    // 1/sqrt(2e-4 kg): a light attachment, so the per-step mobility is large
+    // enough for a three-root window at a 1 N load. The endpoint line's
+    // mobility, about h/m, is twice the held-displacement line's h/(2m), so
+    // this mass keeps the window the 1e-4 kg attachment had under that rule.
     FrictionModalSystem::new(network, ModalFrictionPort {
-        left: ModalAttachment { component: 0, shapes: vec![100.0] }, right: None, law },
+        left: ModalAttachment { component: 0, shapes: vec![100.0 * core::f64::consts::FRAC_1_SQRT_2] }, right: None, law },
         ModalFrictionConfig { max_iterations: 96, maximum_force_n: 50.0, maximum_slip_speed_m_s: 100.0,
             force_absolute_tolerance_n: 1e-12, force_relative_tolerance: 1e-10, sticking_tolerance_m: 1e-12 },
         &gate).unwrap()
@@ -69,8 +72,10 @@ fn check_law(law: FrictionLaw) -> (usize, usize) {
     let (mut stuck_three, mut high_three) = (0, 0);
     for _ in 0..6_000 {
         system.network.prepare_prediction(&[0.0], None).unwrap();
-        let free = drive.speed_m_s * dt - dot(&system.column, &system.network.free_delta).unwrap();
-        let v_free = free / dt;
+        // An interior stuck step's line is shifted by its run's accumulated slip D (8297).
+        let held = system.last.is_some_and(|frame| frame.regime == ModalFrictionRegime::Sticking);
+        let creep = if held { system.creep_m / dt } else { 0.0 };
+        let v_free = drive.speed_m_s - dot(&system.column, &system.network.free_velocity).unwrap() + creep;
         let frame = *system.step(&[0.0], drive).unwrap();
         let roots = frame.roots.expect("a loaded Stribeck/hyperbolic contact discloses roots");
         let cone = v_free.abs() / m <= static_mu * drive.normal_force_n;
