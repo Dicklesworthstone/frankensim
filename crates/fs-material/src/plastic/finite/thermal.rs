@@ -24,11 +24,18 @@
 //! defect is never heated. This endpoint rule needs timestep refinement;
 //! first-law closure alone does not establish temporal accuracy.
 //!
+//! Explicit Perzyna kinetics may be selected with [`FiniteJ2ThermalOverstress`].
+//! Their Arrhenius viscosity changes flow and physical dissipation, not free
+//! energy or energetic hardening. Every constitutive return then requires the
+//! actual physical duration. The reduced kinetic potential and physical heat
+//! are distinct: only the latter enters the thermal work account.
+//!
 //! The explicit exponential/tangent expansion convention is described in
 //! the [COMSOL finite-strain theory reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.031.html).
 //! This reduced free-energy model is not the full independent-plastic-entropy
 //! theory of Simo–Miehe, doi:10.1016/0045-7825(92)90170-O.
 
+use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{
     FiniteJ2, FiniteJ2Error, FiniteJ2Limits, FiniteJ2Parameters, FiniteJ2Response, FiniteJ2State,
 };
@@ -60,18 +67,45 @@ pub struct FiniteJ2ThermalParameters {
     pub logarithmic_expansion_slope_per_k2: f64,
 }
 
+/// Explicit Perzyna viscosity and thermal activation, in the native Kirchhoff
+/// stress/original-volume convention. This is a dissipative law: its parameters
+/// contribute no artificial stored energy or mechanical entropy.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteJ2ThermalOverstress {
+    /// Positive viscosity at the family's stress-free reference temperature.
+    pub reference_viscosity_pa_s: f64,
+    /// Positive stress scale in `alpha_dot=(sigma_ref/eta)*(f/sigma_ref)^n`.
+    pub stress_scale_pa: f64,
+    /// Dimensionless Perzyna exponent, finite and at least one.
+    pub exponent: f64,
+    /// Explicit `Q/R` in kelvin, finite and nonnegative. Viscosity is
+    /// `eta_ref*exp((Q/R)*(1/T-1/T_ref))`; zero disables thermal activation.
+    pub activation_temperature_k: f64,
+}
+
 /// Immutable native family; source admission is separate from this constitutive law.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AffineThermalFiniteJ2 {
     parameters: FiniteJ2ThermalParameters,
     limits: FiniteJ2Limits,
     minimum_mechanical_heat_capacity_j_m3_k: f64,
+    overstress: Option<FiniteJ2ThermalOverstress>,
+}
+
+/// Keep only one native backbone per frozen point, including kinetic points.
+#[derive(Clone, Debug, PartialEq)]
+enum FrozenNative {
+    RateIndependent(FiniteJ2),
+    /// Fixed-history thermodynamics are defined without a physical interval.
+    /// A constitutive return from this variant always refuses.
+    Inspection(FiniteJ2),
+    Overstress(FiniteOverstressJ2),
 }
 
 /// One owned endpoint-temperature law, without a borrowed temporary source field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FrozenThermalFiniteJ2 {
-    native: FiniteJ2,
+    native: FrozenNative,
     slopes: FiniteJ2TemperatureSlopes,
     temperature_k: f64,
     log_thermal_stretch: f64,
@@ -139,7 +173,7 @@ pub struct FiniteJ2ThermalIncrement {
     pub balance_error_j_m3: f64,
 }
 impl FiniteJ2ThermalIncrement {
-    /// Deposit once: physical yield heat plus signed reversible exchange.
+    /// Deposit once: physical plastic heat plus signed reversible exchange.
     pub fn caloric_heat_j_m3(&self) -> f64 {
         self.mechanical.plastic_dissipation_j_m3 + self.reversible_heat_j_m3
     }
@@ -161,6 +195,8 @@ pub enum FiniteJ2ThermalError {
         maximum_k: f64,
     },
     Numerical(&'static str),
+    /// Selected physical kinetics cannot be advanced without an interval.
+    DurationRequired,
 }
 impl From<FiniteJ2Error> for FiniteJ2ThermalError {
     fn from(error: FiniteJ2Error) -> Self {
@@ -181,6 +217,9 @@ impl core::fmt::Display for FiniteJ2ThermalError {
                 "finite thermoplastic temperature {temperature_k} K outside [{minimum_k},{maximum_k}] K"
             ),
             Self::Numerical(what) => write!(f, "finite thermoplastic numerical refusal: {what}"),
+            Self::DurationRequired => f.write_str(
+                "finite thermoplastic overstress requires an explicit physical duration",
+            ),
         }
     }
 }
@@ -231,6 +270,7 @@ impl AffineThermalFiniteJ2 {
             parameters,
             limits,
             minimum_mechanical_heat_capacity_j_m3_k: 0.0,
+            overstress: None,
         };
         let low = family.at_temperature(lo)?;
         let high = family.at_temperature(hi)?;
@@ -243,10 +283,10 @@ impl AffineThermalFiniteJ2 {
             }
         }
         let max_bulk = low
-            .native
+            .backbone()
             .parameters()
             .bulk_modulus_pa
-            .max(high.native.parameters().bulk_modulus_pa);
+            .max(high.backbone().parameters().bulk_modulus_pa);
         let max_expansion = low.expansion_per_k.abs().max(high.expansion_per_k.abs());
         let max_log_volume = det::sqrt(3.0) * limits.maximum_elastic_log_strain;
         // mu''=H''=0. Bound the remaining volumetric/thermal contribution
@@ -279,10 +319,135 @@ impl AffineThermalFiniteJ2 {
         self.minimum_mechanical_heat_capacity_j_m3_k
     }
 
+    /// Select explicit Perzyna/Arrhenius kinetics without changing any elastic,
+    /// energetic-hardening or thermal-expansion coefficient. The complete
+    /// positive-temperature span must admit representable positive viscosity.
+    pub fn with_overstress(
+        mut self,
+        parameters: FiniteJ2ThermalOverstress,
+    ) -> Result<Self, FiniteJ2ThermalError> {
+        FiniteOverstressParameters {
+            viscosity_pa_s: parameters.reference_viscosity_pa_s,
+            stress_scale_pa: parameters.stress_scale_pa,
+            exponent: parameters.exponent,
+        }
+        .validate()?;
+        if !parameters.activation_temperature_k.is_finite()
+            || parameters.activation_temperature_k < 0.0
+        {
+            return Err(FiniteJ2ThermalError::Parameters(
+                "finite thermal overstress requires a finite nonnegative activation temperature",
+            ));
+        }
+        self.overstress = Some(parameters);
+        // Arrhenius viscosity is monotone for nonnegative activation, so its
+        // two endpoint values bound the entire admitted thermal interval.
+        for temperature in self.parameters.temperature_range_k {
+            self.overstress_viscosity_pa_s(temperature)?;
+        }
+        Ok(self)
+    }
+
+    /// The original explicitly selected kinetics; None is rate independence.
+    pub const fn overstress(&self) -> Option<&FiniteJ2ThermalOverstress> {
+        self.overstress.as_ref()
+    }
+
+    /// Source viscosity at one admitted temperature, without inventing a step.
+    /// The logarithmic evaluation admits a finite product even when forming
+    /// its bare exponential multiplier would overflow or underflow.
+    pub fn overstress_viscosity_pa_s(
+        &self,
+        temperature_k: f64,
+    ) -> Result<Option<f64>, FiniteJ2ThermalError> {
+        self.admit_temperature(temperature_k)?;
+        let Some(parameters) = self.overstress else {
+            return Ok(None);
+        };
+        let reference = self.parameters.reference_temperature_k;
+        if temperature_k == reference || parameters.activation_temperature_k == 0.0 {
+            return Ok(Some(parameters.reference_viscosity_pa_s));
+        }
+        // Equivalent to A*(1/T-1/T_ref), without subtracting close reciprocals
+        // or forming a potentially overflowing T*T_ref product.
+        let log_multiplier = finite(
+            ((reference - temperature_k) / temperature_k)
+                * (parameters.activation_temperature_k / reference),
+        )?;
+        let viscosity = det::exp(finite(
+            det::ln(parameters.reference_viscosity_pa_s) + log_multiplier,
+        )?);
+        if !viscosity.is_finite() || viscosity <= 0.0 {
+            return Err(FiniteJ2ThermalError::Numerical(
+                "Arrhenius viscosity must remain representable and positive over its temperature domain",
+            ));
+        }
+        Ok(Some(viscosity))
+    }
+
+    /// Duration-free constitutive law for the rate-independent selection.
+    /// Explicit kinetics require [`Self::at_temperature_for_step`].
     pub fn at_temperature(
         &self,
         temperature_k: f64,
     ) -> Result<FrozenThermalFiniteJ2, FiniteJ2ThermalError> {
+        if self.overstress.is_some() {
+            return Err(FiniteJ2ThermalError::DurationRequired);
+        }
+        self.freeze(temperature_k, None)
+    }
+
+    /// Freeze one actual positive physical interval at the trial temperature.
+    /// The rate-independent selection retains its original return arithmetic.
+    pub fn at_temperature_for_step(
+        &self,
+        temperature_k: f64,
+        duration_s: f64,
+    ) -> Result<FrozenThermalFiniteJ2, FiniteJ2ThermalError> {
+        if !duration_s.is_finite() || duration_s <= 0.0 {
+            return Err(FiniteJ2ThermalError::Parameters(
+                "finite thermoplastic step duration must be positive and finite",
+            ));
+        }
+        self.freeze(temperature_k, Some(duration_s))
+    }
+
+    /// Inspect fixed-history thermodynamics or an accepted state without a
+    /// physical interval. With selected kinetics, response and stress/potential
+    /// calls on this value refuse instead of silently dropping rate dependence.
+    pub fn at_temperature_for_inspection(
+        &self,
+        temperature_k: f64,
+    ) -> Result<FrozenThermalFiniteJ2, FiniteJ2ThermalError> {
+        self.freeze(temperature_k, None)
+    }
+
+    /// Read mechanical energy/entropy at fixed total deformation and history.
+    pub fn thermodynamics(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        temperature_k: f64,
+    ) -> Result<FiniteJ2Thermodynamics, FiniteJ2ThermalError> {
+        self.at_temperature_for_inspection(temperature_k)?
+            .thermodynamics(f, state)
+    }
+
+    /// Check an accepted state at its actual temperature, without returning it.
+    /// Selected kinetics admit finite positive overstress; rate independence
+    /// retains its explicit yield-surface gate.
+    pub fn validate_committed(
+        &self,
+        f: &[f64; 9],
+        state: &FiniteJ2State,
+        temperature_k: f64,
+        yield_tolerance_pa: f64,
+    ) -> Result<(), FiniteJ2ThermalError> {
+        self.at_temperature_for_inspection(temperature_k)?
+            .validate_committed(f, state, yield_tolerance_pa)
+    }
+
+    fn admit_temperature(&self, temperature_k: f64) -> Result<(), FiniteJ2ThermalError> {
         let p = &self.parameters;
         let [minimum_k, maximum_k] = p.temperature_range_k;
         if !temperature_k.is_finite() || !(minimum_k..=maximum_k).contains(&temperature_k) {
@@ -292,6 +457,16 @@ impl AffineThermalFiniteJ2 {
                 maximum_k,
             });
         }
+        Ok(())
+    }
+
+    fn freeze(
+        &self,
+        temperature_k: f64,
+        duration_s: Option<f64>,
+    ) -> Result<FrozenThermalFiniteJ2, FiniteJ2ThermalError> {
+        self.admit_temperature(temperature_k)?;
+        let p = &self.parameters;
         let delta = temperature_k - p.reference_temperature_k;
         let coefficient = |value: f64, slope: f64| finite(slope.mul_add(delta, value));
         let native = FiniteJ2::new(
@@ -339,6 +514,25 @@ impl AffineThermalFiniteJ2 {
                 "thermal stretch and volume ratio must be representable and positive",
             ));
         }
+        let native = if let Some(kinetics) = self.overstress {
+            if let Some(duration) = duration_s {
+                FrozenNative::Overstress(FiniteOverstressJ2::new(
+                    native,
+                    FiniteOverstressParameters {
+                        viscosity_pa_s: self
+                            .overstress_viscosity_pa_s(temperature_k)?
+                            .expect("selected kinetics have a viscosity"),
+                        stress_scale_pa: kinetics.stress_scale_pa,
+                        exponent: kinetics.exponent,
+                    },
+                    duration,
+                )?)
+            } else {
+                FrozenNative::Inspection(native)
+            }
+        } else {
+            FrozenNative::RateIndependent(native)
+        };
         Ok(FrozenThermalFiniteJ2 {
             native,
             slopes: p.slopes,
@@ -365,19 +559,65 @@ impl AffineThermalFiniteJ2 {
     ) -> Result<FiniteJ2ThermalIncrement, FiniteJ2ThermalError> {
         let old_law = self.at_temperature(old_temperature_k)?;
         let new_law = self.at_temperature(new_temperature_k)?;
+        Self::increment(
+            old_f,
+            old_state,
+            new_f,
+            yield_tolerance_pa,
+            old_law,
+            new_law,
+        )
+    }
+
+    /// Thermal and kinetic update over one explicitly supplied physical interval.
+    /// Old history is inspected at its old temperature, without advancing it
+    /// again or requiring it to lie inside the rate-independent yield surface.
+    #[allow(clippy::too_many_arguments)]
+    pub fn checked_increment_for_step(
+        &self,
+        old_f: &[f64; 9],
+        old_state: &FiniteJ2State,
+        old_temperature_k: f64,
+        new_f: &[f64; 9],
+        new_temperature_k: f64,
+        yield_tolerance_pa: f64,
+        duration_s: f64,
+    ) -> Result<FiniteJ2ThermalIncrement, FiniteJ2ThermalError> {
+        let old_law = self.at_temperature_for_inspection(old_temperature_k)?;
+        let new_law = self.at_temperature_for_step(new_temperature_k, duration_s)?;
+        Self::increment(
+            old_f,
+            old_state,
+            new_f,
+            yield_tolerance_pa,
+            old_law,
+            new_law,
+        )
+    }
+
+    fn increment(
+        old_f: &[f64; 9],
+        old_state: &FiniteJ2State,
+        new_f: &[f64; 9],
+        yield_tolerance_pa: f64,
+        old_law: FrozenThermalFiniteJ2,
+        new_law: FrozenThermalFiniteJ2,
+    ) -> Result<FiniteJ2ThermalIncrement, FiniteJ2ThermalError> {
+        let old_temperature_k = old_law.temperature_k;
+        let new_temperature_k = new_law.temperature_k;
         old_law.validate_committed(old_f, old_state, yield_tolerance_pa)?;
         let old_endpoint = old_law.inspect(old_f, old_state)?;
         let old_fm = old_law.mechanical_deformation(old_f)?.0;
         let (new_fm, new_j) = new_law.mechanical_deformation(new_f)?;
-        let native = new_law.native.response(&new_fm, old_state)?;
+        let native = new_law.native_response(&new_fm, old_state)?;
         let native_piola = native.first_piola_pa;
         let mechanical = new_law.map_response(native, new_j)?;
         let new_endpoint = new_law.inspect(new_f, &mechanical.state)?;
         new_law.validate_committed(new_f, &mechanical.state, yield_tolerance_pa)?;
         let old = old_endpoint.thermodynamics;
         let new = new_endpoint.thermodynamics;
-        let old_p = old_law.native.parameters();
-        let new_p = new_law.native.parameters();
+        let old_p = old_law.backbone().parameters();
+        let new_p = new_law.backbone().parameters();
         let coefficient_storage_change_j_m3 = finite(
             (new_p.shear_modulus_pa - old_p.shear_modulus_pa) * old_endpoint.deviator_squared
                 + 0.5
@@ -450,6 +690,25 @@ struct Inspection {
 }
 
 impl FrozenThermalFiniteJ2 {
+    fn backbone(&self) -> &FiniteJ2 {
+        match &self.native {
+            FrozenNative::RateIndependent(law) | FrozenNative::Inspection(law) => law,
+            FrozenNative::Overstress(law) => law.backbone(),
+        }
+    }
+
+    fn native_response(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+    ) -> Result<FiniteJ2Response, FiniteJ2ThermalError> {
+        Ok(match &self.native {
+            FrozenNative::RateIndependent(law) => law.response(f, old)?,
+            FrozenNative::Overstress(law) => law.response(f, old)?,
+            FrozenNative::Inspection(_) => return Err(FiniteJ2ThermalError::DurationRequired),
+        })
+    }
+
     pub fn temperature_k(&self) -> f64 {
         self.temperature_k
     }
@@ -506,7 +765,7 @@ impl FrozenThermalFiniteJ2 {
         old: &FiniteJ2State,
     ) -> Result<FiniteJ2Response, FiniteJ2ThermalError> {
         let (fm, j) = self.mechanical_deformation(f)?;
-        self.map_response(self.native.response(&fm, old)?, j)
+        self.map_response(self.native_response(&fm, old)?, j)
     }
 
     pub fn stress_and_potential(
@@ -515,7 +774,11 @@ impl FrozenThermalFiniteJ2 {
         old: &FiniteJ2State,
     ) -> Result<([f64; 9], f64), FiniteJ2ThermalError> {
         let (fm, _) = self.mechanical_deformation(f)?;
-        let (piola, potential) = self.native.stress_and_potential(&fm, old)?;
+        let (piola, potential) = match &self.native {
+            FrozenNative::RateIndependent(law) => law.stress_and_potential(&fm, old)?,
+            FrozenNative::Overstress(law) => law.stress_and_potential(&fm, old)?,
+            FrozenNative::Inspection(_) => return Err(FiniteJ2ThermalError::DurationRequired),
+        };
         let piola = piola.map(|x| x * self.inverse_thermal_stretch);
         if piola.iter().any(|x| !x.is_finite()) {
             return Err(FiniteJ2ThermalError::Numerical(
@@ -526,7 +789,7 @@ impl FrozenThermalFiniteJ2 {
     }
 
     pub fn validate_history(&self, state: &FiniteJ2State) -> Result<(), FiniteJ2ThermalError> {
-        Ok(self.native.validate_history(state)?)
+        Ok(self.backbone().validate_history(state)?)
     }
 
     pub fn validate_committed(
@@ -536,9 +799,27 @@ impl FrozenThermalFiniteJ2 {
         yield_tolerance_pa: f64,
     ) -> Result<(), FiniteJ2ThermalError> {
         let (fm, _) = self.mechanical_deformation(f)?;
-        Ok(self
-            .native
-            .validate_committed(&fm, state, yield_tolerance_pa)?)
+        match &self.native {
+            FrozenNative::RateIndependent(law) => {
+                law.validate_committed(&fm, state, yield_tolerance_pa)?;
+            }
+            FrozenNative::Overstress(law) => {
+                law.validate_committed(&fm, state, yield_tolerance_pa)?;
+            }
+            FrozenNative::Inspection(_) => {
+                if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
+                    return Err(FiniteJ2Error::Parameters(
+                        "yield tolerance must be finite and nonnegative",
+                    )
+                    .into());
+                }
+                // Overstress is a valid committed kinetic state. Inspect the
+                // original history, elastic domain, finite stress and thermal
+                // storage without a return or a fictitious physical interval.
+                self.inspect(f, state)?;
+            }
+        }
+        Ok(())
     }
 
     pub fn thermodynamics(
@@ -555,15 +836,15 @@ impl FrozenThermalFiniteJ2 {
         state: &FiniteJ2State,
     ) -> Result<Inspection, FiniteJ2ThermalError> {
         let (fm, jacobian) = self.mechanical_deformation(f)?;
-        let endpoint = self.native.elastic_endpoint(&fm, state)?;
-        self.native
+        let endpoint = self.backbone().elastic_endpoint(&fm, state)?;
+        self.backbone()
             .check_elastic_domain(endpoint.log_j, &endpoint.deviator)?;
-        let p = self.native.parameters();
+        let p = self.backbone().parameters();
         let s = &self.slopes;
         let g = endpoint.log_j;
         let a = self.expansion_per_k;
         let shape = super::dot(&endpoint.deviator, &endpoint.deviator);
-        let free_energy_j_m3 = self.native.energy(g, &endpoint.deviator, state.alpha)?;
+        let free_energy_j_m3 = self.backbone().energy(g, &endpoint.deviator, state.alpha)?;
         let entropy_j_m3_k = finite(
             3.0 * p.bulk_modulus_pa * a * g
                 - s.shear_modulus_pa_k * shape

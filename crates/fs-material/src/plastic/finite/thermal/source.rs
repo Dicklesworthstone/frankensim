@@ -6,6 +6,15 @@
 //! small-strain property-based thermoplastic model. No property conversions,
 //! aliases, missing-parameter defaults or unused selectors are inferred.
 //!
+//! `finite-j2-hencky-kirchhoff-thermal-perzyna`, law/state version 1, explicitly
+//! adds four kinetic parameters to those seventeen: reference viscosity in
+//! Pa s, stress scale in Pa, dimensionless exponent at least one, and an
+//! activation temperature Q/R in kelvin. Viscosity is
+//! `eta(T)=eta_ref*exp((Q/R)*(1/T-1/T_ref))`, positive and representable over
+//! the complete declared interval. The stress scale and exponent stay fixed.
+//! These parameters control dissipation, not additional free-energy storage.
+//! The selected law requires an explicit physical duration for every return.
+//!
 //! The four reference coefficients `shear_modulus_pa`, `bulk_modulus_pa`,
 //! `yield_stress_pa`, `hardening_modulus_pa` are in Pa. Their four derivatives
 //! `shear_modulus_slope_pa_k`, `bulk_modulus_slope_pa_k`,
@@ -42,11 +51,12 @@
 //! coupled owner must bind the original caloric chart and mass, admit positive
 //! total heat capacity, and declare the caloric pressure/reference convention.
 //! Source admission alone neither evolves heat nor converts numerical work
-//! defects into heat. It adds no kinematic hardening, phase or creep model.
+//! defects into heat. It adds no kinematic hardening, phase model, or implicit
+//! conversion from a separately calibrated fluid or small-strain viscosity.
 
 use super::{
-    AffineThermalFiniteJ2, FiniteJ2TemperatureSlopes, FiniteJ2ThermalParameters,
-    FiniteThermalJ2Material,
+    AffineThermalFiniteJ2, FiniteJ2TemperatureSlopes, FiniteJ2ThermalOverstress,
+    FiniteJ2ThermalParameters, FiniteThermalJ2Material,
 };
 use crate::MaterialError;
 use crate::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
@@ -56,8 +66,11 @@ use fs_qty::{Dims, QuantitySpec};
 
 /// Exact affine thermal model, with original-volume and Kirchhoff conventions.
 pub const THERMAL_FINITE_J2_LAW_ID: &str = "finite-j2-hencky-kirchhoff-thermal-affine";
+/// Explicit finite Perzyna law with Arrhenius viscosity and affine thermal energy.
+pub const THERMAL_PERZYNA_FINITE_J2_LAW_ID: &str = "finite-j2-hencky-kirchhoff-thermal-perzyna";
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
+const PA_S: Dims = Dims([-1, 1, -1, 0, 0, 0]);
 const PA_K: Dims = Dims([-1, 1, -2, -1, 0, 0]);
 const K: Dims = Dims([0, 0, 0, 1, 0, 0]);
 const INVERSE_K: Dims = Dims([0, 0, 0, -1, 0, 0]);
@@ -80,6 +93,12 @@ const PARAMETERS: [&str; 17] = [
     "maximum_elastic_log_strain",
     "maximum_plastic_log_strain",
     "maximum_accumulated_plastic_strain",
+];
+const OVERSTRESS_PARAMETERS: [&str; 4] = [
+    "overstress_reference_viscosity_pa_s",
+    "overstress_stress_scale_pa",
+    "overstress_exponent",
+    "overstress_activation_temperature_k",
 ];
 
 /// Original source family, fixed external context and explicit evolving T axis.
@@ -197,11 +216,10 @@ fn refusal(what: impl Into<String>) -> MaterialError {
 }
 
 fn parameter(card: &ConstitutiveModelCard, name: &str, dims: Dims) -> Result<f64, MaterialError> {
-    let parameter = card.parameters.get(name).ok_or_else(|| {
-        refusal(format!(
-            "{THERMAL_FINITE_J2_LAW_ID}: missing parameter {name}"
-        ))
-    })?;
+    let parameter = card
+        .parameters
+        .get(name)
+        .ok_or_else(|| refusal(format!("{}: missing parameter {name}", card.law.0)))?;
     if parameter.dims != dims || !parameter.value.is_finite() {
         return Err(refusal(format!(
             "finite thermal J2 parameter {name}: expected finite {dims:?}, got {parameter:?}"
@@ -213,12 +231,16 @@ fn parameter(card: &ConstitutiveModelCard, name: &str, dims: Dims) -> Result<f64
 fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, MaterialError> {
     card.validate()
         .map_err(|error| refusal(error.to_string()))?;
-    if card.law.0 != THERMAL_FINITE_J2_LAW_ID {
-        return Err(refusal(format!(
-            "unsupported finite thermal J2 law {}; expected {THERMAL_FINITE_J2_LAW_ID}",
-            card.law.0
-        )));
-    }
+    let selected_overstress = match card.law.0.as_str() {
+        THERMAL_FINITE_J2_LAW_ID => false,
+        THERMAL_PERZYNA_FINITE_J2_LAW_ID => true,
+        _ => {
+            return Err(refusal(format!(
+                "unsupported finite thermal J2 law {}; expected {THERMAL_FINITE_J2_LAW_ID} or {THERMAL_PERZYNA_FINITE_J2_LAW_ID}",
+                card.law.0
+            )));
+        }
+    };
     if card.law_version != 1
         || card.state_schema_version != 1
         || card.initial_state != InitialStatePolicy::ZeroInternalState
@@ -227,11 +249,10 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
             "finite thermal J2 cards require law/state v1 and virgin plastic history at the declared reference temperature",
         ));
     }
-    if let Some(name) = card
-        .parameters
-        .keys()
-        .find(|name| !PARAMETERS.contains(&name.as_str()))
-    {
+    if let Some(name) = card.parameters.keys().find(|name| {
+        !PARAMETERS.contains(&name.as_str())
+            && !(selected_overstress && OVERSTRESS_PARAMETERS.contains(&name.as_str()))
+    }) {
         return Err(refusal(format!(
             "unrecognized finite thermal J2 card parameter {name}"
         )));
@@ -273,6 +294,30 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
             Dims::NONE,
         )?,
     };
-    AffineThermalFiniteJ2::new(parameters, limits)
-        .map_err(|error| refusal(format!("inadmissible finite thermal J2 family: {error}")))
+    let family = AffineThermalFiniteJ2::new(parameters, limits)
+        .map_err(|error| refusal(format!("inadmissible finite thermal J2 family: {error}")))?;
+    if selected_overstress {
+        family
+            .with_overstress(FiniteJ2ThermalOverstress {
+                reference_viscosity_pa_s: parameter(
+                    card,
+                    "overstress_reference_viscosity_pa_s",
+                    PA_S,
+                )?,
+                stress_scale_pa: parameter(card, "overstress_stress_scale_pa", PA)?,
+                exponent: parameter(card, "overstress_exponent", Dims::NONE)?,
+                activation_temperature_k: parameter(
+                    card,
+                    "overstress_activation_temperature_k",
+                    K,
+                )?,
+            })
+            .map_err(|error| {
+                refusal(format!(
+                    "inadmissible finite thermal Perzyna family: {error}"
+                ))
+            })
+    } else {
+        Ok(family)
+    }
 }
