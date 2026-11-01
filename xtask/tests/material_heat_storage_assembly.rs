@@ -8,7 +8,8 @@ use fs_matdb::{
     SelectionPolicy, UncertaintyModel,
 };
 use fs_material::thermal::transport::storage::{
-    HeatStorageAmount, HeatStorageComponentQuery, HeatStorageThermalLaw, PreparedHeatStorage,
+    HeatStorageAmount, HeatStorageComponentQuery, HeatStorageThermalLaw,
+    MAX_TABULATED_HEAT_STORAGE_KNOTS, PreparedHeatStorage, TabulatedHeatStorage,
 };
 use fs_qty::{
     Dims, QuantitySpec, Temperature,
@@ -653,4 +654,96 @@ fn g1_g3_real_native_and_mass_capacity_sources_drive_the_existing_heat_timeline(
                 .unwrap();
         }
     }
+}
+
+#[test]
+fn g1_authored_capacity_table_preserves_knots_and_exact_caloric_queries() {
+    let mut input = [
+        [290.0, 490.0],
+        [300.0, 605.0],
+        [310.0, 660.0],
+        [330.0, 520.0],
+    ];
+    let storage = TabulatedHeatStorage::try_new(&input).unwrap();
+    assert_eq!(storage.knots(), input.as_slice());
+    assert_eq!(storage.temperature_span_k(), [290.0, 330.0]);
+    assert_eq!(storage.clone(), storage);
+    input[0][1] = 1.0;
+    assert_ne!(storage.knots()[0], input[0]);
+    assert_eq!(storage.knots()[0], [290.0, 490.0]);
+
+    // Independent piecewise polynomials; authored input needs no fabricated
+    // material cards, claim identities or source evidence.
+    for initial in [290.0, 297.25, 300.0, 310.0, 329.0, 330.0] {
+        close(storage.heat_capacity_j_k(initial).unwrap(), capacity(initial), 3e-12);
+        for end in [290.0, 295.5, 300.0, 305.25, 310.0, 325.75, 330.0] {
+            let expected = energy(end) - energy(initial);
+            close(storage.energy_change_j(initial, end).unwrap(), expected, 3e-11);
+            close(
+                storage.temperature_after_energy_change(initial, expected).unwrap(),
+                end,
+                2e-13,
+            );
+            close(
+                storage.sensible_entropy_change_j_k(initial, end).unwrap(),
+                entropy(end) - entropy(initial),
+                2e-12,
+            );
+            assert_eq!(
+                storage.energy_change_j(initial, end).unwrap(),
+                -storage.energy_change_j(end, initial).unwrap()
+            );
+        }
+    }
+}
+
+#[test]
+fn g0_authored_capacity_table_requires_ordered_positive_bounded_input() {
+    assert!(TabulatedHeatStorage::try_new(&[]).is_err());
+    assert!(TabulatedHeatStorage::try_new(&[[300.0, 1.0]]).is_err());
+    for knots in [
+        [[300.0, 1.0], [300.0, 2.0]],
+        [[400.0, 1.0], [300.0, 2.0]],
+    ] {
+        assert!(TabulatedHeatStorage::try_new(&knots).is_err());
+    }
+    for invalid in [0.0, -1.0, f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        assert!(
+            TabulatedHeatStorage::try_new(&[[invalid, 1.0], [400.0, 2.0]]).is_err(),
+            "temperature={invalid}"
+        );
+        assert!(
+            TabulatedHeatStorage::try_new(&[[300.0, 1.0], [400.0, invalid]]).is_err(),
+            "capacity={invalid}"
+        );
+    }
+    let mut largest: Vec<_> = (0..4096).map(|i| [300.0 + i as f64, 1.0]).collect();
+    let storage = TabulatedHeatStorage::try_new(&largest).unwrap();
+    assert_eq!(storage.knots().len(), MAX_TABULATED_HEAT_STORAGE_KNOTS);
+    largest.push([4396.0, 1.0]);
+    assert!(TabulatedHeatStorage::try_new(&largest).is_err());
+}
+
+#[test]
+fn g0_authored_capacity_queries_refuse_extrapolation_and_nonfinite_inputs() {
+    let storage = TabulatedHeatStorage::try_new(&[[300.0, 2.0], [400.0, 4.0]]).unwrap();
+    for invalid in [
+        0.0, 299.999, 400.001, f64::INFINITY, f64::NEG_INFINITY, f64::NAN,
+    ] {
+        assert!(storage.heat_capacity_j_k(invalid).is_err());
+        assert!(storage.energy_change_j(invalid, 350.0).is_err());
+        assert!(storage.energy_change_j(350.0, invalid).is_err());
+        assert!(storage.sensible_entropy_change_j_k(invalid, 350.0).is_err());
+        assert!(storage.sensible_entropy_change_j_k(350.0, invalid).is_err());
+        assert!(storage.temperature_after_energy_change(invalid, 0.0).is_err());
+    }
+    for invalid in [f64::INFINITY, f64::NEG_INFINITY, f64::NAN] {
+        assert!(storage.temperature_after_energy_change(350.0, invalid).is_err());
+    }
+    assert_eq!(storage.temperature_after_energy_change(300.0, 300.0).unwrap(), 400.0);
+    assert_eq!(storage.temperature_after_energy_change(400.0, -300.0).unwrap(), 300.0);
+    assert!(storage.temperature_after_energy_change(300.0, -1.0).is_err());
+    assert!(storage.temperature_after_energy_change(400.0, 1.0).is_err());
+    assert!(storage.temperature_after_energy_change(300.0, 301.0).is_err());
+    assert!(storage.temperature_after_energy_change(400.0, -301.0).is_err());
 }

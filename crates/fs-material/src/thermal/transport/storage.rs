@@ -25,6 +25,93 @@ pub const MAX_HEAT_STORAGE_COMPONENTS: usize = 64;
 pub const MAX_HEAT_STORAGE_KNOTS: usize =
     MAX_HEAT_STORAGE_COMPONENTS * fs_matdb::MAX_PROPERTY_LINE_KNOTS;
 
+/// Maximum number of breakpoints in an authored total-capacity table.
+pub const MAX_TABULATED_HEAT_STORAGE_KNOTS: usize = 4096;
+
+/// Caller-authored total sensible heat capacity C(T), in J/K.
+///
+/// The retained knots interpolate affinely in positive absolute kelvin. This
+/// input carries no material-card identity, source claims, receipts or measured
+/// material evidence. Use [`PreparedHeatStorage`] for source-qualified constituent
+/// capacities instead. Both types use the same caloric integration and inverse
+/// kernel; queries neither allocate nor extrapolate beyond the declared span.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TabulatedHeatStorage {
+    knots: Vec<[f64; 2]>,
+}
+
+impl TabulatedHeatStorage {
+    /// Admit and copy 2..=4096 [temperature K, total capacity J/K] pairs.
+    ///
+    /// Temperatures and capacities must be finite and strictly positive, and
+    /// temperatures must be strictly increasing. Input is neither sorted nor
+    /// clamped; an invalid table is rejected before allocation.
+    pub fn try_new(knots: &[[f64; 2]]) -> Result<Self, ThermalTransportError> {
+        if !(2..=MAX_TABULATED_HEAT_STORAGE_KNOTS).contains(&knots.len()) {
+            return Err(invalid(
+                "authored heat storage needs two to 4096 temperature-capacity knots",
+            ));
+        }
+        if knots
+            .iter()
+            .any(|knot| !positive(knot[0]) || !positive(knot[1]))
+            || knots.windows(2).any(|pair| pair[0][0] >= pair[1][0])
+        {
+            return Err(invalid(
+                "authored heat storage needs finite positive kelvin and total capacities with strictly increasing temperatures",
+            ));
+        }
+        Ok(Self {
+            knots: knots.to_vec(),
+        })
+    }
+
+    /// Original admitted [temperature K, total capacity J/K] pairs.
+    #[must_use]
+    pub fn knots(&self) -> &[[f64; 2]] {
+        &self.knots
+    }
+
+    /// Inclusive declared support in absolute kelvin.
+    #[must_use]
+    pub fn temperature_span_k(&self) -> [f64; 2] {
+        [self.knots[0][0], self.knots[self.knots.len() - 1][0]]
+    }
+
+    /// Interpolated total heat capacity at a supported temperature, J/K.
+    pub fn heat_capacity_j_k(&self, temperature_k: f64) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).capacity(temperature_k)
+    }
+
+    /// Signed sensible energy change, integral C(T) dT, in joules.
+    pub fn energy_change_j(
+        &self,
+        initial_k: f64,
+        final_k: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).energy_change(initial_k, final_k)
+    }
+
+    /// Unique supported temperature after a signed sensible energy change, J.
+    pub fn temperature_after_energy_change(
+        &self,
+        initial_k: f64,
+        change_j: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).temperature_after_energy_change(initial_k, change_j)
+    }
+
+    /// Reversible sensible entropy change, integral C(T)/T dT, in J/K.
+    /// No absolute entropy datum, mixing contribution or latent heat is inferred.
+    pub fn sensible_entropy_change_j_k(
+        &self,
+        initial_k: f64,
+        final_k: f64,
+    ) -> Result<f64, ThermalTransportError> {
+        CapacityCurve::new(&self.knots).entropy_change(initial_k, final_k)
+    }
+}
+
 /// Explicit physical amount and matching source-capacity basis.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum HeatStorageAmount {
