@@ -4490,3 +4490,17 @@ requested timestep, independent Beer absorption, a latent-plateau fluence
 solution and time refinement, shared conduction/infrared pulse boundaries,
 continued dark cooling, cached scattering through darkness, split continuation,
 bounded admission and transactional cancellation/domain refusal.
+
+`examples/pulsed_optical_heating.rs` drives the original equilibrium enthalpy
+phase chart with a 320 J blue rectangular pulse followed by a 200 J red triangle.
+The independently authored blue/red and infrared coefficients evolve with the
+actual phase inventory of a synthetic 1 g specimen. At 8.5 s, illumination ends
+and an authored convection quench begins on the same native clock. The specimen
+fully melts and then refreezes in darkness while infrared exchange continues.
+CSV output retains temperature, liquid fraction, native specific enthalpy,
+per-lane incident energy, absorption, escape, bath/convection heat and the energy
+residual. Assertions check pulse fluence, full phase traversal, dark transport
+work and conservation. Fixed geometry/density and finite 6–18 micrometre
+infrared quadrature remain the same explicit model limits as the continuous
+phase-change example. Run with
+`cargo run -p fs-render --example pulsed_optical_heating --no-default-features --features optical-heating,material-state`.
