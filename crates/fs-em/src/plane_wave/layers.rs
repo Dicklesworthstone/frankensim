@@ -33,8 +33,8 @@ use fs_math::{c64::C64, det};
 
 mod illumination;
 pub use illumination::{
-    CoherentLayerIllumination, IlluminationBudget, LayerIlluminationPower,
-    PreparedLayerIllumination,
+    CoherentLayerIllumination, IlluminationBudget, LayerIlluminationPower, LayerPointField,
+    LayerPointStatistics, PreparedLayerIllumination, PreparedLayerPoint,
 };
 
 mod fields;

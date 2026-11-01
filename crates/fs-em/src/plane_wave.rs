@@ -173,7 +173,7 @@ impl WaveMedium {
         })
     }
 
-    fn normal(self, cosine: f64) -> Result<C64, ReflectionError> {
+    fn normal_squared(self, cosine: f64) -> C64 {
         // Preserve small positive contrast at normal incidence, and c^2 for
         // equal indices close to grazing where 1-c^2 rounds to one.
         let normal_real = if cosine > 0.5 {
@@ -181,10 +181,14 @@ impl WaveMedium {
         } else {
             (self.index_squared_ratio.re - 1.0) + cosine * cosine
         };
+        C64::new(normal_real, self.index_squared_ratio.im)
+    }
+
+    fn normal(self, cosine: f64) -> Result<C64, ReflectionError> {
         let mut normal = if self.index_squared_ratio == C64::ONE {
             C64::from_re(cosine)
         } else {
-            C64::new(normal_real, self.index_squared_ratio.im).sqrt()
+            self.normal_squared(cosine).sqrt()
         };
         // The principal square root has +i on the negative real axis; the
         // outgoing exp(+i omega t) evanescent branch instead has -i.

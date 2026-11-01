@@ -14,6 +14,9 @@
 use super::*;
 use fs_math::dd::Dd;
 
+mod interior;
+pub use interior::{LayerPointField, LayerPointStatistics, PreparedLayerPoint};
+
 /// A partial-coherence request is admitted before any factor propagation.
 #[derive(Clone, Copy, Debug)]
 pub struct IlluminationBudget {
@@ -51,12 +54,16 @@ pub struct CoherentLayerIllumination {
 pub struct PreparedLayerIllumination<'s, 'm> {
     stack: &'s PlanarDielectricLayers<'m>,
     polarization: Polarization,
+    incidence_cosine: f64,
     admittance_s: [f64; 2],
     // Outgoing-face major, incoming-face minor, in physical tangential E units.
     scattering: [[C64; 2]; 2],
     // layer -> even/odd loss mode -> left/right input; each contracted mode
     // is sqrt(W/m²), including the peak-phasor time-average factor 1/2.
     loss_modes: Vec<[[C64; 2]; 2]>,
+    // Local left/right incoming reference waves, each with two physical source
+    // columns. Retained from the original sweeps for O(1) interior queries.
+    interior_inputs: Vec<[[C64; 2]; 2]>,
 }
 
 fn reflection(state: [C64; 2]) -> C64 {
@@ -191,9 +198,11 @@ impl<'m> PlanarDielectricLayers<'m> {
         let prepared = PreparedLayerIllumination {
             stack: self,
             polarization,
+            incidence_cosine: c,
             admittance_s,
             scattering,
             loss_modes,
+            interior_inputs: inputs,
         };
         // Test the full two-source power form, including both real and imaginary
         // interference. Unit incident powers prevent a large port admittance

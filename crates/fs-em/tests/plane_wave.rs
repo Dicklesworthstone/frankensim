@@ -31,6 +31,8 @@ mod layer_fields;
 
 #[path = "plane_wave/illumination.rs"]
 mod illumination;
+#[path = "plane_wave/interior.rs"]
+mod interior;
 
 fn source(
     properties: &[(&str, Dims, f64)],

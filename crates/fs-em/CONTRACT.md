@@ -2105,6 +2105,30 @@ densities, an inferred bandwidth, or a spatial coherence model. The report
 does not advance temperatures or debit heat into a thermal owner; a coupled
 consumer must book the returned finite-film absorption exactly once.
 
+`PreparedLayerIllumination::prepare_point` and `prepare_point_from_right`
+retain the same two-source solution inside an authored positive-thickness film.
+A prepared point has complete peak Cartesian E [V/m] and H [A/m] transfers;
+repeated coherent or factorized-coherence queries allocate nothing and reuse
+those columns. The x/z plane is the incidence plane; z points from the left
+stack face toward the right. The right-face coordinate preserves shallow exit
+fields even when subtracting a depth from an enormous thickness would round
+back to the face. Zero-thickness identities have no interior volume and refuse
+point queries; both one-sided face traces of a positive film are admitted.
+
+Local fields use only decaying exponentials from physical film faces and the
+analytic critical-wave limit. There is no growing transfer matrix, unstable
+forward/backward division at zero normal wavenumber, or second global solve.
+The complete longitudinal TM electric field contributes to dielectric heat;
+an electric tangential node alone does not imply zero absorption. Positive
+local heat is omega*(-Im epsilon)*<E squared> in W/m³, using the original
+frequency-resolved Debye constitutive law, not a difference of rounded fluxes.
+The report also returns componentwise time-averaged squared fields and complex
+Poynting flux E cross conj(H)/2, including active and reactive components.
+Explicit coherence factors add these observables after within-factor field
+interference; mode/work budgets and cancellation apply. Local and integrated
+film heat are two descriptions of the same physical loss and must never be
+debited independently into a thermal state.
+
 Focused regressions compare simultaneous-source interface continuity,
 admittance-weighted reciprocity, independent E/H boundary equations and
 per-layer Poynting work; phase-controlled thin-film heating; full complex

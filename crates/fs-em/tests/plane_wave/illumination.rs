@@ -60,7 +60,7 @@ fn simultaneous_bare_interface_fields_are_continuous_and_power_reciprocal() {
 
 // Independent conventional characteristic matrices and face continuity.
 // These modest depths permit growing sin/cos; production must never need them.
-fn matrix(
+pub(super) fn matrix(
     epsilon_ratio: C64,
     mu_ratio: f64,
     depth: f64,
@@ -83,10 +83,10 @@ fn matrix(
     let j_sine = C64::new(-co * sh, s * ch);
     [[cosine, j_sine / y], [j_sine * y, cosine]]
 }
-fn product(a: [[C64; 2]; 2], b: [[C64; 2]; 2]) -> [[C64; 2]; 2] {
+pub(super) fn product(a: [[C64; 2]; 2], b: [[C64; 2]; 2]) -> [[C64; 2]; 2] {
     std::array::from_fn(|i| std::array::from_fn(|j| a[i][0] * b[0][j] + a[i][1] * b[1][j]))
 }
-fn act(a: [[C64; 2]; 2], x: [C64; 2]) -> [C64; 2] {
+pub(super) fn act(a: [[C64; 2]; 2], x: [C64; 2]) -> [C64; 2] {
     a.map(|row| row[0] * x[0] + row[1] * x[1])
 }
 

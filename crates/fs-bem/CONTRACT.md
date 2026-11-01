@@ -1588,6 +1588,48 @@ and power by degree describe the requested angular representation; they do not
 bound BEM/FMM or panel-integration error, and truncated coefficients alone do not
 establish total radiated power.
 
+`IterativeBoundaryResponse::prepare_radiation` retains each physical source's
+complex outgoing angular column once. `PreparedRadiationObservation` separately
+stores caller-requested directions and a declared finite ladder of the SAME
+positive Gauss–Legendre/uniform-longitude quadrature used by SH projection.
+`PreparedRadiationOptions` requires at least three grids, initial latitude
+count at least eight, the original direction ceiling/tolerance, and explicit
+aggregate kernel-work and source-entry storage caps. The ladder grows by
+`n/2+1` with staggered longitudes; no preparation is returned on cancellation
+or an exceeded cap. No new boundary solve occurs.
+
+Repeated coherent, factorized partial-coherence and independent-source
+contractions allocate nothing. The `observe_*` methods contract only requested
+directions and require no angular convergence; `evaluate_*` also return the
+converged full-sphere power/moments. The factor layout is mode-major/source-minor,
+with peak second moment `C = B B*`; each entry retains its original coordinate
+units (including m³/s, N or a declared surface velocity coordinate). Complex
+source fields are summed with compensation BEFORE squaring, then independent
+modes are added. Power is the positive angular sum of
+`E[|F|²]/(2 rho c)`, in W; requested-direction statistics are W/sr. This is a
+spectral-line time/ensemble average, not a density in W/Hz. No rounded source
+Gram matrix, diagonal power replacement, sign clipping or wall-loss double
+debit is used. First and second directional power moments retain their signed
+cross terms; the trace of the second moment is total outgoing power.
+
+Every actual drive/factorization must pass two successive grid-to-grid changes
+in total power AND all first/second moments, normalized by the larger total
+power. Quiet cancelling fields are checked on their own surviving power,
+not against separate source self-powers. Exhausting the cached ladder returns
+`AngularPowerNotConverged`; callers must prepare a finer bank before retrying.
+Finite quadrature agreement remains an estimate, not an arbitrary-integrand,
+continuum, BEM/FMM or panel-quadrature certificate. SH truncation does not enter
+this full-field power integral. Runtime product/rank caps and bounded
+cancellation reuse the harmonic-observation work contract.
+
+`BemObservation::prepare_radiation_from_solutions` provides the same angular
+bank for retained dense surface solutions. `prepare_harmonic_from_solutions`
+likewise supplies the original centroid p/gradient receiver rows without
+re-solving a source. Both require exact source order/velocity traces,
+frequency and medium, with the original surface-fingerprint and finite-field
+admission. Their source types and original operator identity are preserved;
+these guards do not certify the accuracy of publicly supplied solution data.
+
 Focused regressions define a two-body, two-finite-source material load and
 receiver case, independent coherent surface-work balance, obstacle-removal
 sensitivity, a three-order iterative-to-dense mutual-loading ladder, signed
