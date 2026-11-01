@@ -160,9 +160,9 @@ fn missing_fiber_spectrum_or_insufficient_history_budget_cannot_render() {
     }
 }
 
-fn strain_memory_text() -> String {
+fn strain_memory_text(samples: usize) -> String {
     include_str!("../fiber-strain-contact.material-strings")
-        .replace("48000 4096", "48000 129")
+        .replace("48000 4096", &format!("48000 {samples}"))
         .replace("bow_fiber_strain", concat!(
             "bow_fiber_memory 30 young_modulus 2 fiber_delta_fast fiber_tau_fast ",
             "fiber_delta_slow fiber_tau_slow\nbow_fiber_strain"))
@@ -171,14 +171,20 @@ fn strain_memory_text() -> String {
 #[test]
 fn selected_fiber_memory_acts_on_full_strain_through_contact_pressure_and_wav() {
     scoped(|cx, gate| {
-        let text = strain_memory_text();
+        // The memory response is the strain history, which only builds once the hair is
+        // loaded: measured soft against stiff, the summed pressure change is 3.8e-13 after
+        // 129 samples (7 loaded) but 1.5e-10 after 257 (38 loaded) and 4.9e-9 after 513,
+        // while an equal-memory control stays exactly zero. The 1e-12 bounds are unchanged;
+        // the run is long enough for the memory to act.
+        const SAMPLES: usize = 257;
+        let text = strain_memory_text(SAMPLES);
         let make = |delta| input::Spec::parse(text.as_bytes()).unwrap().compile_with_profiles(
             cx, gate, None,
             Some(crate::stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes()).unwrap()),
             |name| Ok(if name == "fiber.fsmatpk" { memory_pack(delta, false) }
                 else { pack(name, 7800.0, 200_000.0, None) }),
         ).unwrap();
-        let (mut soft, mut stiff) = (make(0.6e9), make(3e9));
+        let (mut soft, mut stiff, mut same) = (make(0.6e9), make(3e9), make(0.6e9));
         assert_eq!(soft.spec.bytes, stiff.spec.bytes);
         let model = soft.performance.bank().source().fiber_ribbon().unwrap().model();
         let memory = model.material_relaxation().unwrap();
@@ -193,21 +199,32 @@ fn selected_fiber_memory_acts_on_full_strain_through_contact_pressure_and_wav() 
         let mut output = Vec::new();
         let mut pressure_change = 0.0;
         let mut contact_change = 0.0;
-        for _ in 0..129 {
-            let (mut a, mut b) = ([0.0], [0.0]);
+        let mut control_change = 0.0;
+        for _ in 0..SAMPLES {
+            let (mut a, mut b, mut c) = ([0.0], [0.0], [0.0]);
             soft.performance.block(&mut a).unwrap();
             stiff.performance.block(&mut b).unwrap();
+            same.performance.block(&mut c).unwrap();
             output.push(a[0]);
             pressure_change += (a[0] - b[0]).abs();
+            control_change += (a[0] - c[0]).abs();
             let a = soft.performance.bank().system().last_frame().unwrap();
             let b = stiff.performance.bank().system().last_frame().unwrap();
+            let c = same.performance.bank().system().last_frame().unwrap();
             contact_change += a.ports.iter().zip(&b.ports)
                 .map(|(a, b)| (a.traction_n - b.traction_n).abs()
                     + (a.normal_force_n - b.normal_force_n).abs()).sum::<f64>();
+            control_change += a.ports.iter().zip(&c.ports)
+                .map(|(a, c)| (a.traction_n - c.traction_n).abs()
+                    + (a.normal_force_n - c.normal_force_n).abs()).sum::<f64>();
             assert!(a.energy_residual_j.abs() <= a.energy_tolerance_j);
             assert!(b.energy_residual_j.abs() <= b.energy_tolerance_j);
         }
         assert!(pressure_change > 1e-12 && contact_change > 1e-12);
+        // Planted negative: a third run with the SAME memory source, stepped in lockstep,
+        // differs from the first by exactly nothing in pressure and in every port's
+        // traction and normal force, so the changes above come from the memory source.
+        assert_eq!(control_change, 0.0);
         assert!(soft.performance.bank().system().nonlinear_material_memory().iter()
             .zip(&initial).any(|(after, before)| after.iter().zip(before)
                 .any(|(a, b)| (a - b).abs() > 1e-16)));
@@ -220,7 +237,7 @@ fn selected_fiber_memory_acts_on_full_strain_through_contact_pressure_and_wav() 
         let (wav, summary) = make(0.6e9).write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
         let (expected, clips) = fs_couple::pcm_wav::encode_pcm16_wav(&output, 48000, 0.01).unwrap();
         assert_eq!(wav.into_inner(), expected);
-        assert_eq!(summary.samples, 129);
+        assert_eq!(summary.samples as usize, SAMPLES);
         assert_eq!(summary.clipped_samples, clips as u64);
     });
 }
@@ -228,7 +245,7 @@ fn selected_fiber_memory_acts_on_full_strain_through_contact_pressure_and_wav() 
 #[test]
 fn full_fiber_strain_memory_requires_its_geometric_mean_budget_and_original_sources() {
     let gate = CancelGate::new_clock_free();
-    let text = strain_memory_text();
+    let text = strain_memory_text(129);
     let spec = input::Spec::parse(text.as_bytes()).unwrap();
     let (model, _) = compile_fiber_source(&spec, memory_pack(0.6e9, false), &gate).unwrap();
     assert_eq!(model.material_relaxation().unwrap().memory_states(), 30);
@@ -256,7 +273,7 @@ fn ready(cx: &Cx<'_>, gate: &CancelGate, density: f64) -> Ready {
 fn accelerating_fiber_text() -> String {
     include_str!("../fiber-ribbon.material-strings")
         .replace("48000 4096", "48000 256")
-        .replace("initial\tbow\t1e-2\t", "initial\tbow\t0\t")
+        .replace("initial\tbow\t1e-2\t", "initial\tbow\t0e0\t")
         .replace("forces retain", concat!(
             "bow_fiber_program 0 0.1 20 0.01 1048576 3\n",
             "fiber_speed 64 0.01\nfiber_speed 128 -0.01\nfiber_speed 192 0\n",
@@ -292,15 +309,29 @@ fn source_declared_fiber_support_acceleration_reversal_and_material_reach_wav() 
 #[test]
 fn unsupported_support_motion_refuses_before_source_io() {
     let text=accelerating_fiber_text();
-    for (from,to) in [
-        ("bow_fiber_program 0 0.1 20 0.01 1048576 3", "bow_fiber_program 0 0.1 1 0.01 1048576 3"),
-        ("fiber_speed 128 -0.01", "fiber_speed 64 -0.01"),
-        ("fiber_speed 192 0", "fiber_speed 257 0"),
-        ("initial\tbow\t0\t", "initial\tbow\t1e-2\t"),
-        ("bow_fiber_program 0", "bow_fiber_motion 1 1000 0.001 1048576\nbow_fiber_program 0"),
-        ("bow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2\n", ""),
+    // The unmodified program is accepted, so each refusal below belongs to its own edit
+    // and not to a defect in the shared base text (a non-canonical base once refused
+    // every case with the same schedule error and left the guards untested).
+    assert!(input::Spec::parse(text.as_bytes()).is_ok());
+    for (from,to,reason) in [
+        ("bow_fiber_program 0 0.1 20 0.01 1048576 3", "bow_fiber_program 0 0.1 1 0.01 1048576 3",
+            "control refusal: fiber support acceleration exceeds its declared bound"),
+        ("fiber_speed 128 -0.01", "fiber_speed 64 -0.01",
+            "control refusal: fiber support knots must be ordered finite velocities inside the performance"),
+        ("fiber_speed 192 0", "fiber_speed 257 0",
+            "control refusal: fiber support knots must be ordered finite velocities inside the performance"),
+        ("initial\tbow\t0e0\t", "initial\tbow\t1e-2\t",
+            "fiber support program requires zero competing gesture speed"),
+        ("bow_fiber_program 0", "bow_fiber_motion 1 1000 0.001 1048576\nbow_fiber_program 0",
+            "fiber motion and fiber program are exclusive support controls"),
+        // Removing bow_fibers leaves the program rows where `forces` is expected: this
+        // case checks line order, not a fiber guard.
+        ("bow_fibers fiber.fsmatpk 0.00004 0.6 180 40 0.4 2 2\n", "", "expected forces on line 11"),
     ] {
-        assert!(input::Spec::parse(text.replace(from,to).as_bytes()).is_err(),"{from}");
+        let changed=text.replace(from,to);
+        assert_ne!(changed,text,"{from} matched nothing");
+        let error=input::Spec::parse(changed.as_bytes()).err().unwrap_or_else(|| panic!("accepted {from}"));
+        assert_eq!(error.to_string(),reason,"{from}");
     }
 }
 
@@ -613,7 +644,7 @@ fn accelerating_fibers_keep_solved_normal_loads_through_input_and_pcm_output() {
     scoped(|cx, gate| {
         let text = include_str!("../fiber-contact.material-strings")
             .replace("48000 4096", "48000 256")
-            .replace("initial\tbow\t1e-2\t", "initial\tbow\t0\t")
+            .replace("initial\tbow\t1e-2\t", "initial\tbow\t0e0\t")
             .replace("forces retain", concat!(
                 "bow_fiber_program 0 0.1 20 0.01 1048576 3\n",
                 "fiber_speed 64 0.01\nfiber_speed 128 -0.01\nfiber_speed 192 0\n",
@@ -981,7 +1012,9 @@ fn native_fiber_acceleration_and_reversal_reach_the_same_pressure_and_pcm_writer
     });
 }
 #[test]
-fn source_motion_does_not_admit_untransported_normal_or_thermal_hair_patches() {
+fn source_motion_transports_canonical_normal_hair_patches_with_solved_loads() {
+    // Moving hair carries the canonical source normal receiver along with it (e0b9a1154
+    // replaced the old refusal by this transport), with or without string-side patch travel.
     scoped(|cx,gate| {
         for translating_on_string in [false,true] {
             let mut contact=contact_spec();
@@ -993,17 +1026,68 @@ fn source_motion_does_not_admit_untransported_normal_or_thermal_hair_patches() {
                 contact=input::Spec::parse(text.as_bytes()).unwrap();
             }
             contact.bow_fibers.as_mut().unwrap().motion=moving_fiber_spec().bow_fibers.unwrap().motion;
-            let parsed=stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes());
-            // String-side patch travel is admissible, but does not transport a
-            // normal footprint along accelerating hair. Both orders retain the
-            // actual source profile instead of a fabricated modal map.
-            assert!(parsed.is_ok());
-            let result=contact.compile_with_profiles(cx,gate,None,Some(parsed.unwrap()),|name|Ok(if name=="fiber.fsmatpk" {
+            let profile=stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes()).unwrap();
+            let mut run=contact.compile_with_profiles(cx,gate,None,Some(profile),|name|Ok(if name=="fiber.fsmatpk" {
                 fiber_pack(1300.0,false)
-            } else {pack(name,7800.0,200_000.0,None)}));
-            assert!(result.is_err());
+            } else {pack(name,7800.0,200_000.0,None)})).unwrap();
+            assert_eq!(run.performance.bank().source().bow_contact_loads().len(),3);
+            let (mut peak,mut loaded)=(0.0f64,0usize);
+            for _ in 0..256 {
+                let mut sample=[0.0];
+                run.performance.block(&mut sample).unwrap();
+                peak=peak.max(sample[0].abs());
+                let system=run.performance.bank().system();
+                let frame=system.last_frame().unwrap();
+                assert!(frame.energy_residual_j.abs()<=frame.energy_tolerance_j);
+                for (bow,normal) in frame.ports.iter().zip(system.last_obstacle_frames().unwrap()) {
+                    assert_eq!(bow.normal_force_n,normal.normal_force_n);
+                    loaded+=usize::from(bow.normal_force_n>0.0);
+                }
+            }
+            assert!(loaded>0,"no solved normal load reached the moving hair");
+            assert!(peak>1e-12);
+            // The hair really moved: its support translated at the bow speed for 256 samples.
+            let support=run.performance.fiber_support_frame().unwrap();
+            assert_eq!(support.sample,256);
+            assert!((support.translation_m-0.01*256.0/48000.0).abs()<1e-15);
         }
     });
+}
+
+fn layered_hair_pack(name:&str) -> Result<NormalizedPack> {
+    Ok(match name {
+        "fiber.fsmatpk" => fiber_pack(1300.0,false),
+        "manufactured-shear-layer.fsmatpk" => super::shear_layers::layer_pack(4.0,200_000.0,None),
+        _ => pack(name,7800.0,200_000.0,None),
+    })
+}
+
+#[test]
+fn moving_hair_and_bow_migration_refuse_shear_layers_that_would_not_travel_with_them() {
+    // The fiber contact fixture with a source shear layer on the bow.
+    let layered=|extra:&str| include_str!("../fiber-contact.material-strings")
+        .replace("48000 4096","48000 256")
+        .replace("friction coulomb 0.8 0.4",
+            "friction layers 1\nshear-layer bow manufactured-shear-layer.fsmatpk 0.000001 0.0001 0.05")
+        .replace("\nforces ",&format!("\n{extra}forces "));
+    let profile=|| stops::Profile::parse(include_str!("../fiber-contact.stops").as_bytes()).unwrap();
+    scoped(|cx,gate| {
+        // Control: with still fibers the layered contact compiles.
+        let still=input::Spec::parse(layered("").as_bytes()).unwrap();
+        assert!(still.compile_with_profiles(cx,gate,None,Some(profile()),layered_hair_pack).is_ok());
+        // The same text with moving fibers is refused with the moving-fiber guard.
+        let mut moving=input::Spec::parse(layered("").as_bytes()).unwrap();
+        moving.bow_fibers.as_mut().unwrap().motion=moving_fiber_spec().bow_fibers.unwrap().motion;
+        let error=moving.compile_with_profiles(cx,gate,None,Some(profile()),layered_hair_pack).err()
+            .expect("moving fibers over a shear layer were accepted");
+        assert_eq!(error.to_string(),
+            "moving fibers require dry heat routes or a complete v3 film binding attached to the original string patches");
+    });
+    // String-side station migration over the same layer is refused while parsing.
+    let migrating=layered(concat!("bow_station_motion 2 0.00003 1048576 2\n",
+        "bow_station_knot 64 0.202\nbow_station_knot 128 0.201\n"));
+    assert_eq!(input::Spec::parse(migrating.as_bytes()).err().expect("migration over a shear layer was accepted").to_string(),
+        "bow migration requires transported material shear/thermal patches; those combinations are not supported");
     let text=include_str!("../fiber-ribbon.material-strings");
     for limits in ["1 0 0.001 1048576","1 1000 0.001 0","NaN 1000 0.001 1048576"] {
         let text=text.replace("\nforces ",&format!("\nbow_fiber_motion {limits}\nforces "));

@@ -11,7 +11,7 @@ use fs_material::state_point::{
 };
 use std::io::Cursor;
 
-fn layer_pack(viscosity: f64, band: f64, omit: Option<&str>) -> NormalizedPack {
+pub(super) fn layer_pack(viscosity: f64, band: f64, omit: Option<&str>) -> NormalizedPack {
     layer_pack_with_memory(viscosity, band, omit, 200_000.0, 0.002)
 }
 fn layer_pack_with_memory(viscosity: f64, band: f64, omit: Option<&str>,
@@ -72,13 +72,19 @@ fn layer_pack_with_memory(viscosity: f64, band: f64, omit: Option<&str>,
     .unwrap();
     NormalizedPack::from_bytes(&source.to_bytes()).unwrap()
 }
-fn specification() -> input::Spec {
-    // Include both velocity reversals in a short 1024-sample run.
-    let text = include_str!("../shear-layer-bow.material-strings")
-        .replace("48000 4096 0.01 128", "48000 1024 0.01 128")
+/// The fixture cut to a short run that includes both velocity reversals. Its own bow
+/// events sit at 20 ms and 50 ms, after the last control tick of any shorter run, so a run
+/// cut without rescaling them is refused ("bow command starts after the last observed
+/// control tick"). Every short run of this fixture takes its text and its length from here.
+const SHORT_RUN_SAMPLES: usize = 1024;
+fn short_run_text() -> String {
+    include_str!("../shear-layer-bow.material-strings")
+        .replace("48000 4096 0.01 128", &format!("48000 {SHORT_RUN_SAMPLES} 0.01 128"))
         .replace("2e-2\t5e-3", "5e-3\t2e-3")
-        .replace("5e-2\t5e-3", "1.2e-2\t2e-3");
-    input::Spec::parse(text.as_bytes()).unwrap()
+        .replace("5e-2\t5e-3", "1.2e-2\t2e-3")
+}
+fn specification() -> input::Spec {
+    input::Spec::parse(short_run_text().as_bytes()).unwrap()
 }
 fn ready(cx: &Cx<'_>, gate: &CancelGate, spec: input::Spec, viscosity: f64) -> Ready {
     spec.compile(cx, gate, |name| {
@@ -170,15 +176,14 @@ fn layer_history_and_pcm_are_identical_across_callback_boundaries() {
         let (wav, summary) = output.write(Cursor::new(Vec::<u8>::new()), gate).unwrap();
         assert_eq!(wav.into_inner(), expected);
         assert_eq!(summary.clipped_samples, clipped as u64);
-        assert_eq!(summary.samples, 1024);
+        assert_eq!(summary.samples as usize, SHORT_RUN_SAMPLES);
     });
 }
 
 #[test]
 fn source_shear_memory_reaches_original_pressure_history_and_callback_rendering() {
     scoped(|cx, gate| {
-        let text = include_str!("../shear-layer-bow.material-strings")
-            .replace("48000 4096 0.01 128", "48000 256 0.01 128")
+        let text = short_run_text()
             .replace("bow_ribbon", "shear-memory 1 shear_memory_modulus shear_memory_time\nbow_ribbon");
         let build = |modulus, tau| input::Spec::parse(text.as_bytes()).unwrap()
             .compile(cx, gate, |name| Ok(if name == "manufactured-shear-layer.fsmatpk" {
@@ -240,9 +245,7 @@ fn layer_material_swaps_reach_nonlinear_string_pressure_without_resetting_interf
     scoped(|cx, gate| {
         for record in ["geometric-stretching 0.2 64 100000 1e-11 1e-10",
             "longitudinal-waves 0.2 0.01 64 100000 1e-11 1e-10 2 1 2"] {
-            let text = include_str!("../shear-layer-bow.material-strings")
-                .replace("48000 4096 0.01 128", "48000 256 0.01 128")
-                .replace("cavity neck", &format!("{record}\ncavity neck"));
+            let text = short_run_text().replace("cavity neck", &format!("{record}\ncavity neck"));
             let spec = || input::Spec::parse(text.as_bytes()).unwrap();
             let mut direct = ready(cx, gate, spec(), 4.0);
             let mut replay = ready(cx, gate, spec(), 4.0);
@@ -267,8 +270,7 @@ fn layer_material_swaps_reach_nonlinear_string_pressure_without_resetting_interf
             let mut output = ready(cx, gate, spec(), 4.0);
             let (wav, report) = output.write(Cursor::new(Vec::new()), gate).unwrap();
             assert_eq!(wav.into_inner(), fs_couple::pcm_wav::encode_pcm16_wav(&expected, 48_000, 0.01).unwrap().0);
-            assert_eq!(report.samples, 256);
-
+            assert_eq!(report.samples as usize, SHORT_RUN_SAMPLES);
         }
     });
 }
