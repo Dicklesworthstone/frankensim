@@ -1176,6 +1176,46 @@ This is a declared instantaneous rigid attachment. Contact discovery, finite
 grasping duration, fracture, mass flux, internal shape momentum and the thermal
 destination of removed energy require their own physical models.
 
+## Articulated payload release with internal separation recoil
+
+`articulated::motion::inventory::release::release_payload` consumes the capture
+attachment and current loaded tree. It restores the target's exact retained
+spatial inertia and reconstructs the independent payload at the current link
+pose with its actual inherited rigid velocity field. The target's name, parent,
+reference transform, joint and loaded inertia must still match the attachment.
+Other links keep their current inertias. Nested captures on one link release in
+reverse inventory order; repeated release against restored inventory refuses.
+
+An optional `SeparationImpulse` specifies one link-frame application point,
+force impulse on the payload and free angular impulse. Its point-force moment
+and free couple form one complete wrench; the retained link receives the exact
+opposite wrench. The original articulated inverse-mass owner supplies coupled
+tree recoil, and the original six-component spatial-inertia solve supplies
+payload recoil. Optional ideal gear/lock rows react with the retained inertia
+before endpoint speed admission. Zero impulse still admits the state and row
+rank, then preserves the retained tree's state bits.
+
+Both surviving native states, the actual impulse pair and separate separation
+and gear work are returned. Separation work pairs the full impulse with actual
+midpoint endpoint velocities, including force/couple and constraint recoil
+cross terms. Common-frame energy, world momentum and independent projected
+total momentum audits use the actual outputs. The released payload is pulled
+back to the target's virtual link solely for the fixed-event projected audit;
+internal separation impulses cancel and only gear reactions change total
+projected joint momentum. Absolute separation-work and finite gear-work
+allowances are independent, and numerical residuals remain explicit.
+
+Three focused native regressions verify zero-impulse release after native
+motion and continued motion of both outputs; a combined point-force/free-couple
+case with 0.99 J work under a billion-scale uniform velocity; locked-joint recoil
+with 16/75 J work and an inadmissible free intermediate; independent full-tensor
+principal-axis payload recoil and shared-point work; physical momentum/energy
+and frame/boost covariance; stale inventory, work limits and late cancellation.
+
+The caller supplies the actual release event, attachment geometry and work
+source. This instantaneous model does not infer fracture, finite-duration
+separation, subsequent contact, mass flow or thermal conversion.
+
 ## Continuous prescribed-inertia motion
 
 `articulated::motion::reconfigure::step::advance` and

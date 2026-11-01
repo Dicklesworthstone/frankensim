@@ -7,6 +7,10 @@
 //! discovery, finite-duration grasping, mass flux and a thermal destination for
 //! the removed relative kinetic energy remain caller-owned physical models.
 
+/// Conservative payload release with optional internal separation impulses.
+#[path = "inventory/release.rs"]
+pub mod release;
+
 use super::reconfigure::constraints::{
     self, ConstraintControls, ConstraintError, JointConstraint, PreparedJointConstraints,
     admit_constraints, apply_rows,
