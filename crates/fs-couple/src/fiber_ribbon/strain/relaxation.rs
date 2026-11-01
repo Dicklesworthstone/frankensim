@@ -400,8 +400,19 @@ mod tests {
         let part = law(1.0 / 3.0);
         let q = [1e-8, -2e-8, 0.0, 1e-8, 2e-5, -1e-5];
         let qp: Vec<_> = q.iter().map(|q| q / 3.0_f64.sqrt()).collect();
+        // One physical state for both laws, held off its relaxed value on EVERY harmonic of both arms. A relaxed
+        // memory makes the axial elastic strain exactly 0 in the whole law, so a mean-only offset left four of the
+        // six reactions at 0 == 0 against the part law's rounding noise (1e-15) and a 1e-22 tolerance floor.
+        let offsets = [-2e-5, 3e-7, -2e-7, 1e-7, -1.5e-7];
+        let width = whole.material.width();
+        assert_eq!(offsets.len(), width, "an offset for every harmonic of the law");
         let mut memory = whole.relaxed_memory(&q).unwrap();
-        memory[0] -= 2e-5;
+        assert_eq!(memory.len(), width * whole.material.arms().len(), "every arm is offset");
+        for chunk in memory.chunks_exact_mut(width) {
+            for (z, offset) in chunk.iter_mut().zip(offsets) {
+                *z += offset;
+            }
+        }
         let mut fw = [0.0; 6];
         let mut fp = [0.0; 6];
         whole.reaction(&q, &memory, &mut fw).unwrap();
@@ -412,6 +423,17 @@ mod tests {
         );
         for (a, b) in fw.iter().zip(fp) {
             assert!((a - 3.0_f64.sqrt() * b).abs() < 1e-10 * a.abs().max(1e-12));
+        }
+        // Planted negative: a wrongly scaled partition (q/2 instead of q/sqrt(3)) must break the same comparison on
+        // every reaction on its own, axial and normal. A reaction stuck at zero cannot move under q/2 and fails here.
+        let wrong: Vec<_> = q.iter().map(|q| q / 2.0).collect();
+        let mut fx = [0.0; 6];
+        part.reaction(&wrong, &memory, &mut fx).unwrap();
+        for (i, (a, b)) in fw.iter().zip(fx).enumerate() {
+            assert!(
+                (a - 3.0_f64.sqrt() * b).abs() >= 1e-10 * a.abs().max(1e-12),
+                "the partition comparison did not refuse a wrong scale on component {i}: whole {a:e}, wrong {b:e}"
+            );
         }
         let bound = whole.stiffness_upper_bound_per_s2(&memory).unwrap();
         let direction = [0.2, -0.3, 0.15, -0.25, 0.1, 0.4];

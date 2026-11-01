@@ -162,28 +162,39 @@ mod tests {
         let loss=law.stage(&a,&b,&memory,dt,&mut next,&mut force).unwrap();
         assert_eq!(memory,old,"a trial cannot advance accepted history");
         let midpoint:Vec<_>=a.iter().zip(&b).map(|(&a,&b)|f64::midpoint(a,b)).collect();
-        let (mut spatial_loss,mut spatial_force)=(0.0,vec![0.0;a.len()]);
-        for cell in 0..512 {
-            let s=(cell as f64+0.5)/512.0;
-            let ea=spatial(&law,&a,s).0;let eb=spatial(&law,&b,s).0;let gradient=spatial(&law,&midpoint,s).1;
-            for (arm,z) in law.material.arms().iter().zip(memory.chunks_exact(law.width())) {
-                let z=z[0]+z[1..].iter().enumerate().map(|(i,z)|
-                    z*((i+1) as f64*core::f64::consts::PI*s).cos()).sum::<f64>();
-                let rate=dt/arm.relaxation_time_s;
-                let slope=(eb-ea)/rate;let transient=ea-z-slope;
-                // Integrate the independent spatial Maxwell solution in time.
-                let (mut mean,mut square)=(0.0,0.0);
-                for sample in 0..=128 {
-                    let t=sample as f64/128.0;
-                    let q=slope+transient*(-rate*t).exp();
-                    let w=if sample==0 || sample==128 {1.0} else if sample%2==0 {2.0} else {4.0};
-                    mean+=w*q/384.0;square+=w*q*q/384.0;
+        // Independent spatial Maxwell solution, integrated in time by Simpson with `intervals` steps. The branch
+        // solution q=slope+transient*exp(-rate t) has transient up to ~30x the strain scale at dt/tau=0.1, so the
+        // reference error (about h^4) is 1.7e-12 relative at 128 intervals: above the 1e-12 gate. The reference is
+        // therefore refined until it asserts its own convergence below.
+        let reference=|intervals:usize|{
+            let (mut spatial_loss,mut spatial_force)=(0.0,vec![0.0;a.len()]);
+            for cell in 0..512 {
+                let s=(cell as f64+0.5)/512.0;
+                let ea=spatial(&law,&a,s).0;let eb=spatial(&law,&b,s).0;let gradient=spatial(&law,&midpoint,s).1;
+                for (arm,z) in law.material.arms().iter().zip(memory.chunks_exact(law.width())) {
+                    let z=z[0]+z[1..].iter().enumerate().map(|(i,z)|
+                        z*((i+1) as f64*core::f64::consts::PI*s).cos()).sum::<f64>();
+                    let rate=dt/arm.relaxation_time_s;
+                    let slope=(eb-ea)/rate;let transient=ea-z-slope;
+                    let (mut mean,mut square)=(0.0,0.0);
+                    for sample in 0..=intervals {
+                        let t=sample as f64/intervals as f64;
+                        let q=slope+transient*(-rate*t).exp();
+                        let w=if sample==0 || sample==intervals {1.0} else if sample%2==0 {2.0} else {4.0};
+                        mean+=w*q/(3.0*intervals as f64);square+=w*q*q/(3.0*intervals as f64);
+                    }
+                    spatial_loss+=arm.stiffness_j*rate*square/512.0;
+                    for (force,g) in spatial_force.iter_mut().zip(&gradient) {*force-=arm.stiffness_j*mean*g/512.0;}
                 }
-                spatial_loss+=arm.stiffness_j*rate*square/512.0;
-                for (force,g) in spatial_force.iter_mut().zip(&gradient) {*force-=arm.stiffness_j*mean*g/512.0;}
             }
-        }
-        assert!((loss-spatial_loss).abs()<1e-12*loss);
+            (spatial_loss,spatial_force)
+        };
+        let (coarse,_)=reference(1024);
+        let (spatial_loss,spatial_force)=reference(2048);
+        // The reference must be converged to a hundredth of the gate it protects, with the same constant.
+        const GATE:f64=1e-12;
+        assert!((coarse-spatial_loss).abs()<1e-2*GATE*spatial_loss,"the reference has not converged: {coarse:e} vs {spatial_loss:e}");
+        assert!((loss-spatial_loss).abs()<GATE*loss);
         for (a,b) in force.iter().zip(spatial_force) {assert!((a-b).abs()<1e-10*a.abs().max(1e-12));}
         let defect=law.energy(&b,&next).unwrap()-law.energy(&a,&memory).unwrap()+loss
             +force.iter().zip(d).map(|(f,d)|f*d).sum::<f64>();
@@ -191,6 +202,21 @@ mod tests {
         let mut repeat=vec![0.0;next.len()];let mut again=vec![0.0;force.len()];
         assert_eq!(loss,law.stage(&a,&b,&memory,dt,&mut repeat,&mut again).unwrap());
         assert_eq!(repeat,next);assert_eq!(again,force);
+        // Planted negative: the midpoint-decay material this test carried before the exact ramp (960f8ccfa) must be
+        // refused by the same gate (measured 6.9e-2 relative against GATE), so the converged reference does tell exact
+        // from midpoint damping.
+        let mut midpoint_loss=0.0;
+        for cell in 0..512 {
+            let s=(cell as f64+0.5)/512.0;
+            let ea=spatial(&law,&a,s).0;let eb=spatial(&law,&b,s).0;
+            for (arm,z) in law.material.arms().iter().zip(memory.chunks_exact(law.width())) {
+                let z=z[0]+z[1..].iter().enumerate().map(|(i,z)|
+                    z*((i+1) as f64*core::f64::consts::PI*s).cos()).sum::<f64>();
+                let rate=dt/arm.relaxation_time_s;let r=(0.5*(ea+eb)-z)/(1.0+0.5*rate);
+                midpoint_loss+=arm.stiffness_j*rate*r*r/512.0;
+            }
+        }
+        assert!((loss-midpoint_loss).abs()>=GATE*loss,"midpoint damping would pass the exact-ramp gate");
     }
     #[test]
     fn g1_stiffness_admission_covers_bent_geometry_and_retained_material_stress() {
