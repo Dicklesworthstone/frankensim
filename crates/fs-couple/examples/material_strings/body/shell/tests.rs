@@ -882,9 +882,18 @@ fn shell_assembly_options_refuse_missing_repeated_unknown_and_malformed_records(
 }
 
 fn held_coating_pack() -> NormalizedPack {
+    use fs_matdb::ObservationDataset;
     use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, MoistureBasis, QuantityKind, SemanticType, ValueForm}};
     // Manufactured passive films: the endpoints are not measured varnish data.
+    let artifact = fs_blake3::ContentHash([8; 32]);
+    let provenance = Provenance { source: "manufactured held-state coating fixture".into(),
+        license: "CC0-1.0".into(), artifact: Some(artifact) };
     let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "synthetic passive film".into(),
+        method: "manufactured held-state coating fixture".into(), artifact,
+        caveats: "not measured varnish data".into(), provenance: provenance.clone(),
+    }).unwrap();
     let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
     for (key, dims, low, high) in [
         ("density", Density::DIMS, 1000.0, 1200.0),
@@ -903,12 +912,11 @@ fn held_coating_pack() -> NormalizedPack {
                 .with_quantity("frequency", quantity(QuantityKind::Frequency(FrequencyConvention::Cyclic)), 0.01, 20_000.0)
                 .with_quantity("moisture_content", quantity(QuantityKind::Moisture(MoistureBasis::DryMass)), 0.0, 0.2),
             uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
-            provenance: Provenance { source: "manufactured held-state coating fixture".into(),
-                license: "CC0-1.0".into(), artifact: None }, observations: vec![],
+            provenance: provenance.clone(), observations: vec![observation.clone()],
         }).unwrap();
     }
     NormalizedPack::new("synthetic-coating-environment", "synthetic-film-v1",
-        fs_blake3::ContentHash([8; 32]), "CC0-1.0", claims, vec![], vec![]).unwrap()
+        artifact, "CC0-1.0", claims, vec![], vec![]).unwrap()
 }
 
 #[test]
