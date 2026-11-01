@@ -396,3 +396,124 @@ fn invalid_interval_heat_cannot_be_hidden_by_composition() {
     // Ordinary instantaneous observers still expose their complete power field.
     near(active.power_balance_observed(&Producer::new(1, 7.0), || Ok(())).unwrap().external_power_w, 7.0);
 }
+
+#[derive(Clone, Debug, PartialEq)]
+struct TransitionSource {
+    at_s: f64,
+    return_unconditionally: bool,
+    source_states: Vec<(f64, f64)>,
+    intervals: Vec<(f64, f64, f64)>,
+    events: usize,
+}
+impl TransitionSource {
+    fn new(at_s: f64) -> Self {
+        Self { at_s, return_unconditionally: false, source_states: vec![],
+            intervals: vec![], events: 0 }
+    }
+}
+impl DepositionObserver for TransitionSource {
+    type Error = DepositionError;
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        check()?;
+        Ok((self.return_unconditionally || thermal.time_s() < self.at_s).then_some(self.at_s))
+    }
+    fn sources(&mut self, thermal: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.source_states.push((thermal.time_s(), thermal.cells()[&CellId(1)].boundary.source_w));
+        Ok(BTreeMap::from([(CellId(1), if thermal.time_s() < self.at_s { 2.0 } else { 6.0 })]))
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
+        self.events += 1;
+        Ok(())
+    }
+    fn step(&mut self, start_s: f64, dt_s: f64, _: &BTreeMap<CellId, f64>,
+        thermal: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), Self::Error> {
+        self.intervals.push((start_s, dt_s, thermal.time_s()));
+        Ok(())
+    }
+}
+
+#[derive(Clone)]
+struct AdditionalDecay;
+impl DepositionObserver for AdditionalDecay {
+    type Error = DepositionError;
+    fn limit_timestep_s(&mut self, thermal: &DepositionSimulation<'_>, proposed_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<f64, Self::Error> {
+        thermal.limit_timestep_for_additional_conductances(
+            proposed_s, &BTreeMap::from([(CellId(1), 2.0)]), check,
+        )
+    }
+    fn event(&mut self, _: &Event, _: &DepositionSimulation<'_>) -> Result<(), Self::Error> { Ok(()) }
+    fn step(&mut self, _: f64, _: f64, _: &BTreeMap<CellId, f64>, _: &DepositionSimulation<'_>,
+        _: &mut dyn FnMut() -> Result<(), DepositionError>) -> Result<(), Self::Error> { Ok(()) }
+}
+
+#[test]
+fn source_transition_is_exact_after_composed_decay_limits_and_advection_wrapper() {
+    use crate::enthalpy::advection::Advected;
+    // A harmonic limiter comes AFTER the source owner. Treating its transition
+    // as a timestep limit would repeatedly shrink the distance to the edge.
+    let source = CoupledObservers::new(TransitionSource::new(0.125), AdditionalDecay);
+    let observer = Advected::new(source, vec![], 0).unwrap();
+    let (next, accepted, audit) = initial(false).advance_observed(&observer, 0.5,
+        StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-9 }, || Ok(())).unwrap();
+    assert_eq!(accepted.inner().first.intervals, vec![(0.0, 0.125, 0.125), (0.125, 0.375, 0.5)]);
+    assert_eq!(audit.substeps, 2);
+    assert_eq!(audit.events, 2); // Only the authored births, not a synthetic pulse event.
+    near(audit.external_heat_j, 2.0 * 0.125 + 6.0 * 0.375);
+    near(next.energy_j(), 2.5);
+}
+
+#[test]
+fn invalid_transition_cannot_hide_behind_another_owner_or_target_endpoint() {
+    let old = initial(false);
+    for at_s in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, 0.0, -0.125] {
+        let mut invalid = TransitionSource::new(at_s);
+        invalid.return_unconditionally = true;
+        assert!(old.advance_observed(&invalid, 0.5, config(), || Ok(())).is_err());
+        for invalid_first in [true, false] {
+            let valid = TransitionSource::new(2.0); // Beyond this advance, still validate each child.
+            let pair = if invalid_first { CoupledObservers::new(invalid.clone(), valid) }
+                else { CoupledObservers::new(valid, invalid.clone()) };
+            assert!(matches!(old.advance_observed(&pair, 0.5, config(), || Ok(())),
+                Err(ObserverCouplingError::Thermal(DepositionError::InvalidInput(_)))));
+            assert!(old.cells().is_empty());
+            assert_eq!(old.time_s(), 0.0);
+            assert!(pair.first.source_states.is_empty());
+            assert!(pair.second.intervals.is_empty());
+        }
+    }
+    assert!(old.advance_observed(&TransitionSource::new(2.0), 0.5, config(), || Ok(())).is_ok());
+}
+
+#[test]
+fn source_transition_and_native_event_share_one_exact_boundary_and_resume() {
+    let (active, _) = initial(false).advance_to(0.0, config(), || Ok(())).unwrap();
+    let mut schedule: Vec<_> = active.cells().values().cloned().map(|cell| TimedEvent {
+        time_s: 0.0, event: Event::Birth(cell),
+    }).collect();
+    let mut boundary = active.cells()[&CellId(1)].boundary;
+    boundary.source_w = 3.0;
+    schedule.push(TimedEvent { time_s: 0.125, event: Event::Boundary(CellId(1), boundary) });
+    let old = DepositionSimulation::new(schedule, &[(MaterialId(1), &A), (MaterialId(2), &B)],
+        DepositionBudget { max_cells: 2, max_links: 1, max_events: 3, max_substeps: 10 }).unwrap();
+    let source = TransitionSource::new(0.125);
+    let config = StepConfig { max_dt_s: 1.0, energy_tolerance_j: 1e-9 };
+    let (one, whole, audit) = old.advance_observed(&source, 0.5, config, || Ok(())).unwrap();
+    let (middle, first, first_audit) = old.advance_observed(&source, 0.125, config, || Ok(())).unwrap();
+    let (two, split, last_audit) = middle.advance_observed(&first, 0.5, config, || Ok(())).unwrap();
+    assert_eq!(whole, split);
+    assert_eq!(one.cells(), two.cells());
+    assert_eq!(whole.source_states, vec![(0.0, 0.0), (0.125, 3.0)]);
+    assert_eq!(whole.events, 3);
+    assert_eq!(audit.events, first_audit.events + last_audit.events);
+    assert_eq!(audit.substeps, first_audit.substeps + last_audit.substeps);
+    near(audit.external_heat_j, first_audit.external_heat_j + last_audit.external_heat_j);
+    near(one.energy_j(), 2.0 * 0.125 + (6.0 + 3.0) * 0.375);
+}

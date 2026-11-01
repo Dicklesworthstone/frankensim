@@ -123,6 +123,29 @@ impl<A: DepositionObserver, B: DepositionObserver> DepositionObserver for Couple
         self.first.requires_step_interval() || self.second.requires_step_interval()
     }
 
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> {
+        check()?;
+        let first = self.first.next_transition_time_s(thermal, check)
+            .map_err(ObserverCouplingError::First)?;
+        if first.is_some_and(|time| !time.is_finite() || time <= thermal.time_s()) {
+            return Err(DepositionError::InvalidInput("invalid first observer transition time").into());
+        }
+        check()?;
+        let second = self.second.next_transition_time_s(thermal, check)
+            .map_err(ObserverCouplingError::Second)?;
+        if second.is_some_and(|time| !time.is_finite() || time <= thermal.time_s()) {
+            return Err(DepositionError::InvalidInput("invalid second observer transition time").into());
+        }
+        check()?;
+        // Validate each owner before min: f64::min would erase a NaN.
+        Ok(match (first, second) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        })
+    }
+
     fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
         start_s: f64, dt_s: f64, end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)

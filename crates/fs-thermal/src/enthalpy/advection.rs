@@ -319,6 +319,12 @@ impl<O: DepositionObserver> DepositionObserver for Advected<O> {
 
     fn requires_step_interval(&self) -> bool { self.inner.requires_step_interval() }
 
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> {
+        self.inner.next_transition_time_s(thermal, check)
+    }
+
     fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
         start_s: f64, dt_s: f64, end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)

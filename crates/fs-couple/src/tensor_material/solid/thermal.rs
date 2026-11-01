@@ -265,6 +265,11 @@ impl<O: DepositionObserver> DepositionObserver for HeatObserver<'_, '_, '_, '_, 
         self.inner.begin().map_err(SolidThermalError::Observer)
     }
     fn requires_step_interval(&self) -> bool { true }
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>)
+        -> Result<Option<f64>, O::Error> {
+        self.inner.next_transition_time_s(thermal, checkpoint).map_err(SolidThermalError::Observer)
+    }
     fn sources(&mut self, thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> core::result::Result<(), DepositionError>)
         -> Result<BTreeMap<CellId, f64>, O::Error> {

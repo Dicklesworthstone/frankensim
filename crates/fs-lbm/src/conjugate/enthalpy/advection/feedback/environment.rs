@@ -217,6 +217,12 @@ where
         self.flow.requires_step_interval()
     }
 
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> {
+        self.flow.next_transition_time_s(thermal, check).map_err(Into::into)
+    }
+
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,

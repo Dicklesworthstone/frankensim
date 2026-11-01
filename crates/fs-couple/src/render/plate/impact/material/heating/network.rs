@@ -232,6 +232,12 @@ impl<O: DepositionObserver> DepositionObserver for MechanicalHeating<O> {
 
     fn requires_step_interval(&self) -> bool { self.observer.requires_step_interval() }
 
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> {
+        self.observer.next_transition_time_s(thermal, checkpoint).map_err(NetworkError::Observer)
+    }
+
     fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
         start_s: f64, dt_s: f64, end_s: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)

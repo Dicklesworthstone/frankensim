@@ -1021,6 +1021,19 @@ where
                 .is_some_and(|inner| inner.requires_step_interval())
     }
 
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        check_gate(self.gate, check)?;
+        self.advected
+            .as_mut()
+            .ok_or(invalid("unfinished material-flow source epoch"))?
+            .next_transition_time_s(thermal, check)
+            .map_err(MaterialFlowError::Inner)
+    }
+
     fn step_sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,

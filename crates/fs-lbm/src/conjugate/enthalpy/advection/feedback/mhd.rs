@@ -343,6 +343,12 @@ where
         true
     }
 
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> {
+        self.flow.next_transition_time_s(thermal, check).map_err(Into::into)
+    }
+
     fn begin(&mut self) -> Result<(), Self::Error> {
         self.flow.begin()?;
         self.current_solves = 0;

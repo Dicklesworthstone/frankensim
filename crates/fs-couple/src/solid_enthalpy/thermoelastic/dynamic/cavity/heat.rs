@@ -208,6 +208,11 @@ impl<O: DepositionObserver> DepositionObserver for FilmObserver<'_, '_, '_, O> {
         )?)
     }
     fn requires_step_interval(&self) -> bool { self.inner.requires_step_interval() }
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        self.inner.next_transition_time_s(thermal, checkpoint).map_err(CavityError::Observer)
+    }
     fn step_sources(
         &mut self, thermal: &DepositionSimulation<'_>, start: f64, dt: f64, end: f64,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,

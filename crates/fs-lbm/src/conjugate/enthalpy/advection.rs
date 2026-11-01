@@ -152,6 +152,12 @@ impl<F: FluidTransport + ?Sized, O: DepositionObserver> DepositionObserver
 
     fn requires_step_interval(&self) -> bool { self.advected.requires_step_interval() }
 
+    fn next_transition_time_s(&mut self, thermal: &DepositionSimulation<'_>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> {
+        self.advected.next_transition_time_s(thermal, check)
+    }
+
     fn step_sources(&mut self, thermal_start: &DepositionSimulation<'_>,
         start_s: f64, dt_s: f64, end_s: f64,
         check: &mut dyn FnMut() -> Result<(), DepositionError>)

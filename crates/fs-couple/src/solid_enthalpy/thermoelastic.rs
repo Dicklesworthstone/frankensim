@@ -411,6 +411,10 @@ impl<O:DepositionObserver> DepositionObserver for ReversibleHeat<'_,'_,'_,'_,O> 
         self.inner.begin().map_err(ThermoelasticFeedbackError::Observer)
     }
     fn requires_step_interval(&self)->bool {self.inner.requires_step_interval()}
+    fn next_transition_time_s(&mut self,thermal:&DepositionSimulation<'_>,
+        check:&mut dyn FnMut()->Result<(),DepositionError>)->Result<Option<f64>,Self::Error> {
+        self.inner.next_transition_time_s(thermal,check).map_err(ThermoelasticFeedbackError::Observer)
+    }
     fn step_sources(&mut self,thermal:&DepositionSimulation<'_>,start:f64,dt:f64,end:f64,
         check:&mut dyn FnMut()->Result<(),DepositionError>)->Result<BTreeMap<CellId,f64>,Self::Error> {
         self.inner.step_sources(thermal,start,dt,end,check).map_err(ThermoelasticFeedbackError::Observer)

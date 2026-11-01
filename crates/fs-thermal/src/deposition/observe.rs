@@ -26,6 +26,18 @@ pub trait DepositionObserver: Clone {
     type Error: From<DepositionError>;
     /// Start one candidate advance; useful for resetting a per-call work counter.
     fn begin(&mut self) -> Result<(), Self::Error> { Ok(()) }
+    /// Next physical source/state transition, as an absolute time [s]. Called
+    /// after same-time native events and before preparing an active-cell step.
+    /// Return a finite time STRICTLY after the current thermal time, or None.
+    /// The kernel validates it even when it lies beyond the requested endpoint.
+    ///
+    /// This cuts the accepted interval after every CFL restriction, so coupled
+    /// decay limits cannot approach a source discontinuity asymptotically. It
+    /// does not create an event or consume the authored-event budget. Wrappers
+    /// must forward this hook; derive each next transition from accepted state.
+    fn next_transition_time_s(&mut self, _thermal: &DepositionSimulation<'_>,
+        _checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>)
+        -> Result<Option<f64>, Self::Error> { Ok(None) }
     /// Additional signed heat rates [W] at active cells, evaluated at the start
     /// of EACH thermal substep, after same-time events. Omitted cells get zero.
     /// These rates are added to authored boundary sources for this step only;
@@ -34,7 +46,8 @@ pub trait DepositionObserver: Clone {
     ///
     /// The existing conduction CFL does not bound a nonlinear source's stiffness.
     /// Select `max_dt_s` for that source and perform time refinement. A source
-    /// discontinuity must coincide with a scheduled event or an advance endpoint.
+    /// discontinuity must be reported by `next_transition_time_s`, coincide with
+    /// a scheduled event, or be an advance endpoint.
     /// `step` receives the actual CFL-limited duration for integrating a source's
     /// own work/energy account. Generated heat is already in `external_heat_j`;
     /// do not add it again to that thermal audit. On failure, the source owner's
@@ -80,7 +93,7 @@ pub trait DepositionObserver: Clone {
     /// overrides but unchanged enthalpy. Compose coupled decay rates, not just
     /// independent CFL minima. This hook does not itself prove stability.
     ///
-    /// The proposal excludes distance to the next event/end time. The kernel
+    /// The proposal excludes distance to the next event/transition/end time. The kernel
     /// clips the result to that distance AFTER this hook, so repeated tightening
     /// cannot asymptotically approach an event without ever reaching it.
     fn limit_timestep_s(&mut self, _thermal: &DepositionSimulation<'_>, proposed_s: f64,
@@ -92,7 +105,7 @@ pub trait DepositionObserver: Clone {
     /// silently omitting its duration-dependent contribution.
     fn requires_step_interval(&self) -> bool { false }
     /// Additional signed average heat rates [W] for the FINAL accepted interval.
-    /// Called exactly once after all CFL restrictions and event/end clipping,
+    /// Called exactly once after all CFL restrictions and event/transition/end clipping,
     /// before changing enthalpy. `start_s` is the current thermal time; `end_s`
     /// is the exact endpoint that `step` will see (including event-time rounding).
     /// `dt_s` is the duration used for every energy integral in this step.
@@ -392,12 +405,18 @@ impl<'a> DepositionSimulation<'a> {
                 checkpoint()?;
             }
             if next.time_s == target_s { break; }
-            let stop = next.schedule.get(next.cursor).map_or(target_s, |e| e.time_s.min(target_s));
+            let mut stop = next.schedule.get(next.cursor).map_or(target_s, |e| e.time_s.min(target_s));
             if next.cells.is_empty() { next.time_s = stop; continue; }
             if audit.substeps >= next.budget.max_substeps.min(max_substeps) {
                 return Err(DepositionError::Budget("thermal substeps").into());
             }
             let start_s = next.time_s;
+            if let Some(transition) = observer.next_transition_time_s(&next, &mut checkpoint)? {
+                if !transition.is_finite() || transition <= start_s {
+                    return Err(DepositionError::InvalidInput("observer transition must be finite and strictly future").into());
+                }
+                stop = stop.min(transition);
+            }
             let sources = observer.sources(&next, &mut checkpoint)?;
             checkpoint()?;
             let conductances = observer.conductances(&next, &mut checkpoint)?;

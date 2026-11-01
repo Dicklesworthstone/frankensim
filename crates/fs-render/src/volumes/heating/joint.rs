@@ -112,6 +112,14 @@ impl<const NI: usize, const NR: usize> DepositionObserver for JointOpticalHeatin
         self.observers.requires_step_interval()
     }
 
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        self.observers.next_transition_time_s(thermal, checkpoint)
+    }
+
     fn sources(
         &mut self,
         thermal: &DepositionSimulation<'_>,
