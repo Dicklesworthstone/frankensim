@@ -245,6 +245,7 @@ impl<'m, 'c> HeterogeneousEnthalpyBackwardEuler<'m, 'c> {
                 nodal_curves: Some(nodal_curves),
                 masses,
                 phase_conductivity: None,
+                sourced_melting: None,
             },
             element_material_ids: element_material_ids.to_vec(),
             vertex_material_ids,

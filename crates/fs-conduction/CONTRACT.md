@@ -2480,3 +2480,52 @@ transfer, side reversal, supplied heat, equilibrium and zero duration.
 `EnthalpyEndpointEvaluation::residual_j` exposes the original assembled heterogeneous endpoint residual in mesh-vertex order. It is moved from the existing assembly into the report, without a second operator or a second assembly. Prescribed-temperature rows are zero after their exact enthalpy checks; their physical reaction remains in `dirichlet_in_w`. Coupled owners can therefore close every free nodal energy balance instead of substituting a global scalar energy condition.
 
 `HeterogeneousEnthalpyBackwardEuler::evaluate_endpoint_with_radiation` dispatches the existing `EnthalpyRadiation` choice to the original endpoint evaluation for no radiation, mean ambient/enclosure exchange or pointwise ambient/enclosure exchange. Existing radiation controls and source admission remain authoritative; this read-only dispatch performs no nonlinear solve or history advancement. The material-graph spatial integration tests exercise consistent P1 heating, heterogeneous charts and prescribed bath reactions. New native test execution is pending the authoring environment's unchanged runtime dependency/resource blocker.
+
+## Source-bound spatial sharp melting and phase-specific conductivity
+
+transient::enthalpy::material::melting::MaterialMeltingTransport resolves one
+original ResolvedMeltingCurve, independent solid/liquid conductivity tables
+and a single-phase reference-density answer from the same material card.
+Pressure, composition, phase selectors and other fixed source coordinates
+remain those admitted by the original caloric owner. Each branch's Cp, density
+and conductivity requires explicit temperature support. Conductivity queries
+never extend the solid source into the liquid interval or vice versa. All
+original caloric, conductivity and reference-density receipts remain available;
+the combined identity includes the explicit coexistence closure.
+
+At coexistence the caller chooses a parallel arithmetic or series harmonic
+conductivity mixture in **volume** fraction. The liquid volume fraction is
+computed from the original liquid mass fraction and the two sourced densities
+at the melting point. Neither mixture is an inferred microstructure or a
+material-validation claim. Outside coexistence, the corresponding source k(T)
+and the admitted caloric T(h) determine k(h). The exact one-sided derivative
+includes phase-conductivity variation on an unsmoothed latent plateau.
+
+The adapter prepares the existing EnthalpyBackwardEuler owner with its
+original immutable reference masses. It interpolates nodal k(h) with P1 basis
+functions and supplies the exact element mean and dk/dh to the existing sparse
+assembly. A retained unit tensor is only the numerical basis for this assembly,
+not an additional conductivity claim. Replacing that tensor, adding element
+material overrides or stacking a second phase multiplier refuses; physical k
+cannot be multiplied twice silently. No duplicate solver or apparent-Cp
+approximation is introduced. Existing boundary reactions, contact, radiation,
+adaptive stepping, energy gates and cancellation keep their original owners.
+Existing endpoint adjoints use the complete conductivity chain rule and refuse
+additional source k(T) corners as well as the original caloric corners.
+
+tests/material_melting.rs contains six numerical regressions: independent
+mixed-phase P1 balances and Jacobian columns; history-adjoint finite
+differences; original lumped-owner uniform heating/freezing with unchanged
+reference mass; a boundary-driven computed phase contour whose independent
+semi-discrete equation is dh/dt=800+0.5h, with heat closure and temporal
+refinement; validity/budget/cancellation refusals; and a conductivity-source
+corner refusal. The contour case is a single-tetrahedron temporal check, not
+a continuum Stefan or mesh-convergence claim. The existing Stefan refinement
+suite remains the spatial-front reference. These new native tests were
+authored but could not execute in the authoring environment because the shared
+filesystem was full; Rustfmt parsing was completed.
+
+This source adapter currently binds one isotropic material over a stationary
+mesh. Evolving geometry, density-driven mass changes, pressure work, convection,
+phase kinetics, anisotropic phase mixtures and uncertainty propagation are
+not supplied by this path.

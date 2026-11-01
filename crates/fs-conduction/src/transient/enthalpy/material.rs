@@ -5,7 +5,12 @@
 //! Cp; the existing conduction owner evaluates the physical conductivity tensor.
 //! Reference density is resolved ONCE at an explicit reference state and never
 //! replaced by the chart's changing equilibrium density.
-//! This is stationary single-phase transport, without expansion or pressure work.
+//! The base adapter is stationary single-phase transport. The melting submodule
+//! binds source-backed sharp fusion and separate phase conductivities to the same
+//! spatial owner. Neither path adds expansion or pressure work.
+
+/// Source-paired sharp melting and phase-specific isotropic conductivity.
+pub mod melting;
 
 use fs_blake3::{ContentHash, DomainHasher};
 use fs_matdb::{MatDbError, MaterialAnswer, MaterialCard, PropertyKey, QueryPoint};

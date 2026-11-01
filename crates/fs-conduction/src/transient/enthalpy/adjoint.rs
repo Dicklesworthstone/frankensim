@@ -844,6 +844,11 @@ fn check_chart(
             poll(cx, vertex)?;
         }
         let curve = storage.curve_for_vertex(vertex);
+        if let Some(source) = storage.sourced_melting {
+            if source.conductivity_kink_at(value, vertex)? {
+                return Err(EnthalpyAdjointError::MaterialKink);
+            }
+        }
         let knots = curve.knots();
         if let Ok(index) = knots.binary_search_by(|knot| {
             knot.specific_enthalpy_j_kg

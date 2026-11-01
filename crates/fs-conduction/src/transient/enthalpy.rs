@@ -19,6 +19,11 @@
 //! latent account is introduced. The shared conduction assembly retains the
 //! exact base `k'(T)` contribution, natural boundaries and contacts.
 //!
+//! The source-bound melting adapter instead supplies phase-specific nodal
+//! conductivity and its enthalpy derivative. P1 interpolation gives the exact
+//! element mean of that admitted conductivity field, through this same spatial
+//! assembly. Each phase table stays within its original temperature support.
+//!
 //! Uniform and explicitly assigned heterogeneous reference materials share this
 //! transport kernel, natural flux/Robin boundaries and finite-resistance
 //! contacts. Distinct materials require distinct interface vertices; no nodal
@@ -269,6 +274,9 @@ pub struct EnthalpyBackwardEuler<'m, 'c> {
     nodal_curves: Option<Vec<&'c EquilibriumEnthalpyPhaseCurve>>,
     masses: Vec<f64>,
     phase_conductivity: Option<PhaseConductivity>,
+    // A source-bound melting adapter supplies nodal k(h), using the existing
+    // element-scale assembly with its retained unit tensor as numerical basis.
+    sourced_melting: Option<&'c material::melting::MaterialMeltingTransport>,
 }
 
 #[derive(Debug)]
@@ -354,11 +362,13 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
             nodal_curves: None,
             masses,
             phase_conductivity: None,
+            sourced_melting: None,
         })
     }
 
     /// Bind an explicit phase multiplier to every tetrahedron, replacing any
-    /// previous assignment on this consumed owner.
+    /// previous manual assignment on this consumed owner. A source-bound
+    /// melting law already owns complete conductivity and refuses this override.
     ///
     /// Each law is evaluated at the arithmetic mean of the element's nodal
     /// liquid **mass** fractions. It scales the existing, independently
@@ -371,6 +381,11 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
         element_laws: Vec<LiquidMassFractionConductivity>,
     ) -> Result<Self, EnthalpyError> {
         poll(cx, 0)?;
+        if self.sourced_melting.is_some() {
+            return Err(EnthalpyError::InvalidInput(
+                "source-bound melting already owns the complete conductivity law",
+            ));
+        }
         if element_laws.len() != self.mesh.element_count() {
             return Err(EnthalpyError::InvalidInput(
                 "one phase conductivity law per tetrahedron required",
@@ -607,6 +622,13 @@ impl<'m, 'c> EnthalpyBackwardEuler<'m, 'c> {
                 "reference mass and history must match the exact transport mesh",
             ));
         }
+        if let Some(source) = self.sourced_melting {
+            if !source.matches_numerical_basis(problem) {
+                return Err(EnthalpyError::InvalidInput(
+                    "source-bound melting requires its original problem tensor and no element override",
+                ));
+            }
+        }
         validate_work(self.masses.len(), dt_s, config)?;
         for condition in problem.boundary.conditions() {
             condition.validate(self.masses.len())?;
@@ -774,6 +796,26 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn phase_scales(&self, h: &[f64]) -> Result<Option<Vec<f64>>, EnthalpyError> {
+        if let Some(source) = self.storage.sourced_melting {
+            let mut nodal = Vec::with_capacity(h.len());
+            for (vertex, &value) in h.iter().enumerate() {
+                if vertex % ASSEMBLY_TILE == 0 {
+                    poll(self.cx, vertex)?;
+                }
+                nodal.push(source.sample_for_vertex(value, vertex)?.conductivity_w_m_k);
+            }
+            let mut scales = Vec::with_capacity(self.storage.mesh.element_count());
+            for (element, vertices) in self.storage.mesh.complex().tets.iter().enumerate() {
+                if element % ASSEMBLY_TILE == 0 {
+                    poll(self.cx, element)?;
+                }
+                // Exactly integrate the P1 interpolant of nodal conductivity;
+                // do not query either phase at an averaged off-phase state.
+                let mean = vertices.iter().map(|&v| nodal[v as usize] / 4.0).sum();
+                scales.push(finite(mean)?);
+            }
+            return Ok(Some(scales));
+        }
         let Some(policy) = &self.storage.phase_conductivity else {
             return Ok(None);
         };
@@ -807,6 +849,30 @@ impl StepContext<'_, '_, '_, '_> {
     }
 
     fn phase_scale_derivatives(&self, h: &[f64]) -> Result<Option<Vec<[f64; 4]>>, EnthalpyError> {
+        if let Some(source) = self.storage.sourced_melting {
+            let mut nodal = Vec::with_capacity(h.len());
+            for (vertex, &value) in h.iter().enumerate() {
+                if vertex % ASSEMBLY_TILE == 0 {
+                    poll(self.cx, vertex)?;
+                }
+                let derivative = source.sample_for_vertex(value, vertex)?.derivative_per_j_kg;
+                let scaled = finite(derivative / 4.0)?;
+                if derivative != 0.0 && scaled == 0.0 {
+                    return Err(EnthalpyError::InvalidInput(
+                        "source conductivity tangent is not representable in P1 quadrature",
+                    ));
+                }
+                nodal.push(scaled);
+            }
+            let mut derivatives = Vec::with_capacity(self.storage.mesh.element_count());
+            for (element, vertices) in self.storage.mesh.complex().tets.iter().enumerate() {
+                if element % ASSEMBLY_TILE == 0 {
+                    poll(self.cx, element)?;
+                }
+                derivatives.push(vertices.map(|v| nodal[v as usize]));
+            }
+            return Ok(Some(derivatives));
+        }
         let Some(policy) = &self.storage.phase_conductivity else {
             return Ok(None);
         };
