@@ -226,29 +226,85 @@ impl PreparedStrainField {
         q
     }
 
-    /// Extra blocks in the invertible enriched coordinates y = T q + B r.
-    /// Keeping r independent restores both native director inertia modes;
-    /// the original statically condensed nodal blocks remain unchanged.
-    pub(super) fn enrichment_blocks(
+    /// Physical consistent inertia in the COMPLETE fixed coordinates y=Tq+Br.
+    /// Numerical drilling inertia in a separately regularized modal pencil is
+    /// not part of the director velocity field and never enters this matrix.
+    pub(super) fn physical_inertia(
         &self,
         section: &ShearShellSection,
-        mass: ShellMass,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<([[f64; 2]; 18], [[f64; 2]; 2], [[f64; 2]; 2]), PlateError> {
-        let m = mass_matrix(&self.kin, &self.g, section, mass, cancelled)?;
-        let mut cross = [[0.0; 2]; 18];
-        for i in 0..18 {
-            for b in 0..2 {
-                cross[i][b] = m[i][18+b]
-                    + self.bubble[0][i]*m[18][18+b]
-                    + self.bubble[1][i]*m[19][18+b];
+    ) -> Result<Matrix, PlateError> {
+        let m = mass_matrix(&self.kin, &self.g, section, ShellMass::Consistent, cancelled)?;
+        self.in_complete_basis(&m)
+    }
+
+    pub(super) const fn bubble_stiffness(&self) -> [[f64; 2]; 2] {
+        self.bubble_stiffness
+    }
+
+    /// Exactly the native condensed physical nodal stiffness arithmetic. This
+    /// permits the retained owner to isolate its ORIGINAL numerical gauge once.
+    pub(super) fn condensed_stiffness(
+        &self,
+        section: &ShearShellSection,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Matrix, PlateError> {
+        let k = strain_matrix(&self.kin, &self.g, section.coupled_matrices(), cancelled)?;
+        let mut out = [[0.0; N]; N];
+        for i in 0..18 { for j in i..18 {
+            let value = k[i][j] + k[i][18]*self.bubble[0][j] + k[i][19]*self.bubble[1][j];
+            if !value.is_finite() {
+                return Err(PlateError::BadSection { what: "nonfinite original physical nodal stiffness" });
             }
-        }
-        let mb = [[m[18][18], m[18][19]], [m[19][18], m[19][19]]];
-        if cross.iter().flatten().chain(mb.iter().flatten()).any(|v| !v.is_finite()) {
-            return Err(PlateError::BadSection { what: "nonfinite enriched shell inertia" });
-        }
-        Ok((cross, mb, self.bubble_stiffness))
+            out[i][j] = value;
+            out[j][i] = value;
+        } }
+        Ok(out)
+    }
+
+    /// Material-only stiffness change in the ORIGINAL fixed T basis. The
+    /// section coefficient differences enter before quadrature; no changing
+    /// static condensation map is applied to retained coordinates or momentum.
+    pub(super) fn stiffness_change(
+        &self,
+        reference: &ShearShellSection,
+        current: &ShearShellSection,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Matrix, PlateError> {
+        let (a0,b0,d0,s0) = reference.coupled_matrices();
+        let (a1,b1,d1,s1) = current.coupled_matrices();
+        let delta = (
+            core::array::from_fn(|i| a1[i]-a0[i]),
+            core::array::from_fn(|i| b1[i]-b0[i]),
+            core::array::from_fn(|i| d1[i]-d0[i]),
+            core::array::from_fn(|i| core::array::from_fn(|j| s1[i][j]-s0[i][j])),
+        );
+        let k = strain_matrix(&self.kin, &self.g, delta, cancelled)?;
+        self.in_complete_basis(&k)
+    }
+
+    fn in_complete_basis(&self, matrix: &Matrix) -> Result<Matrix, PlateError> {
+        let mut out = [[0.0; N]; N];
+        for i in 0..N { for j in i..N {
+            let mut value = matrix[i][j];
+            if i < 18 {
+                for a in 0..2 { value += self.bubble[a][i]*matrix[18+a][j]; }
+            }
+            if j < 18 {
+                for b in 0..2 { value += matrix[i][18+b]*self.bubble[b][j]; }
+            }
+            if i < 18 && j < 18 {
+                for a in 0..2 { for b in 0..2 {
+                    value += self.bubble[a][i]*matrix[18+a][18+b]*self.bubble[b][j];
+                } }
+            }
+            if !value.is_finite() {
+                return Err(PlateError::BadSection { what: "nonfinite complete reference-basis operator" });
+            }
+            out[i][j] = value;
+            out[j][i] = value;
+        } }
+        Ok(out)
     }
 
     pub(super) fn eval(&self, q: &[f64; N], r: f64, s: f64)

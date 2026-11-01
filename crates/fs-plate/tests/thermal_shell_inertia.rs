@@ -83,7 +83,7 @@ fn near(a: f64, b: f64, relative: f64, absolute: f64) {
 }
 
 #[test]
-fn g1_exact_enriched_inertia_retains_cross_moment_and_original_nodal_pencil() {
+fn g1_exact_enriched_inertia_retains_cross_moment_and_original_nodal_stiffness() {
     let model = make_model(false, ShellMass::Consistent);
     let enriched = EnrichedMitcShell::try_new(Arc::clone(&model), || false).unwrap();
     let n = model.pencil().free;
@@ -107,7 +107,6 @@ fn g1_exact_enriched_inertia_retains_cross_moment_and_original_nodal_pencil() {
     }
     for i in 0..n {
         for j in 0..n {
-            assert_eq!(entry(enriched.mass(), i, j), entry(&model.pencil().m, i, j));
             assert_eq!(
                 entry(enriched.stiffness(), i, j),
                 entry(&model.pencil().k, i, j)
@@ -140,7 +139,10 @@ fn g1_exact_enriched_inertia_retains_cross_moment_and_original_nodal_pencil() {
         drilling[6 * node + 5] = 0.3;
     }
     // A director-axis rotation has no physical material velocity. The native
-    // gauge retains potential stiffness but must not manufacture inertia.
+    // transient gauge retains potential stiffness but must not manufacture
+    // inertia. The general modal pencil separately regularizes relative-spin
+    // inertia; the physical trajectory deliberately does not inherit it.
+    assert!(entry(&model.pencil().m, 5, 5) > 0.0);
     near(entry(enriched.mass(), 5, 5), 0.0, 0.0, 1e-16);
     assert!(
         enriched

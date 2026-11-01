@@ -953,7 +953,7 @@ checks pass; these are not claims of executed numerical or measured validation.
 
 `thermal::transient::EnrichedMitcShell` restores both independent internal
 director coordinates per facet in the invertible basis `y=Tq+Br`. Original
-nodal stiffness, consistent mass, support maps and drilling gauge are retained,
+nodal stiffness, physical reference inertia, support maps and drilling gauge are retained,
 with cross inertia `T^T M B`, bubble inertia and the original bubble stiffness.
 Thermal forces enter both momentum equations; internal motion is evolved,
 never prescribed by a moving thermal lift or reset to its static equilibrium.
@@ -962,11 +962,13 @@ Fixed-step implicit midpoint reuses the existing scaled sparse LDLT and
 compensated refinement kernels, with an owned effective factor shared by all
 trials and reusable across accepted equal-dt intervals without copying the
 sparse operators. The native report separates endpoint total-load work,
-polarized quadratic storage change and complete kinetic-energy change. Actual
+polarized quadratic storage change, stiffness-parameter work and complete kinetic-energy change. Actual
 strain polynomials, transformed nodal and internal material forces, gauge
 storage and whole-facet director bounds are recovered from the accepted full
-motion. The current native consistent mass carries physical translation and
-director motion, with no invented drilling inertia. The midpoint effective
+motion. This transient owner assembles physical I0/I1/I2 translation/director
+mass directly from the original element fields, including the nodal and
+internal cross blocks. It does not inherit the modal pencil's numerical
+relative-spin inertia regularization. The midpoint effective
 operator retains the original algebraic drilling stiffness. Fully free
 massless director-axis directions require compatible initial displacement and
 velocity; unsupported efforts on those numerical directions refuse.
@@ -974,11 +976,35 @@ State/operator identity,
 stationary support compatibility, finite arithmetic and final cancellation
 are admitted before returning immutable proposals.
 
-The scope is fixed linear elasticity, reference geometry and consistent mass.
-No nonlinear prestress, material damping, changing elastic tensors, remesh,
-adjoint or experimental accuracy follows. `tests/thermal_shell_inertia.rs`
+`with_material_model` changes the physical constitutive operator while retaining
+the original FULL `T0` basis, physical mass, support map and numerical drilling
+stiffness. It assembles `K(T)=Kref+T0^T[Kphysical(T)-Kphysical(ref)]T0` on each
+original enriched facet, including the new nodal/internal cross terms. Actual
+thermal loads and material forces are conjugate to this same fixed basis;
+recovery never applies the new static condensation map to accepted motion.
+The current model must retain mesh, directors, constraints and reference mass
+moments. Rebinding is immutable and does not move the physical history.
+
+`PreparedMitcMidpoint::advance_from` uses BOTH endpoint operators in the
+momentum equation. With `h=dt/2`, its factor is `M+h²K1`, and its right-hand side
+is `M v0+h[f_mean-(K0+K1)q0/2]`. The native first-law account separates
+`q0^T(K1-K0)q1/2` from load work and quadratic storage. This diagnostic parameter
+work is not itself a material heat source; the coupled thermodynamic owner must
+use its original free energy and entropy. The constant-operator entry shares
+the same stepping kernel and retains exact zero parameter work without an
+extra stiffness application. Numerical gauge forces come from the fixed
+reference nodal gauge, with exactly zero independent-director components.
+
+The scope is temperature/parameter-dependent LINEAR elasticity in a fixed
+reference geometry with constant physical mass. No nonlinear prestress,
+material damping, remesh, adjoint or experimental accuracy follows.
+`tests/thermal_shell_inertia.rs`
 checks analytic bubble/cross inertia, independent dynamic internal motion,
 static-limit recovery, repeated midpoint conservation and atomic refusals.
+`tests/thermal_shell_material_basis.rs` and `tests/thermal_shell_variable_step.rs`
+add fixed-basis physical observation and inertia, scalar softened-oscillator
+and two-director momentum references, operator-parameter work, compatibility
+and cancellation. Compiler checks do not establish numerical execution.
 
 ## Equilibrium of tied shell assemblies before modal reduction
 

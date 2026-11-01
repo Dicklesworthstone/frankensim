@@ -4,15 +4,20 @@
 //! with eighteen nodal coordinates and an elastic bubble map. Here the two
 //! extra coordinates remain independent: `y = T q + B r`. This is an
 //! invertible change of coordinates on the ORIGINAL enriched element, not a
-//! moving prescribed thermal lift. The blocks are
+//! moving prescribed thermal lift. The INITIAL reference blocks are
 //! `K = diag(K_condensed, K_bb)` and `M = [[M_condensed,L],[L^T,M_bb]]`.
+//! A material refresh retains the generally nonzero stiffness cross blocks in
+//! this original basis; it never diagonalizes them by changing the trajectory.
 //! Thermal load is `[T^T f_th, f_th,b]`. Thus a heated internal rotation has
 //! its own momentum equation and cannot inject unaccounted actuator work.
 //!
 //! The native nodal support frames, reference mass, director interpolation,
-//! quadrature and numerical drilling gauge remain unchanged. This lane uses
-//! consistent mass and fixed elasticity/geometry. It does not claim a finite
-//! rotation, prestressed tangent, damping, or temperature-dependent inertia.
+//! quadrature and numerical drilling stiffness remain unchanged. Source
+//! stiffness may change in this ORIGINAL fixed coordinate basis. Physical
+//! reference mass is assembled directly from the original director velocity
+//! field; numerical drilling inertia in a regularized modal pencil is excluded.
+//! This lane does not claim finite rotation, prestressed tangents, damping,
+//! moving geometry, or temperature-dependent reference inertia.
 //! Director-axis drilling has no physical inertia. Its algebraic constraint
 //! must hold for initial coordinates and rates; unsupported director-axis
 //! efforts are refused instead of supplying fictitious gauge mass.
@@ -27,10 +32,18 @@ use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod material;
+mod step;
+
 /// An immutable full enriched pencil sharing the original nodal shell model.
 #[derive(Clone, Debug)]
 pub struct EnrichedMitcShell {
+    // Permanent coordinate/mass identity carried by every retained state.
     model: Arc<MitcShellModel>,
+    material_model: Arc<MitcShellModel>,
+    reference_fields: Arc<Vec<PreparedStrainField>>,
+    reference_stiffness: Arc<Csr>,
+    gauge_stiffness: Arc<Csr>,
     stiffness: Arc<Csr>,
     mass: Arc<Csr>,
     gauges: Arc<Vec<AlgebraicGauge>>,
@@ -132,7 +145,11 @@ pub struct MitcTransientReport {
     pub load_work_j: f64,
     /// Change in one-half q^T K q, before thermal eigenstrain subtraction [J].
     pub quadratic_energy_change_j: f64,
-    /// Kinetic plus quadratic storage change minus total load work [J].
+    /// Polarized work from changing the physical stiffness at fixed reference
+    /// coordinates: q0^T (K1-K0) q1 / 2 [J]. It is not a caloric heat source.
+    pub stiffness_parameter_work_j: f64,
+    /// Kinetic plus quadratic storage change, minus stiffness-parameter work
+    /// and total load work [J].
     pub energy_residual_j: f64,
 }
 
@@ -146,7 +163,9 @@ pub struct MitcTransientStep {
 
 impl EnrichedMitcShell {
     /// Restore the original two interior director DOFs per facet. The original
-    /// nodal stiffness/mass and drilling gauge are reused without reassembly.
+    /// nodal stiffness and drilling gauge are retained. Physical consistent
+    /// mass is assembled from the native translation/director velocity field,
+    /// excluding any numerical drilling inertia from the modal pencil.
     /// Consistent native mass is required; lumping explicitly removes interior
     /// inertia and therefore cannot supply these two momentum equations.
     pub fn try_new(
@@ -170,15 +189,14 @@ impl EnrichedMitcShell {
             .ok_or_else(|| invalid("enriched shell coordinate extent overflow"))?;
         let mut k = Coo::new(dimension, dimension);
         let mut m = Coo::new(dimension, dimension);
+        let mut gauge = Coo::new(nodal, nodal);
+        let mut reference_fields = Vec::with_capacity(model.mesh.tris.len());
         for row in 0..nodal {
             row_check(row, &mut cancelled)?;
             let (cols, vals) = model.pencil.k.row(row);
             for (&col, &val) in cols.iter().zip(vals) {
                 k.push(row, col, val);
-            }
-            let (cols, vals) = model.pencil.m.row(row);
-            for (&col, &val) in cols.iter().zip(vals) {
-                m.push(row, col, val);
+                gauge.push(row, col, val);
             }
         }
         for (e, tri) in model.mesh.tris.iter().enumerate() {
@@ -191,58 +209,46 @@ impl EnrichedMitcShell {
                 &model.sections[e],
                 &mut cancelled,
             )?;
-            let (cross, mb, kb) =
-                field.enrichment_blocks(&model.sections[e], model.mass_model, &mut cancelled)?;
+            let inertia = field.physical_inertia(&model.sections[e], &mut cancelled)?;
+            material::scatter(&mut m, &model, e, &inertia, 1.0, &mut cancelled)?;
+            let physical = field.condensed_stiffness(&model.sections[e], &mut cancelled)?;
+            material::scatter(&mut gauge, &model, e, &physical, -1.0, &mut cancelled)?;
+            let kb = field.bubble_stiffness();
             let first = nodal + 2 * e;
             for i in 0..2 {
                 for j in 0..2 {
                     k.push(first + i, first + j, kb[i][j]);
-                    m.push(first + i, first + j, mb[i][j]);
                 }
             }
-            for local in 0..18 {
-                let node = tri[local / 6];
-                let component = local % 6;
-                let Some(row) = model.pencil.dof_map[6 * node + component] else {
-                    continue;
-                };
-                for b in 0..2 {
-                    let value: f64 = (0..3)
-                        .map(|axis| {
-                            model.frames[node][component % 3][axis]
-                                * cross[6 * (local / 6) + 3 * (component / 3) + axis][b]
-                        })
-                        .sum();
-                    if !value.is_finite() {
-                        return Err(invalid("nonfinite projected bubble cross inertia"));
-                    }
-                    if value != 0.0 {
-                        m.push(row, first + b, value);
-                        m.push(first + b, row, value);
-                    }
-                }
-            }
+            reference_fields.push(field);
         }
         check(&mut cancelled)?;
         let stiffness = Arc::new(k.assemble());
         let mass = Arc::new(m.assemble());
+        let gauge_stiffness = Arc::new(gauge.assemble());
         let gauges = Arc::new(algebraic_gauges(&model, &stiffness, &mut cancelled)?);
         check(&mut cancelled)?;
         Ok(Self {
+            material_model: Arc::clone(&model),
             model,
+            reference_fields: Arc::new(reference_fields),
+            reference_stiffness: Arc::clone(&stiffness),
+            gauge_stiffness,
             stiffness,
             mass,
             gauges,
         })
     }
 
-    /// Exact immutable native model, including support frames and reference mass.
+    /// Current immutable material model, with the original geometry/supports.
+    /// Thermal loading must be prepared on this model; retained states keep
+    /// their original reference coordinate owner even when this model changes.
     pub fn model(&self) -> &MitcShellModel {
-        &self.model
+        &self.material_model
     }
-    /// Share the original native model without copying its mesh or sparse pencil.
+    /// Share the current material model without copying its mesh or sparse pencil.
     pub fn shared_model(&self) -> Arc<MitcShellModel> {
-        Arc::clone(&self.model)
+        Arc::clone(&self.material_model)
     }
     /// Enriched stiffness, including the original nodal drilling gauge.
     pub fn stiffness(&self) -> &Csr {
@@ -296,11 +302,13 @@ impl EnrichedMitcShell {
     ) -> Result<MitcTransientState, PlateError> {
         self.admit_thermal(thermal)?;
         check(&mut cancelled)?;
-        let bubbles: Vec<_> = thermal
-            .facets
-            .iter()
-            .map(|f| f.equilibrium_bubble())
-            .collect();
+        admit_nodal(&self.model, nodal_displacement_6n)?;
+        let mut bubbles = Vec::with_capacity(thermal.facets.len());
+        for (e, (facet, tri)) in thermal.facets.iter().zip(&self.model.mesh.tris).enumerate() {
+            check(&mut cancelled)?;
+            let nodal = core::array::from_fn(|i| nodal_displacement_6n[6 * tri[i / 6] + i % 6]);
+            bubbles.push(facet.equilibrium_bubble_in_basis(&self.reference_fields[e], &nodal)?);
+        }
         self.state(
             time_s,
             nodal_displacement_6n,
@@ -322,12 +330,15 @@ impl EnrichedMitcShell {
         check(&mut cancelled)?;
         self.admit_thermal(thermal)?;
         self.model.project_load(external_load_6n)?;
-        let world: Vec<_> = thermal
-            .load_6n
-            .iter()
-            .zip(external_load_6n)
-            .map(|(a, b)| a + b)
-            .collect();
+        let mut world = external_load_6n.to_vec();
+        for (e, (facet, tri)) in thermal.facets.iter().zip(&self.model.mesh.tris).enumerate() {
+            check(&mut cancelled)?;
+            let load = facet.load_in_basis(&self.reference_fields[e])?;
+            for i in 0..18 {
+                let slot = 6 * tri[i / 6] + i % 6;
+                world[slot] = finite(world[slot] + load[i])?;
+            }
+        }
         let mut out = self.model.project_load(&world)?;
         for facet in &thermal.facets {
             check(&mut cancelled)?;
@@ -359,10 +370,14 @@ impl EnrichedMitcShell {
             let nodal =
                 core::array::from_fn(|i| state.nodal_displacement_6n[6 * tri[i / 6] + i % 6]);
             let bubble = state.bubble_coordinates[e];
-            maximum_director_motion_rad = maximum_director_motion_rad
-                .max(prepared.director_motion_bound_with_bubble(&nodal, bubble, &mut cancelled)?);
-            let (facet, forces) = prepared.recover_with_bubble(&nodal, bubble, &mut cancelled)?;
-            strain_fields.push(prepared.strain_field_with_bubble(
+            let basis = &self.reference_fields[e];
+            maximum_director_motion_rad = maximum_director_motion_rad.max(
+                prepared.director_motion_bound_in_basis(basis, &nodal, bubble, &mut cancelled)?,
+            );
+            let (facet, forces) =
+                prepared.recover_in_basis(basis, &nodal, bubble, &mut cancelled)?;
+            strain_fields.push(prepared.strain_field_in_basis(
+                basis,
                 &nodal,
                 bubble,
                 &mut cancelled,
@@ -376,13 +391,15 @@ impl EnrichedMitcShell {
         }
         let mut material_generalized_force = self.model.project_load(&nodal_force)?;
         material_generalized_force.extend(bubble_material_force.iter().flatten().copied());
-        let mut numerical_gauge_force =
-            action(&self.stiffness, &state.coordinates, &mut cancelled)?;
-        let thermal_load =
-            self.generalized_load(thermal, &vec![0.0; nodal_force.len()], &mut cancelled)?;
-        for i in 0..self.dimension() {
-            numerical_gauge_force[i] -= thermal_load[i] + material_generalized_force[i];
-        }
+        // The numerical gauge is the ORIGINAL fixed nodal operator. In
+        // particular, no subtraction of temperature-dependent material forces
+        // can manufacture an internal-coordinate gauge force or heat source.
+        let mut numerical_gauge_force = action(
+            &self.gauge_stiffness,
+            &state.coordinates[..self.model.pencil.free],
+            &mut cancelled,
+        )?;
+        numerical_gauge_force.resize(self.dimension(), 0.0);
         let drilling_gauge_energy_j = 0.5 * product(&state.coordinates, &numerical_gauge_force)?;
         let strain_energy_j = finite(storage.0 + storage.1)?;
         let response = ThermalShellResponse {
@@ -441,7 +458,7 @@ impl EnrichedMitcShell {
     }
 
     fn admit_thermal(&self, thermal: &PreparedThermalShell<'_>) -> Result<(), PlateError> {
-        if !std::ptr::eq(self.model.as_ref(), thermal.model) {
+        if !std::ptr::eq(self.material_model.as_ref(), thermal.model) {
             return Err(invalid(
                 "thermal loading must belong to the exact original enriched shell",
             ));
@@ -558,90 +575,9 @@ impl PreparedMitcMidpoint {
         initial: &MitcTransientState,
         load_before: &[f64],
         load_after: &[f64],
-        mut cancelled: impl FnMut() -> bool,
+        cancelled: impl FnMut() -> bool,
     ) -> Result<MitcTransientStep, PlateError> {
-        check(&mut cancelled)?;
-        self.shell.admit_state(initial)?;
-        let n = self.shell.dimension();
-        if load_before.len() != n
-            || load_after.len() != n
-            || load_before.iter().chain(load_after).any(|v| !v.is_finite())
-        {
-            return Err(invalid(
-                "one finite endpoint force per enriched shell coordinate required",
-            ));
-        }
-        self.shell.admit_gauge_load(load_before)?;
-        self.shell.admit_gauge_load(load_after)?;
-        let target = finite(initial.time_s + self.dt_s)?;
-        if target <= initial.time_s {
-            return Err(invalid("midpoint time increment is not representable"));
-        }
-        let h = 0.5 * self.dt_s;
-        let mut rhs = action(&self.shell.mass, &initial.velocity, &mut cancelled)?;
-        let kq = action(&self.shell.stiffness, &initial.coordinates, &mut cancelled)?;
-        let force: Vec<_> = load_before
-            .iter()
-            .zip(load_after)
-            .map(|(a, b)| 0.5 * a + 0.5 * b)
-            .collect();
-        for i in 0..n {
-            row_check(i, &mut cancelled)?;
-            rhs[i] = finite(rhs[i] + h * (force[i] - kq[i]))?;
-        }
-        let midpoint_velocity = self
-            .factor
-            .solve_reduced(&self.effective, &rhs, &mut cancelled)?;
-        let mut q = vec![0.0; n];
-        let mut v = vec![0.0; n];
-        for i in 0..n {
-            row_check(i, &mut cancelled)?;
-            q[i] = finite(initial.coordinates[i] + self.dt_s * midpoint_velocity[i])?;
-            v[i] = finite(2.0 * midpoint_velocity[i] - initial.velocity[i])?;
-        }
-        let state = self.shell.state_reduced(target, q, v, &mut cancelled)?;
-        let displacement: Vec<_> = state
-            .coordinates
-            .iter()
-            .zip(&initial.coordinates)
-            .map(|(b, a)| b - a)
-            .collect();
-        let kq_after = action(&self.shell.stiffness, &state.coordinates, &mut cancelled)?;
-        let mean_stiffness_force: Vec<_> = kq
-            .iter()
-            .zip(kq_after)
-            .map(|(a, b)| 0.5 * a + 0.5 * b)
-            .collect();
-        // Difference of quadratic energies is evaluated by its polarized work,
-        // avoiding cancellation of two large, almost equal energy datums.
-        let quadratic_energy_change_j = product(&displacement, &mean_stiffness_force)?;
-        let load_work_j = product(&displacement, &force)?;
-        let velocity_change: Vec<_> = state
-            .velocity
-            .iter()
-            .zip(&initial.velocity)
-            .map(|(b, a)| b - a)
-            .collect();
-        let mean_velocity: Vec<_> = state
-            .velocity
-            .iter()
-            .zip(&initial.velocity)
-            .map(|(b, a)| 0.5 * a + 0.5 * b)
-            .collect();
-        let mean_momentum = action(&self.shell.mass, &mean_velocity, &mut cancelled)?;
-        let kinetic_energy_change_j = product(&velocity_change, &mean_momentum)?;
-        let energy_residual_j =
-            finite(kinetic_energy_change_j + quadratic_energy_change_j - load_work_j)?;
-        check(&mut cancelled)?;
-        Ok(MitcTransientStep {
-            state,
-            report: MitcTransientReport {
-                kinetic_energy_change_j,
-                load_work_j,
-                quadratic_energy_change_j,
-                energy_residual_j,
-            },
-        })
+        self.advance_from(&self.shell, initial, load_before, load_after, cancelled)
     }
 }
 

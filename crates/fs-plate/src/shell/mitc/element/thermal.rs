@@ -17,6 +17,7 @@ pub(in crate::shell::mitc) struct PreparedThermalFacet {
     loading: ThermalLoading,
     bubble_offset: [f64; 2],
     bubble_load: [f64; 2],
+    raw_nodal_load: [f64; 18],
     pub(in crate::shell::mitc) load: [f64; 18],
 }
 
@@ -49,6 +50,34 @@ impl PreparedThermalFacet {
         self.bubble_load
     }
 
+    /// Static internal displacement expressed as a residual in an ORIGINAL
+    /// retained basis. This is used only when explicitly seeding equilibrium.
+    pub(in crate::shell::mitc) fn equilibrium_bubble_in_basis(
+        &self,
+        basis: &PreparedStrainField,
+        nodal: &[f64; 18],
+    ) -> Result<[f64; 2], PlateError> {
+        let result = core::array::from_fn(|i| self.bubble_offset[i]
+            + (0..18).map(|j| (self.field.bubble[i][j]-basis.bubble[i][j])*nodal[j]).sum::<f64>());
+        if result.iter().any(|v| !v.is_finite()) {
+            return Err(PlateError::BadSection { what: "nonfinite reference-basis equilibrium seed" });
+        }
+        Ok(result)
+    }
+
+    pub(in crate::shell::mitc) fn load_in_basis(
+        &self,
+        basis: &PreparedStrainField,
+    ) -> Result<[f64; 18], PlateError> {
+        let result = core::array::from_fn(|i| self.raw_nodal_load[i]
+            + basis.bubble[0][i]*self.bubble_load[0]
+            + basis.bubble[1][i]*self.bubble_load[1]);
+        if result.iter().any(|v| !v.is_finite()) {
+            return Err(PlateError::BadSection { what: "nonfinite reference-basis thermal load" });
+        }
+        Ok(result)
+    }
+
     pub(in crate::shell::mitc) fn director_motion_bound(
         &self,
         nodal: &[f64; 18],
@@ -63,7 +92,17 @@ impl PreparedThermalFacet {
         bubble: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<f64, PlateError> {
-        let mut q = self.field.expand(nodal);
+        self.director_motion_bound_in_basis(&self.field, nodal, bubble, cancelled)
+    }
+
+    pub(in crate::shell::mitc) fn director_motion_bound_in_basis(
+        &self,
+        basis: &PreparedStrainField,
+        nodal: &[f64; 18],
+        bubble: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<f64, PlateError> {
+        let mut q = basis.expand(nodal);
         for i in 0..2 { q[18 + i] += bubble[i]; }
         let mut motion = [[0.0; 3]; 4];
         for (point, (r, s)) in [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0/3.0, 1.0/3.0)]
@@ -106,7 +145,17 @@ impl PreparedThermalFacet {
         bubble: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<crate::shell::mitc::strain::RealElementStrain, PlateError> {
-        let mut q = self.field.expand(nodal);
+        self.strain_field_in_basis(&self.field, nodal, bubble, cancelled)
+    }
+
+    pub(in crate::shell::mitc) fn strain_field_in_basis(
+        &self,
+        basis: &PreparedStrainField,
+        nodal: &[f64; 18],
+        bubble: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<crate::shell::mitc::strain::RealElementStrain, PlateError> {
+        let mut q = basis.expand(nodal);
         for i in 0..2 {
             q[18 + i] += bubble[i];
         }
@@ -172,6 +221,7 @@ impl PreparedThermalFacet {
             loading,
             bubble_offset,
             bubble_load: [full[18], full[19]],
+            raw_nodal_load: core::array::from_fn(|i| full[i]),
             load,
         })
     }
@@ -197,12 +247,22 @@ impl PreparedThermalFacet {
         bubble: [f64; 2],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<(ThermalFacetResponse, [f64; 2]), PlateError> {
-        let mut q = self.field.expand(nodal);
+        self.recover_in_basis(&self.field, nodal, bubble, cancelled)
+    }
+
+    pub(in crate::shell::mitc) fn recover_in_basis(
+        &self,
+        basis: &PreparedStrainField,
+        nodal: &[f64; 18],
+        bubble: [f64; 2],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(ThermalFacetResponse, [f64; 2]), PlateError> {
+        let mut q = basis.expand(nodal);
         for i in 0..2 { q[18+i] += bubble[i]; }
         let (mut response, force) = self.recover_expanded(&q, cancelled)?;
         for i in 0..18 {
             response.material_nodal_force[i] +=
-                self.field.bubble[0][i]*force[0] + self.field.bubble[1][i]*force[1];
+                basis.bubble[0][i]*force[0] + basis.bubble[1][i]*force[1];
         }
         if response.material_nodal_force.iter().any(|v| !v.is_finite()) {
             return Err(PlateError::BadSection { what: "nonfinite enriched material nodal force" });
