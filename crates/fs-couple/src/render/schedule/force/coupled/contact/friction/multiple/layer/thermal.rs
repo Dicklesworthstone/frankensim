@@ -784,8 +784,19 @@ impl MultiFrictionModalSystem {
                         internal_change_j = number(internal_change_j
                             + current.internal_energy_j - initial.internal_energy_j)?;
                         reversible_heat_j = number(reversible_heat_j + reversible)?;
-                        let relaxation = layer.law.step_dissipation(&layer.state,
-                            &staged.state, dt).map_err(ModalFrictionError::from)?.relaxation_j;
+                        // Split the staged loss with the relaxation part that the SAME
+                        // staged step put into it (MaterialShearLayer::stage, on the
+                        // mechanical period). Re-evaluating it on the thermal interval
+                        // (n+1)T-nT, which differs from T by rounding, made a sticking
+                        // step's plastic part a few 1e-30 J negative.
+                        let layer_frame = system.staged_ports[binding.port].shear_layer
+                            .ok_or(LayerThermalError::Invalid("staged material layer frame is missing"))?;
+                        if layer_frame.dissipated_j != staged.dissipated_j {
+                            return Err(LayerThermalError::Invalid(
+                                "staged material layer frame is not this staged step",
+                            ));
+                        }
+                        let relaxation = layer_frame.relaxation_dissipated_j;
                         physical_heat.push((number(staged.dissipated_j-relaxation)?, relaxation,
                             number(staged.dissipated_j + reversible)?));
                     }
