@@ -19,6 +19,8 @@
 use core::fmt;
 use fs_math::det;
 
+/// Explicit-time Perzyna kinetics on this same finite return and tangent owner.
+pub mod rate;
 /// Strict, explicit model-card binding for this exact Kirchhoff-yield law.
 pub mod source;
 /// Affine temperature dependence and multiplicative isotropic thermal stretch.
@@ -83,12 +85,15 @@ pub struct FiniteJ2Response {
     /// Exact dP/dF at frozen old history, indexed `[P_component][F_component]`.
     /// At the yield kink the numerical zero-overstress branch is elastic.
     pub tangent_pa: [[f64; 9]; 9],
-    /// Reduced incremental potential: returned stored energy + sigma_y dgamma.
+    /// Reduced incremental potential: stored energy + sigma_y dgamma for the
+    /// rate-independent law. Explicit kinetics also adds its integrated convex
+    /// rate potential, which is distinct from physical viscous dissipation.
     /// Its derivative is P; it is not the stored energy of the candidate.
     pub incremental_potential_j_m3: f64,
     /// Actual elastic plus energetic-hardening storage at the returned endpoint.
     pub stored_energy_j_m3: f64,
-    /// Physical dissipation only: sigma_y dgamma, without numerical work defect.
+    /// Physical dissipation only: sigma_y dgamma plus endpoint viscous work
+    /// when kinetics is explicitly selected, without numerical work defect.
     pub plastic_dissipation_j_m3: f64,
     /// Nonnegative increment of accumulated equivalent plastic strain.
     pub plastic_increment: f64,
@@ -324,6 +329,15 @@ impl FiniteJ2 {
         old: &FiniteJ2State,
     ) -> Result<FiniteJ2Response, FiniteJ2Error> {
         let returned = self.return_map(f, old)?;
+        self.response_from_return(f, old, returned)
+    }
+
+    fn response_from_return(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        returned: ReturnMap,
+    ) -> Result<FiniteJ2Response, FiniteJ2Error> {
         let tangent = self.return_tangent(f, old, &returned)?;
         Ok(FiniteJ2Response {
             state: returned.state,
@@ -352,6 +366,15 @@ impl FiniteJ2 {
     }
 
     fn return_map(&self, f: &[f64; 9], old: &FiniteJ2State) -> Result<ReturnMap, FiniteJ2Error> {
+        self.return_map_with_rate(f, old, None)
+    }
+
+    fn return_map_with_rate(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        kinetics: Option<&rate::FiniteOverstressJ2>,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
         let trial = self.elastic_endpoint(f, old)?;
         let p = &self.parameters;
         let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
@@ -371,7 +394,20 @@ impl FiniteJ2 {
             64.0 * f64::EPSILON * (2.0 * p.shear_modulus_pa).max(q_trial).max(radius_old);
         let plastic = excess > yield_roundoff;
         let denominator = 3.0 * p.shear_modulus_pa + p.hardening_modulus_pa;
-        let dgamma = if plastic { excess / denominator } else { 0.0 };
+        let flow = if plastic {
+            kinetics
+                .map(|law| law.solve(excess, denominator))
+                .transpose()?
+        } else {
+            None
+        };
+        let dgamma = if let Some(flow) = &flow {
+            flow.increment
+        } else if plastic {
+            excess / denominator
+        } else {
+            0.0
+        };
         let alpha = old.alpha + dgamma;
         if plastic && (dgamma == 0.0 || alpha == old.alpha) {
             return Err(FiniteJ2Error::Numerical(
@@ -385,7 +421,9 @@ impl FiniteJ2 {
         )?;
         // This expression avoids subtracting nearly equal values for a large
         // plastic step or the perfectly plastic limit H=0.
-        let scale = if plastic {
+        let scale = if let Some(flow) = &flow {
+            (self.yield_radius(alpha) + flow.overstress_pa) / q_trial
+        } else if plastic {
             self.yield_radius(alpha) / q_trial
         } else {
             1.0
@@ -424,10 +462,18 @@ impl FiniteJ2 {
             old.clone()
         };
         let stored = self.energy(trial.log_j, &returned_deviator, alpha)?;
-        let dissipation = p.yield_stress_pa * dgamma;
-        let potential = stored + dissipation;
-        // Equivalent to trial_energy + H alpha_old²/2 - positive(excess)²/(2D),
-        // but the positive sum avoids cancellation after large plastic steps.
+        let yield_dissipation = p.yield_stress_pa * dgamma;
+        let (dissipation, potential) = if let Some(flow) = &flow {
+            let viscous_work = flow.overstress_pa * dgamma;
+            (
+                yield_dissipation + viscous_work,
+                stored + yield_dissipation + flow.potential_fraction * viscous_work,
+            )
+        } else {
+            (yield_dissipation, stored + yield_dissipation)
+        };
+        // Positive stored/rate contributions avoid cancellation after large
+        // plastic steps; physical viscous work remains separate from its integral.
         if tau.iter().chain(first_piola.iter()).any(|x| !x.is_finite())
             || !potential.is_finite()
             || !dissipation.is_finite()
@@ -449,6 +495,7 @@ impl FiniteJ2 {
             stored,
             dissipation,
             potential,
+            flow,
         })
     }
 
@@ -487,8 +534,16 @@ impl FiniteJ2 {
                 // n = s_trial/q avoids q² overflow and a norm derivative at q=0.
                 let direction = trial_stress.map(|x| x / q_trial);
                 let dq = 1.5 * dot(&direction, &dtrial);
-                let coefficient =
-                    -(3.0 * p.shear_modulus_pa / denominator) * (radius_old / q_trial) * dq;
+                let coefficient = if let Some(flow) = &returned.flow {
+                    // Differentiate the implicit scalar flow, not its secant
+                    // approximation. The stable positive numerator avoids
+                    // cancellation in 1/(A+f') - dgamma/q near perfect flow.
+                    -(3.0 * p.shear_modulus_pa / (denominator + flow.tangent_modulus_pa))
+                        * ((radius_old + flow.transverse_overstress_pa) / q_trial)
+                        * dq
+                } else {
+                    -(3.0 * p.shear_modulus_pa / denominator) * (radius_old / q_trial) * dq
+                };
                 for i in 0..9 {
                     dtau[i] += coefficient * direction[i];
                 }
@@ -587,6 +642,7 @@ struct ReturnMap {
     stored: f64,
     dissipation: f64,
     potential: f64,
+    flow: Option<rate::FlowReturn>,
 }
 
 /// Fixed 3-by-3 data; only the existing native eigensolver owns a small workspace.
