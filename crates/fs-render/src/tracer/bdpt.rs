@@ -3023,6 +3023,66 @@ mod tests {
     }
 
     #[test]
+    fn g1_absorbing_bsdf_preserves_importance_and_forced_split_power() {
+        use crate::conductor::{CauchyCoatingLayer, CoherentPeriodicCoating,
+            ConductorDataStatus, ConductorSource};
+        use crate::dielectric::{DielectricCoating, GlassProvenance};
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.absorbing-bdpt", b"synthetic-passive-film"),
+            ConductorDataStatus::Representative,
+        ).unwrap();
+        let coating = DielectricCoating::try_new(CoherentPeriodicCoating::try_new(
+            &[CauchyCoatingLayer::try_new(CauchyIor::try_constant(1.7).unwrap(),
+                0.22, 73.0e-9).unwrap()], 1, source,
+        ).unwrap()).unwrap();
+        let glass = DielectricGlass::new(CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::CLEAR, GlassProvenance::Custom);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let mut vertex = Vertex {
+            kind: VertexKind::Surface { primitive_index: 0 },
+            point: Point3::new(0.0, 0.0, 0.0), geometric_normal: Some(normal), wo: Some(normal),
+            beta: 1.0, pdf_fwd: 1.0, pdf_rev: 0.0, delta: true, positive_medium: None,
+            negative_medium: Some(MediumEntry { boundary_primitive: 0, glass: &glass }),
+        };
+        let mut scene = Scene {
+            primitives: vec![Primitive {
+                shape: Shape::Mesh(closed_smooth_slab(-0.2, 0.0)),
+                material: Material::Dielectric { glass, surface: DielectricSurface::SMOOTH },
+                emission: None,
+            }], lights: Vec::new(), environment: None,
+            camera: Camera { eye: Point3::new(0.0, 0.0, 1.0), forward: normal.scale(-1.0),
+                up: Vec3::new(0.0, 1.0, 0.0), half_tan: 0.0 },
+        };
+        // Independent single-film Airy powers at 550 nm and normal incidence.
+        let (r, t) = (0.1083666104871264, 0.6299495843544911);
+        for rough in [false, true] {
+            let surface = (if rough { DielectricSurface::try_rough(0.2).unwrap() }
+                else { DielectricSurface::SMOOTH }).with_coating(coating);
+            vertex.delta = !rough;
+            scene.primitives[0].material = Material::Dielectric { glass, surface };
+            for (u, event, power) in [(0.0, DielectricEvent::Reflection, r),
+                (0.999, DielectricEvent::Transmission, t)] {
+                for (mode, transport) in [(TransportMode::Radiance,
+                    if event == DielectricEvent::Transmission { 1.0 / 2.25 } else { 1.0 }),
+                    (TransportMode::Importance, 1.0)] {
+                    let actual = sample_surface(&scene, &vertex, 550.0, mode, [0.0, 0.0, u, 0.0])
+                        .unwrap().unwrap();
+                    assert_eq!(actual.event, Some(event));
+                    assert!((actual.weight - (r + t) * transport).abs() < 2.0e-12);
+                    assert_eq!(actual.delta, !rough);
+                    if rough {
+                        assert!(actual.pdf_fwd_solid_angle > 0.0 && actual.pdf_rev_solid_angle > 0.0);
+                    } else {
+                        let split = split_smooth_dielectric_surface(&scene, &vertex, 550.0, mode, event)
+                            .unwrap().unwrap();
+                        assert!((split.weight - power * transport).abs() < 2.0e-12);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn g0_first_smooth_camera_boundary_enumerates_both_fresnel_terms() {
         with_test_cx(|cx| {
             let glass = DielectricGlass::representative_borosilicate();

@@ -698,7 +698,9 @@ struct SlabDirectLane {
     incident_direction: Vec3,
     nee_pdf_solid_angle: f64,
     transmission_probability: f64,
-    entry_transmission_probability: f64,
+    /// Ordered stochastic T/T or T/R/T proposals; unused trailing event is one.
+    /// Forced smooth splits remove the corresponding leading roulette factors.
+    event_probabilities: [f64; 3],
     radiance_transport: f64,
     visible: bool,
     reflection_triangle_index: Option<u32>,
@@ -11073,7 +11075,7 @@ fn trace_parallel_slab_direct_lane(
             incident_direction: geometry.incident_direction,
             nee_pdf_solid_angle,
             transmission_probability: 0.0,
-            entry_transmission_probability: 0.0,
+            event_probabilities: [0.0, 0.0, 1.0],
             radiance_transport: 0.0,
             visible: false,
             reflection_triangle_index: None,
@@ -11245,7 +11247,7 @@ fn trace_parallel_slab_direct_lane(
         incident_direction: geometry.incident_direction,
         nee_pdf_solid_angle,
         transmission_probability,
-        entry_transmission_probability,
+        event_probabilities: [entry_transmission_probability, exit_transmission_probability, 1.0],
         radiance_transport,
         visible,
         reflection_triangle_index: None,
@@ -11951,7 +11953,7 @@ fn trace_planar_manifold_rectangle_direct_lanes(
             incident_direction: connection.incident_direction,
             nee_pdf_solid_angle,
             transmission_probability,
-            entry_transmission_probability,
+            event_probabilities: [entry_transmission_probability, exit_transmission_probability, 1.0],
             radiance_transport,
             visible: true,
             reflection_triangle_index: None,
@@ -12202,15 +12204,17 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                     .norm();
             let beer =
                 medium_transmittance(Some(boundary.glass), wavelength_nm, internal_distance)?;
+            let reflection_probability = reflection_fresnel.event_probabilities()[0];
             let event_probability = entry_transmission_probability
-                * reflection_fresnel.event_probabilities()[0] * exit_transmission_probability;
+                * reflection_probability * exit_transmission_probability;
             let radiance_transport =
                 entry_transmittance * reflection_fresnel.reflectance * exit_transmittance * beer;
             let lane = SlabDirectLane {
                 incident_direction: connection.incident_direction,
                 nee_pdf_solid_angle,
                 transmission_probability: event_probability,
-                entry_transmission_probability,
+                event_probabilities: [entry_transmission_probability, reflection_probability,
+                    exit_transmission_probability],
                 radiance_transport,
                 visible: true,
                 reflection_triangle_index: Some(reflection_triangle),
@@ -12515,7 +12519,7 @@ fn trace_planar_manifold_environment_direct_lanes(
             incident_direction: connection.incident_direction,
             nee_pdf_solid_angle,
             transmission_probability,
-            entry_transmission_probability,
+            event_probabilities: [entry_transmission_probability, exit_transmission_probability, 1.0],
             radiance_transport,
             visible: true,
             reflection_triangle_index: None,
@@ -12617,12 +12621,13 @@ fn previous_after_dielectric_sample(
             return Ok(next);
         };
         let eta_glass = glass.ior().eval(wavelength_nm)?;
-        let reflection_probability = surface.interface(wavelength_nm, true)?.fresnel(
-            incident_ray.dir.dot(frame.geometric).clamp(0.0, 1.0),
-            eta_glass,
-            1.0,
-        )?
-        .event_probabilities()[0];
+        let reflection_probability = if sampled_event_is_forced { 1.0 } else {
+            surface.interface(wavelength_nm, true)?.fresnel(
+                incident_ray.dir.dot(frame.geometric).clamp(0.0, 1.0),
+                eta_glass,
+                1.0,
+            )?.event_probabilities()[0]
+        };
         next.smooth_slab = Some(SmoothSlabPath::ManifoldReflected(PlanarManifoldReflected {
             source_origin: entry.source_origin,
             source_geometric_normal: entry.source_geometric_normal,
@@ -12640,9 +12645,10 @@ fn previous_after_dielectric_sample(
     }
     let eta_i = medium_ior(boundary.incident, wavelength_nm)?;
     let eta_t = medium_ior(boundary.transmitted, wavelength_nm)?;
-    let transmission_probability =
+    let transmission_probability = if sampled_event_is_forced { 1.0 } else {
         deterministic_surface_transmission(frame.oriented, incident_ray.dir, eta_i, eta_t,
-            &surface, wavelength_nm, !frame.entering)?.probability;
+            &surface, wavelength_nm, !frame.entering)?.probability
+    };
 
     if frame.entering && medium_stack.len() == 0 {
         let Some(source) = previous.filter(|source| {
@@ -13405,26 +13411,13 @@ fn slab_nee_mis_weight(
 }
 
 fn competing_dielectric_event_probability(
-    full_event_probability: f64,
-    entry_transmission_probability: f64,
-    entry_was_forced: bool,
+    event_probabilities: [f64; 3],
+    remaining_splits: u8,
 ) -> Result<f64, TracerError> {
-    if !full_event_probability.is_finite()
-        || full_event_probability < 0.0
-        || !entry_transmission_probability.is_finite()
-        || entry_transmission_probability <= 0.0
-        || entry_transmission_probability > 1.0
-    {
+    if event_probabilities.iter().any(|p| !p.is_finite() || !(0.0..=1.0).contains(p)) {
         return Err(TracerError::InvalidInput);
     }
-    let probability = if entry_was_forced {
-        full_event_probability / entry_transmission_probability
-    } else {
-        full_event_probability
-    };
-    (probability.is_finite() && (0.0..=1.0).contains(&probability))
-        .then_some(probability)
-        .ok_or(TracerError::InvalidInput)
+    Ok(event_probabilities.iter().skip(remaining_splits as usize).product())
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]// one integrator, one story
@@ -14831,9 +14824,8 @@ fn trace_path_with_regions<'scene>(
                                             connection.nee_pdf_solid_angle,
                                             source_bsdf_pdf,
                                             competing_dielectric_event_probability(
-                                                connection.transmission_probability,
-                                                connection.entry_transmission_probability,
-                                                remaining_smooth_dielectric_splits > 0,
+                                                connection.event_probabilities,
+                                                remaining_smooth_dielectric_splits,
                                             )?,
                                             competing_bsdf_path_is_evaluated,
                                         )?;
@@ -15111,9 +15103,8 @@ fn trace_path_with_regions<'scene>(
                                                 connection.nee_pdf_solid_angle,
                                                 source_bsdf_pdf,
                                                 competing_dielectric_event_probability(
-                                                    connection.transmission_probability,
-                                                    connection.entry_transmission_probability,
-                                                    remaining_smooth_dielectric_splits > 0,
+                                                    connection.event_probabilities,
+                                                    remaining_smooth_dielectric_splits,
                                                 )?,
                                                 competing_bsdf_path_is_evaluated,
                                             )?;
@@ -17512,39 +17503,43 @@ mod tests {
     }
 
     #[test]
-    fn forced_entry_mis_density_omits_only_the_unsampled_entry_event() {
+    fn forced_split_mis_density_omits_every_unsampled_event() {
         let entry_t = 0.91;
         let exit_t = 0.83;
         let internal_r = 0.17;
-        let tt_physical = entry_t * exit_t;
         let trt_physical = entry_t * internal_r * exit_t;
         assert_near(
-            competing_dielectric_event_probability(tt_physical, entry_t, true).unwrap(),
+            competing_dielectric_event_probability([entry_t, exit_t, 1.0], 1).unwrap(),
             exit_t,
             2.0 * f64::EPSILON,
             "forced TT event density",
         );
         assert_near(
-            competing_dielectric_event_probability(tt_physical, entry_t, false).unwrap(),
+            competing_dielectric_event_probability([entry_t, exit_t, 1.0], 0).unwrap(),
             entry_t * exit_t,
             2.0 * f64::EPSILON,
             "sampled TT event density",
         );
         assert_near(
-            competing_dielectric_event_probability(trt_physical, entry_t, true).unwrap(),
+            competing_dielectric_event_probability([entry_t, internal_r, exit_t], 1).unwrap(),
             internal_r * exit_t,
             2.0 * f64::EPSILON,
             "forced TRT event density",
         );
         assert_near(
-            competing_dielectric_event_probability(trt_physical, entry_t, false).unwrap(),
+            competing_dielectric_event_probability([entry_t, internal_r, exit_t], 0).unwrap(),
             entry_t * internal_r * exit_t,
             2.0 * f64::EPSILON,
             "sampled TRT event density",
         );
+        assert_eq!(competing_dielectric_event_probability([entry_t, exit_t, 1.0], 2).unwrap(), 1.0);
+        assert_eq!(competing_dielectric_event_probability([entry_t, internal_r, exit_t], 2).unwrap(), exit_t);
+        // Dividing a full product would lose this surviving support after
+        // underflow. Forced events have no roulette probability to remove.
+        assert_eq!(competing_dielectric_event_probability([1.0e-200, 1.0e-200, exit_t], 2).unwrap(), exit_t);
         let nee_pdf = 0.37;
         let source_pdf = 0.29;
-        for event_probability in [exit_t, entry_t * exit_t, internal_r * exit_t, trt_physical] {
+        for event_probability in [1.0, exit_t, entry_t * exit_t, internal_r * exit_t, trt_physical] {
             for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
                 let nee =
                     slab_nee_mis_weight(strategy, nee_pdf, source_pdf, event_probability, true)
@@ -20874,21 +20869,23 @@ mod tests {
                     transmitted.probability * transmitted.radiance_weight * 1.5_f64.powi(2));
                 // TT and TRT have different powers and branch densities. The
                 // reciprocal radiance eta factors cancel between entry/exit.
-                for (internal_power, internal_probability) in [
-                    (1.0, 1.0),
-                    (internal_fresnel.reflectance, internal_fresnel.event_probabilities()[0]),
+                for (powers, proposals) in [
+                    ([entry.transmittance, exit.transmittance, 1.0],
+                        [entry.probability, exit.probability, 1.0]),
+                    ([entry.transmittance, internal_fresnel.reflectance, exit.transmittance],
+                        [entry.probability, internal_fresnel.event_probabilities()[0], exit.probability]),
                 ] {
-                    let physical = entry.transmittance * internal_power * exit.transmittance;
-                    let full_probability = entry.probability * internal_probability * exit.probability;
+                    let physical = powers.into_iter().product::<f64>();
+                    let full_probability = proposals.into_iter().product::<f64>();
                     assert!(full_probability > physical);
-                    for forced_entry in [false, true] {
+                    for remaining_splits in 0..=2 {
                         let probability = competing_dielectric_event_probability(
-                            full_probability, entry.probability, forced_entry,
+                            proposals, remaining_splits,
                         ).unwrap();
-                        let random_walk_weight = (if forced_entry { entry.transmittance }
-                            else { entry.transmittance / entry.probability })
-                            * (internal_power / internal_probability)
-                            * (exit.transmittance / exit.probability);
+                        let random_walk_weight = powers.into_iter().zip(proposals).enumerate()
+                            .map(|(i, (power, proposal))| if i < remaining_splits as usize {
+                                power
+                            } else { power / proposal }).product::<f64>();
                         close(probability * random_walk_weight, physical);
                         for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
                             let nee = slab_nee_mis_weight(strategy, 0.73, 0.29, probability, true).unwrap();
@@ -20962,6 +20959,70 @@ mod tests {
         assert_eq!(reverse, expected.pdf);
         assert_ne!(Material::Dielectric { glass, surface }.content_identity(),
             Material::Dielectric { glass, surface: DielectricSurface::SMOOTH }.content_identity());
+    }
+
+    #[test]
+    fn g1_absorbing_packets_and_slab_connectors_separate_power_from_proposal() {
+        use crate::conductor::{CauchyCoatingLayer, CoherentPeriodicCoating,
+            ConductorDataStatus, ConductorSource};
+        use crate::dielectric::DielectricCoating;
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.absorbing-dielectric", b"synthetic-passive-film"),
+            ConductorDataStatus::Representative,
+        ).unwrap();
+        let coating = DielectricCoating::try_new(CoherentPeriodicCoating::try_new(
+            &[CauchyCoatingLayer::try_new(CauchyIor::try_constant(1.7).unwrap(),
+                0.22, 73.0e-9).unwrap()], 1, source,
+        ).unwrap()).unwrap();
+        let surface = DielectricSurface::SMOOTH.with_coating(coating);
+        let glass = DielectricGlass::new(CauchyIor::try_constant(1.5).unwrap(),
+            BeerLambertAbsorption::try_constant(0.4).unwrap(), GlassProvenance::Custom);
+        let boundary = test_entry_boundary(&glass);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        // Independent single-film Airy powers, not an R+T=1 construction.
+        let (r, t) = (0.1083666104871264, 0.6299495843544911);
+        for (u, event, weight) in [
+            (0.0, DielectricEvent::Reflection, r + t),
+            (0.999, DielectricEvent::Transmission, (r + t) / 2.25),
+        ] {
+            let actual = sample_dielectric_path(normal, normal, surface, &boundary,
+                &[550.0; PACKET], 0, 0.0, 0.0, u).unwrap().unwrap();
+            assert_eq!(actual.event, event);
+            for lane in actual.weights { assert_near(lane, weight, 2.0e-12, "absorbing packet weight"); }
+        }
+        let event = deterministic_surface_transmission(normal, normal.scale(-1.0),
+            1.0, 1.5, &surface, 550.0, false).unwrap();
+        assert_near(event.transmittance, t, 2.0e-12, "physical coating power");
+        assert_near(event.probability, t / (r + t), 2.0e-12, "surviving event proposal");
+        assert!(event.probability > event.transmittance + 0.1);
+
+        with_test_cx(|cx| {
+            let (mut scene, direct) = slab_visibility_scene(false);
+            scene.primitives[0].material = Material::Dielectric { glass, surface };
+            let origin = scene.camera.eye;
+            let ray = Ray { origin: origin.offset(normal.scale(RAY_EPS)), dir: direct.direction };
+            let hit = intersect(&scene, cx, &ray, None).unwrap().unwrap();
+            let slab = discover_parallel_slab(&scene, cx, &ray, hit, None).unwrap();
+            let lane = trace_parallel_slab_direct_lane(&scene, cx, None,
+                origin, normal, slab, direct, 550.0).unwrap();
+            assert!(lane.visible);
+            let entry = surface.interface(550.0, false).unwrap()
+                .fresnel(lane.incident_direction.z, 1.0, 1.5).unwrap();
+            let exit = surface.interface(550.0, true).unwrap()
+                .fresnel(entry.transmitted_cosine, 1.5, 1.0).unwrap();
+            let probabilities = [entry.transmittance / (entry.reflectance + entry.transmittance),
+                exit.transmittance / (exit.reflectance + exit.transmittance), 1.0];
+            for (actual, expected) in lane.event_probabilities.into_iter().zip(probabilities) {
+                assert_near(actual, expected, 2.0e-12, "connector conditional probability");
+            }
+            assert_near(lane.transmission_probability, probabilities[0] * probabilities[1],
+                2.0e-12, "connector stochastic density");
+            let beer = (-0.4 * slab.thickness_m / entry.transmitted_cosine).exp();
+            assert_near(lane.radiance_transport, entry.transmittance * exit.transmittance * beer,
+                2.0e-12, "coating and independent bulk absorption");
+            assert!(lane.radiance_transport < lane.transmission_probability);
+            assert_eq!(competing_dielectric_event_probability(lane.event_probabilities, 2).unwrap(), 1.0);
+        });
     }
 
     #[test]
