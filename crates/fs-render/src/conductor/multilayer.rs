@@ -197,7 +197,7 @@ impl CoherentPeriodicCoating {
         self.response::<false>(geometry, false)
     }
 
-    pub(crate) fn lossless_transmission(
+    pub(crate) fn transmission(
         &self,
         wavelength_nm: f64,
         incident_eta: f64,
@@ -206,13 +206,11 @@ impl CoherentPeriodicCoating {
         reverse: bool,
         exit_normal: [f64; 2],
     ) -> Result<CoherentTransmission, ConductorError> {
-        // The dielectric coating owner admits lossless layers and both real
-        // boundary indices. Keep this refusal as a second internal boundary.
-        if self
-            .unit_cell()
-            .iter()
-            .any(|layer| layer.extinction_k != 0.0)
-            || !exit_eta.is_finite()
+        // Both exterior half spaces carry propagating real-index ray power.
+        // The bounded original films may absorb; their complex propagation
+        // must remain in the transmitted field and must never be normalized
+        // into a lossless R+T partition.
+        if !exit_eta.is_finite()
             || !(1.0..=3.0).contains(&exit_eta)
         {
             return Err(ConductorError::InvalidSample);
@@ -229,7 +227,9 @@ impl CoherentPeriodicCoating {
         geometry.exit_normal = Some(Complex::new(exit_normal[0], exit_normal[1]));
         Ok(self
             .response::<true>(geometry, reverse)?
-            .transmission_result())
+            .transmission_result(self.unit_cell().iter().all(|layer| {
+                layer.thickness_m == 0.0 || layer.extinction_k == 0.0
+            })))
     }
 
     fn response<const TRANSMISSION: bool>(
@@ -243,7 +243,7 @@ impl CoherentPeriodicCoating {
                 eta: layer.ior.eval_unchecked(geometry.wavelength_nm),
                 k: layer.extinction_k,
             };
-            *slot = LayerTransfer::new(ior, layer.thickness_m, geometry);
+            *slot = LayerTransfer::new::<TRANSMISSION>(ior, layer.thickness_m, geometry);
         }
         response::<TRANSMISSION>(geometry, self.layer_count(), |index| {
             let index = if reverse {
@@ -263,6 +263,7 @@ pub(crate) struct CoherentTransmission {
     pub(crate) reflected: [[f64; 2]; 2],
     pub(crate) transmitted: [[f64; 2]; 2],
     pub(crate) bare_equivalent: bool,
+    pub(crate) lossless: bool,
 }
 
 pub(crate) fn lossless_stack_transmission(
@@ -298,13 +299,13 @@ pub(crate) fn lossless_stack_transmission(
             .ior()
             .eval(wavelength_nm)
             .map_err(|_| ConductorError::InvalidWavelength)?;
-        Ok(LayerTransfer::new(
+        Ok(LayerTransfer::new::<true>(
             ComplexIor { eta, k: 0.0 },
             layer.thickness_m(),
             geometry,
         ))
     })?
-    .transmission_result())
+    .transmission_result(true))
 }
 
 /// Borrow one fully declared transparent or absorbing spectral layer. Its
@@ -341,6 +342,36 @@ impl<'a> CoherentCoatingStack<'a> {
     #[must_use]
     pub const fn layers(self) -> &'a [CoatingLayer<'a>] {
         self.layers
+    }
+
+    /// Original complex films between two real-index surrounding media. The
+    /// same scaled field kernel owns reflection and transmitted Poynting flux.
+    /// Film order reverses together with the caller's incident/exit media.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn transmission(
+        self,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        exit_eta: f64,
+        cosine: f64,
+        reverse: bool,
+        exit_normal: [f64; 2],
+    ) -> Result<CoherentTransmission, ConductorError> {
+        if !exit_eta.is_finite() || !(1.0..=3.0).contains(&exit_eta) {
+            return Err(ConductorError::InvalidSample);
+        }
+        let mut geometry = Geometry::new(
+            wavelength_nm, incident_eta, ComplexIor { eta: exit_eta, k: 0.0 }, cosine,
+        )?;
+        geometry.exit_normal = Some(Complex::new(exit_normal[0], exit_normal[1]));
+        let mut lossless = true;
+        let result = response::<true>(geometry, self.layers.len(), |index| {
+            let index = if reverse { self.layers.len() - 1 - index } else { index };
+            let (ior, thickness) = self.layer(index, wavelength_nm)?;
+            lossless &= thickness == 0.0 || ior.k == 0.0;
+            Ok(LayerTransfer::new::<true>(ior, thickness, geometry))
+        })?;
+        Ok(result.transmission_result(lossless))
     }
 
     /// Unpolarized reflected power. Only the supplied substrate's complex-IOR
@@ -402,23 +433,24 @@ impl<'a> CoherentCoatingStack<'a> {
 
     fn reflection(self, geometry: Geometry) -> Result<Reflection, ConductorError> {
         reflection(geometry, self.layers.len(), |index| {
-            let (ior, thickness) = match self.layers[index] {
-                CoatingLayer::Dielectric(layer) => (
-                    ComplexIor {
-                        eta: layer
-                            .ior()
-                            .eval(geometry.wavelength_nm)
-                            .map_err(|_| ConductorError::NumericalFailure)?,
-                        k: 0.0,
-                    },
-                    layer.thickness_m(),
-                ),
-                CoatingLayer::Absorbing(layer) => (
-                    layer.complex_ior(geometry.wavelength_nm)?,
-                    layer.thickness_m(),
-                ),
-            };
-            Ok(LayerTransfer::new(ior, thickness, geometry))
+            let (ior, thickness) = self.layer(index, geometry.wavelength_nm)?;
+            Ok(LayerTransfer::new::<false>(ior, thickness, geometry))
+        })
+    }
+
+    fn layer(self, index: usize, wavelength_nm: f64) -> Result<(ComplexIor, f64), ConductorError> {
+        Ok(match self.layers[index] {
+            CoatingLayer::Dielectric(layer) => (
+                ComplexIor {
+                    eta: layer.ior().eval(wavelength_nm)
+                        .map_err(|_| ConductorError::NumericalFailure)?,
+                    k: 0.0,
+                },
+                layer.thickness_m(),
+            ),
+            CoatingLayer::Absorbing(layer) => (
+                layer.complex_ior(wavelength_nm)?, layer.thickness_m(),
+            ),
         })
     }
 }
@@ -471,6 +503,10 @@ struct LayerTransfer {
     incident_match: bool,
     substrate_match: bool,
     propagation_log_scale: f64,
+    // Off-diagonal coefficient in the fixed incident-admittance wave basis.
+    // It is factored by n_layer²-n_incident², retaining weak matched-film
+    // reflection without subtracting almost equal total fields.
+    wave_mixing: [Complex; 2],
 }
 
 impl LayerTransfer {
@@ -482,9 +518,10 @@ impl LayerTransfer {
         incident_match: true,
         substrate_match: true,
         propagation_log_scale: 0.0,
+        wave_mixing: [Complex::new(0.0, 0.0); 2],
     };
 
-    fn new(ior: ComplexIor, thickness_m: f64, geometry: Geometry) -> Self {
+    fn new<const TRANSMISSION: bool>(ior: ComplexIor, thickness_m: f64, geometry: Geometry) -> Self {
         // A zero-thickness layer has no physical interfaces. Removing it
         // exactly also avoids catastrophic cancellation between its interfaces.
         if thickness_m == 0.0 {
@@ -496,6 +533,26 @@ impl LayerTransfer {
         let (cosine, sine_over_q, propagation_log_scale) =
             super::absorbing_film::propagation_with_scale(q_squared, phase_scale);
         let minus_i = Complex::new(0.0, -1.0);
+        // Opaque reflection retains its field/flux evaluation and does not
+        // prepare coefficients used only by the transmitting wave basis.
+        let wave_mixing = if TRANSMISSION && geometry.cosine > 0.0 {
+            let incident_squared = geometry.incident_eta * geometry.incident_eta;
+            let contrast = Complex::new(
+                (ior.eta - geometry.incident_eta) * (ior.eta + geometry.incident_eta)
+                    - ior.k * ior.k,
+                2.0 * ior.eta * ior.k,
+            );
+            let p_contrast = contrast
+                * ((n_squared + Complex::new(incident_squared, 0.0))
+                    * (geometry.cosine * geometry.cosine / incident_squared)
+                    - Complex::new(1.0, 0.0));
+            [
+                minus_i * sine_over_q * contrast
+                    * (-0.5 / (geometry.incident_eta * geometry.cosine)),
+                minus_i * sine_over_q * p_contrast / n_squared
+                    * (0.5 * geometry.incident_eta / geometry.cosine),
+            ]
+        } else { [Complex::new(0.0, 0.0); 2] };
         Self {
             cosine,
             upper: [minus_i * sine_over_q, minus_i * n_squared * sine_over_q],
@@ -507,6 +564,7 @@ impl LayerTransfer {
             incident_match: ior.k == 0.0 && ior.eta == geometry.incident_eta,
             substrate_match: ior == geometry.substrate,
             propagation_log_scale,
+            wave_mixing,
         }
     }
 }
@@ -518,11 +576,12 @@ struct Reflection {
 }
 
 impl Reflection {
-    fn transmission_result(self) -> CoherentTransmission {
+    fn transmission_result(self, lossless: bool) -> CoherentTransmission {
         CoherentTransmission {
             reflected: self.amplitudes.map(|value| [value.re, value.im]),
             transmitted: self.transmission.map(|value| [value.re, value.im]),
             bare_equivalent: self.bare_equivalent,
+            lossless,
         }
     }
 
@@ -567,9 +626,40 @@ fn response<const TRANSMISSION: bool>(
     let q = geometry.exit_normal.unwrap_or_else(|| {
         super::thin_film::forward_sqrt(n_squared - Complex::new(geometry.transverse_squared, 0.0))
     });
+    let incident = [
+        geometry.incident_eta * geometry.cosine,
+        geometry.cosine / geometry.incident_eta,
+    ];
+    let exit = [q, q / n_squared];
+    let mut initial_transmission = [Complex::new(0.0, 0.0); 2];
     let mut field = [Complex::new(1.0, 0.0); 2];
-    let mut flux = [q, q / n_squared];
-    let exit_admittance = [q.re, (q / n_squared).re];
+    let mut flux = exit;
+    if TRANSMISSION {
+        // Here field/flux hold incoming/reflected wave coordinates, both
+        // relative to the ORIGINAL incident admittance, rather than F/G.
+        // Factor the bare contrast too: adjacent real exterior indices must
+        // not seed a spurious or vanished weak reflection.
+        let ni = geometry.incident_eta;
+        let nt = geometry.substrate.eta;
+        let ni2 = ni * ni;
+        let nt2 = nt * nt;
+        let contrast = (nt - ni) * (nt + ni);
+        let s_denominator = Complex::new(incident[0], 0.0) + q;
+        let p_denominator = Complex::new(incident[0] * nt2, 0.0) + q * ni2;
+        flux = [
+            Complex::new(-contrast, 0.0) / s_denominator.square(),
+            Complex::new(ni2 * contrast
+                * (geometry.cosine * geometry.cosine * (nt2 + ni2) - ni2), 0.0)
+                / p_denominator.square(),
+        ];
+        for pol in 0..2 {
+            if exit[pol].re > 0.0 {
+                initial_transmission[pol] = Complex::new(
+                    2.0 * det::sqrt(incident[pol]) * det::sqrt(exit[pol].re), 0.0,
+                ) / (Complex::new(incident[pol], 0.0) + exit[pol]);
+            }
+        }
+    }
     let mut logarithmic_scale = [0.0; 2];
     let mut bare_equivalent = true;
     let mut inside_incident = false;
@@ -587,8 +677,16 @@ fn response<const TRANSMISSION: bool>(
             bare_equivalent = false;
         }
         for pol in 0..2 {
-            let next_field = transfer.cosine * field[pol] + transfer.upper[pol] * flux[pol];
-            let next_flux = transfer.lower[pol] * field[pol] + transfer.cosine * flux[pol];
+            let (next_field, next_flux) = if TRANSMISSION {
+                let diagonal = (transfer.upper[pol] * incident[pol]
+                    + transfer.lower[pol] * (1.0 / incident[pol])) * 0.5;
+                let mixing = transfer.wave_mixing[pol];
+                ((transfer.cosine + diagonal) * field[pol] - mixing * flux[pol],
+                    mixing * field[pol] + (transfer.cosine - diagonal) * flux[pol])
+            } else {
+                (transfer.cosine * field[pol] + transfer.upper[pol] * flux[pol],
+                    transfer.lower[pol] * field[pol] + transfer.cosine * flux[pol])
+            };
             let scale = next_field
                 .re
                 .abs()
@@ -621,12 +719,10 @@ fn response<const TRANSMISSION: bool>(
             transmission: [Complex::new(0.0, 0.0); 2],
         });
     }
-    let incident = [
-        geometry.incident_eta * geometry.cosine,
-        geometry.cosine / geometry.incident_eta,
-    ];
     let mut amplitudes = core::array::from_fn(|pol| {
-        (field[pol] * incident[pol] - flux[pol]) / (field[pol] * incident[pol] + flux[pol])
+        if TRANSMISSION { flux[pol] / field[pol] } else {
+            (field[pol] * incident[pol] - flux[pol]) / (field[pol] * incident[pol] + flux[pol])
+        }
     });
     if geometry.cosine == 1.0 {
         amplitudes[1] = Complex::new(-amplitudes[0].re, -amplitudes[0].im);
@@ -634,13 +730,8 @@ fn response<const TRANSMISSION: bool>(
     let mut transmission = [Complex::new(0.0, 0.0); 2];
     if TRANSMISSION {
         for pol in 0..2 {
-            if exit_admittance[pol] > 0.0 {
-                let numerator = 2.0
-                    * det::sqrt(incident[pol] * exit_admittance[pol])
-                    * det::exp(-logarithmic_scale[pol]);
-                transmission[pol] =
-                    Complex::new(numerator, 0.0) / (field[pol] * incident[pol] + flux[pol]);
-            }
+            transmission[pol] = initial_transmission[pol] * det::exp(-logarithmic_scale[pol])
+                / field[pol];
         }
         if geometry.cosine == 1.0 {
             transmission[1] = transmission[0];

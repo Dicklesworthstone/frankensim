@@ -69,23 +69,31 @@ differentiable lift). Pure Rust throughout.
 - **Coherent coatings on transmitting dielectrics:** `DielectricSurface` owns
   an optional source-bound `DielectricCoating`, separate from homogeneous glass
   and bulk Beer-Lambert absorption. It admits the existing one-to-four-law
-  Cauchy unit cell and at most 64 expanded physical layers only when every
-  extinction coefficient is exactly zero. Absorbing dielectric films refuse;
-  their loss is never relabeled transmitted power. The borrowed
+  Cauchy unit cell and at most 64 expanded physical layers, with passive
+  wavelength-independent extinction for each compact law. The borrowed
   `DielectricCoatingStack` additionally evaluates arbitrary ordered full Cauchy,
-  Sellmeier or tabulated transparent laws without fitting or heap-backed scene
-  materials. Authored order runs outside-to-inside and reverses on exits and
+  Sellmeier or tabulated transparent laws; `try_mixed` borrows those together
+  with original nine-knot absorbing-film laws without fitting, resampling or
+  heap-backed scene materials. Authored order runs outside-to-inside and reverses on exits and
   reverse transmission proposals. Indices always use vacuum-wavelength phase
   dispersion. Storage and work stay fixed and bounded, with no per-hit allocation.
-  Both dielectric and conductor films share the same passive boundary-field
-  composition and analytic critical-angle limit. The transmitting branch also
-  retains normalization scales in logarithmic form, so evanescent barriers use
-  decaying exponentials and transmitted complex amplitudes retain their phase.
+  Both dielectric and conductor films share the same passive layer propagation
+  and analytic critical-angle limit. The transmitting branch composes incident
+  and reflected wave coordinates with factored original index contrasts, so
+  weak reflection does not subtract nearly equal total fields. Opaque reflection
+  retains its field/flux specialization. Logarithmic normalization scales keep
+  evanescent barriers and strongly absorbing films on decaying exponentials;
+  transmitted complex amplitudes retain their phase.
   Separate s/p transmitted amplitudes are normalized by outgoing/incident normal
-  Poynting flux before Mueller construction. Per-polarization `R+T=1` is checked;
-  only bounded roundoff is normalized in amplitude space. `FresnelDielectric`
-  exposes explicit transmittance, preserving weak Bragg leakage when reflectance
-  rounds to one. Existing bare-interface arithmetic and identities are retained.
+  Poynting flux before Mueller construction. Lossless layers check and normalize
+  bounded roundoff in `R+T=1`; absorbing layers retain their physical `R+T<1`.
+  Only an above-one excess within the stated roundoff allowance is normalized;
+  larger gain refuses. `FresnelDielectric` exposes explicit transmittance,
+  preserving weak Bragg leakage when reflectance rounds to one. Its signed
+  `absorption_residual()` is a balance diagnostic, not a positive layer-resolved
+  heat source or a certificate for sub-ULP losses. Absorbing coatings can remove
+  power under external total internal reflection while transmitted power remains
+  zero. Existing bare-interface arithmetic and identities are retained.
   Smooth/GGX sampling, hero packet weights and forced splits, forward/reverse
   BSDF PDFs, bidirectional transport, slab/manifold connectors and direct
   photometric/thermal/volume-light receivers consume the same coating response.
@@ -99,7 +107,7 @@ differentiable lift). Pure Rust throughout.
   Exact grazing of a nonzero coating also refuses zero incoming normal power.
   Film boundaries are isotropic, locally parallel and laterally uniform; the
   caller declares sufficient coherence across the entire stack. This does not
-  introduce scene-path coherence, film absorption/heating, rough inter-facet
+  introduce scene-path coherence, layer-resolved heating, rough inter-facet
   multiple scattering or thickness statistics. G0/G1/G3 regressions cover
   independent complex Airy R/T phases, quarter-wave antireflection, etalons,
   internal critical/evanescent and terminal-TIR limits, reciprocal flux and
@@ -114,10 +122,22 @@ differentiable lift). Pure Rust throughout.
   Coated Monte Carlo events place the smaller R/T probability at the low end of
   the variate, retaining weak transmitted support even when R rounds to one.
   Smooth weights, GGX PDFs, polarized throughput and importance transport use
-  the same normalized branch probabilities. Uncoated event ordering is unchanged.
+  the same normalized branch probabilities. For absorbing layers, these are
+  conditional survival proposals `R/(R+T)` and `T/(R+T)`: sampled throughput
+  retains physical power divided by its proposal. Deterministic slab/manifold
+  TT and TRT connectors carry physical R/T separately from those MIS densities,
+  and completed random-walk paths replay the same conditional probabilities.
+  A representably black coating has a zero-weight reflection proposal. Uncoated
+  event ordering is unchanged. The scalar camera model remains unpolarized at
+  each interaction; repeated scalar R/T products do not carry Stokes history.
   The exterior longitudinal wave is taken from native Snell/TIR classification,
   preventing a separate squared-index rounding from inventing a propagating
   transmitted mode at a native critical ray; internal film roots remain complex.
+  Absorbing-film regressions compare s/p Mueller entries against independent
+  interface-scattering/Airy recursion over angle, wavelength and extinction,
+  check original mixed spectral knots and reversed layer/media reciprocity,
+  and exercise equal-index loss, absorbing TIR, smooth/GGX survival powers,
+  weak-loss reflection, opaque/zero-thickness limits and connector MIS density.
 - **Dielectric launch media:** camera pupils, cinematic/moving origins, area-only
   photometric probes, and both BDPT endpoints initialize the physical host
   before their first segment. Mesh edge closure/orientation is prepared once;

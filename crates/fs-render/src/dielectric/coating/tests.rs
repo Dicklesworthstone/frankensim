@@ -588,15 +588,15 @@ fn g1_native_polarized_beam_uses_coated_transmission_and_correct_frame() {
 }
 
 #[test]
-fn g0_absorbing_dielectric_films_are_refused_and_work_is_bounded() {
+fn g0_absorbing_dielectric_films_retain_loss_and_work_is_bounded() {
     let absorbing =
         CauchyCoatingLayer::try_new(CauchyIor::try_constant(1.5).unwrap(), 0.01, 80.0e-9).unwrap();
-    assert_eq!(
-        DielectricCoating::try_new(
+    let coating = DielectricCoating::try_new(
             CoherentPeriodicCoating::try_new(&[absorbing], 1, source()).unwrap()
-        ),
-        Err(DielectricError::InvalidCoating)
-    );
+        ).unwrap();
+    let response = DielectricSurface::SMOOTH.with_coating(coating)
+        .interface(550.0, false).unwrap().fresnel(0.8, 1.0, 1.5).unwrap();
+    assert!(response.absorption_residual() > 0.0);
     let film = CoherentDielectricCoating::try_new(
         CauchyIor::try_constant(1.5).unwrap(),
         80.0e-9,

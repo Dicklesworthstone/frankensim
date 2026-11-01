@@ -10938,15 +10938,29 @@ fn deterministic_snell_transmission(
         eta_i, eta_t, incident_cosine, fresnel)
 }
 
+/// A forced connector carries physical normal power independently of the
+/// random walk's conditional survival proposal. They coincide for lossless
+/// interfaces; an absorbing film makes their distinction essential to MIS.
+struct SurfaceTransmission {
+    direction: Vec3,
+    transmittance: f64,
+    probability: f64,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn deterministic_surface_transmission(
     normal_toward_incident: Vec3, travel_direction: Vec3, eta_i: f64, eta_t: f64,
     surface: &DielectricSurface, wavelength_nm: f64, reverse: bool,
-) -> Result<(Vec3, f64), TracerError> {
+) -> Result<SurfaceTransmission, TracerError> {
     let cosine = normal_toward_incident.dot(travel_direction.scale(-1.0)).clamp(0.0, 1.0);
     let fresnel = surface.interface(wavelength_nm, reverse)?.fresnel(cosine, eta_i, eta_t)?;
-    deterministic_transmission_direction(normal_toward_incident, travel_direction,
-        eta_i, eta_t, cosine, fresnel)
+    let (direction, transmittance) = deterministic_transmission_direction(
+        normal_toward_incident, travel_direction, eta_i, eta_t, cosine, fresnel)?;
+    Ok(SurfaceTransmission {
+        direction,
+        transmittance,
+        probability: fresnel.event_probabilities()[1],
+    })
 }
 
 fn dielectric_surface(scene: &Scene, primitive: usize) -> Result<&DielectricSurface, TracerError> {
@@ -11094,7 +11108,11 @@ fn trace_parallel_slab_direct_lane(
         ));
     }
 
-    let (internal_direction, entry_transmission_probability) = deterministic_surface_transmission(
+    let SurfaceTransmission {
+        direction: internal_direction,
+        transmittance: entry_transmittance,
+        probability: entry_transmission_probability,
+    } = deterministic_surface_transmission(
         entry_frame.geometric,
         geometry.incident_direction,
         1.0,
@@ -11148,7 +11166,11 @@ fn trace_parallel_slab_direct_lane(
             "connected path observes a nonuniform slab thickness",
         ));
     }
-    let (outgoing_direction, exit_transmission_probability) = deterministic_surface_transmission(
+    let SurfaceTransmission {
+        direction: outgoing_direction,
+        transmittance: exit_transmittance,
+        probability: exit_transmission_probability,
+    } = deterministic_surface_transmission(
         exit_frame.geometric.scale(-1.0),
         internal_direction,
         eta_glass,
@@ -11205,9 +11227,9 @@ fn trace_parallel_slab_direct_lane(
     // ambient on both sides the reciprocal factors cancel analytically, but
     // retaining both terms pins the transport convention and catches a future
     // one-interface omission.
-    let entry_btdf = entry_transmission_probability * ratio * ratio;
+    let entry_btdf = entry_transmittance * ratio * ratio;
     let exit_eta_ratio = eta_glass;
-    let exit_btdf = exit_transmission_probability * exit_eta_ratio * exit_eta_ratio;
+    let exit_btdf = exit_transmittance * exit_eta_ratio * exit_eta_ratio;
     let radiance_transport = entry_btdf * exit_btdf * beer;
     if !transmission_probability.is_finite()
         || transmission_probability < 0.0
@@ -11845,8 +11867,11 @@ fn trace_planar_manifold_rectangle_direct_lanes(
         if !entry_frame.entering {
             continue;
         }
-        let (internal_direction, entry_transmission_probability) =
-            deterministic_surface_transmission(
+        let SurfaceTransmission {
+            direction: internal_direction,
+            transmittance: entry_transmittance,
+            probability: entry_transmission_probability,
+        } = deterministic_surface_transmission(
                 entry_frame.geometric,
                 connection.incident_direction,
                 1.0,
@@ -11883,7 +11908,11 @@ fn trace_planar_manifold_rectangle_direct_lanes(
         {
             continue;
         }
-        let (outgoing_direction, exit_transmission_probability) = deterministic_surface_transmission(
+        let SurfaceTransmission {
+            direction: outgoing_direction,
+            transmittance: exit_transmittance,
+            probability: exit_transmission_probability,
+        } = deterministic_surface_transmission(
             exit_frame.geometric.scale(-1.0),
             internal_direction,
             eta_glass,
@@ -11915,8 +11944,8 @@ fn trace_planar_manifold_rectangle_direct_lanes(
         let transmission_probability =
             entry_transmission_probability * exit_transmission_probability;
         let entry_eta_ratio = 1.0 / eta_glass;
-        let entry_btdf = entry_transmission_probability * entry_eta_ratio * entry_eta_ratio;
-        let exit_btdf = exit_transmission_probability * eta_glass * eta_glass;
+        let entry_btdf = entry_transmittance * entry_eta_ratio * entry_eta_ratio;
+        let exit_btdf = exit_transmittance * eta_glass * eta_glass;
         let radiance_transport = entry_btdf * exit_btdf * beer;
         let lane = SlabDirectLane {
             incident_direction: connection.incident_direction,
@@ -12048,7 +12077,11 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let entry_frame = surface_frame(&entry_hit.hit, &entry_ray)?;
-            let (internal_incident, entry_transmission) = deterministic_surface_transmission(
+            let SurfaceTransmission {
+                direction: internal_incident,
+                transmittance: entry_transmittance,
+                probability: entry_transmission_probability,
+            } = deterministic_surface_transmission(
                 entry_frame.geometric,
                 connection.incident_direction,
                 1.0,
@@ -12127,7 +12160,11 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                 continue;
             }
             let exit_frame = surface_frame(&exit_hit.hit, &exit_ray)?;
-            let (outgoing, exit_transmission) = deterministic_surface_transmission(
+            let SurfaceTransmission {
+                direction: outgoing,
+                transmittance: exit_transmittance,
+                probability: exit_transmission_probability,
+            } = deterministic_surface_transmission(
                 exit_frame.geometric.scale(-1.0),
                 reflected,
                 eta_glass,
@@ -12165,14 +12202,15 @@ fn trace_prepared_planar_reflected_manifold_rectangle_direct_lanes(
                     .norm();
             let beer =
                 medium_transmittance(Some(boundary.glass), wavelength_nm, internal_distance)?;
-            let event_probability =
-                entry_transmission * reflection_fresnel.reflectance * exit_transmission;
-            let radiance_transport = event_probability * beer;
+            let event_probability = entry_transmission_probability
+                * reflection_fresnel.event_probabilities()[0] * exit_transmission_probability;
+            let radiance_transport =
+                entry_transmittance * reflection_fresnel.reflectance * exit_transmittance * beer;
             let lane = SlabDirectLane {
                 incident_direction: connection.incident_direction,
                 nee_pdf_solid_angle,
                 transmission_probability: event_probability,
-                entry_transmission_probability: entry_transmission,
+                entry_transmission_probability,
                 radiance_transport,
                 visible: true,
                 reflection_triangle_index: Some(reflection_triangle),
@@ -12402,8 +12440,11 @@ fn trace_planar_manifold_environment_direct_lanes(
         if !entry_frame.entering {
             continue;
         }
-        let (internal_direction, entry_transmission_probability) =
-            deterministic_surface_transmission(
+        let SurfaceTransmission {
+            direction: internal_direction,
+            transmittance: entry_transmittance,
+            probability: entry_transmission_probability,
+        } = deterministic_surface_transmission(
                 entry_frame.geometric,
                 connection.incident_direction,
                 1.0,
@@ -12436,7 +12477,11 @@ fn trace_planar_manifold_environment_direct_lanes(
         {
             continue;
         }
-        let (outgoing_direction, exit_transmission_probability) = deterministic_surface_transmission(
+        let SurfaceTransmission {
+            direction: outgoing_direction,
+            transmittance: exit_transmittance,
+            probability: exit_transmission_probability,
+        } = deterministic_surface_transmission(
             exit_frame.geometric.scale(-1.0),
             internal_direction,
             eta_glass,
@@ -12463,8 +12508,8 @@ fn trace_planar_manifold_environment_direct_lanes(
         let transmission_probability =
             entry_transmission_probability * exit_transmission_probability;
         let entry_eta_ratio = 1.0 / eta_glass;
-        let entry_btdf = entry_transmission_probability * entry_eta_ratio * entry_eta_ratio;
-        let exit_btdf = exit_transmission_probability * eta_glass * eta_glass;
+        let entry_btdf = entry_transmittance * entry_eta_ratio * entry_eta_ratio;
+        let exit_btdf = exit_transmittance * eta_glass * eta_glass;
         let radiance_transport = entry_btdf * exit_btdf * beer;
         let lane = SlabDirectLane {
             incident_direction: connection.incident_direction,
@@ -12577,7 +12622,7 @@ fn previous_after_dielectric_sample(
             eta_glass,
             1.0,
         )?
-        .reflectance;
+        .event_probabilities()[0];
         next.smooth_slab = Some(SmoothSlabPath::ManifoldReflected(PlanarManifoldReflected {
             source_origin: entry.source_origin,
             source_geometric_normal: entry.source_geometric_normal,
@@ -12595,9 +12640,9 @@ fn previous_after_dielectric_sample(
     }
     let eta_i = medium_ior(boundary.incident, wavelength_nm)?;
     let eta_t = medium_ior(boundary.transmitted, wavelength_nm)?;
-    let (_, transmission_probability) =
+    let transmission_probability =
         deterministic_surface_transmission(frame.oriented, incident_ray.dir, eta_i, eta_t,
-            &surface, wavelength_nm, !frame.entering)?;
+            &surface, wavelength_nm, !frame.entering)?.probability;
 
     if frame.entering && medium_stack.len() == 0 {
         let Some(source) = previous.filter(|source| {
@@ -20784,6 +20829,84 @@ mod tests {
     }
 
     #[test]
+    fn g1_absorbing_coated_connectors_distinguish_power_from_mis_probability() {
+        use crate::conductor::{
+            CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
+        };
+        use crate::dielectric::DielectricCoating;
+        let source = ConductorSource::try_new(
+            hash_domain("org.frankensim.test.absorbing-connector", b"declared-film"),
+            ConductorDataStatus::Representative,
+        ).unwrap();
+        let coating = DielectricCoating::try_new(CoherentPeriodicCoating::try_new(
+            &[CauchyCoatingLayer::try_new(
+                CauchyIor::try_constant(1.8).unwrap(), 0.25, 130.0e-9,
+            ).unwrap()], 1, source,
+        ).unwrap()).unwrap();
+        let surface = DielectricSurface::SMOOTH.with_coating(coating);
+        let normal = Vec3::new(0.0, 0.0, 1.0);
+        let close = |actual: f64, expected: f64| {
+            assert!((actual - expected).abs() <= 2.0e-14,
+                "actual={actual:.17e}, expected={expected:.17e}");
+        };
+        for wavelength in [420.0, 550.0, 720.0] {
+            for cosine in [0.55_f64, 1.0] {
+                let travel = Vec3::new((1.0 - cosine * cosine).sqrt(), 0.0, -cosine);
+                let entry = deterministic_surface_transmission(normal, travel,
+                    1.0, 1.5, &surface, wavelength, false).unwrap();
+                let exit = deterministic_surface_transmission(normal, entry.direction,
+                    1.5, 1.0, &surface, wavelength, true).unwrap();
+                let entry_fresnel = surface.interface(wavelength, false).unwrap()
+                    .fresnel(cosine, 1.0, 1.5).unwrap();
+                let internal_fresnel = surface.interface(wavelength, true).unwrap()
+                    .fresnel(-entry.direction.z, 1.5, 1.0).unwrap();
+                close(entry.transmittance, entry_fresnel.transmittance);
+                close(exit.transmittance, internal_fresnel.transmittance);
+                assert!(entry.probability > entry.transmittance + 0.1);
+                assert!(exit.probability > exit.transmittance + 0.1);
+                let transmitted = [0.0, 1.0_f64.next_down()].into_iter().find_map(|u| {
+                    let sample = surface.interface(wavelength, false).unwrap()
+                        .sample_smooth(normal, travel.scale(-1.0), 1.0, 1.5, u).unwrap();
+                    (sample.event == DielectricEvent::Transmission).then_some(sample)
+                }).unwrap();
+                close(entry.probability, transmitted.probability);
+                close(entry.transmittance,
+                    transmitted.probability * transmitted.radiance_weight * 1.5_f64.powi(2));
+                // TT and TRT have different powers and branch densities. The
+                // reciprocal radiance eta factors cancel between entry/exit.
+                for (internal_power, internal_probability) in [
+                    (1.0, 1.0),
+                    (internal_fresnel.reflectance, internal_fresnel.event_probabilities()[0]),
+                ] {
+                    let physical = entry.transmittance * internal_power * exit.transmittance;
+                    let full_probability = entry.probability * internal_probability * exit.probability;
+                    assert!(full_probability > physical);
+                    for forced_entry in [false, true] {
+                        let probability = competing_dielectric_event_probability(
+                            full_probability, entry.probability, forced_entry,
+                        ).unwrap();
+                        let random_walk_weight = (if forced_entry { entry.transmittance }
+                            else { entry.transmittance / entry.probability })
+                            * (internal_power / internal_probability)
+                            * (exit.transmittance / exit.probability);
+                        close(probability * random_walk_weight, physical);
+                        for strategy in [DirectStrategy::Mis, DirectStrategy::PowerMis] {
+                            let nee = slab_nee_mis_weight(strategy, 0.73, 0.29, probability, true).unwrap();
+                            let bsdf = match strategy {
+                                DirectStrategy::Mis => balance_heuristic(1, 0.29 * probability, 1, 0.73),
+                                DirectStrategy::PowerMis => power_heuristic(1, 0.29 * probability, 1, 0.73),
+                                _ => unreachable!(),
+                            };
+                            close(nee + bsdf, 1.0);
+                            close(nee * physical + bsdf * probability * random_walk_weight, physical);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn g1_coated_dielectric_packets_connectors_and_reverse_pdf_share_optics() {
         use crate::conductor::{
             CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
@@ -20823,10 +20946,10 @@ mod tests {
             assert_relative_close(sample.weights[lane], response.transmittance / 2.25_f64.powi(2),
                 3.0e-14, "coherent packet transmission");
         }
-        let (direction, probability) = deterministic_surface_transmission(normal, normal.scale(-1.0),
+        let connector = deterministic_surface_transmission(normal, normal.scale(-1.0),
             1.0, 2.25, &surface, 550.0, false).unwrap();
-        assert_eq!(direction, sample.direction);
-        assert_relative_close(probability, 1.0, 3.0e-14, "coated connector probability");
+        assert_eq!(connector.direction, sample.direction);
+        assert_relative_close(connector.probability, 1.0, 3.0e-14, "coated connector probability");
         let rough = DielectricSurface::try_rough(0.18).unwrap().with_coating(coating);
         let rough_sample = sample_dielectric_path(normal, test_oblique_wo(), rough, &boundary,
             &wavelengths, 0, 0.21, 0.67, 0.999).unwrap().unwrap();

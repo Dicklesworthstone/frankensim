@@ -1,4 +1,4 @@
-//! Source-bound, lossless coherent coatings on transmitting dielectric bodies.
+//! Source-bound, passive coherent coatings on transmitting dielectric bodies.
 //!
 //! The optical kernel is shared with conductor multilayers, including scaled
 //! evanescent propagation and critical-angle limits. Unlike opaque substrates,
@@ -12,7 +12,7 @@ use super::{
     SmoothDielectricSample,
 };
 use crate::conductor::{
-    CoherentDielectricCoating, CoherentPeriodicCoating, CoherentTransmission,
+    CoatingLayer, CoherentCoatingStack, CoherentDielectricCoating, CoherentPeriodicCoating, CoherentTransmission,
     MAX_COHERENT_STACK_LAYERS,
 };
 use crate::polarization::Mueller;
@@ -23,23 +23,19 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_geom::Vec3;
 use fs_math::det;
 
-/// Compact transparent coating on a dielectric surface. Every layer must
-/// declare exactly zero extinction: absorbing coatings are explicitly refused,
-/// never treated as `T=1-R`. Bulk Beer-Lambert absorption remains independent.
+/// Compact passive coating on a dielectric surface. Each original layer owns
+/// its real phase index, nonnegative extinction and physical thickness.
+/// Absorbing films retain independent reflected and transmitted fields;
+/// survival is R+T, never an invented lossless partition. Bulk Beer-Lambert
+/// absorption remains independent and is applied only along bulk ray segments.
 /// The source-bound Cauchy unit cell and 64-layer work bound are unchanged.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DielectricCoating(CoherentPeriodicCoating);
 
 impl DielectricCoating {
-    /// Admit a fully declared periodic coating only when every film is lossless.
+    /// Admit a fully declared passive periodic coating. The original layer
+    /// constructors enforce finite indices, nonnegative loss and bounded work.
     pub fn try_new(coating: CoherentPeriodicCoating) -> Result<Self, DielectricError> {
-        if coating
-            .unit_cell()
-            .iter()
-            .any(|layer| layer.extinction_k() != 0.0)
-        {
-            return Err(DielectricError::InvalidCoating);
-        }
         Ok(Self(coating))
     }
 
@@ -65,13 +61,20 @@ impl DielectricCoating {
     }
 }
 
-/// Borrowed arbitrary ordered transparent spectral stack. This preserves each
-/// full Cauchy, Sellmeier or tabulated law and source without fitting it to the
-/// compact scene material's Cauchy cell. Thicknesses and wavelengths use the
-/// existing coating contracts. The stack does not allocate or own scene data.
+/// Borrowed arbitrary ordered passive spectral stack. This preserves each
+/// full Cauchy, Sellmeier or tabulated law, spectral extinction and source
+/// without fitting it to the compact scene material's Cauchy cell. Thicknesses
+/// and wavelengths use the existing coating contracts. No allocation or
+/// per-query copy of the original optical tables is needed.
 #[derive(Clone, Copy, Debug)]
 pub struct DielectricCoatingStack<'a> {
-    layers: &'a [CoherentDielectricCoating],
+    layers: StackLayers<'a>,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum StackLayers<'a> {
+    Transparent(&'a [CoherentDielectricCoating]),
+    Mixed(CoherentCoatingStack<'a>),
 }
 
 impl<'a> DielectricCoatingStack<'a> {
@@ -81,13 +84,43 @@ impl<'a> DielectricCoatingStack<'a> {
         if layers.len() > MAX_COHERENT_STACK_LAYERS {
             return Err(DielectricError::InvalidCoating);
         }
-        Ok(Self { layers })
+        Ok(Self { layers: StackLayers::Transparent(layers) })
+    }
+
+    /// Borrow arbitrarily ordered transparent and absorbing spectral films.
+    /// Their authored order runs outside first. Negative extinction is already
+    /// refused by the original film constructors. The same 64-layer bound
+    /// applies, including empty and zero-thickness stacks.
+    pub fn try_mixed(layers: &'a [CoatingLayer<'a>]) -> Result<Self, DielectricError> {
+        let stack = CoherentCoatingStack::try_new(layers)
+            .map_err(|_| DielectricError::InvalidCoating)?;
+        Ok(Self { layers: StackLayers::Mixed(stack) })
+    }
+
+    /// Number of authored physical layers, including zero-thickness films.
+    #[must_use]
+    pub fn layer_count(self) -> usize {
+        match self.layers {
+            StackLayers::Transparent(layers) => layers.len(),
+            StackLayers::Mixed(stack) => stack.layers().len(),
+        }
+    }
+
+    fn is_active(self) -> bool {
+        match self.layers {
+            StackLayers::Transparent(layers) => layers.iter().any(|film| film.thickness_m() != 0.0),
+            StackLayers::Mixed(stack) => stack.layers().iter().any(|film| match film {
+                CoatingLayer::Dielectric(film) => film.thickness_m() != 0.0,
+                CoatingLayer::Absorbing(film) => film.thickness_m() != 0.0,
+            }),
+        }
     }
 
     /// Reflected/transmitted ray-power matrices. `reverse` traverses the authored
     /// stack in the opposite order; callers also supply reversed boundary indices
     /// and the corresponding Snell angle. Exact grazing of a nonzero stack is
-    /// refused because incoming normal flux is zero. No absorption is inferred.
+    /// refused because incoming normal flux is zero. Absorption reduces R+T;
+    /// no lossless renormalization is applied to a lossy physical solution.
     pub fn fresnel_polarized(
         self,
         wavelength_nm: f64,
@@ -98,23 +131,22 @@ impl<'a> DielectricCoatingStack<'a> {
     ) -> Result<PolarizedFresnel, DielectricError> {
         super::validate_wavelength(wavelength_nm)?;
         let bare = fresnel_dielectric_polarized(cosine, eta_i, eta_t)?;
-        if self.layers.iter().all(|layer| layer.thickness_m() == 0.0) {
+        if !self.is_active() {
             return Ok(bare);
         }
         if cosine == 0.0 {
             return Err(DielectricError::InvalidInterface);
         }
-        let response = crate::conductor::lossless_stack_transmission(
-            self.layers,
-            wavelength_nm,
-            eta_i,
-            eta_t,
-            cosine,
-            reverse,
-            exit_normal_wave(bare.scalar, cosine, eta_i, eta_t),
-        )
-        .map_err(|_| DielectricError::InvalidInterface)?;
-        polarized_response(response, bare, self.layers.len())
+        let exit = exit_normal_wave(bare.scalar, cosine, eta_i, eta_t);
+        let response = match self.layers {
+            StackLayers::Transparent(layers) => crate::conductor::lossless_stack_transmission(
+                layers, wavelength_nm, eta_i, eta_t, cosine, reverse, exit,
+            ),
+            StackLayers::Mixed(stack) => stack.transmission(
+                wavelength_nm, eta_i, eta_t, cosine, reverse, exit,
+            ),
+        }.map_err(|_| DielectricError::InvalidInterface)?;
+        polarized_response(response, bare, self.layer_count())
     }
 
     /// Scalar power and native refraction classification from the same solution.
@@ -163,7 +195,8 @@ impl<'a> DielectricInterface<'a> {
         self.coating.is_some_and(|coating| {
             coating.0.unit_cell().iter().any(|layer| {
                 layer.thickness_m() != 0.0
-                    && layer.ior().eval_unchecked(self.wavelength_nm) != index
+                    && (layer.extinction_k() != 0.0
+                        || layer.ior().eval_unchecked(self.wavelength_nm) != index)
             })
         })
     }
@@ -198,7 +231,7 @@ impl<'a> DielectricInterface<'a> {
         }
         let response = coating
             .0
-            .lossless_transmission(
+            .transmission(
                 self.wavelength_nm,
                 eta_i,
                 eta_t,
@@ -210,7 +243,9 @@ impl<'a> DielectricInterface<'a> {
         polarized_response(response, bare, coating.0.layer_count())
     }
 
-    /// Native smooth reflection/transmission sample using this coherent response.
+    /// Native smooth sample using this coherent response. The proposal is
+    /// conditional on survival; its weight retains R+T so absorbing coatings
+    /// remove power once without a separate absorption roulette event.
     pub fn sample_smooth(
         self,
         normal: Vec3,
@@ -313,14 +348,18 @@ fn polarized_response(
             + reflected[1] * reflected[1]
             + transmitted[0] * transmitted[0]
             + transmitted[1] * transmitted[1];
-        if !closure.is_finite() || (closure - 1.0).abs() > tolerance {
+        if !closure.is_finite() || closure > 1.0 + tolerance
+            || (response.lossless && (closure - 1.0).abs() > tolerance) {
             return Err(DielectricError::InvalidInterface);
         }
-        // Only lossless films are admitted. Normalize bounded arithmetic
-        // roundoff in amplitude space, keeping both channels and their phases.
-        let scale = 1.0 / det::sqrt(closure);
-        response.reflected[pol] = reflected.map(|component| component * scale);
-        response.transmitted[pol] = transmitted.map(|component| component * scale);
+        // Preserve the established lossless arithmetic. A passive absorbing
+        // stack retains its actual survival deficit; only an above-one excess
+        // within the declared floating-point allowance may be removed.
+        if response.lossless || closure > 1.0 {
+            let scale = 1.0 / det::sqrt(closure);
+            response.reflected[pol] = reflected.map(|component| component * scale);
+            response.transmitted[pol] = transmitted.map(|component| component * scale);
+        }
     }
     let matrix = |amplitudes: [[f64; 2]; 2]| {
         let [s, p] = amplitudes;

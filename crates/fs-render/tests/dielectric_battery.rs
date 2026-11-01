@@ -7,6 +7,9 @@ mod spectra;
 #[path = "dielectric_battery/initial_medium.rs"]
 mod initial_medium;
 
+#[path = "dielectric_battery/absorbing_coatings.rs"]
+mod absorbing_coatings;
+
 use asupersync::types::Budget;
 use fs_exec::{CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};

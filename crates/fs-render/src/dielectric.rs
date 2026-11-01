@@ -71,7 +71,7 @@ impl core::fmt::Display for DielectricError {
             Self::UndefinedGroupIndex => "group index is undefined at this dielectric table knot",
             Self::InvalidDirection => "invalid dielectric direction frame",
             Self::InvalidInterface => "invalid dielectric interface parameters",
-            Self::InvalidCoating => "invalid lossless dielectric coating",
+            Self::InvalidCoating => "invalid passive dielectric coating",
             Self::CoatedNullRoughInterface => "rough coated equal-index boundaries require a mixed delta/rough model",
         })
     }
@@ -861,7 +861,7 @@ impl DielectricSurface {
         self.roughness_alpha.is_none()
     }
 
-    /// Attach an explicitly source-bound lossless coherent multilayer coating.
+    /// Attach an explicitly source-bound passive coherent multilayer coating.
     /// The authored order runs from outside the object into its bulk medium;
     /// an exiting ray must evaluate the reversed order. Bulk Beer-Lambert
     /// absorption stays independent and is not applied inside these films.
@@ -898,6 +898,31 @@ pub struct FresnelDielectric {
     pub transmitted_cosine: f64,
     /// Whether Snell's law admits no propagating transmitted ray.
     pub total_internal_reflection: bool,
+}
+
+impl FresnelDielectric {
+    /// Reflection/transmission proposal probabilities conditional on surviving
+    /// this interface. Absorbing coatings retain their physical `R` and `T` in
+    /// throughput; a sampled branch divides that power by its proposal. Direct
+    /// connectors use these probabilities for MIS, never as physical powers.
+    /// A representably black interface has a deterministic zero-weight
+    /// reflection proposal.
+    #[must_use]
+    pub fn event_probabilities(self) -> [f64; 2] {
+        let total = self.reflectance + self.transmittance;
+        if total == 0.0 { return [1.0, 0.0]; }
+        [self.reflectance / total, self.transmittance / total]
+    }
+
+    /// Total surface absorption inferred from the normal-power balance.
+    /// This signed floating-point residual is not a layer-resolved heat source
+    /// or a certificate for losses below arithmetic resolution. Tiny negative
+    /// values retain the optical calculation's roundoff rather than inventing
+    /// gain or silently assigning that defect to bulk material absorption.
+    #[must_use]
+    pub fn absorption_residual(self) -> f64 {
+        (1.0 - self.reflectance) - self.transmittance
+    }
 }
 
 /// Evaluate exact unpolarized dielectric Fresnel for an incident cosine in
@@ -1294,8 +1319,7 @@ fn interface_fresnel(interface: Option<DielectricInterface<'_>>, cosine: f64,
 fn interface_event_probabilities(interface: Option<DielectricInterface<'_>>,
     fresnel: FresnelDielectric) -> [f64; 2] {
     if interface.is_some_and(|value| value.is_active()) {
-        let total = fresnel.reflectance + fresnel.transmittance;
-        [fresnel.reflectance / total, fresnel.transmittance / total]
+        fresnel.event_probabilities()
     } else { [fresnel.reflectance, fresnel.transmittance] }
 }
 
