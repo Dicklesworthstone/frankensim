@@ -29,6 +29,9 @@ use crate::polarization::dielectric::scene::measurement::raster::DetectorRaster;
 use crate::polarization::{Stokes, photometry::PolarizedSource};
 use fs_exec::Cx;
 
+/// Raw calibrated sensor channels in the native OpenEXR format.
+pub mod output;
+
 /// Received broadband flux and empirical sampling errors for one finite cell.
 /// Errors are componentwise; their cross-component covariance is not provided.
 #[derive(Clone, Copy, Debug, PartialEq)]
