@@ -396,7 +396,9 @@ fn unconstrained_receipt(
     }
 }
 
-pub(super) fn validate_controls(controls: ConstraintControls<'_>) -> Result<(), ConstraintError> {
+pub(in crate::articulated::motion) fn validate_controls(
+    controls: ConstraintControls<'_>,
+) -> Result<(), ConstraintError> {
     if !controls.maximum_reaction_work_j.is_finite() || controls.maximum_reaction_work_j < 0.0 {
         return Err(ConstraintError::Invalid("absolute reaction-work budget"));
     }
@@ -449,7 +451,7 @@ fn validate_rows(
     Ok(())
 }
 
-pub(super) fn apply_rows(
+pub(in crate::articulated::motion) fn apply_rows(
     rows: &[JointConstraint],
     values: &[f64],
     cancelled: &mut impl FnMut() -> bool,
@@ -492,12 +494,12 @@ fn admit_positions(
     Ok(residuals)
 }
 
-pub(super) struct ConstraintResiduals {
-    pub(super) position: Vec<f64>,
-    pub(super) velocity: Vec<f64>,
+pub(in crate::articulated::motion) struct ConstraintResiduals {
+    pub(in crate::articulated::motion) position: Vec<f64>,
+    pub(in crate::articulated::motion) velocity: Vec<f64>,
 }
 
-pub(super) fn admit_constraints(
+pub(in crate::articulated::motion) fn admit_constraints(
     rows: &[JointConstraint],
     position: &[f64],
     velocity: &[f64],
@@ -530,25 +532,25 @@ struct VelocityColumn {
 }
 
 /// Cached original mass responses and one normalized small row factorization.
-pub(super) struct PreparedJointConstraints<'a> {
+pub(in crate::articulated::motion) struct PreparedJointConstraints<'a> {
     rows: &'a [JointConstraint],
     joints: usize,
     columns: Vec<VelocityColumn>,
     scale: Vec<f64>,
     factor: LuWorkspace,
-    pub(super) reciprocal_condition: f64,
+    pub(in crate::articulated::motion) reciprocal_condition: f64,
 }
 
-pub(super) struct ConstraintResponse {
-    pub(super) multipliers: Vec<f64>,
-    pub(super) joint_effort: Vec<f64>,
-    pub(super) base_delta: Twist,
-    pub(super) joint_delta: Vec<f64>,
+pub(in crate::articulated::motion) struct ConstraintResponse {
+    pub(in crate::articulated::motion) multipliers: Vec<f64>,
+    pub(in crate::articulated::motion) joint_effort: Vec<f64>,
+    pub(in crate::articulated::motion) base_delta: Twist,
+    pub(in crate::articulated::motion) joint_delta: Vec<f64>,
 }
 
 impl<'a> PreparedJointConstraints<'a> {
     #[allow(clippy::too_many_lines)]
-    pub(super) fn new(
+    pub(in crate::articulated::motion) fn new(
         model: &ArticulatedModel,
         joint_position: &[f64],
         rows: &'a [JointConstraint],
@@ -669,7 +671,7 @@ impl<'a> PreparedJointConstraints<'a> {
         })
     }
 
-    pub(super) fn solve_response(
+    pub(in crate::articulated::motion) fn solve_response(
         &mut self,
         rhs: &[f64],
         cancelled: &mut impl FnMut() -> bool,

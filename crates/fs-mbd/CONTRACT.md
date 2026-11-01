@@ -1134,6 +1134,48 @@ continued flight, a mixed-joint offset tree with full tensors and independent
 link-level momentum reconstruction, frame/Galilean covariance, reverse transfer,
 large common translation, and atomic identity/limit/work/cancellation behavior.
 
+## Rigid payload capture on a moving articulated tree
+
+`articulated::motion::inventory::capture_payload` attaches an independent native
+spatial-inertia body to any existing link at its actual supplied pose. The link
+frame, topology, joint coordinates and base pose remain unchanged. Loaded mass,
+COM and full rotated centroidal inertia use a reduced-mass parallel-axis sum;
+a mass increment below representable resolution refuses. The original native
+articulated inverse-mass recursion solves all base and joint recoil from the
+combined incoming momenta. No dense generalized mass matrix is assembled.
+
+Optional existing constant affine gear/lock rows react with the loaded inertia
+before final speed-limit admission. Their initial position and velocity must
+already satisfy the declared rows. The bounded prepared row-mobility owner is
+shared with constrained inertia reconfiguration; there is no independent gear
+solver or intermediate free-candidate speed rejection.
+
+The receipt retains the loaded native model/state, the actual attached payload
+state and an opaque attachment binding the original retained inertia and exact
+loaded target signature. Independent world linear/angular momentum sums and
+zero-velocity RNEA reconstruct every base/joint conjugate momentum, including
+the incoming payload pulled back to the target's virtual link. Only the
+reported internal gear reaction changes total projected joint momentum.
+
+Removed relative energy is a sum of nonnegative old-body velocity-change
+quadratics. The inverse-mass solve and separate endpoint energy audit use one
+common translating inertial frame, preserving small capture signals under a
+large uniform velocity. Actual finite gear midpoint work is reported and capped
+separately. No rounding defect is assigned to heat. All physical momentum,
+energy-loss, reaction-work and balance tolerances must pass before publication;
+cancellation and native inertia/state/limit refusals leave inputs untouched.
+
+Three focused native regressions cover analytic carrier/rotor capture and
+continued native motion, a 3.8475 J loss under a billion-scale common velocity
+with a 4 J allowance, mixed revolute/prismatic/helical joints with offset COMs
+and full rotated tensors, independent spatial/screw and parallel-axis oracles,
+scene/boost covariance, locked-joint recoil with an otherwise inadmissible free
+candidate, and atomic inventory/budget/constraint/cancellation refusals.
+
+This is a declared instantaneous rigid attachment. Contact discovery, finite
+grasping duration, fracture, mass flux, internal shape momentum and the thermal
+destination of removed energy require their own physical models.
+
 ## Continuous prescribed-inertia motion
 
 `articulated::motion::reconfigure::step::advance` and

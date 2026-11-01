@@ -331,7 +331,7 @@ fn validate_compatible_models(
     Ok(())
 }
 
-fn validate_controls(
+pub(in crate::articulated::motion) fn validate_controls(
     model: &ArticulatedModel,
     controls: ReconfigurationControls<'_>,
 ) -> Result<(), ReconfigurationError> {
@@ -362,7 +362,7 @@ fn validate_controls(
     Ok(())
 }
 
-fn state_kinematics(
+pub(in crate::articulated::motion) fn state_kinematics(
     model: &ArticulatedModel,
     state: &FreeFloatingMotionState,
 ) -> Result<Kinematics, ReconfigurationError> {
@@ -408,7 +408,7 @@ fn generalized_momentum(
     Ok(result)
 }
 
-fn audit_momentum(
+pub(in crate::articulated::motion) fn audit_momentum(
     before: &[f64],
     after: &[f64],
     world_before: ArticulatedMomentum,
