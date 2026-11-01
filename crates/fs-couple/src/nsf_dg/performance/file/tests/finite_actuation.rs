@@ -215,10 +215,12 @@ fn g0_named_actuation_requires_owned_bounded_controls_and_preserves_the_accepted
         renderer.block(&mut [0.0]).unwrap();
         let prefix = snapshot(&renderer);
         let refused = renderer.block(&mut [0.0]).unwrap_err();
-        if next == "0 1000" {
-            // 1000 W over one interval heats the chamber about 1.2 K: the window refuses it.
-            assert!(format!("{refused:?}").to_lowercase().contains("window"), "{refused:?}");
-        }
+        // Each case is refused for its own reason. -1 m^3/s over one interval moves the
+        // 10 mL chamber by its whole volume against the 1 % bound
+        // (finite_reservoir.rs, "exceeds its positive bounded volume movement");
+        // 1000 W heats it about 1.2 K, out of the +-0.1 K window.
+        let reason = if next == "0 1000" { "window" } else { "exceeds its positive bounded volume movement" };
+        assert!(format!("{refused:?}").to_lowercase().contains(reason), "{next}: {refused:?}");
         assert_eq!(snapshot(&renderer), prefix);
     }
 }

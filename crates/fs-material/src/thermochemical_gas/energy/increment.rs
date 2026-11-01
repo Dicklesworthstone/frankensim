@@ -191,9 +191,30 @@ impl GasCaloricBranch<'_> {
     }
 }
 
+/// Half a quantum of the temperature coordinate: T moves in steps of
+/// `capacity * (spacing of floats at T)` J/kg, so a request that is not a whole
+/// number of quanta is answered by a temperature at least half a quantum away
+/// from it in the worst case, and the tightening below (`0.5 |request|`) can
+/// exceed that for a request under one quantum. Used only to accept a temperature
+/// that MOVED off the reference, never the reference itself, and never beyond
+/// the caller's own tolerance. Derived from the representation, not a typed number.
+fn representation_floor(temperature_k: f64, capacity_j_kg_k: f64) -> f64 {
+    0.5 * capacity_j_kg_k
+        * (temperature_k.next_up() - temperature_k).max(temperature_k - temperature_k.next_down())
+}
+
 fn solve_temperature(
     branch: &GasCaloricBranch<'_>, context: &QueryPoint, constraint: Constraint,
     requested: f64, cancelled: &mut impl FnMut() -> bool,
+) -> Result<root::Solution, GasEnergyError> {
+    solve_temperature_with(branch, context, constraint, requested, cancelled, true)
+}
+
+// `floored == false` is the solver exactly as it was before the representation
+// floor; the tests compare the two bit for bit.
+fn solve_temperature_with(
+    branch: &GasCaloricBranch<'_>, context: &QueryPoint, constraint: Constraint,
+    requested: f64, cancelled: &mut impl FnMut() -> bool, floored: bool,
 ) -> Result<root::Solution, GasEnergyError> {
     let (model, controls) = (branch.model, branch.controls);
     poll(cancelled)?;
@@ -247,8 +268,17 @@ fn solve_temperature(
         if !positive(tolerance) {
             return Err(GasEnergyError::Invalid("nonzero caloric increment is below represented solve resolution"));
         }
-        root::solve(lo, hi, tolerance,
-            controls.maximum_iterations, evaluate, cancelled).map_err(map_root)?
+        // At a stagnated bracket (adjacent floats) the best end is accepted when its
+        // residual is within the representation floor, so a request of 0.5..2/3 of a
+        // quantum is answered by the neighbouring temperature instead of refused.
+        // The reference itself keeps a zero floor, so a nonzero request is never
+        // answered by "no change", and the caller's tolerance still caps the floor.
+        let (reference, caller_tolerance) = (initial.value(), controls.energy_tolerance_j_kg);
+        root::solve_with_floor(lo, hi, tolerance, controls.maximum_iterations, evaluate, cancelled,
+            |t, sample| if floored && t != reference {
+                representation_floor(t, sample.tangent).min(caller_tolerance)
+            } else { 0.0 })
+            .map_err(map_root)?
     };
     Ok(solved)
 }
@@ -304,3 +334,5 @@ fn admit_increment(
 mod tests;
 #[cfg(test)]
 mod prepared_tests;
+#[cfg(test)]
+mod floor_tests;
