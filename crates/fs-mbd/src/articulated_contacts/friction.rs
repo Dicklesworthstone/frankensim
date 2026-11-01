@@ -14,7 +14,7 @@ pub mod elliptic;
 
 use super::{
     ArticulatedContactError, ArticulatedContactSystem, ContactCounterpart, EventResponse,
-    EventWorkspace, LinkContactPoint, Prepared, finite, poll, prepare_point, unit_normal,
+    EventWorkspace, LinkContactPoint, Prepared, finite, poll,
 };
 use crate::articulated::FreeFloatingImpulseResponse;
 use crate::articulated::contact_geometry::prepare_contact_frame;

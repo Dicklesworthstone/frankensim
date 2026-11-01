@@ -9,17 +9,18 @@
 use super::super::{
     ArticulatedContactError, ArticulatedContactSystem, ArticulatedFrictionalContact,
     ArticulatedFrictionalContactResult, EventResponse, FrictionalContactConfig, LinkContactPoint,
-    Prepared, PreparedContactEvent, admit_support_work, finite, poll, prepare_event,
-    prepare_point, solve_frictional_contacts, unit_normal,
+    PreparedContactEvent, admit_support_work, finite, poll, prepare_event,
+    solve_frictional_contacts,
+};
+use super::operators::{
+    ConstrainedMobility, native_reference_mobility, prepare_bilateral_rows,
+    validate_constraint_config,
 };
 use super::{
     ConstrainedImpactConfig, ImpactDistanceConstraint,
     resolve_constrained_articulated_frictional_contacts,
 };
-use crate::articulated::{motion::MAX_FREE_FLOATING_STEP_LINKS, solve_floating_base_system};
-use crate::articulated_contacts::Term;
-use fs_ga::{Vec3, Wrench};
-use fs_la::factor::cholesky;
+use crate::articulated::motion::MAX_FREE_FLOATING_STEP_LINKS;
 
 /// Maximum independently reacting scalar bilateral rows in one impact.
 pub const MAX_IMPACT_BILATERAL_ROWS: usize = 32;
@@ -127,22 +128,12 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
 ) -> Result<BilateralArticulatedContactResult, ArticulatedContactError> {
     poll(&mut cancelled)?;
     let cfg = constraint_config;
-    if [
-        cfg.position_tolerance_m,
-        cfg.velocity_tolerance_mps,
-        cfg.minimum_scaled_pivot,
-    ]
-    .iter()
-    .any(|x| !x.is_finite() || *x <= 0.)
-        || cfg.minimum_scaled_pivot < 4096. * f64::EPSILON
-        || cfg.minimum_scaled_pivot >= 1.
-    {
-        return Err(ArticulatedContactError::Invalid(
-            "invalid constrained-impact controls",
-        ));
-    }
+    validate_constraint_config(cfg)?;
 
-    if constraints.iter().all(|c| matches!(c, ImpactBilateralConstraint::Distance(_))) {
+    if constraints
+        .iter()
+        .all(|c| matches!(c, ImpactBilateralConstraint::Distance(_)))
+    {
         let distances: Vec<_> = constraints
             .iter()
             .map(|c| match *c {
@@ -151,12 +142,7 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
             })
             .collect();
         let old = resolve_constrained_articulated_frictional_contacts(
-            systems,
-            contacts,
-            &distances,
-            config,
-            cfg,
-            cancelled,
+            systems, contacts, &distances, config, cfg, cancelled,
         )?;
         return Ok(BilateralArticulatedContactResult {
             impact: old.impact,
@@ -200,98 +186,11 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
         order,
     } = prepare_event(systems, contacts, config, &mut cancelled)?;
     let n = prepared.len();
-    let mut rows = Vec::with_capacity(scalar_rows);
-    let mut residuals = Vec::with_capacity(scalar_rows);
-    let mut rates = Vec::with_capacity(scalar_rows);
-
-    for (constraint_index, constraint) in constraints.iter().copied().enumerate() {
-        poll(&mut cancelled)?;
-        match constraint {
-            ImpactBilateralConstraint::Distance(c) => {
-                if !c.length_m.is_finite()
-                    || c.length_m <= 0.
-                    || same_link(c.a, c.b)
-                {
-                    return Err(ArticulatedContactError::Invalid(
-                        "invalid impact distance endpoints/length",
-                    ));
-                }
-                let (_, a) = prepare_point(c.a, Vec3::new(1., 0., 0.), &workspace.before)?;
-                let (_, b) = prepare_point(c.b, Vec3::new(1., 0., 0.), &workspace.before)?;
-                let delta = b - a;
-                let length = finite(delta.norm())?;
-                let gap = finite(length - c.length_m)?;
-                if gap.abs() > cfg.position_tolerance_m {
-                    return Err(ArticulatedContactError::Invalid(
-                        "initial rigid distance is inconsistent",
-                    ));
-                }
-                let normal = unit_normal(delta)?;
-                let (first, world_point) = prepare_point(c.b, normal, &workspace.before)?;
-                let (second, _) = prepare_point(c.a, normal.scale(-1.), &workspace.before)?;
-                let row = Prepared {
-                    first,
-                    second: Some(second),
-                    axis_world: normal,
-                    world_point,
-                    plane_speed: 0.,
-                    minimum_speed: None,
-                };
-                let rate = finite(row.velocity(&workspace.before))?;
-                if rate.abs() > cfg.velocity_tolerance_mps {
-                    return Err(ArticulatedContactError::Invalid(
-                        "initial rigid distance velocity is not tangent",
-                    ));
-                }
-                prepared.push(row);
-                rows.push(ImpactBilateralRow {
-                    constraint: constraint_index,
-                    kind: ImpactBilateralRowKind::Distance,
-                });
-                residuals.push(gap);
-                rates.push(rate);
-            }
-            ImpactBilateralConstraint::PointCoincidence(c) => {
-                append_point_rows(
-                    c.a,
-                    c.b,
-                    constraint_index,
-                    false,
-                    cfg,
-                    &workspace.before,
-                    &mut prepared,
-                    &mut rows,
-                    &mut residuals,
-                    &mut rates,
-                )?;
-            }
-            ImpactBilateralConstraint::Weld(c) => {
-                append_point_rows(
-                    c.a,
-                    c.b,
-                    constraint_index,
-                    true,
-                    cfg,
-                    &workspace.before,
-                    &mut prepared,
-                    &mut rows,
-                    &mut residuals,
-                    &mut rates,
-                )?;
-                append_weld_angular_rows(
-                    c.a,
-                    c.b,
-                    constraint_index,
-                    cfg,
-                    &workspace.before,
-                    &mut prepared,
-                    &mut rows,
-                    &mut residuals,
-                    &mut rates,
-                )?;
-            }
-        }
-    }
+    let geometry = prepare_bilateral_rows(constraints, cfg, &workspace.before, &mut cancelled)?;
+    let rows: Vec<_> = geometry.iter().map(|r| r.row).collect();
+    let residuals: Vec<_> = geometry.iter().map(|r| r.position_residual_m).collect();
+    let rates: Vec<_> = geometry.iter().map(|r| r.velocity_before).collect();
+    prepared.extend(geometry.iter().map(|r| r.prepared()));
 
     let k = rows.len();
     if k == 0 {
@@ -301,96 +200,20 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
     }
     let dimension = n + k;
     let gram = workspace.delassus(systems, &prepared, &mut cancelled)?;
-    let mut scale = Vec::with_capacity(k);
-    for i in 0..k {
-        poll(&mut cancelled)?;
-        let row = &prepared[n + i];
-        let d = gram[(n + i) * dimension + n + i];
-        let mut free = 0.;
-        for term in row.terms() {
-            let system = &systems[term.point.system_index];
-            let inertia = system.model.links()[term.point.link_index].inertia();
-            let matrix = super::super::super::dynamics(term.point.system_index, inertia.matrix())?;
-            let response = super::super::super::dynamics(
-                term.point.system_index,
-                solve_floating_base_system(&matrix, term.direction),
-            )?;
-            free += term.direction.pairing(response);
-        }
-        if !free.is_finite() || free <= 0. || d <= 0. || d / free < cfg.minimum_scaled_pivot {
-            return Err(ArticulatedContactError::Invalid(
-                "bilateral row has unresolved native mobility",
-            ));
-        }
-        scale.push(d.sqrt());
-    }
+    let reference = native_reference_mobility(systems, &prepared[n..], &mut cancelled)?;
+    let projection = ConstrainedMobility::new(
+        &gram,
+        n,
+        &reference,
+        cfg.minimum_scaled_pivot,
+        &mut cancelled,
+    )?;
 
-    let mut a = vec![0.; k * k];
-    for i in 0..k {
-        a[i * k + i] = 1.;
-        for j in 0..i {
-            let x = (gram[(n + i) * dimension + n + j] / scale[i]) / scale[j];
-            let y = (gram[(n + j) * dimension + n + i] / scale[j]) / scale[i];
-            if !x.is_finite() || !y.is_finite() || (x - y).abs() > 1e-10 {
-                return Err(ArticulatedContactError::Unresolved(
-                    "bilateral mobility reciprocity",
-                ));
-            }
-            a[i * k + j] = 0.5 * (x + y);
-            a[j * k + i] = a[i * k + j];
-        }
-    }
-    poll(&mut cancelled)?;
-    let factor = cholesky(&a, k)
-        .map_err(|_| ArticulatedContactError::Invalid("dependent impact bilateral constraints"))?;
-    let mut minimum_pivot = 1.0_f64;
-    for i in 0..k {
-        let pivot = factor.l(i, i).powi(2);
-        if !pivot.is_finite() || pivot < cfg.minimum_scaled_pivot {
-            return Err(ArticulatedContactError::Invalid(
-                "ill-conditioned impact bilateral constraints",
-            ));
-        }
-        minimum_pivot = minimum_pivot.min(pivot);
-    }
-
-    let mut recovery = vec![0.; n * k];
-    for column in 0..n {
-        poll(&mut cancelled)?;
-        let rhs = &mut recovery[column * k..(column + 1) * k];
-        for i in 0..k {
-            rhs[i] = gram[(n + i) * dimension + column] / scale[i];
-        }
-        factor.solve(rhs);
-        for i in 0..k {
-            rhs[i] = finite(rhs[i] / scale[i])?;
-        }
-    }
-
-    let mut mobility = vec![0.; n * n];
-    for i in 0..n {
-        poll(&mut cancelled)?;
-        for j in 0..n {
-            let correction: f64 = (0..k)
-                .map(|r| gram[i * dimension + n + r] * recovery[j * k + r])
-                .sum();
-            mobility[i * n + j] = finite(gram[i * dimension + j] - correction)?;
-        }
-    }
-
-    let contact = solve_frictional_contacts(&laws, &mobility, config, &mut cancelled)?;
+    let contact =
+        solve_frictional_contacts(&laws, &projection.contact_mobility, config, &mut cancelled)?;
     admit_support_work(&contact, contacts, &order)?;
     let mut impulses: Vec<_> = contact.impulses.iter().flatten().copied().collect();
-    let bilateral_impulses: Vec<_> = (0..k)
-        .map(|r| {
-            -(0..n)
-                .map(|i| recovery[i * k + r] * impulses[i])
-                .sum::<f64>()
-        })
-        .collect();
-    for &value in &bilateral_impulses {
-        finite(value)?;
-    }
+    let bilateral_impulses = projection.recover(&impulses, &mut cancelled)?;
     impulses.extend_from_slice(&bilateral_impulses);
 
     let mut predicted: Vec<_> = contact
@@ -449,7 +272,7 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
                 .chunks_exact(3)
                 .map(|v| [v[0], v[1], v[2]])
                 .collect(),
-            delassus: mobility,
+            delassus: projection.contact_mobility,
             plane_work: mechanics.plane_work,
             energy_balance_residual: mechanics.energy_balance_residual,
             linear_momentum_residual: mechanics.linear_momentum_residual,
@@ -462,156 +285,6 @@ pub fn resolve_bilateral_articulated_frictional_contacts(
         velocity_before: rates,
         velocity_after: after,
         constraint_work_j: constraint_work,
-        minimum_scaled_pivot: minimum_pivot,
+        minimum_scaled_pivot: projection.minimum_scaled_pivot,
     })
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_point_rows(
-    a: LinkContactPoint,
-    b: LinkContactPoint,
-    constraint_index: usize,
-    weld: bool,
-    cfg: ConstrainedImpactConfig,
-    kinematics: &[crate::articulated::Kinematics],
-    prepared: &mut Vec<Prepared>,
-    rows: &mut Vec<ImpactBilateralRow>,
-    residuals: &mut Vec<f64>,
-    rates: &mut Vec<f64>,
-) -> Result<(), ArticulatedContactError> {
-    if same_link(a, b) {
-        return Err(ArticulatedContactError::Invalid(
-            "point constraint requires distinct rigid links",
-        ));
-    }
-    let (_, a_world) = prepare_point(a, Vec3::new(1., 0., 0.), kinematics)?;
-    let (_, b_world) = prepare_point(b, Vec3::new(1., 0., 0.), kinematics)?;
-    let pose_a = kinematics[a.system_index].world_from_link[a.link_index];
-    let delta_world = b_world - a_world;
-    let delta_a = pose_a.rotation().inverse().rotate(delta_world)?;
-    if delta_a.norm() > cfg.position_tolerance_m {
-        return Err(ArticulatedContactError::Invalid(
-            "initial point closure is inconsistent",
-        ));
-    }
-    let basis = [
-        Vec3::new(1., 0., 0.),
-        Vec3::new(0., 1., 0.),
-        Vec3::new(0., 0., 1.),
-    ];
-    for (component, axis_a) in basis.into_iter().enumerate() {
-        let axis_world = pose_a.rotation().rotate(axis_a)?;
-        let (first, world_point) = prepare_point(b, axis_world, kinematics)?;
-        let (mut second, _) = prepare_point(a, axis_world.scale(-1.), kinematics)?;
-        // g = R_A^T(x_B-x_A). Its A-side covector contains the geometric
-        // couple -(x_B-x_A) x F, which makes the internal row objective and
-        // preserves zero net spatial impulse away from exact closure.
-        let couple_world = delta_world.cross(axis_world).scale(-1.);
-        second.direction.torque =
-            second.direction.torque + pose_a.rotation().inverse().rotate(couple_world)?;
-        let row = Prepared {
-            first,
-            second: Some(second),
-            axis_world,
-            world_point,
-            plane_speed: 0.,
-            minimum_speed: None,
-        };
-        let rate = finite(row.velocity(kinematics))?;
-        if rate.abs() > cfg.velocity_tolerance_mps {
-            return Err(ArticulatedContactError::Invalid(
-                "initial point-closure velocity is not tangent",
-            ));
-        }
-        prepared.push(row);
-        rows.push(ImpactBilateralRow {
-            constraint: constraint_index,
-            kind: if weld {
-                ImpactBilateralRowKind::WeldPoint { component }
-            } else {
-                ImpactBilateralRowKind::Point { component }
-            },
-        });
-        residuals.push(component_value(delta_a, component));
-        rates.push(rate);
-    }
-    Ok(())
-}
-
-#[allow(clippy::too_many_arguments)]
-fn append_weld_angular_rows(
-    a: LinkContactPoint,
-    b: LinkContactPoint,
-    constraint_index: usize,
-    cfg: ConstrainedImpactConfig,
-    kinematics: &[crate::articulated::Kinematics],
-    prepared: &mut Vec<Prepared>,
-    rows: &mut Vec<ImpactBilateralRow>,
-    residuals: &mut Vec<f64>,
-    rates: &mut Vec<f64>,
-) -> Result<(), ArticulatedContactError> {
-    let pose_a = kinematics
-        .get(a.system_index)
-        .and_then(|k| k.world_from_link.get(a.link_index))
-        .copied()
-        .ok_or(ArticulatedContactError::Invalid(
-            "weld A endpoint is out of range",
-        ))?;
-    let pose_b = kinematics
-        .get(b.system_index)
-        .and_then(|k| k.world_from_link.get(b.link_index))
-        .copied()
-        .ok_or(ArticulatedContactError::Invalid(
-            "weld B endpoint is out of range",
-        ))?;
-    let basis = [
-        Vec3::new(1., 0., 0.),
-        Vec3::new(0., 1., 0.),
-        Vec3::new(0., 0., 1.),
-    ];
-    for (component, axis_a) in basis.into_iter().enumerate() {
-        let axis_world = pose_a.rotation().rotate(axis_a)?;
-        let torque_a = pose_a.rotation().inverse().rotate(axis_world.scale(-1.))?;
-        let torque_b = pose_b.rotation().inverse().rotate(axis_world)?;
-        let row = Prepared {
-            first: Term {
-                point: b,
-                direction: Wrench::new(torque_b, Vec3::default()),
-            },
-            second: Some(Term {
-                point: a,
-                direction: Wrench::new(torque_a, Vec3::default()),
-            }),
-            axis_world,
-            world_point: pose_b.transform_point(b.point_body)?,
-            plane_speed: 0.,
-            minimum_speed: None,
-        };
-        let rate = finite(row.velocity(kinematics))?;
-        if rate.abs() > cfg.velocity_tolerance_mps {
-            return Err(ArticulatedContactError::Invalid(
-                "initial weld angular velocity is not tangent",
-            ));
-        }
-        prepared.push(row);
-        rows.push(ImpactBilateralRow {
-            constraint: constraint_index,
-            kind: ImpactBilateralRowKind::WeldAngular { component },
-        });
-        residuals.push(0.);
-        rates.push(rate);
-    }
-    Ok(())
-}
-
-fn same_link(a: LinkContactPoint, b: LinkContactPoint) -> bool {
-    a.system_index == b.system_index && a.link_index == b.link_index
-}
-
-fn component_value(v: Vec3, component: usize) -> f64 {
-    match component {
-        0 => v.x,
-        1 => v.y,
-        _ => v.z,
-    }
 }

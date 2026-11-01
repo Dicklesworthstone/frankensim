@@ -332,6 +332,36 @@ It does not discover collision times, infer cross-tree hydrodynamic mass,
 supply persistent contact or finite-patch spin, choose material coefficients,
 or allocate impact loss to heat/deformation.
 
+### Rigid linkages during complete-fluid Coulomb impacts
+
+`partitioned::articulated::impact::friction::constrained::resolve` preserves
+admitted distance, spherical point and weld constraints during one caller-located
+event. Original native bilateral geometry and normalized Schur condensation
+consume the augmented mobility from the same per-tree prepared dry-plus-fluid
+mass. The original Coulomb law solves on the condensed mobility; all contact
+and recovered bilateral impulses are accumulated before one update per tree.
+No penalty stiffness, sequential velocity projection or dry-only reaction mass
+is substituted.
+
+Up to 21 contacts and 32 independent scalar bilateral rows (95 total) are
+admitted, within the existing per-tree bounds, 128 trees and 4096 total links.
+Uncancelled endpoint response scales use the complete mass and reuse each
+endpoint solve when forming combined rows. Native actual rates, complete
+kinetic/support work and spatial momentum still gate publication. Admitted
+numerical bilateral work is reported separately and remains in the energy
+residual; it is not heat. Reactions have N s units for point/range rows and
+N m s for weld angular rows. The inherited native scalar velocity threshold
+uses m/s or rad/s according to row kind. Empty constraints delegate to the
+existing unconstrained consumer. The original unique-velocity verdict gives
+no new authority to local contact or linkage loads.
+
+`articulated_constrained` checks analytic fluid-loaded distance transmission,
+distinct off-centre spherical/weld recoil, the objective geometric couple at
+admitted closure error, simultaneous redundant contact/chain ordering and atomic
+refusals. This adds instantaneous constrained impacts; continuous loop
+integration, collision discovery and cross-tree hydrodynamic mass remain
+separate.
+
 ### Mechanical travel stops with coupled recoil and support
 
 `partitioned::articulated::stops::step_with_stops` advances the original coupled

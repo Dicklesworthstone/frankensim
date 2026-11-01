@@ -83,6 +83,8 @@ pub(crate) struct PreparedRows {
     rows: Vec<PreparedRow>,
     pub delassus: Vec<f64>,
     pub relative_speeds_before: Vec<f64>,
+    /// Uncancelled endpoint mobility for the trailing bilateral rows only.
+    pub bilateral_reference_mobility: Vec<f64>,
 }
 
 fn vector(value: Vec3) -> Result<Vec3, Refusal> {
@@ -191,15 +193,43 @@ impl<'a> ImpactWorkspace<'a> {
         geometries: &[PointImpactRow],
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<PreparedRows, Refusal> {
-        if geometries.len() > 64 {
+        self.project(geometries, None, cancelled)
+    }
+
+    /// At most 63 Coulomb rows followed by 32 independent bilateral rows.
+    /// Only bilateral rows require an uncancelled endpoint-response scale.
+    pub(crate) fn project_bilateral_rows(
+        &self,
+        geometries: &[PointImpactRow],
+        contact_rows: usize,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedRows, Refusal> {
+        self.project(geometries, Some(contact_rows), cancelled)
+    }
+
+    fn project(
+        &self,
+        geometries: &[PointImpactRow],
+        bilateral_start: Option<usize>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<PreparedRows, Refusal> {
+        let invalid = match bilateral_start {
+            Some(n) => n > 63 || n > geometries.len() || geometries.len() - n > 32,
+            None => geometries.len() > 64,
+        };
+        if invalid {
             return Err(refusal(
                 "articulated-impact-invalid",
-                "more than 64 point-direction rows",
+                "impact exceeds its contact/bilateral row bounds",
             ));
         }
+        let mut bilateral_reference_mobility =
+            Vec::with_capacity(bilateral_start.map_or(0, |n| geometries.len() - n));
         let mut rows = Vec::with_capacity(geometries.len());
         let mut speeds = Vec::with_capacity(geometries.len());
-        for &geometry in geometries {
+        for (row_index, &geometry) in geometries.iter().enumerate() {
+            let needs_reference = bilateral_start.is_some_and(|n| row_index >= n);
+            let mut reference = 0.;
             poll(cancelled)?;
             finite(geometry.plane_speed)?;
             finite(geometry.relative_speed_before)?;
@@ -233,17 +263,40 @@ impl<'a> ImpactWorkspace<'a> {
                     parts.last_mut().expect("one inserted point direction")
                 };
                 let columns = system.map.body_jacobian(term.point.link_index);
-                for (i, value) in part.jacobian.iter_mut().enumerate() {
-                    *value = finite(*value + term.direction.pairing(columns[native_index(i)]))?;
+                if needs_reference {
+                    let individual: Vec<_> = (0..part.jacobian.len())
+                        .map(|i| finite(term.direction.pairing(columns[native_index(i)])))
+                        .collect::<Result<_, _>>()?;
+                    let response = system.mass.solve(&individual)?;
+                    reference = finite(reference + dot(&individual, &response))?;
+                    if part.response.is_empty() {
+                        part.response.resize(response.len(), 0.);
+                    }
+                    // Linearity combines the endpoint responses without a
+                    // second solve of their sum. Keeping their uncancelled
+                    // work distinguishes redundant rows using THIS full mass.
+                    for i in 0..individual.len() {
+                        part.jacobian[i] = finite(part.jacobian[i] + individual[i])?;
+                        part.response[i] = finite(part.response[i] + response[i])?;
+                    }
+                } else {
+                    for (i, value) in part.jacobian.iter_mut().enumerate() {
+                        *value = finite(*value + term.direction.pairing(columns[native_index(i)]))?;
+                    }
                 }
             }
             let mut speed = -geometry.plane_speed;
             for part in &mut parts {
                 let system = &self.systems[part.system];
                 speed = finite(speed + dot(&part.jacobian, &system.velocity))?;
-                part.response = system.mass.solve(&part.jacobian)?;
+                if part.response.is_empty() {
+                    part.response = system.mass.solve(&part.jacobian)?;
+                }
             }
             speeds.push(speed);
+            if needs_reference {
+                bilateral_reference_mobility.push(reference);
+            }
             rows.push(PreparedRow { geometry, parts });
         }
         let count = rows.len();
@@ -271,6 +324,7 @@ impl<'a> ImpactWorkspace<'a> {
             rows,
             delassus,
             relative_speeds_before: speeds,
+            bilateral_reference_mobility,
         })
     }
 

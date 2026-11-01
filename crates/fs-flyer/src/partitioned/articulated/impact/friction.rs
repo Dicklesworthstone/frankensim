@@ -4,6 +4,10 @@
 //! contact law solves normal and tangent impulses together. The common impact
 //! mechanics workspace applies one accumulated impulse per articulated tree.
 
+/// Distance, spherical and weld reactions through the complete physical inertia.
+#[path = "friction/constrained.rs"]
+pub mod constrained;
+
 use super::mechanics::{ImpactWorkspace, PointImpactRow};
 use super::{ArticulatedImpactSystem, ImpactMechanics};
 use crate::Refusal;
@@ -12,9 +16,11 @@ use fs_contact::frictional_multicontact::{
     FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
     FrictionalContactError, FrictionalContactResult, solve_frictional_contacts,
 };
+use fs_mbd::articulated::Kinematics;
 use fs_mbd::articulated::contact_geometry::{ContactCounterpart, prepare_contact_frame};
 use fs_mbd::articulated::generalized::GeneralizedKinematics;
 pub use fs_mbd::articulated_contacts::friction::ArticulatedFrictionalContact;
+use std::borrow::Borrow;
 
 /// A fully audited event, retaining the original contact-law determinacy result.
 #[derive(Debug, Clone)]
@@ -23,7 +29,9 @@ pub struct ArticulatedFrictionalImpact {
     pub contact_ids: Vec<u64>,
     /// Original Coulomb result. A velocity witness does not identify local loads.
     pub contact: FrictionalContactResult,
-    /// Original complete `J M_total^-1 J^T`, normal-first within each contact.
+    /// Contact-law mobility, normal-first within each contact. The unconstrained
+    /// entry uses complete `J M_total^-1 J^T`; the constrained entry uses its
+    /// bilateral Schur complement through that same physical mass.
     pub delassus: Vec<f64>,
     /// Accepted states, measured row speeds, total kinetic work and spatial audits.
     pub mechanics: ImpactMechanics,
@@ -76,81 +84,14 @@ pub fn resolve(
     mut cancelled: impl FnMut() -> bool,
 ) -> Result<ArticulatedFrictionalImpact, Refusal> {
     poll(&mut cancelled)?;
-    if contacts.len() > 21 || contacts.len() > config.maximum_contacts {
-        return Err(refusal(
-            "articulated-friction-invalid",
-            "contact event exceeds its size cap",
-        ));
-    }
-    let mut order: Vec<_> = (0..contacts.len()).collect();
-    order.sort_unstable_by_key(|&index| contacts[index].id);
-    if order
-        .windows(2)
-        .any(|pair| contacts[pair[0]].id == contacts[pair[1]].id)
-    {
-        return Err(refusal(
-            "articulated-friction-invalid",
-            "duplicate contact identity",
-        ));
-    }
+    let order = contact_order(contacts, config)?;
     let workspace = ImpactWorkspace::new(systems, evaluate_fluid, &mut cancelled)?;
     let kinematics = workspace.kinematics();
-    let mut rows = Vec::with_capacity(3 * contacts.len());
-    let mut laws = Vec::with_capacity(contacts.len());
-    for &index in &order {
-        poll(&mut cancelled)?;
-        let c = contacts[index];
-        let geometry = prepare_contact_frame(
-            c.point,
-            c.other,
-            c.normal_world,
-            c.tangent_world,
-            index,
-            &kinematics,
-        )
-        .map_err(|error| refusal("articulated-friction-invalid", error))?;
-        laws.push(FrictionalContact {
-            id: c.id,
-            gap: geometry.rows[0].gap,
-            activation_tolerance: c.activation_tolerance,
-            relative_velocity: geometry.rows.map(|row| row.relative_normal_speed),
-            friction_coefficient: c.friction_coefficient,
-            normal_law: c.normal_law,
-        });
-        rows.extend(geometry.rows.map(PointImpactRow::from));
-    }
+    let (rows, laws) = prepare_contacts(contacts, &order, &kinematics, &mut cancelled)?;
     let prepared = workspace.project_rows(&rows, &mut cancelled)?;
     let contact = solve_frictional_contacts(&laws, &prepared.delassus, config, &mut cancelled)
-        .map_err(|error| {
-            let code = if matches!(error, FrictionalContactError::Cancelled) {
-                "articulated-friction-cancelled"
-            } else {
-                "articulated-friction-law"
-            };
-            refusal(code, error)
-        })?;
-    if matches!(
-        contact.determinacy,
-        FrictionalContactDeterminacy::UniqueVelocity(_)
-    ) {
-        // A null contact impulse changes no body's velocity, hence no total
-        // external impulse. One common support translation therefore has
-        // fixed total work; unequal support velocities need a further witness.
-        let mut common_velocity = None;
-        for &active in &contact.active_indices {
-            if let ContactCounterpart::PrescribedPlane { velocity_world, .. } =
-                contacts[order[active]].other
-            {
-                if common_velocity.is_some_and(|v| v != velocity_world) {
-                    return Err(refusal(
-                        "articulated-friction-support-work",
-                        "redundant impulses do not establish work for independently moving supports",
-                    ));
-                }
-                common_velocity = Some(velocity_world);
-            }
-        }
-    }
+        .map_err(law_refusal)?;
+    admit_support_work(&contact, contacts, &order)?;
     let impulses: Vec<_> = contact.impulses.iter().flatten().copied().collect();
     let predicted: Vec<_> = contact
         .relative_velocities_after
@@ -174,4 +115,100 @@ pub fn resolve(
         delassus: prepared.delassus,
         mechanics,
     })
+}
+
+fn contact_order(
+    contacts: &[ArticulatedFrictionalContact],
+    config: FrictionalContactConfig,
+) -> Result<Vec<usize>, Refusal> {
+    if contacts.len() > 21 || contacts.len() > config.maximum_contacts {
+        return Err(refusal(
+            "articulated-friction-invalid",
+            "contact event exceeds its size cap",
+        ));
+    }
+    let mut order: Vec<_> = (0..contacts.len()).collect();
+    order.sort_unstable_by_key(|&index| contacts[index].id);
+    if order
+        .windows(2)
+        .any(|pair| contacts[pair[0]].id == contacts[pair[1]].id)
+    {
+        return Err(refusal(
+            "articulated-friction-invalid",
+            "duplicate contact identity",
+        ));
+    }
+    Ok(order)
+}
+
+fn prepare_contacts(
+    contacts: &[ArticulatedFrictionalContact],
+    order: &[usize],
+    kinematics: &[impl Borrow<Kinematics>],
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(Vec<PointImpactRow>, Vec<FrictionalContact>), Refusal> {
+    let mut rows = Vec::with_capacity(3 * contacts.len());
+    let mut laws = Vec::with_capacity(contacts.len());
+    for &index in order {
+        poll(cancelled)?;
+        let c = contacts[index];
+        let geometry = prepare_contact_frame(
+            c.point,
+            c.other,
+            c.normal_world,
+            c.tangent_world,
+            index,
+            kinematics,
+        )
+        .map_err(|error| refusal("articulated-friction-invalid", error))?;
+        laws.push(FrictionalContact {
+            id: c.id,
+            gap: geometry.rows[0].gap,
+            activation_tolerance: c.activation_tolerance,
+            relative_velocity: geometry.rows.map(|row| row.relative_normal_speed),
+            friction_coefficient: c.friction_coefficient,
+            normal_law: c.normal_law,
+        });
+        rows.extend(geometry.rows.map(PointImpactRow::from));
+    }
+    Ok((rows, laws))
+}
+
+fn law_refusal(error: FrictionalContactError) -> Refusal {
+    let code = if matches!(error, FrictionalContactError::Cancelled) {
+        "articulated-friction-cancelled"
+    } else {
+        "articulated-friction-law"
+    };
+    refusal(code, error)
+}
+
+fn admit_support_work(
+    contact: &FrictionalContactResult,
+    contacts: &[ArticulatedFrictionalContact],
+    order: &[usize],
+) -> Result<(), Refusal> {
+    if matches!(
+        contact.determinacy,
+        FrictionalContactDeterminacy::UniqueVelocity(_)
+    ) {
+        // A null contact impulse changes no body's velocity, hence no total
+        // external impulse. One common support translation therefore has
+        // fixed total work; unequal support velocities need a further witness.
+        let mut common_velocity = None;
+        for &active in &contact.active_indices {
+            if let ContactCounterpart::PrescribedPlane { velocity_world, .. } =
+                contacts[order[active]].other
+            {
+                if common_velocity.is_some_and(|v| v != velocity_world) {
+                    return Err(refusal(
+                        "articulated-friction-support-work",
+                        "redundant impulses do not establish work for independently moving supports",
+                    ));
+                }
+                common_velocity = Some(velocity_world);
+            }
+        }
+    }
+    Ok(())
 }

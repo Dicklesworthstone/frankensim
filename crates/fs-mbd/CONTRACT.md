@@ -2761,6 +2761,22 @@ This supplies instantaneous distance-constrained impacts, not continuous
 cross-tree integration, spherical/weld impact closure, CCD, finite-patch spin
 friction, compliant history or a unique-reaction guarantee.
 
+### Shared bilateral impact geometry and inertia condensation
+
+`friction::constrained::operators` owns the original objective distance,
+spherical and weld covectors and the normalized bilateral Schur construction.
+Both native constrained entry points consume this owner; the empty and
+all-distance delegation paths remain intact. Borrowed native kinematics admit
+fluid consumers without cloning trees.
+
+The mass provider supplies one augmented contact/bilateral mobility and an
+uncancelled positive reference response per bilateral row; normalization and
+`fs-la` Cholesky preserve the existing independent-row admission. Geometry
+retains the A-frame point-closure couple and equal/opposite weld couples, so
+admitted nonzero closure error does not create an artificial internal spatial
+impulse. The helper supplies no mass, contact law, drift correction, endpoint
+authority or unique local reactions on its own.
+
 ### Spherical point closures mixed with rigid distance loops
 
 `articulated::motion::spatial_loads::implicit::distance` now admits
