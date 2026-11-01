@@ -8,7 +8,9 @@
 //! branch identity must remain unchanged across the spectrum.
 //!
 //! This is a local, single-image measurement; [`multipath`] sums a bounded set
-//! of separately connected optical branches. The supplied initial direction
+//! of separately connected optical histories. [`images`] discovers distinct
+//! regular images within those histories and tracks their spectral power.
+//! The supplied initial direction
 //! must reach the finite detector in the first bin's convergence basin. Other
 //! images, diffuse paths, finite-aperture caustics and wavelengths outside the
 //! native quadrature require their own transport/integration owners.
@@ -30,6 +32,9 @@ use fs_geom::Vec3;
 
 /// Incoherent spectral power from distinct reflected/transmitted branches.
 pub mod multipath;
+
+/// Spectral continuation and incoherent power from discovered regular images.
+pub mod images;
 
 /// One native planar receiver and a local initial guess for the first bin.
 /// Source polarization is defined relative to the supplied world axis projected
