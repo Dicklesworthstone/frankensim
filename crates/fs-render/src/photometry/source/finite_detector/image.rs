@@ -24,8 +24,11 @@ use super::{
 };
 use crate::photometry::observer::xyz_at_bin;
 use crate::photometry::source::{BIN_WIDTH_NM, LUMINOUS_EFFICACY_LM_W, photopic_weight_nm};
-use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
+use crate::polarization::dielectric::scene::curved::{
+    CurvedPathResult, CurvedPolarizedScene, CurvedSceneError,
+};
 use crate::polarization::dielectric::scene::measurement::raster::DetectorRaster;
+use crate::polarization::dielectric::transport::PolarizedBeam;
 use crate::polarization::{Stokes, photometry::PolarizedSource};
 use fs_exec::Cx;
 
@@ -196,6 +199,38 @@ fn render(
     raster: DetectorRaster,
     polarization: impl Fn(usize) -> Stokes,
 ) -> Result<DetectorImage, FiniteDetectorError> {
+    render_with_transport(
+        source,
+        cx,
+        scene,
+        request,
+        raster,
+        polarization,
+        |beam, path_id| {
+            scene.trace(
+                cx,
+                beam,
+                request.initial_medium,
+                request.trace,
+                request.seed,
+                path_id,
+            )
+        },
+    )
+}
+
+/// Shared physical contact rasterization and correlated spectral moments.
+/// The transport owner supplies completed native paths without changing their
+/// contact position, polarization reference frame or physical packet power.
+pub(super) fn render_with_transport(
+    source: &PhotometricSource,
+    cx: &Cx<'_>,
+    scene: &CurvedPolarizedScene<'_>,
+    request: FiniteDetectorRequest,
+    raster: DetectorRaster,
+    polarization: impl Fn(usize) -> Stokes,
+    mut trace: impl FnMut(PolarizedBeam, u64) -> Result<CurvedPathResult, CurvedSceneError>,
+) -> Result<DetectorImage, FiniteDetectorError> {
     let prepared = PreparedSource::new(source, cx, scene, request, polarization)?;
     let bound = scene.detector_raster(request.detector_object_id, raster)?;
     let mut cells = Vec::new();
@@ -214,7 +249,7 @@ fn render(
         // At most one original contact per wavelength; no per-ray allocation.
         let mut hits = [HitContribution::EMPTY; SPECTRAL_BINS];
         let mut used = 0;
-        let meter = prepared.trace_sample(cx, scene, sample, |bin, path| {
+        let meter = prepared.trace_sample_with(cx, scene, sample, &mut trace, |bin, path| {
             if let Some(hit) = bound.contribution(bin, path)? {
                 hits[used] = HitContribution {
                     pixel: hit.pixel.unwrap_or(usize::MAX),

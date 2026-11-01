@@ -27,7 +27,7 @@ use crate::polarization::dielectric::scene::curved::{
     CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
 };
 use crate::polarization::dielectric::scene::measurement::{MeterError, SpectralPowerMeter};
-use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame};
+use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame, PolarizedBeam};
 use crate::polarization::{Stokes, photometry::PolarizedSource};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
@@ -38,6 +38,9 @@ use moments::Moments;
 
 /// Spatially resolved physical sensor measurements through native refraction.
 pub mod image;
+
+/// Received power and sensor images through refracting, scattering media.
+pub mod participating;
 
 /// Explicit ceiling on complete spectral samples in one measurement.
 pub const MAX_FINITE_DETECTOR_SAMPLES: u32 = 1_048_576;
@@ -304,6 +307,35 @@ impl<'a> PreparedSource<'a> {
         cx: &Cx<'_>,
         scene: &CurvedPolarizedScene<'_>,
         sample: u32,
+        visit: impl FnMut(usize, &CurvedPathResult) -> Result<(), FiniteDetectorError>,
+    ) -> Result<SpectralPowerMeter, FiniteDetectorError> {
+        self.trace_sample_with(
+            cx,
+            scene,
+            sample,
+            |beam, path_id| {
+                scene.trace(
+                    cx,
+                    beam,
+                    self.request.initial_medium,
+                    self.request.trace,
+                    self.request.seed,
+                    path_id,
+                )
+            },
+            visit,
+        )
+    }
+
+    // Both surface-only and participating paths use identical source sampling,
+    // packet calibration, incomplete-path admission and spectral bookkeeping.
+    // The closure is monomorphized; no dynamic dispatch or path list is needed.
+    fn trace_sample_with(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedPolarizedScene<'_>,
+        sample: u32,
+        mut trace: impl FnMut(PolarizedBeam, u64) -> Result<CurvedPathResult, CurvedSceneError>,
         mut visit: impl FnMut(usize, &CurvedPathResult) -> Result<(), FiniteDetectorError>,
     ) -> Result<SpectralPowerMeter, FiniteDetectorError> {
         cx.checkpoint()?;
@@ -343,16 +375,7 @@ impl<'a> PreparedSource<'a> {
                     power,
                 )
                 .map_err(transport_error)?;
-            let path = scene
-                .trace(
-                    cx,
-                    beam,
-                    request.initial_medium,
-                    request.trace,
-                    request.seed,
-                    u64::from(sample),
-                )
-                .map_err(transport_error)?;
+            let path = trace(beam, u64::from(sample)).map_err(transport_error)?;
             if path.beam().power().i > 0.0
                 && matches!(
                     path.termination(),
