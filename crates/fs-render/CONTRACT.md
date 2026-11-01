@@ -4443,3 +4443,50 @@ conservation and traversal of both the melting and freezing plateaus. Geometry
 and density are fixed, data are synthetic, and infrared quadrature covers only
 6–18 micrometres. Run it with
 `cargo run -p fs-render --example phase_change_optical_heating --no-default-features --features optical-heating,material-state`.
+
+### Scheduled spectral absorption on the native physical clock
+
+`illumination::schedule::SpectralPowerSchedule` admits bounded, ordered,
+nonoverlapping linear power segments with independent wavelength-lane watts.
+Segments can meet with a jump or leave dark gaps. Power is zero outside the
+explicit support. Immutable identities include all times and endpoint powers;
+clones share their segment storage. Interval means integrate local overlaps,
+avoiding cancellation between large historical fluences and short late pulses.
+They use the represented clock span and the original native integration duration
+for energy, including endpoint-rounding cases.
+
+`TemperatureIlluminationHeating::from_scheduled_field` retains the existing
+temperature/enthalpy field, scattering transport, heat receivers and joint
+infrared coupling. Source transitions cut the native step after all stability
+limits. Interval source heat enters once, after that final cut. Native events at
+the same instant precede preparation of the following interval; no synthetic
+event consumes the authored event budget.
+
+Each wavelength/source is admitted at its complete-schedule power envelope.
+Absolute uncertainty and unresolved-power allowances therefore apply at a
+conservative simultaneous peak. The same immutable transport reports are scaled
+by interval-mean power without reseeding, retracing or copying cell reports when
+only illumination power changes. Whole dark intervals draw no incident photons,
+retain reusable transport and still validate the native material domain. Changed
+material coefficients rebuild transport when illumination resumes. Separate
+incident, absorbed, ballistic/diffuse escape and unresolved energy accounts
+retain their spectral lanes; reference sampling errors retain the admitted
+envelope scale. Thermal input uses the actual combined
+receiver map. Pending energy publishes only with the accepted native endpoint.
+
+The existing work limits count every interval query, including darkness and
+cache reuse. An additional total segment limit bounds source-profile storage
+and at most twice as many transition entries. Whole-trajectory refinement and
+joint visible/infrared coupling retain the same schedule and stream identities.
+Geometry, density, direction, spectrum locations and source quadrature remain
+prescribed. Exact profile fluence does not remove temporal error from freezing
+nonlinear material coefficients during a step; existing refinement remains
+necessary. These waveforms do not add laser propagation delay, pulse coherence,
+ultrafast carrier physics, temperature-dependent source hardware or experimental
+material validation.
+
+G0/G1/G3/G4 checks cover rectangular/triangular spectral fluences despite a larger
+requested timestep, independent Beer absorption, a latent-plateau fluence
+solution and time refinement, shared conduction/infrared pulse boundaries,
+continued dark cooling, cached scattering through darkness, split continuation,
+bounded admission and transactional cancellation/domain refusal.

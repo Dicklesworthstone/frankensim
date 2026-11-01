@@ -12,6 +12,12 @@
 //! This sampled response field can have nonlinear finite-history feedback bias;
 //! neither its source errors nor exact energy conservation certify that bias.
 
+mod program;
+/// Bounded finite-duration spectral source profiles and their interval means.
+pub mod schedule;
+pub use program::ScheduledIlluminationSource;
+use program::{Program, ProgramState};
+
 use super::feedback::OpticalFeedbackError;
 use super::scattering::{ScatteringHeating, ScatteringHeatingTolerance};
 use super::scattering_feedback::{
@@ -63,6 +69,7 @@ struct Model<'g, const N: usize> {
     sources: Vec<IncidentIlluminationSource<N>>,
     config: ScatteringDepositionConfig,
     tolerance: ScatteringHeatingTolerance,
+    program: Option<Program<N>>,
 }
 
 /// Already-admitted per-source reports and their single combined heat field.
@@ -90,6 +97,7 @@ pub struct TemperatureIlluminationHeating<'g, const N: usize> {
     builds: usize,
     sums: EnergySums<N>,
     energy: ScatteringFeedbackEnergyBudget<N>,
+    program_state: Option<ProgramState<N>>,
 }
 
 impl<const N: usize> core::fmt::Debug for TemperatureIlluminationHeating<'_, N> {
@@ -194,6 +202,7 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
                 sources: retained,
                 config,
                 tolerance,
+                program: None,
             }),
             coefficients,
             current: None,
@@ -207,6 +216,7 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
             builds: 0,
             sums,
             energy,
+            program_state: None,
         })
     }
 
@@ -250,10 +260,14 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
         config
     }
     /// Canonical source-id order, independent of the caller's insertion order.
+    /// Scheduled sources expose their admitted lane-wise power envelopes here.
     pub fn incident_sources(&self) -> &[IncidentIlluminationSource<N>] {
         &self.model.sources
     }
     pub fn sources_w(&self) -> Option<&BTreeMap<CellId, f64>> {
+        if let Some(program) = &self.program_state {
+            return program.sources_w();
+        }
         self.current
             .as_ref()
             .filter(|_| self.cache_valid)
@@ -261,6 +275,8 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
     }
     /// Conditional report from the current prepared packet; no combined
     /// standard error is manufactured from independent scalar error bars.
+    /// For scheduled illumination this is the retained power-envelope report;
+    /// `sources_w` and `energy` carry the actual interval power and fluence.
     pub fn deposition(&self, source_id: u64) -> Option<&ScatteringPowerDeposition<N>> {
         if !self.cache_valid {
             return None;
@@ -511,27 +527,12 @@ impl<'g, const N: usize> TemperatureIlluminationHeating<'g, N> {
             traced,
         ))
     }
-}
 
-impl<const N: usize> DepositionObserver for TemperatureIlluminationHeating<'_, N> {
-    type Error = OpticalFeedbackError;
-
-    fn begin(&mut self) -> Result<(), Self::Error> {
-        self.evaluations = 0;
-        self.segments = 0;
-        self.builds = 0;
-        Ok(())
-    }
-    fn sources(
+    fn prepare_transport(
         &mut self,
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
-    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
-        self.check_clock(thermal)?;
-        checkpoint()?;
-        if self.evaluations >= self.budget.max_source_evaluations {
-            return Err(OpticalFeedbackError::Budget);
-        }
+    ) -> Result<(), OpticalFeedbackError> {
         let reusable = self.cache_valid;
         self.cache_valid = false;
         let changed = self
@@ -557,6 +558,57 @@ impl<const N: usize> DepositionObserver for TemperatureIlluminationHeating<'_, N
         }
         checkpoint()?;
         self.cache_valid = true;
+        Ok(())
+    }
+}
+
+impl<const N: usize> DepositionObserver for TemperatureIlluminationHeating<'_, N> {
+    type Error = OpticalFeedbackError;
+
+    fn begin(&mut self) -> Result<(), Self::Error> {
+        self.evaluations = 0;
+        self.segments = 0;
+        self.builds = 0;
+        if let Some(program) = &mut self.program_state {
+            program.clear_pending();
+        }
+        Ok(())
+    }
+
+    fn requires_step_interval(&self) -> bool {
+        self.model.program.is_some()
+    }
+
+    fn next_transition_time_s(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Option<f64>, Self::Error> {
+        self.check_clock(thermal)?;
+        checkpoint()?;
+        Ok(self.model.program.as_ref().and_then(|program| {
+            let index = program
+                .transitions_s
+                .partition_point(|time| *time <= self.time_s);
+            program.transitions_s.get(index).copied()
+        }))
+    }
+    fn sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        self.check_clock(thermal)?;
+        checkpoint()?;
+        if let Some(program) = &mut self.program_state {
+            program.clear_pending();
+            // The accepted interval supplies all scheduled watts exactly once.
+            return Ok(BTreeMap::new());
+        }
+        if self.evaluations >= self.budget.max_source_evaluations {
+            return Err(OpticalFeedbackError::Budget);
+        }
+        self.prepare_transport(thermal, checkpoint)?;
         self.evaluations += 1;
         Ok(self
             .current
@@ -564,6 +616,20 @@ impl<const N: usize> DepositionObserver for TemperatureIlluminationHeating<'_, N
             .expect("prepared illumination")
             .sources_w
             .clone())
+    }
+
+    fn step_sources(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        start_s: f64,
+        duration_s: f64,
+        end_s: f64,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<BTreeMap<CellId, f64>, Self::Error> {
+        if self.model.program.is_none() {
+            return Ok(BTreeMap::new());
+        }
+        self.prepare_scheduled_interval(thermal, start_s, duration_s, end_s, checkpoint)
     }
     fn event(&mut self, _: &Event, thermal: &DepositionSimulation<'_>) -> Result<(), Self::Error> {
         self.check_clock(thermal)?;
@@ -579,6 +645,9 @@ impl<const N: usize> DepositionObserver for TemperatureIlluminationHeating<'_, N
         thermal: &DepositionSimulation<'_>,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(), Self::Error> {
+        if self.model.program.is_some() {
+            return self.accept_scheduled_interval(start_s, duration_s, thermal, checkpoint);
+        }
         if start_s != self.time_s
             || !duration_s.is_finite()
             || duration_s <= 0.0

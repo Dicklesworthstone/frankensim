@@ -24,6 +24,9 @@ mod joint;
 #[path = "optical_heating/enthalpy.rs"]
 mod enthalpy;
 
+#[path = "optical_heating/pulsed.rs"]
+mod pulsed;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;

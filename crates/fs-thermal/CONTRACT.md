@@ -785,3 +785,21 @@ identity together with the existing material and storage-basis checks. The
 identity supplies no new caloric model and does not authenticate empirical
 data. Existing thermal laws and temperature-only consumers remain valid when
 the optional identity is absent; consumers requiring it must refuse absence.
+
+## Physical source transitions on the observed native timeline
+
+`DepositionObserver::next_transition_time_s` optionally supplies an absolute
+physical source/state transition. The explicit native owner queries it after
+same-time authored events, before preparing an active-cell interval. Returned
+times must be finite and strictly future, even when beyond the requested target.
+The native interval ends at the earliest event, transition or target after all
+conduction and observer timestep restrictions. A later harmonic decay limiter
+therefore cannot turn a source edge into an asymptotic sequence of steps.
+
+Transitions are not authored events and do not consume their budget. They retain
+the existing substep budget and transactional candidate semantics. Coupled
+observers validate each child's result before selecting the minimum; generic
+thermal, optical, flow and mechanical wrappers forward the hook. Default None
+preserves existing stepping arithmetic, and the existing empty-grid skip is
+unchanged. Focused observer regressions check exact coupled boundaries, invalid
+time rejection with rollback, coincident native events and split continuation.

@@ -474,6 +474,33 @@ impl<const N: usize> ScatteringHeating<N> {
         )
     }
 
+    /// Reuse the admitted transport response for lane-wise source modulation.
+    /// The combining owner adds its final mapped thermal source exactly once;
+    /// this report carries radiation channels and their scaled errors only.
+    pub(super) fn scaled_radiation_energy(
+        &self,
+        duration_s: f64,
+        factors: &[f64; N],
+    ) -> Result<ScatteringEnergyBudget<N>, OpticalHeatingError> {
+        if !duration_s.is_finite()
+            || duration_s <= 0.0
+            || factors
+                .iter()
+                .any(|factor| !factor.is_finite() || !(0.0..=1.0).contains(factor))
+        {
+            return Err(invalid(
+                "positive interval and bounded spectral power factors required",
+            ));
+        }
+        integrate_scaled(
+            &self.deposition,
+            self.residual_w,
+            0.0,
+            duration_s,
+            Some(factors),
+        )
+    }
+
     fn check_clock(&self, thermal: &DepositionSimulation<'_>) -> Result<(), OpticalHeatingError> {
         if thermal.time_s() != self.time_s {
             Err(invalid(
@@ -564,6 +591,16 @@ fn integrate<const N: usize>(
     thermal_w: f64,
     duration_s: f64,
 ) -> Result<ScatteringEnergyBudget<N>, OpticalHeatingError> {
+    integrate_scaled(report, residual, thermal_w, duration_s, None)
+}
+
+fn integrate_scaled<const N: usize>(
+    report: &ScatteringPowerDeposition<N>,
+    residual: [f64; N],
+    thermal_w: f64,
+    duration_s: f64,
+    factors: Option<&[f64; N]>,
+) -> Result<ScatteringEnergyBudget<N>, OpticalHeatingError> {
     let mut energy = ScatteringEnergyBudget {
         duration_s,
         incident_j: [0.0; N],
@@ -577,17 +614,18 @@ fn integrate<const N: usize>(
         thermal_input_j: finite(thermal_w * duration_s)?,
     };
     for lane in 0..N {
-        energy.incident_j[lane] = finite(report.incident_power_w[lane] * duration_s)?;
-        energy.ballistic_escape_j[lane] =
-            finite(report.ballistic_escape.mean_w[lane] * duration_s)?;
-        energy.diffuse_escape_j[lane] = finite(report.diffuse_escape.mean_w[lane] * duration_s)?;
-        energy.absorbed_j[lane] = finite(report.absorbed.mean_w[lane] * duration_s)?;
-        energy.unresolved_j[lane] = finite(report.unresolved.mean_w[lane] * duration_s)?;
-        energy.absorbed_standard_error_j[lane] =
-            finite(report.absorbed.standard_error_w[lane] * duration_s)?;
+        // None preserves the original fixed-source multiplication exactly.
+        let joules =
+            |power: f64| finite(factors.map_or(power, |scale| power * scale[lane]) * duration_s);
+        energy.incident_j[lane] = joules(report.incident_power_w[lane])?;
+        energy.ballistic_escape_j[lane] = joules(report.ballistic_escape.mean_w[lane])?;
+        energy.diffuse_escape_j[lane] = joules(report.diffuse_escape.mean_w[lane])?;
+        energy.absorbed_j[lane] = joules(report.absorbed.mean_w[lane])?;
+        energy.unresolved_j[lane] = joules(report.unresolved.mean_w[lane])?;
+        energy.absorbed_standard_error_j[lane] = joules(report.absorbed.standard_error_w[lane])?;
         energy.unresolved_standard_error_j[lane] =
-            finite(report.unresolved.standard_error_w[lane] * duration_s)?;
-        energy.residual_j[lane] = finite(residual[lane] * duration_s)?;
+            joules(report.unresolved.standard_error_w[lane])?;
+        energy.residual_j[lane] = joules(residual[lane])?;
     }
     Ok(energy)
 }

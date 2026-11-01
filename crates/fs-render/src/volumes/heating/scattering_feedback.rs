@@ -551,6 +551,18 @@ impl<const N: usize> EnergySums<N> {
         interval: &ScatteringEnergyBudget<N>,
     ) -> Result<(), OpticalFeedbackError> {
         self.thermal.add(interval.thermal_input_j)?;
+        self.add_source_radiation(interval)
+    }
+    /// Scheduled sources reduce their actual receiving-cell heat once, after
+    /// combining all independently scaled spectral source reports.
+    pub(super) fn add_thermal_input(&mut self, joules: f64) -> Result<(), OpticalFeedbackError> {
+        self.thermal.add(joules)?;
+        Ok(())
+    }
+    pub(super) fn add_source_radiation(
+        &mut self,
+        interval: &ScatteringEnergyBudget<N>,
+    ) -> Result<(), OpticalFeedbackError> {
         for lane in 0..N {
             self.incident[lane].add(interval.incident_j[lane])?;
             self.ballistic_escape[lane].add(interval.ballistic_escape_j[lane])?;
