@@ -96,6 +96,10 @@ fn shell_pair_bulk(name:&str,model:PlateMaterialModel)->NormalizedPack {
     let base=shell_bulk(name,6e9);
     if !name.contains("body") { return base; }
     let mut claims=ClaimSet::new();
+    // Kept claims keep their observation, so its record comes across first.
+    for id in base.claims().observation_ids() {
+        claims.register_observation(base.claims().observation(id).unwrap().clone()).unwrap();
+    }
     for (_,original) in base.claims().claims_ordered() {
         if (original.key.name()=="poisson_ratio" && model!=PlateMaterialModel::Isotropic)
             || (original.key.name()=="young_modulus" && model==PlateMaterialModel::IsotropicBulkShear) {

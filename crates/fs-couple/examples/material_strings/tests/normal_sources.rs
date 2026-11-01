@@ -212,7 +212,12 @@ fn canonical_material_stop_sources_preserve_ordered_identity_and_physics() {
         // A canonical envelope must not erase or retag its receiver's axes.
         use fs_qty::{QuantitySpec, semantic::{FrequencyConvention, QuantityKind, SemanticType, ValueForm}};
         let mut claims = ClaimSet::new();
-        for (_, original) in bulk("receiver.fsmatpk", 2e7).claims().claims_ordered() {
+        // The retyped claims keep their observation, so its record comes across first.
+        let source = bulk("receiver.fsmatpk", 2e7);
+        for id in source.claims().observation_ids() {
+            claims.register_observation(source.claims().observation(id).unwrap().clone()).unwrap();
+        }
+        for (_, original) in source.claims().claims_ordered() {
             let mut claim = original.clone();
             claim.validity = ValidityDomain::unconstrained()
                 .with_quantity("T", QuantitySpec::semantic(SemanticType::new(
