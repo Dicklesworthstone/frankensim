@@ -1725,3 +1725,29 @@ regressions independently perturb full entropy-preserving equilibrium states.
 Each result retains both search receipts, all original feed roots, the exact numerical options, and the selected homogeneous root or separated phases. Two converged nonnegative stationary searches are finite screening evidence and do not certify a global minimum over all compositions or phases. No homogeneous vapor amount or liquid/vapor label is inferred.
 
 The stability receipt reports its actual cubic EOS count (one feed plus both trial counts). A phase-selection receipt reports that observed screening work plus the original flash's conservative work ceiling when a split was attempted. The whole-call ceiling is `1 + 2*stability.maximum_iterations + 6*flash.maximum_iterations + 2`; it is not an observed EOS iteration count. Original per-iteration cancellation and a final publication checkpoint are retained.
+
+## Stable single-root Peng–Robinson evaluation
+
+Peng–Robinson evaluator operation version 2 corrects cancellation in the
+single-real-root Cardano branch. For the depressed polynomial `y^3+p*y+q=0`,
+it takes the larger-magnitude cube-root argument and recovers the other factor
+from `u*v=-p/3`. This avoids subtracting nearly equal `q/2` and the square root
+of the discriminant before taking a cube root. The source then admits at most
+two finite Newton corrections, each required to decrease the residual of the
+original cubic. Only the already-selected unique-root branch is polished.
+
+Discriminant classification, three-root multiplicity and branch selection,
+mechanical admission, phase/stability tolerances, source work limits and
+fugacity/material/Gibbs acceptance criteria are unchanged. This is an original
+EOS arithmetic correction, not an alternative phase solver or relaxed
+equilibrium acceptance. No global stability, near-critical root enclosure or
+general convergence guarantee follows from the correction.
+
+Focused G1 tests retain the original binary state at
+`T=217.1522724700456 K`, `p=2500001.5210795477 Pa`: the independent liquid
+composition makes the small direct Cardano argument round to zero, although
+its unique real root is well conditioned. Tests check the original polynomial
+residual and independent compressibility factor, a small positive/negative
+depressed-p family, and the complete screened binary flash against independent
+simultaneous cubic/fugacity phase compositions and lever-rule amount. The
+phase and stability tolerances stay at `1e-12`; iteration ceilings are retained.

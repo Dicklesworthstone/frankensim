@@ -26,7 +26,7 @@ pub mod saturation;
 /// Maximum number of components in one bounded mixture.
 pub const MAX_PENG_ROBINSON_COMPONENTS_V1: usize = 64;
 /// Fixed operation-tree version.
-pub const PENG_ROBINSON_EVALUATOR_VERSION_V1: u32 = 1;
+pub const PENG_ROBINSON_EVALUATOR_VERSION_V1: u32 = 2;
 
 const ROOT_TOL: f64 = 128.0 * f64::EPSILON;
 const COMPOSITION_TOL: f64 = 256.0 * f64::EPSILON;
@@ -492,9 +492,30 @@ fn cubic_real_roots(
         .max(f64::MIN_POSITIVE);
     if discriminant > ROOT_TOL * scale {
         let root_discriminant = det::sqrt(discriminant);
-        let root = signed_cuberoot(-0.5 * q + root_discriminant)
-            + signed_cuberoot(-0.5 * q - root_discriminant)
-            - c2 / 3.0;
+        // Recover the smaller Cardano term from u*v = -p/3. Directly
+        // subtracting nearly equal q/2 and sqrt(discriminant) can round its
+        // argument to zero; taking a cube root amplifies that loss into large
+        // fugacity noise even when this unique mechanical root is well conditioned.
+        let u = signed_cuberoot(-0.5 * q - root_discriminant.copysign(q));
+        if !u.is_finite() || u == 0.0 {
+            return Err(PengRobinsonErrorV1::Unrepresentable {
+                what: "single-root cubic factor",
+            });
+        }
+        let mut root = u - p / (3.0 * u) - c2 / 3.0;
+        // Only the already-admitted unique-root branch is polished. A finite
+        // correction must reduce the original polynomial residual; neither
+        // discriminant classification nor three-root branch labels are changed.
+        for _ in 0..2 {
+            let residual = ((root + c2) * root + c1) * root + c0;
+            let slope = (3.0 * root + 2.0 * c2) * root + c1;
+            let next = root - residual / slope;
+            if !next.is_finite() || !slope.is_finite() || slope == 0.0
+                || (((next + c2) * next + c1) * next + c0).abs() >= residual.abs() {
+                break;
+            }
+            root = next;
+        }
         return Ok(vec![root]);
     }
     if p >= 0.0 {
@@ -802,6 +823,72 @@ mod tests {
 
     fn pure(component: PengRobinsonComponentV1) -> PengRobinsonMixtureV1 {
         PengRobinsonMixtureV1::new(vec![component], vec![1.0], vec![]).unwrap()
+    }
+
+    fn methane_ethane(methane_fraction: f64) -> PengRobinsonMixtureV1 {
+        let ethane = PengRobinsonComponentV1 {
+            critical_temperature: Temperature::new(305.322),
+            critical_pressure: Pressure::new(4.8722e6),
+            acentric_factor: 0.0995,
+            molar_mass: MolarMass::new(0.030_069_04),
+        };
+        PengRobinsonMixtureV1::new(vec![methane(), ethane],
+            vec![methane_fraction, 1.0 - methane_fraction], vec![]).unwrap()
+    }
+
+    #[test]
+    fn g1_single_root_cardano_retains_small_complement_and_cubic_residual() {
+        // This original liquid-composition state has depressed p=5.58e-7,
+        // q=0.01389. One direct Cardano argument rounds to zero, giving a
+        // cubic residual about1.34e-7 before the product-form correction.
+        let state = methane_ethane(0.314_603_967_109_088_94)
+            .evaluate_pt(Temperature::new(217.152_272_470_045_6),
+                Pressure::new(2_500_001.521_079_547_7)).unwrap();
+        assert_eq!(state.phase_roots().len(), 1);
+        assert_eq!(state.evaluator_version(), 2);
+        let z = state.phase_roots()[0].compressibility_factor();
+        // Independent polynomial root, not a cubic-formula round trip.
+        assert!((z - 0.076_224_432_883_693_82).abs() < 2e-14);
+        let a = state.dimensionless_a();
+        let b = state.dimensionless_b();
+        let c2 = b - 1.0;
+        let c1 = a - 3.0*b*b - 2.0*b;
+        let c0 = -(a*b - b*b - b*b*b);
+        assert!((((z + c2)*z + c1)*z + c0).abs() < 1e-16);
+        for p in [-1e-6, -1e-9, 0.0, 1e-9, 1e-6] {
+            let q = 0.013_892_238_324_066_268;
+            let roots = cubic_real_roots(0.0, p, q).unwrap();
+            assert_eq!(roots.len(), 1);
+            let z = roots[0];
+            assert!((z*z*z + p*z + q).abs() < 2e-17);
+        }
+    }
+
+    #[test]
+    fn g1_binary_flash_survives_cardano_cancellation_without_weaker_tolerances() {
+        let model = methane_ethane(0.5);
+        let options = phase_screen::PengRobinsonPhaseScreenOptionsV1 {
+            stability: stability::PengRobinsonStabilityOptionsV1 {
+                stationarity_tolerance: 1e-12, tangent_plane_tolerance: 1e-12,
+                ..Default::default()
+            },
+            flash: flash::PengRobinsonFlashOptionsV1 {
+                log_k_tolerance: 1e-12, ..Default::default()
+            },
+        };
+        let state = model.phase_screen_pt_cancellable(
+            Temperature::new(217.152_272_470_045_6),
+            Pressure::new(2_500_001.521_079_547_7), options, || false).unwrap();
+        let split = state.two_phase().unwrap();
+        // Independent simultaneous polynomial/fugacity equations and exact
+        // binary lever rule, not production successive substitution.
+        assert!((split.liquid_mole_fractions()[0] - 0.314_603_967_109_088_94).abs() < 3e-10);
+        assert!((split.vapor_mole_fractions()[0] - 0.803_195_924_585_061_2).abs() < 3e-10);
+        assert!((split.vapor_fraction_mol() - 0.379_449_620_596_811_37).abs() < 3e-10);
+        assert!(split.log_k_residual() <= options.flash.log_k_tolerance);
+        assert!(state.stability().vapor_seed().stationarity_residual() <= 1e-12);
+        assert!(state.stability().liquid_seed().stationarity_residual() <= 1e-12);
+        assert!(split.iterations() <= options.flash.maximum_iterations);
     }
 
     #[test]
