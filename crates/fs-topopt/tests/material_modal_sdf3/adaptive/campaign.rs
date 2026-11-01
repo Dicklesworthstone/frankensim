@@ -9,6 +9,7 @@ use fs_topopt::sdf3::modal::campaign::{
     Sdf3EigenfrequencyMarking3,
 };
 use fs_topopt::sdf3::modal::refinement::Sdf3EigenfrequencyAdaptiveError3;
+use fs_topopt::SolveControlCheckpoint;
 
 fn forced_refit() -> Sdf3EigenfrequencyCampaignOptions3 {
     Sdf3EigenfrequencyCampaignOptions3 {
@@ -109,6 +110,66 @@ fn cancellation_before_promotion_retains_the_rechecked_candidate_for_resume() {
     assert_eq!(campaign.candidate_attempts(), 1);
     assert!(campaign.pending().is_none());
     assert_physical(campaign.current());
+    assert_eq!(&*builds.borrow(), &[
+        Sdf3EigenfrequencyBuild3::Probe,
+        Sdf3EigenfrequencyBuild3::Refit,
+        Sdf3EigenfrequencyBuild3::Probe,
+    ]);
+}
+
+
+#[test]
+fn detached_pending_candidate_resumes_without_rebuild_or_budget_reset() {
+    let armed = Cell::new(false);
+    let cancelled = Cell::new(false);
+    let mut first_callback = |progress: SolveProgress| {
+        if armed.get() && !cancelled.get() && progress.stage == "sdf3-modal-campaign-promote" {
+            cancelled.set(true);
+            ControlFlow::Break(())
+        } else {
+            poll()
+        }
+    };
+    let mut first_control = SolveControl::new(SolveBudget::default(), &mut first_callback);
+    let (tree, source) = seed(false, &mut first_control);
+    let builds = Rc::new(RefCell::new(Vec::new()));
+    let first_builds = Rc::clone(&builds);
+    let mut campaign = Sdf3EigenfrequencyCampaign3::new(
+        source, tree, forced_refit(), &mut first_control,
+        move |tree, kind, checkpoint| {
+            first_builds.borrow_mut().push(kind);
+            build(tree, 3.0, checkpoint)
+        },
+    ).unwrap();
+    armed.set(true);
+    assert!(campaign.run(1).is_err());
+    assert!(campaign.pending().is_some());
+    let spent = campaign.work();
+    let state = campaign.detach();
+    let receipt: SolveControlCheckpoint = state.control_checkpoint();
+    assert_eq!(receipt.work(), spent);
+    assert!(state.pending().is_some());
+    assert_eq!(state.candidate_attempts(), 1);
+    drop(first_control);
+
+    armed.set(false);
+    let mut second_callback = |_| poll();
+    let mut second_control = SolveControl::resume(receipt, &mut second_callback);
+    let second_builds = Rc::clone(&builds);
+    let mut resumed = Sdf3EigenfrequencyCampaign3::resume(
+        state, &mut second_control,
+        move |tree, kind, checkpoint| {
+            second_builds.borrow_mut().push(kind);
+            build(tree, 3.0, checkpoint)
+        },
+    ).unwrap();
+    assert_eq!(resumed.work(), spent);
+    assert_eq!(resumed.run(1).unwrap(), Sdf3EigenfrequencyCampaignStop3::RefinementLimit);
+    assert_eq!(resumed.candidate_attempts(), 1);
+    assert_eq!(resumed.grids().len(), 2);
+    assert_eq!(resumed.probes().len(), 2);
+    assert!(resumed.pending().is_none());
+    assert_physical(resumed.current());
     assert_eq!(&*builds.borrow(), &[
         Sdf3EigenfrequencyBuild3::Probe,
         Sdf3EigenfrequencyBuild3::Refit,

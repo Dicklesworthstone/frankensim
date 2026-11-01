@@ -337,6 +337,13 @@ full probe. Compact histories retain grid metrics while superseded operators
 are released. The caller's builder preserves physical domain, supports and
 source material assignment and spends one cumulative geometry budget.
 
+Campaigns can also detach from their borrowed cancellation callback and resume under a
+new callback with an opaque `SolveControlCheckpoint`. That receipt preserves the exact
+original solve budget and cumulative work, so rebinding cannot mint fresh Krylov work.
+Completed probes and a freshly rechecked pending candidate move with the state and are
+not replayed after resume. This is an in-memory ownership handoff, not durable byte
+serialization or a cross-process source-identity claim.
+
 Run the bounded native minimum-kg example with
 `cargo run -p fs-topopt --features cutfem-marquee --example adaptive_material_modal_sdf3`.
 It reports its actual stopping reason, current-grid mass change, freshly

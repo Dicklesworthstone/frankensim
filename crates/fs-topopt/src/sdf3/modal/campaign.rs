@@ -11,7 +11,7 @@ use super::refit::Sdf3EigenfrequencyRefit3;
 use crate::sdf3::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
 use crate::sdf3_goal::GoalRefinementError3;
-use crate::{SolveControl, SolveWork};
+use crate::{SolveControl, SolveControlCheckpoint, SolveWork};
 use fs_cutfem::octree3::Octree3;
 use std::ops::ControlFlow;
 
@@ -195,6 +195,100 @@ fn resolved(
             v.is_finite() && v >= 0.0 && v <= options.objective_tolerance)
         && report.subspace_change.is_finite() && report.subspace_change >= 0.0
         && report.subspace_change <= options.subspace_tolerance
+}
+
+
+/// Owned pause state for rebinding an adaptive campaign to another cancellation
+/// callback without rebuilding validated physics or renewing numerical work.
+/// This is an in-memory handoff, not a byte-serialization or cross-process
+/// identity claim. The state is opaque: only a live campaign can create it.
+pub struct Sdf3EigenfrequencyCampaignState3<O: AdaptiveSdf3Elasticity> {
+    current: Sdf3EigenfrequencyRefit3<O>,
+    tree: Octree3,
+    options: Sdf3EigenfrequencyCampaignOptions3,
+    grids: Vec<Sdf3EigenfrequencyGridSummary3>,
+    probes: Vec<Sdf3EigenfrequencyProbe3>,
+    checked: Option<(Octree3, Sdf3EigenfrequencyRefinement3)>,
+    pending: Option<(Octree3, Sdf3EigenfrequencyRefit3<O>)>,
+    rejected: Option<(Octree3, Sdf3EigenfrequencyRefit3<O>)>,
+    attempts: usize,
+    terminal: Option<Sdf3EigenfrequencyCampaignStop3>,
+    control: SolveControlCheckpoint,
+}
+
+impl<O: AdaptiveSdf3Elasticity> Sdf3EigenfrequencyCampaignState3<O> {
+    #[must_use]
+    pub fn control_checkpoint(&self) -> SolveControlCheckpoint { self.control }
+    #[must_use]
+
+    /// Detach all validated grid/probe/candidate state from the borrowed
+    /// callback. The returned control receipt must be used to construct the
+    /// next SolveControl; otherwise resume refuses before any physics work.
+    pub fn detach(self) -> Sdf3EigenfrequencyCampaignState3<O> {
+        let control = self.control.checkpoint_state();
+        Sdf3EigenfrequencyCampaignState3 {
+            current: self.current,
+            tree: self.tree,
+            options: self.options,
+            grids: self.grids,
+            probes: self.probes,
+            checked: self.checked,
+            pending: self.pending,
+            rejected: self.rejected,
+            attempts: self.attempts,
+            terminal: self.terminal,
+            control,
+        }
+    }
+
+    /// Rebind a detached campaign to a new callback/control owner. Completed
+    /// probes and freshly rechecked pending candidates are reused exactly; no
+    /// geometry, modal solve, gradient gate or optimizer step is replayed.
+    pub fn resume(
+        state: Sdf3EigenfrequencyCampaignState3<O>,
+        control: &'a mut SolveControl<'callback>,
+        build: B,
+    ) -> Result<Self, Sdf3EigenfrequencyAdaptiveError3> {
+        if state.control != control.checkpoint_state() {
+            return Err(invalid("modal campaign resume would change budget or cumulative work"));
+        }
+        state.current.study.operator().validate_material_mass(&state.current.mass)?;
+        state.current.study.require_material_body_recipe("sdf3-modal-campaign-material-recipe")?;
+        let point = state.current.recheck.as_ref().and_then(|r| r.as_ref().ok())
+            .ok_or_else(|| invalid("modal campaign resume lacks a rechecked current design"))?;
+        admit(&state.current.study, &point.rho, state.current.goal, state.current.options.design)?;
+        check_tree(state.current.study.operator(), &state.tree, control)?;
+        if let Some((tree, candidate)) = &state.pending {
+            if !candidate.completed_and_rechecked() {
+                return Err(invalid("modal campaign pending candidate lost its physical recheck"));
+            }
+            check_tree(candidate.study.operator(), tree, control)?;
+        }
+        Ok(Self {
+            current: state.current,
+            tree: state.tree,
+            options: state.options,
+            control,
+            build,
+            grids: state.grids,
+            probes: state.probes,
+            checked: state.checked,
+            pending: state.pending,
+            rejected: state.rejected,
+            attempts: state.attempts,
+            terminal: state.terminal,
+        })
+    }
+
+    pub fn current(&self) -> &Sdf3EigenfrequencyRefit3<O> { &self.current }
+    #[must_use]
+    pub fn tree(&self) -> &Octree3 { &self.tree }
+    #[must_use]
+    pub fn pending(&self) -> Option<&(Octree3, Sdf3EigenfrequencyRefit3<O>)> {
+        self.pending.as_ref()
+    }
+    #[must_use]
+    pub fn candidate_attempts(&self) -> usize { self.attempts }
 }
 
 /// In-memory adaptive design with native material-preserving transfer.
