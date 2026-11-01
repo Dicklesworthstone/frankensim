@@ -158,57 +158,69 @@ pub fn propagate_seeded_bundle_with_control<F: SecondOrderIndexField + ?Sized>(
         options,
         &mut control,
     )?;
-    let mut result = seed.at_endpoint();
-    let past = result.propagation;
-    let distance_m = checked_sum(past.distance_m, segment.distance_m)?;
-    if segment.distance_m > 0.0 && distance_m <= past.distance_m {
-        return Err(BundleError::NumericalRange);
+    seed.append_segment(segment, derivatives)
+}
+
+impl BundleContinuation {
+    // Fixed-distance and native-boundary propagation accumulate history with
+    // the same rules, while each caller retains its own per-call work counts.
+    pub(super) fn append_segment(
+        &self,
+        segment: GradientIndexPropagation,
+        derivatives: [AngularDerivative; 2],
+    ) -> Result<RayBundlePropagation, BundleError> {
+        let mut result = self.at_endpoint();
+        let past = result.propagation;
+        let distance_m = checked_sum(past.distance_m, segment.distance_m)?;
+        if segment.distance_m > 0.0 && distance_m <= past.distance_m {
+            return Err(BundleError::NumericalRange);
+        }
+        result.propagation = GradientIndexPropagation {
+            ray: segment.ray,
+            transverse_axis: segment.transverse_axis,
+            initial_sample: past.initial_sample,
+            final_sample: segment.final_sample,
+            distance_m,
+            optical_path_length_m: checked_sum(
+                past.optical_path_length_m,
+                segment.optical_path_length_m,
+            )?,
+            // An unsupported value at a zero-length endpoint contributes no delay.
+            // Missing group information on a positive-length leg remains missing
+            // throughout every later continuation.
+            group_optical_path_length_m: if segment.distance_m == 0.0 {
+                past.group_optical_path_length_m
+            } else if past.distance_m == 0.0 {
+                segment.group_optical_path_length_m
+            } else {
+                match (
+                    past.group_optical_path_length_m,
+                    segment.group_optical_path_length_m,
+                ) {
+                    (Some(a), Some(b)) => Some(checked_sum(a, b)?),
+                    _ => None,
+                }
+            },
+            optical_depth: checked_sum(past.optical_depth, segment.optical_depth)?,
+            accepted_steps: past
+                .accepted_steps
+                .checked_add(segment.accepted_steps)
+                .ok_or(BundleError::NumericalRange)?,
+            rejected_steps: past
+                .rejected_steps
+                .checked_add(segment.rejected_steps)
+                .ok_or(BundleError::NumericalRange)?,
+            field_evaluations: past
+                .field_evaluations
+                .checked_add(segment.field_evaluations)
+                .ok_or(BundleError::NumericalRange)?,
+            max_normalized_error_estimate: past
+                .max_normalized_error_estimate
+                .max(segment.max_normalized_error_estimate),
+        };
+        result.derivatives = derivatives;
+        Ok(result)
     }
-    result.propagation = GradientIndexPropagation {
-        ray: segment.ray,
-        transverse_axis: segment.transverse_axis,
-        initial_sample: past.initial_sample,
-        final_sample: segment.final_sample,
-        distance_m,
-        optical_path_length_m: checked_sum(
-            past.optical_path_length_m,
-            segment.optical_path_length_m,
-        )?,
-        // An unsupported value at a zero-length endpoint contributes no delay.
-        // Missing group information on a positive-length leg remains missing
-        // throughout every later continuation.
-        group_optical_path_length_m: if segment.distance_m == 0.0 {
-            past.group_optical_path_length_m
-        } else if past.distance_m == 0.0 {
-            segment.group_optical_path_length_m
-        } else {
-            match (
-                past.group_optical_path_length_m,
-                segment.group_optical_path_length_m,
-            ) {
-                (Some(a), Some(b)) => Some(checked_sum(a, b)?),
-                _ => None,
-            }
-        },
-        optical_depth: checked_sum(past.optical_depth, segment.optical_depth)?,
-        accepted_steps: past
-            .accepted_steps
-            .checked_add(segment.accepted_steps)
-            .ok_or(BundleError::NumericalRange)?,
-        rejected_steps: past
-            .rejected_steps
-            .checked_add(segment.rejected_steps)
-            .ok_or(BundleError::NumericalRange)?,
-        field_evaluations: past
-            .field_evaluations
-            .checked_add(segment.field_evaluations)
-            .ok_or(BundleError::NumericalRange)?,
-        max_normalized_error_estimate: past
-            .max_normalized_error_estimate
-            .max(segment.max_normalized_error_estimate),
-    };
-    result.derivatives = derivatives;
-    Ok(result)
 }
 
 fn checked_sum(a: f64, b: f64) -> Result<f64, BundleError> {

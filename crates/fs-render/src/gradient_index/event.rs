@@ -33,6 +33,10 @@
 
 use super::*;
 
+mod stepping;
+pub(super) use stepping::EventStepper;
+use stepping::OpticalStepper;
+
 /// Hard cap on geometrical queries made by one boundary propagation request.
 pub const MAX_BOUNDARY_QUERIES: u32 = 1_000_000;
 
@@ -335,19 +339,52 @@ pub fn propagate_to_boundary_with_control<
     transverse_axis: Vec3,
     wavelength_nm: f64,
     max_distance_m: f64,
-    mut departure: Option<GradientDeparture>,
+    departure: Option<GradientDeparture>,
     options: GradientEventOptions,
     mut control: impl FnMut() -> bool,
 ) -> Result<GradientBoundaryPropagation, GradientIndexError> {
+    let (result, _) = propagate_with_stepper(
+        oracle,
+        ray,
+        transverse_axis,
+        wavelength_nm,
+        max_distance_m,
+        departure,
+        options,
+        &mut control,
+        |ray, axis| OpticalStepper::new(field, ray, axis, wavelength_nm),
+    )?;
+    Ok(result)
+}
+
+// The geometric event policy has exactly one owner. Optical and augmented
+// differential steppers share its contact admission, free balls, departure
+// neighborhoods, query accounting and cancellation ordering.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn propagate_with_stepper<
+    S: EventStepper,
+    O: BoundaryOracle + ?Sized,
+    E: From<GradientIndexError>,
+>(
+    oracle: &mut O,
+    ray: Ray,
+    transverse_axis: Vec3,
+    wavelength_nm: f64,
+    max_distance_m: f64,
+    mut departure: Option<GradientDeparture>,
+    options: GradientEventOptions,
+    control: &mut impl FnMut() -> bool,
+    initialize: impl FnOnce(Ray, Vec3) -> Result<S, E>,
+) -> Result<(GradientBoundaryPropagation, S), E> {
     options.validate()?;
     if !max_distance_m.is_finite() || max_distance_m < 0.0 {
-        return Err(GradientIndexError::InvalidOptions);
+        return Err(GradientIndexError::InvalidOptions.into());
     }
     if !wavelength_nm.is_finite() || !(LAMBDA_MIN..=LAMBDA_MAX).contains(&wavelength_nm) {
-        return Err(DielectricError::InvalidWavelength.into());
+        return Err(GradientIndexError::Dielectric(DielectricError::InvalidWavelength).into());
     }
     if !finite_point(ray.origin) {
-        return Err(GradientIndexError::InvalidRay);
+        return Err(GradientIndexError::InvalidRay.into());
     }
     let direction = unit(ray.dir).ok_or(GradientIndexError::InvalidRay)?;
     let axis =
@@ -362,7 +399,7 @@ pub fn propagate_to_boundary_with_control<
             .sign()
             .ok_or(GradientIndexError::UnsupportedBoundaryDeparture)?;
         if !control() {
-            return Err(GradientIndexError::Cancelled);
+            return Err(GradientIndexError::Cancelled.into());
         }
         charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
         let neighborhood = oracle.prepare_departure(DepartureRequest {
@@ -380,25 +417,24 @@ pub fn propagate_to_boundary_with_control<
             || radius <= 4.0 * options.surface_tolerance_m
             || cosine < options.min_approach_cosine
         {
-            return Err(GradientIndexError::UnsupportedBoundaryDeparture);
+            return Err(GradientIndexError::UnsupportedBoundaryDeparture.into());
         }
         contact_resolution = proximity / cosine;
         departure_neighborhood = Some(neighborhood);
     }
     if !control() {
-        return Err(GradientIndexError::Cancelled);
+        return Err(GradientIndexError::Cancelled.into());
     }
-    let initial_sample = field.sample(ray.origin, wavelength_nm)?;
-    let uniform = field.is_spatially_uniform();
-    if uniform && initial_sample.phase_gradient_per_m != Vec3::new(0.0, 0.0, 0.0) {
-        return Err(GradientIndexError::InvalidSample);
-    }
+    let mut stepper = initialize(
+        Ray {
+            origin: ray.origin,
+            dir: direction,
+        },
+        axis,
+    )?;
+    let initial_sample = stepper.initial_sample();
+    let uniform = stepper.is_uniform();
     let track_group = initial_sample.group_index.is_some();
-    let mut state = [0.0; 12];
-    put_vec(&mut state, 3, direction);
-    put_vec(&mut state, 6, axis);
-    let mut final_sample = initial_sample;
-    let mut derivative = rhs(&state, initial_sample, track_group)?;
     let mut distance = 0.0;
     let mut step = options.integration.initial_step_m.min(max_distance_m);
     let mut accepted = 0;
@@ -409,12 +445,13 @@ pub fn propagate_to_boundary_with_control<
 
     let termination = loop {
         if !control() {
-            return Err(GradientIndexError::Cancelled);
+            return Err(GradientIndexError::Cancelled.into());
         }
+        let state = stepper.state();
         let point = ray.origin.offset(get_vec(&state, 0));
         let tangent = get_vec(&state, 3);
         if !finite_point(point) {
-            return Err(GradientIndexError::NumericalRange);
+            return Err(GradientIndexError::NumericalRange.into());
         }
         if uniform {
             step = max_distance_m - distance;
@@ -438,7 +475,7 @@ pub fn propagate_to_boundary_with_control<
                 }
                 DepartureNeighborhood::Smooth { .. } => {
                     if !control() {
-                        return Err(GradientIndexError::Cancelled);
+                        return Err(GradientIndexError::Cancelled.into());
                     }
                     charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
                     oracle
@@ -458,7 +495,7 @@ pub fn propagate_to_boundary_with_control<
                 let radius = neighborhood.radius();
                 let cosine = neighborhood.margin(previous.witness, sign, tangent);
                 if cosine < options.min_approach_cosine {
-                    return Err(GradientIndexError::BoundaryResolutionLimit);
+                    return Err(GradientIndexError::BoundaryResolutionLimit.into());
                 }
                 let available = radius - distance_upper(point, previous.witness.surface_point);
                 let target = (3.0 * options.surface_tolerance_m - signed_distance) / cosine;
@@ -499,10 +536,10 @@ pub fn propagate_to_boundary_with_control<
                                 .next_up()
                                 >= radius
                         {
-                            return Err(GradientIndexError::BoundaryResolutionLimit);
+                            return Err(GradientIndexError::BoundaryResolutionLimit.into());
                         }
                         if !control() {
-                            return Err(GradientIndexError::Cancelled);
+                            return Err(GradientIndexError::Cancelled.into());
                         }
                         charge_query(&mut boundary_evaluations, options.max_boundary_queries)?;
                         if let Some(neighborhood) = oracle.admit_arrival(DepartureRequest {
@@ -522,20 +559,20 @@ pub fn propagate_to_boundary_with_control<
                             neighborhood.validate()?;
                             let margin = neighborhood.margin(witness, -side, tangent);
                             if margin < options.min_approach_cosine {
-                                return Err(GradientIndexError::BoundaryResolutionLimit);
+                                return Err(GradientIndexError::BoundaryResolutionLimit.into());
                             }
                             residual = (witness.distance_upper_m / margin).next_up();
                             if (distance_upper(point, witness.surface_point) + residual).next_up()
                                 >= neighborhood.radius()
                             {
-                                return Err(GradientIndexError::BoundaryResolutionLimit);
+                                return Err(GradientIndexError::BoundaryResolutionLimit.into());
                             }
                         }
                         contact_resolution = contact_resolution.max(residual);
                         break BoundaryTermination::Surface(witness);
                     }
                     if approach.abs() < options.min_approach_cosine {
-                        return Err(GradientIndexError::BoundaryResolutionLimit);
+                        return Err(GradientIndexError::BoundaryResolutionLimit.into());
                     }
                 }
                 step = step.min((0.875 * query.clearance_m).next_down());
@@ -545,12 +582,12 @@ pub fn propagate_to_boundary_with_control<
             break BoundaryTermination::DistanceLimit;
         }
         if accepted + rejected >= options.integration.max_steps {
-            return Err(GradientIndexError::StepBudgetExceeded);
+            return Err(GradientIndexError::StepBudgetExceeded.into());
         }
         let remaining = max_distance_m - distance;
         step = step.min(remaining);
         if !step.is_finite() || step <= 0.0 || distance + step == distance {
-            return Err(GradientIndexError::BoundaryResolutionLimit);
+            return Err(GradientIndexError::BoundaryResolutionLimit.into());
         }
         let mut guard_error = None;
         let mut guard = |candidate: Point3, stage_tangent: Vec3| {
@@ -593,80 +630,42 @@ pub fn propagate_to_boundary_with_control<
                 }
             })
         };
-        let trial = if uniform {
-            let new_distance = if step == remaining {
-                max_distance_m
-            } else {
-                distance + step
-            };
-            let mut next = state;
-            put_vec(&mut next, 0, direction.scale(new_distance));
-            next[9] = initial_sample.phase_index * new_distance;
-            next[10] = initial_sample.group_index.unwrap_or(0.0) * new_distance;
-            next[11] = initial_sample.absorption_per_m * new_distance;
-            let next_point = ray.origin.offset(get_vec(&next, 0));
-            if next.iter().any(|value| !value.is_finite()) || !finite_point(next_point) {
-                return Err(GradientIndexError::NumericalRange);
-            }
-            if guard(next_point, direction) {
-                Ok(Trial {
-                    state: next,
-                    error: [0.0; 12],
-                    projection_error: 0.0,
-                    sample: initial_sample,
-                })
-            } else {
-                Err(GradientIndexError::BoundaryClearanceExceeded)
-            }
+        let new_distance = if step == remaining {
+            max_distance_m
         } else {
-            trial_step_guarded(
-                field,
-                ray.origin,
-                wavelength_nm,
-                &state,
-                derivative,
-                step,
-                track_group,
-                guard,
-                &mut evaluations,
-            )
+            distance + step
         };
+        let trial = stepper.trial(step, new_distance, &mut guard, &mut evaluations);
         // A cancelled or exhausted geometry owner is not a geometric step
         // rejection. Preserve it before retry logic can halve the ODE step.
         if let Some(error) = guard_error {
-            return Err(error);
+            return Err(error.into());
         }
         let trial = match trial {
             Ok(trial) => trial,
             Err(GradientIndexError::BoundaryClearanceExceeded) => {
                 rejected += 1;
                 if uniform || step <= options.integration.min_step_m {
-                    return Err(GradientIndexError::BoundaryResolutionLimit);
+                    return Err(GradientIndexError::BoundaryResolutionLimit.into());
                 }
                 step = (step * 0.5).max(options.integration.min_step_m);
                 continue;
             }
-            Err(error) => return Err(error),
+            Err(error) => return Err(error.into()),
         };
-        let error = normalized_error(&state, &trial, step, options.integration)?;
+        let error = stepper.normalized_error(&trial, step, options.integration)?;
         let factor = if error == 0.0 {
             5.0
         } else {
             (0.9 * det::pow(error, -0.2)).clamp(0.2, 5.0)
         };
         if error <= 1.0 {
-            let next_point = ray.origin.offset(get_vec(&trial.state, 0));
+            let next_point = ray.origin.offset(get_vec(&S::trial_state(&trial), 0));
             if next_point == point {
-                return Err(GradientIndexError::NumericalRange);
+                return Err(GradientIndexError::NumericalRange.into());
             }
-            state = trial.state;
-            final_sample = trial.sample;
-            derivative = rhs(&state, final_sample, track_group)?;
-            distance = if step == remaining {
-                max_distance_m
-            } else {
-                distance + step
-            };
+            stepper.accept(trial)?;
+            distance = new_distance;
             accepted += 1;
             max_error = max_error.max(error);
             step = (step * factor)
@@ -676,15 +675,16 @@ pub fn propagate_to_boundary_with_control<
         } else {
             rejected += 1;
             if step <= options.integration.min_step_m {
-                return Err(GradientIndexError::AccuracyNotReached);
+                return Err(GradientIndexError::AccuracyNotReached.into());
             }
             step = (step * factor.min(0.9)).max(options.integration.min_step_m);
         }
     };
     if !contact_resolution.is_finite() {
-        return Err(GradientIndexError::NumericalRange);
+        return Err(GradientIndexError::NumericalRange.into());
     }
-    Ok(GradientBoundaryPropagation {
+    let state = stepper.state();
+    let result = GradientBoundaryPropagation {
         propagation: GradientIndexPropagation {
             ray: Ray {
                 origin: ray.origin.offset(get_vec(&state, 0)),
@@ -692,7 +692,7 @@ pub fn propagate_to_boundary_with_control<
             },
             transverse_axis: get_vec(&state, 6),
             initial_sample,
-            final_sample,
+            final_sample: stepper.final_sample(),
             distance_m: distance,
             optical_path_length_m: state[9],
             group_optical_path_length_m: track_group.then_some(state[10]),
@@ -705,7 +705,8 @@ pub fn propagate_to_boundary_with_control<
         termination,
         boundary_evaluations,
         contact_resolution_m: contact_resolution,
-    })
+    };
+    Ok((result, stepper))
 }
 
 fn charge_query(used: &mut u32, maximum: u32) -> Result<(), GradientIndexError> {

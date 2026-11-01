@@ -32,6 +32,7 @@ use super::*;
 use fs_ivl::Interval;
 
 pub mod continuation;
+pub mod event;
 pub mod interface;
 pub use continuation::{
     BundleContinuation, propagate_seeded_bundle, propagate_seeded_bundle_with_control,
@@ -752,8 +753,9 @@ fn propagate_segment<F: SecondOrderIndexField + ?Sized>(
             derivative,
             step,
             track_group,
+            |_, _| true,
+            &mut evaluations,
         )?;
-        evaluations += 6;
         let error = bundle_error(&state, &trial, step, options)?;
         let factor = if error == 0.0 {
             5.0
@@ -878,6 +880,8 @@ fn bundle_step<F: SecondOrderIndexField + ?Sized>(
     first: BundleState,
     step: f64,
     track_group: bool,
+    mut admits_stage: impl FnMut(Point3, Vec3) -> bool,
+    field_evaluations: &mut u32,
 ) -> Result<BundleTrial, GradientIndexError> {
     let mut k = [[0.0; 24]; 7];
     k[0] = first;
@@ -898,6 +902,13 @@ fn bundle_step<F: SecondOrderIndexField + ?Sized>(
         if !finite_point(point) {
             return Err(GradientIndexError::NumericalRange);
         }
+        // Hessian evaluation has exactly the same native-geometry guard as
+        // the optical state. Never sample an unadmitted material side and
+        // never charge the six-query full-trial cost for a rejected stage.
+        if !admits_stage(point, read_vec(&stage, 3)) {
+            return Err(GradientIndexError::BoundaryClearanceExceeded);
+        }
+        *field_evaluations += 1;
         let jet = field.sample_second_order(point, wavelength)?;
         k[i + 1] = bundle_rhs(&stage, jet, track_group)?;
         last = Some(jet);
