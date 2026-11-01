@@ -615,6 +615,178 @@ fn g1_quarter_wave_coating_reflects_between_equal_index_bulk_media() {
 }
 
 #[test]
+fn g1_smooth_metal_keeps_native_stokes_phase_and_virtual_source_footprint() {
+    let material = glass(1.0, 0.12);
+    let field = HomogeneousIndexField::new(&material);
+    let launch = Ray {
+        origin: Point3::new(0.0, 0.0, 0.0),
+        dir: Vec3::new(0.6, 0.0, 0.8),
+    };
+    let source = Stokes::try_new(1.0, 0.15, 0.45, 0.3).unwrap();
+    let path = PolarizedRayBundle::try_new(
+        propagate_bundle(
+            &field,
+            launch,
+            Vec3::new(0.0, 1.0, 0.0),
+            550.0,
+            1.25,
+            BundleOptions::default(),
+        )
+        .unwrap(),
+        source,
+    )
+    .unwrap();
+    let metal = ConductorOptics::representative_tungsten();
+    let expected = metal
+        .fresnel_mueller(550.0, 1.0, 0.8)
+        .unwrap()
+        .apply(source);
+    let reflected = path
+        .smooth_conductor_interface(
+            plane_normal(Vec3::new(0.0, 0.0, 1.0)),
+            &metal,
+            InterfaceOptions::default(),
+        )
+        .unwrap()
+        .continue_in(&field, 1.25, BundleOptions::default())
+        .unwrap();
+    let state = reflected.interface_state();
+    let weight = reflected.interface_log_power().exp();
+    for (actual, expected) in [state.i, state.q, state.u, state.v]
+        .into_iter()
+        .zip([expected.i, expected.q, expected.u, expected.v])
+    {
+        close(actual * weight, expected, 2e-12);
+    }
+    assert_eq!(reflected.propagation().interface_events(), 1);
+    let propagation = reflected.propagation().propagation();
+    close(propagation.ray.origin.x, 1.5, 2e-12);
+    close(propagation.ray.origin.z, 0.0, 2e-12);
+    close(propagation.optical_depth, 0.3, 2e-12);
+    // Reflection in a plane is the straight ray from its image source:
+    // dA/dOmega = total_distance² / receiving cosine.
+    let projection = reflected
+        .propagation()
+        .project_at_endpoint(Vec3::new(0.0, 0.0, 1.0), ProjectionOptions::default())
+        .unwrap();
+    close(
+        projection.area_per_solid_angle_m2(),
+        2.5_f64.powi(2) / 0.8,
+        2e-12,
+    );
+    close(
+        reflected
+            .point_source_irradiance(Vec3::new(0.0, 0.0, 1.0), ProjectionOptions::default(), 1.0)
+            .unwrap(),
+        expected.i * (-0.3_f64).exp() * 0.8 / 2.5_f64.powi(2),
+        2e-12,
+    );
+}
+
+#[test]
+fn g3_material_multilayer_bundle_preserves_authored_order_and_physical_branch_power() {
+    use crate::conductor::{
+        CauchyCoatingLayer, CoherentPeriodicCoating, ConductorDataStatus, ConductorSource,
+    };
+    use crate::dielectric::{DielectricCoating, DielectricSurface};
+    let provenance = ConductorSource::try_new(
+        fs_blake3::hash_domain("bundle-material-coating-test", b"ordered-three-layer-film"),
+        ConductorDataStatus::Representative,
+    )
+    .unwrap();
+    let layers = [(1.3, 72e-9), (2.1, 43e-9), (1.45, 110e-9)].map(|(n, thickness)| {
+        CauchyCoatingLayer::try_new(CauchyIor::try_constant(n).unwrap(), 0.0, thickness).unwrap()
+    });
+    let coated = DielectricSurface::SMOOTH.with_coating(
+        DielectricCoating::try_new(
+            CoherentPeriodicCoating::try_new(&layers, 1, provenance).unwrap(),
+        )
+        .unwrap(),
+    );
+    let normal = Vec3::new(0.0, 0.0, 1.0);
+    let cosine = 0.83_f64;
+    let source = Stokes::try_new(1.0, 0.1, 0.4, 0.6).unwrap();
+    for reverse in [false, true] {
+        let (eta_i, eta_t, sign) = if reverse {
+            (1.7, 1.0, 1.0)
+        } else {
+            (1.0, 1.7, -1.0)
+        };
+        let medium = glass(eta_i, 0.0);
+        let target = glass(eta_t, 0.0);
+        let field = HomogeneousIndexField::new(&medium);
+        let target = HomogeneousIndexField::new(&target);
+        let ray = Ray {
+            origin: Point3::new(0.0, 0.0, 0.0),
+            dir: Vec3::new((1.0 - cosine * cosine).sqrt(), 0.0, sign * cosine),
+        };
+        let path = PolarizedRayBundle::try_new(
+            propagate_bundle(
+                &field,
+                ray,
+                Vec3::new(0.0, sign, 0.0),
+                550.0,
+                0.0,
+                BundleOptions::default(),
+            )
+            .unwrap(),
+            source,
+        )
+        .unwrap();
+        let target_sample = target.sample(ray.origin, 550.0).unwrap();
+        let response = coated
+            .interface(550.0, reverse)
+            .unwrap()
+            .fresnel_polarized(cosine, eta_i, eta_t)
+            .unwrap();
+        let wrong_order = coated
+            .interface(550.0, !reverse)
+            .unwrap()
+            .fresnel_polarized(cosine, eta_i, eta_t)
+            .unwrap();
+        assert!((response.reflection.0[2][3] - wrong_order.reflection.0[2][3]).abs() > 1e-5);
+        for (event, matrix) in [
+            (DielectricEvent::Reflection, response.reflection),
+            (DielectricEvent::Transmission, response.transmission),
+        ] {
+            let result = path
+                .smooth_surface_interface(
+                    plane_normal(normal),
+                    target_sample,
+                    &coated,
+                    event,
+                    InterfaceOptions::default(),
+                )
+                .unwrap();
+            let expected = matrix.apply(source);
+            let actual = result.interface_state();
+            let weight = result.interface_log_power().exp();
+            for (actual, expected) in [actual.i, actual.q, actual.u, actual.v]
+                .into_iter()
+                .zip([expected.i, expected.q, expected.u, expected.v])
+            {
+                close(actual * weight, expected, 3e-12);
+            }
+            assert_eq!(result.propagation().propagation().distance_m, 0.0);
+            assert_eq!(
+                result.propagation().propagation().optical_path_length_m,
+                0.0
+            );
+        }
+        assert_eq!(
+            path.smooth_surface_interface(
+                plane_normal(normal),
+                target_sample,
+                &DielectricSurface::POLISHED,
+                DielectricEvent::Transmission,
+                InterfaceOptions::default()
+            ),
+            Err(PolarizedBundleError::UnsupportedSurface)
+        );
+    }
+}
+
+#[test]
 fn g1_p_polarized_brewster_branch_is_dark_without_invalid_normalized_stokes() {
     let air = glass(1.0, 0.0);
     let lens = glass(1.5, 0.0);

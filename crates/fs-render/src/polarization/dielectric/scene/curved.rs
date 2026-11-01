@@ -30,6 +30,7 @@ use super::{
 };
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
 use crate::dielectric::{DielectricEvent, DielectricGlass};
+use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::gradient_index::event::{
     BoundarySide, BoundaryTermination, BoundaryWitness, GradientDeparture, GradientEventOptions,
     propagate_to_boundary_with_control,
@@ -41,6 +42,9 @@ use crate::instances::InstanceScene;
 use crate::instances::proximity::{BoundaryGeometry, ProximityError};
 use crate::polarization::Stokes;
 
+/// Native geometry walks retaining the original launch-angle derivatives.
+pub mod bundle;
+
 /// Borrowed physical medium. A field identity names its complete immutable
 /// source/snapshot/reconstruction; equality at one sample cannot do that.
 #[derive(Clone, Copy)]
@@ -48,6 +52,13 @@ pub enum SceneMedium<'a> {
     Homogeneous(&'a DielectricGlass),
     GradientIndex {
         field: &'a (dyn GradientIndexField + Sync),
+        identity: ContentHash,
+    },
+    /// Frozen smooth field with analytic phase-index Hessians. Ordinary beams
+    /// and differentiated bundles share this same physical medium snapshot.
+    /// The first-order-only variant above deliberately cannot trace bundles.
+    Differentiable {
+        field: &'a (dyn SecondOrderIndexField + Sync),
         identity: ContentHash,
     },
 }
@@ -226,7 +237,9 @@ impl<'a> CurvedPolarizedScene<'a> {
         )?;
         if media.iter().any(|medium| {
             matches!(medium,
-            SceneMedium::GradientIndex { identity, .. } if *identity == ContentHash([0; 32]))
+            SceneMedium::GradientIndex { identity, .. }
+                | SceneMedium::Differentiable { identity, .. }
+                if *identity == ContentHash([0; 32]))
         }) {
             return Err(CurvedSceneError::MissingFieldIdentity);
         }
@@ -257,6 +270,11 @@ impl<'a> CurvedPolarizedScene<'a> {
         {
             SceneMedium::Homogeneous(material) => Ok(BeamMedium::Homogeneous(**material)),
             SceneMedium::GradientIndex { field, .. } => Ok(BeamMedium::try_gradient_at(
+                *field,
+                position,
+                wavelength_nm,
+            )?),
+            SceneMedium::Differentiable { field, .. } => Ok(BeamMedium::try_gradient_at(
                 *field,
                 position,
                 wavelength_nm,
@@ -373,6 +391,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                     &homogeneous
                 }
                 SceneMedium::GradientIndex { field, .. } => *field,
+                SceneMedium::Differentiable { field, .. } => *field,
             };
             let segment = propagate_to_boundary_with_control(
                 field,
@@ -561,7 +580,8 @@ impl<'a> CurvedPolarizedScene<'a> {
     fn medium_identity(&self, index: usize) -> Option<ContentHash> {
         match self.media[index] {
             SceneMedium::Homogeneous(_) => None,
-            SceneMedium::GradientIndex { identity, .. } => Some(identity),
+            SceneMedium::GradientIndex { identity, .. }
+            | SceneMedium::Differentiable { identity, .. } => Some(identity),
         }
     }
 }

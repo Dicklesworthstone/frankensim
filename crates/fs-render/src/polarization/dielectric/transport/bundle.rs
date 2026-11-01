@@ -7,18 +7,23 @@
 //! loss with Beer--Lambert bulk optical depth. No Monte Carlo branch probability
 //! or radiance eta-squared factor is part of this deterministic branch weight.
 //!
-//! Every segment and boundary is supplied explicitly. This owner does not find
-//! connecting rays, establish visibility, differentiate rough scattering or
-//! enumerate multiple images. Its irradiance is the contribution of this one
-//! branch; different admitted branches can be added by their caller.
+//! Explicit continuations and the native scene's automatic boundary walk use
+//! the same physical transfer. This owner does not find connecting rays,
+//! differentiate rough scattering or enumerate multiple images. Its irradiance
+//! is the contribution of this one branch; admitted branches add separately.
 
+use super::super::mirrors::ConductorBeamError;
 use super::*;
-use crate::conductor::CoherentDielectricCoating;
+use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
+use crate::gradient_index::bundle::event::{
+    BundleBoundaryPropagation, BundleEventOptions, propagate_seeded_bundle_to_boundary_with_control,
+};
 use crate::gradient_index::bundle::interface::{BundleInterfaceError, InterfaceOptions};
 use crate::gradient_index::bundle::{
     BundleError, BundleOptions, ProjectionOptions, RayBundlePropagation, SecondOrderIndexField,
     propagate_seeded_bundle_with_control,
 };
+use crate::gradient_index::event::{BoundaryOracle, GradientDeparture};
 use crate::instances::proximity::InstanceNormalDifferential;
 use fs_geom::NormalDifferential;
 
@@ -27,9 +32,11 @@ pub enum PolarizedBundleError {
     Bundle(BundleError),
     Interface(BundleInterfaceError),
     Beam(BeamError),
+    Conductor(ConductorBeamError),
     MissingInterfaceTransfer,
     InvalidSourcePolarization,
     ContactPositionMismatch,
+    UnsupportedSurface,
     NumericalRange,
 }
 impl From<BundleError> for PolarizedBundleError {
@@ -47,6 +54,11 @@ impl From<BeamError> for PolarizedBundleError {
         Self::Beam(error)
     }
 }
+impl From<ConductorBeamError> for PolarizedBundleError {
+    fn from(error: ConductorBeamError) -> Self {
+        Self::Conductor(error)
+    }
+}
 impl core::fmt::Display for PolarizedBundleError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "polarized refractive bundle: {self:?}")
@@ -60,6 +72,12 @@ pub struct PolarizedRayBundle {
     bundle: RayBundlePropagation,
     interface_state: Stokes,
     interface_log_power: f64,
+}
+
+enum InterfaceOptics<'a> {
+    Bare,
+    Film(&'a CoherentDielectricCoating),
+    Surface(&'a DielectricSurface),
 }
 
 impl PolarizedRayBundle {
@@ -140,6 +158,39 @@ impl PolarizedRayBundle {
         Ok(Self { bundle, ..*self })
     }
 
+    /// The scene consumes one native augmented boundary solve without
+    /// reconstructing a second ray or dropping accumulated interface power.
+    /// Geometric replacement stays private and is constructed from this seed.
+    pub(crate) fn continue_to_boundary_with_control<
+        F: SecondOrderIndexField + ?Sized,
+        O: BoundaryOracle + ?Sized,
+    >(
+        &self,
+        field: &F,
+        oracle: &mut O,
+        max_distance_m: f64,
+        departure: Option<GradientDeparture>,
+        options: BundleEventOptions,
+        control: impl FnMut() -> bool,
+    ) -> Result<(Self, BundleBoundaryPropagation), PolarizedBundleError> {
+        let segment = propagate_seeded_bundle_to_boundary_with_control(
+            field,
+            oracle,
+            &self.bundle.continuation(),
+            max_distance_m,
+            departure,
+            options,
+            control,
+        )?;
+        Ok((
+            Self {
+                bundle: segment.bundle,
+                ..*self
+            },
+            segment,
+        ))
+    }
+
     /// Select one physical smooth-interface branch at the current endpoint.
     /// Curvature and spatial index gradients affect its angular derivatives;
     /// the native s/p Mueller response affects its power and polarization.
@@ -150,7 +201,7 @@ impl PolarizedRayBundle {
         event: DielectricEvent,
         options: InterfaceOptions,
     ) -> Result<Self, PolarizedBundleError> {
-        self.interface(surface, target, None, event, options)
+        self.interface(surface, target, InterfaceOptics::Bare, event, options)
     }
 
     /// A native coherent transparent coating changes the physical Mueller
@@ -165,7 +216,62 @@ impl PolarizedRayBundle {
         event: DielectricEvent,
         options: InterfaceOptions,
     ) -> Result<Self, PolarizedBundleError> {
-        self.interface(surface, target, Some(coating), event, options)
+        self.interface(
+            surface,
+            target,
+            InterfaceOptics::Film(coating),
+            event,
+            options,
+        )
+    }
+
+    /// Preserve an authored smooth material's complete coherent multilayer.
+    /// `surface.normal` points outward, so exiting rays use the native reversed
+    /// layer order. No stochastic selection or camera eta factor is introduced.
+    pub fn smooth_surface_interface(
+        &self,
+        surface: NormalDifferential,
+        target: GradientIndexSample,
+        material: &DielectricSurface,
+        event: DielectricEvent,
+        options: InterfaceOptions,
+    ) -> Result<Self, PolarizedBundleError> {
+        if !material.is_delta() {
+            return Err(PolarizedBundleError::UnsupportedSurface);
+        }
+        self.interface(
+            surface,
+            target,
+            InterfaceOptics::Surface(material),
+            event,
+            options,
+        )
+    }
+
+    /// Native smooth-metal reflection with the same differentiated geometric
+    /// reflection map. Complex optical constants, coating and Stokes phase
+    /// remain owned by the existing polarized conductor response.
+    pub fn smooth_conductor_interface(
+        &self,
+        surface: NormalDifferential,
+        optics: &ConductorOptics,
+        options: InterfaceOptions,
+    ) -> Result<Self, PolarizedBundleError> {
+        let bundle = self
+            .bundle
+            .smooth_interface(
+                surface,
+                self.bundle.propagation().final_sample,
+                DielectricEvent::Reflection,
+                options,
+            )?
+            .at_endpoint();
+        let output = self
+            .endpoint_beam()?
+            .reflect_conductor(surface.normal, optics)?
+            .beam
+            .with_reference_axis(bundle.propagation().transverse_axis)?;
+        self.retain_interface_power(bundle, output.power())
     }
 
     /// Use a differential admitted by the original prepared geometry owner.
@@ -188,7 +294,7 @@ impl PolarizedRayBundle {
         &self,
         surface: NormalDifferential,
         target: GradientIndexSample,
-        coating: Option<&CoherentDielectricCoating>,
+        optics: InterfaceOptics<'_>,
         event: DielectricEvent,
         options: InterfaceOptions,
     ) -> Result<Self, PolarizedBundleError> {
@@ -206,26 +312,23 @@ impl PolarizedRayBundle {
                 sample,
             })
         };
-        let incident = PolarizedBeam::try_new(
-            origin,
-            PolarizationFrame::try_new(previous.ray.dir, previous.transverse_axis)?,
-            wavelength_nm,
-            medium(previous.final_sample),
-            self.interface_state,
-        )?;
+        let incident = self.endpoint_beam()?;
         let normal = incident.incident_normal(surface.normal)?;
         let cosine = (-normal.dot(incident.frame().direction())).clamp(0.0, 1.0);
         let eta_i = previous.final_sample.phase_index();
         let eta_t = target.phase_index();
-        let response = match coating {
-            None => fresnel_dielectric_polarized(cosine, eta_i, eta_t),
-            Some(coating) => super::super::fresnel_coated_dielectric_polarized(
+        let response = match optics {
+            InterfaceOptics::Bare => fresnel_dielectric_polarized(cosine, eta_i, eta_t),
+            InterfaceOptics::Film(coating) => super::super::fresnel_coated_dielectric_polarized(
                 cosine,
                 eta_i,
                 eta_t,
                 wavelength_nm,
                 coating,
             ),
+            InterfaceOptics::Surface(material) => material
+                .interface(wavelength_nm, surface.normal.dot(previous.ray.dir) > 0.0)
+                .and_then(|interface| interface.fresnel_polarized(cosine, eta_i, eta_t)),
         }
         .map_err(BeamError::from)?;
         let matrix = match event {
@@ -246,7 +349,29 @@ impl PolarizedRayBundle {
                 medium(target),
             )?
             .with_reference_axis(bundle.propagation().transverse_axis)?;
-        let power = output.power();
+        self.retain_interface_power(bundle, output.power())
+    }
+
+    fn endpoint_beam(&self) -> Result<PolarizedBeam, PolarizedBundleError> {
+        let propagation = self.bundle.propagation();
+        Ok(PolarizedBeam::try_new(
+            propagation.ray.origin,
+            PolarizationFrame::try_new(propagation.ray.dir, propagation.transverse_axis)?,
+            self.bundle.wavelength_nm(),
+            BeamMedium::GradientIndex(LocalGradientMedium {
+                position: propagation.ray.origin,
+                wavelength_nm: self.bundle.wavelength_nm(),
+                sample: propagation.final_sample,
+            }),
+            self.interface_state,
+        )?)
+    }
+
+    fn retain_interface_power(
+        &self,
+        bundle: RayBundlePropagation,
+        power: Stokes,
+    ) -> Result<Self, PolarizedBundleError> {
         if power.i > 1.0 + 512.0 * f64::EPSILON {
             return Err(PolarizedBundleError::NumericalRange);
         }
