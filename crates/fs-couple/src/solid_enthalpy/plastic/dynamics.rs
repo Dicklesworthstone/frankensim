@@ -1,7 +1,8 @@
 //! Source-bound inertial solids with spatial plastic and reversible heating.
 //!
 //! The existing thermoplastic owner retains all material claims, original
-//! caloric objects, fixed reference mass, P1 displacement and J2 history. Its
+//! caloric objects, fixed reference mass, P1 displacement and complete native
+//! constitutive history. Its
 //! shared thermal fixed-point now calls the original solid Newton owner with
 //! consistent backward-Euler inertia. Every thermal proposal restarts from
 //! the same accepted displacement, velocity, plastic history and enthalpy.
@@ -14,7 +15,9 @@
 //!
 //! This inherits the original source/phase/small-strain admission. The model
 //! uses rate-independent J2 by default; explicit material viscosity selects the
-//! same source-bound overstress law as the quasistatic thermal owner.
+//! same source-bound overstress law as the quasistatic thermal owner. A sourced
+//! Chaboche family retains every independent backstress, its temperature
+//! transport and recovery dissipation on that same coupled path.
 //! Both constitutive kinetics and inertia use the actual physical interval.
 //! Loads and support displacements are endpoint values; resolve pulses and
 //! refine physical intervals to assess first-order time accuracy. The thermal
@@ -39,8 +42,8 @@ pub(super) struct Motion {
 
 /// One accepted material/thermal/mechanical trajectory, with full nodal velocity.
 #[derive(Clone, Debug)]
-pub struct ThermoplasticDynamics<'a> {
-    solid: ThermoplasticSolid<'a>,
+pub struct ThermoplasticDynamics<'a, S: ThermoplasticSourceFamily<'a> = ThermoplasticSource<'a>> {
+    solid: ThermoplasticSolid<'a, S>,
     velocity_mps: Vec<[f64; 3]>,
 }
 
@@ -54,17 +57,22 @@ pub struct ThermoplasticDynamicsReport<R = ThermoplasticReport> {
     pub inertia: InertialEnergy,
 }
 
-pub struct ThermoplasticDynamicsCandidate<'m, 't, O> {
+pub struct ThermoplasticDynamicsCandidate<
+    'm,
+    't,
+    O,
+    S: ThermoplasticSourceFamily<'m> = ThermoplasticSource<'m>,
+> {
     thermal: DepositionSimulation<'t>,
-    dynamics: ThermoplasticDynamics<'m>,
+    dynamics: ThermoplasticDynamics<'m, S>,
     observer: O,
     report: ThermoplasticDynamicsReport,
 }
-impl<'m, 't, O> ThermoplasticDynamicsCandidate<'m, 't, O> {
+impl<'m, 't, O, S: ThermoplasticSourceFamily<'m>> ThermoplasticDynamicsCandidate<'m, 't, O, S> {
     pub const fn thermal(&self) -> &DepositionSimulation<'t> {
         &self.thermal
     }
-    pub const fn dynamics(&self) -> &ThermoplasticDynamics<'m> {
+    pub const fn dynamics(&self) -> &ThermoplasticDynamics<'m, S> {
         &self.dynamics
     }
     pub const fn observer(&self) -> &O {
@@ -77,7 +85,7 @@ impl<'m, 't, O> ThermoplasticDynamicsCandidate<'m, 't, O> {
         self,
     ) -> (
         DepositionSimulation<'t>,
-        ThermoplasticDynamics<'m>,
+        ThermoplasticDynamics<'m, S>,
         O,
         ThermoplasticDynamicsReport,
     ) {
@@ -85,12 +93,12 @@ impl<'m, 't, O> ThermoplasticDynamicsCandidate<'m, 't, O> {
     }
 }
 
-impl<'a> ThermoplasticDynamics<'a> {
+impl<'a, S: ThermoplasticSourceFamily<'a>> ThermoplasticDynamics<'a, S> {
     /// Attach actual full nodal velocity to an admitted material solid at its
     /// current clock. This establishes initial kinetic energy; it does not
     /// claim that a prior loading or acceleration process was simulated.
     pub fn try_new(
-        solid: ThermoplasticSolid<'a>,
+        solid: ThermoplasticSolid<'a, S>,
         velocity_mps: Vec<[f64; 3]>,
         cx: &Cx<'_>,
     ) -> Result<Self, ThermoplasticError> {
@@ -108,7 +116,7 @@ impl<'a> ThermoplasticDynamics<'a> {
         })
     }
 
-    pub const fn solid(&self) -> &ThermoplasticSolid<'a> {
+    pub const fn solid(&self) -> &ThermoplasticSolid<'a, S> {
         &self.solid
     }
     pub fn velocity_mps(&self) -> &[[f64; 3]] {
@@ -135,7 +143,7 @@ impl<'a> ThermoplasticDynamics<'a> {
         thermal_config: StepConfig,
         config: ThermoplasticConfig,
         cx: &Cx<'_>,
-    ) -> Result<ThermoplasticDynamicsCandidate<'a, 't, O>, ThermoplasticError<O::Error>> {
+    ) -> Result<ThermoplasticDynamicsCandidate<'a, 't, O, S>, ThermoplasticError<O::Error>> {
         let (candidate, motion) = self.solid.advance_with_motion(
             thermal,
             observer,

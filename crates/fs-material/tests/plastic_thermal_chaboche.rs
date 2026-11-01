@@ -16,6 +16,7 @@ use fs_material::plastic::rate::{
 };
 use fs_material::plastic::source::{HardeningPropertyBasis, KINEMATIC_HARDENING_MODULUS_PROPERTY};
 use fs_material::plastic::thermal::chaboche::ThermalChabocheSource;
+use fs_material::plastic::thermal::family::{ThermoplasticFamilyError, ThermoplasticSourceFamily};
 use fs_material::plastic::thermal::{SourceQuery, ThermoplasticSource};
 use fs_material::plastic::voce::source::{
     VOCE_SATURATION_INCREMENT_PROPERTY as Q, VOCE_SATURATION_RATE_PROPERTY as B,
@@ -232,6 +233,157 @@ fn near(actual: f64, expected: f64, tolerance: f64) {
         "{actual:e} != {expected:e}; tolerance={tolerance:e}"
     );
 }
+
+#[test]
+fn shared_family_retains_every_branch_and_native_heat_through_hot_reversal() {
+    let fixture = Fixture::new(rate_properties());
+    for source in [fixture.binding(), fixture.rate(false), fixture.rate(true)] {
+        let initial = source.resolve_step(0.0, 0.0, 4e-4).unwrap();
+        let mut state = initial.law.initial_state();
+        let mut old_strain = [0.0; 6];
+        let mut old_h = 0.0;
+        for (temperature, axial, dt) in [
+            (300.0, 0.011, 4e-4),
+            (315.0, 0.011, 8e-4),
+            (305.0, -0.009, 6e-4),
+        ] {
+            let strain = [axial, -0.5 * axial, -0.5 * axial, 0.001, 0.0, 0.0];
+            let new_h = h(temperature);
+            let step = source.resolve_step(old_h, new_h, dt).unwrap();
+            let native = source
+                .advance_with_energy_for_step(old_h, new_h, &old_strain, &state, &strain, tol(), dt)
+                .unwrap();
+            let candidate = source
+                .checked_increment(old_h, new_h, &old_strain, &state, &strain, tol(), dt)
+                .unwrap();
+            assert_eq!(candidate.state, native.state);
+            assert_eq!(candidate.state, step.law.update_state(&strain, &state));
+            assert_eq!(candidate.thermal.mechanical, native.thermal.mechanical);
+            assert_eq!(
+                candidate.thermal.caloric_heat_j_m3(),
+                native.thermal.caloric_heat_j_m3()
+            );
+            assert_eq!(
+                candidate.thermal.stored_change_j_m3(),
+                native.thermal.stored_change_j_m3()
+            );
+            assert_eq!(step.temperature_k, temperature);
+            assert_eq!(
+                step.material.material().properties().len(),
+                source.base().reference().material().properties().len(),
+            );
+            assert_ne!(
+                candidate.state.backstress_pa[0],
+                candidate.state.backstress_pa[1]
+            );
+            source
+                .validate_accepted(new_h, &strain, &candidate.state, tol().yield_pa)
+                .unwrap();
+            state = candidate.state;
+            old_strain = strain;
+            old_h = new_h;
+        }
+    }
+}
+
+#[test]
+fn accepted_family_history_checks_never_relax_or_repair_the_committed_endpoint() {
+    let fixture = Fixture::new(rate_properties());
+    let strain = [0.012, -0.006, -0.006, 0.001, 0.0, 0.0];
+    for power in [false, true] {
+        let source = fixture.rate(power);
+        let law = source.resolve_step(0.0, 0.0, 2e-4).unwrap().law;
+        let accepted = source
+            .checked_increment(
+                0.0,
+                0.0,
+                &[0.0; 6],
+                &law.initial_state(),
+                &strain,
+                tol(),
+                2e-4,
+            )
+            .unwrap();
+        let frozen = accepted.state.clone();
+        let overstress = law
+            .law()
+            .yield_function_with_state(&accepted.thermal.mechanical.stress_pa, &accepted.state);
+        assert!(overstress > 10_000.0);
+        source
+            .validate_accepted(0.0, &strain, &accepted.state, tol().yield_pa)
+            .unwrap();
+        assert_eq!(accepted.state, frozen);
+        // An actual second constitutive step does relax: validation must not
+        // confuse that new physical state with inspection of the accepted one.
+        assert!(law.update_state(&strain, &accepted.state).plastic.alpha > frozen.plastic.alpha);
+        assert!(matches!(
+            fixture
+                .binding()
+                .validate_accepted(0.0, &strain, &accepted.state, tol().yield_pa),
+            Err(ThermoplasticFamilyError::Energy(
+                fs_material::plastic::energy::EnergyError::YieldResidual { .. }
+            )),
+        ));
+        for invalid in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(
+                source
+                    .validate_accepted(0.0, &strain, &accepted.state, invalid)
+                    .is_err()
+            );
+        }
+        let mut corrupted = accepted.state.clone();
+        corrupted.backstress_pa[0][0] += 1.0;
+        assert!(
+            source
+                .validate_accepted(0.0, &strain, &corrupted, tol().yield_pa)
+                .is_err()
+        );
+        assert!(
+            source
+                .validate_accepted(h(321.0), &strain, &accepted.state, tol().yield_pa)
+                .is_err()
+        );
+        assert_eq!(accepted.state, frozen);
+    }
+}
+
+#[test]
+fn original_j2_family_keeps_exact_voce_rate_heat_and_history() {
+    let fixture = Fixture::new(rate_properties());
+    for source in [
+        fixture.base(),
+        fixture
+            .base()
+            .with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly)
+            .unwrap(),
+    ] {
+        let step = source.resolve_step(0.0, h(315.0), 5e-4).unwrap();
+        let old = step.law.initial_state();
+        let strain = [0.011, -0.0055, -0.0055, 0.002, 0.0, 0.0];
+        let native = source
+            .advance_with_energy_for_step(0.0, h(315.0), &[0.0; 6], &old, &strain, tol(), 5e-4)
+            .unwrap();
+        let candidate = source
+            .checked_increment(0.0, h(315.0), &[0.0; 6], &old, &strain, tol(), 5e-4)
+            .unwrap();
+        assert_eq!(candidate.state, native.mechanical.state);
+        assert_eq!(candidate.state, step.law.update_state(&strain, &old));
+        assert_eq!(candidate.thermal.mechanical, native.mechanical);
+        assert_eq!(
+            candidate.thermal.caloric_heat_j_m3(),
+            native.caloric_heat_j_m3()
+        );
+        source
+            .validate_accepted(h(315.0), &strain, &candidate.state, tol().yield_pa)
+            .unwrap();
+        assert!(
+            source
+                .validate_accepted(h(315.0), &strain, &candidate.state, f64::NAN)
+                .is_err()
+        );
+    }
+}
+
 fn stored(strain: &[f64; 6], state: &ChabocheState<2>, t: f64, variable: bool) -> f64 {
     let dt = t - 300.0;
     let (youngs, hi, hk, q, expansion) = if variable {

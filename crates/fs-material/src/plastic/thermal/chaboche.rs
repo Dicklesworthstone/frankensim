@@ -255,7 +255,7 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
         &self.properties
     }
 
-    fn law_at(&self, source: &ResolvedJ2Plasticity) -> Result<ChabocheJ2<N>, FeedbackError> {
+    pub(super) fn law_at(&self, source: &ResolvedJ2Plasticity) -> Result<ChabocheJ2<N>, FeedbackError> {
         let mut branches =
             [BackstressBranch::new(0.0, 0.0).map_err(|e| FeedbackError::Source(e.into()))?; N];
         for (i, names) in self.properties.iter().enumerate() {

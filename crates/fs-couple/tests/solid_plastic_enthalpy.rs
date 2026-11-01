@@ -16,6 +16,10 @@ mod dynamics;
 mod overstress;
 #[path = "solid_plastic_enthalpy/voce.rs"]
 mod voce;
+#[path = "solid_plastic_enthalpy/chaboche.rs"]
+mod chaboche;
+#[path = "solid_plastic_enthalpy/chaboche_dynamics.rs"]
+mod chaboche_dynamics;
 
 use std::collections::BTreeMap;
 
