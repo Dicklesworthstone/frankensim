@@ -81,8 +81,6 @@ pub struct NonlinearStepSolution {
     pub threshold_j: f64,
 }
 
-}
-
 /// A nonlinear backward-Euler endpoint whose source-backed contact law was
 /// evaluated and differentiated at every accepted Newton field.
 #[derive(Debug)]
