@@ -7,8 +7,8 @@
 //! small-strain or current-volume material claims.
 //!
 //! `Fm=F/theta(T)`, `ln(theta)=integral(a(T)dT)`, where the explicitly
-//! logarithmic expansion coefficient is `a=d ln(theta)/dT`. Plastic history
-//! remains exactly the native `Cp^-1, alpha`. The existing exponential J2
+//! logarithmic expansion coefficient is `a=d ln(theta)/dT`. Inelastic history
+//! remains with the native finite-strain owner. The existing exponential J2
 //! return is evaluated at the endpoint temperature. At frozen temperature,
 //! `P=P_native/theta` and `dP/dF=A_native/theta²` by the exact chain rule.
 //!
@@ -42,11 +42,20 @@
 //! The [Norton/Arrhenius reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.039.html)
 //! uses the rate prefactor A; the explicit normalization here is `A=s0/eta`.
 //!
+//! [`AffineThermalFiniteJ2::with_norton_creep`] instead selects simultaneous
+//! Norton creep and rate-independent J2 yielding. One inelastic metric carries
+//! their shared coaxial increment; `alpha` retains plastic accumulation and
+//! `creep_alpha` retains creep accumulation. Only alpha enters hardening energy.
+//! Physical yield and creep losses remain separate, and their sum supplies the
+//! dissipative part of caloric heat. An accepted combined state must satisfy
+//! equilibrium yield at its actual temperature even when inspected without dt.
+//!
 //! The explicit exponential/tangent expansion convention is described in
 //! the [COMSOL finite-strain theory reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.031.html).
 //! This reduced free-energy model is not the full independent-plastic-entropy
 //! theory of Simo–Miehe, doi:10.1016/0045-7825(92)90170-O.
 
+use super::combined::FiniteNortonJ2;
 use super::rate::{FiniteOverstressJ2, FiniteOverstressParameters};
 use super::{
     FiniteJ2, FiniteJ2Error, FiniteJ2Limits, FiniteJ2Parameters, FiniteJ2Response, FiniteJ2State,
@@ -122,6 +131,7 @@ pub struct AffineThermalFiniteJ2 {
     minimum_mechanical_heat_capacity_j_m3_k: f64,
     overstress: Option<FiniteJ2ThermalOverstress>,
     norton_creep: bool,
+    maximum_accumulated_creep_strain: Option<f64>,
 }
 
 /// Keep only one native backbone per frozen point, including kinetic points.
@@ -131,7 +141,11 @@ enum FrozenNative {
     /// Fixed-history thermodynamics are defined without a physical interval.
     /// A constitutive return from this variant always refuses.
     Inspection(FiniteJ2),
+    /// Combined creep and rate-independent yielding still require dt for flow,
+    /// but accepted-state inspection retains the equilibrium yield condition.
+    CombinedInspection(FiniteJ2),
     Overstress(FiniteOverstressJ2),
+    Combined(FiniteNortonJ2),
 }
 
 /// One owned endpoint-temperature law, without a borrowed temporary source field.
@@ -207,7 +221,7 @@ pub struct FiniteJ2ThermalIncrement {
 impl FiniteJ2ThermalIncrement {
     /// Deposit once: physical inelastic heat plus signed reversible exchange.
     pub fn caloric_heat_j_m3(&self) -> f64 {
-        self.mechanical.plastic_dissipation_j_m3 + self.reversible_heat_j_m3
+        self.mechanical.inelastic_dissipation_j_m3() + self.reversible_heat_j_m3
     }
     /// Stable two-temperature mechanical internal-energy increment.
     pub fn internal_energy_change_j_m3(&self) -> f64 {
@@ -250,7 +264,7 @@ impl core::fmt::Display for FiniteJ2ThermalError {
             ),
             Self::Numerical(what) => write!(f, "finite thermoplastic numerical refusal: {what}"),
             Self::DurationRequired => f.write_str(
-                "finite thermoplastic overstress requires an explicit physical duration",
+                "selected finite thermoplastic kinetics require an explicit physical duration",
             ),
         }
     }
@@ -342,6 +356,7 @@ impl AffineThermalFiniteJ2 {
             minimum_mechanical_heat_capacity_j_m3_k: 0.0,
             overstress: None,
             norton_creep,
+            maximum_accumulated_creep_strain: None,
         };
         family.native_backbone(p.reference)?;
         let low = family.at_temperature(lo)?;
@@ -377,7 +392,12 @@ impl AffineThermalFiniteJ2 {
         if self.norton_creep {
             FiniteJ2::new_creep_backbone(parameters, self.limits)
         } else {
-            FiniteJ2::new(parameters, self.limits)
+            let native = FiniteJ2::new(parameters, self.limits)?;
+            if let Some(maximum) = self.maximum_accumulated_creep_strain {
+                native.with_creep_history_limit(maximum)
+            } else {
+                Ok(native)
+            }
         }
     }
 
@@ -385,6 +405,12 @@ impl AffineThermalFiniteJ2 {
     /// explicitly selected threshold-free Norton mechanism.
     pub const fn is_norton_creep(&self) -> bool {
         self.norton_creep
+    }
+
+    /// Explicit separate creep-history bound for the simultaneous selection.
+    /// None retains the original single-mechanism state interpretation.
+    pub const fn maximum_accumulated_creep_strain(&self) -> Option<f64> {
+        self.maximum_accumulated_creep_strain
     }
 
     pub fn parameters(&self) -> &FiniteJ2ThermalParameters {
@@ -413,6 +439,11 @@ impl AffineThermalFiniteJ2 {
         mut self,
         parameters: FiniteJ2ThermalOverstress,
     ) -> Result<Self, FiniteJ2ThermalError> {
+        if self.maximum_accumulated_creep_strain.is_some() {
+            return Err(FiniteJ2ThermalError::Parameters(
+                "combined Norton/J2 kinetics cannot be replaced by a Perzyna selector",
+            ));
+        }
         FiniteOverstressParameters {
             viscosity_pa_s: parameters.reference_viscosity_pa_s,
             stress_scale_pa: parameters.stress_scale_pa,
@@ -435,8 +466,33 @@ impl AffineThermalFiniteJ2 {
         Ok(self)
     }
 
+    /// Add explicitly calibrated Norton creep to the original rate-independent
+    /// J2 family. Both mechanisms use the same implicit endpoint stress; creep
+    /// does not accumulate plastic hardening. Already selected Perzyna or pure
+    /// Norton families require another constitutive composition and refuse.
+    pub fn with_norton_creep(
+        self,
+        kinetics: FiniteJ2ThermalOverstress,
+        maximum_accumulated_creep_strain: f64,
+    ) -> Result<Self, FiniteJ2ThermalError> {
+        if self.norton_creep
+            || self.overstress.is_some()
+            || self.maximum_accumulated_creep_strain.is_some()
+        {
+            return Err(FiniteJ2ThermalError::Parameters(
+                "simultaneous Norton/J2 requires an unselected rate-independent plastic family",
+            ));
+        }
+        self.native_backbone(self.parameters.reference)?
+            .with_creep_history_limit(maximum_accumulated_creep_strain)?;
+        let mut family = self.with_overstress(kinetics)?;
+        family.maximum_accumulated_creep_strain = Some(maximum_accumulated_creep_strain);
+        Ok(family)
+    }
+
     /// The original explicitly selected kinetics; None is rate independence.
     /// Norton creep always has kinetics; its driving stress is full equivalent q.
+    /// In the simultaneous selection these are the creep kinetics only.
     pub const fn overstress(&self) -> Option<&FiniteJ2ThermalOverstress> {
         self.overstress.as_ref()
     }
@@ -522,8 +578,8 @@ impl AffineThermalFiniteJ2 {
     }
 
     /// Check an accepted state at its actual temperature, without returning it.
-    /// Selected kinetics admit finite positive overstress; rate independence
-    /// retains its explicit yield-surface gate.
+    /// Perzyna and pure creep admit positive stress beyond equilibrium yield.
+    /// Rate-independent and simultaneous Norton/J2 retain the yield-surface gate.
     pub fn validate_committed(
         &self,
         f: &[f64; 9],
@@ -595,17 +651,22 @@ impl AffineThermalFiniteJ2 {
         }
         let native = if let Some(kinetics) = self.overstress {
             if let Some(duration) = duration_s {
-                FrozenNative::Overstress(FiniteOverstressJ2::new(
-                    native,
-                    FiniteOverstressParameters {
-                        viscosity_pa_s: self
-                            .overstress_viscosity_pa_s(temperature_k)?
-                            .expect("selected kinetics have a viscosity"),
-                        stress_scale_pa: kinetics.stress_scale_pa,
-                        exponent: kinetics.exponent,
-                    },
-                    duration,
-                )?)
+                let parameters = FiniteOverstressParameters {
+                    viscosity_pa_s: self
+                        .overstress_viscosity_pa_s(temperature_k)?
+                        .expect("selected kinetics have a viscosity"),
+                    stress_scale_pa: kinetics.stress_scale_pa,
+                    exponent: kinetics.exponent,
+                };
+                if let Some(maximum) = self.maximum_accumulated_creep_strain {
+                    FrozenNative::Combined(FiniteNortonJ2::new(
+                        native, parameters, duration, maximum,
+                    )?)
+                } else {
+                    FrozenNative::Overstress(FiniteOverstressJ2::new(native, parameters, duration)?)
+                }
+            } else if self.maximum_accumulated_creep_strain.is_some() {
+                FrozenNative::CombinedInspection(native)
             } else {
                 FrozenNative::Inspection(native)
             }
@@ -650,7 +711,8 @@ impl AffineThermalFiniteJ2 {
 
     /// Thermal and kinetic update over one explicitly supplied physical interval.
     /// Old history is inspected at its old temperature, without advancing it
-    /// again or requiring it to lie inside the rate-independent yield surface.
+    /// again. The combined Norton/J2 selection checks its old equilibrium yield
+    /// condition; Perzyna retains its legitimate accepted overstress.
     #[allow(clippy::too_many_arguments)]
     pub fn checked_increment_for_step(
         &self,
@@ -731,7 +793,7 @@ impl AffineThermalFiniteJ2 {
         let endpoint_work_defect_j_m3 = finite(
             mechanical_coordinate_work_j_m3
                 - (new.free_energy_j_m3 - frozen_old_storage)
-                - mechanical.plastic_dissipation_j_m3,
+                - mechanical.inelastic_dissipation_j_m3(),
         )?;
         let reversible_heat_j_m3 = finite(
             thermal_deformation_work_j_m3
@@ -741,11 +803,11 @@ impl AffineThermalFiniteJ2 {
         let balance_error_j_m3 = finite(
             mechanical_work_j_m3
                 - (new.free_energy_j_m3 - old.free_energy_j_m3 + thermoelastic_storage_change_j_m3)
-                - mechanical.plastic_dissipation_j_m3
+                - mechanical.inelastic_dissipation_j_m3()
                 - reversible_heat_j_m3
                 - endpoint_work_defect_j_m3,
         )?;
-        finite(mechanical.plastic_dissipation_j_m3 + reversible_heat_j_m3)?;
+        finite(mechanical.inelastic_dissipation_j_m3() + reversible_heat_j_m3)?;
         Ok(FiniteJ2ThermalIncrement {
             mechanical,
             old,
@@ -771,8 +833,11 @@ struct Inspection {
 impl FrozenThermalFiniteJ2 {
     fn backbone(&self) -> &FiniteJ2 {
         match &self.native {
-            FrozenNative::RateIndependent(law) | FrozenNative::Inspection(law) => law,
+            FrozenNative::RateIndependent(law)
+            | FrozenNative::Inspection(law)
+            | FrozenNative::CombinedInspection(law) => law,
             FrozenNative::Overstress(law) => law.backbone(),
+            FrozenNative::Combined(law) => law.backbone(),
         }
     }
 
@@ -784,7 +849,10 @@ impl FrozenThermalFiniteJ2 {
         Ok(match &self.native {
             FrozenNative::RateIndependent(law) => law.response(f, old)?,
             FrozenNative::Overstress(law) => law.response(f, old)?,
-            FrozenNative::Inspection(_) => return Err(FiniteJ2ThermalError::DurationRequired),
+            FrozenNative::Combined(law) => law.response(f, old)?,
+            FrozenNative::Inspection(_) | FrozenNative::CombinedInspection(_) => {
+                return Err(FiniteJ2ThermalError::DurationRequired);
+            }
         })
     }
 
@@ -856,7 +924,10 @@ impl FrozenThermalFiniteJ2 {
         let (piola, potential) = match &self.native {
             FrozenNative::RateIndependent(law) => law.stress_and_potential(&fm, old)?,
             FrozenNative::Overstress(law) => law.stress_and_potential(&fm, old)?,
-            FrozenNative::Inspection(_) => return Err(FiniteJ2ThermalError::DurationRequired),
+            FrozenNative::Combined(law) => law.stress_and_potential(&fm, old)?,
+            FrozenNative::Inspection(_) | FrozenNative::CombinedInspection(_) => {
+                return Err(FiniteJ2ThermalError::DurationRequired);
+            }
         };
         let piola = piola.map(|x| x * self.inverse_thermal_stretch);
         if piola.iter().any(|x| !x.is_finite()) {
@@ -879,10 +950,13 @@ impl FrozenThermalFiniteJ2 {
     ) -> Result<(), FiniteJ2ThermalError> {
         let (fm, _) = self.mechanical_deformation(f)?;
         match &self.native {
-            FrozenNative::RateIndependent(law) => {
+            FrozenNative::RateIndependent(law) | FrozenNative::CombinedInspection(law) => {
                 law.validate_committed(&fm, state, yield_tolerance_pa)?;
             }
             FrozenNative::Overstress(law) => {
+                law.validate_committed(&fm, state, yield_tolerance_pa)?;
+            }
+            FrozenNative::Combined(law) => {
                 law.validate_committed(&fm, state, yield_tolerance_pa)?;
             }
             FrozenNative::Inspection(_) => {

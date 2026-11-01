@@ -56,6 +56,8 @@ pub struct FiniteThermoplasticElementEnergy {
     pub internal_before_j_m3: f64,
     pub internal_after_j_m3: f64,
     pub plastic_dissipation_j_m3: f64,
+    /// Separate Norton loss for the simultaneous creep/plastic selection.
+    pub creep_dissipation_j_m3: f64,
     pub reversible_heat_j_m3: f64,
     pub coefficient_storage_change_j_m3: f64,
     /// Delta(T*s), not an additional caloric source.
@@ -70,9 +72,13 @@ pub struct FiniteThermoplasticElementEnergy {
 }
 
 impl FiniteThermoplasticElementEnergy {
+    /// Physical inelastic loss, excluding reversible and numerical accounts.
+    pub fn inelastic_dissipation_j_m3(&self) -> f64 {
+        self.plastic_dissipation_j_m3 + self.creep_dissipation_j_m3
+    }
     /// Deposit this signed quantity once into the original-volume caloric owner.
     pub fn caloric_heat_j_m3(&self) -> f64 {
-        self.plastic_dissipation_j_m3 + self.reversible_heat_j_m3
+        self.inelastic_dissipation_j_m3() + self.reversible_heat_j_m3
     }
     /// Stable mechanical internal-energy change from the native entropy account.
     pub fn internal_energy_change_j_m3(&self) -> f64 {
@@ -86,6 +92,7 @@ impl FiniteThermoplasticElementEnergy {
             internal_before_j_m3: value.old.internal_energy_j_m3,
             internal_after_j_m3: value.new.internal_energy_j_m3,
             plastic_dissipation_j_m3: value.mechanical.plastic_dissipation_j_m3,
+            creep_dissipation_j_m3: value.mechanical.creep_dissipation_j_m3,
             reversible_heat_j_m3: value.reversible_heat_j_m3,
             coefficient_storage_change_j_m3: value.coefficient_storage_change_j_m3,
             thermoelastic_storage_change_j_m3: value.thermoelastic_storage_change_j_m3,
@@ -105,6 +112,8 @@ pub struct FiniteThermoplasticTetEnergy {
     pub free_energy_change_j: f64,
     pub internal_energy_change_j: f64,
     pub plastic_dissipation_j: f64,
+    /// Separate Norton loss for the simultaneous creep/plastic selection.
+    pub creep_dissipation_j: f64,
     pub reversible_heat_j: f64,
     pub caloric_heat_j: f64,
     pub coefficient_storage_change_j: f64,
@@ -120,6 +129,13 @@ pub struct FiniteThermoplasticTetEnergy {
     /// External work minus ΔU, caloric transfer, signed defect and optional
     /// kinetic change/numerical loss. Independently checked before acceptance.
     pub balance_error_j: f64,
+}
+
+impl FiniteThermoplasticTetEnergy {
+    /// Physical inelastic loss over the original mesh, with no numerical loss.
+    pub fn inelastic_dissipation_j(&self) -> f64 {
+        self.plastic_dissipation_j + self.creep_dissipation_j
+    }
 }
 
 #[derive(Debug)]
@@ -491,10 +507,11 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 .map_err(|source| FiniteThermoplasticTetError::Material { element, source })?;
             let account = FiniteThermoplasticElementEnergy::from_increment(&value);
             let v = geometry.volume;
-            // Perzyna physical loss is (Y+f_visc)*gamma, whereas the
-            // variational flow potential integrates f_visc over gamma:
-            // Y*gamma + n/(n+1)*f_visc*gamma. Viscosity is not hardening
-            // storage and the smaller potential must never be heated.
+            // The rate potential integrates the viscous stress over its flow
+            // increment. For Perzyna this is the overstress contribution; for
+            // simultaneous Norton/J2 it is the separate creep work. Both give
+            // Y*delta_p + n/(n+1)*(D_total-Y*delta_p), with Y=0 for standalone
+            // Norton. Physical heat remains the full D_total.
             let family = self.families[element].thermal_finite_j2();
             let flow_potential = if let Some(kinetics) = family.overstress() {
                 let p = family.parameters();
@@ -505,9 +522,9 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 let yield_loss = yield_pa * value.mechanical.plastic_increment;
                 yield_loss
                     + kinetics.exponent / (kinetics.exponent + 1.0)
-                        * (account.plastic_dissipation_j_m3 - yield_loss)
+                        * (account.inelastic_dissipation_j_m3() - yield_loss)
             } else {
-                account.plastic_dissipation_j_m3
+                account.inelastic_dissipation_j_m3()
             };
             flow_potential_j = v.mul_add(flow_potential, flow_potential_j);
             energy_gate(
@@ -536,6 +553,8 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 account.plastic_dissipation_j_m3,
                 energy.plastic_dissipation_j,
             );
+            energy.creep_dissipation_j =
+                v.mul_add(account.creep_dissipation_j_m3, energy.creep_dissipation_j);
             energy.reversible_heat_j =
                 v.mul_add(account.reversible_heat_j_m3, energy.reversible_heat_j);
             energy.caloric_heat_j = v.mul_add(account.caloric_heat_j_m3(), energy.caloric_heat_j);
@@ -621,7 +640,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             ),
             (
                 "finite thermal caloric decomposition",
-                energy.caloric_heat_j - energy.plastic_dissipation_j - energy.reversible_heat_j,
+                energy.caloric_heat_j - energy.inelastic_dissipation_j() - energy.reversible_heat_j,
             ),
             (
                 "finite thermal support/dead-load work",
@@ -644,6 +663,8 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             || !new_internal.is_finite()
             || !energy.plastic_dissipation_j.is_finite()
             || energy.plastic_dissipation_j < 0.0
+            || !energy.creep_dissipation_j.is_finite()
+            || energy.creep_dissipation_j < 0.0
             || [
                 energy.coefficient_storage_change_j,
                 energy.thermoelastic_storage_change_j,
@@ -653,7 +674,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             .iter()
             .any(|value| !value.is_finite())
         {
-            return Err(invalid("finite storage/internal energy and nonnegative physical plastic dissipation required").into());
+            return Err(invalid("finite storage/internal energy and nonnegative physical plastic and creep dissipation required").into());
         }
         checkpoint(cx)?;
         let (next_motion, inertia) = match (motion, self.motion.as_ref()) {
