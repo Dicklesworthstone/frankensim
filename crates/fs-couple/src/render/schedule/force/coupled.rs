@@ -870,6 +870,17 @@ fn extension(models: &[ModalAcousticTimeModel], column: &[f64], rest: f64) -> Re
     }
     finite(sum - rest)
 }
+/// The magnitude of the terms `extension` cancels: |rest| plus every |shape * displacement|. A cancelling sum is rounded
+/// by the size of its terms, not of its result, so a link whose exact extension is zero carries a rounded zero and a
+/// reaction of rounding size. This is the one scale of a link's static force; every balance that re-sums link reactions
+/// from the states must scale them by it.
+fn extension_terms(models: &[ModalAcousticTimeModel], column: &[f64], rest: f64) -> Result<f64, ModalCouplingError> {
+    let mut terms = rest.abs();
+    for (state, &shape) in models.iter().flat_map(|m| m.states()).zip(column) {
+        terms = finite(terms + (shape * state.displacement_m_sqrt_kg).abs())?;
+    }
+    Ok(terms)
+}
 fn dot(a: &[f64], b: &[f64]) -> Result<f64, ModalCouplingError> {
     a.iter().zip(b).try_fold(0.0, |s, (a,b)| finite(s+a*b))
 }

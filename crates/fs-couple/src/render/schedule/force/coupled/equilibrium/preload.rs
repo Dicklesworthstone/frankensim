@@ -105,10 +105,14 @@ pub(super) fn initialize(
     for (column, link) in network.columns.iter().zip(&network.connections) {
         poll(Some(gate))?;
         let reaction = finite(-link.stiffness_n_m*extension(&network.candidates, column, link.rest_extension_m)?)?;
+        // The same rounding scale stage_static_equilibrium gives this link for these states: the extension is a
+        // cancelling sum, so a link that ends exactly slack carries a rounded-zero reaction that is balanced, not
+        // a 100% residual of its own magnitude.
+        let reaction_scale = finite(link.stiffness_n_m*extension_terms(&network.candidates, column, link.rest_extension_m)?)?;
         for j in 0..actual_forces.len() {
             let force = finite(column[j]*reaction)?;
             actual_forces[j] = finite(actual_forces[j]+force)?;
-            actual_scale[j] = finite(actual_scale[j]+force.abs())?;
+            actual_scale[j] = finite(actual_scale[j]+column[j].abs()*reaction_scale)?;
         }
     }
     let mut j = 0;
