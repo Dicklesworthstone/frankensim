@@ -250,9 +250,9 @@ impl PreloadProblem<'_> {
                     (1.-self.fraction)*old+self.fraction*(*p)
                 };
             }
-            for tether in self.tethers {tether.add_gradient(u,&mut load,-1.)?;}
+            for tether in self.tethers {tether.add_gradient_at(u,&mut load,-1.,self.fraction)?;}
         } else {
-            for tether in self.tethers {tether.add_gradient(u,&mut load,-1.)?;}
+            for tether in self.tethers {tether.add_gradient_at(u,&mut load,-1.,self.fraction)?;}
             for p in &mut load {*p*=self.fraction;}
         }
         if load.iter().any(|v|!v.is_finite()) {return Err("nonfinite combined shell load".into());}
@@ -283,7 +283,7 @@ impl PreloadProblem<'_> {
                 || c.tangent.iter().any(|v|!v.is_finite()) {return Err("invalid equilibrium tangent".into());}
             element.add_tangent(&c.tangent,&mut k);
         }
-        for tether in self.tethers {tether.add_tangent(u,&mut k,self.connection_fraction())?;}
+        for tether in self.tethers {tether.add_tangent_at(u,&mut k,self.connection_fraction(),self.fraction)?;}
         Ok(k.assemble())
     }
     fn connection_fraction(&self)->f64 {
@@ -319,7 +319,7 @@ impl PreloadProblem<'_> {
             }}
         }
         for tether in self.tethers {
-            if tether.add_action(&u,&v,out,self.connection_fraction()).is_err() {out.fill(f64::NAN);return;}
+            if tether.add_action_at(&u,&v,out,self.connection_fraction(),self.fraction).is_err() {out.fill(f64::NAN);return;}
         }
         let value=self.base.solve(out);
         for ((out,v),scale) in out.iter_mut().zip(value).zip(self.scale) {*out=v*scale;}

@@ -1,10 +1,11 @@
 //! Continuing static load paths on one immutable, originally unloaded assembly.
 //!
-//! A new endpoint changes dead forces only. Geometry, material sections, ties,
-//! supports and axial connection laws retain their original reference. The
-//! original Newton owner starts at the last accepted deformation; tethers and
-//! struts stay fully active while dead loads interpolate between endpoints.
-//! This is quasi-static equilibrium, not elapsed-time dynamics or load work.
+//! Endpoints may change dead forces, tether reference tension and strut free
+//! length. Geometry, sections, ties, supports, tether stiffness and strut EA
+//! retain their original reference. The original Newton owner starts at the
+//! last accepted deformation and evaluates the original unilateral axial laws
+//! at each interpolated setting. This is quasi-static equilibrium, not elapsed
+//! time, material history, or an actuation/dead-load work integral.
 
 use super::{
     AssemblyStrut, AssemblyTether, EdgeTie, FaceTie, PreloadOptions, PreloadProblem,
@@ -23,6 +24,8 @@ pub struct ShellAssemblyLoadPath {
     accepted: PreloadedConnectedShellAssembly,
     component_loads: Vec<Vec<f64>>,
     retained_load: Vec<f64>,
+    tether_reference_tensions_n: Vec<f64>,
+    strut_free_lengths_m: Vec<f64>,
 }
 
 impl ShellAssemblyLoadPath {
@@ -30,7 +33,8 @@ impl ShellAssemblyLoadPath {
     ///
     /// The first solve has exactly the one-shot assembly's load-ramp semantics:
     /// dead loads and complete axial potentials grow from zero together. Later
-    /// `advance` calls change only dead loads and retain full axial potentials.
+    /// `advance` calls change only dead loads and retain full axial potentials;
+    /// `advance_with_axial_settings` also changes their explicit settings.
     /// Inputs are copied into the prepared physical kernels, so this path never
     /// borrows mutable caller geometry or load storage.
     ///
@@ -83,6 +87,8 @@ impl ShellAssemblyLoadPath {
             accepted,
             component_loads,
             retained_load,
+            tether_reference_tensions_n: tethers.iter().map(|t| t.reference_tension_n).collect(),
+            strut_free_lengths_m: struts.iter().map(|s| s.free_length_m).collect(),
         })
     }
 
@@ -102,6 +108,18 @@ impl ShellAssemblyLoadPath {
     /// work-conjugate tie projection. Loads on supports are retained here.
     pub fn component_loads(&self) -> &[Vec<f64>] {
         &self.component_loads
+    }
+
+    /// Accepted tensions at the ORIGINAL unloaded geometry [N], in tether order.
+    /// Actual loaded tensions remain in `accepted().tether_responses`.
+    pub fn tether_reference_tensions_n(&self) -> &[f64] {
+        &self.tether_reference_tensions_n
+    }
+
+    /// Accepted uncompressed lengths [m], in original strut order. Original EA
+    /// remains fixed; the original law computes each axial stiffness as EA/L.
+    pub fn strut_free_lengths_m(&self) -> &[f64] {
+        &self.strut_free_lengths_m
     }
 
     /// Continue to complete new dead loads on the same original components.
@@ -174,7 +192,107 @@ impl ShellAssemblyLoadPath {
         self.retained_load = load;
         Ok(&self.accepted)
     }
+
+    /// Continue dead loads and the original axial settings together.
+    ///
+    /// Tether reference tension and strut free length interpolate linearly in
+    /// the existing load-continuation fraction. Each intermediate strut uses
+    /// `EA / interpolated_free_length`; interpolating stiffness or blending
+    /// endpoint potentials would describe a different member. The original
+    /// tension-only/compression-only branches, direction-updating forces and
+    /// complete material/geometric tangents remain authoritative.
+    ///
+    /// Endpoints, ties, supports, shell reference geometry, tether stiffness and
+    /// strut EA cannot change. Prepared connection maps share their immutable
+    /// columns; no geometry or reference matrix is rebuilt. Every intermediate
+    /// equilibrium retains the existing deformation, force, tangent-inertia and
+    /// whole-call work gates. All loads, settings and state publish atomically.
+    ///
+    /// Repeating the exact settings and full loads is the existing exact no-op.
+    /// Connection energy reports use the NEW law's original-geometry datum;
+    /// their difference across changing settings is not an actuator-work audit.
+    /// No physical duration, damping, actuator work, kinetics or changing
+    /// material history is inferred from this numerical continuation.
+    ///
+    /// # Errors
+    /// Original preload refusals, setting-count mismatch, nonfinite/negative
+    /// tension, free length below the original 1e-9 m floor, or unrepresentable
+    /// EA/L. Any refusal or cancellation preserves the complete accepted state.
+    pub fn advance_with_axial_settings(
+        &mut self,
+        component_loads: &[&[f64]],
+        tether_reference_tensions_n: &[f64],
+        strut_free_lengths_m: &[f64],
+        options: PreloadOptions,
+        solve: &mut impl FnMut(
+            &PreloadProblem<'_>,
+            Vec<f64>,
+            usize,
+        ) -> Result<(Vec<f64>, usize), String>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<&PreloadedConnectedShellAssembly, String> {
+        validate_options(options)?;
+        if cancelled() {
+            return Err("assembled axial setting path cancelled".into());
+        }
+        if tether_reference_tensions_n.len() != self.tether_reference_tensions_n.len()
+            || strut_free_lengths_m.len() != self.strut_free_lengths_m.len()
+        {
+            return Err("one setting per original tether and strut is required".into());
+        }
+        let same = tether_reference_tensions_n
+            .iter()
+            .zip(&self.tether_reference_tensions_n)
+            .chain(strut_free_lengths_m.iter().zip(&self.strut_free_lengths_m))
+            .all(|(a, b)| a.to_bits() == b.to_bits());
+        if same {
+            return self.advance(component_loads, options, solve, cancelled);
+        }
+        let load = self
+            .prepared
+            .assembly
+            .project_loads(component_loads)
+            .map_err(|e| e.to_string())?;
+        let mut connections = Vec::with_capacity(self.prepared.tethers.len());
+        for (i, original) in self.prepared.tethers.iter().enumerate() {
+            if cancelled() {
+                return Err("assembled axial setting path cancelled".into());
+            }
+            connections.push(if i < self.prepared.tether_count {
+                original.with_reference_tension(tether_reference_tensions_n[i])?
+            } else {
+                original.with_free_length(strut_free_lengths_m[i - self.prepared.tether_count])?
+            });
+        }
+        let candidate = self.prepared.solve_with_connections(
+            &connections,
+            &load,
+            Some(&self.retained_load),
+            Some(&self.accepted.equilibrium.coordinates),
+            options,
+            solve,
+            &mut cancelled,
+        )?;
+        for connection in &mut connections {
+            connection.accept_setting();
+        }
+        let loads = component_loads.iter().map(|p| p.to_vec()).collect();
+        let tensions = tether_reference_tensions_n.to_vec();
+        let lengths = strut_free_lengths_m.to_vec();
+        if cancelled() {
+            return Err("assembled axial setting path cancelled".into());
+        }
+        self.accepted = candidate;
+        self.component_loads = loads;
+        self.retained_load = load;
+        self.prepared.tethers = connections;
+        self.tether_reference_tensions_n = tensions;
+        self.strut_free_lengths_m = lengths;
+        Ok(&self.accepted)
+    }
 }
 
+#[cfg(test)]
+mod axial_tests;
 #[cfg(test)]
 mod tests;

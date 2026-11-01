@@ -489,13 +489,39 @@ impl PreparedAssembly {
             Vec<f64>,
             usize,
         ) -> Result<(Vec<f64>, usize), String>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<PreloadedConnectedShellAssembly, String> {
+        self.solve_with_connections(
+            &self.tethers,
+            load,
+            load_origin,
+            initial,
+            options,
+            solve,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_with_connections(
+        &self,
+        connections: &[PreparedTether],
+        load: &[f64],
+        load_origin: Option<&[f64]>,
+        initial: Option<&[f64]>,
+        options: PreloadOptions,
+        solve: &mut impl FnMut(
+            &PreloadProblem<'_>,
+            Vec<f64>,
+            usize,
+        ) -> Result<(Vec<f64>, usize), String>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<PreloadedConnectedShellAssembly, String> {
         let mut problem = PreloadProblem {
             model: &self.assembly.model,
             elements: &self.elements,
             transforms: &self.transforms,
-            tethers: &self.tethers,
+            tethers: connections,
             base: &self.base,
             scale: &self.scale,
             load,

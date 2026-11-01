@@ -10,6 +10,7 @@
 use super::{CoordinateRows, ShellMesh, ShellModel, dot, norm};
 use fs_sparse::Coo;
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 /// One massless tensile connection to a fixed anchor. The three nodes and
 /// weights identify an existing shell facet; no new mesh or support is inferred.
@@ -111,21 +112,25 @@ impl PreparedPoint {
     }
 }
 
+#[derive(Clone)]
 pub(super) struct PreparedTether {
     dofs: [Option<usize>;18],
     columns: [[f64;3];18],
     chord: [f64;3],
     length: f64,
     law: AxialLaw,
+    // Only a trial parameter continuation has an origin. Accepted laws retain
+    // the original geometric reference and clear this numerical path state.
+    setting_origin: Option<f64>,
     // Relative bearing-minus-anchor motion after the original component ties.
     // Unique retained columns combine shared/slave DOFs before any work or
     // Hessian is assembled. None preserves the original one-shell arithmetic.
-    mapped_columns: Option<Vec<(usize,[f64;3])>>,
+    mapped_columns: Option<Arc<Vec<(usize,[f64;3])>>>,
 }
 #[derive(Clone, Copy)]
 enum AxialLaw {
     Tensile {tension:f64,stiffness:f64},
-    Compressive {free_length:f64,stiffness:f64},
+    Compressive {free_length:f64,stiffness:f64,axial_rigidity:f64},
 }
 struct AxialResponse {
     force_n:[f64;3],
@@ -159,6 +164,9 @@ impl PreparedTether {
     }
     pub(super) fn at_strut(point:&PreparedPoint,anchor:[f64;3],free_length:f64,axial_rigidity:f64)
         ->Result<Self,String> {
+        Self::with_law(point,anchor,Self::compressive_law(free_length,axial_rigidity)?)
+    }
+    fn compressive_law(free_length:f64,axial_rigidity:f64)->Result<AxialLaw,String> {
         if !free_length.is_finite() || free_length<1e-9
             || !axial_rigidity.is_finite() || axial_rigidity<=0. {
             return Err("strut requires positive finite free length [m] and axial rigidity EA [N]".into());
@@ -167,7 +175,7 @@ impl PreparedTether {
         if !stiffness.is_finite() || stiffness<=0. {
             return Err("strut EA/free_length stiffness is not representable".into());
         }
-        Self::with_law(point,anchor,AxialLaw::Compressive {free_length,stiffness})
+        Ok(AxialLaw::Compressive {free_length,stiffness,axial_rigidity})
     }
     fn with_law(point:&PreparedPoint,anchor:[f64;3],law:AxialLaw)->Result<Self,String> {
         if anchor.iter().any(|v|!v.is_finite()) {
@@ -177,7 +185,52 @@ impl PreparedTether {
         let chord=std::array::from_fn(|c|point.arm[c]-anchor[c]+point.midsurface[c]);
         let length=norm(&chord);
         if !length.is_finite() || length<1e-9 {return Err("tether anchor coincides with its bearing".into());}
-        Ok(Self {dofs:point.dofs,columns:point.columns,chord,length,law,mapped_columns:None})
+        Ok(Self {dofs:point.dofs,columns:point.columns,chord,length,law,
+            setting_origin:None,mapped_columns:None})
+    }
+    pub(super) fn with_reference_tension(&self,tension:f64)->Result<Self,String> {
+        if !tension.is_finite() || tension<0. {
+            return Err("continued tether reference tension must be finite and nonnegative [N]".into());
+        }
+        let AxialLaw::Tensile {tension:old,stiffness}=self.law else {
+            return Err("cannot replace a compressive connection with a tensile law".into());
+        };
+        let mut target=self.clone();
+        target.setting_origin=Some(old);
+        target.law=AxialLaw::Tensile {tension,stiffness};
+        Ok(target)
+    }
+    pub(super) fn with_free_length(&self,free_length:f64)->Result<Self,String> {
+        let AxialLaw::Compressive {free_length:old,axial_rigidity,..}=self.law else {
+            return Err("cannot replace a tensile connection with a compressive law".into());
+        };
+        let law=Self::compressive_law(free_length,axial_rigidity)?;
+        let mut target=self.clone();
+        target.setting_origin=Some(old);
+        target.law=law;
+        Ok(target)
+    }
+    pub(super) fn accept_setting(&mut self) {self.setting_origin=None;}
+    fn law_at(&self,fraction:f64)->Result<AxialLaw,String> {
+        let Some(origin)=self.setting_origin else {return Ok(self.law);};
+        if !fraction.is_finite() || !(0.0..=1.0).contains(&fraction) {
+            return Err("axial setting continuation fraction must lie in [0,1]".into());
+        }
+        let blend=|target:f64| {
+            if fraction==0. {origin} else if fraction==1. || origin==target {target}
+            else {(1.-fraction)*origin+fraction*target}
+        };
+        match self.law {
+            AxialLaw::Tensile {tension,stiffness}=>{
+                let tension=blend(tension);
+                if !tension.is_finite() || tension<0. {
+                    return Err("continued tether reference tension overflow".into());
+                }
+                Ok(AxialLaw::Tensile {tension,stiffness})
+            }
+            AxialLaw::Compressive {free_length,axial_rigidity,..}=>
+                Self::compressive_law(blend(free_length),axial_rigidity),
+        }
     }
     pub(super) fn remap(mut self,bearing:&CoordinateRows,
         anchor:Option<(&PreparedPoint,&CoordinateRows)>)->Result<Self,String> {
@@ -195,11 +248,11 @@ impl PreparedTether {
         if columns.values().flatten().any(|v|!v.is_finite()) {
             return Err("assembled tether motion map overflows".into());
         }
-        self.mapped_columns=Some(columns.into_iter().filter(|(_,v)|v.iter().any(|x|*x!=0.)).collect());
+        self.mapped_columns=Some(Arc::new(columns.into_iter().filter(|(_,v)|v.iter().any(|x|*x!=0.)).collect()));
         Ok(self)
     }
     pub(super) fn column_count(&self)->usize {
-        self.mapped_columns.as_ref().map_or_else(||self.dofs.iter().flatten().count(),Vec::len)
+        self.mapped_columns.as_ref().map_or_else(||self.dofs.iter().flatten().count(),|c|c.len())
     }
     fn movement(&self,u:&[f64])->[f64;3] {
         if let Some(columns)=&self.mapped_columns {
@@ -209,13 +262,16 @@ impl PreparedTether {
             self.dofs[i].map_or(0.,|d|self.columns[i][c]*u[d])).sum())
     }
     fn state(&self,du:[f64;3])->Result<State,String> {
+        self.state_at(du,1.)
+    }
+    fn state_at(&self,du:[f64;3],fraction:f64)->Result<State,String> {
         let chord: [f64;3]=std::array::from_fn(|i|self.chord[i]+du[i]);
         let length=norm(&chord);
         if !length.is_finite() || length<1e-9 {return Err("tether trial reaches its anchor".into());}
         // Rationalize length-length_ref: exact zero at the reference and no
         // loss of a small extension in the subtraction of metre-scale lengths.
         let change=(2.*dot(self.chord,du)+dot(du,du))/(length+self.length);
-        let (force,axial,energy,gap,stored)=match self.law {
+        let (force,axial,energy,gap,stored)=match self.law_at(fraction)? {
             AxialLaw::Tensile {tension,stiffness}=>{
                 // Preserve the established tensile arithmetic exactly.
                 let trial=tension+stiffness*change;
@@ -227,7 +283,7 @@ impl PreparedTether {
                 }else{change*(tension+0.5*stiffness*change)};
                 (force,axial,energy,0.,0.)
             }
-            AxialLaw::Compressive {free_length,stiffness}=>{
+            AxialLaw::Compressive {free_length,stiffness,..}=>{
                 let reference_shortening=free_length-self.length;
                 let shortening=reference_shortening-change;
                 let compression=stiffness*shortening.max(0.);
@@ -280,10 +336,14 @@ impl PreparedTether {
             length_change_m:s.length_change_m,gap_m:s.gap_m,stored_energy_j:s.stored_energy_j,
             potential_change_j:s.potential_change_j})
     }
+    #[cfg(test)]
     pub(super) fn add_gradient(&self,u:&[f64],out:&mut[f64],factor:f64)->Result<(),String> {
-        let state=self.state(self.movement(u))?;
+        self.add_gradient_at(u,out,factor,1.)
+    }
+    pub(super) fn add_gradient_at(&self,u:&[f64],out:&mut[f64],factor:f64,fraction:f64)->Result<(),String> {
+        let state=self.state_at(self.movement(u),fraction)?;
         if let Some(columns)=&self.mapped_columns {
-            for &(d,column) in columns {out[d]+=factor*dot(column,state.gradient);}
+            for &(d,column) in columns.iter() {out[d]+=factor*dot(column,state.gradient);}
             return Ok(());
         }
         for i in 0..18 {if let Some(d)=self.dofs[i] {
@@ -291,12 +351,16 @@ impl PreparedTether {
         }}
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn add_action(&self,u:&[f64],v:&[f64],out:&mut[f64],factor:f64)->Result<(),String> {
-        let state=self.state(self.movement(u))?;
+        self.add_action_at(u,v,out,factor,1.)
+    }
+    pub(super) fn add_action_at(&self,u:&[f64],v:&[f64],out:&mut[f64],factor:f64,fraction:f64)->Result<(),String> {
+        let state=self.state_at(self.movement(u),fraction)?;
         let movement=self.movement(v);
         let hv=super::mul(&state.hessian,movement);
         if let Some(columns)=&self.mapped_columns {
-            for &(d,column) in columns {out[d]+=factor*dot(column,hv);}
+            for &(d,column) in columns.iter() {out[d]+=factor*dot(column,hv);}
             return Ok(());
         }
         for i in 0..18 {if let Some(d)=self.dofs[i] {
@@ -304,8 +368,12 @@ impl PreparedTether {
         }}
         Ok(())
     }
+    #[cfg(test)]
     pub(super) fn add_tangent(&self,u:&[f64],out:&mut Coo,factor:f64)->Result<(),String> {
-        let state=self.state(self.movement(u))?;
+        self.add_tangent_at(u,out,factor,1.)
+    }
+    pub(super) fn add_tangent_at(&self,u:&[f64],out:&mut Coo,factor:f64,fraction:f64)->Result<(),String> {
+        let state=self.state_at(self.movement(u),fraction)?;
         if let Some(columns)=&self.mapped_columns {
             for (i,&(a,column)) in columns.iter().enumerate() {
                 for &(b,other) in &columns[..=i] {
@@ -331,7 +399,7 @@ mod tests {
     fn radial(stiffness:f64)->PreparedTether {
         let chord=[0.7,-0.2,0.3];
         PreparedTether {dofs:[None;18],columns:[[0.;3];18],chord,length:norm(&chord),
-            law:AxialLaw::Tensile {tension:200.,stiffness},mapped_columns:None}
+            law:AxialLaw::Tensile {tension:200.,stiffness},setting_origin:None,mapped_columns:None}
     }
     #[test]
     fn energy_force_and_material_geometric_tangent_are_consistent() {
@@ -369,7 +437,7 @@ mod tests {
     #[test]
     fn elastic_compression_has_one_potential_and_negative_transverse_curvature() {
         let mut p=radial(0.);p.chord=[1.,0.,0.];p.length=1.;
-        p.law=AxialLaw::Compressive {free_length:1.01,stiffness:2_000.};
+        p.law=AxialLaw::Compressive {free_length:1.01,stiffness:2_000.,axial_rigidity:2_020.};
         assert_eq!(p.state([0.;3]).unwrap().response.potential_change_j,0.);
         let u=[0.002,0.001,-0.003];let state=p.state(u).unwrap();
         let length=norm(&[1.+u[0],u[1],u[2]]);
@@ -398,7 +466,7 @@ mod tests {
     #[test]
     fn compression_release_is_continuous_with_an_explicit_open_side_tangent() {
         let mut p=radial(0.);p.chord=[1.,0.,0.];p.length=1.;
-        p.law=AxialLaw::Compressive {free_length:1.,stiffness:3_000.};
+        p.law=AxialLaw::Compressive {free_length:1.,stiffness:3_000.,axial_rigidity:3_000.};
         let boundary=p.state([0.;3]).unwrap();
         assert_eq!(boundary.response.axial_force_n,0.);
         assert_eq!(boundary.response.gap_m,0.);
@@ -418,7 +486,7 @@ mod tests {
         assert!((closed.hessian[0]-3_000.).abs()<1e-10);
         // Releasing an initially compressed post removes all force and keeps
         // the exact change of its stored energy, rather than creating tension.
-        p.law=AxialLaw::Compressive {free_length:1.01,stiffness:3_000.};
+        p.law=AxialLaw::Compressive {free_length:1.01,stiffness:3_000.,axial_rigidity:3_030.};
         let released=p.state([0.02,0.,0.]).unwrap();
         assert_eq!(released.gradient,[0.;3]);
         assert_eq!(released.hessian,[0.;9]);

@@ -1290,3 +1290,59 @@ is supplied. A subsequent vibration calculation remains local to its accepted
 equilibrium and must preserve the chosen axial connection branches. This slice
 does not close the broader assembled-prestress bead or claim a calibrated
 instrument specimen.
+
+## Continuing axial settings on the original assembled equilibrium
+
+`ShellAssemblyLoadPath::advance_with_axial_settings` continues the complete
+component dead loads, each original tether's reference tension [N], and each
+original compression-only strut's free length [m] from the last accepted state.
+The setting arrays follow the original tether and strut input orders. Accepted
+settings are available through `tether_reference_tensions_n` and
+`strut_free_lengths_m`; actual endpoint tensions/compressions remain in the
+accepted physical response records. Ordinary `advance` retains these accepted
+settings while changing dead loads.
+
+The existing equal-increment driver interpolates the scalar settings as well
+as dead loads. At each increment the original tension-only and compression-only
+potentials supply the direction-updating force and complete material/geometric
+Hessian. Strut axial rigidity EA stays fixed and stiffness is recomputed as
+`EA / interpolated_free_length`; a blend of endpoint stiffnesses or potentials
+would represent a different physical member. Tether axial stiffness stays fixed.
+Original endpoints, unloaded geometry, supports, tie maps, element laws, elastic
+reference pencil, mass and preconditioner stay fixed. Immutable connection map
+columns are shared when preparing candidate laws, and no new geometry or
+reference matrix is assembled for a settings change.
+
+The first continued balance check uses the old accepted setting exactly; each
+candidate increment must pass the existing deformation, physical force balance
+and positive tangent-inertia gates before its endpoint can be accepted. Setting
+count mismatch, negative/nonfinite tension, free length below the original
+1e-9 m floor, unrepresentable EA/L, solver or work-budget failure, and cancellation
+leave the complete accepted loads, settings, equilibrium and response records
+unchanged. The final cancellation poll follows all candidate construction.
+Exact repeated settings and full load bits take the original no-op path and
+retain the last actual solve's reports without recertifying under new options.
+
+Connection potential changes are measured from the original unloaded geometry
+using the new setting's law. Their difference between endpoints with different
+settings is not an actuator-work audit. Structural storage remains the original
+shell/beam/glue energy, separate from the axial connection responses. This
+extension supplies no physical actuation time, damping, material history,
+prescribed support motion, follower force, unstable-branch continuation or global
+stability certificate. The original CST/DKT moderate-rotation and local
+small-vibration limits continue to apply; changing a connection branch requires
+a new equilibrium and its corresponding tangent.
+
+Four focused G0/G1/G4 regressions cover an independently integrated cubic panel
+equilibrium and tangent under simultaneous retensioning, free-length changes
+and dead loads, including slack/open transitions; nonmatching tied path
+partition/reversal versus cold equilibrium; original intermediate laws and full
+sparse/matrix-free connection tangents against force finite differences;
+invalid-setting and evaluation-budget atomicity; exact repeated-input no-op;
+and last-poll cancellation/retry after caller source mutation. The broader
+assembled-prestress bead remains open.
+
+Native validation: `cargo check --offline --locked -p fs-plate --tests` passed,
+including all four new regressions. Runtime execution remains unverified: the
+shared native test build was killed by the 8 GiB memory limit while compiling
+upstream asupersync, before any test ran. No executed-test pass is claimed.
