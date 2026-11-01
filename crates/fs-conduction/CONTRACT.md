@@ -1,5 +1,24 @@
 # CONTRACT: fs-conduction
 
+## Spatial resistance maps on independently meshed interfaces
+
+`NonmatchingSurface::new_mapped` binds one positive, source-backed resistance
+to every explicitly named A-side face. The original common-refinement geometry
+is prepared once; each overlap stencil retains its owning face's coefficient.
+The B-side tessellation does not redistribute or average the resistance map.
+Both nonmatching overlaps and exactly matching delegated pieces use the same
+assigned values for assembly, signed heat and whole-law resistance controls.
+
+A map must cover the A-side faces exactly once and retain one original card
+identity. Values and their authority stay bound through deterministic sorting.
+`nonmatching_face_resistance_sources` exposes every keyed original source;
+the aggregate flux's first canonical receipt is representative, not a source
+claim for an averaged resistance. Fixed geometry, declared plane/coverage
+tolerances and original work budgets still apply. This is spatially varying
+static resistance, not a nonlinear nonmatching temperature or pressure law.
+Focused G1/G3 fixtures cover a heterogeneous bondline on independent meshes,
+uniform-map parity, conservation, delegation and resistance-scale contraction.
+
 ## Two-sided source laws on matching thermal interfaces
 
 `interface::temperature::TemperatureContact::new_two_sided` binds separate
@@ -1402,19 +1421,16 @@ authority.
 - NO CONVECTION PHYSICS. The Robin row is a convective BOUNDARY COUPLING: `h`
   is an input. This crate computes no correlation, solves no boundary layer, and
   has no fluid side. Conjugate coupling is a separate bead.
-- CONTACT IS MATCHING P1 ONLY. The implemented jump law requires exact
-  coordinate-bit equality between duplicated boundary triangles and a positive
-  `R''` that is constant ON EACH FACE. `InterfaceSurface::new` declares one
-  value for the whole surface; `InterfaceSurface::new_mapped` declares one per
-  face pair (bead `frankensim-extreal-program-f85xj.12.9`), which is what lets
-  a measured as-built bond-line thickness or roughness map drive the operator.
-  A map is still a GEOMETRY-DRIVEN SPATIAL VARIATION, not a constitutive law:
-  there is still no nonmatching or mortar projection, no
-  pressure/gap/temperature-dependent resistance, no changing contact area, no
-  imperfect geometric match tolerance, and no automatic lowering from an
-  `fs-scenario` interface object. Perfect contact is never inferred, and a
-  mapped surface still resolves nothing about where its numbers came from —
-  see the value-origin boundary below.
+- CONTACT RETAINS INDEPENDENT P1 TRACES. The matching path requires exact
+  coordinate-bit equality between duplicated boundary triangles. The explicit
+  planar nonmatching path integrates their common refinement under declared
+  geometry/coverage tolerances. Positive static resistance may vary per
+  matching face pair or per nonmatching A-side face. The separate matching
+  temperature-contact owner resolves its declared mean or two-sided source
+  law; a spatial map alone implies no evolving pressure, gap, temperature or
+  contact-area law. Perfect contact and automatic scenario lowering are not
+  inferred. A mapped surface still distinguishes material authority from
+  caller-supplied values, as specified below.
 - A RESISTANCE MAP VARIES THE VALUE, NOT THE AUTHORITY. Every face of a mapped
   surface must cite the same material card; a surface whose faces disagree
   about their card refuses rather than averaging them or attributing the

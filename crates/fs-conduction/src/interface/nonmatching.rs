@@ -28,15 +28,40 @@ pub struct NonmatchingOptions {
     pub max_overlap_triangles: usize,
 }
 
-/// Explicit, uniformly resistive planar interface. Face slots belong to the
+/// Explicit resistive planar interface. Face slots belong to the
 /// supplied conduction mesh; A and B remain independent nodal traces.
 #[derive(Debug, Clone, PartialEq)]
 pub struct NonmatchingSurface {
     pub(super) name: String,
     pub(super) side_a: Vec<usize>,
     pub(super) side_b: Vec<usize>,
-    pub(super) resistance: InterfaceResistance,
+    resistances: ResistanceField,
     options: NonmatchingOptions,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum ResistanceField {
+    Uniform(InterfaceResistance),
+    /// Canonical A-face order, retaining each original source query.
+    Mapped(Vec<(usize, InterfaceResistance)>),
+}
+impl ResistanceField {
+    fn at(&self, face_index: usize) -> &InterfaceResistance {
+        match self { Self::Uniform(value) => value, Self::Mapped(values) => &values[face_index].1 }
+    }
+    fn representative(&self) -> &InterfaceResistance { self.at(0) }
+    fn mapped(&self) -> bool { matches!(self, Self::Mapped(_)) }
+    fn sources(&self) -> Option<&[(usize, InterfaceResistance)]> {
+        match self { Self::Uniform(_) => None, Self::Mapped(values) => Some(values) }
+    }
+    fn uniform_conductance(&self) -> Option<f64> {
+        let first = self.representative().value_m2_k_per_w();
+        match self {
+            Self::Uniform(_) => Some(1.0 / first),
+            Self::Mapped(values) if values.iter().all(|(_, r)| r.value_m2_k_per_w().to_bits() == first.to_bits()) => Some(1.0 / first),
+            Self::Mapped(_) => None,
+        }
+    }
 }
 impl NonmatchingSurface {
     /// Declare both complete tessellations and a card-backed constant R''.
@@ -62,7 +87,49 @@ impl NonmatchingSurface {
         if !density.is_finite() || density <= 0.0 {
             return Err(error(&name, "contact conductance density is not representable"));
         }
-        Ok(Self { name, side_a, side_b, resistance, options })
+        Ok(Self { name, side_a, side_b, resistances: ResistanceField::Uniform(resistance), options })
+    }
+
+    /// Bind one source-backed resistance to every explicitly named A face.
+    /// Each value is constant on that face and inherited by all of its common-
+    /// refinement triangles; the independent B tessellation does not resample
+    /// or average the map. Entries may arrive in any order but must cover A
+    /// exactly once. As with matching maps, all entries retain one card identity.
+    ///
+    /// The eventual aggregate flux receipt represents the first canonical A
+    /// face, not an averaged source claim. All original per-face receipts remain
+    /// available through `ThermalInterfaces::nonmatching_face_resistance_sources`.
+    pub fn new_mapped(name: impl Into<String>, side_a: Vec<usize>, side_b: Vec<usize>,
+        mut resistances: Vec<(usize, InterfaceResistance)>, options: NonmatchingOptions)
+        -> Result<Self, ConductionError> {
+        let name = name.into();
+        resistances.sort_by_key(|(face, _)| *face);
+        let representative = resistances.first().ok_or_else(|| error(&name,"a resistance map must cover every A face"))?.1.clone();
+        let mut surface = Self::new(name, side_a, side_b, representative, options)?;
+        if resistances.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+            return Err(error(&surface.name,"a mapped A face appears more than once"));
+        }
+        if resistances.len() != surface.side_a.len()
+            || resistances.iter().zip(&surface.side_a).any(|((face,_),expected)| face != expected) {
+            return Err(error(&surface.name,"a resistance map must name every declared A face and no other face"));
+        }
+        let identity = resistances[0].1.card_identity();
+        for (_, resistance) in &resistances {
+            if resistance.card_identity() != identity {
+                return Err(error(&surface.name,"a resistance map varies values, not card identity; declare separate interfaces for distinct cards"));
+            }
+            let conductance = 1.0 / resistance.value_m2_k_per_w();
+            if !conductance.is_finite() || conductance <= 0.0 {
+                return Err(error(&surface.name,"mapped contact conductance density is not representable"));
+            }
+        }
+        surface.resistances = ResistanceField::Mapped(resistances);
+        Ok(surface)
+    }
+
+    pub(super) fn is_mapped(&self) -> bool { self.resistances.mapped() }
+    pub(super) fn resistance_for_face(&self, face: usize) -> Option<&InterfaceResistance> {
+        self.side_a.binary_search(&face).ok().map(|index| self.resistances.at(index))
     }
 }
 
@@ -97,6 +164,8 @@ impl Face {
 #[derive(Debug, Clone, PartialEq)]
 struct Stencil {
     vertices: [usize; 6],
+    /// Index of the original A face in its retained resistance map.
+    resistance_index: usize,
     /// Signed A-minus-B basis evaluations at three degree-two quadrature points.
     basis: [[f64; 6]; 3],
     weight_m2: f64,
@@ -117,7 +186,7 @@ impl Stencil {
 #[derive(Debug, Clone, PartialEq)]
 pub(super) struct Bound {
     pub(super) name: String,
-    resistance: InterfaceResistance,
+    resistances: ResistanceField,
     faces: Vec<Face>,
     stencils: Vec<Stencil>,
 }
@@ -187,7 +256,7 @@ impl Bound {
         } } }
         let mut coverage = BTreeMap::<usize,f64>::new();
         let mut stencils = Vec::new();
-        for left in &ta { for right in &tb {
+        for (resistance_index,left) in ta.iter().enumerate() { for right in &tb {
             poll(cx,at)?; at+=1;
             let polygon = intersection(left,right);
             for i in 1..polygon.len().saturating_sub(1) {
@@ -212,13 +281,13 @@ impl Bound {
                     for k in 0..3 { row[k]=l[k]; row[k+3]=-r[k]; }
                 }
                 let weight_m2 = finite(area/3.0,name)?;
-                let weighted_conductance = finite(weight_m2/surface.resistance.value_m2_k_per_w(),name)?;
+                let weighted_conductance = finite(weight_m2/surface.resistances.at(resistance_index).value_m2_k_per_w(),name)?;
                 if weight_m2 <= 0.0 || weighted_conductance <= 0.0 {
                     return Err(error(name,"contact quadrature weight or conductance underflow"));
                 }
                 let key = (left.slot.min(right.slot),left.slot.max(right.slot));
                 stencils.push(Stencil { vertices:[left.ids[0],left.ids[1],left.ids[2],right.ids[0],right.ids[1],right.ids[2]],
-                    basis, weight_m2, delegated:exact.contains(&key) });
+                    resistance_index, basis, weight_m2, delegated:exact.contains(&key) });
             }
         } }
         for face in a.iter().chain(&b) {
@@ -228,7 +297,7 @@ impl Bound {
             }
         }
         poll(cx,at)?;
-        Ok(Self { name:name.clone(), resistance:surface.resistance.clone(),
+        Ok(Self { name:name.clone(), resistances:surface.resistances.clone(),
             faces:a.into_iter().chain(b).collect(), stencils })
     }
 
@@ -241,10 +310,10 @@ impl Bound {
         Ok(())
     }
     pub(super) fn assemble_into(&self,cx:&Cx<'_>,coo:&mut Coo)->Result<(),ConductionError> {
-        let g=1.0/self.resistance.value_m2_k_per_w();
         for (index,stencil) in self.stencils.iter().enumerate() {
             poll(cx,index)?;
             if stencil.delegated {continue;}
+            let g=1.0/self.resistances.at(stencil.resistance_index).value_m2_k_per_w();
             for q in &stencil.basis { for i in 0..6 { for j in i..6 {
                 let value=finite((g*stencil.weight_m2)*(q[i]*q[j]),&self.name)?;
                 coo.push(stencil.vertices[i],stencil.vertices[j],value);
@@ -264,27 +333,33 @@ impl Bound {
     /// Only the non-delegated portion; matching flux is merged by the owner.
     pub(super) fn flux(&self,values:&[f64])->Result<Option<InterfaceFlux>,ConductionError> {
         self.check_field(values)?;
-        let mut area=0.0; let mut heat=0.0; let g=1.0/self.resistance.value_m2_k_per_w();
+        let mut area=0.0; let mut heat=0.0; let mut conductance=0.0;
+        let uniform=self.resistances.uniform_conductance();
         for stencil in &self.stencils {
             if stencil.delegated {continue;}
+            let g=1.0/self.resistances.at(stencil.resistance_index).value_m2_k_per_w();
             for q in &stencil.basis {
                 area=finite(area+stencil.weight_m2,&self.name)?;
                 heat=finite(heat+g*stencil.weight_m2*stencil.jump(values,q),&self.name)?;
+                if uniform.is_none() {conductance=finite(conductance+g*stencil.weight_m2,&self.name)?;}
             }
         }
         if area==0.0 {return Ok(None);}
-        let conductance=finite(area*g,&self.name)?;
+        // Preserve the original uniform arithmetic, including constant maps.
+        let conductance=finite(uniform.map_or(conductance,|g|area*g),&self.name)?;
         if conductance<=0.0 {return Err(error(&self.name,"contact conductance underflow"));}
+        let representative=self.resistances.representative();
         Ok(Some(InterfaceFlux {interface:self.name.clone(),area_m2:area,
             conductance_w_per_k:conductance,mean_jump_k:finite(heat/conductance,&self.name)?,
-            heat_rate_a_to_b_w:heat,card_identity:self.resistance.card_identity(),receipt:self.resistance.receipt().clone()}))
+            heat_rate_a_to_b_w:heat,card_identity:representative.card_identity(),receipt:representative.receipt().clone()}))
     }
     /// Total `lambda^T K_contact T`, including any exactly matched subpatch.
     pub(super) fn log_resistance_pullback(&self,cx:&Cx<'_>,temperature:&[f64],lambda:&[f64])->Result<f64,ConductionError> {
         self.check_field(temperature)?;self.check_field(lambda)?;
-        let mut result=0.0;let g=1.0/self.resistance.value_m2_k_per_w();
+        let mut result=0.0;
         for (index,stencil) in self.stencils.iter().enumerate() {
             poll(cx,index)?;
+            let g=1.0/self.resistances.at(stencil.resistance_index).value_m2_k_per_w();
             for q in &stencil.basis {
                 result=finite(result+g*stencil.weight_m2*stencil.jump(temperature,q)*stencil.jump(lambda,q),&self.name)?;
             }
@@ -292,8 +367,11 @@ impl Bound {
         Ok(result)
     }
     pub(super) fn resistances(&self)->Vec<f64> {
-        vec![self.resistance.value_m2_k_per_w();self.stencils.len()]
+        self.stencils.iter().map(|stencil|self.resistances.at(stencil.resistance_index).value_m2_k_per_w()).collect()
     }
+    pub(super) fn is_mapped(&self)->bool { self.resistances.mapped() }
+    pub(super) fn resistance_sources(&self)->Option<&[(usize,InterfaceResistance)]> { self.resistances.sources() }
+    pub(super) fn representative_resistance(&self)->&InterfaceResistance { self.resistances.representative() }
 }
 
 struct Triangle {points:[[f64;2];3],ids:[usize;3],slot:usize,area:f64}

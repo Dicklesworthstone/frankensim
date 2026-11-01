@@ -52,7 +52,7 @@ impl ThermalInterfaces {
     ///
     /// Exact triangle pairs within a nonmatching patch are delegated to the
     /// original matching producer, not assembled twice. The remaining overlaps
-    /// share the same name, resistance and signed heat report.
+    /// share the same name, original A-face resistance and signed heat report.
     ///
     /// # Errors
     /// All matching refusals, plus bounded planar-intersection/coverage,
@@ -92,7 +92,16 @@ impl ThermalInterfaces {
                 }
             }
             if !pairs.is_empty() {
-                matching.push(InterfaceSurface::new(surface.name,pairs,surface.resistance)?);
+                matching.push(if surface.is_mapped() {
+                    let resistances=pairs.iter().map(|pair|surface.resistance_for_face(pair.side_a).cloned()
+                        .ok_or_else(||invalid("exact contact delegation lost its original A-face resistance")))
+                        .collect::<Result<Vec<_>,_>>()?;
+                    InterfaceSurface::new_mapped(surface.name,pairs,resistances)?
+                } else {
+                    let resistance=surface.resistance_for_face(pairs[0].side_a).cloned()
+                        .ok_or_else(||invalid("exact contact delegation lost its original A-face resistance"))?;
+                    InterfaceSurface::new(surface.name,pairs,resistance)?
+                });
             }
             nonmatching.push(bound);
         }
@@ -125,18 +134,27 @@ impl ThermalInterfaces {
         self.matching.surface_count()+self.nonmatching.iter()
             .filter(|s|self.matching.surface_is_mapped(&s.name).is_none()).count()
     }
-    /// Nonmatching surfaces currently carry one constant resistance.
+    /// Whether a named interface carries a spatial resistance map.
     #[must_use]
     pub fn surface_is_mapped(&self,name:&str)->Option<bool> {
-        if self.nonmatching.iter().any(|s|s.name==name) {Some(false)}
+        if let Some(surface)=self.nonmatching.iter().find(|s|s.name==name) {Some(surface.is_mapped())}
         else {self.matching.surface_is_mapped(name)}
     }
     /// Matching: per-face-pair values in the original order. Nonmatching:
-    /// constant resistance repeated per common-refinement integration triangle.
+    /// resistance inherited from the original A face for each common-refinement
+    /// integration triangle, including exactly matched delegated pieces.
     #[must_use]
     pub fn surface_face_resistances(&self,name:&str)->Option<Vec<f64>> {
         self.nonmatching.iter().find(|s|s.name==name).map(nonmatching::Bound::resistances)
             .or_else(||self.matching.surface_face_resistances(name))
+    }
+    /// Original source-backed values of a mapped nonmatching interface, keyed
+    /// by canonical A-face slot. Uniform and matching-only surfaces return None.
+    /// Each retained receipt is its actual source query; an aggregate heat
+    /// report's representative receipt is not a spatially averaged material claim.
+    #[must_use]
+    pub fn nonmatching_face_resistance_sources(&self,name:&str)->Option<&[(usize,InterfaceResistance)]> {
+        self.nonmatching.iter().find(|s|s.name==name).and_then(nonmatching::Bound::resistance_sources)
     }
     /// Whether a named surface uses explicitly admitted planar overlap traces.
     #[must_use]
@@ -146,6 +164,9 @@ impl ThermalInterfaces {
 
     /// One signed A-to-B heat report per named interface. Matching-only calls
     /// return the original report directly, retaining legacy arithmetic order.
+    /// A mapped nonmatching report retains the first canonical A-face receipt
+    /// as a representative; inspect `nonmatching_face_resistance_sources` for
+    /// every original local query. Conductance is the integrated local 1/R''.
     pub fn fluxes(&self,temperature:&[f64])->Result<Vec<InterfaceFlux>,ConductionError> {
         let original=self.matching.fluxes(temperature)?;
         if self.nonmatching.is_empty(){return Ok(original);}
@@ -158,6 +179,11 @@ impl ThermalInterfaces {
                     total.heat_rate_a_to_b_w=finite(total.heat_rate_a_to_b_w+extra.heat_rate_a_to_b_w)?;
                     total.mean_jump_k=finite(total.heat_rate_a_to_b_w/total.conductance_w_per_k)?;
                 } else {fluxes.insert(extra.interface.clone(),extra);}
+            }
+            if surface.is_mapped() {
+                if let Some(total)=fluxes.get_mut(&surface.name) {
+                    total.receipt=surface.representative_resistance().receipt().clone();
+                }
             }
         }
         Ok(fluxes.into_values().collect())
