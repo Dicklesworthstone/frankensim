@@ -23,6 +23,8 @@ use std::collections::{BTreeMap, BTreeSet};
 pub mod creep;
 /// Loaded J2 tetrahedra exchange physical plastic heat with spatial enthalpy.
 pub mod plastic;
+/// Finite-deformation plastic history with reciprocal caloric feedback.
+pub mod finite_plastic;
 /// Reciprocal source thermodynamics on the native elastic equilibrium/heat history.
 pub mod thermoelastic;
 /// One finite source gas exchanges heat with distinct spatial solid cells.
