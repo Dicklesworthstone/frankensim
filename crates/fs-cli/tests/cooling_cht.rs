@@ -2065,7 +2065,86 @@ fn compact_junction_capacity_is_required_and_positive_for_cli_marches() {
     assert_ne!(missing, COMPACT_TRANSIENT);
     let (code, diagnostic, _) = run(&scratch("compact-capacity-missing.json", &missing));
     assert_eq!(code, 4, "{diagnostic:?}");
-    assert!(diagnostic.str_field("message").unwrap().contains("heat_capacity_j_k is required"));
+    assert!(diagnostic.str_field("message").unwrap().contains(
+        "requires heat_capacity_j_k or heat_capacity_table_j_k"
+    ));
+}
+
+const COMPACT_TABLE_TRANSIENT: &str = r#"{
+ "schema":"frankensim.cooling-cht.v1","size_m":[3,1,1],"voxel_m":1,
+ "fluid":{"density_kg_m3":1,"specific_heat_j_kg_k":2,
+   "conductivity_w_m_k":1,"kinematic_viscosity_m2_s":1},
+ "materials":[{"name":"board","conductivity_w_m_k":1,
+   "volumetric_heat_capacity_j_m3_k":4}],
+ "solids":[{"material":"board","min_m":[0,0,0],"max_m":[1,1,1]}],
+ "components":[{"name":"package","min_m":[1,0,0],"max_m":[2,1,1],
+   "board_side":"x-","power_w":1,"junction_to_case_k_w":1,"junction_to_board_k_w":1,
+   "heat_capacity_table_j_k":[[299,2],[300,2],[300.2,2.8],[301,6]]}],
+ "probes":[{"name":"solid","at_m":[0.5,0.5,0.5]},
+   {"name":"junction","at_m":[1.5,0.5,0.5]},
+   {"name":"fluid","at_m":[2.5,0.5,0.5]}],
+ "transient":{"flow":"unsteady","time_step_s":0.5,"steps":4,"initial_temperature_k":300},
+ "solver":{"tolerance":1e-10}
+}"#;
+
+#[test]
+fn compact_junction_capacity_table_integrates_temperature_dependent_storage() {
+    // Cs=4, Cf=2 and Cj=2+4*(T-300) J/K. The sealed system receives 2 J.
+    let (code, result, error) = run(&scratch("compact-capacity-table.json", COMPACT_TABLE_TRANSIENT));
+    assert_eq!(code, 0, "{error}");
+    let probes = result.get("probes").and_then(J::as_array).unwrap();
+    let solid_rise = f(&probes[0], &["temperature_k"]) - 300.0;
+    let junction_rise = f(&probes[1], &["temperature_k"]) - 300.0;
+    let fluid_rise = f(&probes[2], &["temperature_k"]) - 300.0;
+    assert!(junction_rise > solid_rise && solid_rise > 0.0);
+    assert!(junction_rise > fluid_rise && fluid_rise > 0.0);
+    assert!(junction_rise > 0.2, "the march must cross the interior capacity knot");
+    let stored = 4.0 * solid_rise
+        + 2.0 * junction_rise + 2.0 * junction_rise * junction_rise
+        + 2.0 * fluid_rise;
+    assert!((stored - 2.0).abs() < 1e-7, "{stored}");
+    let records = result.path(&["transient", "records"]).and_then(J::as_array).unwrap();
+    assert_eq!(records.len(), 4);
+    for record in records {
+        assert!((f(record, &["source_energy_j"]) - 0.5).abs() < 1e-12);
+        assert!((f(record, &["stored_energy_change_j"]) - 0.5).abs() < 1e-8);
+        assert!(f(record, &["closure_j"]).abs() < 1e-8);
+    }
+}
+
+#[test]
+fn compact_junction_capacity_tables_refuse_ambiguous_or_unsupported_data() {
+    let declared = "[[299,2],[300,2],[300.2,2.8],[301,6]]";
+    for (index, table) in [
+        "[[300,2]]",
+        "[[299,2],[299,3]]",
+        "[[299,2],[301,0]]",
+        "[[299,\"warm\"],[301,6]]",
+        // Valid tables, but the physical march must stay within their support.
+        "[[299,2],[300,2],[300.01,2.04]]",
+        "[[301,2],[302,6]]",
+    ].into_iter().enumerate() {
+        let scene = COMPACT_TABLE_TRANSIENT.replace(declared, table);
+        assert_ne!(scene, COMPACT_TABLE_TRANSIENT);
+        let (code, diagnostic, error) = run(&scratch(
+            &format!("compact-table-refusal-{index}.json"), &scene,
+        ));
+        assert_eq!(code, 4, "{diagnostic:?} {error}");
+        if index < 4 {
+            assert_eq!(diagnostic.str_field("code"), Some("cooling-cht-input"));
+        } else {
+            assert!(matches!(diagnostic.str_field("code"),
+                Some("cooling-cht-input" | "cooling-cht-solve")));
+        }
+        assert!(diagnostic.get("transient").is_none());
+    }
+    let ambiguous = COMPACT_TABLE_TRANSIENT.replace(
+        "\"heat_capacity_table_j_k\":",
+        "\"heat_capacity_j_k\":2,\"heat_capacity_table_j_k\":",
+    );
+    let (code, diagnostic, _) = run(&scratch("compact-table-ambiguous.json", &ambiguous));
+    assert_eq!(code, 4, "{diagnostic:?}");
+    assert!(diagnostic.str_field("message").unwrap().contains("declare only one"));
 }
 
 #[test]
