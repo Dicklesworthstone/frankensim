@@ -33,7 +33,7 @@ pub enum BoundedResponse3<'a> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResponseLimitSense3 { AtMost, AtLeast }
 impl ResponseLimitSense3 {
-    fn sign(self) -> f64 { match self { Self::AtMost => 1.0, Self::AtLeast => -1.0 } }
+    pub(in crate::sdf3) fn sign(self) -> f64 { match self { Self::AtMost => 1.0, Self::AtLeast => -1.0 } }
 }
 /// One upper or lower response limit. To constrain a window, supply both sides.
 /// Scale has the response's physical units and is independent of its bound;
@@ -135,7 +135,7 @@ fn admit_limits<O: AdaptiveSdf3Elasticity>(study: &CutDensityStudy3<O>,
     Ok(())
 }
 
-fn aggregate(residuals: &[f64], beta: f64) -> Result<(f64, f64, Vec<f64>), ResponseError3> {
+pub(in crate::sdf3) fn aggregate(residuals: &[f64], beta: f64) -> Result<(f64, f64, Vec<f64>), ResponseError3> {
     if residuals.is_empty() || residuals.iter().any(|v| !v.is_finite())
         || !beta.is_finite() || beta <= 0.0 {
         return Err(ResponseError3::Invalid("invalid smooth-maximum input"));

@@ -1,5 +1,6 @@
 //! Constrained design for a common load plus a continuous uncertain load set.
 //! One existing projected-AL state owns both compliance and inventory modes.
+use super::response::{AffineResponseLimits3, AffineResponseOptions3};
 use super::{AffineLoadSpace3, AffineLoadSpaceEvaluation3};
 use crate::gradient_check::{GradientSample, audit_design_map};
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
@@ -42,7 +43,7 @@ impl AffineLoadSpaceDesignGoal3 {
 pub struct AffineLoadSpaceDesignOptions3 {
     pub robustness: RobustOptions3,
     pub density_floor: f64,
-    /// Actual full-chain worst-compliance AND selected-inventory check.
+    /// Actual full-chain objective AND complete-constraint check.
     pub gradient_check: GradientCheckOptions,
     pub optimizer: ProjectedAlOptions,
 }
@@ -57,17 +58,18 @@ impl Default for AffineLoadSpaceDesignOptions3 {
     }
 }
 
-/// Numerical directional evidence at the initial design. The shared audit's
-/// second scalar is named inventory here because it may be physical kg.
+/// Numerical directional evidence for the ACTUAL optimizer objective and
+/// constraint, including any joint response limits and their aggregation.
 #[derive(Debug, Clone)]
 pub struct AffineLoadSpaceGradientCheck3 {
     pub params: SimpParams,
     pub goal: AffineLoadSpaceDesignGoal3,
     pub options: GradientCheckOptions,
-    pub baseline_maximum: f64,
-    pub baseline_inventory: f64,
-    pub maximum_relative_error: f64,
-    pub inventory_relative_error: f64,
+    pub response_options: Option<AffineResponseOptions3>,
+    pub baseline_objective: f64,
+    pub baseline_constraint: f64,
+    pub objective_relative_error: f64,
+    pub constraint_relative_error: f64,
     pub directions: usize,
     pub work: SolveWork,
 }
@@ -75,9 +77,12 @@ impl AffineLoadSpaceGradientCheck3 {
     #[must_use]
     pub fn passed(&self) -> bool {
         self.directions > 0
-            && [self.maximum_relative_error, self.inventory_relative_error]
-                .iter()
-                .all(|e| e.is_finite() && *e >= 0.0 && *e <= self.options.relative_tolerance)
+            && [
+                self.objective_relative_error,
+                self.constraint_relative_error,
+            ]
+            .iter()
+            .all(|e| e.is_finite() && *e >= 0.0 && *e <= self.options.relative_tolerance)
     }
 }
 
@@ -154,7 +159,7 @@ pub(super) fn physical_feasible(
     goal: AffineLoadSpaceDesignGoal3,
     policy: &AffineLoadSpace3,
 ) -> bool {
-    match goal {
+    let original = match goal {
         AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => {
             e.physical.dilated_volume_fraction.is_finite()
                 && e.physical.dilated_volume_fraction <= volume_limit
@@ -166,7 +171,129 @@ pub(super) fn physical_feasible(
                 && e.worst_compliance >= 0.0
                 && e.worst_compliance <= policy.reference()
         }
+    };
+    original
+        && e.responses.as_ref().is_none_or(|responses| {
+            responses.physically_feasible()
+                && constraint_value(e, goal).is_ok_and(|constraint| constraint <= 0.0)
+        })
+}
+
+fn aggregate_constraints(
+    base: f64,
+    e: &AffineLoadSpaceEvaluation3,
+) -> Result<(f64, [f64; 2]), EvaluationStop> {
+    let Some(responses) = &e.responses else {
+        return Ok((base, [1.0, 0.0]));
+    };
+    let (value, _, weights) = crate::sdf3::response::limits::aggregate(
+        &[base, responses.constraint],
+        responses.options.sharpness,
+    )
+    .map_err(|error| match error {
+        crate::sdf3::response::ResponseError3::Evaluation(stop) => stop,
+        _ => failure("sdf3-affine-design-joint-constraint"),
+    })?;
+    Ok((value, [weights[0], weights[1]]))
+}
+
+fn constraint_value(
+    e: &AffineLoadSpaceEvaluation3,
+    goal: AffineLoadSpaceDesignGoal3,
+) -> Result<f64, EvaluationStop> {
+    let base = match goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => {
+            normalize(e.physical.dilated_volume_fraction, volume_limit)? - 1.0
+        }
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => e.maximum - 1.0,
+    };
+    aggregate_constraints(base, e).map(|(value, _)| value)
+}
+
+// Both constructors, gradient probes, line-search trials and fresh rechecks
+// use the same physics dispatch. A bound family cannot disappear on a trial.
+#[allow(clippy::too_many_arguments)]
+fn evaluate<O: Sdf3Elasticity>(
+    study: &mut CutDensityStudy3<O>,
+    rho: &[f64],
+    dead: &[f64],
+    basis: &[&[f64]],
+    policy: &AffineLoadSpace3,
+    goal: AffineLoadSpaceDesignGoal3,
+    options: AffineLoadSpaceDesignOptions3,
+    responses: Option<AffineResponseLimits3<'_>>,
+    control: &mut SolveControl<'_>,
+) -> Result<AffineLoadSpaceEvaluation3, EvaluationStop> {
+    match responses {
+        Some(family) => study.affine_load_space_response_with_mass(
+            rho,
+            dead,
+            basis,
+            options.robustness,
+            policy,
+            family,
+            goal.needs_mass(),
+            control,
+        ),
+        None => study.affine_load_space_with_mass(
+            rho,
+            dead,
+            basis,
+            options.robustness,
+            policy,
+            goal.needs_mass(),
+            control,
+        ),
     }
+}
+
+fn optimization_sample(
+    e: &AffineLoadSpaceEvaluation3,
+    goal: AffineLoadSpaceDesignGoal3,
+    gradients: bool,
+) -> Result<Option<ProjectedAlSample>, EvaluationStop> {
+    let gradient = match &e.gradient {
+        Some(gradient) => gradient.clone(),
+        None if !gradients => Vec::new(),
+        None => return Ok(None),
+    };
+    let (material, material_gradient) = inventory(e, goal)?;
+    let mut sample = match goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => ProjectedAlSample {
+            objective: e.maximum,
+            gradient,
+            constraint: material - 1.0,
+            constraint_gradient: material_gradient,
+        },
+        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => ProjectedAlSample {
+            objective: material,
+            gradient: material_gradient,
+            constraint: e.maximum - 1.0,
+            constraint_gradient: gradient,
+        },
+    };
+    if let Some(responses) = &e.responses {
+        let (constraint, weights) = aggregate_constraints(sample.constraint, e)?;
+        if gradients {
+            let Some(response_gradient) = &responses.gradient else {
+                return Ok(None);
+            };
+            if response_gradient.len() != sample.constraint_gradient.len() {
+                return Err(failure("sdf3-affine-design-response-gradient-shape"));
+            }
+            for (gradient, response) in sample.constraint_gradient.iter_mut().zip(response_gradient)
+            {
+                *gradient = super::grid::finite(
+                    weights[0] * *gradient + weights[1] * response,
+                    "sdf3-affine-design-response-gradient",
+                )?;
+            }
+        } else {
+            sample.constraint_gradient.clear();
+        }
+        sample.constraint = constraint;
+    }
+    Ok(Some(sample))
 }
 // Rank physical inventory directly: normalizing two distinct feasible masses
 // can round them to the same quotient. AL/history keep their declared scales.
@@ -215,37 +342,17 @@ fn sample<O: Sdf3Elasticity>(
     policy: &AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
     options: AffineLoadSpaceDesignOptions3,
+    responses: Option<AffineResponseLimits3<'_>>,
     last: &mut Option<AffineLoadSpaceDesignPoint3>,
     control: &mut SolveControl<'_>,
 ) -> Result<Option<ProjectedAlSample>, EvaluationStop> {
-    let e = study.affine_load_space_with_mass(
-        rho,
-        dead,
-        basis,
-        options.robustness,
-        policy,
-        goal.needs_mass(),
-        control,
+    let e = evaluate(
+        study, rho, dead, basis, policy, goal, options, responses, control,
     )?;
     // A valid worst-load witness can exist without a unique differentiable
     // envelope. Let the existing bounded line search reject that trial.
-    let Some(gradient) = e.gradient.as_ref() else {
+    let Some(sample) = optimization_sample(&e, goal, true)? else {
         return Ok(None);
-    };
-    let (material, material_gradient) = inventory(&e, goal)?;
-    let sample = match goal {
-        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => ProjectedAlSample {
-            objective: e.maximum,
-            gradient: gradient.clone(),
-            constraint: material - 1.0,
-            constraint_gradient: material_gradient,
-        },
-        AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => ProjectedAlSample {
-            objective: material,
-            gradient: material_gradient,
-            constraint: e.maximum - 1.0,
-            constraint_gradient: gradient.clone(),
-        },
     };
     *last = Some(AffineLoadSpaceDesignPoint3 {
         rho: rho.to_vec(),
@@ -353,6 +460,7 @@ fn gradient_check<O: Sdf3Elasticity>(
     policy: &AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
     options: AffineLoadSpaceDesignOptions3,
+    responses: Option<AffineResponseLimits3<'_>>,
     control: &mut SolveControl<'_>,
 ) -> Result<AffineLoadSpaceGradientCheck3, EvaluationStop> {
     let params = study.params();
@@ -362,26 +470,28 @@ fn gradient_check<O: Sdf3Elasticity>(
         options.gradient_check,
         control,
         |r, baseline, control| {
-            let e = study.affine_load_space_with_mass(
-                r,
-                dead,
-                basis,
-                options.robustness,
-                policy,
-                goal.needs_mass(),
-                control,
+            let e = evaluate(
+                study, r, dead, basis, policy, goal, options, responses, control,
             )?;
-            let gradient = match &e.gradient {
-                Some(g) => g.clone(),
-                None if !baseline => Vec::new(),
-                None => return Err(failure("sdf3-affine-design-nondifferentiable-baseline")),
+            let sample = optimization_sample(&e, goal, baseline)?
+                .ok_or(failure("sdf3-affine-design-nondifferentiable-baseline"))?;
+            // With a single normalized cap, audit before subtracting its
+            // constant one. Otherwise a loose cap can round away a perfectly
+            // resolvable tiny compliance variation during finite differences.
+            // This additive constant does not change the audited derivative.
+            let constraint = if responses.is_none() {
+                match goal {
+                    AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => inventory(&e, goal)?.0,
+                    AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => e.maximum,
+                }
+            } else {
+                sample.constraint
             };
-            let (material, material_gradient) = inventory(&e, goal)?;
             Ok(GradientSample {
-                compliance: e.maximum,
-                compliance_gradient: gradient,
-                volume: material,
-                volume_gradient: material_gradient,
+                compliance: sample.objective,
+                compliance_gradient: sample.gradient,
+                volume: constraint,
+                volume_gradient: sample.constraint_gradient,
             })
         },
     )?;
@@ -389,14 +499,16 @@ fn gradient_check<O: Sdf3Elasticity>(
         params,
         goal,
         options: options.gradient_check,
-        baseline_maximum: numerical.baseline_compliance,
-        baseline_inventory: numerical.baseline_volume_fraction,
-        maximum_relative_error: numerical
+        response_options: responses.map(|family| family.options),
+        baseline_objective: numerical.baseline_compliance,
+        baseline_constraint: numerical.baseline_volume_fraction
+            - if responses.is_none() { 1.0 } else { 0.0 },
+        objective_relative_error: numerical
             .probes
             .iter()
             .map(|p| p.compliance_relative_error)
             .fold(0.0, f64::max),
-        inventory_relative_error: numerical
+        constraint_relative_error: numerical
             .probes
             .iter()
             .map(|p| p.volume_relative_error)
@@ -436,6 +548,7 @@ pub struct AffineLoadSpaceDesign3<'a, 'callback, O: Sdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>,
     dead: &'a [f64],
     basis: &'a [&'a [f64]],
+    responses: Option<AffineResponseLimits3<'a>>,
     control: &'a mut SolveControl<'callback>,
     policy: AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
@@ -458,7 +571,65 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
         options: AffineLoadSpaceDesignOptions3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
+        Self::new_optional(
+            study,
+            dead_offset,
+            basis,
+            rho,
+            policy,
+            goal,
+            options,
+            None,
+            control,
+        )
+    }
+
+    /// Keep every signed displacement/support-force bound over the complete
+    /// affine load ball in the SAME optimizer. The original compliance/volume
+    /// constraint and all response limits form one conservative upper aggregate;
+    /// raw physical checks additionally protect the feasible archive. Observation
+    /// laws, bounds, numerical scales and smoothing stay fixed across all trials.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_response_limits(
+        study: &'a mut CutDensityStudy3<O>,
+        dead_offset: &'a [f64],
+        basis: &'a [&'a [f64]],
+        rho: &[f64],
+        policy: AffineLoadSpace3,
+        goal: AffineLoadSpaceDesignGoal3,
+        options: AffineLoadSpaceDesignOptions3,
+        responses: AffineResponseLimits3<'a>,
+        control: &'a mut SolveControl<'callback>,
+    ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
+        Self::new_optional(
+            study,
+            dead_offset,
+            basis,
+            rho,
+            policy,
+            goal,
+            options,
+            Some(responses),
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_optional(
+        study: &'a mut CutDensityStudy3<O>,
+        dead_offset: &'a [f64],
+        basis: &'a [&'a [f64]],
+        rho: &[f64],
+        policy: AffineLoadSpace3,
+        goal: AffineLoadSpaceDesignGoal3,
+        options: AffineLoadSpaceDesignOptions3,
+        responses: Option<AffineResponseLimits3<'a>>,
+        control: &'a mut SolveControl<'callback>,
+    ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
         admit(study, dead_offset, basis, rho, &policy, goal, options)?;
+        if let Some(family) = responses {
+            super::response::admit(study, family).map_err(ProjectedAlError::Evaluation)?;
+        }
         let check = gradient_check(
             study,
             rho,
@@ -467,12 +638,13 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             &policy,
             goal,
             options,
+            responses,
             control,
         )
         .map_err(ProjectedAlError::Evaluation)?;
         if !check.passed() {
             return Err(ProjectedAlError::Invalid(
-                "affine worst-load or inventory gradient gate failed",
+                "affine objective or complete constraint gradient gate failed",
             ));
         }
         let mut last = None;
@@ -494,6 +666,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
                         &policy,
                         goal,
                         options,
+                        responses,
                         &mut last,
                         &mut **ledger.borrow_mut(),
                     )
@@ -512,6 +685,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             study,
             dead: dead_offset,
             basis,
+            responses,
             control,
             policy,
             goal,
@@ -538,6 +712,10 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
     #[must_use]
     pub fn options(&self) -> AffineLoadSpaceDesignOptions3 {
         self.options
+    }
+    #[must_use]
+    pub fn response_limits(&self) -> Option<AffineResponseLimits3<'a>> {
+        self.responses
     }
     #[must_use]
     pub fn accepted(&self) -> &AffineLoadSpaceDesignPoint3 {
@@ -581,6 +759,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
                 let policy = &self.policy;
                 let goal = self.goal;
                 let options = self.options;
+                let responses = self.responses;
                 self.state.try_run(
                     remaining.min(1),
                     &mut |r| {
@@ -592,6 +771,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
                             policy,
                             goal,
                             options,
+                            responses,
                             &mut last,
                             &mut **ledger.borrow_mut(),
                         )
@@ -646,13 +826,15 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             return Ok(None);
         };
         self.control.checkpoint("sdf3-affine-design-recheck")?;
-        let evaluation = self.study.affine_load_space_with_mass(
+        let evaluation = evaluate(
+            self.study,
             &best.rho,
             self.dead,
             self.basis,
-            self.options.robustness,
             &self.policy,
-            self.goal.needs_mass(),
+            self.goal,
+            self.options,
+            self.responses,
             self.control,
         )?;
         if !physical_feasible(&evaluation, self.goal, &self.policy) {

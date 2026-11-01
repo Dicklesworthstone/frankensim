@@ -15,6 +15,7 @@ use fs_ivl::Interval;
 use fs_material::elastic::acoustic::ElasticAcousticState;
 use fs_solver::LinearOp;
 use fs_topopt::sdf3::response::limits::design::MinimumMaterialObjective3;
+use fs_topopt::sdf3::response::limits::{BoundedResponse3, ResponseLimit3, ResponseLimitSense3};
 use fs_topopt::sdf3::robust::RobustOptions3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::campaign::{
     AffineLoadSpaceBuild3, AffineLoadSpaceCampaign3, AffineLoadSpaceCampaignOptions3,
@@ -25,12 +26,15 @@ use fs_topopt::sdf3::robust::envelope::affine_load_space::design::{
 };
 use fs_topopt::sdf3::robust::envelope::affine_load_space::refinement::AffineLoadSpaceRefinementOptions3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::refit::AffineLoadSpaceRefitOptions3;
+use fs_topopt::sdf3::robust::envelope::affine_load_space::response::{
+    AffineResponseLimits3, AffineResponseOptions3,
+};
 use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     AffineLoadSpace3, AffineLoadSpaceEvaluation3,
 };
 use fs_topopt::sdf3::{CutDensityStudy3, PhysicalRegion3};
 use fs_topopt::sdf3_goal::GoalRefinementError3;
-use fs_topopt::{SimpParams, SolveBudget, SolveControl};
+use fs_topopt::{EvaluationStop, SimpParams, SolveBudget, SolveControl, SolveProgress};
 
 struct Top;
 impl CutSdf3 for Top {
@@ -82,7 +86,9 @@ fn operator() -> CutElasticity3 {
     .unwrap()
 }
 fn fixture() -> (CutDensityStudy3, Vec<f64>, Vec<f64>, Vec<f64>) {
-    let op = operator();
+    fixture_on_operator(operator())
+}
+fn fixture_on_operator(op: CutElasticity3) -> (CutDensityStudy3, Vec<f64>, Vec<f64>, Vec<f64>) {
     let first = op
         .body_load(&|p| [0.0, -0.001 * (1.0 + p[1]), 0.0], poll)
         .unwrap();
@@ -1352,4 +1358,553 @@ fn affine_mass_campaign_retains_the_source_when_a_regular_fine_candidate_exceeds
     );
     assert!(still_checked.evaluation.maximum <= 1.0);
     assert!(still_checked.evaluation.worst_compliance <= cap.reference());
+}
+
+// Fix one genuine linear displacement observation whose affine response vector
+// is orthogonal to the compliance adversary at this baseline. The observation
+// stays fixed through every subsequent raw-density perturbation.
+fn transverse_observation(e: &AffineLoadSpaceEvaluation3) -> Vec<f64> {
+    let u = &e.basis_displacements;
+    let g00 = dot(&u[0], &u[0]);
+    let g01 = dot(&u[0], &u[1]);
+    let g11 = dot(&u[1], &u[1]);
+    let determinant = g00 * g11 - g01 * g01;
+    assert!(determinant > 1e-8 * g00 * g11);
+    let target = [
+        -1e-4 * e.worst_coefficients[1],
+        1e-4 * e.worst_coefficients[0],
+    ];
+    let x = (g11 * target[0] - g01 * target[1]) / determinant;
+    let y = (g00 * target[1] - g01 * target[0]) / determinant;
+    u[0].iter().zip(&u[1]).map(|(a, b)| x * a + y * b).collect()
+}
+
+#[test]
+fn affine_response_ball_has_its_own_adversaries_and_factored_native_body_adjoints() {
+    let (mut study, dead, first, second) = fixture();
+    let rho = raw(&study);
+    let basis = [&first[..], &second[..]];
+    let scales = study.operator().scales().to_vec();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let baseline = study
+        .evaluate_robust_affine_load_space(
+            &rho,
+            &dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            &mut control,
+        )
+        .unwrap();
+    let ordinary_solves = control.work().linear_solves;
+    let q = transverse_observation(&baseline);
+    let center = dot(&q, &baseline.offset_displacement);
+    let response_basis: Vec<_> = baseline
+        .basis_displacements
+        .iter()
+        .map(|u| dot(&q, u))
+        .collect();
+    let radius = dot(&response_basis, &response_basis).sqrt();
+    let limits = [
+        ResponseLimit3 {
+            response: BoundedResponse3::Displacement(&q),
+            sense: ResponseLimitSense3::AtMost,
+            bound: center + 1.1 * radius,
+            scale: radius,
+        },
+        ResponseLimit3 {
+            response: BoundedResponse3::Displacement(&q),
+            sense: ResponseLimitSense3::AtLeast,
+            bound: center - 2.0 * radius,
+            scale: radius,
+        },
+    ];
+    let options = AffineResponseOptions3 {
+        sharpness: 20.0,
+        ..Default::default()
+    };
+    let pair = study
+        .evaluate_robust_affine_response_limits(
+            &rho,
+            &dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            AffineResponseLimits3 {
+                limits: &limits,
+                options,
+            },
+            &mut control,
+        )
+        .unwrap();
+    let response = pair.responses.as_ref().unwrap();
+    assert_eq!(response.adjoints.len(), 2);
+    assert!(response.physically_feasible());
+    for (i, witness) in response.witnesses.iter().enumerate() {
+        let sign = if i == 0 { 1.0 } else { -1.0 };
+        close(witness.baseline, center, 1e-10);
+        close_vector(&witness.basis_responses, &response_basis);
+        close(witness.radius, radius, 1e-10);
+        close(witness.worst_value, center + sign * radius, 1e-10);
+        close(
+            witness.residual,
+            sign * (witness.worst_value - witness.bound) / witness.scale,
+            1e-10,
+        );
+        close(
+            dot(&witness.coefficients, &witness.coefficients),
+            1.0,
+            1e-10,
+        );
+        assert!(dot(&witness.coefficients, &pair.worst_coefficients).abs() < 1e-7);
+        let field = combine(
+            &pair.offset_displacement,
+            &pair.basis_displacements,
+            &witness.coefficients,
+        );
+        close(dot(&q, &field), witness.worst_value, 1e-10);
+        for j in 0..360 {
+            let angle = std::f64::consts::TAU * j as f64 / 360.0;
+            let value = center + response_basis[0] * angle.cos() + response_basis[1] * angle.sin();
+            assert!(sign * (value - witness.worst_value) <= 1e-10 * radius);
+        }
+    }
+    // Four original inequalities share only three affine-field adjoints. Exact
+    // duplication adds log(2)/beta to this unnormalized upper aggregate, while
+    // preserving its derivative. It must not duplicate the primal family.
+    let duplicated = [limits[0], limits[1], limits[0], limits[1]];
+    let family = AffineResponseLimits3 {
+        limits: &duplicated,
+        options,
+    };
+    let before = control.work().linear_solves;
+    let factored = study
+        .evaluate_robust_affine_response_limits(
+            &rho,
+            &dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            family,
+            &mut control,
+        )
+        .unwrap();
+    assert!(control.work().linear_solves - before <= ordinary_solves + 4);
+    let full = factored.responses.as_ref().unwrap();
+    assert_eq!(full.adjoints.len(), 3);
+    close(
+        full.constraint - response.constraint,
+        2.0_f64.ln() / options.sharpness,
+        1e-10,
+    );
+    let gradient = full.gradient.as_ref().unwrap();
+    for (&a, &b) in gradient.iter().zip(response.gradient.as_ref().unwrap()) {
+        close(a, b, 3e-6);
+    }
+    // Freezing exactly this baseline's body force preserves the current fields
+    // but removes B^T z from their derivative. The two gradients must differ.
+    let mut frozen = CutDensityStudy3::new(operator(), 0.15, study.params())
+        .with_physical_regions(study.physical_regions().unwrap().to_vec())
+        .unwrap();
+    let frozen = frozen
+        .evaluate_robust_affine_response_limits(
+            &rho,
+            &baseline.offset_force,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            family,
+            &mut control,
+        )
+        .unwrap();
+    let frozen = frozen.responses.as_ref().unwrap();
+    close(full.constraint, frozen.constraint, 1e-9);
+    let difference = gradient
+        .iter()
+        .zip(frozen.gradient.as_ref().unwrap())
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0_f64, f64::max);
+    let gradient_scale = gradient.iter().map(|g| g.abs()).fold(0.0_f64, f64::max);
+    assert!(difference > 1e-4 * gradient_scale);
+    for direction in [
+        vec![1.0; rho.len()],
+        (0..rho.len()).map(|i| (i % 3) as f64 * 0.5 - 0.5).collect(),
+    ] {
+        let h = 2e-5;
+        let plus: Vec<_> = rho.iter().zip(&direction).map(|(r, d)| r + h * d).collect();
+        let minus: Vec<_> = rho.iter().zip(&direction).map(|(r, d)| r - h * d).collect();
+        let a = study
+            .evaluate_robust_affine_response_limits(
+                &plus,
+                &dead,
+                &basis,
+                RobustOptions3::default(),
+                &policy(),
+                family,
+                &mut control,
+            )
+            .unwrap();
+        let b = study
+            .evaluate_robust_affine_response_limits(
+                &minus,
+                &dead,
+                &basis,
+                RobustOptions3::default(),
+                &policy(),
+                family,
+                &mut control,
+            )
+            .unwrap();
+        close(
+            (a.responses.unwrap().constraint - b.responses.unwrap().constraint) / (2.0 * h),
+            dot(gradient, &direction),
+            5e-4,
+        );
+    }
+    assert_eq!(study.operator().scales(), scales);
+}
+
+fn embedded_response_operator() -> CutElasticity3 {
+    let mut callback = |_| poll();
+    let mut quadrature = QuadratureControl3::new(
+        QuadratureOptions3 {
+            depth: 1,
+            root_relative_tolerance: 1e-12,
+            ..Default::default()
+        },
+        &mut callback,
+    )
+    .unwrap();
+    CutElasticity3::build_with_material_field_and_embedded_dirichlet(
+        HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
+        [2; 3],
+        &Top,
+        ElasticMaterialField3::ByCell(&native_material),
+        &|_| false,
+        &|_, _| true,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        &mut quadrature,
+    )
+    .unwrap()
+}
+fn weighted_support_mode(p: [f64; 3], _: [f64; 3]) -> [f64; 3] {
+    [0.0, 1.0 + p[0], 0.0]
+}
+
+#[test]
+fn affine_reaction_limits_include_direct_material_and_body_terms_and_roll_back_stops() {
+    let (mut study, dead, first, second) = fixture_on_operator(embedded_response_operator());
+    let rho = raw(&study);
+    let basis = [&first[..], &second[..]];
+    let scales = study.operator().scales().to_vec();
+    let fingerprint = study.material_body_load_fingerprint();
+    let limits = [
+        ResponseLimit3 {
+            response: BoundedResponse3::Reaction(&weighted_support_mode),
+            sense: ResponseLimitSense3::AtMost,
+            bound: 0.01,
+            scale: 0.01,
+        },
+        ResponseLimit3 {
+            response: BoundedResponse3::Reaction(&weighted_support_mode),
+            sense: ResponseLimitSense3::AtLeast,
+            bound: -0.02,
+            scale: 0.01,
+        },
+    ];
+    let family = AffineResponseLimits3 {
+        limits: &limits,
+        options: AffineResponseOptions3::default(),
+    };
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let evaluated = study
+        .evaluate_robust_affine_response_limits(
+            &rho,
+            &dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            family,
+            &mut control,
+        )
+        .unwrap();
+    let response = evaluated.responses.as_ref().unwrap();
+    let mut native = embedded_response_operator();
+    native
+        .set_scales(&evaluated.physical.eroded_scales)
+        .unwrap();
+    for witness in &response.witnesses {
+        let field = combine(
+            &evaluated.offset_displacement,
+            &evaluated.basis_displacements,
+            &witness.coefficients,
+        );
+        let direct = native
+            .embedded_reaction(&field, None, &weighted_support_mode, poll)
+            .unwrap();
+        close(direct.value, witness.worst_value, 1e-9);
+        assert!(direct.scale_gradient.iter().any(|v| v.abs() > 1e-10));
+    }
+    for direction in [
+        vec![1.0; rho.len()],
+        (0..rho.len()).map(|i| (i % 3) as f64 * 0.5 - 0.5).collect(),
+    ] {
+        let h = 2e-5;
+        let plus: Vec<_> = rho.iter().zip(&direction).map(|(r, d)| r + h * d).collect();
+        let minus: Vec<_> = rho.iter().zip(&direction).map(|(r, d)| r - h * d).collect();
+        let a = study
+            .evaluate_robust_affine_response_limits(
+                &plus,
+                &dead,
+                &basis,
+                RobustOptions3::default(),
+                &policy(),
+                family,
+                &mut control,
+            )
+            .unwrap();
+        let b = study
+            .evaluate_robust_affine_response_limits(
+                &minus,
+                &dead,
+                &basis,
+                RobustOptions3::default(),
+                &policy(),
+                family,
+                &mut control,
+            )
+            .unwrap();
+        close(
+            (a.responses.unwrap().constraint - b.responses.unwrap().constraint) / (2.0 * h),
+            dot(response.gradient.as_ref().unwrap(), &direction),
+            5e-4,
+        );
+    }
+    for stage in [
+        "sdf3-affine-response-adjoint",
+        "sdf3-affine-response-publish",
+    ] {
+        let mut stop = |p: SolveProgress| {
+            if p.stage == stage && (stage.ends_with("publish") || p.solve_iterations > 0) {
+                ControlFlow::Break(())
+            } else {
+                poll()
+            }
+        };
+        let mut stopped = SolveControl::new(SolveBudget::default(), &mut stop);
+        assert!(matches!(
+            study.evaluate_robust_affine_response_limits(
+                &rho,
+                &dead,
+                &basis,
+                RobustOptions3::default(),
+                &policy(),
+                family,
+                &mut stopped,
+            ),
+            Err(EvaluationStop::Cancelled)
+        ));
+        assert!(stopped.work().linear_iterations > 0);
+        assert_eq!(study.operator().scales(), scales);
+        assert_eq!(study.material_body_load_fingerprint(), fingerprint);
+    }
+}
+
+#[test]
+fn affine_mass_design_keeps_robust_response_and_compliance_caps_in_its_fresh_recheck() {
+    let (mut study, dead, first, second) = fixture();
+    let rho = vec![0.7; study.cells()];
+    let basis = [&first[..], &second[..]];
+    let q: Vec<_> = first.iter().map(|v| -v).collect();
+    let scales = study.operator().scales().to_vec();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let baseline = study
+        .evaluate_robust_affine_load_space(
+            &rho,
+            &dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            &mut control,
+        )
+        .unwrap();
+    let center = dot(&q, &baseline.offset_displacement);
+    let projected: Vec<_> = baseline
+        .basis_displacements
+        .iter()
+        .map(|u| dot(&q, u))
+        .collect();
+    let lower = center - dot(&projected, &projected).sqrt();
+    assert!(lower < 0.0);
+    let cap = AffineLoadSpace3::new(2, 2.0 * baseline.worst_compliance).unwrap();
+    let mut limits = [ResponseLimit3 {
+        response: BoundedResponse3::Displacement(&q),
+        sense: ResponseLimitSense3::AtLeast,
+        bound: 0.5 * lower,
+        scale: lower.abs(),
+    }];
+    {
+        // Compliance already passes, but this original response bound does not.
+        // It must not enter the feasible mass archive merely because it is stiff.
+        let mut rejected = AffineLoadSpaceDesign3::new_with_response_limits(
+            &mut study,
+            &dead,
+            &basis,
+            &rho,
+            cap.clone(),
+            mass_goal(),
+            AffineLoadSpaceDesignOptions3::default(),
+            AffineResponseLimits3 {
+                limits: &limits,
+                options: AffineResponseOptions3::default(),
+            },
+            &mut control,
+        )
+        .unwrap();
+        assert!(rejected.accepted().evaluation.maximum <= 1.0);
+        assert!(
+            rejected
+                .accepted()
+                .evaluation
+                .responses
+                .as_ref()
+                .unwrap()
+                .worst_residual
+                > 0.0
+        );
+        assert!(rejected.best_feasible().is_none());
+        assert!(rejected.recheck_best().unwrap().is_none());
+    }
+    limits[0].bound = 2.0 * lower;
+    let mut design = AffineLoadSpaceDesign3::new_with_response_limits(
+        &mut study,
+        &dead,
+        &basis,
+        &rho,
+        cap.clone(),
+        mass_goal(),
+        AffineLoadSpaceDesignOptions3::default(),
+        AffineResponseLimits3 {
+            limits: &limits,
+            options: AffineResponseOptions3::default(),
+        },
+        &mut control,
+    )
+    .unwrap();
+    assert!(design.gradient_check().passed());
+    let start_mass = design
+        .accepted()
+        .evaluation
+        .physical
+        .dilated_mass_kg
+        .unwrap();
+    design.run(6).unwrap();
+    assert!(design.history().len() > 1);
+    let best = design.best_feasible().unwrap();
+    assert!(best.evaluation.physical.dilated_mass_kg.unwrap() < start_mass);
+    assert!(
+        best.evaluation
+            .responses
+            .as_ref()
+            .unwrap()
+            .physically_feasible()
+    );
+    assert!(best.evaluation.maximum <= 1.0);
+    let best_rho = best.rho.clone();
+    let count = design.history().len();
+    let work = design.optimizer_work();
+    let checked = design.recheck_best().unwrap().unwrap();
+    assert_eq!(checked.rho, best_rho);
+    assert_eq!(design.history().len(), count);
+    assert_eq!(design.optimizer_work(), work);
+    let response = checked.evaluation.responses.as_ref().unwrap();
+    assert!(response.physically_feasible());
+    assert!(checked.evaluation.worst_compliance <= cap.reference());
+    let actual_center = dot(&q, &checked.evaluation.offset_displacement);
+    let actual_basis: Vec<_> = checked
+        .evaluation
+        .basis_displacements
+        .iter()
+        .map(|u| dot(&q, u))
+        .collect();
+    let actual_lower = actual_center - dot(&actual_basis, &actual_basis).sqrt();
+    close(actual_lower, response.witnesses[0].worst_value, 1e-9);
+    assert!(actual_lower >= limits[0].bound);
+    let inventory: f64 = design
+        .study()
+        .operator()
+        .reference_cell_masses_kg()
+        .unwrap()
+        .iter()
+        .zip(&checked.evaluation.physical.dilated_rho)
+        .map(|(m, r)| m * r)
+        .sum();
+    close(
+        checked.evaluation.physical.dilated_mass_kg.unwrap(),
+        inventory,
+        1e-12,
+    );
+    drop(design);
+    assert_eq!(study.operator().scales(), scales);
+}
+
+#[test]
+fn a_zero_affine_response_radius_retains_values_without_inventing_a_smooth_design_gradient() {
+    let (mut study, dead, first, second) = fixture();
+    let rho = raw(&study);
+    let basis = [&first[..], &second[..]];
+    let zero = vec![0.0; study.operator().n()];
+    let limits = [ResponseLimit3 {
+        response: BoundedResponse3::Displacement(&zero),
+        sense: ResponseLimitSense3::AtMost,
+        bound: 1.0,
+        scale: 1.0,
+    }];
+    let family = AffineResponseLimits3 {
+        limits: &limits,
+        options: AffineResponseOptions3::default(),
+    };
+    let scales = study.operator().scales().to_vec();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let evaluated = study
+        .evaluate_robust_affine_response_limits(
+            &rho,
+            &dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            family,
+            &mut control,
+        )
+        .unwrap();
+    assert!(evaluated.gradient.is_some());
+    let response = evaluated.responses.as_ref().unwrap();
+    assert_eq!(response.witnesses[0].radius, 0.0);
+    assert_eq!(response.witnesses[0].worst_value, 0.0);
+    assert_eq!(response.worst_residual, -1.0);
+    assert!(response.physically_feasible());
+    assert!(response.gradient.is_none());
+    assert!(response.adjoints.is_empty());
+    let cap = AffineLoadSpace3::new(2, 2.0 * evaluated.worst_compliance).unwrap();
+    assert!(
+        AffineLoadSpaceDesign3::new_with_response_limits(
+            &mut study,
+            &dead,
+            &basis,
+            &rho,
+            cap,
+            mass_goal(),
+            AffineLoadSpaceDesignOptions3::default(),
+            family,
+            &mut control,
+        )
+        .is_err()
+    );
+    assert_eq!(study.operator().scales(), scales);
 }

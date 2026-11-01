@@ -309,13 +309,45 @@ the existing projected augmented-Lagrangian state. It can minimize worst
 compliance under a dilated-volume cap, or minimize dilated volume/physical kg
 under a worst-compliance cap. The latter uses the policy reference as the
 physical cap; kg uses the native material inventory and an explicit kg scale.
-Initialization checks both full-chain derivatives with the shared directional
-audit. Nondifferentiable baseline designs refuse; such line-search trials are
+Initialization checks the actual optimizer objective and complete constraint
+with the shared directional audit. Single-cap checks retain the unshifted
+quantity during differencing to avoid cancellation against a constant one.
+Nondifferentiable baseline designs refuse; such line-search trials are
 rejected by the existing bounded optimizer. Accepted state, history, work and
 the best physically feasible point are retained across run segments. Physical
 feasibility uses the actual cap, independently of AL stopping tolerances, and
 `recheck_best` recomputes the complete envelope without advancing the optimizer.
 No monotonic feasibility restoration is assumed for design-dependent gravity.
+
+`affine_load_space::response` applies the existing signed displacement and
+embedded support-force/moment limit types to the same continuous affine ball.
+For an original scalar response `y(a)=y0+v^T a`, its upper/lower signed residual
+has discrete worst value `[sign*(y0-bound)+||v||_2]/scale`. Every observation has
+its own maximizing coefficient vector. The compliance adversary is never used
+as a substitute. Each report retains the baseline, basis responses, radius,
+coefficients, original bounds and a native remeasurement of the combined field.
+Both the support formula and actual witness must pass the physical bound.
+
+The joint evaluator shares the original filter, physical realizations, native
+stiffness preparation and offset/basis primal fields. Response gradients use
+the native observation pullback, embedded-reaction direct material term,
+stiffness contractions and `B^T z`, then the same physical density pullback.
+Few limits use one adjoint per observation; larger families factor the aggregate
+by the affine primal fields and use at most `dimension+1` adjoints. Only the
+offset field receives the material body-load derivative in that factorization.
+The report identifies the retained adjoint layout. Measurement-only assessments
+reuse the same support/witness calculations without adjoints or extra primals.
+
+`AffineLoadSpaceDesign3::new_with_response_limits` retains these inequalities
+through every gradient probe, optimizer trial, feasible archive update and
+fresh recheck. The original compliance or volume constraint and response
+aggregate are combined with the existing unnormalized log-sum-exp upper
+aggregate. Its weights supply the exact discrete chain rule; no averaged
+constraint can hide an original violation. The existing optimizer supports
+both design goals, including dilated native kilograms. A zero response radius
+retains valid discrete values but exposes no smooth norm derivative, so smooth
+baseline admission refuses and such trials are rejected. Native material
+scales are restored on all returned outcomes, including late component stops.
 
 `affine_load_space::refit` binds pure reference dead/basis laws to an initial
 or explicitly refined native grid and invokes the same affine design owner.

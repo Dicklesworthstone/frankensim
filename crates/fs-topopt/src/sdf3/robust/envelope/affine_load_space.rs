@@ -10,6 +10,7 @@ pub mod design;
 mod grid;
 pub mod refinement;
 pub mod refit;
+pub mod response;
 pub use grid::AffineLoadSpaceGrid3;
 
 use super::super::RobustOptions3;
@@ -130,6 +131,10 @@ pub struct AffineLoadSpaceEvaluation3 {
     pub worst_displacement: Vec<f64>,
     /// Actual physical work of the returned witness, before normalization.
     pub worst_compliance: f64,
+    /// Optional original response limits over the SAME complete affine ball.
+    /// Each limit has its own adverse direction; compliance's witness is not
+    /// substituted for a displacement or support-force extremum.
+    pub responses: Option<response::AffineResponseEvaluation3>,
     pub work: SolveWork,
 }
 
@@ -186,6 +191,41 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         include_mass: bool,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceEvaluation3, EvaluationStop> {
+        self.affine_load_space_extended(
+            rho,
+            dead_offset,
+            basis,
+            robustness,
+            policy,
+            include_mass,
+            control,
+            |_, _, _, _, _| Ok(()),
+        )
+        .map(|(evaluation, ())| evaluation)
+    }
+
+    // A component borrows the actual eroded design, native preparation and
+    // freshly solved affine field family inside this one material transaction.
+    // Nothing public admits cached fields, and the component cannot mutate the
+    // operator or trigger a second filter/preconditioner preparation.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn affine_load_space_extended<T>(
+        &mut self,
+        rho: &[f64],
+        dead_offset: &[f64],
+        basis: &[&[f64]],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        include_mass: bool,
+        control: &mut SolveControl<'_>,
+        extension: impl FnOnce(
+            &Self,
+            &crate::sdf3::Design3,
+            &O::Prepared<'_>,
+            &AffineLoadSpaceGrid3,
+            &mut SolveControl<'_>,
+        ) -> Result<T, EvaluationStop>,
+    ) -> Result<(AffineLoadSpaceEvaluation3, T), EvaluationStop> {
         let m = policy.dimension;
         let n = self.operator.n();
         if !robustness.valid(self.params)
@@ -254,6 +294,15 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             let prepared = self.operator.prepare_elasticity(control)?;
             let body = self.material_body_force(&eroded.projected, control)?;
             let offset_force = self.external_force(dead_offset, body.as_deref(), control)?;
+            let grid = grid::evaluate_grid(
+                &self.operator,
+                &prepared,
+                offset_force,
+                basis,
+                policy,
+                control,
+            )?;
+            let extra = extension(self, &eroded, &prepared, &grid, control)?;
             let AffineLoadSpaceGrid3 {
                 gram,
                 linear,
@@ -270,14 +319,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 worst_force,
                 worst_displacement,
                 worst_compliance,
-            } = grid::evaluate_grid(
-                &self.operator,
-                &prepared,
-                offset_force,
-                basis,
-                policy,
-                control,
-            )?;
+            } = grid;
             let gradient = if oracle.gradient_admissible() {
                 // Danskin's derivative holds for the resolved unique maximizer.
                 // No derivative of its coefficients or the iterative solves.
@@ -338,28 +380,32 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 dilated_mass_gradient,
             };
             control.checkpoint("sdf3-affine-load-space-publish")?;
-            Ok(AffineLoadSpaceEvaluation3 {
-                policy: policy.clone(),
-                robustness,
-                physical,
-                gram,
-                linear,
-                offset,
-                oracle,
-                maximum,
-                gradient,
-                reciprocity_defect,
-                witness_relative_defect,
-                witness_relative_residual,
-                offset_force,
-                offset_displacement,
-                basis_displacements,
-                worst_coefficients,
-                worst_force,
-                worst_displacement,
-                worst_compliance,
-                work: control.work(),
-            })
+            Ok((
+                AffineLoadSpaceEvaluation3 {
+                    policy: policy.clone(),
+                    robustness,
+                    physical,
+                    gram,
+                    linear,
+                    offset,
+                    oracle,
+                    maximum,
+                    gradient,
+                    reciprocity_defect,
+                    witness_relative_defect,
+                    witness_relative_residual,
+                    offset_force,
+                    offset_displacement,
+                    basis_displacements,
+                    worst_coefficients,
+                    worst_force,
+                    worst_displacement,
+                    worst_compliance,
+                    responses: None,
+                    work: control.work(),
+                },
+                extra,
+            ))
         })();
         self.operator
             .set_scales(&previous)

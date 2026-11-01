@@ -5,6 +5,7 @@ use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3,MaterialBodyLoad3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::stress::BulkStressPoint3;
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
+use fs_cutfem::elastic3::dirichlet::EmbeddedReaction3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
 use fs_solver::op::{LinearOp, two_level::TwoLevelError, multilevel::MultilevelError};
 use fs_sparse::precond::{IdentityPrecond, Precond};
@@ -54,6 +55,12 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
         -> Result<Vec<f64>, ElasticityError3>;
     /// Existing embedded support method; None means no prescribed-motion path.
     fn embedded_dirichlet_penalty(&self) -> Option<f64>;
+    /// Native embedded reaction and its state/direct material derivatives.
+    /// Pure virtual modes and optional prescribed motion use the same support
+    /// quadrature, reference material and strong/hanging constraints as K.
+    fn embedded_reaction(&self, u: &[f64], prescribed: Option<&PrescribedMotion3<'_>>,
+        mode: &PrescribedMotion3<'_>, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<EmbeddedReaction3, ElasticityError3>;
     /// Current-material Nitsche lifting in the operator's actual DOF order.
     fn prescribed_displacement_load(&self, motion: &PrescribedMotion3<'_>, checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<f64>, ElasticityError3>;
@@ -87,6 +94,9 @@ impl Sdf3Elasticity for CutElasticity3 {
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
     fn embedded_dirichlet_penalty(&self)->Option<f64> {CutElasticity3::embedded_dirichlet_penalty(self)}
+    fn embedded_reaction(&self,u:&[f64],prescribed:Option<&PrescribedMotion3<'_>>,
+        mode:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<EmbeddedReaction3,ElasticityError3> {CutElasticity3::embedded_reaction(self,u,prescribed,mode,checkpoint)}
     fn prescribed_displacement_load(&self,motion:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::prescribed_displacement_load(self,motion,checkpoint)}
     fn prescribed_displacement_scale_work(&self,motion:&PrescribedMotion3<'_>,z:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
@@ -129,6 +139,9 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
     fn embedded_dirichlet_penalty(&self)->Option<f64> {AdaptiveElasticity3::embedded_dirichlet_penalty(self)}
+    fn embedded_reaction(&self,u:&[f64],prescribed:Option<&PrescribedMotion3<'_>>,
+        mode:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<EmbeddedReaction3,ElasticityError3> {AdaptiveElasticity3::embedded_reaction(self,u,prescribed,mode,checkpoint)}
     fn prescribed_displacement_load(&self,motion:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::prescribed_displacement_load(self,motion,checkpoint)}
     fn prescribed_displacement_scale_work(&self,motion:&PrescribedMotion3<'_>,z:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
@@ -188,6 +201,9 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {self.elasticity().reference_bulk_stress_pullback(derivatives,checkpoint)}
     fn embedded_dirichlet_penalty(&self)->Option<f64> {self.elasticity().embedded_dirichlet_penalty()}
+    fn embedded_reaction(&self,u:&[f64],prescribed:Option<&PrescribedMotion3<'_>>,
+        mode:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<EmbeddedReaction3,ElasticityError3> {self.elasticity().embedded_reaction(u,prescribed,mode,checkpoint)}
     fn prescribed_displacement_load(&self,motion:&PrescribedMotion3<'_>,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {self.elasticity().prescribed_displacement_load(motion,checkpoint)}
     fn prescribed_displacement_scale_work(&self,motion:&PrescribedMotion3<'_>,z:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
