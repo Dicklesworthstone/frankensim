@@ -7,6 +7,9 @@ mod response_refinement;
 #[path = "material_affine_load_space_sdf3/stress.rs"]
 mod stress;
 
+#[path = "material_affine_load_space_sdf3/stress_refinement.rs"]
+mod stress_refinement;
+
 use fs_ascent::quadratic_ball::QuadraticBallBranch;
 use fs_blake3::ContentHash;
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;

@@ -26,6 +26,8 @@ use fs_cutfem::elastic3::ElasticityError3;
 use fs_sparse::precond::Precond;
 use std::ops::ControlFlow;
 
+pub mod refinement;
+
 /// One explicit cap in the admitted reference material's stress units.
 /// The constitutive tensor and material-domain ceiling remain native; this
 /// declaration does not infer an allowable stress from an elastic modulus.

@@ -3,9 +3,11 @@
 //! Both grids remaximize their complete quadratic, including the common
 //! material body force. Two frozen load directions use the existing DWR owner;
 //! neither a smooth envelope derivative nor a continuum bound is assumed.
+use super::constraints::{AffineLoadSpaceConstraintPolicy3, ReferenceAffineLoadSpaceConstraints3};
 use super::grid::{combine_fields, evaluate_grid, finite, normalize, relative_difference};
 use super::response::reference::{self as response_reference, ReferenceAffineResponseLimits3};
 use super::response::{AffineResponseEvaluation3, AffineResponseLimits3, measure_affine_responses};
+use super::stress::refinement::{self as stress_refinement, AffineStressRefinement3};
 use super::{AffineLoadSpace3, AffineLoadSpaceGrid3, RobustOptions3};
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
 use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3, Sdf3Elasticity};
@@ -108,6 +110,11 @@ pub struct AffineLoadSpaceRefinement3 {
     /// Optional original response limits, re-bound to each native grid without
     /// extra elasticity solves. Assessment does not request smooth gradients.
     pub responses: Option<AffineResponseRefinement3>,
+    /// The same original family and joint upper aggregate as the design audit.
+    pub constraints: AffineLoadSpaceConstraintPolicy3,
+    /// Original coarse/fine stress envelopes and full-ball model changes on
+    /// matched fine quadrature sites. No additional elasticity solves.
+    pub stress: Option<AffineStressRefinement3>,
     /// ||G_f-G_c||_F + 2||h_f-h_c||_2 + |c_f-c_c|, in normalized units.
     /// In exact arithmetic this bounds the quadratic change on the unit ball.
     /// This computed numerical metric is not an interval or continuum bound.
@@ -264,6 +271,22 @@ impl AffineLoadSpaceRefinement3 {
         change_tolerance: f64,
         response_tolerance: f64,
     ) -> bool {
+        self.stable_and_feasible_with_constraint_tolerances(
+            change_tolerance,
+            response_tolerance,
+            change_tolerance,
+        )
+    }
+
+    /// Resolve every actual constraint family under its own tolerance. Strength
+    /// checks both the changing sampled aggregate and matched full-ball fields;
+    /// every original physical cap and the joint upper aggregate remain strict.
+    pub fn stable_and_feasible_with_constraint_tolerances(
+        &self,
+        change_tolerance: f64,
+        response_tolerance: f64,
+        stress_tolerance: f64,
+    ) -> bool {
         change_tolerance.is_finite()
             && change_tolerance >= 0.0
             && self.normalized_model_change.is_finite()
@@ -276,20 +299,36 @@ impl AffineLoadSpaceRefinement3 {
                     && grid.worst_compliance >= 0.0
                     && grid.worst_compliance <= self.policy.reference()
             })
-            && self.responses.as_ref().is_none_or(|responses| {
-                responses.stable_and_feasible(response_tolerance)
-                    && [
-                        (&self.coarse, &responses.coarse),
-                        (&self.fine, &responses.fine),
-                    ]
-                    .iter()
-                    .all(|(grid, response)| {
-                        crate::sdf3::response::limits::aggregate(
-                            &[grid.maximum - 1.0, response.constraint],
-                            response.options.sharpness,
-                        )
-                        .is_ok_and(|(constraint, _, _)| constraint <= 0.0)
-                    })
+            && self
+                .responses
+                .as_ref()
+                .is_none_or(|r| r.stable_and_feasible(response_tolerance))
+            && self
+                .stress
+                .as_ref()
+                .is_none_or(|s| s.stable_and_feasible(stress_tolerance))
+            && [
+                (
+                    &self.coarse,
+                    self.responses.as_ref().map(|r| &r.coarse),
+                    self.stress.as_ref().map(|s| &s.coarse),
+                ),
+                (
+                    &self.fine,
+                    self.responses.as_ref().map(|r| &r.fine),
+                    self.stress.as_ref().map(|s| &s.fine),
+                ),
+            ]
+            .iter()
+            .all(|(grid, responses, stress)| {
+                self.constraints.matches_components(*responses, *stress)
+                    && super::constraints::aggregate(
+                        grid.maximum - 1.0,
+                        responses.map(|r| r.constraint),
+                        stress.map(|s| s.constraint),
+                        self.constraints.sharpness,
+                    )
+                    .is_ok_and(|(value, _)| value <= 0.0)
             })
     }
 }
@@ -505,7 +544,16 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
         self.affine_load_space_enrichment(
-            enriched, rho, dead, basis, robustness, policy, None, None, options, control,
+            enriched,
+            rho,
+            dead,
+            basis,
+            robustness,
+            policy,
+            None,
+            ReferenceAffineLoadSpaceConstraints3::default(),
+            options,
+            control,
         )
     }
 
@@ -539,7 +587,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             robustness,
             policy,
             Some((objective, volume_scale)),
-            None,
+            ReferenceAffineLoadSpaceConstraints3::default(),
             options,
             control,
         )
@@ -565,6 +613,39 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: AffineLoadSpaceRefinementOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        self.estimate_affine_load_space_enrichment_with_constraints(
+            enriched,
+            rho,
+            dead,
+            basis,
+            robustness,
+            policy,
+            objective,
+            volume_scale,
+            ReferenceAffineLoadSpaceConstraints3::from_responses(family),
+            options,
+            control,
+        )
+    }
+
+    /// Full compliance, inventory, response and strength assessment on the same
+    /// native grids. Prolonged coarse fields supply a matched-site stress-model
+    /// comparison; actual fine fields are independently solved and remaximized.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_affine_load_space_enrichment_with_constraints<F: AdaptiveSdf3Elasticity>(
+        &mut self,
+        enriched: F,
+        rho: &[f64],
+        dead: ReferenceLoad3<'_>,
+        basis: &[ReferenceLoad3<'_>],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        objective: MinimumMaterialObjective3,
+        volume_scale: f64,
+        constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
+        options: AffineLoadSpaceRefinementOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
         self.affine_load_space_enrichment(
             enriched,
             rho,
@@ -573,7 +654,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             robustness,
             policy,
             Some((objective, volume_scale)),
-            Some(family),
+            constraints,
             options,
             control,
         )
@@ -589,7 +670,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         robustness: RobustOptions3,
         policy: &AffineLoadSpace3,
         inventory_policy: Option<(MinimumMaterialObjective3, f64)>,
-        response_policy: Option<ReferenceAffineResponseLimits3<'_>>,
+        constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
         options: AffineLoadSpaceRefinementOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
@@ -621,8 +702,18 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 crate::sdf3::inventory::mass_weights(&enriched)?;
             }
         }
-        if let Some(family) = response_policy {
-            response_reference::admit(&self.operator, family)?;
+        constraints.admit(self)?;
+        if constraints.stress.is_some_and(|limit| {
+            basis
+                .len()
+                .checked_add(1)
+                .is_none_or(|n| n > limit.options.max_cases)
+        }) {
+            return Err(GoalRefinementError3::Invalid(
+                "affine stress field allowance exhausted",
+            ));
+        }
+        if let Some(family) = constraints.responses {
             response_reference::admit(&enriched, family)?;
         }
         let filtered = self.filter_apply(rho, control)?;
@@ -775,9 +866,26 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     control,
                 )?
             };
-            let responses = response_policy
+            let responses = constraints
+                .responses
                 .map(|family| {
                     assess_responses(&self.operator, &enriched, &coarse, &fine, family, control)
+                })
+                .transpose()?;
+            let stress = constraints
+                .stress
+                .map(|limit| {
+                    stress_refinement::assess(
+                        &transfer,
+                        &coarse,
+                        &fine,
+                        &eroded.projected,
+                        &fine_eroded_rho,
+                        self.params,
+                        limit,
+                        policy.oracle_options(),
+                        control,
+                    )
                 })
                 .transpose()?;
             let normalized_model_change = finite(
@@ -949,6 +1057,8 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 fine,
                 inventory,
                 responses,
+                constraints: constraints.policy(),
+                stress,
                 normalized_model_change,
                 normalized_maximum_change,
                 normalized_witness_change,

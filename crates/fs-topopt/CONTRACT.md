@@ -468,6 +468,25 @@ the same joint unnormalized upper constraint used by the optimizer. These
 checks need no extra primal or adjoint solve; they are numerical two-grid
 evidence, with no continuum or interval-certificate claim.
 
+`estimate_affine_load_space_enrichment_with_constraints` additionally carries
+the original sampled-strength policy. Both actual native quadrature sets are
+independently remaximized over the entire load ball. To compare complete stress
+fields at matching sites, the owner natively prolongates every coarse affine
+displacement field and samples that family and the actual fine family with the
+SAME fine material and retained points. Each physical family separately passes
+native source-domain admission; a difference field is never misrepresented as
+a physical state. Occupancy and scales must be literal parent copies.
+
+At each matched fine site the numerical bound
+`VM(delta_sigma0) + sqrt(sum_j VM(delta_sigma_j)^2)` bounds the complete-ball
+reference stress change by triangle/Cauchy inequalities. The report retains
+reference, relaxed and physical forms normalized by the original stress cap.
+Acceptance resolves the actually constrained relaxed/physical forms and the
+change of the actual p-norm aggregate. Unscaled reference change remains a
+diagnostic. The p-norm's sample-count dependence can keep a campaign unresolved
+even for a nearly unchanged field; no adaptive-convergence or continuum-strength
+guarantee follows. These checks require no extra primal or adjoint solve.
+
 `affine_load_space::campaign::AffineLoadSpaceCampaign3` automatically repeats
 full assessment and refitting for the minimum-material goal. Its physical
 compliance cap, objective, filter/SIMP parameters, pure dead/basis laws and
@@ -502,6 +521,17 @@ constraint, all original bounds, full load/response models and native inventory.
 Reference callbacks remain pure model inputs whose physical identity the caller
 must preserve across grids.
 
+`AffineLoadSpaceCampaign3::new_with_constraints` retains compliance, responses
+and sampled strength as one original family. Both older constructors delegate
+to that owner with their explicit subsets and refuse a starting design whose
+audited constraints would be omitted. The campaign always uses the same joint
+refit/assessment dispatch, with independent `stress_change_tolerance`. Unresolved
+strength fields or aggregate trigger uniform candidate refinement when frozen
+compliance-witness marking was requested. Promotion and the final probe require
+all original bounds and the same joint upper constraint, without spending
+optimizer tolerance as physical slack. Histories retain stress aggregate,
+constraint and resolution changes alongside compliance, responses and kilograms.
+
 `material_affine_load_space_sdf3` exercises native force balance and load-space
 sampling, full-chain compliance/volume derivatives, hard-case refusal and an
 actual minimum-kg constrained run with fresh feasible-point reassessment.
@@ -518,6 +548,13 @@ terms, cancellation rollback and nonsmooth-radius admission. The adaptive
 response regression independently reintegrates observations on the promoted
 and final probe grids and checks the complete response-model change and native
 kg objective; a separate admission check prevents silent response omission.
+Full-ball strength regressions compare point envelopes against native tensor
+samples and angular loads, audit complete material/self-weight derivatives,
+and exercise strict strength archives, budgets and rollback. Native sampler
+regressions check the whole material strain domain and adaptive constraints.
+Joint adaptive regressions compare matched stress fields independently, retain
+all constraint families and native kilograms, check assessment solve counts,
+and refuse campaign admission that would omit optimized strength requirements.
 These APIs cover fixed geometry, homogeneous supports, fixed dead loads and
 reference acceleration. Numerical load optimality evidence is not an interval
 enclosure, a continuum guarantee, a global design optimum, or a serialized

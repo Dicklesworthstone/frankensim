@@ -32,8 +32,15 @@ impl AffineLoadSpaceConstraintPolicy3 {
     }
 
     pub(super) fn matches(self, evaluation: &AffineLoadSpaceEvaluation3) -> bool {
-        self.responses == evaluation.responses.as_ref().map(|r| r.options)
-            && self.stress == evaluation.stress.as_ref().map(|s| s.limit)
+        self.matches_components(evaluation.responses.as_ref(), evaluation.stress.as_ref())
+    }
+
+    pub(super) fn matches_components(
+        self,
+        responses: Option<&response::AffineResponseEvaluation3>,
+        stress: Option<&stress::AffineStressEvaluation3>,
+    ) -> bool {
+        self.responses == responses.map(|r| r.options) && self.stress == stress.map(|s| s.limit)
     }
 }
 
