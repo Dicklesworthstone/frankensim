@@ -1395,3 +1395,29 @@ capacitor work beside the same unchanged large stored coordinate. Zero-update
 ordinary and analytic requests refuse without modifying output sentinels or
 publishing a retained effort. This adds physical-unit algebraic admission;
 it does not certify temporal accuracy or relax source support.
+
+## Complete memoryless port conductance
+
+`PortHamiltonian::with_port_conductance` closes the physical law
+`u_selected = u_external - D*y_selected` in the original continuous generator.
+The complete selected-port conductance adds `G_selected D G_selected^T` to
+resistance. All mutual terms, original states, storage and external port slots
+are retained. It introduces no artificial memory, step delay or fitted rate.
+This permits direct and dynamic physical loads to be assembled before one
+shared exact propagation; source units and applicability remain with consumers.
+
+The source-witness entry retains an original positive decomposition of `D`,
+including low-rank loss nullspaces. Original base resistance witnesses and
+the transformed load squares pass through the existing checked positive QR
+owner, preserving independent integrated heat. Full matrix shape, unique ports,
+finite arithmetic, symmetry and componentwise factor reconstruction are required.
+Negative or unresolved directions refuse without clipping or matrix repair.
+Empty/zero loads are identities after port/shape validation. Preparation does
+the factor work; existing warm runtimes incur no new work or allocations.
+
+Five focused G0/G2/G3 regressions in `tests/port_conductance.rs` cover independent
+coupled decay/heat, complete forced physical equations with original and new
+source squares, direct power under forty decades of conductance scaling,
+selection permutation, inactive ports and invalid/nonpassive refusal. These
+checks qualify the declared finite conductance, not a frequency-dependent
+radiation law, a general material domain or the full workspace gate.

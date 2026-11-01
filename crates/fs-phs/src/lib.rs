@@ -63,6 +63,7 @@ mod newton;
 use fs_math::c64::C64;
 use fs_math::det;
 mod relaxation_map;
+mod port_conductance;
 pub use relaxation_map::{MappedRelaxationBranch, RelaxationStrainMap};
 use relaxation_map::RelaxationCoupling;
 pub use newton::{
