@@ -523,3 +523,155 @@ fn checkpoint_body_map_binding_refuses_changed_acceleration_before_reservations(
         assert_eq!(different.operator().scales(), scales);
     }
 }
+
+#[test]
+fn physical_material_domain_rejects_unweighted_cases_and_binary_endpoints() {
+    use fs_topopt::sdf3::robust::envelope::limits::ComplianceCaps3;
+    use fs_topopt::sdf3::robust::envelope::limits::binary::BinaryComplianceError3;
+
+    for sourced in [true, false] {
+        let mut op = cartesian(sourced.then_some([2.0, 8.0]));
+        let outside: Vec<_> = op
+            .nodes()
+            .iter()
+            .flat_map(|p| [2.0 * p[0], 0.0, 0.0])
+            .collect();
+        let mut force = vec![0.0; op.n()];
+        op.apply(&outside, &mut force);
+        let safe: Vec<_> = force.iter().map(|v| 0.1 * v).collect();
+        let incoming: Vec<_> = (0..op.cells()).map(|i| 0.4 + 0.02 * i as f64).collect();
+        op.set_scales(&incoming).unwrap();
+        let mut study = CutDensityStudy3::new(op, 0.0, params());
+        let rho = vec![1.0; study.cells()];
+        let cases = [
+            LoadCase {
+                force: &safe,
+                weight: 1.0,
+            },
+            // The returned family includes this experiment even when its
+            // objective weight is zero; it must remain physical.
+            LoadCase {
+                force: &force,
+                weight: 0.0,
+            },
+        ];
+        let mut callback = |_| poll();
+        let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+        let result = study.evaluate(&rho, &cases, &mut control);
+        if sourced {
+            assert!(matches!(
+                result,
+                Err(EvaluationStop::Breakdown {
+                    stage: "sdf3-material-domain"
+                })
+            ));
+            assert_eq!(study.operator().scales(), incoming);
+        } else {
+            assert!(
+                result.is_ok(),
+                "legacy material has no authored strain ceiling"
+            );
+        }
+        let previous = study.operator().scales().to_vec();
+        let caps = ComplianceCaps3::new(vec![1e6; 2], 0.01, 2).unwrap();
+        let binary = study.evaluate_binary_compliance_caps(
+            &rho,
+            &[&safe, &force],
+            &caps,
+            Default::default(),
+            &mut control,
+        );
+        if sourced {
+            assert!(matches!(
+                binary,
+                Err(BinaryComplianceError3::Evaluation(
+                    EvaluationStop::Breakdown {
+                        stage: "sdf3-material-domain"
+                    }
+                ))
+            ));
+        } else {
+            assert!(binary.is_ok());
+        }
+        assert_eq!(study.operator().scales(), previous);
+        assert!(study.evaluate(&rho, &cases[..1], &mut control).is_ok());
+    }
+}
+
+#[test]
+fn source_domain_applies_to_response_primals_and_never_to_adjoint_vectors() {
+    use fs_topopt::sdf3::response::{ResponseCase3, ResponseError3, ResponseTarget3};
+
+    let mut study = adaptive(true, [2.0, 8.0]);
+    let op = study.operator().elasticity();
+    let state: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|p| [0.02 * (p[0] - 0.17), 0.0, 0.0])
+        .collect();
+    let large_adjoint: Vec<_> = state.iter().map(|v| 5_000.0 * v).collect();
+    let mut force = vec![0.0; op.n()];
+    let mut q = vec![0.0; op.n()];
+    op.apply(&state, &mut force);
+    op.apply(&large_adjoint, &mut q);
+    let value: f64 = q.iter().zip(&state).map(|(q, u)| q * u).sum();
+    let targets = [ResponseTarget3 {
+        q: &q,
+        target: value - 1.0,
+        scale: 1.0,
+        weight: 1.0,
+    }];
+    let rho = vec![1.0; study.cells()];
+    let incoming = study.operator().scales().to_vec();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let accepted = study
+        .evaluate_responses(
+            &rho,
+            &[ResponseCase3 {
+                force: &force,
+                prescribed: None,
+                targets: &targets,
+            }],
+            Default::default(),
+            &mut control,
+        )
+        .unwrap();
+    study
+        .operator()
+        .admit_material_domain(&accepted.displacements[0], poll)
+        .unwrap();
+    assert!(
+        study
+            .operator()
+            .admit_material_domain(&accepted.adjoints[0], poll)
+            .is_err()
+    );
+    assert_eq!(study.operator().scales(), incoming);
+
+    let excessive_force: Vec<_> = force.iter().map(|v| 100.0 * v).collect();
+    let mut saw_adjoint = false;
+    let mut callback = |p: SolveProgress| {
+        saw_adjoint |= p.stage == "sdf3-response-adjoint";
+        poll()
+    };
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let refused = study.evaluate_responses(
+        &rho,
+        &[ResponseCase3 {
+            force: &excessive_force,
+            prescribed: None,
+            targets: &targets,
+        }],
+        Default::default(),
+        &mut control,
+    );
+    assert!(matches!(
+        refused,
+        Err(ResponseError3::Evaluation(EvaluationStop::Breakdown {
+            stage: "sdf3-material-domain"
+        }))
+    ));
+    assert_eq!(study.operator().scales(), incoming);
+    assert!(!saw_adjoint);
+}

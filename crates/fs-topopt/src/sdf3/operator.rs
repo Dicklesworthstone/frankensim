@@ -55,6 +55,9 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// native source domains and strong/hanging maps with no heap allocation.
     fn admit_affine_material_domain(&self, offset: &[f64], basis: &[&[f64]],
         checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3>;
+    /// Admit the zero-offset physical load ball without allocating a zero field.
+    fn admit_load_space_material_domain(&self, basis: &[&[f64]],
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3>;
     /// Actual retained bulk quadrature stresses, with no surface/ghost samples.
     fn bulk_stress(&self, u: &[f64], max_points: usize, checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>, ElasticityError3>;
@@ -104,6 +107,8 @@ impl Sdf3Elasticity for CutElasticity3 {
         -> Result<(),ElasticityError3> {CutElasticity3::admit_material_domain(self,u,checkpoint)}
     fn admit_affine_material_domain(&self,offset:&[f64],basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<(),ElasticityError3> {CutElasticity3::admit_affine_material_domain(self,offset,basis,checkpoint)}
+    fn admit_load_space_material_domain(&self,basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {CutElasticity3::admit_load_space_material_domain(self,basis,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {CutElasticity3::bulk_stress(self,u,max_points,checkpoint)}
     fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
@@ -155,6 +160,8 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
         -> Result<(),ElasticityError3> {AdaptiveElasticity3::admit_material_domain(self,u,checkpoint)}
     fn admit_affine_material_domain(&self,offset:&[f64],basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<(),ElasticityError3> {AdaptiveElasticity3::admit_affine_material_domain(self,offset,basis,checkpoint)}
+    fn admit_load_space_material_domain(&self,basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {AdaptiveElasticity3::admit_load_space_material_domain(self,basis,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {AdaptiveElasticity3::bulk_stress(self,u,max_points,checkpoint)}
     fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
@@ -223,6 +230,8 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
         -> Result<(),ElasticityError3> {self.elasticity().admit_material_domain(u,checkpoint)}
     fn admit_affine_material_domain(&self,offset:&[f64],basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<(),ElasticityError3> {self.elasticity().admit_affine_material_domain(offset,basis,checkpoint)}
+    fn admit_load_space_material_domain(&self,basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {self.elasticity().admit_load_space_material_domain(basis,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {self.elasticity().bulk_stress(u,max_points,checkpoint)}
     fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
@@ -260,6 +269,16 @@ impl AdaptiveSdf3Elasticity for AdaptiveSolveSpace3 {
 
 // Material validity belongs to physical solutions, not every linear solve:
 // adjoints and uncertainty columns are algebraic fields with different units.
+pub(crate) fn admit_material_domain(
+    operator: &impl Sdf3Elasticity,
+    displacement: &[f64],
+    control: &mut SolveControl<'_>,
+) -> Result<(), EvaluationStop> {
+    material_domain_controlled(control, "sdf3-material-domain", |poll| {
+        operator.admit_material_domain(displacement, poll)
+    })
+}
+
 pub(crate) fn admit_affine_material_domain(
     operator: &impl Sdf3Elasticity,
     offset: &[f64],
@@ -268,6 +287,16 @@ pub(crate) fn admit_affine_material_domain(
 ) -> Result<(), EvaluationStop> {
     material_domain_controlled(control, "sdf3-affine-material-domain", |poll| {
         operator.admit_affine_material_domain(offset, basis, poll)
+    })
+}
+
+pub(crate) fn admit_load_space_material_domain(
+    operator: &impl Sdf3Elasticity,
+    basis: &[&[f64]],
+    control: &mut SolveControl<'_>,
+) -> Result<(), EvaluationStop> {
+    material_domain_controlled(control, "sdf3-affine-material-domain", |poll| {
+        operator.admit_load_space_material_domain(basis, poll)
     })
 }
 

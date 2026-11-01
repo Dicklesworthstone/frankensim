@@ -319,6 +319,16 @@ fn affine_stress_family_uses_native_tensor_and_admits_the_whole_source_strain_ba
     op.affine_bulk_stress(&near_limit, &[&direction], baseline.len() * 2, poll)
         .unwrap();
     op.admit_material_domain(&endpoint, poll).unwrap();
+    op.admit_load_space_material_domain(&[&endpoint], poll)
+        .unwrap();
+    // Each direction has 0.09 axial strain, but their coefficient-ball
+    // combination reaches sqrt(2) * 0.09 and exceeds the retained 0.1 ceiling.
+    assert!(matches!(
+        op.admit_load_space_material_domain(&[&endpoint, &endpoint], poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain"
+        ))
+    ));
     op.admit_affine_material_domain(&near_limit, &[&direction], poll)
         .unwrap();
     assert!(matches!(
@@ -393,6 +403,16 @@ fn adaptive_material_domain_streams_the_native_hanging_family_without_stress_out
     }
     let endpoint: Vec<_> = offset.iter().zip(&direction).map(|(a, b)| a + b).collect();
     op.admit_material_domain(&endpoint, poll).unwrap();
+    op.admit_load_space_material_domain(&[&endpoint], poll)
+        .unwrap();
+    // Each direction has 0.09 axial strain, but their coefficient-ball
+    // combination reaches sqrt(2) * 0.09 and exceeds the retained 0.1 ceiling.
+    assert!(matches!(
+        op.admit_load_space_material_domain(&[&endpoint, &endpoint], poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain"
+        ))
+    ));
     op.admit_affine_material_domain(&offset, &[&direction], poll)
         .unwrap();
     assert!(matches!(

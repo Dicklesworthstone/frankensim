@@ -243,6 +243,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             let mut all_coarse = Vec::new();
             for (i, case) in cases.iter().enumerate() {
                 let u = &accepted.displacements[i];
+                crate::sdf3::admit_material_domain(coarse, u, control)?;
                 let mut rhs = coarse.reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
                 add_force(&mut rhs, coarse_body_force.as_deref(), control)?;
                 let residual = coarse.field_residual(u, &rhs, || poll(control))?;
@@ -304,6 +305,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 let mut rhs = enriched.adaptive().reference_load_with_motion(case.load, case.prescribed, || poll(control))?;
                 add_force(&mut rhs, fine_body_force.as_deref(), control)?;
                 let uf = checked_solve_preconditioned(&enriched, &pf, &rhs, 1e-11, "response-limit-goal-primal", control)?;
+                crate::sdf3::admit_material_domain(&enriched, &uf, control)?;
                 let uc = &accepted.displacements[i];
                 let mut changes = Vec::with_capacity(case.limits.len());
                 for limit in case.limits {

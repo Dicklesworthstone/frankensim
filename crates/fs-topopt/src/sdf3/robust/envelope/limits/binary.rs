@@ -189,6 +189,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 let rhs = self.external_force(force, body.as_deref(), control)?;
                 let u = checked_solve_preconditioned(&self.operator, &prepared, &rhs,
                     1e-11, "sdf3-binary-cap-elasticity", control)?;
+                crate::sdf3::admit_material_domain(&self.operator, &u, control)?;
                 let c: f64 = rhs.iter().zip(&u).map(|(f, u)| f * u).sum();
                 if !c.is_finite() || c < 0.0 { return Err(failure("sdf3-binary-cap-compliance").into()); }
                 case_compliances.push(c); displacements.push(u);

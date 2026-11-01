@@ -30,7 +30,9 @@ pub mod stress;
 pub mod design;
 pub mod robust;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
-pub(crate) use operator::admit_affine_material_domain;
+pub(crate) use operator::{
+    admit_affine_material_domain, admit_load_space_material_domain, admit_material_domain,
+};
 pub use refine::inherit_raw_densities3;
 pub use regions::PhysicalRegion3;
 use fs_cutfem::elastic3::{CutElasticity3, MaterialBodyLoad3};
@@ -264,6 +266,7 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                 control.checkpoint("sdf3-elasticity")?;
                 let rhs = self.external_force(load.force, body.as_deref(), control)?;
                 let u = checked_solve_preconditioned(&self.operator,&prepared,&rhs,1e-11,"sdf3-elasticity",control)?;
+                admit_material_domain(&self.operator, &u, control)?;
                 let c: f64 = rhs.iter().zip(&u).map(|(f,u)|f*u).sum();
                 compliance += load.weight*c;
                 let energies = self.operator.scale_quadratic_forms(&u).map_err(|_|failure("sdf3-energy"))?;

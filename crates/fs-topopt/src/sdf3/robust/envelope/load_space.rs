@@ -163,6 +163,10 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         let loads: Vec<_> = basis.iter().map(|&force| LoadCase { force, weight: 1.0/m as f64 }).collect();
         let physical = self.evaluate_robust(rho, &loads, robustness, control)?;
         let states = &physical.eroded.objective.displacements;
+        // Coordinate cases alone cannot admit all simultaneous combinations.
+        // Native source validity must hold before constructing the spectrum.
+        let fields: Vec<_> = states.iter().map(Vec::as_slice).collect();
+        crate::sdf3::admit_load_space_material_domain(&self.operator, &fields, control)?;
         let mut gram = vec![0.0; m*m];
         for i in 0..m { for j in 0..m {
             control.checkpoint("sdf3-load-space-cross-work")?;

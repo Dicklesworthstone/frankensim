@@ -27,6 +27,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             }
             let u = checked_solve_preconditioned(&self.operator, prepared, &rhs, 1e-11,
                 "response-limits-primal", control)?;
+            crate::sdf3::admit_material_domain(&self.operator, &u, control)?;
             let mut values = Vec::with_capacity(case.limits.len());
             let mut row = Vec::with_capacity(case.limits.len());
             for limit in case.limits {

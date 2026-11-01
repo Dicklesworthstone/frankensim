@@ -336,7 +336,25 @@ impl CutElasticity3 {
         checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<(), ElasticityError3> {
         self.admit_affine_material_domain_mapped(
-            offset,
+            Some(offset),
+            basis,
+            self.n(),
+            |cell, field| self.stress_local(cell, field),
+            checkpoint,
+        )
+    }
+
+    /// Admit every field `sum_j a[j] * basis[j]`, `||a||_2 <= 1`, against
+    /// the retained source strain ceilings. Uses the same streaming whole-ball
+    /// owner as affine admission with an implicit zero local offset; no global
+    /// zero displacement vector, stress output or other heap storage is allocated.
+    pub fn admit_load_space_material_domain(
+        &self,
+        basis: &[&[f64]],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.admit_affine_material_domain_mapped(
+            None,
             basis,
             self.n(),
             |cell, field| self.stress_local(cell, field),
@@ -348,14 +366,16 @@ impl CutElasticity3 {
     // this native traversal still owns material validity and point ordering.
     pub(super) fn admit_affine_material_domain_mapped(
         &self,
-        offset: &[f64],
+        offset: Option<&[f64]>,
         basis: &[&[f64]],
         n: usize,
         mut local: impl FnMut(&Cell3, &[f64]) -> [f64; 24],
         mut checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<(), ElasticityError3> {
         self.admit_stress_state(None, &mut checkpoint)?;
-        admit_displacement(offset, n, &mut checkpoint)?;
+        if let Some(offset) = offset {
+            admit_displacement(offset, n, &mut checkpoint)?;
+        }
         for &field in basis {
             admit_displacement(field, n, &mut checkpoint)?;
         }
@@ -364,7 +384,7 @@ impl CutElasticity3 {
             if cell.material.source_state().is_none() {
                 continue;
             }
-            let local_offset = local(cell, offset);
+            let local_offset = offset.map_or([0.0; 24], |field| local(cell, field));
             for &(position, _) in cell.rules.bulk() {
                 poll(&mut checkpoint)?;
                 let (_, gradients) = q1(cell.bounds, position);

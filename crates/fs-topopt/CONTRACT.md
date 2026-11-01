@@ -146,6 +146,40 @@ physical density scaling, full-chain derivatives, robust mass curvature and
 live-IR mass/compliance composition. The raw-SDF path below uses the same
 physical-inventory convention with its own retained cut-cell quadrature.
 
+## Physical material validity on raw-SDF designs
+
+Physical 3-D equilibrium fields must satisfy each retained source material's
+absolute Mandel-strain ceiling on the native bulk quadrature, independently
+of whether the caller requests stress measurements or strength constraints.
+The common native admission path covers ordinary and robust independent-load
+compliance, displacement/reaction fitting and limits, and freshly resolved
+binary endpoints. Every returned experiment is admitted, including a case
+with zero objective weight. Source-free legacy elastic models receive no
+invented strain ceiling.
+
+The zero-offset spectral load-space evaluator also admits the COMPLETE
+coefficient unit ball before its spectrum. Its gray and binary refinement paths
+independently admit both coarse and fine combined families against the actual
+native operators. The fine family is checked before the shared DWR owner releases
+its material and hanging maps; no reconstruction of a substitute operator or
+extra equilibrium solve is needed. Independent-scenario APIs retain their
+separate-experiment semantics. The native zero-offset entry point avoids even
+allocating an all-zero displacement field.
+
+Response and compliance refinement re-admit retained coarse physical fields
+and independently admit fresh fine physical fields before producing goal
+changes. The shared control adapter preserves cancellation and budget stops;
+a material-domain refusal cannot publish a partial evaluation. Existing scale
+rollback contracts remain in force. Admission adds no equilibrium solve and
+does not allocate a retained stress-point family.
+
+Adjoint vectors, virtual modes, residuals and DWR difference fields are
+algebraic quantities, not physical experiments, and do not inherit physical
+strain ceilings. The same native tensor and hanging-node/strong-clamp maps
+still govern their actions and pullbacks. These checks establish numerical
+validity at retained quadrature points, not continuum strain bounds,
+constitutive extrapolation, yielding or a nonlinear material model.
+
 ## Physical mass on raw-SDF designs
 
 All three `Sdf3Elasticity` backends expose the original native reference cell

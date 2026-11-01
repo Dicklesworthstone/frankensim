@@ -25,7 +25,26 @@ impl AdaptiveElasticity3 {
         checkpoint: impl FnMut() -> ControlFlow<()>,
     ) -> Result<(), ElasticityError3> {
         self.raw.admit_affine_material_domain_mapped(
-            offset,
+            Some(offset),
+            basis,
+            self.n(),
+            |cell, field| {
+                std::array::from_fn(|i| self.physical_coefficient(field, cell.nodes[i / 3], i % 3))
+            },
+            checkpoint,
+        )
+    }
+
+    /// Admit the complete zero-offset coefficient unit ball with exact hanging
+    /// reconstruction and master clamps. No global zero field or reconstructed
+    /// family is allocated; source checks share the affine admission owner.
+    pub fn admit_load_space_material_domain(
+        &self,
+        basis: &[&[f64]],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.raw.admit_affine_material_domain_mapped(
+            None,
             basis,
             self.n(),
             |cell, field| {

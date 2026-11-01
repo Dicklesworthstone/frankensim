@@ -196,11 +196,13 @@ The checked `point_count * (basis_count+1)` allowance precedes output allocation
 and adaptive field reconstruction. The adaptive implementation preserves the
 same hanging-node map and strong-clamp masking for the entire family.
 
-`admit_material_domain` and `admit_affine_material_domain` expose that same
-source-strain admission independently of stress output. They check shape, finite
-coefficients and scales before any legacy/source distinction, then stream only
-source-bound cells and retained points with constant auxiliary storage and no
-heap allocation. Adaptive fields reconstruct one cell at a time through the
+`admit_material_domain`, `admit_affine_material_domain` and
+`admit_load_space_material_domain` expose that same source-strain admission
+independently of stress output. They check shape, finite coefficients and scales
+before any legacy/source distinction, then stream only source-bound cells and
+retained points with constant auxiliary storage and no heap allocation. The
+zero-offset load-space method uses an implicit local zero rather than allocating
+an all-zero displacement vector. Adaptive fields reconstruct one cell at a time through the
 identical scalar row owner used by full physical displacement export. This lets
 compliance, response and optimization consumers enforce native validity without
 allocating point-by-field stress arrays or performing constitutive stress work.

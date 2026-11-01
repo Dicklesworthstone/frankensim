@@ -227,6 +227,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     for (r, b) in rhs.iter_mut().zip(lifting) { *r = finite(*r+b)?; }
                 }
                 let u = checked_solve_preconditioned(&self.operator, &prepared, &rhs, 1e-11, "sdf3-response-primal", control)?;
+                crate::sdf3::admit_material_domain(&self.operator, &u, control)?;
                 let mut observed = Vec::with_capacity(case.targets.len());
                 let mut adjoint_rhs = vec![0.0; op.n()];
                 for target in case.targets {

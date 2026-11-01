@@ -226,8 +226,10 @@ impl ComplianceRefinement3 {
         dorfler3(&self.marking_mass, theta, max_marks, checkpoint)
     }
 }
-/// Internal retention for full load-basis assessments. Old callers allocate no
-/// retained family. Only a complete successful estimator call returns these.
+/// Internal retention for complete zero-offset load-ball assessments. Ordinary
+/// independent-scenario callers allocate no retained family and do not combine
+/// their fields. A retained family is admitted on its actual fine operator
+/// before a complete successful estimator call returns it.
 #[derive(Debug, Default)]
 pub(crate) struct EnrichedLoadFields3 {
     pub forces: Vec<Vec<f64>>,
@@ -306,9 +308,12 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         self.estimate_load_family(enriched, coarser, loads, coarse_displacements, None, options, None, control)
     }
 
-    pub(crate) fn estimate_reference_compliance_with_fields(&self, enriched: AdaptiveElasticity3,
+    pub(crate) fn estimate_reference_load_space_with_fields(&self, enriched: AdaptiveElasticity3,
         loads: &[GoalReferenceLoad3<'_>], coarse: &[Vec<f64>], options: GoalRefinementOptions3,
         control: &mut SolveControl<'_>) -> Result<(ComplianceRefinement3, EnrichedLoadFields3), GoalRefinementError3> {
+        self.require_homogeneous_load_space().map_err(GoalRefinementError3::Invalid)?;
+        let basis: Vec<_> = coarse.iter().map(Vec::as_slice).collect();
+        crate::sdf3::admit_load_space_material_domain(self.operator(), &basis, control)?;
         let mut fields = EnrichedLoadFields3::default();
         let estimate = self.estimate_load_family(enriched, &[], loads, coarse, None, options, Some(&mut fields), control)?;
         Ok((estimate, fields))
@@ -340,6 +345,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         enriched.set_scales(&scales)?;
         for (load, coarse) in loads.iter().zip(coarse_displacements) {
             // Reject the entire stale family BEFORE spending setup or a fine solve.
+            crate::sdf3::admit_material_domain(coarse_operator, coarse, control)?;
             let mut rhs_coarse = coarse_operator.reference_load(load.load(), || poll(control))?;
             crate::sdf3::body::add_force(&mut rhs_coarse, material.as_ref().map(|m| m.coarse_force.as_slice()), control)?;
             let residual = coarse_operator.field_residual(coarse, &rhs_coarse, || poll(control))?;
@@ -399,6 +405,7 @@ fn complete_family<L: GoalLaw3>(transfer: &AdaptiveTransfer3<'_>, loads: &[L], c
         let mut rhs = enriched.reference_load(law, || poll(control))?;
         crate::sdf3::body::add_force(&mut rhs, material.map(|m| m.fine_force.as_slice()), control)?;
         let fine = control.solve_preconditioned(enriched, prepared, &rhs, 1e-12, 50_000, "sdf3-goal-elasticity")?;
+        crate::sdf3::admit_material_domain(enriched, &fine, control)?;
         // The DWR owner rechecks true residuals before using this CG output.
         let estimate = if let Some(body) = material {
             let mut coarse_force = transfer.coarse().reference_load(law, || poll(control))?;
@@ -424,6 +431,13 @@ fn complete_family<L: GoalLaw3>(transfer: &AdaptiveTransfer3<'_>, loads: &[L], c
             fields.forces.push(rhs);
             fields.displacements.push(fine);
         }
+    }
+    if let Some(fields) = retained.as_deref() {
+        // The retained path represents a continuous load ball, not unrelated
+        // experiments. Check the complete family while the real fine operator,
+        // inherited material and hanging constraints are still borrowed here.
+        let basis: Vec<_> = fields.displacements.iter().map(Vec::as_slice).collect();
+        crate::sdf3::admit_load_space_material_domain(enriched, &basis, control)?;
     }
     if ![report.coarse_value, report.fine_value, report.correction].iter().all(|v| v.is_finite())
         || !report.marking_mass.values().all(|v| v.is_finite()) { return Err(GoalRefinementError3::Invalid("weighted goal overflow")); }

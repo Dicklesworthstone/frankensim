@@ -396,6 +396,21 @@ fn adaptive_affine_stress_preserves_the_full_hanging_field_family_and_masks() {
         op.admit_affine_material_domain(&offset, &[&first, &second], || ControlFlow::Break(())),
         Err(ElasticityError3::Cancelled)
     ));
+    op.admit_load_space_material_domain(&[&masked_first, &masked_second], poll)
+        .unwrap();
+    op.admit_load_space_material_domain(&[], poll).unwrap();
+    assert!(
+        op.admit_load_space_material_domain(&[&first[..first.len() - 1]], poll)
+            .is_err()
+    );
+    assert!(
+        op.admit_load_space_material_domain(&[&nonfinite], poll)
+            .is_err()
+    );
+    assert!(matches!(
+        op.admit_load_space_material_domain(&[&first, &second], || ControlFlow::Break(())),
+        Err(ElasticityError3::Cancelled)
+    ));
     assert_eq!(op.scales(), scales);
 }
 

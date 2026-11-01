@@ -159,7 +159,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         let loads: Vec<_> = laws.iter().map(|&load| GoalReferenceLoad3 {
             load, weight: 1.0/laws.len() as f64 }).collect();
         let fine_fixed = enriched.fixed().to_vec();
-        let (basis_assessment, fields) = self.estimate_reference_compliance_with_fields(
+        let (basis_assessment, fields) = self.estimate_reference_load_space_with_fields(
             enriched, &loads, states, options, control)?;
         let fine = grid_check(&fields.forces, &fields.displacements, &fine_fixed, cap, control)?;
         let change = gram_change(&fine.spectrum.gram, &coarse.spectrum.gram)?;
