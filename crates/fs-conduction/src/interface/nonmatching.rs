@@ -213,8 +213,14 @@ impl Bound {
         if b.iter().flat_map(|f| f.vertices).any(|v| av.contains(&v)) {
             return Err(error(name,"contact sides must own distinct temperature nodes"));
         }
-        let origin = a[0].points[0];
-        let normal = a[0].normal;
+        // Keep the projection and clipping arithmetic independent of which
+        // physical trace is called A. Nonlinear laws must sample the same
+        // quadrature points when their ordered source coordinates are reversed.
+        let reference = a.iter().chain(&b).min_by_key(|face| face.slot)
+            .expect("nonempty admitted contact sides");
+        let origin = reference.points[0];
+        let normal = reference.normal;
+        let side_a_sign = if a.iter().any(|face| face.slot == reference.slot) { 1.0 } else { -1.0 };
         let axis = (0..3).max_by(|&i,&j| normal[i].abs().total_cmp(&normal[j].abs())).unwrap_or(0);
         let u = (axis+1)%3; let v = (axis+2)%3;
         let mut scale = 0.0_f64;
@@ -246,8 +252,8 @@ impl Bound {
             if det < 0.0 { points.swap(1,2); ids.swap(1,2); }
             Ok(Triangle { points, ids, slot:face.slot, area:face.area })
         };
-        let ta = a.iter().map(|f|project(f,1.0)).collect::<Result<Vec<_>,_>>()?;
-        let tb = b.iter().map(|f|project(f,-1.0)).collect::<Result<Vec<_>,_>>()?;
+        let ta = a.iter().map(|f|project(f,side_a_sign)).collect::<Result<Vec<_>,_>>()?;
+        let tb = b.iter().map(|f|project(f,-side_a_sign)).collect::<Result<Vec<_>,_>>()?;
         let tolerance = surface.options.coverage_relative_tolerance;
         let mut at = 0;
         for side in [&ta,&tb] { for i in 0..side.len() { for j in i+1..side.len() {
@@ -456,6 +462,10 @@ fn cross(a:[f64;2],b:[f64;2],c:[f64;2])->f64 {
     (b[0]-a[0])*(c[1]-a[1])-(b[1]-a[1])*(c[0]-a[0])
 }
 fn intersection(a:&Triangle,b:&Triangle)->Vec<[f64;2]> {
+    // Fixed operand order also fixes the polygon's fan anchor. A different
+    // fan is equivalent for constant resistance but changes nonlinear
+    // quadrature and its tangent, despite representing the same contact.
+    let (a,b)=if a.slot<=b.slot {(a,b)} else {(b,a)};
     let mut polygon=a.points.to_vec();
     for edge in 0..3 {
         if polygon.is_empty(){break;}

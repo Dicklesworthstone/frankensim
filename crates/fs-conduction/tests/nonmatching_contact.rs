@@ -179,7 +179,8 @@ fn mapped_source_values(scale:f64)->[InterfaceResistance;2] {
     claims.insert_claim(PropertyClaim {key:PropertyKey::new(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,dims),
         value:PropertyValue::Curve {abscissa:"normal_pressure".into(),abscissa_dims:fs_qty::Pressure::DIMS,
             knots:vec![(1e6,0.3*scale),(2e6,0.1*scale)],dims},
-        validity:ValidityDomain::unconstrained().with("normal_pressure",1e6,2e6),
+        validity:ValidityDomain::unconstrained().with_quantity("normal_pressure",
+            fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS),1e6,2e6),
         uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::LinearInside,
         observations:vec![],provenance:Provenance {source:"manufactured pressure-dependent bondline, not measurements".into(),
             license:"internal-test-use".into(),artifact:None}}).unwrap();
@@ -197,6 +198,7 @@ fn mapped_declaration(mesh:&ConductionMesh,scale:f64)->NonmatchingSurface {
     let entries=a.iter().map(|&face|(face,values[usize::from(mesh.boundary()[face].centroid[1]>1.5)].clone())).collect();
     NonmatchingSurface::new_mapped("bond",a,b,entries,options()).unwrap()
 }
+#[track_caller]
 fn near(actual:f64,expected:f64,tolerance:f64) {
     assert!((actual-expected).abs()<=tolerance,"{actual} versus {expected}; tolerance {tolerance}");
 }

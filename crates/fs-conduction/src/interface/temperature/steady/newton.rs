@@ -214,7 +214,11 @@ impl PhysicalProblem<'_, '_, '_, '_> {
         let contacts = self.contacts.evaluate_with_query_refusal(
             self.cx, self.problem.boundary, &temperature, &mut |error| {
                 source_domain = matches!(error,
-                    fs_matdb::MatDbError::PinnedClaimOutOfDomain { .. }
+                    // The original query owner checks the shared domain set
+                    // before selecting the pinned claim. An empty set is
+                    // therefore also a source-domain miss for a pinned query.
+                    fs_matdb::MatDbError::NoClaimInDomain { .. }
+                    | fs_matdb::MatDbError::PinnedClaimOutOfDomain { .. }
                     | fs_matdb::MatDbError::OutsideKnotSpan { .. }
                     | fs_matdb::MatDbError::OutsideSurfaceSupport { .. });
             },

@@ -10,13 +10,16 @@ fn source_value(a: f64, b: f64) -> f64 {
     0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0
 }
 
-pub(super) fn source_point() -> QueryPoint {
+fn kelvin() -> fs_qty::QuantitySpec {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
-    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
+    fs_qty::QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,
-    ));
-    QueryPoint::new().with_quantity("TA", kelvin, 320.0).unwrap()
-        .with_quantity("TB", kelvin, 320.0).unwrap()
+    ))
+}
+
+pub(super) fn source_point() -> QueryPoint {
+    QueryPoint::new().with_quantity("TA", kelvin(), 320.0).unwrap()
+        .with_quantity("TB", kelvin(), 320.0).unwrap()
         .with_quantity("normal_pressure",
             fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS), 1e6).unwrap()
 }
@@ -33,8 +36,9 @@ pub(super) fn source_card(scale: f64, reverse: bool) -> InterfaceSystemCard {
                 .into_iter().map(|p| (p, scale * source_value(p[0], p[1]))).collect(),
             triangles: vec![[0,1,2], [1,3,2]], dims,
         },
-        validity: ValidityDomain::unconstrained().with("TA",256.0,384.0)
-            .with("TB",256.0,384.0).with("normal_pressure",1e6,1e6),
+        validity: ValidityDomain::unconstrained().with_quantity("TA",kelvin(),256.0,384.0)
+            .with_quantity("TB",kelvin(),256.0,384.0).with_quantity("normal_pressure",
+                fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS),1e6,1e6),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::LinearInside, observations: vec![],
         provenance: Provenance {

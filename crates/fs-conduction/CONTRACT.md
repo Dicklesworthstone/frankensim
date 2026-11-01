@@ -125,6 +125,11 @@ of a variable nonmatching law use this pointwise rule exactly once; unrelated
 matching contacts retain their existing face-mean semantics and arithmetic.
 No geometry intersection is repeated by a constitutive trial.
 
+The projection reference and clipping operands are canonical across both
+traces. Reversing A/B together with the ordered source coordinates retains
+the same overlap fan and quadrature points, including nonlinear contact
+tangents. This symmetry leaves the original quadrature order unchanged.
+
 `TemperatureContactEvaluation::quadrature_states` retains each ordered face
 pair, canonical quadrature index, area weight, actual trace temperatures and
 original source receipt. The complete contact Jacobian differentiates both

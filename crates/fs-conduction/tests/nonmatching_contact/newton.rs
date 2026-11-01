@@ -13,7 +13,11 @@ use fs_conduction::interface::temperature::steady::newton::{
 // resistance is 0.1 K/W. This positive source law has deliberately strong
 // feedback, but is smooth throughout its admitted thermal neighbourhood.
 fn steep_card() -> InterfaceSystemCard {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
     let dims = AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static,
+    ));
     let mut claims = ClaimSet::new();
     claims.insert_claim(PropertyClaim {
         key: PropertyKey::new(AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, dims),
@@ -24,9 +28,10 @@ fn steep_card() -> InterfaceSystemCard {
             dims,
         },
         validity: ValidityDomain::unconstrained()
-            .with("TA", 309.0, 312.0)
-            .with("TB", 300.0, 340.0)
-            .with("normal_pressure", 1e6, 1e6),
+            .with_quantity("TA", kelvin, 309.0, 312.0)
+            .with_quantity("TB", kelvin, 300.0, 340.0)
+            .with_quantity("normal_pressure",
+                fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS), 1e6, 1e6),
         uncertainty: UncertaintyModel::Unstated,
         interpolation: InterpolationPolicy::LinearInside,
         observations: vec![],
