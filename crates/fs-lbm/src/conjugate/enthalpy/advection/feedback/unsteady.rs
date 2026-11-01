@@ -335,9 +335,6 @@ where
                 invalid("retained momentum source epoch differs from the thermal start").into(),
             );
         }
-        let active = self.momentum_domain(&applied.samples, check)?;
-        let domain = active.as_ref().unwrap_or(self.domain);
-        self.check_phase_drives(domain, check)?;
         for sample in &applied.samples {
             check_gate(self.gate, check)?;
             if old.get(&sample.cell).map(|t| t.to_bits()) != Some(sample.temperature_k.to_bits()) {
@@ -347,6 +344,24 @@ where
                 .into());
             }
         }
+        self.advance_resolved_momentum(start_s, dt_s, end_s, check)
+    }
+
+    /// Advance the original native inertia from its accepted clock using the
+    /// already resolved material epoch. Explicit splitting checks start samples
+    /// above; implicit callers instead admit their proposed endpoint samples.
+    pub(super) fn advance_resolved_momentum(
+        &mut self,
+        start_s: f64,
+        dt_s: f64,
+        end_s: f64,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(), MaterialFlowError<O::Error>> {
+        check_gate(self.gate, check)?;
+        let applied = self.applied.as_ref().ok_or(invalid("native momentum lacks its material epoch"))?;
+        let active = self.momentum_domain(&applied.samples, check)?;
+        let domain = active.as_ref().unwrap_or(self.domain);
+        self.check_phase_drives(domain, check)?;
         if domain.fluid_count() == 0 {
             self.unsteady.as_mut().expect("checked retained momentum").advance_immobile(
                 domain,

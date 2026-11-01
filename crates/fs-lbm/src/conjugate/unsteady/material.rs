@@ -169,6 +169,11 @@ impl MaterialMomentum {
         self.heating.is_some()
     }
 
+    #[cfg(feature = "implicit-enthalpy-coupling")]
+    pub fn heating_controls(&self) -> Option<ViscousHeatControls> {
+        self.heating.as_ref().map(|heating| heating.controls)
+    }
+
     /// Capture only an explicitly supported endpoint. This updates the actual
     /// native history and its separate heat account; the enclosing thermal
     /// candidate must still receive that heat and pass phase/source admission.

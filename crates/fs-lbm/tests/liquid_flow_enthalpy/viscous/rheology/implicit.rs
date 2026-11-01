@@ -9,6 +9,8 @@ use fs_lbm::conjugate::enthalpy::advection::feedback::rheology::QuasisteadyRheol
 use fs_material::phase::mushy::MushyPhaseLaw;
 use fs_material::phase::{EnthalpyPhaseKnot, EquilibriumEnthalpyPhaseCurve};
 
+mod unsteady;
+
 fn implicit_controls() -> ImplicitFlowControls {
     ImplicitFlowControls {
         max_unknowns: 16,

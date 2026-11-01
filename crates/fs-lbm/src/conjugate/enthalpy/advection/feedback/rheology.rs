@@ -8,7 +8,64 @@
 use super::*;
 
 mod quasisteady;
-pub use quasisteady::{QuasisteadyRheologyControls, QuasisteadyRheologyReport};
+
+/// Numerical closure of source response against the actual native strain.
+/// These controls apply to both stationary flow and an endpoint step from a
+/// fixed accepted momentum history; they do not assert constitutive uniqueness.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RheologyControls {
+    pub max_iterations: usize,
+    /// Each cell must meet this absolute OR the relative physical-rate gate.
+    pub absolute_rate_tolerance_per_s: f64,
+    pub relative_rate_tolerance: f64,
+    /// Re-query the actual rate: viscosity, conductivity, Cp and any active
+    /// buoyancy density departure must agree within this relative bound.
+    pub relative_transport_tolerance: f64,
+    /// Convex relaxation of the next source-rate query, in (0,1].
+    pub relaxation: f64,
+}
+
+/// Closure of the coefficients actually used by native momentum and heat.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RheologyReport {
+    pub iterations: usize,
+    pub maximum_rate_mismatch_per_s: f64,
+    pub maximum_relative_rate_mismatch: f64,
+    pub maximum_relative_transport_mismatch: f64,
+}
+
+// The stationary public names denote these same numerical controls/receipts.
+pub use RheologyControls as QuasisteadyRheologyControls;
+pub use RheologyReport as QuasisteadyRheologyReport;
+
+impl RheologyControls {
+    pub(super) fn admit(self) -> Result<(), DepositionError> {
+        if self.max_iterations == 0
+            || !self.absolute_rate_tolerance_per_s.is_finite()
+            || self.absolute_rate_tolerance_per_s < 0.0
+            || !self.relative_rate_tolerance.is_finite()
+            || !(0.0 < self.relative_rate_tolerance && self.relative_rate_tolerance <= 1.0)
+            || !self.relative_transport_tolerance.is_finite()
+            || !(0.0 < self.relative_transport_tolerance
+                && self.relative_transport_tolerance <= 1.0)
+            || !self.relaxation.is_finite()
+            || !(0.0 < self.relaxation && self.relaxation <= 1.0)
+        {
+            return Err(invalid(
+                "rheology needs a positive iteration budget, finite rate/transport gates and relaxation in (0,1]",
+            ));
+        }
+        Ok(())
+    }
+}
+
+fn relative_difference(a: f64, b: f64) -> f64 {
+    if a == b {
+        0.0
+    } else {
+        (a - b).abs() / a.abs().max(b.abs())
+    }
+}
 
 /// Immutable constitutive source on actual caloric and kinematic coordinates.
 /// Implementations must retain original source claims and refuse unsupported
@@ -42,7 +99,7 @@ where
 pub(super) struct RheologyBinding<'a, F> {
     source: &'a dyn FlowRheologySource<F>,
     pub(super) rates: Vec<f64>,
-    quasisteady: Option<QuasisteadyRheologyControls>,
+    pub(super) quasisteady: Option<QuasisteadyRheologyControls>,
     report: Option<QuasisteadyRheologyReport>,
 }
 
@@ -111,6 +168,17 @@ where
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<Vec<FlowMaterialSample<F, T>>, MaterialFlowError<O::Error>> {
+        self.sample_materials_at_rates(thermal, None, check)
+    }
+
+    /// Explicit rate iterates are numerical source coordinates. They never
+    /// replace accepted native velocity or advance its momentum history.
+    pub(super) fn sample_materials_at_rates(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        rates: Option<Vec<f64>>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Vec<FlowMaterialSample<F, T>>, MaterialFlowError<O::Error>> {
         let Some(binding) = &self.rheology else {
             return sample(
                 thermal,
@@ -124,7 +192,9 @@ where
             );
         };
         let source = binding.source;
-        let mut rates = if binding.quasisteady.is_some() {
+        let mut rates = if let Some(rates) = rates {
+            rates
+        } else if binding.quasisteady.is_some() {
             binding.rates.clone()
         } else {
             let owner = self
@@ -169,5 +239,98 @@ where
         )?;
         self.rheology.as_mut().expect("binding retained").rates = rates;
         Ok(samples)
+    }
+
+    /// One shared admission and mismatch calculation for stationary and
+    /// unsteady constitutive iterations. Observed sources remain distinct from
+    /// the queried samples that supplied the candidate's momentum and power.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn observe_rheology(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        epoch: &MaterialFlowEpoch<F, T>,
+        rates: Vec<f64>,
+        iteration: usize,
+        controls: RheologyControls,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(RheologyReport, bool, Vec<FlowMaterialSample<F, T>>), MaterialFlowError<O::Error>>
+    {
+        let queried = epoch
+            .shear_rate_per_s
+            .as_ref()
+            .ok_or(invalid("bound rheology lacks source rates"))?;
+        if rates.len() != queried.len() || rates.len() != self.domain.cell_count() {
+            return Err(
+                invalid("native and source shear fields must share the original grid").into(),
+            );
+        }
+        let mut report = RheologyReport {
+            iterations: iteration,
+            maximum_rate_mismatch_per_s: 0.0,
+            maximum_relative_rate_mismatch: 0.0,
+            maximum_relative_transport_mismatch: 0.0,
+        };
+        let mut rate_closed = true;
+        for (&actual, &query) in rates.iter().zip(queried) {
+            check_gate(self.gate, check)?;
+            let error = (actual - query).abs();
+            let relative = relative_difference(actual, query);
+            report.maximum_rate_mismatch_per_s = report.maximum_rate_mismatch_per_s.max(error);
+            report.maximum_relative_rate_mismatch =
+                report.maximum_relative_rate_mismatch.max(relative);
+            rate_closed &= error <= controls.absolute_rate_tolerance_per_s
+                || relative <= controls.relative_rate_tolerance;
+        }
+        // Source-admit the ACTUAL physical rate before any relaxation.
+        let observed = self.sample_materials_at_rates(thermal, Some(rates), check)?;
+        admit_density(&observed, self.density_kg_m3)?;
+        self.check_phase_conduction(&observed, check)?;
+        for (applied, actual) in epoch.samples.iter().zip(&observed) {
+            check_gate(self.gate, check)?;
+            if let Some((gravity, density)) = self.buoyancy {
+                if gravity.iter().any(|&g| g != 0.0) {
+                    report.maximum_relative_transport_mismatch = report
+                        .maximum_relative_transport_mismatch
+                        .max(relative_difference(
+                            density(&applied.material) - self.density_kg_m3,
+                            density(&actual.material) - self.density_kg_m3,
+                        ));
+                }
+            }
+            report.maximum_relative_transport_mismatch = report
+                .maximum_relative_transport_mismatch
+                .max(relative_difference(
+                    applied.transport.thermal_conductivity_w_m_k(),
+                    actual.transport.thermal_conductivity_w_m_k(),
+                ));
+            match (
+                applied.transport.mobile_transport(),
+                actual.transport.mobile_transport(),
+            ) {
+                (Some(a), Some(b)) => {
+                    for (x, y) in [
+                        (a.dynamic_viscosity_pa_s(), b.dynamic_viscosity_pa_s()),
+                        (a.specific_heat_j_kg_k(), b.specific_heat_j_kg_k()),
+                    ] {
+                        report.maximum_relative_transport_mismatch = report
+                            .maximum_relative_transport_mismatch
+                            .max(relative_difference(x, y));
+                    }
+                }
+                (None, None) => {}
+                _ => {
+                    return Err(invalid(
+                        "constitutive iteration changed occupancy at fixed caloric state",
+                    )
+                    .into());
+                }
+            }
+        }
+        let closed = rate_closed
+            && report.maximum_relative_transport_mismatch <= controls.relative_transport_tolerance;
+        if closed {
+            self.rheology.as_mut().expect("binding retained").report = Some(report);
+        }
+        Ok((report, closed, observed))
     }
 }

@@ -9,7 +9,7 @@
 use super::rheology::QuasisteadyRheologyReport;
 use super::*;
 use fs_conduction::enthalpy::backward_euler::{
-    BackwardEulerStep, StepCoefficients, TransportStepCoefficients,
+    BackwardEulerStep, BackwardEulerTrial, StepCoefficients, TransportStepCoefficients,
 };
 use fs_conduction::transient::deposition::EnergyAudit;
 use fs_solver::finite_difference::{FallibleFiniteDifference, FiniteDifferenceError};
@@ -17,6 +17,9 @@ use fs_solver::{
     NewtonError, NewtonKrylovConfig, NewtonKrylovState, NewtonReport, SolverRunProgress,
 };
 use std::cell::{Cell, RefCell};
+
+mod unsteady;
+pub use unsteady::{ImplicitUnsteadyFlowControls, ImplicitUnsteadyFlowReport};
 
 /// Numerical work and independent physical acceptance for one implicit interval.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -30,6 +33,28 @@ pub struct ImplicitFlowControls {
     pub total_energy_tolerance_j: f64,
     /// Residual coordinates are joules. Inner work remains explicitly bounded.
     pub newton: NewtonKrylovConfig,
+}
+
+impl ImplicitFlowControls {
+    fn admit(self, count: usize, initial: &[f64]) -> Result<(), ImplicitFlowError> {
+        self.newton.validate()?;
+        if self.max_unknowns == 0
+            || count > self.max_unknowns
+            || initial.len() != count
+            || self.max_newton_iterations == 0
+            || !self.difference_step_j.is_finite()
+            || self.difference_step_j <= 0.0
+            || !self.cell_energy_tolerance_j.is_finite()
+            || self.cell_energy_tolerance_j < 0.0
+            || !self.total_energy_tolerance_j.is_finite()
+            || self.total_energy_tolerance_j < 0.0
+        {
+            return Err(ImplicitFlowError::Invalid(
+                "invalid unknown/work budget, difference scale or joule tolerance",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -125,6 +150,63 @@ fn finite(value: f64) -> Result<f64, DepositionError> {
     }
 }
 
+struct AcceptedEndpoint<'t, P> {
+    thermal: DepositionSimulation<'t>,
+    payload: P,
+    audit: EnergyAudit,
+    nonlinear: NewtonReport,
+    maximum_cell_residual_j: f64,
+}
+
+/// Shared numerical closure; physical residuals and acceptance remain owned
+/// by the original caloric step for both stationary and retained flow.
+fn solve_endpoint<'t, P>(
+    count: usize,
+    controls: ImplicitFlowControls,
+    initial: &[f64],
+    evaluate: impl Fn(&[f64]) -> Result<BackwardEulerTrial<'t, P>, MaterialFlowError<DepositionError>>,
+    gate: &CancelGate,
+    check: &dyn Fn() -> Result<(), DepositionError>,
+) -> Result<AcceptedEndpoint<'t, P>, ImplicitFlowError> {
+    let problem =
+        FallibleFiniteDifference::new(count, controls.difference_step_j, |x: &[f64]| {
+            evaluate(x).map(|trial| trial.residual_j().to_vec())
+        })
+        .map_err(numerical_error)?;
+    let construction = NewtonKrylovState::new(&problem, initial.to_vec(), controls.newton);
+    if let Some(error) = problem.take_failure() {
+        return Err(numerical_error(error));
+    }
+    let mut solver = construction?;
+    let result = solver.run_controlled(&problem, controls.max_newton_iterations, &mut || {
+        gate.is_requested() || problem.has_failed()
+    });
+    if let Some(error) = problem.take_failure() {
+        return Err(numerical_error(error));
+    }
+    check()?;
+    if result.progress != SolverRunProgress::Complete {
+        return Err(ImplicitFlowError::Interrupted(result.progress));
+    }
+    if !result.report.converged {
+        return Err(ImplicitFlowError::NotConverged(result.report));
+    }
+    let trial = evaluate(&solver.x)?;
+    let maximum_cell_residual_j = trial.maximum_cell_residual_j();
+    let (thermal, payload, audit) = trial.accept(
+        controls.cell_energy_tolerance_j,
+        controls.total_energy_tolerance_j,
+        || check(),
+    )?;
+    Ok(AcceptedEndpoint {
+        thermal,
+        payload,
+        audit,
+        nonlinear: result.report,
+        maximum_cell_residual_j,
+    })
+}
+
 impl<F: Clone, R, T: FlowTransportSnapshot> MaterialFlowFeedback<'_, F, R, (), T>
 where
     R: Clone + FnMut(usize, &DepositedCell, f64) -> Result<F, MaterialError>,
@@ -170,22 +252,7 @@ where
         let checkpoint = RefCell::new(checkpoint);
         let check = || check_gate(self.gate, &mut *checkpoint.borrow_mut());
         check()?;
-        controls.newton.validate()?;
-        if controls.max_unknowns == 0
-            || thermal.cells().len() > controls.max_unknowns
-            || initial_energy_increments_j.len() != thermal.cells().len()
-            || controls.max_newton_iterations == 0
-            || !controls.difference_step_j.is_finite()
-            || controls.difference_step_j <= 0.0
-            || !controls.cell_energy_tolerance_j.is_finite()
-            || controls.cell_energy_tolerance_j < 0.0
-            || !controls.total_energy_tolerance_j.is_finite()
-            || controls.total_energy_tolerance_j < 0.0
-        {
-            return Err(ImplicitFlowError::Invalid(
-                "invalid unknown/work budget, difference scale or joule tolerance",
-            ));
-        }
+        controls.admit(thermal.cells().len(), initial_energy_increments_j)?;
         if self.unsteady.is_some() || self.buoyancy.is_some() || self.viscous_heating.is_none() {
             return Err(ImplicitFlowError::Invalid(
                 "implicit material flow needs the existing stationary Stokes heating owner",
@@ -260,40 +327,19 @@ where
                 || check(),
             )
         };
-        let problem = FallibleFiniteDifference::new(
+        let AcceptedEndpoint {
+            thermal: next,
+            payload: endpoint,
+            audit: thermal_audit,
+            nonlinear,
+            maximum_cell_residual_j,
+        } = solve_endpoint(
             step.cell_ids().len(),
-            controls.difference_step_j,
-            |x: &[f64]| evaluate(x).map(|trial| trial.residual_j().to_vec()),
-        )
-        .map_err(numerical_error)?;
-        let construction = NewtonKrylovState::new(
-            &problem,
-            initial_energy_increments_j.to_vec(),
-            controls.newton,
-        );
-        if let Some(error) = problem.take_failure() {
-            return Err(numerical_error(error));
-        }
-        let mut solver = construction?;
-        let result = solver.run_controlled(&problem, controls.max_newton_iterations, &mut || {
-            self.gate.is_requested() || problem.has_failed()
-        });
-        if let Some(error) = problem.take_failure() {
-            return Err(numerical_error(error));
-        }
-        check()?;
-        if result.progress != SolverRunProgress::Complete {
-            return Err(ImplicitFlowError::Interrupted(result.progress));
-        }
-        if !result.report.converged {
-            return Err(ImplicitFlowError::NotConverged(result.report));
-        }
-        let trial = evaluate(&solver.x)?;
-        let maximum_cell_residual_j = trial.maximum_cell_residual_j();
-        let (next, endpoint, thermal_audit) = trial.accept(
-            controls.cell_energy_tolerance_j,
-            controls.total_energy_tolerance_j,
-            || check(),
+            controls,
+            initial_energy_increments_j,
+            evaluate,
+            self.gate,
+            &check,
         )?;
         let dt = step.duration_s();
         let mut mechanical = self.viscous_heating.clone().expect("heating admitted");
@@ -335,7 +381,7 @@ where
             next,
             ImplicitFlowReport {
                 thermal: thermal_audit,
-                nonlinear: result.report,
+                nonlinear,
                 maximum_cell_residual_j,
                 momentum_solves: work.get(),
                 endpoint: endpoint.flow,

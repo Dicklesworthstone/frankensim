@@ -774,7 +774,16 @@ where
         thermal: &DepositionSimulation<'_>,
         check: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<(MaterialFlowEpoch<F, T>, Option<FluidTransportState>), MaterialFlowError<O::Error>> {
-        let samples = self.sample_materials(thermal, check)?;
+        self.solve_material_flow_epoch_at_rates(thermal, None, check)
+    }
+
+    fn solve_material_flow_epoch_at_rates(
+        &mut self,
+        thermal: &DepositionSimulation<'_>,
+        rates: Option<Vec<f64>>,
+        check: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(MaterialFlowEpoch<F, T>, Option<FluidTransportState>), MaterialFlowError<O::Error>> {
+        let samples = self.sample_materials_at_rates(thermal, rates, check)?;
         admit_density(&samples, self.density_kg_m3)?;
         self.check_phase_conduction(&samples, check)?;
         let active_domain = self.momentum_domain(&samples, check)?;

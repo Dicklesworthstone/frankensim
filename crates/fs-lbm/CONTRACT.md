@@ -3892,6 +3892,58 @@ regressions compare analytic thermal/rate-flow roots, pressure-driven donor
 and conductive exchange, latent mobility, constant-source behavior, shared
 work budgets, source refusal and deterministic cancellation/retry.
 
+### Implicit material feedback with retained native inertia
+
+Under `implicit-enthalpy-coupling`,
+`MaterialFlowFeedback<..., (), ...>::step_unsteady_implicit` closes total
+enthalpy, source response and the ORIGINAL unsteady Stokes momentum at one
+endpoint. Each thermal Newton trial and constitutive rate iterate restores the
+same accepted native face velocity/pressure history. It advances that history
+over the exact proposed interval with endpoint viscosity, optional sourced
+Darcy/Forchheimer resistance, material buoyancy and explicit actuator force.
+The endpoint flow supplies the original directed enthalpy graph; the same
+material epoch supplies fluid-face conduction and molecular/porous heat.
+Latent fractions can change coefficients while temperature stays constant.
+Neither momentum nor caloric storage is reimplemented.
+
+`ImplicitUnsteadyFlowControls` uses the original joule residual/Newton controls
+and the shared `RheologyControls` when a native-rate source is attached.
+Stationary and transient closure share the actual-rate source admission and
+viscosity/conductivity/Cp mismatch calculation. An active source buoyancy
+density departure must close at that same rate. `QuasisteadyRheologyControls`
+and its report name denote these same numerical types. Only source-rate
+coordinates relax; velocities, heat and history never relax or accumulate
+across candidates. Every real native solve, including finite-difference and
+final acceptance trials, consumes the original `max_solves` ceiling.
+
+The method returns both accepted thermal state and its retained feedback owner.
+Resume with those two together, including after changing the prescribed drive.
+The original `BackwardEulerStep` independently checks local and total thermal
+energy defects. Native work closes physical heat, actual face-mass kinetic
+change and nonnegative backward-Euler numerical loss. The latter NEVER heats
+material. A combined thermal/kinetic/work gate independently bounds the total
+defect, including the separately limited pressure-constraint work. Buoyancy
+work remains a subset of body work, not another heat source or a newly modeled
+gravitational reservoir. `applied()` describes the implicit endpoint epoch;
+`ImplicitUnsteadyFlowReport` owns this interval's accounting, while `audit()`
+remains the explicit-advection observer account. Authored sources/contacts stay
+unchanged. No trial state or prepared mechanical receipt is published after
+source refusal, nonconvergence, exhausted work, cancellation or failed balance.
+
+Admission retains closed walls/symmetry, creeping-flow/source bounds, fixed
+reference density, grid and caloric object. Mobile mushy/porous response may
+evolve; a change in mobile/solid occupancy refuses until an admitted phase
+event/kinetic handoff is supplied. Mutable wrapped observers, moving skeletons,
+free surfaces, compressible storage and constitutive memory remain outside this
+entry. Target-time events stay pending and interior events refuse. No explicit
+thermal CFL is imposed, but time/space/constitutive/Jacobian refinement and
+source support remain necessary; nonlinear convergence is not a physical
+accuracy certificate. Five focused G1/G3/G4 groups independently reduce
+temperature/shear-dependent startup and drive-off, directed donor transport
+with Fourier exchange, latent Darcy response, constant-source native parity
+and observer continuation, and shared-budget/source/late-cancellation rollback.
+Their addition is not a claim that native tests or physical validation ran.
+
 ### Quasisteady source rheology closes native pressure flow and heat
 
 `MaterialFlowFeedback::with_quasisteady_rheology` and the original pinned
