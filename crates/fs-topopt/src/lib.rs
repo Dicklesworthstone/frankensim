@@ -50,7 +50,7 @@ pub use continuation::{
     controlled_gradient_checked_multi_load_continuation, controlled_multi_load_continuation,
     multi_load_continuation,
 };
-pub use control::{EvaluationStop, SolveBudget, SolveControl, SolveProgress, SolveWork};
+pub use control::{EvaluationStop, SolveBudget, SolveControl, SolveControlCheckpoint, SolveProgress, SolveWork};
 pub use eigenfreq::{
     eigenfrequency_objective, eigenvalue_gradient, lowest_eigenpairs, mass_interp, smooth_min,
 };

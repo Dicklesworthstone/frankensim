@@ -10,12 +10,41 @@ use fs_solver::{CgState, LinearOp};
 use fs_sparse::precond::{IdentityPrecond, Precond};
 
 /// Limits shared by every filter, load solve and pullback in one computation.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SolveBudget {
     /// Maximum iterations in any one linear solve. Zero admits only zero RHS.
     pub per_solve_iterations: usize,
     /// Cumulative Krylov iterations, including rejected optimization trials.
     pub total_iterations: usize,
+    #[test]
+    fn g4_checkpoint_rebind_preserves_budget_and_spent_work() {
+        let op = operator();
+        let rhs = [1.0; 7];
+        let budget = SolveBudget { per_solve_iterations: 100, total_iterations: 8 };
+        let mut first_callback = |_| ControlFlow::Continue(());
+        let mut first = SolveControl::new(budget, &mut first_callback);
+        first.solve(&op, &rhs, 1e-12, 100, "first").unwrap();
+        assert_eq!(first.work().linear_iterations, 7);
+        let checkpoint = first.checkpoint_state();
+        assert_eq!(checkpoint.budget(), budget);
+        assert_eq!(checkpoint.work(), first.work());
+        drop(first);
+
+        let mut seen = Vec::new();
+        let mut second_callback = |progress: SolveProgress| {
+            seen.push(progress.work);
+            ControlFlow::Continue(())
+        };
+        let mut resumed = SolveControl::resume(checkpoint, &mut second_callback);
+        assert_eq!(resumed.budget(), budget);
+        assert_eq!(resumed.work(), checkpoint.work());
+        assert_eq!(resumed.solve(&op, &rhs, 1e-12, 100, "second"),
+            Err(EvaluationStop::TotalBudget { stage: "second" }));
+        assert_eq!(resumed.work().linear_iterations, 8);
+        drop(resumed);
+        assert!(seen.first().is_some_and(|work| *work == checkpoint.work()));
+    }
+
 }
 
 impl Default for SolveBudget {
@@ -39,6 +68,22 @@ pub struct SolveWork {
     /// Governed by the hierarchy's product cap; not equivalent to a fine apply,
     /// an outer iteration, total arithmetic, or wall-clock time.
     pub preconditioner_galerkin_products: usize,
+}
+
+/// Opaque cumulative-work receipt for moving a computation to a new callback
+/// without minting a fresh numerical budget. It carries no in-flight Krylov
+/// vector: checkpoints are only taken between public phases/solves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SolveControlCheckpoint {
+    budget: SolveBudget,
+    work: SolveWork,
+}
+
+impl SolveControlCheckpoint {
+    #[must_use]
+    pub fn budget(&self) -> SolveBudget { self.budget }
+    #[must_use]
+    pub fn work(&self) -> SolveWork { self.work }
 }
 
 /// Context provided to cancellation/wall-time callbacks.
@@ -91,6 +136,29 @@ impl<'a> SolveControl<'a> {
     ) -> Self {
         Self { budget, work: SolveWork::default(), callback }
     }
+
+    /// Rebind a completed public-phase checkpoint to a new callback while
+    /// preserving the exact original budget and cumulative work. This is not
+    /// an in-flight linear-solver restart; callers checkpoint only between
+    /// public phases, so no hidden Krylov state is discarded.
+    pub fn resume(
+        checkpoint: SolveControlCheckpoint,
+        callback: &'a mut dyn FnMut(SolveProgress) -> ControlFlow<()>,
+    ) -> Self {
+        Self { budget: checkpoint.budget, work: checkpoint.work, callback }
+    }
+
+    /// Immutable receipt suitable for handing the computation to another
+    /// callback/context. Restoring it cannot renew either per-solve or total
+    /// iteration allowances.
+    #[must_use]
+    pub fn checkpoint_state(&self) -> SolveControlCheckpoint {
+        SolveControlCheckpoint { budget: self.budget, work: self.work }
+    }
+
+    /// Original numerical allowance, unchanged by checkpoint/resume.
+    #[must_use]
+    pub fn budget(&self) -> SolveBudget { self.budget }
 
     /// Work consumed so far, also available after a stopped evaluation.
     #[must_use]
