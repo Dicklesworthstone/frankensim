@@ -11,6 +11,8 @@ use fs_phs::circuit::{Branch, CircuitDae};
 use super::storage::{MaterialStorageCandidate, StorageParameterWork};
 use super::{MAX_STATES, MaterialCircuit, MaterialCircuitError, poll};
 
+/// Explicit complete-matrix parameter work at fixed original capacitor charges.
+pub mod blocks;
 /// Original nonlinear dielectric material and fixed geometry in ordinary circuits.
 pub mod dielectric;
 

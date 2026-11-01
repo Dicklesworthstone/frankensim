@@ -20154,3 +20154,41 @@ matrix preparation, ownership refusal and cancellation replay. Existing nonlinea
 capacitance, source-backed dielectric, finite enthalpy and dielectric-motion
 regressions remain green on the selected native source closure. This gate does
 not claim a full-workspace Cargo/DSR run.
+
+## Fixed-charge replacement of complete capacitance blocks
+
+`MaterialCircuit::rebind_capacitance_blocks_candidate` replaces authored
+reciprocal C blocks at the same original charge and flux coordinates. It
+returns the existing `MaterialStorageCandidate`, including the new circuit,
+signed per-branch storage contributions and total reversible parameter work.
+The original contacts, material resistors, scalar capacitor laws, dielectric
+source records, mutual inductance and magnetic source metadata remain retained.
+The same native descriptor rechecks the proposed potential against the original
+constraints; an incompatible ideal voltage clamp refuses without an impulse.
+
+Every block retains its original set of capacitor branches. Block-list order
+and coordinate order within a block may change. Coefficient comparison in
+original branch coordinates detects a physically unchanged C and retains that
+block's original prepared inverse and ordering, even when another block changes.
+An equivalent permutation therefore has exactly zero parameter work and shares
+the original preparation. Adding/removing coordinates or regrouping blocks
+requires a separate topology and storage-authority owner and refuses here.
+Scalar material, nonlinear curve and source-derived scalar dielectric ownership
+cannot overlap a block. Empty-to-empty remains a zero-work update.
+
+For a changed block the admitted represented potential determines the work:
+W = q^T (C_after^-1 - C_before^-1) q / 2. Inverse coefficients are subtracted
+before charge products and compensated row/total accumulation. The method does
+not subtract large endpoint energies or voltages. The same graph-branch mapping
+is used for both matrix coordinate orders. Per-branch q_i v_i/2 contributions
+can be negative; only their complete sum is coupled field storage, and cross
+energy is never added again. Displayed endpoint contributions can coincide
+after rounding while their separately evaluated parameter work remains nonzero.
+
+Positive work must be supplied by the physical owner changing the matrix and
+negative work returned to it; the operation deposits no Joule heat. It is an
+explicit zero-time parameter transaction, not continuous material evolution,
+geometry/force coupling, a thermal entropy model, a switching impulse solver,
+or a new source fit. Existing graph/coordinate capacities bound allocations
+and matrix work. Cancellation and native arithmetic/domain refusal publish no
+partial charge, flux, material or contact update.

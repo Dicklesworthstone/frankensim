@@ -33,14 +33,15 @@ pub struct MaterialStorage {
 }
 
 /// One branch's contribution to parameter work at fixed conserved coordinates.
-/// With mutual coupling, magnetic contributions are `lambda_i * i_i / 2`.
+/// With reciprocal coupling, electric contributions are `q_i * v_i / 2`
+/// and magnetic contributions are `lambda_i * i_i / 2`.
 /// An individual contribution may be negative; only their sum is the physical
-/// magnetic storage. Mutual energy must never be added a second time.
+/// coupled storage. Cross energy must never be added a second time.
 #[derive(Clone, Debug, PartialEq)]
 pub struct StorageParameterWork {
     /// Original graph branch.
     pub branch: usize,
-    /// Electric energy or signed magnetic energy contribution before [J].
+    /// Signed electric or magnetic storage contribution before [J].
     pub stored_before_j: f64,
     /// Same charge/total flux evaluated with the complete new storage law [J].
     pub stored_after_j: f64,
