@@ -2,10 +2,9 @@
 //!
 //! A scalar source must describe the admitted heat-flow direction. No isotropy,
 //! phase mixing rule, fluid motion or changing reference geometry is inferred.
-//! Pure-phase temperature segments and isothermal liquid-mass-fraction segments
-//! reuse the canonical one-coordinate source-line owner. Every source crossing
-//! and caloric knot survives compilation. Simultaneously changing temperature
-//! and fraction require a multidimensional path owner and are refused here.
+//! Pure-phase, latent and solidus/liquidus segments reuse the canonical source
+//! path owner. Every crossed source cell/curve knot and caloric knot survives
+//! compilation, including when temperature and liquid fraction vary together.
 //!
 //! The native conduction observer and implicit chain/graph retain all thermal
 //! history, storage, fluxes, nonlinear solves and energy acceptance. Evaluation
@@ -19,7 +18,7 @@ use crate::state_point::{
 };
 use crate::thermal::source::{ThermalMaterialError, ThermalMaterialPoint};
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_matdb::{ClaimId, ClaimSelection, PropertyKey, PropertyLineSlice, PropertySupportError};
+use fs_matdb::{ClaimId, ClaimSelection, PropertyKey, PropertyPathSlice, PropertySupportError};
 use fs_qty::{
     QuantitySpec,
     semantic::{QuantityKind, SemanticType, ValueForm},
@@ -30,7 +29,7 @@ use fs_thermal::enthalpy::conduction::implicit::{
 };
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
-/// Combined source/caloric knot ceiling; each individual source line also has
+/// Combined source/caloric knot ceiling; each individual source path also has
 /// the canonical `MAX_PROPERTY_LINE_KNOTS` bound. No adaptive resampling occurs.
 pub const MAX_PHASE_CONDUCTIVITY_KNOTS: usize = 65_536;
 
@@ -80,11 +79,11 @@ impl From<DepositionError> for PhaseConductivityError {
 struct Interval {
     temperature_slope: f64,
     conductivity_slope: f64,
-    source_line: usize,
+    source_path: usize,
 }
 
 /// Exact compiled scalar response, distinct from a fresh source-query receipt.
-/// Source authority remains on the retained lines, not on this numerical sample.
+/// Source authority remains on the retained paths, not on this numerical sample.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhaseConductivitySample {
     specific_enthalpy: f64,
@@ -93,7 +92,7 @@ pub struct PhaseConductivitySample {
     conductivity: f64,
     temperature_slope: f64,
     conductivity_slope: f64,
-    source_line: usize,
+    source_path: usize,
 }
 impl PhaseConductivitySample {
     pub const fn specific_enthalpy_j_kg(self) -> f64 {
@@ -123,9 +122,9 @@ impl PhaseConductivitySample {
     pub const fn conductivity_enthalpy_derivative_kg_w_m_k_j(self) -> f64 {
         self.conductivity_slope
     }
-    /// Retained source line used by the selected one-sided interval.
-    pub const fn source_line_index(self) -> usize {
-        self.source_line
+    /// Retained source path used by the selected one-sided interval.
+    pub const fn source_path_index(self) -> usize {
+        self.source_path
     }
 }
 
@@ -140,7 +139,7 @@ pub struct PreparedPhaseConductivity<'a> {
     caloric: &'a EquilibriumEnthalpyPhaseCurve,
     knots: Vec<[f64; 2]>,
     intervals: Vec<Interval>,
-    source_lines: Vec<PropertyLineSlice>,
+    source_paths: Vec<PropertyPathSlice>,
     selected: ClaimId,
     identity: ContentHash,
 }
@@ -155,7 +154,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
     /// source switching and unrepresentable breakpoints/tangents refuse without
     /// publishing a partial law. Explicit constant-zero insulation is admitted;
     /// a zero k with nonzero selected tangent is outside the native implicit law.
-    /// Source-line admission is synchronous and individually bounded; cancellation
+    /// Source-path admission is synchronous and individually bounded; cancellation
     /// is checked around every query and at most every 256 retained source knots.
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -212,11 +211,41 @@ impl<'a> PreparedPhaseConductivity<'a> {
         if last - first >= MAX_PHASE_CONDUCTIVITY_KNOTS {
             return Err(DepositionError::Budget("phase conductivity caloric knots").into());
         }
+        let initial = point.at(caloric.state_at_specific_enthalpy(lo)?)?;
+        let answer = match selection {
+            ClaimSelection::Policy(policy) => {
+                point.material.claims().query_typed(key, &initial, policy)
+            }
+            ClaimSelection::Pinned(pin) => point
+                .material
+                .claims()
+                .query_pinned_typed(key, &initial, pin),
+        }
+        .map_err(|error| PropertySupportError::Evaluation {
+            point: initial.clone(),
+            error: Box::new(error),
+        })?;
+        let selected = answer.receipt.selected;
+        let requirement =
+            ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::NonNegative)
+                .map_err(ThermalMaterialError::Material)?;
+        let bundle = resolve_material_state_point(
+            point.material,
+            &initial,
+            &[requirement],
+            MaterialPropertySelection::PinnedByProperty(vec![(key.name().to_owned(), selected)]),
+        )
+        .map_err(ThermalMaterialError::Material)?;
+        point.admit_static(
+            bundle
+                .properties()
+                .first()
+                .ok_or(invalid("empty conductivity bundle"))?,
+        )?;
         let mut knots = Vec::new();
         let mut intervals = Vec::new();
-        let mut source_lines = Vec::new();
-        let mut selected = None;
-        let mut hash = DomainHasher::new("org.frankensim.fs-material.phase-conductivity.v1");
+        let mut source_paths = Vec::new();
+        let mut hash = DomainHasher::new("org.frankensim.fs-material.phase-conductivity.v2");
         hash.update(caloric.identity().as_bytes());
         for h in enthalpy_range_j_kg {
             hash.update(&h.to_bits().to_le_bytes());
@@ -225,15 +254,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
             checkpoint()?;
             let a = lo.max(pair[0].specific_enthalpy_j_kg);
             let b = hi.min(pair[1].specific_enthalpy_j_kg);
-            let changes_t = pair[0].temperature_k != pair[1].temperature_k;
             let changes_fraction = pair[0].liquid_mass_fraction != pair[1].liquid_mass_fraction;
-            if changes_t
-                && (changes_fraction || ![0.0, 1.0].contains(&pair[0].liquid_mass_fraction))
-            {
-                return Err(invalid(
-                    "temperature may vary only on a pure-phase segment; varying T and fraction needs a multidimensional source path",
-                ));
-            }
             if changes_fraction && point.liquid_fraction_axis.is_none() {
                 return Err(invalid(
                     "latent transport requires an explicitly evolving liquid mass fraction axis",
@@ -241,54 +262,17 @@ impl<'a> PreparedPhaseConductivity<'a> {
             }
             let lower = point.at(caloric.state_at_specific_enthalpy(a)?)?;
             let upper = point.at(caloric.state_at_specific_enthalpy(b)?)?;
-            let axis = if changes_fraction {
-                point.liquid_fraction_axis.unwrap_or(point.temperature_axis)
-            } else {
-                point.temperature_axis
-            };
-            let line = point.material.claims().query_line_typed(
-                key,
-                axis,
-                &lower,
-                &upper,
-                selected.map(ClaimSelection::Pinned).unwrap_or(selection),
-            )?;
+            let path = point
+                .material
+                .claims()
+                .query_path_pinned_typed(key, &lower, &upper, selected)?;
             checkpoint()?;
-            let answer = &line
-                .knots
-                .first()
-                .ok_or(invalid("empty conductivity source line"))?
-                .1;
-            if selected.is_none() {
-                selected = Some(answer.receipt.selected);
-                let requirement =
-                    ScalarPropertyRequirement::try_with_key(key, ScalarAdmissibility::NonNegative)
-                        .map_err(|error| ThermalMaterialError::Material(error))?;
-                let bundle = resolve_material_state_point(
-                    point.material,
-                    &lower,
-                    &[requirement],
-                    MaterialPropertySelection::PinnedByProperty(vec![(
-                        key.name().to_owned(),
-                        answer.receipt.selected,
-                    )]),
-                )
-                .map_err(|error| ThermalMaterialError::Material(error))?;
-                point.admit_static(
-                    bundle
-                        .properties()
-                        .first()
-                        .ok_or(invalid("empty conductivity bundle"))?,
-                )?;
-            }
             let temperature_slope = caloric.temperature_derivative_at_specific_enthalpy(a)?;
-            let x0 = lower.axes()[axis];
-            let x1 = upper.axes()[axis];
-            let line_index = source_lines.len();
-            hash.update(&(line_index as u64).to_le_bytes());
-            hash.update(&(line.knots.len() as u64).to_le_bytes());
+            let path_index = source_paths.len();
+            hash.update(&(path_index as u64).to_le_bytes());
+            hash.update(&(path.knots.len() as u64).to_le_bytes());
             let mut previous = None;
-            for (index, (x, answer)) in line.knots.iter().enumerate() {
+            for (index, (fraction, answer)) in path.knots.iter().enumerate() {
                 if index % 256 == 0 {
                     checkpoint()?;
                 }
@@ -301,10 +285,10 @@ impl<'a> PreparedPhaseConductivity<'a> {
                 hash.update(answer.receipt.content_hash().as_bytes());
                 let h = if index == 0 {
                     a
-                } else if index + 1 == line.knots.len() {
+                } else if index + 1 == path.knots.len() {
                     b
                 } else {
-                    (b - a).mul_add((*x - x0) / (x1 - x0), a)
+                    (b - a).mul_add(*fraction, a)
                 };
                 Self::append(
                     &mut knots,
@@ -312,22 +296,10 @@ impl<'a> PreparedPhaseConductivity<'a> {
                     &mut previous,
                     [h, k],
                     temperature_slope,
-                    line_index,
+                    path_index,
                 )?;
             }
-            // A phase-independent source may be constant on the entire latent
-            // interval. Retain both caloric endpoints even for one source point.
-            if line.knots.len() == 1 {
-                Self::append(
-                    &mut knots,
-                    &mut intervals,
-                    &mut previous,
-                    [b, line.knots[0].1.evidence.value.value],
-                    temperature_slope,
-                    line_index,
-                )?;
-            }
-            source_lines.push(line);
+            source_paths.push(path);
         }
         hash.update(&(knots.len() as u64).to_le_bytes());
         for (index, knot) in knots.iter().enumerate() {
@@ -349,8 +321,8 @@ impl<'a> PreparedPhaseConductivity<'a> {
             caloric,
             knots,
             intervals,
-            source_lines,
-            selected: selected.ok_or(invalid("empty caloric conductivity path"))?,
+            source_paths,
+            selected,
             identity: hash.finalize(),
         })
     }
@@ -361,7 +333,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
         previous: &mut Option<[f64; 2]>,
         knot: [f64; 2],
         temperature_slope: f64,
-        source_line: usize,
+        source_path: usize,
     ) -> Result<(), PhaseConductivityError> {
         if let Some(before) = *previous {
             let width = knot[0] - before[0];
@@ -379,7 +351,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
             intervals.push(Interval {
                 temperature_slope,
                 conductivity_slope: slope,
-                source_line,
+                source_path,
             });
         } else if let Some(last) = knots.last() {
             if last != &knot {
@@ -415,9 +387,9 @@ impl<'a> PreparedPhaseConductivity<'a> {
     pub fn knots(&self) -> &[[f64; 2]] {
         &self.knots
     }
-    /// Exact source lines and point receipts, in increasing caloric-interval order.
-    pub fn source_lines(&self) -> &[PropertyLineSlice] {
-        &self.source_lines
+    /// Exact source paths and point receipts, in increasing caloric-interval order.
+    pub fn source_paths(&self) -> &[PropertyPathSlice] {
+        &self.source_paths
     }
 
     /// Evaluate without allocation, hashing, source selection or extrapolation.
@@ -464,7 +436,7 @@ impl<'a> PreparedPhaseConductivity<'a> {
             conductivity: k,
             temperature_slope: interval.temperature_slope,
             conductivity_slope: interval.conductivity_slope,
-            source_line: interval.source_line,
+            source_path: interval.source_path,
         })
     }
 }

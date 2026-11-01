@@ -8557,10 +8557,12 @@ estimate or an audit for externally heated, reacting or moving-volume systems.
 
 `thermal::conduction::phase::PreparedPhaseConductivity` binds one selected
 scalar static conductivity claim to an explicit enthalpy interval of the original
-borrowed `EquilibriumEnthalpyPhaseCurve`. Pure-phase temperature paths and
-isothermal liquid-mass-fraction paths use the canonical source-line evaluator;
-every original source crossing and caloric knot is retained. The initial claim
-is pinned throughout. Caloric and conductivity sources share the same material
+borrowed `EquilibriumEnthalpyPhaseCurve`. Pure-phase, latent and solidus/liquidus
+paths use the canonical pinned source-path evaluator. Temperature and liquid
+mass fraction can evolve together, or temperature can change at a fixed mixed
+fraction. Every original crossed source cell/curve knot and caloric knot is
+retained. The claim selected at the initial state is pinned throughout; this
+does not select a new source at later states. Caloric and conductivity sources share the same material
 card and fixed external conditions. An evolving fraction requires a declared
 fraction axis, even for a phase-independent conductivity source.
 
@@ -8570,21 +8572,25 @@ Interior breakpoints use right derivatives and the admitted upper bound uses
 left derivatives. The caloric owner's public numeric sample supplies unchanged
 temperature, fraction and density without constructing a state identity. Runtime
 evaluation allocates nothing and performs no source query or hashing. Original
-source lines retain their receipts; compiled samples are numerical responses,
+source paths retain their receipts through `source_paths`; samples identify
+their original path with `source_path_index`. Compiled samples are numerical responses,
 not new measurements. A combined knot cap bounds preparation, with cancellation
 around source queries and during copying. Typed source/caloric failures remain
 available; native thermal traits retain their `MaterialDomain` refusal contract.
 
 The existing explicit observer and implicit chain/graph own storage, heat flux,
 time stepping and acceptance. No phase mixing rule, liquid fluid properties,
-reference-mass update or second thermal solver is introduced. Simultaneous T
-and fraction variation, sensible transport at a fixed mixed fraction, negative
-conductivity and unsupported source paths refuse. Explicit zero insulation is
+reference-mass update or second thermal solver is introduced. The same law's
+piecewise-affine derivative includes both T and fraction dependence through
+the original caloric segment. Negative conductivity and unsupported source
+paths refuse. Explicit zero insulation is
 admitted only with the zero tangent required by the native implicit owner.
 Constitutive regressions cover source crossings, one-sided tangents, original
-caloric values, insulation, source/domain refusals and cancelled preparation;
-cross-owner latent transport and contact tests live in `fs-couple`.
-
+caloric values, source-only material swaps, insulation, source/domain refusals
+and cancelled preparation. Cross-owner latent transport, finite hot-body
+solidus/liquidus transport and contact tests live in `fs-couple`; independent
+backward-Euler energy elimination supplies their finite-body heat oracle.
+The compiled-law identity domain is v2 for the generalized original source paths.
 
 ## Joint Voce hardening and Perzyna overstress
 

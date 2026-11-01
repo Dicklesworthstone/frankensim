@@ -30,6 +30,8 @@ use fs_thermal::enthalpy::*;
 const CENTER: CellId = CellId(17);
 const HOT: [CellId; 3] = [CellId(3), CellId(40), CellId(91)];
 
+mod mushy;
+
 fn provenance() -> Provenance {
     Provenance {
         source: "synthetic phase-conduction oracle, not measured data".into(),

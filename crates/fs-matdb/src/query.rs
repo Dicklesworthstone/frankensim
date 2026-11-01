@@ -36,6 +36,8 @@ use crate::{
 
 mod line;
 pub use line::{MAX_PROPERTY_LINE_KNOTS, PropertyLineSlice};
+mod path;
+pub use path::PropertyPathSlice;
 
 /// Semantic version of the portable property-usage receipt identity.
 ///

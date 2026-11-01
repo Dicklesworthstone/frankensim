@@ -14,6 +14,8 @@ use fs_thermal::enthalpy::conduction::ConductivityLaw;
 use fs_thermal::enthalpy::conduction::implicit::ImplicitConductionLaw;
 use fs_thermal::enthalpy::{DepositionError, ThermalLaw};
 
+mod mushy;
+
 fn claim(value: PropertyValue, fraction_bounds: [f64; 2]) -> PropertyClaim {
     PropertyClaim {
         key: PropertyKey::new("k", KD),
@@ -174,7 +176,7 @@ fn every_source_and_caloric_knot_survives_with_correct_one_sided_latent_tangents
             sample.conductivity_enthalpy_derivative_kg_w_m_k_j()
         );
         assert_eq!(native.temperature_slope_kg_k_j, dt);
-        assert!(sample.source_line_index() < path.source_lines().len());
+        assert!(sample.source_path_index() < path.source_paths().len());
     }
     let clipped = prepare(&card, &curve, [10.0, 100.0], || Ok(())).unwrap();
     assert_eq!(clipped.enthalpy_bounds_j_kg(), [10.0, 100.0]);
@@ -208,7 +210,7 @@ fn every_source_and_caloric_knot_survives_with_correct_one_sided_latent_tangents
         &path as *const PreparedPhaseConductivity<'_>
     ));
     assert!(
-        path.source_lines()
+        path.source_paths()
             .iter()
             .flat_map(|line| &line.knots)
             .all(|(_, answer)| answer.receipt.selected == path.selected_claim())
@@ -296,10 +298,14 @@ fn source_changes_holes_negative_interior_and_unowned_phase_paths_refuse() {
         ordinary.content_hash(),
         &[(0.0, 300.0, 0.0), (100.0, 800.0, 1.0)],
     );
-    assert!(matches!(
-        prepare(&ordinary, &mushy, [0.0, 100.0], || Ok(())),
-        Err(PhaseConductivityError::Invalid(_))
-    ));
+    let mushy_path = prepare(&ordinary, &mushy, [0.0, 100.0], || Ok(())).unwrap();
+    close(
+        mushy_path
+            .state_at_specific_enthalpy(40.0)
+            .unwrap()
+            .conductivity_w_m_k(),
+        2.4,
+    );
     let mixed_sensible = curve(
         ordinary.content_hash(),
         &[
@@ -309,10 +315,14 @@ fn source_changes_holes_negative_interior_and_unowned_phase_paths_refuse() {
             (100.0, 800.0, 1.0),
         ],
     );
-    assert!(matches!(
-        prepare(&ordinary, &mixed_sensible, [25.0, 50.0], || Ok(())),
-        Err(PhaseConductivityError::Invalid(_))
-    ));
+    let fixed_mixture = prepare(&ordinary, &mixed_sensible, [25.0, 50.0], || Ok(())).unwrap();
+    close(
+        fixed_mixture
+            .state_at_specific_enthalpy(40.0)
+            .unwrap()
+            .conductivity_w_m_k(),
+        2.5,
+    );
     let ordinary_chart = caloric(&ordinary);
     let missing_axis = PreparedPhaseConductivity::new(
         &ordinary_chart,

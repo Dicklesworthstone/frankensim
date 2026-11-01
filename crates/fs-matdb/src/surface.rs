@@ -13,6 +13,8 @@ use crate::{EvaluationDecision, InterpolationPolicy, MatDbError};
 
 mod differential;
 pub use differential::{PreparedSurfaceResponse, SurfaceDifferential};
+mod path;
+pub(crate) use path::segment_knots;
 
 /// Maximum samples in one two-coordinate material response.
 pub const MAX_SURFACE_SAMPLES: usize = 4_096;

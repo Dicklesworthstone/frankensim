@@ -42,6 +42,29 @@ affine planes, original value parity, cell orientation, edge/sample selection
 and unsupported source regions. Implicit material contact consumes both axis
 derivatives through the original caloric chain rule and thermal residual.
 
+## Simultaneous physical coordinates on an original source path
+
+`ClaimSet::query_path_pinned_typed` follows one explicitly selected scalar claim
+along an affine path between complete typed query points. `PropertyPathSlice`
+retains those endpoints and every original curve knot or crossed surface edge,
+parameterized from zero to one, with ordinary replayable point receipts. The
+caller owns source selection. Axis-aligned paths reuse `query_line_typed`;
+simultaneous coordinates use the same source cells and exact membership predicates.
+An original shared vertex/edge must connect the intersected cells from start to
+end. Rounded cut proximity never joins disconnected support or fills a hole.
+Point-only and discrete response support cannot become continuous support.
+
+Endpoint applicability covers the affine path within the selected claim's
+rectangular validity domain, not its surrounding multidimensional response box.
+Source bounds, quantity descriptors and pins remain authoritative. The existing
+surface/line limits bound preparation; unrepresentable or collapsed crossings
+refuse. This cold operation neither solves physics nor invents a mixture law,
+uncertainty propagation or floating-point enclosure. G0/G3 regressions cover
+two-coordinate cell crossings, direction/axis changes, vertex connectivity,
+disconnected cells, exact curve knots and complete-context refusals. The original
+enthalpy conductivity adapter consumes these paths through solidus/liquidus
+intervals without introducing another thermal solver.
+
 ## Purpose and layer
 
 "Real material properties" are NAMED CONDITIONS with uncertainty, not
