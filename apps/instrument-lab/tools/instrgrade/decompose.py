@@ -43,7 +43,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from descriptors import GraderRefusalError, fit_stiff_string_law, track_partials  # noqa: E402
 from instrgrade import GRADER_VERSION, SR, describe, distance, highpass, hz_of, load, midi_of, name_of, write_wav  # noqa: E402
 
-DECOMPOSE_VERSION = "decompose-1"
+DECOMPOSE_VERSION = "decompose-2"
 PREROLL_S = 0.010  # both signals are cut this long before the detected onset
 MAX_S = 3.0
 ALIGN_TOL_MS = 1.5
@@ -100,6 +100,7 @@ def floor_of_file(x, f0_hz, block=1 << 18):
     return floor_of(np.concatenate([highpass(x[i:i + block], f0_hz) for i in range(0, len(x), block)]))
 
 
+ONSET_HOP = 48  # env_rms_db's hop in samples (1 ms): the grid the onset crossings sit on
 STEADY_DROP_DB = 20.0  # the onset is where the envelope first reaches this far under the note's own steady level
 STEADY_FRAMES_DB = 40.0  # "sounding" frames for the steady level: within this of the loudest
 
@@ -119,6 +120,25 @@ def steady_level_db(e):
 
 def onset_times(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
     """(noise-floor crossing, steady-relative crossing) in seconds from the start of y; the onset is the later of the two.
+    Both are frame centres on the 1 ms analysis grid; see _onset_crossings() for the rules and onset_times_subframe() for the same two crossings
+    placed between frames."""
+    return _onset_crossings(y, floor_db, anchor_s, f0_hz, steady_db)[:2]
+
+
+def onset_times_subframe(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
+    """The same two crossings as onset_times(), placed BETWEEN the 1 ms analysis frames instead of on a frame centre.
+
+    The window that makes the envelope is slid one sample at a time over the WHOLE envelope, and the crossing is the first window start whose level is
+    over the threshold (for an anchored recording, found the way onset_times() finds it: from the anchor frame back to the last start under it). That is the
+    same definition at sample resolution, so the result moves with the signal sample for sample (nothing is interpolated, and there is no interpolation
+    error to bound). A short excursion between two grid frames is therefore seen, which a search limited to one hop would miss. If the fine envelope has no
+    crossing the grid crossing is kept.
+    """
+    return _onset_crossings(y, floor_db, anchor_s, f0_hz, steady_db)[2:]
+
+
+def _onset_crossings(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
+    """(ta, tb, ta_subframe, tb_subframe) in seconds from the start of y. ta and tb are what onset_times() has always returned.
 
     A: the envelope crosses floor + 12 dB.  B: it crosses (the signal's own steady level) - 20 dB, so a low priming
     step, a click or the skirt of a slow attack does not count and the same rule applies to a render and to a
@@ -142,30 +162,55 @@ def onset_times(y, floor_db, anchor_s=None, f0_hz=None, steady_db=None):
     if pk < floor_db + 20:
         raise OnsetMisaligned(f"IRPDECOMP_NO_SIGNAL: steady level {pk:.1f} dB is under floor {floor_db:.1f} dB + 20")
 
+    # The same envelope at a hop of ONE sample (window power at every start), for the sample-resolution crossings. The 1 ms grid frames are a subset of it.
+    cs = np.concatenate([[0.0], np.cumsum(y * y)])
+    nf = len(y) - env_window(f0_hz) + 1
+    # a difference of cumulative sums can come out slightly negative by rounding after loud earlier material: clamp it, or the log is NaN and reads as "under"
+    lev_f = 10 * np.log10(np.maximum(cs[env_window(f0_hz): env_window(f0_hz) + nf] - cs[:nf], 0.0) / env_window(f0_hz) + 1e-18)
+    t_f = (np.arange(nf) + env_window(f0_hz) / 2) / SR
+
+    def crossing_fine(th, grid_t):
+        """The crossing the way crossing() takes it, but on every window start instead of every 48th: the first start over th (no anchor), or walking back from
+        the anchor frame to the last start under th. Falls back to the grid crossing `grid_t` if the fine envelope has none."""
+        above = lev_f > th
+        if anchor_s is None:
+            idx = np.flatnonzero(above)
+            return float(t_f[idx[0]]) if len(idx) else grid_t
+        jf = min(n - 1, j0 + 25) * ONSET_HOP
+        if not above[jf]:
+            idx = np.flatnonzero(above[jf:])
+            return float(t_f[jf + idx[0]]) if len(idx) else grid_t
+        under = np.flatnonzero(~above[:jf])
+        return float(t_f[under[-1] + 1]) if len(under) else grid_t
+
     def crossing(th, strict):
         above = e > th
         if anchor_s is None:
             idx = np.flatnonzero(above)
-            return float(t[idx[0]]) if len(idx) else None
-        j = min(n - 1, j0 + 25)
-        if not above[j]:
-            idx = np.flatnonzero(above[j:])
-            return float(t[j + idx[0]]) if len(idx) else None
-        i = j
-        while i > 0 and above[i - 1]:
-            i -= 1
-        if i == 0:
-            if strict:
-                raise OnsetMisaligned(f"IRPDECOMP_NO_QUIET_BEFORE_ONSET: the level never falls under {th:.1f} dB before the note "
-                                      "(it begins legato on the previous note)")
-            return None
-        return float(t[i])
+            g = float(t[idx[0]]) if len(idx) else None
+        else:
+            j = min(n - 1, j0 + 25)
+            if not above[j]:
+                idx = np.flatnonzero(above[j:])
+                g = float(t[j + idx[0]]) if len(idx) else None
+            else:
+                i = j
+                while i > 0 and above[i - 1]:
+                    i -= 1
+                if i == 0:
+                    if strict:
+                        raise OnsetMisaligned(f"IRPDECOMP_NO_QUIET_BEFORE_ONSET: the level never falls under {th:.1f} dB before the note "
+                                              "(it begins legato on the previous note)")
+                    return None
+                g = float(t[i])
+        return None if g is None else (g, crossing_fine(th, g))
 
     tb = crossing(pk - STEADY_DROP_DB, True)
     ta = crossing(floor_db + 12.0, False)
     if tb is None:
         raise OnsetMisaligned("IRPDECOMP_NO_SIGNAL: the note never reaches its own steady window")
-    return (tb if ta is None else ta), tb
+    ta = tb if ta is None else ta
+    return ta[0], tb[0], ta[1], tb[1]
 
 
 def render_floor(y, f0_hz=None):
@@ -184,6 +229,10 @@ def render_floor(y, f0_hz=None):
 def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
     """High-pass with the note's corner, find the onset, cut `preroll_s` before it. Returns (y, info).
 
+    decompose-2: the cut is placed at the onset found at sample resolution (onset_times_subframe), not at the frame centre the 1 ms analysis grid gives.
+    Placed on the grid, the onset inside the cut kept up to 1 ms of the phase of the signal against that grid, which moved the cut's content and the
+    pair check's verdict with it. Placed at the sample-resolution onset, the onset inside the cut is `preroll_s` to within a sample or two at any phase.
+
     A signal that begins at its own onset (a render, or a reference window that starts at the file's first sample:
     `at_start`) is given silence to start from before detection, so that a plucked note's step edge is found by the
     same detector, with the same window, on the signal and on its cut. A window that starts in the middle of a
@@ -201,9 +250,10 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
         anchor_s = None if anchor_s is None else anchor_s + pad / SR
     pk = None
     for _ in range(4):
-        ta, tb = onset_times(y, floor_db, anchor_s, f0_hz, pk)
-        t_on = max(ta, tb)
-        a = a_in = int(round((t_on - pre) * SR))
+        ta, tb, sa0, sb0 = _onset_crossings(y, floor_db, anchor_s, f0_hz, pk)
+        t_on = max(ta, tb)  # on the 1 ms grid: what `onset_s` has always reported
+        tau = max(sa0, sb0)  # the same onset at sample resolution: where the cut is placed (decompose-2; decompose-1 cut at t_on, on the 1 ms grid)
+        a = a_in = int(round((tau - pre) * SR))
         ypad = y
         if a < 0:
             ypad, a = np.concatenate([np.zeros(-a), y]), 0
@@ -212,25 +262,40 @@ def align(raw, f0_hz, floor_db, anchor_s=None, at_start=False):
         if pk is not None and abs(pk_cut - pk) < 0.01:
             break
         pk = pk_cut
-    ra, rb = onset_times(cut, floor_db, None, f0_hz)
+    ra, rb, sa, sb = _onset_crossings(cut, floor_db, None, f0_hz)
     got = max(ra, rb)
-    if anchor_s is not None and abs(got - pre) * 1000 > ALIGN_TOL_MS:
+    got_sub = max(sa, sb)  # the same onset placed between frames: what the pair check compares (the grid value above is on a 1 ms grid)
+    if anchor_s is not None and abs(got_sub - pre) * 1000 > ALIGN_TOL_MS:
         # A recording's onset was found by walking back from the note to the last dip under the threshold. The first crossing of its cut
         # can be earlier: a touch, a click or a fret noise that reached the threshold, dropped back under it and was followed by the note
         # lies inside the lead-in (guitar Gb4/F5 and violin B5 were refused for it). Re-detect the way the onset was found, on the cut
         # given silence to start from (as above), and accept it only if that lands on the lead-in to the same tolerance.
         padc = int((pre + win / SR + 0.005) * SR)
         try:
-            ra, rb = onset_times(np.concatenate([np.zeros(padc), cut]), floor_db, padc / SR + pre, f0_hz, pk_cut)
+            ra, rb, sa, sb = _onset_crossings(np.concatenate([np.zeros(padc), cut]), floor_db, padc / SR + pre, f0_hz, pk_cut)
             got = max(ra, rb) - padc / SR
+            got_sub = max(sa, sb) - padc / SR
         except OnsetMisaligned:
             pass  # no better: the first-crossing miss below stands
-    if abs(got - pre) * 1000 > ALIGN_TOL_MS:
-        raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got * 1000:.2f} ms, expected {pre * 1000:.1f} ms")
+    # The per-side assertion reads the same sample-resolution onset the cut was placed by (decompose-2). Read on the 1 ms grid it would refuse a note whose grid
+    # crossing lags the true one by more than the tolerance (clarinet A4 and C5 on the site: 12.27 and 12.91 ms), which the grid-placed cut of decompose-1 hid.
+    if abs(got_sub - pre) * 1000 > ALIGN_TOL_MS:
+        raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: cut onset {got_sub * 1000:.2f} ms, expected {pre * 1000:.1f} ms")
     off = pad / SR
     return cut, dict(onset_s=float(t_on) - off, noise_criterion_s=float(ta) - off, peak_criterion_s=float(tb) - off,
                      criteria_spread_ms=float(abs(ta - tb) * 1000), floor_db=float(floor_db), cut_onset_s=float(got),
-                     cut_start_s=a_in / SR - off, preroll_s=pre)
+                     cut_onset_subframe_s=float(got_sub), cut_start_s=a_in / SR - off, preroll_s=pre)
+
+
+def onset_gap_ms(ours_info, real_info):
+    """(gap, grid_gap) in ms between the render's and the recording's onset in their cuts: the gap the pair check refuses on, and the old one.
+
+    The gap compares the onsets placed between frames (cut_onset_subframe_s). The grid gap compares the frame centres (cut_onset_s), which sit on a
+    1 ms grid and move in steps of 1 ms with the phase of the signal against that grid: it is kept for the record and no longer decides. An info that
+    has no sub-frame onset (one made by an earlier grader) falls back to the grid value on that side."""
+    def pick(info):
+        return info.get("cut_onset_subframe_s", info["cut_onset_s"])
+    return (abs(pick(ours_info) - pick(real_info)) * 1000, abs(ours_info["cut_onset_s"] - real_info["cut_onset_s"]) * 1000)
 
 
 # ------------------------------------------------------------------------------- time-frequency maps
@@ -1010,7 +1075,7 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
     real = Note(ref_y[:n], f0, ref_e["kind"], inh, "real", ref_info)
     ours = Note(cand_y[:n], f0, ref_e["kind"], inh, "ours", cand_info, max_cents=400.0) if cand_y is not None else None
     if ours is not None:
-        d_on = abs(ours.info["cut_onset_s"] - real.info["cut_onset_s"]) * 1000
+        d_on, _ = onset_gap_ms(ours.info, real.info)
         if d_on > ALIGN_TOL_MS:
             raise OnsetMisaligned(f"IRPDECOMP_ONSET_MISALIGNED: ours and real onsets are {d_on:.2f} ms apart after alignment")
     nf = min(real.frames, ours.frames) if ours else real.frames
@@ -1051,7 +1116,11 @@ def _write_pair_staged(stage, final, family, note_name, ref_e, refs, ref_y, ref_
                                    "equals the real recording's." if ours else "the real recording is otherwise untouched."))),
         alignment=dict(onset_real_s=ref_info["source_onset_s"], onset_ours_s=cand_info["onset_s"] if cand_info else None, highpass_hz=hp,
                        level_offset_db=off if ours else None, band_hz=refs.band_hz, preroll_ms=ref_info["preroll_s"] * 1000, tolerance_ms=ALIGN_TOL_MS,
-                       onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None)),
+                       onset_criteria_spread_ms=dict(real=ref_info["criteria_spread_ms"], ours=cand_info["criteria_spread_ms"] if cand_info else None),
+                       **(dict(onset_gap_ms=onset_gap_ms(ours.info, real.info)[0], onset_gap_grid_ms=onset_gap_ms(ours.info, real.info)[1],
+                               cut_onset_subframe_ms=dict(real=real.info.get("cut_onset_subframe_s", real.info["cut_onset_s"]) * 1000,
+                                                          ours=ours.info.get("cut_onset_subframe_s", ours.info["cut_onset_s"]) * 1000))
+                          if ours else {})),
         figures=figs, partials=parts, metrics=metrics,
         verdicts=verdict_counts(metrics) if ours else None,
         ruler_with={c: [r["with_"] for r in rs] for c, rs in ruler.items()},

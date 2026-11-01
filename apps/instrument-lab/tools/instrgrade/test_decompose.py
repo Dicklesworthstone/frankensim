@@ -686,10 +686,15 @@ class ContractTests(unittest.TestCase):
         y, info = self.refs.aligned(ref_e)
         raw = tone(f0=F0 * 2 ** (1 / 12), dur=2.4, lead=0.2)
         cy, ci = dc.align(raw, F0 * 2 ** (1 / 12), dc.render_floor(raw, F0 * 2 ** (1 / 12)))
-        ci = dict(ci, cut_onset_s=ci["cut_onset_s"] + 0.01)  # the render's onset sits 10 ms late in its own cut
+        # the render's onset sits 10 ms late in its own cut: planted on the grid onset and on the sub-frame onset the pair check compares
+        ci = dict(ci, cut_onset_s=ci["cut_onset_s"] + 0.01, cut_onset_subframe_s=ci["cut_onset_subframe_s"] + 0.01)
         meta = dict(wav="r.wav", git_sha="x", observer="o", sample_rate=48000, recipe="r.sh")
         with self.assertRaises(dc.OnsetMisaligned):
             dc.write_pair(self.tmp / "bad", "syn", "Bb3", ref_e, self.refs, y, info, cy, ci, meta)
+        # an info made by an earlier grader has no sub-frame onset: the grid onset decides on that side, as before
+        old = {k: v for k, v in ci.items() if k != "cut_onset_subframe_s"}
+        with self.assertRaises(dc.OnsetMisaligned):
+            dc.write_pair(self.tmp / "bad-old-info", "syn", "Bb3", ref_e, self.refs, y, info, cy, old, meta)
 
     def test_reference_only_run_never_replaces_a_graded_pair(self):
         root = self.tmp / "keep"
@@ -958,6 +963,148 @@ class ContractTests(unittest.TestCase):
         import json
         s = json.dumps(dc.clean({"a": float("nan"), "b": np.float32(1.5), "c": [np.inf]}), allow_nan=False)
         self.assertEqual(json.loads(s), {"a": None, "b": 1.5, "c": [None]})
+
+
+class SubframeOnsetTests(unittest.TestCase):
+    """The pair check's onset gap is measured between the 1 ms analysis frames (bead frankensim-grader-onset-subframe-zlv3e).
+
+    The envelope frames sit on a 1 ms grid, so a crossing taken at a frame centre moves in 1 ms steps with the phase of the signal against that grid.
+    The sub-frame crossing slides the same window one sample at a time over the whole envelope. Every expected value here is fixed by how the signal is
+    built: an edge moved by a number of samples, a delay planted on an aligned cut, a swell too steep for align()'s iteration to settle. decompose-2 places
+    the cut at the sample-resolution onset, so the onset inside a cut is the pre-roll to within a sample or two at every phase; the planted-delay test
+    states what a delay does to the pair check, and the swell test reaches the per-side refusal."""
+
+    SHIFTS = range(48)  # one analysis hop
+    ONE_SAMPLE_MS = 1000.0 / SR
+
+    @staticmethod
+    def edge(shift=0, attack=0.002):
+        """A tone with a 2 ms raised-cosine attack after 0.3 s of silence, the WHOLE waveform moved later by `shift` samples (zeros in front). Moving only the
+        edge would change the carrier phase at the edge, which moves an energy threshold crossing by itself."""
+        return np.concatenate([np.zeros(shift), tone(attack=attack, lead=0.3, dur=1.2)])
+
+    def test_onset_times_is_the_grid_part_of_the_crossings(self):
+        y = dc.highpass(self.edge(), F0)
+        ta, tb, sa, sb = dc._onset_crossings(y, -100.0, None, F0)
+        self.assertEqual((ta, tb), dc.onset_times(y, -100.0, None, F0))
+        self.assertEqual((sa, sb), dc.onset_times_subframe(y, -100.0, None, F0))
+        self.assertLessEqual(sb, tb)  # between the last frame under the threshold and the first over it
+        self.assertGreater(sb, tb - 0.001 - 1e-9)
+
+    def test_subframe_crossing_follows_the_edge_sample_for_sample_and_the_grid_one_does_not(self):
+        sub, grid = [], []
+        for sh in self.SHIFTS:
+            y = dc.highpass(self.edge(sh), F0)
+            ta, tb, sa, sb = dc._onset_crossings(y, -100.0, None, F0)
+            sub.append(sb - sh / SR)
+            grid.append(tb - sh / SR)
+        # moving the edge by sh samples moves the sub-frame crossing by sh samples (to within one sample) ...
+        self.assertLessEqual((max(sub) - min(sub)) * 1000, self.ONE_SAMPLE_MS + 1e-9)
+        # ... while the frame-centre crossing is off by up to a whole millisecond from the edge over one hop
+        self.assertGreater((max(grid) - min(grid)) * 1000, 0.5)
+
+    def test_align_keeps_the_grid_onset_and_adds_the_subframe_one(self):
+        for sh in (0, 11, 23, 47):
+            x = self.edge(sh)
+            floor = dc.render_floor(dc.highpass(x, F0), F0)
+            y, info = dc.align(x, F0, floor)
+            ra, rb = dc.onset_times(y, floor, None, F0)
+            self.assertEqual(info["cut_onset_s"], max(ra, rb))  # unchanged: re-detection on the cut, on the grid
+            self.assertLessEqual(info["cut_onset_subframe_s"], info["cut_onset_s"])
+            self.assertGreater(info["cut_onset_subframe_s"], info["cut_onset_s"] - 0.001 - 1e-9)
+
+    def test_gap_is_the_subframe_gap_and_the_grid_gap_is_kept_for_the_record(self):
+        ours = dict(cut_onset_s=0.0103, cut_onset_subframe_s=0.0091)
+        real = dict(cut_onset_s=0.0113, cut_onset_subframe_s=0.0104)
+        gap, grid = dc.onset_gap_ms(ours, real)
+        self.assertAlmostEqual(gap, 1.3, places=9)
+        self.assertAlmostEqual(grid, 1.0, places=9)
+        # an info from an earlier grader has no sub-frame onset: that side falls back to its grid onset
+        gap_old, _ = dc.onset_gap_ms({"cut_onset_s": 0.0103}, real)
+        self.assertAlmostEqual(gap_old, abs(0.0103 - 0.0104) * 1000, places=9)
+
+    def test_the_onset_inside_the_cut_is_the_preroll_at_every_phase(self):
+        # decompose-2 places the cut at the sample-resolution onset: the onset inside the cut is `preroll_s` to within a sample or two at every phase of
+        # the signal against the 1 ms grid. Placed on the grid (decompose-1) it was anywhere in the hop before it.
+        pre_ms = dc.preroll_s(F0) * 1000
+        subs = []
+        for sh in self.SHIFTS:
+            x = self.edge(sh)
+            _, info = dc.align(x, F0, dc.render_floor(dc.highpass(x, F0), F0))
+            subs.append(info["cut_onset_subframe_s"] * 1000)
+        self.assertLessEqual(max(abs(v - pre_ms) for v in subs), 2 * self.ONE_SAMPLE_MS + 1e-9, f"{min(subs):.3f}..{max(subs):.3f} ms")
+
+    def test_step_edge_crossing_is_recovered_within_a_sample_of_the_power_linear_window(self):
+        # A square wave has a constant instantaneous power, so the RMS window over a step edge is EXACTLY a linear ramp of the window start: with the edge at
+        # e0 (samples, fractional: the first sample carries the fraction a of the amplitude, so e0 = n0 + 1 - a^2) the window power is A^2 (s + W - e0) / W,
+        # and criterion B (steady - 20 dB, q = 1 %) is first over its threshold at the first window start s > e0 - W (1 - q). The centre of that window is
+        # the crossing. The bound is one sample: the start is an integer.
+        W = dc.env_window(F0)
+        q = 10.0 ** (-dc.STEADY_DROP_DB / 10.0)
+        A, n0 = 0.1, 14400
+        for a in (0.05, 0.3, 0.5, 0.7, 0.95):
+            for sh in (0, 7, 19, 31, 47):
+                n = int(1.0 * SR)
+                y = np.zeros(n)
+                half = 109  # square wave of period 218 samples
+                sq = A * np.where((np.arange(n - (n0 + sh)) // half) % 2 == 0, 1.0, -1.0)
+                y[n0 + sh:] = sq
+                y[n0 + sh] *= a
+                e0 = n0 + sh + 1 - a * a
+                s_min = math.floor(e0 - W * (1 - q)) + 1
+                want = (s_min + W / 2) / SR
+                _, _, _, sb = dc._onset_crossings(y, -120.0, None, F0)
+                self.assertAlmostEqual(sb, want, delta=1.0 / SR + 1e-9, msg=f"a={a} shift={sh}")
+                self.assertAlmostEqual(sb, (e0 - W / 2 + q * W) / SR, delta=1.0 / SR + 1e-9)  # and the closed form
+
+    def test_planted_delay_on_an_aligned_cut_is_judged_the_same_at_every_phase(self):
+        # align() cuts every signal at its own onset, so a delay of the RAW render is removed by design and cannot refuse. The phase of the raw render
+        # against the 1 ms grid is set first (0..47 samples), the render is aligned, and the delay is planted on the aligned cut.
+        floor = dc.render_floor(dc.highpass(self.edge(), F0), F0)
+        real_cut, real_info = dc.align(self.edge(), F0, floor)
+
+        def gaps(delay_ms):
+            out = []
+            for sh in self.SHIFTS:
+                y, _ = dc.align(self.edge(sh), F0, floor)
+                y = np.concatenate([np.zeros(int(round(delay_ms * SR / 1000))), y])
+                ra, rb, sa, sb = dc._onset_crossings(y, floor, None, F0)
+                out.append(dc.onset_gap_ms(dict(cut_onset_s=max(ra, rb), cut_onset_subframe_s=max(sa, sb)), real_info)[0])
+            return out
+
+        for delay, refused in ((0.0, False), (1.0, False), (1.7, True), (2.5, True)):
+            g = gaps(delay)
+            self.assertEqual({v > dc.ALIGN_TOL_MS for v in g}, {refused}, f"{delay} ms delay: gaps {min(g):.3f}..{max(g):.3f}")
+            self.assertTrue(all(abs(v - delay) <= 3 * self.ONE_SAMPLE_MS for v in g), f"{delay} ms delay: gaps {min(g):.3f}..{max(g):.3f}")
+
+
+    @staticmethod
+    def swell(slope_db_s, dur=6.0, t0=0.3):
+        """A tone whose level rises linearly in dB from t0 to the end of the signal (an exponential swell), 220 Hz with 11 harmonics."""
+        n = int(dur * SR)
+        t = np.arange(n) / SR
+        x = np.zeros(n)
+        on = t >= t0
+        env = 10.0 ** (slope_db_s * (t[on] - t0) / 20.0)
+        x[on] = env * sum(np.sin(2 * np.pi * k * F0 * t[on] + 0.3 * k) / k for k in range(1, 12))
+        return 0.2 * x / np.abs(x).max()
+
+    def test_a_swell_the_iteration_cannot_settle_on_is_refused_at_the_per_side_reading(self):
+        # The per-side assertion: after the cut is placed at the sample-resolution onset, the onset re-detected on the cut (and, for a recording, re-detected again by
+        # walking back from the anchor) must sit within ALIGN_TOL_MS of the pre-roll. Nothing is mocked: these are real notes through the real align().
+        # A level rising linearly in dB for longer than the 3 s cut has no steady level of its own: the median of the sounding frames follows where the cut ends, so
+        # every pass of align()'s four-pass iteration moves the cut by a fixed step, and a swell steeper than about 13 dB/s does not settle. A 14 dB/s swell lasting
+        # 6 s is refused (about 137 ms off the pre-roll, with or without an anchor, so the walk-back re-detection of a recording does not rescue it either); the
+        # same note at 10 dB/s converges and lands on the pre-roll to within a sample.
+        pre_ms = dc.preroll_s(F0) * 1000
+        for anchor in (None, 0.8):  # a render, then a recording with an anchor inside the rise (the walk-back re-detection runs)
+            steep, gentle = self.swell(14.0), self.swell(10.0)
+            with self.assertRaisesRegex(dc.OnsetMisaligned, r"IRPDECOMP_ONSET_MISALIGNED: cut onset -?[0-9.]+ ms, expected 10\.0 ms") as r:
+                dc.align(steep, F0, dc.render_floor(dc.highpass(steep, F0), F0), anchor_s=anchor)
+            off = float(str(r.exception).split("cut onset ")[1].split(" ms")[0])
+            self.assertGreater(abs(off - pre_ms), dc.ALIGN_TOL_MS, f"anchor {anchor}: refused at {off} ms")
+            _, info = dc.align(gentle, F0, dc.render_floor(dc.highpass(gentle, F0), F0), anchor_s=anchor)  # the control: within tolerance, so it is graded
+            self.assertLessEqual(abs(info["cut_onset_subframe_s"] * 1000 - pre_ms), dc.ALIGN_TOL_MS, f"anchor {anchor}")
 
 
 if __name__ == "__main__":
