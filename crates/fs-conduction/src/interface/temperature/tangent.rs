@@ -1,6 +1,7 @@
 //! Exact linearization of admitted per-face mean or two-sided contact laws.
-//! The original matching producer supplies its vertex correspondence and mass
-//! rule. This adds dK/dT * T; it does not replace K or finite-difference a solve.
+//! Matching faces retain their original mass rule. Nonmatching faces retain
+//! their common-refinement point samples. This adds dK/dT * T; it does not
+//! replace K, change the quadrature, or finite-difference a solve.
 
 use std::collections::BTreeMap;
 use fs_exec::Cx;
@@ -55,7 +56,7 @@ impl<'a> ContactCapacityLinearization<'a> {
         }
         let transport = self.step.pullback(cx, temperature_weights, mean_weights, heat_weights)?;
         let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
-            .matching_resistance_scale_pullback(
+            .resistance_scale_pullback(
                 cx, self.contact.temperature(), &transport.nodal_load, max_face_pairs,
             )?;
         Ok(ContactCapacityGradient { transport, resistance_multipliers })
@@ -235,19 +236,22 @@ impl TemperatureContacts<'_, '_> {
     /// a genuine source corner or thermal domain end refuses. Fixed external
     /// coordinates do not acquire artificial derivative requirements.
     ///
-    /// `max_face_pairs` bounds ALL fixed and variable faces. At most 36 extra
-    /// entries per variable pair are staged before sparse assembly; both
+    /// `max_face_pairs` bounds matching pairs plus overlap triangles. At most
+    /// 36 extra entries per matching pair or 108 per overlap triangle are staged;
+    /// both
     /// orientations and nodal action workspace have checked size products.
     /// This bound is not a measurement of allocator/source-card storage.
     pub fn linearize_temperature(
         &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperature: &[f64], max_face_pairs: usize,
     ) -> Result<ContactTemperatureLinearization, ConductionError> {
         poll(cx, 0)?;
-        let count = self.fixed.iter().try_fold(self.variable_pairs, |n, surface|
+        let base = self.variable_pairs.checked_add(self.nonmatching_triangles)
+            .ok_or_else(|| invalid("<contact-tangent>", "contact triangle count overflows"))?;
+        let count = self.fixed.iter().try_fold(base, |n, surface|
             n.checked_add(surface.face_pairs().len()))
             .ok_or_else(|| invalid("<contact-tangent>", "contact face allowance overflows"))?;
         let n = self.mesh.vertex_count();
-        if count > max_face_pairs || count.checked_mul(144 * 24)
+        if count > max_face_pairs || count.checked_mul(432 * 24)
             .and_then(|bytes| n.checked_mul(8 * 8).and_then(|nodes| bytes.checked_add(nodes)))
             .is_none_or(|bytes| bytes > isize::MAX as usize)
         {
@@ -270,9 +274,35 @@ impl TemperatureContacts<'_, '_> {
                 return Err(invalid(law.name(), "duplicate local contact derivative"));
             }
         }
-        let feedback = physical.interfaces.matching.temperature_feedback(
+        let matching_feedback = physical.interfaces.matching_integration().temperature_feedback(
             cx, temperature, &partials, max_face_pairs,
         )?;
+        let feedback=if physical.quadrature_states().is_empty() {matching_feedback} else {
+            let mut local=BTreeMap::<&str,Vec<[f64;2]>>::new();
+            for (i,state) in physical.quadrature_states().iter().enumerate() {
+                poll(cx,i)?;
+                let (law,response)=responses.get(state.interface.as_str())
+                    .ok_or_else(||invalid("<contact-tangent>","quadrature state lost its source owner"))?;
+                let entries=local.entry(state.interface.as_str()).or_default();
+                if state.quadrature_index!=entries.len() {
+                    return Err(invalid(law.name(),"quadrature derivative order differs from the retained physical rule"));
+                }
+                entries.push(law.temperature_partials(cx,
+                    [state.side_a_temperature_k,state.side_b_temperature_k],response)?);
+            }
+            let mut coo=Coo::new(n,n);
+            for row in 0..n {
+                if row%256==0 {poll(cx,row)?;}
+                let (columns,values)=matching_feedback.row(row);
+                for (&column,&value) in columns.iter().zip(values) {coo.push(row,column,value);}
+            }
+            for surface in &physical.interfaces.nonmatching {
+                if let Some(partials)=local.get(surface.name.as_str()) {
+                    surface.temperature_feedback(cx,temperature,partials,&mut coo)?;
+                }
+            }
+            coo.assemble()
+        };
         let mut coo = Coo::new(n, n);
         physical.interfaces.assemble_into(cx, &mut coo)?;
         let frozen = coo.assemble();

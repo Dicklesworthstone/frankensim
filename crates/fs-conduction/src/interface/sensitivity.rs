@@ -18,6 +18,45 @@ pub struct ContactResistanceGradient {
 }
 
 impl ThermalInterfaces {
+    /// Whole-law multipliers on a complete mixed matching/nonmatching contact
+    /// operator. The supplied dual must already include every temperature-law
+    /// feedback term. Each nonmatching patch contracts its original common
+    /// quadrature, including its exact subpatches, exactly once. Geometry,
+    /// source selection and nonthermal coordinates stay fixed.
+    ///
+    /// The work allowance counts matching pairs plus retained overlap triangles.
+    /// For a pointwise law, mapped is true and face_pairs reports that patch's
+    /// retained triangle count. No new material-source authority is inferred.
+    pub fn resistance_scale_pullback(
+        &self,cx:&Cx<'_>,temperature:&[f64],nodal_load_adjoint:&[f64],max_face_pairs:usize,
+    )->Result<Vec<ContactResistanceGradient>,ConductionError> {
+        poll(cx,0)?;
+        if self.nonmatching.is_empty() {
+            return self.matching.resistance_scale_pullback(cx,temperature,nodal_load_adjoint,max_face_pairs);
+        }
+        if temperature.len()!=nodal_load_adjoint.len() {
+            return Err(error("contact controls require primal and dual fields with equal lengths"));
+        }
+        let count=self.nonmatching.iter().try_fold(0usize,|n,s|n.checked_add(s.triangle_count()))
+            .ok_or_else(||error("contact triangle count overflows"))?;
+        let remaining=max_face_pairs.checked_sub(count)
+            .ok_or_else(||error("contact controls exceed the trace-element allowance"))?;
+        let names=self.nonmatching.iter().map(|s|s.name.clone()).collect();
+        let matching=self.matching.excluding(&names);
+        let mut result=matching.resistance_scale_pullback(cx,temperature,nodal_load_adjoint,remaining)?;
+        result.try_reserve_exact(self.nonmatching.len()).map_err(|_|error("contact gradient allocation refused"))?;
+        for (index,surface) in self.nonmatching.iter().enumerate() {
+            poll(cx,index)?;
+            result.push(ContactResistanceGradient {interface:surface.name.clone(),
+                derivative:surface.log_resistance_pullback(cx,temperature,nodal_load_adjoint)?,
+                card_identity:surface.representative_resistance().card_identity(),
+                mapped:surface.is_mapped(),face_pairs:surface.triangle_count()});
+        }
+        result.sort_by(|a,b|a.interface.cmp(&b.interface));
+        poll(cx,count)?;
+        Ok(result)
+    }
+
     /// Contract complete nodal-load adjoints with all matching contact controls.
     ///
     /// For R''_face -> s R''_face at s=1, dK_contact/ds = -K_contact and

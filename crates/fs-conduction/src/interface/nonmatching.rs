@@ -9,6 +9,7 @@
 //! mode and equal/opposite heat. Floating-point geometry/coverage tests are
 //! explicitly tolerance-based, not certified intersection predicates.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 use fs_exec::Cx;
 use fs_sparse::Coo;
 use crate::{ConductionError, ConductionMesh, ThermalBoundary};
@@ -163,6 +164,7 @@ impl Face {
 
 #[derive(Debug, Clone, PartialEq)]
 struct Stencil {
+    pair: super::InterfaceFacePair,
     vertices: [usize; 6],
     /// Index of the original A face in its retained resistance map.
     resistance_index: usize,
@@ -187,8 +189,10 @@ impl Stencil {
 pub(super) struct Bound {
     pub(super) name: String,
     resistances: ResistanceField,
-    faces: Vec<Face>,
-    stencils: Vec<Stencil>,
+    faces: Arc<[Face]>,
+    stencils: Arc<[Stencil]>,
+    // Pointwise source answers use these same immutable geometric stencils.
+    quadrature_resistances: Option<Vec<[InterfaceResistance; 3]>>,
 }
 
 impl Bound {
@@ -286,7 +290,8 @@ impl Bound {
                     return Err(error(name,"contact quadrature weight or conductance underflow"));
                 }
                 let key = (left.slot.min(right.slot),left.slot.max(right.slot));
-                stencils.push(Stencil { vertices:[left.ids[0],left.ids[1],left.ids[2],right.ids[0],right.ids[1],right.ids[2]],
+                stencils.push(Stencil { pair:super::InterfaceFacePair { side_a:left.slot, side_b:right.slot },
+                    vertices:[left.ids[0],left.ids[1],left.ids[2],right.ids[0],right.ids[1],right.ids[2]],
                     resistance_index, basis, weight_m2, delegated:exact.contains(&key) });
             }
         } }
@@ -298,11 +303,12 @@ impl Bound {
         }
         poll(cx,at)?;
         Ok(Self { name:name.clone(), resistances:surface.resistances.clone(),
-            faces:a.into_iter().chain(b).collect(), stencils })
+            faces:a.into_iter().chain(b).collect::<Vec<_>>().into(), stencils:stencils.into(),
+            quadrature_resistances:None })
     }
 
     pub(super) fn validate_for(&self, mesh: &ConductionMesh, boundary: &ThermalBoundary) -> Result<(),ConductionError> {
-        for face in &self.faces {
+        for face in self.faces.iter() {
             if !face.same_bits(&Face::read(mesh,boundary,face.slot,&self.name)?) {
                 return Err(error(&self.name,"nonmatching contact mesh changed after binding"));
             }
@@ -312,9 +318,10 @@ impl Bound {
     pub(super) fn assemble_into(&self,cx:&Cx<'_>,coo:&mut Coo)->Result<(),ConductionError> {
         for (index,stencil) in self.stencils.iter().enumerate() {
             poll(cx,index)?;
-            if stencil.delegated {continue;}
-            let g=1.0/self.resistances.at(stencil.resistance_index).value_m2_k_per_w();
-            for q in &stencil.basis { for i in 0..6 { for j in i..6 {
+            if stencil.delegated && self.quadrature_resistances.is_none() {continue;}
+            for (point,q) in stencil.basis.iter().enumerate() {
+                let g=1.0/self.resistance_at(index,point).value_m2_k_per_w();
+                for i in 0..6 { for j in i..6 {
                 let value=finite((g*stencil.weight_m2)*(q[i]*q[j]),&self.name)?;
                 coo.push(stencil.vertices[i],stencil.vertices[j],value);
                 if i!=j {coo.push(stencil.vertices[j],stencil.vertices[i],value);}
@@ -323,7 +330,7 @@ impl Bound {
         Ok(())
     }
     fn check_field(&self,values:&[f64])->Result<(),ConductionError> {
-        for face in &self.faces { for vertex in face.vertices {
+        for face in self.faces.iter() { for vertex in face.vertices {
             if vertex>=values.len() || !values[vertex].is_finite() {
                 return Err(error(&self.name,"contact field has missing or nonfinite trace entries"));
             }
@@ -334,11 +341,11 @@ impl Bound {
     pub(super) fn flux(&self,values:&[f64])->Result<Option<InterfaceFlux>,ConductionError> {
         self.check_field(values)?;
         let mut area=0.0; let mut heat=0.0; let mut conductance=0.0;
-        let uniform=self.resistances.uniform_conductance();
-        for stencil in &self.stencils {
-            if stencil.delegated {continue;}
-            let g=1.0/self.resistances.at(stencil.resistance_index).value_m2_k_per_w();
-            for q in &stencil.basis {
+        let uniform=if self.quadrature_resistances.is_some() {None} else {self.resistances.uniform_conductance()};
+        for (index,stencil) in self.stencils.iter().enumerate() {
+            if stencil.delegated && self.quadrature_resistances.is_none() {continue;}
+            for (point,q) in stencil.basis.iter().enumerate() {
+                let g=1.0/self.resistance_at(index,point).value_m2_k_per_w();
                 area=finite(area+stencil.weight_m2,&self.name)?;
                 heat=finite(heat+g*stencil.weight_m2*stencil.jump(values,q),&self.name)?;
                 if uniform.is_none() {conductance=finite(conductance+g*stencil.weight_m2,&self.name)?;}
@@ -348,7 +355,7 @@ impl Bound {
         // Preserve the original uniform arithmetic, including constant maps.
         let conductance=finite(uniform.map_or(conductance,|g|area*g),&self.name)?;
         if conductance<=0.0 {return Err(error(&self.name,"contact conductance underflow"));}
-        let representative=self.resistances.representative();
+        let representative=self.representative_resistance();
         Ok(Some(InterfaceFlux {interface:self.name.clone(),area_m2:area,
             conductance_w_per_k:conductance,mean_jump_k:finite(heat/conductance,&self.name)?,
             heat_rate_a_to_b_w:heat,card_identity:representative.card_identity(),receipt:representative.receipt().clone()}))
@@ -359,19 +366,89 @@ impl Bound {
         let mut result=0.0;
         for (index,stencil) in self.stencils.iter().enumerate() {
             poll(cx,index)?;
-            let g=1.0/self.resistances.at(stencil.resistance_index).value_m2_k_per_w();
-            for q in &stencil.basis {
+            for (point,q) in stencil.basis.iter().enumerate() {
+                let g=1.0/self.resistance_at(index,point).value_m2_k_per_w();
                 result=finite(result+g*stencil.weight_m2*stencil.jump(temperature,q)*stencil.jump(lambda,q),&self.name)?;
             }
         }
         Ok(result)
     }
     pub(super) fn resistances(&self)->Vec<f64> {
+        if let Some(values)=&self.quadrature_resistances {
+            return values.iter().flatten().map(InterfaceResistance::value_m2_k_per_w).collect();
+        }
         self.stencils.iter().map(|stencil|self.resistances.at(stencil.resistance_index).value_m2_k_per_w()).collect()
     }
-    pub(super) fn is_mapped(&self)->bool { self.resistances.mapped() }
+    pub(super) fn is_mapped(&self)->bool { self.quadrature_resistances.is_some() || self.resistances.mapped() }
     pub(super) fn resistance_sources(&self)->Option<&[(usize,InterfaceResistance)]> { self.resistances.sources() }
-    pub(super) fn representative_resistance(&self)->&InterfaceResistance { self.resistances.representative() }
+    pub(super) fn representative_resistance(&self)->&InterfaceResistance {
+        self.quadrature_resistances.as_ref().and_then(|values|values.first())
+            .map_or_else(||self.resistances.representative(),|values|&values[0])
+    }
+
+    fn resistance_at(&self, triangle:usize, point:usize)->&InterfaceResistance {
+        self.quadrature_resistances.as_ref().map_or_else(
+            ||self.resistances.at(self.stencils[triangle].resistance_index), |values|&values[triangle][point])
+    }
+
+    pub(super) fn triangle_count(&self)->usize {self.stencils.len()}
+
+    pub(super) fn at_quadrature(&self,cx:&Cx<'_>,temperature:&[f64],
+        mut query:impl FnMut(super::InterfaceFacePair,usize,f64,[f64;2])->Result<InterfaceResistance,ConductionError>)
+        ->Result<Self,ConductionError> {
+        self.check_field(temperature)?;
+        let mut values=Vec::new();
+        values.try_reserve_exact(self.stencils.len()).map_err(|_|error(&self.name,"quadrature source allocation refused"))?;
+        for (index,stencil) in self.stencils.iter().enumerate() {
+            poll(cx,index)?;
+            let v=stencil.vertices;
+            let mut sample=|point:usize|->Result<InterfaceResistance,ConductionError> {
+                let q=stencil.basis[point];
+                let a=finite(temperature[v[0]]+q[1]*(temperature[v[1]]-temperature[v[0]])
+                    +q[2]*(temperature[v[2]]-temperature[v[0]]),&self.name)?;
+                let b=finite(temperature[v[3]]-q[4]*(temperature[v[4]]-temperature[v[3]])
+                    -q[5]*(temperature[v[5]]-temperature[v[3]]),&self.name)?;
+                let resistance=query(stencil.pair,index*3+point,stencil.weight_m2,[a,b])?;
+                let g=1.0/resistance.value_m2_k_per_w();
+                if !g.is_finite() || g<=0.0 || !(g*stencil.weight_m2).is_finite()
+                    || g*stencil.weight_m2<=0.0 {
+                    return Err(error(&self.name,"quadrature contact conductance is unrepresentable"));
+                }
+                Ok(resistance)
+            };
+            values.push([sample(0)?,sample(1)?,sample(2)?]);
+        }
+        let mut result=self.clone();
+        result.quadrature_resistances=Some(values);
+        Ok(result)
+    }
+
+    /// dK(T)/dT * T at the SAME point samples as the frozen weak form.
+    /// The signed test trace shares a common scalar heat, so its columns sum
+    /// to zero. This is generally nonsymmetric; the caller retains its transpose.
+    pub(super) fn temperature_feedback(&self,cx:&Cx<'_>,temperature:&[f64],
+        partials:&[[f64;2]],coo:&mut Coo)->Result<(),ConductionError> {
+        self.check_field(temperature)?;
+        if self.quadrature_resistances.is_none() || self.stencils.len().checked_mul(3)!=Some(partials.len()) {
+            return Err(error(&self.name,"quadrature contact partials do not match the retained physical samples"));
+        }
+        for (index,stencil) in self.stencils.iter().enumerate() {
+            poll(cx,index)?;
+            for (point,q) in stencil.basis.iter().enumerate() {
+                let g=1.0/self.resistance_at(index,point).value_m2_k_per_w();
+                let load=finite(finite(g*stencil.weight_m2,&self.name)?*stencil.jump(temperature,q),&self.name)?;
+                let derivatives=partials[index*3+point];
+                for j in 0..6 {
+                    let source_weight=if j<3 {derivatives[0]*q[j]} else {-derivatives[1]*q[j]};
+                    let factor=finite(finite(-g*source_weight,&self.name)?*load,&self.name)?;
+                    for i in 0..6 {
+                        coo.push(stencil.vertices[i],stencil.vertices[j],finite(q[i]*factor,&self.name)?);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
 }
 
 struct Triangle {points:[[f64;2];3],ids:[usize;3],slot:usize,area:f64}

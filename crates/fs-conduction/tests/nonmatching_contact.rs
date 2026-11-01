@@ -1,5 +1,7 @@
 //! Different trace meshes, one physical interface: no nodal averaging oracle.
 mod support;
+#[path = "nonmatching_contact/temperature.rs"]
+mod temperature;
 use support::with_cx;
 use fs_conduction::*;
 use fs_conduction::fixtures::{box_grid,on_box_face};

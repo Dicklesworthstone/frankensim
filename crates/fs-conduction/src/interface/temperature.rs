@@ -16,29 +16,42 @@ use fs_matdb::{InterfaceSystemCard, QueryPoint, SelectionPolicy};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 use fs_qty::{QuantitySpec, Temperature};
 
-use super::{InterfaceFacePair, InterfaceResistance, InterfaceSurface, ThermalInterfaces};
+use super::{InterfaceFacePair, InterfaceResistance, InterfaceSurface, NonmatchingOptions,
+    NonmatchingSurface, ThermalInterfaces};
 use crate::{ConductionError, ConductionMesh, ThermalBoundary};
 
-/// Thermal coordinates owned by a matching-contact source law.
+/// Thermal coordinates owned by a contact source law. Matching contacts use
+/// face means; nonmatching contacts use both traces at each common quadrature point.
 ///
 /// Face-pair A/B order is the source card's declared surface order. A reversal
 /// of the physical interface must reverse both the face assignment and the
 /// corresponding source coordinates; the solver never sorts the two sides.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TemperatureContactCoordinates {
-    /// One source axis follows (mean trace A + mean trace B)/2.
+    /// One source axis follows (trace A + trace B)/2 at the declared samples.
     Mean(String),
-    /// Separate source axes follow the independent mean traces in A/B order.
+    /// Separate source axes follow the independent traces in A/B order.
     TwoSided([String; 2]),
 }
 
-/// A named matching surface and one source law, selected once at a reference point.
+#[derive(Debug, Clone)]
+enum ContactSurface {
+    Matching(InterfaceSurface),
+    Nonmatching(NonmatchingSurface),
+}
+
+enum ContactFaces {
+    Matching(Vec<InterfaceFacePair>),
+    Nonmatching { side_a:Vec<usize>, side_b:Vec<usize>, options:NonmatchingOptions },
+}
+
+/// A named surface and one source law, selected once at a reference point.
 #[derive(Debug, Clone)]
 pub struct TemperatureContact<'a> {
     card: &'a InterfaceSystemCard,
     reference_point: QueryPoint,
     coordinates: TemperatureContactCoordinates,
-    reference: InterfaceSurface,
+    reference: ContactSurface,
     resistance: InterfaceResistance,
 }
 
@@ -55,7 +68,7 @@ impl<'a> TemperatureContact<'a> {
         temperature_axis: &str,
         selection: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
-        Self::bind(name.into(), face_pairs, card, point,
+        Self::bind(name.into(), ContactFaces::Matching(face_pairs), card, point,
             TemperatureContactCoordinates::Mean(temperature_axis.into()), selection)
     }
 
@@ -74,13 +87,29 @@ impl<'a> TemperatureContact<'a> {
         temperature_axes: [&str; 2],
         selection: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
-        Self::bind(name.into(), face_pairs, card, point,
+        Self::bind(name.into(), ContactFaces::Matching(face_pairs), card, point,
             TemperatureContactCoordinates::TwoSided(temperature_axes.map(String::from)), selection)
+    }
+
+    /// Bind a local source law to two independently triangulated planar traces.
+    /// Each retained three-point, degree-two overlap rule queries the original
+    /// source at both P1 temperatures at the SAME physical point. The nonlinear
+    /// reciprocal law is quadrature-approximated, not integrated exactly or
+    /// replaced by a face-mean source. Geometry/work policies remain explicit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_nonmatching(
+        name:impl Into<String>, side_a:Vec<usize>, side_b:Vec<usize>,
+        card:&'a InterfaceSystemCard, point:&QueryPoint,
+        coordinates:TemperatureContactCoordinates, selection:SelectionPolicy,
+        options:NonmatchingOptions,
+    )->Result<Self,ConductionError> {
+        Self::bind(name.into(),ContactFaces::Nonmatching{side_a,side_b,options},
+            card,point,coordinates,selection)
     }
 
     fn bind(
         name: String,
-        face_pairs: Vec<InterfaceFacePair>,
+        faces: ContactFaces,
         card: &'a InterfaceSystemCard,
         point: &QueryPoint,
         coordinates: TemperatureContactCoordinates,
@@ -108,7 +137,11 @@ impl<'a> TemperatureContact<'a> {
             }
         }
         let resistance = InterfaceResistance::from_card(&name, card, point, selection)?;
-        let reference = InterfaceSurface::new(name, face_pairs, resistance.clone())?;
+        let reference = match faces {
+            ContactFaces::Matching(pairs)=>ContactSurface::Matching(InterfaceSurface::new(name,pairs,resistance.clone())?),
+            ContactFaces::Nonmatching{side_a,side_b,options}=>ContactSurface::Nonmatching(
+                NonmatchingSurface::new(name,side_a,side_b,resistance.clone(),options)?),
+        };
         Ok(Self {
             card, reference_point: point.clone(), coordinates,
             reference, resistance,
@@ -117,7 +150,10 @@ impl<'a> TemperatureContact<'a> {
 
     /// Stable interface name, retaining the ordered card's surface convention.
     #[must_use]
-    pub fn name(&self) -> &str { self.reference.name() }
+    pub fn name(&self) -> &str {
+        match &self.reference {ContactSurface::Matching(surface)=>surface.name(),
+            ContactSurface::Nonmatching(surface)=>&surface.name}
+    }
     /// Original query including fixed pressure and all other source conditions.
     #[must_use]
     pub fn reference_point(&self) -> &QueryPoint { &self.reference_point }
@@ -177,6 +213,26 @@ pub struct ContactFaceState {
 pub struct TemperatureContactEvaluation {
     interfaces: ThermalInterfaces,
     states: Vec<ContactFaceState>,
+    quadrature_states:Vec<ContactQuadratureState>,
+}
+
+/// One physical common-refinement quadrature query, with its original A/B roles.
+#[derive(Debug,Clone,PartialEq)]
+pub struct ContactQuadratureState {
+    /// Named physical interface.
+    pub interface:String,
+    /// Ordered original boundary-face slots containing this common point.
+    pub pair:InterfaceFacePair,
+    /// Canonical triangle/point index within this named interface.
+    pub quadrature_index:usize,
+    /// Positive physical area weight of this integration point, m².
+    pub weight_m2:f64,
+    /// Interpolated P1 surface temperature on the original A trace, K.
+    pub side_a_temperature_k:f64,
+    /// Interpolated P1 surface temperature on the original B trace, K.
+    pub side_b_temperature_k:f64,
+    /// Original selected source evaluated at these local coordinates.
+    pub resistance:InterfaceResistance,
 }
 
 impl TemperatureContactEvaluation {
@@ -187,17 +243,25 @@ impl TemperatureContactEvaluation {
     /// Source-backed state for each temperature-dependent face pair.
     #[must_use]
     pub fn states(&self) -> &[ContactFaceState] { &self.states }
+    /// Pointwise nonmatching source states, including exactly coincident pieces.
+    /// These are actual source queries; a surface aggregate uses only a
+    /// representative receipt and does not invent an averaged material claim.
+    #[must_use]
+    pub fn quadrature_states(&self)->&[ContactQuadratureState] {&self.quadrature_states}
 }
 
-/// Complete matching-contact set, including any unchanged constant interfaces.
-/// Geometry is checked at construction. Rebinding reuses the original mesh,
-/// source cards and paired faces; it never substitutes perfect contact.
+/// Complete contact set, including any unchanged constant interfaces.
+/// Geometry is checked once. Frozen trials reuse retained common-refinement
+/// stencils, original cards and ordered traces; they never re-intersect meshes.
 #[derive(Debug)]
 pub struct TemperatureContacts<'m, 'c> {
     mesh: &'m ConductionMesh,
     fixed: Vec<InterfaceSurface>,
     variable: Vec<TemperatureContact<'c>>,
     variable_pairs: usize,
+    reference:ThermalInterfaces,
+    nonmatching_triangles:usize,
+    variable_quadrature_points:usize,
 }
 
 impl<'m, 'c> TemperatureContacts<'m, 'c> {
@@ -209,15 +273,35 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         mesh: &'m ConductionMesh,
         boundary: &ThermalBoundary,
         fixed: Vec<InterfaceSurface>,
-        mut variable: Vec<TemperatureContact<'c>>,
+        variable: Vec<TemperatureContact<'c>>,
         max_face_pairs: usize,
     ) -> Result<Self, ConductionError> {
+        if variable.iter().any(|law|matches!(law.reference,ContactSurface::Nonmatching(_))) {
+            return Err(invalid("<contact-set>","nonmatching laws require an explicit common-quadrature allowance"));
+        }
+        Self::with_nonmatching(cx,mesh,boundary,fixed,Vec::new(),variable,max_face_pairs,0)
+    }
+
+    /// Bind matching and nonmatching laws with independent trace-work limits.
+    /// max_face_pairs bounds matching pairs plus retained overlap triangles;
+    /// max_quadrature_points bounds all nonmatching samples, including fixed
+    /// patches. Each planar surface also retains its own geometry-work policy.
+    /// Exact pieces of variable nonmatching laws stay on the pointwise rule;
+    /// they are admitted by the original matching owner but assembled once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_nonmatching(
+        cx:&Cx<'_>,mesh:&'m ConductionMesh,boundary:&ThermalBoundary,
+        fixed:Vec<InterfaceSurface>,mut fixed_nonmatching:Vec<NonmatchingSurface>,
+        mut variable:Vec<TemperatureContact<'c>>,max_face_pairs:usize,max_quadrature_points:usize,
+    )->Result<Self,ConductionError> {
         poll(cx, 0)?;
-        if variable.is_empty() || fixed.len().checked_add(variable.len()).is_none_or(|n| n > 64) {
+        if variable.is_empty() || fixed.len().checked_add(variable.len())
+            .and_then(|n|n.checked_add(fixed_nonmatching.len())).is_none_or(|n| n > 64) {
             return Err(invalid("<contact-set>", "one to 64 interfaces and at least one temperature law are required"));
         }
         let mut count = 0usize;
-        for surface in fixed.iter().chain(variable.iter().map(|law| &law.reference)) {
+        for surface in fixed.iter().chain(variable.iter().filter_map(|law|match &law.reference {
+            ContactSurface::Matching(surface)=>Some(surface),ContactSurface::Nonmatching(_)=>None})) {
             poll(cx, count)?;
             count = count.checked_add(surface.face_pairs().len())
                 .ok_or_else(|| invalid("<contact-set>", "contact face count overflows"))?;
@@ -226,14 +310,28 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
             }
         }
         variable.sort_by(|a, b| a.name().cmp(b.name()));
-        let variable_pairs = variable.iter().map(|law| law.reference.face_pairs().len()).sum();
+        let variable_pairs = variable.iter().filter_map(|law|match &law.reference {
+            ContactSurface::Matching(surface)=>Some(surface.face_pairs().len()),ContactSurface::Nonmatching(_)=>None}).sum();
         let mut all = fixed.clone();
-        all.extend(variable.iter().map(|law| law.reference.clone()));
+        for law in &variable {match &law.reference {
+            ContactSurface::Matching(surface)=>all.push(surface.clone()),
+            ContactSurface::Nonmatching(surface)=>fixed_nonmatching.push(surface.clone()),
+        }}
         // The original owner rejects missing, duplicated, shared-node,
         // noncoincident and externally occupied contact faces.
-        ThermalInterfaces::new(mesh, boundary, all)?;
+        let reference=if fixed_nonmatching.is_empty() {ThermalInterfaces::new(mesh,boundary,all)?}
+            else {ThermalInterfaces::with_nonmatching(cx,mesh,boundary,all,fixed_nonmatching)?};
+        let nonmatching_triangles=reference.nonmatching.iter().try_fold(0usize,|n,s|
+            n.checked_add(s.triangle_count())).ok_or_else(||invalid("<contact-set>","overlap-triangle count overflows"))?;
+        if count.checked_add(nonmatching_triangles).is_none_or(|n|n>max_face_pairs)
+            || nonmatching_triangles.checked_mul(3).is_none_or(|n|n>max_quadrature_points
+                || n.checked_mul(std::mem::size_of::<ContactQuadratureState>()).is_none_or(|bytes|bytes>isize::MAX as usize)) {
+            return Err(invalid("<contact-set>","contact triangles or quadrature states exceed their explicit allowances"));
+        }
+        let variable_quadrature_points=reference.nonmatching.iter().filter(|surface|
+            variable.iter().any(|law|law.name()==surface.name)).map(|surface|surface.triangle_count()*3).sum();
         poll(cx, count)?;
-        Ok(Self { mesh, fixed, variable, variable_pairs })
+        Ok(Self { mesh, fixed, variable, variable_pairs, reference, nonmatching_triangles,variable_quadrature_points })
     }
 
     /// Query every declared local thermal coordinate and build one complete snapshot.
@@ -250,15 +348,17 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
             if i % 256 == 0 { poll(cx, i)?; }
             positive(t)?;
         }
-        let mut surfaces = self.fixed.clone();
+        self.reference.validate_for(self.mesh,boundary)?;
+        let mut surfaces = Vec::new();
         let mut states = Vec::new();
         states.try_reserve_exact(self.variable_pairs)
             .map_err(|_| invalid("<contact-set>", "local source-state allocation refused"))?;
         for law in &self.variable {
+            let ContactSurface::Matching(reference)=&law.reference else {continue;};
             let mut resistances = Vec::new();
-            resistances.try_reserve_exact(law.reference.face_pairs().len())
+            resistances.try_reserve_exact(reference.face_pairs().len())
                 .map_err(|_| invalid(law.name(), "local resistance allocation refused"))?;
-            for &pair in law.reference.face_pairs() {
+            for &pair in reference.face_pairs() {
                 poll(cx, states.len())?;
                 let mean = |slot: usize| -> Result<f64, ConductionError> {
                     let face = &self.mesh.boundary()[slot];
@@ -279,12 +379,28 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
                 });
             }
             surfaces.push(InterfaceSurface::new_mapped(
-                law.name(), law.reference.face_pairs().to_vec(), resistances,
+                law.name(), reference.face_pairs().to_vec(), resistances,
             )?);
         }
-        let interfaces = ThermalInterfaces::new(self.mesh, boundary, surfaces)?;
+        let mut interfaces=self.reference.clone();
+        let mut quadrature_states=Vec::new();
+        quadrature_states.try_reserve_exact(self.variable_quadrature_points)
+            .map_err(|_|invalid("<contact-set>","local quadrature state allocation refused"))?;
+        let mut quadrature_owned=std::collections::BTreeSet::new();
+        for surface in &mut interfaces.nonmatching {
+            let Some(law)=self.variable.iter().find(|law|law.name()==surface.name) else {continue;};
+            *surface=surface.at_quadrature(cx,temperatures,|pair,index,weight,traces| {
+                let resistance=law.at_traces(traces)?;
+                quadrature_states.push(ContactQuadratureState {interface:law.name().into(),pair,
+                    quadrature_index:index,weight_m2:weight,side_a_temperature_k:traces[0],
+                    side_b_temperature_k:traces[1],resistance:resistance.clone()});
+                Ok(resistance)
+            })?;
+            quadrature_owned.insert(law.name().to_string());
+        }
+        interfaces.refresh_matching(&surfaces,&quadrature_owned)?;
         poll(cx, states.len())?;
-        Ok(TemperatureContactEvaluation { interfaces, states })
+        Ok(TemperatureContactEvaluation { interfaces, states,quadrature_states })
     }
 
     pub(crate) fn check_mesh(&self, mesh: &ConductionMesh) -> Result<(), ConductionError> {
@@ -332,7 +448,7 @@ impl ContactIterationConfig {
 fn invalid(name: &str, what: impl Into<String>) -> ConductionError {
     ConductionError::Interface {
         interface: name.into(), what: what.into(),
-        fix: "supply complete matching contacts and in-domain source laws; inspect the unchanged physical residual and work limits".into(),
+        fix: "supply complete ordered contact traces and in-domain source laws; inspect the unchanged physical residual and work limits".into(),
     }
 }
 fn finite(value: f64) -> Result<f64, ConductionError> {

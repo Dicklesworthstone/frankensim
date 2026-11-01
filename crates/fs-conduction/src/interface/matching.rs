@@ -1147,6 +1147,33 @@ pub struct ThermalInterfaces {
 }
 
 impl ThermalInterfaces {
+    // Retain the checked geometry while refreshing only already-owned local
+    // sources. The ordered faces and original card identity cannot change.
+    pub(super) fn update_surfaces(&mut self, surfaces: &[InterfaceSurface]) -> Result<(), ConductionError> {
+        for source in surfaces {
+            let source = source.clone().expand();
+            let bound = self.surfaces.iter_mut().find(|surface| surface.name == source.name)
+                .ok_or_else(|| super::invalid("contact coefficient refresh lost its bound surface"))?;
+            if bound.card_identity != source.card_identity || bound.faces.len() != source.faces.len()
+                || bound.faces.iter().zip(&source.faces).any(|(face, (pair, _))| face.pair != *pair) {
+                return Err(super::invalid("contact coefficient refresh changed its ordered geometry or source identity"));
+            }
+            for (face, (_, resistance)) in bound.faces.iter_mut().zip(source.faces) {
+                face.resistance = resistance;
+            }
+            bound.receipt = source.receipt;
+            bound.mapped = source.mapped;
+        }
+        Ok(())
+    }
+
+    // Geometry admission keeps every exact declaration. A separate integration
+    // view excludes patches whose common-refinement owner integrates them all.
+    pub(super) fn excluding(&self, names: &BTreeSet<String>) -> Self {
+        Self { surfaces: self.surfaces.iter().filter(|surface| !names.contains(&surface.name))
+            .cloned().collect() }
+    }
+
     /// Validate and bind every coincident boundary-face pair.
     ///
     /// Geometry matching is intentionally exact in coordinate-bit space.  It

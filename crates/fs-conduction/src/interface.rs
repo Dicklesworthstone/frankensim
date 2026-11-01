@@ -33,6 +33,9 @@ use crate::{ConductionError, ConductionMesh, ThermalBoundary};
 #[derive(Debug, Clone, PartialEq)]
 pub struct ThermalInterfaces {
     matching: matching::ThermalInterfaces,
+    // Some nonlinear nonmatching patches own even their exact subpatches.
+    // The original matching binding remains the geometry/ownership witness.
+    integration_matching: Option<matching::ThermalInterfaces>,
     nonmatching: Vec<nonmatching::Bound>,
 }
 
@@ -41,7 +44,7 @@ impl ThermalInterfaces {
     pub fn new(mesh: &ConductionMesh, boundary: &ThermalBoundary,
         surfaces: Vec<InterfaceSurface>) -> Result<Self, ConductionError> {
         Ok(Self { matching: matching::ThermalInterfaces::new(mesh,boundary,surfaces)?,
-            nonmatching: Vec::new() })
+            integration_matching: None, nonmatching: Vec::new() })
     }
 
     /// Bind matching and explicitly supplied nonmatching planar interfaces.
@@ -106,7 +109,19 @@ impl ThermalInterfaces {
             nonmatching.push(bound);
         }
         let matching = matching::ThermalInterfaces::new(mesh,boundary,matching)?;
-        Ok(Self { matching, nonmatching })
+        Ok(Self { matching, integration_matching: None, nonmatching })
+    }
+
+    fn matching_integration(&self) -> &matching::ThermalInterfaces {
+        self.integration_matching.as_ref().unwrap_or(&self.matching)
+    }
+
+    fn refresh_matching(&mut self, surfaces: &[InterfaceSurface],
+        quadrature_owned: &BTreeSet<String>) -> Result<(), ConductionError> {
+        self.matching.update_surfaces(surfaces)?;
+        self.integration_matching = (!quadrature_owned.is_empty())
+            .then(|| self.matching.excluding(quadrature_owned));
+        Ok(())
     }
 
     /// Exact matching candidates only. No proximity or nonmatching face search
@@ -123,7 +138,7 @@ impl ThermalInterfaces {
         Ok(())
     }
     pub(crate) fn assemble_into(&self,cx:&Cx<'_>,coo:&mut Coo)->Result<(),ConductionError> {
-        self.matching.assemble_into(cx,coo)?;
+        self.matching_integration().assemble_into(cx,coo)?;
         for surface in &self.nonmatching {surface.assemble_into(cx,coo)?;}
         Ok(())
     }
@@ -168,7 +183,7 @@ impl ThermalInterfaces {
     /// as a representative; inspect `nonmatching_face_resistance_sources` for
     /// every original local query. Conductance is the integrated local 1/R''.
     pub fn fluxes(&self,temperature:&[f64])->Result<Vec<InterfaceFlux>,ConductionError> {
-        let original=self.matching.fluxes(temperature)?;
+        let original=self.matching_integration().fluxes(temperature)?;
         if self.nonmatching.is_empty(){return Ok(original);}
         let mut fluxes:BTreeMap<String,InterfaceFlux>=original.into_iter().map(|f|(f.interface.clone(),f)).collect();
         for surface in &self.nonmatching {

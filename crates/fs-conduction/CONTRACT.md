@@ -19,6 +19,41 @@ static resistance, not a nonlinear nonmatching temperature or pressure law.
 Focused G1/G3 fixtures cover a heterogeneous bondline on independent meshes,
 uniform-map parity, conservation, delegation and resistance-scale contraction.
 
+## Temperature-dependent source laws on nonmatching thermal interfaces
+
+`TemperatureContact::new_nonmatching` assigns an ordered source law to two
+explicit planar P1 trace meshes. `TemperatureContacts::with_nonmatching`
+admits complete face ownership and coverage once, then retains the original
+common-refinement geometry. Every trial interpolates the independent A/B
+temperatures at the same physical quadrature point and queries the pinned
+source there. A mean-temperature law must be selected explicitly; it uses
+the two local trace values. Fixed pressure, finish, medium, history and claim
+selection retain their original context.
+
+The existing positive three-point rule on each overlap triangle integrates
+one shared flux into equal-and-opposite weak loads. This is a quadrature
+approximation to a nonlinear contact law, not an exact continuum integral.
+Geometry and quadrature-count budgets are explicit. Exactly coincident pieces
+of a variable nonmatching law use this pointwise rule exactly once; unrelated
+matching contacts retain their existing face-mean semantics and arithmetic.
+No geometry intersection is repeated by a constitutive trial.
+
+`TemperatureContactEvaluation::quadrature_states` retains each ordered face
+pair, canonical quadrature index, area weight, actual trace temperatures and
+original source receipt. The complete contact Jacobian differentiates both
+temperature coordinates through the local P1 traces and includes the
+resistance feedback. Its transpose and whole-law resistance controls feed
+the existing capacity and primary-enthalpy endpoint owners. A frozen
+resistance snapshot alone still omits that feedback.
+
+Source refusal, derivative corners, exhausted work limits or cancellation
+publish no partial contact state or thermal history. Mechanical pressure,
+gap, surface-area evolution and automatic quadrature error control remain
+outside this fixed-geometry extension. Focused regressions exercise an exact
+constant heat flux with spatially varying source resistance, mixed overlap
+and coincident patches, a manufactured transient energy balance, source
+reversal, the full Jacobian/transpose and fresh-solve resistance sensitivities.
+
 ## Two-sided source laws on matching thermal interfaces
 
 `interface::temperature::TemperatureContact::new_two_sided` binds separate
@@ -1425,10 +1460,10 @@ authority.
   coordinate-bit equality between duplicated boundary triangles. The explicit
   planar nonmatching path integrates their common refinement under declared
   geometry/coverage tolerances. Positive static resistance may vary per
-  matching face pair or per nonmatching A-side face. The separate matching
-  temperature-contact owner resolves its declared mean or two-sided source
-  law; a spatial map alone implies no evolving pressure, gap, temperature or
-  contact-area law. Perfect contact and automatic scenario lowering are not
+  matching face pair or per nonmatching A-side face. The temperature-contact
+  owner resolves declared mean or two-sided source laws at matching face means
+  or nonmatching overlap quadrature points. A spatial map alone implies no
+  evolving pressure, gap, temperature or contact-area law. Perfect contact and automatic scenario lowering are not
   inferred. A mapped surface still distinguishes material authority from
   caller-supplied values, as specified below.
 - A RESISTANCE MAP VARIES THE VALUE, NOT THE AUTHORITY. Every face of a mapped

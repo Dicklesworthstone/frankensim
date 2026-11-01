@@ -261,7 +261,7 @@ impl ContactEnthalpyLinearization<'_> {
         let storage = self.step.pullback(cx, seed, linear)?;
         let load_dual = self.step.transport().nodal_load_pullback(cx, &storage.transport.adjoint)?;
         let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
-            .matching_resistance_scale_pullback(
+            .resistance_scale_pullback(
                 cx, self.contact.temperature(), &load_dual, max_face_pairs,
             )?;
         Ok(ContactEnthalpyGradient { storage, resistance_multipliers })
@@ -299,7 +299,8 @@ impl TemperatureContacts<'_, '_> {
         let contact = self.linearize_temperature(
             cx, problem.boundary, &accepted.conduction.temperature, max_face_pairs,
         )?;
-        if contact.physical_contacts().states() != accepted.physical_contacts.states() {
+        if contact.physical_contacts().states() != accepted.physical_contacts.states()
+            || contact.physical_contacts().quadrature_states() != accepted.physical_contacts.quadrature_states() {
             return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
                 "rebound contact source state differs from the accepted physical endpoint",
             ));
@@ -359,7 +360,7 @@ impl ContactEnthalpyRadiationLinearization<'_> {
         let radiation = self.step.pullback(cx, seed, linear)?;
         let load_dual = self.step.transport().nodal_load_pullback(cx, &radiation.storage.transport.adjoint)?;
         let resistance_multipliers = self.contact.physical_contacts().frozen_interfaces()
-            .matching_resistance_scale_pullback(
+            .resistance_scale_pullback(
                 cx, self.contact.temperature(), &load_dual, max_face_pairs,
             )?;
         Ok(ContactEnthalpyRadiationGradient { radiation, resistance_multipliers })
@@ -397,7 +398,8 @@ impl TemperatureContacts<'_, '_> {
         let contact = self.linearize_temperature(
             cx, problem.boundary, &accepted.conduction.temperature, max_face_pairs,
         )?;
-        if contact.physical_contacts().states() != accepted.physical_contacts.states() {
+        if contact.physical_contacts().states() != accepted.physical_contacts.states()
+            || contact.physical_contacts().quadrature_states() != accepted.physical_contacts.quadrature_states() {
             return Err(crate::transient::enthalpy::adjoint::EnthalpyAdjointError::InvalidInput(
                 "rebound radiative-contact source state differs from accepted physical endpoint",
             ));
