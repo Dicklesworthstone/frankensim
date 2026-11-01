@@ -4,9 +4,12 @@ use super::*;
 const OPEN_BODY: &str = include_str!("../../open-shell-cavity.body");
 const OPEN_PERFORMANCE: &str = include_str!("../../open-shell-cavity.material-strings");
 
+fn open_source_text() -> String {
+    OPEN_PERFORMANCE.replace("audio 8000 4096", "audio 8000 1024")
+}
+
 fn open_source() -> input::Spec {
-    input::Spec::parse(OPEN_PERFORMANCE.replace("audio 8000 4096", "audio 8000 1024")
-        .as_bytes()).unwrap()
+    input::Spec::parse(open_source_text().as_bytes()).unwrap()
 }
 
 #[test]
@@ -15,6 +18,15 @@ fn declared_opening_faces_reach_joint_bem_and_actual_flow_observation() {
     // and mouth columns. Native execution still owns qualification: construction,
     // strict matrix admission, causal fit and receiver assertions remain hard gates.
     scoped(|cx,gate| {
+        // The declared frequency-entry budget is this card's exact need: 2 observed
+        // sources x 4 x (16384/2 + 1) = 65544 entries. One entry less refuses.
+        let short = open_source_text().replace("1e-4 65544 80000000000","1e-4 65543 80000000000");
+        assert_ne!(short, open_source_text());
+        let refused = input::Spec::parse(short.as_bytes()).unwrap().compile_with_body(cx,gate,
+            Some(body::Profile::parse(OPEN_BODY.as_bytes()).unwrap()),
+            |name| Ok(if name == "closed-shell.fsmatpk" { shell_pack(name,700.0) }
+                else { pack(name,7800.0,200_000.0,None) })).err().unwrap();
+        assert_eq!(format!("{refused:?}"),"Transfer(Cap { requested: 65544, cap: 65543 })");
         let mut loaded = ready(cx,gate,open_source(),OPEN_BODY,700.0);
         let cavity = loaded.performance.bank().source().bank().spatial_cavity().unwrap();
         assert_eq!(*cavity.gas(),loaded.spec.gas);

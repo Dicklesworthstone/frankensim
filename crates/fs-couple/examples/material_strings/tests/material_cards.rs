@@ -315,20 +315,25 @@ fn canonical_material_axes_preserve_kelvin_and_angular_frequency_without_relabel
             QuantitySpec::semantic(SemanticType::new(frequency, ValueForm::Static))
         );
         assert_eq!(pressure(&mut source, 37), pressure(&mut reference, 128));
-        for (t, omega) in [
-            (QuantityKind::TemperatureDifference, frequency),
+        // fs-material's fixed-environment owner refuses each mis-typed axis
+        // by name (5d538baac moved this check out of the example).
+        for (t, omega, axis) in [
+            (QuantityKind::TemperatureDifference, frequency, "T"),
             (
                 temperature,
                 QuantityKind::Frequency(FrequencyConvention::Cyclic),
+                "omega",
             ),
         ] {
             let error = spec()
                 .compile(cx, gate, |name| Ok(typed(name, t, omega)))
                 .err()
                 .unwrap();
-            assert!(
-                error.to_string().contains("kelvin/radian-per-second"),
-                "{error}"
+            assert_eq!(
+                error.to_string(),
+                format!(
+                    "material coordinate {axis}: source convention disagrees with the physical coordinate owner"
+                ),
             );
         }
     });

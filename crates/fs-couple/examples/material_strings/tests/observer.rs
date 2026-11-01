@@ -52,9 +52,12 @@ pub(super) fn shell_pack(name: &str) -> NormalizedPack {
     NormalizedPack::from_bytes(&pack.to_bytes()).unwrap()
 }
 
+// The site's instruments render at 48 kHz. At this card's 8 kHz the 400 Hz
+// load's complete frequency bound (3695 Hz) exceeds the Nyquist admission
+// (3600 Hz), and its prepared air band exceeds the one cent budget.
 fn observed_source() -> input::Spec {
     input::Spec::parse(
-        OBSERVED.replace("audio 8000 4096", "audio 8000 1024")
+        OBSERVED.replace("audio 8000 4096", "audio 48000 1024")
             .replace("shell_angular_refinement 0","shell_angular_refinement 1").as_bytes(),
     ).unwrap()
 }
