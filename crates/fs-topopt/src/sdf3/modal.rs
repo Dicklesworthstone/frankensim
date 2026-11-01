@@ -6,6 +6,8 @@
 //! are removed from the spectral space; adaptive hanging constraints already
 //! belong to both native operators.
 
+pub mod design;
+
 use fs_cutfem::elastic3::mass::MaterialMass3;
 use fs_sparse::precond::Precond;
 use fs_spectral::generalized::{
@@ -59,6 +61,17 @@ const MASS_SWITCH: &str =
     "sdf3 eigenfrequency mass interpolation is nondifferentiable at rho=0.1";
 const CLUSTER_CROSSING: &str =
     "sdf3 eigenfrequency selected cluster has no resolved outer gap";
+
+/// Trial optimizers may backtrack over these known nonsmooth points without
+/// discarding cancellation, linear budgets or a genuine spectral breakdown.
+pub(super) fn nondifferentiable(error: &MatrixFreeEigenError) -> bool {
+    match error {
+        GeneralizedError::InvalidInput(message) | GeneralizedError::Breakdown(message) => {
+            *message == MASS_SWITCH || *message == CLUSTER_CROSSING
+        }
+        _ => false,
+    }
+}
 
 struct ElasticPencil<'a, 'b, 'c, O: Sdf3Elasticity, P: Precond> {
     elasticity: &'a O,

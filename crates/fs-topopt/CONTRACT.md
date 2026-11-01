@@ -269,6 +269,24 @@ certificate. The shared eigensolver's residual-qualified Ritz estimates and
 the numerical cluster check confer neither spectral completeness nor a
 continuum frequency/error guarantee. The `cutfem-marquee` feature gate remains.
 
+`sdf3::modal::design::Sdf3EigenfrequencyDesign3` connects this same evaluator
+to the existing projected augmented-Lagrangian owner. Its two goals maximize
+the smooth minimum under a physical volume cap, or minimize physical volume/kg
+under a squared-frequency floor. The fixed eigenvalue reference is a numerical
+normalization in the former and the actual required floor in the latter.
+A source density cannot be overridden by a separate modal density scalar.
+
+Both objective and constraint pass the existing full-chain numerical gradient
+gate before optimization. Known cluster-boundary or piecewise mass-law
+nonsmooth trials may be rejected by the bounded line search; cancellation,
+linear budgets and other spectral errors retain their original causes.
+Run segments preserve the same optimizer state. The feasible archive checks
+original physical volume or both the smooth minimum and lowest returned
+eigenvalue independently of AL tolerance, and a fresh recheck resolves the
+entire selected modal group. Incoming stiffness scales remain unchanged.
+The example `material_modal_sdf3` exercises the complete minimum-kg journey
+with explicitly authored heterogeneous material inputs.
+
 ## Native material body loads on raw-SDF designs
 
 Prepare an acceleration load with the native Cartesian or adaptive operator's

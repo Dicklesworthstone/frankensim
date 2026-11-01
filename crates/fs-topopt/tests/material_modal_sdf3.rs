@@ -366,3 +366,70 @@ fn absent_or_foreign_inertia_and_cancelled_modal_trials_publish_no_result() {
     assert!(other.evaluate_eigenfrequency(&mass, &rho, options(), &mut control).is_err());
     assert_eq!(other.operator().scales(), other_scales);
 }
+
+#[test]
+fn both_design_goals_use_real_modes_and_recheck_the_original_physical_limit() {
+    use fs_ascent::projected_al::ProjectedAlOptions;
+    use fs_topopt::sdf3::modal::design::{
+        Sdf3EigenfrequencyDesign3, Sdf3EigenfrequencyDesignOptions3, Sdf3EigenfrequencyGoal3,
+    };
+    use fs_topopt::sdf3::response::limits::design::MinimumMaterialObjective3;
+
+    for minimum_mass in [false, true] {
+        let operator = cartesian([2.0, 5.0], 1.0);
+        let mass = operator.prepare_material_mass(100_000, poll).unwrap();
+        let mut study = CutDensityStudy3::new(operator, 0.12, params());
+        let incoming = study.operator().scales().to_vec();
+        let rho = [0.64, 0.71, 0.68, 0.74];
+        let baseline = evaluate(&mut study, &mass, &rho);
+        assert!(baseline.objective.aggregate > 0.0);
+        let reference = 0.45 * baseline.objective.aggregate;
+        let goal = if minimum_mass {
+            Sdf3EigenfrequencyGoal3::MinimumMaterial {
+                objective: MinimumMaterialObjective3::MassKg {
+                    scale_kg: baseline.physical_mass_kg,
+                },
+                volume_scale: 1.0,
+            }
+        } else {
+            Sdf3EigenfrequencyGoal3::MaximumFrequency { volume_limit: 0.97 }
+        };
+        let settings = Sdf3EigenfrequencyDesignOptions3 {
+            frequency: options(),
+            eigenvalue_reference: reference,
+            density_floor: 0.3,
+            optimizer: ProjectedAlOptions {
+                max_spectral_step: 0.01,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut callback = |_| poll();
+        let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+        let best = {
+            let mut design = Sdf3EigenfrequencyDesign3::new(
+                &mut study, &mass, &rho, goal, settings, &mut control,
+            )
+            .unwrap();
+            assert!(design.gradient_check().passed());
+            design.run(3).unwrap();
+            assert!(design.history().len() > 1);
+            design.recheck_best().unwrap().unwrap()
+        };
+        if minimum_mass {
+            assert!(
+                best.evaluation.physical_mass_kg
+                    < baseline.physical_mass_kg * (1.0 - 1e-7)
+            );
+            assert!(best.evaluation.objective.aggregate >= reference);
+            assert!(best.evaluation.objective.modal.values[0] >= reference);
+        } else {
+            assert!(
+                best.evaluation.objective.aggregate
+                    > baseline.objective.aggregate * (1.0 + 1e-7)
+            );
+            assert!(best.evaluation.volume_fraction <= 0.97);
+        }
+        assert_eq!(study.operator().scales(), incoming);
+    }
+}
