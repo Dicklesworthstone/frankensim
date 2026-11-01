@@ -3,8 +3,10 @@
 //! The optical model is an ideal thin lens. Focus distance is the positive
 //! axial distance from the lens plane, not distance along each raster ray.
 //! Opt-in circular, annular and bladed pupil diffraction covers incoherent, paraxial,
-//! focused, declared-plane and separated multi-plane defocused imaging. Lens distortion, chromatic
-//! aberration, rolling shutter, and autofocus heuristics are outside this contract.
+//! focused, declared-plane and separated multi-plane defocused imaging. With
+//! `tracer`, native material laws can explicitly drive longitudinal thin-lens
+//! dispersion. Lens distortion, other aberrations, rolling shutter, and
+//! autofocus heuristics are outside this contract.
 
 use core::fmt;
 
@@ -22,6 +24,8 @@ pub use diffraction::{
     DefocusedDiffraction, FocusedDiffraction, LayeredCameraRay, LayeredDiffraction,
     SpectralCameraRay,
 };
+#[cfg(feature = "tracer")]
+pub use diffraction::{DispersiveThinLens, ThinLensElement};
 
 const PI: f64 = core::f64::consts::PI;
 const LOOK_AT_SINE_MIN: f64 = 1.0e-10;
@@ -71,6 +75,10 @@ pub enum CameraError {
     DiffractionRequiresSourceDepth,
     /// The modeled defocus or residual visible-depth phase exceeds its budget.
     DefocusOutsideDiffractionModel,
+    /// Thin-element prescription, reference wavelength or reference power is invalid.
+    InvalidDispersiveLens,
+    /// Projection, wavelength, focus, or slope lies outside the thin-lens model.
+    DispersiveLensOutsideModel,
     /// A shot contains no keyframes.
     EmptyShot,
     /// Shot bounds or shot identity are invalid.
@@ -181,6 +189,11 @@ impl CameraError {
             code: "pupil_diffraction",
             message: "use spectral rays and a nonzero circular, annular or regular bladed pupil with opaque diffuse sources and no additional pupil occlusion in the declared depth model",
         }];
+        const DISPERSIVE_LENS: &[CameraFix] = &[CameraFix {
+            rank: 1,
+            code: "admit_dispersive_thin_lens",
+            message: "use one to eight native visible-band thin elements, matching focal/sensor metadata, finite-defocus or layered diffraction, and paraxial pupil/raster slopes",
+        }];
         const EXPOSURE_METADATA: &[CameraFix] = &[
             CameraFix {
                 rank: 1,
@@ -254,6 +267,7 @@ impl CameraError {
             | Self::DiffractionRequiresSpectralPath
             | Self::DiffractionRequiresSourceDepth
             | Self::DefocusOutsideDiffractionModel => DIFFRACTION,
+            Self::InvalidDispersiveLens | Self::DispersiveLensOutsideModel => DISPERSIVE_LENS,
             Self::EmptyShot => EMPTY_SHOT,
             Self::InvalidShot => INVALID_SHOT,
             Self::InvalidKeyframes | Self::IncompatibleKeyframes | Self::InvalidInterpolation => {
@@ -289,6 +303,10 @@ impl fmt::Display for CameraError {
             }
             Self::DefocusOutsideDiffractionModel => {
                 "visible depth exceeds the declared diffraction phase budget"
+            }
+            Self::InvalidDispersiveLens => "thin-element lens prescription is invalid",
+            Self::DispersiveLensOutsideModel => {
+                "camera, wavelength or slope exceeds the dispersive thin-lens model"
             }
             Self::EmptyShot => "camera shot has no keyframes",
             Self::InvalidShot => "camera shot bounds or identity are invalid",
@@ -783,6 +801,8 @@ pub struct PhysicalCamera {
     diffraction: Option<FocusedDiffraction>,
     defocused_diffraction: Option<DefocusedDiffraction>,
     layered_diffraction: Option<LayeredDiffraction>,
+    #[cfg(feature = "tracer")]
+    dispersive_lens: Option<DispersiveThinLens>,
 }
 
 /// Projection of a world point through the deterministic optical centre.
@@ -949,6 +969,8 @@ impl PhysicalCamera {
             diffraction: None,
             defocused_diffraction: None,
             layered_diffraction: None,
+            #[cfg(feature = "tracer")]
+            dispersive_lens: None,
         })
     }
 
@@ -989,6 +1011,24 @@ impl PhysicalCamera {
         self.projection
     }
 
+    /// Active vertical raster half-tangent. Ordinarily this is exactly the
+    /// declared projection. An explicitly dispersive thin lens uses its fixed
+    /// sensor height and actual reference-focus sensor conjugate, so focus
+    /// racks also produce physically consistent finite-conjugate magnification.
+    #[must_use]
+    pub fn raster_vertical_half_tan(&self) -> f64 {
+        #[cfg(feature = "tracer")]
+        if let Some(distance) = self.dispersive_sensor_distance_m() {
+            return half_ratio(
+                self.projection
+                    .sensor_height_m()
+                    .expect("admitted physical sensor"),
+                distance,
+            );
+        }
+        self.projection.vertical_half_tan()
+    }
+
     /// Positive axial focus distance (m).
     #[must_use]
     pub const fn focus_distance_m(&self) -> f64 {
@@ -1024,14 +1064,15 @@ impl PhysicalCamera {
     ///
     /// `aspect_ratio = width / height` is explicit. The legacy zero-half-tan
     /// center-ray fixture is not an invertible image projection and therefore
-    /// refuses here. Thin-lens aperture state does not affect this mapping.
+    /// refuses here. Aperture sampling does not affect this mapping. An
+    /// explicitly dispersive lens uses its actual reference sensor conjugate.
     pub fn project_from_optical_center(
         &self,
         world_point: Point3,
         aspect_ratio: f64,
     ) -> Result<OpticalCenterProjection, CameraError> {
         ensure_point_finite(world_point)?;
-        let half_tan = self.projection.vertical_half_tan();
+        let half_tan = self.raster_vertical_half_tan();
         if !aspect_ratio.is_finite()
             || aspect_ratio <= 0.0
             || !half_tan.is_finite()
@@ -1115,7 +1156,7 @@ impl PhysicalCamera {
         let distance_m = scaled_norm(from_camera)?;
         let direction_from_camera = from_camera.scale(1.0 / distance_m);
         let optical_cosine = direction_from_camera.dot(self.forward);
-        let half_tan = self.projection.vertical_half_tan();
+        let half_tan = self.raster_vertical_half_tan();
         let tangent_pixel_area =
             4.0 * aspect_ratio * half_tan * half_tan / (f64::from(width) * f64::from(height));
         let optical_cosine_cubed = optical_cosine * optical_cosine * optical_cosine;
@@ -1198,10 +1239,19 @@ impl PhysicalCamera {
         camera.diffraction = self.diffraction;
         camera.defocused_diffraction = self.defocused_diffraction;
         camera.layered_diffraction = self.layered_diffraction;
+        #[cfg(feature = "tracer")]
+        {
+            camera.dispersive_lens = self.dispersive_lens.clone();
+            camera.admit_dispersive_lens()?;
+        }
         Ok(camera)
     }
 
     fn optical_state_matches(&self, other: &Self) -> bool {
+        #[cfg(feature = "tracer")]
+        if self.dispersive_lens != other.dispersive_lens {
+            return false;
+        }
         self.projection == other.projection
             && self.aperture == other.aperture
             && self.exposure == other.exposure
@@ -1251,6 +1301,8 @@ impl CameraKeyframe {
         // bits rather than round-tripping the basis through a quaternion.
         let mut camera = camera;
         camera.focus_distance_m = distance;
+        #[cfg(feature = "tracer")]
+        camera.admit_dispersive_lens()?;
         Self::try_with_focus(
             absolute_time_s,
             camera,

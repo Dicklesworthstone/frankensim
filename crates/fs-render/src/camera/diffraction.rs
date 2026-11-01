@@ -18,9 +18,10 @@
 //! phase `pi*a^2/lambda * (1/z - 1/s)`, and gates residual depth error.
 //! The layered policy selects that phase from the actual sampled source,
 //! after a depth-independent proposal and all-pupil scene visibility admission.
-//! Geometric pupil blur is not added to either wave PSF. Coherence between
-//! scene points, polarization, aberrations and pupil-dependent occlusion are
-//! outside this scalar, paraxial, isoplanatic model.
+//! Native material-based thin elements may explicitly add wavelength-dependent
+//! lens power to that quadratic phase. Geometric pupil blur is not added to a
+//! wave PSF. Coherence between scene points, polarization, other aberrations
+//! and pupil-dependent occlusion are outside this paraxial, isoplanatic model.
 
 use super::{ApertureKind, CameraError, LensSample, PhysicalCamera, direct_unit};
 use crate::charts::Ray;
@@ -30,10 +31,14 @@ use fs_math::det;
 
 mod annular;
 mod circular;
+#[cfg(feature = "tracer")]
+mod dispersive;
 mod layered;
 mod polygon;
 use annular::AnnularPupil;
 use circular::{CircularDefocus, jinc};
+#[cfg(feature = "tracer")]
+pub use dispersive::{DispersiveThinLens, ThinLensElement};
 #[cfg(feature = "tracer")]
 pub(crate) use layered::ProjectedPupilFootprint;
 pub use layered::{LayeredCameraRay, LayeredDiffraction};
@@ -151,6 +156,10 @@ impl PhysicalCamera {
         mut self,
         policy: FocusedDiffraction,
     ) -> Result<Self, CameraError> {
+        #[cfg(feature = "tracer")]
+        if self.dispersive_lens.is_some() {
+            return Err(CameraError::DispersiveLensOutsideModel);
+        }
         if self.aperture.is_pinhole() {
             return Err(CameraError::InvalidDiffraction);
         }
@@ -251,6 +260,17 @@ impl PhysicalCamera {
         let (minimum, maximum) = self.diffraction_wavelength_range(wavelengths_nm)?;
         let reference_nm = 0.5 * minimum + 0.5 * maximum;
         let scale = (reference_nm * 1.0e-9 / self.aperture.radius_m()) / (2.0 * PI);
+        #[cfg(feature = "tracer")]
+        if self.dispersive_lens.is_some() {
+            return self.generate_dispersive_spectral_ray(
+                cx,
+                [x_tan, y_tan],
+                diffraction_sample,
+                wavelengths_nm,
+                reference_nm,
+                scale,
+            );
+        }
         let (x, y, weights) = if self.aperture.is_annular() {
             let obscuration = self.aperture.obscuration_ratio();
             let reference_phase = self
@@ -486,7 +506,15 @@ impl PhysicalCamera {
         let (minimum, _) = self.diffraction_wavelength_range(wavelengths_nm)?;
         if self.layered_diffraction.is_some() {
             let point = point.ok_or(CameraError::DefocusOutsideDiffractionModel)?;
-            return self.admit_layered_depth(point.delta_from(self.eye).dot(self.forward), minimum);
+            let depth = point.delta_from(self.eye).dot(self.forward);
+            self.admit_layered_depth(depth, minimum)?;
+            #[cfg(feature = "tracer")]
+            if self.dispersive_lens.is_some() {
+                for &wavelength in wavelengths_nm {
+                    self.pupil_defocus_phase(1.0 / depth, wavelength)?;
+                }
+            }
+            return Ok(());
         }
         let inverse_depth = match point {
             Some(point) => {
@@ -498,6 +526,16 @@ impl PhysicalCamera {
             }
             None => 0.0,
         };
+        #[cfg(feature = "tracer")]
+        if self.dispersive_lens.is_some() {
+            // Chromatic power is not monotone in a compound prescription or
+            // a tabulated native material. Admit the actual source at every
+            // lane as well as the declared source; shortest lambda alone is
+            // sufficient only for the separate geometric depth-error budget.
+            for &wavelength in wavelengths_nm {
+                self.pupil_defocus_phase(inverse_depth, wavelength)?;
+            }
+        }
         let (reference_inverse_depth, maximum_phase) = match self.defocused_diffraction {
             Some(policy) => (
                 policy.inverse_object_distance(),
@@ -576,10 +614,24 @@ impl PhysicalCamera {
         inverse_object_distance: f64,
         wavelength_nm: f64,
     ) -> Result<f64, CameraError> {
+        let inverse_difference = inverse_object_distance - 1.0 / self.focus_distance_m;
+        #[cfg(feature = "tracer")]
+        let inverse_difference = if let Some(lens) = &self.dispersive_lens {
+            if !inverse_object_distance.is_finite()
+                || inverse_object_distance < 0.0
+                || self.aperture.radius_m() * inverse_object_distance
+                    > DispersiveThinLens::MAXIMUM_PARAXIAL_SLOPE
+            {
+                return Err(CameraError::DispersiveLensOutsideModel);
+            }
+            inverse_difference + lens.power_difference_per_m(wavelength_nm)?
+        } else {
+            inverse_difference
+        };
         let phase = PI
             * (self.aperture.radius_m() / (wavelength_nm * 1.0e-9))
             * self.aperture.radius_m()
-            * (inverse_object_distance - 1.0 / self.focus_distance_m);
+            * inverse_difference;
         if !phase.is_finite() || phase.abs() > DefocusedDiffraction::MAXIMUM_DEFOCUS_PHASE_RAD {
             return Err(CameraError::DefocusOutsideDiffractionModel);
         }
@@ -587,6 +639,8 @@ impl PhysicalCamera {
     }
 
     fn admit_diffraction_projection(&self) -> Result<(), CameraError> {
+        #[cfg(feature = "tracer")]
+        self.admit_dispersive_lens()?;
         if self
             .projection
             .focal_length_m()

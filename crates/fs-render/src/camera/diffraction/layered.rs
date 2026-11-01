@@ -189,6 +189,14 @@ impl PhysicalCamera {
         }
         let (minimum, maximum) = self.diffraction_wavelength_range(wavelengths_nm)?;
         let reference_nm = 0.5 * minimum + 0.5 * maximum;
+        #[cfg(feature = "tracer")]
+        let phase = if self.dispersive_lens.is_some() {
+            self.admit_dispersive_raster(x_tan, y_tan)?;
+            self.dispersive_proposal_phase(wavelengths_nm, reference_nm)?
+        } else {
+            self.layered_maximum_phase(reference_nm)?
+        };
+        #[cfg(not(feature = "tracer"))]
         let phase = self.layered_maximum_phase(reference_nm)?;
         let (q, proposal) = match &self.aperture.kind {
             ApertureKind::RegularPolygon { vertices, .. } => {
@@ -299,7 +307,11 @@ impl PhysicalCamera {
         Ok(())
     }
 
-    fn layered_pupil_density(&self, q: [f64; 2], phase: f64) -> Result<f64, CameraError> {
+    pub(super) fn layered_pupil_density(
+        &self,
+        q: [f64; 2],
+        phase: f64,
+    ) -> Result<f64, CameraError> {
         let radius = det::hypot(q[0], q[1]);
         if !radius.is_finite() {
             return Err(CameraError::InvalidDiffraction);

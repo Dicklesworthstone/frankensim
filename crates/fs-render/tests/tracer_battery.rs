@@ -2303,6 +2303,168 @@ fn separated_diffraction_planes() -> Scene {
     scene
 }
 
+fn material_dispersion_camera(
+    scene: &Scene,
+    aperture: Aperture,
+    focus: f64,
+    chromatic: bool,
+) -> PhysicalCamera {
+    use fs_render::camera::{CameraProjection, DispersiveThinLens, ThinLensElement};
+    use fs_render::dielectric::CauchyIor;
+    let law = if chromatic {
+        CauchyIor::try_new(1.5, 0.002, 0.0).unwrap()
+    } else {
+        CauchyIor::try_constant(1.5).unwrap()
+    };
+    let curvature = 10.0 / (law.eval(550.0).unwrap() - 1.0);
+    let lens = DispersiveThinLens::try_new(
+        550.0,
+        &[ThinLensElement::try_new(law.into(), curvature, -curvature).unwrap()],
+    )
+    .unwrap();
+    PhysicalCamera::try_look_at(
+        scene.camera.eye,
+        Point3::new(
+            scene.camera.eye.x + scene.camera.forward.x,
+            scene.camera.eye.y + scene.camera.forward.y,
+            scene.camera.eye.z + scene.camera.forward.z,
+        ),
+        scene.camera.up,
+        CameraProjection::try_focal_sensor(lens.reference_focal_length_m(), 1.0e-7).unwrap(),
+        focus,
+        aperture,
+    )
+    .unwrap()
+    .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.01).unwrap())
+    .unwrap()
+    .with_dispersive_lens(lens)
+    .unwrap()
+}
+
+/// Real native glass changes a nonuniform spectral image through the ray
+/// integrator. The same physical prescription replays absolute sample chunks.
+#[test]
+fn material_lens_dispersion_reaches_the_renderer_and_replays_for_all_pupils() {
+    let mut scene = focus_probe_scene(0.0, 1.0e-3);
+    scene.primitives[0].shape = Shape::Mesh(quad(
+        [1.0e-4, -1.0e-3, 0.0],
+        [1.0e-3, -1.0e-3, 0.0],
+        [1.0e-3, 1.0e-3, 0.0],
+        [1.0e-4, 1.0e-3, 0.0],
+    ));
+    let mut settings = motion_settings(2_048);
+    settings.strategy = DirectStrategy::BsdfOnly;
+    let shutter = motion_shutter(0.5, 0.0);
+    with_cx(|cx| {
+        for aperture in [
+            Aperture::try_circular(0.0024).unwrap(),
+            Aperture::try_annular(0.0024, 0.00144).unwrap(),
+            Aperture::try_regular_polygon(0.0024, 3, 0.31).unwrap(),
+        ] {
+            let camera = static_cinematic_camera(material_dispersion_camera(
+                &scene,
+                aperture.clone(),
+                2.0,
+                true,
+            ));
+            let control =
+                static_cinematic_camera(material_dispersion_camera(&scene, aperture, 2.0, false));
+            let actual =
+                render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+            let reference =
+                render_cinematic(&scene, &control, CutSide::After, cx, &settings, shutter).unwrap();
+            assert!(
+                actual.xyz[0]
+                    .iter()
+                    .all(|value| value.is_finite() && *value > 0.0)
+            );
+            assert!(
+                (actual.xyz[0][1] - reference.xyz[0][1]).abs() > 1.0e-3 * reference.xyz[0][1],
+                "native glass dispersion changes a nonuniform image at fixed reference focus"
+            );
+            let mut progressive = Film::try_new(1, 1).unwrap();
+            for (from, to) in [(0, 1_024), (1_024, 2_048)] {
+                render_cinematic_range(
+                    &scene,
+                    &camera,
+                    CutSide::After,
+                    cx,
+                    &settings,
+                    &mut progressive,
+                    from,
+                    to,
+                    shutter,
+                )
+                .unwrap();
+            }
+            assert_film_bits_eq(&actual, &progressive, "material lens diffraction replay");
+        }
+    });
+}
+
+#[test]
+fn material_lens_keeps_layered_sources_separate_during_a_focus_rack() {
+    let scene = separated_diffraction_planes();
+    let frames = [(0.0, 0.0, 0.9), (1.0, 1.0e-4, 1.1)]
+        .into_iter()
+        .map(|(time, x, focus)| {
+            let mut shifted = scene.clone();
+            shifted.camera.eye.x = x;
+            let physical = material_dispersion_camera(
+                &shifted,
+                Aperture::try_regular_polygon(1.0e-3, 5, 0.31).unwrap(),
+                focus,
+                true,
+            )
+            .with_layered_diffraction(LayeredDiffraction::try_new(&[1.0, 2.0], 0.01).unwrap())
+            .unwrap();
+            CameraKeyframe::try_new(time, physical).unwrap()
+        })
+        .collect();
+    let camera =
+        AnimatedCamera::try_new(vec![CameraShot::try_new(739, 0.0, 1.0, frames).unwrap()]).unwrap();
+    let mut settings = motion_settings(1_024);
+    settings.strategy = DirectStrategy::BsdfOnly;
+    let shutter = motion_shutter(0.0, 1.0);
+    with_cx(|cx| {
+        let combined =
+            render_cinematic(&scene, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+        let mut near = scene.clone();
+        near.primitives[1].emission = None;
+        let mut far = scene.clone();
+        far.primitives[0].emission = None;
+        let near_image =
+            render_cinematic(&near, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+        let far_image =
+            render_cinematic(&far, &camera, CutSide::After, cx, &settings, shutter).unwrap();
+        assert!(near_image.xyz[0][1] > 0.0 && far_image.xyz[0][1] > 0.0);
+        for lane in 0..3 {
+            let sum = near_image.xyz[0][lane] + far_image.xyz[0][lane];
+            assert!((combined.xyz[0][lane] - sum).abs() < 1.0e-11 * sum.max(1.0));
+        }
+        let mut progressive = Film::try_new(1, 1).unwrap();
+        for (from, to) in [(0, 512), (512, 1_024)] {
+            render_cinematic_range(
+                &scene,
+                &camera,
+                CutSide::After,
+                cx,
+                &settings,
+                &mut progressive,
+                from,
+                to,
+                shutter,
+            )
+            .unwrap();
+        }
+        assert_film_bits_eq(
+            &combined,
+            &progressive,
+            "material lens layered focus-rack replay",
+        );
+    });
+}
+
 fn layered_patch_camera(scene: &Scene, aperture: Aperture, pan: f64, axial: f64) -> AnimatedCamera {
     let mut frames = Vec::new();
     for (time, x, z, focus) in [(0.0, 0.0, 2.0, 0.9), (1.0, pan, 2.0 + axial, 1.1)] {

@@ -2093,3 +2093,287 @@ fn layered_policy_is_bounded_and_survives_focus_interpolation() {
             .is_err()
     );
 }
+
+#[cfg(feature = "tracer")]
+fn material_lens() -> fs_render::camera::DispersiveThinLens {
+    use fs_render::camera::{DispersiveThinLens, ThinLensElement};
+    use fs_render::dielectric::CauchyIor;
+    let law = CauchyIor::try_new(1.5, 0.002, 0.0).unwrap();
+    let curvature = 10.0 / (law.eval(550.0).unwrap() - 1.0);
+    DispersiveThinLens::try_new(
+        550.0,
+        &[ThinLensElement::try_new(law.into(), curvature, -curvature).unwrap()],
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "tracer")]
+fn physical_material_camera(aperture: Aperture, focus: f64) -> PhysicalCamera {
+    PhysicalCamera::try_look_at(
+        Point3::new(0.0, 0.0, 0.0),
+        Point3::new(0.0, 0.0, -1.0),
+        Vec3::new(0.0, 1.0, 0.0),
+        CameraProjection::try_focal_sensor(material_lens().reference_focal_length_m(), 0.002)
+            .unwrap(),
+        focus,
+        aperture,
+    )
+    .unwrap()
+}
+
+/// G1: material phase changes are independently equivalent to the lensmaker
+/// conjugate shift, for every supported pupil and for actual source depths.
+#[cfg(feature = "tracer")]
+#[test]
+fn native_lens_dispersion_drives_every_pupil_and_actual_source_phase() {
+    let lens = material_lens();
+    for aperture in [
+        Aperture::try_circular(1.0e-3).unwrap(),
+        Aperture::try_annular(1.0e-3, 6.0e-4).unwrap(),
+        Aperture::try_regular_polygon(1.0e-3, 3, 0.37).unwrap(),
+    ] {
+        let source = physical_material_camera(aperture.clone(), 2.0)
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.0).unwrap())
+            .unwrap();
+        let camera = source.clone().with_dispersive_lens(lens.clone()).unwrap();
+        assert_eq!(
+            camera
+                .defocused_diffraction_density([0.0; 2], 550.0)
+                .unwrap()
+                .to_bits(),
+            source
+                .defocused_diffraction_density([0.0; 2], 550.0)
+                .unwrap()
+                .to_bits()
+        );
+        let layered = camera
+            .clone()
+            .with_layered_diffraction(LayeredDiffraction::try_new(&[1.5, 2.0], 0.01).unwrap())
+            .unwrap();
+        for wavelength in [400.0, 550.0, 700.0] {
+            let shift = lens.power_difference_per_m(wavelength).unwrap();
+            let effective_focus = 1.0 / (0.5 - shift);
+            for depth in [1.5, 2.0] {
+                let independent = axial_camera(aperture.clone(), effective_focus)
+                    .with_defocused_diffraction(
+                        DefocusedDiffraction::try_new(Some(depth), 0.0).unwrap(),
+                    )
+                    .unwrap();
+                for offset in [[0.0; 2], [1.0e-4, -7.0e-5], [0.04, 0.03]] {
+                    let expected = independent
+                        .defocused_diffraction_density(offset, wavelength)
+                        .unwrap();
+                    let actual = layered
+                        .layered_diffraction_density(offset, depth, wavelength)
+                        .unwrap();
+                    assert_close(
+                        actual,
+                        expected,
+                        2.0e-11 * expected.max(1.0),
+                        "native material pupil phase",
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// G1/G3: reference focus uses the sensor conjugate, including finite-distance
+/// magnification and focus breathing. Original projection metadata is retained.
+#[cfg(feature = "tracer")]
+#[test]
+fn dispersive_camera_sensor_scale_and_focus_rack_are_consistent() {
+    use fs_render::camera::OpticalCenterProjection;
+    let make = |focus| {
+        physical_material_camera(Aperture::try_circular(1.0e-3).unwrap(), focus)
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.01).unwrap())
+            .unwrap()
+            .with_dispersive_lens(material_lens())
+            .unwrap()
+    };
+    let camera = make(1.0);
+    let t = camera.dispersive_sensor_distance_m().unwrap();
+    assert_close(t, 1.0 / 19.0, 1.0e-16, "reference conjugate");
+    assert_close(
+        camera.raster_vertical_half_tan(),
+        0.001 / t,
+        1.0e-16,
+        "physical sensor half-tangent",
+    );
+    assert_ne!(
+        camera.raster_vertical_half_tan(),
+        camera.projection().vertical_half_tan()
+    );
+    let projected = camera
+        .project_from_optical_center(Point3::new(0.001, 0.0, -1.0), 1.0)
+        .unwrap();
+    let OpticalCenterProjection::InFront { ndc_xy, .. } = projected else {
+        panic!("front point")
+    };
+    assert_close(
+        ndc_xy[0],
+        t,
+        1.0e-16,
+        "sensor magnification at unit object distance",
+    );
+    let animation = AnimatedCamera::try_new(vec![
+        CameraShot::try_new(
+            380,
+            0.0,
+            1.0,
+            vec![
+                CameraKeyframe::try_new(0.0, make(1.0)).unwrap(),
+                CameraKeyframe::try_new(1.0, make(2.0)).unwrap(),
+            ],
+        )
+        .unwrap(),
+    ])
+    .unwrap();
+    with_cx(|_, cx| {
+        let middle = animation.evaluate(cx, 0.5, CutSide::After).unwrap();
+        assert_eq!(middle.dispersive_lens(), Some(&material_lens()));
+        assert_close(
+            middle.dispersive_sensor_distance_m().unwrap(),
+            1.0 / (20.0 - 1.0 / 1.5),
+            1.0e-16,
+            "focus-rack conjugate",
+        );
+    });
+    assert!(
+        CameraKeyframe::try_with_world_focus(0.0, camera, Point3::new(0.0, 0.0, -0.04)).is_err()
+    );
+}
+
+/// A sharp reference wavelength cannot select a narrow proposal for every
+/// color. All wavelengths retain unit power and complete nonzero tail support.
+#[cfg(feature = "tracer")]
+#[test]
+fn dispersive_proposal_covers_packet_colors_and_preserves_power() {
+    let camera = physical_material_camera(Aperture::try_circular(1.0e-3).unwrap(), 2.0)
+        .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.0).unwrap())
+        .unwrap()
+        .with_dispersive_lens(material_lens())
+        .unwrap();
+    let wavelengths = [400.0, 550.0, 700.0];
+    let scale = 550.0e-9 / (2.0 * core::f64::consts::PI * 1.0e-3);
+    let maximum_phase = wavelengths
+        .into_iter()
+        .map(|wavelength| {
+            core::f64::consts::PI * 1.0e-6 / (wavelength * 1.0e-9)
+                * material_lens()
+                    .power_difference_per_m(wavelength)
+                    .unwrap()
+                    .abs()
+                * wavelength
+                / 550.0
+        })
+        .fold(0.0_f64, f64::max);
+    with_cx(|_, cx| {
+        let sample = |u, v| {
+            camera
+                .generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.0,
+                    0.0,
+                    LensSample::CENTER,
+                    LensSample::try_new(u, v).unwrap(),
+                    &wavelengths,
+                )
+                .unwrap()
+        };
+        let broad = sample(0.75, 0.0);
+        let q = broad.ray.dir.x / -broad.ray.dir.z / scale;
+        assert_close(
+            q,
+            fs_math::det::sqrt(3.0) * (2.0 * maximum_phase).max(2.0),
+            2.0e-13,
+            "widest packet phase in reference coordinates",
+        );
+        let mut power = [0.0; 3];
+        let count = 16_384_u32;
+        for i in 0..count {
+            let ray = sample(
+                (f64::from(i) + 0.5) / f64::from(count),
+                fs_render::radical_inverse(2, u64::from(i)),
+            );
+            for (sum, weight) in power.iter_mut().zip(ray.weights) {
+                *sum += weight / f64::from(count);
+            }
+        }
+        for value in power {
+            assert_close(value, 1.0, 0.02, "chromatic unit-power pupil");
+        }
+        let tail = sample(1.0 - f64::EPSILON, 0.13);
+        assert!(
+            tail.weights
+                .iter()
+                .all(|weight| weight.is_finite() && *weight >= 0.0)
+        );
+        assert!(tail.weights.iter().any(|weight| *weight > 0.0));
+    });
+}
+
+#[cfg(feature = "tracer")]
+#[test]
+fn dispersive_camera_refuses_unmodeled_paths_and_extreme_optics() {
+    let lens = material_lens();
+    let pupil = Aperture::try_circular(1.0e-3).unwrap();
+    assert!(
+        physical_material_camera(pupil.clone(), 2.0)
+            .with_dispersive_lens(lens.clone())
+            .is_err()
+    );
+    assert!(
+        axial_camera(pupil.clone(), 2.0)
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.0).unwrap())
+            .unwrap()
+            .with_dispersive_lens(lens.clone())
+            .is_err()
+    );
+    assert!(
+        physical_material_camera(Aperture::try_circular(0.003).unwrap(), 2.0)
+            .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.0).unwrap())
+            .unwrap()
+            .with_dispersive_lens(lens.clone())
+            .is_err()
+    );
+    let camera = physical_material_camera(pupil, 2.0)
+        .with_defocused_diffraction(DefocusedDiffraction::try_new(Some(2.0), 0.0).unwrap())
+        .unwrap()
+        .with_dispersive_lens(lens)
+        .unwrap();
+    assert!(
+        camera
+            .clone()
+            .with_in_focus_diffraction(FocusedDiffraction::try_new(0.01).unwrap())
+            .is_err()
+    );
+    assert!(
+        camera
+            .defocused_diffraction_density([0.0; 2], 379.0)
+            .is_err()
+    );
+    assert!(
+        camera
+            .clone()
+            .with_layered_diffraction(LayeredDiffraction::try_new(&[0.005, 2.0], 0.01).unwrap())
+            .unwrap()
+            .layered_diffraction_density([0.0; 2], 0.005, 550.0)
+            .is_err()
+    );
+    with_cx(|_, cx| {
+        assert_eq!(
+            camera
+                .generate_spectral_ray_from_tangent_offsets(
+                    cx,
+                    0.1,
+                    0.1,
+                    LensSample::CENTER,
+                    LensSample::CENTER,
+                    &[550.0]
+                )
+                .unwrap_err(),
+            CameraError::DispersiveLensOutsideModel
+        );
+    });
+}

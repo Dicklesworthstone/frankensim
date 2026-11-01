@@ -9889,6 +9889,36 @@ fn update_physical_camera_continuity(hasher: &mut DomainHasher, camera: &Physica
         }
         update_continuity_f64(hasher, diffraction.maximum_depth_phase_error_rad());
     }
+    if let Some(lens) = camera.dispersive_lens() {
+        // Keep every pre-existing camera identity byte unchanged when absent.
+        // Both material dispersion and reference focus calibration determine
+        // the PSF; a matching reference focal length alone is insufficient.
+        hasher.update(b"native-material-dispersive-thin-lens-v1");
+        update_continuity_f64(hasher, lens.reference_wavelength_nm());
+        hasher.update(&(lens.elements().len() as u64).to_le_bytes());
+        for element in lens.elements() {
+            update_continuity_f64s(hasher, element.curvatures_per_m());
+            match element.ior() {
+                DielectricIor::Cauchy(law) => {
+                    hasher.update(&[0]);
+                    update_continuity_f64s(hasher, law.coefficients());
+                }
+                DielectricIor::Sellmeier(law) => {
+                    hasher.update(&[1]);
+                    let (strengths, resonances_um2) = law.coefficients();
+                    update_continuity_f64s(hasher, strengths);
+                    update_continuity_f64s(hasher, resonances_um2);
+                }
+                DielectricIor::Tabulated(law) => {
+                    hasher.update(&[2]);
+                    for sample in law.samples() {
+                        update_continuity_f64(hasher, sample.wavelength_nm());
+                        update_continuity_f64(hasher, sample.index());
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn update_continuity_point(hasher: &mut DomainHasher, point: Point3) {
@@ -13573,7 +13603,11 @@ fn trace_path_with_regions<'scene>(
                     exposure,
                     time.interval.time_at(time.normalized),
                 )?;
-                let half_tan = physical.projection().vertical_half_tan();
+                let half_tan = physical.raster_vertical_half_tan();
+                // Admit the complete requested raster field, independently of
+                // where this pixel's jitter happened to land. PSF tails are
+                // propagated afterwards and are never cut to this field limit.
+                physical.admit_dispersive_raster(half_tan * s.camera_aspect(), half_tan)?;
                 let x_tan = (2.0 * (f64::from(px) + jx) / w - 1.0) * s.camera_aspect() * half_tan;
                 let y_tan = (1.0 - 2.0 * (f64::from(py) + jy) / h) * half_tan;
                 #[cfg(feature = "volumes")]

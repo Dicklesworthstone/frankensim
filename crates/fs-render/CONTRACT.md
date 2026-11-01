@@ -2552,6 +2552,96 @@ discussed by Ikoma et al., *ICCP* (2021), section 3.2,
 the explicit clearance proof above restricts this mode to a class that does
 not require their approximate layer-occlusion composition.
 
+### Native material dispersion in thin camera lenses
+
+With `tracer`, `ThinLensElement` and `DispersiveThinLens` explicitly enable
+longitudinal chromatic aberration in the existing finite-defocus and layered
+camera paths. A prescription contains one to eight coincident ideal thin
+elements, each retaining its exact native `DielectricIor` (Cauchy, Sellmeier or
+tabulated phase index) and signed front/back surface curvatures in inverse
+metres. The exterior index is exactly one and wavelengths are vacuum nm in
+the native 380–780 nm support; group index is never substituted for phase
+index. No IOR fit, RGB conversion, external optics library or new pupil raster
+is introduced. The immutable bounded prescription is shared across evaluated
+camera states; per-ray material evaluation and pupil propagation allocate
+nothing.
+
+For reference wavelength `lambda_ref`, element power adds at the common pupil:
+
+`P(lambda) = sum_j (n_j(lambda)-1)*(C_front,j-C_back,j)`.
+
+The declared reference focus `s` sets the positive sensor conjugate
+`t = 1/(P(lambda_ref)-1/s)`. At actual source depth `z`, the propagated pupil
+phase is
+
+`phi(lambda,z) = pi*a^2/lambda * [1/z - 1/s + P(lambda_ref)-P(lambda)]`.
+
+Infinity has `1/z=0`. The chromatic power difference is evaluated as the
+compensated sum of each element's **index difference**, before multiplication
+and summation, avoiding subtraction of two large aggregate powers. Positive
+and negative elements can therefore represent an achromatic doublet while
+retaining its secondary spectrum. The native circular, annular and polygonal
+kernels receive this same signed total phase; annular inner/outer amplitude
+interference and odd-blade phase orientation remain intact. Single-plane and
+source-resolved density queries and actual spectral ray weights use the same
+law, including the inverse-square wavelength density Jacobian.
+
+`PhysicalCamera::with_dispersive_lens` requires a nonzero pupil and explicit
+focal-length/sensor-height projection. Its focal length must agree with the
+reference lens power within 64 relative machine epsilons. The finite-defocus
+or layered diffraction policy must already be selected; a geometric or
+focused-Airy camera refuses the lens, and an attached lens cannot silently
+switch to focused Airy imaging. A source at reference focus uses the
+finite-defocus policy with that declared plane. The original `CameraProjection`
+metadata is retained, while `raster_vertical_half_tan()` returns `H/(2*t)`.
+Both cinematic ray construction and optical-centre reprojection use this
+active scale. Focus racks therefore change finite-conjugate magnification for
+the fixed physical sensor height. All wavelengths share that sensor and chief
+ray mapping; this models longitudinal dispersion, not an artificial lateral
+color displacement. Lens prescriptions cannot change within one shot and
+their full native material coefficients/tables enter AOV camera continuity.
+Without an explicitly attached lens, previous raster arithmetic, sampling
+paths and continuity bytes are unchanged.
+
+Paraxial admission requires `a*abs(C_surface) <= 0.05`, object- and image-side
+pupil tangent slopes at most 0.1, and nominal raster chief-ray tangent radius
+at most 0.1. The tracer checks the entire raster corner, including its aspect
+ratio, independently of pixel jitter. The nominal raster limit is checked **before** drawing the PSF;
+the scalar kernel's complete mathematical tails are never clipped or
+renormalized. Existing scalar opening-width admission and the absolute
+16-radian total pupil-phase limit still apply. Every packet wavelength and
+both source-depth endpoints determine a common proposal envelope, using
+`max(abs(phi(lambda,z))*lambda/lambda_proposal)` in the shared reference
+coordinates. A narrow/broad full-support mixture retains both a sharp
+reference wavelength and wider defocused colors. Actual source depths are
+also admitted at every packet wavelength; the shortest wavelength alone
+still bounds only the separate residual geometric depth error.
+
+The existing clear-pupil scene and motion admission is unchanged: this lens
+does not bypass partial-pupil occlusion, primary-material, medium, prepared
+history, or finite/infinite source restrictions. This is a unit-transmission
+quadratic phase model, not a finite-thickness lens ray trace. It makes no
+claim for separated elements/principal-plane shifts, surface spherical
+aberration, coatings/reflection, bulk absorption, sensor irradiance or
+photometric exposure. It preserves normalized radiance averaging and adds
+no brightness multiplier. The lensmaker and quadratic phase conventions
+follow Kirchauer, TU Wien, section 4.1.2, equations (4.15)–(4.18),
+<https://www.iue.tuwien.ac.at/phd/kirchauer/node51.html>; finite-conjugate
+imaging and magnification follow the thin-lens construction in MIT's
+*Foundations of Computer Vision*, chapter 6,
+<https://visionbook.mit.edu/lenses.html>.
+
+Focused G1/G3 regressions cover native Cauchy/Sellmeier/table units, phase
+versus group index, signed achromat cancellation and secondary spectrum,
+reference focus and sensor magnification, all-pupil actual-source phase,
+packet proposal width, unit power and complete tails, focus-rack state, and
+strict unsupported-input admission. Renderer regressions exercise native
+glass dispersion for all pupil families, separate source-depth contributions
+during a lateral focus rack, and exact progressive replay. A temporary native
+numerical slice can execute the exact IOR/lens numerical bodies and existing
+pupil kernels independently of the runtime; that check is not a substitute
+for compiling or running the full camera/tracer integration tests.
+
 The motion path reconstructs only the supplied interpolation model. It does not
 invent mechanical bandwidth, unwrap rotations absent from keyframes, smooth a
 declared contact/terminal discontinuity, validate the source dynamics, or claim
