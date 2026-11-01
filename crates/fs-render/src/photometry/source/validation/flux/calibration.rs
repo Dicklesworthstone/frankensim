@@ -29,6 +29,9 @@ use super::super::{
     evaluate, finite, hash_float, nonnegative, prepare,
 };
 
+/// Independent emitter gains from controlled-output observations.
+pub mod emitters;
+
 /// Version of measurement admission, interval inversion and evidence binding.
 pub const FLUX_CALIBRATION_SEMANTICS_VERSION: u32 = 1;
 
@@ -37,6 +40,8 @@ pub const FLUX_CALIBRATION_SEMANTICS_VERSION: u32 = 1;
 pub enum FluxCalibrationError {
     /// Lux intervals must be finite and nonnegative.
     InvalidMeasurement,
+    /// Independent-emitter count or sparse coefficient storage exceeds its budget.
+    EmitterBudgetExceeded,
     /// A nonzero identity must describe the measurement or calibration scope.
     MissingEvidence,
     /// No finite completed fit is available for a prediction check.
