@@ -261,7 +261,6 @@ impl<const N: usize> ScatteringHeating<N> {
         })
     }
 
-
     /// Build the same native stochastic heating observer after a higher-level
     /// owner has resolved several physical constituents inside each optical cell.
     ///
@@ -455,6 +454,24 @@ impl<const N: usize> ScatteringHeating<N> {
     }
     pub fn time_s(&self) -> f64 {
         self.time_s
+    }
+
+    /// Integrate already-admitted fixed powers for one accepted interval.
+    /// Temperature-dependent source owners retain their own compensated history
+    /// while sharing this original physical accounting law and immutable report.
+    pub(super) fn interval_energy(
+        &self,
+        duration_s: f64,
+    ) -> Result<ScatteringEnergyBudget<N>, OpticalHeatingError> {
+        if !duration_s.is_finite() || duration_s <= 0.0 {
+            return Err(invalid("positive finite illumination interval required"));
+        }
+        integrate(
+            &self.deposition,
+            self.residual_w,
+            self.thermal_input_w,
+            duration_s,
+        )
     }
 
     fn check_clock(&self, thermal: &DepositionSimulation<'_>) -> Result<(), OpticalHeatingError> {

@@ -512,7 +512,7 @@ impl<const N: usize> DepositionObserver for TemperatureScatteringHeating<'_, N> 
 }
 
 #[derive(Clone, Debug)]
-struct EnergySums<const N: usize> {
+pub(super) struct EnergySums<const N: usize> {
     duration: CheckedSum,
     incident: [CheckedSum; N],
     ballistic_escape: [CheckedSum; N],
@@ -538,7 +538,18 @@ impl<const N: usize> Default for EnergySums<N> {
 }
 impl<const N: usize> EnergySums<N> {
     fn add(&mut self, interval: &ScatteringEnergyBudget<N>) -> Result<(), OpticalFeedbackError> {
-        self.duration.add(interval.duration_s)?;
+        self.add_duration(interval.duration_s)?;
+        self.add_source(interval)
+    }
+    pub(super) fn add_duration(&mut self, duration_s: f64) -> Result<(), OpticalFeedbackError> {
+        self.duration.add(duration_s)?;
+        Ok(())
+    }
+    /// Several simultaneously active sources share one accepted duration.
+    pub(super) fn add_source(
+        &mut self,
+        interval: &ScatteringEnergyBudget<N>,
+    ) -> Result<(), OpticalFeedbackError> {
         self.thermal.add(interval.thermal_input_j)?;
         for lane in 0..N {
             self.incident[lane].add(interval.incident_j[lane])?;
@@ -550,7 +561,7 @@ impl<const N: usize> EnergySums<N> {
         }
         Ok(())
     }
-    fn value(&self) -> Result<ScatteringFeedbackEnergyBudget<N>, OpticalFeedbackError> {
+    pub(super) fn value(&self) -> Result<ScatteringFeedbackEnergyBudget<N>, OpticalFeedbackError> {
         let mut result = ScatteringFeedbackEnergyBudget {
             duration_s: self.duration.value()?,
             incident_j: [0.0; N],
@@ -570,6 +581,18 @@ impl<const N: usize> EnergySums<N> {
             result.residual_j[lane] = self.residual[lane].value()?;
         }
         Ok(result)
+    }
+    pub(super) fn energy_sum(&self, channel: usize, lane: usize) -> CheckedSum {
+        match channel {
+            0 => self.incident[lane],
+            1 => self.ballistic_escape[lane],
+            2 => self.diffuse_escape[lane],
+            3 => self.absorbed[lane],
+            4 => self.unresolved[lane],
+            5 => self.residual[lane],
+            6 => self.thermal,
+            _ => unreachable!("private optical energy channel"),
+        }
     }
 }
 

@@ -4299,3 +4299,36 @@ above. Regression
 cases cover independent Airy phase/work, antireflection, reversed media, critical
 and evanescent films, original spectral laws, weak positive branch support, both
 native scene consumers and calibrated detector power/handedness.
+
+
+### Distributed illumination on temperature-dependent material fields
+
+`volumes::heating::illumination::TemperatureIlluminationHeating<N>` admits a
+bounded set of source-identified incident rays with explicit quadrature-weighted
+spectral watts. It prepares one native-temperature coefficient packet and one
+borrowed physical field for the whole illumination. Sources are reduced in
+canonical ID order; reordering inputs or adding an inactive source does not
+change existing photon streams. Ray weights describe caller-supplied spatial/
+angular quadrature; no finite-emitter or beam-profile accuracy is inferred.
+
+Every source uses the original multiple-scattering deposition and fixed heating
+owners. Absorption heats native cells; ballistic/diffuse escape and unresolved
+energy remain separate. The existing compensated account owner integrates time
+once per accepted native interval and sums the physical source energies. Sampling,
+receiving-cell error, truncation and power-balance allowances apply to the whole
+illumination as well as its original per-source admission. Source standard errors
+remain conditional diagnostics, not final temperature uncertainty.
+
+Independent source/replica streams are common across temperature, time and
+history-count comparisons, with common H/2H prefixes. The entire admitted
+transport set is shared immutably and reused when coefficient bits are unchanged;
+Planck or other coupled physical rates still evolve through their own owners.
+This sampled response field may have nonlinear finite-history bias. Empty
+illumination and unchanged cached continuation require no photon segments.
+
+Source count, combined retained deposition cells, source evaluations and all-source
+photon segments have explicit limits. Segment allowances cover every source and
+rebuild in one native advance; no per-ray reset replenishes them. Every material
+binding, including transparent/scattering-only cells, retains source-domain
+checks at actual starts, events and endpoints. Original native thermal cloning
+owns cancellation, conservation and atomic rollback of the entire candidate.

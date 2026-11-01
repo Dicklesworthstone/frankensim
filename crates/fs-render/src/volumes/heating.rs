@@ -31,6 +31,9 @@ pub mod scattering_feedback;
 /// Shared source-bound temperature-dependent absorption/scattering fields.
 pub mod temperature_field;
 
+/// Distributed incident absorption with shared local material preparation.
+pub mod illumination;
+
 /// Passive volumetric emission, reabsorption and bath exchange on native thermal cells.
 pub mod exchange;
 
