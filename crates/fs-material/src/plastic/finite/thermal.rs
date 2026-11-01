@@ -30,6 +30,18 @@
 //! actual physical duration. The reduced kinetic potential and physical heat
 //! are distinct: only the latter enters the thermal work account.
 //!
+//! [`AffineThermalFiniteJ2::new_norton`] explicitly selects threshold-free
+//! Norton creep with the same finite kinematics, stress and heat owners. Its
+//! rate is `alpha_dot=(s0/eta(T))*(q/s0)^n` for equivalent KIRCHHOFF stress q,
+//! not an inferred conversion of an ordinary Cauchy-stress creep fit. This
+//! selection has no yield or hardening energy. The native `Cp^-1, alpha` state,
+//! plastic-named result fields and history bounds then describe creep: alpha
+//! is accumulated equivalent creep, and physical loss is `q*delta_alpha`.
+//! This is one secondary-creep mechanism, not simultaneous creep and yielding,
+//! primary/tertiary creep, rupture or an empirical material calibration.
+//! The [Norton/Arrhenius reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.039.html)
+//! uses the rate prefactor A; the explicit normalization here is `A=s0/eta`.
+//!
 //! The explicit exponential/tangent expansion convention is described in
 //! the [COMSOL finite-strain theory reference](https://doc.comsol.com/6.4/doc/com.comsol.help.sme/sme_ug_theory.06.031.html).
 //! This reduced free-energy model is not the full independent-plastic-entropy
@@ -67,9 +79,28 @@ pub struct FiniteJ2ThermalParameters {
     pub logarithmic_expansion_slope_per_k2: f64,
 }
 
-/// Explicit Perzyna viscosity and thermal activation, in the native Kirchhoff
+/// Affine elastic and thermal coefficients for explicit secondary Norton creep.
+/// Yield and hardening parameters are absent because this mechanism has neither.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct FiniteNortonThermalParameters {
+    pub reference_temperature_k: f64,
+    pub temperature_range_k: [f64; 2],
+    /// Original-reference-volume Hencky shear modulus at the reference temperature.
+    pub shear_modulus_pa: f64,
+    /// Original-reference-volume Hencky bulk modulus at the reference temperature.
+    pub bulk_modulus_pa: f64,
+    pub shear_modulus_slope_pa_k: f64,
+    pub bulk_modulus_slope_pa_k: f64,
+    /// Logarithmic instantaneous thermal expansion, `d ln(theta)/dT`.
+    pub logarithmic_expansion_per_k: f64,
+    pub logarithmic_expansion_slope_per_k2: f64,
+}
+
+/// Explicit power-law viscosity and thermal activation, in the native Kirchhoff
 /// stress/original-volume convention. This is a dissipative law: its parameters
-/// contribute no artificial stored energy or mechanical entropy.
+/// contribute no artificial stored energy or mechanical entropy. The driving
+/// stress is Perzyna overstress for plasticity and full equivalent stress for
+/// the explicitly selected Norton creep family.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiniteJ2ThermalOverstress {
     /// Positive viscosity at the family's stress-free reference temperature.
@@ -90,6 +121,7 @@ pub struct AffineThermalFiniteJ2 {
     limits: FiniteJ2Limits,
     minimum_mechanical_heat_capacity_j_m3_k: f64,
     overstress: Option<FiniteJ2ThermalOverstress>,
+    norton_creep: bool,
 }
 
 /// Keep only one native backbone per frozen point, including kinetic points.
@@ -173,7 +205,7 @@ pub struct FiniteJ2ThermalIncrement {
     pub balance_error_j_m3: f64,
 }
 impl FiniteJ2ThermalIncrement {
-    /// Deposit once: physical plastic heat plus signed reversible exchange.
+    /// Deposit once: physical inelastic heat plus signed reversible exchange.
     pub fn caloric_heat_j_m3(&self) -> f64 {
         self.mechanical.plastic_dissipation_j_m3 + self.reversible_heat_j_m3
     }
@@ -242,6 +274,45 @@ impl AffineThermalFiniteJ2 {
         parameters: FiniteJ2ThermalParameters,
         limits: FiniteJ2Limits,
     ) -> Result<Self, FiniteJ2ThermalError> {
+        Self::build(parameters, limits, false)
+    }
+
+    /// Select secondary Norton creep with explicit positive kinetics and no
+    /// yield threshold or hardening storage. Every return requires physical dt.
+    /// The existing native metric/alpha state and plastic-named limits then
+    /// describe creep; their full reachability and finite-strain checks remain.
+    pub fn new_norton(
+        parameters: FiniteNortonThermalParameters,
+        limits: FiniteJ2Limits,
+        kinetics: FiniteJ2ThermalOverstress,
+    ) -> Result<Self, FiniteJ2ThermalError> {
+        let p = parameters;
+        let shared = FiniteJ2ThermalParameters {
+            reference_temperature_k: p.reference_temperature_k,
+            temperature_range_k: p.temperature_range_k,
+            reference: FiniteJ2Parameters {
+                shear_modulus_pa: p.shear_modulus_pa,
+                bulk_modulus_pa: p.bulk_modulus_pa,
+                yield_stress_pa: 0.0,
+                hardening_modulus_pa: 0.0,
+            },
+            slopes: FiniteJ2TemperatureSlopes {
+                shear_modulus_pa_k: p.shear_modulus_slope_pa_k,
+                bulk_modulus_pa_k: p.bulk_modulus_slope_pa_k,
+                yield_stress_pa_k: 0.0,
+                hardening_modulus_pa_k: 0.0,
+            },
+            logarithmic_expansion_per_k: p.logarithmic_expansion_per_k,
+            logarithmic_expansion_slope_per_k2: p.logarithmic_expansion_slope_per_k2,
+        };
+        Self::build(shared, limits, true)?.with_overstress(kinetics)
+    }
+
+    fn build(
+        parameters: FiniteJ2ThermalParameters,
+        limits: FiniteJ2Limits,
+        norton_creep: bool,
+    ) -> Result<Self, FiniteJ2ThermalError> {
         let p = &parameters;
         let [lo, hi] = p.temperature_range_k;
         if !lo.is_finite()
@@ -265,13 +336,14 @@ impl AffineThermalFiniteJ2 {
                 "finite affine derivatives and a positive finite T interval containing T_ref required",
             ));
         }
-        FiniteJ2::new(p.reference, limits)?;
         let mut family = Self {
             parameters,
             limits,
             minimum_mechanical_heat_capacity_j_m3_k: 0.0,
             overstress: None,
+            norton_creep,
         };
+        family.native_backbone(p.reference)?;
         let low = family.at_temperature(lo)?;
         let high = family.at_temperature(hi)?;
         // The quadratic log stretch has at most one interior extremum.
@@ -301,6 +373,20 @@ impl AffineThermalFiniteJ2 {
         Ok(family)
     }
 
+    fn native_backbone(&self, parameters: FiniteJ2Parameters) -> Result<FiniteJ2, FiniteJ2Error> {
+        if self.norton_creep {
+            FiniteJ2::new_creep_backbone(parameters, self.limits)
+        } else {
+            FiniteJ2::new(parameters, self.limits)
+        }
+    }
+
+    /// Whether Cp/alpha and native inelastic result fields describe the
+    /// explicitly selected threshold-free Norton mechanism.
+    pub const fn is_norton_creep(&self) -> bool {
+        self.norton_creep
+    }
+
     pub fn parameters(&self) -> &FiniteJ2ThermalParameters {
         &self.parameters
     }
@@ -319,7 +405,7 @@ impl AffineThermalFiniteJ2 {
         self.minimum_mechanical_heat_capacity_j_m3_k
     }
 
-    /// Select explicit Perzyna/Arrhenius kinetics without changing any elastic,
+    /// Select explicit power-law/Arrhenius kinetics without changing any elastic,
     /// energetic-hardening or thermal-expansion coefficient. The complete
     /// positive-temperature span must admit representable positive viscosity.
     pub fn with_overstress(
@@ -349,6 +435,7 @@ impl AffineThermalFiniteJ2 {
     }
 
     /// The original explicitly selected kinetics; None is rate independence.
+    /// Norton creep always has kinetics; its driving stress is full equivalent q.
     pub const fn overstress(&self) -> Option<&FiniteJ2ThermalOverstress> {
         self.overstress.as_ref()
     }
@@ -469,27 +556,18 @@ impl AffineThermalFiniteJ2 {
         let p = &self.parameters;
         let delta = temperature_k - p.reference_temperature_k;
         let coefficient = |value: f64, slope: f64| finite(slope.mul_add(delta, value));
-        let native = FiniteJ2::new(
-            FiniteJ2Parameters {
-                shear_modulus_pa: coefficient(
-                    p.reference.shear_modulus_pa,
-                    p.slopes.shear_modulus_pa_k,
-                )?,
-                bulk_modulus_pa: coefficient(
-                    p.reference.bulk_modulus_pa,
-                    p.slopes.bulk_modulus_pa_k,
-                )?,
-                yield_stress_pa: coefficient(
-                    p.reference.yield_stress_pa,
-                    p.slopes.yield_stress_pa_k,
-                )?,
-                hardening_modulus_pa: coefficient(
-                    p.reference.hardening_modulus_pa,
-                    p.slopes.hardening_modulus_pa_k,
-                )?,
-            },
-            self.limits,
-        )?;
+        let native = self.native_backbone(FiniteJ2Parameters {
+            shear_modulus_pa: coefficient(
+                p.reference.shear_modulus_pa,
+                p.slopes.shear_modulus_pa_k,
+            )?,
+            bulk_modulus_pa: coefficient(p.reference.bulk_modulus_pa, p.slopes.bulk_modulus_pa_k)?,
+            yield_stress_pa: coefficient(p.reference.yield_stress_pa, p.slopes.yield_stress_pa_k)?,
+            hardening_modulus_pa: coefficient(
+                p.reference.hardening_modulus_pa,
+                p.slopes.hardening_modulus_pa_k,
+            )?,
+        })?;
         let expansion_per_k = coefficient(
             p.logarithmic_expansion_per_k,
             p.logarithmic_expansion_slope_per_k2,

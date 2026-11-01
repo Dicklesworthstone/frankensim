@@ -15,6 +15,21 @@
 //! These parameters control dissipation, not additional free-energy storage.
 //! The selected law requires an explicit physical duration for every return.
 //!
+//! `finite-norton-hencky-kirchhoff-thermal`, law/state version 1, selects
+//! threshold-free secondary creep. Its seventeen explicit parameters are the
+//! original thermal set minus the two yield/hardening values and their slopes,
+//! plus `creep_reference_viscosity_pa_s`, `creep_stress_scale_pa`,
+//! `creep_exponent`, and `creep_activation_temperature_k`, with the same units
+//! and Arrhenius convention as above. Yield/hardening and Perzyna kinetic keys
+//! are rejected for this selector. No creep/yield combination is implied.
+//! Its declared rate is `alpha_dot=(s0/eta(T))*(q/s0)^n` in equivalent KIRCHHOFF
+//! stress and ORIGINAL-volume energy. Ordinary Cauchy-stress creep fits require
+//! an explicitly authored conversion; they cannot silently select this law.
+//! In its native state Cp^-1 denotes the inverse creep metric and alpha the
+//! accumulated equivalent creep. The existing `maximum_plastic_log_strain`
+//! and `maximum_accumulated_plastic_strain` keys then bound these creep states;
+//! no second plastic mechanism or stored hardening is introduced.
+//!
 //! The four reference coefficients `shear_modulus_pa`, `bulk_modulus_pa`,
 //! `yield_stress_pa`, `hardening_modulus_pa` are in Pa. Their four derivatives
 //! `shear_modulus_slope_pa_k`, `bulk_modulus_slope_pa_k`,
@@ -43,8 +58,8 @@
 //! must cover the entire native temperature span, including the reference.
 //! Other declared coordinates remain fixed external conditions. The exact
 //! original card, typed reference context and temperature-axis name persist.
-//! State schema 1 retains Cp^-1 and accumulated plastic strain; virgin zero
-//! plastic strain means Cp^-1=I, alpha=0 at the reference temperature.
+//! State schema 1 retains Cp^-1 and accumulated inelastic strain for the selected
+//! mechanism; virgin history means Cp^-1=I, alpha=0 at the reference temperature.
 //!
 //! The native owner supplies entropy -partial(psi)/partial(T) at fixed F/history,
 //! internal energy psi+T*s and the mechanical heat-capacity correction. The
@@ -56,7 +71,7 @@
 
 use super::{
     AffineThermalFiniteJ2, FiniteJ2TemperatureSlopes, FiniteJ2ThermalOverstress,
-    FiniteJ2ThermalParameters, FiniteThermalJ2Material,
+    FiniteJ2ThermalParameters, FiniteNortonThermalParameters, FiniteThermalJ2Material,
 };
 use crate::MaterialError;
 use crate::plastic::finite::{FiniteJ2Limits, FiniteJ2Parameters};
@@ -68,6 +83,8 @@ use fs_qty::{Dims, QuantitySpec};
 pub const THERMAL_FINITE_J2_LAW_ID: &str = "finite-j2-hencky-kirchhoff-thermal-affine";
 /// Explicit finite Perzyna law with Arrhenius viscosity and affine thermal energy.
 pub const THERMAL_PERZYNA_FINITE_J2_LAW_ID: &str = "finite-j2-hencky-kirchhoff-thermal-perzyna";
+/// Explicit threshold-free finite Norton creep with Arrhenius thermal kinetics.
+pub const THERMAL_FINITE_NORTON_LAW_ID: &str = "finite-norton-hencky-kirchhoff-thermal";
 
 const PA: Dims = Dims([-1, 1, -2, 0, 0, 0]);
 const PA_S: Dims = Dims([-1, 1, -1, 0, 0, 0]);
@@ -99,6 +116,18 @@ const OVERSTRESS_PARAMETERS: [&str; 4] = [
     "overstress_stress_scale_pa",
     "overstress_exponent",
     "overstress_activation_temperature_k",
+];
+const PLASTIC_PARAMETERS: [&str; 4] = [
+    "yield_stress_pa",
+    "hardening_modulus_pa",
+    "yield_stress_slope_pa_k",
+    "hardening_modulus_slope_pa_k",
+];
+const CREEP_PARAMETERS: [&str; 4] = [
+    "creep_reference_viscosity_pa_s",
+    "creep_stress_scale_pa",
+    "creep_exponent",
+    "creep_activation_temperature_k",
 ];
 
 /// Original source family, fixed external context and explicit evolving T axis.
@@ -228,15 +257,28 @@ fn parameter(card: &ConstitutiveModelCard, name: &str, dims: Dims) -> Result<f64
     Ok(parameter.value)
 }
 
+fn kinetics(
+    card: &ConstitutiveModelCard,
+    names: &[&str; 4],
+) -> Result<FiniteJ2ThermalOverstress, MaterialError> {
+    Ok(FiniteJ2ThermalOverstress {
+        reference_viscosity_pa_s: parameter(card, names[0], PA_S)?,
+        stress_scale_pa: parameter(card, names[1], PA)?,
+        exponent: parameter(card, names[2], Dims::NONE)?,
+        activation_temperature_k: parameter(card, names[3], K)?,
+    })
+}
+
 fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, MaterialError> {
     card.validate()
         .map_err(|error| refusal(error.to_string()))?;
-    let selected_overstress = match card.law.0.as_str() {
-        THERMAL_FINITE_J2_LAW_ID => false,
-        THERMAL_PERZYNA_FINITE_J2_LAW_ID => true,
+    let (selected_overstress, selected_norton) = match card.law.0.as_str() {
+        THERMAL_FINITE_J2_LAW_ID => (false, false),
+        THERMAL_PERZYNA_FINITE_J2_LAW_ID => (true, false),
+        THERMAL_FINITE_NORTON_LAW_ID => (false, true),
         _ => {
             return Err(refusal(format!(
-                "unsupported finite thermal J2 law {}; expected {THERMAL_FINITE_J2_LAW_ID} or {THERMAL_PERZYNA_FINITE_J2_LAW_ID}",
+                "unsupported finite thermal law {}; expected {THERMAL_FINITE_J2_LAW_ID}, {THERMAL_PERZYNA_FINITE_J2_LAW_ID} or {THERMAL_FINITE_NORTON_LAW_ID}",
                 card.law.0
             )));
         }
@@ -246,16 +288,64 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
         || card.initial_state != InitialStatePolicy::ZeroInternalState
     {
         return Err(refusal(
-            "finite thermal J2 cards require law/state v1 and virgin plastic history at the declared reference temperature",
+            "finite thermal cards require law/state v1 and virgin inelastic history at the declared reference temperature",
         ));
     }
     if let Some(name) = card.parameters.keys().find(|name| {
-        !PARAMETERS.contains(&name.as_str())
-            && !(selected_overstress && OVERSTRESS_PARAMETERS.contains(&name.as_str()))
+        let name = name.as_str();
+        if selected_norton {
+            !(PARAMETERS.contains(&name) && !PLASTIC_PARAMETERS.contains(&name)
+                || CREEP_PARAMETERS.contains(&name))
+        } else {
+            !PARAMETERS.contains(&name)
+                && !(selected_overstress && OVERSTRESS_PARAMETERS.contains(&name))
+        }
     }) {
         return Err(refusal(format!(
             "unrecognized finite thermal J2 card parameter {name}"
         )));
+    }
+    let limits = FiniteJ2Limits {
+        minimum_jacobian: parameter(card, "minimum_mechanical_jacobian", Dims::NONE)?,
+        maximum_elastic_log_strain: parameter(card, "maximum_elastic_log_strain", Dims::NONE)?,
+        maximum_plastic_log_strain: parameter(card, "maximum_plastic_log_strain", Dims::NONE)?,
+        maximum_accumulated_plastic_strain: parameter(
+            card,
+            "maximum_accumulated_plastic_strain",
+            Dims::NONE,
+        )?,
+    };
+    if selected_norton {
+        return AffineThermalFiniteJ2::new_norton(
+            FiniteNortonThermalParameters {
+                reference_temperature_k: parameter(card, "reference_temperature_k", K)?,
+                temperature_range_k: [
+                    parameter(card, "minimum_temperature_k", K)?,
+                    parameter(card, "maximum_temperature_k", K)?,
+                ],
+                shear_modulus_pa: parameter(card, "shear_modulus_pa", PA)?,
+                bulk_modulus_pa: parameter(card, "bulk_modulus_pa", PA)?,
+                shear_modulus_slope_pa_k: parameter(card, "shear_modulus_slope_pa_k", PA_K)?,
+                bulk_modulus_slope_pa_k: parameter(card, "bulk_modulus_slope_pa_k", PA_K)?,
+                logarithmic_expansion_per_k: parameter(
+                    card,
+                    "logarithmic_expansion_per_k",
+                    INVERSE_K,
+                )?,
+                logarithmic_expansion_slope_per_k2: parameter(
+                    card,
+                    "logarithmic_expansion_slope_per_k2",
+                    INVERSE_K2,
+                )?,
+            },
+            limits,
+            kinetics(card, &CREEP_PARAMETERS)?,
+        )
+        .map_err(|error| {
+            refusal(format!(
+                "inadmissible finite thermal Norton family: {error}"
+            ))
+        });
     }
     let reference = FiniteJ2Parameters {
         shear_modulus_pa: parameter(card, "shear_modulus_pa", PA)?,
@@ -284,34 +374,11 @@ fn parse_law(card: &ConstitutiveModelCard) -> Result<AffineThermalFiniteJ2, Mate
             INVERSE_K2,
         )?,
     };
-    let limits = FiniteJ2Limits {
-        minimum_jacobian: parameter(card, "minimum_mechanical_jacobian", Dims::NONE)?,
-        maximum_elastic_log_strain: parameter(card, "maximum_elastic_log_strain", Dims::NONE)?,
-        maximum_plastic_log_strain: parameter(card, "maximum_plastic_log_strain", Dims::NONE)?,
-        maximum_accumulated_plastic_strain: parameter(
-            card,
-            "maximum_accumulated_plastic_strain",
-            Dims::NONE,
-        )?,
-    };
     let family = AffineThermalFiniteJ2::new(parameters, limits)
         .map_err(|error| refusal(format!("inadmissible finite thermal J2 family: {error}")))?;
     if selected_overstress {
         family
-            .with_overstress(FiniteJ2ThermalOverstress {
-                reference_viscosity_pa_s: parameter(
-                    card,
-                    "overstress_reference_viscosity_pa_s",
-                    PA_S,
-                )?,
-                stress_scale_pa: parameter(card, "overstress_stress_scale_pa", PA)?,
-                exponent: parameter(card, "overstress_exponent", Dims::NONE)?,
-                activation_temperature_k: parameter(
-                    card,
-                    "overstress_activation_temperature_k",
-                    K,
-                )?,
-            })
+            .with_overstress(kinetics(card, &OVERSTRESS_PARAMETERS)?)
             .map_err(|error| {
                 refusal(format!(
                     "inadmissible finite thermal Perzyna family: {error}"

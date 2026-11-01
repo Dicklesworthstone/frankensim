@@ -4,6 +4,8 @@
 //! manufactured from the independently tested native point law; the coupled
 //! solve must recover an actual free displacement and temperature together.
 
+#[path = "finite_plastic_enthalpy/creep.rs"]
+mod creep;
 #[path = "finite_plastic_enthalpy/rate.rs"]
 mod rate;
 
