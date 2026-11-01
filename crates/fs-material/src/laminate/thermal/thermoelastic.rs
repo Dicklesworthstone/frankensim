@@ -310,6 +310,14 @@ impl AffineLaminaThermoelastic {
             self.curvature_bound,
         )?)
     }
+
+    /// Original affine-source interval jets, shared only with the section
+    /// potential. They cover the COMPLETE declared temperature interval;
+    /// sampling the current material is not an interval certificate.
+    pub(super) fn stiffness_derivative_bounds(&self) -> ([Jet<Interval>; 9], [Jet<Interval>; 2]) {
+        let coefficients: Vec<_> = self.elastic.iter().map(Coefficient::bound).collect();
+        plane(&self.source.input().elasticity, &coefficients)
+    }
     /// Resolve the original claims at one actual temperature. Runtime source
     /// data and the signed expansion integral are retained unchanged.
     pub fn at_temperature(
@@ -693,10 +701,10 @@ trait Number:
 impl Number for f64 {}
 impl Number for Interval {}
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Jet<T> {
-    v: T,
-    d: T,
-    dd: T,
+pub(super) struct Jet<T> {
+    pub(super) v: T,
+    pub(super) d: T,
+    pub(super) dd: T,
 }
 impl<T: Number> Jet<T> {
     fn constant(v: f64) -> Self {
@@ -835,16 +843,16 @@ fn native_values(
 // Nonfinite interval arithmetic remains an explicit failed bound. Never use
 // min/max to discard a NaN corner or invert an interval crossing a pole.
 #[derive(Clone, Copy, Debug, PartialEq)]
-struct Interval {
-    lo: f64,
-    hi: f64,
+pub(super) struct Interval {
+    pub(super) lo: f64,
+    pub(super) hi: f64,
 }
 impl Interval {
     const WHOLE: Self = Self {
         lo: f64::NEG_INFINITY,
         hi: f64::INFINITY,
     };
-    fn range(lo: f64, hi: f64) -> Self {
+    pub(super) fn range(lo: f64, hi: f64) -> Self {
         if !lo.is_finite() || !hi.is_finite() {
             Self::WHOLE
         } else if lo == 0.0 && hi == 0.0 {
@@ -856,13 +864,13 @@ impl Interval {
             }
         }
     }
-    fn finite(self) -> bool {
+    pub(super) fn finite(self) -> bool {
         self.lo.is_finite() && self.hi.is_finite() && self.lo <= self.hi
     }
     fn zero(self) -> bool {
         self.lo == 0.0 && self.hi == 0.0
     }
-    fn abs_max(self) -> f64 {
+    pub(super) fn abs_max(self) -> f64 {
         self.lo.abs().max(self.hi.abs())
     }
 }

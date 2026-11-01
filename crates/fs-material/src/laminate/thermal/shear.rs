@@ -18,6 +18,11 @@
 //! direction. No derivative is claimed through that fallback or a source kink.
 //! Geometry, orientation, reference density and mass stay fixed.
 
+pub mod bounds;
+pub mod increment;
+
+pub use increment::LaminateShearTemperatureIncrement;
+
 use super::source::ResolvedLaminateThermal;
 use super::thermoelastic::AffineLaminaThermoelastic;
 use crate::elastic::thermal::ThermoelasticError;
@@ -85,6 +90,7 @@ struct Layer {
     sin: f64,
     cos: f64,
     strain_limit: f64,
+    temperature_range: [f64; 2],
 }
 
 /// Source-pinned current section with temperature gradients cached once.
@@ -191,6 +197,7 @@ impl ResolvedLaminateShearThermoelastic {
                 sin,
                 cos,
                 strain_limit: law.maximum_absolute_engineering_strain(),
+                temperature_range: law.temperature_range_k(),
             });
             temperatures.push(resolved.temperature_k());
         }

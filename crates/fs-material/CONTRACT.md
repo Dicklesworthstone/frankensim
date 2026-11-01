@@ -299,14 +299,46 @@ derivatives and the entropy Hessian action, including mixed layer derivatives.
 There is no arbitrary allocation of shear internal energy among cells.
 
 Preparation and Hessian actions use O(n²) work and O(n) storage; directional
-derivatives use O(n) work, and point evaluation uses cached gradients. This is
-a local constitutive foundation, not a whole-interval thermal-capacity bound,
-heat stepper or fully coupled 3-D warping model. Its directional native Whitney
-approximation does not establish general off-axis multilayer covariance.
+derivatives use O(n) work, and point evaluation uses cached gradients. Its
+directional native Whitney approximation does not establish general off-axis
+multilayer covariance or a fully coupled 3-D warping model.
 `tests/laminate_thermal_shear.rs` covers the homogeneous closed form, unequal
 temperature derivatives, mixed symmetry, reference/axis transformations and
 source/domain/cancellation/fallback refusals. Numerical execution and physical
 validation require their own evidence.
+
+`shear::bounds::LaminateShearCapacityBound` extends this potential to the complete
+Cartesian product of the original source-temperature intervals. Outward source
+jets and analytic derivative-norm propagation bound each absolute row sum of
+the shear entropy Hessian, per reference area, over the declared principal
+strain envelope. Positive square integrals avoid cancellation in the Whitney
+energy enclosure; interval poles, unresolved positivity and unrepresentable
+bounds refuse. The one-layer homogeneous reduction retains the exact 5Gh/6
+identity. O(n²) preparation and O(n) storage avoid a dense thermal Hessian.
+The caller must combine this bound with its actual caloric and in-plane entropy
+derivatives; it is not itself a heat step or a discrete passivity certificate.
+
+`temperature_increment` gives the finite change of the same source operator
+one original temperature coordinate at a time. It averages forward and reverse
+spatial-order sweeps, using cached endpoint coefficient records without new
+source queries or AD preparations. The coordinate matrices telescope to H1-H0;
+reversing the endpoints reverses every contribution, and unchanged coordinates
+receive exact zero. Endpoints must retain the exact same immutable source
+owner, geometry, original affine intervals and strain envelopes. Roundoff is
+bounded and reported, never distributed into a physical heat source.
+
+For endpoint shear strains g0/g1 and reference area A, the per-coordinate
+temperature work is `A*g0^T*delta_H_i*g1/2`, and reversible heat is its negative
+minus `delta(T_i*S_i)`. Summing these transfers gives mechanical shear work
+minus the change in the ONE stack internal energy. This symmetric coordinate
+path is a declared finite-step approximation requiring refinement; it is not
+the exact straight-path entropy integral or invariant under arbitrary layer
+reordering. The material carrier does not advance or replace caloric storage.
+`tests/laminate_thermal_shear_bounds.rs` and
+`tests/laminate_thermal_shear_increment.rs` cover closed forms, mixed-temperature
+enclosures, work telescoping/reversal, consistency and atomic refusals. Focused
+compiler checks and independent analytical references are distinct from Rust
+numerical execution and measured material validation.
 
 ### Thermal-strain histories of compatible viscoelastic laminates
 
