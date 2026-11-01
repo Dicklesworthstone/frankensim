@@ -1,5 +1,7 @@
 use super::super::{CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings, SceneMedium};
-use super::{CurvedRayleighMedium, CurvedRayleighScene, CurvedRayleighTraceSettings};
+use super::{
+    CurvedDensityField, CurvedRayleighMedium, CurvedRayleighScene, CurvedRayleighTraceSettings,
+};
 use crate::charts::TriMesh;
 use crate::dielectric::{
     BeerLambertAbsorption, CauchyIor, DielectricGlass, DielectricSurface, GlassProvenance,
@@ -562,5 +564,163 @@ fn g0_invalid_limits_samples_and_cancellation_never_become_dark_measurements() {
             ),
             Err(CurvedSceneError::Scene(SceneError::Cancelled))
         ));
+    });
+}
+
+
+struct LinearDensity;
+impl CurvedDensityField for LinearDensity {
+    fn density_kg_m3(
+        &self,
+        position: Point3,
+    ) -> Result<f64, crate::volumes::transport::VolumeTransportError> {
+        if !position.x.is_finite() || !position.y.is_finite() || !position.z.is_finite() {
+            return Err(crate::volumes::transport::VolumeTransportError::Density { index: 0 });
+        }
+        Ok((1.0 + position.z).clamp(0.0, 2.0))
+    }
+}
+
+struct ViolatingDensity;
+impl CurvedDensityField for ViolatingDensity {
+    fn density_kg_m3(
+        &self,
+        _: Point3,
+    ) -> Result<f64, crate::volumes::transport::VolumeTransportError> {
+        Ok(3.0)
+    }
+}
+
+#[test]
+fn g1_delta_tracking_resolves_heterogeneous_density_on_the_actual_path() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, 2, 5.0)]).unwrap();
+        let material = glass(1.4, 0.0);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![detector(9)], 100_000)
+                .unwrap();
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let density = LinearDensity;
+        let volumes = [Some(
+            CurvedRayleighMedium::try_new_heterogeneous(
+                &spectrum,
+                &density,
+                2.0,
+                ContentHash([91; 32]),
+                &phase,
+            )
+            .unwrap(),
+        )];
+        let scattering = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+        let input = scene
+            .launch_beam(
+                Point3::new(0.0, 0.0, 0.0),
+                frame(),
+                550.0,
+                0,
+                Stokes::unpolarized(1.0),
+            )
+            .unwrap();
+        let mut limit = settings();
+        limit.max_volume_events = 1;
+        let output = scattering
+            .trace_with_tracking_samples(
+                cx,
+                input,
+                0,
+                limit,
+                |_| panic!("candidate scattering precedes the detector"),
+                |candidate| match candidate {
+                    // majorant=2/m: first candidate at z=0.2, rho=1.2 => p=0.6.
+                    0 => [1.0 - (-0.4_f64).exp(), 0.5, 0.0, 0.9],
+                    // Null collision leaves state unchanged. Next 0.3 m reaches
+                    // z=0.5, rho=1.5 => p=0.75 and is accepted.
+                    1 => [1.0 - (-0.6_f64).exp(), 0.5, 0.0, 0.5],
+                    _ => panic!("accepted event reaches the volume limit"),
+                },
+            )
+            .unwrap();
+        assert_eq!(output.path().termination(), PathTermination::VolumeLimit);
+        assert_eq!(output.volume_events(), 1);
+        assert_eq!(output.free_flight_draws(), 2);
+        close(output.path().traveled_m(), 0.5, 2e-12);
+        close(output.path().beam().ray().origin.z, 0.5, 2e-12);
+        close(output.path().optical_path_length_m(), 0.7, 2e-12);
+        close(output.path().beam().power().i, 1.0, 2e-12);
+        assert_eq!(
+            volumes[0].unwrap().density_identity(),
+            Some(ContentHash([91; 32]))
+        );
+        assert!(volumes[0].unwrap().is_heterogeneous());
+
+        // The legacy three-variate custom sampler cannot silently correlate
+        // acceptance and phase sampling in a heterogeneous field.
+        assert!(
+            scattering
+                .trace_with_samples(cx, input, 0, limit, |_| [0.5; 3], |_| [0.5; 3])
+                .is_err()
+        );
+    });
+}
+
+#[test]
+fn g0_delta_tracking_refuses_density_majorant_violations() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, 2, 5.0)]).unwrap();
+        let material = glass(1.33, 0.0);
+        let media = [SceneMedium::Homogeneous(&material)];
+        let scene =
+            CurvedPolarizedScene::try_new(cx, &geometry, &media, vec![detector(9)], 100_000)
+                .unwrap();
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let density = ViolatingDensity;
+        assert!(
+            CurvedRayleighMedium::try_new_heterogeneous(
+                &spectrum,
+                &density,
+                0.0,
+                ContentHash([92; 32]),
+                &phase,
+            )
+            .is_err()
+        );
+        assert!(
+            CurvedRayleighMedium::try_new_heterogeneous(
+                &spectrum,
+                &density,
+                2.0,
+                ContentHash([0; 32]),
+                &phase,
+            )
+            .is_err()
+        );
+        let volumes = [Some(
+            CurvedRayleighMedium::try_new_heterogeneous(
+                &spectrum,
+                &density,
+                2.0,
+                ContentHash([92; 32]),
+                &phase,
+            )
+            .unwrap(),
+        )];
+        let scattering = CurvedRayleighScene::try_new(cx, &scene, &volumes).unwrap();
+        let input = scene
+            .launch_beam(
+                Point3::new(0.0, 0.0, 0.0),
+                frame(),
+                550.0,
+                0,
+                Stokes::unpolarized(1.0),
+            )
+            .unwrap();
+        assert!(
+            scattering
+                .trace(cx, input, 0, settings(), 19, 7)
+                .is_err()
+        );
     });
 }

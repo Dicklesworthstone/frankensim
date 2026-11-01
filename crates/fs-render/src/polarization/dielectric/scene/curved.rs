@@ -58,6 +58,9 @@ pub mod participating;
 struct CurvedVolumeFlight {
     distance_m: f64,
     phase_samples: [f64; 2],
+    /// Independent delta-tracking acceptance variate. Uniform-density owners
+    /// ignore it, preserving their existing physical and random-number path.
+    acceptance_sample: f64,
 }
 
 /// Borrowed physical medium. A field identity names its complete immutable
@@ -364,7 +367,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             samples,
             0,
             |_, _| Ok(None),
-            |_, _, _| Err(CurvedSceneError::NumericalRange),
+            |_, _, _, _| Err(CurvedSceneError::NumericalRange),
         )
         .map(|(path, _)| path)
     }
@@ -386,7 +389,8 @@ impl<'a> CurvedPolarizedScene<'a> {
             usize,
             PolarizedBeam,
             [f64; 2],
-        ) -> Result<PolarizedBeam, CurvedSceneError>,
+            f64,
+        ) -> Result<Option<PolarizedBeam>, CurvedSceneError>,
     ) -> Result<(CurvedPathResult, u32), CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_surface_events == 0
@@ -534,12 +538,21 @@ impl<'a> CurvedPolarizedScene<'a> {
                             return Err(GradientIndexError::BoundaryResolutionLimit.into());
                         }
                         let selected = volume_flight.ok_or(CurvedSceneError::NumericalRange)?;
-                        result.beam = scatter(result.medium, result.beam, selected.phase_samples)?;
-                        volume_events += 1;
-                        if volume_events >= max_volume_events {
-                            result.termination = PathTermination::VolumeLimit;
-                            break;
+                        if let Some(scattered) = scatter(
+                            result.medium,
+                            result.beam,
+                            selected.phase_samples,
+                            selected.acceptance_sample,
+                        )? {
+                            result.beam = scattered;
+                            volume_events += 1;
+                            if volume_events >= max_volume_events {
+                                result.termination = PathTermination::VolumeLimit;
+                                break;
+                            }
                         }
+                        // Rejected delta-tracking candidates are null collisions:
+                        // continue from this exact curved endpoint unchanged.
                         continue;
                     }
                     BoundaryTermination::Surface(_) => {
