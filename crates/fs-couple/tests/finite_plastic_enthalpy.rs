@@ -4,6 +4,9 @@
 //! manufactured from the independently tested native point law; the coupled
 //! solve must recover an actual free displacement and temperature together.
 
+#[path = "finite_plastic_enthalpy/rate.rs"]
+mod rate;
+
 use std::collections::BTreeMap;
 
 use fs_couple::solid_enthalpy::finite_plastic::{

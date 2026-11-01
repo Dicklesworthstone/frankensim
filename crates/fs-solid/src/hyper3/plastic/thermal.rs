@@ -5,6 +5,9 @@
 //! total deformation, plastic metric and accumulated flow advance together.
 //! Old states are checked at their OLD temperature: new thermal softening may
 //! legitimately produce plastic flow without any imposed displacement change.
+//! Explicit Perzyna families use the actual physical interval in every frozen
+//! trial; accepted positive overstress is retained for later relaxation. The
+//! variational flow potential and physical yield/viscous heat remain distinct.
 //!
 //! Physical free/internal storage, yield dissipation, reversible caloric transfer
 //! and signed mechanical endpoint defect come from the native thermal owner.
@@ -258,7 +261,10 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 .into());
             }
             laws.push(
-                law.at_temperature(temperature)
+                // Reference preparation only checks geometry and material
+                // cardinality. This inspection view cannot advance kinetics
+                // and introduces no invented physical interval.
+                law.at_temperature_for_inspection(temperature)
                     .map_err(|source| FiniteThermoplasticTetError::Material { element, source })?,
             );
             states.push(law.initial_state());
@@ -407,7 +413,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
             let refused = |source| FiniteThermoplasticTetError::Material { element, source };
             let family = family.thermal_finite_j2();
             family
-                .at_temperature(self.temperatures_k[element])
+                .at_temperature_for_inspection(self.temperatures_k[element])
                 .map_err(refused)?
                 .validate_committed(
                     &self.state.element_deformation[element],
@@ -417,7 +423,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 .map_err(refused)?;
             laws.push(
                 family
-                    .at_temperature(new_temperatures_k[element])
+                    .at_temperature_for_step(new_temperatures_k[element], dt_s)
                     .map_err(refused)?,
             );
         }
@@ -463,6 +469,7 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
         let mut energy = FiniteThermoplasticTetEnergy::default();
         let (mut old_free, mut new_free, mut old_internal, mut new_internal) = (0.0, 0.0, 0.0, 0.0);
         let mut point_work = 0.0;
+        let mut flow_potential_j = 0.0;
         let tolerance = controls.material.equilibrium_work_tolerance_j;
         for (element, geometry) in self.state.elements.iter().enumerate() {
             if element % 1024 == 0 {
@@ -472,17 +479,37 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 HyperTetProblem::<FrozenThermalPoint<'_>>::deformation_gradient(geometry, new_u);
             let value = self.families[element]
                 .thermal_finite_j2()
-                .checked_increment(
+                .checked_increment_for_step(
                     &self.state.element_deformation[element],
                     &self.state.element_states[element],
                     self.temperatures_k[element],
                     &f,
                     new_temperatures_k[element],
                     controls.material.yield_tolerance_pa,
+                    dt_s,
                 )
                 .map_err(|source| FiniteThermoplasticTetError::Material { element, source })?;
             let account = FiniteThermoplasticElementEnergy::from_increment(&value);
             let v = geometry.volume;
+            // Perzyna physical loss is (Y+f_visc)*gamma, whereas the
+            // variational flow potential integrates f_visc over gamma:
+            // Y*gamma + n/(n+1)*f_visc*gamma. Viscosity is not hardening
+            // storage and the smaller potential must never be heated.
+            let family = self.families[element].thermal_finite_j2();
+            let flow_potential = if let Some(kinetics) = family.overstress() {
+                let p = family.parameters();
+                let yield_pa = p.slopes.yield_stress_pa_k.mul_add(
+                    new_temperatures_k[element] - p.reference_temperature_k,
+                    p.reference.yield_stress_pa,
+                );
+                let yield_loss = yield_pa * value.mechanical.plastic_increment;
+                yield_loss
+                    + kinetics.exponent / (kinetics.exponent + 1.0)
+                        * (account.plastic_dissipation_j_m3 - yield_loss)
+            } else {
+                account.plastic_dissipation_j_m3
+            };
+            flow_potential_j = v.mul_add(flow_potential, flow_potential_j);
             energy_gate(
                 "finite thermal point energy identity",
                 v * account.balance_error_j_m3,
@@ -577,8 +604,8 @@ impl<'a, L: FiniteThermalJ2Material> FiniteThermoplasticTetSolid<'a, L> {
                 equilibrium.strain_energy_j - energy.incremental_potential_j,
             ),
             (
-                "finite thermal storage/dissipation potential",
-                energy.incremental_potential_j - new_free - energy.plastic_dissipation_j,
+                "finite thermal stored energy/flow potential",
+                energy.incremental_potential_j - new_free - flow_potential_j,
             ),
             (
                 "finite thermal point/assembled work",
