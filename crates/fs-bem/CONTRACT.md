@@ -1792,3 +1792,53 @@ reactive exchange. Regression controls compare complex fluid-sphere partial-wave
 solutions on 20, 80 and 320 panels for density-only, speed-only and combined
 contrasts, check actual interior/exterior receivers and finite-source phase,
 and resolve the first-Born forward limit down to a `1e-12` speed contrast.
+
+## Mutually reflecting penetrable fluid bodies
+
+`helmholtz::transmission::multiple::FluidBodies` extends the original fluid
+interface to multiple separated bodies, each retaining its original surface
+and `FluidAcoustics` source. The common exterior is queried once and each
+interior once. A complete coupled factorization and cached exterior Green
+transfer are reused across coherent plane, volume, force and mixed incidents.
+There is no independent-body superposition or reflection-order truncation.
+
+For the original single-body contrast `C_i` and pressure-scaled outgoing traces
+`s_i=(p_i,q_i/k_o)`, the exciting field is `inc_i + sum_j E_ij s_j`, with
+`E_ij=[D_o,-k_o S_o; N_o/k_o,-D'_o]`. The coupled rows are therefore
+`(I+C_i)s_i + sum_j C_i E_ij s_j = -C_i inc_i`. This reuses the original stable
+contrast kernels and preserves weak scattering. Identical-fluid bodies have
+the exact algebraic equation `s_i=0`: their zero outgoing columns are removed
+from the coupling without changing other bodies' fields. They still receive
+and transmit the complete exciting field. All-transparent arrays preserve the
+original incident traces and return bitwise zero outgoing coefficients.
+
+Local outgoing coefficients are distinct from physical scattered boundary
+traces, which include every other body's contribution. `Solution` exposes
+both explicitly. Its complete scattered work includes mutual interference;
+per-body total interface work retains signed discretization defects. The
+internal outgoing representation is private. Source-bound finite receivers
+and bounded, cancellable retained-triangle far-field evaluation reuse the
+original observers. Body-indexed interior receivers use each body's own
+wavenumber, density, total traces and original winding/clearance checks.
+
+Each body must be one outward closed, non-self-intersecting component. Positive
+separation of retained-vertex axis-aligned boxes is conservatively required;
+overlapping boxes refuse even when the actual surfaces might be disjoint.
+Nested domains, touching bodies and self-intersection certification remain
+outside this owner. Both wavelengths on every body pass the original resolution
+gate. Peak logical numerical-payload admission includes dense coupled and
+transfer matrices, local contrast blocks, original worker-dependent LU scratch,
+vectors and copied surface arrays; allocator/runtime metadata and stacks are
+excluded. This is not a process-RSS bound.
+
+`tests/fluid_multiple.rs` checks original single-body agreement, exact and mixed
+transparency, coherent-source identity, permutation and translation covariance,
+mutual interference work, weak-contrast first-Born volume scaling, and the
+geometry/source/receiver/resource/cancellation boundaries. An independent
+coaxial multiple-sphere reference uses spherical Bessel/Hankel waves,
+Gauss-Legendre translation projection and its own small linear solve. Separate
+wave-order and 20/80/320-panel-per-body mesh ladders are required. The last mesh
+has a declared 5% far-field fixture tolerance; this is not a general accuracy
+certificate. Stationary inviscid nondispersive fluids, constant-panel centroid
+interaction, equivalent-disc self terms, and source-free interiors retain the
+original owner's limitations. Close-interaction accuracy requires refinement.

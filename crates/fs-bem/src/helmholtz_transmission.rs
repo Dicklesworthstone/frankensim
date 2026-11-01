@@ -31,6 +31,9 @@ use fs_la::eigen_complex::{
 use fs_material::MaterialError;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 
+#[path = "helmholtz_transmission_multiple.rs"]
+pub mod multiple;
+
 /// A transmission solve has two pressure-scaled unknowns per panel.
 pub const MAX_TRANSMISSION_PANELS: usize = MAX_DENSE_PANELS / 2;
 
