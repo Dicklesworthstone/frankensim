@@ -9,7 +9,7 @@
 
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
-use fs_material::hyper::cards::HyperelasticMaterial;
+use fs_material::hyper::cards::FiniteStrainPotential;
 use fs_sparse::Csr;
 
 use super::{Element, Evaluated, HyperTetError, HyperTetProblem, checkpoint};
@@ -19,12 +19,12 @@ use super::{Element, Evaluated, HyperTetError, HyperTetProblem, checkpoint};
 /// Retains O(number of tetrahedra) reference gradients and volumes. No tangent,
 /// current force, current deformation or constitutive history is cached.
 #[derive(Debug)]
-pub struct PreparedHyperTetProblem<'a, L: HyperelasticMaterial = Hyperelastic> {
+pub struct PreparedHyperTetProblem<'a, L: FiniteStrainPotential = Hyperelastic> {
     problem: HyperTetProblem<'a, L>,
     elements: Vec<Element>,
 }
 
-impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
+impl<'a, L: FiniteStrainPotential> HyperTetProblem<'a, L> {
     /// Admit the reference problem once for repeated dynamic evaluations.
     ///
     /// # Errors
@@ -41,7 +41,7 @@ impl<'a, L: HyperelasticMaterial> HyperTetProblem<'a, L> {
     }
 }
 
-impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
+impl<L: FiniteStrainPotential> PreparedHyperTetProblem<'_, L> {
     /// Current TOTAL P1 deformation gradient of one original element, row-major.
     ///
     /// The callback supplies displacement in metres for each of this element's
@@ -116,7 +116,10 @@ impl<L: HyperelasticMaterial> PreparedHyperTetProblem<'_, L> {
         Ok(self.evaluate(displacement_m, cx)?.internal)
     }
 
-    /// Native stored strain energy, J, with full current-state admission.
+    /// Native material potential, J, with full current-state admission.
+    ///
+    /// Equals stored strain energy for hyperelastic laws. Frozen inelastic
+    /// adapters own the distinction between incremental and stored energy.
     ///
     /// # Errors
     /// Invalid displacement, material-domain refusal, overflow or cancellation.

@@ -68,7 +68,7 @@
 
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
-use fs_material::hyper::cards::HyperelasticMaterial;
+use fs_material::hyper::cards::FiniteStrainPotential;
 use fs_solver::krylov::{PminresState, StallDiagnosis};
 use fs_solver::nonlinear::{FgmresState, SolverRunProgress};
 use fs_solver::op::CsrOp;
@@ -85,6 +85,9 @@ pub mod gravity;
 
 /// Immutable reference preparation for repeated finite-deformation evaluation.
 pub mod prepared;
+
+/// Retained multiplicative finite-strain plastic history on the native mesh.
+pub mod plastic;
 
 /// Newton / load-stepping controls.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -116,27 +119,27 @@ impl Default for HyperTetSettings {
     }
 }
 
-/// Uniform or per-element hyperelastic laws in tetrahedron connectivity order.
+/// Uniform or per-element finite-strain potentials in connectivity order.
 ///
 /// A field may borrow native laws or complete source-bound laws. Each element
 /// uses its own law for every trial energy, stress and tangent; coefficients
 /// remain fixed over the load path and are never homogenized by the solver.
 #[derive(Debug)]
-pub enum HyperelasticLawField<'a, L: HyperelasticMaterial = Hyperelastic> {
+pub enum HyperelasticLawField<'a, L: FiniteStrainPotential = Hyperelastic> {
     /// One law shared by every tetrahedron.
     Uniform(&'a L),
     /// Exactly one law for each tetrahedron.
     PerElement(&'a [L]),
 }
 
-impl<L: HyperelasticMaterial> Copy for HyperelasticLawField<'_, L> {}
-impl<L: HyperelasticMaterial> Clone for HyperelasticLawField<'_, L> {
+impl<L: FiniteStrainPotential> Copy for HyperelasticLawField<'_, L> {}
+impl<L: FiniteStrainPotential> Clone for HyperelasticLawField<'_, L> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<L: HyperelasticMaterial> HyperelasticLawField<'_, L> {
+impl<L: FiniteStrainPotential> HyperelasticLawField<'_, L> {
     fn validate_count(&self, expected: usize) -> Result<(), HyperTetError> {
         if let Self::PerElement(laws) = self
             && laws.len() != expected
@@ -159,12 +162,12 @@ impl<L: HyperelasticMaterial> HyperelasticLawField<'_, L> {
 
 /// A static finite-strain problem on a tetrahedral mesh.
 #[derive(Debug)]
-pub struct HyperTetProblem<'a, L: HyperelasticMaterial = Hyperelastic> {
+pub struct HyperTetProblem<'a, L: FiniteStrainPotential = Hyperelastic> {
     /// Reference vertex coordinates, m.
     pub nodes_m: &'a [[f64; 3]],
     /// Four vertex indices per conforming tetrahedron.
     pub tetrahedra: &'a [[usize; 4]],
-    /// Uniform or per-element native or source-bound hyperelastic laws.
+    /// Uniform or per-element native or source-bound finite-strain potentials.
     pub material: HyperelasticLawField<'a, L>,
     /// Prescribed displacements at full load: (`3 node + component`, m).
     pub prescribed_m: &'a [(usize, f64)],
@@ -178,8 +181,8 @@ pub struct HyperTetProblem<'a, L: HyperelasticMaterial = Hyperelastic> {
     pub settings: HyperTetSettings,
 }
 
-impl<L: HyperelasticMaterial> Copy for HyperTetProblem<'_, L> {}
-impl<L: HyperelasticMaterial> Clone for HyperTetProblem<'_, L> {
+impl<L: FiniteStrainPotential> Copy for HyperTetProblem<'_, L> {}
+impl<L: FiniteStrainPotential> Clone for HyperTetProblem<'_, L> {
     fn clone(&self) -> Self {
         *self
     }
@@ -209,7 +212,11 @@ pub struct HyperTetSolution {
     /// Reaction forces at the prescribed DOFs (internal minus external), N,
     /// in the order of `prescribed_m`.
     pub reactions_n: Vec<(usize, f64)>,
-    /// Stored strain energy `sum V W(F)`, J.
+    /// Material potential `sum V W(F)`, J.
+    ///
+    /// This is stored strain energy for a hyperelastic law. A frozen inelastic
+    /// adapter supplies its reduced incremental potential instead; obtain
+    /// physical stored energy and dissipation from that adapter's owner.
     pub strain_energy_j: f64,
     /// Smallest element `det F` in the converged state.
     pub min_det_f: f64,
@@ -340,8 +347,13 @@ fn triple(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
         + (a[0] * b[1] - a[1] * b[0]) * c[2]
 }
 
-impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
+impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
     fn validate(&self) -> Result<Vec<Element>, HyperTetError> {
+        self.validate_inputs()?;
+        self.reference_elements()
+    }
+
+    fn validate_inputs(&self) -> Result<(), HyperTetError> {
         let invalid = |what: String| Err(HyperTetError::InvalidInput { what });
         let n = self.nodes_m.len();
         if n == 0 || self.tetrahedra.is_empty() {
@@ -390,6 +402,12 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         if free > self.budget.maximum_free_dofs {
             return invalid(format!("{free} free DOFs exceed the budget"));
         }
+        Ok(())
+    }
+
+    fn reference_elements(&self) -> Result<Vec<Element>, HyperTetError> {
+        let invalid = |what: String| Err(HyperTetError::InvalidInput { what });
+        let n = self.nodes_m.len();
         let mut elements = Vec::with_capacity(self.tetrahedra.len());
         for (element, tet) in self.tetrahedra.iter().enumerate() {
             if tet.iter().any(|&v| v >= n) {
@@ -475,7 +493,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         f
     }
 
-    /// Internal force (all DOFs) and stored energy; `Err(element)` when the
+    /// Internal force (all DOFs) and material potential; `Err(element)` when the
     /// card refuses a state.
     fn evaluate(
         &self,
@@ -497,15 +515,14 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
             };
             min_det_f = min_det_f.min(j);
             let material = self.material.at(index);
-            let p = match material.first_piola(&f) {
-                Ok(p) => p,
+            let (p, w) = match material.stress_and_potential(&f) {
+                Ok(response) => response,
                 Err(error) => return Ok(Err((index, error.to_string()))),
             };
-            let w = material.energy_density(&f);
             if !w.is_finite() {
                 return Ok(Err((
                     index,
-                    format!("non-finite stored energy at det F = {j}"),
+                    format!("non-finite material potential at det F = {j}"),
                 )));
             }
             energy = element.volume.mul_add(w, energy);
@@ -704,11 +721,13 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         Ok(force)
     }
 
-    /// Actual stored strain energy, J, evaluated by the same material law and
+    /// Material potential, J, evaluated by the same material law and
     /// deformation gradient as the native force and tangent.
     ///
-    /// The material's determinant and principal-stretch domain is admitted
-    /// before energy is returned. This is storage, not dissipated heat.
+    /// The material's deformation domain is admitted before energy is returned.
+    /// This equals stored strain energy for a hyperelastic material. A frozen
+    /// inelastic adapter supplies its incremental potential; its original
+    /// material owner reports physical storage and dissipation separately.
     ///
     /// # Errors
     /// Invalid input/budget, material-domain refusal, overflow, or cancellation.
@@ -750,6 +769,24 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
     /// See [`HyperTetError`].
     pub fn solve(&self, cx: &Cx<'_>) -> Result<HyperTetSolution, HyperTetError> {
         self.solve_loaded(None, None, cx)
+    }
+
+    /// Solve one absolute dead-load endpoint from an existing displacement.
+    ///
+    /// The supplied displacement is the initial Newton iterate. The prescribed
+    /// values and forces remain the full endpoint data; they are never ramped
+    /// again from the reference state. Inelastic adapters must hold accepted
+    /// material history fixed throughout this solve and commit it separately.
+    ///
+    /// # Errors
+    /// Requires exactly one load step, finite displacement of the mesh's size,
+    /// and the same material, geometry and equilibrium gates as [`Self::solve`].
+    pub fn solve_from(
+        &self,
+        displacement_m: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_loaded_from(Some(displacement_m), None, None, None, cx)
     }
 
     /// Solve dead loads together with uniform current-area follower pressure.
@@ -869,7 +906,6 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         )
     }
 
-    #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search owner
     fn solve_loaded(
         &self,
         pressure: Option<(
@@ -879,10 +915,43 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
+        self.solve_loaded_from(None, None, pressure, gravity, cx)
+    }
+
+    #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search owner
+    fn solve_loaded_from(
+        &self,
+        initial_displacement: Option<&[f64]>,
+        prepared_elements: Option<&[Element]>,
+        pressure: Option<(
+            &pressure::ClosedTetPressureSurface,
+            pressure::TetPressure<'_>,
+        )>,
+        gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
+        cx: &Cx<'_>,
+    ) -> Result<HyperTetSolution, HyperTetError> {
         checkpoint(cx)?;
-        let elements = self.validate()?;
+        self.validate_inputs()?;
+        if let Some(displacement) = initial_displacement {
+            if self.settings.load_steps != 1 {
+                return Err(HyperTetError::InvalidInput {
+                    what: "continuation from an accepted displacement requires exactly one physical load endpoint"
+                        .into(),
+                });
+            }
+            self.check_len(displacement)?;
+        }
+        // Only an immutable native mesh owner may provide cached geometry.
+        // Every endpoint still validates its supports, loads and free-DOF budget.
+        let owned_elements;
+        let elements = if let Some(elements) = prepared_elements {
+            elements
+        } else {
+            owned_elements = self.reference_elements()?;
+            &owned_elements
+        };
         let gravity_weights = gravity
-            .map(|(density, _)| gravity::reference_weights(&elements, density, cx))
+            .map(|(density, _)| gravity::reference_weights(elements, density, cx))
             .transpose()?;
         let n = self.nodes_m.len();
         let dofs = 3 * n;
@@ -895,11 +964,11 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         for (row, &dof) in free.iter().enumerate() {
             row_of[dof] = row;
         }
-        let mut u = vec![0.0f64; dofs];
+        let mut u = initial_displacement.map_or_else(|| vec![0.0; dofs], <[f64]>::to_vec);
         let mut steps = Vec::with_capacity(self.settings.load_steps);
         let refused =
             |(element, what): (usize, String)| HyperTetError::MaterialRefused { element, what };
-        let mut state = self.evaluate(&elements, &u, cx)?.map_err(refused)?;
+        let mut state = self.evaluate(elements, &u, cx)?.map_err(refused)?;
         if !state.energy.is_finite() || state.internal.iter().any(|value| !value.is_finite()) {
             return Err(HyperTetError::InvalidInput {
                 what: "initial solid energy or internal force is not representable".into(),
@@ -909,7 +978,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         let mut scaled_faces = Vec::new();
         for step in 1..=self.settings.load_steps {
             let load = step as f64 / self.settings.load_steps as f64;
-            let f_dead = self.external(&elements, load);
+            let f_dead = self.external(elements, load);
             if let Some((_, pressure::TetPressure::PerFace(values))) = pressure {
                 scaled_faces.clear();
                 scaled_faces.reserve(values.len());
@@ -949,7 +1018,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 if let Some((_, field)) = gravity {
                     let sampled = gravity::evaluate(
                         self.nodes_m,
-                        &elements,
+                        elements,
                         gravity_weights.as_deref().expect("prepared gravity masses"),
                         displacement,
                         field,
@@ -997,14 +1066,14 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                 let pending_any = pending.iter().any(|&(_, dp)| dp != 0.0);
                 // The diagonal times displacement provides a force scale even
                 // at stress-free states where internal force vanishes.
-                let mut full = self.tangent(&elements, &u, cx)?.map_err(refused)?;
+                let mut full = self.tangent(elements, &u, cx)?.map_err(refused)?;
                 let pressure_tangent = applied_pressure
                     .map(|(surface, value)| surface.force_tangent(&u, value, cx))
                     .transpose()?;
                 let gravity_tangent = if let Some((_, field)) = gravity {
                     gravity::evaluate(
                         self.nodes_m,
-                        &elements,
+                        elements,
                         gravity_weights.as_deref().expect("prepared gravity masses"),
                         &u,
                         field,
@@ -1107,7 +1176,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
                     for &(dof, dp) in &pending {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
-                    if let Ok(evaluated) = self.evaluate(&elements, &trial, cx)?
+                    if let Ok(evaluated) = self.evaluate(elements, &trial, cx)?
                         && evaluated.energy.is_finite()
                         && evaluated.internal.iter().all(|value| value.is_finite())
                     {
@@ -1225,7 +1294,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
             }
             steps.push(record);
         }
-        let mut f_ext = self.external(&elements, 1.0);
+        let mut f_ext = self.external(elements, 1.0);
         if let Some((surface, value)) = pressure {
             for (total, current) in f_ext.iter_mut().zip(surface.force_n(&u, value, cx)?) {
                 *total += current;
@@ -1234,7 +1303,7 @@ impl<L: HyperelasticMaterial> HyperTetProblem<'_, L> {
         if let Some((_, field)) = gravity {
             let sampled = gravity::evaluate(
                 self.nodes_m,
-                &elements,
+                elements,
                 gravity_weights.as_deref().expect("prepared gravity masses"),
                 &u,
                 field,

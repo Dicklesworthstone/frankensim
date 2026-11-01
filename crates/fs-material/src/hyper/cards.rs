@@ -54,6 +54,53 @@ impl HyperelasticMaterial for Hyperelastic {
     }
 }
 
+/// Work-conjugate finite-strain potential at fixed material history.
+///
+/// The spatial solver uses this same potential, first Piola stress and exact
+/// derivative throughout a Newton solve. For a hyperelastic law the potential
+/// is stored energy. For an inelastic law it may instead be a reduced
+/// incremental potential with the previously accepted history held fixed.
+/// Such a law must report physical stored energy and dissipation separately;
+/// the spatial solver must never interpret its incremental potential as heat.
+pub trait FiniteStrainPotential {
+    /// Potential per original reference volume; nonfinite values refuse a trial.
+    fn energy_density(&self, deformation: &[f64; 9]) -> f64;
+
+    /// First Piola stress conjugate to the total deformation gradient.
+    fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError>;
+
+    /// Derivative of first Piola stress with respect to the same gradient.
+    fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError>;
+
+    /// Evaluate stress and potential together without duplicating a return map.
+    ///
+    /// Existing hyperelastic owners keep their original independent methods;
+    /// inelastic adapters may override this bounded per-point operation.
+    fn stress_and_potential(
+        &self,
+        deformation: &[f64; 9],
+    ) -> Result<([f64; 9], f64), MaterialError> {
+        Ok((
+            self.first_piola(deformation)?,
+            self.energy_density(deformation),
+        ))
+    }
+}
+
+impl<T: HyperelasticMaterial + ?Sized> FiniteStrainPotential for T {
+    fn energy_density(&self, deformation: &[f64; 9]) -> f64 {
+        HyperelasticMaterial::energy_density(self, deformation)
+    }
+
+    fn first_piola(&self, deformation: &[f64; 9]) -> Result<[f64; 9], MaterialError> {
+        HyperelasticMaterial::first_piola(self, deformation)
+    }
+
+    fn consistent_tangent(&self, deformation: &[f64; 9]) -> Result<[[f64; 9]; 9], MaterialError> {
+        HyperelasticMaterial::consistent_tangent(self, deformation)
+    }
+}
+
 /// A native hyperelastic law retaining the exact admitted model card.
 ///
 /// Parameters and their physical context stay fixed over the mechanical load

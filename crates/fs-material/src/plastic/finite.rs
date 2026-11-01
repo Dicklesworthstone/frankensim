@@ -28,7 +28,9 @@ const ROUND_OFF: f64 = 2048.0 * f64::EPSILON;
 /// Independently specified, fixed-temperature coefficients in Pa.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FiniteJ2Parameters {
+    /// Elastic shear modulus, positive and finite.
     pub shear_modulus_pa: f64,
+    /// Elastic bulk modulus, positive and finite.
     pub bulk_modulus_pa: f64,
     /// Initial yield radius in Kirchhoff equivalent stress.
     pub yield_stress_pa: f64,
@@ -70,9 +72,11 @@ pub struct FiniteJ2State {
 /// An immutable candidate: the caller commits `state` only after step acceptance.
 #[derive(Clone, Debug, PartialEq)]
 pub struct FiniteJ2Response {
+    /// Complete candidate history, committed only when the surrounding step succeeds.
     pub state: FiniteJ2State,
     /// Work conjugate to F, row-major tensor components, per reference area.
     pub first_piola_pa: [f64; 9],
+    /// Kirchhoff stress `tau = J sigma`, in row-major tensor components.
     pub kirchhoff_pa: [f64; 9],
     /// Exact dP/dF at frozen old history, indexed `[P_component][F_component]`.
     /// At the yield kink the numerical zero-overstress branch is elastic.
@@ -80,16 +84,21 @@ pub struct FiniteJ2Response {
     /// Reduced incremental potential: returned stored energy + sigma_y dgamma.
     /// Its derivative is P; it is not the stored energy of the candidate.
     pub incremental_potential_j_m3: f64,
+    /// Actual elastic plus energetic-hardening storage at the returned endpoint.
     pub stored_energy_j_m3: f64,
     /// Physical dissipation only: sigma_y dgamma, without numerical work defect.
     pub plastic_dissipation_j_m3: f64,
+    /// Nonnegative increment of accumulated equivalent plastic strain.
     pub plastic_increment: f64,
+    /// Returned `sqrt(3/2) ||dev(tau)||`, independent of volumetric stress.
     pub equivalent_kirchhoff_pa: f64,
+    /// Current-to-reference volume ratio `det(F)`.
     pub jacobian: f64,
 }
 
 /// Allows a strict source-resolved owner to expose the same immutable native law.
 pub trait FiniteJ2Material {
+    /// Borrow the admitted native coefficients and applicability bounds.
     fn finite_j2(&self) -> &FiniteJ2;
 }
 
@@ -108,17 +117,27 @@ impl<T: FiniteJ2Material + ?Sized> FiniteJ2Material for &T {
 /// Rejections leave the borrowed accepted state untouched.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FiniteJ2Error {
+    /// Invalid constitutive coefficients, domain bounds or caller tolerance.
     Parameters(&'static str),
+    /// Invalid or unreachable retained material history or stretch metric.
     State(&'static str),
+    /// A declared strain or Jacobian bound was exceeded.
     Domain {
+        /// Quantity and, for the Jacobian, lower-bound direction.
         quantity: &'static str,
+        /// Rejected value.
         value: f64,
+        /// Declared applicability bound.
         limit: f64,
     },
+    /// An inspected accepted endpoint lies outside the yield surface.
     YieldResidual {
+        /// Equivalent Kirchhoff stress minus the current yield radius.
         residual_pa: f64,
+        /// Explicit caller tolerance for the accepted-state check.
         tolerance_pa: f64,
     },
+    /// The checked update cannot be represented with finite numerical outputs.
     Numerical(&'static str),
 }
 
@@ -191,16 +210,19 @@ impl FiniteJ2 {
         Ok(Self { parameters, limits })
     }
 
+    /// Original immutable constitutive coefficients.
     #[must_use]
     pub fn parameters(&self) -> &FiniteJ2Parameters {
         &self.parameters
     }
 
+    /// Original immutable applicability bounds.
     #[must_use]
     pub fn limits(&self) -> &FiniteJ2Limits {
         &self.limits
     }
 
+    /// Virgin history: identity plastic metric and no accumulated plastic flow.
     #[must_use]
     pub fn initial_state(&self) -> FiniteJ2State {
         FiniteJ2State {
@@ -222,7 +244,12 @@ impl FiniteJ2 {
             state.alpha,
             self.limits.maximum_accumulated_plastic_strain,
         )?;
-        if state.alpha == 0.0 && state.inverse_plastic_cauchy_green != IDENTITY6 {
+        // The exact identity needs neither a spectral decomposition nor a
+        // reachability test, including a closed plastic path with alpha > 0.
+        if state.inverse_plastic_cauchy_green == IDENTITY6 {
+            return Ok(());
+        }
+        if state.alpha == 0.0 {
             return Err(FiniteJ2Error::State(
                 "zero accumulated flow requires the virgin plastic metric",
             ));
@@ -294,6 +321,35 @@ impl FiniteJ2 {
         f: &[f64; 9],
         old: &FiniteJ2State,
     ) -> Result<FiniteJ2Response, FiniteJ2Error> {
+        let returned = self.return_map(f, old)?;
+        let tangent = self.return_tangent(f, old, &returned)?;
+        Ok(FiniteJ2Response {
+            state: returned.state,
+            first_piola_pa: returned.first_piola,
+            kirchhoff_pa: returned.tau,
+            tangent_pa: tangent,
+            incremental_potential_j_m3: returned.potential,
+            stored_energy_j_m3: returned.stored,
+            plastic_dissipation_j_m3: returned.dissipation,
+            plastic_increment: returned.dgamma,
+            equivalent_kirchhoff_pa: returned.scale * returned.q_trial,
+            jacobian: returned.trial.jacobian,
+        })
+    }
+
+    /// One checked Piola stress and reduced potential evaluation, without
+    /// assembling dP/dF. Newton line searches use the same return map and
+    /// retained/returned-history domain checks as [`Self::response`].
+    pub fn stress_and_potential(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+    ) -> Result<([f64; 9], f64), FiniteJ2Error> {
+        let returned = self.return_map(f, old)?;
+        Ok((returned.first_piola, returned.potential))
+    }
+
+    fn return_map(&self, f: &[f64; 9], old: &FiniteJ2State) -> Result<ReturnMap, FiniteJ2Error> {
         let trial = self.elastic_endpoint(f, old)?;
         let p = &self.parameters;
         let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
@@ -370,6 +426,46 @@ impl FiniteJ2 {
         let potential = stored + dissipation;
         // Equivalent to trial_energy + H alpha_old²/2 - positive(excess)²/(2D),
         // but the positive sum avoids cancellation after large plastic steps.
+        if tau.iter().chain(first_piola.iter()).any(|x| !x.is_finite())
+            || !potential.is_finite()
+            || !dissipation.is_finite()
+            || (plastic && dissipation == 0.0)
+        {
+            return Err(FiniteJ2Error::Numerical(
+                "stress, potential or physical dissipation is not representable",
+            ));
+        }
+        Ok(ReturnMap {
+            trial,
+            state,
+            first_piola,
+            tau,
+            inverse_transpose,
+            scale,
+            q_trial,
+            dgamma,
+            stored,
+            dissipation,
+            potential,
+        })
+    }
+
+    fn return_tangent(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        returned: &ReturnMap,
+    ) -> Result<[[f64; 9]; 9], FiniteJ2Error> {
+        let p = &self.parameters;
+        let trial = &returned.trial;
+        let inverse_transpose = &returned.inverse_transpose;
+        let first_piola = &returned.first_piola;
+        let scale = returned.scale;
+        let q_trial = returned.q_trial;
+        let plastic = returned.dgamma > 0.0;
+        let radius_old = self.yield_radius(old.alpha);
+        let denominator = 3.0 * p.shear_modulus_pa + p.hardening_modulus_pa;
+        let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
         let cp_inv = expand(&old.inverse_plastic_cauchy_green);
         let f_cp = multiply(f, &cp_inv);
         let log_derivative = trial.spectrum.divided_differences();
@@ -398,38 +494,19 @@ impl FiniteJ2 {
             for i in [0, 4, 8] {
                 dtau[i] += p.bulk_modulus_pa * inverse_transpose[column];
             }
-            let dp = multiply(&dtau, &inverse_transpose);
+            let dp = multiply(&dtau, inverse_transpose);
             for ij in 0..9 {
                 // dP = dtau F^-T - P dF^T F^-T.
                 tangent[ij][column] =
                     dp[ij] - first_piola[3 * (ij / 3) + col] * inverse_transpose[3 * row + ij % 3];
             }
         }
-        if tau
-            .iter()
-            .chain(first_piola.iter())
-            .chain(tangent.iter().flatten())
-            .any(|x| !x.is_finite())
-            || !potential.is_finite()
-            || !dissipation.is_finite()
-            || (plastic && dissipation == 0.0)
-        {
+        if tangent.iter().flatten().any(|x| !x.is_finite()) {
             return Err(FiniteJ2Error::Numerical(
-                "stress, tangent, potential or physical dissipation is not representable",
+                "consistent tangent is not representable",
             ));
         }
-        Ok(FiniteJ2Response {
-            state,
-            first_piola_pa: first_piola,
-            kirchhoff_pa: tau,
-            tangent_pa: tangent,
-            incremental_potential_j_m3: potential,
-            stored_energy_j_m3: stored,
-            plastic_dissipation_j_m3: dissipation,
-            plastic_increment: dgamma,
-            equivalent_kirchhoff_pa: scale * q_trial,
-            jacobian: trial.jacobian,
-        })
+        Ok(tangent)
     }
 
     fn yield_radius(&self, alpha: f64) -> f64 {
@@ -492,6 +569,22 @@ struct ElasticEndpoint {
     log_j: f64,
     spectrum: Spectrum,
     deviator: [f64; 9],
+}
+
+/// Checked constitutive candidate, with no tangent storage or evaluation.
+/// The spectral trial data are reused only when the caller requests dP/dF.
+struct ReturnMap {
+    trial: ElasticEndpoint,
+    state: FiniteJ2State,
+    first_piola: [f64; 9],
+    tau: [f64; 9],
+    inverse_transpose: [f64; 9],
+    scale: f64,
+    q_trial: f64,
+    dgamma: f64,
+    stored: f64,
+    dissipation: f64,
+    potential: f64,
 }
 
 /// Fixed 3-by-3 data; only the existing native eigensolver owns a small workspace.

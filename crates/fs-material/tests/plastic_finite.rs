@@ -202,6 +202,10 @@ fn rigid_rotations_and_noncoaxial_retained_history_are_objective() {
 fn check_derivatives(material: &FiniteJ2, f: [f64; 9], old: &FiniteJ2State) {
     let original = old.clone();
     let r = material.response(&f, old).unwrap();
+    assert_eq!(
+        material.stress_and_potential(&f, old).unwrap(),
+        (r.first_piola_pa, r.incremental_potential_j_m3)
+    );
     let mut squared_error = 0.0;
     let mut squared_reference = 0.0;
     for column in 0..9 {
@@ -210,13 +214,12 @@ fn check_derivatives(material: &FiniteJ2, f: [f64; 9], old: &FiniteJ2State) {
         let mut minus = f;
         plus[column] += h;
         minus[column] -= h;
-        let a = material.response(&plus, old).unwrap();
-        let b = material.response(&minus, old).unwrap();
-        let potential_derivative =
-            (a.incremental_potential_j_m3 - b.incremental_potential_j_m3) / (2.0 * h);
+        let a = material.stress_and_potential(&plus, old).unwrap();
+        let b = material.stress_and_potential(&minus, old).unwrap();
+        let potential_derivative = (a.1 - b.1) / (2.0 * h);
         near(potential_derivative, r.first_piola_pa[column], 25.0, 4e-7);
         for row in 0..9 {
-            let numerical = (a.first_piola_pa[row] - b.first_piola_pa[row]) / (2.0 * h);
+            let numerical = (a.0[row] - b.0[row]) / (2.0 * h);
             let analytic = r.tangent_pa[row][column];
             near(analytic, numerical, 5e3, 2e-6);
             near(analytic, r.tangent_pa[column][row], 1e-3, 3e-12);
@@ -376,6 +379,7 @@ fn malformed_histories_bounds_and_unaccepted_endpoints_are_rejected_without_muta
     let mut inverted = IDENTITY;
     inverted[0] = -1.0;
     assert!(material.response(&inverted, &initial).is_err());
+    assert!(material.stress_and_potential(&inverted, &initial).is_err());
     assert!(material.response(&[f64::NAN; 9], &initial).is_err());
     assert!(
         material
@@ -418,6 +422,11 @@ fn malformed_histories_bounds_and_unaccepted_endpoints_are_rejected_without_muta
     )
     .unwrap();
     assert!(metric_bound.response(&coaxial(0.1, 0.0), &initial).is_err());
+    assert!(
+        metric_bound
+            .stress_and_potential(&coaxial(0.1, 0.0), &initial)
+            .is_err()
+    );
     for bad in [f64::NAN, f64::INFINITY, -1.0, 0.0] {
         assert!(
             FiniteJ2::new(
