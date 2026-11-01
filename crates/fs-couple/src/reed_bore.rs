@@ -985,12 +985,13 @@ mod fast_mode_tests {
         };
         let zc = fixture_impedance(&gas);
         let face = reed_pressure_face(reed);
+        let mut closed_cells = 0;
         for opening in [0.0, 0.25 * reed.rest_opening_m, reed.rest_opening_m] {
             for velocity in [-0.1, 0.0, 0.1] {
                 for mouth in [-3000.0, 0.0, 12000.0] {
                     let incoming = 70.0;
                     let body_flow = 2e-7;
-                    let (outgoing, _, next_velocity) = step_massive_reed(
+                    let (outgoing, next_opening, next_velocity) = step_massive_reed(
                         reed,
                         gas.density,
                         zc,
@@ -1007,25 +1008,42 @@ mod fast_mode_tests {
                     .unwrap();
                     let dp = mouth - (outgoing + incoming);
                     // Independent signed Bernoulli reference, not the solver helper.
-                    let jet = reed.width_m
-                        * opening
-                        * (2.0 * dp.abs() / gas.density).sqrt()
-                        * dp.signum();
+                    // The step solves the junction at the clamped MIDPOINT opening of its
+                    // implicit midpoint motion (contact::step_with_contact_response), the
+                    // opening the swept-face flow is conjugate to, not at the starting one.
+                    // This test predates that change (da2da0935, 938435817) and used `opening`.
+                    let jet_at = |height: f64| {
+                        reed.width_m * height * (2.0 * dp.abs() / gas.density).sqrt() * dp.signum()
+                    };
+                    let flow_opening = f64::midpoint(opening, next_opening).max(0.0);
+                    let jet = jet_at(flow_opening);
                     let wave = (outgoing - incoming) / zc;
                     let midpoint_velocity = 0.5 * (velocity + next_velocity);
                     assert!((wave - jet + face * midpoint_velocity - body_flow).abs() < 1e-16);
+                    if opening == 0.0 && velocity == 0.0 && mouth == -3000.0 {
+                        // Negative: the starting-opening reference is the one this test used to
+                        // carry. On the first cell where the slit opens within the step it
+                        // misses the identity by about 7e-9, seven orders over the bound above,
+                        // so the identity can tell the midpoint opening from the starting one.
+                        assert!(flow_opening > 0.0);
+                        let at_start = wave - jet_at(opening) + face * midpoint_velocity - body_flow;
+                        assert!(at_start.abs() > 1e-12, "starting opening missed by {at_start}");
+                    }
                     // Midpoint pressure/face work cancels; jet loss is nonnegative.
                     let pressure_force = -face * dp;
                     let loss = dp * (wave - body_flow) - pressure_force * midpoint_velocity;
                     assert!((loss - dp * jet).abs() < 1e-12);
                     assert!(dp * jet >= 0.0);
-                    if opening == 0.0 {
+                    if flow_opening == 0.0 {
+                        closed_cells += 1;
                         let expected = incoming + zc * (-face * midpoint_velocity + body_flow);
                         assert!((outgoing - expected).abs() < 1e-12 * (1.0 + outgoing.abs()));
                     }
                 }
             }
         }
+        // The closed-slit branch must really run: it is keyed on the midpoint opening.
+        assert!(closed_cells > 0);
     }
 
     #[test]
@@ -1067,10 +1085,15 @@ mod fast_mode_tests {
                             .unwrap();
                             let vm = 0.5 * (v + v1);
                             let dp = mouth - outgoing - incoming;
-                            let jet = reed.width_m
-                                * y
-                                * (2.0 * dp.abs() / gas.density).sqrt()
-                                * dp.signum();
+                            // Jet loss at the clamped MIDPOINT opening the step solves at
+                            // (da2da0935, 938435817); this test used the starting opening `y`.
+                            let jet_at = |height: f64| {
+                                reed.width_m
+                                    * height
+                                    * (2.0 * dp.abs() / gas.density).sqrt()
+                                    * dp.signum()
+                            };
+                            let jet = jet_at(f64::midpoint(y, y1).max(0.0));
                             let flow = (outgoing - incoming) / zc;
                             let supply = dt * dp * (flow - body);
                             let loss = dt * (dp * jet + damping * vm * vm);
@@ -1081,6 +1104,23 @@ mod fast_mode_tests {
                                 "linear energy defect {} at dt={dt}",
                                 change + loss - supply
                             );
+                            if damping_ratio == 0.0
+                                && dt == 1e-6
+                                && y == 0.0
+                                && v == 0.1
+                                && mouth == -500.0
+                            {
+                                // Negative: the starting-opening loss was this test's reference.
+                                // On the first cell where the slit opens within the step it
+                                // misses the energy identity by about 1.2e-11, almost six orders
+                                // over the bound above.
+                                let at_start =
+                                    change + dt * (dp * jet_at(y) + damping * vm * vm) - supply;
+                                assert!(
+                                    at_start.abs() > 1e-13,
+                                    "starting opening missed by {at_start}"
+                                );
+                            }
                             assert!((y1 - y - dt * vm).abs() < 1e-18);
                         }
                     }
