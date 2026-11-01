@@ -1,9 +1,10 @@
 //! Bounded backward Euler on the original column's source-qualified Darcy flux.
 
 use super::{
-    Hydraulics, LiquidCapillaryPressure, LiquidSaturationCandidate, LiquidSaturationColumn,
-    LiquidSaturationStep, LiquidSaturationStepInput, WetPoreLiquidState, compensated_sum,
-    hydraulics, interface_mobility, invalid, positive,
+    Hydraulics, LiquidCapillaryPressure, LiquidSaturationBoundaryStepInput,
+    LiquidSaturationCandidate, LiquidSaturationColumn, LiquidSaturationStep,
+    LiquidSaturationStepInput, WetPoreLiquidState, compensated_sum, hydraulics, interface_mobility,
+    invalid, positive,
 };
 use crate::MaterialError;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
@@ -131,7 +132,7 @@ impl Endpoint {
 fn endpoint(
     original: &LiquidSaturationColumn,
     saturations: Vec<f64>,
-    input: LiquidSaturationStepInput,
+    input: LiquidSaturationBoundaryStepInput,
     controls: LiquidSaturationImplicitControls,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Endpoint, LiquidSaturationImplicitError> {
@@ -279,7 +280,7 @@ impl Linearization {
         &mut self,
         original: &LiquidSaturationColumn,
         point: &Endpoint,
-        input: LiquidSaturationStepInput,
+        input: LiquidSaturationBoundaryStepInput,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, LiquidSaturationImplicitError> {
         let mut full = true;
@@ -303,7 +304,7 @@ impl Linearization {
         &mut self,
         original: &LiquidSaturationColumn,
         point: &Endpoint,
-        input: LiquidSaturationStepInput,
+        input: LiquidSaturationBoundaryStepInput,
         full: bool,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<bool, LiquidSaturationImplicitError> {
@@ -319,14 +320,16 @@ impl Linearization {
             if face == 0 || face == n {
                 let i = if face == 0 { 0 } else { n - 1 };
                 let sign = if face == 0 { -1.0 } else { 1.0 };
-                let mut derivative = if point.flow.mobility[i] == 0.0 {
+                let boundary = &point.flow.boundaries[usize::from(face == n)];
+                let mut derivative = if boundary.pressure_conductance == 0.0 {
                     0.0
                 } else {
-                    sign * point.flow.mobility[i] / (0.5 * original.cells[i].thickness_m)
-                        * self.pressure_tangent[i]
+                    sign * boundary.pressure_conductance * self.pressure_tangent[i]
                 };
-                if full {
-                    derivative += point.flow.faces[face] * self.mobility_tangent[i];
+                if full && boundary.mobility_fraction != 0.0 {
+                    derivative += point.flow.faces[face]
+                        * boundary.mobility_fraction
+                        * self.mobility_tangent[i];
                 }
                 monotone &= derivative.is_finite() && sign * derivative >= 0.0;
                 self.diagonal[i] += sign
@@ -390,6 +393,25 @@ impl LiquidSaturationColumn {
     pub fn step_candidate_implicit(
         &self,
         input: LiquidSaturationStepInput,
+        controls: LiquidSaturationImplicitControls,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<
+        (LiquidSaturationCandidate, LiquidSaturationImplicitReport),
+        LiquidSaturationImplicitError,
+    > {
+        self.step_candidate_implicit_with_boundaries(input.into(), controls, cancelled)
+    }
+
+    /// Solve the same fully implicit interval with sealed, prescribed-flow or
+    /// pressure/resistive-pressure boundaries. Surface and porous half-cell
+    /// resistances add in series; the exact interface mobility sensitivity
+    /// enters the native tridiagonal Jacobian. Prescribed flux has zero
+    /// boundary tangent but retains actual pressure/speed source admission.
+    /// Local residual, whole-column volume and bounded-work controls are
+    /// unchanged; no rejected trial or partial interval is published.
+    pub fn step_candidate_implicit_with_boundaries(
+        &self,
+        input: LiquidSaturationBoundaryStepInput,
         controls: LiquidSaturationImplicitControls,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<

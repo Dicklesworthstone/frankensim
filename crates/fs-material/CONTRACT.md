@@ -8261,6 +8261,25 @@ requires supported convergent states and representable time advancement; it
 does not certify temporal accuracy, introduce hidden substeps, solve gas or
 heat storage, infer fluid density, or add hysteresis or capillary work.
 
+`LiquidSaturationBoundary` supplies sealed, signed superficial-flux and
+pressure/resistive-pressure conditions to that same explicit/implicit flux
+owner. Positive flux points left to right on both ends. Surface hydraulic
+resistance [Pa s/m] acts in series with the actual porous half-cell resistance,
+with no additional storage or body-force span. Its exact pressure and mobility
+sensitivities enter the existing tridiagonal nonlinear solve. The original
+pressure APIs select zero surface resistance.
+
+Initial and accepted states qualify actual speed and reconstructed porous-side
+boundary pressure. An imposed flux cannot force an unsupported hydraulic head;
+external pressure behind a resistive surface is distinct from material-side
+pressure. Nonzero flux through exact dry/intrinsic seals refuses. The typed
+explicit entrypoint requires a fixed volume budget; implicit local residual and
+whole-column budgets retain their original meaning. Public fixtures check
+inventory-determined closed equilibration, infiltration/drainage and throughflow,
+manufactured nonlinear Robin balance and its mirror, actual source domains,
+budget refusal and late cancellation. No finite-reservoir compliance, coupled
+gas/heat storage or empirical hydraulic calibration is inferred.
+
 ### Adaptive coupled gas, adsorption and sensible-heat transport
 
 `AdsorbingPoreDomain::{step_candidate_adaptive_to,advance_adaptive_to}` control
