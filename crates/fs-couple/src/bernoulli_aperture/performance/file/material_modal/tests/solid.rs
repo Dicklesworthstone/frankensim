@@ -2,7 +2,6 @@
 //! Manufactured geometry/laws do not establish measured instrument realism.
 mod surface;
 use super::*;
-use crate::acoustic_realize::AcousticRealizeError;
 use crate::bernoulli_aperture::dg::loaded::performance::LoadedDgPerformance;
 use crate::bernoulli_aperture::performance::file::material_modal::dg::MaterialModalDgValvePerformance;
 
@@ -335,64 +334,108 @@ fn source_pressure_load_and_complete_volume_image_match_an_independent_tetrahedr
 #[test]
 fn native_solid_refuses_missing_sources_unresolved_images_and_nonphysical_pressure_faces() {
     let text = source();
-    for (missing, band) in [("density", 100000.0), ("branch_33", 100000.0), ("", 1000.0)] {
-        assert!(
-            MaterialModalDgValvePerformance::from_bytes_with_sources(
-                text.as_bytes(),
-                37,
-                &CancelGate::new_clock_free(),
-                None,
-                |_| Ok(solid_pack(1000.0, 20000.0, 400.0, missing, band)),
-            )
-            .is_err()
-        );
+    // The reason of each refusal is asserted, not only that there is one: a refusal for any
+    // other reason would leave the guard its row names untested. Each phrase is the part of the
+    // refusal that identifies its guard, measured per row on 2026-11-01 and matched as a
+    // substring of the error's Debug text (no quotes in the phrases for rows whose reason sits
+    // inside a nested message string, where Debug escapes them).
+    let refusal = |input: &str, missing: &str, band: f64| {
+        let error = MaterialModalDgValvePerformance::from_bytes_with_sources(
+            input.as_bytes(),
+            37,
+            &CancelGate::new_clock_free(),
+            None,
+            |_| Ok(solid_pack(1000.0, 20000.0, 400.0, missing, band)),
+        )
+        .err()
+        .expect("must refuse");
+        format!("{error:?}")
+    };
+    for (missing, band, reason) in [
+        ("density", 100000.0, "UnknownProperty { property: \"density\" }"),
+        ("branch_33", 100000.0, "UnknownProperty { property: \"branch_33\" }"),
+        ("", 1000.0, "NoClaimInDomain { property: \"branch_11\""),
+    ] {
+        let error = refusal(&text, missing, band);
+        assert!(error.contains(reason), "{missing:?} refused for another reason: {error}");
     }
-    for changed in [
-        text.replace("solid tet4", "solid tet10"),
-        text.replace(
-            "solid_axes 1 0 0 0 1 0 0 0 1",
-            "solid_axes 2 0 0 0 1 0 0 0 1",
+    for (changed, reason) in [
+        (
+            text.replace("solid tet4", "solid tet10"),
+            "native solid pressure geometry requires explicit tet4",
         ),
-        text.replace("solid_limits 4 1 2 1e-6 6", "solid_limits 4 1 1 1e-6 6"),
-        text.replace("solid_limits 4 1 2 1e-6 6", "solid_limits 4 1 2 1e-6 5"),
-        text.replace(
-            "solid_pressure_face 1 2 3 -1",
-            "solid_pressure_face 0 0 3 -1",
+        (
+            text.replace(
+                "solid_axes 1 0 0 0 1 0 0 0 1",
+                "solid_axes 2 0 0 0 1 0 0 0 1",
+            ),
+            "rotation matrix must be orthogonal",
         ),
-        text.replace(
-            "solid_pressure_face 1 2 3 -1",
-            "solid_pressure_face 1 2 3 0.5",
+        (
+            text.replace("solid_limits 4 1 2 1e-6 6", "solid_limits 4 1 1 1e-6 6"),
+            "requested: 2, maximum: 1",
         ),
-        text.replace(
-            "solid_pressure_faces 1\nsolid_pressure_face 1 2 3 -1",
-            "solid_pressure_faces 2\nsolid_pressure_face 1 2 3 -1\nsolid_pressure_face 3 1 2 -1",
+        (
+            text.replace("solid_limits 4 1 2 1e-6 6", "solid_limits 4 1 2 1e-6 5"),
+            "InternalStateBudget { needed: 6, cap: 5 }",
         ),
-        text.replace("valve 0.0004", "valve 0.0005"),
-        text.replace(
-            "solid_approximation 2000 0.02 0.02",
-            "solid_approximation 2000 0 0",
+        (
+            text.replace(
+                "solid_pressure_face 1 2 3 -1",
+                "solid_pressure_face 0 0 3 -1",
+            ),
+            "pressure face must be an original exterior triangle",
         ),
-        text.replace("initial 2\nstate 0 0\nstate 0 0", "initial 1\nstate 0 0"),
-        text.replace("source_forces 2", "wetted_surfaces 0\nsource_forces 2"),
-        text.replace(
-            "solid_material solid-valve.matpack isotropic",
-            "solid_material solid-valve.matpack orthotropic",
+        (
+            text.replace(
+                "solid_pressure_face 1 2 3 -1",
+                "solid_pressure_face 1 2 3 0.5",
+            ),
+            "solid pressure face sign must be +1 inward or -1 outward",
+        ),
+        (
+            text.replace(
+                "solid_pressure_faces 1\nsolid_pressure_face 1 2 3 -1",
+                "solid_pressure_faces 2\nsolid_pressure_face 1 2 3 -1\nsolid_pressure_face 3 1 2 -1",
+            ),
+            "duplicate surface load assignment",
+        ),
+        (
+            text.replace("valve 0.0004", "valve 0.0005"),
+            "valve rest gap must agree with the original three-dimensional opening geometry",
+        ),
+        (
+            text.replace(
+                "solid_approximation 2000 0.02 0.02",
+                "solid_approximation 2000 0 0",
+            ),
+            "material storage dispersion exceeds the admitted frozen valve image",
+        ),
+        (
+            text.replace("initial 2\nstate 0 0\nstate 0 0", "initial 1\nstate 0 0"),
+            "initial states must cover every selected solid mode",
+        ),
+        (
+            text.replace("source_forces 2", "wetted_surfaces 0\nsource_forces 2"),
+            "solid pressure surfaces belong to the original volume mesh",
+        ),
+        (
+            text.replace(
+                "solid_material solid-valve.matpack isotropic",
+                "solid_material solid-valve.matpack orthotropic",
+            ),
+            "UnknownProperty { property: \"poisson_ratio_12\" }",
         ),
     ] {
-        assert!(
-            MaterialModalDgValvePerformance::from_bytes_with_sources(
-                changed.as_bytes(),
-                37,
-                &CancelGate::new_clock_free(),
-                None,
-                |_| Ok(solid_pack(1000.0, 20000.0, 400.0, "", 100000.0)),
-            )
-            .is_err(),
-            "must refuse {changed}"
-        );
+        let error = refusal(&changed, "", 100000.0);
+        assert!(error.contains(reason), "refused for another reason than {reason:?}: {error}");
     }
     let gate = CancelGate::new_clock_free();
     gate.request();
+    // A gate requested before the call is caught by the entry's first checkpoint
+    // (performance/file.rs checkpoint, from 23f32cc27), which answers Input, not
+    // Physics(Cancelled); that variant is only produced by solid.rs failure() once a source
+    // is being resolved. The panicking closure proves no source was loaded either way.
     assert!(matches!(
         MaterialModalDgValvePerformance::from_bytes_with_sources(
             text.as_bytes(),
@@ -403,9 +446,10 @@ fn native_solid_refuses_missing_sources_unresolved_images_and_nonphysical_pressu
                 panic!("cancel before loading source")
             },
         ),
-        Err(PlateValveInputError::Physics(
-            AcousticRealizeError::Cancelled
-        ))
+        Err(PlateValveInputError::Input {
+            what: "plate-valve input cancelled",
+            ..
+        })
     ));
 }
 
