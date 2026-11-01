@@ -416,8 +416,11 @@ fn g3_held_wall_environment_reaches_both_ducts_and_the_same_coupled_reed() {
 
     // Uniform and regional DG adapters call this same original wall input.
     // Geometry, constitutive selection and use band remain fixed.
+    // The thin-membrane law is admitted only for thickness/radius <= 0.05 (local.rs base_patch),
+    // and the impedance below is evaluated at 7 mm, so the wall is 0.3 mm (0.043), not the 1 mm
+    // (0.143) this test was born with.
     let load_dg = |moisture| {
-        let text = format!("isotropic wall.matpack 293.15 1000 0.001 strain-fixed 50 2000 kelvin-voigt environment 1 moisture_content {moisture}");
+        let text = format!("isotropic wall.matpack 293.15 1000 3e-4 strain-fixed 50 2000 kelvin-voigt environment 1 moisture_content {moisture}");
         crate::dg_port::input::wall::DgMaterialWallInput::read(1, &mut text.split_ascii_whitespace())
             .unwrap().unwrap().resolve(std::sync::Arc::new(material.clone()),
                 &CancelGate::new_clock_free()).unwrap()
@@ -429,4 +432,22 @@ fn g3_held_wall_environment_reaches_both_ducts_and_the_same_coupled_reed() {
     assert_eq!(a.wall().thickness_m(), b.wall().thickness_m());
     assert_ne!(a.wall().specific_impedance(0.007, 1000.0).unwrap(),
         b.wall().specific_impedance(0.007, 1000.0).unwrap());
+}
+
+// Negative for the thin-membrane limit above: the same declaration with a 1 mm wall is refused
+// just over thickness/radius = 0.05 and accepted just under it.
+#[test]
+fn g3_membrane_wall_refuses_thickness_over_a_twentieth_of_the_radius() {
+    let material = environment_pack(wall_pack(1e6, None, 100000.0), true);
+    let text = "isotropic wall.matpack 293.15 1000 0.001 strain-fixed 50 2000 kelvin-voigt environment 1 moisture_content 0";
+    let loaded = crate::dg_port::input::wall::DgMaterialWallInput::read(1, &mut text.split_ascii_whitespace())
+        .unwrap().unwrap().resolve(std::sync::Arc::new(material.clone()),
+            &CancelGate::new_clock_free()).unwrap();
+    // 0.001 / 0.0195 = 0.0513 and 0.001 / 0.021 = 0.0476.
+    assert!(matches!(
+        loaded.wall().specific_impedance(0.0195, 1000.0),
+        Err(crate::acoustic_realize::AcousticRealizeError::InvalidDescription { what })
+            if what == "local membrane wall requires positive geometry and thickness/radius <= 0.05"
+    ));
+    assert!(loaded.wall().specific_impedance(0.021, 1000.0).is_ok());
 }
