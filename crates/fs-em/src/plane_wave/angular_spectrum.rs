@@ -30,6 +30,13 @@ pub use layers::{
     AngularSpectrumLayerField, AngularSpectrumLayerLimits, PreparedAngularSpectrumLayer,
 };
 
+mod coherence;
+pub use coherence::{
+    AngularSpectrumCoherence, AngularSpectrumCoherenceField, AngularSpectrumCoherenceLayerField,
+    AngularSpectrumCoherenceLimits, AngularSpectrumPointStatistics,
+    PreparedAngularSpectrumCoherenceLayer,
+};
+
 /// Bounds the uninterruptible work of one existing FFT pencil.
 pub const MAX_AXIS_POINTS: usize = 4096;
 

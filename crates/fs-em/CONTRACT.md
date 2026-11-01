@@ -2105,6 +2105,45 @@ not evolve a temperature, claim isolated finite-edge convergence, or add a
 nonlinear, anisotropic or three-dimensional Maxwell solver. Thermal consumers
 must debit the reported absorption only once.
 
+### Spatial partial coherence through the same diffracting films
+
+`angular_spectrum::AngularSpectrumCoherence` borrows original prepared beams
+as explicit positive cross-spectral factors: `W(r,r') = sum B_m(r) B_m(r')*`.
+Every factor retains the exact same source operator address and periodic grid;
+its field amplitude includes its square-root statistical weight. An explicit
+anchor fixes that operator/grid without adding power, so an empty factor bank
+is exact darkness. No independence between Fourier bins is assumed: the
+existing six-component Maxwell reconstruction interferes each factor first,
+then the mutually uncorrelated factors add as second moments. The output
+retains the complete Hermitian electric coherency tensor, componentwise
+magnetic RMS squared and all three complex Poynting components. Peak-phasor
+time averaging contributes one factor of one half. Electric coherency is in
+V²/m²; physical energy flux comes from E cross H*, not an impedance guess.
+
+The selected-layer consumer shares ONE original TE/TM response cache across
+the entire factor bank. Local positive dielectric heat is evaluated after
+within-factor field interference, and original positive film-loss modes
+supply the integrated watts without subtracting fluxes or quadrature. Local
+and integrated heat remain the same physical loss, never two thermal inputs.
+Repeated depth queries do not repeat constitutive evaluation or layer solves.
+No new source or film kernel is introduced.
+
+Caller limits admit at most 4096 factors, total factor/point pairs, total FFT
+work and conservative numerical workspace before allocation. Queries stream
+one reconstructed factor at a time: additional storage is O(grid points),
+and FFT work is O(factors × points × log(points)). The workspace bound includes
+one original beam's complete workspace, result/accumulation planes and the
+shared layer cache; other caller-owned factor beams, earlier retained results
+and allocator overhead are excluded. Cancellation polls through the original
+FFTs and bounded moment-reduction batches, returning no partial statistics.
+
+G1/G3 tests check analytic fringe visibility and signed Maxwell flux,
+independent Airy standing-wave heat, depth-integrated absorption, complex
+unitary source-factor changes, polarization, zero-rank and lossless limits,
+exact source binding, work limits and cancellation. This is a monochromatic
+spatial ensemble; finite bandwidth, temporal beats, source-coherence inference,
+temperature evolution and isolated-aperture convergence remain outside it.
+
 ### Two-sided coherent illumination and layer heating
 
 `PlanarDielectricLayers::prepare_illumination` retains the same source-bound

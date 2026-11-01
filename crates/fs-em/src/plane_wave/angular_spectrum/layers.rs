@@ -173,7 +173,56 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         depth_m: f64,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<AngularSpectrumLayerField, AngularSpectrumError> {
+        self.field_for_beam(self.beam, depth_m, &mut cancelled)
+    }
+
+    // A coherence factor changes only the incident amplitudes. The source,
+    // spatial bins and their TE/TM boundary responses must remain identical.
+    fn admit_beam(&self, beam: &PlanarAngularSpectrum<'s, 'm>) -> Result<(), AngularSpectrumError> {
+        if !core::ptr::eq(beam.source(), self.beam.source()) || beam.grid() != self.beam.grid() {
+            return Err(bad(
+                "layer factors require the same original source and grid",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(super) fn absorbed_power_for_beam(
+        &self,
+        beam: &PlanarAngularSpectrum<'s, 'm>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, AngularSpectrumError> {
+        self.admit_beam(beam)?;
+        let area = (beam.grid.width as f64 * beam.grid.spacing_m[0])
+            * (beam.grid.height as f64 * beam.grid.spacing_m[1]);
+        let mut sum = fs_math::dd::Dd::ZERO;
+        for (index, (mode, prepared)) in beam.modes.iter().zip(&self.modes).enumerate() {
+            if index % 64 == 0 {
+                poll(&mut cancelled)?;
+            }
+            let amplitudes = polarized(mode.incident_e, basis(mode.kx, mode.ky));
+            for p in 0..2 {
+                sum = sum
+                    + fs_math::dd::Dd::from_f64(
+                        area * amplitudes[p].norm_sq() * prepared[p].absorbed_power_w_m2(),
+                    );
+            }
+        }
+        let power = sum.to_f64();
+        if !power.is_finite() || power < 0.0 {
+            return Err(bad("coherence factor film absorption is unrepresentable"));
+        }
+        Ok(power)
+    }
+
+    pub(super) fn field_for_beam(
+        &self,
+        beam: &PlanarAngularSpectrum<'s, 'm>,
+        depth_m: f64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumLayerField, AngularSpectrumError> {
         poll(&mut cancelled)?;
+        self.admit_beam(beam)?;
         let thickness = self
             .beam
             .source
@@ -186,7 +235,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
         let n = self.modes.len();
         let mut electric = Vec::with_capacity(n);
         let mut magnetic = Vec::with_capacity(n);
-        for (index, (mode, prepared)) in self.beam.modes.iter().zip(&self.modes).enumerate() {
+        for (index, (mode, prepared)) in beam.modes.iter().zip(&self.modes).enumerate() {
             if index % 64 == 0 {
                 poll(&mut cancelled)?;
             }
@@ -210,7 +259,7 @@ impl<'b, 's, 'm> PreparedAngularSpectrumLayer<'b, 's, 'm> {
             electric.push(e);
             magnetic.push(h);
         }
-        let field = self.beam.synthesize(electric, magnetic, &mut cancelled)?;
+        let field = beam.synthesize(electric, magnetic, &mut cancelled)?;
         let mut absorbed_power_density_w_m3 = Vec::with_capacity(n);
         let mut sum = 0.0;
         for (index, e) in field.electric_v_per_m().iter().enumerate() {
