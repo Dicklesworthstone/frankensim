@@ -317,6 +317,25 @@ feasibility uses the actual cap, independently of AL stopping tolerances, and
 `recheck_best` recomputes the complete envelope without advancing the optimizer.
 No monotonic feasibility restoration is assumed for design-dependent gravity.
 
+`affine_load_space::refit` binds pure reference dead/basis laws to an initial
+or explicitly refined native grid and invokes the same affine design owner.
+`refit_reference_affine_load_space` immutably borrows the source, checks genuine
+enrichment and complete native material compatibility, copies raw controls and
+protected physical-region labels through the parent map, preserves the filter
+and nominal SIMP/projection policy, and rebuilds the common acceleration map.
+The candidate performs its own filter, gradient audit and constrained solves.
+Its baseline may be infeasible; adding material is not assumed to restore the
+constraint when that material also changes self-weight.
+
+The owned refit result retains initial, latest accepted, best feasible and
+freshly rechecked points separately, with the original AL outcome and spent
+work. Numerical initialization failure retains the candidate and its failure;
+later stops retain the completed optimization prefix. A completed bounded
+allowance and fresh full-envelope physical-constraint check are required by
+`completed_and_rechecked`. The source is never replaced by an explicit refit,
+and objective improvement is compared within the candidate grid, without a
+cross-grid descent claim. Both existing affine design goal modes are supported.
+
 `estimate_affine_load_space_enrichment` independently recomputes the full
 affine load model and maximizer on an actual enriched adaptive grid. The same
 grid evaluator serves fixed-grid optimization and enrichment; fine stiffness

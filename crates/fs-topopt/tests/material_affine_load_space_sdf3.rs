@@ -20,6 +20,7 @@ use fs_topopt::sdf3::robust::envelope::affine_load_space::design::{
     AffineLoadSpaceDesign3, AffineLoadSpaceDesignGoal3, AffineLoadSpaceDesignOptions3,
 };
 use fs_topopt::sdf3::robust::envelope::affine_load_space::refinement::AffineLoadSpaceRefinementOptions3;
+use fs_topopt::sdf3::robust::envelope::affine_load_space::refit::AffineLoadSpaceRefitOptions3;
 use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     AffineLoadSpace3, AffineLoadSpaceEvaluation3,
 };
@@ -454,6 +455,9 @@ fn minimum_native_mass_under_the_affine_compliance_cap_rechecks_the_actual_endpo
 
 fn adaptive_operator(level: u8) -> AdaptiveSolveSpace3 {
     let tree = Octree3::uniform(level, 4, 4096).unwrap();
+    adaptive_on_tree(&tree)
+}
+fn adaptive_on_tree(tree: &Octree3) -> AdaptiveSolveSpace3 {
     let mut callback = |_| poll();
     let mut q = QuadratureControl3::new(
         QuadratureOptions3 {
@@ -466,7 +470,7 @@ fn adaptive_operator(level: u8) -> AdaptiveSolveSpace3 {
     .unwrap();
     let native = AdaptiveElasticity3::build_with_material_field(
         HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
-        &tree,
+        tree,
         &Top,
         ElasticMaterialField3::ByCell(&native_material),
         &|p| p[0] == 0.0,
@@ -475,6 +479,43 @@ fn adaptive_operator(level: u8) -> AdaptiveSolveSpace3 {
     )
     .unwrap();
     AdaptiveSolveSpace3::jacobi(native, 100_000_000)
+}
+fn adaptive_material_study(tree: &Octree3) -> CutDensityStudy3<AdaptiveSolveSpace3> {
+    let study = CutDensityStudy3::new(
+        adaptive_on_tree(tree),
+        0.15,
+        SimpParams {
+            beta: 2.0,
+            penal: 3.0,
+            e_min: 0.03,
+            eta: 0.5,
+        },
+    )
+    .with_material_acceleration(acceleration, 100_000, poll)
+    .unwrap();
+    let mut regions = vec![PhysicalRegion3::Design; study.cells()];
+    regions[0] = PhysicalRegion3::Solid;
+    let last = regions.len() - 1;
+    regions[last] = PhysicalRegion3::Void;
+    study.with_physical_regions(regions).unwrap()
+}
+fn design_first(p: [f64; 3]) -> [f64; 3] {
+    [0.0, -0.001 * (1.0 + p[1]), 0.0]
+}
+fn design_second(p: [f64; 3]) -> [f64; 3] {
+    [0.0, -0.0006 * (1.0 + p[1]), -0.0008 * (1.0 + p[0])]
+}
+fn design_laws() -> [ReferenceLoad3<'static>; 2] {
+    [
+        ReferenceLoad3::body(&design_first),
+        ReferenceLoad3::body(&design_second),
+    ]
+}
+fn mass_goal() -> AffineLoadSpaceDesignGoal3 {
+    AffineLoadSpaceDesignGoal3::MinimumMaterial {
+        objective: MinimumMaterialObjective3::MassKg { scale_kg: 2.0 },
+        volume_scale: 1.0,
+    }
 }
 fn refinement_dead(_: [f64; 3]) -> [f64; 3] {
     [0.0002, -0.0001, -0.0003]
@@ -730,4 +771,207 @@ fn affine_refinement_remaximizes_native_loads_and_decomposes_regular_and_hard_wi
             close(mass, expected, 1e-10);
         }
     }
+}
+
+#[test]
+fn explicit_affine_refit_reoptimizes_native_mass_on_its_own_grid_and_rechecks_the_full_cap() {
+    let tree = Octree3::uniform(1, 4, 4096).unwrap();
+    let source = adaptive_material_study(&tree);
+    let rho = vec![0.7; source.cells()];
+    let fine_tree = tree
+        .refined(&[source.operator().elasticity().leaves()[2]], poll)
+        .unwrap();
+    let candidate = adaptive_on_tree(&fine_tree);
+    let parents = AdaptiveTransfer3::new(
+        source.operator().elasticity(),
+        candidate.elasticity(),
+        2_000_000,
+        poll,
+    )
+    .unwrap()
+    .parents()
+    .to_vec();
+    let inherited: Vec<_> = parents.iter().map(|&p| rho[p]).collect();
+    let labels: Vec<_> = parents
+        .iter()
+        .map(|&p| source.physical_regions().unwrap()[p])
+        .collect();
+    let mut direct = adaptive_material_study(&fine_tree)
+        .with_physical_regions(labels.clone())
+        .unwrap();
+    let dead = ReferenceLoad3::body(&refinement_dead);
+    let laws = design_laws();
+    let direct_dead = direct
+        .operator()
+        .elasticity()
+        .reference_load(dead, poll)
+        .unwrap();
+    let direct_forces: Vec<_> = laws
+        .iter()
+        .map(|&law| {
+            direct
+                .operator()
+                .elasticity()
+                .reference_load(law, poll)
+                .unwrap()
+        })
+        .collect();
+    let basis: Vec<_> = direct_forces.iter().map(Vec::as_slice).collect();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    // Author the fixed cap from an independently refiltered fine baseline.
+    // No assumption that increasing material restores self-weight feasibility.
+    let baseline = direct
+        .evaluate_robust_affine_load_space(
+            &inherited,
+            &direct_dead,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            &mut control,
+        )
+        .unwrap();
+    let cap = AffineLoadSpace3::new(laws.len(), 1.8 * baseline.worst_compliance).unwrap();
+    let initial = source
+        .solve_reference_affine_load_space(
+            &rho,
+            dead,
+            &laws,
+            &cap,
+            mass_goal(),
+            AffineLoadSpaceRefitOptions3 {
+                accepted_steps: 0,
+                ..Default::default()
+            },
+            &mut control,
+        )
+        .unwrap();
+    assert!(initial.completed_and_rechecked(), "{:?}", initial.outcome);
+    let old_scales = initial.study.operator().elasticity().scales().to_vec();
+    let old_fingerprint = initial.study.material_body_load_fingerprint();
+    let old_point = initial.accepted.as_ref().unwrap().clone();
+    let result = initial
+        .study
+        .refit_reference_affine_load_space(
+            candidate,
+            &rho,
+            dead,
+            &laws,
+            &cap,
+            mass_goal(),
+            AffineLoadSpaceRefitOptions3 {
+                accepted_steps: 6,
+                ..Default::default()
+            },
+            &mut control,
+        )
+        .unwrap();
+    assert!(result.completed_and_rechecked(), "{:?}", result.outcome);
+    assert_eq!(result.policy, cap);
+    assert_eq!(result.goal, mass_goal());
+    assert_eq!(result.inherited_rho, inherited);
+    assert_eq!(result.study.physical_regions().unwrap(), labels);
+    assert!(result.study.cells() > initial.study.cells());
+    assert!(result.study.can_refine_material_body_load());
+    assert_ne!(
+        result.study.material_body_load_fingerprint(),
+        old_fingerprint
+    );
+    assert!(result.gradient_check.as_ref().unwrap().passed());
+    let first = result.initial.as_ref().unwrap();
+    let accepted = result.accepted.as_ref().unwrap();
+    let best = result.best.as_ref().unwrap();
+    let checked = result.recheck.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(first.rho, inherited);
+    assert_eq!(result.history[0].iteration, 0);
+    assert!(result.history.len() > 1);
+    close(
+        first.evaluation.worst_compliance,
+        baseline.worst_compliance,
+        1e-9,
+    );
+    close(
+        result.history.last().unwrap().objective,
+        accepted.evaluation.physical.dilated_mass_kg.unwrap() / 2.0,
+        1e-10,
+    );
+    assert!(
+        best.evaluation.physical.dilated_mass_kg.unwrap()
+            < first.evaluation.physical.dilated_mass_kg.unwrap()
+    );
+    assert_eq!(checked.rho, best.rho);
+    assert!(checked.evaluation.worst_compliance <= cap.reference());
+    assert!(checked.evaluation.maximum <= 1.0);
+    close_vector(
+        &checked.evaluation.worst_displacement,
+        &best.evaluation.worst_displacement,
+    );
+
+    let fresh = direct
+        .evaluate_robust_affine_load_space(
+            &checked.rho,
+            &direct_dead,
+            &basis,
+            RobustOptions3::default(),
+            &cap,
+            &mut control,
+        )
+        .unwrap();
+    close_vector(&fresh.gram, &checked.evaluation.gram);
+    close_vector(&fresh.linear, &checked.evaluation.linear);
+    close_vector(&fresh.worst_force, &checked.evaluation.worst_force);
+    close_vector(
+        &fresh.worst_displacement,
+        &checked.evaluation.worst_displacement,
+    );
+    close(fresh.maximum, checked.evaluation.maximum, 1e-9);
+    let kg: f64 = direct
+        .operator()
+        .elasticity()
+        .reference_cell_masses_kg()
+        .unwrap()
+        .iter()
+        .zip(&fresh.physical.dilated_rho)
+        .map(|(m, r)| m * r)
+        .sum();
+    close(
+        kg,
+        checked.evaluation.physical.dilated_mass_kg.unwrap(),
+        1e-12,
+    );
+    let mut native = adaptive_on_tree(&fine_tree);
+    native.set_scales(&fresh.physical.eroded_scales).unwrap();
+    let body = native
+        .elasticity()
+        .prepare_material_body_load(&acceleration, 100_000, poll)
+        .unwrap();
+    let self_weight = body.load(&fresh.physical.eroded_rho, poll).unwrap();
+    let offset: Vec<_> = direct_dead
+        .iter()
+        .zip(self_weight)
+        .map(|(f, b)| f + b)
+        .collect();
+    let force = combine(&offset, &direct_forces, &fresh.worst_coefficients);
+    assert!(
+        native
+            .elasticity()
+            .field_residual(&checked.evaluation.worst_displacement, &force, poll)
+            .unwrap()
+            < 1e-8
+    );
+    assert_eq!(initial.study.operator().elasticity().scales(), old_scales);
+    assert_eq!(
+        initial.study.material_body_load_fingerprint(),
+        old_fingerprint
+    );
+    assert_eq!(initial.accepted.as_ref().unwrap().rho, old_point.rho);
+    assert_eq!(
+        initial
+            .accepted
+            .as_ref()
+            .unwrap()
+            .evaluation
+            .worst_displacement,
+        old_point.evaluation.worst_displacement
+    );
 }

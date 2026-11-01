@@ -8,6 +8,7 @@
 pub mod design;
 mod grid;
 pub mod refinement;
+pub mod refit;
 pub use grid::AffineLoadSpaceGrid3;
 
 use super::super::RobustOptions3;

@@ -149,7 +149,7 @@ fn inventory(
             .collect::<Result<_, _>>()?,
     ))
 }
-fn physical_feasible(
+pub(super) fn physical_feasible(
     e: &AffineLoadSpaceEvaluation3,
     goal: AffineLoadSpaceDesignGoal3,
     policy: &AffineLoadSpace3,
@@ -264,17 +264,36 @@ fn admit<O: Sdf3Elasticity>(
     goal: AffineLoadSpaceDesignGoal3,
     options: AffineLoadSpaceDesignOptions3,
 ) -> Result<(), ProjectedAlError<EvaluationStop>> {
+    admit_model(study, rho, basis.len(), policy, goal, options)?;
+    if dead.len() != study.operator().n()
+        || dead.iter().any(|f| !f.is_finite())
+        || basis
+            .iter()
+            .any(|f| f.len() != dead.len() || f.iter().any(|v| !v.is_finite()))
+    {
+        return Err(ProjectedAlError::Invalid(
+            "invalid affine load-space design inputs or gradient policy",
+        ));
+    }
+    Ok(())
+}
+
+// Shared with reference-law fitting so raw bounds, numerical controls, native
+// inventory and protected-solid constraints are admitted before callbacks.
+pub(super) fn admit_model<O: Sdf3Elasticity>(
+    study: &CutDensityStudy3<O>,
+    rho: &[f64],
+    basis_count: usize,
+    policy: &AffineLoadSpace3,
+    goal: AffineLoadSpaceDesignGoal3,
+    options: AffineLoadSpaceDesignOptions3,
+) -> Result<(), ProjectedAlError<EvaluationStop>> {
     let invalid = ProjectedAlError::Invalid;
     options
         .optimizer
         .validate::<EvaluationStop>(study.cells())?;
     if !options.robustness.valid(study.params())
-        || dead.len() != study.operator().n()
-        || dead.iter().any(|f| !f.is_finite())
-        || basis.len() != policy.dimension()
-        || basis
-            .iter()
-            .any(|f| f.len() != dead.len() || f.iter().any(|v| !v.is_finite()))
+        || basis_count != policy.dimension()
         || !options.density_floor.is_finite()
         || options.density_floor <= 0.0
         || options.density_floor >= 1.0
