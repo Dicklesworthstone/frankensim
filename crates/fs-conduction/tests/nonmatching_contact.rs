@@ -4,6 +4,8 @@ mod support;
 mod temperature;
 #[path = "nonmatching_contact/steady.rs"]
 mod steady;
+#[path = "nonmatching_contact/steady_linearization.rs"]
+mod steady_linearization;
 use support::with_cx;
 use fs_conduction::*;
 use fs_conduction::fixtures::{box_grid,on_box_face};

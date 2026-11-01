@@ -1,5 +1,9 @@
 //! Steady source-backed contact coupling through the original spatial solver.
 
+/// Revalidated steady tangents and adjoints of the complete contact law.
+pub mod linearization;
+pub use linearization::{ContactSteadyGradient, ContactSteadyLinearization};
+
 use fs_exec::Cx;
 use fs_solver::norm2;
 use crate::{ConductionError, ConductionProblem, ConductionSolution, DofMap, EnergyBalance,
@@ -95,7 +99,8 @@ impl TemperatureContacts<'_, '_> {
     /// Source support and selection remain pinned. Any source, cancellation,
     /// inner-solve or coupling refusal returns no field and mutates no caller
     /// state. This bounded fixed point does not assert uniqueness or convergence
-    /// for arbitrary positive source laws, or provide a steady coupled adjoint.
+    /// for arbitrary positive source laws. Use linearize_steady_endpoint for
+    /// a separately revalidated complete steady tangent and adjoint.
     pub fn solve_steady(
         &self, cx: &Cx<'_>, problem: ConductionProblem<'_>, initial: &[f64],
         mut solver: SolveConfig, coupling: SteadyContactConfig,

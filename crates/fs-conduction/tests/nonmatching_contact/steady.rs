@@ -4,25 +4,25 @@ use super::temperature::{bind, source_card, source_point};
 use fs_conduction::interface::temperature::{TemperatureContact, TemperatureContacts};
 use fs_conduction::interface::temperature::steady::SteadyContactConfig;
 
-fn solver_config() -> SolveConfig {
+pub(super) fn solver_config() -> SolveConfig {
     let mut config = SolveConfig::default();
     config.nonlinearity = Nonlinearity::FixedPoint {relaxation:1.0,max_backtracks:16};
     config.linear.tolerance=1e-12;config.linear.max_iterations=20_000;
     config.stop.residual_rtol=1e-13;config.stop.step_atol=0.0;
     config
 }
-fn coupling() -> SteadyContactConfig {
+pub(super) fn coupling() -> SteadyContactConfig {
     SteadyContactConfig {max_iterations:64,relaxation:1.0,
         residual_tolerance_w:1e-8,energy_tolerance_w:1e-8}
 }
-fn reservoir_boundary(mesh:&ConductionMesh,robin:bool)->ThermalBoundary {
+pub(super) fn reservoir_boundary(mesh:&ConductionMesh,robin:bool)->ThermalBoundary {
     if !robin {return boundary(mesh);}
     ThermalBoundaryBuilder::new(mesh)
         .region("cold",|f|on_box_face(f.centroid[0],0.0),ThermalBc::dirichlet(300.0).unwrap()).unwrap()
         .region("hot reservoir",|f|on_box_face(f.centroid[0],2.0),ThermalBc::robin(10.0,330.0).unwrap()).unwrap()
         .adiabatic_remainder().finish().unwrap()
 }
-fn contacts<'m,'c>(cx:&fs_exec::Cx<'_>,mesh:&'m ConductionMesh,bc:&ThermalBoundary,
+pub(super) fn contacts<'m,'c>(cx:&fs_exec::Cx<'_>,mesh:&'m ConductionMesh,bc:&ThermalBoundary,
     card:&'c InterfaceSystemCard,split:usize,matching:bool)->TemperatureContacts<'m,'c> {
     let (a,b)=sides(mesh,split,0.0);
     if !matching {return bind(cx,mesh,bc,card,a,b,false);}
@@ -33,7 +33,7 @@ fn contacts<'m,'c>(cx:&fs_exec::Cx<'_>,mesh:&'m ConductionMesh,bc:&ThermalBounda
         ["TA","TB"],SelectionPolicy::SingleClaimOnly).unwrap();
     TemperatureContacts::new(cx,mesh,bc,vec![],vec![law],10_000).unwrap()
 }
-fn scalar_heat(robin:bool)->f64 {
+pub(super) fn scalar_heat(robin:bool)->f64 {
     // Independent uniform one-dimensional series law: each bulk slab is
     // 0.1 K/W and the optional reservoir film contributes another 0.1 K/W.
     let film=if robin {0.1}else{0.0};

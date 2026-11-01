@@ -41,11 +41,37 @@ solve, tolerance widening or caller-state mutation occurs on refusal.
 target and a separate watt heat-closure tolerance. Counted nonlinear/Krylov
 work is bounded by the existing inner solver limits and the contact allowance.
 This is a bounded fixed point, with no claim of arbitrary-law convergence,
-uniqueness or a steady coupled adjoint. Pure-Neumann and fully prescribed
-limitations remain those of the existing spatial solver. Analytical slab
+or uniqueness. Pure-Neumann and fully prescribed limitations remain those
+of the existing spatial solver. Analytical slab
 regressions cover matching/nonmatching traces, Dirichlet/Robin reservoirs,
 source support and a frozen-contact candidate with cancelling global heat
 but an unacceptable local residual.
+
+## Complete steady contact tangents and adjoints
+
+`TemperatureContacts::linearize_steady_endpoint` binds the unchanged physical
+temperature field after rechecking exact prescribed values, the original
+free-node residual in watts and whole-domain heat closure. Insulated singular
+steady systems refuse even if a constant field has zero residual. The existing
+Robin response owner retains bulk `K + K'(T)T`, frozen interface conductance
+and both contact-temperature feedback terms exactly once. Its bounded FGMRES
+tangent and true transpose support heterogeneous bulk laws, matching face
+means and nonmatching common-refinement quadrature without another primal
+solve or differentiation through iteration history.
+
+Nodal temperature, selected Robin mean-temperature and outward-heat goals
+share the same complete adjoint. Controls include assembled nodal source loads,
+uniform Robin reference temperatures, log heat-transfer coefficients and
+each named interface's whole-law resistance multiplier. Resistance controls
+are at fixed geometry, source claim and nonthermal context, with no physical
+time factor. The local derivative does not evolve pressure or contact area,
+select a derivative at source/material corners, or quantify source uncertainty.
+
+Focused regressions compare independent slab-series derivatives and fresh
+coupled solves on both trace meshes; mixed reservoir/source controls exercise
+the true transpose. Endpoint tampering, singular insulated equilibria and
+exhausted trace budgets refuse. These analytical fixtures establish no
+measured-data validation.
 
 ## Temperature-dependent source laws on nonmatching thermal interfaces
 

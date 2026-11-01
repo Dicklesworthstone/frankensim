@@ -224,7 +224,10 @@ impl ContactTemperatureLinearization {
         poll(cx, input.len())?;
         Ok(result)
     }
-    /// Only checked in-crate transient binders may attach this physical term.
+    /// Matching pairs plus retained overlap triangles in this physical binding.
+    pub(crate) fn trace_elements(&self) -> usize { self.face_pairs }
+
+    /// Only checked in-crate endpoint binders may attach this physical term.
     pub(crate) fn feedback(&self) -> &Csr { &self.feedback }
 }
 
