@@ -7,6 +7,10 @@
 //! This does not represent contact, moving gear ratios, backlash, compliance,
 //! point/weld geometry or additional internal shape momentum.
 
+/// Continuous native motion with stage-resolved ideal joint reactions.
+#[path = "constraints/step.rs"]
+pub mod step;
+
 use super::{
     InertiaReconfiguration, ReconfigurationControls, ReconfigurationError, audit_momentum,
     generalized_momentum, parameter_work, raw_momentum_candidate, state_kinematics,

@@ -1211,6 +1211,41 @@ whose free intermediate violates limits while its coupled endpoint is valid.
 This slice covers constant ideal joint relations; moving ratios, backlash,
 nonlinear point/weld closures, rolling and unilateral contact need their own laws.
 
+## Continuous gear-constrained inertia motion
+
+`articulated::motion::reconfigure::constraints::step::{advance, advance_with_effort}`
+surround the original native free-floating step with constrained start-to-midpoint
+and midpoint-to-end tensor transfers. At both actual native force stages, the
+original free acceleration and the mobility at that stage's configuration supply
+joint reactions enforcing `A qddot = 0`. Constant affine gear/lock relations
+therefore remain compatible with the native midpoint position/rate updates.
+Initial, stage and final row residuals are admitted; no position repair is added.
+
+Caller effort is evaluated before reactions are added, at native elapsed times
+zero and half-duration. The first callback sees the virtual constrained rates
+under midpoint inertia. Independent stage powers keep caller actuator work
+separate from reaction work; the retained original native actuator-work receipt
+continues to include their sum. Original generalized-effort limits admit the
+combined actuator and constraint load.
+
+Separate complete-window caps count absolute parameter and reaction work.
+The last transfer receives only each remaining allowance, including reaction
+work already supplied during smooth motion. Opposite signs cannot hide work.
+Both transfer receipts, both stage reactions and the native motion result are
+retained, with independently calculated final energy and world-momentum residuals.
+A failed stage/helper/native step or cancellation returns no state; typed helper
+errors survive the callback adapter. Callback-owned side effects cannot roll back.
+
+Second-order refinement requires smooth resolved loads and prescribed tensors,
+an O(duration²)-accurate midpoint sample and adequate mode resolution. This
+does not turn native explicit midpoint into an energy-exact or reversible method.
+The focused G1 tests compare driven nonuniform inertia against scalar reduced
+gear equations and analytic reaction torques, then state-dependent damping
+against closed-form motion and separately integrated work. Both use 8/16/32
+steps over one second; empty-row equivalence, gross work and midpoint cancellation
+are also exercised. This remains a constant ideal-joint model, excluding
+time-dependent ratios, constraint engagement, backlash and general contact.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared
