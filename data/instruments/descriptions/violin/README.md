@@ -106,9 +106,36 @@ Their factors replace the ones read at c6854036b on the same body at drilling
 
 The factor is first order. Bending stiffness and the body's loading keep f1
 from scaling exactly as the square root of the tension. No probe has run at the
-new tensions. The open notes of the first render at these tensions will show
-where the strings land. Until then, this card is not claimed to be at equal
+new tensions. The bowed open notes of `render.sh` at dda01dcbd, the first render
+at these tensions, read G +0.27, D +2.79, A +3.52 and E -1.16 c from equal
+temperament (the same reader over 1.0-2.5 s), so the bowed card is not at equal
 temperament.
+
+## Phrases
+
+`render_phrases.sh` renders the site's violin phrases on the same route: the G
+major scale up and down, the first phrase of Ode to Joy at 100 bpm, and four
+double stops in G major. `gen_violin_phrase_notes.py` writes one note per
+rendered note from the h6 card above, with its tensions and residual record.
+Each note has its own bow schedule (the bow card's force and speed, an 80 ms
+speed ramp, 0.1 of the speaking length from the bridge) and rings for 0.45 s
+after the bow lifts. A stopped note adds the finger as a preloaded spring and
+dashpot pair: K = 1e6 N/m, a stated unknown, and C = 1.9 N s/m. Every note then
+renders through `render.sh`'s launcher, packs, shell table and assembly options.
+An open string in a phrase is not the graded open note: its speed ramp is 80 ms
+where the bow card's is 150 ms, and its schedule keeps the h6 card's 700 Hz
+control rate where `render.sh` writes the bow card's 1000 Hz.
+
+```bash
+data/instruments/descriptions/violin/render_phrases.sh \
+  target/release/material_strings /path/to/new-phrase-run 21
+```
+
+The last argument is how many notes render at once (default 1). Each takes one
+core and about 1.5 GB. `notes/violin/` holds the 21 written notes and their stop
+profiles, and `violin/NAME/render.wav` each render.
+`apps/instrument-explorer/tools/phrases/phrasekit.py` joins them; a note stops
+the one before on its own string.
 
 `cannone-dominant-g3.material-strings` keeps the untuned tensions and has no
 residual record. The 8 mm experiments below use their own cards, unchanged.
