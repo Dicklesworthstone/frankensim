@@ -21,6 +21,8 @@
 
 /// Saturation from the original reversible H(B) source and its dual energy.
 pub mod force;
+/// Source-bearing three-dimensional Ohmic current and local Joule heat.
+pub mod conduction;
 pub mod nonlinear;
 pub mod vector_potential;
 
@@ -364,21 +366,44 @@ fn prepare_scalar_boundary(
     flux_tolerance_wb: f64,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<ScalarBoundary, SpatialMagneticError> {
+    prepare_scalar_boundary_traces(
+        mesh,
+        faces,
+        components,
+        boundary.potential.iter().map(|t| (t.face, t.potential_a)),
+        boundary.flux.iter().map(|t| (t.face, t.outward_flux_density_t)),
+        flux_tolerance_wb,
+        cancelled,
+    )
+}
+
+// Geometry, P1 face moments, component gauges and relative coordinates have
+// no constitutive law. Electrical and magnetic owners supply their own units
+// and flux sign, then recover and audit their own physical currents/fluxes.
+fn prepare_scalar_boundary_traces(
+    mesh: &TetComplex,
+    faces: &[Face],
+    components: &[usize],
+    potential: impl IntoIterator<Item = (usize, [f64; 3])>,
+    flux: impl IntoIterator<Item = (usize, f64)>,
+    flux_tolerance_wb: f64,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<ScalarBoundary, SpatialMagneticError> {
     let n = mesh.vertex_count;
     let mut prescribed = vec![None; n];
     let mut has_potential = vec![false; n];
     let mut used_faces = BTreeSet::new();
-    for trace in &boundary.potential {
+    for (face, values) in potential {
         poll(cancelled)?;
-        if faces.get(trace.face).is_none_or(|f| f.cells.len() != 1)
-            || !used_faces.insert(trace.face)
-            || trace.potential_a.iter().any(|v| !v.is_finite())
+        if faces.get(face).is_none_or(|f| f.cells.len() != 1)
+            || !used_faces.insert(face)
+            || values.iter().any(|v| !v.is_finite())
         {
             return Err(invalid(
                 "potential trace needs unique exterior faces and finite values",
             ));
         }
-        for (&v, &value) in mesh.faces[trace.face].iter().zip(&trace.potential_a) {
+        for (&v, &value) in mesh.faces[face].iter().zip(&values) {
             let v = v as usize;
             if prescribed[v].is_some_and(|old| old != value) {
                 return Err(invalid("inconsistent potential at shared trace vertex"));
@@ -390,18 +415,18 @@ fn prepare_scalar_boundary(
     let physical_prescribed: Vec<_> = prescribed.iter().map(Option::is_some).collect();
     let mut flux_load_wb = vec![0.0; n];
     let mut net_flux = vec![0.0; n];
-    for trace in &boundary.flux {
+    for (face, density) in flux {
         poll(cancelled)?;
-        if faces.get(trace.face).is_none_or(|f| f.cells.len() != 1)
-            || !used_faces.insert(trace.face)
-            || !trace.outward_flux_density_t.is_finite()
+        if faces.get(face).is_none_or(|f| f.cells.len() != 1)
+            || !used_faces.insert(face)
+            || !density.is_finite()
         {
             return Err(invalid(
                 "flux trace needs unique exterior faces disjoint from potential traces",
             ));
         }
-        let amount = finite(trace.outward_flux_density_t * faces[trace.face].area_m2)?;
-        let vertices = mesh.faces[trace.face];
+        let amount = finite(density * faces[face].area_m2)?;
+        let vertices = mesh.faces[face];
         let component = components[vertices[0] as usize];
         net_flux[component] = finite(net_flux[component] + amount)?;
         for v in vertices {

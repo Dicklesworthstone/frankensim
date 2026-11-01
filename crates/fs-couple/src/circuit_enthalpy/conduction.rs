@@ -15,6 +15,8 @@ pub mod dielectric;
 pub mod heat;
 /// Source-driven nonlinear spatial current and the original finite heat network.
 pub mod response;
+/// Tetrahedral source-bearing current and finite-cell material feedback.
+pub mod spatial;
 
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, CircuitThermalCoefficients,
@@ -137,6 +139,7 @@ pub enum ConductionThermalError {
     Heat(super::contacts::heat::HeatNetworkError),
     Conductor(ConductorError),
     Field(ConductionError),
+    SpatialField(fs_em::spatial::conduction::SpatialConductionError),
     Response(fs_em::conduction::response::ConductionResponseError),
     Storage(super::field_storage::FieldThermalError),
     Dielectric(fs_em::electrostatic::relaxation::DielectricRelaxationError),
@@ -560,9 +563,25 @@ impl ConductionThermalNetwork<'_> {
         mesh: &fs_rep_mesh::TriComplex2,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<CellId>, Error> {
+        let volumes = (0..mesh.faces().len()).map(|cell| {
+            check(cancel)?;
+            mesh.face_measure(cell)
+                .ok_or_else(|| invalid("electrical triangle lacks physical volume"))
+        }).collect::<Result<Vec<_>, Error>>()?;
+        self.admit_volume_routes(thermal, &volumes, cancel)
+    }
+
+    // Dimension-independent receiving inventory; each field owner supplies its
+    // original admitted cell volumes and stable electrical-cell correspondence.
+    fn admit_volume_routes(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        volumes_m3: &[f64],
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<CellId>, Error> {
         if !self.volume_tolerance_m3.is_finite()
             || self.volume_tolerance_m3 < 0.0
-            || self.regions.len() != mesh.faces().len()
+            || self.regions.len() != volumes_m3.len()
         {
             return Err(invalid(
                 "one heat receiver per electrical triangle and a finite volume tolerance required",
@@ -581,8 +600,8 @@ impl ConductionThermalNetwork<'_> {
                     "duplicate electrical triangle or inactive thermal receiver",
                 ));
             }
-            let volume = mesh
-                .face_measure(region.triangle)
+            let volume = volumes_m3
+                .get(region.triangle).copied()
                 .ok_or_else(|| invalid("electrical triangle lacks physical volume"))?;
             let sum = volumes.entry(region.cell).or_insert(0.0);
             *sum = finite(*sum + volume)?;

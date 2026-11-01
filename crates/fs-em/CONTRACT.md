@@ -347,6 +347,36 @@ and binding/budget/cancellation/true-pole refusal. The same fixed-bias planar MQ
 and source-domain limits apply; native test execution is a separate requirement
 where the workspace dependency repositories are available.
 
+## Three-dimensional Ohmic transport and local Joule heat
+
+`spatial::conduction::SpatialConduction<C>` consumes the original tetrahedral
+geometry and source-bearing `SpatialConductorMaterial`. Scalar and explicitly
+oriented principal conductivity/resistivity share `d0^T M_sigma d0`, the existing
+Whitney weighted Hodge, component-relative voltage gauges and checked CG.
+The original geometry is shared across source refreshes; only material weights
+and the electrical operator are rebuilt. No magnetic constitutive law is used.
+
+Complete exterior P1 voltage faces and uniform inward-current-density faces
+define the boundary. Unlisted faces are insulating; voltage/current faces are
+disjoint. Each current-only component must have zero net imposed current before
+one deterministic voltage gauge is applied. A current-density trace is not an
+equipotential total-current electrode. Source work includes authored trace loads
+and solved voltage reactions exactly once, using component-relative potentials.
+
+Actual cell E=-grad(V), J=sigma E and volume-integrated E.J remain unsmoothed.
+Acceptance separately checks free-node/current balance, recovered versus Hodge
+power and supplied terminal work. These dimensional residual gates are not
+spatial-error certificates. Native synthetic G1/G3/G4 tests cover layered 3D
+series conduction under voltage/current/mixed traces, a rotated tensor with
+transverse current, SI geometry scaling, source swaps, gauges and cancellation.
+
+The explicit liquid-mass-fraction role admits source-supported confined phase
+snapshots in this stationary Ohmic owner. Three principal sources retain their
+own exact keys, independent conductivity/resistivity basis and fixed axes.
+Existing induction keeps its stricter static-source admission. This adds no
+phase mixing rule, Hall law, dielectric storage, induction, contact layers,
+moving geometry, field-dependent conduction or measured-material validation.
+
 ## Ionized-gas current and Joule heating
 
 `PlanarConduction` accepts the sealed `PlanarOhmicResponse` material response,

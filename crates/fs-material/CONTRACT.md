@@ -1,5 +1,18 @@
 # fs-material — CONTRACT
 
+## Explicit phase coordinates in spatial conductivity
+
+`SpatialConductorMaterial` retains an optional original liquid-mass-fraction
+coordinate and a distinct stationary-Ohmic source admission.
+`ResolvedOrthotropicConductor3::try_from_phase_material` admits three exact
+principal sources with that same existing typed coordinate in [0,1]. Refresh
+preserves all keys, independent conductivity/resistivity basis, complete source
+bundle, phase role and fixed principal axes. No mixture law or missing principal
+coefficient is inferred. The original static-source admission used by induction
+is unchanged; a phase-dependent snapshot does not silently widen that owner.
+The tetrahedral current/finite-enthalpy regression supplies the actual original
+caloric fraction on every endpoint trial, including latent-temperature plateaus.
+
 ## Original phase response in the Ohmic constitutive node
 
 `conductor::graph::MaterialOhmicNode::try_new_with_liquid_mass_fraction`

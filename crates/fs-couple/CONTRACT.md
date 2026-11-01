@@ -90,6 +90,42 @@ retry. Pinned Rustfmt parsing, whitespace checks and source/physical-accounting
 review passed. These newly authored native tests, compilation and the required
 `dsr quality --tool frankensim` gate have not run in this environment.
 
+## Tetrahedral material current closes finite enthalpy
+
+`circuit_enthalpy::conduction::spatial::SpatialConductionThermalNetwork` closes
+the original 3D Whitney current field inside the existing finite-cell
+backward-Euler enthalpy/Newton owner. Each trial refreshes every original
+electrical source role and heat-transport binding at its actual endpoint
+temperature and liquid mass fraction. Scalar and fixed-orientation orthotropic
+sources use the same field, thermal residual and source work account.
+
+Each original tetrahedron maps to exactly one thermal receiver; several tets
+may cover one receiver only with matching full volume and original mass/density.
+The existing planar/volume-independent receiving-inventory and heat-summing
+owner is reused without constructing a surrogate planar mesh. Confined phase
+charts require constant equal density, complete source support and an explicit
+liquid-MASS-fraction coordinate. Latent heat stays inside the original enthalpy.
+
+Native per-tet E.J powers enter their receiving cells once. Terminal work is
+computed independently from authored current traces and solved voltage-source
+reactions. Existing authored thermal sources, boundary transfer and material
+conduction links remain in the same residual. The original circuit-trial budget
+counts native field solves, including finite-difference and fresh final
+acceptance. Cancellation, source refusal, budget exhaustion and unsupported
+event windows publish neither thermal state nor endpoint electrical operator.
+
+Synthetic G1/G3/G4 cases compare independent two-cell electrothermal elimination,
+material swaps, voltage/current reversal, tetrahedral subdivision, continuation,
+and source T/f surface feedback through an isothermal latent interval in both
+conductivity/resistivity bases. Scalar and oriented material snapshots produce
+the same admitted aligned limit. Final cancellation, work-budget, foreign-source
+and receiving-volume refusals retain retryable original inputs.
+
+This fixed-geometry, memoryless DC closure adds no thermal spatial-resolution
+claim beyond its authored finite cells, phase-density motion, electrical contact
+layer, induction, dielectric storage, total-current equipotential terminal,
+unconditional nonlinear convergence or empirical material validation.
+
 ## Original latent fractions in constitutive graph feedback
 
 `constitutive_graph::enthalpy::GraphLiquidMassFraction` binds an original finite

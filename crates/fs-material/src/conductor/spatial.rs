@@ -8,6 +8,7 @@
 use super::{ConductorError, ElectricalPropertyBasis, ResolvedConductorState};
 use crate::state_point::ResolvedMaterialStatePoint;
 use fs_matdb::PropertyKey;
+use fs_qty::{Dims, QuantitySpec};
 
 /// Native coefficient in S/m. Scalar arithmetic remains distinct, so existing
 /// isotropic assemblies retain their original multiplication order.
@@ -55,6 +56,8 @@ pub trait SpatialConductorMaterial: sealed::Sealed + Clone + PartialEq {
     fn source_keys(&self) -> impl Iterator<Item = &PropertyKey>;
     /// Rows are principal directions in the same physical frame as E, J and B.
     fn principal_axes(&self) -> Option<[[f64; 3]; 3]>;
+    /// Explicit phase coordinate owned by a confined enthalpy consumer.
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> { None }
     fn conductivity(&self) -> SpatialConductivity;
     fn with_material(&self, material: ResolvedMaterialStatePoint) -> Result<Self, ConductorError>;
     fn has_admitted_static_sources(&self) -> bool {
@@ -63,10 +66,25 @@ pub trait SpatialConductorMaterial: sealed::Sealed + Clone + PartialEq {
                 .is_some_and(|p| p.is_static_at_fixed_external_conditions())
         })
     }
+    /// Stationary Ohmic snapshots may additionally own one explicit phase
+    /// coordinate. Induction retains its separate static-source admission.
+    fn has_admitted_ohmic_sources(&self) -> bool {
+        self.source_keys().all(|key| {
+            self.material().property_by_key(key).is_some_and(|p| {
+                match self.liquid_mass_fraction_axis() {
+                    Some(axis) => p.has_only_owned_and_fixed_external_conditions(
+                        axis, QuantitySpec::dimensional(Dims([0; 6])),
+                    ),
+                    None => p.is_static_at_fixed_external_conditions(),
+                }
+            })
+        })
+    }
     fn has_same_electrical_source(&self, other: &Self) -> bool {
         self.source_basis() == other.source_basis()
             && self.source_keys().eq(other.source_keys())
             && self.principal_axes() == other.principal_axes()
+            && self.liquid_mass_fraction_axis() == other.liquid_mass_fraction_axis()
     }
 }
 impl sealed::Sealed for ResolvedConductorState {}
@@ -77,6 +95,9 @@ impl SpatialConductorMaterial for ResolvedConductorState {
         core::iter::once(self.source_key())
     }
     fn principal_axes(&self) -> Option<[[f64; 3]; 3]> { None }
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.liquid_mass_fraction_axis()
+    }
     fn conductivity(&self) -> SpatialConductivity {
         SpatialConductivity::Scalar(self.resistivity_ohm_m().recip())
     }
@@ -95,6 +116,7 @@ pub struct ResolvedOrthotropicConductor3 {
     axes: [[f64; 3]; 3],
     principal_s_m: [f64; 3],
     coefficient: SpatialConductivity,
+    liquid_mass_fraction_axis: Option<String>,
 }
 impl ResolvedOrthotropicConductor3 {
     /// Retain the exact keys and complete source state. Repeated keys are an
@@ -107,6 +129,29 @@ impl ResolvedOrthotropicConductor3 {
         keys: [PropertyKey; 3],
         axes: [[f64; 3]; 3],
     ) -> Result<Self, ConductorError> {
+        Self::from_material(material, basis, keys, axes, None)
+    }
+    /// The same three principal source laws with an explicitly owned liquid
+    /// MASS fraction. No phase mixing rule or evolving orientation is supplied.
+    pub fn try_from_phase_material(
+        material: ResolvedMaterialStatePoint,
+        basis: ElectricalPropertyBasis,
+        keys: [PropertyKey; 3],
+        axes: [[f64; 3]; 3],
+        liquid_mass_fraction_axis: impl Into<String>,
+    ) -> Result<Self, ConductorError> {
+        Self::from_material(material, basis, keys, axes, Some(liquid_mass_fraction_axis.into()))
+    }
+    fn from_material(
+        material: ResolvedMaterialStatePoint,
+        basis: ElectricalPropertyBasis,
+        keys: [PropertyKey; 3],
+        axes: [[f64; 3]; 3],
+        liquid_mass_fraction_axis: Option<String>,
+    ) -> Result<Self, ConductorError> {
+        if let Some(axis) = &liquid_mass_fraction_axis {
+            super::validate_liquid_mass_fraction_axis(&material, axis)?;
+        }
         for i in 0..3 {
             for j in 0..3 {
                 let dot: f64 = (0..3).map(|k| axes[i][k] * axes[j][k]).sum();
@@ -123,7 +168,13 @@ impl ResolvedOrthotropicConductor3 {
             let scalar = ResolvedConductorState::try_from_material_with_property(
                 material.clone(), basis, key,
             )?;
-            if !scalar.source_property().is_static_at_fixed_external_conditions() {
+            let admitted = match &liquid_mass_fraction_axis {
+                Some(axis) => scalar.source_property().has_only_owned_and_fixed_external_conditions(
+                    axis, QuantitySpec::dimensional(Dims([0; 6])),
+                ),
+                None => scalar.source_property().is_static_at_fixed_external_conditions(),
+            };
+            if !admitted {
                 return Err(ConductorError::InvalidInput {
                     quantity: "static spatial principal electrical source",
                 });
@@ -156,7 +207,7 @@ impl ResolvedOrthotropicConductor3 {
                 quantity: "representably positive spatial conductivity tensor",
             });
         }
-        Ok(Self { material, basis, keys, axes, principal_s_m, coefficient })
+        Ok(Self { material, basis, keys, axes, principal_s_m, coefficient, liquid_mass_fraction_axis })
     }
     pub const fn principal_conductivity_s_m(&self) -> &[f64; 3] {
         &self.principal_s_m
@@ -168,9 +219,13 @@ impl SpatialConductorMaterial for ResolvedOrthotropicConductor3 {
     fn source_basis(&self) -> ElectricalPropertyBasis { self.basis }
     fn source_keys(&self) -> impl Iterator<Item = &PropertyKey> { self.keys.iter() }
     fn principal_axes(&self) -> Option<[[f64; 3]; 3]> { Some(self.axes) }
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        self.liquid_mass_fraction_axis.as_deref()
+    }
     fn conductivity(&self) -> SpatialConductivity { self.coefficient }
     fn with_material(&self, material: ResolvedMaterialStatePoint) -> Result<Self, ConductorError> {
-        Self::try_from_material(material, self.basis, self.keys.clone(), self.axes)
+        Self::from_material(material, self.basis, self.keys.clone(), self.axes,
+            self.liquid_mass_fraction_axis.clone())
     }
 }
 
@@ -203,6 +258,12 @@ impl SpatialConductorMaterial for ResolvedSpatialConductor {
     }
     fn principal_axes(&self) -> Option<[[f64; 3]; 3]> {
         match self { Self::Isotropic(_) => None, Self::Orthotropic(s) => s.principal_axes() }
+    }
+    fn liquid_mass_fraction_axis(&self) -> Option<&str> {
+        match self {
+            Self::Isotropic(s) => s.liquid_mass_fraction_axis(),
+            Self::Orthotropic(s) => s.liquid_mass_fraction_axis(),
+        }
     }
     fn conductivity(&self) -> SpatialConductivity {
         match self {
