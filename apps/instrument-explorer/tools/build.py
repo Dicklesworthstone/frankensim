@@ -871,7 +871,7 @@ def main() -> int:
                               "era": "August 2026 listening fixture (before the 2026-10-21 first-principles pivot)",
                               "provenance": {k: prov.get(k) for k in ("fixture", "sample_rate", "git_sha", "command") if k in prov}})
 
-    # Extra renders: ungraded violin, flute and timpani renders.
+    # Extra renders: ungraded violin, flute and timpani renders, and lanes' listening sets.
     extras: dict[str, list[dict]] = defaultdict(list)
     va = mirror / "renders" / "violin-assembled"
     for wav in sorted(va.glob("*.wav")) if va.is_dir() else []:
@@ -888,6 +888,18 @@ def main() -> int:
         extras["timpani"].append({"id": wav.stem, "title": "Kettle B, one strike (4 s)", "audio": media.audio(wav, f"audio/extra/timpani/{wav.stem}"),
                                   "date": stamp_of(wav), "era": f"timpani/render.sh at commit {wav.parent.name[:9]}: partial ratios checked "
                                                                 "against the model's own coupled modes, not graded against a recording"})
+    # A lane's listening set with its own record, renders/extras/<family>/<set>/extras.json:
+    # {"era": "...", "items": [{"stem": "...", "title": "..."}]}, played in the record's order and never graded.
+    xd = mirror / "renders" / "extras"
+    for rec in sorted(xd.glob("*/*/extras.json")) if xd.is_dir() else []:
+        fid, doc = rec.parent.parent.name, json.loads(rec.read_text())
+        for it in doc["items"]:
+            wav = rec.parent / f"{it['stem']}.wav"
+            if not wav.is_file():
+                sys.exit(f"{rec}: no {wav.name}")
+            key = f"{rec.parent.name}-{it['stem']}"
+            extras[fid].append({"id": key, "title": it["title"], "audio": media.audio(wav, f"audio/extra/{fid}/{key}"),
+                                "date": stamp_of(wav), "era": doc["era"]})
 
     # Every note a family can play today, joined into one phrase, then each note on its own.
     playable = mirror / "renders" / "playable"
