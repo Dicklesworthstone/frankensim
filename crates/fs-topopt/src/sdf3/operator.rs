@@ -3,7 +3,7 @@ use std::collections::BTreeMap;
 use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3,MaterialBodyLoad3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
-use fs_cutfem::elastic3::stress::BulkStressPoint3;
+use fs_cutfem::elastic3::stress::{AffineBulkStress3, BulkStressPoint3};
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 use fs_cutfem::elastic3::dirichlet::EmbeddedReaction3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
@@ -50,6 +50,9 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// Actual retained bulk quadrature stresses, with no surface/ghost samples.
     fn bulk_stress(&self, u: &[f64], max_points: usize, checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>, ElasticityError3>;
+    /// One retained-point affine family with whole-ball native strain admission.
+    fn affine_bulk_stress(&self, offset: &[f64], basis: &[&[f64]], max_point_fields: usize,
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<AffineBulkStress3, ElasticityError3>;
     /// Pull back reference-material stress cotangents through the physical Q1 map.
     fn reference_bulk_stress_pullback(&self, derivatives: &[[f64; 6]], checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<f64>, ElasticityError3>;
@@ -91,6 +94,8 @@ impl Sdf3Elasticity for CutElasticity3 {
         -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::scale_bilinear_forms(self,z,u,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {CutElasticity3::bulk_stress(self,u,max_points,checkpoint)}
+    fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<AffineBulkStress3,ElasticityError3> {CutElasticity3::affine_bulk_stress(self,offset,basis,max_point_fields,checkpoint)}
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
     fn embedded_dirichlet_penalty(&self)->Option<f64> {CutElasticity3::embedded_dirichlet_penalty(self)}
@@ -136,6 +141,8 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
         -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::scale_bilinear_forms(self,z,u,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {AdaptiveElasticity3::bulk_stress(self,u,max_points,checkpoint)}
+    fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<AffineBulkStress3,ElasticityError3> {AdaptiveElasticity3::affine_bulk_stress(self,offset,basis,max_point_fields,checkpoint)}
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::reference_bulk_stress_pullback(self,derivatives,checkpoint)}
     fn embedded_dirichlet_penalty(&self)->Option<f64> {AdaptiveElasticity3::embedded_dirichlet_penalty(self)}
@@ -198,6 +205,8 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
         -> Result<Vec<f64>,ElasticityError3> {self.elasticity().scale_bilinear_forms(z,u,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {self.elasticity().bulk_stress(u,max_points,checkpoint)}
+    fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<AffineBulkStress3,ElasticityError3> {self.elasticity().affine_bulk_stress(offset,basis,max_point_fields,checkpoint)}
     fn reference_bulk_stress_pullback(&self,derivatives:&[[f64;6]],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {self.elasticity().reference_bulk_stress_pullback(derivatives,checkpoint)}
     fn embedded_dirichlet_penalty(&self)->Option<f64> {self.elasticity().embedded_dirichlet_penalty()}

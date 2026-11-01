@@ -349,6 +349,43 @@ retains valid discrete values but exposes no smooth norm derivative, so smooth
 baseline admission refuses and such trials are rejected. Native material
 scales are restored on all returned outcomes, including late component stops.
 
+`affine_load_space::constraints` binds compliance/volume, original signed
+responses and optional sampled strength to ONE constraint policy. The joint
+evaluator shares the existing filter, native stiffness preparation and affine
+primal fields. The optimizer's `new_with_constraints` and the initial/refitted
+reference-grid `*_with_constraints` methods preserve that policy throughout
+audits, trials, feasible archives and fresh physical rechecks. Response-only
+entry points delegate to this same owner. The joint upper aggregate uses the
+existing unnormalized log-sum-exp and exact component weights.
+
+`affine_load_space::stress` applies the existing `SampledPeakBound` model to
+the entire load ball. Squared von Mises stress at EACH retained quadrature point
+is its own affine quadratic; the native bounded quadratic-ball solver finds
+that point's adverse coefficients with the original oracle policy. The
+unweighted p-norm of point envelopes bounds both qp-relaxed reference stress
+and actual SIMP-scaled physical stress. This is conservative relative to the
+maximum of a single global p-norm with one common load direction. Sample count
+affects the problem; the result is neither a continuum bound nor an interval
+certificate. The cap is explicit physical stress data, never inferred from E.
+
+The stress adjoint factors by baseline and uncertainty fields, needing at most
+`dimension+1` adjoints irrespective of point count. It reuses the native tensor
+stress pullback, the existing paired-stress coefficient and density derivative,
+stiffness contractions and baseline-only `B^T z`, followed by the common
+physical-region/projection/filter pullback. Positive hard/flat/near-hard point
+contributions retain values but withhold a smooth gradient. No stress basis
+direction is admitted as a stand-alone physical state: the native sampler
+checks the ENTIRE affine Mandel-strain ball against each retained source ceiling.
+Budgets count all baseline/basis point fields before native output allocation.
+
+Strength-bearing optimization uses the existing qp-turnover admission on the
+ERODED projected density floor and checks the actual trial fields as well.
+Immutable prescribed voids retain the existing exception; free densities cannot
+exploit the ersatz foldback branch. Pure evaluation still exposes the declared
+stress measure across its full admitted density range. Both original relaxed
+and physical stresses and the conservative aggregate must pass the physical cap;
+AL stopping tolerances never excuse excess.
+
 `affine_load_space::refit` binds pure reference dead/basis laws to an initial
 or explicitly refined native grid and invokes the same affine design owner.
 `refit_reference_affine_load_space` immutably borrows the source, checks genuine

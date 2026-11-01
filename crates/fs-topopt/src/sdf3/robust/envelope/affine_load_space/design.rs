@@ -1,6 +1,7 @@
 //! Constrained design for a common load plus a continuous uncertain load set.
 //! One existing projected-AL state owns both compliance and inventory modes.
-use super::response::{AffineResponseLimits3, AffineResponseOptions3};
+use super::constraints::{AffineLoadSpaceConstraintPolicy3, AffineLoadSpaceConstraints3};
+use super::response::AffineResponseLimits3;
 use super::{AffineLoadSpace3, AffineLoadSpaceEvaluation3};
 use crate::gradient_check::{GradientSample, audit_design_map};
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
@@ -65,7 +66,7 @@ pub struct AffineLoadSpaceGradientCheck3 {
     pub params: SimpParams,
     pub goal: AffineLoadSpaceDesignGoal3,
     pub options: GradientCheckOptions,
-    pub response_options: Option<AffineResponseOptions3>,
+    pub constraints: AffineLoadSpaceConstraintPolicy3,
     pub baseline_objective: f64,
     pub baseline_constraint: f64,
     pub objective_relative_error: f64,
@@ -173,28 +174,25 @@ pub(super) fn physical_feasible(
         }
     };
     original
-        && e.responses.as_ref().is_none_or(|responses| {
-            responses.physically_feasible()
-                && constraint_value(e, goal).is_ok_and(|constraint| constraint <= 0.0)
-        })
+        && e.constraints.matches(e)
+        && e.responses.as_ref().is_none_or(|r| r.physically_feasible())
+        && e.stress.as_ref().is_none_or(|s| s.physically_feasible())
+        && constraint_value(e, goal).is_ok_and(|constraint| constraint <= 0.0)
 }
 
 fn aggregate_constraints(
     base: f64,
     e: &AffineLoadSpaceEvaluation3,
-) -> Result<(f64, [f64; 2]), EvaluationStop> {
-    let Some(responses) = &e.responses else {
-        return Ok((base, [1.0, 0.0]));
-    };
-    let (value, _, weights) = crate::sdf3::response::limits::aggregate(
-        &[base, responses.constraint],
-        responses.options.sharpness,
+) -> Result<(f64, [f64; 3]), EvaluationStop> {
+    if !e.constraints.matches(e) {
+        return Err(failure("sdf3-affine-design-constraint-binding"));
+    }
+    super::constraints::aggregate(
+        base,
+        e.responses.as_ref().map(|r| r.constraint),
+        e.stress.as_ref().map(|s| s.constraint),
+        e.constraints.sharpness,
     )
-    .map_err(|error| match error {
-        crate::sdf3::response::ResponseError3::Evaluation(stop) => stop,
-        _ => failure("sdf3-affine-design-joint-constraint"),
-    })?;
-    Ok((value, [weights[0], weights[1]]))
 }
 
 fn constraint_value(
@@ -221,30 +219,37 @@ fn evaluate<O: Sdf3Elasticity>(
     policy: &AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
     options: AffineLoadSpaceDesignOptions3,
-    responses: Option<AffineResponseLimits3<'_>>,
+    constraints: AffineLoadSpaceConstraints3<'_>,
     control: &mut SolveControl<'_>,
 ) -> Result<AffineLoadSpaceEvaluation3, EvaluationStop> {
-    match responses {
-        Some(family) => study.affine_load_space_response_with_mass(
-            rho,
-            dead,
-            basis,
-            options.robustness,
-            policy,
-            family,
-            goal.needs_mass(),
-            control,
-        ),
-        None => study.affine_load_space_with_mass(
-            rho,
-            dead,
-            basis,
-            options.robustness,
-            policy,
-            goal.needs_mass(),
-            control,
-        ),
+    let result = study.affine_load_space_constraints_with_mass(
+        rho,
+        dead,
+        basis,
+        options.robustness,
+        policy,
+        constraints,
+        goal.needs_mass(),
+        control,
+    )?;
+    if let Some(limit) = constraints.stress {
+        for (i, &r) in result.physical.eroded_rho.iter().enumerate() {
+            let prescribed_void = r == 0.0
+                && study
+                    .physical_regions()
+                    .is_some_and(|regions| regions[i] == crate::sdf3::PhysicalRegion3::Void);
+            if !prescribed_void
+                && !crate::sdf3::design::monotone_stress_branch(
+                    r,
+                    study.params(),
+                    limit.options.relaxation_power,
+                )
+            {
+                return Err(failure("sdf3-affine-design-stress-turnover"));
+            }
+        }
     }
+    Ok(result)
 }
 
 fn optimization_sample(
@@ -272,21 +277,31 @@ fn optimization_sample(
             constraint_gradient: gradient,
         },
     };
-    if let Some(responses) = &e.responses {
+    if e.constraints.has_limits() {
         let (constraint, weights) = aggregate_constraints(sample.constraint, e)?;
         if gradients {
-            let Some(response_gradient) = &responses.gradient else {
-                return Ok(None);
-            };
-            if response_gradient.len() != sample.constraint_gradient.len() {
-                return Err(failure("sdf3-affine-design-response-gradient-shape"));
+            for gradient in &mut sample.constraint_gradient {
+                *gradient *= weights[0];
             }
-            for (gradient, response) in sample.constraint_gradient.iter_mut().zip(response_gradient)
-            {
-                *gradient = super::grid::finite(
-                    weights[0] * *gradient + weights[1] * response,
-                    "sdf3-affine-design-response-gradient",
-                )?;
+            for (weight, component) in [
+                (weights[1], e.responses.as_ref().map(|r| &r.gradient)),
+                (weights[2], e.stress.as_ref().map(|s| &s.gradient)),
+            ] {
+                let Some(component) = component else {
+                    continue;
+                };
+                let Some(component) = component else {
+                    return Ok(None);
+                };
+                if component.len() != sample.constraint_gradient.len() {
+                    return Err(failure("sdf3-affine-design-constraint-gradient-shape"));
+                }
+                for (gradient, value) in sample.constraint_gradient.iter_mut().zip(component) {
+                    *gradient = super::grid::finite(
+                        *gradient + weight * value,
+                        "sdf3-affine-design-constraint-gradient",
+                    )?;
+                }
             }
         } else {
             sample.constraint_gradient.clear();
@@ -342,12 +357,20 @@ fn sample<O: Sdf3Elasticity>(
     policy: &AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
     options: AffineLoadSpaceDesignOptions3,
-    responses: Option<AffineResponseLimits3<'_>>,
+    constraints: AffineLoadSpaceConstraints3<'_>,
     last: &mut Option<AffineLoadSpaceDesignPoint3>,
     control: &mut SolveControl<'_>,
 ) -> Result<Option<ProjectedAlSample>, EvaluationStop> {
     let e = evaluate(
-        study, rho, dead, basis, policy, goal, options, responses, control,
+        study,
+        rho,
+        dead,
+        basis,
+        policy,
+        goal,
+        options,
+        constraints,
+        control,
     )?;
     // A valid worst-load witness can exist without a unique differentiable
     // envelope. Let the existing bounded line search reject that trial.
@@ -460,7 +483,7 @@ fn gradient_check<O: Sdf3Elasticity>(
     policy: &AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
     options: AffineLoadSpaceDesignOptions3,
-    responses: Option<AffineResponseLimits3<'_>>,
+    constraints: AffineLoadSpaceConstraints3<'_>,
     control: &mut SolveControl<'_>,
 ) -> Result<AffineLoadSpaceGradientCheck3, EvaluationStop> {
     let params = study.params();
@@ -471,7 +494,15 @@ fn gradient_check<O: Sdf3Elasticity>(
         control,
         |r, baseline, control| {
             let e = evaluate(
-                study, r, dead, basis, policy, goal, options, responses, control,
+                study,
+                r,
+                dead,
+                basis,
+                policy,
+                goal,
+                options,
+                constraints,
+                control,
             )?;
             let sample = optimization_sample(&e, goal, baseline)?
                 .ok_or(failure("sdf3-affine-design-nondifferentiable-baseline"))?;
@@ -479,7 +510,7 @@ fn gradient_check<O: Sdf3Elasticity>(
             // constant one. Otherwise a loose cap can round away a perfectly
             // resolvable tiny compliance variation during finite differences.
             // This additive constant does not change the audited derivative.
-            let constraint = if responses.is_none() {
+            let constraint = if !constraints.policy().has_limits() {
                 match goal {
                     AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => inventory(&e, goal)?.0,
                     AffineLoadSpaceDesignGoal3::MinimumMaterial { .. } => e.maximum,
@@ -499,10 +530,14 @@ fn gradient_check<O: Sdf3Elasticity>(
         params,
         goal,
         options: options.gradient_check,
-        response_options: responses.map(|family| family.options),
+        constraints: constraints.policy(),
         baseline_objective: numerical.baseline_compliance,
         baseline_constraint: numerical.baseline_volume_fraction
-            - if responses.is_none() { 1.0 } else { 0.0 },
+            - if !constraints.policy().has_limits() {
+                1.0
+            } else {
+                0.0
+            },
         objective_relative_error: numerical
             .probes
             .iter()
@@ -548,7 +583,7 @@ pub struct AffineLoadSpaceDesign3<'a, 'callback, O: Sdf3Elasticity> {
     study: &'a mut CutDensityStudy3<O>,
     dead: &'a [f64],
     basis: &'a [&'a [f64]],
-    responses: Option<AffineResponseLimits3<'a>>,
+    constraints: AffineLoadSpaceConstraints3<'a>,
     control: &'a mut SolveControl<'callback>,
     policy: AffineLoadSpace3,
     goal: AffineLoadSpaceDesignGoal3,
@@ -571,7 +606,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
         options: AffineLoadSpaceDesignOptions3,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
-        Self::new_optional(
+        Self::new_with_constraints(
             study,
             dead_offset,
             basis,
@@ -579,7 +614,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             policy,
             goal,
             options,
-            None,
+            AffineLoadSpaceConstraints3::default(),
             control,
         )
     }
@@ -601,7 +636,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
         responses: AffineResponseLimits3<'a>,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
-        Self::new_optional(
+        Self::new_with_constraints(
             study,
             dead_offset,
             basis,
@@ -609,13 +644,16 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             policy,
             goal,
             options,
-            Some(responses),
+            AffineLoadSpaceConstraints3::from_responses(responses),
             control,
         )
     }
 
+    /// Bind compliance/volume, signed response limits and native sampled
+    /// strength to one existing AL owner. Every trial and fresh recheck carries
+    /// the entire family; no component's adverse direction stands in for another.
     #[allow(clippy::too_many_arguments)]
-    fn new_optional(
+    pub fn new_with_constraints(
         study: &'a mut CutDensityStudy3<O>,
         dead_offset: &'a [f64],
         basis: &'a [&'a [f64]],
@@ -623,12 +661,29 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
         policy: AffineLoadSpace3,
         goal: AffineLoadSpaceDesignGoal3,
         options: AffineLoadSpaceDesignOptions3,
-        responses: Option<AffineResponseLimits3<'a>>,
+        constraints: AffineLoadSpaceConstraints3<'a>,
         control: &'a mut SolveControl<'callback>,
     ) -> Result<Self, ProjectedAlError<EvaluationStop>> {
         admit(study, dead_offset, basis, rho, &policy, goal, options)?;
-        if let Some(family) = responses {
-            super::response::admit(study, family).map_err(ProjectedAlError::Evaluation)?;
+        constraints
+            .admit(study)
+            .map_err(ProjectedAlError::Evaluation)?;
+        if let Some(limit) = constraints.stress {
+            let params = study.params();
+            let floor = crate::filter::heaviside(
+                options.density_floor,
+                params.beta,
+                params.eta + options.robustness.threshold_offset,
+            );
+            if !crate::sdf3::design::monotone_stress_branch(
+                floor,
+                params,
+                limit.options.relaxation_power,
+            ) {
+                return Err(ProjectedAlError::Invalid(
+                    "eroded density floor permits ersatz stress foldback",
+                ));
+            }
         }
         let check = gradient_check(
             study,
@@ -638,7 +693,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             &policy,
             goal,
             options,
-            responses,
+            constraints,
             control,
         )
         .map_err(ProjectedAlError::Evaluation)?;
@@ -666,7 +721,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
                         &policy,
                         goal,
                         options,
-                        responses,
+                        constraints,
                         &mut last,
                         &mut **ledger.borrow_mut(),
                     )
@@ -685,7 +740,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             study,
             dead: dead_offset,
             basis,
-            responses,
+            constraints,
             control,
             policy,
             goal,
@@ -715,7 +770,11 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
     }
     #[must_use]
     pub fn response_limits(&self) -> Option<AffineResponseLimits3<'a>> {
-        self.responses
+        self.constraints.responses
+    }
+    #[must_use]
+    pub fn constraints(&self) -> AffineLoadSpaceConstraints3<'a> {
+        self.constraints
     }
     #[must_use]
     pub fn accepted(&self) -> &AffineLoadSpaceDesignPoint3 {
@@ -759,7 +818,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
                 let policy = &self.policy;
                 let goal = self.goal;
                 let options = self.options;
-                let responses = self.responses;
+                let constraints = self.constraints;
                 self.state.try_run(
                     remaining.min(1),
                     &mut |r| {
@@ -771,7 +830,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
                             policy,
                             goal,
                             options,
-                            responses,
+                            constraints,
                             &mut last,
                             &mut **ledger.borrow_mut(),
                         )
@@ -834,7 +893,7 @@ impl<'a, 'callback, O: Sdf3Elasticity> AffineLoadSpaceDesign3<'a, 'callback, O> 
             &self.policy,
             self.goal,
             self.options,
-            self.responses,
+            self.constraints,
             self.control,
         )?;
         if !physical_feasible(&evaluation, self.goal, &self.policy) {

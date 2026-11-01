@@ -85,7 +85,12 @@ fn affine_response_campaign_reintegrates_observations_and_rechecks_the_promoted_
         .unwrap();
     assert!(initial.completed_and_rechecked(), "{:?}", initial.outcome);
     assert_eq!(
-        initial.gradient_check.as_ref().unwrap().response_options,
+        initial
+            .gradient_check
+            .as_ref()
+            .unwrap()
+            .constraints
+            .responses,
         Some(family.options)
     );
     let builds = RefCell::new(Vec::new());
@@ -144,7 +149,12 @@ fn affine_response_campaign_reintegrates_observations_and_rechecks_the_promoted_
     assert_eq!(current.goal, mass_goal());
     assert_eq!(current.policy, cap);
     assert_eq!(
-        current.gradient_check.as_ref().unwrap().response_options,
+        current
+            .gradient_check
+            .as_ref()
+            .unwrap()
+            .constraints
+            .responses,
         Some(family.options)
     );
     let checked = current.recheck.as_ref().unwrap().as_ref().unwrap();

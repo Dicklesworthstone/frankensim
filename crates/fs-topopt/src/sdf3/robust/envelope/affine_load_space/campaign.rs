@@ -352,9 +352,14 @@ where
                 "affine campaign goal differs from its optimized objective",
             ));
         }
-        if audit.response_options != responses.map(|family| family.options) {
+        let constraint_policy = super::constraints::AffineLoadSpaceConstraintPolicy3 {
+            responses: responses.map(|family| family.options),
+            stress: None,
+            sharpness: responses.map_or(40.0, |family| family.options.sharpness),
+        };
+        if audit.constraints != constraint_policy {
             return Err(invalid(
-                "affine campaign must retain its optimized response policy",
+                "affine campaign must retain its optimized constraint policy",
             ));
         }
         if let Some(family) = responses {

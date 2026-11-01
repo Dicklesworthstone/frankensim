@@ -190,6 +190,146 @@ fn coupled_tensor_stress_and_vjps_share_the_source_law_and_strain_domain() {
 }
 
 #[test]
+fn affine_stress_family_uses_native_tensor_and_admits_the_whole_source_strain_ball() {
+    let material = state(
+        [
+            [11.0, 2.0, 1.0, 0.4, 0.2, -0.3],
+            [2.0, 9.0, 1.5, -0.2, 0.3, 0.1],
+            [1.0, 1.5, 8.0, 0.1, -0.3, 0.2],
+            [0.4, -0.2, 0.1, 5.0, 0.25, -0.15],
+            [0.2, 0.3, -0.3, 0.25, 4.0, 0.35],
+            [-0.3, 0.1, 0.2, -0.15, 0.35, 6.0],
+        ],
+        0.1,
+    );
+    let mut callback = |_| poll();
+    let mut control =
+        QuadratureControl3::new(QuadratureOptions3::default(), &mut callback).unwrap();
+    let mut op = CutElasticity3::build_with_material_field(
+        domain(),
+        [2; 3],
+        &Slab,
+        ElasticMaterialField3::Uniform(&material),
+        &|p| p == [0.0; 3],
+        Default::default(),
+        &mut control,
+    )
+    .unwrap();
+    let scales: Vec<_> = (0..op.cells()).map(|i| 0.5 + 0.02 * i as f64).collect();
+    op.set_scales(&scales).unwrap();
+    let offset: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|&[x, y, z]| [0.055 * x, -0.01 * y, 0.005 * z])
+        .collect();
+    let first: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|&[x, y, _]| [0.02 * x, 0.01 * y, 0.0])
+        .collect();
+    let second: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|&[x, _, z]| [0.025 * x, 0.0, 0.01 * z])
+        .collect();
+    let baseline = op.bulk_stress(&offset, 100_000, poll).unwrap();
+    let budget = baseline.len() * 3;
+    let family = op
+        .affine_bulk_stress(&offset, &[&first, &second], budget, poll)
+        .unwrap();
+    assert_eq!(family.baseline, baseline);
+    for (column, field) in family
+        .basis_reference_stresses
+        .iter()
+        .zip([&first, &second])
+    {
+        let native = op.bulk_stress(field, baseline.len(), poll).unwrap();
+        assert_eq!(column.len(), native.len());
+        for (actual, point) in column.iter().zip(native) {
+            assert_eq!(actual, &point.reference_stress);
+        }
+    }
+    let combined: Vec<_> = offset
+        .iter()
+        .zip(&first)
+        .zip(&second)
+        .map(|((b, u), v)| b + 0.6 * u - 0.8 * v)
+        .collect();
+    for (i, point) in op
+        .bulk_stress(&combined, baseline.len(), poll)
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        assert_eq!(point.cell, family.baseline[i].cell);
+        assert_eq!(point.position, family.baseline[i].position);
+        assert_eq!(point.weight, family.baseline[i].weight);
+        for k in 0..6 {
+            let expected = family.baseline[i].reference_stress[k]
+                + 0.6 * family.basis_reference_stresses[0][i][k]
+                - 0.8 * family.basis_reference_stresses[1][i][k];
+            close(point.reference_stress[k], expected, 2e-13);
+            close(point.stress[k], scales[point.cell] * expected, 2e-13);
+        }
+    }
+    assert!(matches!(
+        op.affine_bulk_stress(&offset, &[&first, &second], budget - 1, poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk stress point-field allowance exhausted"
+        ))
+    ));
+    assert!(
+        op.affine_bulk_stress(&offset, &[&first[..first.len() - 1]], budget, poll)
+            .is_err()
+    );
+    let mut calls = 0;
+    assert!(matches!(
+        op.affine_bulk_stress(&offset, &[&first, &second], budget, || {
+            calls += 1;
+            if calls > 40 {
+                ControlFlow::Break(())
+            } else {
+                poll()
+            }
+        }),
+        Err(ElasticityError3::Cancelled)
+    ));
+
+    // Every coordinate endpoint satisfies the native ceiling, but the diagonal
+    // adverse direction has 0.06 + sqrt(0.03²+0.03²) > 0.1 axial strain.
+    let near_limit: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|p| [0.06 * p[0], 0.0, 0.0])
+        .collect();
+    let direction: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|p| [0.03 * p[0], 0.0, 0.0])
+        .collect();
+    let endpoint: Vec<_> = near_limit
+        .iter()
+        .zip(&direction)
+        .map(|(a, b)| a + b)
+        .collect();
+    op.bulk_stress(&endpoint, baseline.len(), poll).unwrap();
+    op.affine_bulk_stress(&near_limit, &[&direction], baseline.len() * 2, poll)
+        .unwrap();
+    assert!(matches!(
+        op.affine_bulk_stress(&near_limit, &[&direction, &direction], budget, poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain"
+        ))
+    ));
+    assert_eq!(op.scales(), scales);
+    assert_eq!(
+        family,
+        op.affine_bulk_stress(&offset, &[&first, &second], budget, poll)
+            .unwrap()
+    );
+}
+
+#[test]
 fn anisotropic_embedded_motion_reaction_and_lifting_have_matching_derivatives() {
     let diagonal = [10.0, 7.0, 6.0, 4.0, 3.0, 8.0];
     let material = state(

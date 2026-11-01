@@ -46,8 +46,9 @@ pub(in crate::sdf3) struct SharedStressFields3<'a> {
 #[path = "stress/measure.rs"]
 mod measure;
 pub use measure::StressMeasure3;
+pub(in crate::sdf3) use measure::peak_scale;
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct StressOptions3 {
     /// qp-relaxation exponent. Values below one are not admitted because their
     /// derivative is singular at an exactly zero projected density.
@@ -141,14 +142,8 @@ pub(super) fn admit<O: Sdf3Elasticity>(
     loads: &[LoadCase<'_>],
     options: StressOptions3,
 ) -> Result<(), StressError3> {
-    if !options.relaxation_power.is_finite()
-        || options.relaxation_power < 1.0
-        || options.relaxation_power >= study.params.penal
-        || !options.aggregation_power.is_finite()
-        || !(2.0..=64.0).contains(&options.aggregation_power)
-        || options.max_cases == 0
-        || options.max_points == 0
-        || loads.is_empty()
+    admit_options(study.params, options)?;
+    if loads.is_empty()
         || loads.len() > options.max_cases
         || !loads.iter().any(|l| l.weight > 0.0)
     {
@@ -169,6 +164,27 @@ pub(super) fn admit<O: Sdf3Elasticity>(
     {
         return Err(StressError3::Invalid(
             "invalid stress design or independent loads",
+        ));
+    }
+    Ok(())
+}
+
+// The same qp/peak model is also consumed by continuous affine load families.
+// Keep its physical exponent domain and bounded allocation policy in one owner.
+pub(in crate::sdf3) fn admit_options(
+    params: SimpParams,
+    options: StressOptions3,
+) -> Result<(), StressError3> {
+    if !options.relaxation_power.is_finite()
+        || options.relaxation_power < 1.0
+        || options.relaxation_power >= params.penal
+        || !options.aggregation_power.is_finite()
+        || !(2.0..=64.0).contains(&options.aggregation_power)
+        || options.max_cases == 0
+        || options.max_points == 0
+    {
+        return Err(StressError3::Invalid(
+            "invalid qp stress policy or load count",
         ));
     }
     Ok(())
@@ -199,7 +215,7 @@ fn finite(value: f64) -> Result<f64, StressError3> {
         Err(failure("sdf3-stress-arithmetic").into())
     }
 }
-fn power(r: f64, p: f64) -> f64 {
+pub(in crate::sdf3) fn power(r: f64, p: f64) -> f64 {
     if p == 0.0 {
         1.0
     } else if r == 0.0 {

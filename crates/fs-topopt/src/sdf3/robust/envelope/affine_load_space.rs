@@ -6,11 +6,13 @@
 //! A selected hard-case witness is useful evidence but is not a differentiable
 //! objective. Only a numerically separated regular maximizer gets a gradient.
 pub mod campaign;
+pub mod constraints;
 pub mod design;
 mod grid;
 pub mod refinement;
 pub mod refit;
 pub mod response;
+pub mod stress;
 pub use grid::AffineLoadSpaceGrid3;
 
 use super::super::RobustOptions3;
@@ -135,6 +137,10 @@ pub struct AffineLoadSpaceEvaluation3 {
     /// Each limit has its own adverse direction; compliance's witness is not
     /// substituted for a displacement or support-force extremum.
     pub responses: Option<response::AffineResponseEvaluation3>,
+    /// Original optional constraint policy, shared with the audit and optimizer.
+    pub constraints: constraints::AffineLoadSpaceConstraintPolicy3,
+    /// Full-ball sampled strength, using the same native material and fields.
+    pub stress: Option<stress::AffineStressEvaluation3>,
     pub work: SolveWork,
 }
 
@@ -402,6 +408,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
                     worst_displacement,
                     worst_compliance,
                     responses: None,
+                    constraints: constraints::AffineLoadSpaceConstraintPolicy3::default(),
+                    stress: None,
                     work: control.work(),
                 },
                 extra,

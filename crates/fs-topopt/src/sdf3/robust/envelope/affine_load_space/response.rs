@@ -569,7 +569,7 @@ pub(super) fn measure_affine_responses(
     measure_evaluation(operator, grid, family, control).map(|(report, _)| report)
 }
 
-fn evaluate<O: Sdf3Elasticity>(
+pub(super) fn evaluate<O: Sdf3Elasticity>(
     study: &CutDensityStudy3<O>,
     design: &Design3,
     prepared: &impl Precond,
@@ -644,23 +644,21 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceEvaluation3, EvaluationStop> {
         control.checkpoint("sdf3-affine-response-start")?;
-        admit(self, family)?;
-        let (mut result, mut responses) = self.affine_load_space_extended(
+        let mut result = self.affine_load_space_constraints_with_mass(
             rho,
             dead_offset,
             basis,
             robustness,
             policy,
+            super::constraints::AffineLoadSpaceConstraints3::from_responses(family),
             include_mass,
             control,
-            |study, design, prepared, grid, control| {
-                evaluate(study, design, prepared, grid, family, control)
-            },
         )?;
         control.checkpoint("sdf3-affine-response-publish")?;
-        responses.work = control.work();
         result.work = control.work();
-        result.responses = Some(responses);
+        if let Some(response) = &mut result.responses {
+            response.work = control.work();
+        }
         Ok(result)
     }
 }

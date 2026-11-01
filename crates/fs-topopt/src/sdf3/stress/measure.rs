@@ -48,7 +48,7 @@ impl StressMeasure3 {
 // c(rho)*vm_ref, c=(rho^(q*p)+k^p)^(1/p). Differentiate the algebraic norm,
 // NOT a frozen maximum scale, and include BOTH direct density contributions.
 // The scaling avoids underflow of k^p in a prescribed void at high p.
-pub(super) fn peak_scale(rho: f64, relaxed: f64, stiffness: f64,
+pub(in crate::sdf3) fn peak_scale(rho: f64, relaxed: f64, stiffness: f64,
     params: SimpParams, options: StressOptions3) -> Result<(f64, f64), StressError3> {
     let p = options.aggregation_power;
     let m = relaxed.max(stiffness);

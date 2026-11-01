@@ -305,6 +305,82 @@ fn adaptive_stress_preserves_affine_fields_and_exact_hanging_transpose() {
 }
 
 #[test]
+fn adaptive_affine_stress_preserves_the_full_hanging_field_family_and_masks() {
+    let mut op = adaptive();
+    assert!(op.physical_nodes().len() > op.nodes().len());
+    let scales: Vec<_> = (0..op.cells()).map(|i| 0.4 + 0.01 * i as f64).collect();
+    op.set_scales(&scales).unwrap();
+    let offset = affine(op.nodes());
+    let first: Vec<_> = (0..op.n()).map(|i| 0.01 * ((i % 7) as f64 - 3.0)).collect();
+    let second: Vec<_> = (0..op.n()).map(|i| 0.02 * ((i % 5) as f64 - 2.0)).collect();
+    let baseline = op.bulk_stress(&offset, 10_000, poll).unwrap();
+    let budget = baseline.len() * 3;
+    let family = op
+        .affine_bulk_stress(&offset, &[&first, &second], budget, poll)
+        .unwrap();
+    assert_eq!(family.baseline, baseline);
+    for (column, field) in family
+        .basis_reference_stresses
+        .iter()
+        .zip([&first, &second])
+    {
+        for (actual, point) in column
+            .iter()
+            .zip(op.bulk_stress(field, baseline.len(), poll).unwrap())
+        {
+            assert_eq!(actual, &point.reference_stress);
+        }
+    }
+    let combined: Vec<_> = offset
+        .iter()
+        .zip(&first)
+        .zip(&second)
+        .map(|((b, u), v)| b + 0.6 * u + 0.8 * v)
+        .collect();
+    for (i, point) in op
+        .bulk_stress(&combined, baseline.len(), poll)
+        .unwrap()
+        .iter()
+        .enumerate()
+    {
+        for k in 0..6 {
+            let expected = family.baseline[i].reference_stress[k]
+                + 0.6 * family.basis_reference_stresses[0][i][k]
+                + 0.8 * family.basis_reference_stresses[1][i][k];
+            close(point.reference_stress[k], expected, 3e-12);
+            close(point.stress[k], scales[point.cell] * expected, 3e-12);
+        }
+    }
+    let (mut masked_offset, mut masked_first, mut masked_second) =
+        (offset.clone(), first.clone(), second.clone());
+    for (i, &fixed) in op.fixed().iter().enumerate() {
+        if fixed {
+            masked_offset[3 * i..3 * i + 3].fill(1e100);
+            masked_first[3 * i..3 * i + 3].fill(-1e100);
+            masked_second[3 * i..3 * i + 3].fill(2e100);
+        }
+    }
+    assert_eq!(
+        family,
+        op.affine_bulk_stress(
+            &masked_offset,
+            &[&masked_first, &masked_second],
+            budget,
+            poll
+        )
+        .unwrap()
+    );
+    // The family allowance is checked before attempting native reconstruction.
+    assert!(matches!(
+        op.affine_bulk_stress(&[], &[&first, &second], budget - 1, poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk stress point-field allowance exhausted"
+        ))
+    ));
+    assert_eq!(op.scales(), scales);
+}
+
+#[test]
 fn bounded_stress_observation_refuses_invalid_and_interrupted_work_atomically() {
     let op = adaptive();
     let u = affine(op.nodes());

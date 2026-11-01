@@ -2,6 +2,7 @@
 //! Raw controls are inherited; physical assessment and reoptimization remain
 //! different experiments. Adding material is not a self-weight restoration.
 use super::AffineLoadSpace3;
+use super::constraints::{AffineLoadSpaceConstraints3, ReferenceAffineLoadSpaceConstraints3};
 use super::design::{
     AffineLoadSpaceDesign3, AffineLoadSpaceDesignGoal3, AffineLoadSpaceDesignIteration3,
     AffineLoadSpaceDesignOptions3, AffineLoadSpaceDesignPoint3, AffineLoadSpaceGradientCheck3,
@@ -76,27 +77,22 @@ impl<O: AdaptiveSdf3Elasticity> AffineLoadSpaceRefit3<O> {
             && self.recheck.as_ref().is_some_and(|result| {
                 result.as_ref().is_ok_and(|point| {
                     self.gradient_check.as_ref().is_some_and(|audit| {
-                        audit.passed()
-                            && audit.response_options
-                                == point
-                                    .evaluation
-                                    .responses
-                                    .as_ref()
-                                    .map(|response| response.options)
+                        audit.passed() && audit.constraints == point.evaluation.constraints
                     }) && self.initial.as_ref().is_some_and(|initial| {
-                        match (&initial.evaluation.responses, &point.evaluation.responses) {
-                            (None, None) => true,
-                            (Some(a), Some(b)) => {
-                                a.options == b.options
-                                    && a.witnesses.len() == b.witnesses.len()
-                                    && a.witnesses.iter().zip(&b.witnesses).all(|(a, b)| {
-                                        a.bound == b.bound
-                                            && a.sense == b.sense
-                                            && a.scale == b.scale
-                                    })
+                        initial.evaluation.constraints == point.evaluation.constraints
+                            && match (&initial.evaluation.responses, &point.evaluation.responses) {
+                                (None, None) => true,
+                                (Some(a), Some(b)) => {
+                                    a.options == b.options
+                                        && a.witnesses.len() == b.witnesses.len()
+                                        && a.witnesses.iter().zip(&b.witnesses).all(|(a, b)| {
+                                            a.bound == b.bound
+                                                && a.sense == b.sense
+                                                && a.scale == b.scale
+                                        })
+                                }
+                                _ => false,
                             }
-                            _ => false,
-                        }
                     }) && physical_feasible(&point.evaluation, self.goal, &self.policy)
                 })
             })
@@ -147,8 +143,16 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: AffineLoadSpaceRefitOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<F>, AffineLoadSpaceRefitError3> {
-        self.refit_reference_affine_load_space_optional(
-            operator, rho, dead, basis, policy, goal, options, None, control,
+        self.refit_reference_affine_load_space_with_constraints(
+            operator,
+            rho,
+            dead,
+            basis,
+            policy,
+            goal,
+            options,
+            ReferenceAffineLoadSpaceConstraints3::default(),
+            control,
         )
     }
 
@@ -170,7 +174,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         responses: ReferenceAffineResponseLimits3<'_>,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<F>, AffineLoadSpaceRefitError3> {
-        self.refit_reference_affine_load_space_optional(
+        self.refit_reference_affine_load_space_with_constraints(
             operator,
             rho,
             dead,
@@ -178,13 +182,16 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             policy,
             goal,
             options,
-            Some(responses),
+            ReferenceAffineLoadSpaceConstraints3::from_responses(responses),
             control,
         )
     }
 
+    /// Rebuild and refit the complete compliance/inventory, response and
+    /// full-ball sampled-strength problem. The same pure laws, stress policy,
+    /// native material source and joint aggregation survive the transfer.
     #[allow(clippy::too_many_arguments)]
-    fn refit_reference_affine_load_space_optional<F: AdaptiveSdf3Elasticity>(
+    pub fn refit_reference_affine_load_space_with_constraints<F: AdaptiveSdf3Elasticity>(
         &self,
         operator: F,
         rho: &[f64],
@@ -193,14 +200,14 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         policy: &AffineLoadSpace3,
         goal: AffineLoadSpaceDesignGoal3,
         options: AffineLoadSpaceRefitOptions3,
-        responses: Option<ReferenceAffineResponseLimits3<'_>>,
+        constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<F>, AffineLoadSpaceRefitError3> {
         control.checkpoint("sdf3-affine-refit-start")?;
         self.require_material_body_recipe("sdf3-affine-refit-material-recipe")?;
         admit_reference(self, rho, basis.len(), policy, goal, options)?;
-        if let Some(family) = responses {
-            reference::admit(self.operator(), family)?;
+        constraints.admit(self)?;
+        if let Some(family) = constraints.responses {
             reference::admit(&operator, family)?;
         }
         let (inherited_rho, regions) =
@@ -255,15 +262,16 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             goal,
             options,
         )?;
+        constraints.admit(&candidate)?;
         self.inherit_material_acceleration(&mut candidate, control)?;
-        candidate.solve_reference_affine_load_space_optional(
+        candidate.solve_reference_affine_load_space_with_constraints(
             &inherited_rho,
             dead,
             basis,
             policy,
             goal,
             options,
-            responses,
+            constraints,
             control,
         )
     }
@@ -291,8 +299,15 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         options: AffineLoadSpaceRefitOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<O>, AffineLoadSpaceRefitError3> {
-        self.solve_reference_affine_load_space_optional(
-            incoming, dead, basis, policy, goal, options, None, control,
+        self.solve_reference_affine_load_space_with_constraints(
+            incoming,
+            dead,
+            basis,
+            policy,
+            goal,
+            options,
+            ReferenceAffineLoadSpaceConstraints3::default(),
+            control,
         )
     }
 
@@ -313,20 +328,22 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         responses: ReferenceAffineResponseLimits3<'_>,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<O>, AffineLoadSpaceRefitError3> {
-        self.solve_reference_affine_load_space_optional(
+        self.solve_reference_affine_load_space_with_constraints(
             incoming,
             dead,
             basis,
             policy,
             goal,
             options,
-            Some(responses),
+            ReferenceAffineLoadSpaceConstraints3::from_responses(responses),
             control,
         )
     }
 
+    /// Bind one complete reference constraint family to this actual native
+    /// grid and retain it through gradient admission, optimization and recheck.
     #[allow(clippy::too_many_arguments)]
-    fn solve_reference_affine_load_space_optional(
+    pub fn solve_reference_affine_load_space_with_constraints(
         self,
         incoming: &[f64],
         dead: ReferenceLoad3<'_>,
@@ -334,14 +351,12 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         policy: &AffineLoadSpace3,
         goal: AffineLoadSpaceDesignGoal3,
         options: AffineLoadSpaceRefitOptions3,
-        responses: Option<ReferenceAffineResponseLimits3<'_>>,
+        constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefit3<O>, AffineLoadSpaceRefitError3> {
         control.checkpoint("sdf3-affine-reference-start")?;
         admit_reference(&self, incoming, basis.len(), policy, goal, options)?;
-        if let Some(family) = responses {
-            reference::admit(self.operator(), family)?;
-        }
+        constraints.admit(&self)?;
         let params = self.params();
         let mut study = self;
         let dead_force = controlled_goal3(control, "sdf3-affine-reference-load", |poll| {
@@ -366,43 +381,38 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             )?);
         }
         let borrowed: Vec<_> = forces.iter().map(Vec::as_slice).collect();
-        let observations = responses
+        let observations = constraints
+            .responses
             .map(|family| reference::assemble(study.operator(), family, control))
             .transpose()?;
         let response_limits = observations.as_ref().map(|prepared| prepared.limits());
-        let nodal_responses = responses
-            .zip(response_limits.as_deref())
-            .map(|(family, limits)| AffineResponseLimits3 {
-                limits,
-                options: family.options,
-            });
+        let nodal_responses =
+            constraints
+                .responses
+                .zip(response_limits.as_deref())
+                .map(|(family, limits)| AffineResponseLimits3 {
+                    limits,
+                    options: family.options,
+                });
         let (mut gradient_check, mut initial, mut accepted, mut best, mut recheck) =
             (None, None, None, None, None);
         let mut history = Vec::new();
         let outcome = {
-            let attempt = match nodal_responses {
-                Some(family) => AffineLoadSpaceDesign3::new_with_response_limits(
-                    &mut study,
-                    &dead_force,
-                    &borrowed,
-                    incoming,
-                    policy.clone(),
-                    goal,
-                    options.design,
-                    family,
-                    control,
-                ),
-                None => AffineLoadSpaceDesign3::new(
-                    &mut study,
-                    &dead_force,
-                    &borrowed,
-                    incoming,
-                    policy.clone(),
-                    goal,
-                    options.design,
-                    control,
-                ),
-            };
+            let attempt = AffineLoadSpaceDesign3::new_with_constraints(
+                &mut study,
+                &dead_force,
+                &borrowed,
+                incoming,
+                policy.clone(),
+                goal,
+                options.design,
+                AffineLoadSpaceConstraints3 {
+                    responses: nodal_responses,
+                    stress: constraints.stress,
+                    sharpness: constraints.sharpness,
+                },
+                control,
+            );
             match attempt {
                 Err(error) => Err(error),
                 Ok(mut session) => {

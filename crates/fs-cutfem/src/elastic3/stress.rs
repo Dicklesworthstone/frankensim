@@ -22,6 +22,20 @@ pub struct BulkStressPoint3 {
     pub stress: [f64; 6],
 }
 
+/// One affine displacement family, sampled on the SAME retained bulk points.
+/// For coefficients with Euclidean norm at most one, the reference stress is
+/// `baseline[p].reference_stress + sum_j a[j]*basis_reference_stresses[j][p]`.
+/// Source-bound material strain domains are admitted over this entire ball,
+/// not by treating coordinate directions as independent physical states.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AffineBulkStress3 {
+    /// Offset-field stresses and retained quadrature metadata, including scales.
+    pub baseline: Vec<BulkStressPoint3>,
+    /// Field-major: original basis order, then exactly the baseline point order.
+    /// These are unscaled constitutive directions, with physical shear entries.
+    pub basis_reference_stresses: Vec<Vec<[f64; 6]>>,
+}
+
 /// Partial derivatives of a scalar functional of the physical stress samples.
 /// These do not include the effect of equilibrium changing with material.
 #[derive(Debug, Clone, PartialEq)]
@@ -40,15 +54,42 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Elastici
     }
 }
 
-fn stress(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+fn stress_basis(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
+    std::array::from_fn(|i| material.basis_stress(gradients[i / 3], i % 3))
+}
+
+fn apply_stress_basis(basis: &[[f64; 6]; 24], local: &[f64; 24]) -> [f64; 6] {
     let mut value = [0.0; 6];
     for i in 0..24 {
-        let b = material.basis_stress(gradients[i / 3], i % 3);
         for k in 0..6 {
-            value[k] += b[k] * local[i];
+            value[k] += basis[i][k] * local[i];
         }
     }
     value
+}
+
+fn stress(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+    apply_stress_basis(&stress_basis(material, gradients), local)
+}
+
+fn mandel_strain(gradients: &[[f64; 3]; 8], local: &[f64; 24]) -> [f64; 6] {
+    let mut gradient = [[0.0; 3]; 3];
+    for a in 0..8 {
+        for c in 0..3 {
+            for d in 0..3 {
+                gradient[c][d] += local[3 * a + c] * gradients[a][d];
+            }
+        }
+    }
+    let shear = core::f64::consts::FRAC_1_SQRT_2;
+    [
+        gradient[0][0],
+        gradient[1][1],
+        gradient[2][2],
+        shear * (gradient[0][1] + gradient[1][0]),
+        shear * (gradient[1][2] + gradient[2][1]),
+        shear * (gradient[2][0] + gradient[0][2]),
+    ]
 }
 
 // Admit the actual displacement strain, never the unit basis functions or
@@ -61,23 +102,7 @@ fn admit_material_strain(
     let Some(source) = material.source_state() else {
         return Ok(());
     };
-    let mut gradient = [[0.0; 3]; 3];
-    for a in 0..8 {
-        for c in 0..3 {
-            for d in 0..3 {
-                gradient[c][d] += local[3 * a + c] * gradients[a][d];
-            }
-        }
-    }
-    let shear = core::f64::consts::FRAC_1_SQRT_2;
-    let strain = [
-        gradient[0][0],
-        gradient[1][1],
-        gradient[2][2],
-        shear * (gradient[0][1] + gradient[1][0]),
-        shear * (gradient[1][2] + gradient[2][1]),
-        shear * (gradient[2][0] + gradient[0][2]),
-    ];
+    let strain = mandel_strain(gradients, local);
     if strain
         .iter()
         .any(|v| !v.is_finite() || v.abs() > source.maximum_absolute_mandel_strain())
@@ -85,6 +110,52 @@ fn admit_material_strain(
         return Err(ElasticityError3::Invalid(
             "bulk strain exceeds retained material domain",
         ));
+    }
+    Ok(())
+}
+
+fn admit_affine_material_strain(
+    material: &ReferenceMaterial3,
+    gradients: &[[f64; 3]; 8],
+    offset: &[f64; 24],
+    basis: &[[f64; 24]],
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+) -> Result<(), ElasticityError3> {
+    let Some(source) = material.source_state() else {
+        return Ok(());
+    };
+    let baseline = mandel_strain(gradients, offset);
+    let mut norm_scale = [0.0_f64; 6];
+    let mut norm_sum = [0.0_f64; 6];
+    for local in basis {
+        poll(checkpoint)?;
+        let strain = mandel_strain(gradients, local);
+        for k in 0..6 {
+            let value = strain[k].abs();
+            if !value.is_finite() {
+                return Err(ElasticityError3::Invalid("nonfinite affine bulk strain"));
+            }
+            // Scaled sum of squares avoids squaring a large or tiny direction.
+            if value > norm_scale[k] {
+                let ratio = norm_scale[k] / value;
+                norm_sum[k] = 1.0 + norm_sum[k] * ratio * ratio;
+                norm_scale[k] = value;
+            } else if value != 0.0 {
+                let ratio = value / norm_scale[k];
+                norm_sum[k] += ratio * ratio;
+            }
+        }
+    }
+    for k in 0..6 {
+        // This is the exact component support formula in real arithmetic;
+        // floating-point evaluation is numerical admission, not an enclosure.
+        let radius = norm_scale[k] * norm_sum[k].sqrt();
+        let maximum = baseline[k].abs() + radius;
+        if !maximum.is_finite() || maximum > source.maximum_absolute_mandel_strain() {
+            return Err(ElasticityError3::Invalid(
+                "affine bulk strain ball exceeds retained material domain",
+            ));
+        }
     }
     Ok(())
 }
@@ -154,6 +225,29 @@ impl CutElasticity3 {
                 .ok_or(ElasticityError3::Invalid(
                     "bulk stress point count overflow",
                 ))?;
+        }
+        Ok(count)
+    }
+
+    // Adaptive reconstruction must admit this output family BEFORE allocating
+    // its expanded displacement vectors. Reuse the same point/field accounting.
+    pub(super) fn affine_stress_point_count(
+        &self,
+        basis_count: usize,
+        max_point_fields: usize,
+        checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+    ) -> Result<usize, ElasticityError3> {
+        let fields = basis_count.checked_add(1).ok_or(ElasticityError3::Invalid(
+            "affine bulk stress field count overflow",
+        ))?;
+        let count = self.stress_point_count(checkpoint)?;
+        if count
+            .checked_mul(fields)
+            .is_none_or(|n| n > max_point_fields)
+        {
+            return Err(ElasticityError3::Invalid(
+                "affine bulk stress point-field allowance exhausted",
+            ));
         }
         Ok(count)
     }
@@ -250,6 +344,87 @@ impl CutElasticity3 {
         }
         poll(&mut checkpoint)?;
         Ok(points)
+    }
+
+    /// Sample one affine field family in a single retained-quadrature traversal.
+    /// `max_point_fields` bounds `point_count * (basis.len()+1)` before any
+    /// output or local-family allocation. Baseline metadata and every direction
+    /// use identical points, masks, tensors and stress arithmetic. Constitutive
+    /// basis stresses are prepared once per point and reused for all fields.
+    ///
+    /// Each source Mandel-strain component must satisfy
+    /// `abs(epsilon_offset) + l2(epsilon_basis) <= source_ceiling`. Independent
+    /// coordinate-state checks would miss correlated adverse combinations.
+    /// Legacy operators retain their existing lack of a source-domain ceiling.
+    /// No point family escapes on refusal/cancellation; operator state is unchanged.
+    pub fn affine_bulk_stress(
+        &self,
+        offset: &[f64],
+        basis: &[&[f64]],
+        max_point_fields: usize,
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<AffineBulkStress3, ElasticityError3> {
+        self.admit_stress_state(Some(offset), &mut checkpoint)?;
+        let count =
+            self.affine_stress_point_count(basis.len(), max_point_fields, &mut checkpoint)?;
+        for &field in basis {
+            self.admit_stress_state(Some(field), &mut checkpoint)?;
+        }
+        let mut result = AffineBulkStress3 {
+            baseline: Vec::with_capacity(count),
+            basis_reference_stresses: (0..basis.len())
+                .map(|_| Vec::with_capacity(count))
+                .collect(),
+        };
+        let mut local_basis = Vec::with_capacity(basis.len());
+        for (id, cell) in self.cells.iter().enumerate() {
+            poll(&mut checkpoint)?;
+            let local_offset = self.stress_local(cell, offset);
+            local_basis.clear();
+            for &field in basis {
+                poll(&mut checkpoint)?;
+                local_basis.push(self.stress_local(cell, field));
+            }
+            for &(position, weight) in cell.rules.bulk() {
+                poll(&mut checkpoint)?;
+                let (_, gradients) = q1(cell.bounds, position);
+                admit_affine_material_strain(
+                    &cell.material,
+                    &gradients,
+                    &local_offset,
+                    &local_basis,
+                    &mut checkpoint,
+                )?;
+                let constitutive = stress_basis(&cell.material, &gradients);
+                let reference_stress = apply_stress_basis(&constitutive, &local_offset);
+                let stress = reference_stress.map(|s| self.scales[id] * s);
+                if !reference_stress
+                    .iter()
+                    .chain(&stress)
+                    .all(|s| s.is_finite())
+                {
+                    return Err(ElasticityError3::Invalid("affine bulk stress overflow"));
+                }
+                for (column, local) in result.basis_reference_stresses.iter_mut().zip(&local_basis)
+                {
+                    poll(&mut checkpoint)?;
+                    let direction = apply_stress_basis(&constitutive, local);
+                    if direction.iter().any(|s| !s.is_finite()) {
+                        return Err(ElasticityError3::Invalid("affine bulk stress overflow"));
+                    }
+                    column.push(direction);
+                }
+                result.baseline.push(BulkStressPoint3 {
+                    cell: id,
+                    position,
+                    weight,
+                    reference_stress,
+                    stress,
+                });
+            }
+        }
+        poll(&mut checkpoint)?;
+        Ok(result)
     }
 
     /// Exact VJP of the PHYSICAL stresses returned by `bulk_stress`.

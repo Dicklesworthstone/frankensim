@@ -182,6 +182,19 @@ stress. An equilibrium derivative additionally needs the solve adjoint and
 by both backgrounds. Adaptive observations use the original hanging-node map
 and its transpose; there is no nodal stress recovery, remeshing or new assembly.
 
+`affine_bulk_stress` samples one offset field and a family of uncertain
+directions on those same points. It shares native Mandel-strain extraction and
+constitutive action with ordinary stress observations, and stores reference
+stress columns in original field/point order. Coordinate columns are not
+independent physical load cases. For every sourced material and Mandel component
+it checks `abs(epsilon0) + ||epsilon_basis||_2` against the retained strain ceiling,
+which admits the complete coefficient unit ball in real arithmetic. The scaled
+norm avoids squaring large or tiny components; computed admission is numerical,
+not an interval enclosure. Legacy material laws gain no fabricated ceiling.
+The checked `point_count * (basis_count+1)` allowance precedes output allocation
+and adaptive field reconstruction. The adaptive implementation preserves the
+same hanging-node map and strong-clamp masking for the entire family.
+
 Output point allowances are checked before allocating the stress array. State,
 cotangents and arithmetic must be finite, and observation/pullback work polls
 at each point and before publication. Errors return no partial result and leave
