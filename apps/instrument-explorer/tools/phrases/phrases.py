@@ -105,7 +105,13 @@ RAMP = 0.08  # bow speed reaches its value in 80 ms (the committed cards use 150
 # bass E 0.2 (G1 480 ms, all slow), A 0.1 (A1 180 ms), D 0.5 (D2 200 ms), G 0.2 (A2 120, B2 160 ms). Real players:
 # cello C2 120-280 ms, bass A1 40-120 ms. The violin and viola speak at once from full force, while a low set-down
 # leaves the violin A string quiet and bright, sometimes on its second mode. 1 where no phrase bows the string.
-SET_DOWN = {"violin": (1, 1, 1, 1), "viola": (1, 1, 1, 1), "cello": (0.1, 0.7, 0.35, 1), "double-bass": (0.2, 0.1, 0.5, 0.2)}
+# Those values were swept at the cards' earlier forces. Swept again at the 24866e58f forces (01c5841f4 build, the same
+# measure on each string's scale notes, 0.02 to 1), with the rule fixed before the run: the least lock time summed over
+# the string's notes, leaving out a share at which a note sounds its octave or settles 1.5 times brighter than its
+# median. Bass A 0.2 (A1 280, B1 60, C2 40 ms at 18.16 N; 0.1 gives 440, 60, 40); bass E keeps 0.2 (G1 200 ms). The
+# rule finds no share for the cello C and G strings, whose stopped D2 and C3 sound their octave (D2 at 0.1 settles
+# brighter instead) at every share, so they keep 0.1 and 0.7.
+SET_DOWN = {"violin": (1, 1, 1, 1), "viola": (1, 1, 1, 1), "cello": (0.1, 0.7, 0.35, 1), "double-bass": (0.2, 0.2, 0.5, 0.2)}
 # Those lock times came from the audio, which cannot tell Helmholtz motion from a steady multiple slip. The solver's
 # own slip traces (one slip per period, slip time beta of the period) show the cello D string at 0.35 in multiple
 # slip for 0.9 s (D3 locks at 1.0 s), and the bass D and G strings out of Helmholtz motion for 0.3-0.5 s (bass F#2,
