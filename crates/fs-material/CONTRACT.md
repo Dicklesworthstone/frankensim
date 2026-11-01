@@ -8585,6 +8585,26 @@ appearance/disappearance, irreversible mixing, source/cancellation refusal and
 porous counterdiffusion. This is a closed endpoint account, not a temporal error
 estimate or an audit for externally heated, reacting or moving-volume systems.
 
+`transport::audit_reservoir_window` supplies the separate rigid, nonreacting
+held-bath chart: Delta U minus bath species partial enthalpy and reduced heat,
+and Delta S minus bath species partial entropy and reduced heat divided by its
+actual bath temperature. Each explicit bath model must reproduce its retained
+resolved state. Original caloric, transport, pack and water-species bindings
+remain identified even when a species vanishes at one parcel and appears at
+another; a final endpoint cannot authorize a new source through a mass tolerance.
+
+Analytic species increments cancel common formation and entropy references
+before rounding. Pressure-flow work appears once as the ideal-gas R*T_bath term;
+no absolute large-reference subtraction or mass-tolerance-scaled datum enters
+the energy/entropy result. Source-qualified and aggregate per-species mass,
+direct total mass, energy and total entropy retain fixed absolute budgets.
+An absent finite species may enter from an authored bath; nonzero exchange at
+zero bath activity refuses. This is an endpoint account for explicitly supplied
+bath-chart streams, not a rate law, arbitrary open-stream chart, trajectory
+certificate or finite-reservoir storage model. Public gas fixtures independently
+check ideal mixing entropy, gas cooling, hidden energy defects, original source
+identity across absent-species transitions, fixed budgets and late cancellation.
+
 ### Source-bound conductivity through latent phase change
 
 `thermal::conduction::phase::PreparedPhaseConductivity` binds one selected

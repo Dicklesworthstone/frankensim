@@ -6,6 +6,9 @@
 //! deliberately not interpreted as physical entropy generation. No reactions,
 //! external mass sources or moving boundaries are admitted by this helper.
 
+mod reservoir;
+pub(super) use reservoir::open_inventory_change;
+
 use super::super::snapshot::MAX_SNAPSHOT_PARCELS;
 use super::{ClosedGasParcel, GasEnergyError, SpeciesId, source_error};
 use fs_qty::Temperature;

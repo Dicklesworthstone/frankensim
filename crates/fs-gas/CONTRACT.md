@@ -1146,6 +1146,25 @@ Fourier relaxation, accepted-only replay with native nozzle paths, reference
 invariance, typed physical retries, late source/work/cancellation rollback and
 ordinary plus large represented clocks.
 
+`ParcelMolecularTransport::reservoir_candidate` connects independently exposed
+held material baths to finite gas traces through the original zero-barycentric
+Maxwell-Stefan/pressure/Soret-Dufour/Fourier face. Every bath reads one original
+finite inventory. Signed species mass, combined gross withdrawal and separate
+reduced heat enter the existing open species/enthalpy inversion once. Both
+stream directions carry original bath partial enthalpy via analytic increments;
+there is no fictitious finite bath volume or additional caloric solver.
+
+Original bath, gas, sampled face and final gas source domains qualify. Nonzero
+exchange at zero bath species activity refuses without introducing a trace.
+Acceptance uses actual endpoint mass, source-qualified species, reference-free
+energy residual and gas-plus-bath entropy against fixed absolute budgets. Gas
+entropy may decrease when the enclosing bath account compensates it. The
+candidate remains first order and requires an admissible caller-supplied step;
+it does not add bulk advection, finite bath depletion or an adaptive timeline.
+Public fixtures check independent flux/temperature/entropy equations, unequal
+molar masses, datum invariance, pure heat, absent species, simultaneous baths,
+supported entropy-decreasing overshoot, and late source/cancellation refusal.
+
 
 ## Reacting Navier-Stokes composition with original-source molecular transport
 

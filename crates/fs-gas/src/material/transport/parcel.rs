@@ -8,6 +8,8 @@
 
 /// Bounded whole-window temporal accuracy over the original physical candidates.
 pub mod adaptive;
+/// Molecular species and heat exchange with explicitly held material reservoirs.
+pub mod reservoir;
 
 use crate::multicomponent::dissipation::{
     DissipationError, MaxwellStefanSolveV1, PlanarTransport, TransportFaceReport, TransportLaw,

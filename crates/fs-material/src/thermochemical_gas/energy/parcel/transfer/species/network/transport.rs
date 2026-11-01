@@ -24,7 +24,10 @@ mod sample;
 pub use sample::GasTransportRates;
 pub(crate) use sample::sample_transfers;
 mod window;
-pub use window::{GasTransportWindowAudit, audit_closed_window};
+pub use window::{
+    GasReservoirExchange, GasReservoirWindowAudit, GasTransportWindowAudit,
+    ReservoirSpeciesTransfer, audit_closed_window, audit_reservoir_window,
+};
 
 use super::super::super::nozzle::network::snapshot::{
     self as pressure, SnapshotNozzleError, SnapshotNozzleLink, SnapshotNozzleLinkStep,

@@ -5,6 +5,10 @@
 mod adaptive;
 #[path = "material_parcel_transport/closed_window.rs"]
 mod closed_window;
+#[path = "material_parcel_transport/reservoir.rs"]
+mod reservoir;
+#[path = "material_parcel_transport/reservoir_window.rs"]
+mod reservoir_window;
 
 use fs_evidence::ValidityDomain;
 use fs_gas::material::transport::parcel::{
