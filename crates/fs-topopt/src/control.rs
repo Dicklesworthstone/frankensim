@@ -16,35 +16,6 @@ pub struct SolveBudget {
     pub per_solve_iterations: usize,
     /// Cumulative Krylov iterations, including rejected optimization trials.
     pub total_iterations: usize,
-    #[test]
-    fn g4_checkpoint_rebind_preserves_budget_and_spent_work() {
-        let op = operator();
-        let rhs = [1.0; 7];
-        let budget = SolveBudget { per_solve_iterations: 100, total_iterations: 8 };
-        let mut first_callback = |_| ControlFlow::Continue(());
-        let mut first = SolveControl::new(budget, &mut first_callback);
-        first.solve(&op, &rhs, 1e-12, 100, "first").unwrap();
-        assert_eq!(first.work().linear_iterations, 7);
-        let checkpoint = first.checkpoint_state();
-        assert_eq!(checkpoint.budget(), budget);
-        assert_eq!(checkpoint.work(), first.work());
-        drop(first);
-
-        let mut seen = Vec::new();
-        let mut second_callback = |progress: SolveProgress| {
-            seen.push(progress.work);
-            ControlFlow::Continue(())
-        };
-        let mut resumed = SolveControl::resume(checkpoint, &mut second_callback);
-        assert_eq!(resumed.budget(), budget);
-        assert_eq!(resumed.work(), checkpoint.work());
-        assert_eq!(resumed.solve(&op, &rhs, 1e-12, 100, "second"),
-            Err(EvaluationStop::TotalBudget { stage: "second" }));
-        assert_eq!(resumed.work().linear_iterations, 8);
-        drop(resumed);
-        assert!(seen.first().is_some_and(|work| *work == checkpoint.work()));
-    }
-
 }
 
 impl Default for SolveBudget {
@@ -378,6 +349,35 @@ mod tests {
         drop(control);
         let phases: Vec<_> = seen.into_iter().filter(|(s,_,_)| *s == "phase" || *s == "pause").collect();
         assert_eq!(phases, vec![("phase",0,spent),("pause",0,spent),("phase",0,spent)]);
+    }
+
+    #[test]
+    fn g4_checkpoint_rebind_preserves_budget_and_spent_work() {
+        let op = operator();
+        let rhs = [1.0; 7];
+        let budget = SolveBudget { per_solve_iterations: 100, total_iterations: 8 };
+        let mut first_callback = |_| ControlFlow::Continue(());
+        let mut first = SolveControl::new(budget, &mut first_callback);
+        first.solve(&op, &rhs, 1e-12, 100, "first").unwrap();
+        assert_eq!(first.work().linear_iterations, 7);
+        let checkpoint = first.checkpoint_state();
+        assert_eq!(checkpoint.budget(), budget);
+        assert_eq!(checkpoint.work(), first.work());
+        drop(first);
+
+        let mut seen = Vec::new();
+        let mut second_callback = |progress: SolveProgress| {
+            seen.push(progress.work);
+            ControlFlow::Continue(())
+        };
+        let mut resumed = SolveControl::resume(checkpoint, &mut second_callback);
+        assert_eq!(resumed.budget(), budget);
+        assert_eq!(resumed.work(), checkpoint.work());
+        assert_eq!(resumed.solve(&op, &rhs, 1e-12, 100, "second"),
+            Err(EvaluationStop::TotalBudget { stage: "second" }));
+        assert_eq!(resumed.work().linear_iterations, 8);
+        drop(resumed);
+        assert!(seen.first().is_some_and(|work| *work == checkpoint.work()));
     }
 
 }
