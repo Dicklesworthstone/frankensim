@@ -865,6 +865,62 @@ fn integrated_resistance_loss_inner(
     Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, witness, false, heat)?.dissipated)
 }
 
+/// The d x d held-input transition of the exact ZOH step, d = n + 1 + m: the Gramian-form exponential of the balanced
+/// generator with the held force in column n and an integrator row per port. It reads the system's J, R and G, the
+/// split's complete Q, the clock and the force vector `u`, and never the state, so it is the same matrix on every step
+/// that holds the same force bit for bit. `forward` and `inverse` are the split's diagonal coordinate scaling.
+fn held_input_transition(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    forward: &[f64],
+    inverse: &[f64],
+    dt: f64,
+    u: &[f64],
+) -> Result<Vec<f64>, PhsError> {
+    let n = split.n;
+    let d = n + 1 + split.m;
+    let mut flow = vec![0.0; n * n];
+    for i in 0..n {
+        for j in 0..n {
+            for k in 0..n {
+                flow[i * n + j] +=
+                    (sys.j[i * n + k] - sys.r[i * n + k]) * split.quadratic.matrix[k * n + j];
+            }
+        }
+    }
+    let balanced = product(&product(forward, &flow, n), inverse, n);
+    let effort_map = product(&split.quadratic.matrix, inverse, n);
+    let mut b = vec![0.0; d * d];
+    for i in 0..n {
+        for j in 0..n {
+            b[i * d + j] = balanced[i * n + j];
+        }
+        for a in 0..n {
+            for p in 0..split.m {
+                b[i * d + n] += forward[i * n + a] * sys.g[a * split.m + p] * u[p];
+            }
+        }
+    }
+    // Integrators for EVERY port output, independently of the held input.
+    for p in 0..split.m {
+        for j in 0..n {
+            for a in 0..n {
+                b[(n + 1 + p) * d + j] += sys.g[a * split.m + p] * effort_map[a * n + j];
+            }
+        }
+    }
+    // Preserve the original dense capacity gate and held-input transition.
+    // Physical heat has its own positive factor, so a tiny vibration
+    // about static force balance never subtracts expanded Gramian entries.
+    admit_exponential(2 * d, DenseExponentialBudget {
+        max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
+        max_dense_bytes: usize::MAX,
+        max_multiply_terms: u64::MAX,
+    })?;
+    let flow = gramian::flow_integral(&b, &vec![0.0; d * d], d, dt).map_err(refuse)?;
+    Ok(flow.transition)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn exact_zoh_loss(
     sys: &PortHamiltonian,
@@ -902,52 +958,21 @@ fn exact_zoh_loss(
         forward[i * n + i] = scale;
         inverse[i * n + i] = 1.0 / scale;
     }
-    let mut flow = vec![0.0; n * n];
-    for i in 0..n {
-        for j in 0..n {
-            for k in 0..n {
-                flow[i * n + j] +=
-                    (sys.j[i * n + k] - sys.r[i * n + k]) * split.quadratic.matrix[k * n + j];
-            }
-        }
-    }
-    let balanced = product(&product(&forward, &flow, n), &inverse, n);
-    let effort_map = product(&split.quadratic.matrix, &inverse, n);
-    let mut b = vec![0.0; d * d];
     let mut initial = vec![0.0; d];
     initial[n] = 1.0;
     for i in 0..n {
         initial[i] = (0..n).map(|j| forward[i * n + j] * x0[j]).sum();
-        for j in 0..n {
-            b[i * d + j] = balanced[i * n + j];
-        }
-        for a in 0..n {
-            for p in 0..split.m {
-                b[i * d + n] += forward[i * n + a] * sys.g[a * split.m + p] * u[p];
-            }
-        }
     }
-    // Integrators for EVERY port output, independently of the held input.
-    for p in 0..split.m {
-        for j in 0..n {
-            for a in 0..n {
-                b[(n + 1 + p) * d + j] += sys.g[a * split.m + p] * effort_map[a * n + j];
-            }
-        }
-    }
-    // Preserve the original dense capacity gate and held-input transition.
-    // Physical heat has its own positive factor below, so a tiny vibration
-    // about static force balance never subtracts expanded Gramian entries.
-    admit_exponential(2 * d, DenseExponentialBudget {
-        max_dimension: MAX_LINEAR_EXPONENTIAL_BLOCK_DIM,
-        max_dense_bytes: usize::MAX,
-        max_multiply_terms: u64::MAX,
+    // The held-input transition reads the system, split, clock and the force vector, never the state: a holder that
+    // steps one fixed system reuses it while the force is bit-equal (after the 0.16 ms contact of a struck bar it is
+    // the constant rest force); everyone else builds it here exactly as before.
+    let transition = heat_cache::transition(heat_cache, sys, split, dt, u, || {
+        held_input_transition(sys, split, &forward, &inverse, dt, u)
     })?;
-    let flow = gramian::flow_integral(&b, &vec![0.0; d * d], d, dt).map_err(refuse)?;
     let mut end = vec![0.0; d];
     for i in 0..d {
         for j in 0..d {
-            end[i] += flow.transition[i * d + j] * initial[j];
+            end[i] += transition[i * d + j] * initial[j];
         }
     }
     // The factor reads the system, split, clock and channel only, never x0 or u: a holder that steps one fixed

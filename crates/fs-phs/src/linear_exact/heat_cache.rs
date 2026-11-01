@@ -9,8 +9,14 @@
 //! entry whose every input is bit-equal or it rebuilds. The cache belongs to the instance that holds the fixed
 //! system and is never global, so renders that share a thread or run in parallel cannot see each other's entries.
 //!
-//! The uncached entry points of [`super`] are unchanged and build the factor on every call. A holder opts in through
-//! the `*_cached` functions, which return exactly the bits of their uncached twins.
+//! The same discipline holds the held-input transition of the exact step: the d x d matrix that carries the state over
+//! one step reads the system's J, R and G, the whole split, the clock and the force vector, and never the state. While
+//! a struck bar rings the force is the constant rest force, so the transition is the same matrix on all but the few
+//! hundred substeps of the contact, and every resistance channel of a step shares it. Its key is the same full,
+//! bit-for-bit copy plus the force vector's bits, compared first; a changed force is a miss and rebuilds.
+//!
+//! The uncached entry points of [`super`] are unchanged and build both on every call. A holder opts in through the
+//! `*_cached` functions, which return exactly the bits of their uncached twins.
 
 use super::{LinearSplit, LinearSplitBudget, QuadraticPart, positive_heat::PositiveHeat};
 use crate::{PhsError, PortHamiltonian, ResistanceWitness, StepRecord};
@@ -158,12 +164,47 @@ impl HeatKey {
     }
 }
 
-/// Positive-heat factors built by one holder of a fixed system, reused only on a bit-for-bit equal key. See the
-/// module documentation. A clone starts empty: the entries belong to the instance, not to its copies.
+/// Every input of one held-input transition (`held_input_transition`): the system's J, R and G, the whole split, the
+/// clock and the force vector. The resistance channel being integrated and the resistance witness are NOT inputs:
+/// the transition is shared by every channel's call of a step, and only the force vector changes it from step to step.
+struct TransitionKey {
+    dt_bits: u64,
+    force_bits: Vec<u64>,
+    system: SystemKey,
+    split: LinearSplit,
+}
+
+impl TransitionKey {
+    fn of(sys: &PortHamiltonian, split: &LinearSplit, dt: f64, force: &[f64]) -> Self {
+        Self {
+            dt_bits: dt.to_bits(),
+            force_bits: force.iter().map(|v| v.to_bits()).collect(),
+            system: SystemKey::of(sys),
+            split: split.clone(),
+        }
+    }
+
+    // The force is compared first: it is the one input that changes between steps, so a changed force misses on the
+    // shortest comparison and an unchanged one pays for the full comparison it needs.
+    fn matches(&self, sys: &PortHamiltonian, split: &LinearSplit, dt: f64, force: &[f64]) -> bool {
+        self.force_bits.len() == force.len()
+            && self.force_bits.iter().zip(force).all(|(bits, v)| *bits == v.to_bits())
+            && self.dt_bits == dt.to_bits()
+            && self.system.matches(sys)
+            && same_split(&self.split, split)
+    }
+}
+
+/// Positive-heat factors and held-input transitions built by one holder of a fixed system, reused only on a
+/// bit-for-bit equal key. See the module documentation. A clone starts empty: the entries belong to the instance,
+/// not to its copies.
 pub struct HeatCache {
     entries: Mutex<Vec<(HeatKey, Arc<PositiveHeat>)>>,
+    transitions: Mutex<Vec<(TransitionKey, Arc<Vec<f64>>)>>,
     builds: AtomicU64,
     reuses: AtomicU64,
+    transition_builds: AtomicU64,
+    transition_reuses: AtomicU64,
     enabled: bool,
 }
 
@@ -173,8 +214,11 @@ impl HeatCache {
     pub fn new() -> Self {
         Self {
             entries: Mutex::new(Vec::new()),
+            transitions: Mutex::new(Vec::new()),
             builds: AtomicU64::new(0),
             reuses: AtomicU64::new(0),
+            transition_builds: AtomicU64::new(0),
+            transition_reuses: AtomicU64::new(0),
             enabled: true,
         }
     }
@@ -198,7 +242,25 @@ impl HeatCache {
         self.reuses.load(Ordering::Relaxed)
     }
 
-    /// Entries currently held.
+    /// Held-input transitions built through this cache (a miss, or every call of a disabled cache).
+    #[must_use]
+    pub fn transition_builds(&self) -> u64 {
+        self.transition_builds.load(Ordering::Relaxed)
+    }
+
+    /// Held-input transitions returned from an entry whose key matched bit for bit.
+    #[must_use]
+    pub fn transition_reuses(&self) -> u64 {
+        self.transition_reuses.load(Ordering::Relaxed)
+    }
+
+    /// Held-input transitions currently held.
+    #[must_use]
+    pub fn transition_len(&self) -> usize {
+        self.transitions.lock().unwrap_or_else(PoisonError::into_inner).len()
+    }
+
+    /// Positive-heat factors currently held.
     #[must_use]
     pub fn len(&self) -> usize {
         self.entries.lock().unwrap_or_else(PoisonError::into_inner).len()
@@ -230,6 +292,9 @@ impl core::fmt::Debug for HeatCache {
             .field("entries", &self.len())
             .field("builds", &self.builds())
             .field("reuses", &self.reuses())
+            .field("transitions", &self.transition_len())
+            .field("transition_builds", &self.transition_builds())
+            .field("transition_reuses", &self.transition_reuses())
             .finish()
     }
 }
@@ -276,6 +341,45 @@ pub(super) fn obtain(
         ));
     }
     Ok(heat)
+}
+
+/// The held-input transition for one step: from `cache` on a bit-equal key (system, split, clock and force vector),
+/// otherwise built by `build` exactly as the uncached path builds it (and stored when the cache is enabled). A failed
+/// build stores nothing. `build` runs outside the lock.
+pub(super) fn transition(
+    cache: Option<&HeatCache>,
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    dt: f64,
+    force: &[f64],
+    build: impl FnOnce() -> Result<Vec<f64>, PhsError>,
+) -> Result<Arc<Vec<f64>>, PhsError> {
+    let Some(cache) = cache else {
+        return build().map(Arc::new);
+    };
+    if cache.enabled {
+        let entries = cache.transitions.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(entry) = entries
+            .iter()
+            .find(|entry| entry.0.matches(sys, split, dt, force))
+        {
+            cache.transition_reuses.fetch_add(1, Ordering::Relaxed);
+            return Ok(Arc::clone(&entry.1));
+        }
+    }
+    let transition = Arc::new(build()?);
+    cache.transition_builds.fetch_add(1, Ordering::Relaxed);
+    if cache.enabled {
+        let mut entries = cache.transitions.lock().unwrap_or_else(PoisonError::into_inner);
+        if entries.len() >= CAPACITY {
+            entries.remove(0);
+        }
+        entries.push((
+            TransitionKey::of(sys, split, dt, force),
+            Arc::clone(&transition),
+        ));
+    }
+    Ok(transition)
 }
 
 /// [`super::step_render`] that takes its positive-heat factor from `cache`. The returned record is bit-identical
@@ -436,6 +540,9 @@ mod tests {
         assert_eq!(cache.builds(), 3);
         assert_eq!(cache.reuses(), 3 * steps as u64 - 3);
         assert_eq!(cache.len(), 3);
+        // The force changes every step here: one transition per step, shared by the step's three calls.
+        assert_eq!(cache.transition_builds(), steps as u64);
+        assert_eq!(cache.transition_reuses(), 2 * steps as u64);
     }
 
     // A channel value for which one ulp on its diagonal really moves the plain output. A value like 0.0625 = 2^-4 does
@@ -642,6 +749,10 @@ mod tests {
             assert_same_record(&plain, &cached, 0);
         }
         assert_eq!((disabled.builds(), disabled.reuses(), disabled.len()), (5, 0, 0));
+        assert_eq!(
+            (disabled.transition_builds(), disabled.transition_reuses(), disabled.transition_len()),
+            (5, 0, 0)
+        );
         let live = HeatCache::new();
         step_render_cached(&sys, &split, &x, &u, DT, &live).unwrap();
         assert_eq!(live.len(), 1);
@@ -664,5 +775,168 @@ mod tests {
                 .unwrap_err();
         assert_eq!(format!("{plain:?}"), format!("{cached:?}"));
         assert_eq!((cache.builds(), cache.reuses(), cache.len()), (0, 0, 0));
+        assert_eq!((cache.transition_builds(), cache.transition_len()), (0, 0));
+    }
+
+    fn records_differ(a: &StepRecord, b: &StepRecord) -> bool {
+        bits(&a.x) != bits(&b.x)
+            || bits(&a.y) != bits(&b.y)
+            || a.delta_h.to_bits() != b.delta_h.to_bits()
+            || a.dissipated.to_bits() != b.dissipated.to_bits()
+            || a.supplied.to_bits() != b.supplied.to_bits()
+    }
+
+    // G2: the replay a struck bar produces. The force changes on each of 256 steps (the contact: every step is a miss,
+    // and the 8-entry cache evicts), then is held for 344 steps (one miss, then hits). The cached path must equal the
+    // plain path field by field and loss by loss under to_bits on every step, miss or hit.
+    #[test]
+    fn the_transition_replay_is_bit_identical_through_force_changes_and_holds() {
+        let (sys, split, witness) = fresh();
+        let cache = HeatCache::new();
+        let (changing, held) = (256_usize, 344_usize);
+        let hold = [0.123_456_789];
+        let mut x = vec![0.3, -0.1];
+        for k in 0..changing + held {
+            let u = if k < changing { input(k) } else { hold };
+            let plain = step_render(&sys, &split, &x, &u, DT).unwrap();
+            let cached = step_render_cached(&sys, &split, &x, &u, DT, &cache).unwrap();
+            assert_same_record(&plain, &cached, k);
+            let a = integrated_resistance_loss(&sys, &split, &x, &u, DT, &CHANNEL).unwrap();
+            let b = integrated_resistance_loss_cached(&sys, &split, &x, &u, DT, &CHANNEL, &cache)
+                .unwrap();
+            assert_eq!(a.to_bits(), b.to_bits(), "channel loss at step {k}");
+            let c = integrated_resistance_loss_with_witness(&sys, &split, &x, &u, DT, &witness)
+                .unwrap();
+            let d = integrated_resistance_loss_with_witness_cached(
+                &sys, &split, &x, &u, DT, &witness, &cache,
+            )
+            .unwrap();
+            assert_eq!(c.to_bits(), d.to_bits(), "witnessed loss at step {k}");
+            x = plain.x;
+        }
+        // One build per changed force and one for the held force; the step's other two calls (three channels share
+        // one transition) and every later held step reuse it.
+        let calls = 3 * (changing + held) as u64;
+        assert_eq!(cache.transition_builds(), changing as u64 + 1);
+        assert_eq!(cache.transition_reuses(), calls - changing as u64 - 1);
+        assert_eq!(cache.transition_len(), CAPACITY);
+        // The positive-heat factors are untouched by the force: three keys for the whole run.
+        assert_eq!(cache.builds(), 3);
+    }
+
+    // The planted negative for a stale force key: a force that differs by one ulp must change the plain output, so a
+    // cache that ignored the force would be caught; the cached path alternates between the two forces and must follow
+    // the plain path bit for bit, rebuilding exactly twice and reusing from then on.
+    #[test]
+    fn a_one_ulp_force_change_moves_the_output_and_the_cache_follows_it() {
+        let (sys, split, _) = fresh();
+        let cache = HeatCache::new();
+        let x0 = [0.3, -0.1];
+        let (force, bumped) = (|| {
+            for k in 1..=64 {
+                let value = 0.37 + 0.0137 * f64::from(k);
+                let bumped = f64::from_bits(value.to_bits() + 1);
+                let a = step_render(&sys, &split, &x0, &[value], DT).unwrap();
+                let b = step_render(&sys, &split, &x0, &[bumped], DT).unwrap();
+                if records_differ(&a, &b) {
+                    return ([value], [bumped]);
+                }
+            }
+            panic!("no force in the scan is moved by one ulp");
+        })();
+        assert_ne!(force[0].to_bits(), bumped[0].to_bits());
+        let mut moved = 0;
+        let mut x = x0.to_vec();
+        let steps = 40;
+        for k in 0..steps {
+            // Two steps on the force, two on the bumped force, and so on.
+            let (u, other) = if (k / 2) % 2 == 0 { (&force, &bumped) } else { (&bumped, &force) };
+            let plain = step_render(&sys, &split, &x, u, DT).unwrap();
+            let stale = step_render(&sys, &split, &x, other, DT).unwrap();
+            let cached = step_render_cached(&sys, &split, &x, u, DT, &cache).unwrap();
+            assert_same_record(&plain, &cached, k);
+            if records_differ(&plain, &stale) {
+                moved += 1;
+            }
+            x = plain.x;
+        }
+        // The negative can fail: serving the other force's transition would have moved the output on most steps.
+        assert!(moved > 0, "a one-ulp force change never moved the plain output");
+        assert_eq!(cache.transition_builds(), 2);
+        assert_eq!(cache.transition_reuses(), steps as u64 - 2);
+    }
+
+    // Every input of the transition is part of its key, the force vector first: one ulp, a zero's sign or a different
+    // length is a miss. The resistance channel and the factor root are not inputs (the transition is shared by every
+    // channel of a step), so planting them must reuse.
+    #[test]
+    fn every_input_of_the_transition_is_part_of_its_key() {
+        let dummy = || Ok(vec![0.0; 4]);
+        let one = [0.25_f64];
+        let ulp_up = [f64::from_bits(one[0].to_bits() + 1)];
+        let ulp_down = [f64::from_bits(one[0].to_bits() - 1)];
+        let forces: [(&str, &[f64], &[f64]); 5] = [
+            ("one ulp up", &one, &ulp_up),
+            ("one ulp down", &one, &ulp_down),
+            ("sign of the force", &one, &[-0.25]),
+            ("sign of a zero force", &[0.0], &[-0.0]),
+            ("length of the force", &one, &[0.25, 0.0]),
+        ];
+        for (name, base, planted) in forces {
+            let cache = HeatCache::new();
+            let (sys, split, _) = fresh();
+            transition(Some(&cache), &sys, &split, DT, base, dummy).unwrap();
+            assert_eq!((cache.transition_builds(), cache.transition_reuses()), (1, 0), "{name}");
+            transition(Some(&cache), &sys, &split, DT, planted, dummy).unwrap();
+            assert_eq!(
+                (cache.transition_builds(), cache.transition_reuses()),
+                (2, 0),
+                "{name}: a changed force must miss"
+            );
+            transition(Some(&cache), &sys, &split, DT, base, dummy).unwrap();
+            assert_eq!(
+                (cache.transition_builds(), cache.transition_reuses()),
+                (2, 1),
+                "{name}: the original force is still served"
+            );
+        }
+        let plants = [
+            Plant::Dt,
+            Plant::Resistance,
+            Plant::FactorRoot,
+            Plant::SysJ,
+            Plant::SysJNegativeZero,
+            Plant::SysR,
+            Plant::SysG,
+            Plant::SysWitnessMatrix,
+            Plant::SysWitnessRoot,
+            Plant::SplitJ,
+            Plant::SplitR,
+            Plant::SplitG,
+            Plant::SplitQuadraticMatrix,
+            Plant::SplitValues,
+            Plant::SplitBasis,
+            Plant::SplitFrequencies,
+            Plant::SplitFrequencyBasis,
+            Plant::SplitMaxOmegaDt,
+            Plant::SplitPoleRateBound,
+        ];
+        for which in plants {
+            let cache = HeatCache::new();
+            let (sys, split, _) = fresh();
+            transition(Some(&cache), &sys, &split, DT, &one, dummy).unwrap();
+            let mut planted = fresh();
+            let mut dt = DT;
+            let mut resistance = vec![0.0; 4];
+            plant(which, &mut planted, &mut dt, &mut resistance);
+            transition(Some(&cache), &planted.0, &planted.1, dt, &one, dummy).unwrap();
+            let shared = matches!(which, Plant::Resistance | Plant::FactorRoot);
+            assert_eq!(
+                (cache.transition_builds(), cache.transition_reuses()),
+                if shared { (1, 1) } else { (2, 0) },
+                "{which:?}: {}",
+                if shared { "not an input of the transition: must reuse" } else { "an input: must miss" }
+            );
+        }
     }
 }

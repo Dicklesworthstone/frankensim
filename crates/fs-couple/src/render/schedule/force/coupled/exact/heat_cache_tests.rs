@@ -58,6 +58,33 @@ fn assert_same_record(a: &StepRecord, b: &StepRecord, k: usize) {
     );
 }
 
+fn records_differ(a: &StepRecord, b: &StepRecord) -> bool {
+    bits(&a.x) != bits(&b.x)
+        || bits(&a.y) != bits(&b.y)
+        || a.delta_h.to_bits() != b.delta_h.to_bits()
+        || a.dissipated.to_bits() != b.dissipated.to_bits()
+        || a.supplied.to_bits() != b.supplied.to_bits()
+}
+
+/// The held external force of step `k`: it changes every step for 20 steps (every one a transition miss), is held to
+/// step 40 (hits), then the dominant block's coordinate 1 changes by `fulps` ulps and is held to step 50, and is zero
+/// after (the rest force only).
+fn force(k: usize, fulps: u64) -> [f64; 4] {
+    let varying = |k: usize| ((k * 7 % 13) as f64) / 13.0 - 0.5;
+    let c = if k < 20 {
+        varying(k)
+    } else if k < 50 {
+        varying(19)
+    } else {
+        0.0
+    };
+    let mut f = [1e-4 * c, -2e-4 * c, 3e-4 * c, -4e-4 * c];
+    if (40..50).contains(&k) {
+        f[1] = f64::from_bits(f[1].to_bits() + fulps);
+    }
+    f
+}
+
 #[test]
 fn the_block_heat_cache_replays_the_plain_exact_stage_bit_for_bit() {
     let rate = 48_000;
@@ -112,11 +139,24 @@ fn the_block_heat_cache_replays_the_plain_exact_stage_bit_for_bit() {
             loss.to_bits() != start_loss.to_bits()
         })
         .expect("some planted ulp count moves the component loss");
+    // The same for the force: the smallest ulp count on the dominant block's coordinate-1 force that moves the
+    // record at the starting state, so that serving the previous force's transition would be caught.
+    let held = force(25, 0);
+    let (held_record, _, _) = control.advance(&models, &[], &[], &held, dt).unwrap();
+    let fulps = (1..=64_u64)
+        .find(|&fulps| {
+            let mut changed = held;
+            changed[1] = f64::from_bits(held[1].to_bits() + fulps);
+            let (record, _, _) = control.advance(&models, &[], &[], &changed, dt).unwrap();
+            records_differ(&held_record, &record)
+        })
+        .expect("some planted force ulp count moves the record");
     let contact = [1.0, -2.0, 0.3, 0.4];
     let steps = 60;
     let plant_at = 30;
     let mut builds_before_plant = 0;
     let mut moved = 0;
+    let mut force_moved = 0;
     for k in 0..steps {
         if k == plant_at {
             builds_before_plant = cached.blocks[PLANTED].1.heat.builds();
@@ -131,11 +171,18 @@ fn the_block_heat_cache_replays_the_plain_exact_stage_bit_for_bit() {
             }
         }
         // The held force changes every step for 40 steps, then is zero (the rest force only).
-        let c = if k < 40 { ((k * 7 % 13) as f64) / 13.0 - 0.5 } else { 0.0 };
-        let external = [1e-4 * c, -2e-4 * c, 3e-4 * c, -4e-4 * c];
+        let external = force(k, fulps);
         let (rc, xc, uc) = cached.advance(&models, &[], &[], &external, dt).unwrap();
         let (rp, xp, up) = plain.advance(&models, &[], &[], &external, dt).unwrap();
         assert_same_record(&rc, &rp, k);
+        if (40..50).contains(&k) {
+            // The stale-key negative: the plain stage fed the unchanged force at this same state is what a cache that
+            // ignored the force would have served. It must differ on some step, or the key proves nothing.
+            let (stale, _, _) = control.advance(&models, &[], &[], &force(39, fulps), dt).unwrap();
+            if records_differ(&rp, &stale) {
+                force_moved += 1;
+            }
+        }
         assert_eq!(bits(&xc), bits(&xp), "start state at step {k}");
         assert_eq!(bits(&uc), bits(&up), "held input at step {k}");
         let lc = cached.losses(&xc, &uc, dt, rc.dissipated).unwrap();
@@ -169,8 +216,10 @@ fn the_block_heat_cache_replays_the_plain_exact_stage_bit_for_bit() {
                 .unwrap();
         }
     }
-    // The negative can fail: the planted ulp moved the component loss against the unplanted control.
+    // The negatives can fail: the planted ulps moved the component loss against the unplanted control, and the
+    // planted force change moved the record against the previous force's.
     assert!(moved > 0, "the planted {ulps}-ulp change never moved the component loss");
+    assert!(force_moved > 0, "the planted {fulps}-ulp force change never moved the record");
     // Changing the resistance rebuilt exactly one factor of the planted block (its component channel), once.
     assert_eq!(cached.blocks[PLANTED].1.heat.builds(), builds_before_plant + 1);
     for (_, block) in &cached.blocks {
@@ -186,8 +235,22 @@ fn the_block_heat_cache_replays_the_plain_exact_stage_bit_for_bit() {
             block.heat.reuses()
         );
     }
+    for (_, block) in &cached.blocks {
+        // The transitions: a build for each changed force (and the contact-response column, which competes for the
+        // 8 slots while the force changes), then every later call of a held force reuses. Reuses dominate.
+        assert!(block.heat.transition_builds() <= 60, "transition builds {}", block.heat.transition_builds());
+        assert!(block.heat.transition_len() <= 8, "transition entries {}", block.heat.transition_len());
+        assert!(
+            block.heat.transition_reuses() > 2 * block.heat.transition_builds(),
+            "transition builds {} reuses {}",
+            block.heat.transition_builds(),
+            block.heat.transition_reuses()
+        );
+    }
     for (_, block) in &plain.blocks {
         assert_eq!((block.heat.reuses(), block.heat.len()), (0, 0));
+        assert_eq!((block.heat.transition_reuses(), block.heat.transition_len()), (0, 0));
         assert!(block.heat.builds() > 100);
+        assert!(block.heat.transition_builds() > 100);
     }
 }
