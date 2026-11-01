@@ -122,6 +122,13 @@ impl ParcelMolecularCandidate {
 pub struct ParcelMolecularTransport<L: TransportLaw> {
     face: PlanarTransport<L>,
 }
+/// Original continuum rates before ANY finite inventory is reconstructed.
+struct ParcelMolecularSample {
+    transfers: Vec<SpeciesNetworkTransfer>,
+    heat: Vec<SpeciesNetworkHeatTransfer>,
+    links: Vec<ParcelMolecularLinkStep>,
+    traces: BTreeMap<u64, Vec<f64>>,
+}
 impl<L: TransportLaw> ParcelMolecularTransport<L> {
     pub const fn new(face: PlanarTransport<L>) -> Self {
         Self { face }
@@ -151,6 +158,62 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
         controls: ParcelMolecularSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ParcelMolecularCandidate, Error> {
+        let sampled = self.sample_links(
+            parcels,
+            links,
+            duration_s,
+            endpoints,
+            controls,
+            &mut cancelled,
+        )?;
+        let candidate = transport::step_candidate_with_paths_and_fluxes(
+            parcels,
+            paths,
+            duration_s,
+            &sampled.transfers,
+            &sampled.heat,
+            endpoints,
+            controls.physical,
+            &mut cancelled,
+        )?;
+        for &id in sampled.traces.keys() {
+            poll(&mut cancelled)?;
+            let parcel = &candidate.parcels()[&id];
+            let partial = self.partial_densities(parcel)?;
+            self.face.qualify_primitive(
+                primitive(parcel, &partial),
+                controls.face,
+                &mut cancelled,
+            )?;
+        }
+        poll(&mut cancelled)?;
+        let (parcels, transport) = candidate.into_parts();
+        Ok(ParcelMolecularCandidate {
+            parcels,
+            step: ParcelMolecularStep {
+                species: self
+                    .face
+                    .gas()
+                    .source()
+                    .models()
+                    .iter()
+                    .map(|s| s.species().clone())
+                    .collect(),
+                links: sampled.links,
+                transport,
+            },
+        })
+    }
+
+    fn sample_links(
+        &mut self,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        links: &[ParcelMolecularLink],
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        controls: ParcelMolecularSolve,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<ParcelMolecularSample, Error> {
         poll(&mut cancelled)?;
         let n = self.face.gas().species_count();
         if !positive(duration_s)
@@ -270,42 +333,12 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
                 face,
             });
         }
-        let candidate = transport::step_candidate_with_paths_and_fluxes(
-            parcels,
-            paths,
-            duration_s,
-            &transfers,
-            &heat,
-            endpoints,
-            controls.physical,
-            &mut cancelled,
-        )?;
-        for &id in traces.keys() {
-            poll(&mut cancelled)?;
-            let parcel = &candidate.parcels()[&id];
-            let partial = self.partial_densities(parcel)?;
-            self.face.qualify_primitive(
-                primitive(parcel, &partial),
-                controls.face,
-                &mut cancelled,
-            )?;
-        }
         poll(&mut cancelled)?;
-        let (parcels, transport) = candidate.into_parts();
-        Ok(ParcelMolecularCandidate {
-            parcels,
-            step: ParcelMolecularStep {
-                species: self
-                    .face
-                    .gas()
-                    .source()
-                    .models()
-                    .iter()
-                    .map(|s| s.species().clone())
-                    .collect(),
-                links: reports,
-                transport,
-            },
+        Ok(ParcelMolecularSample {
+            transfers,
+            heat,
+            links: reports,
+            traces,
         })
     }
 

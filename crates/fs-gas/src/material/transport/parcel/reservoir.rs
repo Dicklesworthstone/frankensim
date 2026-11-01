@@ -78,6 +78,9 @@ pub struct ReservoirMolecularLinkStep {
 pub struct ReservoirMolecularStep {
     pub duration_s: f64,
     pub species: Vec<SpeciesId>,
+    /// Internal continuum faces sampled on the SAME original inventory.
+    pub internal_links: Vec<ParcelMolecularLinkStep>,
+    /// Held-bath faces; every signed stream is positive into the finite gas.
     pub links: Vec<ReservoirMolecularLinkStep>,
     /// Original gross withdrawal, source join and one-shot caloric reconstruction.
     pub exchange: SpeciesNetworkStep,
@@ -119,6 +122,39 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
         duration_s: f64,
         endpoints: &BTreeMap<u64, GasEnergySolve>,
         controls: ParcelMolecularSolve,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<ReservoirMolecularCandidate, ParcelMolecularError> {
+        self.network_candidate(
+            parcels,
+            &[],
+            links,
+            duration_s,
+            endpoints,
+            controls,
+            cancelled,
+        )
+    }
+
+    /// Simultaneous internal diffusion and held-bath exchange on finite gases.
+    ///
+    /// All continuum and reservoir faces read the original inventory and enter
+    /// one gross-withdrawal budget, source join and caloric reconstruction.
+    /// Internal faces retain their original midpoint-enthalpy chart; baths
+    /// retain their boundary-enthalpy chart. Their analytic corrections and
+    /// reduced heat are each supplied once to the same native energy owner.
+    /// The final open audit includes only external bath transfers: all internal
+    /// mass and energy exchanges cancel. Either face family may be empty.
+    /// IDs are unique across both face families. Each face denotes a separate
+    /// exposed area; no dusty-gas or bulk-flow path is duplicated here.
+    #[allow(clippy::too_many_arguments)]
+    pub fn network_candidate(
+        &mut self,
+        parcels: &BTreeMap<u64, ClosedGasParcel>,
+        internal_links: &[ParcelMolecularLink],
+        links: &[ReservoirMolecularLink<'_>],
+        duration_s: f64,
+        endpoints: &BTreeMap<u64, GasEnergySolve>,
+        controls: ParcelMolecularSolve,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<ReservoirMolecularCandidate, ParcelMolecularError> {
         poll(&mut cancelled)?;
@@ -130,14 +166,28 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
             || links
                 .len()
                 .checked_mul(n + 2)
+                .and_then(|count| {
+                    internal_links
+                        .len()
+                        .checked_mul(n + 1)
+                        .and_then(|internal| count.checked_add(internal))
+                })
                 .is_none_or(|m| m > MAX_SNAPSHOT_TRANSFERS)
         {
             return Err(Error::Invalid(
                 "bounded reservoir graph, exact endpoint map and positive duration required",
             ));
         }
+        let sampled = self.sample_links(
+            parcels,
+            internal_links,
+            duration_s,
+            endpoints,
+            controls,
+            &mut cancelled,
+        )?;
         let mut ordered = BTreeMap::new();
-        let mut traces = BTreeMap::new();
+        let mut traces = sampled.traces;
         // Local immutable identities avoid re-resolving a shared bath per face.
         let mut baths: BTreeMap<*const MolecularReservoir, Vec<f64>> = BTreeMap::new();
         for link in links {
@@ -145,16 +195,26 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
             if !positive(link.area_m2)
                 || !positive(link.distance_m)
                 || ordered.insert(link.id, link).is_some()
+                || sampled
+                    .links
+                    .binary_search_by_key(&link.id, |row| row.id)
+                    .is_ok()
             {
                 return Err(Error::Invalid(
-                    "reservoir faces need unique IDs and positive geometry",
+                    "continuum and reservoir faces need globally unique IDs and positive geometry",
                 ));
             }
             let gas = parcels
                 .get(&link.parcel)
                 .ok_or(Error::Invalid("missing reservoir-connected gas owner"))?;
             if let std::collections::btree_map::Entry::Vacant(entry) = traces.entry(link.parcel) {
-                entry.insert(self.partial_densities(gas)?);
+                let partial = self.partial_densities(gas)?;
+                self.face.qualify_primitive(
+                    primitive(gas, &partial),
+                    controls.face,
+                    &mut cancelled,
+                )?;
+                entry.insert(partial);
             }
             let key = core::ptr::from_ref(link.reservoir);
             if let std::collections::btree_map::Entry::Vacant(entry) = baths.entry(key) {
@@ -166,14 +226,6 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
                 )?;
                 entry.insert(partial);
             }
-        }
-        for (&id, partial) in &traces {
-            poll(&mut cancelled)?;
-            self.face.qualify_primitive(
-                primitive(&parcels[&id], partial),
-                controls.face,
-                &mut cancelled,
-            )?;
         }
         let mut species_rows = Vec::with_capacity(links.len());
         let mut audit_rows = Vec::with_capacity(links.len());
@@ -283,8 +335,8 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
             .collect();
         let candidate = network::exchange_candidate_with_external_heat(
             parcels,
-            &[],
-            &[],
+            &sampled.transfers,
+            &sampled.heat,
             &boundaries,
             &heat,
             endpoints,
@@ -332,6 +384,7 @@ impl<L: TransportLaw> ParcelMolecularTransport<L> {
                     .iter()
                     .map(|s| s.species().clone())
                     .collect(),
+                internal_links: sampled.links,
                 links: reports,
                 exchange,
                 audit,

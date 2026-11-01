@@ -1165,6 +1165,25 @@ Public fixtures check independent flux/temperature/entropy equations, unequal
 molar masses, datum invariance, pure heat, absent species, simultaneous baths,
 supported entropy-decreasing overshoot, and late source/cancellation refusal.
 
+`ParcelMolecularTransport::network_candidate` combines internal continuum links
+and held-bath faces on that same original snapshot. Its internal face sampler is
+shared with the closed finite-gas consumer. All signed species streams, original
+donor/midpoint enthalpy corrections and separate bath reduced heat enter one
+native gross-withdrawal budget, source join and caloric reconstruction. Bath
+arrivals cannot replenish an internal outflow allowance. Internal transfers
+cancel in the final open mass/energy/entropy audit; only actual bath streams
+cross its accounting boundary. All participating final gas states, including
+cells with no direct bath contact, must satisfy the original constitutive law.
+
+Both face families share globally unique physical IDs and one native work bound
+before rate allocation. Reports retain internal and bath faces separately;
+`reservoir_candidate` delegates with no internal links. Empty bath/internal
+families preserve the corresponding physical specialization. This remains a
+first-order continuum candidate with an explicit duration. Public network
+fixtures cover independent two-cell/bath Fourier balances, simultaneous binary
+species/Dufour increments, closed/open parity, shared gross withdrawal, joint
+work/identity limits and late source/cancellation atomicity.
+
 
 ## Reacting Navier-Stokes composition with original-source molecular transport
 
