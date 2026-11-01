@@ -3,6 +3,10 @@
 # enclosed air, using the existing material_strings engine. The old .performance
 # cards supply ONLY bow speed/force/articulation and duration; their one-way body,
 # EI=0 string and constant modal damping are no longer the rendering route.
+# The body is the 6 mm rung (cannone-h6.assembly, shell-assembly-h6.tsv) with all
+# 132 modes of its 15 Hz-5 kHz window (cannone-dominant-g3-h6.material-strings).
+# ASSEMBLY_OPTIONS, SHELL_TABLE and MATERIAL_STRINGS_PERFORMANCE select another
+# rung or card; README.md gives the 8 mm commands of the variant experiments.
 # usage: render.sh MATERIAL_STRINGS_BIN NEW_OUT_DIR [launcher options]
 # See README.md for sources, limitations, material/gas variants and lab export.
 set -euo pipefail
@@ -12,9 +16,10 @@ shift 2
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 repo="$(cd "$here/../../../.." && pwd -P)"
 materials="$repo/crates/fs-couple/examples/material_strings"
-assembly_options="${ASSEMBLY_OPTIONS:-$materials/cannone-h8.assembly}"
-performance="${MATERIAL_STRINGS_PERFORMANCE:-$materials/cannone-dominant-g3.material-strings}"
+assembly_options="${ASSEMBLY_OPTIONS:-$materials/cannone-h6.assembly}"
+performance="${MATERIAL_STRINGS_PERFORMANCE:-$materials/cannone-dominant-g3-h6.material-strings}"
 geometry="$repo/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026"
+shell_table="${SHELL_TABLE:-$geometry/shell-assembly-h6.tsv}"
 for note in ${NOTES:-G3 D4 A4 E5}; do
     case "$note" in
         G3) string=0 ;; D4) string=1 ;; A4) string=2 ;; E5) string=3 ;;
@@ -24,7 +29,7 @@ for note in ${NOTES:-G3 D4 A4 E5}; do
         --renderer "$bin" --out "$out/$note" \
         --performance "$performance" \
         --pack-root "$materials/packs" \
-        --shell-table "$geometry/shell-assembly-h8.tsv" \
+        --shell-table "$shell_table" \
         --assembly-options "$assembly_options" \
         --bow-card "$here/arco-open-$note.performance" --string-index "$string" \
         --bow-distance-from-bridge 0.1 --family violin --note "$note" \

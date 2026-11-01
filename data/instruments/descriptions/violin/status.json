@@ -15,7 +15,7 @@
   "dry air (N2 0.8, O2 0.2) at 293.15 K and 101325 Pa as one gas state for string loading, cavity and pressure output"
  ],
  "physics_missing": [
-  "convergence: the 6 mm mesh rung and the 5 kHz body-mode window are not converged; the committed render.sh uses the 8 mm rung with a 2 kHz window, the phrases the 6 mm one, and no wood source reaches above 5-6 kHz",
+  "convergence: the 6 mm mesh rung and the 5 kHz body-mode window are not converged; render.sh and the phrases both use the 6 mm rung with all 132 modes of its 5 kHz window, and no wood source reaches above 5-6 kHz",
   "an exterior radiation solve: pressure is the compact baffled, zero-retardation body and neck observer, with no directivity or f-hole geometry",
   "the strings' transverse internal loss: Pickering measured none, so the bending loss and the tension loss (eta_F) are stated unknowns, both entered as zero, and a string loses transverse energy only to air drag and its supports; measured wound violin and cello strings lose much more at high frequency, and the bowed slip regime depends on it (pexfp.299)",
   "the string-to-bridge joint: an authored spring and dashpot per string (200000 N/m, 0.1 N s/m), not the contact mechanics of the bridge notch",

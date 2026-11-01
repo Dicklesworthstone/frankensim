@@ -19,11 +19,50 @@ and rendering logs, and `render.wav`. Set `NOTES="G3"` to render one note.
 Existing note directories refuse; completed or partial work is never overwritten.
 The native solver remains responsible for admitting all source data and physics.
 
-The recipe preserves the committed 144 kHz clock, 30 body modes and 8 mm shell
-mesh rung in `cannone-h8.assembly`. Bowing one string retains the other three
-strings in the reciprocal mechanical assembly. Bow position is explicitly one
-tenth of that string's speaking length from its bridge. Geometry, tension and
-PCM scale do not change when another material pack is selected.
+The recipe preserves the committed 144 kHz clock. It runs the 6 mm shell mesh
+rung (`cannone-h6.assembly`, `shell-assembly-h6.tsv`) with all 132 body modes of
+its 15 Hz to 5 kHz window (`cannone-dominant-g3-h6.material-strings`). Bowing
+one string retains the other three strings in the reciprocal mechanical
+assembly. Bow position is explicitly one tenth of that string's speaking length
+from its bridge. Geometry, tension and PCM scale do not change when another
+material pack is selected.
+
+## Body rung and retained modes
+
+The default used to be the 8 mm rung (`cannone-h8.assembly`, 15 Hz to 2 kHz)
+with the 30 body modes of `cannone-dominant-g3.material-strings`. The shell
+assembly keeps the lowest n modes of its window. Those 30 modes end at or below
+2 kHz. Rendered at cc787fa72, the four open strings' 2-4 kHz bands sat 18 to
+46 dB below the 6 mm renders that the site plays.
+
+The window of `cannone-h6.assembly` holds 132 modes at the committed drilling
+constant (1e-2). A request for more refuses, and the refusal prints the count:
+
+```text
+Error: Material(Nonlinear("assembled shell window has fewer modes than requested: it holds 132, 184 requested"))
+```
+
+The E5 measurements on h6 were taken at cc787fa72. Each render is 0.2 s; levels
+are dB re partial 1, from a 100 ms Hann window with frames centred 0.05-0.15 s:
+
+| body modes | p3 1989 Hz | p4 2652 Hz | p5 3315 Hz | p6 3978 Hz | p7 4641 Hz | p8 5280 Hz |
+|---|---|---|---|---|---|---|
+| 30 | -30.3 | -40.3 | -39.3 | -44.3 | -35.6 | -36.3 |
+| 66 | -8.9 | -18.2 | -16.6 | -38.4 | -35.3 | -40.7 |
+| 132, the whole window | -9.1 | -18.7 | -19.7 | -20.3 | -13.7 | -42.0 |
+
+Each partial settles once the modes under it are in the basis. In the 1.5-4 kHz
+bands, 66 and 132 modes agree within 0.4 dB, and only the whole window reaches
+4-5 kHz. Partial 8 lies above the window in every row.
+
+The whole window cost 596 s of setup and 1585 s per simulated second. That was
+measured on one core of a lightly loaded host (ts2, load 9-17). It comes to
+about 5350 s for a 3 s note, 1.45 times the 8 mm note.
+
+`cannone-dominant-g3.material-strings` keeps the 8 mm rung's 30 modes, and its
+tests stay with it. The bow, hair and varnish experiments below were written
+for that rung, so their commands select it with `ASSEMBLY_OPTIONS`,
+`SHELL_TABLE` and, where needed, `MATERIAL_STRINGS_PERFORMANCE`.
 
 ## Material and atmosphere experiments
 
@@ -115,6 +154,8 @@ bow-residual-flexibility exact-static-green
 
 ```bash
 NOTES=G3 \
+ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8.assembly" \
+SHELL_TABLE="$PWD/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv" \
 MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-bow-residual.material-strings" \
 data/instruments/descriptions/violin/render.sh \
   target/release/material_strings /path/to/new-bow-residual-violin-run
@@ -152,6 +193,8 @@ Select this data through the existing violin renderer:
 
 ```bash
 NOTES=G3 \
+ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8.assembly" \
+SHELL_TABLE="$PWD/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv" \
 MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-ribbon-10mm.material-strings" \
 data/instruments/descriptions/violin/render.sh \
   target/release/material_strings /path/to/new-ribbon-violin-run
@@ -175,8 +218,9 @@ Stribeck law, rigid bow support and uniform load distribution. It does not
 claim measured hair compliance, a rosin thermal law, individual hair
 engagement or improved acoustic fidelity. The source horsehair measurements
 do not supply the full frequency/temperature-dependent constitutive data
-needed to replace those assumptions. The point-contact recipe remains the
-default and is available for the controlled comparison.
+needed to replace those assumptions. For the controlled comparison, run the
+point-contact card `cannone-dominant-g3.material-strings` on the same 8 mm
+rung, with the same `ASSEMBLY_OPTIONS` and `SHELL_TABLE`.
 
 ## Add source-selected hair compliance
 
@@ -204,6 +248,8 @@ cargo run -p xtask -- matdb-pack \
   --manifest "data/matdb/seed-v1/$hair/manifest.tsv" \
   --out "$hair_dir/$hair.fsmatpk"
 NOTES=G3 \
+ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8.assembly" \
+SHELL_TABLE="$PWD/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv" \
 MATERIAL_STRINGS_PERFORMANCE="$PWD/data/instruments/descriptions/violin/cannone-hair-compliance.material-strings" \
 data/instruments/descriptions/violin/render.sh \
   target/release/material_strings /path/to/new-hair-compliance-run \
@@ -246,12 +292,15 @@ cargo run -p xtask -- matdb-pack \
   --out "$varnish_dir/$varnish.fsmatpk"
 NOTES=G3 \
 ASSEMBLY_OPTIONS="$PWD/crates/fs-couple/examples/material_strings/cannone-h8-varnish-memory.assembly" \
+SHELL_TABLE="$PWD/data/instruments/geometry/violin-cannone-guarneri-1743-esrf2026/shell-assembly-h8.tsv" \
+MATERIAL_STRINGS_PERFORMANCE="$PWD/crates/fs-couple/examples/material_strings/cannone-dominant-g3.material-strings" \
 data/instruments/descriptions/violin/render.sh \
   target/release/material_strings /path/to/new-varnished-violin-run \
   --pack "$varnish.fsmatpk=$varnish_dir/$varnish.fsmatpk"
 ```
 
-Run the ordinary recipe into another new directory for the bare comparison.
+For the bare comparison, run the same command into another new directory with
+`cannone-h8.assembly` in place of the varnish assembly and without the `--pack`.
 Keep bow input, strings, mesh, mode count, atmosphere and pressure scale equal.
 For another film family/specimen, edit a copy of the assembly options and
 compile its corresponding pack; merely changing a file label does not change

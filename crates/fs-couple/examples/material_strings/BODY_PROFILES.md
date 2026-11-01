@@ -1539,6 +1539,24 @@ Two inputs of this note are authored, not measured:
 - the bridge joint (200000 N/m, 0.1 N s/m);
 - the Stribeck friction law (0.8, 0.4, 0.1 m/s).
 
+`cannone-dominant-g3-h6.material-strings` is the same note on h6, and it is the
+card that the violin's `render.sh` renders. It differs from
+`cannone-dominant-g3.material-strings` in three records:
+- the body record carries h6's dimensions, as `assemble-shell` prints them, and
+  132 body modes;
+- the cavity record is h6's row;
+- the prepared budget is 640 coordinates and 8589934592 bytes.
+
+132 modes is the whole of h6's 15 Hz-5 kHz window at drilling 1e-2. A request
+for 184 refuses with `assembled shell window has fewer modes than requested: it
+holds 132, 184 requested`. With the body and cavity, the note has 576
+coordinates.
+
+The h8 note's 30 modes end at or below 2 kHz. On h6, keeping only 30 modes
+leaves E5's partials 4-7 (2.65-4.64 kHz) 20 to 24 dB below the whole window.
+66 modes restore them up to about 3.3 kHz. The violin README has the measured
+table and the cost: 596 s of setup and 1585 s per simulated second.
+
 `cannone-dominant-g3-crown-compliant.material-strings` and
 `cannone-dominant-g3-crown-stiff.material-strings` replace the authored joint.
 They are the same note, but every string's joint comes from its interface pack
