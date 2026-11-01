@@ -7,6 +7,8 @@ mod energy_volume;
 mod entropy;
 #[path = "nonideal_flash/entropy_volume.rs"]
 mod entropy_volume;
+#[path = "nonideal_flash/isentropic.rs"]
+mod isentropic;
 #[path = "nonideal_flash/isobaric.rs"]
 mod isobaric;
 #[path = "nonideal_flash/parcel.rs"]

@@ -9076,6 +9076,56 @@ the independently solved binary isentropic expansion and reverse compression,
 phase-boundary changes under large independent species datums, exact rest and
 whole-call budget boundaries, invalid/source/bracket refusals, and final
 cancellation/replay. They also check Delta h - Delta u against the actual change
-in p*v. Rustfmt parsing passed. Native compilation/execution is pending while
-the restored dependency graph is checked; no new executed-test result is claimed
-by this entry.
+in p*v. Rustfmt parsing passed. Native type checking passed with
+`cargo check --offline --locked -p fs-material --test nonideal_flash`, including
+the six new regressions. Runtime execution remains unverified: the native test
+build was killed by the 8 GiB memory limit while compiling upstream asupersync,
+before any test ran. No executed-test pass is claimed.
+
+## Prescribed-volume reversible mixture equilibrium
+
+`nonideal::flash::parcel::isentropic::IsentropicMixtureEquilibriumParcel` retains
+one original mixture model, conserved feed mass, prescribed physical volume and
+accepted phase state. PT initialization defines its matching volume; S,V
+initialization retains the caller's volume and original entropy reference.
+`change_volume` uses the original source-increment S,V owner with zero entropy
+change. Temperature, pressure, phase compositions and amounts can change while
+the complete species inventory remains fixed.
+
+The process is explicitly closed, spatially uniform, reversible, adiabatic and
+quasistatic. Boundary work BY the mixture is inferred as minus the original
+source-integrated Delta U. This is a thermodynamic endpoint work convention,
+not independent pressure-work quadrature or a time-discrete mechanical energy
+audit. The step also reports independently integrated Delta H, actual Delta S,
+the original EOS volume minus the prescribed published volume, and all original
+pressure/PT work counts and conservative EOS ceilings. Species formation and
+entropy datums cancel before increment rounding; latent energy remains within
+the original thermodynamic potential.
+
+Small nonzero motion reserves entropy and volume resolution against its declared
+pressure-work scale. These numerical safeguards do not certify a relative work
+error. A motion below the retained initial volume resolution, nonrepresentable
+inventory or tolerances, zero or wrong-sign inferred work, failed entropy or
+physical-volume closure, source refusal, exhausted work and final cancellation
+publish no mutation. State and physical volume change atomically after the final
+poll. Nonzero changes require the accepted original phase policy, including its
+flash and stability controls, so reference reevaluation cannot silently rebase
+stored caloric energy or entropy. Source rectangles and outer caloric tolerances
+may change without changing that phase policy. Exact unchanged volume preserves
+every accepted bit with no phase query
+and reports its retained source-volume residual without refining that state.
+Its valid controls are admitted but a different phase policy is not applied.
+
+This consumer does not infer piston force, inertia, elapsed time, heat transfer,
+phase kinetics, slip, chemical reactions, acoustic response or a global phase
+minimum. Its finite phase-selection evidence retains the original source scope.
+Six focused G0/G1/G3/G4 cases cover an independent binary isentropic expansion
+and compression, three-rung pressure-volume quadrature against source work,
+partitioned motion, extensive scaling, small motion under loose controls,
+large independent species datums, entropy initialization, exact rest,
+unrepresentable inputs, bounded work and final-cancellation replay.
+
+Native validation: `cargo check --offline --locked -p fs-material --test
+nonideal_flash` passed with both the S,V closure and all six parcel regressions
+registered. Rustfmt and whitespace checks passed. Runtime test execution remains
+unverified following the upstream compiler memory failure described above.

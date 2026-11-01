@@ -15,6 +15,9 @@ use fs_thermochem::eos::peng_robinson::phase_screen::PengRobinsonPhaseScreenOpti
 /// Closed phase-changing inventories against a constant pressure load.
 pub mod isobaric;
 
+/// Closed mixture compression and expansion at conserved entropy.
+pub mod isentropic;
+
 /// One accepted closed-vessel heat increment and its independent source balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureEquilibriumHeatStep {
