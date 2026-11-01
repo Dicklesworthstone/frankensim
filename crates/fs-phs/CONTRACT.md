@@ -1421,3 +1421,46 @@ source squares, direct power under forty decades of conductance scaling,
 selection permutation, inactive ports and invalid/nonpassive refusal. These
 checks qualify the declared finite conductance, not a frequency-dependent
 radiation law, a general material domain or the full workspace gate.
+
+## Reciprocal coupled-capacitance blocks
+
+`circuit::capacitance::CapacitanceBlock` prepares a complete reciprocal
+capacitance matrix on 1..=128 original capacitor branch coordinates. Its law
+is q=Cv and H=q^T C^-1 q/2. The declared matrix owns its diagonal and all
+cross terms; it is not restricted to positive pair-capacitor realizations.
+Either off-diagonal sign is admitted when the complete matrix is positive
+definite. Original C values and branch order are retained without clipping,
+fitting or symmetrization. Branch orientation defines both charge and voltage.
+
+Preparation diagonally equilibrates C, uses the original fs-la Cholesky
+owner, refuses unresolved pivots/gauges, and independently checks the
+represented reciprocal inverse against the original scaled coefficients.
+Immutable matrices are shared across clones and `with_branches` remapping.
+The prepared C is not refactored during circuit rebuild; ordinary native
+graph and combined-storage admission still apply. The coordinate cap bounds
+the preparation and inverse checks and each subsequent dense block query.
+Stable energy increments use mean-voltage work rather than subtracting large
+endpoint energies.
+
+`assemble_circuit_with_capacitance_blocks` stamps the inverse into the same
+quadratic charge storage, preserving the original descriptor incidence,
+charge/flux ordering, sources, resistors, transformers and optional mutual
+inductance. Disjoint nonlinear scalar charge laws remain on that same owner.
+Duplicate blocks, overlapping block/curve ownership, wrong branch types and
+nonrepresentable matrices refuse. Positive scalar graph coefficients are
+placeholders on block-owned branches. Empty block lists retain the existing
+assembly behavior, and an all-linear assembly retains exact-quadratic access.
+No new solver or time integrator is introduced.
+
+The caller supplies the reference/gauge and physical source authority. A
+singular unreferenced Maxwell matrix is not silently grounded. Fixed matrices
+do not infer geometry evolution, parameter work, dielectric memory, leakage,
+thermal entropy, switching impulses or a spatial-error bound. Preparation's
+numeric inverse checks are admission checks, not constitutive validation.
+
+Focused native regressions check both cross signs against independent two-node
+midpoint RC equations and resistor heat; noncontiguous/reversed branch mapping;
+nonlinear knot crossing alongside full mutual inductance; stable small work
+beside an unchanged energy bias; shared preparation and ownership/rank refusals.
+An independent modal test covers nF/pF/fF matrices and the same dynamics beside
+a held 1 F capacitor with 10^8 C charge, checking terminal KCL and physical work.

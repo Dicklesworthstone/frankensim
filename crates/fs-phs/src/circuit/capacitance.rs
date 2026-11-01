@@ -21,6 +21,10 @@ use super::{
 use crate::{ConstitutiveDiscreteGradient, QuadraticStorage, Storage, linear_exact::QuadraticPart};
 use std::sync::Arc;
 
+/// Prepared reciprocal multi-terminal storage on the original charge states.
+pub mod block;
+pub use block::CapacitanceBlock;
+
 /// Maximum retained knots per capacitor, bounding each crossed-segment sum.
 pub const MAX_CAPACITOR_KNOTS: usize = 4096;
 
@@ -440,6 +444,28 @@ pub fn assemble_circuit_with_capacitor_curves(
     curves: &[CapacitorCurve],
     mutual: &[MutualInductance],
 ) -> Result<CircuitDae, CircuitError> {
+    assemble_circuit_with_capacitance_blocks(graph, &[], curves, mutual)
+}
+
+/// Assemble reciprocal coupled C, disjoint scalar V(q), and mutual L into
+/// the SAME Kirchhoff descriptor and original conserved charge/flux states.
+///
+/// Each prepared block owns its complete capacitance matrix, including its
+/// diagonal. The graph's capacitor coefficients remain positive placeholders
+/// on bound branches. Other capacitors retain their ordinary scalar storage.
+/// Block/curve overlap refuses: no individual law may erase a cross term.
+/// All supplied block inverses are reused without refactorization; exact
+/// quadratic storage stays available when no nonlinear curve is supplied.
+///
+/// References, branch orientations, and physical source authority belong to
+/// the caller. Singular unreferenced Maxwell matrices are refused when the
+/// block is prepared, never grounded or replaced by pair-capacitor fits.
+pub fn assemble_circuit_with_capacitance_blocks(
+    graph: &CircuitGraph,
+    blocks: &[CapacitanceBlock],
+    curves: &[CapacitorCurve],
+    mutual: &[MutualInductance],
+) -> Result<CircuitDae, CircuitError> {
     let mut ordered: Vec<_> = curves.iter().collect();
     ordered.sort_by_key(|entry| entry.branch);
     if ordered
@@ -457,7 +483,7 @@ pub fn assemble_circuit_with_capacitor_curves(
         ));
     }
     let mut dae = assemble_circuit_with_mutual_inductance(graph, mutual)?;
-    if ordered.is_empty() {
+    if ordered.is_empty() && blocks.is_empty() {
         return Ok(dae);
     }
     let n = dae.system.state_dim();
@@ -467,6 +493,11 @@ pub fn assemble_circuit_with_capacitor_curves(
         .exact_quadratic_matrix()
         .expect("native circuit storage is quadratic")
         .to_vec();
+    block::stamp(graph, &dae, blocks, &ordered, &mut matrix)?;
+    if ordered.is_empty() {
+        dae.system.storage = Box::new(QuadraticStorage::new(matrix, n)?);
+        return Ok(dae);
+    }
     let mut bound = Vec::with_capacity(ordered.len());
     for entry in ordered {
         let slot = graph.branches[..entry.branch]
