@@ -30,7 +30,7 @@ use fs_phs::circuit::{Branch, CircuitDae, CircuitError};
 use super::storage::MaterialStorageElement;
 use super::contacts::{self, ContactHeat, SeriesElectricalContact};
 use super::{MaterialCircuit, MaterialCircuitError, MaterialCircuitSolve, MaterialResistor,
-    ResistorHeat, account_step, bind_with_mutual, extended, poll, positive};
+    ResistorHeat, account_step, bind_with_storage_laws, extended, poll, positive};
 
 /// A source-bound capacitor OR inductor and one translationally guided body.
 /// Positive gap velocity separates the electrodes or magnetic poles; the other
@@ -189,6 +189,9 @@ impl MaterialFieldMotion {
     {
         if !circuit.capacitor_curves.is_empty() {
             return Err(invalid("gap motion requires a jointly derived geometry-dependent capacitor law"));
+        }
+        if circuit.capacitance_blocks.iter().any(|block| block.branches().contains(&branch)) {
+            return Err(invalid("moving a coupled capacitor requires its complete geometry-dependent field potential"));
         }
         if circuit.mutual.iter().any(|link| link.henries != 0.0
             && (link.branches.0 == branch || link.branches.1 == branch)) {
@@ -390,8 +393,9 @@ impl MaterialFieldMotion {
             || !positive(controls.energy_tolerance_j) || !positive(controls.power_tolerance_w) {
             return Err(invalid("finite held force and positive duration/work/power tolerances required"));
         }
-        let (graph, resistors, dae) = bind_with_mutual(&self.circuit.graph, sources,
-            &contacts, &self.circuit.mutual)?;
+        let (graph, resistors, dae) = bind_with_storage_laws(&self.circuit.graph, sources,
+            &contacts, &self.circuit.mutual, &self.circuit.capacitor_curves,
+            &self.circuit.capacitance_blocks)?;
         let electrical_x0 = extended(&dae, &self.circuit.fluxes_wb, &self.circuit.charges_c,
             input.electrical_ports)?;
         let (system, law) = self.assemble(&dae)?;
@@ -440,8 +444,9 @@ impl MaterialFieldMotion {
         };
         poll(&mut cancelled)?;
         let graph = super::storage::lower(&graph, &mut storage)?;
-        let mut circuit = MaterialCircuit::new_with_contacts_and_mutual_inductance(graph, resistors,
-            contacts, self.circuit.mutual.clone(),
+        let mut circuit = MaterialCircuit::new_with_capacitance_blocks(graph, resistors,
+            contacts, self.circuit.mutual.clone(), self.circuit.capacitance_blocks.to_vec(),
+            self.circuit.capacitor_curves.to_vec(),
             dae.flux_index.iter().map(|&i| record.x[i]).collect(),
             dae.charge_index.iter().map(|&i| record.x[i]).collect(), input.electrical_ports)?;
         circuit.storage = storage;

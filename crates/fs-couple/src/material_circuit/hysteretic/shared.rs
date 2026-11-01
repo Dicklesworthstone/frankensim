@@ -534,6 +534,7 @@ impl NativeWindingPorts {
             mutual: accepted.circuit.mutual.clone(),
             magnetic_couplings: accepted.circuit.magnetic_couplings.clone(),
             capacitor_curves: accepted.circuit.capacitor_curves.clone(),
+            capacitance_blocks: accepted.circuit.capacitance_blocks.clone(),
             dielectric_capacitors: accepted.circuit.dielectric_capacitors.clone(),
             resistors: self.resistors,
             contacts: vec![],

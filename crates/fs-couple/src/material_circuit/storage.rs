@@ -310,8 +310,8 @@ impl MaterialCircuit {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<MaterialStorageCandidate, MaterialCircuitError> {
         poll(&mut cancelled)?;
-        if !self.capacitor_curves.is_empty() {
-            return Err(invalid("authored capacitor curves require their explicit charge-law work owner"));
+        if !self.capacitor_curves.is_empty() || !self.capacitance_blocks.is_empty() {
+            return Err(invalid("authored capacitor curves and blocks require their explicit parameter-work owner"));
         }
         let storage_count = self
             .graph

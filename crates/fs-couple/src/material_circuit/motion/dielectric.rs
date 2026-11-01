@@ -254,7 +254,7 @@ impl ReversibleDielectricGapMotion {
         curves.sort_by_key(|curve| curve.branch);
         contacts::admit(&mut contacts)?;
         let (graph, resistors, dae) =
-            bind_with_storage_laws(&graph, sources, &contacts, &mutual, &curves)?;
+            bind_with_storage_laws(&graph, sources, &contacts, &mutual, &curves, &[])?;
         let charge_slot = graph.branches[..dielectric.branch]
             .iter()
             .filter(|b| matches!(b.2, Branch::Capacitor { .. }))
@@ -276,6 +276,7 @@ impl ReversibleDielectricGapMotion {
             mutual,
             magnetic_couplings: Vec::new(),
             capacitor_curves: curves.into(),
+            capacitance_blocks: Vec::new().into(),
             dielectric_capacitors: Vec::new().into(),
             resistors,
             contacts,
@@ -389,6 +390,7 @@ impl ReversibleDielectricGapMotion {
             &contacts,
             &self.routing.mutual,
             &self.routing.capacitor_curves,
+            &self.routing.capacitance_blocks,
         )?;
         let (coupled, law) = self.assemble(&dae)?;
         let x0 = self.extended(&dae, &coupled, input.electrical_ports)?;

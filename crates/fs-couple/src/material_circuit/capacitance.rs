@@ -176,11 +176,12 @@ impl MaterialCircuit {
                 "an authored capacitor curve cannot replace a retained linear material law",
             ));
         }
-        let mut candidate = Self::new_with_capacitor_curves(
+        let mut candidate = Self::new_with_capacitance_blocks(
             self.graph.clone(),
             self.resistors.clone(),
             self.contacts.clone(),
             self.mutual.clone(),
+            self.capacitance_blocks.to_vec(),
             curves,
             self.fluxes_wb.clone(),
             self.charges_c.clone(),
@@ -225,8 +226,8 @@ impl MaterialCircuit {
 }
 
 /// Independent constitutive increment for the frozen ordinary circuit law.
-/// Capacitors use their declared integral; coupled magnetic storage uses the
-/// SAME native inverse-inductance gradient, including all shared-field terms.
+/// Scalar curves use their declared integral; all reciprocal quadratic storage
+/// uses the SAME native gradient, including coupled electric and magnetic terms.
 /// Fixed buffers bound work and avoid an extra matrix clone or factorization.
 pub(super) fn storage_change(
     graph: &fs_phs::circuit::CircuitGraph,
@@ -242,24 +243,40 @@ pub(super) fn storage_change(
         ));
     }
     let (mut total, mut correction) = (0.0, 0.0);
-    if !dae.flux_index.is_empty() {
+    let mut quadratic = [false; MAX_STATES];
+    for &i in &dae.flux_index {
+        quadratic[i] = true;
+    }
+    let mut charge_slot = 0;
+    for (branch, &(_, _, element)) in graph.branches.iter().enumerate() {
+        if matches!(element, Branch::Capacitor { .. }) {
+            if law(curves, branch).is_none() {
+                quadratic[dae.charge_index[charge_slot]] = true;
+            }
+            charge_slot += 1;
+        }
+    }
+    if quadratic[..n].iter().any(|&owned| owned) {
         let mut midpoint = [0.0; MAX_STATES];
         let mut offset = [0.0; MAX_STATES];
         let mut effort = [0.0; MAX_STATES];
         let mut effort_offset = [0.0; MAX_STATES];
-        for &i in &dae.flux_index {
+        for i in 0..n {
+            if !quadratic[i] { continue; }
             midpoint[i] = f64::midpoint(before[i], after[i]);
             offset[i] = 0.5 * (before[i] - midpoint[i]) + 0.5 * (after[i] - midpoint[i]);
         }
-        // Capacitor charges are zero in these magnetic probes, inside every
-        // admitted curve's support. Algebraic efforts have no stored energy.
+        // Scalar nonlinear coordinates stay zero in both probes, inside every
+        // admitted curve's support. Disjoint ownership prevents a block from
+        // coupling into such a coordinate. Algebraic efforts store no energy.
         dae.system
             .storage()
             .gradient(&midpoint[..n], &mut effort[..n]);
         dae.system
             .storage()
             .gradient(&offset[..n], &mut effort_offset[..n]);
-        for &i in &dae.flux_index {
+        for i in 0..n {
+            if !quadratic[i] { continue; }
             let change = finite(after[i] - before[i])?;
             add(&mut total, &mut correction, change * effort[i])?;
             add(&mut total, &mut correction, change * effort_offset[i])?;
@@ -267,7 +284,7 @@ pub(super) fn storage_change(
     }
     let mut slot = 0;
     for (branch, &(_, _, element)) in graph.branches.iter().enumerate() {
-        let Branch::Capacitor { farads } = element else {
+        let Branch::Capacitor { .. } = element else {
             continue;
         };
         let i = dae.charge_index[slot];
@@ -278,12 +295,6 @@ pub(super) fn storage_change(
                 &mut correction,
                 curve.energy_change_j(before[i], after[i])?,
             )?;
-        } else {
-            let change = finite(after[i] - before[i])?;
-            let midpoint = f64::midpoint(before[i], after[i]);
-            let offset = 0.5 * (before[i] - midpoint) + 0.5 * (after[i] - midpoint);
-            add(&mut total, &mut correction, change * (midpoint / farads))?;
-            add(&mut total, &mut correction, change * (offset / farads))?;
         }
     }
     finite(total + correction)

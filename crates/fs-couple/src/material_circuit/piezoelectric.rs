@@ -105,6 +105,7 @@ impl PiezoelectricCircuit {
         let circuit = MaterialCircuit {
             graph, mutual: Vec::new(), magnetic_couplings: Vec::new(),
             capacitor_curves: Vec::new().into(),
+            capacitance_blocks: Vec::new().into(),
             dielectric_capacitors: Vec::new().into(),
             resistors, contacts: Vec::new(), fluxes_wb, charges_c, storage: Vec::new(),
         };

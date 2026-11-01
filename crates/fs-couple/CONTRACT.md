@@ -20050,3 +20050,40 @@ cases. All material data are authored numerical fixtures.
 The direct matrix enters the shared `with_port_conductance` owner as G D G^T; the dynamic source enters the existing skew interconnection before ONE complete exact exponential. All load coordinates, mutual terms, material-memory storage and original resistance survive. Physical load loss remains separate from reference-wave exchange. A purely conductive source introduces no fictitious state: original mouth forcing slots stay present at zero input while only inlet slots are selected as external wave channels. Warm steps reuse the held-input buffer and all exact-owner scratch; refusal preserves accepted physical history and output accounts.
 
 Focused regressions cover bidirectional coherent pulses with unequal face references, a dynamically loaded cylinder against an independent analytic impedance on 12/24/48 axial elements, live mutual-mode reflection with direct and dynamic losses, exact held-wave subdivision, a matched conductive mouth, and source/capacity/transactional refusal. The source and runtime targets together pass 13 focused native checks (5 new and 8 existing), using actual original material/modal/math/algebra/PH source. This is component validation, not a Cargo/DSR gate or full-band BEM radiation qualification. The load may be an admitted complete physical system; no nonlinear forcing, azimuthal modes, sourced higher-mode losses, arbitrary direct nonsymmetric law or closed-loop frequency-error certificate is supplied.
+
+## Coupled capacitance retained through material circuits
+
+`MaterialCircuit::new_with_capacitance_blocks` accepts the native prepared,
+reciprocal capacitance blocks on original capacitor branch coordinates, together
+with disjoint scalar charge laws, mutual inductance, material resistors and
+series electrical contacts. Its `capacitance_blocks()` accessor exposes the
+retained immutable authority. The complete matrix, including either sign of
+cross-capacitance, owns its branches; their positive graph C coefficients are
+topology placeholders. Preparation is shared through circuit copies and rebuilds.
+
+Ordinary resistance, conductivity, contact and finite-body thermal trials retain
+the same blocks and physical charge history. Independent electric/magnetic
+storage accounting evaluates the complete native quadratic gradient against
+charge/flux increments, including the represented-midpoint correction and all
+cross terms. Disjoint nonlinear capacitor curves retain their exact integral
+increments. This avoids loss of small capacitor work beside an unchanged large
+storage bias and prevents diagonal-only accounting from accepting wrong heat.
+
+Scalar capacitor-law replacement retains unrelated blocks and refuses overlapping
+ownership. The existing scalar material-storage rebind refuses block-bearing
+circuits: changing a matrix requires an explicit full-matrix parameter-work owner.
+A moving scalar capacitor may coexist with an unchanged block, but moving a
+block-owned coordinate is refused without a complete geometry-dependent storage
+potential. Fixed blocks infer no dielectric temperature dependence, entropy or
+mechanical work. Their coefficients remain held throughout the existing thermal
+fixed-point trials.
+
+The focused material block tests exercise picofarad common/differential RC modes
+beside a held 1 F / 10^8 C bias, contact replacement with temperature-dependent
+bulk resistance, disjoint charge-law replacement with explicit parameter work,
+and two-body finite thermal feedback. They check physical charge, separate bulk
+and contact heat, complete storage work, each thermal energy balance, shared
+matrix preparation, ownership refusal and cancellation replay. Existing nonlinear
+capacitance, source-backed dielectric, finite enthalpy and dielectric-motion
+regressions remain green on the selected native source closure. This gate does
+not claim a full-workspace Cargo/DSR run.
