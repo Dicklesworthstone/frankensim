@@ -430,7 +430,9 @@ impl Profile {
             {
                 return Err("film cell must retain its exact material, initial temperature, density and layer volume".into());
             }
-            layer.thermal_stiffness_slope_n_m_k(
+            // Admit the complete affine potential, Maxwell arms included: the
+            // layer heat owner carries every arm's entropy (4d9905692).
+            layer.thermal_stiffness_slopes_n_m_k(
                 &source.card,
                 "T",
                 (cell.temperatures[0], cell.temperatures[2]),
