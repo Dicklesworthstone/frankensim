@@ -25,8 +25,8 @@ mod thermal;
 pub use gravity::{NetworkGravity, NetworkGravityReport};
 pub use thermal::{
     BranchWallContact, NetworkThermalReport, NetworkWallOperator, PlenumThermalContact,
-    PlenumThermalOperator, SharedWall, SharedWallControl, SharedWallGas, SharedWallPort,
-    SharedWallReport,
+    PlenumThermalOperator, SharedWall, SharedWallControl, SharedWallGas, SharedWallLink,
+    SharedWallLinkReport, SharedWallPort, SharedWallReport,
 };
 
 /// Explicit topology bound, in addition to the aggregate cell-storage bound.

@@ -10,27 +10,27 @@ use fs_thermal::enthalpy::{
     ThermalLaw, ThermalStorageBasis,
 };
 
-fn close(a: f64, b: f64, tolerance: f64) {
+pub(super) fn close(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance,
         "actual={a:.16e}, expected={b:.16e}, tolerance={tolerance:.3e}"
     );
 }
-fn gas(linear: f64, formation: f64) -> FrozenGas {
+pub(super) fn gas(linear: f64, formation: f64) -> FrozenGas {
     let original = crate::dynamics::tests::gas(linear, formation);
     let mut domain = original.domain();
     domain.absolute_energy_tolerance = 1e-13;
     domain.relative_energy_tolerance = 1e-14;
     FrozenGas::new(original.source().clone(), domain, || false).unwrap()
 }
-fn controls() -> WallControl {
+pub(super) fn controls() -> WallControl {
     WallControl {
         absolute_energy_tolerance_j: 1e-11,
         relative_energy_tolerance: 1e-12,
         ..WallControl::default()
     }
 }
-fn periodic(gas: &FrozenGas, temperature: f64, velocity: f64) -> Euler1d {
+pub(super) fn periodic(gas: &FrozenGas, temperature: f64, velocity: f64) -> Euler1d {
     Euler1d::new(
         gas.clone(),
         Length::new(0.25),
@@ -41,7 +41,7 @@ fn periodic(gas: &FrozenGas, temperature: f64, velocity: f64) -> Euler1d {
     )
     .unwrap()
 }
-fn base(network: &GasNetwork1d, drag: WallDrag) -> NetworkWallOperator<'static> {
+pub(super) fn base(network: &GasNetwork1d, drag: WallDrag) -> NetworkWallOperator<'static> {
     NetworkWallOperator::new(
         network,
         vec![
@@ -76,13 +76,17 @@ fn base(network: &GasNetwork1d, drag: WallDrag) -> NetworkWallOperator<'static> 
     )
     .unwrap()
 }
-fn port(branch: usize, cell: usize, conductance: f64) -> SharedWallPort {
+pub(super) fn port(branch: usize, cell: usize, conductance: f64) -> SharedWallPort {
     SharedWallPort {
         gas: SharedWallGas::Branch { branch, cell },
         conductance_w_per_k: conductance,
     }
 }
-fn lumped(temperature: f64, capacity: f64, ports: Vec<SharedWallPort>) -> SharedWall<'static> {
+pub(super) fn lumped(
+    temperature: f64,
+    capacity: f64,
+    ports: Vec<SharedWallPort>,
+) -> SharedWall<'static> {
     SharedWall {
         storage: PlenumThermalContact {
             thermal: WallThermal::Lumped {
@@ -95,7 +99,7 @@ fn lumped(temperature: f64, capacity: f64, ports: Vec<SharedWallPort>) -> Shared
         ports,
     }
 }
-fn wall_temperature(walls: &NetworkWallOperator<'_>, index: usize) -> f64 {
+pub(super) fn wall_temperature(walls: &NetworkWallOperator<'_>, index: usize) -> f64 {
     let wall = &walls.shared_wall(index).unwrap().storage;
     match &wall.heat_storage {
         Some(source) => source.temperature_k(wall.thermal).unwrap(),
@@ -105,7 +109,7 @@ fn wall_temperature(walls: &NetworkWallOperator<'_>, index: usize) -> f64 {
         },
     }
 }
-fn attach(
+pub(super) fn attach(
     network: &GasNetwork1d,
     drag: WallDrag,
     walls: Vec<SharedWall<'static>>,
@@ -114,7 +118,7 @@ fn attach(
         .with_shared_walls(network, walls, SharedWallControl::default(), || false)
         .unwrap()
 }
-fn step(
+pub(super) fn step(
     network: &mut GasNetwork1d,
     walls: &mut NetworkWallOperator<'_>,
     dt: f64,
@@ -129,7 +133,7 @@ fn step(
         )
         .unwrap()
 }
-fn fields(network: &GasNetwork1d) -> Vec<Vec<Conserved>> {
+pub(super) fn fields(network: &GasNetwork1d) -> Vec<Vec<Conserved>> {
     network
         .branches()
         .iter()
@@ -390,7 +394,7 @@ impl ThermalLaw for Latent {
         1.0
     }
 }
-fn latent(range: [f64; 2], ports: Vec<SharedWallPort>) -> SharedWall<'static> {
+pub(super) fn latent(range: [f64; 2], ports: Vec<SharedWallPort>) -> SharedWall<'static> {
     let source = MaterialWallCaloric::from_thermal_law(
         Latent,
         DepositedCell {

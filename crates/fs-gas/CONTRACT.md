@@ -2592,3 +2592,51 @@ passive response, large independent gas energy datums, exact hydrostatic and
 thermal rest at a large common potential datum, one original latent inventory,
 heat-driven field motion, source/work/overlap refusal, and final cancellation
 with deterministic history replay.
+
+## Connected finite wall inventories
+
+`NetworkWallOperator::with_shared_wall_links` connects the existing shared-wall
+inventories through ordered `SharedWallLink` thermal ports. Each has two
+distinct original wall indices and one complete nonnegative conductance in
+W/K. Cycles and parallel interfaces retain authored order; a zero-conductance
+link transports no heat. No gas mass or species passes through these ports.
+
+After the original simultaneous gas/shared-wall solves, each link solves
+`Q = dt G (Ta(-Q) - Tb(Q))` with the existing safeguarded scalar owner. Original
+capacity integrals or T(h/u) charts supply both endpoint states, including
+latent plateaus and their conserved phase energy. Exact available tangents
+accelerate the same equation; absent local tangents use its bounded bisection.
+The heat interval intersects both original source domains and the passive
+initial-flux bound. No source extrapolation, fitted capacity, duplicate wall
+mass or alternate nonlinear solver is introduced.
+
+Acceptance checks both actual represented storage changes and the stage heat
+equation. Their signed sum enters the existing whole-network wall-energy
+account; wall-to-wall transfer is internal and never counted as external heat
+or gas heating. Source queries share `SharedWallControl` across gas groups and
+all link stages, including failed evaluations and final checks. Prepared
+receipt arrays are reused. Failure or final cancellation leaves gas fields,
+wall inventories, clocks and all previously accepted reports unchanged.
+
+`shared_wall_link_reports` retains every link's initial and endpoint original
+states and temperatures, signed heat received by the second wall, both actual
+storage changes, energy/flux residuals and scalar iteration count. These are
+stage endpoints: a later link can change a wall again. The final wall state is
+not substituted into an earlier gas or wall heat equation. All links use the
+actual interval accepted by the original network transport/retry owner.
+
+This is first-order composition of finite thermal ports, with observable
+link-order error that must be controlled by timestep refinement. It is not a
+simultaneous backward-Euler solve of the whole thermal graph, nor a spatial
+PDE discretization. Geometric/material spatial conduction remains owned by
+`fs-thermal`; no conductivity or geometric resolution is inferred from the
+authored W/K ports. Existing fixed-geometry and lumped-cell validity conditions
+remain. The scalar solves alone do not establish a general entropy theorem.
+
+G0/G1 regressions cover independent staged gas/wall calorimetry; an analytical
+three-wall chain with first-order convergence and vanishing link-order bias;
+latent inventory transfer and exit into sensible cooling; exact thermal rest
+with cyclic/parallel links and isolated storage; exact whole-attempt source
+budget boundaries and late source-domain refusal; and atomic cancellation with
+bitwise checkpoint replay. Source-specific calorimetry, energy closure and
+temperature-hull checks do not claim experimental heat-transfer accuracy.

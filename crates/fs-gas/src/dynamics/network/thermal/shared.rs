@@ -4,6 +4,10 @@ use super::*;
 use crate::multicomponent::wall_exchange::solve_scalar;
 use std::cell::Cell;
 
+mod conduction;
+use conduction::WallLinks;
+pub use conduction::{SharedWallLink, SharedWallLinkReport};
+
 /// Original gas control volume attached to a shared, spatially uniform wall.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SharedWallGas {
@@ -51,17 +55,20 @@ impl Default for SharedWallControl {
     }
 }
 
-/// Accepted common-endpoint equations and actual nested work, separate from
-/// the complete network's original heat, gravity and transport accounts.
+/// Accepted gas-contact equations and actual nested work, separate from the
+/// complete network's original heat, gravity and transport accounts. With
+/// wall links, these contacts precede the ordered link stages; they do not
+/// claim a simultaneous endpoint for the entire thermal graph.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SharedWallReport {
     /// Actual accepted source interval.
     pub elapsed: Time,
     /// Sum of represented shared-wall plus gas storage residuals [J].
     pub energy_residual_j: f64,
-    /// Largest absolute individual shared inventory balance [J].
+    /// Largest absolute gas-group or wall-link storage balance [J].
     pub maximum_wall_residual_j: f64,
-    /// Largest absolute Q - dt G (Tw_new - Tg_new) among interfaces [J].
+    /// Largest absolute endpoint heat-equation residual among gas and wall
+    /// interfaces, each at its own accepted composition stage [J].
     pub maximum_contact_residual_j: f64,
     /// Actual calls to the original caloric/state owners.
     pub source_evaluations: usize,
@@ -127,6 +134,7 @@ struct Group<'law> {
 pub(super) struct SharedWalls<'law> {
     groups: Vec<Group<'law>>,
     controls: SharedWallControl,
+    links: Option<WallLinks>,
     branch_correction: Vec<f64>,
     candidate_report: Option<SharedWallReport>,
     last_report: Option<SharedWallReport>,
@@ -144,9 +152,10 @@ impl<'law> NetworkWallOperator<'law> {
     ///
     /// Every group closes its simultaneous backward-Euler endpoint equations,
     /// using one wall-energy increment unknown and the original gas solver.
-    /// Transport/source composition remains first order. Spatial conduction,
-    /// changing geometry and multiple shared walls on one gas cell are separate
-    /// models, not inferred by this uniform-wall reduction.
+    /// Transport/source composition remains first order. Optional finite wall
+    /// links compose afterward through [`Self::with_shared_wall_links`].
+    /// Geometric spatial conduction, changing geometry and multiple shared
+    /// walls on one gas cell are not inferred by this uniform-cell reduction.
     pub fn with_shared_walls(
         mut self,
         network: &GasNetwork1d,
@@ -251,6 +260,7 @@ impl<'law> NetworkWallOperator<'law> {
         self.shared = Some(SharedWalls {
             groups,
             controls,
+            links: None,
             branch_correction: allocated(network.branches.len(), 0.0)?,
             candidate_report: None,
             last_report: None,
@@ -304,13 +314,24 @@ struct WallPoint {
 
 impl Group<'_> {
     fn after(&self, change: f64, work: &Work) -> Result<WallPoint, WallExchangeError> {
+        self.after_state(self.accepted.storage.thermal, change, work)
+    }
+
+    // The same original storage, now about a candidate composition-stage state.
+    // Neither gas contact nor wall links store a second thermal inventory.
+    fn after_state(
+        &self,
+        thermal: WallThermal,
+        change: f64,
+        work: &Work,
+    ) -> Result<WallPoint, WallExchangeError> {
         work.charge()?;
         let storage = &self.accepted.storage;
         if let Some(source) = &storage.heat_storage {
             let point = source.after(
                 WallContact {
                     drag: WallDrag::None,
-                    thermal: storage.thermal,
+                    thermal,
                 },
                 change,
             )?;
@@ -325,7 +346,7 @@ impl Group<'_> {
             temperature_k,
             heat_capacity_j_per_k,
             ..
-        } = storage.thermal
+        } = thermal
         else {
             return Err(WallExchangeError::Invalid(
                 "shared wall missing caloric source",
@@ -640,6 +661,31 @@ impl SharedWalls<'_> {
                 }
             }
         }
+        if let Some(links) = &mut self.links {
+            for (link, receipt) in links.ports.iter().zip(&mut links.candidate) {
+                poll(cancelled)?;
+                *receipt =
+                    conduction::exchange(&self.groups, *link, duration, control, &work, cancelled)?;
+                for i in 0..2 {
+                    self.groups[link.walls[i]].candidate = receipt.endpoint_state[i];
+                }
+                maximum_wall = maximum_wall.max(receipt.energy_residual_j.abs());
+                iterations = iterations
+                    .checked_add(receipt.iterations)
+                    .ok_or(Error::Allocation)?;
+                total.add(WallCellReport {
+                    elapsed: duration,
+                    wall_impulse_ns: 0.0,
+                    drag_heating_j: 0.0,
+                    heat_to_gas_j: 0.0,
+                    wall_energy_change_j: receipt.energy_residual_j,
+                    external_heat_to_gas_j: 0.0,
+                    energy_residual_j: receipt.energy_residual_j,
+                    thermal_residual_j: receipt.flux_residual_j,
+                    iterations: receipt.iterations,
+                })?;
+            }
+        }
         poll(cancelled)?;
         let report = total.report(duration);
         self.candidate_report = Some(SharedWallReport {
@@ -669,5 +715,8 @@ impl SharedWalls<'_> {
             group.accepted.storage.thermal = group.candidate;
         }
         self.last_report = self.candidate_report;
+        if let Some(links) = &mut self.links {
+            links.accepted.clone_from(&links.candidate);
+        }
     }
 }

@@ -18,7 +18,10 @@ pub use branch::BranchWallContact;
 
 mod shared;
 use shared::SharedWalls;
-pub use shared::{SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport};
+pub use shared::{
+    SharedWall, SharedWallControl, SharedWallGas, SharedWallLink, SharedWallLinkReport,
+    SharedWallPort, SharedWallReport,
+};
 
 /// One compact volume's thermal boundary and optional original finite storage.
 /// Distinct contacts represent distinct physical wall masses. A shared wall
