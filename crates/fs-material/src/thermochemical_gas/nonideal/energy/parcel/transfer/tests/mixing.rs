@@ -210,6 +210,30 @@ fn different_compositions_match_independent_pr_mixing_energy_and_continue() {
     );
 }
 
+/// Worst-case difference between two correctly rounded evaluations of the ABSOLUTE specific internal energy of one composition
+/// at two states, when a formation datum of magnitude |u| is stored in it. Only roundings that depend on the state count (the
+/// stored coefficient a7 = mass*reference/R and the molar mass are the same in both evaluations and cancel). With
+/// unit = 2^-53, D_i = x_i * mass_i * reference_i (J/mol), K = sum |D_i| and H = |sum D_i|, the chain of
+/// `fs-thermochem` `NASA-9` `evaluate_source_region` and `evaluate_core` and `nonideal.rs` is:
+///   per species   inverse_t = 1/t, a7*inverse_t, the add of that term last to the small ones, R*t, (R*t)*h_over_rt:
+///                 5 roundings, each at most `unit` of the datum term, so 5 unit * |D_i|;
+///   mixture h     x_i*h_i (1 rounding per species, unit * |D_i|) and the running add (unit * H): 6 unit * K + unit * H;
+///   u = h - R*t   the subtraction (R*t is 1e-19 of h): unit * H;
+///   / molar mass  unit * |u|, and the departure add-back (residual/M is about 1e-3 ulp of u): unit * |u|.
+/// With |u| = H / molar mass the relative error of one evaluation is at most unit * ((6K + 2H) / H + 2); the two
+/// evaluations can differ by twice that. This is a first-order bound (terms of order unit^2 are neglected); the physical
+/// change of u between the states is added.
+fn datum_roundoff_bound_j_kg(
+    masses: &[f64], fractions: &[f64], references: &[f64; 2], u: f64, physical_change: f64,
+) -> f64 {
+    let unit = 0.5 * f64::EPSILON;
+    let datums: Vec<f64> = masses.iter().zip(fractions).zip(references)
+        .map(|((mass, x), reference)| x * mass * reference).collect();
+    let k: f64 = datums.iter().map(|d| d.abs()).sum();
+    let h = datums.iter().sum::<f64>().abs();
+    2.0 * unit * u.abs() * ((6.0 * k + 2.0 * h) / h + 2.0) + physical_change.abs()
+}
+
 #[test]
 fn distinct_huge_species_formation_datums_do_not_change_mixing_physics() {
     let [donor, receiver] = pair([0.0; 2]);
@@ -240,11 +264,32 @@ fn distinct_huge_species_formation_datums_do_not_change_mixing_physics() {
         );
         // Absolute donor u has lost the entire physical cooling signal; the
         // native increment still resolves it without subtracting these values.
-        assert_eq!(
+        // Two correctly rounded evaluations of a datum-dominated u at two states need not agree to the bit:
+        // they agree within the derived worst-case rounding of the evaluation chain, and the physical
+        // cooling is far below one ulp of u.
+        let (u_before, u_after) = (
+            donor.state().specific_internal_energy_j_kg(),
             actual.donor().state().specific_internal_energy_j_kg(),
-            donor.state().specific_internal_energy_j_kg()
         );
+        let cooling = donor.state().temperature_k() - actual.donor().state().temperature_k();
+        let physical = actual.donor().state().specific_heat_cv_j_kg_k() * cooling;
+        let masses: Vec<f64> = donor.model().source().thermodynamics().components().iter()
+            .map(|species| species.molar_mass().value()).collect();
+        let fractions = donor.model().mechanics().mole_fractions().to_vec();
+        let bound = datum_roundoff_bound_j_kg(&masses, &fractions, &references, u_before, physical);
+        assert!(
+            (u_after - u_before).abs() <= bound,
+            "absolute u moved {:e} J/kg, more than the derived rounding bound {bound:e}",
+            u_after - u_before
+        );
+        assert!(physical < u_before.abs().next_up() - u_before.abs(), "the cooling signal is below one ulp of u");
         assert!(actual.donor().state().temperature_k() < donor.state().temperature_k() - 2.0);
+        // Planted negative: the bound has teeth. A one-part-in-1e9 change of species A's datum moves u by about 1e15 J/kg.
+        let [nudged, _] = pair([references[0] * (1.0 + 1e-9), references[1]]);
+        assert!(
+            (nudged.state().specific_internal_energy_j_kg() - u_before).abs() > bound,
+            "a perturbed datum must violate the derived bound"
+        );
     }
 }
 
