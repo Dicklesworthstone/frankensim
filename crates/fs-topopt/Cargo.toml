@@ -225,3 +225,7 @@ required-features = ["cutfem-marquee"]
 [[example]]
 name = "material_modal_sdf3"
 required-features = ["cutfem-marquee"]
+
+[[example]]
+name = "adaptive_material_modal_sdf3"
+required-features = ["cutfem-marquee"]

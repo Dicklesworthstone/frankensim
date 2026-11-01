@@ -321,6 +321,31 @@ AL owner handles that problem directly, without assuming that adding material
 always raises frequency. Objective improvement is meaningful against the new
 grid's own initial design, rather than across different discretizations.
 
+`sdf3::modal::campaign::Sdf3EigenfrequencyCampaign3` connects those owners into
+automatic Probe → Refit → Probe for both design goals. Every assessment uses
+uniformly enriched active cells; candidate refinement may use all active cells
+or diagnostic modal-residual marks. Unresolved native inventory, or empty
+marks, triggers uniform candidate refinement. Stopping requires the original
+physical bounds on both grids plus selected-spectrum, original-objective,
+volume, kg and whole-subspace change gates.
+
+The current validated design survives failed construction, optimization and
+cancellation. A freshly rechecked candidate remains pending across cancellation
+immediately before atomic promotion. Candidate attempts and all numerical work
+stay charged, and every normally returned promoted grid receives its own fresh
+full probe. Compact histories retain grid metrics while superseded operators
+are released. The caller's builder preserves physical domain, supports and
+source material assignment and spends one cumulative geometry budget.
+
+Run the bounded native minimum-kg example with
+`cargo run -p fs-topopt --features cutfem-marquee --example adaptive_material_modal_sdf3`.
+It reports its actual stopping reason, current-grid mass change, freshly
+rechecked frequency and cumulative geometry work. The adaptive modal
+regressions cover physical-field copying versus refiltering, material mismatch,
+scale restoration, both refit goals, final probes and resumable promotion.
+This is numerical resolution evidence for undamped zero-prestress vibrations;
+it does not certify continuum frequency bounds or global design optimality.
+
 ## Native material body loads on raw-SDF designs
 
 Prepare an acceleration load with the native Cartesian or adaptive operator's

@@ -61,3 +61,5 @@ fn design_settings(reference: f64) -> Sdf3EigenfrequencyDesignOptions3 {
 mod assessment;
 
 mod refit;
+
+mod campaign;
