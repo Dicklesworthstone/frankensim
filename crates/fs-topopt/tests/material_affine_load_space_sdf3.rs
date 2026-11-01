@@ -1,5 +1,5 @@
 //! G1/G3: an affine uncertainty ball includes native material self-weight.
-use std::ops::ControlFlow;
+use std::{cell::RefCell, ops::ControlFlow};
 
 use fs_ascent::quadratic_ball::QuadraticBallBranch;
 use fs_blake3::ContentHash;
@@ -16,6 +16,10 @@ use fs_material::elastic::acoustic::ElasticAcousticState;
 use fs_solver::LinearOp;
 use fs_topopt::sdf3::response::limits::design::MinimumMaterialObjective3;
 use fs_topopt::sdf3::robust::RobustOptions3;
+use fs_topopt::sdf3::robust::envelope::affine_load_space::campaign::{
+    AffineLoadSpaceBuild3, AffineLoadSpaceCampaign3, AffineLoadSpaceCampaignOptions3,
+    AffineLoadSpaceCampaignStop3, AffineLoadSpaceMarking3,
+};
 use fs_topopt::sdf3::robust::envelope::affine_load_space::design::{
     AffineLoadSpaceDesign3, AffineLoadSpaceDesignGoal3, AffineLoadSpaceDesignOptions3,
 };
@@ -25,6 +29,7 @@ use fs_topopt::sdf3::robust::envelope::affine_load_space::{
     AffineLoadSpace3, AffineLoadSpaceEvaluation3,
 };
 use fs_topopt::sdf3::{CutDensityStudy3, PhysicalRegion3};
+use fs_topopt::sdf3_goal::GoalRefinementError3;
 use fs_topopt::{SimpParams, SolveBudget, SolveControl};
 
 struct Top;
@@ -458,7 +463,13 @@ fn adaptive_operator(level: u8) -> AdaptiveSolveSpace3 {
     adaptive_on_tree(&tree)
 }
 fn adaptive_on_tree(tree: &Octree3) -> AdaptiveSolveSpace3 {
-    let mut callback = |_| poll();
+    adaptive_on_tree_controlled(tree, &mut poll).unwrap()
+}
+fn adaptive_on_tree_controlled(
+    tree: &Octree3,
+    checkpoint: &mut dyn FnMut() -> ControlFlow<()>,
+) -> Result<AdaptiveSolveSpace3, GoalRefinementError3> {
+    let mut callback = |_| checkpoint();
     let mut q = QuadratureControl3::new(
         QuadratureOptions3 {
             depth: 1,
@@ -467,7 +478,7 @@ fn adaptive_on_tree(tree: &Octree3) -> AdaptiveSolveSpace3 {
         },
         &mut callback,
     )
-    .unwrap();
+    .map_err(ElasticityError3::from)?;
     let native = AdaptiveElasticity3::build_with_material_field(
         HexCell::try_new([0.0; 3], [1.0; 3]).unwrap(),
         tree,
@@ -476,9 +487,8 @@ fn adaptive_on_tree(tree: &Octree3) -> AdaptiveSolveSpace3 {
         &|p| p[0] == 0.0,
         Default::default(),
         &mut q,
-    )
-    .unwrap();
-    AdaptiveSolveSpace3::jacobi(native, 100_000_000)
+    )?;
+    Ok(AdaptiveSolveSpace3::jacobi(native, 100_000_000))
 }
 fn adaptive_material_study(tree: &Octree3) -> CutDensityStudy3<AdaptiveSolveSpace3> {
     let study = CutDensityStudy3::new(
@@ -974,4 +984,372 @@ fn explicit_affine_refit_reoptimizes_native_mass_on_its_own_grid_and_rechecks_th
             .worst_displacement,
         old_point.evaluation.worst_displacement
     );
+}
+
+#[test]
+fn affine_mass_campaign_reoptimizes_promotes_and_probes_its_actual_new_design() {
+    let tree = Octree3::uniform(1, 4, 4096).unwrap();
+    let study = adaptive_material_study(&tree);
+    let rho = vec![0.7; study.cells()];
+    let old_cells = study.cells();
+    let old_fingerprint = study.material_body_load_fingerprint();
+    let dead = ReferenceLoad3::body(&refinement_dead);
+    let laws = design_laws();
+    // A deliberately loose physical cap isolates material optimization from
+    // feasibility restoration. Each grid still has to pass its fresh cap check.
+    let cap = AffineLoadSpace3::new(laws.len(), 1.0).unwrap();
+    // The unused volume normalization must not restrict a kilogram objective.
+    let goal = AffineLoadSpaceDesignGoal3::MinimumMaterial {
+        objective: MinimumMaterialObjective3::MassKg { scale_kg: 2.0 },
+        volume_scale: 0.0,
+    };
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let initial = study
+        .solve_reference_affine_load_space(
+            &rho,
+            dead,
+            &laws,
+            &cap,
+            goal,
+            AffineLoadSpaceRefitOptions3 {
+                accepted_steps: 1,
+                ..Default::default()
+            },
+            &mut control,
+        )
+        .unwrap();
+    assert!(initial.completed_and_rechecked(), "{:?}", initial.outcome);
+    let builds = RefCell::new(Vec::new());
+    let mut campaign = AffineLoadSpaceCampaign3::new(
+        initial,
+        tree,
+        dead,
+        &laws,
+        AffineLoadSpaceCampaignOptions3 {
+            max_refits: 1,
+            max_candidate_attempts: 1,
+            change_tolerance: 0.0,
+            volume_tolerance: 1e-8,
+            objective_tolerance: 1e-8,
+            marking: AffineLoadSpaceMarking3::FrozenWitness {
+                theta: 0.5,
+                max_marks: 1,
+            },
+            ..Default::default()
+        },
+        &mut control,
+        |tree, kind, checkpoint| {
+            builds.borrow_mut().push(kind);
+            adaptive_on_tree_controlled(tree, checkpoint)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        campaign.run(0).unwrap(),
+        AffineLoadSpaceCampaignStop3::Paused
+    );
+    assert_eq!(campaign.grids().len(), 1);
+    assert_eq!(campaign.probes().len(), 1);
+    assert_eq!(campaign.candidate_attempts(), 0);
+    assert_eq!(builds.borrow().as_slice(), &[AffineLoadSpaceBuild3::Probe]);
+    let work = campaign.work();
+    assert_eq!(
+        campaign.run(0).unwrap(),
+        AffineLoadSpaceCampaignStop3::Paused
+    );
+    assert_eq!(campaign.work(), work);
+    assert_eq!(campaign.probes().len(), 1);
+    assert_eq!(
+        campaign.run(1).unwrap(),
+        AffineLoadSpaceCampaignStop3::RefinementLimit
+    );
+    assert_eq!(
+        builds.borrow().as_slice(),
+        &[
+            AffineLoadSpaceBuild3::Probe,
+            AffineLoadSpaceBuild3::Refit,
+            AffineLoadSpaceBuild3::Probe,
+        ]
+    );
+    assert_eq!(campaign.grids().len(), 2);
+    assert_eq!(campaign.probes().len(), 2);
+    assert_eq!(campaign.probes()[1].source_grid, 1);
+    assert_eq!(campaign.candidate_attempts(), 1);
+    assert!(campaign.pending().is_none());
+    assert!(campaign.rejected().is_none());
+    let current = campaign.current();
+    assert!(current.completed_and_rechecked());
+    assert_eq!(current.policy, cap);
+    assert_eq!(current.goal, goal);
+    assert!(current.study.cells() > old_cells);
+    assert!(current.study.can_refine_material_body_load());
+    assert_ne!(
+        current.study.material_body_load_fingerprint(),
+        old_fingerprint
+    );
+    assert!(current.gradient_check.as_ref().unwrap().passed());
+    assert!(current.history.len() > 1);
+    let start = current.initial.as_ref().unwrap();
+    let checked = current.recheck.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(checked.rho, current.best.as_ref().unwrap().rho);
+    assert!(
+        checked.evaluation.physical.dilated_mass_kg.unwrap()
+            < start.evaluation.physical.dilated_mass_kg.unwrap()
+    );
+    assert!(checked.evaluation.maximum <= 1.0);
+    assert!(checked.evaluation.worst_compliance <= cap.reference());
+    let probe = campaign.current_probe().unwrap();
+    assert_eq!(probe.rho, checked.rho);
+    close(probe.coarse.maximum, checked.evaluation.maximum, 1e-9);
+    let inventory = probe.inventory.as_ref().unwrap();
+    assert_eq!(
+        inventory.objective,
+        MinimumMaterialObjective3::MassKg { scale_kg: 2.0 }
+    );
+    assert_eq!(inventory.volume_scale, 0.0);
+    close(
+        inventory.coarse_mass_kg.unwrap(),
+        checked.evaluation.physical.dilated_mass_kg.unwrap(),
+        1e-12,
+    );
+    close(
+        inventory.coarse_objective,
+        inventory.coarse_mass_kg.unwrap() / 2.0,
+        1e-12,
+    );
+    close(
+        inventory.coarse_volume_fraction,
+        checked.evaluation.physical.dilated_volume_fraction,
+        1e-12,
+    );
+
+    // Reconstruct B and the authored loads on the installed native owner.
+    // This audits the promoted field without another optimization or PDE solve.
+    let mut native = adaptive_on_tree(campaign.tree());
+    native
+        .set_scales(&checked.evaluation.physical.eroded_scales)
+        .unwrap();
+    let body = native
+        .elasticity()
+        .prepare_material_body_load(&acceleration, 100_000, poll)
+        .unwrap();
+    let weight = body
+        .load(&checked.evaluation.physical.eroded_rho, poll)
+        .unwrap();
+    let offset: Vec<_> = native
+        .elasticity()
+        .reference_load(dead, poll)
+        .unwrap()
+        .iter()
+        .zip(weight)
+        .map(|(f, b)| f + b)
+        .collect();
+    let columns: Vec<_> = laws
+        .iter()
+        .map(|&law| native.elasticity().reference_load(law, poll).unwrap())
+        .collect();
+    let force = combine(&offset, &columns, &checked.evaluation.worst_coefficients);
+    close_vector(&force, &checked.evaluation.worst_force);
+    assert!(
+        native
+            .elasticity()
+            .field_residual(&checked.evaluation.worst_displacement, &force, poll)
+            .unwrap()
+            < 1e-8
+    );
+    let kg: f64 = native
+        .elasticity()
+        .reference_cell_masses_kg()
+        .unwrap()
+        .iter()
+        .zip(&checked.evaluation.physical.dilated_rho)
+        .map(|(m, r)| m * r)
+        .sum();
+    close(kg, inventory.coarse_mass_kg.unwrap(), 1e-12);
+}
+
+fn switching_dead(p: [f64; 3]) -> [f64; 3] {
+    let ordinary = refinement_dead(p);
+    let unresolved = refinement_second(p);
+    // The fixed offset has a component along the new fine-grid mode. Both
+    // endpoints remain regular; rejection must come from the physical cap.
+    std::array::from_fn(|i| ordinary[i] + 2.0 * unresolved[i])
+}
+
+fn reference_baseline(
+    study: &mut CutDensityStudy3<AdaptiveSolveSpace3>,
+    rho: &[f64],
+    dead: ReferenceLoad3<'_>,
+    laws: &[ReferenceLoad3<'_>],
+    control: &mut SolveControl<'_>,
+) -> AffineLoadSpaceEvaluation3 {
+    let offset = study
+        .operator()
+        .elasticity()
+        .reference_load(dead, poll)
+        .unwrap();
+    let columns: Vec<_> = laws
+        .iter()
+        .map(|&law| {
+            study
+                .operator()
+                .elasticity()
+                .reference_load(law, poll)
+                .unwrap()
+        })
+        .collect();
+    let basis: Vec<_> = columns.iter().map(Vec::as_slice).collect();
+    study
+        .evaluate_robust_affine_load_space(
+            rho,
+            &offset,
+            &basis,
+            RobustOptions3::default(),
+            &policy(),
+            control,
+        )
+        .unwrap()
+}
+
+#[test]
+fn affine_mass_campaign_retains_the_source_when_a_regular_fine_candidate_exceeds_the_cap() {
+    let tree = Octree3::uniform(1, 4, 4096).unwrap();
+    let mut source = adaptive_material_study(&tree);
+    let rho = vec![0.7; source.cells()];
+    let fine_tree = tree
+        .refined(source.operator().elasticity().leaves(), poll)
+        .unwrap();
+    let fine = adaptive_on_tree(&fine_tree);
+    let parents = AdaptiveTransfer3::new(
+        source.operator().elasticity(),
+        fine.elasticity(),
+        2_000_000,
+        poll,
+    )
+    .unwrap()
+    .parents()
+    .to_vec();
+    let inherited: Vec<_> = parents.iter().map(|&p| rho[p]).collect();
+    let labels: Vec<_> = parents
+        .iter()
+        .map(|&p| source.physical_regions().unwrap()[p])
+        .collect();
+    let mut direct = adaptive_material_study(&fine_tree)
+        .with_physical_regions(labels)
+        .unwrap();
+    let dead = ReferenceLoad3::body(&switching_dead);
+    let laws = [
+        ReferenceLoad3::body(&refinement_first),
+        ReferenceLoad3::body(&refinement_second),
+    ];
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    // Evaluate the refiltered raw candidate, not the inherited-physical probe:
+    // it is this distinct full affine model that a candidate must reoptimize.
+    let coarse = reference_baseline(&mut source, &rho, dead, &laws, &mut control);
+    let fine = reference_baseline(&mut direct, &inherited, dead, &laws, &mut control);
+    assert!(coarse.oracle.gradient_admissible());
+    assert!(fine.oracle.gradient_admissible());
+    assert!(fine.worst_compliance > coarse.worst_compliance);
+    let cap = AffineLoadSpace3::new(
+        laws.len(),
+        0.5 * (coarse.worst_compliance + fine.worst_compliance),
+    )
+    .unwrap();
+    let initial = source
+        .solve_reference_affine_load_space(
+            &rho,
+            dead,
+            &laws,
+            &cap,
+            mass_goal(),
+            AffineLoadSpaceRefitOptions3 {
+                accepted_steps: 0,
+                ..Default::default()
+            },
+            &mut control,
+        )
+        .unwrap();
+    assert!(initial.completed_and_rechecked(), "{:?}", initial.outcome);
+    let source_point = initial.recheck.as_ref().unwrap().as_ref().unwrap().clone();
+    let source_scales = initial.study.operator().elasticity().scales().to_vec();
+    let source_fingerprint = initial.study.material_body_load_fingerprint();
+    let source_regions = initial.study.physical_regions().unwrap().to_vec();
+    let builds = RefCell::new(Vec::new());
+    let mut campaign = AffineLoadSpaceCampaign3::new(
+        initial,
+        tree.clone(),
+        dead,
+        &laws,
+        AffineLoadSpaceCampaignOptions3 {
+            max_refits: 1,
+            max_candidate_attempts: 1,
+            change_tolerance: 0.0,
+            volume_tolerance: 1e-8,
+            objective_tolerance: 1e-8,
+            marking: AffineLoadSpaceMarking3::UniformActive,
+            ..Default::default()
+        },
+        &mut control,
+        |tree, kind, checkpoint| {
+            builds.borrow_mut().push(kind);
+            adaptive_on_tree_controlled(tree, checkpoint)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        campaign.run(1).unwrap(),
+        AffineLoadSpaceCampaignStop3::CandidateStopped
+    );
+    assert_eq!(
+        builds.borrow().as_slice(),
+        &[AffineLoadSpaceBuild3::Probe, AffineLoadSpaceBuild3::Refit]
+    );
+    assert_eq!(campaign.grids().len(), 1);
+    assert_eq!(campaign.probes().len(), 1);
+    assert_eq!(campaign.candidate_attempts(), 1);
+    assert!(campaign.pending().is_none());
+    let (rejected_tree, rejected) = campaign.rejected().unwrap();
+    assert_eq!(rejected_tree.leaves(), fine_tree.leaves());
+    assert!(!rejected.completed_and_rechecked());
+    assert!(rejected.outcome.is_ok());
+    assert!(rejected.gradient_check.as_ref().unwrap().passed());
+    assert_eq!(rejected.history.len(), 1);
+    assert_eq!(rejected.inherited_rho, inherited);
+    let rejected_point = rejected.initial.as_ref().unwrap();
+    assert!(rejected_point.evaluation.oracle.gradient_admissible());
+    close(
+        rejected_point.evaluation.worst_compliance,
+        fine.worst_compliance,
+        1e-9,
+    );
+    assert!(rejected_point.evaluation.worst_compliance > cap.reference());
+    assert!(rejected_point.evaluation.maximum > 1.0);
+    assert!(rejected.best.is_none());
+    assert!(rejected.recheck.as_ref().unwrap().is_err());
+    let current = campaign.current();
+    assert!(current.completed_and_rechecked());
+    assert_eq!(campaign.tree().leaves(), tree.leaves());
+    assert_eq!(
+        current.study.operator().elasticity().scales(),
+        source_scales
+    );
+    assert_eq!(
+        current.study.material_body_load_fingerprint(),
+        source_fingerprint
+    );
+    assert_eq!(current.study.physical_regions().unwrap(), source_regions);
+    let still_checked = current.recheck.as_ref().unwrap().as_ref().unwrap();
+    assert_eq!(still_checked.rho, source_point.rho);
+    assert_eq!(
+        still_checked.evaluation.worst_force,
+        source_point.evaluation.worst_force
+    );
+    assert_eq!(
+        still_checked.evaluation.worst_displacement,
+        source_point.evaluation.worst_displacement
+    );
+    assert!(still_checked.evaluation.maximum <= 1.0);
+    assert!(still_checked.evaluation.worst_compliance <= cap.reference());
 }

@@ -22,12 +22,7 @@ fn scale(options: ResponseLimitRefinementOptions3) -> Result<f64, GoalRefinement
     Ok(scale)
 }
 fn weights(op: &impl Sdf3Elasticity) -> Result<&[f64], GoalRefinementError3> {
-    let weights = op.reference_cell_masses_kg()
-        .ok_or(invalid("mass refinement requires native source material densities"))?;
-    if weights.len() != op.cells() || weights.iter().any(|w| !w.is_finite() || *w <= 0.0) {
-        return Err(invalid("invalid native reference inventory for refinement"));
-    }
-    Ok(weights)
+    crate::sdf3::inventory::mass_weights(op).map_err(Into::into)
 }
 pub(super) fn admit(coarse: &impl Sdf3Elasticity, fine: &impl Sdf3Elasticity,
     accepted: &ResponseLimitEvaluation3, options: ResponseLimitRefinementOptions3)
@@ -48,12 +43,7 @@ pub(super) fn measure(op: &impl Sdf3Elasticity, projected: &[f64], volume: f64,
     if matches!(options.objective, MinimumMaterialObjective3::VolumeFraction) {
         return Ok((None, normalized(volume, scale)?));
     }
-    if projected.len() != op.cells() { return Err(invalid("refinement inventory field length mismatch")); }
-    let mut mass = 0.0;
-    for (i, (&weight, &rho)) in weights(op)?.iter().zip(projected).enumerate() {
-        if i%1024 == 0 { control.checkpoint("response-limit-goal-mass")?; }
-        mass = number(mass + weight*rho)?;
-    }
+    let mass = crate::sdf3::inventory::weighted_occupancy(weights(op)?, projected, control)?;
     Ok((Some(mass), normalized(mass, scale)?))
 }
 

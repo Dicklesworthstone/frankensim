@@ -367,17 +367,53 @@ both grids must satisfy it in normalized and physical units, and the whole
 model change must meet its separate tolerance. That tolerance never waives
 physical cap excess.
 
+`estimate_affine_load_space_enrichment_with_inventory` additionally evaluates
+the dilated objective on both grids. It shares the original forward filter,
+copies the resulting physical dilated occupancy through the same native parent
+map, and integrates each grid's own volume or reference-material mass weights.
+It reports physical kg, normalized objective change and geometric volume change
+separately. The ordinary mass evaluator, response-limit refinement and affine
+refinement share the native weighted-occupancy integration; no SIMP stiffness
+floor is interpreted as physical mass. The additional inventory needs no
+elasticity solve, fine refilter or inventory adjoint.
+
+`affine_load_space::campaign::AffineLoadSpaceCampaign3` automatically repeats
+full assessment and refitting for the minimum-material goal. Its physical
+compliance cap, objective, filter/SIMP parameters, pure dead/basis laws and
+native acceleration recipe remain fixed. Every probe refines all active source
+cells and independently remaximizes the complete affine quadratic. A pass
+requires both physical caps, the full-model change gate, dilated-volume change
+and the selected normalized-inventory change. Uniform candidate refinement is
+the default; optional frozen-witness marking is a diagnostic heuristic, with
+uniform fallback whenever volume or inventory remains unresolved or no marks
+are produced. Selective marking never substitutes for the full final probe.
+
+Candidates inherit raw controls and protected labels, rebuild native self-weight,
+and reoptimize on their own filtered grid. A completed allowance and fresh
+full-envelope cap check precede atomic promotion of the tree, study and fields.
+Rejected candidate prefixes remain separate from the accepted design. Cumulative
+refit and attempt caps span all run segments, and failed attempts are charged.
+Completed probes and pending promotions are reused; original work-budget and
+cancellation reasons survive native callbacks. `run(0)` assesses the current
+design without attempting a candidate. Each successful promotion receives a
+fresh full probe before a normal pause or count limit. The caller's builder
+must preserve physical identity and enforce its cumulative geometry budget.
+
 `material_affine_load_space_sdf3` exercises native force balance and load-space
 sampling, full-chain compliance/volume derivatives, hard-case refusal and an
 actual minimum-kg constrained run with fresh feasible-point reassessment.
 Its adaptive regression introduces a coarse-unresolved spatial load and checks
 the changed fine adversary, inherited material/body force, both DWR identities,
 signed switching, source rollback and the direct-solve work bound. It also
-assesses hard-case witnesses without a design gradient.
+assesses hard-case witnesses without a design gradient. Explicit and automatic
+refit regressions check candidate-grid kg descent, a fresh final full-model and
+inventory probe, native body-load replay, and preservation of an accepted source
+when a completed candidate cannot meet the physical cap.
 These APIs cover fixed geometry, homogeneous supports, fixed dead loads and
 reference acceleration. Numerical load optimality evidence is not an interval
-enclosure, a continuum guarantee, a global design optimum, or an automatic
-refinement/reoptimization or serialized restart contract for this design owner.
+enclosure, a continuum guarantee, a global design optimum, or a serialized
+restart contract for this design owner. Automatic adaptive design currently
+uses the minimum-material formulation; explicit refits support both goals.
 
 ## 3-D cut-cell continuation
 

@@ -5,6 +5,7 @@
 //! numerical optimality evidence, rather than a smooth spectral surrogate.
 //! A selected hard-case witness is useful evidence but is not a differentiable
 //! objective. Only a numerically separated regular maximizer gets a gradient.
+pub mod campaign;
 pub mod design;
 mod grid;
 pub mod refinement;

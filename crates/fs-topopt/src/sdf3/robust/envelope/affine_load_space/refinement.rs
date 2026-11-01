@@ -5,7 +5,8 @@
 //! neither a smooth envelope derivative nor a continuum bound is assumed.
 use super::grid::{combine_fields, evaluate_grid, finite, normalize, relative_difference};
 use super::{AffineLoadSpace3, AffineLoadSpaceGrid3, RobustOptions3};
-use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3};
+use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
+use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3, Sdf3Elasticity};
 use crate::sdf3_goal::{GoalRefinementError3, controlled_goal3, prepare_material_goal3};
 use crate::{SolveControl, SolveWork};
 use fs_cutfem::elastic3::adaptive::enrichment::AdaptiveTransfer3;
@@ -38,6 +39,27 @@ impl Default for AffineLoadSpaceRefinementOptions3 {
     }
 }
 
+/// Dilated material inventory on the two actual native grids. Fine occupancy
+/// is copied from source parents, independently of eroded stiffness/self-weight.
+#[derive(Debug, Clone)]
+pub struct AffineLoadSpaceInventory3 {
+    pub objective: MinimumMaterialObjective3,
+    pub volume_scale: f64,
+    pub coarse_volume_fraction: f64,
+    pub fine_volume_fraction: f64,
+    /// Absolute change in numerical dilated volume fraction.
+    pub volume_change: f64,
+    pub coarse_mass_kg: Option<f64>,
+    pub fine_mass_kg: Option<f64>,
+    /// Inventory divided by volume_scale or the selected MassKg scale_kg.
+    pub coarse_objective: f64,
+    pub fine_objective: f64,
+    /// Absolute physical inventory change divided by its objective scale.
+    pub objective_change: f64,
+    /// Absolute dilated inventory change in kg, present only for MassKg.
+    pub mass_change_kg: Option<f64>,
+}
+
 /// Complete successful two-grid experiment at one raw source design.
 #[derive(Debug, Clone)]
 pub struct AffineLoadSpaceRefinement3 {
@@ -51,6 +73,8 @@ pub struct AffineLoadSpaceRefinement3 {
     pub fine_eroded_scales: Vec<f64>,
     pub coarse: AffineLoadSpaceGrid3,
     pub fine: AffineLoadSpaceGrid3,
+    /// Optional DILATED inventory, evaluated without another filter or solve.
+    pub inventory: Option<AffineLoadSpaceInventory3>,
     /// ||G_f-G_c||_F + 2||h_f-h_c||_2 + |c_f-c_c|, in normalized units.
     /// In exact arithmetic this bounds the quadratic change on the unit ball.
     /// This computed numerical metric is not an interval or continuum bound.
@@ -75,6 +99,97 @@ pub struct AffineLoadSpaceRefinement3 {
     /// by the reference. Diagnostic marking ONLY, not whole-envelope error.
     pub marking_mass: BTreeMap<Octant3, f64>,
     pub work: SolveWork,
+}
+
+fn inventory_scale(
+    objective: MinimumMaterialObjective3,
+    volume_scale: f64,
+) -> Result<f64, GoalRefinementError3> {
+    let scale = match objective {
+        MinimumMaterialObjective3::VolumeFraction => volume_scale,
+        MinimumMaterialObjective3::MassKg { scale_kg } => scale_kg,
+    };
+    // Mass mode carries volume_scale as metadata only, matching design admission.
+    if !scale.is_finite() || scale <= 0.0 || !(1.0 / scale).is_finite() || 1.0 / scale == 0.0 {
+        return Err(GoalRefinementError3::Invalid(
+            "affine inventory requires positive invertible scales",
+        ));
+    }
+    Ok(scale)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assess_inventory<O: Sdf3Elasticity, F: Sdf3Elasticity>(
+    coarse: &CutDensityStudy3<O>,
+    fine: &F,
+    projected: &[f64],
+    parents: &[usize],
+    objective: MinimumMaterialObjective3,
+    volume_scale: f64,
+    control: &mut SolveControl<'_>,
+) -> Result<AffineLoadSpaceInventory3, GoalRefinementError3> {
+    let scale = inventory_scale(objective, volume_scale)?;
+    if parents.len() != fine.cells() || projected.len() != coarse.cells() {
+        return Err(GoalRefinementError3::Invalid(
+            "affine inventory parent-map shape mismatch",
+        ));
+    }
+    let mut fine_projected = Vec::with_capacity(parents.len());
+    for (i, &parent) in parents.iter().enumerate() {
+        if i % 64 == 0 {
+            control.checkpoint("sdf3-affine-goal-dilated-occupancy")?;
+        }
+        fine_projected.push(*projected.get(parent).ok_or(GoalRefinementError3::Invalid(
+            "invalid affine inventory parent",
+        ))?);
+    }
+    let coarse_volume_fraction =
+        crate::sdf3::inventory::weighted_occupancy(&coarse.mass, projected, control)?;
+    let fine_volume_fraction =
+        crate::sdf3::inventory::volume_fraction(fine, &fine_projected, control)?;
+    let volume_change = (fine_volume_fraction - coarse_volume_fraction).abs();
+    let (coarse_mass_kg, fine_mass_kg, coarse_value, fine_value, mass_change_kg) = match objective {
+        MinimumMaterialObjective3::VolumeFraction => (
+            None,
+            None,
+            coarse_volume_fraction,
+            fine_volume_fraction,
+            None,
+        ),
+        MinimumMaterialObjective3::MassKg { .. } => {
+            let a = crate::sdf3::inventory::weighted_occupancy(
+                crate::sdf3::inventory::mass_weights(&coarse.operator)?,
+                projected,
+                control,
+            )?;
+            let b = crate::sdf3::inventory::weighted_occupancy(
+                crate::sdf3::inventory::mass_weights(fine)?,
+                &fine_projected,
+                control,
+            )?;
+            (Some(a), Some(b), a, b, Some((b - a).abs()))
+        }
+    };
+    let coarse_objective = normalize(coarse_value, scale, "sdf3-affine-goal-inventory")?;
+    let fine_objective = normalize(fine_value, scale, "sdf3-affine-goal-inventory")?;
+    let objective_change = normalize(
+        (fine_value - coarse_value).abs(),
+        scale,
+        "sdf3-affine-goal-inventory-change",
+    )?;
+    Ok(AffineLoadSpaceInventory3 {
+        objective,
+        volume_scale,
+        coarse_volume_fraction,
+        fine_volume_fraction,
+        volume_change,
+        coarse_mass_kg,
+        fine_mass_kg,
+        coarse_objective,
+        fine_objective,
+        objective_change,
+        mass_change_kg,
+    })
 }
 impl AffineLoadSpaceRefinement3 {
     /// Symmetric reconstruction of the normalized actual endpoint difference.
@@ -251,12 +366,65 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
     #[allow(clippy::too_many_arguments)]
     pub fn estimate_affine_load_space_enrichment<F: AdaptiveSdf3Elasticity>(
         &mut self,
+        enriched: F,
+        rho: &[f64],
+        dead: ReferenceLoad3<'_>,
+        basis: &[ReferenceLoad3<'_>],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        options: AffineLoadSpaceRefinementOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        self.affine_load_space_enrichment(
+            enriched, rho, dead, basis, robustness, policy, None, options, control,
+        )
+    }
+
+    /// The same complete affine experiment with DILATED inventory assessment.
+    /// Source eroded and dilated projections share one forward filter. Fine
+    /// dilated occupancy is copied from the same checked source parents, then
+    /// integrated against that grid's own volume and native mass weights.
+    /// No fine filter, inventory adjoint or additional elasticity solve occurs.
+    /// VolumeFraction does not require density; MassKg refuses either grid
+    /// without complete native material density. The existing load-set/DWR
+    /// identities and eroded fields retain their original meaning.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_affine_load_space_enrichment_with_inventory<F: AdaptiveSdf3Elasticity>(
+        &mut self,
+        enriched: F,
+        rho: &[f64],
+        dead: ReferenceLoad3<'_>,
+        basis: &[ReferenceLoad3<'_>],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        objective: MinimumMaterialObjective3,
+        volume_scale: f64,
+        options: AffineLoadSpaceRefinementOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        self.affine_load_space_enrichment(
+            enriched,
+            rho,
+            dead,
+            basis,
+            robustness,
+            policy,
+            Some((objective, volume_scale)),
+            options,
+            control,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn affine_load_space_enrichment<F: AdaptiveSdf3Elasticity>(
+        &mut self,
         mut enriched: F,
         rho: &[f64],
         dead: ReferenceLoad3<'_>,
         basis: &[ReferenceLoad3<'_>],
         robustness: RobustOptions3,
         policy: &AffineLoadSpace3,
+        inventory_policy: Option<(MinimumMaterialObjective3, f64)>,
         options: AffineLoadSpaceRefinementOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
@@ -281,12 +449,28 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 "invalid affine enrichment design/load family/options",
             ));
         }
+        if let Some((objective, volume_scale)) = inventory_policy {
+            inventory_scale(objective, volume_scale)?;
+            if matches!(objective, MinimumMaterialObjective3::MassKg { .. }) {
+                crate::sdf3::inventory::mass_weights(&self.operator)?;
+                crate::sdf3::inventory::mass_weights(&enriched)?;
+            }
+        }
         let filtered = self.filter_apply(rho, control)?;
         let eroded = self.design_from_filtered(
             &filtered,
             self.params.eta + robustness.threshold_offset,
             control,
         )?;
+        let dilated = inventory_policy
+            .map(|_| {
+                self.design_from_filtered(
+                    &filtered,
+                    self.params.eta - robustness.threshold_offset,
+                    control,
+                )
+            })
+            .transpose()?;
         let previous = self.operator.scales().to_vec();
         self.operator.set_scales(&eroded.scales)?;
         let result = (|| {
@@ -318,6 +502,22 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 }
                 fine_eroded_rho.push(eroded.projected[parent]);
             }
+            let inventory = inventory_policy
+                .map(|(objective, volume_scale)| {
+                    assess_inventory(
+                        self,
+                        &enriched,
+                        &dilated
+                            .as_ref()
+                            .expect("inventory projection was prepared")
+                            .projected,
+                        initial.parents(),
+                        objective,
+                        volume_scale,
+                        control,
+                    )
+                })
+                .transpose()?;
             drop(initial);
             enriched.set_scales(&fine_eroded_scales)?;
             let transfer = controlled_goal3(control, "sdf3-affine-goal-transfer", |poll| {
@@ -573,6 +773,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 fine_eroded_scales,
                 coarse,
                 fine,
+                inventory,
                 normalized_model_change,
                 normalized_maximum_change,
                 normalized_witness_change,

@@ -19,6 +19,7 @@
 //! graph Helmholtz filter is not the tetrahedral FEEC filter.
 
 mod operator;
+mod inventory;
 pub(crate) mod body;
 mod refine;
 pub mod regions;
@@ -213,9 +214,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     fn mass_prepared(&self, design: &Design3, control: &mut SolveControl<'_>)
         -> Result<(f64, Vec<f64>), EvaluationStop> {
         control.checkpoint("sdf3-material-mass")?;
-        let weights = self.operator.reference_cell_masses_kg()
-            .ok_or_else(|| failure("sdf3-material-mass-unavailable"))?;
-        let mass: f64 = weights.iter().zip(&design.projected).map(|(m,r)|m*r).sum();
+        let weights = inventory::mass_weights(&self.operator)?;
+        let mass = inventory::weighted_occupancy(weights, &design.projected, control)?;
         let local: Vec<f64> = weights.iter().zip(&design.slope).map(|(m,s)|m*s).collect();
         if !mass.is_finite() || mass < 0.0 || local.iter().any(|v| !v.is_finite()) {
             return Err(failure("sdf3-material-mass-overflow"));
