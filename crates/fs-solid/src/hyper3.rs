@@ -340,6 +340,18 @@ fn checkpoint(cx: &Cx<'_>) -> Result<(), HyperTetError> {
     cx.checkpoint().map_err(|_| HyperTetError::Cancelled)
 }
 
+fn inertia_error(error: crate::inertia::InertiaError) -> HyperTetError {
+    match error {
+        crate::inertia::InertiaError::InvalidInput { what } => HyperTetError::InvalidInput { what },
+        crate::inertia::InertiaError::Cancelled => HyperTetError::Cancelled,
+    }
+}
+
+fn free_force_norm(force: &[f64], free: &[usize]) -> f64 {
+    free.iter()
+        .fold(0.0_f64, |value, &dof| value.hypot(force[dof]))
+}
+
 /// `(a, b, c) -> (a x b) . c`.
 fn triple(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> f64 {
     (a[1] * b[2] - a[2] * b[1]) * c[0]
@@ -786,7 +798,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         displacement_m: &[f64],
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
-        self.solve_loaded_from(Some(displacement_m), None, None, None, cx)
+        self.solve_loaded_from(Some(displacement_m), None, None, None, None, cx)
     }
 
     /// Solve dead loads together with uniform current-area follower pressure.
@@ -915,7 +927,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
         gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
-        self.solve_loaded_from(None, None, pressure, gravity, cx)
+        self.solve_loaded_from(None, None, pressure, gravity, None, cx)
     }
 
     #[allow(clippy::too_many_lines)] // one load-step / Newton / line-search owner
@@ -928,10 +940,21 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             pressure::TetPressure<'_>,
         )>,
         gravity: Option<(&[f64], &gravity::GravityField3<'_>)>,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
         cx: &Cx<'_>,
     ) -> Result<HyperTetSolution, HyperTetError> {
         checkpoint(cx)?;
         self.validate_inputs()?;
+        if inertia.is_some()
+            && (initial_displacement.is_none()
+                || self.settings.load_steps != 1
+                || pressure.is_some()
+                || gravity.is_some())
+        {
+            return Err(HyperTetError::InvalidInput {
+                what: "finite inertia requires one accepted endpoint and held dead loads".into(),
+            });
+        }
         if let Some(displacement) = initial_displacement {
             if self.settings.load_steps != 1 {
                 return Err(HyperTetError::InvalidInput {
@@ -973,6 +996,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
             return Err(HyperTetError::InvalidInput {
                 what: "initial solid energy or internal force is not representable".into(),
             });
+        }
+        let mut material_free_norm = 0.0;
+        let mut current_inertia_potential = 0.0;
+        if let Some(inertia) = inertia {
+            material_free_norm = free_force_norm(&state.internal, &free);
+            inertia
+                .add_force(&u, &mut state.internal, cx)
+                .map_err(inertia_error)?;
+            current_inertia_potential = inertia.potential(&u, cx).map_err(inertia_error)?;
         }
         let nonsymmetric = matches!(pressure, Some((_, pressure::TetPressure::PerFace(_))));
         let mut scaled_faces = Vec::new();
@@ -1084,7 +1116,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 } else {
                     None
                 };
-                if pressure_tangent.is_some() || gravity_tangent.is_some() {
+                if pressure_tangent.is_some() || gravity_tangent.is_some() || inertia.is_some() {
                     let mut combined = Coo::new(dofs, dofs);
                     for row in 0..dofs {
                         if row % 4096 == 0 {
@@ -1100,6 +1132,11 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                             }
                         }
                     }
+                    if let Some(inertia) = inertia {
+                        inertia
+                            .add_tangent(&mut combined, cx)
+                            .map_err(inertia_error)?;
+                    }
                     full = combined.assemble();
                 }
                 for row in 0..dofs {
@@ -1112,24 +1149,39 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                         });
                     }
                 }
-                let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
-                // Common translation is not a deformation scale: it must not
-                // loosen the force-equilibrium gate.
-                let origin = [u[0], u[1], u[2]];
-                let reach = u
-                    .chunks_exact(3)
-                    .flat_map(|node| {
-                        [
-                            (node[0] - origin[0]).abs(),
-                            (node[1] - origin[1]).abs(),
-                            (node[2] - origin[2]).abs(),
-                        ]
-                    })
-                    .fold(0.0, f64::max);
-                let scale = norm(&state.internal)
-                    .max(norm(&f_ext))
-                    .max(stiffness * reach)
-                    .max(f64::MIN_POSITIVE);
+                let scale = if let Some(inertia) = inertia {
+                    // Momentum balance uses only physical forces on free rows;
+                    // neither rigid travel nor unrelated support forces can
+                    // inflate its acceptance threshold.
+                    inertia
+                        .force_scale(
+                            &u,
+                            &free,
+                            material_free_norm,
+                            free_force_norm(&f_ext, &free),
+                            cx,
+                        )
+                        .map_err(inertia_error)?
+                } else {
+                    let stiffness = (0..dofs).map(|d| full.get(d, d).abs()).fold(0.0, f64::max);
+                    // Common translation is not a deformation scale: it must not
+                    // loosen the force-equilibrium gate.
+                    let origin = [u[0], u[1], u[2]];
+                    let reach = u
+                        .chunks_exact(3)
+                        .flat_map(|node| {
+                            [
+                                (node[0] - origin[0]).abs(),
+                                (node[1] - origin[1]).abs(),
+                                (node[2] - origin[2]).abs(),
+                            ]
+                        })
+                        .fold(0.0, f64::max);
+                    norm(&state.internal)
+                        .max(norm(&f_ext))
+                        .max(stiffness * reach)
+                        .max(f64::MIN_POSITIVE)
+                };
                 let relative = norm(&residual) / scale;
                 record.residual_history.push(relative);
                 if !pending_any && relative <= self.settings.relative_tolerance {
@@ -1176,10 +1228,31 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     for &(dof, dp) in &pending {
                         trial[dof] = alpha.mul_add(dp, trial[dof]);
                     }
-                    if let Ok(evaluated) = self.evaluate(elements, &trial, cx)?
+                    if let Ok(mut evaluated) = self.evaluate(elements, &trial, cx)?
                         && evaluated.energy.is_finite()
                         && evaluated.internal.iter().all(|value| value.is_finite())
                     {
+                        let mut trial_material_free_norm = 0.0;
+                        let trial_inertia_potential = if let Some(inertia) = inertia {
+                            trial_material_free_norm = free_force_norm(&evaluated.internal, &free);
+                            let evaluated_inertia = (|| {
+                                inertia.add_force(&trial, &mut evaluated.internal, cx)?;
+                                inertia.potential(&trial, cx)
+                            })();
+                            match evaluated_inertia {
+                                Ok(value) => value,
+                                Err(crate::inertia::InertiaError::Cancelled) => {
+                                    return Err(HyperTetError::Cancelled);
+                                }
+                                Err(_) => {
+                                    alpha *= 0.5;
+                                    record.backtracks += 1;
+                                    continue;
+                                }
+                            }
+                        } else {
+                            0.0
+                        };
                         let (trial_ext, trial_volume, trial_gravity_potential) =
                             match loaded(&trial) {
                                 Ok(value) => value,
@@ -1203,7 +1276,11 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 .fold(0.0, |sum, (force, (after, before))| {
                                     force.mul_add(after - before, sum)
                                 });
-                            let energy_change = evaluated.energy - state.energy;
+                            let mut energy_change = evaluated.energy - state.energy;
+                            if inertia.is_some() {
+                                energy_change +=
+                                    trial_inertia_potential - current_inertia_potential;
+                            }
                             let pressure_change = match applied_pressure {
                                 Some((_, pressure::TetPressure::Uniform(value))) => {
                                     value * (trial_volume - current_volume)
@@ -1214,7 +1291,7 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 load * (trial_gravity_potential - current_gravity_potential);
                             let change =
                                 energy_change - dead_work + pressure_change + gravity_change;
-                            let roundoff = 1e-12
+                            let mut roundoff = 1e-12
                                 * state
                                     .energy
                                     .abs()
@@ -1222,6 +1299,14 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                     .max(dead_work.abs())
                                     .max(pressure_change.abs())
                                     .max(gravity_change.abs());
+                            if inertia.is_some() {
+                                roundoff = roundoff.max(
+                                    1e-12
+                                        * current_inertia_potential
+                                            .abs()
+                                            .max(trial_inertia_potential.abs()),
+                                );
+                            }
                             // A field may use a large absolute potential datum
                             // (e.g. zero at infinity). If endpoint subtraction
                             // loses the step's energy change, require an actual
@@ -1265,6 +1350,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                                 trial_ext,
                                 trial_volume,
                                 trial_gravity_potential,
+                                trial_material_free_norm,
+                                trial_inertia_potential,
                             ));
                             break;
                         }
@@ -1272,8 +1359,15 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                     alpha *= 0.5;
                     record.backtracks += 1;
                 }
-                let Some((trial, evaluated, trial_ext, trial_volume, trial_gravity_potential)) =
-                    accepted
+                let Some((
+                    trial,
+                    evaluated,
+                    trial_ext,
+                    trial_volume,
+                    trial_gravity_potential,
+                    trial_material_free_norm,
+                    trial_inertia_potential,
+                )) = accepted
                 else {
                     return Err(HyperTetError::NewtonStalled {
                         load_factor: load,
@@ -1285,6 +1379,8 @@ impl<L: FiniteStrainPotential> HyperTetProblem<'_, L> {
                 f_ext = trial_ext;
                 current_volume = trial_volume;
                 current_gravity_potential = trial_gravity_potential;
+                material_free_norm = trial_material_free_norm;
+                current_inertia_potential = trial_inertia_potential;
             }
             if !converged {
                 return Err(HyperTetError::NewtonStalled {

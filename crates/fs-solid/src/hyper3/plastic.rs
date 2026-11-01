@@ -18,8 +18,9 @@
 //! flow can cause volumetric locking even when the elastic Poisson ratio is
 //! moderate. Accurate bending in strongly plastic or nearly incompressible
 //! regimes requires a mixed/stabilized successor and mesh evidence; an affine
-//! patch does not establish that accuracy. No thermal evolution, inertia,
-//! contact, follower loads or cyclic kinematic hardening is supplied here.
+//! patch does not establish that accuracy. [`dynamics`] adds endpoint inertia
+//! on this same solve. No thermal evolution, contact, follower loads or cyclic
+//! kinematic hardening is supplied here.
 
 use std::sync::Arc;
 
@@ -34,7 +35,12 @@ use super::{
 };
 use crate::linear3::TetAssemblyBudget;
 
+/// Consistent reference inertia with atomic finite-plastic motion acceptance.
+pub mod dynamics;
+
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+
+type AcceptedMotion = (Vec<[f64; 3]>, crate::inertia::InertialEnergy);
 
 /// Exact original laws, in original tetrahedron order; no property averaging.
 #[derive(Debug)]
@@ -104,7 +110,8 @@ pub struct FinitePlasticTetEnergy {
     pub support_endpoint_work_j: f64,
     /// Sum(V P_after : (F_after - F_before)).
     pub internal_endpoint_work_j: f64,
-    /// External endpoint work minus internal endpoint work; signed, gate checked.
+    /// External endpoint work minus material internal work and, for dynamics,
+    /// inertial endpoint work; signed and independently gate checked.
     pub equilibrium_work_residual_j: f64,
     /// Internal endpoint work minus stored-energy change minus plastic dissipation.
     /// Signed quadrature defect; never heat or an assumed nonnegative quantity.
@@ -364,7 +371,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
     /// Requires one native load step and explicit finite nonnegative work/yield
     /// tolerances. Every refusal, including cancellation after equilibrium,
     /// returns no candidate and leaves `self` unchanged.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    #[allow(clippy::too_many_arguments)]
     pub fn advance(
         &self,
         prescribed_m: &[(usize, f64)],
@@ -374,6 +381,33 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         controls: FinitePlasticStepControls,
         cx: &Cx<'_>,
     ) -> Result<FinitePlasticTetStep<'a, L>, FinitePlasticTetError> {
+        self.advance_loaded(
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            settings,
+            controls,
+            None,
+            cx,
+        )
+        .map(|(step, _)| step)
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        clippy::type_complexity
+    )]
+    fn advance_loaded(
+        &self,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        controls: FinitePlasticStepControls,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(FinitePlasticTetStep<'a, L>, Option<AcceptedMotion>), FinitePlasticTetError> {
         checkpoint(cx)?;
         if settings.load_steps != 1
             || [
@@ -425,9 +459,19 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             settings,
         };
         let old_u = self.displacement_m.as_flattened();
-        let equilibrium =
-            problem.solve_loaded_from(Some(old_u), Some(&self.elements), None, None, cx)?;
+        let equilibrium = problem.solve_loaded_from(
+            Some(old_u),
+            Some(&self.elements),
+            None,
+            None,
+            inertia,
+            cx,
+        )?;
         let new_u = equilibrium.displacement_m.as_flattened();
+        let motion = inertia
+            .map(|inertia| inertia.motion(new_u, cx))
+            .transpose()
+            .map_err(super::inertia_error)?;
         let mut element_states = Vec::with_capacity(self.elements.len());
         let mut element_deformation = Vec::with_capacity(self.elements.len());
         let mut element_first_piola_pa = Vec::with_capacity(self.elements.len());
@@ -503,6 +547,9 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
             + energy.support_endpoint_work_j
             - energy.internal_endpoint_work_j;
+        if let Some((_, inertia)) = &motion {
+            energy.equilibrium_work_residual_j -= inertia.inertial_work_j;
+        }
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j
             - (energy.stored_after_j - energy.stored_before_j)
             - energy.plastic_dissipation_j;
@@ -548,10 +595,13 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             element_first_piola_pa,
             stored_energy_j: energy.stored_after_j,
         };
-        Ok(FinitePlasticTetStep {
-            solid,
-            equilibrium,
-            energy,
-        })
+        Ok((
+            FinitePlasticTetStep {
+                solid,
+                equilibrium,
+                energy,
+            },
+            motion,
+        ))
     }
 }

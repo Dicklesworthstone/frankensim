@@ -45,6 +45,8 @@ pub mod frame2d;
 pub mod hyper2d;
 /// Three-dimensional finite-strain hyperelasticity on linear tetrahedra.
 pub mod hyper3;
+/// Shared consistent reference mass and endpoint momentum integration.
+mod inertia;
 #[cfg(feature = "koiter-asymptotics")]
 pub mod koiter;
 pub mod linear;
