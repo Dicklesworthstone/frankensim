@@ -18,6 +18,9 @@ use fs_exec::CancelGate;
 use fs_math::{c64::C64, det};
 use std::f64::consts::TAU;
 
+#[path = "force_dipole/mixed_surface.rs"]
+mod mixed_surface;
+
 const MEDIUM: Medium = Medium {
     density: 1.2,
     sound_speed: 340.0,

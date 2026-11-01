@@ -1524,6 +1524,35 @@ does not qualify measured player/chair geometry or close the full W9 milestone.
 
 ### Shared material diffraction, finite-source reaction and angular fields
 
+`LocalBoundaryObservation::combine_surface_and_scattering` and its iterative
+counterpart consume already-admitted finite-source and compact-source owners
+to create one coherent bank. Finite structural velocity/aperture flow columns
+precede compact volume-flow/force columns and keep their original SI units.
+The exact surface object, medium, receiver identities/order, clearance,
+material boundary, frequency limit, receiver quadrature and lower window must
+agree; iterative solver settings must also agree. Duplicate names and combined
+source/output extents exceeding the original caps refuse before any solve.
+
+One boundary preparation and receiver quadrature table serve the whole bank
+at each frequency. Prescribed surface velocity and incident Robin traces reach
+the original solve owner; analytic compact pressure and full particle velocity
+are added exactly once. Retained source dispatch carries that same distinction
+through harmonic statistics, microphones, directivity and positive angular
+power. Cross terms therefore survive between a signed wall mode, an aperture,
+a volume injection and a force on the fluid, including destructive interference.
+Original source clearance, passive-patch disjointness and cancellation remain
+active. A force column refuses raw DC and an unwindowed FIR; a matching explicit
+lower window is retained. A mixed compact basis still refuses finite velocity
+self-impedance extraction: no point-source self-work port or automatic
+structural loading law is invented.
+
+Focused G1/G3 tests define an independently assembled combined Robin drive,
+dense/iterative total p/u parity, signed-coordinate reversal, microphone nulls
+with nonzero velocity/outgoing power, factorized partial coherence and exact
+direct compact far-field terms. Identity, source clearance, cancellation and
+window refusals use the original admission paths. These algebraic tests do not
+establish mesh convergence or measured source fidelity.
+
 `IterativeBoundaryObservation::solve_frequency` retains the original pressure
 and actual normal velocity for every source at one positive physical frequency.
 One shared FMM/preconditioner solves every original source column; the streaming

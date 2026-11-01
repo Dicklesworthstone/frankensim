@@ -112,10 +112,7 @@ impl<'o, 's> IterativeBoundaryResponse<'o, 's> {
         if index >= self.solutions.len() {
             return Err(TransferError::Invalid("retained source index is out of range").into());
         }
-        Ok(match &self.observer.observation.excitation {
-            Excitation::Point(owner) => Some(owner.compact_sources[index].unit_incident()),
-            Excitation::Surface { .. } => None,
-        })
+        Ok(self.observer.observation.source_incident(index))
     }
 
     /// Volume-only adapter for the original point-source API. Force columns

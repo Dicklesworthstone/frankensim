@@ -222,6 +222,38 @@ impl<'a> IterativeBoundaryObservation<'a> {
         })
     }
 
+    /// One coherent finite-wall/aperture plus compact flow/force bank. Both
+    /// admitted observations must have identical physical and numerical
+    /// bindings. Each frequency shares one FMM/preconditioner across all
+    /// columns; retained fields and analytic incident additions keep their
+    /// original owners. Point-source self-loading remains unsupported.
+    pub fn combine_surface_and_scattering(
+        surface: Self,
+        scattering: Self,
+        gate: &CancelGate,
+    ) -> Result<Self, IterativeObservationError> {
+        poll(gate)?;
+        let identity = |options: &IterativeOptions| {
+            let mut hash = DomainHasher::new("fs-bem:combined-iterative-options:v1");
+            hash_options(&mut hash, options);
+            hash.finalize()
+        };
+        if identity(&surface.solver) != identity(&scattering.solver) {
+            return Err(TransferError::Invalid(
+                "combined observations require identical solver options",
+            )
+            .into());
+        }
+        Ok(Self {
+            observation: LocalBoundaryObservation::combine_surface_and_scattering(
+                surface.observation,
+                scattering.observation,
+                || gate.is_requested(),
+            )?,
+            solver: surface.solver,
+        })
+    }
+
     pub fn sources(&self) -> &[SourceId] {
         self.observation.sources()
     }
@@ -332,10 +364,7 @@ impl<'a> IterativeBoundaryObservation<'a> {
     ) -> Result<(PreparedHarmonicObservation, Vec<IterativeSourceReport>), IterativeObservationError>
     {
         poll(gate)?;
-        let medium = match &self.observation.excitation {
-            Excitation::Point(owner) => owner.medium,
-            Excitation::Surface { owner, .. } => owner.medium,
-        };
+        let medium = self.field_geometry().1;
         harmonic::admit_frequency(omega, medium)?;
         let sample = self.physical_frequency_sample(omega, gate)?;
         let field = PreparedHarmonicObservation::from_samples(
@@ -404,19 +433,7 @@ impl<'a> IterativeBoundaryObservation<'a> {
     }
 
     fn field_geometry(&self) -> (&'a SpherePanels, Medium, &Geometry<'a>, Options) {
-        match &self.observation.excitation {
-            Excitation::Point(owner) => (
-                owner.surface,
-                owner.medium,
-                &owner.receiver_geometry,
-                owner.quadrature,
-            ),
-            Excitation::Surface {
-                owner,
-                geometry,
-                quadrature,
-            } => (owner.surface, owner.medium, geometry, *quadrature),
-        }
+        self.observation.field_geometry()
     }
 
     // One original solve traversal for streaming observation and retained
@@ -464,10 +481,9 @@ impl<'a> IterativeBoundaryObservation<'a> {
         let mut output = prepare()?;
         for (index, source) in self.sources().iter().enumerate() {
             poll(gate)?;
-            let (radiation, solve, resources, absorbed_power_w) = match &self.observation.excitation
-            {
-                Excitation::Point(owner) => {
-                    let sources = [owner.compact_sources[index].unit_incident()];
+            let (radiation, solve, resources, absorbed_power_w) =
+                if let Some(source) = self.observation.source_incident(index) {
+                    let sources = [source];
                     let incident = IncidentTraces::from_admitted_field(
                         surface,
                         k,
@@ -482,18 +498,19 @@ impl<'a> IterativeBoundaryObservation<'a> {
                         resources,
                         response.absorbed_power_w,
                     )
-                }
-                Excitation::Surface { owner, .. } => {
-                    let (response, solve, resources) =
-                        prepared.solve(&owner.fields[index], gate)?;
+                } else {
+                    let field = self
+                        .observation
+                        .source_velocity(index)
+                        .ok_or(TransferError::Invalid("missing finite source trace"))?;
+                    let (response, solve, resources) = prepared.solve(field, gate)?;
                     (
                         response.radiation,
                         solve,
                         resources,
                         response.absorbed_power_w,
                     )
-                }
-            };
+                };
             receive(
                 &mut output,
                 index,
@@ -529,20 +546,20 @@ impl<'a> IterativeBoundaryObservation<'a> {
                 .iter()
                 .zip(&received.particle_velocity_m_s),
         ) {
-            let (pressure, velocity) = match &self.observation.excitation {
-                Excitation::Point(owner) => {
-                    let sources = [owner.compact_sources[index].unit_incident()];
-                    let direct = IncidentField::Sources(&sources).pressure_velocity_at(
-                        k,
-                        medium,
-                        receiver.position_m,
-                    )?;
-                    (
-                        pressure + direct.pressure_pa,
-                        std::array::from_fn(|axis| velocity[axis] + direct.velocity_m_s[axis]),
-                    )
-                }
-                Excitation::Surface { .. } => (pressure, *velocity),
+            let (pressure, velocity) = if let Some(source) = self.observation.source_incident(index)
+            {
+                let sources = [source];
+                let direct = IncidentField::Sources(&sources).pressure_velocity_at(
+                    k,
+                    medium,
+                    receiver.position_m,
+                )?;
+                (
+                    pressure + direct.pressure_pa,
+                    std::array::from_fn(|axis| velocity[axis] + direct.velocity_m_s[axis]),
+                )
+            } else {
+                (pressure, *velocity)
             };
             output.push(pressure);
             output.extend(velocity.iter().map(|&component| momentum * component));
