@@ -143,6 +143,13 @@ impl EnergyConfig {
         gate: &CancelGate,
     ) -> Result<EnergySolution, ChtError> {
         super::super::poll(gate)?;
+        if !setup.source_face_contacts.is_empty() {
+            return super::source_contact::solve(domain, solids, setup, false, gate, |fixed| {
+                self.solve_with_fields(
+                    domain, fluid, solids, flow, fixed, molecular_w_m_k, enthalpy, step, gate,
+                )
+            });
+        }
         if molecular_w_m_k.len() != domain.cell_count() {
             return Err(ChtError::InvalidInput {
                 field: "thermal.molecular_conductivity",

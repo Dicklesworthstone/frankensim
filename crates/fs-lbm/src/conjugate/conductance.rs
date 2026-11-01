@@ -262,6 +262,36 @@ pub(crate) fn interface_conductance(
     db: f64,
     contact: f64,
 ) -> Option<f64> {
+    solve_interface(a, ta, da, b, tb, db, contact, None)
+}
+
+/// The same fixed-resistance solve, retaining its ordered physical surfaces.
+pub(crate) struct InterfaceResponse {
+    pub(crate) conductance_w_m2_k: f64,
+    pub(crate) surface_temperature_k: [f64; 2],
+}
+
+pub(crate) fn interface_response(
+    a: ConductivityCurve<'_>, ta: f64, da: f64,
+    b: ConductivityCurve<'_>, tb: f64, db: f64, contact: f64,
+) -> Option<InterfaceResponse> {
+    let mut surface_temperature_k = [0.0; 2];
+    let conductance_w_m2_k = solve_interface(
+        a, ta, da, b, tb, db, contact, Some(&mut surface_temperature_k),
+    )?;
+    surface_temperature_k.iter().all(|t| t.is_finite()).then_some(InterfaceResponse {
+        conductance_w_m2_k, surface_temperature_k,
+    })
+}
+
+// The ordinary coefficient path does not recover or validate unused surfaces;
+// its arithmetic and admissible range remain unchanged.
+#[allow(clippy::too_many_arguments)]
+fn solve_interface(
+    a: ConductivityCurve<'_>, ta: f64, da: f64,
+    b: ConductivityCurve<'_>, tb: f64, db: f64, contact: f64,
+    surfaces: Option<&mut [f64; 2]>,
+) -> Option<f64> {
     if !ta.is_finite()
         || !tb.is_finite()
         || !da.is_finite()
@@ -278,7 +308,13 @@ pub(crate) fn interface_conductance(
         return None;
     }
     if ta < tb {
-        return interface_conductance(b, tb, db, a, ta, da, contact);
+        if let Some(surfaces) = surfaces {
+            let mut reversed = [0.0; 2];
+            let g = solve_interface(b, tb, db, a, ta, da, contact, Some(&mut reversed))?;
+            *surfaces = [reversed[1], reversed[0]];
+            return Some(g);
+        }
+        return solve_interface(b, tb, db, a, ta, da, contact, None);
     }
     if ta == tb || (a.table.len() <= 1 && b.table.len() <= 1) || (da == 0.0 && db == 0.0) {
         let ka = a.at(ta);
@@ -293,6 +329,12 @@ pub(crate) fn interface_conductance(
             return None;
         }
         let g = (1.0 / (ra / scale + rb / scale + contact / scale)) / scale;
+        if let Some(surfaces) = surfaces {
+            let total = ra / scale + rb / scale + contact / scale;
+            let span = ta - tb;
+            *surfaces = [ta - span * ((ra / scale) / total),
+                tb + span * ((rb / scale) / total)];
+        }
         return positive(g).then_some(g);
     }
     if !(ta - tb).is_finite() {
@@ -327,6 +369,10 @@ pub(crate) fn interface_conductance(
         if f >= 0.0 {
             let flux = root(&hot, &cold, contact, low, high)?;
             let g = flux / scale;
+            if let Some(surfaces) = surfaces {
+                *surfaces = [ta - (ta - tb) * hot.evaluate(flux)?.0,
+                    tb + (ta - tb) * cold.evaluate(flux)?.0];
+            }
             return positive(g).then_some(g);
         }
         if high == contact_limit
@@ -336,6 +382,10 @@ pub(crate) fn interface_conductance(
             // At a complete half-cell drop the true residual is nonnegative.
             // Permit only its final floating-point summation uncertainty.
             let g = high / scale;
+            if let Some(surfaces) = surfaces {
+                *surfaces = [ta - (ta - tb) * hot.evaluate(high)?.0,
+                    tb + (ta - tb) * cold.evaluate(high)?.0];
+            }
             return (f >= -16.0 * f64::EPSILON && positive(g)).then_some(g);
         }
         low = high;

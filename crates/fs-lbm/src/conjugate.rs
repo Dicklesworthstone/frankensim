@@ -124,7 +124,8 @@ pub use electric::{
 pub use energy::{
     AdvectiveEnthalpyField, AffineSpecificEnthalpy, CellSink, CompactComponent, ContactResistance,
     ConvectionScheme, EnergyBalance, EnergyConfig,
-    EnergyReport, EnergySolution, FaceContactResistance, JunctionSolution, ThermalFace,
+    EnergyReport, EnergySolution, FaceContactResistance, JunctionSolution, SourceContactControls,
+    SourceContactState, SourceFaceContact, ThermalFace,
     ThermalSetup, solve_energy,
 };
 pub use flow::{

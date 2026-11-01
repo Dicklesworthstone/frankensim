@@ -5,6 +5,36 @@ link-wise D3Q19 wall/open-boundary topology, the lattice-scaling assistant,
 and dense-grid extension scaffolding for vector forcing, local rheology,
 thermal double-population fixtures, and a free-surface mass-ledger prototype.
 
+## Source-backed surface contact in native conjugate heat transfer
+
+`ThermalSetup::source_face_contacts` binds original ordered interface cards to
+explicit cell-face pairs. Each law updates only its two declared absolute-
+temperature coordinates; pressure, medium, finish, history and the selected
+claim retain their original context. The resistance is queried at the solved
+surface temperatures, not the bulk cell centres. The existing half-cell owner
+integrates native authored k(T) curves and recovers both surfaces from one
+common heat flux. Explicit resolved conductivity fields keep their declared
+frozen-bulk semantics, including the fluid's eddy contribution exactly once.
+
+Native and resolved-field energy entry points share one bounded contact
+iteration. Each trial reuses the original conservative fixed-resistance solve;
+transient trials retain the original stored-energy history. There is no second
+time integrator, interfacial storage or additional source of heat. Duplicate
+face ownership, compact aliases and through-flow use the existing face-contact
+admission. A failed query, cancellation or exhausted iteration publishes no
+candidate and changes no caller-owned setup or thermal history.
+
+Acceptance checks both the relative difference between source and assembled
+resistance and the local Kelvin defect `(T_surface_A-T_surface_B)-R_source*q`.
+`EnergySolution::source_contact_states` retains the actual surfaces, ordered
+heat, applied/source resistance, residuals and original source receipts.
+Explicit iteration, relaxation and tolerance controls govern this fixed point;
+arbitrary positive source laws do not imply uniqueness or global convergence.
+The no-source path retains its existing behavior. Focused G1/G3/G4 tests cover
+closed transient energy against an independent scalar flux equation, nonlinear
+solid/fluid half-cell integration, ordered source reversal, surface-only source
+support, the heat observer, and transactional refusals.
+
 ## Purpose and layer
 
 Layer L3 (FLUX). Depends on `fs-evidence` (the `Color` for the Evidence-typed

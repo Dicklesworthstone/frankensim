@@ -32,6 +32,8 @@ mod enthalpy_field;
 pub use enthalpy_field::{AdvectiveEnthalpyField, AffineSpecificEnthalpy};
 mod face_contact;
 pub use face_contact::FaceContactResistance;
+mod source_contact;
+pub use source_contact::{SourceContactControls, SourceContactState, SourceFaceContact};
 
 /// Thermal rule on one domain face.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -92,6 +94,11 @@ pub struct ThermalSetup {
     /// These interfaces have no storage and admit no through-flow; they do not
     /// change either cell's mechanical occupancy or material assignment.
     pub face_contacts: Vec<FaceContactResistance>,
+    /// Ordered source laws evaluated at their solved half-cell surfaces.
+    /// Every face has exactly one fixed or source-backed resistance owner.
+    pub source_face_contacts: Vec<SourceFaceContact>,
+    /// Shared endpoint controls for the source-backed face resistances.
+    pub source_contact_controls: SourceContactControls,
     /// Linear exchanges `G (T_cell - T_sink)` leaving individual cells (a
     /// linearized radiation exchange, a compact thermal model's link).
     pub cell_sinks: Vec<CellSink>,
@@ -205,6 +212,8 @@ impl ThermalSetup {
             fixed_temperature: Vec::new(),
             contacts: Vec::new(),
             face_contacts: Vec::new(),
+            source_face_contacts: Vec::new(),
+            source_contact_controls: SourceContactControls::default(),
             cell_sinks: Vec::new(),
             eddy_conductivity_w_m_k: Vec::new(),
             compact_components: Vec::new(),
@@ -337,6 +346,11 @@ pub struct EnergySolution {
     /// Canonical `(lower cell, upper cell)` face resistances actually used by
     /// this solve, m² K/W. Kept for consistent downstream heat-flow observers.
     pub face_contact_resistance_m2_k_w: std::collections::BTreeMap<(usize, usize), f64>,
+    /// Final source queries and physical surface states, in declaration order.
+    pub source_contact_states: Vec<SourceContactState>,
+    /// Fixed-resistance thermal solves used by this source-contact endpoint.
+    /// Zero when no source contacts were supplied.
+    pub source_contact_iterations: usize,
     /// Ordinary solid/fluid faces as `(solid cell, fluid cell, conductance W/K)`.
     /// These are the actual accepted face coefficients, including nonlinear
     /// bulk response and contact. Compact junctions retain their own links.
@@ -748,6 +762,11 @@ pub(crate) fn solve_energy_inner(
     step: Option<&PseudoStep<'_>>,
     gate: &CancelGate,
 ) -> Result<EnergySolution, ChtError> {
+    if !setup.source_face_contacts.is_empty() {
+        return source_contact::solve(domain, solids, setup, true, gate, |fixed| {
+            solve_energy_inner(domain, fluid, solids, flow, fixed, config, step, gate)
+        });
+    }
     if solids.iter().all(|s| s.conductivity_table.is_empty()) {
         return solve_energy_once(domain, fluid, solids, flow, setup, config, step, None, gate);
     }
@@ -1397,6 +1416,8 @@ fn solve_energy_field(
         temperature,
         conductivity: ctx.k,
         face_contact_resistance_m2_k_w: ctx.face_contacts,
+        source_contact_states: Vec::new(),
+        source_contact_iterations: 0,
         solid_fluid_links,
         junctions,
         report,
