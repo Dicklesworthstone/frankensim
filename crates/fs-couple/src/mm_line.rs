@@ -246,6 +246,15 @@ pub struct MmComboReceipt {
     pub tail_energy: f64,
     /// Worst shift in cents of the first three impedance peaks vs the preceding rung.
     pub peak_shift_cents: f64,
+    /// Peak pairs compared, at most ten: the first `|Z|` peaks above 45 Hz of
+    /// the stored taps and of the spectrum they were realized from, on the
+    /// same `n_fft` bins.
+    pub image_peaks: usize,
+    /// Worst frequency difference of those pairs [cents], taps against the
+    /// spectrum. Printed, not refused; `NaN` when no pair was found.
+    pub image_worst_cents: f64,
+    /// Worst level difference of those pairs [dB]; `NaN` when no pair was found.
+    pub image_worst_db: f64,
 }
 
 /// A record of one valve switch's state lift.
@@ -718,6 +727,8 @@ impl MmLineBank {
                 });
             }
             let table_bins = rung.from_table[1..].iter().filter(|&&t| t).count();
+            let (image_peaks, image_worst_cents, image_worst_db) =
+                image_peak_error(&rung.r_pos, &rung.ir, dt);
             lines.push(DelayedFilter::from_impulse_response(dt, rung.ir.clone())?);
             taps.push(rung.ir);
             receipts.push(MmComboReceipt {
@@ -730,6 +741,9 @@ impl MmLineBank {
                 rungs_tried,
                 tail_energy: rung.tail_energy,
                 peak_shift_cents: rung.shift,
+                image_peaks,
+                image_worst_cents,
+                image_worst_db,
             });
         }
 
@@ -975,6 +989,58 @@ fn peak_shift_cents(previous: &[f64], current: &[f64]) -> f64 {
             .map(|(&a, &b)| (1200.0 * (b / a).log2()).abs())
             .fold(0.0_f64, f64::max)
     }
+}
+
+/// The bank's own error, read after the taps are final: the first ten `|Z|`
+/// peaks above 45 Hz of the stored taps against those of `r_pos`, the spectrum
+/// the taps were realized from. Both curves are read on the same `n_fft` bins
+/// with a parabola through log magnitude, so no impedance is evaluated again.
+/// Returns the pairs compared and their worst cents and dB. The card receipt
+/// prints these; nothing refuses on them yet.
+fn image_peak_error(r_pos: &[C64], taps: &[f64], dt: f64) -> (usize, f64, f64) {
+    const PEAKS: usize = 10;
+    let n_fft = taps.len();
+    let half = n_fft / 2;
+    debug_assert_eq!(r_pos.len(), half + 1);
+    let mut buf: Vec<FftC64> = taps.iter().map(|&h| FftC64::new(h, 0.0)).collect();
+    let mut scratch = vec![FftC64::new(0.0, 0.0); n_fft];
+    Fft::new(n_fft).forward(&mut buf, &mut scratch);
+    // |Z / zc0|^2 = |1 + R|^2 / |1 - R|^2 is the same for R and its conjugate,
+    // so the taps' DFT sign convention does not enter.
+    let norm_z_sq = |re: f64, im: f64| {
+        ((1.0 + re) * (1.0 + re) + im * im) / ((1.0 - re) * (1.0 - re) + im * im).max(1.0e-30)
+    };
+    let df = 1.0 / (n_fft as f64 * dt);
+    let peaks = |z: &[f64]| {
+        let mut found: Vec<(f64, f64)> = Vec::with_capacity(PEAKS);
+        for k in ((45.0 / df).ceil() as usize).max(1)..half {
+            if found.len() == PEAKS {
+                break;
+            }
+            if z[k] > z[k - 1] && z[k] >= z[k + 1] {
+                let (la, lb, lc) = (z[k - 1].ln(), z[k].ln(), z[k + 1].ln());
+                let offset = 0.5 * (la - lc) / (la - 2.0 * lb + lc);
+                found.push((
+                    (k as f64 + offset) * df,
+                    10.0 * (lb - 0.25 * (la - lc) * offset) / core::f64::consts::LN_10,
+                ));
+            }
+        }
+        found
+    };
+    let taps_z: Vec<f64> = buf[..=half].iter().map(|c| norm_z_sq(c.re, c.im)).collect();
+    let image_z: Vec<f64> = r_pos.iter().map(|r| norm_z_sq(r.re, r.im)).collect();
+    let (taps_peaks, image_peaks) = (peaks(&taps_z), peaks(&image_z));
+    let pairs = taps_peaks.len().min(image_peaks.len());
+    if pairs == 0 {
+        return (0, f64::NAN, f64::NAN);
+    }
+    let (mut cents, mut db) = (0.0_f64, 0.0_f64);
+    for (realized, image) in taps_peaks.iter().zip(&image_peaks) {
+        cents = cents.max((1200.0 * (realized.0 / image.0).log2()).abs());
+        db = db.max((realized.1 - image.1).abs());
+    }
+    (pairs, cents, db)
 }
 
 /// Row-major `N x N` modal reflection matrix at the input plane, against the
@@ -2402,6 +2468,37 @@ mod mm_line_tests {
                 receipt.peak_shift_cents,
                 ladder.peak_tol_cents
             ),
+        );
+    }
+
+    /// The receipt's own read on a delayed reflection `R = -g e^{i w T}`: the
+    /// taps realized from it read nothing against it, and the same taps one
+    /// sample late read the cents that sample moves every peak by. At 32768
+    /// bins and 32 kHz, the trumpet card's resolution, the parabola's bias on
+    /// this curve is 0.007 c and 0.001 dB in a numpy replica of the read.
+    #[test]
+    fn image_peak_error_reads_a_planted_sample_of_delay() {
+        let (n_fft, dt, delay, gain) = (32_768_usize, 1.0 / 32_000.0, 100.3, 0.9);
+        let r_pos: Vec<C64> = (0..=n_fft / 2)
+            .map(|k| {
+                let phase = core::f64::consts::TAU * k as f64 * delay / n_fft as f64;
+                C64::new(-gain * phase.cos(), -gain * phase.sin())
+            })
+            .collect();
+        let taps = crate::driving_point::realize_reflectance_ir_from_positive_spectrum(
+            &r_pos, n_fft, delay, false,
+        );
+        let (pairs, cents, db) = image_peak_error(&r_pos, &taps, dt);
+        assert_eq!(pairs, 10);
+        assert!(cents < 1e-6 && db < 1e-6, "on time: {cents} c, {db} dB");
+        let mut late = taps;
+        late.rotate_right(1);
+        let (pairs, cents, db) = image_peak_error(&r_pos, &late, dt);
+        let predicted = 1200.0 * ((delay + 1.0) / delay).log2();
+        assert_eq!(pairs, 10);
+        assert!(
+            (cents - predicted).abs() < 0.05 && db < 0.01,
+            "one sample late: {cents} c against {predicted} c, {db} dB"
         );
     }
 }

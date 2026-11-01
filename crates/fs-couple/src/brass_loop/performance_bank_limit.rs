@@ -150,7 +150,13 @@ fn check(tag: &str, rate_hz: u32, head: &str) {
         worst_cents = worst_cents.max((1200.0 * (played.0 / image.0).log2()).abs());
         worst_db = worst_db.max((played.1 - image.1).abs());
     }
-    println!("bank limit {tag}: worst {worst_cents:.2} cents, {worst_db:.2} dB");
+    // The card receipt's own read, taps against the spectrum they were
+    // realized from on the bank's bins, printed beside the played one.
+    let receipt = &voice.receipts()[0];
+    println!(
+        "bank limit {tag}: worst {worst_cents:.2} cents, {worst_db:.2} dB; receipt {:.2} cents, {:.2} dB over {} peaks",
+        receipt.image_worst_cents, receipt.image_worst_db, receipt.image_peaks
+    );
     assert!(
         worst_cents <= 2.0 && worst_db <= 0.3,
         "{tag}: worst {worst_cents:.2} cents, {worst_db:.2} dB"
