@@ -2706,3 +2706,54 @@ cases. The finite-wall phase-crossing fixture now declares a supported heat
 bracket and a 256-iteration original flash budget, retaining the original
 strict tolerances. Its final rerun was blocked by shared disk exhaustion and
 remains unverified; neither that case nor the complete suite is claimed green.
+
+## Adiabatic equilibrium mixture compressors and expanders
+
+With `material`, `material::phase_machinery::adiabatic_mixture_machine`
+resolves a steady adiabatic compressor or expander over one immutable
+`ThermochemicalPengRobinsonModel`. It first solves the original pressure/entropy
+increment constraint `Delta s = 0` at the outlet pressure. For an authored
+isentropic efficiency `0 < eta <= 1`, the actual enthalpy target is
+`Delta h_s / eta` for compression and `eta * Delta h_s` for expansion. The
+existing pressure/enthalpy increment owner resolves the actual outlet using
+exactly the same original phase-screen policy. Source intervals may differ
+between the ideal and actual temperature solves; phase policies may not.
+
+Both solves retain the complete feed, original NASA laws, EOS departures,
+phase mixing entropy and finite original phase-screen evidence. Liquid/vapor
+amounts may change. Species energy and entropy reference datums cancel through
+the original integrated increments before rounding. No mixed heat capacity,
+extra latent energy, dilute transport extrapolation or replacement EOS enters
+the machine model.
+
+The signed shaft work **into** the fluid is the actual source-integrated
+enthalpy rise. This steady-flow balance assumes no external heat and negligible
+inlet/outlet kinetic and potential energy differences. Stream enthalpy already
+contains pressure-flow work; another pressure-volume debit would double count
+it. The result retains the ideal endpoint, actual endpoint, source work,
+actual entropy production, enthalpy residual and ideal entropy residual.
+The caller may convert work to power with an independently supplied nonnegative
+typed mass flow. Pressure ratio and efficiency do not predict that flow.
+
+Admission checks the pressure direction and representable work sign. Actual
+source entropy change must be nonnegative within a declared numerical
+allowance; the reported value is never clipped. A single bounded PT allowance
+covers both original solves, including repeated inlet queries and all bracket
+states. Each nested owner receives only the remaining allowance. Cancellation,
+source-domain refusal, unresolved phase work or an exhausted budget returns no
+partial outlet. Efficiency one reuses the accepted PS endpoint; equal pressure
+returns exact zero work and entropy change after one original inlet selection
+when the reference is inside its admitted bracket.
+
+This is an equilibrium endpoint model with a caller-authored efficiency, not a
+validated machine map, rotor/transient model, reaction/phase-kinetic model,
+resolved flow geometry, choking model, or global phase-stability certificate.
+The declared tolerances bound numerical residuals, not model-form error.
+
+Seven focused regressions cover an independent two-phase isentropic expansion,
+reversible round trip and both efficiency conventions, actual nonnegative
+entropy production, large independent species reference shifts, exact rest,
+whole-call budget boundaries, malformed policies and final cancellation/replay.
+Rustfmt parsed the new source and tests. Native compilation and execution remain
+unverified because the shared build disk is exhausted; no passing native result
+is claimed for this new module.

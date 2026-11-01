@@ -5,6 +5,9 @@
 //! original mass, volume and total internal energy. Transport and acoustics use
 //! those same products and sources. No additional reaction heat is applied.
 
+/// Adiabatic compressor/expander outlets with original mixture phase equilibrium.
+pub mod phase_machinery;
+
 /// Shared material-card viscosity/conductivity in conservative gas transport.
 #[cfg(feature = "experimental-euler")]
 pub mod transport;
