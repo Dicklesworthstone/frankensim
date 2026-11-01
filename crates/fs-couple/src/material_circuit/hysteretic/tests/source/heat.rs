@@ -34,7 +34,12 @@ fn heat_card(original: MaterialCard, emissivity: f64) -> (MaterialCard, Resolved
             .insert_claim(PropertyClaim {
                 key: PropertyKey::new(name, dims),
                 value: PropertyValue::Scalar { value, dims },
-                validity: ValidityDomain::unconstrained().with("T", 200.0, 2000.0),
+                validity: ValidityDomain::unconstrained().with_quantity(
+                    "T",
+                    QuantitySpec::dimensional(Temperature::DIMS),
+                    200.0,
+                    2000.0,
+                ),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
                 observations: vec![],

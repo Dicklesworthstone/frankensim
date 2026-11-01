@@ -45,7 +45,8 @@ fn sources(slope: f64, alpha: f64) -> (MaterialCard, ResolvedHeatCapacityCurve) 
             abscissa_dims: Temperature::DIMS,
             knots: vec![(200.0, value-100.0*slope),(600.0,value+300.0*slope)], dims }
         } else { PropertyValue::Scalar { value, dims } };
-        let mut validity = ValidityDomain::unconstrained().with("T",200.0,600.0);
+        let mut validity = ValidityDomain::unconstrained()
+            .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 200.0, 600.0);
         if name.ends_with("_eta") { validity = validity.with("omega",0.0,1e7); }
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name,dims), value, validity,
             uncertainty: UncertaintyModel::Unstated,

@@ -26,7 +26,8 @@ fn with_heat<R>(emissivity: f64, resistance: f64, core_upper: f64,
         (SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS, emissivity)] {
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },
-            validity: ValidityDomain::unconstrained().with("T", 200.0, 2000.0),
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("T", QuantitySpec::dimensional(Temperature::DIMS), 200.0, 2000.0),
             uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
             observations: vec![], provenance: Provenance { source: "manufactured core/winding exchange".into(),
                 license: "CC0-1.0".into(), artifact: None } }).unwrap();
