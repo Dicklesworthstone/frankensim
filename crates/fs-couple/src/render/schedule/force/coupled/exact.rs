@@ -3,8 +3,9 @@
 use super::*;
 use fs_math::det;
 use fs_phs::linear_exact::{
-    HeatCache, LinearSplit, LinearSplitBudget, integrated_resistance_loss_cached,
-    integrated_resistance_loss_with_witness_cached, split_quadratic, step_render_cached,
+    HeatCache, LinearSplit, LinearSplitBudget, PsdVerdict,
+    integrated_resistance_loss_verdict_cached, integrated_resistance_loss_with_witness_cached,
+    integrated_resistance_loss_with_witness_verdict_cached, split_quadratic, step_render_cached,
 };
 // The uncached twins are the reference the tests (and `use super::*` in the submodules' tests) compare against.
 #[cfg(test)]
@@ -472,6 +473,31 @@ struct ExactBlock {
     /// Positive-heat factors of this fixed system, reused only on a bit-equal key (`fs_phs::linear_exact::HeatCache`).
     /// Owned by the block, never shared; a disabled one rebuilds on every call.
     heat: HeatCache,
+    /// One PSD verdict per loss channel integrated on every stage (bead frankensim-3sw19), separate from `heat`.
+    verdicts: ChannelVerdicts,
+}
+
+/// The block's loss channels each keep one `fs_phs::linear_exact::PsdVerdict`. The matrices are constant for the
+/// block's life, so each channel's eigendecomposition runs once; a matrix changed in any bit re-checks. The
+/// per-link witnesses of `connection_work` keep the plain per-call check.
+#[derive(Default)]
+struct ChannelVerdicts {
+    component: PsdVerdict,
+    connection: PsdVerdict,
+    material: PsdVerdict,
+    radiation: PsdVerdict,
+}
+
+impl ChannelVerdicts {
+    #[cfg(test)]
+    fn disabled() -> Self {
+        Self {
+            component: PsdVerdict::disabled(),
+            connection: PsdVerdict::disabled(),
+            material: PsdVerdict::disabled(),
+            radiation: PsdVerdict::disabled(),
+        }
+    }
 }
 
 impl ExactBlock {
@@ -668,6 +694,7 @@ impl ExactBlock {
             memory_indices: Vec::new(),
             radiation_indices: Vec::new(),
             heat: HeatCache::new(),
+            verdicts: ChannelVerdicts::default(),
         })
     }
 
@@ -719,17 +746,17 @@ impl ExactBlock {
             // Independently integrate each actual resistance against the SAME
             // augmented trajectory. No endpoint energy remainder or modal-loss
             // allocation is used to invent a constitutive loss channel.
-            let integrate = |resistance: &[f64]| {
+            let integrate = |resistance: &[f64], verdict: &PsdVerdict| {
                 if resistance.iter().all(|v| *v == 0.0) { return Ok(0.0); }
-                integrated_resistance_loss_cached(
-                    &self.system, &self.split, x, u, dt, resistance, &self.heat,
+                integrated_resistance_loss_verdict_cached(
+                    &self.system, &self.split, x, u, dt, resistance, &self.heat, verdict,
                 )
                 .map_err(ModalCouplingError::Propagation)
             };
-            let component = integrate(&self.component_r)?;
+            let component = integrate(&self.component_r, &self.verdicts.component)?;
             let connection = self.connection_loss(x, u, dt)?;
-            let material = integrate(&self.material_r)?;
-            let radiation = integrate(&self.radiation_r)?;
+            let material = integrate(&self.material_r, &self.verdicts.material)?;
+            let radiation = integrate(&self.radiation_r, &self.verdicts.radiation)?;
             let scale = self.system.hamiltonian(x).abs().max(total.abs()).max(f64::MIN_POSITIVE);
             if (component + connection + material + radiation - total).abs() > 1e-12 * scale {
                 return Err(invalid("independent acoustic/material/modal/connection losses do not sum to complete loss"));
@@ -742,8 +769,9 @@ impl ExactBlock {
         if self.connection_r.iter().all(|v| *v == 0.0) {
             return Ok((total, 0.0, 0.0, 0.0));
         }
-        let component = integrated_resistance_loss_cached(
+        let component = integrated_resistance_loss_verdict_cached(
             &self.system, &self.split, x, u, dt, &self.component_r, &self.heat,
+            &self.verdicts.component,
         )
         .map_err(ModalCouplingError::Propagation)?;
         let connection = self.connection_loss(x, u, dt)?;
@@ -765,8 +793,9 @@ impl ExactBlock {
         if self.connection_r.iter().all(|value| *value == 0.0) {
             return Ok(0.0);
         }
-        integrated_resistance_loss_with_witness_cached(
+        integrated_resistance_loss_with_witness_verdict_cached(
             &self.system, &self.split, x, u, dt, &self.connection_witness, &self.heat,
+            &self.verdicts.connection,
         ).map_err(ModalCouplingError::Propagation)
     }
 

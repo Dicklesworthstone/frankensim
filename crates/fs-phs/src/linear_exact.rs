@@ -40,8 +40,9 @@ mod common_flow;
 mod nonlinear;
 mod heat_cache;
 pub use heat_cache::{
-    HeatCache, integrated_resistance_loss_cached, integrated_resistance_loss_with_witness_cached,
-    step_render_cached,
+    HeatCache, PsdVerdict, integrated_resistance_loss_cached,
+    integrated_resistance_loss_verdict_cached, integrated_resistance_loss_with_witness_cached,
+    integrated_resistance_loss_with_witness_verdict_cached, step_render_cached,
 };
 pub use common_flow_zoh::PreparedCommonFlowZoh;
 pub use common_flow::CommonFlowProjection;
@@ -811,7 +812,7 @@ pub fn integrated_resistance_loss(
     dt: f64,
     resistance: &[f64],
 ) -> Result<f64, PhsError> {
-    integrated_resistance_loss_inner(sys, split, x0, u, dt, resistance, None, None)
+    integrated_resistance_loss_inner(sys, split, x0, u, dt, resistance, None, None, None)
 }
 
 /// Integrate a source's checked positive resistance squares along the SAME
@@ -826,7 +827,17 @@ pub fn integrated_resistance_loss_with_witness(
     dt: f64,
     witness: &crate::ResistanceWitness,
 ) -> Result<f64, PhsError> {
-    integrated_resistance_loss_inner(sys, split, x0, u, dt, &witness.matrix, Some(witness), None)
+    integrated_resistance_loss_inner(
+        sys,
+        split,
+        x0,
+        u,
+        dt,
+        &witness.matrix,
+        Some(witness),
+        None,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -839,6 +850,7 @@ fn integrated_resistance_loss_inner(
     resistance: &[f64],
     witness: Option<&crate::ResistanceWitness>,
     heat: Option<&HeatCache>,
+    verdict: Option<&PsdVerdict>,
 ) -> Result<f64, PhsError> {
     let n = split.n;
     if sys.n != n
@@ -861,7 +873,10 @@ fn integrated_resistance_loss_inner(
         ));
     }
     crate::require_symmetric(resistance, n, "loss channel R")?;
-    crate::require_psd(resistance, n, "loss channel R")?;
+    match verdict {
+        Some(verdict) => verdict.admit(resistance, n, "loss channel R")?,
+        None => crate::require_psd(resistance, n, "loss channel R")?,
+    }
     Ok(exact_zoh_loss(sys, split, x0, u, dt, resistance, witness, false, heat)?.dissipated)
 }
 

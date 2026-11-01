@@ -17,6 +17,11 @@
 //!
 //! The uncached entry points of [`super`] are unchanged and build both on every call. A holder opts in through the
 //! `*_cached` functions, which return exactly the bits of their uncached twins.
+//!
+//! A loss channel's positive-semidefinite admission is a full Jacobi eigendecomposition of its matrix, and a coupled
+//! owner passes the same constant matrix on every sweep of every step (bead frankensim-3sw19: 64% of the ordinary
+//! coupled owner's step). A [`PsdVerdict`] is one channel's slot. It keeps the last matrix it admitted and skips the
+//! eigendecomposition only on a bit-equal matrix; it is separate from the cache's entries, so it never evicts them.
 
 use super::{LinearSplit, LinearSplitBudget, QuadraticPart, positive_heat::PositiveHeat};
 use crate::{PhsError, PortHamiltonian, ResistanceWitness, StepRecord};
@@ -299,6 +304,104 @@ impl core::fmt::Debug for HeatCache {
     }
 }
 
+/// One loss channel's positive-semidefinite admission, reused only on a bit-equal matrix (bead frankensim-3sw19).
+/// It keeps the bits of the last matrix it ADMITTED. A call whose matrix equals that one bit for bit (`f64::to_bits`,
+/// so `-0.0` and `0.0` differ) is admitted without the eigendecomposition; any other matrix is checked by the same
+/// `require_psd` the uncached path runs. A refusal is never stored, so it is recomputed on every call and a verdict
+/// cannot turn a refusal into an admission. The holder keeps one verdict per channel it integrates: there is no
+/// capacity and no eviction, and a channel whose matrix changes (a temperature-dependent resistance) re-checks. It is
+/// separate from [`HeatCache`]. A clone starts empty, like the cache.
+pub struct PsdVerdict {
+    admitted: Mutex<Option<Vec<f64>>>,
+    checks: AtomicU64,
+    reuses: AtomicU64,
+    enabled: bool,
+}
+
+impl PsdVerdict {
+    /// An empty verdict that admits a bit-equal matrix again without an eigendecomposition.
+    #[must_use]
+    pub fn new() -> Self {
+        Self {
+            admitted: Mutex::new(None),
+            checks: AtomicU64::new(0),
+            reuses: AtomicU64::new(0),
+            enabled: true,
+        }
+    }
+
+    /// A verdict that never stores: every call runs the eigendecomposition, exactly as the plain functions do. It
+    /// counts its checks, so a test can hold it beside an enabled twin and compare their outputs bit for bit.
+    #[must_use]
+    pub fn disabled() -> Self {
+        Self {
+            enabled: false,
+            ..Self::new()
+        }
+    }
+
+    /// Eigendecompositions run through this verdict: a first call, a changed matrix, a refusal, or every call of a
+    /// disabled verdict.
+    #[must_use]
+    pub fn checks(&self) -> u64 {
+        self.checks.load(Ordering::Relaxed)
+    }
+
+    /// Calls admitted because the matrix equals the stored admitted one bit for bit.
+    #[must_use]
+    pub fn reuses(&self) -> u64 {
+        self.reuses.load(Ordering::Relaxed)
+    }
+
+    // `crate::require_psd(r, n, what)`, skipped only when `r` is bit-equal to the last matrix this verdict admitted.
+    // The caller has already admitted `r.len() == n * n`, so equal lengths mean equal dimensions.
+    pub(super) fn admit(&self, r: &[f64], n: usize, what: &'static str) -> Result<(), PhsError> {
+        let mut admitted = self.admitted.lock().unwrap_or_else(PoisonError::into_inner);
+        if self.enabled && admitted.as_deref().is_some_and(|stored| same(stored, r)) {
+            self.reuses.fetch_add(1, Ordering::Relaxed);
+            return Ok(());
+        }
+        self.checks.fetch_add(1, Ordering::Relaxed);
+        crate::require_psd(r, n, what)?;
+        if self.enabled {
+            *admitted = Some(r.to_vec());
+        }
+        Ok(())
+    }
+}
+
+impl Default for PsdVerdict {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Clone for PsdVerdict {
+    fn clone(&self) -> Self {
+        if self.enabled {
+            Self::new()
+        } else {
+            Self::disabled()
+        }
+    }
+}
+
+impl core::fmt::Debug for PsdVerdict {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let held = self
+            .admitted
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .is_some();
+        f.debug_struct("PsdVerdict")
+            .field("enabled", &self.enabled)
+            .field("admitted", &held)
+            .field("checks", &self.checks())
+            .field("reuses", &self.reuses())
+            .finish()
+    }
+}
+
 /// The factor for one construction: from `cache` on a bit-equal key, otherwise built exactly as the uncached path
 /// builds it (and stored when the cache is enabled). A failed construction stores nothing.
 pub(super) fn obtain(
@@ -412,7 +515,17 @@ pub fn integrated_resistance_loss_cached(
     resistance: &[f64],
     cache: &HeatCache,
 ) -> Result<f64, PhsError> {
-    super::integrated_resistance_loss_inner(sys, split, x0, u, dt, resistance, None, Some(cache))
+    super::integrated_resistance_loss_inner(
+        sys,
+        split,
+        x0,
+        u,
+        dt,
+        resistance,
+        None,
+        Some(cache),
+        None,
+    )
 }
 
 /// [`super::integrated_resistance_loss_with_witness`] that takes its positive-heat factor from `cache`.
@@ -438,6 +551,67 @@ pub fn integrated_resistance_loss_with_witness_cached(
         &witness.matrix,
         Some(witness),
         Some(cache),
+        None,
+    )
+}
+
+/// [`integrated_resistance_loss_cached`] whose PSD admission of `resistance` goes through `verdict`: the
+/// eigendecomposition runs only when `resistance` differs in any bit from the last matrix `verdict` admitted. Every
+/// other admission runs on every call. Bit-identical to the uncached call, refusals included.
+///
+/// # Errors
+/// Those of [`super::integrated_resistance_loss`].
+#[allow(clippy::too_many_arguments)]
+pub fn integrated_resistance_loss_verdict_cached(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    resistance: &[f64],
+    cache: &HeatCache,
+    verdict: &PsdVerdict,
+) -> Result<f64, PhsError> {
+    super::integrated_resistance_loss_inner(
+        sys,
+        split,
+        x0,
+        u,
+        dt,
+        resistance,
+        None,
+        Some(cache),
+        Some(verdict),
+    )
+}
+
+/// [`integrated_resistance_loss_with_witness_cached`] whose PSD admission of the witness's matrix goes through
+/// `verdict`, as in [`integrated_resistance_loss_verdict_cached`]. Bit-identical to the uncached call, refusals
+/// included.
+///
+/// # Errors
+/// Those of [`super::integrated_resistance_loss_with_witness`].
+#[allow(clippy::too_many_arguments)]
+pub fn integrated_resistance_loss_with_witness_verdict_cached(
+    sys: &PortHamiltonian,
+    split: &LinearSplit,
+    x0: &[f64],
+    u: &[f64],
+    dt: f64,
+    witness: &ResistanceWitness,
+    cache: &HeatCache,
+    verdict: &PsdVerdict,
+) -> Result<f64, PhsError> {
+    super::integrated_resistance_loss_inner(
+        sys,
+        split,
+        x0,
+        u,
+        dt,
+        &witness.matrix,
+        Some(witness),
+        Some(cache),
+        Some(verdict),
     )
 }
 
@@ -508,6 +682,7 @@ mod tests {
     fn the_cache_can_be_shared_across_threads() {
         fn send_sync<T: Send + Sync>() {}
         send_sync::<HeatCache>();
+        send_sync::<PsdVerdict>();
     }
 
     // G2: a long replay of the stepping and both loss integrals, with the state and the held force changing every
@@ -776,6 +951,98 @@ mod tests {
         assert_eq!(format!("{plain:?}"), format!("{cached:?}"));
         assert_eq!((cache.builds(), cache.reuses(), cache.len()), (0, 0, 0));
         assert_eq!((cache.transition_builds(), cache.transition_len()), (0, 0));
+    }
+
+    // frankensim-3sw19: one channel's PSD verdict. A bit-equal admitted matrix skips the eigendecomposition and every
+    // loss keeps the plain call's bits; any bit difference re-checks; a refusal is never stored, cold or warm.
+    #[test]
+    fn the_psd_verdict_skips_only_a_bit_equal_admitted_matrix_and_never_stores_a_refusal() {
+        let (sys, split, witness) = fresh();
+        let (cache, verdict, witnessed) = (HeatCache::new(), PsdVerdict::new(), PsdVerdict::new());
+        let mut x = vec![0.3, -0.1];
+        for k in 0..40 {
+            let u = input(k);
+            let plain = integrated_resistance_loss(&sys, &split, &x, &u, DT, &CHANNEL).unwrap();
+            let slot = integrated_resistance_loss_verdict_cached(
+                &sys, &split, &x, &u, DT, &CHANNEL, &cache, &verdict,
+            )
+            .unwrap();
+            assert_eq!(plain.to_bits(), slot.to_bits(), "channel loss at step {k}");
+            let plain = integrated_resistance_loss_with_witness(&sys, &split, &x, &u, DT, &witness)
+                .unwrap();
+            let slot = integrated_resistance_loss_with_witness_verdict_cached(
+                &sys, &split, &x, &u, DT, &witness, &cache, &witnessed,
+            )
+            .unwrap();
+            assert_eq!(
+                plain.to_bits(),
+                slot.to_bits(),
+                "witnessed loss at step {k}"
+            );
+            x = step_render(&sys, &split, &x, &u, DT).unwrap().x;
+        }
+        assert_eq!((verdict.checks(), verdict.reuses()), (1, 39));
+        assert_eq!((witnessed.checks(), witnessed.reuses()), (1, 39));
+        let (x, u) = ([0.3, -0.1], input(1));
+        let slot = |r: &[f64], v: &PsdVerdict| {
+            integrated_resistance_loss_verdict_cached(&sys, &split, &x, &u, DT, r, &cache, v)
+        };
+        // Planted negative: the admitted matrix with one entry changed so it is indefinite. The warm slot refuses it
+        // exactly as the plain call does, twice (a refusal is not stored), and still holds the admitted matrix.
+        let indefinite = [0.0, 0.0, 0.0, -0.0625];
+        let plain = integrated_resistance_loss(&sys, &split, &x, &u, DT, &indefinite).unwrap_err();
+        for attempt in 0..2 {
+            let refused = slot(&indefinite, &verdict).unwrap_err();
+            assert!(
+                matches!(
+                    refused,
+                    PhsError::NotPsd {
+                        what: "loss channel R"
+                    }
+                ),
+                "{refused:?}"
+            );
+            assert_eq!(
+                format!("{plain:?}"),
+                format!("{refused:?}"),
+                "attempt {attempt}"
+            );
+        }
+        assert_eq!(
+            verdict.checks(),
+            3,
+            "each refusal ran the eigendecomposition"
+        );
+        slot(&CHANNEL, &verdict).unwrap();
+        assert_eq!(
+            (verdict.checks(), verdict.reuses()),
+            (3, 40),
+            "the admitted matrix is still the held one"
+        );
+        // Planted negative: a cold slot refuses the indefinite matrix on its first call.
+        let cold = PsdVerdict::new();
+        assert!(matches!(
+            slot(&indefinite, &cold),
+            Err(PhsError::NotPsd {
+                what: "loss channel R"
+            })
+        ));
+        assert_eq!((cold.checks(), cold.reuses()), (1, 0));
+        // A sign-only change (-0.0 for 0.0) is a different key: re-checked, admitted, the plain call's bits.
+        let signed = [-0.0, 0.0, 0.0, 0.0625];
+        let plain = integrated_resistance_loss(&sys, &split, &x, &u, DT, &signed).unwrap();
+        assert_eq!(plain.to_bits(), slot(&signed, &verdict).unwrap().to_bits());
+        assert_eq!((verdict.checks(), verdict.reuses()), (4, 40));
+        // A disabled slot checks on every call; a clone starts empty.
+        let disabled = PsdVerdict::disabled();
+        for _ in 0..3 {
+            slot(&CHANNEL, &disabled).unwrap();
+        }
+        assert_eq!((disabled.checks(), disabled.reuses()), (3, 0));
+        let copy = verdict.clone();
+        assert_eq!((copy.checks(), copy.reuses()), (0, 0));
+        slot(&CHANNEL, &copy).unwrap();
+        assert_eq!(copy.checks(), 1, "a clone holds no admitted matrix");
     }
 
     fn records_differ(a: &StepRecord, b: &StepRecord) -> bool {

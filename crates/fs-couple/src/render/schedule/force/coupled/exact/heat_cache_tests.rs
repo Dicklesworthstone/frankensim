@@ -254,3 +254,149 @@ fn the_block_heat_cache_replays_the_plain_exact_stage_bit_for_bit() {
         assert!(block.heat.transition_builds() > 100);
     }
 }
+
+/// (checks, reuses) of each block's component and connection verdicts.
+fn verdict_counts(network: &ExactNetwork) -> Vec<[(u64, u64); 2]> {
+    network
+        .blocks
+        .iter()
+        .map(|(_, block)| {
+            let v = &block.verdicts;
+            [
+                (v.component.checks(), v.component.reuses()),
+                (v.connection.checks(), v.connection.reuses()),
+            ]
+        })
+        .collect()
+}
+
+// frankensim-3sw19: the blocks' PSD verdicts against verdicts disabled, which run the eigendecomposition on every call
+// as the code did before the slots existed. Every record and all four losses are compared with to_bits. A one-ulp
+// change planted in one block's component resistance re-checks that channel once. An indefinite component resistance
+// planted in the warm slot is refused exactly as the disabled twin refuses it, on every attempt.
+#[test]
+fn the_block_psd_verdicts_replay_the_plain_loss_channels_bit_for_bit_and_never_admit_a_refusal() {
+    let rate = 48_000;
+    let mut models = four_models(rate, 1_000.0);
+    let columns = [vec![1.0, 0.0, -0.7, 0.0], vec![0.0, -0.3, 0.0, 1.0]];
+    let links = [
+        ConnectionLaw {
+            stiffness_n_m: 2e5,
+            damping_n_s_m: 70.0,
+            rest_extension_m: 1e-9,
+            constant_loss_reference_omega_rad_s: None,
+        },
+        ConnectionLaw {
+            stiffness_n_m: 3e5,
+            damping_n_s_m: 90.0,
+            rest_extension_m: -2e-9,
+            constant_loss_reference_omega_rad_s: None,
+        },
+    ];
+    let gate = CancelGate::new();
+    let mut slots = ExactNetwork::new(&models, &columns, &links, 4, &gate).unwrap();
+    let mut plain = ExactNetwork::new(&models, &columns, &links, 4, &gate).unwrap();
+    for (_, block) in &mut plain.blocks {
+        block.verdicts = ChannelVerdicts::disabled();
+    }
+    assert_eq!(slots.blocks.len(), 2, "two noncontiguous islands");
+    let dt = 1.0 / f64::from(rate);
+    let (steps, plant_at) = (60_u64, 30_u64);
+    let start = verdict_counts(&slots);
+    let restore = |models: &mut [ModalAcousticTimeModel], x: &[f64]| {
+        for (i, model) in models.iter_mut().enumerate() {
+            model
+                .restore_states(&[ModalAcousticState {
+                    displacement_m_sqrt_kg: x[2 * i],
+                    velocity_m_sqrt_kg_per_s: x[2 * i + 1],
+                }])
+                .unwrap();
+        }
+    };
+    for k in 0..steps {
+        if k == plant_at {
+            for network in [&mut slots, &mut plain] {
+                let resistance = &mut network.blocks[PLANTED].1.component_r;
+                assert!(resistance.iter().any(|v| *v != 0.0), "component loss");
+                for v in resistance.iter_mut().filter(|v| **v != 0.0) {
+                    *v = f64::from_bits(v.to_bits() + 1);
+                }
+            }
+        }
+        let external = force(k as usize, 1);
+        let (rs, xs, us) = slots.advance(&models, &[], &[], &external, dt).unwrap();
+        let (rp, xp, up) = plain.advance(&models, &[], &[], &external, dt).unwrap();
+        assert_same_record(&rs, &rp, k as usize);
+        let ls = slots.losses(&xs, &us, dt, rs.dissipated).unwrap();
+        let lp = plain.losses(&xp, &up, dt, rp.dissipated).unwrap();
+        for (a, b) in [(ls.0, lp.0), (ls.1, lp.1), (ls.2, lp.2), (ls.3, lp.3)] {
+            assert_eq!(a.to_bits(), b.to_bits(), "losses at step {k}");
+        }
+        restore(&mut models, &rs.x);
+    }
+    // One loss evaluation per block per step: the planted block's component channel checked once more after the plant,
+    // every other call admitted from its slot. The disabled twin checked on every call.
+    for (i, (now, then)) in verdict_counts(&slots).iter().zip(&start).enumerate() {
+        let component_checks = if i == PLANTED { 2 } else { 1 };
+        let component = (now[0].0 - then[0].0, now[0].1 - then[0].1);
+        let connection = (now[1].0 - then[1].0, now[1].1 - then[1].1);
+        assert_eq!(
+            component,
+            (component_checks, steps - component_checks),
+            "block {i} component"
+        );
+        assert_eq!(connection, (1, steps - 1), "block {i} connection");
+    }
+    for (_, block) in &plain.blocks {
+        assert_eq!(
+            block.verdicts.component.reuses() + block.verdicts.connection.reuses(),
+            0
+        );
+        assert!(
+            block.verdicts.component.checks() >= steps
+                && block.verdicts.connection.checks() >= steps
+        );
+    }
+    // Planted negative: the warm slot's component resistance made indefinite (its largest diagonal entry negated).
+    let external = force(steps as usize, 1);
+    let (rs, xs, us) = slots.advance(&models, &[], &[], &external, dt).unwrap();
+    let (rp, xp, up) = plain.advance(&models, &[], &[], &external, dt).unwrap();
+    for network in [&mut slots, &mut plain] {
+        let resistance = &mut network.blocks[PLANTED].1.component_r;
+        let n = (1..=resistance.len())
+            .find(|n| n * n == resistance.len())
+            .unwrap();
+        let i = (0..n)
+            .max_by(|&a, &b| resistance[a * n + a].total_cmp(&resistance[b * n + b]))
+            .unwrap();
+        assert!(
+            resistance[i * n + i] > 0.0,
+            "a positive diagonal entry to negate"
+        );
+        resistance[i * n + i] = -resistance[i * n + i];
+    }
+    let held = verdict_counts(&slots)[PLANTED][0];
+    for attempt in 0..2 {
+        let refused = slots.losses(&xs, &us, dt, rs.dissipated).unwrap_err();
+        let expected = plain.losses(&xp, &up, dt, rp.dissipated).unwrap_err();
+        assert!(
+            matches!(
+                refused,
+                ModalCouplingError::Propagation(fs_phs::PhsError::NotPsd {
+                    what: "loss channel R"
+                })
+            ),
+            "attempt {attempt}: {refused:?}"
+        );
+        assert_eq!(
+            format!("{refused:?}"),
+            format!("{expected:?}"),
+            "attempt {attempt}"
+        );
+    }
+    assert_eq!(
+        verdict_counts(&slots)[PLANTED][0],
+        (held.0 + 2, held.1),
+        "each refusal ran the eigendecomposition; none was admitted from the slot"
+    );
+}
