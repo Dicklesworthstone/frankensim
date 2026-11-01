@@ -29,6 +29,7 @@ pub mod response;
 pub mod stress;
 pub mod design;
 pub mod robust;
+pub mod modal;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
 pub(crate) use operator::{
     admit_affine_material_domain, admit_load_space_material_domain, admit_material_domain,

@@ -4,6 +4,7 @@ use std::ops::ControlFlow;
 use fs_cutfem::elastic3::{CutElasticity3,ElasticityError3,MaterialBodyLoad3};
 use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
 use fs_cutfem::elastic3::stress::{AffineBulkStress3, BulkStressPoint3};
+use fs_cutfem::elastic3::mass::MaterialMass3;
 use fs_cutfem::elastic3::adaptive::dirichlet::PrescribedMotion3;
 use fs_cutfem::elastic3::dirichlet::EmbeddedReaction3;
 use fs_cutfem::elastic3::adaptive::enrichment::precondition::{AdaptivePrepared3, AdaptivePreconditionError3, AdaptiveSolveSpace3, AdaptiveSetupWork3};
@@ -29,6 +30,12 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// Full-material kg inventory in the SAME active-cell order. None means
     /// the operator was constructed without a native material density.
     fn reference_cell_masses_kg(&self) -> Option<&[f64]>;
+    /// Prepare reusable consistent inertia from the same source density,
+    /// retained quadrature and homogeneous strong/hanging constraint map.
+    fn prepare_material_mass(&self, max_terms: usize, checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<MaterialMass3, ElasticityError3>;
+    /// Admit this prepared mass only on its exact native owner and space.
+    fn validate_material_mass(&self, mass: &MaterialMass3) -> Result<(), ElasticityError3>;
     /// Bind a prepared native density load to this exact geometry, material
     /// assignment, strong-clamp map and displacement space.
     fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3>;
@@ -90,6 +97,9 @@ impl Sdf3Elasticity for CutElasticity3 {
     fn cells(&self)->usize {CutElasticity3::cells(self)}
     fn volumes(&self)->Vec<f64> {CutElasticity3::volumes(self)}
     fn reference_cell_masses_kg(&self) -> Option<&[f64]> { CutElasticity3::reference_cell_masses_kg(self) }
+    fn prepare_material_mass(&self,max_terms:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<MaterialMass3,ElasticityError3> {CutElasticity3::prepare_material_mass(self,max_terms,checkpoint)}
+    fn validate_material_mass(&self,mass:&MaterialMass3)->Result<(),ElasticityError3> {CutElasticity3::validate_material_mass(self,mass)}
     fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3> {
         CutElasticity3::validate_material_body_load(self, load)
     }
@@ -143,6 +153,9 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
     fn cells(&self)->usize {AdaptiveElasticity3::cells(self)}
     fn volumes(&self)->Vec<f64> {AdaptiveElasticity3::volumes(self)}
     fn reference_cell_masses_kg(&self) -> Option<&[f64]> { AdaptiveElasticity3::reference_cell_masses_kg(self) }
+    fn prepare_material_mass(&self,max_terms:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<MaterialMass3,ElasticityError3> {AdaptiveElasticity3::prepare_material_mass(self,max_terms,checkpoint)}
+    fn validate_material_mass(&self,mass:&MaterialMass3)->Result<(),ElasticityError3> {AdaptiveElasticity3::validate_material_mass(self,mass)}
     fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3> {
         AdaptiveElasticity3::validate_material_body_load(self, load)
     }
@@ -213,6 +226,9 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     fn cells(&self)->usize {self.elasticity().cells()}
     fn volumes(&self)->Vec<f64> {self.elasticity().volumes()}
     fn reference_cell_masses_kg(&self) -> Option<&[f64]> { self.elasticity().reference_cell_masses_kg() }
+    fn prepare_material_mass(&self,max_terms:usize,checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<MaterialMass3,ElasticityError3> {self.elasticity().prepare_material_mass(max_terms,checkpoint)}
+    fn validate_material_mass(&self,mass:&MaterialMass3)->Result<(),ElasticityError3> {self.elasticity().validate_material_mass(mass)}
     fn validate_material_body_load(&self, load: &MaterialBodyLoad3) -> Result<(), ElasticityError3> {
         self.elasticity().validate_material_body_load(load)
     }
@@ -274,7 +290,7 @@ pub(crate) fn admit_material_domain(
     displacement: &[f64],
     control: &mut SolveControl<'_>,
 ) -> Result<(), EvaluationStop> {
-    material_domain_controlled(control, "sdf3-material-domain", |poll| {
+    native_controlled(control, "sdf3-material-domain", |poll| {
         operator.admit_material_domain(displacement, poll)
     })
 }
@@ -285,7 +301,7 @@ pub(crate) fn admit_affine_material_domain(
     basis: &[&[f64]],
     control: &mut SolveControl<'_>,
 ) -> Result<(), EvaluationStop> {
-    material_domain_controlled(control, "sdf3-affine-material-domain", |poll| {
+    native_controlled(control, "sdf3-affine-material-domain", |poll| {
         operator.admit_affine_material_domain(offset, basis, poll)
     })
 }
@@ -295,16 +311,17 @@ pub(crate) fn admit_load_space_material_domain(
     basis: &[&[f64]],
     control: &mut SolveControl<'_>,
 ) -> Result<(), EvaluationStop> {
-    material_domain_controlled(control, "sdf3-affine-material-domain", |poll| {
+    native_controlled(control, "sdf3-affine-material-domain", |poll| {
         operator.admit_load_space_material_domain(basis, poll)
     })
 }
 
-fn material_domain_controlled(
+// Preserve the original control stop across all native callback boundaries.
+pub(super) fn native_controlled<T>(
     control: &mut SolveControl<'_>,
     stage: &'static str,
-    action: impl FnOnce(&mut dyn FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3>,
-) -> Result<(), EvaluationStop> {
+    action: impl FnOnce(&mut dyn FnMut() -> ControlFlow<()>) -> Result<T, ElasticityError3>,
+) -> Result<T, EvaluationStop> {
     control.checkpoint(stage)?;
     let mut stopped = None;
     let result = action(&mut || match control.checkpoint(stage) {

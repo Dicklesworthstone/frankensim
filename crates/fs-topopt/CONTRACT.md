@@ -232,6 +232,43 @@ inventory and real response-constrained mass minimization. The
 and stiffness in two explicitly synthetic material regions. These additions do
 not claim a continuum certificate or completion of the full marquee milestone.
 
+## Native 3-D vibration and eigenfrequency sensitivities
+
+`sdf3::modal::controlled_sdf3_eigenpairs` connects every sealed
+`Sdf3Elasticity` backend (Cartesian, adaptive and reusable adaptive solve space)
+to the existing matrix-free `fs-spectral::generalized` owner. The same native
+elasticity tensor, retained cut quadrature, strong/hanging constraints and
+prepared `MaterialMass3` define `K phi = lambda M phi`. Fixed identity rows
+are excluded. One existing backend preconditioner is prepared per evaluation,
+and every inverse action uses the shared true-residual linear-solve gate and
+the caller's original cumulative cancellation/iteration control. The adapter
+reuses scratch vectors for stiffness and allocation-free mass applications.
+
+`CutDensityStudy3::evaluate_eigenfrequency` returns source-material modes, an
+unnormalized smooth minimum of the selected low eigenvalues, physical volume
+and kg inventory, and all raw-design derivatives at the SAME design. The
+gradient contracts both native stiffness and native consistent-mass cell
+derivatives before the shared physical-occupancy/SIMP/projection/filter
+pullback. Physical kg inventory remains linear in occupancy. Modal inertia
+uses the existing shared low-density interpolation; it is not substituted for
+physical inventory.
+
+An extra computed mode checks the outer gap of a truncated selected cluster.
+An unresolved boundary or a variable cell exactly at the piecewise mass-law
+switch withholds the derivative. Protected cells retain their original zero
+local design slopes. Mode normalization is not a physical excitation amplitude,
+so source strain ceilings for physical responses do not constrain eigenvectors.
+Both successful evaluations and returned failures restore incoming stiffness
+scales; work already consumed remains charged.
+
+The lane models undamped, infinitesimal vibrations about the undeformed,
+zero-prestress reference state. Gravity and other external loads do not create
+geometric stiffness in this formulation. Native source density is required.
+Zero-mass free rows refuse; a positive mass diagonal alone is not an SPD
+certificate. The shared eigensolver's residual-qualified Ritz estimates and
+the numerical cluster check confer neither spectral completeness nor a
+continuum frequency/error guarantee. The `cutfem-marquee` feature gate remains.
+
 ## Native material body loads on raw-SDF designs
 
 Prepare an acceleration load with the native Cartesian or adaptive operator's
