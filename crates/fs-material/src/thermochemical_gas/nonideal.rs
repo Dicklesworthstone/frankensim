@@ -33,6 +33,8 @@ pub mod energy;
 mod temperature;
 /// Conserved-density calorics with liquid/vapor equilibrium and phase changes.
 pub mod equilibrium;
+/// Source-bound multicomponent caloric and enthalpy-constrained phase equilibrium.
+pub mod flash;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct PengRobinsonSpeciesBinding {

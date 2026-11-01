@@ -8691,3 +8691,54 @@ scale laws, changed bundles, negative-magnitude state queries and unrepresentabl
 nonzero field contributions refuse. Focused evidence is in
 `tests/dielectric_reversible_thermal.rs`; existing dielectric kernel and Debye
 thermal tests continue to exercise the shared material boundaries.
+
+### Source-bound multicomponent caloric and enthalpy-constrained flash
+
+`thermochemical_gas::nonideal::flash` adds complete PT calorics and a bounded
+fixed-pressure enthalpy inversion over the original Peng–Robinson two-phase
+owner. The immutable result retains the original critical-property/mixing law,
+canonical feed, full NASA receipt, phase roots and original material/fugacity/
+Gibbs residuals. Phase mole, mass and volume fractions remain distinct; bulk
+density is conserved feed mass over additive phase volume.
+
+The exact feed carries each ideal species enthalpy/internal-energy reference
+once. Amount-weighted original phase departures provide the nonideal part.
+Entropy also includes the phase redistribution of ideal mixing:
+`R [sum(z ln z) - (1-beta) sum(x ln x) - beta sum(y ln y)]`.
+Thus a rounded phase material residual is never multiplied by a large species
+formation datum, and feed ideal mixing is not incorrectly retained unchanged.
+Each phase must have stable original mechanical and caloric response using its
+own composition; a feed Cv is not substituted for separated-phase Cv.
+
+The enthalpy solve uses safeguarded secants and periodic bisection, physical
+enthalpy residual and temperature-step/bracket acceptance. Its caller-declared
+temperature interval must retain original source support and explicit caloric
+continuity. Both temperature endpoints must resolve a two-phase state when a
+search is needed. At identical pressure and zero enthalpy increment, an admitted
+reference within the declared bracket is returned exactly after one PT call.
+The increment API integrates original NASA changes and then adds departure
+differences, preserving small heating/cooling and pressure-change calorics under
+large independent species reference shifts. It also returns the independently
+evaluated entropy change. Absolute-energy spacing that cannot resolve the
+requested tolerance refuses with an increment-API alternative.
+
+The work limit counts all original PT calls, including the reference and both
+bracket endpoints. The reported cubic-EOS count is explicitly an upper bound,
+`PT_calls * (6 * maximum_iterations + 2)`, not a measured iteration count.
+Cancellation is retained through nested phase searches, bounded source
+admission and final publication. Single-phase or unresolved search endpoints
+refuse without a stability fallback. This remains the original bounded
+two-phase solution rather than a global Gibbs-minimum certificate; no mixed
+Cp, acoustic relaxation, gas transport, interface kinetics or flow-rate law is
+invented. A process consumer must impose its own entropy/work convention.
+
+The public `nonideal_flash` target compares independent 50-digit simultaneous
+cubic/fugacity PT and cubic/fugacity/enthalpy PH solutions, independently
+reconstructs full phase NASA/mixing/departure calorics, and checks species/mass/
+volume closure, isenthalpic pressure-drop entropy, source-datum invariance,
+small heat cycles, bounded work, exact fixed points and cancellation. The
+equimolar methane/ethane fixture uses synthetic Cp/R values 3.5 and 4.5; these
+checks verify constitutive consistency, not experimental mixture accuracy.
+The phase enthalpy convention is documented by the original-law cubic EOS
+reference at
+<https://idaes-pse.readthedocs.io/en/stable/explanations/components/property_package/general/eos/cubic.html>.
