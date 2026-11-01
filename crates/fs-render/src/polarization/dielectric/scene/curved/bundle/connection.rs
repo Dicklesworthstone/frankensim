@@ -24,6 +24,9 @@ use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
 
+/// Deterministic finite-seed discovery of distinct regular optical images.
+pub mod images;
+
 /// One fixed source and polarization law while its launch direction is solved.
 /// The transverse axis is projected into each trial ray's transverse plane;
 /// the normalized Stokes coordinates are defined in that projected frame.
@@ -291,14 +294,35 @@ impl CurvedPolarizedScene<'_> {
         options: BundleConnectionOptions,
         policy: BundleBranchPolicy<'_>,
     ) -> Result<BundleConnection, BundleConnectionError> {
+        self.connect_bundle_with_policy_work(
+            cx,
+            launch,
+            target,
+            options,
+            policy,
+            &mut Work::default(),
+        )
+    }
+
+    // The caller retains work even when a completed trial misses the receiver
+    // or a bounded local solve fails. Image discovery uses this same solver;
+    // it neither retraces the first ray nor estimates failed-attempt work.
+    fn connect_bundle_with_policy_work(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+        work: &mut Work,
+    ) -> Result<BundleConnection, BundleConnectionError> {
         options.validate()?;
         if matches!(policy, BundleBranchPolicy::Sequence(events)
             if events.len() > MAX_POLARIZED_PATH_EVENTS as usize)
         {
             return Err(BundleConnectionError::InvalidBranchPlan);
         }
-        let mut work = Work::default();
-        let first = self.connection_trial(cx, launch, options, policy, &mut work)?;
+        let first = self.connection_trial(cx, launch, options, policy, work)?;
         let signature = first.branch_signature();
         let mut current = arrival(first, target, options.projection)?;
         for iteration in 0..=options.max_iterations {
@@ -309,7 +333,7 @@ impl CurvedPolarizedScene<'_> {
                     path: current.path,
                     residual_m: current.position_error,
                     iterations: iteration,
-                    work,
+                    work: *work,
                 });
             }
             if current.tangent_error <= target.position_tolerance_m
@@ -346,7 +370,7 @@ impl CurvedPolarizedScene<'_> {
                     },
                     ..launch
                 };
-                let path = self.connection_trial(cx, trial_launch, options, policy, &mut work)?;
+                let path = self.connection_trial(cx, trial_launch, options, policy, work)?;
                 // A changed visibility/topology cannot use the current smooth
                 // Jacobian. Smaller trials may remain in the admitted basin.
                 if path.branch_signature() == signature {
@@ -404,21 +428,24 @@ impl CurvedPolarizedScene<'_> {
             launch.normalized_source_stokes,
             launch.initial_medium,
         )?;
-        let path = match policy {
-            BundleBranchPolicy::TransmitOrReflectTir => self.trace_bundle_with_checked_branches(
-                cx,
-                bundle,
-                launch.initial_medium,
-                options.scene,
-                true,
-                |_, context| {
-                    Ok(if context.total_internal_reflection {
-                        DielectricEvent::Reflection
-                    } else {
-                        DielectricEvent::Transmission
-                    })
-                },
-            )?,
+        let (path, branch_plan) = match policy {
+            BundleBranchPolicy::TransmitOrReflectTir => (
+                self.trace_bundle_with_checked_branches(
+                    cx,
+                    bundle,
+                    launch.initial_medium,
+                    options.scene,
+                    true,
+                    |_, context| {
+                        Ok(if context.total_internal_reflection {
+                            DielectricEvent::Reflection
+                        } else {
+                            DielectricEvent::Transmission
+                        })
+                    },
+                )?,
+                None,
+            ),
             BundleBranchPolicy::Sequence(events) => {
                 let mut consumed = 0;
                 let path = self.trace_bundle_with_checked_branches(
@@ -437,13 +464,7 @@ impl CurvedPolarizedScene<'_> {
                         Ok(event)
                     },
                 )?;
-                if path.termination() == PathTermination::Detected && consumed != events.len() {
-                    return Err(BundleConnectionError::BranchPlanNotConsumed {
-                        planned: events.len(),
-                        consumed,
-                    });
-                }
-                path
+                (path, Some((events.len(), consumed)))
             }
         };
         work.fields = work
@@ -454,6 +475,11 @@ impl CurvedPolarizedScene<'_> {
             .geometry
             .checked_add(path.query_work())
             .ok_or(BundleConnectionError::NumericalRange)?;
+        if let Some((planned, consumed)) = branch_plan {
+            if path.termination() == PathTermination::Detected && consumed != planned {
+                return Err(BundleConnectionError::BranchPlanNotConsumed { planned, consumed });
+            }
+        }
         Ok(path)
     }
 }
