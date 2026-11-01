@@ -29,6 +29,8 @@ mod ray_partition;
 pub mod validation;
 /// Calibrated irradiance from differentiated curved ray bundles.
 pub mod bundle;
+/// Finite native-detector power through sampled refractive paths.
+pub mod finite_detector;
 /// Prepared sampling of calibrated angular source profiles.
 pub mod sampling;
 
