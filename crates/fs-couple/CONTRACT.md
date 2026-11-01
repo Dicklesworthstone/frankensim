@@ -13175,6 +13175,43 @@ This remains fixed-geometry, homogeneous-exterior, rigid-wall harmonic physics;
 spatial refinement, measured validation and causal time-domain realization are
 not established by these algebraic compositions or compiler checks.
 
+### Loaded generator directivity and total outgoing power
+
+`RadiatingNetwork::prepare_sources_with_radiation` additionally prepares the
+original BEM angular bank while the same unit-opening solutions that produced
+the complete mutual radiation load are still retained. The ordinary source
+preparation has no angular cost. `PreparedRadiatingNetwork::far_field` returns
+a view bound to that exact loaded network, exterior gas and source partition;
+no repeated observation solves a network or boundary problem.
+
+Canonical pressure/flow drives and coherence factors map through the original
+loaded outward-opening transfer before complex angular fields are summed and
+squared. Independent generators retain the induced cross-opening coherence;
+diagonal opening powers cannot replace their factor columns. Peak exp(-iωt)
+amplitudes F have units Pa m, with p ~ F exp(ikr)/r. Directional time/ensemble
+power is E[|F|²]/(2ρc) in W/sr. Arbitrary observation directions remain separate
+from the positive full-sphere quadrature ladder. The original owner requires
+two successive grid refinements to agree for each actual drive's total power,
+first directional moments and second directional moments. Quiet cancellation
+is evaluated in the complex fields, not a rounded source-power Gram matrix.
+
+Angular kernel work and storage have their own explicit cold-preparation
+bounds. Repeated calls allocate nothing; their one harmonic work allowance
+includes both the at-most-32³ source-to-opening products and the original
+angular contraction. Cancellation remains bounded between mapped factors and
+angular work tiles. After an error, the caller discards its output slice and
+receives no converged integrated result. Zero coherence factors are silence.
+
+Radiated power is an outgoing-field observation, never an additional network
+loss or a repair of signed surface work. Its angular refinement estimates do
+not establish continuum, panel-integration, port-basis or boundary-solve
+accuracy. Focused G1/G3 regressions define a separately assembled physical
+boundary solve and independent Simpson/azimuthal angular integral, mixed-unit phase
+and amplitude scaling, a dark generator mode with positive internal loss,
+partial coherence, and a case where dropping induced opening correlations
+changes the predicted radiation. Budget, cancellation and silence refusals use
+the same native owners.
+
 ## Prescribed-volume finite gas networks
 
 `prescribed_gas::step_candidate` composes the original same-snapshot finite-nozzle network with original NASA-9 midpoint heat/volume proposals for explicitly driven chambers and finite reservoirs. All drives and endpoint solvers cover the same parcel identities; concurrent inlet/outlet enthalpy is counted once. Gross gas `p_mid * dV` work, exterior-pressure work and net work to the prescribed drive remain separate. Actual local storage balances include transported enthalpy; the complete finite network closes `sum(dU) + sum(W_gross) - sum(Q_external) = 0` before all original owners can be returned atomically. The original graph-size, source, inventory, withdrawal and pressure-crossing limits remain active.

@@ -5,7 +5,8 @@ use super::*;
 use fs_bem::near_field::FirstOrder;
 use fs_bem::observation_transfers::{
     BemObservation, HarmonicField, HarmonicFieldStatistics, HarmonicWorkBudget,
-    PreparedHarmonicObservation, PreparedMicrophoneArray, ReceiverSpec, SourceId,
+    PreparedHarmonicObservation, PreparedMicrophoneArray, PreparedRadiationObservation,
+    PreparedRadiationOptions, ReceiverSpec, SourceId,
 };
 use fs_duct::network::{
     CoupledSourceBank, MAX_NETWORK_PORTS, NetworkCoherenceBudget, NetworkSourceCoordinate,
@@ -14,6 +15,9 @@ use fs_duct::network::{
 };
 
 const FACTOR_ENTRIES: usize = MAX_NETWORK_PORTS * MAX_NETWORK_PORTS;
+
+mod angular;
+pub use angular::PreparedRadiatingFarField;
 
 /// One immutable source/network/exterior binding at a common positive frequency.
 /// Both the original source laws and the exterior geometry remain borrowed.
@@ -30,6 +34,7 @@ pub struct PreparedRadiatingNetwork<'a> {
     network: PreparedNetworkSources,
     opening_indices: Vec<usize>,
     observer: PreparedHarmonicObservation,
+    radiation: Option<PreparedRadiationObservation>,
     // Source-major, receiver-minor, per the canonical source coordinate's SI unit.
     receiver_columns: Vec<HarmonicField>,
 }
@@ -53,6 +58,49 @@ impl RadiatingNetwork {
         sources: &'a [PortSource],
         bank: Option<&'a CoupledSourceBank>,
         scalar_loads: &'a [PortTermination],
+        gate: &CancelGate,
+    ) -> Result<PreparedRadiatingNetwork<'a>, ExteriorNetworkError> {
+        self.prepare_sources_inner(omega, loss, sources, bank, scalar_loads, None, gate)
+    }
+
+    /// Additionally prepare far-field amplitudes and full-sphere radiated power
+    /// from the SAME opening solutions that supply the complete radiation load.
+    /// Requested unit directions are separate from the positive quadrature
+    /// ladder. `radiation` independently bounds additional angular kernel work,
+    /// storage and drive-specific power/moment convergence; no new solve occurs.
+    /// The ordinary [`Self::prepare_sources`] path pays no angular cost.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_sources_with_radiation<'a>(
+        &'a self,
+        omega: f64,
+        loss: LossModel,
+        sources: &'a [PortSource],
+        bank: Option<&'a CoupledSourceBank>,
+        scalar_loads: &'a [PortTermination],
+        directions: &[[f64; 3]],
+        radiation: PreparedRadiationOptions,
+        gate: &CancelGate,
+    ) -> Result<PreparedRadiatingNetwork<'a>, ExteriorNetworkError> {
+        self.prepare_sources_inner(
+            omega,
+            loss,
+            sources,
+            bank,
+            scalar_loads,
+            Some((directions, radiation)),
+            gate,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn prepare_sources_inner<'a>(
+        &'a self,
+        omega: f64,
+        loss: LossModel,
+        sources: &'a [PortSource],
+        bank: Option<&'a CoupledSourceBank>,
+        scalar_loads: &'a [PortTermination],
+        angular: Option<(&[[f64; 3]], PreparedRadiationOptions)>,
         gate: &CancelGate,
     ) -> Result<PreparedRadiatingNetwork<'a>, ExteriorNetworkError> {
         poll(gate)?;
@@ -159,6 +207,11 @@ impl RadiatingNetwork {
         // It observes the SAME solutions that produced the full boundary above.
         let observer =
             owner.prepare_harmonic_from_solutions(omega, &solutions, || gate.is_requested())?;
+        let radiation = angular
+            .map(|(directions, options)| {
+                owner.prepare_radiation_from_solutions(omega, &solutions, directions, options, gate)
+            })
+            .transpose()?;
         let mut prepared = PreparedRadiatingNetwork {
             model: self,
             sources,
@@ -169,6 +222,7 @@ impl RadiatingNetwork {
             network,
             opening_indices,
             observer,
+            radiation,
             receiver_columns: Vec::with_capacity(count * r),
         };
         let mut field = vec![HarmonicField::default(); r];

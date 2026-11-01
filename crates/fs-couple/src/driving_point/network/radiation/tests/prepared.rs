@@ -6,6 +6,8 @@ use fs_duct::network::{
     PortExcitation, PortSource, network_drive_source_bank, network_drive_sources,
 };
 
+mod angular;
+
 const FIELD_BUDGET: HarmonicWorkBudget = HarmonicWorkBudget {
     maximum_products: 100_000,
 };

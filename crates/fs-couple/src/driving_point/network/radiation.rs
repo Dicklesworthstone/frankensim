@@ -23,8 +23,8 @@ use fs_duct::network::NetworkMedia;
 
 mod prepared;
 pub use prepared::{
-    PreparedRadiatingMicrophones, PreparedRadiatingNetwork, RadiatingSourceResponse,
-    RadiatingSourceStatistics,
+    PreparedRadiatingFarField, PreparedRadiatingMicrophones, PreparedRadiatingNetwork,
+    RadiatingSourceResponse, RadiatingSourceStatistics,
 };
 
 /// One actual opening on a closed, outward-oriented, capped surface. All other
