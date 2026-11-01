@@ -45,7 +45,7 @@ mod angular;
 pub use angular::MAX_ANGULAR_CELLS_PER_ENCLOSURE;
 mod spectral_medium;
 use spectral_medium::PreparedMedium;
-mod visibility;
+pub(in crate::photometry) mod visibility;
 use visibility::{Visibility, VisibilityIndex};
 pub use visibility::MAX_VISIBILITY_TRIANGLES;
 

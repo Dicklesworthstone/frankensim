@@ -87,20 +87,20 @@ struct Node {
     count: usize,
 }
 
-pub(super) struct VisibilityIndex {
+pub(in crate::photometry) struct VisibilityIndex {
     entries: Vec<Entry>,
     nodes: Vec<Node>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum Visibility {
+pub(in crate::photometry) enum Visibility {
     Clear,
     Blocked,
     Uncertain,
 }
 
 impl VisibilityIndex {
-    pub(super) fn prepare(
+    pub(in crate::photometry) fn prepare(
         primitives: &[Primitive],
         hash: &mut DomainHasher,
         cx: &Cx<'_>,
@@ -179,6 +179,27 @@ impl VisibilityIndex {
         end: Interval,
         cx: &Cx<'_>,
     ) -> Result<Visibility, PhotometryError> {
+        self.visibility_impl(primitives, origin, direction, end, None, cx)
+    }
+
+    /// All ray origins are on the supplied nondegenerate source face, and the
+    /// caller has established receiver separation from its plane. Exclude only
+    /// that face and provably coplanar faces in the SAME native primitive from
+    /// the open source endpoint. Other faces of folded emitters still occlude.
+    /// This is internal: an arbitrary bounding box does not justify exclusion.
+    pub(in crate::photometry) fn visibility_from_face(
+        &self, primitives: &[Primitive], source_vertices: [Vector; 3], receiver: Vector,
+        end: Interval, origin_face: (usize, usize), cx: &Cx<'_>,
+    ) -> Result<Visibility, PhotometryError> {
+        let origin = std::array::from_fn(|i| source_vertices[0][i].hull(source_vertices[1][i]).hull(source_vertices[2][i]));
+        let direction = std::array::from_fn(|i| receiver[i] - origin[i]);
+        self.visibility_impl(primitives, origin, direction, end, Some((source_vertices, receiver, origin_face)), cx)
+    }
+
+    fn visibility_impl(
+        &self, primitives: &[Primitive], origin: Vector, direction: Vector,
+        end: Interval, source: Option<([Vector; 3], Vector, (usize, usize))>, cx: &Cx<'_>,
+    ) -> Result<Visibility, PhotometryError> {
         let mut result = Visibility::Clear;
         let mut node_index = 0;
         while node_index < self.nodes.len() {
@@ -193,8 +214,18 @@ impl VisibilityIndex {
                 if !entry.bounds.may_intersect(origin, direction, end) {
                     continue;
                 }
+                if source.is_some_and(|(_, _, (primitive, triangle))| {
+                    primitive == entry.primitive as usize
+                        && (triangle == entry.triangle as usize
+                            || same_coordinate_plane(&primitives[primitive], triangle, entry.triangle as usize))
+                }) {
+                    continue;
+                }
                 let state = world_triangle(&primitives[entry.primitive as usize], entry.triangle as usize)
-                    .map_or(Visibility::Uncertain, |triangle| triangle_visibility(origin, direction, end, triangle));
+                    .map_or(Visibility::Uncertain, |triangle| match source {
+                        Some((vertices, receiver, _)) => triangle_bundle_visibility(vertices, receiver, end, triangle),
+                        None => triangle_visibility(origin, direction, end, triangle),
+                    });
                 match state {
                     Visibility::Blocked => return Ok(Visibility::Blocked),
                     Visibility::Uncertain => result = Visibility::Uncertain,
@@ -206,6 +237,20 @@ impl VisibilityIndex {
         cx.checkpoint()?;
         Ok(result)
     }
+}
+
+// Exact coordinate equality, not a floating-point coplanarity tolerance. A
+// common body-coordinate plane remains a plane under the shared affine rigid
+// placement. General coplanarity stays uncertain, so no predicate underflow
+// assumption or rounded world-coordinate comparison can erase a real blocker.
+fn same_coordinate_plane(primitive: &Primitive, first: usize, second: usize) -> bool {
+    let Some((mesh, _)) = native_mesh(primitive) else { return false; };
+    let (Some(a), Some(b)) = (mesh.triangles.get(first), mesh.triangles.get(second)) else { return false; };
+    (0..3).any(|axis| {
+        let Some(vertex) = mesh.vertices.get(a[0] as usize) else { return false; };
+        let coordinate = vertex[axis];
+        a.iter().chain(b).all(|&i| mesh.vertices.get(i as usize).is_some_and(|v| v[axis] == coordinate))
+    })
 }
 
 fn build(entries: &mut [Entry], start: usize, nodes: &mut Vec<Node>, cx: &Cx<'_>) -> Result<(), PhotometryError> {
@@ -275,23 +320,27 @@ fn world_triangle(primitive: &Primitive, triangle: usize) -> Option<[Vector; 3]>
 // Moller-Trumbore determinants evaluated outward, not a nominal hit plus a
 // tolerance. Strict tests prove misses/hits; inconclusive predicates widen
 // visibility. Winding is irrelevant for an opaque two-sided blocker.
-fn triangle_visibility(origin: Vector, direction: Vector, end: Interval, [a, b, c]: [Vector; 3]) -> Visibility {
+fn triangle_parameters(origin: Vector, direction: Vector, [a, b, c]: [Vector; 3]) -> Option<([Interval; 4], bool)> {
     let subtract = |left: Vector, right: Vector| std::array::from_fn(|i| left[i] - right[i]);
     let vectors = [subtract(b, a), subtract(c, a), direction, subtract(origin, a)];
-    if vectors.iter().flatten().any(|v| !finite(*v)) { return Visibility::Uncertain; }
+    if vectors.iter().flatten().any(|v| !finite(*v)) { return None; }
     let scale = vectors.iter().flatten().map(|v| v.lo().abs().max(v.hi().abs())).fold(0.0_f64, f64::max);
-    if scale == 0.0 { return Visibility::Uncertain; }
+    if scale == 0.0 { return None; }
     // Common scaling leaves all three determinant ratios unchanged and avoids
     // cubic overflow on finite, otherwise well-separated large stage geometry.
     let [e1, e2, d, offset] = vectors.map(|v| v.map(|x| x / Interval::point(scale)));
     let p = cross(d, e2);
     let determinant = dot(e1, p);
-    if determinant.contains_zero() || !finite(determinant) { return Visibility::Uncertain; }
+    if determinant.contains_zero() || !finite(determinant) { return None; }
     let q = cross(offset, e1);
     let u = dot(offset, p) / determinant;
     let v = dot(d, q) / determinant;
     let t = dot(e2, q) / determinant;
     let uv = u + v;
+    Some(([u, v, uv, t], determinant.lo() > 0.0))
+}
+
+fn classify_parameters([u, v, uv, t]: [Interval; 4], end: Interval) -> Visibility {
     if u.hi() < 0.0 || v.hi() < 0.0 || uv.lo() > 1.0 || t.hi() <= 0.0 || t.lo() > end.hi() {
         Visibility::Clear
     } else if u.lo() >= 0.0 && v.lo() >= 0.0 && uv.hi() <= 1.0 && t.lo() > 0.0 && t.hi() <= end.lo() {
@@ -299,6 +348,35 @@ fn triangle_visibility(origin: Vector, direction: Vector, end: Interval, [a, b, 
     } else {
         Visibility::Uncertain
     }
+}
+
+fn triangle_visibility(origin: Vector, direction: Vector, end: Interval, triangle: [Vector; 3]) -> Visibility {
+    triangle_parameters(origin, direction, triangle)
+        .map_or(Visibility::Uncertain, |(parameters, _)| classify_parameters(parameters, end))
+}
+
+// With a FIXED receiver and reverse direction P-receiver, every intersection
+// numerator and denominator is affine in P (t's numerator is constant). If the
+// determinant has one strict sign over all three vertex boxes, each ratio over
+// their convex hull is bounded by its vertex ratios: the interpolation weights
+// are barycentric weights times same-sign determinants, normalized by their sum.
+// Enclose u+v at the vertices too, rather than summing unrelated extrema.
+// Reverse t back to the existing source-to-receiver endpoint convention.
+fn triangle_bundle_visibility(vertices: [Vector; 3], receiver: Vector, end: Interval, triangle: [Vector; 3]) -> Visibility {
+    let mut combined: Option<([Interval; 4], bool)> = None;
+    for vertex in vertices {
+        let direction = std::array::from_fn(|i| vertex[i] - receiver[i]);
+        let Some((mut parameters, sign)) = triangle_parameters(receiver, direction, triangle) else {
+            return Visibility::Uncertain;
+        };
+        parameters[3] = Interval::point(1.0) - parameters[3];
+        combined = match combined {
+            None => Some((parameters, sign)),
+            Some((old, old_sign)) if sign == old_sign => Some((std::array::from_fn(|i| old[i].hull(parameters[i])), sign)),
+            _ => return Visibility::Uncertain,
+        };
+    }
+    combined.map_or(Visibility::Uncertain, |(parameters, _)| classify_parameters(parameters, end))
 }
 
 #[cfg(test)]

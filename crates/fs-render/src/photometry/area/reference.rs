@@ -28,6 +28,8 @@ use fs_exec::Cx;
 use fs_ivl::{Interval, angle::atan2_upper_half_plane};
 use std::io::{self, Write};
 
+pub mod occlusion;
+
 /// Version of the reference's geometry, clipping and numerical interpretation.
 pub const AREA_REFERENCE_SEMANTICS_VERSION: u32 = 1;
 
@@ -83,6 +85,8 @@ impl From<fs_exec::Cancelled> for AreaReferenceError {
 type Vector = [Interval; 3];
 
 struct Face {
+    // Original face identity for source-endpoint exclusion in occlusion queries.
+    origin_face: (usize, usize),
     vertices: [Vector; 3],
     // Positively rescaled winding normal, used only for source-side admission.
     perpendicular: Vector,
@@ -145,7 +149,7 @@ impl UnoccludedAreaReference {
             let both = source.sidedness() == EmissionSidedness::Both;
             hash.update(&[u8::from(both)]);
             hash_float(&mut hash, source.flux_lm());
-            for triangle in &mesh.triangles {
+            for (triangle_index, triangle) in mesh.triangles.iter().enumerate() {
                 cx.checkpoint()?;
                 let mut vertices = [[zero(); 3]; 3];
                 let mut key = [[0_u64; 3]; 3];
@@ -174,7 +178,7 @@ impl UnoccludedAreaReference {
                 let face_area = mul(mul(mul(point(0.5), length), point(scale)), point(scale));
                 if !finite(face_area) || face_area.lo() <= 0.0 { return Err(AreaReferenceError::NumericalRange); }
                 area = add(area, face_area);
-                faces.push(Face { vertices, perpendicular, area: face_area, luminance: zero(), both_sides: both });
+                faces.push(Face { origin_face: (source.primitive_index(), triangle_index), vertices, perpendicular, area: face_area, luminance: zero(), both_sides: both });
             }
             keys.sort_unstable();
             if keys.windows(2).any(|w| w[0] == w[1]) { return Err(AreaReferenceError::InvalidGeometry); }
