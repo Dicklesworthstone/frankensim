@@ -48,13 +48,13 @@ fn native_shadow_and_receiver_floor_enclose_independent_point_lux() {
             let scene = PhotometricScene::try_new(&geometry,&sources,
                 HomogeneousMedium::try_new(sigma,0.0,PhaseFunction::Isotropic).unwrap(),TransportOptions::default(),cx).unwrap();
             let prepared = prepare(&scene,cx).unwrap();
-            let Prepared::Available { visibility, .. } = &prepared else { panic!("native meshes must be admitted"); };
+            let Prepared::Available { visibility, medium, .. } = &prepared else { panic!("native meshes must be admitted"); };
             for (x,reference) in [(0.0,0.0),(3.0,0.512_f64*(-5.0_f64*sigma).exp())] {
                 let p = probe(x,0.0);
                 let report = scene.illuminance_with_enclosure(cx,&p).unwrap();
                 contains(report,reference);
                 // Check the independent interval BEFORE nominal-value hulling.
-                let (raw,uncertain) = direct_bound(&scene,cx,&p,visibility).unwrap().unwrap();
+                let (raw,uncertain) = direct_bound(&scene,cx,&p,visibility,medium,&mut |_, _| {}).unwrap().unwrap();
                 assert!(raw.contains(reference),"{raw:?}, reference={reference}");
                 assert_eq!(uncertain,0);
                 assert_eq!(report.uncertain_visibility_sources,Some(0));

@@ -293,15 +293,15 @@ fn g1_eighty_bin_direct_and_internal_reflection_images_match_independent_plate_o
         assert!(expected_lux[1] > 100.0 * expected_lux[2]);
         assert_eq!(
             result.trace_evaluations(),
-            result.branches().iter().map(|b| b.trace_evaluations).sum()
+            result.branches().iter().map(|b| b.trace_evaluations).sum::<u64>()
         );
         assert_eq!(
             result.field_evaluations(),
-            result.branches().iter().map(|b| b.field_evaluations).sum()
+            result.branches().iter().map(|b| b.field_evaluations).sum::<u64>()
         );
         assert_eq!(
             result.query_work(),
-            result.branches().iter().map(|b| b.query_work).sum()
+            result.branches().iter().map(|b| b.query_work).sum::<u64>()
         );
     });
 }

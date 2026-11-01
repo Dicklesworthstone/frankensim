@@ -16,7 +16,8 @@
 //! propagated and counted in distance, optical lengths and absorption. Geometry and field
 //! snapshots stay fixed for an entire trace. This forward ray-power estimator
 //! supplies detector samples; it does not supply scalar camera/BDPT MIS
-//! Jacobians, scattered-light transport or a global accuracy certificate.
+//! Jacobians or a global accuracy certificate. [`participating`] adds molecular
+//! scattering in physical arc length while retaining this same native walk.
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -28,13 +29,13 @@ use super::{
     Interaction, MAX_POLARIZED_PATH_EVENTS, PathTermination, SceneError, SurfaceBinding,
     admit_bindings, sample_boundary,
 };
-use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
 use crate::charts::Ray;
+use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
 use crate::dielectric::{DielectricEvent, DielectricGlass};
 use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::gradient_index::event::{
-    BoundarySide, BoundaryTermination, BoundaryWitness, GradientDeparture, GradientEventOptions,
-    propagate_to_boundary_with_control,
+    BoundaryOracle, BoundarySide, BoundaryTermination, BoundaryWitness, GradientDeparture,
+    GradientEventOptions, propagate_to_boundary_with_control,
 };
 use crate::gradient_index::{
     GradientIndexError, GradientIndexField, HomogeneousIndexField, MAX_GRADIENT_INDEX_STEPS,
@@ -45,6 +46,19 @@ use crate::polarization::Stokes;
 
 /// Native geometry walks retaining the original launch-angle derivatives.
 pub mod bundle;
+
+/// Molecular scattering through the same native curved surface traversal.
+#[cfg(feature = "volumes")]
+pub mod participating;
+
+/// One physical scattering distance, independent of geometric propagation.
+/// An infinite distance is permitted when the sampled flight exceeds the
+/// representable range. The active law still prevents a straight escape claim.
+#[derive(Clone, Copy)]
+struct CurvedVolumeFlight {
+    distance_m: f64,
+    phase_samples: [f64; 2],
+}
 
 /// Borrowed physical medium. A field identity names its complete immutable
 /// source/snapshot/reconstruction; equality at one sample cannot do that.
@@ -218,7 +232,15 @@ impl<'a> CurvedPolarizedScene<'a> {
         bindings: Vec<SurfaceBinding>,
         max_build_work: u64,
     ) -> Result<Self, CurvedSceneError> {
-        Self::try_new_with_optics(cx, geometry, media, conductors, &[], bindings, max_build_work)
+        Self::try_new_with_optics(
+            cx,
+            geometry,
+            media,
+            conductors,
+            &[],
+            bindings,
+            max_build_work,
+        )
     }
 
     /// Borrow original coherent dielectric films for local curved-ray boundary
@@ -234,7 +256,11 @@ impl<'a> CurvedPolarizedScene<'a> {
     ) -> Result<Self, CurvedSceneError> {
         cx.checkpoint()?;
         let bindings = admit_bindings(
-            geometry, media.len(), conductors.len(), coatings.len(), bindings,
+            geometry,
+            media.len(),
+            conductors.len(),
+            coatings.len(),
+            bindings,
         )?;
         if media.iter().any(|medium| {
             matches!(medium,
@@ -328,8 +354,40 @@ impl<'a> CurvedPolarizedScene<'a> {
         beam: PolarizedBeam,
         initial_medium: usize,
         settings: CurvedTraceSettings,
-        mut samples: impl FnMut(u32) -> [f64; 3],
+        samples: impl FnMut(u32) -> [f64; 3],
     ) -> Result<CurvedPathResult, CurvedSceneError> {
+        self.trace_with_flights(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            samples,
+            0,
+            |_, _| Ok(None),
+            |_, _, _| Err(CurvedSceneError::NumericalRange),
+        )
+        .map(|(path, _)| path)
+    }
+
+    // Surface-only and participating paths share every interface, geometric
+    // departure, optical integral, and limit. A flight law supplies arc length;
+    // this driver alone decides whether a physical surface occurs before it.
+    #[allow(clippy::too_many_arguments)]
+    fn trace_with_flights(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedTraceSettings,
+        mut samples: impl FnMut(u32) -> [f64; 3],
+        max_volume_events: u32,
+        mut flight: impl FnMut(usize, f64) -> Result<Option<CurvedVolumeFlight>, CurvedSceneError>,
+        mut scatter: impl FnMut(
+            usize,
+            PolarizedBeam,
+            [f64; 2],
+        ) -> Result<PolarizedBeam, CurvedSceneError>,
+    ) -> Result<(CurvedPathResult, u32), CurvedSceneError> {
         cx.checkpoint()?;
         if settings.max_surface_events == 0
             || settings.max_surface_events > MAX_POLARIZED_PATH_EVENTS
@@ -367,17 +425,21 @@ impl<'a> CurvedPolarizedScene<'a> {
         );
         let mut departure = None;
         let mut remaining_steps = settings.max_total_steps;
-        for event in 0..settings.max_surface_events {
+        let mut volume_events = 0_u32;
+        while result.surface_events < settings.max_surface_events {
             cx.checkpoint()?;
             if result.beam.power().i == 0.0 {
                 result.termination = PathTermination::Extinguished;
                 break;
             }
-            if self.straight_ray_escapes(
-                result.medium,
-                result.beam.ray(),
-                settings.event.surface_tolerance_m,
-            )? {
+            let volume_flight = flight(result.medium, result.beam.wavelength_nm())?;
+            if volume_flight.is_none()
+                && self.straight_ray_escapes(
+                    result.medium,
+                    result.beam.ray(),
+                    settings.event.surface_tolerance_m,
+                )?
+            {
                 result.termination = PathTermination::Escaped;
                 break;
             }
@@ -386,6 +448,9 @@ impl<'a> CurvedPolarizedScene<'a> {
                 result.termination = PathTermination::DistanceLimit;
                 break;
             }
+            let segment_distance =
+                volume_flight.map_or(remaining, |flight| flight.distance_m.min(remaining));
+            let collision_due = volume_flight.is_some_and(|flight| flight.distance_m < remaining);
             let ray = result.beam.ray();
             let wavelength = result.beam.wavelength_nm();
             if remaining_steps == 0 {
@@ -409,7 +474,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 ray,
                 result.beam.frame().horizontal(),
                 wavelength,
-                remaining,
+                segment_distance,
                 departure.take(),
                 event_options,
                 || cx.checkpoint().is_ok(),
@@ -449,12 +514,51 @@ impl<'a> CurvedPolarizedScene<'a> {
             result.max_contact_resolution_m = result
                 .max_contact_resolution_m
                 .max(segment.contact_resolution_m);
+            if collision_due {
+                match segment.termination {
+                    BoundaryTermination::DistanceLimit => {
+                        // A collision inside an unresolved geometric collar
+                        // cannot be safely ordered with the physical interface.
+                        // In particular it must not be skipped during departure
+                        // or restarted as though the previous surface vanished.
+                        let clearance = oracle
+                            .query(result.beam.ray().origin)
+                            .map_err(|error| {
+                                oracle.last_error().map_or(
+                                    CurvedSceneError::Propagation(error),
+                                    CurvedSceneError::Geometry,
+                                )
+                            })?
+                            .clearance_m;
+                        if clearance <= 2.0 * settings.event.surface_tolerance_m {
+                            return Err(GradientIndexError::BoundaryResolutionLimit.into());
+                        }
+                        let selected = volume_flight.ok_or(CurvedSceneError::NumericalRange)?;
+                        result.beam = scatter(result.medium, result.beam, selected.phase_samples)?;
+                        volume_events += 1;
+                        if volume_events >= max_volume_events {
+                            result.termination = PathTermination::VolumeLimit;
+                            break;
+                        }
+                        continue;
+                    }
+                    BoundaryTermination::Surface(_) => {
+                        let selected = volume_flight.ok_or(CurvedSceneError::NumericalRange)?;
+                        if selected.distance_m - propagation.distance_m
+                            <= segment.contact_resolution_m
+                        {
+                            return Err(GradientIndexError::BoundaryResolutionLimit.into());
+                        }
+                    }
+                }
+            }
             let BoundaryTermination::Surface(witness) = segment.termination else {
-                result.termination = if self.straight_ray_escapes(
-                    result.medium,
-                    result.beam.ray(),
-                    settings.event.surface_tolerance_m,
-                )? {
+                result.termination = if volume_flight.is_none()
+                    && self.straight_ray_escapes(
+                        result.medium,
+                        result.beam.ray(),
+                        settings.event.surface_tolerance_m,
+                    )? {
                     PathTermination::Escaped
                 } else {
                     PathTermination::DistanceLimit
@@ -480,6 +584,7 @@ impl<'a> CurvedPolarizedScene<'a> {
                 witness,
                 resolution_m: segment.contact_resolution_m,
             });
+            let event = result.surface_events;
             result.surface_events += 1;
             match binding.interaction {
                 Interaction::Detector { reference_axis } => {
@@ -506,44 +611,79 @@ impl<'a> CurvedPolarizedScene<'a> {
                         .map_err(SceneError::from)?
                         .beam;
                 }
-                Interaction::RoughConductor { optics, medium, surface } => {
+                Interaction::RoughConductor {
+                    optics,
+                    medium,
+                    surface,
+                } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
-                            object_id: instance.object_id(), expected: medium, actual: result.medium,
-                        }.into());
+                            object_id: instance.object_id(),
+                            expected: medium,
+                            actual: result.medium,
+                        }
+                        .into());
                     }
                     let draw = samples(event);
-                    let Some(next) = result.beam.sample_rough_conductor(
-                        witness.normal, &self.conductors[optics], surface, [draw[0], draw[1]],
-                    ).map_err(SceneError::from)? else {
+                    let Some(next) = result
+                        .beam
+                        .sample_rough_conductor(
+                            witness.normal,
+                            &self.conductors[optics],
+                            surface,
+                            [draw[0], draw[1]],
+                        )
+                        .map_err(SceneError::from)?
+                    else {
                         result.termination = PathTermination::RejectedMicrofacet;
                         break;
                     };
                     result.beam = next.beam;
                 }
-                Interaction::BrushedConductor { optics, medium, detail } => {
+                Interaction::BrushedConductor {
+                    optics,
+                    medium,
+                    detail,
+                } => {
                     if result.medium != medium {
                         return Err(SceneError::MediumMismatch {
-                            object_id: instance.object_id(), expected: medium, actual: result.medium,
-                        }.into());
+                            object_id: instance.object_id(),
+                            expected: medium,
+                            actual: result.medium,
+                        }
+                        .into());
                     }
                     let transform = instance.transform();
-                    let local_point = transform.inverse().map_err(SceneError::from)?
+                    let local_point = transform
+                        .inverse()
+                        .map_err(SceneError::from)?
                         .transform_point(witness.surface_point);
                     let draw = samples(event);
                     // The surface representative defines the procedural finish.
                     // The physical beam stays at its integrated endpoint.
-                    let Some(next) = result.beam.sample_instanced_brushed_conductor(
-                        &self.conductors[optics], &detail, transform, local_point,
-                        witness.normal, [draw[0], draw[1]],
-                    ).map_err(SceneError::from)? else {
+                    let Some(next) = result
+                        .beam
+                        .sample_instanced_brushed_conductor(
+                            &self.conductors[optics],
+                            &detail,
+                            transform,
+                            local_point,
+                            witness.normal,
+                            [draw[0], draw[1]],
+                        )
+                        .map_err(SceneError::from)?
+                    else {
                         result.termination = PathTermination::RejectedMicrofacet;
                         break;
                     };
                     result.beam = next.beam;
                 }
-                interaction @ (Interaction::Dielectric { outside, inside, .. }
-                | Interaction::CoatedDielectric { outside, inside, .. }) => {
+                interaction @ (Interaction::Dielectric {
+                    outside, inside, ..
+                }
+                | Interaction::CoatedDielectric {
+                    outside, inside, ..
+                }) => {
                     let cosine = witness.normal.dot(result.beam.ray().dir);
                     if !cosine.is_finite() || cosine == 0.0 {
                         return Err(CurvedSceneError::InvalidContact);
@@ -564,8 +704,12 @@ impl<'a> CurvedPolarizedScene<'a> {
                     let target_medium =
                         self.medium_at(target, result.beam.ray().origin, wavelength)?;
                     let Some(next) = sample_boundary(
-                        result.beam, witness.normal, target_medium, interaction,
-                        self.coatings, samples(event),
+                        result.beam,
+                        witness.normal,
+                        target_medium,
+                        interaction,
+                        self.coatings,
+                        samples(event),
                     )?
                     else {
                         result.termination = PathTermination::RejectedMicrofacet;
@@ -592,7 +736,7 @@ impl<'a> CurvedPolarizedScene<'a> {
             });
         }
         cx.checkpoint()?;
-        Ok(result)
+        Ok((result, volume_events))
     }
 
     fn straight_ray_escapes(
@@ -641,7 +785,7 @@ mod rough_conductor_tests {
     impl GradientIndexField for VerticalIndex {
         fn sample(&self, p: Point3, _: f64) -> Result<GradientIndexSample, GradientIndexError> {
             let n = 1.2 + 0.02 * p.z;
-            GradientIndexSample::try_new(n, Vec3::new(0.0,0.0,0.02), 0.1, Some(n))
+            GradientIndexSample::try_new(n, Vec3::new(0.0, 0.0, 0.02), 0.1, Some(n))
         }
     }
 
@@ -649,57 +793,101 @@ mod rough_conductor_tests {
     fn g1_rough_metal_uses_event_local_index_and_retains_gradient_snapshot() {
         let gate = CancelGate::new();
         fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
-            let cx = Cx::new(&gate, arena,
-                StreamKey { seed:31, kernel_id:7, tile:0, iteration:0 },
-                asupersync::types::Budget::INFINITE, ExecMode::Deterministic);
-            let plane = |id: u64, z: f64| GeometryInstance::try_new(id,
-                fs_blake3::hash_domain("org.frankensim.test.rough-gradient", &id.to_le_bytes()),
-                SharedGeometry::mesh(TriMesh::new(
-                    vec![[-10.0,-10.0,z],[10.0,-10.0,z],[0.0,10.0,z]],vec![[0,1,2]],
-                )), RigidTransform::identity()).unwrap();
-            let geometry = InstanceScene::try_new(vec![plane(1,1.0),plane(2,-1.0)]).unwrap();
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 31,
+                    kernel_id: 7,
+                    tile: 0,
+                    iteration: 0,
+                },
+                asupersync::types::Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let plane = |id: u64, z: f64| {
+                GeometryInstance::try_new(
+                    id,
+                    fs_blake3::hash_domain("org.frankensim.test.rough-gradient", &id.to_le_bytes()),
+                    SharedGeometry::mesh(TriMesh::new(
+                        vec![[-10.0, -10.0, z], [10.0, -10.0, z], [0.0, 10.0, z]],
+                        vec![[0, 1, 2]],
+                    )),
+                    RigidTransform::identity(),
+                )
+                .unwrap()
+            };
+            let geometry = InstanceScene::try_new(vec![plane(1, 1.0), plane(2, -1.0)]).unwrap();
             let field = VerticalIndex;
-            let identity = ContentHash([42;32]);
-            let media = [SceneMedium::GradientIndex { field:&field, identity }];
+            let identity = ContentHash([42; 32]);
+            let media = [SceneMedium::GradientIndex {
+                field: &field,
+                identity,
+            }];
             let metals = [ConductorOptics::representative_tungsten()];
             let bindings = vec![
-                SurfaceBinding { object_id:1, interaction:Interaction::RoughConductor {
-                    optics:0, medium:0, surface:ConductorSurface::try_rough(0.2).unwrap(),
-                } },
-                SurfaceBinding { object_id:2, interaction:Interaction::Detector {
-                    reference_axis:Vec3::new(1.0,0.0,0.0),
-                } },
+                SurfaceBinding {
+                    object_id: 1,
+                    interaction: Interaction::RoughConductor {
+                        optics: 0,
+                        medium: 0,
+                        surface: ConductorSurface::try_rough(0.2).unwrap(),
+                    },
+                },
+                SurfaceBinding {
+                    object_id: 2,
+                    interaction: Interaction::Detector {
+                        reference_axis: Vec3::new(1.0, 0.0, 0.0),
+                    },
+                },
             ];
             let scene = CurvedPolarizedScene::try_new_with_conductors(
-                &cx,&geometry,&media,&metals,bindings,100_000,
-            ).unwrap();
-            let input = scene.launch_beam(Point3::new(0.0,0.0,0.0),
-                PolarizationFrame::try_new(Vec3::new(0.0,0.0,1.0),Vec3::new(1.0,0.0,0.0)).unwrap(),
-                550.0,0,Stokes::try_new(1.0,0.0,0.0,1.0).unwrap()).unwrap();
+                &cx, &geometry, &media, &metals, bindings, 100_000,
+            )
+            .unwrap();
+            let input = scene
+                .launch_beam(
+                    Point3::new(0.0, 0.0, 0.0),
+                    PolarizationFrame::try_new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(1.0, 0.0, 0.0))
+                        .unwrap(),
+                    550.0,
+                    0,
+                    Stokes::try_new(1.0, 0.0, 0.0, 1.0).unwrap(),
+                )
+                .unwrap();
             let settings = CurvedTraceSettings {
-                max_surface_events:4, max_distance_m:4.0, max_total_steps:16_384, max_query_work:1_000_000,
-                event:GradientEventOptions {
-                    integration:GradientIndexOptions {
-                        position_tolerance_m:1e-11, direction_tolerance:1e-12,
+                max_surface_events: 4,
+                max_distance_m: 4.0,
+                max_total_steps: 16_384,
+                max_query_work: 1_000_000,
+                event: GradientEventOptions {
+                    integration: GradientIndexOptions {
+                        position_tolerance_m: 1e-11,
+                        direction_tolerance: 1e-12,
                         ..GradientIndexOptions::default()
                     },
-                    surface_tolerance_m:1e-7, ..GradientEventOptions::default()
+                    surface_tolerance_m: 1e-7,
+                    ..GradientEventOptions::default()
                 },
             };
             let mut calls = 0;
-            let out = scene.trace_with_samples(&cx,input,0,settings,|event| {
-                assert_eq!(event,0); calls += 1; [0.0,0.0,0.5]
-            }).unwrap();
-            assert_eq!(calls,1);
-            assert_eq!(out.termination(),PathTermination::Detected);
-            assert_eq!(out.medium_snapshot_identity(),Some(identity));
-            assert!(matches!(out.beam().medium(),BeamMedium::GradientIndex(_)));
-            assert!((out.traveled_m()-3.0).abs()<3e-6);
-            assert!((out.optical_path_length_m()-3.61).abs()<4e-6);
-            assert!((out.optical_depth()-0.3).abs()<1e-6);
-            let expected = metals[0].fresnel(550.0,1.22,1.0).unwrap()*(-0.3_f64).exp();
-            assert!((out.beam().power().i-expected).abs()<2e-6);
-            assert!((out.beam().power().v+expected).abs()<2e-6);
+            let out = scene
+                .trace_with_samples(&cx, input, 0, settings, |event| {
+                    assert_eq!(event, 0);
+                    calls += 1;
+                    [0.0, 0.0, 0.5]
+                })
+                .unwrap();
+            assert_eq!(calls, 1);
+            assert_eq!(out.termination(), PathTermination::Detected);
+            assert_eq!(out.medium_snapshot_identity(), Some(identity));
+            assert!(matches!(out.beam().medium(), BeamMedium::GradientIndex(_)));
+            assert!((out.traveled_m() - 3.0).abs() < 3e-6);
+            assert!((out.optical_path_length_m() - 3.61).abs() < 4e-6);
+            assert!((out.optical_depth() - 0.3).abs() < 1e-6);
+            let expected = metals[0].fresnel(550.0, 1.22, 1.0).unwrap() * (-0.3_f64).exp();
+            assert!((out.beam().power().i - expected).abs() < 2e-6);
+            assert!((out.beam().power().v + expected).abs() < 2e-6);
         });
     }
 }

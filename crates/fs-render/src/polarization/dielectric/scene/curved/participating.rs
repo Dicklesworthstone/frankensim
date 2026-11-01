@@ -1,0 +1,254 @@
+//! Molecular multiple scattering along actual curved physical paths.
+//!
+//! Each declared medium has a spatially uniform mass-scattering spectrum and
+//! density. Its original phase-index field may vary, and that original field
+//! continues to own absorption and group delay. An exponential scattering-only
+//! flight is measured in arc length, not endpoint separation or a tangent ray.
+//! Native geometry decides whether a surface interrupts that flight. At a
+//! collision the original Rayleigh Mueller/PDF sampler acts on the locally
+//! transported polarization frame and current physical refractive index.
+//!
+//! Sampling scattering separately from continuous Beer absorption is the
+//! survival-biased power estimator: scattering survival is already represented
+//! by flight probability, so no extra scattering extinction or albedo weight
+//! multiplies the packet. Source power receives no radiance/index-squared
+//! factor. A volume collision may redirect a ray toward a previously missed
+//! detector; an active scattering medium cannot use a straight escape proof.
+//!
+//! This owner does not turn a heterogeneous density grid into constant cells or
+//! trace its chords. Spatially varying scattering requires a curved optical-
+//! depth event owner. Only molecular Rayleigh/depolarized-Rayleigh phase laws
+//! have the requisite native Stokes response; scalar particle laws refuse.
+//! The medium snapshot must remain immutable for the complete path.
+
+use super::{
+    CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
+    CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError,
+};
+use crate::volumes::transport::VolumeTransportError;
+use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
+use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
+use fs_exec::Cx;
+use fs_math::det;
+use fs_rand::philox::philox4x32_10;
+
+/// Immutable spatially uniform scattering law for one explicit native medium.
+/// Absorption is deliberately absent: it belongs to the original optical field.
+#[derive(Clone, Copy, Debug)]
+pub struct CurvedRayleighMedium<'a> {
+    scattering: &'a MassScatteringSpectrum,
+    density_kg_m3: f64,
+    phase: &'a PhaseFunction,
+}
+
+impl<'a> CurvedRayleighMedium<'a> {
+    /// Admit kg/m³ and m²/kg without inferring either from refractive index.
+    /// Every declared phase is checked, including a zero-density medium.
+    pub fn try_new(
+        scattering: &'a MassScatteringSpectrum,
+        density_kg_m3: f64,
+        phase: &'a PhaseFunction,
+    ) -> Result<Self, CurvedSceneError> {
+        if !density_kg_m3.is_finite() || density_kg_m3 < 0.0 {
+            return Err(volume_error(VolumeTransportError::Density { index: 0 }));
+        }
+        phase.rayleigh_mueller(0.0).map_err(scattering_error)?;
+        Ok(Self {
+            scattering,
+            density_kg_m3,
+            phase,
+        })
+    }
+
+    pub const fn scattering_spectrum(&self) -> &'a MassScatteringSpectrum {
+        self.scattering
+    }
+    pub const fn density_kg_m3(&self) -> f64 {
+        self.density_kg_m3
+    }
+    pub const fn phase(&self) -> &'a PhaseFunction {
+        self.phase
+    }
+
+    /// Physical scattering rate per metre of ray arc length.
+    pub fn scattering_per_m(&self, wavelength_nm: f64) -> Result<f64, CurvedSceneError> {
+        let mass = self.scattering.at(wavelength_nm).map_err(volume_error)?;
+        let rate = mass * self.density_kg_m3;
+        if !rate.is_finite() || (mass > 0.0 && self.density_kg_m3 > 0.0 && rate == 0.0) {
+            return Err(volume_error(VolumeTransportError::Unrepresentable));
+        }
+        Ok(rate)
+    }
+}
+
+/// Independent physical-distance, surface-event and volume-collision limits.
+#[derive(Clone, Copy, Debug)]
+pub struct CurvedRayleighTraceSettings {
+    pub surfaces: CurvedTraceSettings,
+    pub max_volume_events: u32,
+}
+
+/// The original detector-consumable path plus actual volume-work counts.
+/// Surviving power at a volume cap has `PathTermination::VolumeLimit`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CurvedRayleighPath {
+    path: CurvedPathResult,
+    volume_events: u32,
+    free_flight_draws: u32,
+}
+impl CurvedRayleighPath {
+    pub const fn path(&self) -> &CurvedPathResult {
+        &self.path
+    }
+    pub const fn volume_events(&self) -> u32 {
+        self.volume_events
+    }
+    pub const fn free_flight_draws(&self) -> u32 {
+        self.free_flight_draws
+    }
+}
+
+/// Borrowed original geometry and one optional scattering law per medium.
+/// Binding and tracing allocate no heap workspace or copied optical tables.
+pub struct CurvedRayleighScene<'a, 'scene, 'optics> {
+    scene: &'a CurvedPolarizedScene<'scene>,
+    media: &'a [Option<CurvedRayleighMedium<'optics>>],
+}
+impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
+    pub fn try_new(
+        cx: &Cx<'_>,
+        scene: &'a CurvedPolarizedScene<'scene>,
+        media: &'a [Option<CurvedRayleighMedium<'optics>>],
+    ) -> Result<Self, CurvedSceneError> {
+        cx.checkpoint()?;
+        if media.len() != scene.media.len() {
+            return Err(SceneError::InvalidBindings.into());
+        }
+        Ok(Self { scene, media })
+    }
+
+    pub const fn surface_scene(&self) -> &'a CurvedPolarizedScene<'scene> {
+        self.scene
+    }
+
+    /// Surface draws keep the native domain and surface ordinal. Flights use a
+    /// disjoint Philox domain and their own ordinal, including interrupted
+    /// flights. Sharing path IDs across wavelengths intentionally correlates
+    /// spectral estimates. Zero scattering consumes no random flight draw.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        seed: u64,
+        path_id: u64,
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        let draws = |ordinal, domain| {
+            let block = philox4x32_10(
+                [path_id as u32, (path_id >> 32) as u32, ordinal, domain],
+                [seed as u32, (seed >> 32) as u32],
+            );
+            core::array::from_fn(|i| (f64::from(block[i]) + 0.5) / 4_294_967_296.0)
+        };
+        self.trace_with_samples(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            |event| draws(event, 0x706f_6c32),
+            |flight| draws(flight, 0x706f_6c34),
+        )
+    }
+
+    /// Flight draws are [CDF variate, phase cosine variate, phase azimuth
+    /// variate], all in [0,1). The first gives `-ln(1-u)/sigma_s` metres of
+    /// actual arc length. A surface winning the race starts a fresh flight in
+    /// its selected medium, using exponential memorylessness. Interfaces and
+    /// colliding packets retain their original physical power exactly once.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace_with_samples(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        mut flight_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        cx.checkpoint()?;
+        if settings.max_volume_events == 0 || settings.max_volume_events > MAX_POLARIZED_PATH_EVENTS
+        {
+            return Err(SceneError::InvalidSettings.into());
+        }
+        let mut free_flight_draws = 0_u32;
+        let (path, volume_events) = self.scene.trace_with_flights(
+            cx,
+            beam,
+            initial_medium,
+            settings.surfaces,
+            surface_samples,
+            settings.max_volume_events,
+            |medium, wavelength| {
+                let Some(law) = self.media[medium] else {
+                    return Ok(None);
+                };
+                let rate = law.scattering_per_m(wavelength)?;
+                if rate == 0.0 {
+                    return Ok(None);
+                }
+                let draws = flight_samples(free_flight_draws);
+                free_flight_draws = free_flight_draws
+                    .checked_add(1)
+                    .ok_or(CurvedSceneError::NumericalRange)?;
+                if !draws
+                    .into_iter()
+                    .all(|u| u.is_finite() && (0.0..1.0).contains(&u))
+                {
+                    return Err(volume_error(VolumeTransportError::Sample));
+                }
+                // Compensate the rounded subtraction in 1-u. If it rounds to
+                // one, u itself is the correctly resolved first-order depth.
+                let complement = 1.0 - draws[0];
+                let depth = if complement == 1.0 {
+                    draws[0]
+                } else {
+                    -det::ln(complement) * (draws[0] / (1.0 - complement))
+                };
+                let distance_m = depth / rate;
+                if distance_m.is_nan() || distance_m < 0.0 || (depth > 0.0 && distance_m == 0.0) {
+                    return Err(volume_error(VolumeTransportError::Unrepresentable));
+                }
+                Ok(Some(CurvedVolumeFlight {
+                    distance_m,
+                    phase_samples: [draws[1], draws[2]],
+                }))
+            },
+            |medium, beam, samples| {
+                let law = self.media[medium].ok_or(CurvedSceneError::NumericalRange)?;
+                Ok(law
+                    .phase
+                    .sample_polarized(beam, samples)
+                    .map_err(scattering_error)?
+                    .beam)
+            },
+        )?;
+        cx.checkpoint()?;
+        Ok(CurvedRayleighPath {
+            path,
+            volume_events,
+            free_flight_draws,
+        })
+    }
+}
+
+fn scattering_error(error: PolarizedScatteringError) -> CurvedSceneError {
+    SceneError::from(error).into()
+}
+fn volume_error(error: VolumeTransportError) -> CurvedSceneError {
+    scattering_error(PolarizedScatteringError::Volume(error))
+}
+
+#[cfg(test)]
+mod tests;
