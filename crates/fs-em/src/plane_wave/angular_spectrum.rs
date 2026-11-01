@@ -25,6 +25,11 @@ use modes::{basis, cartesian, fields, finite, normal_flux, polarized, propagatio
 
 mod modes;
 
+mod layers;
+pub use layers::{
+    AngularSpectrumLayerField, AngularSpectrumLayerLimits, PreparedAngularSpectrumLayer,
+};
+
 /// Bounds the uninterruptible work of one existing FFT pencil.
 pub const MAX_AXIS_POINTS: usize = 4096;
 
@@ -128,6 +133,7 @@ impl AngularSpectrumField {
 struct Mode {
     kx: f64,
     ky: f64,
+    incidence_cosine: f64,
     incident_kz: f64,
     exit_kz: C64,
     incident_e: [C64; 2],
@@ -305,6 +311,7 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
                 modes.push(Mode {
                     kx,
                     ky,
+                    incidence_cosine: cosine,
                     incident_kz,
                     exit_kz,
                     incident_e,
@@ -422,6 +429,18 @@ impl<'s, 'm> PlanarAngularSpectrum<'s, 'm> {
             electric.push(e);
             magnetic.push(h);
         }
+        self.synthesize(electric, magnetic, &mut cancelled)
+    }
+
+    // All exterior and internal planes use these same six transforms and
+    // physical E cross H* contraction. The mode assembly owns its storage.
+    fn synthesize(
+        &self,
+        mut electric: Vec<[C64; 3]>,
+        mut magnetic: Vec<[C64; 3]>,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<AngularSpectrumField, AngularSpectrumError> {
+        let n = self.modes.len();
         let mut buffer = vec![FftComplex::default(); n];
         let mut line = vec![FftComplex::default(); self.grid.width.max(self.grid.height)];
         let mut scratch = line.clone();

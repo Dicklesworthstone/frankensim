@@ -26,6 +26,9 @@ const M: f64 = 1e-6;
 #[path = "plane_wave/angular_spectrum.rs"]
 mod angular_spectrum;
 
+#[path = "plane_wave/layer_fields.rs"]
+mod layer_fields;
+
 #[path = "plane_wave/illumination.rs"]
 mod illumination;
 

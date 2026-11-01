@@ -37,6 +37,10 @@ pub use illumination::{
     PreparedLayerIllumination,
 };
 
+mod fields;
+pub(super) use fields::PREPARATION_WORKSPACE_BYTES as FIELD_PREPARATION_WORKSPACE_BYTES;
+pub use fields::{LayerTangentialField, PreparedLayerField};
+
 /// Preparation storage and allocation-free angle work are bounded by this cap.
 pub const MAX_LAYERS: usize = 64;
 

@@ -2024,6 +2024,57 @@ requires the workspace constellation dependencies. This feature does not add
 transients, incident near-field excitation, rough/finite film edges, arbitrary
 three-dimensional scattering, or empirical material-frequency qualification.
 
+### Diffraction-resolved fields and dielectric heating inside finite films
+
+`PlanarDielectricLayers::prepare_layer_field` retains one original film and
+polarization under unit tangential-E incidence. It reuses the existing bounded
+slab/state recursion, including source epsilon/mu, lossy exits, evanescent
+tunnelling, zero-thickness identities and opaque limits. Both physical E/H
+boundary traces come from that same stack. Interior waves decay from their
+nearest face; near a critical normal wave number, an entire cosine/sinc E/H
+propagator gives the exact linear kz=0 limit. No growing exponential, division
+by a vanishing kz, independent material law or second film solver is used.
+Depth is measured from the selected film's first face. The public tangential
+H axis is power-conjugate to E, with positive z directed into the stack.
+
+`PlanarAngularSpectrum::prepare_layer` caches those responses for the actual
+coherent beam, with the original incidence cosines preserved exactly. Only
+the selected layer is retained, in O(grid points) storage. Further depth
+planes reuse the original six FFTs and reconstruct longitudinal E/H from
+tangential E AND H, so internal critical-angle fields remain representable.
+At an interface, longitudinal E belongs to the selected material; normal D/B
+and tangential E/H satisfy their distinct continuity conditions.
+
+The returned `AngularSpectrumLayerField` contains all complex vector fields,
+signed normal Poynting flux and local cycle-mean dielectric heat in W/m³:
+`Q = -omega*Im(epsilon)*|E|²/2` for this exp(+i omega t), peak-phasor convention.
+All spatial modes and polarizations interfere before Q is computed. The
+transverse heat integral has units W/m of layer depth. Separately, the
+prepared layer reports total absorbed watts from the original positive
+even/odd loss factors, retaining weak absorption without flux subtraction or
+depth quadrature. Lossless films return exactly zero heat. Source mu is real
+and lossless; no magnetic dissipation is inferred.
+
+Preparation explicitly budgets both polarization/layer/mode work and logical
+numerical storage, including the borrowed beam workspace, selected response
+cache, fixed stack scratch and one E/H/heat plane. Query FFT work has its own
+cap. Cancellation polls between bounded source solves, modal batches and FFT
+pencils; refusal publishes no partial result and leaves prepared owners
+unchanged. Reusing a layer for many depths requires no new material or stack
+solve. These are storage/operation bounds, not measured throughput claims.
+
+Native production-kernel regressions cover critical/near-critical/opaque
+limits, independently constructed counterpropagating waves, both Maxwell
+curls and divergences, and volume dielectric heating versus signed Poynting
+loss. Source-backed integration regressions additionally exercise beam/film
+interface continuity, coherent spatial heating fringes, independent depth
+integration, original positive film absorption, budgets and cancellation;
+their full Cargo execution requires the workspace constellation dependencies.
+This extension remains a monochromatic periodic planar-field model. It does
+not evolve a temperature, claim isolated finite-edge convergence, or add a
+nonlinear, anisotropic or three-dimensional Maxwell solver. Thermal consumers
+must debit the reported absorption only once.
+
 ### Two-sided coherent illumination and layer heating
 
 `PlanarDielectricLayers::prepare_illumination` retains the same source-bound

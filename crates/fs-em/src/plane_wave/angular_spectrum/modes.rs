@@ -66,6 +66,32 @@ pub(super) fn normal_flux(e: [C64; 3], h: [C64; 3]) -> f64 {
     0.5 * (e[0] * h[1].conj() - e[1] * h[0].conj()).re
 }
 
+/// Total TE/TM tangential E and power-conjugate H determine all six fields,
+/// including a critical internal mode. This avoids dividing by kz entirely.
+pub(super) fn fields_from_tangential(
+    kx: f64,
+    ky: f64,
+    omega_epsilon: C64,
+    omega_mu: f64,
+    electric_te_tm: [C64; 2],
+    magnetic_te_tm: [C64; 2],
+) -> Option<([C64; 3], [C64; 3])> {
+    let p = basis(kx, ky);
+    let transverse = cartesian(electric_te_tm, p);
+    let kt = det::hypot(kx, ky);
+    let e = [
+        transverse[0],
+        transverse[1],
+        -magnetic_te_tm[1].scale(kt) / omega_epsilon,
+    ];
+    let h = [
+        -magnetic_te_tm[0].scale(p[0]) - magnetic_te_tm[1].scale(p[1]),
+        -magnetic_te_tm[0].scale(p[1]) + magnetic_te_tm[1].scale(p[0]),
+        electric_te_tm[0].scale(kt / omega_mu),
+    ];
+    e.iter().chain(&h).all(|&z| finite(z)).then_some((e, h))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -141,5 +167,65 @@ mod tests {
             propagation(C64::from_re(2.0), -0.3).unwrap(),
             forward.conj(),
         );
+    }
+
+    #[test]
+    fn tangential_state_reconstruction_agrees_with_forward_and_backward_plane_waves() {
+        for kz in [
+            C64::from_re(2.0),
+            C64::from_re(-2.0),
+            C64::new(0.7, -0.3),
+            C64::new(0.0, -1.2),
+        ] {
+            let (kx, ky, omega_mu) = (0.6, -0.8, 1.4);
+            let omega_epsilon = (kz * kz + C64::ONE).scale(1.0 / omega_mu);
+            let et = [C64::new(0.4, -0.2), C64::new(0.1, 0.8)];
+            let p = basis(kx, ky);
+            let a = polarized(et, p);
+            let conjugate_h = [a[0] * kz.scale(1.0 / omega_mu), a[1] * omega_epsilon / kz];
+            let (expected_e, expected_h) = fields(kx, ky, kz, omega_mu, et).unwrap();
+            let (e, h) =
+                fields_from_tangential(kx, ky, omega_epsilon, omega_mu, a, conjugate_h).unwrap();
+            for c in 0..3 {
+                close(e[c], expected_e[c]);
+                close(h[c], expected_h[c]);
+            }
+        }
+    }
+
+    #[test]
+    fn critical_and_absorbing_internal_states_satisfy_both_full_maxwell_curls() {
+        let (kx, ky, omega_mu) = (0.6, -0.8, 1.4);
+        for omega_epsilon in [C64::from_re(1.0 / omega_mu), C64::new(2.0, -0.7)] {
+            let et = [C64::new(0.4, -0.2), C64::new(0.1, 0.8)];
+            let ht = [C64::new(0.2, 0.3), C64::new(-0.5, 0.6)];
+            let i = C64::new(0.0, 1.0);
+            let de = [
+                -i * ht[0].scale(omega_mu),
+                -i * (C64::from_re(omega_mu) - C64::ONE / omega_epsilon) * ht[1],
+            ];
+            let dh = [
+                -i * (omega_epsilon - C64::from_re(1.0 / omega_mu)) * et[0],
+                -i * omega_epsilon * et[1],
+            ];
+            let (e, h) = fields_from_tangential(kx, ky, omega_epsilon, omega_mu, et, ht).unwrap();
+            let (dz_e, dz_h) =
+                fields_from_tangential(kx, ky, omega_epsilon, omega_mu, de, dh).unwrap();
+            let curl = |f: [C64; 3], dz: [C64; 3]| {
+                [
+                    -i * f[2].scale(ky) - dz[1],
+                    dz[0] + i * f[2].scale(kx),
+                    -i * f[1].scale(kx) + i * f[0].scale(ky),
+                ]
+            };
+            let curl_e = curl(e, dz_e);
+            let curl_h = curl(h, dz_h);
+            for c in 0..3 {
+                close(curl_e[c], -i * h[c].scale(omega_mu));
+                close(curl_h[c], i * omega_epsilon * e[c]);
+            }
+            close(e[0].scale(kx) + e[1].scale(ky), -i * dz_e[2]);
+            close(h[0].scale(kx) + h[1].scale(ky), -i * dz_h[2]);
+        }
     }
 }
