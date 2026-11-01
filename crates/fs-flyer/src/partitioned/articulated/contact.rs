@@ -5,8 +5,9 @@
 //! sustained mode, not an impact reset or an automatic collision detector.
 
 use super::{
-    ArticulatedLoads, ArticulatedState, ArticulatedStep, ArticulatedStepConfig, JointImpedance,
-    VelocityResponseContext, admit_state, cancelled, pose_at, step_with_velocity_response,
+    ArticulatedLoads, ArticulatedStage, ArticulatedState, ArticulatedStep, ArticulatedStepConfig,
+    JointImpedance, StepSystem, VelocityResponseContext, admit_state, cancelled, pose_at,
+    step_systems_with_velocity_response,
 };
 use crate::Refusal;
 use crate::addedmass::joint::native_index;
@@ -22,6 +23,10 @@ use fs_mbd::articulated::contact_geometry::{
 use fs_mbd::articulated::generalized::GeneralizedKinematics;
 use fs_mbd::articulated::{ArticulatedModel, BaseState, Kinematics, forward_kinematics};
 pub use fs_mbd::articulated_contacts::friction::ArticulatedFrictionalContact;
+
+/// Simultaneous sustained contact among independently assembled fluid-bearing trees.
+#[path = "contact/systems.rs"]
+pub mod systems;
 
 /// The original smooth and contact controls retain their distinct units.
 #[derive(Clone, Copy, Debug)]
@@ -143,7 +148,7 @@ pub struct ContactStep<P> {
 
 struct AcceptedReaction {
     solve: FrictionalContactResult,
-    midpoint: ArticulatedState,
+    midpoints: Vec<ArticulatedState>,
     geometry: Vec<ContactFrameGeometry>,
     residuals: FrictionalContactResiduals,
     velocity_residual: f64,
@@ -208,7 +213,7 @@ fn kinematics(model: &ArticulatedModel, state: &ArticulatedState) -> Result<Kine
     .map_err(invalid)
 }
 fn frames(
-    native: &Kinematics,
+    native: &[&Kinematics],
     contacts: &[ArticulatedFrictionalContact],
     elapsed: f64,
     is_cancelled: &mut dyn FnMut() -> bool,
@@ -234,7 +239,7 @@ fn frames(
                 c.normal_world,
                 c.tangent_world,
                 index,
-                &[native],
+                native,
             )
             .map_err(invalid)
         })
@@ -262,11 +267,11 @@ fn nonnegative_gaps(frames: &[ContactFrameGeometry]) -> Result<Vec<f64>, Refusal
 // In unforced pure approach this allowance scales the approach itself, so even
 // an arbitrarily small resolved closing speed still requires an impact reset.
 fn normal_speed_admission(
-    context: &VelocityResponseContext<'_>,
-    free_increment: &[f64],
+    contexts: &[VelocityResponseContext<'_>],
+    free_increments: &[Vec<f64>],
     contacts: &[ArticulatedFrictionalContact],
     before: &[ContactFrameGeometry],
-    initial_native: &Kinematics,
+    initial_native: &[Kinematics],
 ) -> Result<Vec<f64>, Refusal> {
     let mut allowances = Vec::with_capacity(contacts.len());
     for (c, frame) in contacts.iter().zip(before) {
@@ -277,11 +282,14 @@ fn normal_speed_admission(
             ContactCounterpart::Body(_) => 0.0,
         };
         for term in core::iter::once(frame.rows[0].first).chain(frame.rows[0].second) {
+            let system = term.point.system_index;
             let arm = finite(term.point.point_body.norm())?;
-            let input = initial_native.body_twist[term.point.link_index];
+            let input = initial_native[system].body_twist[term.point.link_index];
             scale = finite(scale + input.linear.norm() + input.angular.norm() * arm)?;
-            let columns = context.kinematics.body_jacobian(term.point.link_index);
-            for (i, du) in free_increment.iter().enumerate() {
+            let columns = contexts[system]
+                .kinematics
+                .body_jacobian(term.point.link_index);
+            for (i, du) in free_increments[system].iter().enumerate() {
                 let column = columns[native_index(i)];
                 scale = finite(
                     scale + du.abs() * (column.linear.norm() + column.angular.norm() * arm),
@@ -304,40 +312,73 @@ fn normal_speed_admission(
     Ok(allowances)
 }
 
+// A row touches at most two independently prepared trees. The same-tree case
+// combines both endpoint wrenches BEFORE solving, preserving the original row.
+struct RowPart {
+    system: usize,
+    jacobian: Vec<f64>,
+    response: Vec<f64>,
+}
+
 // Every row uses the original point wrench and the SAME native stage map.
 fn solve_midpoint(
-    context: &VelocityResponseContext<'_>,
-    increment: &mut [f64],
-    initial_velocity: &[f64],
+    contexts: &[VelocityResponseContext<'_>],
+    increments: &mut [Vec<f64>],
+    initial_velocities: &[Vec<f64>],
     contacts: &[ArticulatedFrictionalContact],
     initial_gaps: &[f64],
     geometry: &[ContactFrameGeometry],
     config: FrictionalContactConfig,
     is_cancelled: &mut dyn FnMut() -> bool,
 ) -> Result<FrictionalContactResult, Refusal> {
-    let n = increment.len();
-    let free: Vec<_> = initial_velocity
+    let free: Vec<Vec<_>> = initial_velocities
         .iter()
-        .zip(increment.iter())
-        .map(|(u, du)| u + 0.5 * du)
+        .zip(increments.iter())
+        .map(|(initial, increment)| {
+            initial
+                .iter()
+                .zip(increment)
+                .map(|(u, du)| u + 0.5 * du)
+                .collect()
+        })
         .collect();
-    let mut rows = Vec::with_capacity(3 * contacts.len());
-    let mut responses = Vec::with_capacity(3 * contacts.len());
+    let mut rows: Vec<Vec<RowPart>> = Vec::with_capacity(3 * contacts.len());
     let mut laws = Vec::with_capacity(contacts.len());
     for (i, frame) in geometry.iter().enumerate() {
         poll(is_cancelled)?;
         let mut speeds = [0.0; 3];
         for (a, g) in frame.rows.iter().enumerate() {
-            let mut row = vec![0.0; n];
+            let mut parts: Vec<RowPart> = Vec::with_capacity(2);
             for term in core::iter::once(g.first).chain(g.second) {
-                let columns = context.kinematics.body_jacobian(term.point.link_index);
-                for (j, value) in row.iter_mut().enumerate() {
+                let system = term.point.system_index;
+                let index = if let Some(index) = parts.iter().position(|p| p.system == system) {
+                    index
+                } else {
+                    parts.push(RowPart {
+                        system,
+                        jacobian: vec![0.0; increments[system].len()],
+                        response: Vec::new(),
+                    });
+                    parts.len() - 1
+                };
+                let columns = contexts[system]
+                    .kinematics
+                    .body_jacobian(term.point.link_index);
+                for (j, value) in parts[index].jacobian.iter_mut().enumerate() {
                     *value = finite(*value + term.direction.pairing(columns[native_index(j)]))?;
                 }
             }
-            speeds[a] = finite(dot(&row, &free) - g.plane_speed)?;
-            responses.push(context.mass.solve(&row)?);
-            rows.push(row);
+            let mut speed = 0.0;
+            for part in &mut parts {
+                speed = finite(speed + dot(&part.jacobian, &free[part.system]))?;
+                part.response = if part.jacobian.iter().any(|j| *j != 0.0) {
+                    contexts[part.system].mass.solve(&part.jacobian)?
+                } else {
+                    vec![0.0; part.jacobian.len()]
+                };
+            }
+            speeds[a] = finite(speed - g.plane_speed)?;
+            rows.push(parts);
         }
         laws.push(FrictionalContact {
             id: contacts[i].id,
@@ -355,9 +396,17 @@ fn solve_midpoint(
     for i in 0..count {
         poll(is_cancelled)?;
         for j in 0..=i {
+            let (mut ij, mut ji) = (0.0, 0.0);
+            for first in &rows[i] {
+                for second in &rows[j] {
+                    if first.system == second.system {
+                        ij = finite(ij + dot(&first.jacobian, &second.response))?;
+                        ji = finite(ji + dot(&second.jacobian, &first.response))?;
+                    }
+                }
+            }
             // One half of the physical velocity response enters the midpoint.
-            let value =
-                finite(0.25 * (dot(&rows[i], &responses[j]) + dot(&rows[j], &responses[i])))?;
+            let value = finite(0.25 * (ij + ji))?;
             matrix[i * count + j] = value;
             matrix[j * count + i] = value;
         }
@@ -370,15 +419,28 @@ fn solve_midpoint(
                 unresolved(e)
             }
         })?;
-    let mut impulse = vec![0.0; n];
-    for (row, p) in rows.iter().zip(solved.impulses.iter().flatten()) {
-        for (total, j) in impulse.iter_mut().zip(row) {
-            *total = finite(*total + p * j)?;
+    let mut impulses: Vec<Option<Vec<f64>>> = vec![None; contexts.len()];
+    for (parts, p) in rows.iter().zip(solved.impulses.iter().flatten()) {
+        if *p == 0.0 {
+            continue;
+        }
+        for part in parts {
+            let impulse =
+                impulses[part.system].get_or_insert_with(|| vec![0.0; part.jacobian.len()]);
+            for (total, j) in impulse.iter_mut().zip(&part.jacobian) {
+                *total = finite(*total + p * j)?;
+            }
         }
     }
-    let response = context.mass.solve(&impulse)?;
-    for (du, change) in increment.iter_mut().zip(response) {
-        *du = finite(*du + change)?;
+    // Preserve the original single summed-impulse solve per affected tree.
+    // Unconnected trees and exactly cancelling zero blocks require no solve.
+    for (system, impulse) in impulses.iter().enumerate() {
+        if let Some(impulse) = impulse.as_ref().filter(|p| p.iter().any(|x| *x != 0.0)) {
+            let response = contexts[system].mass.solve(impulse)?;
+            for (du, change) in increments[system].iter_mut().zip(response) {
+                *du = finite(*du + change)?;
+            }
+        }
     }
     Ok(solved)
 }
@@ -435,7 +497,7 @@ fn actual_law(
 // integrator's finite-step momentum defect. Never hide a finite-gap couple.
 fn spatial_impulses(
     frames: &[ContactFrameGeometry],
-    native: &Kinematics,
+    native: &[&Kinematics],
     impulses: &[[f64; 3]],
 ) -> Result<(Vec3, Vec3), Refusal> {
     let (mut total_p, mut total_l, mut external_p, mut external_l) = (
@@ -448,7 +510,7 @@ fn spatial_impulses(
     for (frame, impulse) in frames.iter().zip(impulses) {
         for (row, &p) in frame.rows.iter().zip(impulse) {
             for term in core::iter::once(row.first).chain(row.second) {
-                let pose = native.world_from_link[term.point.link_index];
+                let pose = native[term.point.system_index].world_from_link[term.point.link_index];
                 let local = Wrench::new(
                     term.direction.torque.scale(p),
                     term.direction.force.scale(p),
@@ -519,214 +581,56 @@ pub fn step_with_contacts<F, P>(
 where
     F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
 {
-    poll(&mut is_cancelled)?;
-    if model.link_count() > super::MAX_ARTICULATED_LINKS
-        || model.dof_count() > super::MAX_CONTROL_COORDS
-        || contacts.len() > 21
-        || contacts.len() > config.contact.maximum_contacts
-        || !t_s.is_finite()
-        || !dt_s.is_finite()
-        || dt_s <= 0.0
-    {
-        return Err(invalid("invalid bounded model, contacts or step duration"));
-    }
-    let mut ordered = contacts.to_vec();
-    ordered.sort_unstable_by_key(|c| c.id);
-    if ordered.windows(2).any(|pair| pair[0].id == pair[1].id) {
-        return Err(invalid("duplicate contact identity"));
-    }
-    for c in &ordered {
-        if c.point.system_index != 0
-            || matches!(c.other,ContactCounterpart::Body(p) if p.system_index!=0)
-            || !c.activation_tolerance.is_finite()
-            || c.activation_tolerance < 0.0
-            || !c.friction_coefficient.is_finite()
-            || c.friction_coefficient < 0.0
-            || !matches!(
-                c.normal_law,
-                NormalVelocityLaw::Target { speed: 0.0 }
-                    | NormalVelocityLaw::NewtonRestitution { coefficient: 0.0 }
-            )
-        {
-            return Err(invalid(
-                "sustained contacts require this tree, finite friction and zero normal target/restitution",
-            ));
-        }
-    }
-    admit_state(model, &state.motion)?;
-    let initial_native = kinematics(model, state)?;
-    let before = frames(&initial_native, &ordered, 0.0, &mut is_cancelled)?;
-    let initial_gaps = nonnegative_gaps(&before)?;
-    let initial_velocity = velocity(state);
-    let mut previous = None;
-    let mut accepted = None;
-    let step = step_with_velocity_response(
+    let inputs = [systems::ContactSystem {
         model,
         impedance,
         state,
         memory_inputs,
+        smooth: config.smooth,
+    }];
+    let result = systems::step_with_contacts(
+        &inputs,
         t_s,
         dt_s,
-        config.smooth,
-        evaluate,
-        |context, increment, cancel| {
-            let normal_speed_roundoff =
-                normal_speed_admission(&context, increment, &ordered, &before, &initial_native)?;
-            let geometry = frames(
-                context.kinematics.native_kinematics(),
-                &ordered,
-                0.5 * dt_s,
-                cancel,
-            )?;
-            let next = solve_midpoint(
-                &context,
-                increment,
-                &initial_velocity,
-                &ordered,
-                &initial_gaps,
-                &geometry,
-                config.contact,
-                cancel,
-            )?;
-            // The smooth owner publishes its evaluated candidate, whose delta
-            // came from the PREVIOUS response. Keep the reaction aligned with it.
-            let aligned = previous.replace(next);
-            if let Some(solve) = aligned {
-                let (residuals, velocity_residual, ready) =
-                    actual_law(&solve, &geometry, &ordered, config.contact)?;
-                accepted = ready.then(|| AcceptedReaction {
-                    solve,
-                    midpoint: context.midpoint.clone(),
-                    geometry,
-                    residuals,
-                    velocity_residual,
-                    normal_speed_roundoff,
-                });
-                Ok(ready)
-            } else {
-                Ok(false)
-            }
+        contacts,
+        config.contact,
+        |time, stages| Ok(vec![evaluate(time, stages[0].state, stages[0].kinematics)?]),
+        |path| {
+            admit_path(&ContactPath {
+                model,
+                initial: state,
+                midpoint: &path.midpoints[0],
+                endpoint: path.endpoints[0],
+                contacts: path.contacts,
+                start_time_s: path.start_time_s,
+                duration_s: path.duration_s,
+            })
         },
         &mut is_cancelled,
     )?;
-    let accepted = accepted.ok_or_else(|| unresolved("no aligned accepted reaction"))?;
-    nonnegative_gaps(&accepted.geometry)?;
-    let after = frames(
-        &kinematics(model, &step.state)?,
-        &ordered,
-        dt_s,
-        &mut is_cancelled,
-    )?;
-    let endpoint_gaps = nonnegative_gaps(&after)?;
-    for &i in &accepted.solve.active_indices {
-        let p = accepted.solve.impulses[i];
-        let first = before[i].rows.map(|r| r.relative_normal_speed);
-        let last = after[i].rows.map(|r| r.relative_normal_speed);
-        let c = ordered[i];
-        if p[0] > config.contact.impulse_tolerance
-            && (accepted.geometry[i].rows[0].gap > c.activation_tolerance
-                || endpoint_gaps[i] > c.activation_tolerance
-                || first[0] > config.contact.velocity_tolerance
-                || last[0] < -config.contact.velocity_tolerance)
-        {
-            return Err(unresolved(
-                "resolve separation or recontact before applying a sustained normal reaction",
-            ));
-        }
-        let first_slip = finite(first[1].hypot(first[2]))?;
-        if p[1].hypot(p[2]) > config.contact.impulse_tolerance
-            && first_slip > config.contact.velocity_tolerance
-            && finite(first[1] * last[1] + first[2] * last[2])?
-                < -config.contact.velocity_tolerance * first_slip
-        {
-            return Err(unresolved(
-                "the step crosses an unresolved friction stopping or turning event",
-            ));
-        }
-    }
-    if matches!(
-        accepted.solve.determinacy,
-        FrictionalContactDeterminacy::UniqueVelocity(_)
-    ) {
-        let mut common = None;
-        for &i in &accepted.solve.active_indices {
-            if let ContactCounterpart::PrescribedPlane { velocity_world, .. } = ordered[i].other {
-                if common.is_some_and(|v| v != velocity_world) {
-                    return Err(unresolved(
-                        "redundant reactions do not establish work for independently moving supports",
-                    ));
-                }
-                common = Some(velocity_world);
-            }
-        }
-    }
-    let midpoint_native = kinematics(model, &accepted.midpoint)?;
-    let (external_linear_impulse_world, external_angular_impulse_world) = spatial_impulses(
-        &accepted.geometry,
-        &midpoint_native,
-        &accepted.solve.impulses,
-    )?;
-    let (mut reaction_work, mut normal_work, mut friction_work, mut support_work) =
-        (0.0, 0.0, 0.0, 0.0);
-    for (g, p) in accepted.geometry.iter().zip(&accepted.solve.impulses) {
-        normal_work = finite(normal_work + p[0] * g.rows[0].relative_normal_speed)?;
-        for a in 0..3 {
-            let relative = finite(p[a] * g.rows[a].relative_normal_speed)?;
-            let support = finite(p[a] * g.rows[a].plane_speed)?;
-            reaction_work = finite(reaction_work + relative + support)?;
-            support_work = finite(support_work + support)?;
-            if a > 0 {
-                friction_work = finite(friction_work + relative)?;
-            }
-        }
-    }
-    if friction_work > config.contact.complementarity_tolerance
-        || normal_work.abs()
-            > config.contact.complementarity_tolerance * (ordered.len().max(1) as f64)
-    {
-        return Err(unresolved(
-            "accepted contact work exceeds the declared physical residual budget",
-        ));
-    }
-    poll(&mut is_cancelled)?;
-    let path_admission = admit_path(&ContactPath {
-        model,
-        initial: state,
-        midpoint: &accepted.midpoint,
-        endpoint: &step.state,
-        contacts: &ordered,
-        start_time_s: t_s,
-        duration_s: dt_s,
-    })?;
-    poll(&mut is_cancelled)?;
+    let step = result
+        .steps
+        .into_iter()
+        .next()
+        .ok_or_else(|| invalid("missing accepted tree"))?;
     Ok(ContactStep {
         step,
-        contact_ids: ordered.iter().map(|c| c.id).collect(),
-        midpoint_relative_velocities: accepted
-            .geometry
-            .iter()
-            .map(|g| g.rows.map(|r| r.relative_normal_speed))
-            .collect(),
-        endpoint_relative_velocities: after
-            .iter()
-            .map(|g| g.rows.map(|r| r.relative_normal_speed))
-            .collect(),
-        initial_gaps,
-        endpoint_gaps,
-        initial_normal_speeds: before
-            .iter()
-            .map(|g| g.rows[0].relative_normal_speed)
-            .collect(),
-        normal_speed_roundoff_mps: accepted.normal_speed_roundoff,
-        midpoint_law_residuals: accepted.residuals,
-        midpoint_velocity_residual_mps: accepted.velocity_residual,
-        reaction_work_j: reaction_work,
-        normal_work_j: normal_work,
-        friction_work_j: friction_work,
-        support_work_j: support_work,
-        external_linear_impulse_world,
-        external_angular_impulse_world,
-        reaction_solve: accepted.solve,
-        path_admission,
+        reaction_solve: result.reaction_solve,
+        contact_ids: result.contact_ids,
+        midpoint_relative_velocities: result.midpoint_relative_velocities,
+        endpoint_relative_velocities: result.endpoint_relative_velocities,
+        initial_gaps: result.initial_gaps,
+        endpoint_gaps: result.endpoint_gaps,
+        initial_normal_speeds: result.initial_normal_speeds,
+        normal_speed_roundoff_mps: result.normal_speed_roundoff_mps,
+        midpoint_law_residuals: result.midpoint_law_residuals,
+        midpoint_velocity_residual_mps: result.midpoint_velocity_residual_mps,
+        reaction_work_j: result.reaction_work_j,
+        normal_work_j: result.normal_work_j,
+        friction_work_j: result.friction_work_j,
+        support_work_j: result.support_work_j,
+        external_linear_impulse_world: result.external_linear_impulse_world,
+        external_angular_impulse_world: result.external_angular_impulse_world,
+        path_admission: result.path_admission,
     })
 }

@@ -442,8 +442,9 @@ Redundant reactions retain the original unique-velocity versus unique-impulse
 distinction and the common-support-translation restriction for determined work.
 There is no claim of unique local support loads, automatic heat allocation,
 exact finite-step nonlinear energy/momentum conservation, automatic event
-localization, cross-tree sustained contact or cross-tree hydrodynamic coupling.
-This bounded consumer admits at most 21 fixed-frame point contacts on one
+localization or cross-tree hydrodynamic coupling. The multi-tree entrypoint below
+extends sustained contact to independent articulated trees.
+This single-tree entrypoint admits at most 21 fixed-frame point contacts on one
 existing admitted articulated tree.
 
 G0/G1/G3 regressions advance 20 consecutive returned-state sliding and sticking
@@ -453,6 +454,47 @@ impact, stopping, curved/interior penetration, cancellation and internal-couple
 refusals. An independent supported prismatic-joint oracle verifies complete
 implicit carrier recoil with and without fluid inertia and balances kinetic,
 spring, gravity, damping and actuator work.
+
+### Simultaneous sustained contact between articulated systems
+
+`partitioned::articulated::contact::systems::step_with_contacts` advances
+independently moving trees with one shared coupled midpoint iteration. The load
+callback receives all `ArticulatedStage` states and generalized kinematics at
+the same stage time, permitting cross-tree forces without stale partner states.
+Each tree retains its own physical tolerances, dry-plus-fluid mass, analytic
+fluid bias, implicit joint impedance and exact memory transition. The common
+iteration budget is the minimum of the supplied tree budgets. The original
+single-tree smooth, stop and contact APIs reuse this midpoint owner.
+
+Contact rows retain only their incident tree blocks, combining both endpoint
+wrenches first when a pair belongs to one tree. Cached inverse-mass responses
+assemble the simultaneous half-step contact mobility; one final solve per
+affected tree applies its accumulated generalized impulse. There is no dense
+global mass assembly or sequence of pairwise contact projections. Full carrier
+recoil and off-diagonal joint inertia remain active. Separate tree masses do
+not imply hydrodynamic cross-tree inertia blocks.
+
+The owner admits one to 128 trees, at most 4096 total links, 256 links/eight
+joints per tree, and 21 contacts. Contact identities are canonicalized without
+changing caller system indices. Every candidate is accepted or refused
+together, preserving the aligned reaction, actual law/work and determinacy
+checks above. Internal linear and angular impulses cancel across all incident
+trees; prescribed supports contribute the reported external spatial impulse.
+
+The mandatory `ContactSystemsPath` callback admits every configuration path,
+continued witnesses, frozen contact frames and omitted-feature coverage before
+publication. Actual nonnegative gaps and arithmetic-only incoming-speed
+allowances remain required. Automatic CCD, friction-mode event localization,
+unique redundant local reactions and exact nonlinear finite-step conservation
+are outside this bounded entrypoint.
+
+Regressions cover repeated two-tree support, a three-tree stack, system/contact
+permutation, sliding transfer, a synchronized cross-tree spring, and refusal
+atomicity. A separate analytic prismatic-joint oracle checks dry and fluid
+recoil, spring/damper elimination and work under both system orders. A
+16-step accelerating-current trajectory connects this owner to uniform-flow
+added inertia, balancing affine fluid momentum and relative-fluid storage
+against ambient source work.
 
 ### Mechanical travel stops with coupled recoil and support
 

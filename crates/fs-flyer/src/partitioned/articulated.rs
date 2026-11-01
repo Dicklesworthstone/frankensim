@@ -20,7 +20,7 @@ use crate::addedmass::joint::{admit_fluid, native_index};
 use crate::addedmass::{AeroGeneralizedLoads, MAX_CONTROL_COORDS, PreparedArticulatedMass};
 use fs_ga::{Se3, Twist, Vec3, Wrench};
 use fs_mbd::articulated::generalized::{
-    GeneralizedError, GeneralizedKinematics, free_floating_terms,
+    FreeFloatingTerms, GeneralizedError, GeneralizedKinematics, free_floating_terms,
 };
 use fs_mbd::articulated::motion::FreeFloatingMotionState;
 use fs_mbd::articulated::{ArticulatedError, ArticulatedModel, BaseState, forward_kinematics};
@@ -202,134 +202,178 @@ where
     )
 }
 
+/// One synchronized midpoint view for a simultaneous multi-tree load evaluation.
+/// Every state and motion map belongs to the same outer iterate and stage time.
+#[derive(Clone, Copy)]
+pub struct ArticulatedStage<'a> {
+    pub state: &'a ArticulatedState,
+    pub kinematics: &'a GeneralizedKinematics,
+}
+
 // Contact consumers change only the simultaneous velocity response. Every
 // consumer sees the SAME admitted midpoint geometry and complete mass factor.
+#[derive(Clone, Copy)]
 struct VelocityResponseContext<'a> {
     mass: &'a PreparedArticulatedMass,
     kinematics: &'a GeneralizedKinematics,
     midpoint: &'a ArticulatedState,
 }
 
-#[allow(clippy::too_many_arguments)]
-fn step_with_velocity_response<F, R>(
-    model: &ArticulatedModel,
-    impedance: &[JointImpedance],
-    state: &ArticulatedState,
-    memory_inputs: &[f64],
-    t_s: f64,
-    dt_s: f64,
-    config: ArticulatedStepConfig<'_>,
-    evaluate: F,
-    mut response: R,
-    mut is_cancelled: impl FnMut() -> bool,
-) -> Result<ArticulatedStep, Refusal>
-where
-    F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
-    R: FnMut(
-        VelocityResponseContext<'_>,
-        &mut [f64],
-        &mut dyn FnMut() -> bool,
-    ) -> Result<bool, Refusal>,
-{
-    if is_cancelled() {
-        return Err(cancelled());
-    }
-    let nc = model.dof_count();
-    if nc > MAX_CONTROL_COORDS
-        || model.link_count() > MAX_ARTICULATED_LINKS
-        || impedance.len() != nc
-        || config.joint_velocity_tolerances.len() != nc
-        || config.max_iterations == 0
-        || config.max_iterations > super::coupled::MAX_COUPLED_ITERATIONS
-        || !t_s.is_finite()
-        || !dt_s.is_finite()
-        || dt_s <= 0.0
-        || !(t_s + dt_s).is_finite()
-        || t_s + dt_s <= t_s
-        || !config
-            .joint_velocity_tolerances
+#[derive(Clone, Copy)]
+struct StepSystem<'a> {
+    model: &'a ArticulatedModel,
+    impedance: &'a [JointImpedance],
+    state: &'a ArticulatedState,
+    memory_inputs: &'a [f64],
+    config: ArticulatedStepConfig<'a>,
+}
+
+// The same per-tree stage is used by smooth motion, mechanical stops, and
+// single/multiple-tree sustained contact. No consumer owns a second integrator.
+struct StepWorkspace<'a> {
+    system: StepSystem<'a>,
+    initial: [f64; 6 + MAX_CONTROL_COORDS],
+    delta: [f64; 6 + MAX_CONTROL_COORDS],
+    midpoint_velocity: [f64; 6 + MAX_CONTROL_COORDS],
+    midpoint: ArticulatedState,
+    control_diagonal: Vec<f64>,
+    residual: f64,
+}
+
+impl<'a> StepWorkspace<'a> {
+    fn new(system: StepSystem<'a>, t_s: f64, dt_s: f64) -> Result<Self, Refusal> {
+        let StepSystem {
+            model,
+            impedance,
+            state,
+            memory_inputs,
+            config,
+        } = system;
+        let nc = model.dof_count();
+        if nc > MAX_CONTROL_COORDS
+            || model.link_count() > MAX_ARTICULATED_LINKS
+            || impedance.len() != nc
+            || config.joint_velocity_tolerances.len() != nc
+            || config.max_iterations == 0
+            || config.max_iterations > super::coupled::MAX_COUPLED_ITERATIONS
+            || !t_s.is_finite()
+            || !dt_s.is_finite()
+            || dt_s <= 0.0
+            || !(t_s + dt_s).is_finite()
+            || t_s + dt_s <= t_s
+            || !config
+                .joint_velocity_tolerances
+                .iter()
+                .chain([
+                    &config.linear_tolerance_mps,
+                    &config.angular_tolerance_rad_s,
+                ])
+                .all(|x| x.is_finite() && *x > 0.0)
+            || !impedance.iter().all(|p| {
+                p.damping.is_finite()
+                    && p.damping >= 0.0
+                    && p.stiffness.is_finite()
+                    && p.stiffness >= 0.0
+                    && p.rest_position.is_finite()
+            })
+        {
+            return Err(invalid(
+                "invalid coupled model size, impedance, time or residual budget",
+            ));
+        }
+        if memory_inputs.len() != state.memory.len()
+            || state.memory.len() > MAX_CERT_STATES
+            || !memory_inputs.iter().all(|x| x.is_finite())
+            || !state
+                .memory
+                .iter()
+                .all(|m| m.tau_s.is_finite() && m.tau_s > 0.0 && m.value.is_finite())
+        {
+            return Err(invalid(
+                "one finite held input per finite positive-time-scale memory state is required",
+            ));
+        }
+        admit_state(model, &state.motion)?;
+        let half = 0.5 * dt_s;
+        let mut initial = [0.0; 6 + MAX_CONTROL_COORDS];
+        initial[..6].copy_from_slice(&state.motion.base.twist_body.to_array());
+        initial[6..6 + nc].copy_from_slice(&state.motion.joint_velocity);
+        let control_diagonal: Vec<_> = impedance
             .iter()
-            .chain([
-                &config.linear_tolerance_mps,
-                &config.angular_tolerance_rad_s,
-            ])
-            .all(|x| x.is_finite() && *x > 0.0)
-        || !impedance.iter().all(|p| {
-            p.damping.is_finite()
-                && p.damping >= 0.0
-                && p.stiffness.is_finite()
-                && p.stiffness >= 0.0
-                && p.rest_position.is_finite()
-        })
-    {
-        return Err(invalid(
-            "invalid coupled model size, impedance, time or residual budget",
-        ));
-    }
-    if memory_inputs.len() != state.memory.len()
-        || state.memory.len() > MAX_CERT_STATES
-        || !memory_inputs.iter().all(|x| x.is_finite())
-        || !state
-            .memory
-            .iter()
-            .all(|m| m.tau_s.is_finite() && m.tau_s > 0.0 && m.value.is_finite())
-    {
-        return Err(invalid(
-            "one finite held input per finite positive-time-scale memory state is required",
-        ));
-    }
-    admit_state(model, &state.motion)?;
-    let n = 6 + nc;
-    let half = 0.5 * dt_s;
-    let initial_pose = state.motion.base.world_from_base;
-    let mut initial = [0.0; 6 + MAX_CONTROL_COORDS];
-    initial[..6].copy_from_slice(&state.motion.base.twist_body.to_array());
-    initial[6..n].copy_from_slice(&state.motion.joint_velocity);
-    let control_diagonal: Vec<_> = impedance
-        .iter()
-        .map(|p| half * p.damping + half * half * p.stiffness)
-        .collect();
-    if !control_diagonal.iter().all(|x| x.is_finite()) {
-        return Err(invalid("unrepresentable implicit control diagonal"));
-    }
-    let memory_at = |duration| {
-        state
+            .map(|p| half * p.damping + half * half * p.stiffness)
+            .collect();
+        if !control_diagonal.iter().all(|x| x.is_finite()) {
+            return Err(invalid("unrepresentable implicit control diagonal"));
+        }
+        let mut midpoint = state.clone();
+        midpoint.memory = state
             .memory
             .iter()
             .zip(memory_inputs)
-            .map(|(m, u)| m.advanced(*u, duration))
-            .collect::<Vec<_>>()
-    };
-    let mut midpoint = state.clone();
-    midpoint.memory = memory_at(half);
-    if !midpoint.memory.iter().all(|m| m.value.is_finite()) {
-        return Err(invalid("unrepresentable midpoint memory state"));
+            .map(|(m, u)| m.advanced(*u, half))
+            .collect();
+        if !midpoint.memory.iter().all(|m| m.value.is_finite()) {
+            return Err(invalid("unrepresentable midpoint memory state"));
+        }
+        Ok(Self {
+            system,
+            initial,
+            delta: [0.0; 6 + MAX_CONTROL_COORDS],
+            midpoint_velocity: initial,
+            midpoint,
+            control_diagonal,
+            residual: f64::INFINITY,
+        })
     }
-    let mut delta = [0.0; 6 + MAX_CONTROL_COORDS];
-    let mut residual = f64::INFINITY;
-    for iteration in 1..=config.max_iterations {
-        let mut um = initial;
-        for i in 0..n {
-            um[i] += 0.5 * delta[i];
+
+    fn prepare(
+        &mut self,
+        half: f64,
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<FreeFloatingTerms, Refusal> {
+        let nc = self.system.model.dof_count();
+        let mut um = self.initial;
+        for (i, value) in um.iter_mut().enumerate().take(6 + nc) {
+            *value += 0.5 * self.delta[i];
         }
-        midpoint.motion.base.twist_body = twist(&um);
-        midpoint.motion.base.world_from_base = pose_at(initial_pose, twist(&um), half)?;
+        self.midpoint_velocity = um;
+        self.midpoint.motion.base.twist_body = twist(&um);
+        self.midpoint.motion.base.world_from_base = pose_at(
+            self.system.state.motion.base.world_from_base,
+            twist(&um),
+            half,
+        )?;
         for k in 0..nc {
-            midpoint.motion.joint_velocity[k] = um[6 + k];
-            midpoint.motion.joint_position[k] = state.motion.joint_position[k] + half * um[6 + k];
+            self.midpoint.motion.joint_velocity[k] = um[6 + k];
+            self.midpoint.motion.joint_position[k] =
+                self.system.state.motion.joint_position[k] + half * um[6 + k];
         }
-        let dry = free_floating_terms(
-            model,
-            midpoint.motion.base,
-            &midpoint.motion.joint_position,
-            &midpoint.motion.joint_velocity,
-            &mut is_cancelled,
+        free_floating_terms(
+            self.system.model,
+            self.midpoint.motion.base,
+            &self.midpoint.motion.joint_position,
+            &self.midpoint.motion.joint_velocity,
+            is_cancelled,
         )
-        .map_err(native_error)?;
-        let loads = evaluate(t_s + half, &midpoint, &dry.kinematics)?;
-        if is_cancelled() {
-            return Err(cancelled());
-        }
+        .map_err(native_error)
+    }
+
+    fn free_response(
+        &self,
+        dry: &FreeFloatingTerms,
+        loads: ArticulatedLoads,
+        dt_s: f64,
+    ) -> Result<(PreparedArticulatedMass, Vec<f64>), Refusal> {
+        let StepSystem {
+            model,
+            impedance,
+            state,
+            ..
+        } = self.system;
+        let nc = model.dof_count();
+        let half = 0.5 * dt_s;
+        let initial = &self.initial;
+        let um = &self.midpoint_velocity;
         admit_fluid(&loads.fluid)?;
         if loads.fluid.q_control_nonaccel.len() != nc
             || loads.joint_effort.len() != nc
@@ -369,7 +413,7 @@ where
             .map(|(k, p)| {
                 loads.joint_effort[k]
                     - p.damping * um[6 + k]
-                    - p.stiffness * (midpoint.motion.joint_position[k] - p.rest_position)
+                    - p.stiffness * (self.midpoint.motion.joint_position[k] - p.rest_position)
             })
             .collect();
         model
@@ -386,8 +430,9 @@ where
                 - p.stiffness
                     * (state.motion.joint_position[k] - p.rest_position + half * initial[6 + k]);
         }
-        let mass = PreparedArticulatedMass::with_control_diagonal(&dry, &fluid, &control_diagonal)?;
-        let rhs: Vec<_> = (0..n)
+        let mass =
+            PreparedArticulatedMass::with_control_diagonal(dry, &fluid, &self.control_diagonal)?;
+        let rhs: Vec<_> = (0..6 + nc)
             .map(|i| {
                 let applied = if i < 6 {
                     fluid.q_rigid_nonaccel[i]
@@ -398,27 +443,23 @@ where
             })
             .collect();
         let acceleration = mass.solve(&rhs)?;
-        let mut increment: Vec<_> = acceleration.iter().map(|a| dt_s * a).collect();
-        let response_ready = response(
-            VelocityResponseContext {
-                mass: &mass,
-                kinematics: &dry.kinematics,
-                midpoint: &midpoint,
-            },
-            &mut increment,
-            &mut is_cancelled,
-        )?;
+        let increment = acceleration.iter().map(|a| dt_s * a).collect();
+        Ok((mass, increment))
+    }
+
+    fn next(&mut self, increment: &[f64]) -> Result<[f64; 6 + MAX_CONTROL_COORDS], Refusal> {
+        let nc = self.system.model.dof_count();
+        let n = 6 + nc;
+        let config = self.system.config;
         let mut next = [0.0; 6 + MAX_CONTROL_COORDS];
         for i in 0..6 {
             next[native_index(i)] = increment[i];
         }
-        for k in 0..nc {
-            next[6 + k] = increment[6 + k];
-        }
+        next[6..n].copy_from_slice(&increment[6..n]);
         if !next[..n].iter().all(|x| x.is_finite()) {
             return Err(invalid("unrepresentable coupled velocity increment"));
         }
-        residual = 0.0_f64;
+        self.residual = 0.0_f64;
         for i in 0..n {
             let budget = if i < 3 {
                 config.angular_tolerance_rad_s
@@ -427,40 +468,198 @@ where
             } else {
                 config.joint_velocity_tolerances[i - 6]
             };
-            residual = residual.max((next[i] - delta[i]).abs() / budget);
+            self.residual = self.residual.max((next[i] - self.delta[i]).abs() / budget);
         }
-        if residual <= 1.0 && response_ready {
-            // Publish the candidate whose midpoint was actually evaluated.
-            let mut accepted = midpoint;
-            accepted.motion.base.world_from_base = pose_at(initial_pose, twist(&um), dt_s)?;
-            for i in 0..6 {
-                initial[i] += delta[i];
-            }
-            accepted.motion.base.twist_body = twist(&initial);
-            for k in 0..nc {
-                accepted.motion.joint_position[k] =
-                    state.motion.joint_position[k] + dt_s * um[6 + k];
-                accepted.motion.joint_velocity[k] = initial[6 + k] + delta[6 + k];
-            }
-            accepted.memory = memory_at(dt_s);
-            if !accepted.memory.iter().all(|m| m.value.is_finite()) {
-                return Err(invalid("unrepresentable accepted memory state"));
-            }
-            admit_state(model, &accepted.motion)?;
+        Ok(next)
+    }
+
+    fn accept(self, dt_s: f64, iteration: usize) -> Result<ArticulatedStep, Refusal> {
+        let nc = self.system.model.dof_count();
+        let mut accepted = self.midpoint;
+        let mut initial = self.initial;
+        let um = self.midpoint_velocity;
+        // Publish the candidate whose midpoint was actually evaluated.
+        accepted.motion.base.world_from_base = pose_at(
+            self.system.state.motion.base.world_from_base,
+            twist(&um),
+            dt_s,
+        )?;
+        for i in 0..6 {
+            initial[i] += self.delta[i];
+        }
+        accepted.motion.base.twist_body = twist(&initial);
+        for k in 0..nc {
+            accepted.motion.joint_position[k] =
+                self.system.state.motion.joint_position[k] + dt_s * um[6 + k];
+            accepted.motion.joint_velocity[k] = initial[6 + k] + self.delta[6 + k];
+        }
+        accepted.memory = self
+            .system
+            .state
+            .memory
+            .iter()
+            .zip(self.system.memory_inputs)
+            .map(|(m, u)| m.advanced(*u, dt_s))
+            .collect();
+        if !accepted.memory.iter().all(|m| m.value.is_finite()) {
+            return Err(invalid("unrepresentable accepted memory state"));
+        }
+        admit_state(self.system.model, &accepted.motion)?;
+        Ok(ArticulatedStep {
+            state: accepted,
+            iterations: iteration,
+            normalized_residual: self.residual,
+        })
+    }
+}
+
+fn step_systems_with_velocity_response<F, R>(
+    systems: &[StepSystem<'_>],
+    t_s: f64,
+    dt_s: f64,
+    evaluate: F,
+    mut response: R,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<Vec<ArticulatedStep>, Refusal>
+where
+    F: Fn(f64, &[ArticulatedStage<'_>]) -> Result<Vec<ArticulatedLoads>, Refusal>,
+    R: FnMut(
+        &[VelocityResponseContext<'_>],
+        &mut [Vec<f64>],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<bool, Refusal>,
+{
+    if is_cancelled() {
+        return Err(cancelled());
+    }
+    if systems.is_empty()
+        || systems.len() > 128
+        || systems
+            .iter()
+            .try_fold(0usize, |n, s| n.checked_add(s.model.link_count()))
+            .is_none_or(|n| n > 4096)
+    {
+        return Err(invalid(
+            "one to 128 trees and at most 4096 total links are required",
+        ));
+    }
+    let mut work: Vec<_> = systems
+        .iter()
+        .copied()
+        .map(|system| StepWorkspace::new(system, t_s, dt_s))
+        .collect::<Result<_, _>>()?;
+    let maximum_iterations = systems
+        .iter()
+        .map(|s| s.config.max_iterations)
+        .min()
+        .unwrap_or(1);
+    let half = 0.5 * dt_s;
+    let mut residual = f64::INFINITY;
+    for iteration in 1..=maximum_iterations {
+        // Prepare every candidate before evaluating any cross-system loads.
+        let dry: Vec<_> = work
+            .iter_mut()
+            .map(|w| w.prepare(half, &mut is_cancelled))
+            .collect::<Result<_, _>>()?;
+        let views: Vec<_> = work
+            .iter()
+            .zip(&dry)
+            .map(|(w, d)| ArticulatedStage {
+                state: &w.midpoint,
+                kinematics: &d.kinematics,
+            })
+            .collect();
+        let loads = evaluate(t_s + half, &views)?;
+        if is_cancelled() {
+            return Err(cancelled());
+        }
+        if loads.len() != systems.len() {
+            return Err(invalid(
+                "one synchronized load evaluation per participating tree is required",
+            ));
+        }
+        let evaluated: Vec<_> = work
+            .iter()
+            .zip(&dry)
+            .zip(loads)
+            .map(|((w, d), loads)| w.free_response(d, loads, dt_s))
+            .collect::<Result<_, _>>()?;
+        let (masses, mut increments): (Vec<_>, Vec<_>) = evaluated.into_iter().unzip();
+        let contexts: Vec<_> = work
+            .iter()
+            .zip(&dry)
+            .zip(&masses)
+            .map(|((w, d), mass)| VelocityResponseContext {
+                mass,
+                kinematics: &d.kinematics,
+                midpoint: &w.midpoint,
+            })
+            .collect();
+        let ready = response(&contexts, &mut increments, &mut is_cancelled)?;
+        let next: Vec<_> = work
+            .iter_mut()
+            .zip(&increments)
+            .map(|(w, increment)| w.next(increment))
+            .collect::<Result<_, _>>()?;
+        residual = work.iter().map(|w| w.residual).fold(0.0_f64, f64::max);
+        if residual <= 1.0 && ready {
+            let steps = work
+                .into_iter()
+                .map(|w| w.accept(dt_s, iteration))
+                .collect::<Result<_, _>>()?;
             if is_cancelled() {
                 return Err(cancelled());
             }
-            return Ok(ArticulatedStep {
-                state: accepted,
-                iterations: iteration,
-                normalized_residual: residual,
-            });
+            return Ok(steps);
         }
-        delta = next;
+        for (w, delta) in work.iter_mut().zip(next) {
+            w.delta = delta;
+        }
     }
     Err(refuse(
         "articulated-step-not-converged",
         format!("midpoint velocity residual/budget {residual:e}"),
         "reduce the timestep or increase the bounded midpoint iteration budget",
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn step_with_velocity_response<F, R>(
+    model: &ArticulatedModel,
+    impedance: &[JointImpedance],
+    state: &ArticulatedState,
+    memory_inputs: &[f64],
+    t_s: f64,
+    dt_s: f64,
+    config: ArticulatedStepConfig<'_>,
+    evaluate: F,
+    mut response: R,
+    is_cancelled: impl FnMut() -> bool,
+) -> Result<ArticulatedStep, Refusal>
+where
+    F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
+    R: FnMut(
+        VelocityResponseContext<'_>,
+        &mut [f64],
+        &mut dyn FnMut() -> bool,
+    ) -> Result<bool, Refusal>,
+{
+    let systems = [StepSystem {
+        model,
+        impedance,
+        state,
+        memory_inputs,
+        config,
+    }];
+    step_systems_with_velocity_response(
+        &systems,
+        t_s,
+        dt_s,
+        |time, stages| Ok(vec![evaluate(time, stages[0].state, stages[0].kinematics)?]),
+        |contexts, increments, cancel| response(contexts[0], &mut increments[0], cancel),
+        is_cancelled,
+    )?
+    .into_iter()
+    .next()
+    .ok_or_else(|| invalid("missing accepted tree"))
 }
