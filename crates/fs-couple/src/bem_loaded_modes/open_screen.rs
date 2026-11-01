@@ -17,6 +17,13 @@ use fs_math::c64::C64;
 use fs_plate::shell::reduction::ShellReduction;
 use fs_plate::shell::reduction::radiation::open_screen::OpenScreenRadiationBudget;
 
+/// Loaded modes of the same source/real-frequency boundary discretization.
+pub mod poles;
+pub use poles::{
+    OpenScreenModePole, OpenScreenModeSpectrum, OpenScreenResonanceOptions,
+    OpenScreenResonancePencil,
+};
+
 /// Source geometry/tangent limits, separate from BEM and driven-solve limits.
 #[derive(Clone, Copy, Debug)]
 pub struct OpenScreenModesOptions {

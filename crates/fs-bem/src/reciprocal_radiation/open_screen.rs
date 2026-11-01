@@ -2,7 +2,8 @@
 //! coincident closed faces. In H00^(1/2) the free-edge trace vanishes and the
 //! physical jump behaves as sqrt(distance). Mesh grading is a declared axis.
 //! The weak hypersingular form and singular triangle moments share geometry.rs;
-//! all dynamic kernels share helmholtz::WaveNumber, including damped k.
+//! Real and Laplace solves share helmholtz::WaveNumber. The bounded pole chart
+//! analytically continues the real cosine/angular-Gram operator separately.
 use super::*;
 use crate::helmholtz::{
     MAX_DENSE_PANELS, WaveNumber,
@@ -14,6 +15,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod ports;
 pub use ports::{ScreenPortLimits, ScreenVelocityPortSolution};
+mod complex;
+pub use complex::{ScreenComplexLimits, ScreenComplexOperator};
 
 /// A conforming indexed, oriented open two-manifold. Every component must have
 /// a free edge. No closure, thickness or orientation repair is synthesized.
@@ -428,6 +431,11 @@ impl<'a> PreparedScreen<'a> {
     }
     pub fn unknowns(&self) -> usize {
         self.n
+    }
+    /// Original vertex-to-pressure-unknown map. Free-edge vertices have no
+    /// pressure degree of freedom; their physical velocity need not vanish.
+    pub fn pressure_dof_map(&self) -> &[Option<usize>] {
+        &self.dof
     }
     pub fn cache_bytes(&self) -> usize {
         self.bytes

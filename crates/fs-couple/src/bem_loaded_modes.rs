@@ -38,6 +38,7 @@ use fs_math::{c64::C64, det};
 mod shell;
 mod memory;
 mod harmonic;
+mod pencil;
 pub use harmonic::{BemHarmonicOptions, BemHarmonicPower, BemHarmonicResponse};
 /// Source-owned open-shell reaction and two-sided forced radiation.
 pub mod open_screen;
@@ -233,8 +234,6 @@ impl BemLoadedModes {
     // normalization. Source coordinates are unchanged by this solver scaling.
     fn rebalance(&mut self, cancelled: &mut dyn FnMut() -> bool) -> Result<(), BemModesError> {
         let n = self.dimension();
-        self.row_scales = vec![1.0; n];
-        self.column_scales = vec![1.0; n];
         // Fixed scaling preserves the analytic matrix function. Absolute-value
         // scaling recomputed at each contour node would violate that premise.
         let raw = self.assemble(
@@ -242,33 +241,7 @@ impl BemLoadedModes {
             &mut 0,
             cancelled,
         )?;
-        for i in 0..n {
-            let row: f64 = raw.envelope[i * n..(i + 1) * n].iter().sum();
-            if !row.is_finite() || row <= 0.0 {
-                return Err(bad("zero or unrepresentable reference row"));
-            }
-            self.row_scales[i] = row;
-        }
-        for j in 0..n {
-            let col = (0..n)
-                .map(|i| raw.envelope[i * n + j] / self.row_scales[i])
-                .fold(0.0, f64::max);
-            let scale = 1.0 / col;
-            if !scale.is_finite() || scale <= 0.0 {
-                return Err(bad("zero or unrepresentable reference coordinate"));
-            }
-            self.column_scales[j] = scale;
-        }
-        for i in 0..n {
-            let row: f64 = (0..n)
-                .map(|j| raw.envelope[i * n + j] * self.column_scales[j])
-                .sum();
-            if !row.is_finite() || row <= 0.0 {
-                return Err(bad("unrepresentable balanced reference row"));
-            }
-            self.row_scales[i] = row;
-        }
-        poll(cancelled)?;
+        (self.row_scales, self.column_scales) = raw.fixed_scales(n, cancelled)?;
         Ok(())
     }
 
@@ -466,33 +439,8 @@ impl BemLoadedModes {
         evaluations: &mut usize,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<PoleEvaluation, BemModesError> {
-        let mut raw = self.assemble(omega, evaluations, cancelled)?;
-        let n = self.dimension();
-        let mut scale = 0.0_f64;
-        for i in 0..n {
-            let mut row = 0.0;
-            for j in 0..n {
-                let k = i * n + j;
-                let factor = self.column_scales[j] / self.row_scales[i];
-                raw.value.matrix[k] = raw.value.matrix[k].scale(factor);
-                raw.value.derivative[k] = raw.value.derivative[k].scale(factor);
-                row += raw.envelope[k] * factor;
-            }
-            scale = scale.max(row);
-        }
-        if !scale.is_finite()
-            || scale <= 0.0
-            || raw
-                .value
-                .matrix
-                .iter()
-                .chain(&raw.value.derivative)
-                .any(|&z| !finite(z))
-        {
-            return Err(bad("balanced coupled operator is not representable"));
-        }
-        raw.value.residual_scale = scale;
-        Ok(raw.value)
+        self.assemble(omega, evaluations, cancelled)?
+            .into_balanced(&self.row_scales, &self.column_scales)
     }
 
     fn observe(
@@ -502,25 +450,7 @@ impl BemLoadedModes {
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<BemModePole, BemModesError> {
         let m = self.mode_count();
-        let mut vector: Vec<_> = pole
-            .vector
-            .iter()
-            .zip(&self.column_scales)
-            .map(|(&v, &s)| v.scale(s))
-            .collect();
-        let mut amplitude = vector[..m].iter().map(|v| v.abs()).fold(0.0, f64::max);
-        if amplitude == 0.0 {
-            amplitude = vector.iter().map(|v| v.abs()).fold(0.0, f64::max);
-        }
-        if !amplitude.is_finite() || amplitude <= 0.0 {
-            return Err(bad("original eigenstate scale is not representable"));
-        }
-        for v in &mut vector {
-            *v = divide(*v, amplitude);
-        }
-        if vector.iter().any(|&v| !finite(v)) {
-            return Err(bad("original eigenstate overflow"));
-        }
+        let mut vector = pencil::physical_eigenstate(&pole, &self.column_scales, m)?;
         let raw = self.assemble(pole.value, evaluations, cancelled)?;
         let residuals = self.check_physical_rows(&raw, &vector, None, cancelled)?;
         if pole.value.im > 0.0 {
@@ -548,53 +478,25 @@ impl BemLoadedModes {
     // RHS acts only on structural displacement equations. Material/boundary
     // rows and coefficient envelopes retain their exact original semantics.
     fn check_physical_rows(
-        &self, raw: &PhysicalPencil, vector: &[C64], force: Option<&[C64]>,
+        &self,
+        raw: &PhysicalPencil,
+        vector: &[C64],
+        force: Option<&[C64]>,
         cancelled: &mut dyn FnMut() -> bool,
     ) -> Result<[f64; 3], BemModesError> {
-        let (m, n) = (self.mode_count(), self.dimension());
-        if vector.len() != n || force.is_some_and(|f| f.len() != m) {
-            return Err(bad("physical residual needs complete state and force coordinates"));
+        if vector.len() != self.dimension() {
+            return Err(bad(
+                "physical residual needs complete state and force coordinates",
+            ));
         }
-        let mut residuals = [0.0_f64; 3];
-        for i in 0..n {
-            poll(cancelled)?;
-            let rhs = force.and_then(|f| f.get(i)).copied().unwrap_or(C64::ZERO);
-            let mut sum = -rhs;
-            let mut correction = C64::ZERO;
-            let mut denominator = rhs.abs();
-            for j in 0..n {
-                let term = raw.value.matrix[i * n + j] * vector[j] - correction;
-                let next = sum + term;
-                correction = (next - sum) - term;
-                sum = next;
-                denominator += raw.envelope[i * n + j] * vector[j].abs();
-            }
-            if !finite(sum) || !denominator.is_finite() {
-                return Err(bad("physical residual contraction overflow"));
-            }
-            let relative = if denominator == 0.0 {
-                if sum.abs() == 0.0 { 0.0 } else { f64::INFINITY }
-            } else {
-                sum.abs() / denominator
-            };
-            if !relative.is_finite() {
-                return Err(bad("physical residual is not representable"));
-            }
-            let block = if i < m { 0 } else if i < m + self.panel_count() { 1 } else { 2 };
-            residuals[block] = residuals[block].max(relative);
-        }
-        if residuals
-            .iter()
-            .any(|&r| r > self.settings.physical_residual_tolerance)
-        {
-            return Err(BemModesError::PhysicalResidual {
-                mechanical: residuals[0],
-                boundary: residuals[1],
-                memory: residuals[2],
-            });
-        }
-        poll(cancelled)?;
-        Ok(residuals)
+        raw.physical_residuals(
+            self.mode_count(),
+            self.panel_count(),
+            vector,
+            force,
+            self.settings.physical_residual_tolerance,
+            cancelled,
+        )
     }
 
     /// Local simple-pole refinement. Only the initializer solves pressure from

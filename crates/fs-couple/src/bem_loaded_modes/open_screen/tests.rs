@@ -75,7 +75,7 @@ fn source_options() -> OpenScreenModesOptions {
         maximum_setup_work: 10_000_000,
     }
 }
-fn source() -> OpenScreenLoadedModes {
+pub(super) fn source() -> OpenScreenLoadedModes {
     let damping = ModalPlateViscosity::from_psd_modal_matrix(
         vec![0.8, 0.3, 0.3, 0.7],
         2,
@@ -95,7 +95,7 @@ fn source() -> OpenScreenLoadedModes {
     )
     .unwrap()
 }
-fn boundary_options() -> OpenOptions {
+pub(super) fn boundary_options() -> OpenOptions {
     OpenOptions {
         edge_level: 0,
         maximum_edge_level: 0,
@@ -107,7 +107,7 @@ fn boundary_options() -> OpenOptions {
         workers: 1,
     }
 }
-fn options() -> OpenScreenHarmonicOptions {
+pub(super) fn options() -> OpenScreenHarmonicOptions {
     OpenScreenHarmonicOptions {
         boundary: ScreenPortLimits {
             maximum_ports: 8,

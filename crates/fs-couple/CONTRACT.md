@@ -1451,9 +1451,55 @@ loading, verify coherent jumps/two-sided fields/power, and pin work/payload,
 native topology/band and cancellation/replay refusals. They have not run under
 the current missing canonical dependency checkout. This is a linear forced
 response about the reference source; it does not provide nonlinear motion,
-loaded eigenpoles, a time-domain screen realization, a finite-thickness or
+a time-domain screen realization, a finite-thickness or
 interior-cavity model, or the independent spherical/open-cylinder acceptance
 required by M2.5-W4b.
+
+`PreparedOpenScreenModes::resonance_pencil` adds loaded-mode analysis of the
+same complete K/C source and real-frequency pressure-jump discretization. With
+G in mode-major order, its original operator on `[x, jump_unknowns]` is
+`[K-omega^2 I-i omega C, G; -rho omega^2 G^T, H(omega/c)]`.
+G is the exact existing facet-local P1 pressure/velocity work pairing, prepared
+once. The analytic derivative keeps every block, including `H'(omega/c)/c`.
+No pressure unknown or zero-opening structural coordinate is removed. A contour
+therefore sees the holomorphic augmented operator, not the meromorphic quotient
+`H^-1 G^T`. Local initialization alone solves H for a supplied displacement
+seed and refuses a singular isolated boundary block.
+
+`OpenScreenResonancePencil::{original_pencil,resonance_pole,resonance_spectrum}`
+reuse the existing bordered Newton and Beyn owners. Fixed reference balancing,
+physical eigenstate normalization and compensated original-row acceptance are
+shared with the closed-body loaded-mode owner. Complex frequency never changes
+the balance. Original source dimensions, callback/seed payload, complete cold
+projection and per-callback work, total operator evaluations and full-nodal
+output all have explicit limits; native eigensolver scratch/work remains
+separately bounded. The whole ellipse and its interior are admitted before
+iteration against the boundary's original absolute-wavenumber band and centered
+exponential-growth chart. A finite-node contour does not bypass that domain.
+
+Returned modes contain original modal displacement, the full nodal pressure
+jump with exact free-edge zeros, mechanical/boundary residuals and native
+refinement diagnostics. Amplitude is arbitrary and normalized in the original
+coordinates. `decay_rate_per_s` is `-Im(omega)` under `exp(-i omega t)`;
+`quality_factor` exists only for a decaying oscillatory pole. Growing accepted
+roots refuse. Contour results retain the original rank/count, nested-moment,
+conditioning, unrefined-value and evaluation reports. These are numerical
+finite-operator results, not interval completeness or physical-root certificates.
+
+The open boundary's cosine-plus-Gram continuation is analytic at zero, so no
+closed Burton--Miller `1/k` exclusion is invented. A multiple rigid zero pole
+may still refuse native simple-root refinement. This bounded continuation
+matches the real-frequency operator; it does not replace the distinct damped
+point-kernel Laplace owner, certify all-RHP causality/passivity, supply a CQ
+reaction runtime or add material-memory states. Source, mesh, triangle and
+angular convergence and physical root identification remain required.
+Five authored regressions check complete real-axis harmonic-equation parity,
+complex-direction derivatives and zero, an actual non-radiating planar shell
+mode's exact decay on three native contour grids, the radiating shell's
+independent discrete incompressible added-mass limit, and domain/resource/
+cancellation refusals. Package execution remains blocked by the missing
+canonical dependency checkout; spherical-shell and open-cylinder validation
+remain outstanding.
 
 ### Continuous loaded modal and cavity response
 

@@ -1137,7 +1137,7 @@ sqrt-edge convergence order is reported with `fs_mms`, not assumed smooth.
 
 Analytic Laplace triangle moments, Duffy rules and the outgoing angular Gram
 identity share the existing reciprocal owner. The dynamic remainder uses the
-existing real/damped `WaveNumber` seam. Complex-frequency continuation uses the
+existing real/damped `WaveNumber` seam. The existing RHP `solve_laplace` uses the
 full complex weak kernel and makes no real-frequency power claim. Far fields
 use the jump's double-layer potential; receivers use the existing adaptive P1
 near-field integration. Both screen sides are represented without coincident
@@ -1197,6 +1197,47 @@ independent degree-two triangle quadrature, coherent fields with an original
 combined-drive solve, folded-facet traces with an independently projected
 equivalent weak load, and whole-batch caps/cancellation/replay. These tests have
 not been executed in the current workspace with its missing pinned dependencies.
+
+`PreparedScreen::complex_operator` supplies a separate, bounded holomorphic
+continuation of the **same discrete real-frequency operator** for loaded-pole
+pencils. It retains the analytic static terms and cosine Green remainder, then
+continues the outgoing angular Gram form through symmetric antipodal products
+`(c_-,i*c_+,j + c_+,i*c_-,j)/2`, evaluated at one complex wavenumber without
+conjugation. Real-axis matrix arithmetic is the original assembly order; both
+`H` and its analytic derivative `dH/dk` are returned in the original active P1
+pressure ordering. Their units are metres and square metres. Zero belongs to
+this chart; there is no closed-body `1/k` coupling or pressure elimination.
+
+`velocity_port_pairing` exposes the original exact real P1 mass pairing `G`,
+mode-major, and `pressure_dof_map` exposes the original zero-free-edge pressure
+map. With `exp(-i*w*t)` and modal displacement `x`, the augmented shell rows are
+`(K-w^2 I-i*w*C)*x + G*p = 0` and
+`H(w/c)*p - rho*w^2*G^T*x = 0`. Thus the source and work transpose keep the
+same sign and coordinate units as the real-frequency forced response. No
+inverse of `H` or fitted impedance is needed to define the full pole pencil.
+
+`ScreenComplexLimits` admits both matrices, bounded parallel pair scratch,
+angular/coefficient payloads and derivative assembly work before allocation.
+The original frequency band and preparation work limit still apply. Whole
+contours can be preflighted with `admit_complex_domain`; every subsequent
+sample checks its own domain as well. Both signs of the imaginary part are
+admitted only when `|Im(k)|*2R` fits the declared positive growth limit, at most
+8. `R` covers actual cached samples and vertices about a fixed geometry center,
+so translating a screen cannot create exponentially large individual factors.
+Original deterministic pair order and block cancellation remain in force;
+failure returns no partial operator. These are logical payload/work bounds,
+not process RSS or accuracy certificates.
+
+This finite operator pole chart does not certify positive-real behavior over
+the whole Laplace half-plane, supply a production CQ reaction, or alter
+`solve_laplace`. Loaded poles still require the mesh/quadrature/angular ladder
+and the downstream physical residual checks. Two tests of the exact production
+scalar kernel passed with the native compiler and production `fs_math`: analytic
+derivatives in independent complex directions, zero limits, acoustic reality
+symmetry and translation-invariant antipodal products. Three additional matrix
+tests cover original real-axis bits and work projection, full analytic matrix
+derivatives, domain/resource refusal and cancellation/replay; these are authored
+but have not run with the unavailable pinned package dependencies.
 
 `reciprocal_radiation::pipe_end` (IRP .100, RULING (2)) measures the open
 end of a thin unflanged pipe on this owner, in Levine and Schwinger's own

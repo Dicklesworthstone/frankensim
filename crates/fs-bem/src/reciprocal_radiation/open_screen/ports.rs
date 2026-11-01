@@ -50,6 +50,74 @@ impl<'s> PreparedScreen<'s> {
         u64::try_from(work).map_err(|_| bad("open velocity-port work overflow"))
     }
 
+    /// Exact real work pairing G, mode-major with one entry per ACTIVE pressure
+    /// unknown. This is the same P1 mass projection used by solve_velocity_ports:
+    /// H*p = i*rho*omega*G^T*rate, and resisting modal effort is G*p.
+    /// The pressure ordering is given by pressure_dof_map. No boundary unknown
+    /// is eliminated, and no density/frequency factor is hidden in these rows.
+    ///
+    /// maximum_entries counts the complete returned real array. Conservative
+    /// work is 128*ports*facets + 16*ports*unknowns, before any allocation.
+    pub fn velocity_port_pairing(
+        &self,
+        rows: &[&[[f64; 3]]],
+        maximum_entries: usize,
+        maximum_work: u64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<Vec<f64>>, HelmholtzError> {
+        poll(&mut cancelled)?;
+        let ports = rows.len();
+        let entries = ports
+            .checked_mul(self.n)
+            .ok_or_else(|| bad("open velocity-port pairing extent overflow"))?;
+        let work = ports as u128 * (128 * self.facets.len() as u128 + 16 * self.n as u128);
+        if ports == 0
+            || ports > crate::helmholtz::MAX_RADIATION_FIELDS_PER_BATCH
+            || entries > maximum_entries
+            || work > u128::from(maximum_work)
+        {
+            return Err(bad(
+                "open velocity-port pairing exceeds its source, entry or work limit",
+            ));
+        }
+        for row in rows {
+            poll(&mut cancelled)?;
+            if row.len() != self.facets.len() || row.iter().flatten().any(|v| !v.is_finite()) {
+                return Err(bad(
+                    "open velocity ports require complete finite facet-corner rows",
+                ));
+            }
+        }
+        let mut weak = Vec::new();
+        weak.try_reserve_exact(ports)
+            .map_err(|_| HelmholtzError::AllocationFailed {
+                what: "open velocity-port weak drives",
+            })?;
+        for row in rows {
+            poll(&mut cancelled)?;
+            let mut drive = zeroed(self.n, 0.0)?;
+            for (index, (f, values)) in self.facets.iter().zip(*row).enumerate() {
+                if index % 32 == 0 {
+                    poll(&mut cancelled)?;
+                }
+                for a in 0..3 {
+                    if let Some(u) = self.dof[f.ids[a]] {
+                        for b in 0..3 {
+                            drive[u] +=
+                                values[b] * (f.area * if a == b { 1.0 / 6.0 } else { 1.0 / 12.0 });
+                        }
+                    }
+                }
+            }
+            if drive.iter().any(|v| !v.is_finite()) {
+                return Err(bad("open velocity-port weak projection overflow"));
+            }
+            weak.push(drive);
+        }
+        poll(&mut cancelled)?;
+        Ok(weak)
+    }
+
     /// Solve every physical facet-local P1 velocity against ONE original
     /// hypersingular assembly and LU. rows[mode][facet][corner] is the signed
     /// normal-velocity coefficient on that oriented facet. It need not agree
@@ -102,42 +170,14 @@ impl<'s> PreparedScreen<'s> {
                 "complete open velocity-port batch exceeds declared resources",
             ));
         }
-        for row in rows {
-            poll(&mut cancelled)?;
-            if row.len() != self.facets.len() || row.iter().flatten().any(|v| !v.is_finite()) {
-                return Err(bad(
-                    "open velocity ports require complete finite facet-corner rows",
-                ));
-            }
-        }
         // Retain the actual test/drive pairing once, rather than repeating nine
         // facet products for every mode pair or inventing a lumped mass rule.
-        let mut weak = Vec::new();
-        weak.try_reserve_exact(ports)
-            .map_err(|_| HelmholtzError::AllocationFailed {
-                what: "open velocity-port weak drives",
-            })?;
-        for row in rows {
-            poll(&mut cancelled)?;
-            let mut drive = zeroed(self.n, 0.0)?;
-            for (index, (f, values)) in self.facets.iter().zip(*row).enumerate() {
-                if index % 32 == 0 {
-                    poll(&mut cancelled)?;
-                }
-                for a in 0..3 {
-                    if let Some(u) = self.dof[f.ids[a]] {
-                        for b in 0..3 {
-                            drive[u] +=
-                                values[b] * (f.area * if a == b { 1.0 / 6.0 } else { 1.0 / 12.0 });
-                        }
-                    }
-                }
-            }
-            if drive.iter().any(|v| !v.is_finite()) {
-                return Err(bad("open velocity-port weak projection overflow"));
-            }
-            weak.push(drive);
-        }
+        let weak = self.velocity_port_pairing(
+            rows,
+            limits.maximum_jump_entries,
+            limits.maximum_work,
+            &mut cancelled,
+        )?;
         poll(&mut cancelled)?;
         let (h, lu) = self.factor_wave(k, true, Admittance::Rigid, &mut cancelled)?;
         let mut solutions = Vec::new();
