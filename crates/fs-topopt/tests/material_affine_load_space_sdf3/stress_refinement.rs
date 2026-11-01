@@ -492,3 +492,206 @@ fn legacy_affine_campaign_constructors_cannot_drop_an_optimized_strength_cap() {
         assert_eq!(control.work(), work);
     }
 }
+
+#[test]
+fn affine_compliance_campaign_keeps_volume_response_and_strength_limits_on_every_grid() {
+    let tree = Octree3::uniform(1, 4, 4096).unwrap();
+    let mut study = adaptive_material_study(&tree);
+    let rho = vec![0.7; study.cells()];
+    let original_dimension = study.operator().n();
+    let dead = ReferenceLoad3::body(&refinement_dead);
+    let loads = design_laws();
+    let mut callback = |_| poll();
+    let mut control = SolveControl::new(SolveBudget::default(), &mut callback);
+    let (loose_cap, strength, limits) =
+        calibrated_limits(&mut study, &rho, dead, &loads, &mut control);
+    // This is an objective normalization, deliberately BELOW actual compliance.
+    // Reusing the minimum-material cap predicate would falsely reject the run.
+    let normalization = AffineLoadSpace3::new(loads.len(), loose_cap.reference() / 64.0).unwrap();
+    let volume_limit = 0.95;
+    let goal = AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit };
+    let requirements = ReferenceAffineLoadSpaceConstraints3 {
+        responses: Some(ReferenceAffineResponseLimits3 {
+            limits: &limits,
+            options: AffineResponseOptions3::default(),
+        }),
+        stress: Some(strength),
+        ..Default::default()
+    };
+    let mut options = refit_options(1);
+    // Keep a measurable descent step inside the original volume constraint on
+    // both grids. Accepted-step completion is not a stationarity assertion.
+    options.design.optimizer.max_spectral_step = 0.001;
+    let initial = study
+        .solve_reference_affine_load_space_with_constraints(
+            &rho,
+            dead,
+            &loads,
+            &normalization,
+            goal,
+            options,
+            requirements,
+            &mut control,
+        )
+        .unwrap();
+    assert!(initial.completed_and_rechecked(), "{:?}", initial.outcome);
+    let checked = initial.recheck.as_ref().unwrap().as_ref().unwrap();
+    assert!(checked.evaluation.maximum > 1.0);
+    assert!(
+        checked.evaluation.worst_compliance
+            < initial
+                .initial
+                .as_ref()
+                .unwrap()
+                .evaluation
+                .worst_compliance
+    );
+    let first_objective = checked.evaluation.maximum;
+    let builds = RefCell::new(Vec::new());
+    let mut campaign = AffineLoadSpaceCampaign3::new_with_constraints(
+        initial,
+        tree,
+        dead,
+        &loads,
+        requirements,
+        AffineLoadSpaceCampaignOptions3 {
+            max_refits: 1,
+            max_candidate_attempts: 1,
+            // A genuine nonzero model change forces one native refit.
+            change_tolerance: 0.0,
+            response_change_tolerance: 1e6,
+            stress_change_tolerance: 1e6,
+            volume_tolerance: 1e-6,
+            objective_tolerance: 1e6,
+            ..Default::default()
+        },
+        &mut control,
+        |tree, kind, checkpoint| {
+            builds.borrow_mut().push(kind);
+            adaptive_on_tree_controlled(tree, checkpoint)
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        campaign.run(0).unwrap(),
+        AffineLoadSpaceCampaignStop3::Paused
+    );
+    let first_probe = campaign.current_probe().unwrap();
+    assert_eq!(first_probe.goal, Some(goal));
+    assert!(first_probe.coarse.maximum > 1.0 && first_probe.fine.maximum > 1.0);
+    assert!(first_probe.stable_and_feasible_with_constraint_tolerances(1e6, 1e6, 1e6));
+    assert!(first_probe.normalized_model_change > 0.0);
+    assert_eq!(
+        campaign.run(1).unwrap(),
+        AffineLoadSpaceCampaignStop3::RefinementLimit
+    );
+    assert_eq!(
+        builds.borrow().as_slice(),
+        &[
+            AffineLoadSpaceBuild3::Probe,
+            AffineLoadSpaceBuild3::Refit,
+            AffineLoadSpaceBuild3::Probe,
+        ]
+    );
+    assert_eq!(campaign.grids().len(), 2);
+    assert_eq!(campaign.probes().len(), 2);
+    close(campaign.grids()[0].objective, first_objective, 1e-10);
+    for grid in campaign.grids() {
+        close(
+            grid.objective,
+            grid.worst_compliance / normalization.reference(),
+            1e-9,
+        );
+        assert!(grid.objective > 1.0);
+        assert!(grid.dilated_volume_fraction <= volume_limit);
+    }
+
+    let current = campaign.current();
+    assert!(current.completed_and_rechecked(), "{:?}", current.outcome);
+    assert!(current.study.operator().n() > original_dimension);
+    assert_eq!(current.goal, goal);
+    assert_eq!(current.policy, normalization);
+    let audit = current.gradient_check.as_ref().unwrap();
+    assert!(audit.passed());
+    assert_eq!(audit.goal, goal);
+    assert_eq!(audit.constraints, requirements.policy());
+    let inherited = current.initial.as_ref().unwrap();
+    let checked = current.recheck.as_ref().unwrap().as_ref().unwrap();
+    // Compare the fine endpoint with its own freshly solved starting design.
+    // Different grids need not have ordered objective values.
+    assert!(checked.evaluation.worst_compliance < inherited.evaluation.worst_compliance);
+    assert!(checked.evaluation.maximum > 1.0);
+    assert_eq!(inherited.rho, current.inherited_rho);
+    for point in [
+        inherited,
+        current.accepted.as_ref().unwrap(),
+        current.best.as_ref().unwrap(),
+        checked,
+    ] {
+        let evaluation = &point.evaluation;
+        assert_eq!(evaluation.constraints, requirements.policy());
+        assert!(evaluation.physical.dilated_volume_fraction <= volume_limit);
+        let stress = evaluation.stress.as_ref().unwrap();
+        assert_eq!(stress.limit, strength);
+        assert!(stress.physically_feasible());
+        let responses = evaluation.responses.as_ref().unwrap();
+        assert!(responses.physically_feasible());
+        for (witness, limit) in responses.witnesses.iter().zip(&limits) {
+            assert_eq!(witness.bound, limit.bound);
+            assert_eq!(witness.sense, limit.sense);
+            assert_eq!(witness.scale, limit.scale);
+        }
+    }
+    let probe = campaign.current_probe().unwrap();
+    assert_eq!(probe.goal, Some(goal));
+    assert_eq!(probe.rho, checked.rho);
+    assert_eq!(probe.constraints, requirements.policy());
+    assert!(probe.coarse.maximum > 1.0 && probe.fine.maximum > 1.0);
+    assert!(probe.stable_and_feasible_with_constraint_tolerances(1e6, 1e6, 1e6));
+    let inventory = probe.inventory.as_ref().unwrap();
+    assert_eq!(
+        inventory.objective,
+        MinimumMaterialObjective3::VolumeFraction
+    );
+    assert_eq!(inventory.volume_scale, volume_limit);
+    close(
+        inventory.coarse_volume_fraction,
+        checked.evaluation.physical.dilated_volume_fraction,
+        1e-12,
+    );
+    assert!(inventory.coarse_volume_fraction <= volume_limit);
+    assert!(inventory.fine_volume_fraction <= volume_limit);
+    close(
+        inventory.coarse_objective,
+        inventory.coarse_volume_fraction / volume_limit,
+        1e-12,
+    );
+    close(
+        probe.objective_change().unwrap(),
+        (probe.fine.maximum - probe.coarse.maximum).abs(),
+        1e-12,
+    );
+    close(
+        campaign.probes().last().unwrap().objective_change,
+        probe.objective_change().unwrap(),
+        1e-12,
+    );
+    let stress = probe.stress.as_ref().unwrap();
+    assert_eq!(stress.coarse.limit, strength);
+    assert_eq!(stress.fine.limit, strength);
+    assert!(stress.coarse.physically_feasible() && stress.fine.physically_feasible());
+    let responses = probe.responses.as_ref().unwrap();
+    assert!(responses.coarse.physically_feasible() && responses.fine.physically_feasible());
+
+    // Predicate regression on an otherwise admitted native report: no change
+    // tolerance can excuse even a small excess of the original fine volume cap.
+    let mut excessive = probe.clone();
+    let inventory = excessive.inventory.as_mut().unwrap();
+    inventory.fine_volume_fraction = volume_limit + 1e-8;
+    inventory.fine_objective = inventory.fine_volume_fraction / volume_limit;
+    inventory.volume_change =
+        (inventory.fine_volume_fraction - inventory.coarse_volume_fraction).abs();
+    inventory.objective_change = (inventory.fine_objective - inventory.coarse_objective).abs();
+    assert!(!excessive.stable_and_feasible_with_constraint_tolerances(1e6, 1e6, 1e6));
+    assert!(campaign.pending().is_none() && campaign.rejected().is_none());
+}

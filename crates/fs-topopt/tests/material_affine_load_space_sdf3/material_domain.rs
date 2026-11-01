@@ -308,6 +308,35 @@ fn zero_centered_uncertainty_checks_combinations_beyond_valid_independent_cases(
         }
     );
     assert_eq!(study.operator().scales(), scales);
+
+    use fs_topopt::sdf3::robust::envelope::load_space::design::limits::LoadSpaceCap3;
+    use fs_topopt::sdf3::robust::envelope::load_space::design::limits::binary::BinaryComplianceError3;
+    let binary = study
+        .evaluate_binary_load_space_cap(
+            &rho,
+            &[&force],
+            &LoadSpaceCap3::new(1, 1e6, 0.02).unwrap(),
+            Default::default(),
+            &mut control,
+        )
+        .unwrap();
+    close_vector(&binary.worst_displacement, &field);
+    assert_eq!(study.operator().scales(), scales);
+    assert!(matches!(
+        study.evaluate_binary_load_space_cap(
+            &rho,
+            &[&force, &force],
+            &LoadSpaceCap3::new(2, 1e6, 0.02).unwrap(),
+            Default::default(),
+            &mut control,
+        ),
+        Err(BinaryComplianceError3::Evaluation(
+            EvaluationStop::Breakdown {
+                stage: "sdf3-affine-material-domain"
+            }
+        ))
+    ));
+    assert_eq!(study.operator().scales(), scales);
 }
 
 #[test]

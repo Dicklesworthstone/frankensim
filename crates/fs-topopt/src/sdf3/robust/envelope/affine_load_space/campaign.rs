@@ -47,7 +47,8 @@ pub struct AffineLoadSpaceCampaignOptions3 {
     pub stress_change_tolerance: f64,
     /// Absolute change in dilated numerical volume fraction.
     pub volume_tolerance: f64,
-    /// Absolute inventory change divided by its declared objective scale.
+    /// Absolute change of the original normalized design objective:
+    /// independently remaximized compliance or native dilated inventory.
     pub objective_tolerance: f64,
     pub marking: AffineLoadSpaceMarking3,
     pub enrichment: AffineLoadSpaceRefinementOptions3,
@@ -87,6 +88,7 @@ pub struct AffineLoadSpaceGridSummary3 {
     pub background_cells: usize,
     pub dilated_volume_fraction: f64,
     pub dilated_mass_kg: Option<f64>,
+    /// Original design objective: normalized worst compliance or inventory.
     pub objective: f64,
     pub worst_compliance: f64,
     pub response_constraint: Option<f64>,
@@ -106,6 +108,7 @@ pub struct AffineLoadSpaceProbe3 {
     pub stress_model_change: Option<f64>,
     pub stress_aggregate_change: Option<f64>,
     pub volume_change: f64,
+    /// Absolute change of the original normalized design objective.
     pub objective_change: f64,
     pub mass_change_kg: Option<f64>,
     pub passed: bool,
@@ -116,17 +119,23 @@ fn invalid(message: &'static str) -> AffineLoadSpaceCampaignError3 {
     GoalRefinementError3::Invalid(message).into()
 }
 
-fn inventory_goal(
-    goal: AffineLoadSpaceDesignGoal3,
-) -> Result<(MinimumMaterialObjective3, f64), AffineLoadSpaceCampaignError3> {
-    match goal {
-        AffineLoadSpaceDesignGoal3::MinimumMaterial {
-            objective,
-            volume_scale,
-        } => Ok((objective, volume_scale)),
-        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => Err(invalid(
-            "automatic affine refinement requires a minimum-material compliance cap",
-        )),
+fn same_goal(a: AffineLoadSpaceDesignGoal3, b: AffineLoadSpaceDesignGoal3) -> bool {
+    match (a, b) {
+        (
+            AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit: a },
+            AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit: b },
+        ) => a == b,
+        (
+            AffineLoadSpaceDesignGoal3::MinimumMaterial {
+                objective: a,
+                volume_scale: av,
+            },
+            AffineLoadSpaceDesignGoal3::MinimumMaterial {
+                objective: b,
+                volume_scale: bv,
+            },
+        ) => a == b && (matches!(a, MinimumMaterialObjective3::MassKg { .. }) || av == bv),
+        _ => false,
     }
 }
 
@@ -141,14 +150,20 @@ fn grid<O: AdaptiveSdf3Elasticity>(
         .as_ref()
         .expect("rechecked point")
         .evaluation;
-    let (objective, volume_scale) = inventory_goal(current.goal)?;
-    let value = match objective {
-        MinimumMaterialObjective3::VolumeFraction => normalize(
+    let value = match current.goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { .. } => e.maximum,
+        AffineLoadSpaceDesignGoal3::MinimumMaterial {
+            objective: MinimumMaterialObjective3::VolumeFraction,
+            volume_scale,
+        } => normalize(
             e.physical.dilated_volume_fraction,
             volume_scale,
             "sdf3-affine-campaign-inventory",
         )?,
-        MinimumMaterialObjective3::MassKg { scale_kg } => normalize(
+        AffineLoadSpaceDesignGoal3::MinimumMaterial {
+            objective: MinimumMaterialObjective3::MassKg { scale_kg },
+            ..
+        } => normalize(
             e.physical
                 .dilated_mass_kg
                 .ok_or_else(|| invalid("missing affine campaign kilograms"))?,
@@ -156,8 +171,8 @@ fn grid<O: AdaptiveSdf3Elasticity>(
             "sdf3-affine-campaign-inventory",
         )?,
     };
-    if value < 0.0 {
-        return Err(invalid("negative affine campaign inventory"));
+    if !value.is_finite() || value < 0.0 {
+        return Err(invalid("invalid affine campaign objective"));
     }
     Ok(AffineLoadSpaceGridSummary3 {
         active_cells: current.study.cells(),
@@ -237,7 +252,7 @@ fn build_checked<O: AdaptiveSdf3Elasticity>(
     Ok(operator)
 }
 
-fn inventory_resolved(
+fn volume_resolved(
     report: &AffineLoadSpaceRefinement3,
     options: AffineLoadSpaceCampaignOptions3,
 ) -> bool {
@@ -245,13 +260,19 @@ fn inventory_resolved(
         inventory.volume_change.is_finite()
             && inventory.volume_change >= 0.0
             && inventory.volume_change <= options.volume_tolerance
-            && inventory.objective_change.is_finite()
-            && inventory.objective_change >= 0.0
-            && inventory.objective_change <= options.objective_tolerance
     })
 }
 
-/// In-memory adaptive minimum-material design for one fixed affine load model.
+fn objective_resolved(
+    report: &AffineLoadSpaceRefinement3,
+    options: AffineLoadSpaceCampaignOptions3,
+) -> bool {
+    report
+        .objective_change()
+        .is_some_and(|change| change <= options.objective_tolerance)
+}
+
+/// In-memory adaptive constrained design for one fixed affine load model.
 /// Start with a reference affine solve, including its response family when used.
 /// The load/response laws and builder preserve physical domain, supports, complete
 /// native materials, amplitudes/correlations and purity throughout this owner.
@@ -262,9 +283,11 @@ fn inventory_resolved(
 /// Full probes inherit eroded AND dilated physical fields on uniformly refined
 /// active cells. Candidates inherit RAW controls, rebuild native self-weight,
 /// refilter on their own grid and run the same constrained optimizer. A candidate
-/// is installed only after a fresh complete load-set recheck passes the physical
-/// cap and every original response bound. No monotone self-weight restoration
-/// or cross-grid descent is assumed.
+/// is installed only after a fresh complete load-set recheck passes the original
+/// goal's physical cap and every response/strength requirement. WorstCompliance
+/// minimizes compliance under a dilated volume cap; MinimumMaterial minimizes
+/// inventory under a compliance cap. No monotone self-weight restoration or
+/// cross-grid descent is assumed.
 /// Every installed grid receives a fresh full probe before a normal pause/limit.
 ///
 /// Completed probes and pending candidates survive run segments. Failed refits
@@ -361,16 +384,10 @@ where
         control: &'a mut SolveControl<'callback>,
         build: B,
     ) -> Result<Self, AffineLoadSpaceCampaignError3> {
-        let (objective, volume_scale) = inventory_goal(current.goal)?;
         let audit = current.gradient_check.as_ref().ok_or_else(|| {
             invalid("affine campaign requires the original successful gradient audit")
         })?;
-        let (audited_objective, audited_volume_scale) = inventory_goal(audit.goal)?;
-        if !audit.passed()
-            || objective != audited_objective
-            || (matches!(objective, MinimumMaterialObjective3::VolumeFraction)
-                && volume_scale != audited_volume_scale)
-        {
+        if !audit.passed() || !same_goal(current.goal, audit.goal) {
             return Err(invalid(
                 "affine campaign goal differs from its optimized objective",
             ));
@@ -514,7 +531,13 @@ where
         else {
             return Ok(uniform.clone());
         };
-        if !inventory_resolved(report, self.options)
+        // Compliance changes have native frozen-witness marking. Unresolved
+        // inventory does not, so it still requires the uniform fallback.
+        if !volume_resolved(report, self.options)
+            || (matches!(
+                report.goal,
+                Some(AffineLoadSpaceDesignGoal3::MinimumMaterial { .. })
+            ) && !objective_resolved(report, self.options))
             || report.responses.as_ref().is_some_and(|responses| {
                 !responses.stable_and_feasible(self.options.response_change_tolerance)
             })
@@ -568,29 +591,31 @@ where
                     &mut self.build,
                 )?;
                 let point = self.current.recheck.as_ref().unwrap().as_ref().unwrap();
-                let (objective, volume_scale) = inventory_goal(self.current.goal)?;
                 let report = self
                     .current
                     .study
-                    .estimate_affine_load_space_enrichment_with_constraints(
+                    .estimate_affine_load_space_enrichment_for_goal(
                         operator,
                         &point.rho,
                         self.dead,
                         self.basis,
                         self.current.options.design.robustness,
                         &self.current.policy,
-                        objective,
-                        volume_scale,
+                        self.current.goal,
                         self.constraints,
                         self.options.enrichment,
                         self.control,
                     )?;
                 let inventory = report.inventory.as_ref().expect("inventory requested");
+                let objective_change = report
+                    .objective_change()
+                    .ok_or_else(|| invalid("unrepresentable affine campaign objective change"))?;
                 let passed = report.stable_and_feasible_with_constraint_tolerances(
                     self.options.change_tolerance,
                     self.options.response_change_tolerance,
                     self.options.stress_change_tolerance,
-                ) && inventory_resolved(&report, self.options);
+                ) && volume_resolved(&report, self.options)
+                    && objective_resolved(&report, self.options);
                 self.probes.push(AffineLoadSpaceProbe3 {
                     source_grid: self.grids.len() - 1,
                     coarse_worst_compliance: report.coarse.worst_compliance,
@@ -606,7 +631,7 @@ where
                         .as_ref()
                         .map(|s| s.normalized_aggregate_change),
                     volume_change: inventory.volume_change,
-                    objective_change: inventory.objective_change,
+                    objective_change,
                     mass_change_kg: inventory.mass_change_kg,
                     passed,
                     work: report.work,

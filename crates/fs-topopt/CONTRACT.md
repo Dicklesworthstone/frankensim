@@ -158,7 +158,8 @@ with zero objective weight. Source-free legacy elastic models receive no
 invented strain ceiling.
 
 The zero-offset spectral load-space evaluator also admits the COMPLETE
-coefficient unit ball before its spectrum. Its gray and binary refinement paths
+coefficient unit ball before its spectrum. Direct binary endpoints and their
+threshold scanner share the same complete-family admission. Gray and binary refinement paths
 independently admit both coarse and fine combined families against the actual
 native operators. The fine family is checked before the shared DWR owner releases
 its material and hanging maps; no reconstruction of a substitute operator or
@@ -488,10 +489,11 @@ floating-point evaluation is numerical evidence, not an interval enclosure.
 It detects a changed adverse direction even when grid maxima happen to agree.
 All returned outcomes preserve the source study, and incomplete grid families
 are never published as a usable assessment.
-`stable_and_feasible` explicitly interprets the reference as a compliance cap:
-both grids must satisfy it in normalized and physical units, and the whole
-model change must meet its separate tolerance. That tolerance never waives
-physical cap excess.
+For the basic unbound assessment, `stable_and_feasible` explicitly interprets
+the reference as a compliance cap: both grids must satisfy it in normalized
+and physical units, and the whole model change must meet its separate tolerance.
+A goal-bound assessment instead enforces its original design formulation.
+Change tolerances never waive physical cap excess.
 
 `estimate_affine_load_space_enrichment_with_inventory` additionally evaluates
 the dilated objective on both grids. It shares the original forward filter,
@@ -534,16 +536,29 @@ diagnostic. The p-norm's sample-count dependence can keep a campaign unresolved
 even for a nearly unchanged field; no adaptive-convergence or continuum-strength
 guarantee follows. These checks require no extra primal or adjoint solve.
 
+`estimate_affine_load_space_enrichment_for_goal` binds either original design
+goal to that same assessment owner. Minimum-material mode retains the physical
+compliance cap and selected dilated volume/kg objective. Worst-compliance mode
+uses the compliance reference ONLY for normalization, evaluates native dilated
+volume on both grids and enforces the original strict volume limit. Its joint
+upper constraint uses `volume/volume_limit - 1`, while minimum-material mode
+uses `maximum - 1`; all original response and strength bounds remain active.
+The report retains the goal and inventory binding, and `objective_change()`
+uses the normalized worst-compliance change or the selected inventory change
+as appropriate. Neither mode adds a second solver, filter or optimizer.
+
 `affine_load_space::campaign::AffineLoadSpaceCampaign3` automatically repeats
-full assessment and refitting for the minimum-material goal. Its physical
-compliance cap, objective, filter/SIMP parameters, pure dead/basis laws and
-native acceleration recipe remain fixed. Every probe refines all active source
-cells and independently remaximizes the complete affine quadratic. A pass
-requires both physical caps, the full-model change gate, dilated-volume change
-and the selected normalized-inventory change. Uniform candidate refinement is
-the default; optional frozen-witness marking is a diagnostic heuristic, with
-uniform fallback whenever volume or inventory remains unresolved or no marks
-are produced. Selective marking never substitutes for the full final probe.
+full assessment and refitting for BOTH design goals. Its original physical cap,
+objective, filter/SIMP parameters, pure dead/basis laws and native acceleration
+recipe remain fixed. Every probe refines all active source cells and
+independently remaximizes the complete affine quadratic. A pass requires both
+grids' original physical bounds, the full-model change gate, dilated-volume
+change and the actual normalized-objective change. Grid histories report the
+objective used by the optimizer. Uniform candidate refinement is the default;
+optional frozen-witness marking remains a diagnostic heuristic with uniform
+fallback for unresolved volume/material inventory or empty marks. Compliance
+objective change can use that marking; selective refinement never substitutes
+for the full final probe.
 
 Candidates inherit raw controls and protected labels, rebuild native self-weight,
 and reoptimize on their own filtered grid. A completed allowance and fresh
@@ -602,11 +617,15 @@ regressions check the whole material strain domain and adaptive constraints.
 Joint adaptive regressions compare matched stress fields independently, retain
 all constraint families and native kilograms, check assessment solve counts,
 and refuse campaign admission that would omit optimized strength requirements.
+Worst-compliance campaign regressions retain original volume, response and
+strength limits across Probe/Refit/Probe, including a normalized compliance
+above one that is valid because the reference is a scale rather than a cap.
 These APIs cover fixed geometry, homogeneous supports, fixed dead loads and
 reference acceleration. Numerical load optimality evidence is not an interval
 enclosure, a continuum guarantee, a global design optimum, or a serialized
-restart contract for this design owner. Automatic adaptive design currently
-uses the minimum-material formulation; explicit refits support both goals.
+restart contract for this design owner. Explicit refits and automatic adaptive
+campaigns support both original design goals. Optimization descent is assessed
+within each candidate's own discretization; cross-grid descent is not claimed.
 
 ## 3-D cut-cell continuation
 

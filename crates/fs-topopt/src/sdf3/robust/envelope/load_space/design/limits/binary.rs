@@ -87,6 +87,11 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         let policy = cap.policy();
         let n = policy.dimension();
         let states = &physical.displacements;
+        // The endpoint scanner and direct check share this complete family
+        // admission. Passing every separate basis case does not admit their
+        // simultaneous combinations; strain validity is independent of scale.
+        let fields: Vec<_> = states.iter().map(Vec::as_slice).collect();
+        crate::sdf3::admit_load_space_material_domain(self.operator(), &fields, control)?;
         let dofs = self.operator().n();
         let fixed = self.operator().fixed();
         let mut gram = vec![0.0; n*n];

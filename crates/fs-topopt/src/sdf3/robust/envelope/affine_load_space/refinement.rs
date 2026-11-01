@@ -4,6 +4,7 @@
 //! material body force. Two frozen load directions use the existing DWR owner;
 //! neither a smooth envelope derivative nor a continuum bound is assumed.
 use super::constraints::{AffineLoadSpaceConstraintPolicy3, ReferenceAffineLoadSpaceConstraints3};
+use super::design::AffineLoadSpaceDesignGoal3;
 use super::grid::{combine_fields, evaluate_grid, finite, normalize, relative_difference};
 use super::response::reference::{self as response_reference, ReferenceAffineResponseLimits3};
 use super::response::{AffineResponseEvaluation3, AffineResponseLimits3, measure_affine_responses};
@@ -97,6 +98,10 @@ impl AffineResponseRefinement3 {
 pub struct AffineLoadSpaceRefinement3 {
     pub policy: AffineLoadSpace3,
     pub robustness: RobustOptions3,
+    /// Original optimization goal when this assessment includes design
+    /// requirements. None retains the basic assessment's explicit opt-in
+    /// interpretation of the policy reference as a compliance cap.
+    pub goal: Option<AffineLoadSpaceDesignGoal3>,
     pub rho: Vec<f64>,
     pub coarse_eroded_rho: Vec<f64>,
     /// Literal parent copies; no fine filtering or reconstruction from SIMP.
@@ -156,6 +161,27 @@ fn inventory_scale(
         ));
     }
     Ok(scale)
+}
+
+fn goal_inventory(
+    goal: AffineLoadSpaceDesignGoal3,
+) -> Result<(MinimumMaterialObjective3, f64), GoalRefinementError3> {
+    let inventory = match goal {
+        AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit } => {
+            if volume_limit > 1.0 {
+                return Err(GoalRefinementError3::Invalid(
+                    "affine refinement requires a dilated volume cap in (0,1]",
+                ));
+            }
+            (MinimumMaterialObjective3::VolumeFraction, volume_limit)
+        }
+        AffineLoadSpaceDesignGoal3::MinimumMaterial {
+            objective,
+            volume_scale,
+        } => (objective, volume_scale),
+    };
+    inventory_scale(inventory.0, inventory.1)?;
+    Ok(inventory)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -253,11 +279,89 @@ impl AffineLoadSpaceRefinement3 {
         dorfler3(&self.marking_mass, theta, max_marks, checkpoint)
     }
 
-    /// Interpret the policy's reference as a PHYSICAL compliance cap, as in a
-    /// minimum-material study. Both reduced maxima and actual witness work
-    /// must satisfy that cap. The tolerance applies ONLY to full-model change;
-    /// it never waives cap excess. A reference used solely for normalization
-    /// need not be a design cap, so this interpretation is explicitly opt-in.
+    // The goal and inventory must describe the same physical requirement.
+    // Mass mode intentionally ignores volume_scale, as its optimizer does.
+    fn goal_matches_inventory(&self) -> bool {
+        let Some(goal) = self.goal else {
+            return true;
+        };
+        let Ok((objective, scale)) = goal_inventory(goal) else {
+            return false;
+        };
+        self.inventory.as_ref().is_some_and(|inventory| {
+            inventory.objective == objective
+                && (matches!(objective, MinimumMaterialObjective3::MassKg { .. })
+                    || inventory.volume_scale == scale)
+        })
+    }
+
+    /// Absolute change of the original normalized design objective. Worst
+    /// compliance compares the independently remaximized complete quadratics;
+    /// minimum material compares the inherited native dilated inventories.
+    /// A basic assessment without an inventory has no design-objective metric.
+    #[must_use]
+    pub fn objective_change(&self) -> Option<f64> {
+        if !self.goal_matches_inventory() {
+            return None;
+        }
+        let change = match self.goal {
+            Some(AffineLoadSpaceDesignGoal3::WorstCompliance { .. }) => {
+                self.normalized_maximum_change.abs()
+            }
+            _ => self.inventory.as_ref()?.objective_change,
+        };
+        (change.is_finite() && change >= 0.0).then_some(change)
+    }
+
+    // Original physical bounds and normalized residuals use the SAME goal.
+    // Checking physical volume before division prevents rounding from excusing
+    // a cap excess. The compliance reference is only a scale in volume mode.
+    fn base_constraints(&self) -> Option<[f64; 2]> {
+        if !self.goal_matches_inventory()
+            || [&self.coarse, &self.fine].iter().any(|grid| {
+                !grid.maximum.is_finite()
+                    || grid.maximum < 0.0
+                    || !grid.worst_compliance.is_finite()
+                    || grid.worst_compliance < 0.0
+            })
+        {
+            return None;
+        }
+        match self.goal {
+            Some(AffineLoadSpaceDesignGoal3::WorstCompliance { volume_limit }) => {
+                let inventory = self.inventory.as_ref()?;
+                let volumes = [
+                    inventory.coarse_volume_fraction,
+                    inventory.fine_volume_fraction,
+                ];
+                if volumes
+                    .iter()
+                    .any(|v| !v.is_finite() || *v < 0.0 || *v > volume_limit)
+                {
+                    return None;
+                }
+                Some([
+                    normalize(volumes[0], volume_limit, "sdf3-affine-goal-volume-cap").ok()? - 1.0,
+                    normalize(volumes[1], volume_limit, "sdf3-affine-goal-volume-cap").ok()? - 1.0,
+                ])
+            }
+            _ => {
+                if [&self.coarse, &self.fine].iter().any(|grid| {
+                    grid.maximum > 1.0 || grid.worst_compliance > self.policy.reference()
+                }) {
+                    return None;
+                }
+                Some([self.coarse.maximum - 1.0, self.fine.maximum - 1.0])
+            }
+        }
+    }
+
+    /// Resolve the full load model and the original physical constraints on
+    /// both grids. Goal-bearing assessments keep that goal's meaning: a worst
+    /// compliance objective imposes a dilated volume cap, while minimum
+    /// material imposes the policy's physical compliance cap. Basic assessments
+    /// without a goal retain the explicit opt-in compliance-cap interpretation.
+    /// Tolerances never waive physical excess or the joint upper constraint.
     /// This is numerical two-grid evidence, not continuum feasibility.
     pub fn stable_and_feasible(&self, change_tolerance: f64) -> bool {
         self.stable_and_feasible_with_response_tolerance(change_tolerance, change_tolerance)
@@ -287,18 +391,14 @@ impl AffineLoadSpaceRefinement3 {
         response_tolerance: f64,
         stress_tolerance: f64,
     ) -> bool {
+        let Some(base) = self.base_constraints() else {
+            return false;
+        };
         change_tolerance.is_finite()
             && change_tolerance >= 0.0
             && self.normalized_model_change.is_finite()
             && self.normalized_model_change >= 0.0
             && self.normalized_model_change <= change_tolerance
-            && [&self.coarse, &self.fine].iter().all(|grid| {
-                grid.maximum.is_finite()
-                    && (0.0..=1.0).contains(&grid.maximum)
-                    && grid.worst_compliance.is_finite()
-                    && grid.worst_compliance >= 0.0
-                    && grid.worst_compliance <= self.policy.reference()
-            })
             && self
                 .responses
                 .as_ref()
@@ -309,21 +409,20 @@ impl AffineLoadSpaceRefinement3 {
                 .is_none_or(|s| s.stable_and_feasible(stress_tolerance))
             && [
                 (
-                    &self.coarse,
                     self.responses.as_ref().map(|r| &r.coarse),
                     self.stress.as_ref().map(|s| &s.coarse),
                 ),
                 (
-                    &self.fine,
                     self.responses.as_ref().map(|r| &r.fine),
                     self.stress.as_ref().map(|s| &s.fine),
                 ),
             ]
-            .iter()
-            .all(|(grid, responses, stress)| {
-                self.constraints.matches_components(*responses, *stress)
+            .into_iter()
+            .zip(base)
+            .all(|((responses, stress), base)| {
+                self.constraints.matches_components(responses, stress)
                     && super::constraints::aggregate(
-                        grid.maximum - 1.0,
+                        base,
                         responses.map(|r| r.constraint),
                         stress.map(|s| s.constraint),
                         self.constraints.sharpness,
@@ -586,7 +685,10 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             basis,
             robustness,
             policy,
-            Some((objective, volume_scale)),
+            Some(AffineLoadSpaceDesignGoal3::MinimumMaterial {
+                objective,
+                volume_scale,
+            }),
             ReferenceAffineLoadSpaceConstraints3::default(),
             options,
             control,
@@ -653,7 +755,44 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             basis,
             robustness,
             policy,
-            Some((objective, volume_scale)),
+            Some(AffineLoadSpaceDesignGoal3::MinimumMaterial {
+                objective,
+                volume_scale,
+            }),
+            constraints,
+            options,
+            control,
+        )
+    }
+
+    /// Assess the original optimization goal and its complete constraint
+    /// family on both native grids. WorstCompliance uses the dilated volume
+    /// cap; the compliance reference remains only its objective scale.
+    /// MinimumMaterial uses the same physical compliance cap and inventory as
+    /// its optimizer. Fine eroded/dilated fields are literal parent copies.
+    /// No additional primal, adjoint or filter is required by goal selection.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_affine_load_space_enrichment_for_goal<F: AdaptiveSdf3Elasticity>(
+        &mut self,
+        enriched: F,
+        rho: &[f64],
+        dead: ReferenceLoad3<'_>,
+        basis: &[ReferenceLoad3<'_>],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        goal: AffineLoadSpaceDesignGoal3,
+        constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
+        options: AffineLoadSpaceRefinementOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        self.affine_load_space_enrichment(
+            enriched,
+            rho,
+            dead,
+            basis,
+            robustness,
+            policy,
+            Some(goal),
             constraints,
             options,
             control,
@@ -669,11 +808,13 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         basis: &[ReferenceLoad3<'_>],
         robustness: RobustOptions3,
         policy: &AffineLoadSpace3,
-        inventory_policy: Option<(MinimumMaterialObjective3, f64)>,
+        goal: Option<AffineLoadSpaceDesignGoal3>,
         constraints: ReferenceAffineLoadSpaceConstraints3<'_>,
         options: AffineLoadSpaceRefinementOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        // Admit the original goal before filtering or spending solver work.
+        let inventory_policy = goal.map(goal_inventory).transpose()?;
         control.checkpoint("sdf3-affine-goal-start")?;
         self.require_material_body_recipe("sdf3-affine-goal-material-recipe")?;
         if !robustness.valid(self.params)
@@ -1048,6 +1189,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             Ok(AffineLoadSpaceRefinement3 {
                 policy: policy.clone(),
                 robustness,
+                goal,
                 rho: rho.to_vec(),
                 coarse_eroded_rho: eroded.projected,
                 fine_eroded_rho,
