@@ -484,7 +484,11 @@ fn finite_terminal_gas_volume_and_native_channel_momentum_are_kept_in_the_same_a
     let live = acoustic_fixture::pair(0.03);
     let (mut parcels, mut loads, inputs) = fixture(input.duration_s);
     let radius = 0.0007;
-    let length = 0.004;
+    // The circular passage must be slender: `DgTerminalChannelInput` refuses `radius > 0.1 * length`
+    // (dg_port/channel.rs, 3cea05380). The first 0.004 m (radius/length = 0.175) was refused from the day this
+    // fixture landed (c1a455fe1 is later than that guard), so the assertions below never ran. 0.008 m gives
+    // radius/length = 0.0875.
+    let length = 0.008;
     let cells = 8;
     let channel_volume = core::f64::consts::PI * radius * radius * length;
     let original = &parcels[&10];
