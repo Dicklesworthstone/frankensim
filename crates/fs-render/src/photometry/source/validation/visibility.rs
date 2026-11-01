@@ -295,7 +295,7 @@ fn native_mesh(primitive: &Primitive) -> Option<(&TriMesh, Option<RigidTransform
     }
 }
 
-fn world_triangle(primitive: &Primitive, triangle: usize) -> Option<[Vector; 3]> {
+pub(super) fn world_triangle(primitive: &Primitive, triangle: usize) -> Option<[Vector; 3]> {
     let (mesh, placement) = native_mesh(primitive)?;
     let indices = mesh.triangles.get(triangle)?;
     let mut result = [[Interval::point(0.0); 3]; 3];

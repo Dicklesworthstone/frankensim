@@ -40,6 +40,8 @@ use std::io::{self, Write};
 
 /// Propagate declared scalar fixture-flux uncertainty through this same transport.
 pub mod flux;
+/// Material-resolved direct luminance at original mesh-surface samples.
+pub mod surface;
 
 /// Numerically bounded single-scattered radiance with shared source/visibility owners.
 pub mod scattering;
