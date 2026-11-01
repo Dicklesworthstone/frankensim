@@ -2640,3 +2640,69 @@ with cyclic/parallel links and isolated storage; exact whole-attempt source
 budget boundaries and late source-domain refusal; and atomic cancellation with
 bitwise checkpoint replay. Source-specific calorimetry, energy closure and
 temperature-hull checks do not claim experimental heat-transfer accuracy.
+
+## Finite-time thermal exchange with multicomponent phase equilibrium
+
+With `material,experimental-euler`, `material::phase_thermal::exchange_mixture_parcel`
+couples the original `IsochoricMixtureEquilibriumParcel` to a held-temperature
+reservoir, an authored constant-capacity finite wall, or one retained
+`MaterialWallCaloric`. The parcel's immutable feed, mass and vessel volume
+remain unchanged; pressure, temperature and phase amounts follow the original
+source-bound U,V equilibrium. Every trial uses that same caloric owner and its
+finite phase-screen evidence. No equilibrium Cp/Cv, dilute transport, extra
+latent heat, chemical reaction or phase-change kinetics is inferred.
+
+The existing bounded wall scalar owner solves
+`Q = dt G (Twall(-Q) - Tgas(Q))` in signed heat coordinates. `G` is the complete
+authored conductance in W/K, fixed during the supplied physical interval.
+The caller declares a heat bracket; it is intersected with the initial passive
+flux bound and original finite-wall storage limits. Every remaining gas endpoint
+must satisfy its original pressure/temperature/source brackets. An unsupported
+trial, missing sign bracket or unresolved original phase search refuses rather
+than extrapolating or switching to a homogeneous approximation. Numerical
+secants accelerate the safeguarded scalar root; they carry no heat-capacity or
+physical-tangent authority. The accepted source-bearing trial is retained and
+published without another U,V solve.
+
+Actual represented gas energy, original finite-wall h/u changes and endpoint
+heat flux must independently close in joules. Original wall enthalpy keeps its
+declared pressure-work convention; it is not relabelled rigid-volume internal
+energy. Reservoir heat is external, finite-wall exchange is internal, and
+latent storage already belongs to the original thermodynamic potentials.
+The U,V residual allowance reserves part of the thermal budget; a nonzero
+initial flux tightens the absolute root allowance so a small exchange does not
+vanish into a loose configured tolerance. Source increments cancel species
+formation and entropy datums before rounding.
+
+`MixtureThermalControl` bounds heat queries and all original PT selections for
+the complete interval, in addition to the existing per-trial pressure/phase
+limits. Remaining PT work is passed into every original U,V solve. Reports
+retain actual aggregate heat/PT/pressure work and the sum of original EOS work
+ceilings, separately from the accepted trial's caloric report. Final
+cancellation, source/balance failures and work exhaustion leave both supplied
+inventories unchanged. Zero duration, zero conductance and equal initial
+temperatures retain both states exactly with zero phase evaluations. A cloned
+parcel and retained original wall state supply deterministic retry state.
+
+This is a first-order backward-Euler, spatially uniform thermal interface.
+Uniform gas/wall assumptions, authored conductance applicability and time
+refinement remain caller obligations. It does not establish spatial conduction,
+evaporation rate, slip, moving-boundary work, global Gibbs stability, calibrated
+heat-transfer correlations or experimental fluid accuracy. The gas source
+entropy increment is retained; an arbitrary finite wall may lack its own
+entropy law, so the API makes no combined entropy-production theorem.
+
+The public `phase_equilibrium_thermal` integration target adds six focused
+G0/G1/G3/G4 tests: independent binary isochoric calorics with a held bath;
+finite-wall heating across the phase boundary; original latent-wall cooling;
+independent species-datum and extensive-scaling invariance; exact no-work rest
+and finite source-domain refusal; and whole-call work, final cancellation and
+deterministic retry. The methane/ethane fixture uses synthetic NASA capacities;
+its original cubic/fugacity references test constitutive consistency, not a
+measured-mixture validation claim.
+
+Native validation compiled the production path and passed five of these six
+cases. The finite-wall phase-crossing fixture now declares a supported heat
+bracket and a 256-iteration original flash budget, retaining the original
+strict tolerances. Its final rerun was blocked by shared disk exhaustion and
+remains unverified; neither that case nor the complete suite is claimed green.

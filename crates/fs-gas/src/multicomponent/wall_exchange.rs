@@ -221,6 +221,17 @@ pub enum WallExchangeError {
     /// Original phase-dependent conductivity source or coordinate refused.
     #[cfg(feature = "material")]
     PhaseConduction(fs_material::thermal::source::ThermalMaterialError),
+    /// Original multicomponent phase/energy/volume equilibrium refused.
+    #[cfg(feature = "material")]
+    MixtureEquilibrium(fs_material::thermochemical_gas::nonideal::flash::ThermochemicalFlashError),
+    /// Whole thermal interval exhausted its bounded heat or original PT work.
+    #[cfg(feature = "material")]
+    MixtureThermalWork {
+        /// Attempted heat-coordinate evaluations, including final admission.
+        heat_evaluations: usize,
+        /// Original PT selections charged before the refusal.
+        pt_evaluations: usize,
+    },
     /// Original finite-wall thermal source refused its state or geometry.
     Thermal(fs_thermal::enthalpy::DepositionError),
     /// Actual cell state is outside the declared developed-wall approximation.
@@ -289,6 +300,22 @@ impl From<super::dissipation::DissipationError> for WallExchangeError {
 impl From<fs_material::thermal::transport::ThermalTransportError> for WallExchangeError {
     fn from(value: fs_material::thermal::transport::ThermalTransportError) -> Self {
         Self::Caloric(value)
+    }
+}
+
+#[cfg(feature = "material")]
+impl From<fs_material::thermochemical_gas::nonideal::flash::ThermochemicalFlashError>
+    for WallExchangeError
+{
+    fn from(
+        value: fs_material::thermochemical_gas::nonideal::flash::ThermochemicalFlashError,
+    ) -> Self {
+        match value {
+            fs_material::thermochemical_gas::nonideal::flash::ThermochemicalFlashError::Cancelled => {
+                Self::Cancelled
+            }
+            other => Self::MixtureEquilibrium(other),
+        }
     }
 }
 

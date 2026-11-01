@@ -9,6 +9,10 @@
 #[cfg(feature = "experimental-euler")]
 pub mod transport;
 
+/// Finite-time heat exchange with original multicomponent phase equilibrium.
+#[cfg(feature = "experimental-euler")]
+pub mod phase_thermal;
+
 use crate::chemistry::{
     IsochoricKineticsError, IsochoricKineticsResult, IsochoricKineticsSolve,
     advance_adiabatic_energy,
