@@ -64,6 +64,55 @@ tests stay with it. The bow, hair and varnish experiments below were written
 for that rung, so their commands select it with `ASSEMBLY_OPTIONS`,
 `SHELL_TABLE` and, where needed, `MATERIAL_STRINGS_PERFORMANCE`.
 
+## Residual flexibility and open-string tuning
+
+`cannone-dominant-g3-h6.material-strings` carries the record
+`residual-flexibility exact-static-green` on the line after `prepared-linear`.
+With it, each string's bridge spring and every fixed stop see the exact static
+compliance of the bending modes left out of the string's retained set. Without
+it, the retained basis is a Rayleigh-Ritz upper bound and the strings come out
+sharp. The material_strings README describes the record under "Omitted bending
+modes at the supports". Before the retune, with the record, the coupled
+stiffness bound that `render.log` prints fell from about 3.50e5 to 2.59e5 rad/s,
+and a stopped note's stop pair carried the residual cross terms
+(`stop_compliance_m_N`).
+
+The four open strings are tuned to equal temperament (A4 = 440 Hz) by a tension
+factor per string. Each factor is read from the assembled instrument's own
+pulse response, never from a recording. A probe is this card with these
+changes:
+- `audio 144000 57600 0.02 128`, which gives 0.4 s;
+- `forces retain 1 2`, `port S 0.7707571801566581 centreline 0.0`,
+  `force 0 0 0.02` and `force 14 0 0.0`, which hold 0.02 N on string S at the
+  bow station for 14 samples and then release it;
+- the bow track on string S at speed 0 and force 0, with `events 0`.
+
+Each probe runs with `render.sh`'s own body profile. f1 is the strongest line
+within 3 % of the ET pitch in a Hann spectrum of 0.05-0.4 s, zero-padded to
+2^23 points and refined by a parabola through the three highest log-magnitude
+bins. The factor is (f_ET / f1)^2.
+
+| string | f1 before | from ET | factor | tension before, N | tension after, N |
+|---|---|---|---|---|---|
+| G | 195.9005 Hz | -0.859 c | 1.000993 | 43.99108723688379 | 44.03477038651002 |
+| D | 293.3979 Hz | -1.574 c | 1.001820 | 43.122446939143465 | 43.2009297925727 |
+| A | 439.3384 Hz | -2.605 c | 1.003014 | 55.486491050429706 | 55.6537273344557 |
+| E | 659.4367 Hz | +0.477 c | 0.999449 | 71.63411584970575 | 71.59464545187257 |
+
+These probes used the engine of 10ffa2e62 and the 6 mm body at drilling 1e-2.
+Their factors replace the ones read at c6854036b on the same body at drilling
+1e-3: 1.00100, 1.00182, 1.00302 and 0.99945. The two sets differ by at most
+0.006 c. In the probes the bow carries no force.
+
+The factor is first order. Bending stiffness and the body's loading keep f1
+from scaling exactly as the square root of the tension. No probe has run at the
+new tensions. The open notes of the first render at these tensions will show
+where the strings land. Until then, this card is not claimed to be at equal
+temperament.
+
+`cannone-dominant-g3.material-strings` keeps the untuned tensions and has no
+residual record. The 8 mm experiments below use their own cards, unchanged.
+
 ## Material and atmosphere experiments
 
 The common launcher `apps/instrument-lab/tools/render_material_strings.py`

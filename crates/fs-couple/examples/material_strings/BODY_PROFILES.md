@@ -1541,11 +1541,15 @@ Two inputs of this note are authored, not measured:
 
 `cannone-dominant-g3-h6.material-strings` is the same note on h6, and it is the
 card that the violin's `render.sh` renders. It differs from
-`cannone-dominant-g3.material-strings` in three records:
+`cannone-dominant-g3.material-strings` in these records:
 - the body record carries h6's dimensions, as `assemble-shell` prints them, and
   132 body modes;
 - the cavity record is h6's row;
-- the prepared budget is 640 coordinates and 8589934592 bytes.
+- the prepared budget is 640 coordinates and 8589934592 bytes;
+- `residual-flexibility exact-static-green` follows the prepared budget;
+- each of the four tensions is multiplied by its equal-temperament factor, read
+  from the instrument's own pulse response: G 1.000993, D 1.001820, A 1.003014
+  and E 0.999449. The violin README gives the probe and the readings.
 
 132 modes is the whole of h6's 15 Hz-5 kHz window at drilling 1e-2. A request
 for 184 refuses with `assembled shell window has fewer modes than requested: it
