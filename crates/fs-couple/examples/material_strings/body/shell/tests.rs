@@ -1584,3 +1584,173 @@ fn prepared_body_cost_against_retained_modes() {
         });
     }
 }
+
+/// The drilling-alpha fixture (pexfp.377) as a `frankensim.shell-assembly.v1` table, so its profile comes out of the same
+/// writer as the cards: a free Sitka spruce top patch, 200 x 160 mm and 2.467782 mm thick, on a 10 mm grid; the Esteso
+/// bridge's section, a Rio rosewood wall 28 mm thick and 8.7 mm high, 80 mm along y, edge-tied by its foot to the top's
+/// positive skin as on the card; and a spruce brace 7 mm thick and 4 mm deep, 120 mm along x, edge-tied by its crown to
+/// the top's negative skin as a T-junction. The spruce top is the performance body pack. Every part is meshed at the
+/// top's spacing. The same geometry on a 20 mm grid moved two physical modes +1.71 % and +1.85 % between 1e-3 and 1e-2;
+/// at 10 mm the largest is +0.52 %, so that was discretisation error, not the junction (MagentaBadger 11269).
+fn drilling_fixture_table() -> String {
+    use std::fmt::Write as _;
+    const HALF_TOP_M: f64 = 0.001_233_891;
+    // An `na x nb` grid, a fastest, wound so each facet's normal is (a direction) x (b direction).
+    fn grid(na: usize, nb: usize, at: impl Fn(usize, usize) -> [f64; 3]) -> (Vec<[f64; 3]>, Vec<[usize; 3]>) {
+        let nodes = (0..nb).flat_map(|b| (0..na).map(move |a| (a, b))).map(|(a, b)| at(a, b)).collect();
+        let mut tris = Vec::new();
+        for b in 0..nb - 1 {
+            for a in 0..na - 1 {
+                let n = b * na + a;
+                tris.push([n, n + 1, n + na + 1]);
+                tris.push([n, n + na + 1, n + na]);
+            }
+        }
+        (nodes, tris)
+    }
+    fn component(out: &mut String, name: &str, pack: &str, thickness_m: f64, axis: &str, director: &str,
+        (nodes, tris): &(Vec<[f64; 3]>, Vec<[usize; 3]>), fluid: u8)
+    {
+        use std::fmt::Write as _;
+        writeln!(out, "component\t{name}\t{pack}\t{thickness_m}\t1\t{}\t{}\t{fluid}\t{fluid}\nregion\t{axis}",
+            nodes.len(), tris.len()).unwrap();
+        for p in nodes { writeln!(out, "node\t{}\t{}\t{}\t{director}", p[0], p[1], p[2]).unwrap(); }
+        for t in tris { writeln!(out, "tri\t{}\t{}\t{}\t0", t[0], t[1], t[2]).unwrap(); }
+    }
+    let mut out = String::from("frankensim.shell-assembly.v1\n");
+    // Top: x then y, normal +z; node (i, j) is 21 j + i.
+    let top = grid(21, 17, |i, j| [0.01 * i as f64, 0.01 * j as f64, 0.0]);
+    component(&mut out, "top", "spruce", 2.0 * HALF_TOP_M, "1\t0\t0", "0\t0\t1", &top, 1);
+    // Bridge at x = 100 mm: z (5 rows, foot first) then y from 40 mm to 120 mm, normal -x; foot node b is 5 b.
+    let bridge = grid(5, 9, |a, b| [0.1, 0.04 + 0.01 * b as f64, HALF_TOP_M + 0.002_175 * a as f64]);
+    component(&mut out, "bridge", "rosewood", 0.028, "0\t1\t0", "-1\t0\t0", &bridge, 0);
+    // Brace at y = 20 mm: z (3 rows, crown last) then x from 40 mm to 160 mm, normal +y; crown node b is 3 b + 2.
+    let brace = grid(3, 13, |a, b| [0.04 + 0.01 * b as f64, 0.02, -HALF_TOP_M - 0.004 + 0.002 * a as f64]);
+    component(&mut out, "brace", "spruce", 0.007, "1\t0\t0", "0\t1\t0", &brace, 0);
+    let list = |nodes: Vec<usize>| nodes.iter().map(usize::to_string).collect::<Vec<_>>().join(" ");
+    writeln!(out, "tie\ttop\tbridge\t1\t9\t9\nmaster\t{}\nslave\t{}", list((4..13).map(|j| 21 * j + 10).collect()),
+        list((0..9).map(|b| 5 * b).collect())).unwrap();
+    writeln!(out, "tie\ttop\tbrace\t-1\t13\t13\nmaster\t{}\nslave\t{}", list((4..17).map(|i| 42 + i).collect()),
+        list((0..13).map(|b| 3 * b + 2).collect())).unwrap();
+    out
+}
+
+/// One retained mode of an assembled basis: frequency [Hz]; Q, the angular frequency over the modal viscosity diagonal;
+/// the translational kinetic-energy fraction of the mass-normalized shape, with each part's mass lumped a third of each
+/// triangle's area share to its corners; and the shape at force port 0.
+struct DrillingBasisMode { hz: f64, q: f64, translational: f64, port: f64 }
+
+fn drilling_basis(image: &fs_couple::shear_shell::assembly::MaterialShellAssemblyImage) -> Vec<DrillingBasisMode> {
+    let intervals = image.eigenvalue_intervals();
+    let (n, damping) = (intervals.len(), image.damping().matrix_per_s());
+    let lumped: Vec<Vec<f64>> = image.source().components.iter().map(|part| {
+        let mesh = part.specimen.mesh();
+        let mut share = vec![0.0_f64; mesh.nodes.len()];
+        for t in &mesh.tris {
+            let [a, b, c] = t.map(|i| mesh.nodes[i]);
+            let (u, v) = ([b[0] - a[0], b[1] - a[1], b[2] - a[2]], [c[0] - a[0], c[1] - a[1], c[2] - a[2]]);
+            let x = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+            for &i in t { share[i] += (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt() / 6.0; }
+        }
+        let area: f64 = share.iter().sum();
+        share.iter().map(|s| s / area * part.specimen.mass_kg()).collect()
+    }).collect();
+    (0..n).map(|r| {
+        let omega = (0.5 * (intervals[r].0 + intervals[r].1)).sqrt();
+        let translational = image.physical_modes().iter().zip(&lumped).map(|(shapes, mass)| mass.iter().enumerate()
+            .map(|(i, m)| m * (0..3).map(|d| shapes[r][6 * i + d].powi(2)).sum::<f64>()).sum::<f64>()).sum();
+        DrillingBasisMode { hz: omega / (2.0 * std::f64::consts::PI), q: omega / damping[r * n + r], translational,
+            port: image.force_ports()[0][r] }
+    }).collect()
+}
+
+/// The mean over [lo, hi] Hz (2000 midpoints) of the driving-point Re Y [m/(N s)] at force port 0 of a basis.
+fn drilling_re_y_mean(basis: &[DrillingBasisMode], lo: f64, hi: f64) -> f64 {
+    let two_pi = 2.0 * std::f64::consts::PI;
+    (0..2000).map(|k| {
+        let w = two_pi * (lo + (hi - lo) * (k as f64 + 0.5) / 2000.0);
+        basis.iter().map(|m| {
+            let (wr, c) = (two_pi * m.hz, two_pi * m.hz / m.q);
+            m.port * m.port * w * w * c / ((wr * wr - w * w).powi(2) + (w * c).powi(2))
+        }).sum::<f64>()
+    }).sum::<f64>() / 2000.0
+}
+
+/// pexfp.377: the drilling strength every assembled profile is written with keeps the loaded band free of drilling modes
+/// and moves physical modes little. The basis is every mode of the window from 15 Hz to 1.2 times the guitar cards' band
+/// top (1100 Hz): the window's count is read from the refusal of a larger request.
+/// (a) No mode at or below the band top is both non-translating (translational kinetic-energy fraction below 1e-6) and
+///     undamped (Q above 1e6). The count of such modes anywhere in the basis is printed.
+/// (b) Every physical mode (not caught by (a)) at or below the band top moves at most 1 % between 1e-3 and alpha, rank
+///     paired: the change this constant made. The 1 % is MagentaBadger's (11243), set before any fixture measurement,
+///     as for the violin's land condition; measured at most +0.52 % (median 0.13 %). The physical modes between alpha
+///     and 10 alpha are printed, not asserted: they moved up to +1.55 % when this test was written. The bridge's
+///     driving-point Re Y band means agree within 0.5 dB between alpha and 10 alpha: an EMPIRICAL bound, chosen after
+///     the guitar card measured 0.1 dB; this fixture measured at most 0.28 dB.
+/// Planted: alpha 1e-3 fails (a). The rosewood wall's drilling modes start at sqrt(12 alpha G12 / (rho t^2)), 807.74 Hz;
+/// here its 36 untied nodes give 36 of them at 807.75-869.63 Hz.
+#[test]
+fn drilling_alpha_leaves_no_undamped_mode_in_the_band_and_moves_physical_modes_little() {
+    use super::super::shell::assembly::table::{convert, TableOptions, DRILLING_ALPHA};
+    const BAND_TOP_HZ: f64 = 1100.0;
+    let two_pi = 2.0 * std::f64::consts::PI;
+    let converted = convert(&drilling_fixture_table(), &TableOptions {
+        window: ((two_pi * 15.0).powi(2), (two_pi * 1.2 * BAND_TOP_HZ).powi(2)),
+        projection_work: MAX_SHELL_PROJECTION_WORK,
+        packs: &[("spruce", "@body"), ("rosewood", "guitar-rosewood-brazilian-fpl-gtr282-bremaud2011-shell.fsmatpk")],
+        reference_thickness_m: ESTESO_REFERENCE_THICKNESS_M,
+        bridge_component: "top",
+        bridges: &[(0.1, 0.08)],
+        bridge_direction: [0.0, 0.0, 1.0],
+    }).unwrap();
+    let written = format!("drilling {DRILLING_ALPHA}\n");
+    assert_eq!(converted.profile.matches(&written).count(), 3, "the writer gives every component the constant");
+    let still = |m: &DrillingBasisMode| m.translational < 1e-6 && m.q > 1e6;
+    let in_band = |basis: &[DrillingBasisMode]| basis.iter().filter(|&m| m.hz <= BAND_TOP_HZ && still(m)).count();
+    scoped(|_, gate| {
+        let solve = |alpha: f64, modes: usize| {
+            let text = converted.profile.replace(&written, &format!("drilling {alpha}\n"));
+            let mut spec = shell_spec();
+            spec.body = input::Body { pack: "guitar-spruce-sitka-fpl-gtr282-shell.fsmatpk".into(),
+                length: converted.length_m, width: converted.width_m, thickness: ESTESO_REFERENCE_THICKNESS_M, modes,
+                listener: spec.body.listener };
+            Profile::parse(text.as_bytes()).unwrap()
+                .project_shell(&spec, &mut Catalog::new(), &mut |name| Ok(esteso_pack(name).into()), gate)
+        };
+        let basis = |alpha: f64| {
+            let refusal = match solve(alpha, MAX_MODES) {
+                Ok(_) => panic!("drilling {alpha:e}: the fixture window holds {MAX_MODES} modes or more"),
+                Err(e) => e.to_string(),
+            };
+            let held: usize = refusal.split("it holds ").nth(1).and_then(|s| s.split(',').next())
+                .and_then(|s| s.parse().ok()).unwrap_or_else(|| panic!("{refusal}"));
+            let basis = drilling_basis(solve(alpha, held).unwrap().assembly().unwrap());
+            eprintln!("drilling {alpha:e}: {held} modes in 15-{:.0} Hz, top {:.2} Hz; {} undamped and non-translating, \
+                {} of them at or below {BAND_TOP_HZ} Hz", 1.2 * BAND_TOP_HZ, basis.last().map_or(0.0, |m| m.hz),
+                basis.iter().filter(|&m| still(m)).count(), in_band(&basis));
+            basis
+        };
+        let (chosen, stiffer, planted) = (basis(DRILLING_ALPHA), basis(10.0 * DRILLING_ALPHA), basis(1e-3));
+        assert_eq!(in_band(&chosen), 0, "(a) at the constant");
+        assert!(in_band(&planted) > 0, "planted: drilling 1e-3 must put drilling modes in the band");
+        let physical = |basis: &[DrillingBasisMode]| basis.iter()
+            .filter(|&m| !still(m)).map(|m| m.hz).collect::<Vec<_>>();
+        let low: Vec<f64> = physical(&chosen).into_iter().filter(|&f| f <= BAND_TOP_HZ).collect();
+        let before = physical(&planted);
+        assert!(!low.is_empty() && before.len() >= low.len(), "{before:?} against {low:?}");
+        for (k, (a, b)) in before.iter().zip(&low).enumerate() {
+            eprintln!("physical mode {k}: {a:.2} Hz at 1e-3, {b:.2} Hz at the constant ({:+.3} %)",
+                100.0 * (b / a - 1.0));
+            assert!((b / a - 1.0).abs() <= 0.01, "(b) physical mode {k}: {a:.2} Hz at 1e-3, {b:.2} Hz at the constant");
+        }
+        // Printed, not asserted (MagentaBadger 11243): a tenfold step shows how much the constant's value matters.
+        for (k, (a, b)) in low.iter().zip(&physical(&stiffer)).enumerate() {
+            eprintln!("physical mode {k}: {a:.2} Hz, {b:.2} Hz at 10 alpha ({:+.3} %)", 100.0 * (b / a - 1.0));
+        }
+        for (lo, hi) in [(100.0, 300.0), (300.0, 500.0), (500.0, 800.0), (800.0, BAND_TOP_HZ)] {
+            let db = 10.0 * (drilling_re_y_mean(&stiffer, lo, hi) / drilling_re_y_mean(&chosen, lo, hi)).log10();
+            eprintln!("Re Y {lo}-{hi} Hz: {db:+.3} dB at 10 alpha");
+            assert!(db.abs() <= 0.5, "(b) Re Y {lo}-{hi} Hz: {db:+.3} dB at 10 alpha");
+        }
+    });
+}

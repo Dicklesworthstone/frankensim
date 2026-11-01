@@ -1,7 +1,8 @@
 //! A `frankensim.shell-assembly.v1` table (e.g. data/instruments/geometry/guitar-esteso-1964-zimmer2024/shell-assembly-h12.tsv)
 //! written as a v4 assembled body profile, choice for choice as `guitar_body_modes.rs` assembles it:
 //! - every region is `orthotropic12` at grain 0 on its own axis, shear correction 5/6, at its part's thickness;
-//! - consistent mass, drilling 1e-3, director-min-dot 0.9;
+//! - consistent mass, drilling `DRILLING_ALPHA` (1e-2; `guitar_body_modes.rs` and `shell_body_modes.rs` keep 1e-3),
+//!   director-min-dot 0.9;
 //! - no support (a free body);
 //! - every triangle of a part flagged exterior (cavity) is an exterior (cavity) facet on its positive face;
 //! - every tie is a full-rotation rigid edge tie, on the master's negative skin (side -1) or midsurface (0);
@@ -11,6 +12,24 @@
 //! region axes are normalized to unit length (the table prints them rounded). Nothing else is changed or fitted.
 use super::*;
 use super::super::coating::{FilmInput, MemoryInput, MAX_COATINGS};
+
+/// The numerical drilling strength written into every component (pexfp.377). Since c8f8a2256 each node's drilling
+/// row carries its stiffness and its inertia on the same row, so drilling rotations are non-translating, undamped
+/// modes from sqrt(12 alpha G12 / (rho t^2)) up: they rise as sqrt(alpha), and thick parts sit lowest. On the Esteso
+/// guitar card the 28 mm rosewood bridge wall (G12 1589 MPa, rho 944.2 kg/m^3: 807.74 Hz) put 80 of them at
+/// 807.75-854.56 Hz under 1e-3, inside the 1100 Hz loaded band.
+/// The value is the smallest of 1e-2, 3e-2 and 1e-1 whose lowest drilling mode lies at or above 1.2 max(1100 Hz, the
+/// retained basis top), here 1.2 x 1789.91 = 2147.9 Hz at 128 modes: floor 2554.34 Hz by the √α law, verified at
+/// α = 1e-3 and 5e-3; measured absent to 2000 Hz at 1e-2. At 5e-3 the 80 lie at 1806.19-1910.85 Hz, within 7e-13 of
+/// √5 times their 1e-3 values, with 11 physical modes between them.
+/// Alpha also stiffens physical modes through the ties: the card's 33 physical modes below 800 Hz spread by at most
+/// 16.2 cents (median 9.0) across 1e-3, 1e-2 and 1e-1. il Cannone's 30 h8 modes in [15, 2000] Hz rise +0.02 to
+/// +0.34 % (median 0.04 %) from 1e-3 to 1e-2, with no drilling mode at either. The shell tests' 10 mm fixture
+/// measured: 1e-3 to 1e-2 moves its 13 physical modes to 1100 Hz by at most +0.52 % (median 0.13 %), and a tenfold
+/// step from 1e-2 to 1e-1 by up to +1.55 % (6 of 13 over 1 %): the value matters at the percent level. On a 20 mm
+/// grid the same fixture gave +1.85 % and +3.05 %, which was discretisation. The shell tests'
+/// `drilling_alpha_leaves_no_undamped_mode_in_the_band_and_moves_physical_modes_little` gates the value.
+pub(crate) const DRILLING_ALPHA: f64 = 1e-2;
 
 /// The choices a shell-assembly table leaves to its user.
 pub(crate) struct TableOptions<'a> {
@@ -274,7 +293,7 @@ fn convert_with_coatings(table: &str, options: &TableOptions<'_>, coatings: &[Ta
     if let Some(memory) = coating_memory { memory.write_row(&mut out)?; }
     writeln!(out, "components {}", parts.len())?;
     for part in &parts {
-        writeln!(out, "component {}\ndirector-min-dot 0.9\nmass consistent\ndrilling 0.001\nregions {}",
+        writeln!(out, "component {}\ndirector-min-dot 0.9\nmass consistent\ndrilling {DRILLING_ALPHA}\nregions {}",
             part.name, part.axes.len())?;
         let (profile_pack, ratio) = (pack(part.pack)?, part.thickness_m / options.reference_thickness_m);
         for (k, a) in part.axes.iter().enumerate() {
