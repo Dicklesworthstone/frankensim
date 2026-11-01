@@ -259,6 +259,12 @@ impl ClosedGasParcel {
             }
             x.push(fraction); gradient.push(row_gradient); knudsen.push(dk); scale = scale.min(dk);
         }
+        // The face composition is GENERATED from concentration-weighted partial pressures, so its canonical sum is one only up to
+        // roundoff: two identical parcels at x = 0.499684466129699 and equal pressure already sum to 1 - 2^-53. Close that
+        // roundoff, and nothing else, before the exact-unit-sum owner sees it. Authored compositions never take this path and
+        // `with_composition` stays strict. The closed fractions are the ones every later row uses, so the friction system and
+        // the report carry one composition.
+        fs_thermal::enthalpy::advection::species::close_generated_simplex(&mut x).map_err(source_error)?;
         let composition = Composition::new(CompositionBasis::MoleFraction, x.clone()).map_err(source_error)?;
         let face_model = joined.with_composition(composition)?;
         let point = updated_point(gas_context, temperature, pressure)?;

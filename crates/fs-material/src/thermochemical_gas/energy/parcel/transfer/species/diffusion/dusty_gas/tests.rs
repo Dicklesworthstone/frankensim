@@ -493,3 +493,32 @@ fn unrepresentable_nonzero_driving_force_is_refused_instead_of_fabricating_equil
         &right, &slab, AREA, &bindings, &context, controls(), || false,
     ).is_err());
 }
+
+#[test]
+fn a_generated_face_composition_is_closed_to_exact_unit_while_authored_ones_stay_strict() {
+    // Two identical parcels at equal pressure. The face fractions (0.5 a + 0.5 b)/p are rounded one at a time and, for this x,
+    // sum to 1 - 2^-53 (bits 0x3fefffffffffffff) although the end states are exact.
+    let (left, right) = (binary(0.499684466129699, P), binary(0.499684466129699, P));
+    let (pl, pr) = (left.state().state().pressure, right.state().state().pressure);
+    let pressure = 0.5*pl + 0.5*pr;
+    let (lx, rx) = (left.model().thermodynamics().mole_composition().fractions().to_vec(),
+        right.model().thermodynamics().mole_composition().fractions().to_vec());
+    assert_eq!(lx.iter().sum::<f64>(), 1.0);
+    let raw: Vec<f64> = lx.iter().zip(&rx).map(|(l, r)| (0.5*(pl*l) + 0.5*(pr*r))/pressure).collect();
+    assert_eq!(raw.iter().sum::<f64>().to_bits(), 0x3fef_ffff_ffff_ffff, "premise: the unclosed face is one ulp short");
+    // Planted negative: the shared exact-sum owner refuses that composition, exactly as it refuses any authored one.
+    let refused = left.model()
+        .with_composition(Composition::new(CompositionBasis::MoleFraction, raw.clone()).unwrap())
+        .err().expect("the unclosed face must be refused by the exact-sum owner");
+    assert!(format!("{refused:?}").contains("sum to exact 1.0"), "{refused:?}");
+    // Through the dusty-gas face the same state evaluates: the face closes that roundoff and nothing else.
+    let (d, context, slab) = (card(2e-5), point(T, P), medium(0.0, LENGTH));
+    let bindings = [pair("A", "B", &d, &context)];
+    let flux = left.dusty_gas_flux_to(&right, &slab, AREA, &bindings, &context, controls(), || false).unwrap();
+    let face: Vec<f64> = flux.species.iter().map(|row| row.face_mole_fraction).collect();
+    assert_eq!(face.iter().sum::<f64>(), 1.0);
+    let moved: Vec<_> = face.iter().zip(&raw).filter(|(closed, raw)| closed != raw).collect();
+    assert_eq!(moved.len(), 1, "closure moves one entry: {face:?} against {raw:?}");
+    assert!((moved[0].0 - moved[0].1).abs() <= f64::EPSILON * moved[0].1.abs());
+    assert_eq!(flux.net_molar_flux_mol_m2_s, 0.0);
+}
