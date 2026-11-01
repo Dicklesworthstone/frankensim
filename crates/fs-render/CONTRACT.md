@@ -4363,3 +4363,37 @@ balance. Prescribed ray weights, spectral bins and time steps demonstrate
 integration; measured-material accuracy, spatial quadrature accuracy and
 bolometric cooling are outside that example's claims. Run with
 `cargo run -p fs-render --example distributed_optical_heating --no-default-features --features optical-heating`.
+
+
+### Joint thermal trajectories with separate incident and emission sampling
+
+`JointOpticalHeating::advance_ensemble_refined` evolves independent complete
+joint trajectories using the original native solver and shared scalar-statistics
+owner. Each replica retains common source streams across temperatures and paired
+resolutions. Two consecutive time comparisons must meet physical tolerances with
+actual native substep counts increasing. Final sampling variability and the two
+photon sensitivities have independent caller-supplied gates.
+
+Photon comparisons lower illumination histories while holding radiation fine,
+then lower radiation histories while holding illumination fine. Opposing heating
+and cooling discrepancies therefore cannot cancel a simultaneous-only photon
+check. Emitted volume radiation is always sampled, including pure absorption;
+only exact non-scattering incident transport skips its photon comparison. The
+spatial source quadrature remains the caller's responsibility.
+
+Results preserve actual native trajectories, actual mean caloric T(h), separate
+incident and radiation energy accounts, and covariance in net optical heat.
+Compensated signed component accounts are combined before rounding interval or
+paired differences, retaining representable small net heat against large
+opposing historical fluences. Time, sampling and photon widths are empirical
+finite-sample diagnostics; they do not certify confidence coverage, rare-path
+resolution, optional-stopping behavior or nonlinear finite-history bias.
+
+Separate total source/segment ceilings for each optical owner cover every trial;
+a shared substep limit covers the native solver. The same remaining work is never
+granted twice. Conservative retained pair/cell/report slot limits include both
+geometry packets, vacuum cells, per-source headers and construction/replacement
+overlap. Coarser/low-history ensembles are released before another is allocated.
+Accepted trajectories regain both original continuation budgets, including the
+cached radiation owner's effective source limit. Existing input-state uncertainty
+is conditional rather than resampled, and native refusal remains transactional.

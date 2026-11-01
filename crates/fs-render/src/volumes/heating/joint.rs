@@ -20,6 +20,9 @@ use fs_thermal::enthalpy::{
 use fs_thermal::observers::{CoupledObservers, ObserverCouplingError};
 use std::collections::BTreeMap;
 
+/// Complete joint trajectories with separate temporal and photon assessments.
+pub mod refinement;
+
 /// Preserve the failing illumination, radiation or native thermal owner.
 pub type JointOpticalError = ObserverCouplingError<OpticalFeedbackError, RadiativeFeedbackError>;
 

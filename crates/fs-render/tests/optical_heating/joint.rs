@@ -1,5 +1,8 @@
 //! Separate visible illumination and infrared exchange share native enthalpy.
 
+#[path = "joint/refinement.rs"]
+mod refinement;
+
 use super::*;
 use fs_blake3::ContentHash;
 use fs_render::volumes::heating::exchange::feedback::{
