@@ -196,6 +196,50 @@ solved stiff-hinge recoil problem and damping work, second-order inertial-frame
 translation and finite-hinge kinetic-energy convergence, exact memory timing,
 and bounded atomic refusals.
 
+### Uniform ambient flow in articulated inertia
+
+`addedmass::articulated::assemble_articulated_strips_in_uniform_flow` extends
+the original linked-strip assembly with a prescribed spatially uniform world
+velocity `U` and its world time derivative `Udot`. In each link frame it uses
+`W = V - (0, R^T U)` and
+`c_relative = c + (0, omega cross R^T U - R^T Udot)`.
+The complete bias is `-J^T (G c_relative + ad*_W G W)`; the existing rank modes,
+native motion map and dry/fluid mass factorization retain their owners.
+Uniform flow does not change the mass blocks. The still-fluid entry point and
+the zero-flow branch preserve the original assembly arithmetic.
+
+`UniformFlowAssembly` privately binds its load blocks, disturbance kinetic
+energy `sum(W^T G W)/2`, affine generalized fluid momentum `sum(J^T G W)`
+and work data to the same admitted native state. Its `reaction` method takes
+the actual generalized acceleration in Flyer order and returns
+`Q_fluid = bias - M_fluid * acceleration`, total world force, body power,
+ambient source power `U dot F_world`, and an independently reconstructed
+storage rate. Their balance is admitted against an arithmetic-resolution
+tolerance; it is not a certified interval bound. Native root translation
+columns recover world force correctly even with a nonidentity root mounting
+transform. No reconstructed generalized velocity, extra solve, matrix
+differentiation or second kinematics map is required.
+
+The existing smooth load callback consumes the original returned load blocks
+at its actual midpoint. Fluid density and strip geometry remain fixed.
+Spatial shear, ambient fluid rotation, cross-surface hydrodynamic interaction
+and density-change terms are outside this model. Pressure-gradient force on
+displaced fluid remains a separately supplied external wrench; a displacement
+volume is not inferred from the strip model. These disturbance-storage and
+source-work diagnostics apply to smooth evolution and do not extend the
+homogeneous energy receipts of the existing impact owners to moving fluid.
+
+G0/G1/G3 tests cover zero-flow equivalence and comoving cancellation, the
+independent pitching-plate normal force in a tangential current, rotating serial
+linkages under Galilean and spatial-frame transformations, a nonidentity root
+mount, independent material-point storage differentiation, and the actual
+midpoint response to accelerating current with affine momentum and ambient
+work closure. Reference formulations: Fossen's
+[relative marine-craft equations](https://www.fossen.biz/html/marineCraftModel.html)
+and MIT 13.012
+[fluid-force notes](https://web.mit.edu/13.012/www/handouts/2003/Reading7.pdf);
+the latter separate displaced-fluid pressure force from added mass.
+
 ### Moving dry links and fluid in one coupled step
 
 `partitioned::articulated::step` advances the native free-base articulated
