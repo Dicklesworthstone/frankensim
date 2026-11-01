@@ -1176,6 +1176,41 @@ equivalence, a zero-net-work cycle with 28/15 J gross work, pre-callback admissi
 midpoint cancellation, and state-dependent damping with independently integrated
 mechanical and actuator work. Refinement uses 8, 16 and 32 steps over one second.
 
+## Gear-constrained live inertia changes
+
+`articulated::motion::reconfigure::constraints::transfer_inertia_constrained`
+accepts constant affine joint relations `A q = b`, including ideal gear ratios
+and locked coordinates. Per-row coordinate units, coefficients, position and
+rate tolerances are explicit. Initial configuration and tangent rates must
+already be admissible. The original fixed-mass/COM, unchanged-topology tensor
+compatibility rules remain in force.
+
+The coupled event solves `M_next u_next = M_previous u_previous + [0; A^T lambda]`
+with final `A qdot = 0` to the declared tolerance. Original native ABA mass
+actions form a diagonally normalized mobility for at most 32 independent rows;
+the existing prepared LU owner solves it and retained-factor unit-RHS solves
+measure numerical reciprocal conditioning. There is no assembled generalized
+mass inverse or regularization of dependent constraints. With fixed row count,
+mass actions and response storage scale linearly in link count.
+
+Only the complete constrained endpoint receives native speed and work admission.
+An inadmissible unconstrained intermediate therefore cannot reject an admissible
+coupled result. Independent generalized-momentum audits include the actual
+reaction covector, while native world linear/angular momentum must remain
+conserved. Conditioned kinetic change, parameter work and actual midpoint
+reaction work are separate. Both work channels have independent absolute caps;
+finite tangency residual work is retained and no impact heat is inferred.
+
+Empty rows exactly delegate to the original transfer. Identical models preserve
+state bits after constraint and mobility admission. Invalid geometry/rates,
+rank or conditioning, exhausted work or cancellation publish no state.
+The G0/G1/G3-focused tests use analytic geared rotors, an offset full-tensor
+mixed-joint tree with independent momentum reconstruction, frame/boost and
+signed-row-scaling transformations, reverse transfer, and a locked-joint case
+whose free intermediate violates limits while its coupled endpoint is valid.
+This slice covers constant ideal joint relations; moving ratios, backlash,
+nonlinear point/weld closures, rolling and unilateral contact need their own laws.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared

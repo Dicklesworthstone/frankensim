@@ -16,6 +16,10 @@
 #[path = "reconfigure/step.rs"]
 pub mod step;
 
+/// Constant affine joint and gear constraints during tensor reconfiguration.
+#[path = "reconfigure/constraints.rs"]
+pub mod constraints;
+
 use super::{FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS};
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
@@ -178,65 +182,8 @@ pub fn transfer_inertia(
         });
     }
 
-    // A uniform translation has the same generalized momentum in both models:
-    // only the centroidal tensors differ. Remove it before the native solve
-    // so a large Galilean boost cannot swamp the changing rotational momentum.
-    let mut total_mass = 0.0;
-    for (index, link) in previous.links().iter().enumerate() {
-        if index % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        total_mass += link.inertia().mass();
-        ensure_finite_scalar(total_mass, "reconfigure.total_mass", index)?;
-    }
-    let linear = momentum_before.linear_momentum_world;
-    let boost_world = Vec3::new(
-        linear.x / total_mass,
-        linear.y / total_mass,
-        linear.z / total_mass,
-    );
-    validate_vec3(boost_world, "reconfigure.boost_world")?;
-    let boost_body = state
-        .base
-        .world_from_base
-        .rotation()
-        .inverse()
-        .rotate(boost_world)?;
-    let centered_before = forward_kinematics(
-        previous,
-        BaseState::prescribed(
-            state.base.world_from_base,
-            Twist::new(
-                state.base.twist_body.angular,
-                state.base.twist_body.linear - boost_body,
-            ),
-            Twist::zero(),
-        ),
-        &state.joint_position,
-        &state.joint_velocity,
-    )?;
-    poll(&mut cancelled)?;
-    let mut link_momenta = Vec::with_capacity(previous.link_count());
-    for (index, link) in previous.links().iter().enumerate() {
-        if index % 64 == 0 {
-            poll(&mut cancelled)?;
-        }
-        link_momenta.push(link.inertia().momentum(centered_before.body_twist[index])?);
-    }
-    // Per-link momenta are individual contributions, never accumulated RNEA
-    // subtree wrenches. The result is the new velocity, not a velocity increment.
-    let zero_joint_rhs = vec![0.0; previous.dof_count()];
-    let solved =
-        free_floating_impulse_delta(next, &state.joint_position, &zero_joint_rhs, &link_momenta)?;
-    poll(&mut cancelled)?;
-    let state_after = FreeFloatingMotionState {
-        base: FreeFloatingBaseState::new(
-            state.base.world_from_base,
-            Twist::new(solved.base.angular, solved.base.linear + boost_body),
-        ),
-        joint_position: state.joint_position.clone(),
-        joint_velocity: solved.joint,
-    };
+    let (state_after, boost_world) =
+        raw_momentum_candidate(previous, next, state, momentum_before, &mut cancelled)?;
     let after = state_kinematics(next, &state_after)?;
     poll(&mut cancelled)?;
     let momentum_after = momentum_from_kinematics(next, &after)?;
@@ -268,6 +215,79 @@ pub fn transfer_inertia(
         parameter_work_j,
         maximum_normalized_momentum_residual,
     })
+}
+
+// Internal candidate only: the constrained owner must add its simultaneous
+// reactions before applying endpoint speed, momentum and work admission.
+fn raw_momentum_candidate(
+    previous: &ArticulatedModel,
+    next: &ArticulatedModel,
+    state: &FreeFloatingMotionState,
+    momentum_before: ArticulatedMomentum,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<(FreeFloatingMotionState, Vec3), ReconfigurationError> {
+    // A uniform translation has the same generalized momentum in both models:
+    // only the centroidal tensors differ. Remove it before the native solve
+    // so a large Galilean boost cannot swamp the changing rotational momentum.
+    let mut total_mass = 0.0;
+    for (index, link) in previous.links().iter().enumerate() {
+        if index % 64 == 0 {
+            poll(cancelled)?;
+        }
+        total_mass += link.inertia().mass();
+        ensure_finite_scalar(total_mass, "reconfigure.total_mass", index)?;
+    }
+    let linear = momentum_before.linear_momentum_world;
+    let boost_world = Vec3::new(
+        linear.x / total_mass,
+        linear.y / total_mass,
+        linear.z / total_mass,
+    );
+    validate_vec3(boost_world, "reconfigure.boost_world")?;
+    let boost_body = state
+        .base
+        .world_from_base
+        .rotation()
+        .inverse()
+        .rotate(boost_world)?;
+    let centered_before = forward_kinematics(
+        previous,
+        BaseState::prescribed(
+            state.base.world_from_base,
+            Twist::new(
+                state.base.twist_body.angular,
+                state.base.twist_body.linear - boost_body,
+            ),
+            Twist::zero(),
+        ),
+        &state.joint_position,
+        &state.joint_velocity,
+    )?;
+    poll(cancelled)?;
+    let mut link_momenta = Vec::with_capacity(previous.link_count());
+    for (index, link) in previous.links().iter().enumerate() {
+        if index % 64 == 0 {
+            poll(cancelled)?;
+        }
+        link_momenta.push(link.inertia().momentum(centered_before.body_twist[index])?);
+    }
+    // Per-link momenta are individual contributions, never accumulated RNEA
+    // subtree wrenches. The result is the new velocity, not a velocity increment.
+    let zero_joint_rhs = vec![0.0; previous.dof_count()];
+    let solved =
+        free_floating_impulse_delta(next, &state.joint_position, &zero_joint_rhs, &link_momenta)?;
+    poll(cancelled)?;
+    Ok((
+        FreeFloatingMotionState {
+            base: FreeFloatingBaseState::new(
+                state.base.world_from_base,
+                Twist::new(solved.base.angular, solved.base.linear + boost_body),
+            ),
+            joint_position: state.joint_position.clone(),
+            joint_velocity: solved.joint,
+        },
+        boost_world,
+    ))
 }
 
 fn validate_compatible_models(
