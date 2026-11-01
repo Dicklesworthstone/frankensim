@@ -10,8 +10,8 @@
 //! within an explicit numerical position tolerance, and face the receiver.
 //! Refractive bundles retain native polarized power through every discrete
 //! smooth interface; bare geometric bundles with omitted interface transfer
-//! are refused. This owner does not search connecting rays, test visibility,
-//! or enumerate multiple optical paths. An 80-bin reading
+//! are refused. The [`connection`] consumer solves local connecting rays through
+//! native scene visibility. This owner does not enumerate multiple optical paths. An 80-bin reading
 //! describes one supplied connecting branch per wavelength, not a completeness
 //! certificate for all paths from an extended or multiply imaged source.
 
@@ -25,6 +25,9 @@ use crate::polarization::dielectric::transport::bundle::{
 };
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
+
+/// Automatic native-scene connections and calibrated spectral measurements.
+pub mod connection;
 
 /// Admission failures leave an irradiance accumulator unchanged.
 #[derive(Clone, Copy, Debug, PartialEq)]
