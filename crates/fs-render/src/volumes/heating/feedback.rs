@@ -149,6 +149,13 @@ pub enum OpticalFeedbackError {
         minimum_k: f64,
         maximum_k: f64,
     },
+    /// Native specific enthalpy is outside its source-bound optical domain.
+    EnthalpyDomain {
+        thermal_cell: CellId,
+        specific_h_j_kg: f64,
+        minimum_j_kg: f64,
+        maximum_j_kg: f64,
+    },
     Transport(VolumeTransportError),
     Heating(OpticalHeatingError),
     Thermal(DepositionError),
@@ -265,13 +272,38 @@ impl<const N: usize> CompiledTable<N> {
         temperature_k: f64,
     ) -> Result<[f64; N], OpticalFeedbackError> {
         self.check_temperature(id, temperature_k)?;
+        self.interpolate(temperature_k)
+    }
+
+    /// The same admitted interpolation, with a physically distinct coordinate
+    /// and refusal. Zero and negative enthalpy depend on the source datum.
+    pub(super) fn at_enthalpy(
+        &self,
+        id: CellId,
+        specific_h_j_kg: f64,
+    ) -> Result<[f64; N], OpticalFeedbackError> {
+        let minimum_j_kg = self.rows[0].0;
+        let maximum_j_kg = self.rows[self.rows.len() - 1].0;
+        if !specific_h_j_kg.is_finite() || !(minimum_j_kg..=maximum_j_kg).contains(&specific_h_j_kg)
+        {
+            return Err(OpticalFeedbackError::EnthalpyDomain {
+                thermal_cell: id,
+                specific_h_j_kg,
+                minimum_j_kg,
+                maximum_j_kg,
+            });
+        }
+        self.interpolate(specific_h_j_kg)
+    }
+
+    fn interpolate(&self, coordinate: f64) -> Result<[f64; N], OpticalFeedbackError> {
         let upper = self
             .rows
-            .partition_point(|(t, _)| *t < temperature_k)
+            .partition_point(|(t, _)| *t < coordinate)
             .clamp(1, self.rows.len() - 1);
         let (a, ka) = self.rows[upper - 1];
         let (b, kb) = self.rows[upper];
-        let fraction = (temperature_k - a) / (b - a);
+        let fraction = (coordinate - a) / (b - a);
         let values = std::array::from_fn(|lane| {
             if ka[lane] == kb[lane] {
                 ka[lane]

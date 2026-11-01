@@ -771,3 +771,17 @@ not evolve here. Finite atmosphere energy/species evolution requires its own
 owner accepting the complete transfer. Geometry is fixed reference geometry;
 recession is reported, with no inferred VOF, liquid-flow, dryout, boiling,
 freezing or contact/topology transition.
+
+## Caloric identity for constitutive laws on native stored energy
+
+`ThermalLaw::caloric_identity` optionally exposes the immutable source-law
+identity, including its specific-energy datum, as 32 bytes without adding a
+hashing or material dependency to this thermal kernel. `None` means that the
+law has not supplied this binding. `DepositionSimulation::material_caloric_identity`
+queries the actual registered owner and refuses unknown material IDs.
+
+Constitutive consumers indexed by native specific energy can require this
+identity together with the existing material and storage-basis checks. The
+identity supplies no new caloric model and does not authenticate empirical
+data. Existing thermal laws and temperature-only consumers remain valid when
+the optional identity is absent; consumers requiring it must refuse absence.

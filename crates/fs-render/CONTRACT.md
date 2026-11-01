@@ -4397,3 +4397,37 @@ overlap. Coarser/low-history ensembles are released before another is allocated.
 Accepted trajectories regain both original continuation budgets, including the
 cached radiation owner's effective source limit. Existing input-state uncertainty
 is conditional rather than resampled, and native refusal remains transactional.
+
+### Absorption and scattering through latent-enthalpy plateaus
+
+`TemperatureOpticalField::try_new_enthalpy` compiles explicitly supplied mass
+absorption and scattering spectra on the original native specific-enthalpy
+coordinate. The existing temperature constructor, interpolation, transport,
+source accounting and thermal solver remain their owners. This permits optical
+coefficients to evolve during isothermal melting or freezing, where temperature
+alone cannot determine the material's phase inventory.
+
+Each table carries its optical source identity, caloric-law identity, finite
+ordered enthalpy knots and explicit positive kelvin support. Zero and negative
+enthalpy are legal reference choices. Every binding verifies the actual native
+material ID, enthalpy storage basis and nonzero caloric identity; an unavailable
+or different law identity refuses. Neither enthalpy nor temperature extrapolates.
+Accepted endpoint/event checks include transparent and nonemitting material.
+
+The shared field deduplicates native-state reads and coefficient interpolation.
+Only changed coefficient bits invalidate transport: changing enthalpy on a
+constant optical branch reuses cached transport, while changing coefficients
+on a constant-temperature plateau rebuilds it. Runtime enthalpy does not enter
+photon-stream identity. Incident illumination, reciprocal infrared exchange and
+joint trajectory assessment consume the same field without another heat or
+latent-energy source. Both absorption and scattering use the selected coordinate.
+
+G0/G1 integration checks compare a sharp melting plateau with an independent
+analytic Beer–Lambert feedback solution, exercise energy conservation and time
+refinement, and check the equal-temperature radiative-bath limit while opacity
+changes. G3/G4 checks cover enthalpy-datum changes, bound-law/domain refusals,
+cache continuation and transactional cancellation. These are numerical/model
+checks, not experimental validation. Linear interpolation of supplied effective
+coefficients does not establish a universal solid/liquid optical mixing law.
+Fixed density, geometry, phase functions and spectral quadrature remain explicit
+inputs; this extension adds no deformation, phase kinetics or hysteresis.

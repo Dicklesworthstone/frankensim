@@ -82,6 +82,11 @@ pub enum ThermalStorageBasis {
 pub trait ThermalLaw {
     /// Coordinate selected by this immutable law. Existing laws store enthalpy.
     fn storage_basis(&self) -> ThermalStorageBasis { ThermalStorageBasis::Enthalpy }
+    /// Optional identity of this original caloric law, including its energy
+    /// datum, state domain and constitutive data. State-dependent consumers
+    /// must not substitute a material name or the current temperature for it.
+    /// `None` means that identity-bound energy-coordinate laws are unavailable.
+    fn caloric_identity(&self) -> Option<[u8; 32]> { None }
     /// Admit law-specific mass, geometry and storage constraints before birth
     /// changes any timeline inventory. Generic geometry admission runs first.
     fn validate_cell(&self, _cell: &DepositedCell) -> Result<(), DepositionError> { Ok(()) }
@@ -454,6 +459,12 @@ impl<'a> DepositionSimulation<'a> {
     /// Thermodynamic storage basis of the original registered caloric law.
     pub fn material_storage_basis(&self, id: MaterialId) -> Result<ThermalStorageBasis, DepositionError> {
         self.materials.get(&id).map(|law| law.storage_basis())
+            .ok_or(DepositionError::InvalidInput("unregistered caloric material"))
+    }
+    /// Identity supplied by the original registered caloric law. Its absence
+    /// is preserved; a consumer cannot manufacture a datum binding from T.
+    pub fn material_caloric_identity(&self, id: MaterialId) -> Result<Option<[u8; 32]>, DepositionError> {
+        self.materials.get(&id).map(|law| law.caloric_identity())
             .ok_or(DepositionError::InvalidInput("unregistered caloric material"))
     }
     /// Stored thermal energy relative to declared material data, J.

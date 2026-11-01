@@ -7,6 +7,8 @@
 //! Spectral samples are compiled once per table knot. Each state preparation
 //! reads every distinct native temperature once and evaluates each distinct
 //! receiver/table-pair once; unchanged coefficient bits retain the old packets.
+//! Explicit enthalpy-coordinate laws additionally read the original stored h,
+//! so coefficients can evolve through a constant-temperature latent plateau.
 
 use super::OpticalHeatingError;
 use super::feedback::{
@@ -17,8 +19,16 @@ use crate::volumes::transport::scattering::{
 };
 use crate::volumes::transport::{AbsorbingGrid, VolumeTransportError};
 use fs_blake3::{ContentHash, DomainHasher};
-use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
+use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation, MaterialId};
 use std::collections::BTreeMap;
+
+/// Source-bound optical laws on the original native enthalpy coordinate.
+pub mod enthalpy;
+use enthalpy::{BoundEnthalpy, EnthalpyTableDomain};
+pub use enthalpy::{
+    EnthalpyAbsorptionTable, EnthalpyOpticalFieldBudget, EnthalpyScatteringCell,
+    EnthalpyScatteringTable,
+};
 
 /// Source-bound mass scattering in m²/kg versus kelvin. The retained rows keep
 /// their original spectral owners, including source support and analytic laws.
@@ -127,6 +137,40 @@ struct BoundTemperature {
     thermal_cell: CellId,
     minimum_k: f64,
     maximum_k: f64,
+    enthalpy: Option<BoundEnthalpy>,
+}
+
+/// Both coordinates share spectral compilation and interpolation. The explicit
+/// coordinate tag controls domain checking; h is never relabelled kelvin.
+struct CompiledOpticalTable<const N: usize> {
+    table: CompiledTable<N>,
+    temperature_bounds_k: (f64, f64),
+    enthalpy: Option<EnthalpyTableDomain>,
+}
+impl<const N: usize> CompiledOpticalTable<N> {
+    fn at(
+        &self,
+        id: CellId,
+        temperature_k: f64,
+        specific_h_j_kg: f64,
+    ) -> Result<[f64; N], OpticalFeedbackError> {
+        if self.enthalpy.is_some() {
+            self.table.at_enthalpy(id, specific_h_j_kg)
+        } else {
+            self.table.at(id, temperature_k)
+        }
+    }
+}
+struct PreparedTables<const N: usize> {
+    absorption: Vec<CompiledOpticalTable<N>>,
+    scattering: Vec<CompiledOpticalTable<N>>,
+    bounds_nm: (f64, f64),
+    knots: usize,
+}
+#[derive(Clone, Copy)]
+struct PreparedBinding {
+    cell: ThermalScatteringCell,
+    material_id: Option<MaterialId>,
 }
 
 /// Immutable source-bound constitutive data, independent of incident sources,
@@ -138,8 +182,8 @@ pub struct TemperatureOpticalField<'g, const N: usize> {
     geometry: AbsorbingGrid<'g>,
     wavelengths_nm: [f64; N],
     bounds_nm: (f64, f64),
-    absorption: Vec<CompiledTable<N>>,
-    scattering: Vec<CompiledTable<N>>,
+    absorption: Vec<CompiledOpticalTable<N>>,
+    scattering: Vec<CompiledOpticalTable<N>>,
     materials: Vec<BoundMaterial>,
     temperatures: Vec<BoundTemperature>,
     cell_materials: Vec<Option<usize>>,
@@ -173,6 +217,7 @@ pub struct TemperatureOpticalState<const N: usize> {
     scattering: Vec<[f64; N]>,
     materials: Vec<([f64; N], [f64; N])>,
     temperatures: Vec<f64>,
+    enthalpies: Vec<f64>,
     initialized: bool,
 }
 impl<const N: usize> TemperatureOpticalState<N> {
@@ -282,7 +327,11 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
             let domain = table.wavelength_bounds_nm();
             bounds.0 = bounds.0.max(domain.0);
             bounds.1 = bounds.1.min(domain.1);
-            compiled_absorption.push(table.compile(&wavelengths_nm, &mut hash, checkpoint)?);
+            compiled_absorption.push(CompiledOpticalTable {
+                table: table.compile(&wavelengths_nm, &mut hash, checkpoint)?,
+                temperature_bounds_k: table.temperature_bounds_k(),
+                enthalpy: None,
+            });
         }
         hash.update(&(scattering.len() as u64).to_le_bytes());
         for table in scattering {
@@ -295,28 +344,67 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
             }
             bounds.0 = bounds.0.max(table.wavelength_bounds_nm.0);
             bounds.1 = bounds.1.min(table.wavelength_bounds_nm.1);
-            compiled_scattering.push(CompiledTable::compile(
-                table.source_identity,
-                table.wavelength_bounds_nm,
-                &table.rows,
-                &wavelengths_nm,
-                &mut hash,
-                checkpoint,
-            )?);
+            compiled_scattering.push(CompiledOpticalTable {
+                table: CompiledTable::compile(
+                    table.source_identity,
+                    table.wavelength_bounds_nm,
+                    &table.rows,
+                    &wavelengths_nm,
+                    &mut hash,
+                    checkpoint,
+                )?,
+                temperature_bounds_k: table.temperature_bounds_k(),
+                enthalpy: None,
+            });
         }
+        Self::compile_prepared(
+            geometry,
+            wavelengths_nm,
+            PreparedTables {
+                absorption: compiled_absorption,
+                scattering: compiled_scattering,
+                bounds_nm: bounds,
+                knots,
+            },
+            phases,
+            bindings.iter().map(|cell| PreparedBinding {
+                cell: *cell,
+                material_id: None,
+            }),
+            thermal,
+            hash,
+            checkpoint,
+        )
+    }
+
+    // One binding/cache/transport owner for both constitutive coordinates.
+    #[allow(clippy::too_many_arguments)]
+    fn compile_prepared(
+        geometry: AbsorbingGrid<'g>,
+        wavelengths_nm: [f64; N],
+        tables: PreparedTables<N>,
+        phases: &[PhaseFunction],
+        bindings: impl ExactSizeIterator<Item = PreparedBinding>,
+        thermal: &DepositionSimulation<'_>,
+        mut hash: DomainHasher,
+        checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+    ) -> Result<(Self, TemperatureOpticalState<N>), OpticalFeedbackError> {
+        let count = geometry.cell_count();
+        let binding_count = bindings.len();
         let mut selected = allocate(count, None)?;
-        for binding in bindings {
+        for prepared in bindings {
             checkpoint()?;
+            let binding = prepared.cell;
             if binding.grid_cell >= count
-                || binding.absorption_table >= absorption.len()
-                || binding.scattering_table >= scattering.len()
+                || binding.absorption_table >= tables.absorption.len()
+                || binding.scattering_table >= tables.scattering.len()
                 || binding.phase >= phases.len()
             {
                 return Err(invalid(
                     "optical binding references an unknown cell, table or phase",
                 ));
             }
-            if selected[binding.grid_cell].replace(*binding).is_some() {
+            if selected[binding.grid_cell].replace(prepared).is_some() {
                 return Err(OpticalHeatingError::DuplicateCell(binding.grid_cell).into());
             }
             if !thermal.cells().contains_key(&binding.thermal_cell) {
@@ -327,13 +415,13 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
         let mut temperatures: Vec<BoundTemperature> = Vec::new();
         let mut material_bindings = Vec::new();
         materials
-            .try_reserve_exact(bindings.len())
+            .try_reserve_exact(binding_count)
             .map_err(|_| OpticalFeedbackError::Budget)?;
         temperatures
-            .try_reserve_exact(bindings.len())
+            .try_reserve_exact(binding_count)
             .map_err(|_| OpticalFeedbackError::Budget)?;
         material_bindings
-            .try_reserve_exact(bindings.len())
+            .try_reserve_exact(binding_count)
             .map_err(|_| OpticalFeedbackError::Budget)?;
         let mut unique_materials = BTreeMap::new();
         let mut unique_temperatures = BTreeMap::new();
@@ -344,16 +432,24 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
             let positive_density = geometry
                 .cell_density_kg_m3(index)
                 .is_some_and(|rho| rho > 0.0);
-            let Some(binding) = binding else {
+            let Some(prepared) = binding else {
                 if positive_density {
                     return Err(OpticalHeatingError::UnmappedCell(index).into());
                 }
                 continue;
             };
-            let a_domain = absorption[binding.absorption_table].temperature_bounds_k();
-            let s_domain = scattering[binding.scattering_table].temperature_bounds_k();
+            let binding = prepared.cell;
+            let absorption = &tables.absorption[binding.absorption_table];
+            let scattering = &tables.scattering[binding.scattering_table];
+            let a_domain = absorption.temperature_bounds_k;
+            let s_domain = scattering.temperature_bounds_k;
             let minimum_k = a_domain.0.max(s_domain.0);
             let maximum_k = a_domain.1.min(s_domain.1);
+            let enthalpy = BoundEnthalpy::from_tables(
+                prepared.material_id,
+                absorption.enthalpy,
+                scattering.enthalpy,
+            )?;
             let temperature_slot = *unique_temperatures
                 .entry(binding.thermal_cell)
                 .or_insert_with(|| {
@@ -362,6 +458,7 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
                         thermal_cell: binding.thermal_cell,
                         minimum_k,
                         maximum_k,
+                        enthalpy,
                     });
                     slot
                 });
@@ -369,6 +466,8 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
                 temperatures[temperature_slot].minimum_k.max(minimum_k);
             temperatures[temperature_slot].maximum_k =
                 temperatures[temperature_slot].maximum_k.min(maximum_k);
+            temperatures[temperature_slot].enthalpy =
+                BoundEnthalpy::intersection(temperatures[temperature_slot].enthalpy, enthalpy)?;
             let key = (
                 binding.thermal_cell,
                 binding.absorption_table,
@@ -395,6 +494,9 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
                     maximum_temperature_k: maximum_k,
                 });
             }
+            if let Some(material_id) = prepared.material_id {
+                hash.update(&material_id.0.to_le_bytes());
+            }
             for value in [
                 index as u64,
                 binding.thermal_cell.0,
@@ -415,23 +517,24 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
             phase.hash_into(&mut hash);
             retained_phases.push(phase.clone());
         }
-        let has_scattering = compiled_scattering
+        let has_scattering = tables
+            .scattering
             .iter()
-            .any(CompiledTable::has_nonzero_coefficient);
+            .any(|table| table.table.has_nonzero_coefficient());
         let model = Self {
             identity: hash.finalize(),
             geometry,
             wavelengths_nm,
-            bounds_nm: bounds,
-            absorption: compiled_absorption,
-            scattering: compiled_scattering,
+            bounds_nm: tables.bounds_nm,
+            absorption: tables.absorption,
+            scattering: tables.scattering,
             materials,
             temperatures,
             cell_materials,
             phases: retained_phases,
             cell_phases,
             material_bindings,
-            temperature_knots: knots,
+            temperature_knots: tables.knots,
             has_scattering,
         };
         let state = model.initial_state(thermal, &mut *checkpoint)?;
@@ -485,6 +588,7 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
             scattering: allocate(self.geometry.cell_count(), [0.0; N])?,
             materials: allocate(self.materials.len(), ([0.0; N], [0.0; N]))?,
             temperatures: allocate(self.temperatures.len(), 0.0)?,
+            enthalpies: allocate(self.temperatures.len(), 0.0)?,
             initialized: false,
         };
         self.prepare(thermal, &mut state, &mut checkpoint)?;
@@ -505,19 +609,30 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
         if state.identity != self.identity {
             return Err(VolumeTransportError::SourceIdentity.into());
         }
-        for (binding, value) in self.temperatures.iter().zip(&mut state.temperatures) {
+        for (index, binding) in self.temperatures.iter().enumerate() {
             checkpoint()?;
-            *value = thermal.temperature_k(binding.thermal_cell)?;
-            check_temperature(*binding, *value)?;
+            let temperature_k = thermal.temperature_k(binding.thermal_cell)?;
+            check_temperature(*binding, temperature_k)?;
+            state.temperatures[index] = temperature_k;
+            if let Some(enthalpy) = binding.enthalpy {
+                state.enthalpies[index] = enthalpy.native_value(thermal, binding.thermal_cell)?;
+            }
         }
         let mut changed = !state.initialized;
         for (material, values) in self.materials.iter().zip(&mut state.materials) {
             checkpoint()?;
             let temperature = state.temperatures[material.temperature_slot];
-            values.0 = self.absorption[material.absorption_table]
-                .at(material.thermal_cell, temperature)?;
-            values.1 = self.scattering[material.scattering_table]
-                .at(material.thermal_cell, temperature)?;
+            let enthalpy = state.enthalpies[material.temperature_slot];
+            values.0 = self.absorption[material.absorption_table].at(
+                material.thermal_cell,
+                temperature,
+                enthalpy,
+            )?;
+            values.1 = self.scattering[material.scattering_table].at(
+                material.thermal_cell,
+                temperature,
+                enthalpy,
+            )?;
             for lane in 0..N {
                 changed |= values.0[lane].to_bits()
                     != state.absorption[material.representative_cell][lane].to_bits()
@@ -541,7 +656,8 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
     }
 
     /// Validate all source domains at an accepted endpoint/event, including
-    /// cells that presently emit or absorb no radiation.
+    /// cells that presently emit or absorb no radiation. Enthalpy-coordinate
+    /// fields also validate the original material/datum and stored-h domain.
     pub fn validate_temperatures(
         &self,
         thermal: &DepositionSimulation<'_>,
@@ -550,6 +666,9 @@ impl<'g, const N: usize> TemperatureOpticalField<'g, N> {
         for binding in &self.temperatures {
             checkpoint()?;
             check_temperature(*binding, thermal.temperature_k(binding.thermal_cell)?)?;
+            if let Some(enthalpy) = binding.enthalpy {
+                enthalpy.native_value(thermal, binding.thermal_cell)?;
+            }
         }
         checkpoint()?;
         Ok(())
