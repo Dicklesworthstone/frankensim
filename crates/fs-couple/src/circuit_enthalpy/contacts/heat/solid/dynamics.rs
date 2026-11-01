@@ -1,11 +1,11 @@
-//! Complete original heat transport on a retained inertial J2 trajectory.
+//! Complete original heat transport on a retained native inelastic trajectory.
 
 use super::*;
 use crate::solid_enthalpy::plastic::dynamics::{
     ThermoplasticDynamics, ThermoplasticDynamicsCandidate,
 };
 
-impl<'m> ThermoplasticDynamics<'m> {
+impl<'m, S: ThermoplasticSourceFamily<'m>> ThermoplasticDynamics<'m, S> {
     /// Advance source-bound inertia, plastic history and the complete material
     /// heat network as one candidate.
     ///
@@ -16,8 +16,9 @@ impl<'m> ThermoplasticDynamics<'m> {
     /// thermal bodies remain in the same thermal timeline.
     ///
     /// This calls the native inertial thermoplastic solve, retaining full nodal
-    /// velocity, displacement, J2 history and the physical clock. Physical
-    /// yield/overstress loss and reversible heat enter that one thermal solve.
+    /// velocity, displacement, complete native history and the physical clock.
+    /// Physical yield, overstress and cyclic recovery loss and reversible heat
+    /// enter that one thermal solve.
     /// Consistent reference-mass kinetic energy, hardening storage, constitutive
     /// and inertial numerical losses keep their original separate accounts.
     ///
@@ -54,6 +55,7 @@ impl<'m> ThermoplasticDynamics<'m> {
                 'm,
                 't,
                 CoupledObservers<MaterialHeatObserver<'p, 'n, 'a, 'scope>, O>,
+                S,
             >,
             SolidHeatAudit,
         ),

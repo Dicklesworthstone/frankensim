@@ -108,6 +108,83 @@ fn complete_assembly_preserves_actual_inertial_plastic_state_and_native_heat_acc
 }
 
 #[test]
+fn cyclic_history_reaches_complete_material_heat_networks_and_unsized_assemblies() {
+    use fs_material::plastic::chaboche::source::BackstressProperties;
+    use fs_material::plastic::voce::source::{
+        VOCE_SATURATION_INCREMENT_PROPERTY as Q, VOCE_SATURATION_RATE_PROPERTY as B,
+    };
+    let schema = || [
+        BackstressProperties::new("fast_backstress_C", "fast_backstress_gamma"),
+        BackstressProperties::new("slow_backstress_C", "slow_backstress_gamma"),
+    ];
+    let f = fixture_with_properties(0.7, &[
+        scalar(Q, Pressure::DIMS, 1e6),
+        scalar(B, Dims([0; 6]), 200.0),
+        scalar("fast_backstress_C", Pressure::DIMS, 2e8),
+        scalar("fast_backstress_gamma", Dims([0; 6]), 80.0),
+        scalar("slow_backstress_C", Pressure::DIMS, 5e7),
+        scalar("slow_backstress_gamma", Dims([0; 6]), 10.0),
+    ]);
+    with_heat_fixture(f, 0.1, |cx, _, _, thermal, original, network| {
+        let prepared = network.prepare(cx, thermal).unwrap();
+        let cyclic = original.clone()
+            .with_voce_hardening(&vec![Some(MaterialPropertySelection::SingleClaimOnly); 2], cx)
+            .unwrap()
+            .with_chaboche_branches(&[0, 1].map(|_| (
+                MaterialPropertySelection::SingleClaimOnly, schema(),
+            )), cx).unwrap();
+        let assembly: &dyn HeatAssembly<Sample = HeatNetworkSample, Error = HeatNetworkError> = &prepared;
+        let observer = prepared.observe(cx, (), control().energy_tolerance_j).unwrap();
+        let native = cyclic.advance(thermal, &observer, 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
+        let (direct, direct_audit) = cyclic.advance_heat_network_candidate(
+            thermal, &prepared, &(), 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
+        let (complete, audit) = cyclic.advance_heat_assembly_candidate(
+            thermal, assembly, &(), 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
+        assert_eq!(native.thermal().cells(), direct.thermal().cells());
+        assert_eq!(native.solid().solution(), direct.solid().solution());
+        assert_eq!(complete.thermal().cells(), direct.thermal().cells());
+        assert_eq!(complete.solid().solution(), direct.solid().solution());
+        assert_eq!(audit, direct_audit);
+        let loaded = &complete.solid().solution().element_states[0];
+        assert!(loaded.plastic.alpha > 0.0);
+        assert!(loaded.backstress_pa.iter().all(|branch| branch.iter().any(|x| *x != 0.0)));
+        assert!(complete.report().physical_heat_j > 0.0);
+        assert!(audit.combined_residual_j.abs() <= control().energy_tolerance_j);
+        assert_eq!(cyclic.time_s(), 0.0);
+
+        let mut velocity = vec![[0.0; 3]; NODES.len()];
+        velocity[3][0] = 1.0;
+        let moving = fs_couple::solid_enthalpy::plastic::dynamics::ThermoplasticDynamics::try_new(
+            cyclic, velocity, cx).unwrap();
+        let (direct, direct_audit) = moving.advance_heat_network_candidate(
+            thermal, &prepared, &(), 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
+        let (complete, audit) = moving.advance_heat_assembly_candidate(
+            thermal, assembly, &(), 1.0, &supports(SHEAR), &applied(),
+            IncrementSettings::default(), thermal_config(), control(), cx).unwrap();
+        assert_eq!(complete.thermal().cells(), direct.thermal().cells());
+        assert_eq!(complete.dynamics().solid().solution(), direct.dynamics().solid().solution());
+        assert_eq!(complete.dynamics().velocity_mps(), direct.dynamics().velocity_mps());
+        assert_eq!(complete.report().inertia, direct.report().inertia);
+        assert_eq!(audit, direct_audit);
+        assert!(complete.report().inertia.kinetic_before_j > 0.0);
+        assert!(complete.report().material.physical_heat_j > 0.0);
+        let history = &complete.dynamics().solid().solution().element_states[0];
+        assert!(history.plastic.alpha > 0.0);
+        assert!(history.backstress_pa.iter().all(|branch| branch.iter().any(|x| *x != 0.0)));
+        close(complete.report().material.thermal_audit.stored_energy_change_j,
+            complete.report().material.physical_heat_j + complete.report().material.reversible_heat_j
+                + audit.external_heat_j, control().energy_tolerance_j);
+        assert!(audit.combined_residual_j.abs() <= control().energy_tolerance_j);
+        assert_eq!(moving.time_s(), 0.0);
+        assert_eq!(thermal.time_s(), 0.0);
+    });
+}
+
+#[test]
 fn same_card_and_caloric_law_do_not_excuse_different_mechanical_source_conditions() {
     with_heat(0.7, 0.1, |cx, gate, f, thermal, solid, original| {
         let keys = vec![Some((f.conductivity.clone(), MaterialPropertySelection::SingleClaimOnly)); 2];

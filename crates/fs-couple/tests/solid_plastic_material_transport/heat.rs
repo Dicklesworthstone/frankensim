@@ -26,11 +26,15 @@ fn fixture(emissivity: f64) -> Fixture {
 }
 
 fn fixture_with_property(emissivity: f64, extra: Option<PropertyClaim>) -> Fixture {
+    fixture_with_properties(emissivity, extra.as_slice())
+}
+
+fn fixture_with_properties(emissivity: f64, extra: &[PropertyClaim]) -> Fixture {
     let old = Fixture::new([5.0; 2], 0.01, false);
     let cards = old.cards.map(|card| {
         let mut claims = card.claims().clone();
         claims.insert_claim(scalar(SURFACE_EMISSIVITY_PROPERTY, EMISSIVITY_DIMS, emissivity)).unwrap();
-        if let Some(property) = &extra { claims.insert_claim(property.clone()).unwrap(); }
+        for property in extra { claims.insert_claim(property.clone()).unwrap(); }
         MaterialCard::assemble(card.id().clone(), claims, vec![]).unwrap()
     });
     // The augmented card is the authority for BOTH caloric and mechanical data.

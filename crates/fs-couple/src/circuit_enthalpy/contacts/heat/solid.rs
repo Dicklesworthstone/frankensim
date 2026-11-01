@@ -10,6 +10,7 @@ use crate::solid_enthalpy::plastic::{
 };
 use fs_exec::Cx;
 use fs_material::phase::PhaseStateError;
+use fs_material::plastic::thermal::family::ThermoplasticSourceFamily;
 use fs_material::thermal::source::ThermalMaterialError;
 use fs_solid::plastic3::IncrementSettings;
 use fs_thermal::enthalpy::{DepositionObserver, DepositionSimulation, StepConfig};
@@ -68,11 +69,13 @@ pub(crate) fn closed_account(external: f64, thermal: f64, combined: f64, radiati
     Ok(audit)
 }
 
-impl<'m> ThermoplasticSolid<'m> {
+impl<'m, S: ThermoplasticSourceFamily<'m>> ThermoplasticSolid<'m, S> {
     /// Advance the original loaded tetrahedra with a complete material heat network.
     ///
     /// Conductivity, contact resistance and emissivity use the shared network;
-    /// plastic history, compatibility and physical heating use `advance` unchanged.
+    /// complete native plastic history, compatibility and physical heating use
+    /// `advance` unchanged. A cyclic family retains each independent backstress,
+    /// its thermal transport and recovery heat in that same material solve.
     /// Require identical structural/bulk cards, caloric objects and fixed source
     /// conditions BEFORE solving. Merely sharing a card is insufficient when,
     /// for example, its pressure or processing coordinates differ.
@@ -95,7 +98,7 @@ impl<'m> ThermoplasticSolid<'m> {
         settings: IncrementSettings, thermal_config: StepConfig, config: ThermoplasticConfig,
         cx: &'p Cx<'scope>,
     ) -> Result<(ThermoplasticCandidate<'m, 't,
-        CoupledObservers<MaterialHeatObserver<'p, 'n, 'a, 'scope>, O>>, SolidHeatAudit),
+        CoupledObservers<MaterialHeatObserver<'p, 'n, 'a, 'scope>, O>, S>, SolidHeatAudit),
         SolidHeatError<O::Error>> {
         cx.checkpoint().map_err(|_| SolidHeatError::Cancelled)?;
         let observer = prepared.observe(cx, inner.clone(), config.energy_tolerance_j)

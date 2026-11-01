@@ -1,4 +1,4 @@
-//! Complete coolant/material assemblies on the original static and inertial J2 owners.
+//! Complete coolant/material assemblies on the original native inelastic owners.
 use super::*;
 use super::super::{
     AssemblyHeatObserver, HeatAssembly, HeatAssemblyAdvanceError, observe_heat_assembly,
@@ -15,14 +15,15 @@ pub type SolidHeatAssemblyError<S, O> = HeatAssemblyAdvanceError<
     ThermoplasticError<ObserverCouplingError<CircuitEnthalpyError<S>, O>>,
 >;
 
-impl<'m> ThermoplasticSolid<'m> {
+impl<'m, S: ThermoplasticSourceFamily<'m>> ThermoplasticSolid<'m, S> {
     /// Advance the complete heat assembly and loaded plastic solid together.
     ///
     /// The assembly retains its prepared network as the original material and
     /// caloric identity authority. All additional source-resolved reservoirs and
     /// finite links use the SAME native thermal state and actual substeps.
     /// Physical plastic/reversible heat is added once by the existing solid
-    /// iteration. Full assembly receipts remain in the returned first observer.
+    /// iteration, retaining every native cyclic backstress when selected.
+    /// Full assembly receipts remain in the returned first observer.
     ///
     /// Continue with the returned thermal/solid pair and the second observer's
     /// independent history. Fixed reference geometry, fully-solid source ranges,
@@ -42,7 +43,7 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &'p Cx<'scope>,
     ) -> Result<(
         ThermoplasticCandidate<'m, 't,
-            CoupledObservers<AssemblyHeatObserver<'p, 'scope, A>, O>>,
+            CoupledObservers<AssemblyHeatObserver<'p, 'scope, A>, O>, S>,
         SolidHeatAudit,
     ), SolidHeatAssemblyError<A::Error, O::Error>> {
         self.admit_heat_network::<Infallible>(
@@ -65,7 +66,7 @@ impl<'m> ThermoplasticSolid<'m> {
     }
 }
 
-impl<'m> ThermoplasticDynamics<'m> {
+impl<'m, S: ThermoplasticSourceFamily<'m>> ThermoplasticDynamics<'m, S> {
     /// Retain actual velocity, displacement, plastic history and the clock while
     /// the complete heat assembly drives the native inertial thermal iteration.
     ///
@@ -90,7 +91,7 @@ impl<'m> ThermoplasticDynamics<'m> {
         cx: &'p Cx<'scope>,
     ) -> Result<(
         ThermoplasticDynamicsCandidate<'m, 't,
-            CoupledObservers<AssemblyHeatObserver<'p, 'scope, A>, O>>,
+            CoupledObservers<AssemblyHeatObserver<'p, 'scope, A>, O>, S>,
         SolidHeatAudit,
     ), SolidHeatAssemblyError<A::Error, O::Error>> {
         self.solid().admit_heat_network::<Infallible>(
