@@ -1,25 +1,33 @@
 //! Conservative upstream-enthalpy transfer between two fixed real-gas volumes.
 //!
-//! Both parcels must retain the exact same frozen composition, NASA calorics,
-//! Peng--Robinson interaction model and transport sources. A prescribed positive
-//! mass leaves the donor carrying its upstream total enthalpy and enters the
-//! receiver once. Each fixed vessel then reconstructs temperature and pressure
-//! from its new density and conserved internal energy through the original PR
-//! owner. No ideal-gas pressure, gamma or caloric surrogate is introduced.
+//! A prescribed positive mass carries its upstream species and total enthalpy
+//! into the receiver once. Compatible source models may have different species
+//! fractions or active species; every new PR pair interaction must already be
+//! supplied by an original source. Each fixed vessel reconstructs its new
+//! density, composition, temperature and pressure through the original owners.
+//! No ideal-gas pressure, gamma or caloric surrogate is introduced.
 //!
 //! This is a first-order well-mixed finite-volume transfer primitive. It does
 //! not choose a flow rate, resolve a nozzle/jet, evolve momentum, perform phase
-//! equilibrium or change composition. A higher-level pressure/port owner must
-//! choose and refine the transferred mass.
+//! equilibrium or infer missing cross-species interaction data. A higher-level
+//! pressure/port owner must choose and refine the transferred mass.
 
 /// Quasi-steady pressure-driven flow using the same source-backed PR branch.
 pub mod nozzle;
+mod mixing;
 
 use super::IsochoricRealGasParcel;
 use crate::thermochemical_gas::energy::{
     GasEnergyError, GasEnergySolve, poll, updated_point,
 };
 use crate::thermochemical_gas::positive;
+
+/// Original canonical species-flux and extensive-balance report, now also used
+/// by PR storage. Its energy entries include the original nonideal departures;
+/// conserved species datums cancel before evaluating the reported residual.
+pub use crate::thermochemical_gas::energy::parcel::transfer::{
+    GasMassTransferStep as RealGasMassTransferStep, GasSpeciesTransfer,
+};
 
 /// Bounded endpoint solves and absolute extensive conservation tolerances.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -28,7 +36,7 @@ pub struct RealGasMassTransferSolve {
     pub donor: GasEnergySolve,
     /// Receiver caloric bracket and specific-energy tolerance.
     pub receiver: GasEnergySolve,
-    /// Absolute mass-balance/representability tolerance [kg].
+    /// Absolute total AND individual-species mass/representability tolerance [kg].
     pub mass_tolerance_kg: f64,
     /// Absolute pair internal-energy tolerance [J].
     pub energy_tolerance_j: f64,
@@ -44,27 +52,6 @@ impl RealGasMassTransferSolve {
         }
         Ok(())
     }
-}
-
-/// Conserved two-volume accounting for one prescribed upstream transfer.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct RealGasMassTransferStep {
-    /// Positive mass moved from donor to receiver [kg].
-    pub transferred_mass_kg: f64,
-    /// Donor upstream specific enthalpy on the original NASA/PR datum [J/kg].
-    pub source_enthalpy_j_kg: f64,
-    /// Signed enthalpy carried into the receiver [J].
-    pub transferred_enthalpy_j: f64,
-    /// Donor extensive internal-energy change [J].
-    pub donor_energy_change_j: f64,
-    /// Receiver extensive internal-energy change [J].
-    pub receiver_energy_change_j: f64,
-    /// Pair energy defect after the transported enthalpy cancels [J].
-    pub energy_residual_j: f64,
-    /// Net mass defect across both endpoints [kg].
-    pub mass_residual_kg: f64,
-    /// Sum of interior iterations in both original energy inversions.
-    pub iterations: usize,
 }
 
 /// Immutable tentative endpoints; callers publish both or neither.
@@ -125,17 +112,23 @@ fn endpoint(
 impl IsochoricRealGasParcel {
     /// Transfer a prescribed positive mass to another fixed-volume real-gas parcel.
     ///
-    /// The two parcels must use identical frozen composition and PR/material
-    /// source models. Therefore mass transfer changes density and energy but not
-    /// species fractions; composition-changing real-gas mixing requires a
-    /// separate EOS/source owner and is deliberately refused here.
+    /// Every transported species keeps its original NASA, transport, critical
+    /// properties and pack bindings. Shared source laws and known pair entries
+    /// must agree exactly; a pair absent from BOTH catalogs is refused, including
+    /// when each separate catalog uses zero interactions. No missing cross-pair
+    /// coefficient is guessed. The receiver combines extensive species amounts.
     ///
     /// The donor loses `dm*h_d`; the receiver gains the same quantity. The
     /// energy solves are written in reference-safe differences:
     /// donor `Delta u = -(dm/m1) p_d/rho_d`, while the receiver uses
-    /// `(dm/m1)[u_d-u_r+p_d/rho_d]`, with `u_d-u_r` evaluated directly by
-    /// the original NASA/PR increment law. Large formation-energy constants
-    /// therefore do not contaminate the nonlinear target.
+    /// `(dm/m1)[u_d-u_r+p_d/rho_d]` for identical models. Changing composition
+    /// uses the new mixture at receiver T0 and final density as the energy anchor.
+    /// Its ideal species datums cancel by inventory before arithmetic; original
+    /// NASA temperature increments and all three PR departure energies remain.
+    /// Incoming species and the new mixture must support this common anchor and
+    /// the caloric bracket. Large formation constants do not enter the root.
+    /// Actual species-inventory roundoff has a separate absolute mass budget;
+    /// the pair residual does not subtract enormous displayed energy reports.
     ///
     /// Zero mass is exact identity. Nonzero transfer never mutates either input;
     /// source refusal, an unsupported homogeneous branch, cancellation or failed
@@ -154,11 +147,6 @@ impl IsochoricRealGasParcel {
                 "finite nonnegative real-gas transfer smaller than donor inventory required",
             ));
         }
-        if self.model != receiver.model {
-            return Err(GasEnergyError::Invalid(
-                "real-gas mass transfer requires identical frozen composition and PR/material sources",
-            ));
-        }
         let source_h = self.state.specific_enthalpy_j_kg();
         if mass_kg == 0.0 {
             return Ok(RealGasMassTransferCandidate {
@@ -172,6 +160,8 @@ impl IsochoricRealGasParcel {
                     receiver_energy_change_j: 0.0,
                     energy_residual_j: 0.0,
                     mass_residual_kg: 0.0,
+                    maximum_species_mass_residual_kg: 0.0,
+                    species: Vec::new(),
                     iterations: 0,
                 },
             });
@@ -197,17 +187,12 @@ impl IsochoricRealGasParcel {
             ));
         }
 
+        let mixed = if self.model == receiver.model { None } else {
+            Some(mixing::receiver_model(self, receiver, mass_kg, receiver_mass)?)
+        };
         let flow_work_j_kg = self.state.pressure_pa() / self.density_kg_m3;
         let donor_change_j_kg = -(mass_kg / donor_mass) * flow_work_j_kg;
-        let donor_to_receiver_u = self.model.specific_internal_energy_change_between_densities(
-            receiver.density_kg_m3,
-            receiver.state.temperature_k(),
-            self.density_kg_m3,
-            self.state.temperature_k(),
-        )?;
-        let receiver_change_j_kg =
-            (mass_kg / receiver_mass) * (donor_to_receiver_u + flow_work_j_kg);
-        if ![flow_work_j_kg, donor_change_j_kg, donor_to_receiver_u, receiver_change_j_kg]
+        if ![flow_work_j_kg, donor_change_j_kg]
             .into_iter().all(f64::is_finite)
         {
             return Err(GasEnergyError::Invalid(
@@ -218,8 +203,25 @@ impl IsochoricRealGasParcel {
         let (donor, donor_residual, donor_iterations) = endpoint(
             self, donor_mass, donor_change_j_kg, controls.donor, &mut cancelled,
         )?;
-        let (receiver, receiver_residual, receiver_iterations) = endpoint(
-            receiver, receiver_mass, receiver_change_j_kg, controls.receiver, &mut cancelled,
+        let old_receiver = receiver;
+        let (receiver, receiver_residual, receiver_iterations) = if let Some(model) = mixed {
+            mixing::receiver_endpoint(self, old_receiver, model, receiver_mass, mass_kg,
+                controls.receiver, &mut cancelled)?
+        } else {
+            // Preserve the original identical-model arithmetic and solve.
+            let donor_to_receiver_u = self.model.specific_internal_energy_change_between_densities(
+                receiver.density_kg_m3, receiver.state.temperature_k(),
+                self.density_kg_m3, self.state.temperature_k(),
+            )?;
+            let receiver_change_j_kg =
+                (mass_kg / receiver_mass) * (donor_to_receiver_u + flow_work_j_kg);
+            if !donor_to_receiver_u.is_finite() || !receiver_change_j_kg.is_finite() {
+                return Err(GasEnergyError::Invalid("real-gas receiving enthalpy target is unrepresentable"));
+            }
+            endpoint(receiver, receiver_mass, receiver_change_j_kg, controls.receiver, &mut cancelled)?
+        };
+        let (species, maximum_species_mass_residual_kg) = mixing::species_balance(
+            self, old_receiver, &donor, &receiver, mass_kg,
         )?;
         let transferred_enthalpy_j = mass_kg * source_h;
         let donor_energy_change_j =
@@ -229,13 +231,14 @@ impl IsochoricRealGasParcel {
         let energy_residual_j =
             donor_mass * donor_residual + receiver_mass * receiver_residual;
         let mass_residual_kg =
-            (donor.mass_kg - self.mass_kg) + (receiver.mass_kg - receiver_mass + mass_kg);
+            (donor.mass_kg - self.mass_kg) + (receiver.mass_kg - old_receiver.mass_kg);
         if ![
             transferred_enthalpy_j, donor_energy_change_j, receiver_energy_change_j,
             energy_residual_j, mass_residual_kg,
         ].into_iter().all(f64::is_finite)
             || energy_residual_j.abs() > controls.energy_tolerance_j
             || mass_residual_kg.abs() > controls.mass_tolerance_kg
+            || maximum_species_mass_residual_kg > controls.mass_tolerance_kg
         {
             return Err(GasEnergyError::Invalid(
                 "real-gas paired transfer did not close mass and energy",
@@ -253,6 +256,8 @@ impl IsochoricRealGasParcel {
                 receiver_energy_change_j,
                 energy_residual_j,
                 mass_residual_kg,
+                maximum_species_mass_residual_kg,
+                species,
                 iterations: donor_iterations + receiver_iterations,
             },
         })

@@ -178,8 +178,10 @@ impl GasPiston<IsochoricRealGasParcel> {
     ///
     /// This remains a first-order transfer-then-motion split. The nozzle is a
     /// quasi-steady converging restriction and both gas volumes are homogeneous.
-    /// No jet thrust, moving reservoir wall, phase equilibrium or composition
-    /// change is inferred. Refine physical time for split accuracy.
+    /// Compatible mixtures exchange their actual species through the original
+    /// transfer owner; all PR pair interactions must already be supplied.
+    /// No jet thrust, moving reservoir wall or phase equilibrium is inferred.
+    /// Refine physical time for split accuracy.
     #[allow(clippy::too_many_arguments)]
     pub fn step_with_real_gas_nozzle(
         &mut self,

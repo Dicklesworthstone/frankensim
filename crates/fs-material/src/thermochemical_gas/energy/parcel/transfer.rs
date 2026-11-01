@@ -118,7 +118,7 @@ fn mass_fractions(model: &ThermochemicalGasModel) -> Result<Composition, GasEner
     let masses: Vec<_> = model.thermodynamics().components().iter().map(|s| s.molar_mass()).collect();
     model.thermodynamics().mole_composition().to_mass_fractions(&masses).map_err(source_error)
 }
-fn inventory(model: &ThermochemicalGasModel, mass: f64) -> Result<BTreeMap<SpeciesId, f64>, GasEnergyError> {
+pub(in crate::thermochemical_gas) fn inventory(model: &ThermochemicalGasModel, mass: f64) -> Result<BTreeMap<SpeciesId, f64>, GasEnergyError> {
     model.thermodynamics().components().iter().zip(mass_fractions(model)?.fractions())
         .map(|(species, fraction)| {
             let value = mass * fraction;
@@ -132,7 +132,7 @@ fn water(model: &ThermochemicalGasModel) -> Option<SpeciesId> {
 
 // Each portion is an extensive mass with its ORIGINAL source model. Both the
 // pair and multiport paths use this single species/transport/pack join.
-fn mixed_model_from_portions(
+pub(in crate::thermochemical_gas) fn mixed_model_from_portions(
     portions: &[(&ThermochemicalGasModel, f64)], total_mass: f64,
 ) -> Result<ThermochemicalGasModel, GasEnergyError> {
     if portions.is_empty() || !positive(total_mass)

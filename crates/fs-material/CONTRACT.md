@@ -7028,6 +7028,37 @@ continuous single-phase path through the intervening temperatures. Focused
 regressions cover active-subset mapping, source substitution, branch mismatch
 and original property-domain refusal.
 
+## Conservative real-gas mixture transfer
+
+`IsochoricRealGasParcel::transfer_mass_to` transports each upstream species and
+its enthalpy between fixed volumes. Compatible mixtures may differ in fractions
+or active species. The original ideal source join retains NASA, transport,
+water and pack bindings; original PR critical properties and directed pair
+coefficients must agree wherever shared. Every pair in the resulting catalog
+must be present in an original model. Separate zero-interaction pure-species
+catalogs do not supply a missing cross-species coefficient.
+
+The receiver rebuilds its native mixture from actual extensive inventories and
+reconstructs density, temperature, pressure, calorics, acoustics and transport.
+At the new mixture's final density and old receiver temperature, conserved ideal
+species reference energies cancel analytically. Donor sensible-energy change,
+upstream p/rho and all original PR departure energies remain. The existing
+density/energy increment solver owns inversion; no second EOS or root is added.
+The identical-model path preserves its original numerical arithmetic.
+
+The canonical `GasMassTransferStep`, also named `RealGasMassTransferStep`, reports
+each species flux and its maximum actual inventory residual. Total mass, donor
+withdrawal, receiver gain, pair species conservation and energy each close to
+their declared tolerances. Existing nozzle and piston consumers inherit this
+composition support. Source/domain refusal, exhausted work and cancellation
+publish neither endpoint. This remains a homogeneous first-order transfer,
+without equilibrium flash, jet momentum or an inferred mixing-entropy account.
+
+Focused regressions compare an independent 80-digit dense-mixture reference,
+continue native pressure work after mixing, shift separate species formation
+datums by order 1e24 J/kg, introduce a species with known pair data, and refuse
+missing/conflicting sources and unsupported or unfinished endpoint solves.
+
 ## Conservative real-gas heating at fixed mass and volume
 
 `thermochemical_gas::nonideal::energy` reconstructs a complete source-bound

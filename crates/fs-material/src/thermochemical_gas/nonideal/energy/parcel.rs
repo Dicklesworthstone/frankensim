@@ -11,7 +11,7 @@ mod volume;
 
 /// Simultaneous heat and volume updates with source-backed midpoint pressure work.
 pub mod midpoint;
-/// Conservative fixed-volume mass/enthalpy transfer on one frozen-composition PR source.
+/// Conservative species/enthalpy transfer between compatible original PR sources.
 pub mod transfer;
 
 /// Conserved-mass volume changes through the original real-gas energy/entropy laws.

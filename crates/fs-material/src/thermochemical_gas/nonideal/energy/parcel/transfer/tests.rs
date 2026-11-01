@@ -8,6 +8,8 @@ use fs_qty::{Pressure, Temperature};
 use fs_thermochem::SpeciesId;
 use fs_thermochem::eos::peng_robinson::PengRobinsonPhaseV1;
 
+mod mixing;
+
 fn bound() -> ThermochemicalPengRobinsonModel {
     ThermochemicalPengRobinsonModel::new(
         model(vec![0.75, 0.25], 0.001),

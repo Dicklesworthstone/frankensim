@@ -95,8 +95,9 @@ impl GasPiston<IsochoricRealGasParcel> {
     /// Flow uses accepted initial pressures; subsequent thermal trials share
     /// the one transferred chamber and resolve its actual energy midpoint.
     /// Both stages span `input.duration_s`; temporal refinement is required.
-    /// The original PR flow owner admits identical frozen composition and
-    /// material sources, a homogeneous stable branch, and its donor/sonic bounds.
+    /// The original PR flow owner admits compatible species sources with known
+    /// pair interactions, a homogeneous stable branch, and its donor/sonic bounds.
+    /// The receiving mixture retains the actual transported species inventory.
     ///
     /// `input.heat_j` and `body.internal_heat_j` are external sources only.
     /// Neither includes transported enthalpy or reciprocal wall heat. The gas
