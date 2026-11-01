@@ -141,6 +141,13 @@ impl FiniteOverstressJ2 {
         state: &FiniteJ2State,
         yield_tolerance_pa: f64,
     ) -> Result<(), FiniteJ2Error> {
+        if self.backbone.maximum_creep_alpha.is_some() {
+            // An inspection backbone from the combined law still requires
+            // equilibrium plastic yield; wrapping it cannot relax that gate.
+            return self
+                .backbone
+                .validate_committed(f, state, yield_tolerance_pa);
+        }
         if !yield_tolerance_pa.is_finite() || yield_tolerance_pa < 0.0 {
             return Err(FiniteJ2Error::Parameters(
                 "yield tolerance must be finite and nonnegative",
@@ -215,6 +222,34 @@ impl FiniteOverstressJ2 {
             ));
         }
         Ok(stress)
+    }
+
+    /// Logarithm of the explicit Norton increment evaluated at positive stress.
+    /// Infinite results may classify the coupled branch without forming a power.
+    pub(super) fn log_increment_at_stress(&self, stress: f64) -> f64 {
+        let log_scale = det::ln(self.parameters.stress_scale_pa);
+        log_scale - self.log_viscosity_over_duration
+            + self.parameters.exponent * (det::ln(stress) - log_scale)
+    }
+
+    pub(super) fn increment_at_stress(&self, stress: f64) -> Result<f64, FiniteJ2Error> {
+        let increment = if self.parameters.exponent == 1.0 {
+            stress / (self.parameters.viscosity_pa_s / self.duration_s)
+        } else {
+            det::exp(self.log_increment_at_stress(stress))
+        };
+        if !increment.is_finite() || increment <= 0.0 {
+            return Err(FiniteJ2Error::Numerical(
+                "positive Norton increment at yield is not representable",
+            ));
+        }
+        let check = self.endpoint_overstress_pa(increment)?;
+        if (check - stress).abs() > 128.0 * f64::EPSILON * stress {
+            return Err(FiniteJ2Error::Numerical(
+                "Norton increment violates its physical rate equation",
+            ));
+        }
+        Ok(increment)
     }
 
     pub(super) fn solve(&self, excess: f64, a: f64) -> Result<FlowReturn, FiniteJ2Error> {

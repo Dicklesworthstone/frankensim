@@ -19,6 +19,8 @@
 use core::fmt;
 use fs_math::det;
 
+/// Simultaneous Norton creep and energetic J2 yielding with separate accumulations.
+pub mod combined;
 /// Explicit threshold-free Norton creep on the shared finite return owner.
 pub mod creep;
 /// Explicit-time Perzyna kinetics on this same finite return and tangent owner.
@@ -63,6 +65,7 @@ pub struct FiniteJ2Limits {
 pub struct FiniteJ2 {
     parameters: FiniteJ2Parameters,
     limits: FiniteJ2Limits,
+    maximum_creep_alpha: Option<f64>,
 }
 
 /// Complete native material-point history, with no hidden deformation reset.
@@ -73,6 +76,10 @@ pub struct FiniteJ2State {
     pub inverse_plastic_cauchy_green: [f64; 6],
     /// Accumulated equivalent plastic strain; nonnegative and nondecreasing.
     pub alpha: f64,
+    /// Separate accumulated equivalent creep for the explicitly selected combined
+    /// law. Other finite laws require zero here; their original alpha convention
+    /// remains unchanged. The shared metric contains both inelastic mechanisms.
+    pub creep_alpha: f64,
 }
 
 /// An immutable candidate: the caller commits `state` only after step acceptance.
@@ -99,10 +106,21 @@ pub struct FiniteJ2Response {
     pub plastic_dissipation_j_m3: f64,
     /// Nonnegative increment of accumulated equivalent plastic strain.
     pub plastic_increment: f64,
+    /// Physical Norton heat in the combined law, separate from plastic yield heat.
+    pub creep_dissipation_j_m3: f64,
+    /// Nonnegative increment of the combined law's separate creep accumulation.
+    pub creep_increment: f64,
     /// Returned `sqrt(3/2) ||dev(tau)||`, independent of volumetric stress.
     pub equivalent_kirchhoff_pa: f64,
     /// Current-to-reference volume ratio `det(F)`.
     pub jacobian: f64,
+}
+
+impl FiniteJ2Response {
+    /// Complete physical inelastic heat, excluding stored energy and numerical loss.
+    pub fn inelastic_dissipation_j_m3(&self) -> f64 {
+        self.plastic_dissipation_j_m3 + self.creep_dissipation_j_m3
+    }
 }
 
 /// Allows a strict source-resolved owner to expose the same immutable native law.
@@ -240,7 +258,31 @@ impl FiniteJ2 {
                 "yield radius must remain representable throughout the accumulated-strain domain",
             ));
         }
-        Ok(Self { parameters, limits })
+        Ok(Self {
+            parameters,
+            limits,
+            maximum_creep_alpha: None,
+        })
+    }
+
+    /// Enable the explicitly bounded second accumulation for simultaneous creep
+    /// and positive-yield plasticity. Reapplying the same immutable bound is safe.
+    pub(super) fn with_creep_history_limit(mut self, maximum: f64) -> Result<Self, FiniteJ2Error> {
+        if !maximum.is_finite() || maximum <= 0.0 || self.parameters.yield_stress_pa <= 0.0 {
+            return Err(FiniteJ2Error::Parameters(
+                "combined Norton/J2 requires positive yield and a positive finite creep-history bound",
+            ));
+        }
+        if self
+            .maximum_creep_alpha
+            .is_some_and(|existing| existing != maximum)
+        {
+            return Err(FiniteJ2Error::Parameters(
+                "combined creep-history bound cannot be silently replaced",
+            ));
+        }
+        self.maximum_creep_alpha = Some(maximum);
+        Ok(self)
     }
 
     /// Original immutable constitutive coefficients.
@@ -261,28 +303,54 @@ impl FiniteJ2 {
         FiniteJ2State {
             inverse_plastic_cauchy_green: IDENTITY6,
             alpha: 0.0,
+            creep_alpha: 0.0,
         }
     }
 
-    /// Validate SPD, plastic incompressibility, applicability and reachability.
-    /// The history-distance bound follows from the triangle inequality of the
-    /// congruence-invariant SPD metric: each exponential flow increment has
-    /// distance `sqrt(3/2) dgamma` in the half-log convention.
-    pub fn validate_history(&self, state: &FiniteJ2State) -> Result<(), FiniteJ2Error> {
-        if !state.alpha.is_finite() || state.alpha < 0.0 {
-            return Err(FiniteJ2Error::State("alpha must be finite and nonnegative"));
+    /// Check each mechanism's explicit bound before expensive metric work.
+    fn validate_accumulations(&self, state: &FiniteJ2State) -> Result<f64, FiniteJ2Error> {
+        if !state.alpha.is_finite()
+            || state.alpha < 0.0
+            || !state.creep_alpha.is_finite()
+            || state.creep_alpha < 0.0
+        {
+            return Err(FiniteJ2Error::State(
+                "plastic and creep accumulations must be finite and nonnegative",
+            ));
         }
         upper_bound(
             "accumulated plastic strain",
             state.alpha,
             self.limits.maximum_accumulated_plastic_strain,
         )?;
+        if let Some(maximum) = self.maximum_creep_alpha {
+            upper_bound("accumulated creep strain", state.creep_alpha, maximum)?;
+        } else if state.creep_alpha != 0.0 {
+            return Err(FiniteJ2Error::State(
+                "separate creep history requires the explicit combined law",
+            ));
+        }
+        let total = state.alpha + state.creep_alpha;
+        if !total.is_finite() {
+            return Err(FiniteJ2Error::State(
+                "combined accumulated flow must be representable",
+            ));
+        }
+        Ok(total)
+    }
+
+    /// Validate SPD, inelastic incompressibility, applicability and reachability.
+    /// The history-distance bound follows from the triangle inequality of the
+    /// congruence-invariant SPD metric: each exponential flow increment has
+    /// distance `sqrt(3/2) (dp+dc)` in the half-log convention.
+    pub fn validate_history(&self, state: &FiniteJ2State) -> Result<(), FiniteJ2Error> {
+        let total = self.validate_accumulations(state)?;
         // The exact identity needs neither a spectral decomposition nor a
         // reachability test, including a closed plastic path with alpha > 0.
         if state.inverse_plastic_cauchy_green == IDENTITY6 {
             return Ok(());
         }
-        if state.alpha == 0.0 {
+        if total == 0.0 {
             return Err(FiniteJ2Error::State(
                 "zero accumulated flow requires the virgin plastic metric",
             ));
@@ -300,7 +368,7 @@ impl FiniteJ2 {
             magnitude,
             self.limits.maximum_plastic_log_strain,
         )?;
-        if magnitude > det::sqrt(1.5) * state.alpha + ROUND_OFF * (1.0 + magnitude + state.alpha) {
+        if magnitude > det::sqrt(1.5) * total + ROUND_OFF * (1.0 + magnitude + total) {
             return Err(FiniteJ2Error::State(
                 "plastic metric is unreachable from the retained accumulated flow",
             ));
@@ -374,6 +442,8 @@ impl FiniteJ2 {
             stored_energy_j_m3: returned.stored,
             plastic_dissipation_j_m3: returned.dissipation,
             plastic_increment: returned.dgamma,
+            creep_dissipation_j_m3: returned.creep_dissipation,
+            creep_increment: returned.dcreep,
             equivalent_kirchhoff_pa: returned.scale * returned.q_trial,
             jacobian: returned.trial.jacobian,
         })
@@ -401,6 +471,11 @@ impl FiniteJ2 {
         old: &FiniteJ2State,
         kinetics: Option<&rate::FiniteOverstressJ2>,
     ) -> Result<ReturnMap, FiniteJ2Error> {
+        if self.maximum_creep_alpha.is_some() {
+            return Err(FiniteJ2Error::Parameters(
+                "combined creep history requires its simultaneous Norton/J2 return",
+            ));
+        }
         let trial = self.elastic_endpoint(f, old)?;
         let p = &self.parameters;
         let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
@@ -469,8 +544,80 @@ impl FiniteJ2 {
         } else {
             1.0
         };
+        let yield_dissipation = p.yield_stress_pa * dgamma;
+        let (dissipation, rate_potential) = if let Some(flow) = &flow {
+            let viscous_work = flow.overstress_pa * dgamma;
+            (
+                yield_dissipation + viscous_work,
+                flow.potential_fraction * viscous_work,
+            )
+        } else {
+            (yield_dissipation, 0.0)
+        };
+        let tangent_correction = if !plastic {
+            0.0
+        } else if let Some(flow) = &flow {
+            -(3.0 * p.shear_modulus_pa / (denominator + flow.tangent_modulus_pa))
+                * ((radius_old + flow.transverse_overstress_pa) / q_trial)
+        } else {
+            -(3.0 * p.shear_modulus_pa / denominator) * (radius_old / q_trial)
+        };
+        self.finish_return(
+            f,
+            old,
+            trial,
+            q_trial,
+            RadialReturn {
+                plastic_increment: dgamma,
+                creep_increment: 0.0,
+                scale,
+                tangent_correction,
+                plastic_dissipation: dissipation,
+                creep_dissipation: 0.0,
+                primary_potential: yield_dissipation,
+                rate_potential,
+            },
+        )
+    }
+
+    /// One tensor/history/energy completion for every admitted radial flow law.
+    fn finish_return(
+        &self,
+        f: &[f64; 9],
+        old: &FiniteJ2State,
+        trial: ElasticEndpoint,
+        q_trial: f64,
+        radial: RadialReturn,
+    ) -> Result<ReturnMap, FiniteJ2Error> {
+        let p = &self.parameters;
+        let alpha = old.alpha + radial.plastic_increment;
+        let creep_alpha = old.creep_alpha + radial.creep_increment;
+        let total_increment = radial.plastic_increment + radial.creep_increment;
+        if !total_increment.is_finite()
+            || total_increment < 0.0
+            || radial.plastic_increment < 0.0
+            || radial.creep_increment < 0.0
+            || (radial.plastic_increment > 0.0 && alpha == old.alpha)
+            || (radial.creep_increment > 0.0 && creep_alpha == old.creep_alpha)
+        {
+            return Err(FiniteJ2Error::Numerical(
+                "inelastic increments are outside retained-history resolution",
+            ));
+        }
+        self.validate_accumulations(&FiniteJ2State {
+            inverse_plastic_cauchy_green: old.inverse_plastic_cauchy_green,
+            alpha,
+            creep_alpha,
+        })?;
+        let scale = radial.scale;
+        if !scale.is_finite() || scale < 0.0 || !radial.tangent_correction.is_finite() {
+            return Err(FiniteJ2Error::Numerical(
+                "radial stress or tangent scale is not representable",
+            ));
+        }
         let returned_deviator = trial.deviator.map(|x| scale * x);
         self.check_elastic_domain(trial.log_j, &returned_deviator)?;
+        let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
         let mut tau = trial_stress.map(|x| scale * x);
         for i in [0, 4, 8] {
             tau[i] += p.bulk_modulus_pa * trial.log_j;
@@ -478,7 +625,7 @@ impl FiniteJ2 {
         let inverse = inverse(f, trial.jacobian)?;
         let inverse_transpose = transpose(&inverse);
         let first_piola = multiply(&tau, &inverse_transpose);
-        let state = if plastic {
+        let state = if total_increment > 0.0 {
             let mean = trial.spectrum.log_values.iter().sum::<f64>() / 6.0;
             let elastic_roots = trial
                 .spectrum
@@ -494,31 +641,26 @@ impl FiniteJ2 {
             let candidate = FiniteJ2State {
                 inverse_plastic_cauchy_green: pack(&cp_inv),
                 alpha,
+                creep_alpha,
             };
             self.validate_history(&candidate)?;
             candidate
         } else {
-            // Elastic and rigid increments preserve the accepted metric bit for
-            // bit; unnecessary spectral reconstruction would drift the history.
             old.clone()
         };
         let stored = self.energy(trial.log_j, &returned_deviator, alpha)?;
-        let yield_dissipation = p.yield_stress_pa * dgamma;
-        let (dissipation, potential) = if let Some(flow) = &flow {
-            let viscous_work = flow.overstress_pa * dgamma;
-            (
-                yield_dissipation + viscous_work,
-                stored + yield_dissipation + flow.potential_fraction * viscous_work,
-            )
-        } else {
-            (yield_dissipation, stored + yield_dissipation)
-        };
-        // Positive stored/rate contributions avoid cancellation after large
-        // plastic steps; physical viscous work remains separate from its integral.
+        let potential = stored + radial.primary_potential + radial.rate_potential;
+        let dissipation = radial.plastic_dissipation;
+        let creep_dissipation = radial.creep_dissipation;
         if tau.iter().chain(first_piola.iter()).any(|x| !x.is_finite())
             || !potential.is_finite()
             || !dissipation.is_finite()
-            || (plastic && dissipation == 0.0)
+            || !creep_dissipation.is_finite()
+            || dissipation < 0.0
+            || creep_dissipation < 0.0
+            || !(dissipation + creep_dissipation).is_finite()
+            || (radial.plastic_increment > 0.0 && dissipation == 0.0)
+            || (radial.creep_increment > 0.0 && creep_dissipation == 0.0)
         {
             return Err(FiniteJ2Error::Numerical(
                 "stress, potential or physical dissipation is not representable",
@@ -532,11 +674,13 @@ impl FiniteJ2 {
             inverse_transpose,
             scale,
             q_trial,
-            dgamma,
+            dgamma: radial.plastic_increment,
+            dcreep: radial.creep_increment,
             stored,
             dissipation,
+            creep_dissipation,
             potential,
-            flow,
+            tangent_correction: radial.tangent_correction,
         })
     }
 
@@ -552,9 +696,6 @@ impl FiniteJ2 {
         let first_piola = &returned.first_piola;
         let scale = returned.scale;
         let q_trial = returned.q_trial;
-        let plastic = returned.dgamma > 0.0;
-        let radius_old = self.yield_radius(old.alpha);
-        let denominator = 3.0 * p.shear_modulus_pa + p.hardening_modulus_pa;
         let trial_stress = trial.deviator.map(|x| 2.0 * p.shear_modulus_pa * x);
         let cp_inv = expand(&old.inverse_plastic_cauchy_green);
         let f_cp = multiply(f, &cp_inv);
@@ -571,20 +712,12 @@ impl FiniteJ2 {
             let dlog = trial.spectrum.frechet(&db, &log_derivative);
             let dtrial = deviator(&dlog).map(|x| p.shear_modulus_pa * x);
             let mut dtau = dtrial.map(|x| scale * x);
-            if plastic {
-                // n = s_trial/q avoids q² overflow and a norm derivative at q=0.
+            if returned.tangent_correction != 0.0 {
+                // The scalar owner supplies dq_return/dq_trial - q_return/q_trial.
+                // Reuse the exact same tensor/logarithm derivative for every flow.
                 let direction = trial_stress.map(|x| x / q_trial);
                 let dq = 1.5 * dot(&direction, &dtrial);
-                let coefficient = if let Some(flow) = &returned.flow {
-                    // Differentiate the implicit scalar flow, not its secant
-                    // approximation. The stable positive numerator avoids
-                    // cancellation in 1/(A+f') - dgamma/q near perfect flow.
-                    -(3.0 * p.shear_modulus_pa / (denominator + flow.tangent_modulus_pa))
-                        * ((radius_old + flow.transverse_overstress_pa) / q_trial)
-                        * dq
-                } else {
-                    -(3.0 * p.shear_modulus_pa / denominator) * (radius_old / q_trial) * dq
-                };
+                let coefficient = returned.tangent_correction * dq;
                 for i in 0..9 {
                     dtau[i] += coefficient * direction[i];
                 }
@@ -680,10 +813,24 @@ struct ReturnMap {
     scale: f64,
     q_trial: f64,
     dgamma: f64,
+    dcreep: f64,
     stored: f64,
     dissipation: f64,
+    creep_dissipation: f64,
     potential: f64,
-    flow: Option<rate::FlowReturn>,
+    tangent_correction: f64,
+}
+
+/// Scalar physics supplied to the common tensor and history completion.
+struct RadialReturn {
+    plastic_increment: f64,
+    creep_increment: f64,
+    scale: f64,
+    tangent_correction: f64,
+    plastic_dissipation: f64,
+    creep_dissipation: f64,
+    primary_potential: f64,
+    rate_potential: f64,
 }
 
 /// Fixed 3-by-3 data; only the existing native eigensolver owns a small workspace.

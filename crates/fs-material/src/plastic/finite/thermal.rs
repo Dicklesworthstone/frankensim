@@ -397,6 +397,7 @@ impl AffineThermalFiniteJ2 {
         FiniteJ2State {
             inverse_plastic_cauchy_green: super::IDENTITY6,
             alpha: 0.0,
+            creep_alpha: 0.0,
         }
     }
     /// Add this lower bound to the ORIGINAL-volume caloric capacity. The
