@@ -110,6 +110,27 @@ pub trait ThermoplasticSourceFamily<'a>: Clone + fmt::Debug {
         ThermoplasticFamilyError,
     >;
 
+    /// The same native work proposal at explicit temperatures for the original
+    /// uniform feedback loop. It preserves that loop's temperature arithmetic
+    /// without a caloric inverse, extra time step or alternate return map.
+    #[allow(clippy::too_many_arguments)]
+    fn checked_temperature_increment(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        old_strain: &Voigt,
+        old: &<Self::Material as SmallStrainLaw>::State,
+        new_strain: &Voigt,
+        tolerances: EnergyTolerances,
+        duration_s: f64,
+    ) -> Result<
+        (
+            ResolvedJ2Plasticity,
+            ThermoplasticFamilyIncrement<<Self::Material as SmallStrainLaw>::State>,
+        ),
+        ThermoplasticFamilyError,
+    >;
+
     fn validate_accepted(
         &self,
         h: f64,
@@ -171,6 +192,42 @@ impl<'a> ThermoplasticSourceFamily<'a> for ThermoplasticSource<'a> {
         let mechanical = self.mechanical_strain(phase.temperature_k(), total_strain)?;
         self.validate_committed_history(&material, &mechanical, state, yield_tolerance_pa)?;
         Ok(())
+    }
+
+    fn checked_temperature_increment(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        old_strain: &Voigt,
+        old: &J2State,
+        new_strain: &Voigt,
+        tolerances: EnergyTolerances,
+        duration_s: f64,
+    ) -> Result<
+        (ResolvedJ2Plasticity, ThermoplasticFamilyIncrement<J2State>),
+        ThermoplasticFamilyError,
+    > {
+        if !super::positive(duration_s) {
+            return Err(
+                FeedbackError::Invalid("positive physical constitutive interval required").into(),
+            );
+        }
+        let (source, thermal) = self.increment_at_temperature::<core::convert::Infallible>(
+            old_temperature_k,
+            temperature_k,
+            old_strain,
+            old,
+            new_strain,
+            tolerances,
+            Some(duration_s),
+        )?;
+        Ok((
+            source,
+            ThermoplasticFamilyIncrement {
+                state: thermal.mechanical.state.clone(),
+                thermal,
+            },
+        ))
     }
 }
 
@@ -248,6 +305,45 @@ impl<'a, const N: usize> ThermoplasticSourceFamily<'a> for ThermalChabocheSource
             .into());
         }
         Ok(())
+    }
+
+    fn checked_temperature_increment(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        old_strain: &Voigt,
+        old: &ChabocheState<N>,
+        new_strain: &Voigt,
+        tolerances: EnergyTolerances,
+        duration_s: f64,
+    ) -> Result<
+        (
+            ResolvedJ2Plasticity,
+            ThermoplasticFamilyIncrement<ChabocheState<N>>,
+        ),
+        ThermoplasticFamilyError,
+    > {
+        if !super::positive(duration_s) {
+            return Err(
+                FeedbackError::Invalid("positive physical constitutive interval required").into(),
+            );
+        }
+        let (source, increment) = self.increment_at_temperature(
+            old_temperature_k,
+            temperature_k,
+            old_strain,
+            old,
+            new_strain,
+            tolerances,
+            Some(duration_s),
+        )?;
+        Ok((
+            source,
+            ThermoplasticFamilyIncrement {
+                state: increment.state,
+                thermal: increment.thermal,
+            },
+        ))
     }
 }
 

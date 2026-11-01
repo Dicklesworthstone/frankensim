@@ -17,6 +17,9 @@
 //! physical interval in the same radial return, tangent and work account.
 //! Without that explicit source selection the original rate-independent law
 //! is unchanged. A duration-free response refuses when overstress is selected.
+//! Explicit Chaboche branches retain their complete native history on this same
+//! uniform feedback loop. Their thermal transport, storage, entropy and recovery
+//! heat share the original source-family account used by spatial solid owners.
 //! Phase/volume work, general nonlinear coefficient laws and finite deformation
 //! remain outside this reduction.
 //!
@@ -34,6 +37,7 @@ use voce::VoceSelection;
 pub mod chaboche;
 /// Native history families sharing the original thermal and energy owners.
 pub mod family;
+use family::{ThermoplasticFamilyError, ThermoplasticFamilyIncrement, ThermoplasticSourceFamily};
 
 use super::J2State;
 use super::energy::{EnergyError, EnergyIncrement, EnergyTolerances};
@@ -108,6 +112,8 @@ pub enum FeedbackError<E = Infallible> {
         reason: String,
     },
     Mechanical(EnergyError),
+    /// Complete native cyclic-history or nonlinear branch-return refusal.
+    Cyclic(crate::plastic::chaboche::ChabocheError),
     Caloric(PhaseStateError),
     Transport(E),
     Invalid(&'static str),
@@ -128,6 +134,7 @@ impl<E: fmt::Display> fmt::Display for FeedbackError<E> {
                 write!(f, "thermoplastic source {property}: {reason}")
             }
             Self::Mechanical(e) => write!(f, "thermoplastic mechanical update: {e}"),
+            Self::Cyclic(e) => write!(f, "thermoplastic cyclic update: {e}"),
             Self::Caloric(e) => write!(f, "thermoplastic caloric update: {e}"),
             Self::Transport(e) => write!(f, "thermoplastic transport: {e}"),
             Self::Invalid(s) => write!(f, "thermoplastic feedback: {s}"),
@@ -186,27 +193,30 @@ enum OverstressSelection { Linear, PowerLaw }
 /// Transport owns the lumped/Biot admission; uniform internal heating and fixed
 /// reference geometry remain assumptions of this small-strain specimen model.
 #[derive(Clone, Debug)]
-pub struct CaloricPoint<'a> {
-    binding: ThermoplasticSource<'a>,
+pub struct CaloricPoint<'a, S: ThermoplasticSourceFamily<'a> = ThermoplasticSource<'a>> {
+    binding: S,
     source: ResolvedJ2Plasticity,
     strain: Voigt,
     stress_pa: Voigt,
-    history: J2State,
+    history: <S::Material as SmallStrainLaw>::State,
     state: EquilibriumPhaseState,
     mass_kg: f64,
     volume_m3: f64,
     surface_area_m2: f64,
     time_s: f64,
+    source_lifetime: core::marker::PhantomData<&'a ()>,
 }
 
 /// Complete candidate and the actual transport result. The caller accepts the
 /// returned specimen and any finite-reservoir report together.
 #[derive(Debug)]
-pub struct FeedbackStep<'a, R> {
+pub struct FeedbackStep<'a, R, S: ThermoplasticSourceFamily<'a> = ThermoplasticSource<'a>> {
     /// Immutable specimen candidate, including the accepted native history.
-    pub next: CaloricPoint<'a>,
+    pub next: CaloricPoint<'a, S>,
     /// Native mechanical proposal evaluated at the actual thermal endpoint.
-    /// Its strain argument is total strain minus thermal strain.
+    /// Its strain argument is total strain minus thermal strain. Energy includes
+    /// all selected branches; `state` is the J2 projection. The complete native
+    /// history is retained in `next.history()`.
     pub mechanical: EnergyIncrement,
     /// Original thermal proposal and its concrete report.
     pub transport: UniformEnthalpyStep<R>,
@@ -820,6 +830,7 @@ impl<'a> CaloricPoint<'a> {
             volume_m3,
             surface_area_m2,
             time_s: 0.0,
+            source_lifetime: core::marker::PhantomData,
         })
     }
 
@@ -847,6 +858,49 @@ impl<'a> CaloricPoint<'a> {
         Ok(self)
     }
 
+    /// Select independently sourced cyclic branches before loading or physical
+    /// time advances. Select the Voce backbone and optional kinetic law first.
+    /// Branch order is retained exactly; all original caloric and source owners
+    /// remain attached to the same specimen and finite transport callback.
+    pub fn with_chaboche_branches<const N: usize>(
+        self,
+        selection: MaterialPropertySelection,
+        properties: [crate::plastic::chaboche::source::BackstressProperties; N],
+    ) -> Result<CaloricPoint<'a, chaboche::ThermalChabocheSource<'a, N>>, FeedbackError> {
+        if self.time_s != 0.0
+            || self.strain != [0.0; 6]
+            || self.stress_pa != [0.0; 6]
+            || self.history.alpha != 0.0
+            || self.history.plastic_strain != [0.0; 6]
+        {
+            return Err(FeedbackError::Invalid(
+                "select Chaboche branches before advancing the specimen",
+            ));
+        }
+        let binding = self.binding.with_chaboche_branches(selection, properties)?;
+        let source = binding
+            .base()
+            .resolve_temperature(self.state.temperature_k())?;
+        Ok(CaloricPoint {
+            binding,
+            source,
+            strain: self.strain,
+            stress_pa: self.stress_pa,
+            history: crate::plastic::chaboche::ChabocheState {
+                plastic: self.history,
+                backstress_pa: [[0.0; 6]; N],
+            },
+            state: self.state,
+            mass_kg: self.mass_kg,
+            volume_m3: self.volume_m3,
+            surface_area_m2: self.surface_area_m2,
+            time_s: self.time_s,
+            source_lifetime: core::marker::PhantomData,
+        })
+    }
+}
+
+impl<'a, S: ThermoplasticSourceFamily<'a>> CaloricPoint<'a, S> {
     /// Original complete source snapshot at the accepted temperature.
     #[must_use]
     pub const fn resolved(&self) -> &ResolvedJ2Plasticity {
@@ -862,9 +916,9 @@ impl<'a> CaloricPoint<'a> {
     pub const fn stress_pa(&self) -> &Voigt {
         &self.stress_pa
     }
-    /// Accepted native plastic strain and accumulated history.
+    /// Complete accepted native history, including every selected backstress.
     #[must_use]
-    pub const fn history(&self) -> &J2State {
+    pub const fn history(&self) -> &<S::Material as SmallStrainLaw>::State {
         &self.history
     }
     /// Accepted state from the original caloric curve.
@@ -874,8 +928,8 @@ impl<'a> CaloricPoint<'a> {
     }
     /// Original source-derived Cp/density owner.
     #[must_use]
-    pub const fn caloric_source(&self) -> &'a ResolvedHeatCapacityCurve {
-        self.binding.caloric
+    pub fn caloric_source(&self) -> &'a ResolvedHeatCapacityCurve {
+        self.binding.thermal_source().caloric_source()
     }
     /// Fixed reference mass [kg].
     #[must_use]
@@ -911,7 +965,7 @@ impl<'a> CaloricPoint<'a> {
         config: FeedbackConfig,
         mut transport: impl FnMut(UniformEnthalpyStepInput<'_>) -> Result<UniformEnthalpyStep<R>, E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<FeedbackStep<'a, R>, FeedbackError<E>> {
+    ) -> Result<FeedbackStep<'a, R, S>, FeedbackError<E>> {
         poll(&mut cancelled)?;
         let final_time = self.time_s + duration_s;
         let material_tolerance = config.energy_tolerance_j / self.volume_m3;
@@ -932,15 +986,13 @@ impl<'a> CaloricPoint<'a> {
             ));
         }
         self.binding
-            .validate_committed_history(
-                &self.source,
-                &self
-                    .binding
-                    .mechanical_strain_at(self.state.temperature_k(), &self.strain)?,
+            .validate_accepted(
+                self.state.specific_enthalpy_j_kg(),
+                &self.strain,
                 &self.history,
                 config.yield_tolerance_pa,
             )
-            .map_err(FeedbackError::Mechanical)?;
+            .map_err(family_error)?;
         let tolerances = EnergyTolerances {
             energy_j_m3: material_tolerance,
             yield_pa: config.yield_tolerance_pa,
@@ -950,9 +1002,9 @@ impl<'a> CaloricPoint<'a> {
         for iteration in 1..=config.max_iterations {
             poll(&mut cancelled)?;
             let (_, trial) = self.propose_at(temperature, &strain, tolerances, duration_s)?;
-            let applied_heat_j = product(self.volume_m3, trial.caloric_heat_j_m3())?;
+            let applied_heat_j = product(self.volume_m3, trial.thermal.caloric_heat_j_m3())?;
             let proposal = transport(UniformEnthalpyStepInput {
-                curve: self.binding.caloric.curve(),
+                curve: self.caloric_source().curve(),
                 initial: self.state,
                 mass_kg: self.mass_kg,
                 volume_m3: self.volume_m3,
@@ -963,8 +1015,7 @@ impl<'a> CaloricPoint<'a> {
             .map_err(FeedbackError::Transport)?;
             poll(&mut cancelled)?;
             let checked = self
-                .binding
-                .caloric
+                .caloric_source()
                 .curve()
                 .state_at_specific_enthalpy(proposal.state.specific_enthalpy_j_kg())
                 .map_err(FeedbackError::Caloric)?;
@@ -990,7 +1041,9 @@ impl<'a> CaloricPoint<'a> {
                 ));
             }
             let final_temperature = proposal.state.temperature_k();
-            let (source, increment) = self.propose_at(final_temperature, &strain, tolerances, duration_s)?;
+            let (source, candidate) =
+                self.propose_at(final_temperature, &strain, tolerances, duration_s)?;
+            let increment = candidate.thermal;
             let reversible_heat_j = product(self.volume_m3, increment.reversible_heat_j_m3)?;
             let thermoelastic_storage_change_j =
                 product(self.volume_m3, increment.thermoelastic_storage_change_j_m3)?;
@@ -1028,7 +1081,7 @@ impl<'a> CaloricPoint<'a> {
                 next.source = source;
                 next.strain = strain;
                 next.stress_pa = mechanical.stress_pa;
-                next.history = mechanical.state.clone();
+                next.history = candidate.state;
                 next.state = proposal.state;
                 next.time_s = final_time;
                 return Ok(FeedbackStep {
@@ -1068,16 +1121,58 @@ impl<'a> CaloricPoint<'a> {
         strain: &Voigt,
         tolerances: EnergyTolerances,
         duration_s: f64,
-    ) -> Result<(ResolvedJ2Plasticity, ThermoplasticIncrement), FeedbackError<E>> {
-        self.binding.increment_at_temperature(
-            self.state.temperature_k(),
-            temperature_k,
-            &self.strain,
-            &self.history,
-            strain,
-            tolerances,
-            Some(duration_s),
-        )
+    ) -> Result<
+        (
+            ResolvedJ2Plasticity,
+            ThermoplasticFamilyIncrement<<S::Material as SmallStrainLaw>::State>,
+        ),
+        FeedbackError<E>,
+    > {
+        self.binding
+            .checked_temperature_increment(
+                self.state.temperature_k(),
+                temperature_k,
+                &self.strain,
+                &self.history,
+                strain,
+                tolerances,
+                duration_s,
+            )
+            .map_err(family_error)
+    }
+}
+
+/// Lift source-family failures into the caller's concrete transport error
+/// channel without losing the original constitutive or caloric diagnostics.
+fn family_error<E>(error: ThermoplasticFamilyError) -> FeedbackError<E> {
+    match error {
+        ThermoplasticFamilyError::Energy(error) => FeedbackError::Mechanical(error),
+        ThermoplasticFamilyError::Chaboche(error) => FeedbackError::Cyclic(error),
+        ThermoplasticFamilyError::Thermal(error) => match error {
+            FeedbackError::Source(error) => FeedbackError::Source(error),
+            FeedbackError::Support { property, reason } => {
+                FeedbackError::Support { property, reason }
+            }
+            FeedbackError::Mechanical(error) => FeedbackError::Mechanical(error),
+            FeedbackError::Cyclic(error) => FeedbackError::Cyclic(error),
+            FeedbackError::Caloric(error) => FeedbackError::Caloric(error),
+            FeedbackError::Transport(impossible) => match impossible {},
+            FeedbackError::Invalid(reason) => FeedbackError::Invalid(reason),
+            FeedbackError::Cancelled => FeedbackError::Cancelled,
+            FeedbackError::NotConverged {
+                iterations,
+                temperature_defect_k,
+                heat_defect_j,
+                thermal_residual_j,
+                combined_residual_j,
+            } => FeedbackError::NotConverged {
+                iterations,
+                temperature_defect_k,
+                heat_defect_j,
+                thermal_residual_j,
+                combined_residual_j,
+            },
+        },
     }
 }
 

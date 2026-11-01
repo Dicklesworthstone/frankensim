@@ -323,24 +323,49 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
         new_h_j_kg: f64,
         duration_s: Option<f64>,
     ) -> Result<(EquilibriumPhaseState, ThermalChaboche<N>), FeedbackError> {
-        let (_, previous) = self.base.resolve_enthalpy(old_h_j_kg)?;
-        let (phase, source) = self.base.resolve_enthalpy(new_h_j_kg)?;
+        let old_phase = self
+            .base
+            .caloric
+            .curve()
+            .state_at_specific_enthalpy(old_h_j_kg)
+            .map_err(FeedbackError::Caloric)?;
+        let phase = self
+            .base
+            .caloric
+            .curve()
+            .state_at_specific_enthalpy(new_h_j_kg)
+            .map_err(FeedbackError::Caloric)?;
+        Ok((
+            phase,
+            self.resolve_at_temperatures(
+                old_phase.temperature_k(),
+                phase.temperature_k(),
+                duration_s,
+            )?,
+        ))
+    }
+
+    fn resolve_at_temperatures(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        duration_s: Option<f64>,
+    ) -> Result<ThermalChaboche<N>, FeedbackError> {
+        let previous = self.base.resolve_temperature(old_temperature_k)?;
+        let source = self.base.resolve_temperature(temperature_k)?;
         let previous_law = self.law_at(&previous)?;
         let law = self.law_at(&source)?;
         let rate = self.overstress_law(&source, &law, duration_s)?;
         let expansion_strain = self
             .base
-            .expansion_strain_between(self.base.reference_temperature_k, phase.temperature_k())?;
-        Ok((
-            phase,
-            ThermalChaboche {
-                source,
-                previous_law,
-                law,
-                rate,
-                expansion_strain,
-            },
-        ))
+            .expansion_strain_between(self.base.reference_temperature_k, temperature_k)?;
+        Ok(ThermalChaboche {
+            source,
+            previous_law,
+            law,
+            rate,
+            expansion_strain,
+        })
     }
 
     fn overstress_law(
@@ -449,14 +474,42 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
             .curve()
             .state_at_specific_enthalpy(old_h_j_kg)
             .map_err(FeedbackError::Caloric)?;
-        let (new_phase, resolved) =
-            self.resolve_for_interval(old_h_j_kg, new_h_j_kg, duration_s)?;
-        let old_mechanical = self
+        let new_phase = self
             .base
-            .mechanical_strain(old_phase.temperature_k(), old_strain)?;
-        let mechanical_strain = self
-            .base
-            .mechanical_strain(new_phase.temperature_k(), strain)?;
+            .caloric
+            .curve()
+            .state_at_specific_enthalpy(new_h_j_kg)
+            .map_err(FeedbackError::Caloric)?;
+        Ok(self
+            .increment_at_temperature(
+                old_phase.temperature_k(),
+                new_phase.temperature_k(),
+                old_strain,
+                old_state,
+                strain,
+                tolerances,
+                duration_s,
+            )?
+            .1)
+    }
+
+    /// Shared constitutive proposal for the original temperature-iterating
+    /// uniform owner and the enthalpy-bound spatial owner. No chart inversion
+    /// or second thermal integration is needed to preserve either owner.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn increment_at_temperature(
+        &self,
+        old_temperature_k: f64,
+        temperature_k: f64,
+        old_strain: &Voigt,
+        old_state: &ChabocheState<N>,
+        strain: &Voigt,
+        tolerances: EnergyTolerances,
+        duration_s: Option<f64>,
+    ) -> Result<(ResolvedJ2Plasticity, ThermalChabocheIncrement<N>), ThermalChabocheError> {
+        let resolved = self.resolve_at_temperatures(old_temperature_k, temperature_k, duration_s)?;
+        let old_mechanical = self.base.mechanical_strain(old_temperature_k, old_strain)?;
+        let mechanical_strain = self.base.mechanical_strain(temperature_k, strain)?;
         resolved
             .previous_law
             .validate_history(&old_mechanical, old_state)?;
@@ -501,8 +554,8 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
             energy: mechanical.energy,
         };
         let thermal = self.base.finish_increment_at_temperature(
-            old_phase.temperature_k(),
-            new_phase.temperature_k(),
+            old_temperature_k,
+            temperature_k,
             old_strain,
             &old_state.plastic,
             strain,
@@ -511,11 +564,14 @@ impl<'a, const N: usize> ThermalChabocheSource<'a, N> {
             contribution,
             tolerances,
         )?;
-        Ok(ThermalChabocheIncrement {
-            state: mechanical.state,
-            thermal,
-            recovery_dissipation_j_m3: mechanical.recovery_dissipation_j_m3,
-        })
+        Ok((
+            resolved.source,
+            ThermalChabocheIncrement {
+                state: mechanical.state,
+                thermal,
+                recovery_dissipation_j_m3: mechanical.recovery_dissipation_j_m3,
+            },
+        ))
     }
 }
 

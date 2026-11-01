@@ -6,7 +6,10 @@ use fs_matdb::{
     PropertyValue, Provenance, QueryPoint, SelectionPolicy, UncertaintyModel,
 };
 use fs_material::SmallStrainLaw;
-use fs_material::phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase};
+use fs_material::phase::{
+    EquilibriumPhaseState, HeatCapacitySourceQuery, PhaseStateError, ResolvedHeatCapacityCurve,
+    SolidLiquidPhase, UniformEnthalpyStep, UniformEnthalpyStepInput,
+};
 use fs_material::plastic::chaboche::ChabocheState;
 use fs_material::plastic::chaboche::source::BackstressProperties;
 use fs_material::plastic::energy::EnergyTolerances;
@@ -17,7 +20,9 @@ use fs_material::plastic::rate::{
 use fs_material::plastic::source::{HardeningPropertyBasis, KINEMATIC_HARDENING_MODULUS_PROPERTY};
 use fs_material::plastic::thermal::chaboche::ThermalChabocheSource;
 use fs_material::plastic::thermal::family::{ThermoplasticFamilyError, ThermoplasticSourceFamily};
-use fs_material::plastic::thermal::{SourceQuery, ThermoplasticSource};
+use fs_material::plastic::thermal::{
+    CaloricPoint, FeedbackConfig, FeedbackError, SourceQuery, ThermoplasticSource,
+};
 use fs_material::plastic::voce::source::{
     VOCE_SATURATION_INCREMENT_PROPERTY as Q, VOCE_SATURATION_RATE_PROPERTY as B,
 };
@@ -153,25 +158,25 @@ impl Fixture {
             expansion,
         }
     }
+    fn query(&self) -> SourceQuery<'_> {
+        SourceQuery {
+            card: &self.card,
+            caloric: &self.caloric,
+            context: QueryPoint::new().with("T", 300.0).unwrap(),
+            temperature_axis: "T".into(),
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            hardening_basis: BASIS,
+            thermal_expansion: self
+                .expansion
+                .then_some(MaterialPropertySelection::SingleClaimOnly),
+            strain_limit: 0.04,
+        }
+    }
     fn base(&self) -> ThermoplasticSource<'_> {
-        ThermoplasticSource::try_new(
-            SourceQuery {
-                card: &self.card,
-                caloric: &self.caloric,
-                context: QueryPoint::new().with("T", 300.0).unwrap(),
-                temperature_axis: "T".into(),
-                selection: MaterialPropertySelection::SingleClaimOnly,
-                hardening_basis: BASIS,
-                thermal_expansion: self
-                    .expansion
-                    .then_some(MaterialPropertySelection::SingleClaimOnly),
-                strain_limit: 0.04,
-            },
-            0.0,
-        )
-        .unwrap()
-        .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
-        .unwrap()
+        ThermoplasticSource::try_new(self.query(), 0.0)
+            .unwrap()
+            .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
+            .unwrap()
     }
     fn binding(&self) -> ThermalChabocheSource<'_, 2> {
         self.base()
@@ -186,6 +191,21 @@ impl Fixture {
         } else {
             self.base()
                 .with_linear_overstress(MaterialPropertySelection::SingleClaimOnly)
+        }
+        .unwrap();
+        base.with_chaboche_branches(MaterialPropertySelection::SingleClaimOnly, schema())
+            .unwrap()
+    }
+
+    fn point(&self, power_law: bool) -> CaloricPoint<'_, ThermalChabocheSource<'_, 2>> {
+        let base = CaloricPoint::try_new(self.query(), 0.0, 1e-6, 1e-3)
+            .unwrap()
+            .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
+            .unwrap();
+        let base = if power_law {
+            base.with_power_law_overstress(MaterialPropertySelection::SingleClaimOnly)
+        } else {
+            base.with_linear_overstress(MaterialPropertySelection::SingleClaimOnly)
         }
         .unwrap();
         base.with_chaboche_branches(MaterialPropertySelection::SingleClaimOnly, schema())
@@ -382,6 +402,285 @@ fn original_j2_family_keeps_exact_voce_rate_heat_and_history() {
                 .is_err()
         );
     }
+}
+
+fn feedback_config() -> FeedbackConfig {
+    FeedbackConfig {
+        max_iterations: 64,
+        temperature_tolerance_k: 1e-9,
+        energy_tolerance_j: 1e-8,
+        yield_tolerance_pa: 1e-3,
+        relaxation: 1.0,
+    }
+}
+
+// Independent exact backward-Euler solution of two constant-Cp, uniform bodies.
+// This is a synthetic test callback, not another production transport owner.
+// Both finite states use the original chart and only the accepted report debits
+// the reservoir. The constitutive residual never determines boundary heat.
+fn finite_reservoir_proposal(
+    input: UniformEnthalpyStepInput<'_>,
+    reservoir: EquilibriumPhaseState,
+    conductance_w_k: f64,
+) -> Result<UniformEnthalpyStep<EquilibriumPhaseState>, PhaseStateError> {
+    let reservoir_mass = 2.0 * input.mass_kg;
+    let body_capacity = input.mass_kg * CP;
+    let reservoir_capacity = reservoir_mass * CP;
+    let conductance_dt = conductance_w_k * input.duration_s;
+    let transfer = conductance_dt
+        * (reservoir.temperature_k()
+            - input.initial.temperature_k()
+            - input.internal_heat_j / body_capacity)
+        / (1.0 + conductance_dt * (1.0 / body_capacity + 1.0 / reservoir_capacity));
+    Ok(UniformEnthalpyStep {
+        state: input.curve.advance_specific_energy(
+            input.initial,
+            (input.internal_heat_j + transfer) / input.mass_kg,
+        )?,
+        external_heat_j: transfer,
+        energy_residual_tolerance_j: 1e-8,
+        report: input
+            .curve
+            .advance_specific_energy(reservoir, -transfer / reservoir_mass)?,
+    })
+}
+
+#[test]
+fn uniform_cyclic_feedback_heats_relaxes_and_reverses_with_one_finite_reservoir() {
+    let fixture = Fixture::new(rate_properties());
+    for power in [false, true] {
+        let mut point = fixture.point(power);
+        let source = fixture.rate(power);
+        let mut reservoir = fixture
+            .caloric
+            .curve()
+            .state_at_specific_enthalpy(h(318.0))
+            .unwrap();
+        let mut previous_stress = 0.0;
+        for (index, (axial, duration_s, conductance)) in [
+            (0.012, 2e-4, 0.0),
+            (0.012, 4e-3, 100.0),
+            (0.012, 8e-3, 100.0),
+            (-0.009, 2e-3, 100.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let strain = [axial, -0.5 * axial, -0.5 * axial, 0.001, 0.0, 0.0];
+            let old_h = point.caloric_state().specific_enthalpy_j_kg();
+            let old_alpha = point.history().plastic.alpha;
+            let old_reservoir = reservoir;
+            let mut proposals = 0;
+            let step = point
+                .advance(
+                    strain,
+                    duration_s,
+                    feedback_config(),
+                    |input| {
+                        proposals += 1;
+                        assert_eq!(input.initial, *point.caloric_state());
+                        assert_eq!(input.duration_s, duration_s);
+                        finite_reservoir_proposal(input, old_reservoir, conductance)
+                    },
+                    || false,
+                )
+                .unwrap();
+            assert_eq!(proposals, step.iterations);
+            assert!(proposals > 1);
+            assert!(step.next.history().plastic.alpha > old_alpha);
+            assert!(step.physical_heat_j > 0.0);
+            assert_ne!(
+                step.next.history().backstress_pa[0],
+                step.next.history().backstress_pa[1]
+            );
+            let native = source
+                .advance_with_energy_for_step(
+                    old_h,
+                    step.next.caloric_state().specific_enthalpy_j_kg(),
+                    point.strain(),
+                    point.history(),
+                    &strain,
+                    tol(),
+                    duration_s,
+                )
+                .unwrap();
+            assert_eq!(*step.next.history(), native.state);
+            assert_eq!(step.mechanical, native.thermal.mechanical);
+            near(
+                step.physical_heat_j,
+                1e-6 * native.thermal.mechanical.energy.physical_dissipation_j_m3,
+                1e-14,
+            );
+            let body_change =
+                point.mass_kg() * (step.next.caloric_state().specific_enthalpy_j_kg() - old_h);
+            let reservoir_change = 2.0
+                * point.mass_kg()
+                * (step.transport.report.specific_enthalpy_j_kg()
+                    - old_reservoir.specific_enthalpy_j_kg());
+            near(reservoir_change, -step.transport.external_heat_j, 1e-8);
+            near(
+                body_change + reservoir_change,
+                step.physical_heat_j + step.reversible_heat_j,
+                1e-8,
+            );
+            near(
+                body_change
+                    + reservoir_change
+                    + point.volume_m3() * step.mechanical.energy.stored_change_j_m3()
+                    + step.coefficient_storage_change_j
+                    + step.thermoelastic_storage_change_j
+                    + point.volume_m3() * step.mechanical.energy.numerical_dissipation_j_m3
+                    - step.mechanical_work_j,
+                0.0,
+                1e-8,
+            );
+            if index == 1 || index == 2 {
+                assert!(step.next.stress_pa()[0] < previous_stress);
+                assert!(
+                    step.next.caloric_state().temperature_k()
+                        > point.caloric_state().temperature_k()
+                );
+                assert!(step.transport.report.temperature_k() < old_reservoir.temperature_k());
+                assert_eq!(step.mechanical_work_j, 0.0);
+            }
+            if index == 3 {
+                assert!(step.next.stress_pa()[0] < 0.0);
+            }
+            previous_stress = step.next.stress_pa()[0];
+            eprintln!(
+                "uniform Chaboche power={power} interval={index} T={:.9} K stress={:.6} Pa alpha={:.9}",
+                step.next.caloric_state().temperature_k(),
+                previous_stress,
+                step.next.history().plastic.alpha
+            );
+            reservoir = step.transport.report;
+            point = step.next;
+        }
+    }
+}
+
+#[test]
+fn uniform_cyclic_refusal_and_retry_keep_all_histories_and_reservoir_private() {
+    let fixture = Fixture::new(rate_properties());
+    let initial = fixture.point(true);
+    let reservoir = fixture
+        .caloric
+        .curve()
+        .state_at_specific_enthalpy(h(318.0))
+        .unwrap();
+    let strain = [0.012, -0.006, -0.006, 0.001, 0.0, 0.0];
+    let loaded = initial
+        .advance(
+            strain,
+            2e-4,
+            feedback_config(),
+            |input| finite_reservoir_proposal(input, reservoir, 0.0),
+            || false,
+        )
+        .unwrap()
+        .next;
+    let frozen = (
+        loaded.history().clone(),
+        *loaded.caloric_state(),
+        *loaded.stress_pa(),
+        loaded.time_s(),
+    );
+    let mut limited = feedback_config();
+    limited.max_iterations = 1;
+    assert!(matches!(
+        loaded.advance(
+            strain,
+            4e-3,
+            limited,
+            |input| finite_reservoir_proposal(input, reservoir, 100.0),
+            || false
+        ),
+        Err(FeedbackError::NotConverged { .. })
+    ));
+    let mut polls = 0;
+    assert!(matches!(
+        loaded.advance(
+            strain,
+            4e-3,
+            feedback_config(),
+            |input| finite_reservoir_proposal(input, reservoir, 100.0),
+            || {
+                polls += 1;
+                polls >= 3
+            }
+        ),
+        Err(FeedbackError::Cancelled)
+    ));
+    assert!(matches!(
+        loaded.advance(
+            strain,
+            4e-3,
+            feedback_config(),
+            |_| Err::<UniformEnthalpyStep<()>, _>("reservoir unavailable"),
+            || false
+        ),
+        Err(FeedbackError::Transport("reservoir unavailable"))
+    ));
+    assert_eq!(
+        frozen,
+        (
+            loaded.history().clone(),
+            *loaded.caloric_state(),
+            *loaded.stress_pa(),
+            loaded.time_s()
+        )
+    );
+    let first = loaded
+        .advance(
+            strain,
+            4e-3,
+            feedback_config(),
+            |input| finite_reservoir_proposal(input, reservoir, 100.0),
+            || false,
+        )
+        .unwrap();
+    let retry = loaded
+        .advance(
+            strain,
+            4e-3,
+            feedback_config(),
+            |input| finite_reservoir_proposal(input, reservoir, 100.0),
+            || false,
+        )
+        .unwrap();
+    assert_eq!(first.next.history(), retry.next.history());
+    assert_eq!(first.next.caloric_state(), retry.next.caloric_state());
+    assert_eq!(first.transport, retry.transport);
+    let short = loaded
+        .advance(
+            strain,
+            5e-4,
+            feedback_config(),
+            |input| finite_reservoir_proposal(input, reservoir, 100.0),
+            || false,
+        )
+        .unwrap();
+    assert!(first.next.history().plastic.alpha > short.next.history().plastic.alpha);
+    assert!(first.next.stress_pa()[0] < short.next.stress_pa()[0]);
+    let base = CaloricPoint::try_new(fixture.query(), 0.0, 1e-6, 1e-3)
+        .unwrap()
+        .with_voce_hardening(MaterialPropertySelection::SingleClaimOnly)
+        .unwrap();
+    let advanced = base
+        .advance(
+            [0.0; 6],
+            1e-3,
+            feedback_config(),
+            |input| finite_reservoir_proposal(input, reservoir, 0.0),
+            || false,
+        )
+        .unwrap()
+        .next;
+    assert!(
+        advanced
+            .with_chaboche_branches(MaterialPropertySelection::SingleClaimOnly, schema())
+            .is_err()
+    );
 }
 
 fn stored(strain: &[f64; 6], state: &ChabocheState<2>, t: f64, variable: bool) -> f64 {
