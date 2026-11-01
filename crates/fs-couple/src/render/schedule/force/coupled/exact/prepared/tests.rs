@@ -1,6 +1,7 @@
 use super::*;
 use crate::modal_acoustic_time::{ModalAcousticMode, ModalAcousticTimeBudget};
 use fs_math::c64::C64;
+use fs_math::det;
 use fs_ports::PortedModule;
 
 fn config(modes: usize, links: usize) -> ModalCouplingConfig {
@@ -411,4 +412,466 @@ fn the_fused_loss_pair_equals_two_textbook_quadratics_bit_for_bit_refusals_inclu
         assert!(textbook_quadratic(&huge, &[2.0; 3]).is_err());
         assert!(quadratic_pair(&first, &second, &[2.0; 3]).is_err());
     }
+}
+
+// ---- wohg3: the prepared owner against a closed form (the secular KAT) ----
+//
+// A 60 Hz harmonic string ladder (omega_i = 2 pi 60 i) on ONE bridge spring k = omega_1^2 at station 0.8137, with a
+// dashpot. With proportional loss C = alpha K (zeta_i = alpha omega_i / 2, c = alpha k) the step has a closed form: the
+// eigenpairs of K = W^2 + k phi phi^T from the secular equation, then one damped 2x2 exponential and one held-force
+// integral per coupled mode. The prepared transition, the budgeted exponential and a 1000-step trajectory are held to the
+// stated bound of fs-phs CONTRACT.md ("Stated accuracy") at 40, 64 and 200 modes (dimensions 120, 192 and 600), and the
+// bound must reject two planted wrong answers. The non-proportional dashpot has no closed form; there the ordinary and
+// prepared owners are compared with each other.
+
+const KAT_DT: f64 = 1.0 / 48_000.0;
+
+/// The ladder's modes, the bridge column, spring and dashpot, and alpha of the proportional loss.
+struct Ladder {
+    omega: Vec<f64>,
+    zeta: Vec<f64>,
+    phi: Vec<f64>,
+    k: f64,
+    c: f64,
+    alpha: f64,
+}
+
+/// `k_factor` scales the bridge spring (0 drops the bridge); proportional loss keeps c = alpha k, the non-proportional
+/// dashpot is zeta = 1e-3 on every mode and c = 300 N s/m.
+fn ladder(modes: usize, k_factor: f64, proportional: bool) -> Ladder {
+    let w1 = 2.0 * core::f64::consts::PI * 60.0;
+    let alpha = 2e-3 / w1;
+    let omega: Vec<f64> = (1..=modes).map(|i| w1 * i as f64).collect();
+    let phi = (1..=modes).map(|i| core::f64::consts::SQRT_2 * det::sin(i as f64 * core::f64::consts::PI * 0.8137)).collect();
+    let k = w1 * w1 * k_factor;
+    let (zeta, c) = if proportional {
+        (omega.iter().map(|w| 0.5 * alpha * w).collect(), alpha * k)
+    } else {
+        (vec![1e-3; modes], 300.0)
+    };
+    Ladder { omega, zeta, phi, k, c, alpha }
+}
+
+fn ladder_start(l: &Ladder) -> Vec<ModalAcousticState> {
+    l.omega.iter().enumerate().map(|(i, w)| ModalAcousticState {
+        displacement_m_sqrt_kg: 0.02 / w * det::sin(1.3 * i as f64 + 0.2),
+        velocity_m_sqrt_kg_per_s: 0.02 * det::cos(0.7 * i as f64 + 0.1),
+    }).collect()
+}
+
+fn ladder_force(modes: usize) -> Vec<f64> {
+    (0..modes).map(|i| 0.5 * det::sin(2.1 * i as f64 + 0.3)).collect()
+}
+
+fn ladder_system(l: &Ladder, prepared: bool) -> Result<CoupledModalSystem, ModalCouplingError> {
+    let modes = l.omega.len();
+    let mut model = ModalAcousticTimeModel::try_new(48_000, l.omega.iter().zip(&l.zeta).map(|(&w, &z)| ModalAcousticMode {
+        angular_frequency_rad_s: w, damping_ratio: z, pressure_per_modal_velocity: C64::ZERO }).collect(),
+        ModalAcousticTimeBudget::audible_reference()).unwrap();
+    model.restore_states(&ladder_start(l)).unwrap();
+    let links = vec![ModalColumnConnection { column: l.phi.clone(), stiffness_n_m: l.k, damping_n_s_m: l.c, rest_extension_m: 0.0 }];
+    let config = ModalCouplingConfig { max_setup_terms: 1_000_000_000, ..config(modes, 1) };
+    let gate = CancelGate::new_clock_free();
+    if prepared {
+        let budget = PreparedModalBudget { max_modes: modes, max_dense_bytes: 1 << 30, max_multiply_terms: 2_000_000_000_000 };
+        CoupledModalSystem::new_with_columns_prepared(vec![model], links, config, budget, &gate)
+    } else {
+        CoupledModalSystem::new_with_columns(vec![model], links, config, &gate)
+    }
+}
+
+/// Eigenpairs of K = diag(d) + k z z^T (d increasing, every z_i nonzero, k > 0). Each root mu_j is bisected to adjacent
+/// floats in a variable shifted to its nearer pole and kept as (pole, offset), so mu_j - d_i keeps its relative
+/// accuracy; the vectors follow Gu and Eisenstat (1994): the z for which these roots are exact, then (D - mu_j)^-1 z.
+struct Secular {
+    d: Vec<f64>,
+    roots: Vec<(usize, f64)>,
+    /// Row-major; column j belongs to mu_j.
+    v: Vec<f64>,
+}
+
+impl Secular {
+    fn new(l: &Ladder) -> Self {
+        let m = l.omega.len();
+        let d: Vec<f64> = l.omega.iter().map(|w| w * w).collect();
+        let mut s = Self { roots: (0..m).map(|i| (i, 0.0)).collect(), v: vec![0.0; m * m], d };
+        if l.k == 0.0 {
+            (0..m).for_each(|i| s.v[i * m + i] = 1.0);
+            return s;
+        }
+        let (d, z, k) = (&s.d, &l.phi, l.k);
+        // f rises from -inf to +inf on each (d_j, d_j+1); the last root lies below d_m + k |z|^2.
+        let f = |pole: usize, x: f64| 1.0 + k * (0..m).fold(0.0, |sum, i| sum + z[i] * z[i] / ((d[i] - d[pole]) - x));
+        let reach = k * z.iter().fold(0.0, |sum, v| sum + v * v);
+        s.roots = (0..m).map(|j| {
+            let upper = if j + 1 < m { d[j + 1] } else { d[j] + reach };
+            let pole = if j + 1 < m && f(j, 0.5 * (upper - d[j])) <= 0.0 { j + 1 } else { j };
+            let (mut lo, mut hi) = (d[j] - d[pole], upper - d[pole]);
+            loop {
+                let mid = 0.5 * (lo + hi);
+                if mid <= lo || mid >= hi { break (pole, mid); }
+                if f(pole, mid) > 0.0 { hi = mid } else { lo = mid }
+            }
+        }).collect();
+        let zhat: Vec<f64> = (0..m).map(|i| {
+            let mut p = s.gap(i, m - 1) / k;
+            for j in 0..i { p *= s.gap(i, j) / (s.d[j] - s.d[i]); }
+            for j in i..m - 1 { p *= s.gap(i, j) / (s.d[j + 1] - s.d[i]); }
+            assert!(p > 0.0, "secular interlacing failed at {i}");
+            det::sqrt(p).copysign(z[i])
+        }).collect();
+        for j in 0..m {
+            let column: Vec<f64> = (0..m).map(|i| -zhat[i] / s.gap(i, j)).collect();
+            let norm = det::sqrt(column.iter().fold(0.0, |sum, x| sum + x * x));
+            (0..m).for_each(|i| s.v[i * m + j] = column[i] / norm);
+        }
+        s
+    }
+
+    /// mu_j - d_i.
+    fn gap(&self, i: usize, j: usize) -> f64 { (self.d[self.roots[j].0] - self.d[i]) + self.roots[j].1 }
+
+    fn mu(&self, j: usize) -> f64 { self.d[self.roots[j].0] + self.roots[j].1 }
+
+    /// (orthogonality defect ||V^T V - I||_inf, largest relative residual ||K v_j - mu_j v_j||_2 / mu_j).
+    fn defects(&self, l: &Ladder) -> (f64, f64) {
+        let m = self.d.len();
+        let (mut eta, mut rho) = (0.0_f64, 0.0_f64);
+        for j in 0..m {
+            let col = |i: usize| self.v[i * m + j];
+            eta = eta.max((0..m).fold(0.0, |sum, c| {
+                let dot = (0..m).fold(0.0, |acc, i| acc + col(i) * self.v[i * m + c]);
+                sum + (dot - if c == j { 1.0 } else { 0.0 }).abs()
+            }));
+            let zv = (0..m).fold(0.0, |acc, i| acc + l.phi[i] * col(i));
+            let r = (0..m).fold(0.0, |acc, i| {
+                let x = self.d[i] * col(i) + l.k * l.phi[i] * zv - self.mu(j) * col(i);
+                acc + x * x
+            });
+            rho = rho.max(det::sqrt(r) / self.mu(j));
+        }
+        (eta, rho)
+    }
+}
+
+/// One coupled mode's exact step over t under C = alpha K: the (q, v) transition [E11, E12, E21, E22] and the held unit
+/// force's displacement and velocity [G1, G2].
+fn modal_step(mu: f64, alpha: f64, t: f64) -> [f64; 6] {
+    let sigma = 0.5 * alpha * mu;
+    assert!(mu > sigma * sigma, "the KAT's coupled modes are underdamped");
+    let wd = det::sqrt(mu - sigma * sigma);
+    let e = det::exp(-sigma * t);
+    let (s, c) = det::sin_cos(wd * t);
+    let half = det::sin(0.5 * wd * t);
+    [e * (c + sigma * s / wd), e * s / wd, -e * mu * s / wd, e * (c - sigma * s / wd),
+        (-det::expm1(-sigma * t) * c + 2.0 * half * half - sigma / wd * e * s) / mu, e * s / wd]
+}
+
+/// The exact held-force transition over t in the prepared owner's coordinates z = [w_i q_i, v_i, ..., u_i] (3m x 3m).
+fn closed_form(l: &Ladder, s: &Secular, w: &[f64], t: f64) -> Vec<f64> {
+    let (m, n) = (w.len(), 3 * w.len());
+    let blocks: Vec<[f64; 6]> = (0..m).map(|j| modal_step(s.mu(j), l.alpha, t)).collect();
+    let mut f = vec![0.0; n * n];
+    for i in 0..m {
+        for c in 0..m {
+            let mut sum = [0.0; 6];
+            for (j, block) in blocks.iter().enumerate() {
+                let vv = s.v[i * m + j] * s.v[c * m + j];
+                sum.iter_mut().zip(block).for_each(|(acc, b)| *acc += vv * b);
+            }
+            f[2 * i * n + 2 * c] = w[i] * sum[0] / w[c];
+            f[2 * i * n + 2 * c + 1] = w[i] * sum[1];
+            f[(2 * i + 1) * n + 2 * c] = sum[2] / w[c];
+            f[(2 * i + 1) * n + 2 * c + 1] = sum[3];
+            f[2 * i * n + 2 * m + c] = w[i] * sum[4];
+            f[(2 * i + 1) * n + 2 * m + c] = sum[5];
+        }
+        f[(2 * m + i) * n + 2 * m + i] = 1.0;
+    }
+    f
+}
+
+/// The exact z state (2m entries) at time t from the fixture's start under its constant held force.
+fn closed_path<'a>(l: &'a Ladder, s: &'a Secular, w: &'a [f64]) -> impl Fn(f64) -> Vec<f64> + 'a {
+    let m = w.len();
+    let (start, force) = (ladder_start(l), ladder_force(m));
+    let project = |x: &dyn Fn(usize) -> f64| -> Vec<f64> {
+        (0..m).map(|j| (0..m).fold(0.0, |acc, i| acc + s.v[i * m + j] * x(i))).collect()
+    };
+    let (q0, v0, f0) = (project(&|i| start[i].displacement_m_sqrt_kg), project(&|i| start[i].velocity_m_sqrt_kg_per_s),
+        project(&|i| force[i]));
+    move |t| {
+        let mut z = vec![0.0; 2 * m];
+        for j in 0..m {
+            let b = modal_step(s.mu(j), l.alpha, t);
+            let (q, v) = (b[0] * q0[j] + b[1] * v0[j] + b[4] * f0[j], b[2] * q0[j] + b[3] * v0[j] + b[5] * f0[j]);
+            for i in 0..m {
+                z[2 * i] += w[i] * s.v[i * m + j] * q;
+                z[2 * i + 1] += s.v[i * m + j] * v;
+            }
+        }
+        z
+    }
+}
+
+fn gamma(count: usize) -> f64 {
+    let x = count as f64 * 0.5 * f64::EPSILON;
+    x / (1.0 - x)
+}
+
+/// ||a||_inf, each row summed left to right as fs-phs sums the operator norm that chooses its squarings.
+fn norm_inf(a: &[f64], n: usize) -> f64 {
+    a.chunks_exact(n).fold(0.0, |m, row| m.max(row.iter().fold(0.0, |s, v| s + v.abs())))
+}
+
+fn distance(a: &[f64], b: &[f64], n: usize) -> f64 {
+    a.chunks_exact(n).zip(b.chunks_exact(n)).fold(0.0, |m, (x, y)| m.max(x.iter().zip(y).fold(0.0, |s, (p, q)| s + (p - q).abs())))
+}
+
+fn largest_gap(a: &[f64], b: &[f64]) -> f64 {
+    a.iter().zip(b).fold(0.0, |m, (x, y)| m.max((x - y).abs()))
+}
+
+/// The squarings exponential_with_budget selects for an operator of computed norm `norm`, and the Taylor-stage norm
+/// theta, inflated by gamma_n for the norm's own rounding.
+fn taylor_stage(norm: f64, n: usize) -> (usize, f64) {
+    let (mut scale, mut squarings) = (1.0, 0);
+    while norm * scale > 0.5 {
+        scale *= 0.5;
+        squarings += 1;
+    }
+    (squarings, norm * scale * (1.0 + gamma(n)))
+}
+
+/// fs-phs CONTRACT.md "Stated accuracy": the bound on ||computed - exp(X)||_inf after the Taylor stage at norm theta and
+/// `squarings` squarings. `level(i, e_i)` returns G_i >= ||exp(2^i X')||_inf; `input` is the relative rounding of the
+/// operator's entries against the exact one.
+fn stated_bound(theta: f64, n: usize, squarings: usize, input: f64, mut level: impl FnMut(usize, f64) -> f64) -> f64 {
+    let (g, sums) = (gamma(n + 1), gamma(32));
+    let terms = det::exp(theta) * det::expm1(theta * det::expm1(g));
+    let mut e = terms + sums * (1.0 + sums) * det::exp(theta * det::exp(g))
+        + (n as f64 * 0.25 * f64::EPSILON + terms) * theta / (2.0 - theta)
+        + input * theta * det::exp(theta * (1.0 + input));
+    for i in 0..squarings {
+        let big = level(i, e);
+        e = (2.0 * big + e) * e + gamma(n) * (big + e) * (big + e);
+    }
+    e
+}
+
+/// What the prepared transition's bound needs. Its exponential received the generator times the network's short
+/// interval h and chose `inner` squarings of its own; the network then squared `levels.len() - 1` times. Level i of
+/// the whole chain is exp(2^i X') with X' that operator over `tau`.
+struct PreparedStage {
+    weights: Vec<f64>,
+    transition: Vec<f64>,
+    generator: Vec<f64>,
+    levels: Vec<Vec<f64>>,
+    inner: usize,
+    theta: f64,
+    tau: f64,
+}
+
+impl PreparedStage {
+    fn of(system: &CoupledModalSystem) -> Self {
+        let prepared = system.exact.as_ref().unwrap().prepared.as_ref().unwrap();
+        let integral = prepared.ledger.integral.as_ref().unwrap();
+        let n = prepared.weights.len() * 3;
+        let scaled: Vec<f64> = integral.generator.iter().map(|v| v * integral.h).collect();
+        let (inner, theta) = taylor_stage(norm_inf(&scaled, n), n);
+        Self { weights: prepared.weights.clone(), transition: prepared.transition.clone(),
+            generator: integral.generator.clone(), levels: integral.levels.clone(), inner, theta,
+            tau: integral.h * 0.5_f64.powi(inner as i32) }
+    }
+
+    fn squarings(&self) -> usize { self.inner + self.levels.len() - 1 }
+
+    fn bound(&self, level: impl FnMut(usize, f64) -> f64) -> f64 {
+        stated_bound(self.theta, 3 * self.weights.len(), self.squarings(), gamma(8), level)
+    }
+
+    /// Level norms without a closed form: exp(2^i theta) inside the exponential, the computed level plus its own bound
+    /// after it.
+    fn computed_level(&self, i: usize, e: f64) -> f64 {
+        if i < self.inner {
+            det::exp(self.theta * 2.0_f64.powi(i as i32) * (1.0 + gamma(8)))
+        } else {
+            norm_inf(&self.levels[i - self.inner], 3 * self.weights.len()) + e
+        }
+    }
+}
+
+/// The owner's z trajectory over `steps` held-force steps (z_0 first), and the worst energy balance of a step, from
+/// the frames: |dH + loss - work| over the step's largest term.
+fn walk(system: &mut CoupledModalSystem, w: &[f64], steps: usize) -> (Vec<Vec<f64>>, f64) {
+    let force = ladder_force(w.len());
+    let z = |s: &CoupledModalSystem| -> Vec<f64> {
+        s.components()[0].states().iter().zip(w)
+            .flat_map(|(x, w)| [w * x.displacement_m_sqrt_kg, x.velocity_m_sqrt_kg_per_s]).collect()
+    };
+    let (mut path, mut worst) = (vec![z(system)], 0.0_f64);
+    for _ in 0..steps {
+        let before = system.total_energy_j().unwrap();
+        let frame = system.step(&force).unwrap().clone();
+        let after = system.total_energy_j().unwrap();
+        let loss = frame.total_dissipation_j();
+        let scale = before.abs().max(after.abs()).max(frame.external_work_j.abs()).max(loss);
+        worst = worst.max(((after - before) + loss - frame.external_work_j).abs() / scale);
+        path.push(z(system));
+    }
+    (path, worst)
+}
+
+/// e_N = P sum_{k<N} (B + gamma_{n+4} ||T||_inf) ||[z_k, u]||_inf for N = 0..=steps. P = sqrt(2m kappa), kappa the
+/// condition of the balanced storage blockdiag(W^-1 K W^-1, I): the exact passive step never increases that energy norm,
+/// so P bounds every power of it in the inf-norm. The local term covers the transition's error, the apply and the
+/// weight scaling's roundoff.
+fn trajectory_bound(l: &Ladder, w: &[f64], path: &[Vec<f64>], per_step: f64) -> Vec<f64> {
+    let hi = 1.0 + l.k * l.phi.iter().zip(w).fold(0.0, |s, (p, w)| s + (p / w) * (p / w));
+    let lo = l.omega.iter().zip(w).fold(1.0_f64, |m, (o, w)| m.min(o * o / (w * w)));
+    let p = det::sqrt(2.0 * w.len() as f64 * hi / lo);
+    let held = ladder_force(w.len()).iter().fold(0.0_f64, |m, f| m.max(f.abs()));
+    let mut sum = 0.0;
+    let mut bound = vec![0.0];
+    for z in &path[..path.len() - 1] {
+        sum += per_step * z.iter().fold(held, |m, x| m.max(x.abs()));
+        bound.push(p * sum);
+    }
+    bound
+}
+
+/// The owner's one-step map in z coordinates, column by column from unit single steps (a unit held force for the input
+/// columns); the input rows are the identity.
+fn stepped_transition(system: &mut CoupledModalSystem, w: &[f64]) -> Vec<f64> {
+    let (m, n) = (w.len(), 3 * w.len());
+    let mut t = vec![0.0; n * n];
+    for col in 0..n {
+        let mut states = vec![ModalAcousticState::default(); m];
+        let mut external = vec![0.0; m];
+        match col {
+            c if c >= 2 * m => external[c - 2 * m] = 1.0,
+            c if c % 2 == 0 => states[c / 2].displacement_m_sqrt_kg = 1.0 / w[c / 2],
+            c => states[c / 2].velocity_m_sqrt_kg_per_s = 1.0,
+        }
+        system.models[0].restore_states(&states).unwrap();
+        system.step(&external).unwrap();
+        for (i, (x, w)) in system.components()[0].states().iter().zip(w).enumerate() {
+            t[2 * i * n + col] = w * x.displacement_m_sqrt_kg;
+            t[(2 * i + 1) * n + col] = x.velocity_m_sqrt_kg_per_s;
+        }
+    }
+    (0..m).for_each(|i| t[(2 * m + i) * n + 2 * m + i] = 1.0);
+    t
+}
+
+#[test]
+fn prepared_owner_meets_the_stated_bound_against_the_secular_closed_form_at_40_64_and_200_modes() {
+    let steps = 1000;
+    for modes in [40usize, 64, 200] {
+        let (l, n) = (ladder(modes, 1.0, true), 3 * modes);
+        let eig = Secular::new(&l);
+        let (eta, rho) = eig.defects(&l);
+        // Above 42 modes the ordinary owner refuses on its 256 block; nothing is dropped.
+        let ordinary = ladder_system(&l, false);
+        if modes > 42 {
+            let Err(ModalCouplingError::Propagation(fs_phs::PhsError::LinearSplitBudget { what })) = &ordinary else {
+                panic!("{modes} modes: the ordinary owner did not refuse on its block capacity")
+            };
+            assert!(what.contains("dense exponential block capacity"), "{what}");
+        }
+        let started = std::time::Instant::now();
+        let mut system = ladder_system(&l, true).unwrap();
+        let built_s = started.elapsed().as_secs_f64();
+        let st = PreparedStage::of(&system);
+        let w = st.weights.clone();
+        let bound = st.bound(|i, _| {
+            norm_inf(&closed_form(&l, &eig, &w, st.tau * 2.0_f64.powi(i as i32)), n) * (1.0 + 1e-12)
+        });
+        let (transition, stage) = (&st.transition, format!("{}+{} squarings, theta {:.4}", st.inner, st.levels.len() - 1, st.theta));
+        let exact = closed_form(&l, &eig, &w, KAT_DT);
+        let error = distance(transition, &exact, n);
+        // The same operator through fs-phs alone: X = generator * dt, the exponential choosing its own squarings; the
+        // ordinary entry runs it bit for bit up to dimension 256 and refuses above.
+        let operator: Vec<f64> = st.generator.iter().map(|v| v * KAT_DT).collect();
+        let raw = exponential_with_budget(&operator, n, DenseExponentialBudget {
+            max_dimension: n, max_dense_bytes: usize::MAX, max_multiply_terms: u64::MAX }).unwrap();
+        let (squarings, theta) = taylor_stage(norm_inf(&operator, n), n);
+        let raw_bound = stated_bound(theta, n, squarings, gamma(8), |i, _| {
+            norm_inf(&closed_form(&l, &eig, &w, KAT_DT * 0.5_f64.powi((squarings - i) as i32)), n) * (1.0 + 1e-12)
+        });
+        let raw_error = distance(&raw, &exact, n);
+        match fs_phs::linear_exact::exponential(&operator, n) {
+            Ok(plain) => assert!(n <= 256 && plain.iter().zip(&raw).all(|(a, b)| a.to_bits() == b.to_bits())),
+            Err(fs_phs::PhsError::LinearSplitBudget { what }) => {
+                assert!(n > 256 && what == "invalid or oversized exponential operator", "{what}");
+            }
+            Err(other) => panic!("{other}"),
+        }
+        // A 1000-step trajectory under a constant held force, against the exact modal solution.
+        let started = std::time::Instant::now();
+        let (path, energy) = walk(&mut system, &w, steps);
+        let step_ms = 1e3 * started.elapsed().as_secs_f64() / steps as f64;
+        let bounds = trajectory_bound(&l, &w, &path, bound + gamma(n + 4) * norm_inf(transition, n));
+        let exact_path = closed_path(&l, &eig, &w);
+        let errors: Vec<f64> = path.iter().enumerate().map(|(k, z)| largest_gap(z, &exact_path(k as f64 / 48_000.0))).collect();
+        let worst = errors.iter().zip(&bounds).skip(1).fold(0.0_f64, |m, (e, b)| m.max(e / b));
+        println!("{{\"test\":\"wohg3_secular_kat\",\"modes\":{modes},\"n\":{n},\"transition_error\":{error:.3e},\"bound\":{bound:.3e},\"ratio\":{:.1},\"stage\":\"{stage}\",\"raw_error\":{raw_error:.3e},\"raw_bound\":{raw_bound:.3e},\"raw_squarings\":{squarings},\"oracle_eta\":{eta:.1e},\"oracle_rho\":{rho:.1e},\"path_error\":{:.3e},\"path_bound\":{:.3e},\"worst_path_ratio\":{worst:.2e},\"energy_residual\":{energy:.1e},\"build_s\":{built_s:.2},\"step_ms\":{step_ms:.3}}}",
+            bound / error, errors[steps], bounds[steps]);
+        assert!(error <= bound, "{modes} modes: transition error {error:e} over the stated bound {bound:e}");
+        assert!(raw_error <= raw_bound, "{modes} modes: exponential error {raw_error:e} over the stated bound {raw_bound:e}");
+        assert!(worst <= 1.0, "{modes} modes: trajectory error over its bound (worst ratio {worst:e})");
+        assert!(energy <= 1e-11, "{modes} modes: energy residual {energy:e}");
+        // The planted wrong answers: each must fail the bound that the true answer met.
+        for (name, wrong) in [("bridge dropped", ladder(modes, 0.0, true)), ("bridge k x (1 + 1e-6)", ladder(modes, 1.0 + 1e-6, true))] {
+            let planted_eig = Secular::new(&wrong);
+            let planted = closed_form(&wrong, &planted_eig, &w, KAT_DT);
+            let (against, raw_against) = (distance(transition, &planted, n), distance(&raw, &planted, n));
+            let path_against = largest_gap(&path[steps], &closed_path(&wrong, &planted_eig, &w)(steps as f64 / 48_000.0));
+            println!("{{\"test\":\"wohg3_secular_kat\",\"modes\":{modes},\"planted\":\"{name}\",\"transition_error\":{against:.3e},\"over_bound\":{:.1e},\"raw_over_bound\":{:.1e},\"path_over_bound\":{:.1e}}}",
+                against / bound, raw_against / raw_bound, path_against / bounds[steps]);
+            assert!(against > bound && raw_against > raw_bound, "{modes} modes: planted '{name}' passed the bound");
+            if name == "bridge dropped" {
+                assert!(path_against > bounds[steps], "{modes} modes: the dropped bridge passed the trajectory bound");
+            }
+        }
+        // At 40 modes the ordinary (eigen-split) owner is held to the same bounds: its one-step map and trajectory.
+        if let Ok(mut ordinary) = ordinary {
+            let stepped = stepped_transition(&mut ladder_system(&l, false).unwrap(), &w);
+            let ordinary_error = distance(&stepped, &exact, n);
+            let (ordinary_path, ordinary_energy) = walk(&mut ordinary, &w, steps);
+            let ordinary_worst = ordinary_path.iter().enumerate().skip(1)
+                .fold(0.0_f64, |m, (k, z)| m.max(largest_gap(z, &exact_path(k as f64 / 48_000.0)) / bounds[k]));
+            let local = bound + gamma(n + 4) * norm_inf(transition, n);
+            println!("{{\"test\":\"wohg3_secular_kat\",\"modes\":{modes},\"owner\":\"ordinary\",\"stepped_transition_error\":{ordinary_error:.3e},\"local_bound\":{local:.3e},\"worst_path_ratio\":{ordinary_worst:.2e},\"energy_residual\":{ordinary_energy:.1e}}}");
+            assert!(ordinary_error <= local && ordinary_worst <= 1.0 && ordinary_energy <= 1e-11);
+        }
+    }
+}
+
+#[test]
+fn ordinary_and_prepared_owners_agree_within_the_stated_bound_on_a_non_proportional_bridge_dashpot() {
+    // zeta = 1e-3 on every mode plus a 300 N s/m dashpot at the bridge: C is not a multiple of K, so no closed form. The
+    // ordinary (Jacobi eigen-split) and prepared (Taylor) owners are compared with each other. The cross-check bound
+    // is twice the prepared bound: it ASSUMES the ordinary owner obeys the prepared owner's stated per-step bound, which
+    // the proportional test checks at this size but nothing proves.
+    let (steps, modes) = (1000, 40);
+    let (l, n) = (ladder(modes, 1.0, false), 3 * modes);
+    let (mut prepared, mut ordinary) = (ladder_system(&l, true).unwrap(), ladder_system(&l, false).unwrap());
+    let st = PreparedStage::of(&prepared);
+    let bound = st.bound(|i, e| st.computed_level(i, e));
+    let local = bound + gamma(n + 4) * norm_inf(&st.transition, n);
+    let w = &st.weights;
+    let cross = distance(&stepped_transition(&mut ladder_system(&l, false).unwrap(), w),
+        &stepped_transition(&mut ladder_system(&l, true).unwrap(), w), n);
+    let (prepared_path, prepared_energy) = walk(&mut prepared, w, steps);
+    let (ordinary_path, ordinary_energy) = walk(&mut ordinary, w, steps);
+    let bounds = trajectory_bound(&l, w, &prepared_path, local);
+    let worst = prepared_path.iter().zip(&ordinary_path).zip(&bounds).skip(1)
+        .fold(0.0_f64, |m, ((a, b), e)| m.max(largest_gap(a, b) / (2.0 * e)));
+    let last = largest_gap(&prepared_path[steps], &ordinary_path[steps]);
+    println!("{{\"test\":\"wohg3_cross_check\",\"modes\":{modes},\"n\":{n},\"transition_difference\":{cross:.3e},\"bound\":{:.3e},\"ratio\":{:.1},\"path_difference\":{last:.3e},\"path_bound\":{:.3e},\"worst_path_ratio\":{worst:.2e},\"energy_residuals\":[{prepared_energy:.1e},{ordinary_energy:.1e}]}}",
+        2.0 * local, 2.0 * local / cross, 2.0 * bounds[steps]);
+    assert!(cross <= 2.0 * local, "one-step maps differ by {cross:e}, over twice the stated bound {local:e}");
+    assert!(worst <= 1.0, "trajectories differ beyond twice their bound (worst ratio {worst:e})");
+    assert!(prepared_energy <= 1e-11 && ordinary_energy <= 1e-11, "{prepared_energy:e} {ordinary_energy:e}");
 }

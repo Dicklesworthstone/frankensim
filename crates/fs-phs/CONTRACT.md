@@ -146,7 +146,7 @@ unsupported storage, capacity exhaustion and unrepresentable work refuse.
 `linear_exact::exponential_with_budget` exposes the same dense Taylor/scaling
 algorithm to explicit cold preparation callers. `DenseExponentialBudget`
 declares matrix-dimension, simultaneous dense-byte and multiply-term ceilings;
-the opt-in dimension limit is 4096. Checked preflight reserves five square
+the opt-in dimension limit is 6144. Checked preflight reserves five square
 matrices including the supplied input, plus 32 Taylor products and 48 squarings
 before workspace allocation. Overflow, insufficient budgets, nonfinite input,
 unconverged series and unrepresentable output refuse. The ordinary
@@ -155,6 +155,33 @@ and arithmetic. This entry permits complete-operator preparation; it supplies
 no truncation, hot-path timing or physical-validity guarantee. Its regression
 source checks larger explicit admission, unchanged default refusal and exact
 byte/work boundaries. Native execution is pending.
+
+**Stated accuracy.** This holds for `exponential`, `exponential_with_budget` and
+the block upper-triangular variant, under the standard rounding model with no
+fused multiply-add. Write u = 2^-53 and gamma_m = m u / (1 - m u). Let X be the
+n x n input (duration included) and s the squaring count the algorithm picks,
+so that X' = 2^-s X has computed norm at most 1/2. Let theta = ||X'||_inf
+(1 + gamma_n) and g = gamma_(n+1). The Taylor stage R_0 then satisfies
+
+    e_0 = ||R_0 - exp(X')||_inf <= T + gamma_32 (1 + gamma_32) exp(theta e^g)
+          + (n u / 2 + T) theta / (2 - theta),   T = e^theta expm1(theta expm1(g)).
+
+T covers the rounding of the computed terms and the second term covers the 32
+accumulations. The third covers the series beyond the stopping test: the
+stopped term's largest entry is at most u/2, so its norm is at most n u / 2.
+Each squaring then satisfies e_(i+1) <= (2 G_i + e_i) e_i + gamma_n (G_i + e_i)^2,
+with G_i >= ||exp(2^i X')||_inf, and ||computed - exp(X)||_inf <= e_s. If the
+caller's entries carry relative rounding delta against the exact operator, add
+delta theta exp(theta (1 + delta)) to e_0. The bound is a priori and worst case.
+It is not a stability certificate, and the caller supplies G_i: from an exact
+solution, or as a computed level's norm plus that level's own bound.
+
+fs-couple's prepared-owner tests (`coupled/exact/prepared/tests.rs`, the
+secular KAT) check this bound against a closed form at n = 120, 192 and 600.
+The closed form is a 40-, 64- or 200-mode string ladder on one bridge spring
+with proportional loss, whose eigenpairs come from the secular equation. The
+tests also require the bound to reject two planted wrong answers: the bridge
+dropped, and the bridge stiffness times (1 + 1e-6).
 
 `ExactZoh` advances the full coupled `(J-R)Q` operator with held input. Port
 outputs are step averages. Physical heat independently integrates
