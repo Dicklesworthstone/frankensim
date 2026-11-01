@@ -47,6 +47,14 @@ pub trait Sdf3Elasticity: LinearOp + sealed::Sealed {
     /// Exact bulk, Nitsche and ghost stiffness contraction for an adjoint.
     fn scale_bilinear_forms(&self, z: &[f64], u: &[f64], checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<f64>, ElasticityError3>;
+    /// Admit one physical field against each retained source strain domain.
+    /// No stress output or constitutive stress work is required.
+    fn admit_material_domain(&self, u: &[f64], checkpoint: impl FnMut() -> ControlFlow<()>)
+        -> Result<(), ElasticityError3>;
+    /// Admit the complete physical affine displacement unit ball, using the
+    /// native source domains and strong/hanging maps with no heap allocation.
+    fn admit_affine_material_domain(&self, offset: &[f64], basis: &[&[f64]],
+        checkpoint: impl FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3>;
     /// Actual retained bulk quadrature stresses, with no surface/ghost samples.
     fn bulk_stress(&self, u: &[f64], max_points: usize, checkpoint: impl FnMut() -> ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>, ElasticityError3>;
@@ -92,6 +100,10 @@ impl Sdf3Elasticity for CutElasticity3 {
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3> {CutElasticity3::scale_quadratic_forms(self,u)}
     fn scale_bilinear_forms(&self,z:&[f64],u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {CutElasticity3::scale_bilinear_forms(self,z,u,checkpoint)}
+    fn admit_material_domain(&self,u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {CutElasticity3::admit_material_domain(self,u,checkpoint)}
+    fn admit_affine_material_domain(&self,offset:&[f64],basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {CutElasticity3::admit_affine_material_domain(self,offset,basis,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {CutElasticity3::bulk_stress(self,u,max_points,checkpoint)}
     fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
@@ -139,6 +151,10 @@ impl Sdf3Elasticity for AdaptiveElasticity3 {
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::scale_quadratic_forms(self,u)}
     fn scale_bilinear_forms(&self,z:&[f64],u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {AdaptiveElasticity3::scale_bilinear_forms(self,z,u,checkpoint)}
+    fn admit_material_domain(&self,u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {AdaptiveElasticity3::admit_material_domain(self,u,checkpoint)}
+    fn admit_affine_material_domain(&self,offset:&[f64],basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {AdaptiveElasticity3::admit_affine_material_domain(self,offset,basis,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {AdaptiveElasticity3::bulk_stress(self,u,max_points,checkpoint)}
     fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
@@ -203,6 +219,10 @@ impl Sdf3Elasticity for AdaptiveSolveSpace3 {
     fn scale_quadratic_forms(&self,u:&[f64])->Result<Vec<f64>,ElasticityError3> {self.elasticity().scale_quadratic_forms(u)}
     fn scale_bilinear_forms(&self,z:&[f64],u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<f64>,ElasticityError3> {self.elasticity().scale_bilinear_forms(z,u,checkpoint)}
+    fn admit_material_domain(&self,u:&[f64],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {self.elasticity().admit_material_domain(u,checkpoint)}
+    fn admit_affine_material_domain(&self,offset:&[f64],basis:&[&[f64]],checkpoint:impl FnMut()->ControlFlow<()>)
+        -> Result<(),ElasticityError3> {self.elasticity().admit_affine_material_domain(offset,basis,checkpoint)}
     fn bulk_stress(&self,u:&[f64],max_points:usize,checkpoint:impl FnMut()->ControlFlow<()>)
         -> Result<Vec<BulkStressPoint3>,ElasticityError3> {self.elasticity().bulk_stress(u,max_points,checkpoint)}
     fn affine_bulk_stress(&self,offset:&[f64],basis:&[&[f64]],max_point_fields:usize,checkpoint:impl FnMut()->ControlFlow<()>)
@@ -236,4 +256,37 @@ impl AdaptiveSdf3Elasticity for AdaptiveElasticity3 {
 impl AdaptiveSdf3Elasticity for AdaptiveSolveSpace3 {
     fn adaptive(&self) -> &AdaptiveElasticity3 { self.elasticity() }
     fn into_adaptive(self) -> AdaptiveElasticity3 { self.into_elasticity() }
+}
+
+// Material validity belongs to physical solutions, not every linear solve:
+// adjoints and uncertainty columns are algebraic fields with different units.
+pub(crate) fn admit_affine_material_domain(
+    operator: &impl Sdf3Elasticity,
+    offset: &[f64],
+    basis: &[&[f64]],
+    control: &mut SolveControl<'_>,
+) -> Result<(), EvaluationStop> {
+    material_domain_controlled(control, "sdf3-affine-material-domain", |poll| {
+        operator.admit_affine_material_domain(offset, basis, poll)
+    })
+}
+
+fn material_domain_controlled(
+    control: &mut SolveControl<'_>,
+    stage: &'static str,
+    action: impl FnOnce(&mut dyn FnMut() -> ControlFlow<()>) -> Result<(), ElasticityError3>,
+) -> Result<(), EvaluationStop> {
+    control.checkpoint(stage)?;
+    let mut stopped = None;
+    let result = action(&mut || match control.checkpoint(stage) {
+        Ok(()) => ControlFlow::Continue(()),
+        Err(stop) => {
+            stopped = Some(stop);
+            ControlFlow::Break(())
+        }
+    });
+    if let Some(stop) = stopped {
+        return Err(stop);
+    }
+    result.map_err(|_| super::failure(stage))
 }

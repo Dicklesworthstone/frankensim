@@ -298,6 +298,19 @@ operator application checks the combined equilibrium residual. The report
 retains the branch, numerical primal/dual gap, reciprocity and reconstruction
 evidence. Incoming scales are restored on success and failure.
 
+Every affine grid first admits the COMPLETE physical displacement ball against
+the retained source materials' Mandel strain ceilings. This native check runs
+before the compliance oracle, response adjoints and gradient publication,
+independently of whether sampled strength is requested. It uses the same
+material domain and strong/hanging reconstruction as native stress evaluation
+without stress output allocation, constitutive stress evaluation or additional
+linear solves. A source-valid baseline and valid coordinate endpoints do not
+excuse an invalid correlated direction. Coarse and enriched grids, optimizer
+trials, explicit refits and automatic campaigns all use this common grid owner.
+A failed domain check or cancellation returns no report and restores incoming
+scales. Unsourced legacy laws gain no invented ceiling. Retained-point numerical
+strain admission is not a continuum maximum or an experimental validity claim.
+
 A numerically separated regular maximizer supplies the discrete derivative
 `(-u^T K' u + 2 B^T u) / reference`, composed with the existing physical-region,
 SIMP, projection and filter-transpose operations. Hard, flat and unresolved

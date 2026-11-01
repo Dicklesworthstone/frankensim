@@ -157,6 +157,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// The coefficient witness reconstructs the physical force/displacement
     /// without another elasticity solve. Regular-branch sensitivities include
     /// both stiffness and 2*B^T*u through the shared physical density pullback.
+    /// The complete physical strain ball must satisfy every retained native
+    /// material domain, even when no stress constraint is requested.
     ///
     /// Only homogeneous supports and fixed reference geometry/acceleration are
     /// covered. Eroded material is the declared manufacturing realization; with

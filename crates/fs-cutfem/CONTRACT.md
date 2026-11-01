@@ -158,8 +158,9 @@ cut volume, including supported material. It is independent of the stiffness
 interpolation and has no invented unit-density fallback for legacy inputs.
 Adaptive transfer requires each child's complete native reference state to
 match its coarse ancestor; child masses are re-integrated from their own
-quadrature. Strain validity is checked on actual bulk stress fields, never on
-algebraic basis strains or arbitrary adjoint vectors. Geometry derivatives,
+quadrature. Strain validity is checked on actual physical fields and complete
+affine uncertainty families, never by treating algebraic basis strains or
+arbitrary adjoint vectors as physical states. Geometry derivatives,
 material evolution and continuum certification are outside this frozen-linear
 operator's scope.
 
@@ -194,6 +195,18 @@ not an interval enclosure. Legacy material laws gain no fabricated ceiling.
 The checked `point_count * (basis_count+1)` allowance precedes output allocation
 and adaptive field reconstruction. The adaptive implementation preserves the
 same hanging-node map and strong-clamp masking for the entire family.
+
+`admit_material_domain` and `admit_affine_material_domain` expose that same
+source-strain admission independently of stress output. They check shape, finite
+coefficients and scales before any legacy/source distinction, then stream only
+source-bound cells and retained points with constant auxiliary storage and no
+heap allocation. Adaptive fields reconstruct one cell at a time through the
+identical scalar row owner used by full physical displacement export. This lets
+compliance, response and optimization consumers enforce native validity without
+allocating point-by-field stress arrays or performing constitutive stress work.
+The whole-ball check retains bounded cancellation and leaves operator state
+unchanged on success, refusal or cancellation; it certifies neither unsampled
+strain extrema nor a continuum material domain.
 
 Output point allowances are checked before allocating the stress array. State,
 cotangents and arithmetic must be finite, and observation/pullback work polls

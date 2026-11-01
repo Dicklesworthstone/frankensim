@@ -199,6 +199,20 @@ pub(super) fn evaluate_grid<O: Sdf3Elasticity>(
             control,
         )?);
     }
+    // A compliance witness or coordinate-by-coordinate test cannot establish
+    // source validity for every admissible physical load. Admit the whole ball
+    // before its oracle, observations, sensitivities or report can escape.
+    let mut fields: [&[f64]; fs_ascent::quadratic_ball::MAX_QUADRATIC_BALL_DIMENSION] =
+        [&[]; fs_ascent::quadratic_ball::MAX_QUADRATIC_BALL_DIMENSION];
+    for (slot, field) in fields.iter_mut().zip(&basis_displacements) {
+        *slot = field.as_slice();
+    }
+    crate::sdf3::admit_affine_material_domain(
+        operator,
+        &offset_displacement,
+        &fields[..m],
+        control,
+    )?;
     let fixed = operator.fixed();
     let offset = normalize(
         force_work(&offset_force, &offset_displacement, fixed, control)?,

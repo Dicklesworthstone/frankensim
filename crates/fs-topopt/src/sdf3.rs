@@ -30,6 +30,7 @@ pub mod stress;
 pub mod design;
 pub mod robust;
 pub use operator::{AdaptiveSdf3Elasticity, Sdf3Elasticity};
+pub(crate) use operator::admit_affine_material_domain;
 pub use refine::inherit_raw_densities3;
 pub use regions::PhysicalRegion3;
 use fs_cutfem::elastic3::{CutElasticity3, MaterialBodyLoad3};

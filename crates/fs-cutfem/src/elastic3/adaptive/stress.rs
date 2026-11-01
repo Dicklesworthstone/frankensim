@@ -3,6 +3,38 @@ use super::*;
 use crate::elastic3::stress::{AffineBulkStress3, BulkStressPoint3, BulkStressPullback3};
 
 impl AdaptiveElasticity3 {
+    /// Check one physical field against the original source-material domain,
+    /// with exact hanging reconstruction and homogeneous master clamps.
+    pub fn admit_material_domain(
+        &self,
+        u: &[f64],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.admit_affine_material_domain(u, &[], checkpoint)
+    }
+
+    /// Admit the complete coefficient unit ball on the retained bulk points.
+    /// Reconstruct only the current cell's 24 physical coefficients using the
+    /// SAME row owner as `physical_displacements`; no expanded nodal fields or
+    /// stress samples are allocated. The native owner checks finite inputs and
+    /// source ceilings, with bounded cancellation and no operator mutation.
+    pub fn admit_affine_material_domain(
+        &self,
+        offset: &[f64],
+        basis: &[&[f64]],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.raw.admit_affine_material_domain_mapped(
+            offset,
+            basis,
+            self.n(),
+            |cell, field| {
+                std::array::from_fn(|i| self.physical_coefficient(field, cell.nodes[i / 3], i % 3))
+            },
+            checkpoint,
+        )
+    }
+
     /// Evaluate original bulk rules after exact constrained reconstruction.
     /// Cell ids use `leaves()` ordering. No nodal stress recovery or projection
     /// is inserted. Reconstruction is bounded by the admitted physical DOFs;

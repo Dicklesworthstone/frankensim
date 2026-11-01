@@ -234,6 +234,9 @@ fn affine_stress_family_uses_native_tensor_and_admits_the_whole_source_strain_ba
         .collect();
     let baseline = op.bulk_stress(&offset, 100_000, poll).unwrap();
     let budget = baseline.len() * 3;
+    op.admit_material_domain(&offset, poll).unwrap();
+    op.admit_affine_material_domain(&offset, &[&first, &second], poll)
+        .unwrap();
     let family = op
         .affine_bulk_stress(&offset, &[&first, &second], budget, poll)
         .unwrap();
@@ -315,6 +318,15 @@ fn affine_stress_family_uses_native_tensor_and_admits_the_whole_source_strain_ba
     op.bulk_stress(&endpoint, baseline.len(), poll).unwrap();
     op.affine_bulk_stress(&near_limit, &[&direction], baseline.len() * 2, poll)
         .unwrap();
+    op.admit_material_domain(&endpoint, poll).unwrap();
+    op.admit_affine_material_domain(&near_limit, &[&direction], poll)
+        .unwrap();
+    assert!(matches!(
+        op.admit_affine_material_domain(&near_limit, &[&direction, &direction], poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain"
+        ))
+    ));
     assert!(matches!(
         op.affine_bulk_stress(&near_limit, &[&direction, &direction], budget, poll),
         Err(ElasticityError3::Invalid(
@@ -327,6 +339,89 @@ fn affine_stress_family_uses_native_tensor_and_admits_the_whole_source_strain_ba
         op.affine_bulk_stress(&offset, &[&first, &second], budget, poll)
             .unwrap()
     );
+}
+
+#[test]
+fn adaptive_material_domain_streams_the_native_hanging_family_without_stress_output() {
+    use fs_cutfem::elastic3::adaptive::AdaptiveElasticity3;
+    use fs_cutfem::octree3::Octree3;
+
+    let diagonal = [10.0, 8.0, 6.0, 4.0, 5.0, 7.0];
+    let material = state(
+        std::array::from_fn(|i| std::array::from_fn(|j| if i == j { diagonal[i] } else { 0.0 })),
+        0.1,
+    );
+    let tree = Octree3::uniform(1, 3, 128).unwrap();
+    let mark = *tree
+        .leaves()
+        .iter()
+        .find(|c| c.index() == [1, 0, 0])
+        .unwrap();
+    let tree = tree.refined(&[mark], poll).unwrap();
+    let mut callback = |_| poll();
+    let mut control =
+        QuadratureControl3::new(QuadratureOptions3::default(), &mut callback).unwrap();
+    let mut op = AdaptiveElasticity3::build_with_material_field(
+        domain(),
+        &tree,
+        &Slab,
+        ElasticMaterialField3::Uniform(&material),
+        &|p| p == [0.0; 3],
+        Default::default(),
+        &mut control,
+    )
+    .unwrap();
+    assert!(op.physical_nodes().len() > op.nodes().len());
+    let scales = vec![0.7; op.cells()];
+    op.set_scales(&scales).unwrap();
+    let mut offset: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|p| [0.06 * p[0], 0.0, 0.0])
+        .collect();
+    let mut direction: Vec<_> = op
+        .nodes()
+        .iter()
+        .flat_map(|p| [0.03 * p[0], 0.0, 0.0])
+        .collect();
+    // Masking precedes strain admission, just as in the native physical field.
+    for (node, &fixed) in op.fixed().iter().enumerate() {
+        if fixed {
+            offset[3 * node..3 * node + 3].fill(1e100);
+            direction[3 * node..3 * node + 3].fill(-1e100);
+        }
+    }
+    let endpoint: Vec<_> = offset.iter().zip(&direction).map(|(a, b)| a + b).collect();
+    op.admit_material_domain(&endpoint, poll).unwrap();
+    op.admit_affine_material_domain(&offset, &[&direction], poll)
+        .unwrap();
+    assert!(matches!(
+        op.admit_affine_material_domain(&offset, &[&direction, &direction], poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain"
+        ))
+    ));
+    assert!(matches!(
+        op.affine_bulk_stress(&offset, &[&direction, &direction], usize::MAX, poll),
+        Err(ElasticityError3::Invalid(
+            "affine bulk strain ball exceeds retained material domain"
+        ))
+    ));
+    let mut calls = 0;
+    assert!(matches!(
+        op.admit_affine_material_domain(&offset, &[&direction], || {
+            calls += 1;
+            if calls == 40 {
+                ControlFlow::Break(())
+            } else {
+                poll()
+            }
+        }),
+        Err(ElasticityError3::Cancelled)
+    ));
+    assert_eq!(op.scales(), scales);
+    op.admit_affine_material_domain(&offset, &[&direction], poll)
+        .unwrap();
 }
 
 #[test]

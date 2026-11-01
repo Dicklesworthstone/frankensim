@@ -377,6 +377,25 @@ fn adaptive_affine_stress_preserves_the_full_hanging_field_family_and_masks() {
             "affine bulk stress point-field allowance exhausted"
         ))
     ));
+    // Legacy laws gain no invented strain ceiling, but malformed or nonfinite
+    // coefficients are still refused before the source-domain fast path.
+    op.admit_affine_material_domain(&masked_offset, &[&masked_first, &masked_second], poll)
+        .unwrap();
+    assert!(op.admit_material_domain(&[], poll).is_err());
+    assert!(
+        op.admit_affine_material_domain(&offset, &[&first[..first.len() - 1]], poll)
+            .is_err()
+    );
+    let mut nonfinite = first.clone();
+    nonfinite[0] = f64::NAN;
+    assert!(
+        op.admit_affine_material_domain(&offset, &[&nonfinite], poll)
+            .is_err()
+    );
+    assert!(matches!(
+        op.admit_affine_material_domain(&offset, &[&first, &second], || ControlFlow::Break(())),
+        Err(ElasticityError3::Cancelled)
+    ));
     assert_eq!(op.scales(), scales);
 }
 

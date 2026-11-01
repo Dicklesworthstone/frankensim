@@ -398,15 +398,22 @@ impl AdaptiveElasticity3 {
     pub fn set_scales(&mut self, s: &[f64]) -> Result<(), ElasticityError3> {
         self.raw.set_scales(s)
     }
-    fn expand(&self, x: &[f64]) -> Vec<f64> {
-        self.rows
+    fn physical_coefficient(&self, x: &[f64], node: usize, component: usize) -> f64 {
+        self.rows[node]
             .iter()
-            .flat_map(|row| {
-                (0..3).map(move |c| {
-                    row.iter()
-                        .map(|&(m, w)| if self.fixed[m] { 0.0 } else { w * x[3 * m + c] })
-                        .sum()
-                })
+            .map(|&(m, w)| {
+                if self.fixed[m] {
+                    0.0
+                } else {
+                    w * x[3 * m + component]
+                }
+            })
+            .sum()
+    }
+    fn expand(&self, x: &[f64]) -> Vec<f64> {
+        (0..self.rows.len())
+            .flat_map(|node| {
+                (0..3).map(move |component| self.physical_coefficient(x, node, component))
             })
             .collect()
     }

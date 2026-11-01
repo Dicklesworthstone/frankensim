@@ -54,6 +54,28 @@ fn poll(checkpoint: &mut impl FnMut() -> ControlFlow<()>) -> Result<(), Elastici
     }
 }
 
+fn admit_displacement(
+    u: &[f64],
+    n: usize,
+    checkpoint: &mut impl FnMut() -> ControlFlow<()>,
+) -> Result<(), ElasticityError3> {
+    poll(checkpoint)?;
+    if u.len() != n {
+        return Err(ElasticityError3::Invalid(
+            "invalid bulk stress displacement shape",
+        ));
+    }
+    for chunk in u.chunks(256) {
+        poll(checkpoint)?;
+        if chunk.iter().any(|v| !v.is_finite()) {
+            return Err(ElasticityError3::Invalid(
+                "nonfinite bulk stress displacement",
+            ));
+        }
+    }
+    Ok(())
+}
+
 fn stress_basis(material: &ReferenceMaterial3, gradients: &[[f64; 3]; 8]) -> [[f64; 6]; 24] {
     std::array::from_fn(|i| material.basis_stress(gradients[i / 3], i % 3))
 }
@@ -118,7 +140,7 @@ fn admit_affine_material_strain(
     material: &ReferenceMaterial3,
     gradients: &[[f64; 3]; 8],
     offset: &[f64; 24],
-    basis: &[[f64; 24]],
+    basis: impl IntoIterator<Item = [f64; 24]>,
     checkpoint: &mut impl FnMut() -> ControlFlow<()>,
 ) -> Result<(), ElasticityError3> {
     let Some(source) = material.source_state() else {
@@ -129,7 +151,7 @@ fn admit_affine_material_strain(
     let mut norm_sum = [0.0_f64; 6];
     for local in basis {
         poll(checkpoint)?;
-        let strain = mandel_strain(gradients, local);
+        let strain = mandel_strain(gradients, &local);
         for k in 0..6 {
             let value = strain[k].abs();
             if !value.is_finite() {
@@ -258,20 +280,8 @@ impl CutElasticity3 {
         checkpoint: &mut impl FnMut() -> ControlFlow<()>,
     ) -> Result<(), ElasticityError3> {
         poll(checkpoint)?;
-        if u.is_some_and(|v| v.len() != self.n()) {
-            return Err(ElasticityError3::Invalid(
-                "invalid bulk stress displacement shape",
-            ));
-        }
         if let Some(u) = u {
-            for chunk in u.chunks(256) {
-                poll(checkpoint)?;
-                if chunk.iter().any(|v| !v.is_finite()) {
-                    return Err(ElasticityError3::Invalid(
-                        "nonfinite bulk stress displacement",
-                    ));
-                }
-            }
+            admit_displacement(u, self.n(), checkpoint)?;
         }
         for chunk in self.scales.chunks(256) {
             poll(checkpoint)?;
@@ -296,6 +306,79 @@ impl CutElasticity3 {
                 u[3 * node + i % 3]
             }
         })
+    }
+
+    /// Check the retained source-material domain for one physical displacement.
+    /// No stress samples or displacement-family buffers are allocated.
+    pub fn admit_material_domain(
+        &self,
+        u: &[f64],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.admit_affine_material_domain(u, &[], checkpoint)
+    }
+
+    /// Admit every field `offset + sum_j a[j] * basis[j]`, `||a||_2 <= 1`,
+    /// against the retained source strain ceilings at original bulk points.
+    /// Shapes, finite coefficients and scales are checked even for legacy laws;
+    /// no ceiling is invented for a law without a retained source domain.
+    ///
+    /// This streams cell-local fields with constant auxiliary storage and no
+    /// heap allocation. It shares the stable component support calculation with
+    /// `affine_bulk_stress`, but neither evaluates nor stores constitutive stress.
+    /// Cancellation is polled while checking inputs, at cells and points, within
+    /// each basis family and before publication. Operator state is unchanged.
+    /// The pointwise floating-point admission is not a continuum certificate.
+    pub fn admit_affine_material_domain(
+        &self,
+        offset: &[f64],
+        basis: &[&[f64]],
+        checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.admit_affine_material_domain_mapped(
+            offset,
+            basis,
+            self.n(),
+            |cell, field| self.stress_local(cell, field),
+            checkpoint,
+        )
+    }
+
+    // The adaptive owner supplies the exact constrained local reconstruction;
+    // this native traversal still owns material validity and point ordering.
+    pub(super) fn admit_affine_material_domain_mapped(
+        &self,
+        offset: &[f64],
+        basis: &[&[f64]],
+        n: usize,
+        mut local: impl FnMut(&Cell3, &[f64]) -> [f64; 24],
+        mut checkpoint: impl FnMut() -> ControlFlow<()>,
+    ) -> Result<(), ElasticityError3> {
+        self.admit_stress_state(None, &mut checkpoint)?;
+        admit_displacement(offset, n, &mut checkpoint)?;
+        for &field in basis {
+            admit_displacement(field, n, &mut checkpoint)?;
+        }
+        for cell in &self.cells {
+            poll(&mut checkpoint)?;
+            if cell.material.source_state().is_none() {
+                continue;
+            }
+            let local_offset = local(cell, offset);
+            for &(position, _) in cell.rules.bulk() {
+                poll(&mut checkpoint)?;
+                let (_, gradients) = q1(cell.bounds, position);
+                admit_affine_material_strain(
+                    &cell.material,
+                    &gradients,
+                    &local_offset,
+                    basis.iter().map(|field| local(cell, *field)),
+                    &mut checkpoint,
+                )?;
+            }
+        }
+        poll(&mut checkpoint)?;
+        Ok(())
     }
 
     /// Evaluate the actual bulk quadrature stress with each cell's retained
@@ -392,7 +475,7 @@ impl CutElasticity3 {
                     &cell.material,
                     &gradients,
                     &local_offset,
-                    &local_basis,
+                    local_basis.iter().copied(),
                     &mut checkpoint,
                 )?;
                 let constitutive = stress_basis(&cell.material, &gradients);
