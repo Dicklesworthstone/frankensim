@@ -286,6 +286,12 @@ impl Profile {
             },
             None => None,
         };
+        // A contact-loaded ribbon schedules zero normal force, so a cell
+        // without its own bow-contact binding would have no normal law at all.
+        if !self.bow_contacts.is_empty() && ribbon.as_ref().is_some_and(|ribbon| (0..ribbon.stations().len())
+            .any(|cell| self.bow_contacts.iter().filter(|binding| binding.bow == cell).count() != 1)) {
+            return Err("a contact-loaded bow ribbon needs exactly one bow-contact binding on every cell".into());
+        }
         let locations = self.entries.iter().map(|entry| entry.location(ribbon.as_ref()))
             .collect::<Result<Vec<_>>>()?;
         let mut fiber_normal = None;

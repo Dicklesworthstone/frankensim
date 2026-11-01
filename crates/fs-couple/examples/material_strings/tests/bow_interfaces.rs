@@ -194,14 +194,24 @@ fn ribbon_source_rejects_invalid_width_resolution_or_ambiguous_normal_loads() {
     bytes.extend(schedule.to_canonical_bytes());
     assert!(input::Spec::parse(&bytes).is_err());
     assert!(input::Spec::parse(include_bytes!("../source-bow.material-strings")).is_ok());
+    // One cell bound twice: the profile parser's distinct-bow rule refuses it
+    // before any spec or pack exists.
+    let twice = include_str!("../fiber-contact.stops").replace("bow-contact 0 centre\n",
+        "stop extra 0 ribbon:0 normal 0 -1 fiber:0 -0.000001 5000 1 0 10 0.001\n\
+         bow-contact 0 centre\nbow-contact 0 extra\n");
+    let error = crate::stops::Profile::parse(twice.as_bytes()).err().unwrap();
+    assert!(error.to_string().contains("distinct actual bows"), "{error}");
     scoped(|cx, gate| {
+        // Three zero-load cells with only cell 0 bound leave cells 1 and 2
+        // without a normal law; refused before any pack read.
         let spec = input::Spec::parse(include_bytes!("../contact-bow.material-strings")).unwrap();
         let spec = ribbon_spec(spec, "0.01 3").unwrap();
         let stops = crate::stops::Profile::parse(include_bytes!("../contact-bow.stops")).unwrap();
         let mut reads = 0;
-        assert!(spec.compile_with_profiles(cx, gate, None, Some(stops), |name| {
+        let error = spec.compile_with_profiles(cx, gate, None, Some(stops), |name| {
             reads += 1; Ok(pack(name, 7800.0, 200_000.0, None))
-        }).is_err());
+        }).err().unwrap();
+        assert!(error.to_string().contains("exactly one bow-contact binding on every cell"), "{error}");
         assert_eq!(reads, 0);
     });
 }
