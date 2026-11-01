@@ -15,6 +15,9 @@
 /// World-fixed loads and finite axial connections on original material points.
 pub mod spatial_loads;
 
+/// Momentum-preserving changes of full link inertia at fixed configuration.
+pub mod reconfigure;
+
 use super::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
     Kinematics, SpatialInertia, forward_kinematics, free_floating_forward_dynamics,

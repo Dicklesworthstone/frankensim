@@ -1100,6 +1100,40 @@ are not rolled back. Second order applies to smooth resolved load laws. This
 explicit lane does not imply stiff stability, motor electrical-state coupling,
 hybrid controller switching or a dissipation/thermal model for callback effort.
 
+## Live free-floating inertia reconfiguration
+
+`articulated::motion::reconfigure::transfer_inertia` transfers an actual moving
+tree between full centroidal link tensors at unchanged configuration. It
+preserves all six base and every joint conjugate momentum:
+`M_next(q) u_after = M_previous(q) u_before`. The original articulated-body
+inverse-mass recursion applies the individual old link momenta to the new
+operator, with O(links) work and storage and the existing fixed-size root solve.
+There is no assembled generalized mass matrix or fictitious external impulse.
+
+Link identities, topology, transforms, joints and limits remain identical.
+Per-link mass and COM must be bit-identical. The caller supplies the
+closed-inventory interpretation; this reduced parameter update does not infer
+internal shape velocity/momentum, moving attachments, mass flow, contact,
+closed-loop constraints or fluid storage.
+
+The result independently reconstructs all 6+n momenta through a zero-velocity
+RNEA mass action and world linear/spin-plus-orbital momentum through native link
+kinematics. Caller-declared componentwise physical tolerances govern admission.
+The inverse-mass solve uses a common translating frame to avoid contamination
+by large bulk motion. Signed parameter work is evaluated in that same frame
+with the actual linear-momentum-residual correction; it remains available when
+rounded lab kinetic totals lose a small rotational-energy change. Positive
+and negative work both consume the absolute budget. No heat partition follows.
+
+Identical models preserve state bits after admission. Invalid resulting rates,
+changed inventory/geometry, work exhaustion, numerical failure or cancellation
+publish no state. The native 4096-link cap bounds indivisible tree passes.
+
+Three focused native regressions cover an analytic carrier/rotor transfer and
+continued flight, a mixed-joint offset tree with full tensors and independent
+link-level momentum reconstruction, frame/Galilean covariance, reverse transfer,
+large common translation, and atomic identity/limit/work/cancellation behavior.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared
