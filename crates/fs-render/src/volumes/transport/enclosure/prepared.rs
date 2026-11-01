@@ -6,7 +6,7 @@
 //! wavelength, and only then applies exponential attenuation.
 
 use super::{
-    AbsorbingGrid, GridEnclosureBudget, Interval, MassAbsorptionSpectrum, Point3,
+    AbsorbingGrid, ColumnDensityEnclosure, GridEnclosureBudget, Interval, MassAbsorptionSpectrum, Point3,
     VolumeTransportError, attenuate, checkpoint, exp_neg, finite, nonnegative,
 };
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGrid};
@@ -162,10 +162,33 @@ impl<'g, 'field, const N: usize> PreparedGridExtinction<'g, 'field, N> {
         end: Point3,
         budget: GridEnclosureBudget,
     ) -> Result<[Interval; N], VolumeTransportError> {
+        self.transmittance_query(cx, Query::Points(start, end), budget)
+    }
+
+    /// Bound transmission for EVERY straight segment joining the two finite
+    /// coordinate boxes. A triangle or camera panel can supply its enclosing
+    /// endpoint box; correlation loss widens the result, never drops rays.
+    /// Singleton boxes use the original point-segment path with identical bits.
+    /// The original density/optical maps, cell budget and caller node budget
+    /// remain authoritative. No field copy or per-query allocation is performed.
+    /// This is direct extinction only, not in-scattering or thermal emission.
+    pub fn transmittance_box(
+        &self,
+        cx: &Cx<'_>,
+        start: [Interval; 3],
+        end: [Interval; 3],
+        budget: GridEnclosureBudget,
+    ) -> Result<[Interval; N], VolumeTransportError> {
+        self.transmittance_query(cx, Query::Boxes(start, end), budget)
+    }
+
+    fn transmittance_query(
+        &self, cx: &Cx<'_>, query: Query, budget: GridEnclosureBudget,
+    ) -> Result<[Interval; N], VolumeTransportError> {
         checkpoint(cx)?;
         let (absorption, scattering) = match &self.coefficients {
             Coefficients::Uniform(coefficients) => {
-                let column = self.grid.column_density_enclosure(cx, start, end, budget)?;
+                let column = query.visit(self.grid, cx, budget, |_, _| Ok(()))?;
                 let values = attenuate(column.kg_per_m2, coefficients)?;
                 checkpoint(cx)?;
                 return Ok(values);
@@ -173,7 +196,7 @@ impl<'g, 'field, const N: usize> PreparedGridExtinction<'g, 'field, N> {
             Coefficients::Indexed { absorption, scattering } => (absorption, scattering),
         };
         let mut depth = [Interval::point(0.0); N];
-        self.grid.visit_column(cx, start, end, budget, |cell, column| {
+        query.visit(self.grid, cx, budget, |cell, column| {
             let a_index = self.grid.absorption_palette().map_or(0, |p| p.cell_indices()[cell] as usize);
             let a = &absorption[a_index];
             let s = self.scattering.map(|medium| {
@@ -199,6 +222,23 @@ impl<'g, 'field, const N: usize> PreparedGridExtinction<'g, 'field, N> {
         }
         checkpoint(cx)?;
         Ok(result)
+    }
+}
+
+// Dispatch once per query, outside the shared cell loop; no dynamic callback.
+enum Query {
+    Points(Point3, Point3),
+    Boxes([Interval; 3], [Interval; 3]),
+}
+impl Query {
+    fn visit(
+        self, grid: &AbsorbingGrid<'_>, cx: &Cx<'_>, budget: GridEnclosureBudget,
+        visit: impl FnMut(usize, Interval) -> Result<(), VolumeTransportError>,
+    ) -> Result<ColumnDensityEnclosure, VolumeTransportError> {
+        match self {
+            Self::Points(a, b) => grid.visit_column(cx, a, b, budget, visit),
+            Self::Boxes(a, b) => grid.visit_box_column(cx, a, b, budget, visit),
+        }
     }
 }
 

@@ -16,6 +16,8 @@
 use super::{AbsorbingGrid, MassAbsorptionSpectrum, VolumeTransportError, checkpoint};
 use fs_exec::Cx;
 
+mod bundle;
+pub use bundle::GRID_BUNDLE_ENCLOSURE_SEMANTICS_VERSION;
 mod prepared;
 pub use prepared::{MAX_PREPARED_EXTINCTION_VALUES, PreparedGridExtinction};
 use fs_geom::Point3;
@@ -47,7 +49,7 @@ pub struct ColumnDensityEnclosure {
     pub visited_nodes: usize,
     /// Cells with possibly positive intersection length, including empty cells.
     pub possible_cells: u32,
-    /// Possible cells whose parallel-face ownership was not decided.
+    /// Possible cells with unresolved parallel-face or box-direction ownership.
     pub uncertain_parallel_cells: u32,
 }
 
@@ -121,7 +123,7 @@ impl AbsorbingGrid<'_> {
         start: Point3,
         end: Point3,
         budget: GridEnclosureBudget,
-        mut visit: impl FnMut(usize, Interval) -> Result<(), VolumeTransportError>,
+        visit: impl FnMut(usize, Interval) -> Result<(), VolumeTransportError>,
     ) -> Result<ColumnDensityEnclosure, VolumeTransportError> {
         checkpoint(cx)?;
         if budget.max_nodes_per_segment == 0 {
@@ -136,12 +138,37 @@ impl AbsorbingGrid<'_> {
         if self.grid.dims.iter().any(|&n| n as u128 > (1_u128 << 53)) {
             return Err(VolumeTransportError::Unrepresentable);
         }
+        if a == b {
+            return Ok(ColumnDensityEnclosure {
+                kg_per_m2: Interval::point(0.0), visited_nodes: 0,
+                possible_cells: 0, uncertain_parallel_cells: 0,
+            });
+        }
+        let segment = Segment::new(a, b)?;
+        self.visit_segments(cx, segment.length, budget,
+            |lower, upper| segment.overlap(lower, upper), visit)
+    }
+
+    // The only cell traversal for exact endpoints AND endpoint boxes. The
+    // overlap function must enclose every segment's fraction in each cell.
+    fn visit_segments(
+        &self,
+        cx: &Cx<'_>,
+        length: Interval,
+        budget: GridEnclosureBudget,
+        overlap: impl Fn([Interval; 3], [Interval; 3]) -> Option<(Interval, bool)>,
+        mut visit: impl FnMut(usize, Interval) -> Result<(), VolumeTransportError>,
+    ) -> Result<ColumnDensityEnclosure, VolumeTransportError> {
+        checkpoint(cx)?;
+        if budget.max_nodes_per_segment == 0 { return Err(VolumeTransportError::Budget); }
+        if self.grid.dims.iter().any(|&n| n as u128 > (1_u128 << 53)) {
+            return Err(VolumeTransportError::Unrepresentable);
+        }
         let mut result = ColumnDensityEnclosure {
             kg_per_m2: Interval::point(0.0), visited_nodes: 0,
             possible_cells: 0, uncertain_parallel_cells: 0,
         };
-        if a == b { return Ok(result); }
-        let segment = Segment::new(a, b)?;
+        if length.hi() == 0.0 { return Ok(result); }
         let mut stack = [IndexBox::EMPTY; STACK_CAPACITY];
         stack[0] = IndexBox { lo: [0; 3], hi: self.grid.dims };
         let mut pending = 1;
@@ -163,7 +190,7 @@ impl AbsorbingGrid<'_> {
             if lower.iter().chain(&upper).any(|&v| !finite(v)) {
                 return Err(VolumeTransportError::Unrepresentable);
             }
-            let Some((fraction, parallel_uncertain)) = segment.overlap(lower, upper) else {
+            let Some((fraction, parallel_uncertain)) = overlap(lower, upper) else {
                 continue;
             };
             let spans = std::array::from_fn::<_, 3, _>(|axis| indices.hi[axis] - indices.lo[axis]);
@@ -183,7 +210,7 @@ impl AbsorbingGrid<'_> {
                 let rho = self.grid.data[index];
                 if rho != 0.0 {
                     let fraction_mass = nonnegative(fraction * Interval::point(rho));
-                    let column = nonnegative(fraction_mass * segment.length);
+                    let column = nonnegative(fraction_mass * length);
                     if !finite(column) { return Err(VolumeTransportError::Unrepresentable); }
                     visit(index, column)?;
                     mass_per_parameter = nonnegative(mass_per_parameter + fraction_mass);
@@ -206,7 +233,7 @@ impl AbsorbingGrid<'_> {
         result.kg_per_m2 = if mass_per_parameter.hi() == 0.0 {
             Interval::point(0.0)
         } else {
-            nonnegative(mass_per_parameter * segment.length)
+            nonnegative(mass_per_parameter * length)
         };
         if !finite(result.kg_per_m2) { return Err(VolumeTransportError::Unrepresentable); }
         checkpoint(cx)?;
