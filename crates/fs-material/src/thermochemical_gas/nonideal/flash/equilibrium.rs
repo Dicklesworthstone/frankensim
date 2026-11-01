@@ -17,6 +17,8 @@ use fs_thermochem::eos::peng_robinson::{
     stability::PengRobinsonStabilityOptionsV1,
 };
 
+/// Entropy-constrained pressure changes through the same original phase owner.
+pub mod entropy;
 /// Conserved internal-energy and volume closure over the same phase owner.
 pub mod volume;
 
@@ -205,25 +207,7 @@ impl ThermochemicalPengRobinsonModel {
         initial: &ResolvedThermochemicalPhaseState,
         final_state: &ResolvedThermochemicalPhaseState,
     ) -> Result<f64, E> {
-        let ideal = self
-            .source()
-            .thermodynamics()
-            .specific_internal_energy_change(
-                initial.sample.temperature,
-                final_state.sample.temperature,
-            )
-            .map_err(|error| failure("original phase internal-energy increment", error))?
-            .value();
-        let change = ideal
-            + (final_state.sample.residual_u - initial.sample.residual_u)
-                / self.mechanics().molar_mass().value();
-        if change.is_finite() {
-            Ok(change)
-        } else {
-            Err(E::Invalid(
-                "original phase internal-energy increment overflow",
-            ))
-        }
+        self.caloric_internal_energy_change(&initial.sample, &final_state.sample)
     }
 
     /// Resolve homogeneous or separated PT calorics using the original two-search

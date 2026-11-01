@@ -9002,3 +9002,41 @@ partitioned heat and extensive scaling; large independent species datums;
 small heat under coarse tolerance; initialization/refusal; exact rest; work
 exhaustion; and atomic final-cancellation replay. Synthetic NASA calorics are
 constitutive numerical tests, not experimental fluid validation.
+
+## Pressure–entropy equilibrium through the original mixture phases
+
+`thermochemical_gas::nonideal::flash::equilibrium::entropy` provides absolute
+pressure/entropy and original-source entropy-increment constraints. The original
+screened PT owner resolves homogeneous states or separated compositions and
+amounts at every trial. Both stationary searches must converge; a witnessed
+instability must resolve its split. This finite evidence is retained without
+claiming a global phase minimum or resolving amount-indeterminate coexistence.
+
+The existing safeguarded caloric temperature root now serves enthalpy and entropy
+coordinates. It retains explicit source temperature bounds, monotonic branch
+admission, residual and temperature safeguards, a bounded number of original PT
+queries, conservative nested EOS ceilings, and cancellation before publication.
+Existing PH and U,V consumers continue through the same enthalpy wrapper.
+Neither inversion substitutes a frozen or invented mixed heat capacity.
+
+Entropy increments integrate the original NASA temperature and pressure terms
+before adding the original phase mixing/departure difference. Independent
+species entropy and formation datums cancel before rounding. Accepted increment
+solutions also report separately source-integrated Delta h and Delta u. Absolute
+entropy refuses when the requested tolerance is below its floating-point spacing.
+Nonzero entropy increments tighten the root tolerance to at most a quarter of the
+requested magnitude. At unchanged pressure, zero increment, and a reference
+inside the declared bracket, the exact reference returns after one PT query;
+changing pressure at zero Delta s still solves the isentropic endpoint.
+
+This material-level constraint supplies thermodynamic endpoints. Process work,
+heat transfer, flow rate, phase kinetics, reactions, and acoustic closure remain
+with their physical consumers. Source or work refusal and cancellation publish
+no partial result.
+
+Eight focused regression cases cover independent homogeneous and split calorics,
+an independently solved binary expansion and reversible compression, both phase
+boundaries, source datum invariance, small signed entropy changes, exact rest,
+physical/source/work refusals, and final cancellation/replay. Source and tests
+passed Rustfmt parsing. Native compilation and execution remain pending because
+the shared build filesystem is full; the new suite is not claimed green.

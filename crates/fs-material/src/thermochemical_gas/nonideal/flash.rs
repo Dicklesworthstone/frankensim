@@ -45,6 +45,8 @@ pub enum ThermochemicalFlashError {
     },
     /// The admitted endpoints do not bracket the requested enthalpy.
     OutsideEnthalpyBracket,
+    /// The admitted endpoints do not bracket the requested entropy.
+    OutsideEntropyBracket,
     /// The remaining temperature interval cannot be resolved at the requested accuracy.
     UnresolvedTemperature,
     /// The pressure endpoints do not bracket the requested conserved volume.
