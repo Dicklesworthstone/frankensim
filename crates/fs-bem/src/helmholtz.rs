@@ -2280,16 +2280,7 @@ pub fn directivity_sh_table_from_evaluator_with_options(
             what: "spherical-harmonic degree exceeds MAX_SH_DEGREE",
         });
     }
-    if options.maximum_directions == 0
-        || options.maximum_directions > MAX_SH_QUADRATURE_DIRECTIONS
-        || !options.relative_tolerance.is_finite()
-        || options.relative_tolerance <= 0.0
-        || options.relative_tolerance > 1e-3
-    {
-        return Err(HelmholtzError::BadParameter {
-            what: "invalid spherical-harmonic quadrature budget or tolerance",
-        });
-    }
+    admit_angular_options(options)?;
     let mut n_theta = (l_max + 1).max(8);
     let mut evaluated_directions = 0;
     let mut previous: Option<ShProjection> = None;
@@ -2422,13 +2413,46 @@ fn sh_power(values: impl Iterator<Item = f64>) -> f64 {
     sum
 }
 
-fn sh_project_grid(
-    l_max: usize,
+pub(crate) fn admit_angular_options(
+    options: DirectivityProjectionOptions,
+) -> Result<(), HelmholtzError> {
+    if options.maximum_directions == 0
+        || options.maximum_directions > MAX_SH_QUADRATURE_DIRECTIONS
+        || !options.relative_tolerance.is_finite()
+        || options.relative_tolerance <= 0.0
+        || options.relative_tolerance > 1e-3
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "invalid spherical-harmonic quadrature budget or tolerance",
+        });
+    }
+    Ok(())
+}
+
+/// The original positive Gauss–Legendre × uniform-longitude rule, shared by
+/// SH projection and retained-source power integration. Weights are latitude
+/// weights; each longitude contributes an additional TAU / phases.len().
+pub(crate) struct AngularGrid {
+    pub(crate) nodes: Vec<f64>,
+    pub(crate) weights: Vec<f64>,
+    pub(crate) phases: Vec<C64>,
+    pub(crate) directions: Vec<[f64; 3]>,
+}
+
+pub(crate) fn angular_grid(
     n_theta: usize,
     stagger: bool,
-    evaluator: &mut impl FnMut(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
     cancelled: &impl Fn() -> bool,
-) -> Result<ShProjection, HelmholtzError> {
+) -> Result<AngularGrid, HelmholtzError> {
+    if n_theta == 0
+        || n_theta
+            .checked_mul(n_theta.saturating_mul(2).saturating_add(1))
+            .is_none_or(|count| count > MAX_SH_QUADRATURE_DIRECTIONS)
+    {
+        return Err(HelmholtzError::BadParameter {
+            what: "invalid angular latitude count",
+        });
+    }
     let n_phi = 2 * n_theta + 1;
     let (nodes, weights) = gauss_legendre(n_theta);
     let mut phases = sh_reserve(n_phi)?;
@@ -2446,6 +2470,28 @@ fn sh_project_grid(
             dirs.push([s * phase.re, s * phase.im, x]);
         }
     }
+    Ok(AngularGrid {
+        nodes,
+        weights,
+        phases,
+        directions: dirs,
+    })
+}
+
+fn sh_project_grid(
+    l_max: usize,
+    n_theta: usize,
+    stagger: bool,
+    evaluator: &mut impl FnMut(&[[f64; 3]]) -> Result<Vec<C64>, HelmholtzError>,
+    cancelled: &impl Fn() -> bool,
+) -> Result<ShProjection, HelmholtzError> {
+    let AngularGrid {
+        nodes,
+        weights,
+        phases,
+        directions: dirs,
+    } = angular_grid(n_theta, stagger, cancelled)?;
+    let n_phi = phases.len();
     let mut f = sh_reserve(dirs.len())?;
     let mut scale = 0.0_f64;
     for batch in dirs.chunks(256) {

@@ -10,8 +10,8 @@
 use super::*;
 use crate::near_field::{FirstOrder, MAX_RECEIVERS};
 
-const MAX_MODES: usize = 4096;
-const MAX_PRODUCTS: usize = 64_000_000;
+pub(super) const MAX_MODES: usize = 4096;
+pub(super) const MAX_PRODUCTS: usize = 64_000_000;
 
 /// Explicit ceiling on complex transfer/outer-product terms per evaluation.
 /// Source counts, receiver counts and coherence rank also have fixed caps.
@@ -78,12 +78,12 @@ pub(super) fn admit_frequency(omega: f64, medium: Medium) -> Result<(), Transfer
 // Neumaier summation retains weak residuals after cancellation, separately
 // for each physical component. Do not reduce absolute amplitudes instead.
 #[derive(Clone, Copy, Debug, Default)]
-struct Sum {
+pub(super) struct Sum {
     value: C64,
     correction: C64,
 }
 impl Sum {
-    fn add(&mut self, z: C64) {
+    pub(super) fn add(&mut self, z: C64) {
         fn component(sum: &mut f64, correction: &mut f64, x: f64) {
             let next = *sum + x;
             *correction += if sum.abs() >= x.abs() {
@@ -96,7 +96,7 @@ impl Sum {
         component(&mut self.value.re, &mut self.correction.re, z.re);
         component(&mut self.value.im, &mut self.correction.im, z.im);
     }
-    fn finish(self) -> C64 {
+    pub(super) fn finish(self) -> C64 {
         self.value + self.correction
     }
 }

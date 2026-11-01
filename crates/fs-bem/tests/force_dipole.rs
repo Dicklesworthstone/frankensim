@@ -8,8 +8,9 @@ use fs_bem::observation_transfers::{
     BemObservation, CompactSourceSpec, ForceDipoleSpec, HarmonicField, HarmonicFieldStatistics,
     HarmonicWorkBudget, IterativeBoundaryObservation, IterativeDirectivityOptions,
     IterativeObservationOptions, LocalBoundary, LocalBoundaryObservation, LocalWall,
-    LowerBandWindow, MAX_OBSERVATION_FFT, PointSourceSpec, ProducerUncertainty, ReceiverSpec,
-    ScatteringObservation, SourceId, TransferDeclaration, bake_observation_transfers,
+    LowerBandWindow, MAX_OBSERVATION_FFT, PointSourceSpec, PreparedRadiationOptions,
+    ProducerUncertainty, ReceiverSpec, ScatteringObservation, SourceId, TransferDeclaration,
+    bake_observation_transfers,
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::ContentHash;
@@ -458,6 +459,59 @@ fn g3_mixed_force_scattering_and_harmonic_observation_keep_si_cross_terms() {
             2e-5,
         );
     }
+    // The prepared source bank retains physical Q/F units and direct fields,
+    // and its full positive angular integral agrees with the independently
+    // refined SH owner's total power (including power outside its truncation).
+    let angular = retained
+        .prepare_radiation(
+            &directions,
+            PreparedRadiationOptions {
+                angular: DirectivityProjectionOptions::default(),
+                initial_latitudes: 8,
+                refinements: 4,
+                maximum_kernel_evaluations: 100_000_000,
+                maximum_source_entries: 20_000,
+            },
+            &gate,
+        )
+        .unwrap();
+    let budget = HarmonicWorkBudget {
+        maximum_products: 1_000_000,
+    };
+    let mut outgoing_total = [C64::ZERO; 3];
+    let power = angular
+        .evaluate_coherent(&amplitudes, budget, &mut outgoing_total, || false)
+        .unwrap();
+    let reference_power = projected.table.power_by_degree().iter().sum::<f64>()
+        / projected.table.captured_fraction
+        / (2.0 * MEDIUM.density * MEDIUM.sound_speed);
+    assert!((power.total_power_w / reference_power - 1.0).abs() < 2e-8);
+    for (index, direction) in directions.into_iter().enumerate() {
+        close(
+            outgoing_total[index],
+            solved[2].total_far_field(direction).unwrap(),
+            2e-7,
+        );
+    }
+    let mut density = [0.0; 3];
+    let partial = angular
+        .evaluate_coherence_modes(
+            &[amplitudes[0], amplitudes[1], amplitudes[0], -amplitudes[1]],
+            2,
+            budget,
+            &mut density,
+            || false,
+        )
+        .unwrap();
+    let independent = angular
+        .evaluate_independent_sources(
+            &[2.0 * amplitudes[0].norm_sq(), 2.0 * amplitudes[1].norm_sq()],
+            budget,
+            &mut [0.0; 3],
+            || false,
+        )
+        .unwrap();
+    assert!((partial.total_power_w / independent.total_power_w - 1.0).abs() < 3e-13);
     assert!(
         iterative_owner
             .physical_frequency_sample(0.0, &gate)

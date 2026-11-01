@@ -31,6 +31,8 @@ pub use harmonic::{
     HarmonicField, HarmonicFieldStatistics, HarmonicWorkBudget, PreparedHarmonicObservation,
     PreparedMicrophoneArray,
 };
+mod radiation;
+pub use radiation::{PreparedRadiationObservation, PreparedRadiationOptions, RadiatedPowerMoments};
 mod wall;
 pub use wall::{
     BoundaryObservationBake, BoundaryPortImpedance, IterativeBoundaryObservation,
@@ -122,6 +124,13 @@ pub enum TransferError {
     Fir(FirError),
     Cap { requested: usize, cap: usize },
     NotConverged { tail: f64, wrap: f64, dtft: f64 },
+    /// The cached positive angular rules did not resolve this specific drive
+    /// or coherence factorization. Refine the prepared bank before retrying.
+    AngularPowerNotConverged {
+        evaluated_directions: usize,
+        power_change: Option<f64>,
+        moment_change: Option<f64>,
+    },
     Cancelled,
 }
 impl From<HelmholtzError> for TransferError {
@@ -1015,6 +1024,82 @@ impl<'a> BemObservation<'a> {
         PreparedHarmonicObservation::from_samples(
             omega, self.medium, &self.sources, &self.receivers, self.operator_hash(), samples,
         )
+    }
+    /// Observe the original retained radiation solutions without another
+    /// boundary solve. Source order and exact prescribed velocity traces must
+    /// match this owner, as must frequency, medium and surface identity.
+    /// The original centroid pressure/gradient rows and source SI coordinates
+    /// are unchanged. Solver and spatial errors remain the caller's original
+    /// solution uncertainties; public field identity is not a solve certificate.
+    /// Cancellation is checked before admission and between source observations.
+    pub fn prepare_harmonic_from_solutions(
+        &self,
+        omega: f64,
+        solutions: &[helmholtz::RadiationSolution],
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<PreparedHarmonicObservation, TransferError> {
+        self.admit_retained_solutions(omega, solutions, &mut cancelled)?;
+        let entries = 4 * self.fields.len() * self.points.len();
+        cap(entries, MAX_OBSERVATION_ENTRIES)?;
+        let mut samples = Vec::with_capacity(entries);
+        for solution in solutions {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            Self::flatten(
+                laplace::observe_frequency(
+                    self.surface,
+                    solution,
+                    &self.points,
+                    self.minimum_clearance_m,
+                )?,
+                &mut samples,
+            );
+        }
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        PreparedHarmonicObservation::from_samples(
+            omega,
+            self.medium,
+            &self.sources,
+            &self.receivers,
+            self.operator_hash(),
+            samples,
+        )
+    }
+    fn admit_retained_solutions(
+        &self,
+        omega: f64,
+        solutions: &[helmholtz::RadiationSolution],
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(), TransferError> {
+        harmonic::admit_frequency(omega, self.medium)?;
+        if cancelled() {
+            return Err(TransferError::Cancelled);
+        }
+        if solutions.len() != self.fields.len() {
+            return Err(TransferError::Invalid(
+                "retained harmonic source count differs",
+            ));
+        }
+        let k = omega / self.medium.sound_speed;
+        for (solution, field) in solutions.iter().zip(&self.fields) {
+            if cancelled() {
+                return Err(TransferError::Cancelled);
+            }
+            if solution.k.to_bits() != k.to_bits()
+                || solution.medium != self.medium
+                || solution.velocity != *field
+            {
+                return Err(TransferError::Invalid(
+                    "retained harmonic source trace, frequency or medium differs",
+                ));
+            }
+            // Reuse the existing fingerprint, shape and finite-field admission.
+            helmholtz::exterior_pressure_at_points(self.surface, solution, self.medium, &[])?;
+        }
+        Ok(())
     }
     /// CQ reference samples, with the same full source basis and receiver rows.
     /// A per-receiver advance may extract a known propagation prefix exactly.

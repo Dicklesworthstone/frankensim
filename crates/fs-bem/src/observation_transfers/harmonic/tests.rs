@@ -9,6 +9,79 @@ const BUDGET: HarmonicWorkBudget = HarmonicWorkBudget {
     maximum_products: 1_000_000,
 };
 
+#[test]
+fn retained_dense_solutions_keep_original_fields_and_refuse_cross_wiring() {
+    let surface = SpherePanels::icosphere(0.025, 0).unwrap();
+    let medium = Medium {
+        density: 1.2,
+        sound_speed: 343.0,
+    };
+    let sources = [
+        SourceId::StructuralMode("uniform".into()),
+        SourceId::StructuralMode("signed".into()),
+    ];
+    let traces = [
+        vec![1.0; surface.areas().len()],
+        surface.normals().iter().map(|normal| normal[2]).collect(),
+    ];
+    let receivers = [ReceiverSpec {
+        id: "near".into(),
+        position_m: [0.04, 0.02, 0.08],
+    }];
+    let owner = BemObservation::new(&surface, medium, &sources, &traces, &receivers, 1e-3).unwrap();
+    let omega = 2.0 * medium.sound_speed;
+    let solutions = helmholtz::solve_radiation_batch(
+        &surface,
+        2.0,
+        medium,
+        &owner.fields.iter().map(Vec::as_slice).collect::<Vec<_>>(),
+        helmholtz::Formulation::BurtonMiller,
+    )
+    .unwrap();
+    let retained = owner
+        .prepare_harmonic_from_solutions(omega, &solutions, || false)
+        .unwrap();
+    let repeated = owner.prepare_harmonic(omega, || false).unwrap();
+    assert_eq!(retained.transfers, repeated.transfers);
+    assert_eq!(retained.producer_hash(), owner.operator_hash());
+    assert_eq!(retained.sources(), &sources);
+    assert!(
+        owner
+            .prepare_harmonic_from_solutions(omega, &solutions[..1], || false)
+            .is_err()
+    );
+    assert!(
+        owner
+            .prepare_harmonic_from_solutions(omega * 2.0, &solutions, || false)
+            .is_err()
+    );
+    let mut swapped = solutions.clone();
+    swapped.swap(0, 1);
+    assert!(
+        owner
+            .prepare_harmonic_from_solutions(omega, &swapped, || false)
+            .is_err()
+    );
+    let mut wrong = solutions.clone();
+    wrong[0].medium.density *= 2.0;
+    assert!(
+        owner
+            .prepare_harmonic_from_solutions(omega, &wrong, || false)
+            .is_err()
+    );
+    wrong = solutions.clone();
+    wrong[0].surface_fingerprint ^= 1;
+    assert!(
+        owner
+            .prepare_harmonic_from_solutions(omega, &wrong, || false)
+            .is_err()
+    );
+    assert!(matches!(
+        owner.prepare_harmonic_from_solutions(omega, &solutions, || true),
+        Err(TransferError::Cancelled)
+    ));
+}
+
 fn close(actual: C64, expected: C64) {
     assert!(
         (actual - expected).abs() <= 3e-11 * expected.abs().max(1e-9),
