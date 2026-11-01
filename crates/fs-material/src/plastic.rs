@@ -17,6 +17,8 @@ pub mod reduction;
 pub mod voce;
 /// Independent Armstrong-Frederick/Chaboche backstresses with dynamic recovery.
 pub mod chaboche;
+/// Multiplicative finite-strain Hencky plasticity with a Kirchhoff J2 surface.
+pub mod finite;
 
 use crate::elastic::IsotropicElastic;
 use crate::tensor::{contract, deviator, trace};
