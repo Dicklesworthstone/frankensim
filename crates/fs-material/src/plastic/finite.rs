@@ -21,6 +21,8 @@ use fs_math::det;
 
 /// Strict, explicit model-card binding for this exact Kirchhoff-yield law.
 pub mod source;
+/// Affine temperature dependence and multiplicative isotropic thermal stretch.
+pub mod thermal;
 
 const IDENTITY6: [f64; 6] = [1.0, 1.0, 1.0, 0.0, 0.0, 0.0];
 const ROUND_OFF: f64 = 2048.0 * f64::EPSILON;
