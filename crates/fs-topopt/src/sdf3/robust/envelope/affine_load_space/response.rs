@@ -19,6 +19,8 @@ use fs_sparse::precond::Precond;
 use std::borrow::Cow;
 use std::ops::ControlFlow;
 
+pub mod reference;
+
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AffineResponseOptions3 {
     /// Total original upper/lower inequalities, including both sides of windows.

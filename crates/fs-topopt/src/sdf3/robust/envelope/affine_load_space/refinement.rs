@@ -4,6 +4,8 @@
 //! material body force. Two frozen load directions use the existing DWR owner;
 //! neither a smooth envelope derivative nor a continuum bound is assumed.
 use super::grid::{combine_fields, evaluate_grid, finite, normalize, relative_difference};
+use super::response::reference::{self as response_reference, ReferenceAffineResponseLimits3};
+use super::response::{AffineResponseEvaluation3, AffineResponseLimits3, measure_affine_responses};
 use super::{AffineLoadSpace3, AffineLoadSpaceGrid3, RobustOptions3};
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
 use crate::sdf3::{AdaptiveSdf3Elasticity, CutDensityStudy3, Sdf3Elasticity};
@@ -60,6 +62,34 @@ pub struct AffineLoadSpaceInventory3 {
     pub mass_change_kg: Option<f64>,
 }
 
+/// The complete linear response models on both actual grids. Each original
+/// inequality keeps its own adverse coefficient vector and native witness.
+#[derive(Debug, Clone)]
+pub struct AffineResponseRefinement3 {
+    pub coarse: AffineResponseEvaluation3,
+    pub fine: AffineResponseEvaluation3,
+    /// (|y0_f-y0_c| + ||v_f-v_c||_2)/scale for each ordered original limit.
+    /// In exact arithmetic this bounds the response-model change over the
+    /// whole ball, including directions other than either grid's adversary.
+    /// Computed values are numerical evidence, not interval enclosures.
+    pub normalized_model_changes: Vec<f64>,
+    pub maximum_model_change: f64,
+}
+impl AffineResponseRefinement3 {
+    #[must_use]
+    pub fn stable_and_feasible(&self, tolerance: f64) -> bool {
+        tolerance.is_finite()
+            && tolerance >= 0.0
+            && !self.normalized_model_changes.is_empty()
+            && self
+                .normalized_model_changes
+                .iter()
+                .all(|v| v.is_finite() && *v >= 0.0 && *v <= tolerance)
+            && self.coarse.physically_feasible()
+            && self.fine.physically_feasible()
+    }
+}
+
 /// Complete successful two-grid experiment at one raw source design.
 #[derive(Debug, Clone)]
 pub struct AffineLoadSpaceRefinement3 {
@@ -75,6 +105,9 @@ pub struct AffineLoadSpaceRefinement3 {
     pub fine: AffineLoadSpaceGrid3,
     /// Optional DILATED inventory, evaluated without another filter or solve.
     pub inventory: Option<AffineLoadSpaceInventory3>,
+    /// Optional original response limits, re-bound to each native grid without
+    /// extra elasticity solves. Assessment does not request smooth gradients.
+    pub responses: Option<AffineResponseRefinement3>,
     /// ||G_f-G_c||_F + 2||h_f-h_c||_2 + |c_f-c_c|, in normalized units.
     /// In exact arithmetic this bounds the quadratic change on the unit ball.
     /// This computed numerical metric is not an interval or continuum bound.
@@ -220,6 +253,17 @@ impl AffineLoadSpaceRefinement3 {
     /// need not be a design cap, so this interpretation is explicitly opt-in.
     /// This is numerical two-grid evidence, not continuum feasibility.
     pub fn stable_and_feasible(&self, change_tolerance: f64) -> bool {
+        self.stable_and_feasible_with_response_tolerance(change_tolerance, change_tolerance)
+    }
+
+    /// Separate whole-model tolerances for compliance and original responses.
+    /// Both grids must also pass the SAME joint upper constraint used by the
+    /// optimizer, as well as every original physical cap and bound.
+    pub fn stable_and_feasible_with_response_tolerance(
+        &self,
+        change_tolerance: f64,
+        response_tolerance: f64,
+    ) -> bool {
         change_tolerance.is_finite()
             && change_tolerance >= 0.0
             && self.normalized_model_change.is_finite()
@@ -232,7 +276,92 @@ impl AffineLoadSpaceRefinement3 {
                     && grid.worst_compliance >= 0.0
                     && grid.worst_compliance <= self.policy.reference()
             })
+            && self.responses.as_ref().is_none_or(|responses| {
+                responses.stable_and_feasible(response_tolerance)
+                    && [
+                        (&self.coarse, &responses.coarse),
+                        (&self.fine, &responses.fine),
+                    ]
+                    .iter()
+                    .all(|(grid, response)| {
+                        crate::sdf3::response::limits::aggregate(
+                            &[grid.maximum - 1.0, response.constraint],
+                            response.options.sharpness,
+                        )
+                        .is_ok_and(|(constraint, _, _)| constraint <= 0.0)
+                    })
+            })
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn assess_responses<O: AdaptiveSdf3Elasticity, F: AdaptiveSdf3Elasticity>(
+    coarse_operator: &O,
+    fine_operator: &F,
+    coarse_grid: &AffineLoadSpaceGrid3,
+    fine_grid: &AffineLoadSpaceGrid3,
+    family: ReferenceAffineResponseLimits3<'_>,
+    control: &mut SolveControl<'_>,
+) -> Result<AffineResponseRefinement3, GoalRefinementError3> {
+    let coarse_observations = response_reference::assemble(coarse_operator, family, control)?;
+    let fine_observations = response_reference::assemble(fine_operator, family, control)?;
+    let coarse_limits = coarse_observations.limits();
+    let fine_limits = fine_observations.limits();
+    let coarse = measure_affine_responses(
+        coarse_operator,
+        coarse_grid,
+        AffineResponseLimits3 {
+            limits: &coarse_limits,
+            options: family.options,
+        },
+        control,
+    )?;
+    let fine = measure_affine_responses(
+        fine_operator,
+        fine_grid,
+        AffineResponseLimits3 {
+            limits: &fine_limits,
+            options: family.options,
+        },
+        control,
+    )?;
+    if coarse.witnesses.len() != fine.witnesses.len() {
+        return Err(GoalRefinementError3::Invalid(
+            "affine response refinement family mismatch",
+        ));
+    }
+    let mut normalized_model_changes = Vec::with_capacity(coarse.witnesses.len());
+    for (a, b) in coarse.witnesses.iter().zip(&fine.witnesses) {
+        control.checkpoint("sdf3-affine-goal-response-change")?;
+        if a.basis_responses.len() != b.basis_responses.len()
+            || a.bound != b.bound
+            || a.scale != b.scale
+            || a.sense != b.sense
+        {
+            return Err(GoalRefinementError3::Invalid(
+                "affine response refinement model mismatch",
+            ));
+        }
+        normalized_model_changes.push(normalize(
+            finite(
+                (b.baseline - a.baseline).abs()
+                    + norm_difference(&a.basis_responses, &b.basis_responses)?,
+                "sdf3-affine-goal-response-change",
+            )?,
+            a.scale,
+            "sdf3-affine-goal-response-change",
+        )?);
+    }
+    let maximum_model_change = normalized_model_changes
+        .iter()
+        .copied()
+        .fold(0.0_f64, f64::max);
+    Ok(AffineResponseRefinement3 {
+        coarse,
+        fine,
+        normalized_model_changes,
+        maximum_model_change,
+    })
 }
 
 fn norm_difference(a: &[f64], b: &[f64]) -> Result<f64, GoalRefinementError3> {
@@ -376,7 +505,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
         self.affine_load_space_enrichment(
-            enriched, rho, dead, basis, robustness, policy, None, options, control,
+            enriched, rho, dead, basis, robustness, policy, None, None, options, control,
         )
     }
 
@@ -410,6 +539,41 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
             robustness,
             policy,
             Some((objective, volume_scale)),
+            None,
+            options,
+            control,
+        )
+    }
+
+    /// Reintegrate the unchanged reference response laws on each actual grid,
+    /// then assess their COMPLETE affine response models using the already
+    /// solved fields. The eroded/dilated inheritance, native material body map,
+    /// compliance DWR and inventory assessment remain the same experiment.
+    /// No response adjoint, duplicate primal or fine filter is introduced.
+    #[allow(clippy::too_many_arguments)]
+    pub fn estimate_affine_load_space_enrichment_with_responses<F: AdaptiveSdf3Elasticity>(
+        &mut self,
+        enriched: F,
+        rho: &[f64],
+        dead: ReferenceLoad3<'_>,
+        basis: &[ReferenceLoad3<'_>],
+        robustness: RobustOptions3,
+        policy: &AffineLoadSpace3,
+        objective: MinimumMaterialObjective3,
+        volume_scale: f64,
+        family: ReferenceAffineResponseLimits3<'_>,
+        options: AffineLoadSpaceRefinementOptions3,
+        control: &mut SolveControl<'_>,
+    ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
+        self.affine_load_space_enrichment(
+            enriched,
+            rho,
+            dead,
+            basis,
+            robustness,
+            policy,
+            Some((objective, volume_scale)),
+            Some(family),
             options,
             control,
         )
@@ -425,6 +589,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
         robustness: RobustOptions3,
         policy: &AffineLoadSpace3,
         inventory_policy: Option<(MinimumMaterialObjective3, f64)>,
+        response_policy: Option<ReferenceAffineResponseLimits3<'_>>,
         options: AffineLoadSpaceRefinementOptions3,
         control: &mut SolveControl<'_>,
     ) -> Result<AffineLoadSpaceRefinement3, GoalRefinementError3> {
@@ -455,6 +620,10 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 crate::sdf3::inventory::mass_weights(&self.operator)?;
                 crate::sdf3::inventory::mass_weights(&enriched)?;
             }
+        }
+        if let Some(family) = response_policy {
+            response_reference::admit(&self.operator, family)?;
+            response_reference::admit(&enriched, family)?;
         }
         let filtered = self.filter_apply(rho, control)?;
         let eroded = self.design_from_filtered(
@@ -606,6 +775,11 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                     control,
                 )?
             };
+            let responses = response_policy
+                .map(|family| {
+                    assess_responses(&self.operator, &enriched, &coarse, &fine, family, control)
+                })
+                .transpose()?;
             let normalized_model_change = finite(
                 norm_difference(&coarse.gram, &fine.gram)?
                     + 2.0 * norm_difference(&coarse.linear, &fine.linear)?
@@ -774,6 +948,7 @@ impl<O: AdaptiveSdf3Elasticity> CutDensityStudy3<O> {
                 coarse,
                 fine,
                 inventory,
+                responses,
                 normalized_model_change,
                 normalized_maximum_change,
                 normalized_witness_change,

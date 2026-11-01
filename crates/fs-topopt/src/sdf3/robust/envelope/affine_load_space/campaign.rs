@@ -3,6 +3,7 @@ use super::design::{AffineLoadSpaceDesignGoal3, admit_model};
 use super::grid::normalize;
 use super::refinement::{AffineLoadSpaceRefinement3, AffineLoadSpaceRefinementOptions3};
 use super::refit::{AffineLoadSpaceRefit3, AffineLoadSpaceRefitError3};
+use super::response::reference::{self as response_reference, ReferenceAffineResponseLimits3};
 use crate::sdf3::AdaptiveSdf3Elasticity;
 use crate::sdf3::response::limits::design::MinimumMaterialObjective3;
 use crate::sdf3_goal::GoalRefinementError3;
@@ -38,6 +39,8 @@ pub struct AffineLoadSpaceCampaignOptions3 {
     pub max_candidate_attempts: usize,
     /// Absolute normalized change of the full G, h and c model on the unit ball.
     pub change_tolerance: f64,
+    /// Maximum normalized whole-model change of EACH original response limit.
+    pub response_change_tolerance: f64,
     /// Absolute change in dilated numerical volume fraction.
     pub volume_tolerance: f64,
     /// Absolute inventory change divided by its declared objective scale.
@@ -51,6 +54,7 @@ impl Default for AffineLoadSpaceCampaignOptions3 {
             max_refits: 2,
             max_candidate_attempts: 4,
             change_tolerance: 0.02,
+            response_change_tolerance: 0.02,
             volume_tolerance: 1e-4,
             objective_tolerance: 1e-4,
             marking: AffineLoadSpaceMarking3::UniformActive,
@@ -62,7 +66,7 @@ impl Default for AffineLoadSpaceCampaignOptions3 {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AffineLoadSpaceCampaignStop3 {
     Paused,
-    /// Current design passes both physical compliance caps and all change gates.
+    /// Current design passes both grids' physical bounds and all change gates.
     StableAndFeasible,
     /// The last installed design has been probed but remains unresolved.
     RefinementLimit,
@@ -80,6 +84,8 @@ pub struct AffineLoadSpaceGridSummary3 {
     pub dilated_mass_kg: Option<f64>,
     pub objective: f64,
     pub worst_compliance: f64,
+    pub response_constraint: Option<f64>,
+    pub worst_response_residual: Option<f64>,
     pub work: SolveWork,
 }
 
@@ -89,6 +95,7 @@ pub struct AffineLoadSpaceProbe3 {
     pub coarse_worst_compliance: f64,
     pub fine_worst_compliance: f64,
     pub normalized_model_change: f64,
+    pub response_model_change: Option<f64>,
     pub volume_change: f64,
     pub objective_change: f64,
     pub mass_change_kg: Option<f64>,
@@ -150,6 +157,8 @@ fn grid<O: AdaptiveSdf3Elasticity>(
         dilated_mass_kg: e.physical.dilated_mass_kg,
         objective: value,
         worst_compliance: e.worst_compliance,
+        response_constraint: e.responses.as_ref().map(|response| response.constraint),
+        worst_response_residual: e.responses.as_ref().map(|response| response.worst_residual),
         work: current.work,
     })
 }
@@ -232,9 +241,10 @@ fn inventory_resolved(
 }
 
 /// In-memory adaptive minimum-material design for one fixed affine load model.
-/// Start with solve_reference_affine_load_space. The dead/basis laws and builder
-/// must preserve physical domain, supports, complete native materials, reference
-/// amplitudes/correlations and purity throughout this owner. The builder honors
+/// Start with a reference affine solve, including its response family when used.
+/// The load/response laws and builder preserve physical domain, supports, complete
+/// native materials, amplitudes/correlations and purity throughout this owner.
+/// The builder honors
 /// its checkpoint and ONE cumulative geometry budget, including failed builds.
 /// Native transfer checks material identity and genuine active-space enrichment.
 ///
@@ -242,7 +252,8 @@ fn inventory_resolved(
 /// active cells. Candidates inherit RAW controls, rebuild native self-weight,
 /// refilter on their own grid and run the same constrained optimizer. A candidate
 /// is installed only after a fresh complete load-set recheck passes the physical
-/// cap. No monotone self-weight restoration or cross-grid descent is assumed.
+/// cap and every original response bound. No monotone self-weight restoration
+/// or cross-grid descent is assumed.
 /// Every installed grid receives a fresh full probe before a normal pause/limit.
 ///
 /// Completed probes and pending candidates survive run segments. Failed refits
@@ -255,6 +266,7 @@ pub struct AffineLoadSpaceCampaign3<'a, 'callback, O: AdaptiveSdf3Elasticity, B>
     tree: Octree3,
     dead: ReferenceLoad3<'a>,
     basis: &'a [ReferenceLoad3<'a>],
+    responses: Option<ReferenceAffineResponseLimits3<'a>>,
     options: AffineLoadSpaceCampaignOptions3,
     control: &'a mut SolveControl<'callback>,
     build: B,
@@ -285,6 +297,47 @@ where
         control: &'a mut SolveControl<'callback>,
         build: B,
     ) -> Result<Self, AffineLoadSpaceCampaignError3> {
+        Self::new_optional(current, tree, dead, basis, None, options, control, build)
+    }
+
+    /// Preserve one ordered family of reference response laws and physical
+    /// bounds across every probe and candidate. Displacement observations are
+    /// reintegrated on each actual grid; reaction modes stay native and live.
+    /// The caller keeps their physical identity fixed, as for dead/basis laws.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_response_limits(
+        current: AffineLoadSpaceRefit3<O>,
+        tree: Octree3,
+        dead: ReferenceLoad3<'a>,
+        basis: &'a [ReferenceLoad3<'a>],
+        responses: ReferenceAffineResponseLimits3<'a>,
+        options: AffineLoadSpaceCampaignOptions3,
+        control: &'a mut SolveControl<'callback>,
+        build: B,
+    ) -> Result<Self, AffineLoadSpaceCampaignError3> {
+        Self::new_optional(
+            current,
+            tree,
+            dead,
+            basis,
+            Some(responses),
+            options,
+            control,
+            build,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_optional(
+        current: AffineLoadSpaceRefit3<O>,
+        tree: Octree3,
+        dead: ReferenceLoad3<'a>,
+        basis: &'a [ReferenceLoad3<'a>],
+        responses: Option<ReferenceAffineResponseLimits3<'a>>,
+        options: AffineLoadSpaceCampaignOptions3,
+        control: &'a mut SolveControl<'callback>,
+        build: B,
+    ) -> Result<Self, AffineLoadSpaceCampaignError3> {
         let (objective, volume_scale) = inventory_goal(current.goal)?;
         let audit = current.gradient_check.as_ref().ok_or_else(|| {
             invalid("affine campaign requires the original successful gradient audit")
@@ -298,6 +351,14 @@ where
             return Err(invalid(
                 "affine campaign goal differs from its optimized objective",
             ));
+        }
+        if audit.response_options != responses.map(|family| family.options) {
+            return Err(invalid(
+                "affine campaign must retain its optimized response policy",
+            ));
+        }
+        if let Some(family) = responses {
+            response_reference::admit(current.study.operator(), family)?;
         }
         current
             .study
@@ -315,6 +376,7 @@ where
             || options.enrichment.max_transfer_terms == 0
             || ![
                 options.change_tolerance,
+                options.response_change_tolerance,
                 options.volume_tolerance,
                 options.objective_tolerance,
             ]
@@ -332,6 +394,28 @@ where
             ));
         }
         let point = current.recheck.as_ref().unwrap().as_ref().unwrap();
+        let response_binding = match (responses, &point.evaluation.responses) {
+            (None, None) => true,
+            (Some(family), Some(report)) => {
+                family.options == report.options
+                    && family.limits.len() == report.witnesses.len()
+                    && family
+                        .limits
+                        .iter()
+                        .zip(&report.witnesses)
+                        .all(|(limit, witness)| {
+                            limit.bound == witness.bound
+                                && limit.sense == witness.sense
+                                && limit.scale == witness.scale
+                        })
+            }
+            _ => false,
+        };
+        if !response_binding {
+            return Err(invalid(
+                "affine campaign original response bounds differ from its recheck",
+            ));
+        }
         let p = current.study.params();
         let q = current.params;
         if [p.penal, p.beta, p.eta, p.e_min] != [q.penal, q.beta, q.eta, q.e_min]
@@ -357,6 +441,7 @@ where
             tree,
             dead,
             basis,
+            responses,
             options,
             control,
             build,
@@ -407,7 +492,11 @@ where
         else {
             return Ok(uniform.clone());
         };
-        if !inventory_resolved(report, self.options) {
+        if !inventory_resolved(report, self.options)
+            || report.responses.as_ref().is_some_and(|responses| {
+                !responses.stable_and_feasible(self.options.response_change_tolerance)
+            })
+        {
             return Ok(uniform.clone());
         }
         let marks = controlled(self.control, "sdf3-affine-campaign-mark", |poll| {
@@ -455,29 +544,52 @@ where
                 )?;
                 let point = self.current.recheck.as_ref().unwrap().as_ref().unwrap();
                 let (objective, volume_scale) = inventory_goal(self.current.goal)?;
-                let report = self
-                    .current
-                    .study
-                    .estimate_affine_load_space_enrichment_with_inventory(
-                        operator,
-                        &point.rho,
-                        self.dead,
-                        self.basis,
-                        self.current.options.design.robustness,
-                        &self.current.policy,
-                        objective,
-                        volume_scale,
-                        self.options.enrichment,
-                        self.control,
-                    )?;
+                let report = if let Some(family) = self.responses {
+                    self.current
+                        .study
+                        .estimate_affine_load_space_enrichment_with_responses(
+                            operator,
+                            &point.rho,
+                            self.dead,
+                            self.basis,
+                            self.current.options.design.robustness,
+                            &self.current.policy,
+                            objective,
+                            volume_scale,
+                            family,
+                            self.options.enrichment,
+                            self.control,
+                        )?
+                } else {
+                    self.current
+                        .study
+                        .estimate_affine_load_space_enrichment_with_inventory(
+                            operator,
+                            &point.rho,
+                            self.dead,
+                            self.basis,
+                            self.current.options.design.robustness,
+                            &self.current.policy,
+                            objective,
+                            volume_scale,
+                            self.options.enrichment,
+                            self.control,
+                        )?
+                };
                 let inventory = report.inventory.as_ref().expect("inventory requested");
-                let passed = report.stable_and_feasible(self.options.change_tolerance)
-                    && inventory_resolved(&report, self.options);
+                let passed = report.stable_and_feasible_with_response_tolerance(
+                    self.options.change_tolerance,
+                    self.options.response_change_tolerance,
+                ) && inventory_resolved(&report, self.options);
                 self.probes.push(AffineLoadSpaceProbe3 {
                     source_grid: self.grids.len() - 1,
                     coarse_worst_compliance: report.coarse.worst_compliance,
                     fine_worst_compliance: report.fine.worst_compliance,
                     normalized_model_change: report.normalized_model_change,
+                    response_model_change: report
+                        .responses
+                        .as_ref()
+                        .map(|r| r.maximum_model_change),
                     volume_change: inventory.volume_change,
                     objective_change: inventory.objective_change,
                     mass_change_kg: inventory.mass_change_kg,
@@ -514,16 +626,32 @@ where
                     &mut self.build,
                 )?;
                 let rho = &self.current.recheck.as_ref().unwrap().as_ref().unwrap().rho;
-                let candidate = self.current.study.refit_reference_affine_load_space(
-                    operator,
-                    rho,
-                    self.dead,
-                    self.basis,
-                    &self.current.policy,
-                    self.current.goal,
-                    self.current.options,
-                    self.control,
-                )?;
+                let candidate = if let Some(family) = self.responses {
+                    self.current
+                        .study
+                        .refit_reference_affine_load_space_with_responses(
+                            operator,
+                            rho,
+                            self.dead,
+                            self.basis,
+                            &self.current.policy,
+                            self.current.goal,
+                            self.current.options,
+                            family,
+                            self.control,
+                        )?
+                } else {
+                    self.current.study.refit_reference_affine_load_space(
+                        operator,
+                        rho,
+                        self.dead,
+                        self.basis,
+                        &self.current.policy,
+                        self.current.goal,
+                        self.current.options,
+                        self.control,
+                    )?
+                };
                 if !candidate.completed_and_rechecked() {
                     self.rejected = Some((tree, candidate));
                     return Ok(Stop::CandidateStopped);

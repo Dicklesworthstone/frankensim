@@ -368,6 +368,16 @@ allowance and fresh full-envelope physical-constraint check are required by
 and objective improvement is compared within the candidate grid, without a
 cross-grid descent claim. Both existing affine design goal modes are supported.
 
+`response::reference::ReferenceAffineResponseLimits3` binds the existing pure
+displacement-observation laws and live reaction modes to this same owner.
+`solve_reference_affine_load_space_with_responses` and
+`refit_reference_affine_load_space_with_responses` reintegrate observations in
+each grid's native DOF ordering, then retain every original inequality through
+the candidate audit, optimization and fresh recheck. The refit completion gate
+requires the audited response policy and the initial ordered bounds to survive
+the recheck. No coarse observation vector, frozen reaction row or compliance
+maximizer substitutes for the original response family.
+
 `estimate_affine_load_space_enrichment` independently recomputes the full
 affine load model and maximizer on an actual enriched adaptive grid. The same
 grid evaluator serves fixed-grid optimization and enrichment; fine stiffness
@@ -409,6 +419,18 @@ refinement share the native weighted-occupancy integration; no SIMP stiffness
 floor is interpreted as physical mass. The additional inventory needs no
 elasticity solve, fine refilter or inventory adjoint.
 
+`estimate_affine_load_space_enrichment_with_responses` adds the same reference
+response family to this complete compliance/inventory experiment. Each grid
+reintegrates its own observations and measures its already-solved offset and
+basis fields. For each original inequality it retains both native witnesses
+and the whole response-model change
+`(|y0_f-y0_c| + ||v_f-v_c||_2)/scale`. This measures every direction in the load
+ball, including changes hidden by equal worst values. The maximum of these
+changes has its own tolerance. Both grids must pass every original bound and
+the same joint unnormalized upper constraint used by the optimizer. These
+checks need no extra primal or adjoint solve; they are numerical two-grid
+evidence, with no continuum or interval-certificate claim.
+
 `affine_load_space::campaign::AffineLoadSpaceCampaign3` automatically repeats
 full assessment and refitting for the minimum-material goal. Its physical
 compliance cap, objective, filter/SIMP parameters, pure dead/basis laws and
@@ -431,6 +453,18 @@ design without attempting a candidate. Each successful promotion receives a
 fresh full probe before a normal pause or count limit. The caller's builder
 must preserve physical identity and enforce its cumulative geometry budget.
 
+`AffineLoadSpaceCampaign3::new_with_response_limits` preserves the full response
+family in every probe and refit. Admission checks the original audit policy and
+ordered bound metadata before invoking the grid builder; the original `new`
+constructor refuses a response-bearing design instead of dropping its limits.
+The response model has an independent `response_change_tolerance`; unresolved
+response change or physical bounds trigger uniform candidate refinement when
+frozen-compliance-witness marking was requested. Promotion requires a fresh
+full response/compliance recheck, and the final probe checks the joint upper
+constraint, all original bounds, full load/response models and native inventory.
+Reference callbacks remain pure model inputs whose physical identity the caller
+must preserve across grids.
+
 `material_affine_load_space_sdf3` exercises native force balance and load-space
 sampling, full-chain compliance/volume derivatives, hard-case refusal and an
 actual minimum-kg constrained run with fresh feasible-point reassessment.
@@ -441,6 +475,12 @@ assesses hard-case witnesses without a design gradient. Explicit and automatic
 refit regressions check candidate-grid kg descent, a fresh final full-model and
 inventory probe, native body-load replay, and preservation of an accepted source
 when a completed candidate cannot meet the physical cap.
+The response regressions cover independent adverse directions, upper/lower
+limits, both adjoint layouts, material-body derivatives, native reaction direct
+terms, cancellation rollback and nonsmooth-radius admission. The adaptive
+response regression independently reintegrates observations on the promoted
+and final probe grids and checks the complete response-model change and native
+kg objective; a separate admission check prevents silent response omission.
 These APIs cover fixed geometry, homogeneous supports, fixed dead loads and
 reference acceleration. Numerical load optimality evidence is not an interval
 enclosure, a continuum guarantee, a global design optimum, or a serialized
