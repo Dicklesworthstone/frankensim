@@ -4,7 +4,7 @@ use fs_couple::modal_acoustic_time::{ModalAcousticMode, ModalAcousticState,
 use fs_couple::render::schedule::force::coupled::{CoupledModalSystem, ModalAttachment,
     ModalConnection, ModalCouplingConfig};
 use fs_couple::render::schedule::force::coupled::contact::friction::{FrictionDrive,
-    FrictionModalSystem, ModalFrictionConfig, ModalFrictionPort,
+    FrictionModalSystem, ModalFrictionConfig, ModalFrictionError, ModalFrictionPort,
     ModalFrictionRegime};
 use fs_exec::CancelGate;
 use fs_math::c64::C64;
@@ -59,7 +59,8 @@ fn drive(speed_m_s: f64, normal_force_n: f64) -> FrictionDrive {
     FrictionDrive { speed_m_s, normal_force_n }
 }
 
-use fs_couple::render::schedule::force::coupled::contact::friction::multiple::{MultiFrictionConfig, MultiFrictionModalSystem};
+use fs_couple::render::schedule::force::coupled::contact::friction::multiple::{MultiFrictionConfig, MultiFrictionFrame,
+    MultiFrictionModalSystem};
 fn joint_config() -> MultiFrictionConfig {
     MultiFrictionConfig { max_ports: 4, max_sweeps: 128, max_setup_terms: 10000 }
 }
@@ -342,11 +343,23 @@ fn invalid_inputs_cancelled_and_nonconvergent_trials_do_not_publish() {
     s.step(&[0.0; 2], &ds).unwrap(); exact.step(&[0.0; 2], &ds).unwrap();
     assert_eq!(all_states(&s), all_states(&exact)); assert_eq!(s.last_frame(), exact.last_frame());
     let mut cfg = joint_config(); cfg.max_sweeps = 1;
-    let mut limited = system(true).with_additional_ports(vec![(ModalFrictionPort {
+    let limited_bank = || system(true).with_additional_ports(vec![(ModalFrictionPort {
         left: attachment(1), right: None, law: law(),
     }, config())], cfg, &CancelGate::new()).unwrap();
+    let opposed = [drive(0.001,1.0),drive(-0.001,1.0)];
+    // One sweep cannot converge these opposed drives. Since frankensim-o7qbp the active-set rescue resolves the
+    // step, and it must accept the partition the full sweep reaches on the same bank, with the energy closed.
+    let rescued = limited_bank().step(&[0.0; 2], &opposed).unwrap().clone();
+    let swept = joint(true).step(&[0.0; 2], &opposed).unwrap().clone();
+    assert_eq!((rescued.sweeps, rescued.active_set_rescues, swept.active_set_rescues), (1, 1, 0));
+    let regimes = |f: &MultiFrictionFrame| f.ports.iter().map(|p| p.regime).collect::<Vec<_>>();
+    assert_eq!(regimes(&rescued), regimes(&swept));
+    assert!(rescued.energy_residual_j.abs() <= rescued.energy_tolerance_j);
+    // With the rescue starved as well, the step really does not converge, and it publishes nothing.
+    let mut limited = limited_bank(); limited.force_active_set_budget(0);
     let old = all_states(&limited);
-    assert!(limited.step(&[0.0; 2], &[drive(0.001,1.0),drive(-0.001,1.0)]).is_err());
+    assert!(matches!(limited.step(&[0.0; 2], &opposed),
+        Err(ModalFrictionError::ActiveSetExhausted { pivots: 0, budget: 0, .. })));
     assert_eq!(all_states(&limited), old); assert_eq!(limited.samples_rendered(), 0);
     limited.step(&[0.0; 2], &[drive(0.0,0.0);2]).unwrap();
 }

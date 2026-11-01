@@ -48,7 +48,11 @@ fn base(memory: bool, gauge: bool) -> FrictionModalSystem {
         component,
         shapes: vec![1.0],
     };
-    let mut models = vec![image(100.0, 0.0, 0.0), image(150.0, 0.0, 0.0)];
+    // The acceleration observer bound below owns the pressure, so the bodies carry no narrow-band transfer.
+    let mut models = vec![
+        image(100.0, 0.0, 0.0).without_pressure_transfers(),
+        image(150.0, 0.0, 0.0).without_pressure_transfers(),
+    ];
     if gauge {
         models.push(
             ModalAcousticTimeModel::try_new_with_free_coordinates(
