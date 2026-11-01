@@ -7,7 +7,7 @@ use crate::shell::preload::tests::reference_newton;
 use fs_exec::CancelGate;
 use fs_sparse::{Coo, DirectOrdering, LdltOptions, SymbolicLdlt};
 
-fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
+pub(super) fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
     pool.scope(|arena| {
         f(&Cx::new(
@@ -25,7 +25,7 @@ fn with_cx<R>(gate: &CancelGate, f: impl FnOnce(&Cx<'_>) -> R) -> R {
     })
 }
 
-fn modal_options() -> SliceOptions {
+pub(super) fn modal_options() -> SliceOptions {
     SliceOptions {
         max_lanczos: 512,
         max_restarts: 16,
@@ -42,7 +42,7 @@ fn modal_options() -> SliceOptions {
     }
 }
 
-fn output_budget() -> AssemblyVibrationBudget {
+pub(super) fn output_budget() -> AssemblyVibrationBudget {
     AssemblyVibrationBudget {
         maximum_modes: 16,
         maximum_damping_entries: 256,
@@ -51,12 +51,12 @@ fn output_budget() -> AssemblyVibrationBudget {
 
 // Independent reference for these small fixtures and their empty window gaps;
 // all returned production modes and residuals come from the sparse slicer.
-fn dense_reference(body: &PreloadedShellAssembly) -> Vec<ModePair> {
+pub(super) fn dense_reference(body: &PreloadedShellAssembly) -> Vec<ModePair> {
     let model = &body.assembly.model;
     fs_modal::eigh_gen_dense(&model.k.to_dense(), &model.m.to_dense(), model.free).unwrap()
 }
 
-fn plan(body: &PreloadedShellAssembly, count: usize) -> WindowPlan {
+pub(super) fn plan(body: &PreloadedShellAssembly, count: usize) -> WindowPlan {
     let modes = dense_reference(body);
     let split = count / 2;
     let middle = 0.5 * (modes[split - 1].lambda + modes[split].lambda);
@@ -71,7 +71,7 @@ fn plan(body: &PreloadedShellAssembly, count: usize) -> WindowPlan {
     }
 }
 
-fn solve(parts: &[ShellPreloadComponent<'_>]) -> PreloadedShellAssembly {
+pub(super) fn solve(parts: &[ShellPreloadComponent<'_>]) -> PreloadedShellAssembly {
     equilibrate_shell_assembly(
         parts,
         &[],
@@ -84,7 +84,7 @@ fn solve(parts: &[ShellPreloadComponent<'_>]) -> PreloadedShellAssembly {
     .unwrap()
 }
 
-fn near(a: f64, b: f64, tolerance: f64) {
+pub(super) fn near(a: f64, b: f64, tolerance: f64) {
     assert!(
         (a - b).abs() <= tolerance * (1. + a.abs().max(b.abs())),
         "{a} != {b}"

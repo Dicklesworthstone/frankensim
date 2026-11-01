@@ -226,6 +226,9 @@ pub struct TiedShellModel {
     pub glue_stiffness: Csr,
     /// Optional compliant Kelvin–Voigt interface damping matrix $C_{\text{glue}}$ (`model.free × model.free`).
     pub glue_damping: Option<Csr>,
+    /// Original viscous jump rows and directional square factors, moved from
+    /// the interface patches without a second expanded global operator.
+    glue_damping_sources: Vec<GlueDampingSource>,
     /// Per-component sparse rows of $T_c$: `comp_t[c][local_free]` is a list of `(reduced_dof, weight)`.
     comp_t: Vec<Vec<Vec<(usize, f64)>>>,
     /// Per-component full-DOF (`6 * node + d`) to component-free index (`components[c].model.dof_map`).
@@ -307,6 +310,141 @@ impl TiedShellModel {
             }
         }
         Ok(out)
+    }
+
+    /// Number of original directional glue-loss rows before modal projection.
+    /// Zero-viscosity directions remain exact zero rows; none are truncated.
+    #[must_use]
+    pub fn glue_damping_source_row_count(&self) -> usize {
+        self.glue_damping_sources.len().saturating_mul(3)
+    }
+
+    /// Project the original glue-loss squares through the same constraint and
+    /// modal maps as [`Self::project_glue_damping`]. Returns row-major `B Phi`,
+    /// with [`Self::glue_damping_source_row_count`] rows and `modes.len()`
+    /// columns. The original assembled damping operator is not replaced.
+    ///
+    /// The byte cap includes retained source coefficient payload, the dense
+    /// result and conservative sparse-row staging. Container/allocator metadata
+    /// and the borrowed modes are excluded. The work cap counts conservative
+    /// scalar multiply-add terms, including the original constraint transfer.
+    /// Both caps are checked before allocating projected rows. A downstream
+    /// rectangular factorization must admit its own storage/work separately.
+    ///
+    /// # Errors
+    /// Refuses invalid modes, exhausted/overflowed caps, nonfinite projected
+    /// values, or cancellation (polled before every original source row).
+    pub fn project_glue_damping_source_rows(
+        &self,
+        modes: &[&[f64]],
+        maximum_payload_bytes: usize,
+        maximum_terms: u64,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Vec<f64>, PlateError> {
+        let refuse = || PlateError::BadConstraint {
+            what: "glue damping source projection budget or dimensions exceeded",
+        };
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        let m = modes.len();
+        if m == 0
+            || modes.iter().any(|phi| {
+                phi.len() != self.model.free || phi.iter().any(|value| !value.is_finite())
+            })
+        {
+            return Err(refuse());
+        }
+        if self.glue_damping_sources.is_empty() {
+            return Ok(Vec::new());
+        }
+        let height = self.glue_damping_source_row_count();
+        let entries = height.checked_mul(m).ok_or_else(refuse)?;
+        let mut source_terms = 0usize;
+        let mut mapped_terms = 0u64;
+        for source in &self.glue_damping_sources {
+            for row in &source.rows {
+                if cancelled() {
+                    return Err(PlateError::Cancelled);
+                }
+                source_terms = source_terms.checked_add(row.len()).ok_or_else(refuse)?;
+                for &(c, node, dof, _) in row {
+                    if let Some(local) = self.comp_dof_maps[c][6 * node + dof] {
+                        mapped_terms = mapped_terms
+                            .checked_add(self.comp_t[c][local].len() as u64)
+                            .ok_or_else(refuse)?;
+                    }
+                }
+            }
+        }
+        let bytes = entries
+            .checked_mul(core::mem::size_of::<f64>())
+            .and_then(|v| {
+                source_terms
+                    .checked_mul(core::mem::size_of::<(usize, usize, usize, f64)>())
+                    .and_then(|source| v.checked_add(source))
+            })
+            .and_then(|v| {
+                self.glue_damping_sources
+                    .len()
+                    .checked_mul(core::mem::size_of::<[[f64; 3]; 3]>())
+                    .and_then(|source| v.checked_add(source))
+            })
+            .and_then(|v| {
+                self.model
+                    .free
+                    .checked_mul(6 * core::mem::size_of::<(usize, f64)>())
+                    .and_then(|staging| v.checked_add(staging))
+            })
+            .ok_or_else(refuse)?;
+        let terms = mapped_terms
+            .checked_mul((m as u64).checked_add(1).ok_or_else(refuse)?)
+            .and_then(|v| {
+                (height as u64)
+                    .checked_mul(3)
+                    .and_then(|rows| rows.checked_mul(m as u64))
+                    .and_then(|rows| v.checked_add(rows))
+            })
+            .ok_or_else(refuse)?;
+        if bytes > maximum_payload_bytes || terms > maximum_terms {
+            return Err(refuse());
+        }
+        let mut output = vec![0.0; entries];
+        for (s, source) in self.glue_damping_sources.iter().enumerate() {
+            let mut reduced_rows: [Vec<(usize, f64)>; 3] = core::array::from_fn(|_| Vec::new());
+            for (a, row) in source.rows.iter().enumerate() {
+                if cancelled() {
+                    return Err(PlateError::Cancelled);
+                }
+                reduced_rows[a] =
+                    project_jump_row_to_reduced(row, &self.comp_dof_maps, &self.comp_t);
+            }
+            for (j, phi) in modes.iter().enumerate() {
+                let jump: [f64; 3] = core::array::from_fn(|a| {
+                    reduced_rows[a].iter().map(|&(i, w)| w * phi[i]).sum()
+                });
+                for a in 0..3 {
+                    if cancelled() {
+                        return Err(PlateError::Cancelled);
+                    }
+                    let value = source.factor[a]
+                        .iter()
+                        .zip(jump)
+                        .map(|(factor, motion)| factor * motion)
+                        .sum::<f64>();
+                    if !value.is_finite() {
+                        return Err(PlateError::BadConstraint {
+                            what: "glue damping source projection is nonfinite",
+                        });
+                    }
+                    output[(3 * s + a) * m + j] = value;
+                }
+            }
+        }
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        Ok(output)
     }
 
     /// Expand a reduced coordinate vector `reduced` (`len == self.model.free`) into each
@@ -1690,6 +1828,24 @@ pub fn tie_shells_with_faces(
     } else {
         None
     };
+    // Preserve only the original dissipative channels. Their full-coordinate
+    // jump rows move out of the existing patches; no global sparse matrix is
+    // duplicated, and modal rows are allocated only by the bounded consumer.
+    let mut glue_damping_sources = Vec::new();
+    for patch in compliant_patches {
+        if cancelled() {
+            return Err(PlateError::Cancelled);
+        }
+        if let Some(factor) = patch.c_u_rows {
+            glue_damping_sources.push(GlueDampingSource {
+                rows: patch.u_rows,
+                factor,
+            });
+        }
+        if let (Some((rows, _, _)), Some(factor)) = (patch.rot, patch.c_theta_rows) {
+            glue_damping_sources.push(GlueDampingSource { rows, factor });
+        }
+    }
 
     // Concatenate global dof_map across components.
     let total_full_dofs: usize = components.iter().map(|c| 6 * c.mesh.nodes.len()).sum();
@@ -1716,6 +1872,7 @@ pub fn tie_shells_with_faces(
         },
         glue_stiffness,
         glue_damping,
+        glue_damping_sources,
         comp_t,
         comp_dof_maps,
         slave_couplings,
@@ -1824,6 +1981,12 @@ fn resolve_transitive_slave_constraints(
     })
 }
 
+#[derive(Debug, Clone)]
+struct GlueDampingSource {
+    rows: [Vec<(usize, usize, usize, f64)>; 3],
+    factor: [[f64; 3]; 3],
+}
+
 struct CompliantNodalPatch {
     /// For each translational axis a in 0..3: list of `(comp, node, dof_0..6, weight)` for $\Delta u_a$.
     u_rows: [Vec<(usize, usize, usize, f64)>; 3],
@@ -1831,6 +1994,9 @@ struct CompliantNodalPatch {
     k_u: [[f64; 3]; 3],
     /// Optional global 3x3 translational damping matrix $A_i \mathbf{C}_{g,i}^u$ [N*s/m].
     c_u: Option<[[f64; 3]; 3]>,
+    /// Physical square factors before Cartesian/constraint assembly.
+    c_u_rows: Option<[[f64; 3]; 3]>,
+    c_theta_rows: Option<[[f64; 3]; 3]>,
     /// Optional rotational jump rows and global 3x3 rotational stiffness/damping matrices when `RotationCoupling::Full`.
     rot: Option<(
         [Vec<(usize, usize, usize, f64)>; 3],
@@ -1856,6 +2022,13 @@ fn frame_tensor_3x3(
         }
     }
     out
+}
+
+fn frame_loss_rows(axes: [[f64; 3]; 3], viscosity: [f64; 3], area_scale: f64) -> [[f64; 3]; 3] {
+    core::array::from_fn(|a| {
+        let scale = det::sqrt(area_scale * viscosity[a]);
+        axes[a].map(|direction| scale * direction)
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1992,7 +2165,12 @@ fn append_compliant_nodal_patch(
         .viscosity_n_s_m3
         .filter(|v| v.iter().any(|&x| x > 0.0))
         .map(|v| frame_tensor_3x3(n_unit, t1, t2, v[0], v[1], v[2], area_i));
+    let c_u_rows = glue
+        .viscosity_n_s_m3
+        .filter(|v| v.iter().any(|&x| x > 0.0))
+        .map(|v| frame_loss_rows([n_unit, t1, t2], v, area_i));
 
+    let mut c_theta_rows = None;
     let rot = if rotations == RotationCoupling::Full {
         let rot_scale = area_i * (glue.width_m * glue.width_m / 12.0);
         let theta_rows: [Vec<(usize, usize, usize, f64)>; 3] = core::array::from_fn(|a| {
@@ -2020,6 +2198,10 @@ fn append_compliant_nodal_patch(
             .viscosity_n_s_m3
             .filter(|v| v.iter().any(|&x| x > 0.0))
             .map(|v| frame_tensor_3x3(n_unit, t1, t2, v[0], v[1], v[2], rot_scale));
+        c_theta_rows = glue
+            .viscosity_n_s_m3
+            .filter(|v| v.iter().any(|&x| x > 0.0))
+            .map(|v| frame_loss_rows([n_unit, t1, t2], v, rot_scale));
         Some((theta_rows, k_theta, c_theta))
     } else {
         None
@@ -2029,6 +2211,8 @@ fn append_compliant_nodal_patch(
         u_rows,
         k_u,
         c_u,
+        c_u_rows,
+        c_theta_rows,
         rot,
     });
 }

@@ -1174,3 +1174,66 @@ Perturbations require the original deformation limits and unchanged active
 connection branches. Full-body response convergence and damping certification
 outside the supplied windows are separate requirements; this scope does not
 claim the complete M1.4-W2 measurement or hundred-thousand-DOF performance gate.
+
+## Exact held-force response about an assembled loaded equilibrium
+
+`shell::preload::assembly::vibration::response::AssemblyResponse` prepares a
+fixed-clock forced response from the accepted body and its declared vibration
+windows. It forms the full `M_r = Phi^T M Phi` and `K_r = Phi^T K_t Phi` from
+the original sparse pencil. Finite modal residuals and orthogonality errors are
+retained; identity mass and diagonal eigenvalue stiffness are not substituted.
+The original sparse owner checks both projected matrices for positive
+inertia, and the actual symmetric inverse of `M_r` must pass an explicit
+floating-point residual check. No regularization changes the body.
+
+Canonical state is `[q, p]`, with `p = M_r v`. The existing
+`fs-phs::linear_exact::PreparedExactZoh` owns the complete coupled exponential,
+held-input evolution, positive glue-heat integral and independent storage/work
+accounts. The full `Phi^T C_glue Phi` matrix enters once, including its
+cross-mode terms. Preparation is cached; warm steps perform no exponential.
+No new integration scheme, diagonal damping approximation, Rayleigh loss or
+material/radiation loss is introduced.
+
+The junction retains the original directional viscosity square factors and
+jump rows, including rotational width scaling and eccentric constraint terms.
+Those rows move from the interface assembly patches; a second global sparse
+operator is not stored. A bounded lazy projection through the same tie map and
+mode basis supplies `ResistanceWitness::try_from_source_rows`. Its original
+rectangular QR and componentwise reconstruction gate certify the unchanged
+assembled resistance; no eigenvalue clipping or acceptance relaxation occurs.
+
+Inputs are incremental full-component forces and moments about the already
+balanced static preload. Original junction and modal maps supply the force
+projection and physical outputs. Zero incremental input and zero canonical
+state preserve the loaded equilibrium exactly. Frames include the loaded mean
+displacement, endpoint velocity and the conjugate interval flow `Delta u / dt`.
+Held-force work uses the actual displacement increment; its agreement with the
+original exact owner's independent input integral and the energy balance must
+both satisfy the unchanged `1e-12` relative gate. The reported storage is the
+quadratic perturbation energy, excluding constant static preload energy.
+
+Explicit projection-work and projection-buffer limits sum mass/tangent work,
+retained physical glue-source payload, sparse projection staging, rectangular
+witness buffers and QR work. They are checked before corresponding allocation
+or numerical loops; numeric factors receive the same separate payload ceiling. The
+existing exact owner's scalar-state and augmented-dimension caps remain. With
+one independent input per retained mode this path admits at most 42 modes,
+refusing larger requests without dropping any modes. The projection ceiling
+excludes borrowed eigenvectors and the original bounded preparation cache; it
+is not a process-memory or sparse large-body throughput claim. Cx is polled
+between projection work units and around existing indivisible sparse/physical
+maps and the bounded exact owner. State publication follows the final poll.
+Invalid data, failed preparation/energy gates and cancellation leave the
+physical state unchanged. Complete canonical snapshots restore bitwise on the
+same body, mode order and clock.
+
+G0/G1 regressions cover loaded equilibrium rest and refusals; an independent
+forced-oscillator solution at angular steps 2.5, 1.25 and 0.625; full coupled
+glue dynamics and heat against a three-rung physical-equation RK4 reference;
+the failure of diagonalized glue damping; original FE perturbation storage;
+nonmatching slave force/work reciprocity; original directional loss power;
+source-projection byte/work refusal and late cancellation; and final-cancel/
+checkpoint retry.
+This is linear response in the declared windows. Nonlinear deformation,
+connection/contact branch changes, frequency-dependent loss, omitted-mode
+response and full-body truncation certification remain separate requirements.

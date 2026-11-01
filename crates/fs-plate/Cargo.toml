@@ -15,6 +15,7 @@ fs-exec = { path = "../fs-exec" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
+fs-phs = { path = "../fs-phs" }
 fs-qty = { path = "../fs-qty" }
 fs-rep-nurbs = { path = "../fs-rep-nurbs" }
 # Lowering of the M6.1-W2 measured arching generator. Optional, so fs-plate

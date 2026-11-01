@@ -8,6 +8,9 @@ use super::PreloadedShellAssembly;
 use fs_exec::Cx;
 use fs_modal::{ModePair, MultiSliceReport, SliceOptions, WindowPlan, slice_windows};
 
+/// Exact held-force dynamics about this unchanged loaded equilibrium.
+pub mod response;
+
 /// Output/projection ceilings in addition to the existing eigensolver budgets.
 #[derive(Clone, Copy, Debug)]
 pub struct AssemblyVibrationBudget {
