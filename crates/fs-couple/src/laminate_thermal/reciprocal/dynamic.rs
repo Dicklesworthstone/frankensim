@@ -10,10 +10,14 @@
 //! from the same accepted endpoint on every coupling iteration. Each original
 //! heat cell receives W_stress - delta(Psi + T S), including stress work on the
 //! actual internal motion. Kinetic energy, native corrected shear storage and
-//! numerical drilling storage remain separate from thermal energy. This fixed
-//! elasticity lane retains the parent's source and strain-domain admission.
+//! numerical drilling storage remain separate from thermal energy. Changing
+//! elastic sources retain the INITIAL full coordinate basis and physical mass,
+//! while the material operator, thermal loading and nonlocal shear entropy
+//! follow each actual temperature. The numerical drilling stiffness stays
+//! fixed at launch; it is not a material heating or inertia mechanism.
+//! The parent's full-temperature-box capacity and strain admission apply.
 //! It is not finite-rotation dynamics, moving thermal geometry, viscoelastic
-//! loss, exact discrete isentropy or a temperature-dependent elastic shell.
+//! loss or exact discrete isentropy.
 
 use super::*;
 use fs_plate::shell::mitc::thermal::transient::{
@@ -57,6 +61,12 @@ impl DynamicLaminateState {
     }
     pub fn transverse_shear_energy_j(&self) -> f64 {
         self.thermomechanical.transverse_shear_energy_j()
+    }
+    pub fn transverse_shear_internal_energy_j(&self) -> f64 {
+        self.thermomechanical.transverse_shear_internal_energy_j()
+    }
+    pub fn transverse_shear_entropy_j_k(&self) -> &[f64] {
+        self.thermomechanical.transverse_shear_entropy_j_k()
     }
     pub fn drilling_gauge_energy_j(&self) -> f64 {
         self.thermomechanical.drilling_gauge_energy_j()
@@ -105,6 +115,7 @@ pub struct DynamicLayeredThermalShell<'s, 'b, 'a> {
     source: &'s LayeredThermalShell<'b, 'a>,
     laws: Vec<AffineLaminaThermoelastic>,
     native: EnrichedMitcShell,
+    fixed_elasticity: bool,
     midpoint: Option<PreparedMitcMidpoint>,
     state: DynamicLaminateState,
     quadrature: Vec<([f64; 3], f64)>,
@@ -121,9 +132,9 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
     /// inertia cannot establish this full dynamic state. Free massless drilling
     /// directions must satisfy the native homogeneous gauge in both initial
     /// displacement and velocity; director-axis gauge efforts are unsupported.
-    /// Elastic coefficients must remain constant over their original intervals.
-    /// A temperature-dependent condensation basis needs additional inertial
-    /// transport terms and is not obtained by refreshing a static operator.
+    /// The launch basis, full physical reference mass and numerical drilling
+    /// stiffness stay fixed. Later source stiffness changes act on those SAME
+    /// coordinates, retaining every internal motion and cross-inertia term.
     pub fn begin_transient(
         self,
         nodal_velocity_6n: &[f64],
@@ -135,15 +146,10 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
         if !energy_tolerance_j.is_finite() || energy_tolerance_j <= 0.0 {
             return Err(invalid("positive finite launch energy tolerance required"));
         }
-        if self
+        let fixed_elasticity = self
             .laws
             .iter()
-            .any(|law| !law.is_temperature_independent_elasticity())
-        {
-            return Err(invalid(
-                "dynamic laminate requires fixed elastic sources; a moving condensation basis needs inertial transport",
-            ));
-        }
+            .all(AffineLaminaThermoelastic::is_temperature_independent_elasticity);
         let native =
             EnrichedMitcShell::try_new(Arc::clone(&self.state.shell.model), &mut cancelled)
                 .map_err(LaminateThermoelasticError::Native)?;
@@ -177,6 +183,11 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
             energy_tolerance_j,
             "dynamic launch must retain the original equilibrium material storage",
         )?;
+        gate(
+            recovered.drilling_gauge_energy_j - self.state.gauge_energy_j,
+            energy_tolerance_j,
+            "dynamic launch must preserve the original numerical gauge",
+        )?;
         let ReciprocalLaminateState { shell, loads, .. } = self.state;
         let prepared = PreparedLaminateSnapshot {
             temperatures_k: shell.temperatures_k,
@@ -199,20 +210,17 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
             &self.quadrature,
             shell,
             &loads,
+            Some(native_gauge),
             None,
             energy_tolerance_j,
             &mut cancelled,
-        )?;
-        gate(
-            proposal.state.gauge_energy_j - native_gauge,
-            energy_tolerance_j,
-            "dynamic launch must preserve the original numerical gauge",
         )?;
         check(&mut cancelled)?;
         Ok(DynamicLayeredThermalShell {
             source: self.source,
             laws: self.laws,
             native,
+            fixed_elasticity,
             midpoint: None,
             state: DynamicLaminateState {
                 thermomechanical: proposal.state,
@@ -234,9 +242,10 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
 
     /// Propose and accept one reciprocal heat/motion interval.
     ///
-    /// A single effective sparse factor is cached for the exact requested dt
-    /// and reused across accepted steps and every heat iteration until dt
-    /// changes. No trial advances the accepted motion
+    /// Constant elastic sources reuse one effective sparse factor for the exact
+    /// requested dt. Varying sources prepare the current physical stiffness in
+    /// the original reference basis and use both accepted and proposed endpoint
+    /// forces. No trial advances the accepted motion
     /// or caloric history. Range exits, source mismatches, nonconvergence,
     /// work/energy refusals and cancellation leave both physical histories
     /// untouched; the caller's thermal workspace may retain scratch values.
@@ -292,10 +301,11 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
             .model()
             .project_load(external_load_6n)
             .map_err(LaminateThermoelasticError::Native)?;
-        if self
-            .midpoint
-            .as_ref()
-            .is_none_or(|factor| factor.dt_s().to_bits() != dt.to_bits())
+        if self.fixed_elasticity
+            && self
+                .midpoint
+                .as_ref()
+                .is_none_or(|factor| factor.dt_s().to_bits() != dt.to_bits())
         {
             self.midpoint = Some(
                 self.native
@@ -303,10 +313,6 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                     .map_err(LaminateThermoelasticError::Native)?,
             );
         }
-        let mechanical = self
-            .midpoint
-            .as_ref()
-            .ok_or_else(|| invalid("missing admitted mechanical factor"))?;
         let mut applied = vec![0.0; self.laws.len()];
         let mut last = (f64::INFINITY, f64::INFINITY);
         for iteration in 0..controls.maximum_iterations {
@@ -323,18 +329,50 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                 .map_err(LaminateThermoelasticError::HeatSolve)?;
             let prepared = self
                 .source
-                .prepare_snapshot(&thermal, Some(self.native.shared_model()), &mut cancelled)
+                .prepare_snapshot(
+                    &thermal,
+                    self.fixed_elasticity.then(|| self.native.shared_model()),
+                    &mut cancelled,
+                )
                 .map_err(LaminateThermoelasticError::Shell)?;
+            // The basis and mass belong to launch. Only the physical material
+            // coefficients change; the two internal directors remain actual
+            // unknowns in the same coordinates through EVERY thermal trial.
+            let trial_native = if self.fixed_elasticity {
+                self.native.clone()
+            } else {
+                self.native
+                    .with_material_model(Arc::clone(&prepared.model), &mut cancelled)
+                    .map_err(LaminateThermoelasticError::Native)?
+            };
+            let trial_factor = if self.fixed_elasticity {
+                None
+            } else {
+                Some(
+                    trial_native
+                        .prepare_midpoint(dt, &mut cancelled)
+                        .map_err(LaminateThermoelasticError::Native)?,
+                )
+            };
+            let mechanical = trial_factor
+                .as_ref()
+                .or(self.midpoint.as_ref())
+                .ok_or_else(|| invalid("missing admitted mechanical factor"))?;
             let loading = prepared
                 .model
                 .prepare_laminate_thermal(&prepared.fields, &mut cancelled)
                 .map_err(LaminateThermoelasticError::Native)?;
-            let new_load = self
-                .native
+            let new_load = trial_native
                 .generalized_load(&loading, external_load_6n, &mut cancelled)
                 .map_err(LaminateThermoelasticError::Native)?;
             let candidate = mechanical
-                .advance(&self.state.motion, &old_load, &new_load, &mut cancelled)
+                .advance_from(
+                    &self.native,
+                    &self.state.motion,
+                    &old_load,
+                    &new_load,
+                    &mut cancelled,
+                )
                 .map_err(LaminateThermoelasticError::Native)?;
             if candidate.state.time_s().to_bits() != thermal.time_s().to_bits() {
                 return Err(invalid("thermal and mechanical endpoint times differ"));
@@ -342,10 +380,9 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
             gate(
                 candidate.report.energy_residual_j,
                 controls.energy_tolerance_j,
-                "native midpoint kinetic and quadratic storage do not close",
+                "native midpoint kinetic, quadratic and parameter work do not close",
             )?;
-            let recovered = self
-                .native
+            let recovered = trial_native
                 .recover(&loading, &candidate.state, &mut cancelled)
                 .map_err(LaminateThermoelasticError::Native)?;
             let thermal_load = loading.load_6n().to_vec();
@@ -363,14 +400,10 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                 &self.quadrature,
                 shell,
                 external_load_6n,
+                Some(native_gauge),
                 Some(old),
                 controls.energy_tolerance_j,
                 &mut cancelled,
-            )?;
-            gate(
-                proposal.state.gauge_energy_j - native_gauge,
-                controls.energy_tolerance_j,
-                "native dynamic numerical gauge and nodal gauge differ",
             )?;
             let mut bubble_work = 0.0;
             for (element, (a, b)) in self
@@ -430,6 +463,7 @@ impl<'s, 'b, 'a> DynamicLayeredThermalShell<'s, 'b, 'a> {
                     native: candidate.report,
                 };
                 check(&mut cancelled)?;
+                self.native = trial_native;
                 self.state = DynamicLaminateState {
                     thermomechanical: proposal.state,
                     motion: candidate.state,
@@ -457,13 +491,28 @@ fn admit_recovered(
     recovered: EnrichedThermalResponse,
     thermal_load: Vec<f64>,
     cancelled: &mut impl FnMut() -> bool,
-) -> Result<(LaminateShellSnapshot, Vec<[f64; 2]>, f64), LaminateThermoelasticError> {
+) -> Result<(LaminateShellSnapshot, Vec<[f64; 2]>, NumericalGaugeState), LaminateThermoelasticError>
+{
     envelope(
         "complete director motion",
         recovered.maximum_director_motion_rad,
         source.limits.maximum_rotation_rad,
     )
     .map_err(LaminateThermoelasticError::Shell)?;
+    let nodal = prepared.model.pencil().free;
+    if recovered.numerical_gauge_force.len() != nodal + 2 * recovered.bubble_material_force.len()
+        || recovered.numerical_gauge_force[nodal..]
+            .iter()
+            .any(|force| *force != 0.0)
+    {
+        return Err(invalid(
+            "reference numerical drilling gauge cannot act on physical interior directors",
+        ));
+    }
+    let gauge = NumericalGaugeState {
+        energy_j: recovered.drilling_gauge_energy_j,
+        force: recovered.numerical_gauge_force[..nodal].to_vec(),
+    };
     let shell = source
         .admit_snapshot(
             time_s,
@@ -474,9 +523,5 @@ fn admit_recovered(
             cancelled,
         )
         .map_err(LaminateThermoelasticError::Shell)?;
-    Ok((
-        shell,
-        recovered.bubble_material_force,
-        recovered.drilling_gauge_energy_j,
-    ))
+    Ok((shell, recovered.bubble_material_force, gauge))
 }

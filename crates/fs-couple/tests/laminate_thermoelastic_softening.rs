@@ -492,7 +492,7 @@ fn g1_nonuniform_softening_owns_nonlocal_shear_entropy_and_preserves_late_cancel
 }
 
 #[test]
-fn g0_source_capacity_domain_and_dynamic_transfer_refuse_without_committing_heat() {
+fn g0_source_capacity_and_static_dynamic_domains_refuse_without_committing_heat() {
     for excessive_expansion in [false, true] {
         let cards = [card_with_coefficients(
             "softening admission",
@@ -553,10 +553,26 @@ fn g0_source_capacity_domain_and_dynamic_transfer_refuse_without_committing_heat
             );
             assert_eq!(coupled.time_s(), 0.0);
             assert_eq!(coupled.state().shell().response().displacement_6n, old_u);
-            assert!(matches!(
-                coupled.begin_transient(&[0.0; 24], &[[0.0; 2]; 2], 1e-7, || false),
-                Err(LaminateThermoelasticError::Invalid(_))
-            ));
+            let mut dynamic = coupled
+                .begin_transient(&[0.0; 24], &[[0.0; 2]; 2], 1e-7, || false)
+                .unwrap();
+            assert!(
+                dynamic
+                    .advance_to(
+                        &thermal,
+                        1.0,
+                        &[0.0; 24],
+                        conduction(),
+                        LayeredThermalSolveControls::default(),
+                        controls(),
+                        &mut workspace,
+                        || false,
+                    )
+                    .is_err()
+            );
+            assert_eq!(dynamic.time_s(), 0.0);
+            assert_eq!(dynamic.state().response().displacement_6n, old_u);
+            assert_eq!(dynamic.state().temperatures_k(), &[T0]);
         }
         assert_eq!(thermal.cells(), &original_cells);
         assert_eq!(thermal.time_s(), 0.0);

@@ -318,6 +318,7 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
             shell,
             external_load_6n,
             None,
+            None,
             controls.energy_tolerance_j,
             &mut cancelled,
         )?;
@@ -400,6 +401,7 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
                 &self.quadrature,
                 shell,
                 external_load_6n,
+                None,
                 Some(&self.state),
                 controls.energy_tolerance_j,
                 &mut cancelled,
@@ -448,6 +450,14 @@ struct Proposal {
     shear_temperature_work: Vec<f64>,
 }
 
+/// Numerical storage from the actual fixed-coordinate dynamic owner. A
+/// statically condensed operator cannot recover this force when physical
+/// bubble/nodal stiffness cross terms are present after a material change.
+struct NumericalGaugeState {
+    energy_j: f64,
+    force: Vec<f64>,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assemble_state(
     source: &LayeredThermalShell<'_, '_>,
@@ -455,6 +465,7 @@ fn assemble_state(
     quadrature: &[([f64; 3], f64)],
     shell: LaminateShellSnapshot,
     loads: &[f64],
+    numerical_gauge: Option<NumericalGaugeState>,
     previous: Option<&ReciprocalLaminateState>,
     tolerance: f64,
     cancelled: &mut impl FnMut() -> bool,
@@ -668,7 +679,33 @@ fn assemble_state(
         tolerance,
         "source plane potential and original native material storage disagree",
     )?;
-    let (gauge_energy, gauge_force) = drilling_storage(&shell, tolerance, cancelled)?;
+    let (gauge_energy, gauge_force) = if let Some(gauge) = numerical_gauge {
+        let q = shell
+            .model()
+            .project_load(&shell.response.displacement_6n)
+            .map_err(LaminateThermoelasticError::Native)?;
+        if gauge.force.len() != q.len() || gauge.force.iter().any(|f| !f.is_finite()) {
+            return Err(invalid(
+                "one finite original nodal force per numerical gauge coordinate required",
+            ));
+        }
+        let mut work = 0.0;
+        for (&q, &f) in q.iter().zip(&gauge.force) {
+            check(cancelled)?;
+            work = finite(work + 0.5 * q * f)?;
+        }
+        gate(
+            gauge.energy_j - work,
+            tolerance,
+            "native numerical gauge force and storage disagree",
+        )?;
+        if gauge.energy_j < -tolerance {
+            return Err(invalid("native numerical drilling storage became negative"));
+        }
+        (gauge.energy_j, gauge.force)
+    } else {
+        drilling_storage(&shell, tolerance, cancelled)?
+    };
     let shear_internal_energy = finite(
         shear_energy
             + shell
@@ -819,6 +856,9 @@ fn account(
             })
             .sum(),
     )?;
+    // The inertial owner retains launch-time numerical stabilization even
+    // when the physical constitutive operator changes with temperature.
+    let fixed_gauge = inertia.is_some() || old.shear_potential.is_none();
     let inertia = inertia.unwrap_or_default();
     let material_work = finite(nodal_material_work + inertia.bubble_material_work_j)?;
     let membrane_work = proposal.mechanical_work.iter().sum::<f64>();
@@ -845,7 +885,7 @@ fn account(
     let shear_change = finite(next.shear_energy_j - old.shear_energy_j)?;
     let shear_internal_change = finite(next.shear_internal_energy_j - old.shear_internal_energy_j)?;
     let gauge_change = finite(next.gauge_energy_j - old.gauge_energy_j)?;
-    let gauge_parameter_work = if old.shear_potential.is_some() {
+    let gauge_parameter_work = if !fixed_gauge {
         // Symmetric Kg gives this independent polarized change-of-operator
         // work. Do not define it as an energy residual and do not send it to
         // any caloric cell: the numerical stabilization has no physical heat.

@@ -502,22 +502,34 @@ nodal and residual-director velocities initialize the full native consistent
 mass. Both internal director coordinates per facet then evolve independently
 in the invertible native `y=Tq+Br` basis. Observation uses their actual strain
 polynomials and stress; no later heat trial resets them to a static thermal
-lift. Fixed elasticity, mass, reference geometry and stationary supports remain
-required, while original cells keep unequal temperatures and integrated CTE.
-Transferring a varying-elasticity quasistatic owner into this dynamic lane now
-explicitly refuses: refreshing its condensation basis without inertial transport
-would not preserve the original physical trajectory.
+lift. The full INITIAL coordinate basis, physical mass, reference geometry and
+stationary supports stay fixed. Original affine elastic coefficients and CTE
+may vary with each cell's actual temperature; the parent's complete-box capacity
+and whole-field strain admission remain required. Updating material stiffness
+retains all nodal/internal cross terms in that original basis, so no moving-
+basis lift, momentum remap or inferred temperature-rate actuator is introduced.
+The original numerical drilling stiffness also stays fixed throughout dynamics.
 
 Every outer trial restarts heat and motion from the same accepted histories.
-One midpoint effective sparse factor serves all trials at the chosen dt and
-is cached across accepted intervals while that exact dt remains unchanged. The
+Constant elastic sources reuse one midpoint effective sparse factor across all
+trials and accepted intervals with the same dt. Varying sources assemble and
+factor their actual proposed material operator in the original basis; the
+momentum equation uses both accepted and proposed endpoint stiffness forces. The
 shared source-potential quadrature computes actual nodal AND internal strain
 work; explicit internal-coordinate forces independently check that work.
-Reversible cell heat stays `W_stress-delta(Psi+T*S)`. The combined gate includes
+In-plane reversible cell heat stays `W_stress-delta(Psi+T*S)`; the same nonlocal
+shear entropy and symmetric coordinate-temperature work used by the quasistatic
+owner supply the shear contribution. The combined gate includes
 native kinetic storage, physical corrected shear and separately named numerical
 drilling storage, without adding any of them twice or depositing gauge work as
 heat. The current consistent mass contains physical translation/director
-inertia; the numerical drilling coordinate has no invented kinetic storage.
+inertia, assembled directly from the original material velocity field. The
+modal pencil's numerical relative-spin inertia is not counted as physical heat
+or kinetic energy in this transient owner. Numerical drilling force/storage
+come from the explicit fixed reference gauge, rather than a current condensed
+static operator that would omit actual internal forces. Its parameter work is
+exactly zero. The native diagnostic separately reports physical stiffness-
+parameter work; it is not added again to the source-derived heat account.
 Compatible initial gauge displacement/velocity and absence of effort on free
 massless director-axis directions are required by the native dynamic owner.
 
@@ -527,12 +539,21 @@ defects all pass before the final atomic publication. Failure or cancellation
 leaves accepted motion and caloric history unchanged. The report retains the
 original heat audit, per-cell exchange, native midpoint identity, kinetic
 change and internal-director work. No finite-rotation, prestressed dynamics,
-moving transport, varying elastic-modulus reciprocity, material damping or
-exact discrete-isentropy claim is made. Time/space refinement remains required.
+moving transport, material damping or exact discrete-isentropy claim is made.
+Time/space refinement remains required.
 `tests/laminate_thermal_dynamic.rs` supplies independent scalar-oscillator,
 adiabatic inertial-cooling and analytic internal-inertia oracles, nonuniform
 heating and transactional refusal checks. These synthetic implementation
 fixtures are not experimental material validation.
+
+`tests/laminate_thermal_dynamic_softening.rs` adds an independent heated scalar
+oscillator with simultaneous momentum and finite-heat equations across several
+changing-load steps. A heterogeneous laminate fixture checks original reference
+kinematics and exact physical bubble inertia while the current condensation map
+changes, nonlocal shear heat, full storage balance and late rollback. The native
+stiffness-parameter diagnostic is checked separately from the thermodynamic
+exchange. These authored references require numerical execution and timestep/
+space refinement before making accuracy or experimental claims.
 
 ## One shared hysteretic core in a native multiwinding circuit
 
