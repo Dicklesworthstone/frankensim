@@ -19,6 +19,9 @@ use crate::shell::{ShellMesh, ShellModel, ShellSection, ShellSupport};
 use std::cell::Cell;
 use std::sync::Arc;
 
+/// Certified monolithic vibrations and physical ports about this equilibrium.
+pub mod vibration;
+
 /// One unloaded component with its original sections, supports and dead loads.
 #[derive(Clone, Debug)]
 pub struct ShellPreloadComponent<'a> {

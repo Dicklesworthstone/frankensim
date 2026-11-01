@@ -11,6 +11,7 @@ description = "Orthotropic thin-plate bending elements (DKT), membrane prestress
 layer = "L3"
 
 [dependencies]
+fs-exec = { path = "../fs-exec" }
 fs-material = { path = "../fs-material" }
 fs-math = { path = "../fs-math" }
 fs-modal = { path = "../fs-modal" }
@@ -27,7 +28,6 @@ scenario = ["dep:fs-scenario"]
 [dev-dependencies]
 fs-mesh = { path = "../fs-mesh" }
 fs-alloc = { path = "../fs-alloc" }
-fs-exec = { path = "../fs-exec" }
 fs-aeroac = { path = "../fs-aeroac" }
 # Consuming demo for the instrument material database (bead zwzey): a
 # spruce top's modes computed from queried fs-matdb values alone.

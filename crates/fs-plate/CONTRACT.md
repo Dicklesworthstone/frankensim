@@ -1113,3 +1113,38 @@ a massless elastic axial member with the original moderate-deformation shell
 and linear bearing-offset map. It does not model member flexure/buckling,
 distributed post inertia, finite contact footprints or friction, and does not
 claim complete M1.4-W1 or mixed shell/solid assembly coverage.
+
+## Certified vibrations about an assembled loaded equilibrium
+
+`shell::preload::assembly::vibration::eigen_windows` consumes the accepted
+`PreloadedShellAssembly` tangent and reference mass directly through the
+existing fs-modal multi-window slicer. It retains each original inertia count,
+mode, residual interval and shared-symbolic work receipt. Tethers, elastic
+struts and glue stiffness already belong to the tangent and are never added
+again. No geometry is rebuilt as stress free. A borrow keeps the source body
+unchanged while the returned `AssemblyVibration` is in use.
+
+Original junction maps expand mass-normalized modes and carry incremental
+full-component loads by `Phi^T T^T`, including forces and moments at eliminated
+nonmatching slave nodes. `perturbation_displacements` returns `T Phi q` and
+also serves the conjugate velocity map. `displacements` includes the accepted
+mean `T u_equilibrium`, so zero perturbation preserves the loaded body. Both
+projections and reconstruction require Cx, poll between modes, and poll around
+the original indivisible junction operations before publishing results.
+
+The complete row-major `Phi^T C_glue Phi` projection retains cross-mode damping;
+no diagonal approximation or omitted-mode coupling certificate is inferred.
+Only the existing glue loss is included. Other material, radiation and
+frequency-dependent losses retain their own owners. Mode vectors are borrowed
+during projection instead of allocating a second full eigenbasis. Explicit
+mode-count and dense-projection-entry caps supplement the slicer's own budgets;
+these output caps are checked after its bounded solve. Empty windows remain
+valid, and nonpositive/zero-crossing mode intervals refuse instead of being
+converted into audible frequencies.
+
+This is the original monolithic equilibrium pencil with linear physical port
+images, not a new eigensolver, time integrator or nonlinear modal reduction.
+Perturbations require the original deformation limits and unchanged active
+connection branches. Full-body response convergence and damping certification
+outside the supplied windows are separate requirements; this scope does not
+claim the complete M1.4-W2 measurement or hundred-thousand-DOF performance gate.
