@@ -8875,3 +8875,52 @@ The `fs-render` example `phase_change_optical_heating` uses this adapter directl
 for illumination, infrared exchange and phase observations during heating and
 convective refreezing of one synthetic specimen. The original chart supplies
 temperature and liquid mass fraction throughout both directions of the cycle.
+
+### Conserved multicomponent internal-energy and volume equilibrium
+
+`thermochemical_gas::nonideal::flash::equilibrium::volume` recovers pressure,
+temperature and phase amounts from the original feed's mass-specific U,V.
+Each pressure trial reuses the existing caloric PH owner with
+`h_target = u_target + p*v_target`; a safeguarded outer pressure solve closes
+the original additive phase volume. The declared pressure endpoints must
+bracket its volume residual from positive to negative. The off-root PH curve
+is not assumed globally monotone. All sampled states retain the original
+two-search stability and optional split evidence; failure or indeterminate
+phase amounts refuse without a homogeneous fallback. This bounded bracketed
+solution is not a global Gibbs minimum, entropy maximum or unrestricted
+uniqueness certificate.
+
+The increment path samples its reference once and uses
+`Delta h_target = Delta u_target + p*(v_target-v_initial)
+                  + (p-p_initial)*v_initial`.
+Original NASA internal-energy integration plus the difference of original
+phase U departures independently checks the final Delta-u; large species
+formation datums cancel before rounding. Original entropy increments retain
+the phase-mixing correction. No mixed heat capacity, extra latent source,
+transport, acoustic relaxation or process heat/work law is introduced.
+At identical represented volume and zero increment, an in-bracket reference
+is preserved exactly after one PT selection with no pressure inversion.
+
+Acceptance requires both direct U and V residuals and the pressure safeguard.
+The inner PH tolerance and outer volume tolerance reserve parts of the energy
+budget. A nonzero small energy increment also tightens that budget so it cannot
+vanish into a large configured tolerance. Absolute energy or intermediate
+enthalpy coordinates whose spacing cannot resolve tolerance refuse.
+Temperature-source continuity is admitted once. Final state publication
+retains the complete original source receipt and a final cancellation poll.
+
+Separate limits bound pressure inversions, per-pressure PH selections and all
+original PT selections in the entire call, including the reference and all
+endpoints. Public work receipts distinguish attempted pressure/PT counts from
+the sum of observed stability-screen EOS calls plus bounded split work.
+The existing PH root and original caloric/phase owners are shared; intermediate
+pressure trials do not rebuild complete material receipts.
+
+The existing `nonideal_flash` target adds G0/G1/G3/G4 cases for independent
+homogeneous and coexistence U,V oracles; heating/cooling cross-boundary caloric
+increments; bitwise species-datum invariance; fixed-volume heat, pressure and
+phase-amount response without latent double counting; exact one-call rest;
+nested work/source/phase refusals; and final-cancellation replay. Synthetic
+methane/ethane Cp/R fixtures prove constitutive consistency, not empirical
+mixture-property accuracy. A consumer must still select its own mass, volume,
+heat, work, phase-relaxation and entropy assumptions.

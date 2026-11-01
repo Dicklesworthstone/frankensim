@@ -17,6 +17,9 @@ use fs_thermochem::eos::peng_robinson::{
     stability::PengRobinsonStabilityOptionsV1,
 };
 
+/// Conserved internal-energy and volume closure over the same phase owner.
+pub mod volume;
+
 /// Energy-root controls plus the explicit, bounded phase stability screen.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct PhaseEnthalpyControls {

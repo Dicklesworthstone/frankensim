@@ -45,6 +45,15 @@ pub enum ThermochemicalFlashError {
     OutsideEnthalpyBracket,
     /// The remaining temperature interval cannot be resolved at the requested accuracy.
     UnresolvedTemperature,
+    /// The pressure endpoints do not bracket the requested conserved volume.
+    OutsideVolumeBracket,
+    /// The pressure interval cannot resolve both conserved coordinates.
+    UnresolvedPressure,
+    /// The caller's bounded number of pressure/enthalpy inversions was exhausted.
+    PressureWorkLimit {
+        /// Number of attempted pressure/enthalpy inversions.
+        pressure_evaluations: usize,
+    },
 }
 impl core::fmt::Display for ThermochemicalFlashError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
