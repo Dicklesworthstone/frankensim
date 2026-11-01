@@ -7,7 +7,8 @@
 //! The preceding wavelength supplies the next launch guess. Ordered optical
 //! branch identity must remain unchanged across the spectrum.
 //!
-//! This is a local, single-image measurement. The supplied initial direction
+//! This is a local, single-image measurement; [`multipath`] sums a bounded set
+//! of separately connected optical branches. The supplied initial direction
 //! must reach the finite detector in the first bin's convergence basin. Other
 //! images, diffuse paths, finite-aperture caustics and wavelengths outside the
 //! native quadrature require their own transport/integration owners.
@@ -19,12 +20,16 @@ use super::{
 use crate::charts::Ray;
 use crate::polarization::dielectric::scene::curved::CurvedPolarizedScene;
 use crate::polarization::dielectric::scene::curved::bundle::connection::{
-    BundleConnectionError, BundleConnectionLaunch, BundleConnectionOptions, BundleConnectionTarget,
+    BundleBranchPolicy, BundleConnectionError, BundleConnectionLaunch, BundleConnectionOptions,
+    BundleConnectionTarget,
 };
 use crate::polarization::{Stokes, photometry::PolarizedSource};
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
 use fs_geom::Vec3;
+
+/// Incoherent spectral power from distinct reflected/transmitted branches.
+pub mod multipath;
 
 /// One native planar receiver and a local initial guess for the first bin.
 /// Source polarization is defined relative to the supplied world axis projected
@@ -119,7 +124,27 @@ impl PhotometricSource {
         scene: &CurvedPolarizedScene<'_>,
         request: ConnectedIrradianceRequest,
     ) -> Result<ConnectedIrradianceSpectrum, ConnectedIrradianceError> {
-        connect_spectrum(self, cx, scene, request, |_| Stokes::unpolarized(1.0))
+        self.connect_irradiance_with_policy(
+            cx,
+            scene,
+            request,
+            BundleBranchPolicy::TransmitOrReflectTir,
+        )
+    }
+
+    /// Connect a selected reflection/transmission sequence at every wavelength.
+    /// Every shooting trial and spectral bin starts the policy at its beginning;
+    /// each native interface still determines its own position and local optics.
+    pub fn connect_irradiance_with_policy(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedPolarizedScene<'_>,
+        request: ConnectedIrradianceRequest,
+        policy: BundleBranchPolicy<'_>,
+    ) -> Result<ConnectedIrradianceSpectrum, ConnectedIrradianceError> {
+        connect_spectrum(self, cx, scene, request, policy, |_| {
+            Stokes::unpolarized(1.0)
+        })
     }
 }
 
@@ -133,7 +158,24 @@ impl PolarizedSource {
         scene: &CurvedPolarizedScene<'_>,
         request: ConnectedIrradianceRequest,
     ) -> Result<ConnectedIrradianceSpectrum, ConnectedIrradianceError> {
-        connect_spectrum(self.intensity_source(), cx, scene, request, |bin| {
+        self.connect_irradiance_with_policy(
+            cx,
+            scene,
+            request,
+            BundleBranchPolicy::TransmitOrReflectTir,
+        )
+    }
+
+    /// Connect a selected branch with the source's surviving spectral Stokes
+    /// states. Upstream filtering and every selected interface loss apply once.
+    pub fn connect_irradiance_with_policy(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedPolarizedScene<'_>,
+        request: ConnectedIrradianceRequest,
+        policy: BundleBranchPolicy<'_>,
+    ) -> Result<ConnectedIrradianceSpectrum, ConnectedIrradianceError> {
+        connect_spectrum(self.intensity_source(), cx, scene, request, policy, |bin| {
             let state = self.relative_stokes()[bin];
             if state.i == 0.0 {
                 Stokes::unpolarized(1.0)
@@ -154,6 +196,7 @@ fn connect_spectrum(
     cx: &Cx<'_>,
     scene: &CurvedPolarizedScene<'_>,
     request: ConnectedIrradianceRequest,
+    policy: BundleBranchPolicy<'_>,
     polarization: impl Fn(usize) -> Stokes,
 ) -> Result<ConnectedIrradianceSpectrum, ConnectedIrradianceError> {
     let target = BundleConnectionTarget::try_new(
@@ -176,7 +219,7 @@ fn connect_spectrum(
     let mut query_work = 0_u64;
     for bin in 0..SPECTRAL_BINS {
         let connected = scene
-            .connect_bundle_transmitted(
+            .connect_bundle_with_policy(
                 cx,
                 BundleConnectionLaunch {
                     ray: Ray {
@@ -190,6 +233,7 @@ fn connect_spectrum(
                 },
                 target,
                 request.connection,
+                policy,
             )
             .map_err(|error| ConnectedIrradianceError::Connection { bin, error })?;
         let path = connected.path();
