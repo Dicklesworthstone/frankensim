@@ -538,7 +538,8 @@ impl MaterialHeatStep<'_> {
     }
 
     /// Append the independent junction rows to a material owner's cell rates.
-    /// Their constant authored capacity stays unchanged across caloric trials.
+    /// Constant capacities are final; C(T) entries are only reference rates.
+    /// The shared endpoint owner refreshes their exact enthalpy secants.
     pub(crate) fn append_junction_storage(&self, storage_w_k: &mut Vec<f64>) -> Result<(), ChtError> {
         let cells = self.domain.cell_count();
         if storage_w_k.len() != cells
@@ -601,7 +602,7 @@ impl MaterialHeatStep<'_> {
         remaining_solves: &mut usize,
     ) -> Result<(EnergySolution, f64, f64), ChtError> {
         solve_step_with_fields(self.domain, self.fluid, self.solids, self.flow,
-            self.setup, self.energy, storage_w_k, self.previous_temperature_k, self.radiation,
+            self.setup, self.energy, storage_w_k, self.previous_temperature_k, self.time_step_s, self.radiation,
             Some(conductivity_w_m_k), Some(enthalpy), Some(remaining_solves), self.gate)
     }
 

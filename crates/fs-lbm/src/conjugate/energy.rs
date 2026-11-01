@@ -20,6 +20,7 @@ use fs_exec::CancelGate;
 use fs_sparse::Coo;
 
 use super::conductance::{ConductivityCurve, interface_conductance};
+use super::compact_storage::{CompactHeatStorage, CompactStorageControls, bindings};
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 use super::flow::{FlowField, scale_rows};
 use super::krylov::bicgstab_ilu0;
@@ -99,6 +100,11 @@ pub struct ThermalSetup {
     pub eddy_conductivity_w_m_k: Vec<f64>,
     /// Two-resistor compact thermal models of components.
     pub compact_components: Vec<CompactComponent>,
+    /// Optional total C(T) laws, each replacing one component's constant
+    /// capacity. A compact junction has exactly one physical storage owner.
+    pub compact_heat_storage: Vec<CompactHeatStorage>,
+    /// Shared endpoint controls for temperature-dependent junction storage.
+    pub compact_storage_controls: CompactStorageControls,
 }
 
 /// A JEDEC two-resistor compact thermal model (JESD15-3) of a packaged
@@ -127,9 +133,10 @@ pub struct CompactComponent {
     pub junction_to_case_k_w: f64,
     /// Junction-to-board resistance, K/W.
     pub junction_to_board_k_w: f64,
-    /// Constant total junction heat capacity, J/K. `None` declares only a
-    /// steady model; a transient requires a finite positive value. This is
-    /// an authored lumped storage model, not inferred from either resistor.
+    /// Constant total junction heat capacity, J/K. A physical transient
+    /// requires this positive value or one bound C(T) law in
+    /// [`ThermalSetup::compact_heat_storage`], never both. Storage is not
+    /// inferred from either resistor or the collapsed voxel material.
     pub heat_capacity_j_k: Option<f64>,
 }
 
@@ -201,6 +208,8 @@ impl ThermalSetup {
             cell_sinks: Vec::new(),
             eddy_conductivity_w_m_k: Vec::new(),
             compact_components: Vec::new(),
+            compact_heat_storage: Vec::new(),
+            compact_storage_controls: CompactStorageControls::default(),
         }
     }
 
@@ -869,6 +878,9 @@ fn solve_energy_field(
         }
     }
     let compact_owner = compact_owners(domain, &setup.compact_components, gate)?;
+    // Steady temperatures need not lie in a transient storage span, but
+    // competing or unknown storage owners are always invalid.
+    let _ = bindings(setup, gate)?;
     if molecular_conductivity.is_some() {
         // Collapsed aliases have no bulk law. Their material slots need not
         // appear in the source table; every ordinary solid still must.

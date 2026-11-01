@@ -253,7 +253,7 @@ impl EnergyConfig {
         enthalpy: Option<AdvectiveEnthalpyField<'_>>, capacity_j_k: &[f64], previous_k: &[f64],
         time_step_s: f64, gate: &CancelGate,
     ) -> Result<(EnergySolution, crate::conjugate::TransientRecord), ChtError> {
-        use super::super::transient::{junction_capacity, storage_record};
+        use super::super::transient::{junction_capacity, solve_step_with_fields, storage_record};
         let invalid = |reason: &str| ChtError::InvalidInput {
             field: "thermal.material_storage", reason: reason.into(),
         };
@@ -300,13 +300,9 @@ impl EnergyConfig {
             capacity.push(value);
             storage.push(rate);
         }
-        let step = PseudoStep {
-            coefficient_w_k: &storage[..cells],
-            previous: previous_k,
-            junction_coefficient_w_k: &storage[cells..],
-        };
-        let solution = self.solve_with_fields(
-            domain, fluid, solids, flow, setup, molecular_w_m_k, enthalpy, Some(&step), gate,
+        let (solution, _, _) = solve_step_with_fields(
+            domain, fluid, solids, flow, setup, self, &storage, previous_k, time_step_s,
+            None, Some(molecular_w_m_k), enthalpy, None, gate,
         )?;
         for (cell, &temperature) in solution.temperature.iter().enumerate() {
             if cell.is_multiple_of(4096) { super::super::poll(gate)?; }

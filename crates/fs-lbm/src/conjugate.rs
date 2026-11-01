@@ -93,6 +93,7 @@ use crate::d3q19::Face3;
 pub mod boundary_exchange;
 mod buoyant;
 mod conductance;
+mod compact_storage;
 mod domain;
 mod electric;
 mod energy;
@@ -113,6 +114,7 @@ pub(crate) mod unsteady;
 pub use buoyant::{
     FvBuoyancyConfig, FvNaturalConvection, FvNaturalConvectionReport, fv_natural_convection,
 };
+pub use compact_storage::{CompactHeatStorage, CompactHeatStorageLaw, CompactStorageControls};
 pub use domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 pub use electric::motion::{ElectricMotionInput, MovingConductorSolution};
 pub use electric::{

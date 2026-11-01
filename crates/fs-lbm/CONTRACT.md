@@ -2806,9 +2806,43 @@ The caller offsets the schedule clock on restart. Both native marches apply
 `power_schedule` to cell and component powers from the authored setup each step.
 Artificial steady pseudo-time explicitly omits physical junction storage.
 
+A component may instead bind one `CompactHeatStorageLaw` through
+`ThermalSetup::compact_heat_storage`. `TabulatedHeatStorage` admits an authored
+2..4096-knot total C(T) table; `PreparedHeatStorage` retains source-qualified
+constituents and their explicit fixed amounts. Constant capacity and a bound
+law are mutually exclusive. The shared caloric kernel integrates every crossed
+piecewise-affine breakpoint directly, with no extrapolation or latent-heat
+inference. Steady energy solves validate ownership but do not query transient
+storage support.
+
+The common transient endpoint owner refreshes positive enthalpy secants in the
+junction rows while retaining the original physical time level. It serves
+frozen-flow and coupled native marches, public resolved-field steps, and
+source-caloric fluid/solid marches. Radiation shares the same endpoint passes;
+source-caloric whole-march budgets count every additional energy solve.
+Capacity-derivative damping and per-junction support limits change only the
+constitutive trials. A junction at its span boundary may stay there while
+coupled neighbors adjust. Only an actual supported solved endpoint can pass.
+
+Each bound junction must satisfy both its exact storage/secant consistency and
+`delta H_j = dt * (P_j - Q_case - Q_board)`, independently of global closure.
+`CompactStorageControls` declares temperature, absolute/relative energy,
+relaxation and iteration limits. The energy tolerance uses locally transferred
+heat plus an explicit floating-point resolution allowance; absolute kelvin is
+not the relative heat scale. An insufficient scaled linear solve is tightened
+within the same finite budget. Constant tables skip unnecessary temperature
+fixed-point passes, while retaining their local heat and support checks.
+Accepted ledgers always evaluate the original energy integral once per
+junction; source-solid subtotals and compact voxel aliases exclude it.
+
 `tests/conjugate/compact_transient.rs` checks an independent pulsed RC recurrence,
 unequal-area aliases, closed-system equilibration, backward-Euler refinement,
 nonlinear outside half cells, admission, cancellation and split restart.
+Its C(T) regressions cover heating/cooling across knots, the public resolved-field
+step, sharp supported laws with out-of-span predictors, local heat errors that
+cancel globally, and coupled junctions starting at a support boundary.
+`tests/material_unsteady_buoyancy/compact_caloric.rs` includes a separate
+prepared-material junction alongside original source-caloric fluid/solid storage.
 `tests/conjugate/compact_coupled.rs` checks the same storage and power schedule
 through the actual coupled flow/energy march. Energy remains backward Euler
 even when momentum selects BDF2. Radiating ordinary surroundings retain their
@@ -2821,9 +2855,10 @@ radiation or wall sink because it is not a resolved package surface.
 
 No-claims: the two-resistor model's own limits (boundary-condition dependence
 of a 2R reduction, no spreading inside the package, adiabatic sides). The
-optional single-junction capacity is an authored constant storage reduction,
-not a measured dynamic package impedance, a distributed die/case model,
-temperature-dependent enthalpy, or latent heat.
+optional single-junction storage is an explicit lumped sensible-energy
+reduction, with either constant or bounded temperature-dependent capacity.
+It is not a measured dynamic package impedance, a distributed die/case model,
+or a latent-heat model.
 
 ### Surface radiation to the surroundings (`radiation`)
 

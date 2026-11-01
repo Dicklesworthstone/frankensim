@@ -15,10 +15,10 @@
 //! non-collapsed solid without one refuses). A compact component declares
 //! its own total junction capacity; its voxel aliases carry no extra storage.
 //! Ordinary and compact sources are `power_w` scaled by `power_schedule(t)`.
-//! Each step retains an energy closure computed two
-//! independent ways: the stored-energy change `sum C (T^(n+1) - T^n)` and
-//! `dt (source - boundary outflow)` from boundary fluxes alone; their
-//! difference is the solver residual, never a modelling term.
+//! Each step independently audits stored energy against
+//! `dt (source - boundary outflow)`. Ordinary constant-capacity cells use
+//! `C (T^(n+1) - T^n)`; bound junction C(T) laws use their exact sensible
+//! energy integral. The difference is a solver residual, never a modelling term.
 //!
 //! Radiation, when declared, is converged at the backward-Euler endpoint:
 //! both emission and surface irradiation use the new temperature. Every
@@ -31,6 +31,8 @@
 //! accuracy decision; halving it is the convergence evidence).
 
 use fs_exec::CancelGate;
+
+use super::compact_storage::{CompactStorageIteration, bindings};
 
 use super::domain::{FluidProperties, SolidMaterial, Voxel, VoxelDomain};
 use super::energy::{AdvectiveEnthalpyField, EnergyConfig, EnergySolution, PseudoStep, ThermalSetup, check_ordinary_materials, compact_owners, solve_energy_inner};
@@ -220,12 +222,19 @@ pub(super) fn junction_capacity(
     initial: &[f64],
     gate: &CancelGate,
 ) -> Result<Vec<f64>, ChtError> {
+    let laws = bindings(setup, gate)?;
     let mut capacities = Vec::with_capacity(setup.compact_components.len());
     for (j, part) in setup.compact_components.iter().enumerate() {
-        let capacity = part.heat_capacity_j_k.ok_or_else(|| ChtError::InvalidInput {
-            field: "thermal.compact_components",
-            reason: format!("component {j}: a physical transient requires heat_capacity_j_k"),
-        })?;
+        if j.is_multiple_of(256) { poll(gate)?; }
+        let cell = domain.index(part.lo[0], part.lo[1], part.lo[2]);
+        let capacity = if let Some(law) = laws.get(j).and_then(|law| *law) {
+            law.heat_capacity_j_k(initial[cell])?
+        } else {
+            part.heat_capacity_j_k.ok_or_else(|| ChtError::InvalidInput {
+                field: "thermal.compact_components",
+                reason: format!("component {j}: a physical transient requires heat_capacity_j_k or a compact heat-storage law"),
+            })?
+        };
         finite_positive("thermal.compact_components.heat_capacity_j_k", capacity)?;
         capacities.push(capacity);
     }
@@ -296,7 +305,7 @@ pub(crate) fn energy_step_with_conductivity(
     gate: &CancelGate,
 ) -> Result<(Vec<f64>, TransientRecord), ChtError> {
     let (next, radiated_w, radiation_outflow_correction_w) = solve_step(
-        domain, fluid, solids, flow, setup, energy, storage, previous, radiation,
+        domain, fluid, solids, flow, setup, energy, storage, previous, dt, radiation,
         molecular_w_m_k, gate,
     )?;
     let record = storage_record(domain, setup, capacity, previous, &next,
@@ -324,11 +333,16 @@ pub(super) fn junction_stored_energy_change_j(
             reason: "storage needs cell capacities followed by one capacity per junction".into(),
         });
     }
+    let laws = bindings(setup, gate)?;
     let mut stored = 0.0;
     for (j, part) in setup.compact_components.iter().enumerate() {
         if j.is_multiple_of(256) { poll(gate)?; }
         let cell = domain.index(part.lo[0], part.lo[1], part.lo[2]);
-        let change = capacity[cells + j] * (temperature[cell] - previous[cell]);
+        let change = if let Some(law) = laws.get(j).and_then(|law| *law) {
+            law.energy_change_j(previous[cell], temperature[cell])?
+        } else {
+            capacity[cells + j] * (temperature[cell] - previous[cell])
+        };
         finite("thermal.storage.junction_energy_j", change)?;
         stored += change;
     }
@@ -336,8 +350,8 @@ pub(super) fn junction_stored_energy_change_j(
     Ok(stored)
 }
 
-/// Constant-capacity storage, including one independent contribution per
-/// compact junction, composed with the shared physical boundary ledger.
+/// Ordinary constant-capacity storage plus each junction's actual sensible
+/// energy change, composed with the shared physical boundary ledger.
 #[allow(clippy::too_many_arguments)]
 pub(super) fn storage_record(
     domain: &VoxelDomain,
@@ -425,7 +439,7 @@ pub(super) fn record_energy_step(
 
 /// Solve one endpoint, returning its external radiation and the correction
 /// from tangent sinks to the physical radiation law in the net boundary
-/// balance. The non-radiating path remains one unchanged energy solve.
+/// balance. Constant storage without radiation retains one energy solve.
 #[allow(clippy::too_many_arguments)]
 fn solve_step(
     domain: &VoxelDomain,
@@ -436,17 +450,18 @@ fn solve_step(
     energy: &EnergyConfig,
     storage: &[f64],
     previous: &[f64],
+    time_step_s: f64,
     radiation: Option<(&Radiators, &RadiationConfig)>,
     molecular_w_m_k: Option<&[[f64; 3]]>,
     gate: &CancelGate,
 ) -> Result<(EnergySolution, f64, f64), ChtError> {
     solve_step_with_fields(domain, fluid, solids, flow, setup, energy, storage,
-        previous, radiation, molecular_w_m_k, None, None, gate)
+        previous, time_step_s, radiation, molecular_w_m_k, None, None, gate)
 }
 
-/// Original endpoint radiation iteration and energy kernel, with optional
-/// source h(T) faces and a shared whole-march count of actual linear solves.
-#[allow(clippy::too_many_arguments)]
+/// Shared endpoint iteration for compact sensible storage and radiation, with
+/// optional source h(T) faces and a whole-march count of actual energy solves.
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 pub(super) fn solve_step_with_fields(
     domain: &VoxelDomain,
     fluid: &FluidProperties,
@@ -456,13 +471,23 @@ pub(super) fn solve_step_with_fields(
     energy: &EnergyConfig,
     storage: &[f64],
     previous: &[f64],
+    time_step_s: f64,
     radiation: Option<(&Radiators, &RadiationConfig)>,
     molecular_w_m_k: Option<&[[f64; 3]]>,
     enthalpy: Option<AdvectiveEnthalpyField<'_>>,
     mut remaining_solves: Option<&mut usize>,
     gate: &CancelGate,
 ) -> Result<(EnergySolution, f64, f64), ChtError> {
-    let mut solve = |setup: &ThermalSetup| {
+    let cells = domain.cell_count();
+    if previous.len() != cells || storage.len() != cells + setup.compact_components.len() {
+        return Err(ChtError::InvalidInput {
+            field: "thermal.storage",
+            reason: "storage needs cell rates followed by one rate per junction, and one old temperature per cell".into(),
+        });
+    }
+    finite_positive("thermal.time_step_s", time_step_s)?;
+    let mut compact = CompactStorageIteration::new(domain, setup, previous, time_step_s, gate)?;
+    let mut solve = |setup: &ThermalSetup, rates: &[f64], config: &EnergyConfig| {
         poll(gate)?;
         if let Some(remaining) = remaining_solves.as_deref_mut() {
             *remaining = remaining.checked_sub(1).ok_or_else(|| ChtError::InvalidInput {
@@ -470,28 +495,21 @@ pub(super) fn solve_step_with_fields(
                 reason: "whole-march source-caloric energy-solve budget exhausted".into(),
             })?;
         }
-        // This is the time level, not the previous radiation iterate.
+        // Always the original physical time level, never a constitutive trial.
         let step = PseudoStep {
-            coefficient_w_k: &storage[..domain.cell_count()],
+            coefficient_w_k: &rates[..cells],
             previous,
-            junction_coefficient_w_k: &storage[domain.cell_count()..],
+            junction_coefficient_w_k: &rates[cells..],
         };
         match (molecular_w_m_k, enthalpy) {
-            (Some(field), Some(caloric)) => energy.solve_step_with_enthalpy(
+            (Some(field), Some(caloric)) => config.solve_step_with_enthalpy(
                 domain, fluid, solids, flow, setup, field, caloric, &step, gate,
             ),
-            (Some(field), None) => energy.solve_step_with_conductivity(
+            (Some(field), None) => config.solve_step_with_conductivity(
                 domain, fluid, solids, flow, setup, field, &step, gate,
             ),
             (None, None) => solve_energy_inner(
-                domain,
-                fluid,
-                solids,
-                flow,
-                setup,
-                energy,
-                Some(&step),
-                gate,
+                domain, fluid, solids, flow, setup, config, Some(&step), gate,
             ),
             (None, Some(_)) => Err(ChtError::InvalidInput {
                 field: "unsteady.material_enthalpy",
@@ -499,99 +517,167 @@ pub(super) fn solve_step_with_fields(
             }),
         }
     };
-    let Some((radiators, controls)) = radiation else {
-        return Ok((solve(setup)?, 0.0, 0.0));
-    };
-    finite_positive("radiation.tolerance", controls.tolerance)?;
-    if controls.max_iterations == 0 {
-        return Err(ChtError::InvalidInput {
-            field: "radiation.max_iterations",
-            reason: "must be at least one".into(),
-        });
+    if radiation.is_none() && compact.is_none() {
+        return Ok((solve(setup, storage, energy)?, 0.0, 0.0));
     }
-    let cells = domain.cell_count();
-    let mut fixed = vec![false; cells];
-    for &(cell, _) in &setup.fixed_temperature {
-        // The energy solver supplies the input refusal for invalid indices.
-        if let Some(value) = fixed.get_mut(cell) {
-            *value = true;
+    if let Some((_, controls)) = radiation {
+        finite_positive("radiation.tolerance", controls.tolerance)?;
+        if controls.max_iterations == 0 {
+            return Err(ChtError::InvalidInput {
+                field: "radiation.max_iterations",
+                reason: "must be at least one".into(),
+            });
         }
     }
+    let maximum_iterations = compact.as_ref().map_or(usize::MAX, |c| c.maximum_iterations())
+        .min(radiation.map_or(usize::MAX, |(_, controls)| controls.max_iterations));
+    // Ordinary source-caloric coefficients stay frozen in this inner owner.
+    // Only the junction tail is refreshed from its actual enthalpy secants.
+    let mut rates = compact.as_ref().map(|_| storage.to_vec());
     let mut iterate = previous.to_vec();
-    let mut endpoint = radiators.endpoint(domain, &iterate, gate)?;
-    let mut step = setup.clone();
+    let mut endpoint = match radiation {
+        Some((radiators, _)) => Some(radiators.endpoint(domain, &iterate, gate)?),
+        None => None,
+    };
+    // The storage-only path needs no radiation arrays or setup clone.
+    let radiation_cells = if radiation.is_some() { cells } else { 0 };
+    let mut fixed = vec![false; radiation_cells];
+    for &(cell, _) in &setup.fixed_temperature {
+        if let Some(value) = fixed.get_mut(cell) { *value = true; }
+    }
+    let mut step = radiation.map(|_| setup.clone());
     let base_sinks = setup.cell_sinks.len();
-    let mut tangent_power = vec![0.0; cells];
-    let mut tangent_scale = vec![0.0; cells];
+    let mut tangent_power = vec![0.0; radiation_cells];
+    let mut tangent_scale = vec![0.0; radiation_cells];
+    let mut linear = *energy;
     let mut total_iterations = 0usize;
     let mut relative_residual = f64::INFINITY;
-    for _ in 0..controls.max_iterations {
+    let mut last_radiation_residual = f64::INFINITY;
+    for _ in 0..maximum_iterations {
         poll(gate)?;
-        step.cell_sinks.truncate(base_sinks);
-        step.cell_sinks.extend_from_slice(&endpoint.sinks);
-        let mut next = solve(&step)?;
+        if let (Some(compact), Some(rates)) = (&mut compact, &mut rates) {
+            compact.write_rates(&iterate, &mut rates[cells..], gate)?;
+        }
+        if let (Some(step), Some(endpoint)) = (&mut step, &endpoint) {
+            step.cell_sinks.truncate(base_sinks);
+            step.cell_sinks.extend_from_slice(&endpoint.sinks);
+        }
+        let coefficients = rates.as_deref().unwrap_or(storage);
+        let mut next = solve(step.as_ref().unwrap_or(setup), coefficients, &linear)?;
         total_iterations = total_iterations.saturating_add(next.report.iterations);
-        let physical = radiators.endpoint(domain, &next.temperature, gate)?;
-        tangent_power.fill(0.0);
-        tangent_scale.fill(0.0);
-        for sink in &endpoint.sinks {
-            tangent_power[sink.cell] +=
-                sink.conductance_w_k * (next.temperature[sink.cell] - sink.temperature_k);
-            tangent_scale[sink.cell] += sink.conductance_w_k
-                * (next.temperature[sink.cell].abs() + sink.temperature_k.abs());
-        }
-        let mut lo = f64::INFINITY;
-        let mut hi = f64::NEG_INFINITY;
-        let mut change = 0.0f64;
-        let mut power_residual = 0.0f64;
+        let supported = match &compact {
+            Some(c) => c.supports(&next.temperature, gate)?,
+            None => true,
+        };
+        let storage_residual = if supported {
+            compact.as_ref().map(|c| c.residual(setup, &iterate, &next, gate)).transpose()?
+        } else {
+            None
+        };
+        let compact_residual = if supported {
+            storage_residual.map_or(0.0, |r| r.normalized)
+        } else {
+            f64::INFINITY
+        };
+        let mut radiated_w = 0.0;
         let mut correction_w = 0.0;
-        for cell in 0..cells {
-            if cell % 1024 == 0 {
-                poll(gate)?;
-            }
-            let t = next.temperature[cell];
-            lo = lo.min(t);
-            hi = hi.max(t);
-            change = change.max((t - iterate[cell]).abs());
-            let defect = physical.cell_power_w[cell] - tangent_power[cell];
-            finite("radiation.power_defect_w", defect)?;
-            let scale = physical.cell_power_w[cell]
-                .abs()
-                .max(tangent_power[cell].abs())
-                .max(storage[cell] * (t - previous[cell]).abs())
-                .max(setup.power_w.get(cell).copied().unwrap_or(0.0).abs());
-            // Near radiative equilibrium, emission and absorption cancel;
-            // distinguish that roundoff from a real local power imbalance.
-            finite("radiation.tangent_scale_w", tangent_scale[cell])?;
-            finite("radiation.power_scale_w", scale)?;
-            let roundoff = 64.0 * f64::EPSILON * physical.cell_scale_w[cell]
-                + 64.0 * f64::EPSILON * tangent_scale[cell];
-            finite("radiation.power_roundoff_w", roundoff)?;
-            power_residual = power_residual.max(
-                (defect.abs() - roundoff).max(0.0) / scale.max(f64::MIN_POSITIVE),
-            );
-            if !fixed[cell] {
-                correction_w += defect;
+        let mut radiation_residual = 0.0;
+        let mut physical_endpoint = None;
+        if let (Some((radiators, _)), Some(endpoint)) = (radiation, endpoint.as_ref()) {
+            // Reject an unsupported algebraic predictor before dependent
+            // constitutive evaluations; the next trial may still be supported.
+            if supported {
+                let physical = radiators.endpoint(domain, &next.temperature, gate)?;
+                tangent_power.fill(0.0);
+                tangent_scale.fill(0.0);
+                for sink in &endpoint.sinks {
+                    tangent_power[sink.cell] += sink.conductance_w_k
+                        * (next.temperature[sink.cell] - sink.temperature_k);
+                    tangent_scale[sink.cell] += sink.conductance_w_k
+                        * (next.temperature[sink.cell].abs() + sink.temperature_k.abs());
+                }
+                let mut lo = f64::INFINITY;
+                let mut hi = f64::NEG_INFINITY;
+                let mut change = 0.0f64;
+                let mut power_residual = 0.0f64;
+                for cell in 0..cells {
+                    if cell.is_multiple_of(1024) { poll(gate)?; }
+                    let t = next.temperature[cell];
+                    lo = lo.min(t);
+                    hi = hi.max(t);
+                    change = change.max((t - iterate[cell]).abs());
+                    let defect = physical.cell_power_w[cell] - tangent_power[cell];
+                    finite("radiation.power_defect_w", defect)?;
+                    let scale = physical.cell_power_w[cell].abs()
+                        .max(tangent_power[cell].abs())
+                        .max(coefficients[cell] * (t - previous[cell]).abs())
+                        .max(setup.power_w.get(cell).copied().unwrap_or(0.0).abs());
+                    finite("radiation.tangent_scale_w", tangent_scale[cell])?;
+                    finite("radiation.power_scale_w", scale)?;
+                    let roundoff = 64.0 * f64::EPSILON * physical.cell_scale_w[cell]
+                        + 64.0 * f64::EPSILON * tangent_scale[cell];
+                    finite("radiation.power_roundoff_w", roundoff)?;
+                    power_residual = power_residual.max(
+                        (defect.abs() - roundoff).max(0.0) / scale.max(f64::MIN_POSITIVE),
+                    );
+                    if !fixed[cell] { correction_w += defect; }
+                }
+                finite("radiation.outflow_correction_w", correction_w)?;
+                let temperature_residual =
+                    (change - 64.0 * f64::EPSILON * hi.abs()).max(0.0) / (hi - lo).max(1.0);
+                radiation_residual = temperature_residual.max(power_residual);
+                radiated_w = physical.radiated_w;
+                physical_endpoint = Some(physical);
+            } else {
+                radiation_residual = f64::INFINITY;
             }
         }
-        finite("radiation.outflow_correction_w", correction_w)?;
-        let temperature_residual =
-            (change - 64.0 * f64::EPSILON * hi.abs()).max(0.0) / (hi - lo).max(1.0);
-        relative_residual = temperature_residual.max(power_residual);
-        if relative_residual <= controls.tolerance {
-            // A fixed cell's physical sink correction also corrects the
-            // reservoir injection by the same amount. Only free-cell
-            // corrections therefore enter the net boundary balance.
+        last_radiation_residual = radiation_residual;
+        let radiation_normalized = radiation.map_or(0.0, |(_, c)| radiation_residual / c.tolerance);
+        relative_residual = compact_residual.max(radiation_normalized);
+        if relative_residual <= 1.0 {
+            // Fixed-cell radiation corrections also change reservoir heat;
+            // only free-cell corrections enter the net boundary ledger.
             next.report.iterations = total_iterations;
-            return Ok((next, physical.radiated_w, correction_w));
+            return Ok((next, radiated_w, correction_w));
         }
-        iterate = next.temperature;
-        endpoint = physical;
+        if let Some(residual) = storage_residual
+            && residual.physical > 1.0 && residual.constitutive <= 1.0
+        {
+            // Scaled absolute-temperature residuals can miss small physical
+            // heat changes. Tighten the same solve, within the same budget;
+            // never waive a junction's local energy gate.
+            linear.tolerance = linear.tolerance.min(
+                (linear.tolerance * 0.1).max(4.0 * f64::EPSILON),
+            );
+        }
+        let exact_candidate = match &compact {
+            Some(c) => c.advance_trial(domain, &mut iterate, &next.temperature, gate)?,
+            None => {
+                iterate.copy_from_slice(&next.temperature);
+                true
+            }
+        };
+        if let Some((radiators, _)) = radiation {
+            endpoint = if exact_candidate {
+                physical_endpoint
+            } else {
+                Some(radiators.endpoint(domain, &iterate, gate)?)
+            };
+        }
+    }
+    if compact.is_none() {
+        return Err(ChtError::SolverNotConverged {
+            system: "transient radiation",
+            iterations: maximum_iterations,
+            relative_residual: last_radiation_residual,
+            tolerance: radiation.expect("radiation-only endpoint").1.tolerance,
+        });
     }
     Err(ChtError::SolverNotConverged {
-        system: "transient radiation",
-        iterations: controls.max_iterations,
+        system: "transient compact storage",
+        iterations: maximum_iterations,
         relative_residual,
-        tolerance: controls.tolerance,
+        tolerance: 1.0,
     })
 }

@@ -435,3 +435,106 @@ fn source_solid_compact_storage_preserves_fixed_fluid_cp_and_solid_subtotal() {
         assert_eq!(run.solid_energy_j[domain.index(x, 0, 1)], 0.0);
     }
 }
+
+#[test]
+fn joint_source_caloric_storage_integrates_variable_junction_capacity_once() {
+    use fs_lbm::conjugate::{CompactHeatStorage, CompactHeatStorageLaw};
+    use fs_material::thermal::transport::storage::{
+        HeatStorageAmount, HeatStorageComponentQuery, PreparedHeatStorage,
+    };
+
+    let fluid_card = card(0.002, 0.0);
+    let fluid_source = law(&fluid_card, [290.0, 400.0]);
+    let caloric = source_caloric(&fluid_card, &fluid_source, [290.0, 400.0]);
+    let reference = transport(&fluid_source, 300.0).unwrap();
+    let bound = MaterialChtFluid::try_new(&reference).unwrap();
+    let solid_card = card(0.2, 0.0);
+    let solid = law(&solid_card, [290.0, 400.0]);
+
+    // A distinct 3 kg junction uses the board's source Cp curve. Its amount
+    // is independent of the collapsed package's voxel volume.
+    let point = solid.conductivity().reference().query();
+    let lower = point.clone().with("T", 290.0).unwrap();
+    let upper = point.with("T", 400.0).unwrap();
+    let selected = solid.conductivity().reference().property("cp").unwrap().answer().receipt.selected;
+    let claim = solid_card.claims().claim(selected).unwrap();
+    let junction_storage = PreparedHeatStorage::try_new(&[HeatStorageComponentQuery {
+        id: 17,
+        card: &solid_card,
+        capacity: &claim.key,
+        amount: HeatStorageAmount::MassKg(3.0),
+        temperature_axis: "T",
+        lower: &lower,
+        upper: &upper,
+        selection: fs_matdb::ClaimSelection::Pinned(selected),
+    }]).unwrap();
+
+    let (domain, mut thermal, initial) = fixture(true);
+    thermal.compact_components[0].heat_capacity_j_k = None;
+    thermal.compact_heat_storage = vec![CompactHeatStorage {
+        component: 0,
+        law: CompactHeatStorageLaw::Material(junction_storage),
+    }];
+    thermal.compact_storage_controls.maximum_iterations = 100;
+    thermal.compact_storage_controls.temperature_tolerance_k = 1e-10;
+    thermal.compact_storage_controls.energy_absolute_tolerance_j = 1e-9;
+    thermal.compact_storage_controls.energy_relative_tolerance = 1e-12;
+    thermal.compact_storage_controls.temperature_relaxation = 0.5;
+    let run = bound.march_natural_convection_with_enthalpy_and_material_solids(
+        &domain,
+        &[solid], // Compact material 1 remains intentionally omitted.
+        &SimpleConfig::new([FvBoundary::wall(); 6]),
+        &thermal, &energy(), &initial, bounds(), &caloric, controls(),
+        SolidThermalConfig::default(), &UnsteadyConfig::new(1.0, 1),
+        |_| 1.0, |_| 1.0, None, &CancelGate::new(),
+        |_, t, _| transport(&fluid_source, t),
+    ).unwrap();
+
+    // Independent outside-layer quadratic roots substituted into the
+    // junction equation, using the source curve's piecewise integral.
+    let g = 2.0 / 3.0;
+    let layer_rise = |junction: f64, slope: f64| {
+        let a = 1.5 * slope;
+        let b = 6.0 + g;
+        let drive = g * junction;
+        2.0 * drive / (b + (b * b + 4.0 * a * drive).sqrt())
+    };
+    let delta_j = |rise: f64| {
+        3.0 * (specific_energy(300.0 + rise, 0.2) - specific_energy(320.0, 0.2))
+    };
+    let (mut lo, mut hi) = (0.0, 22.0);
+    for _ in 0..90 {
+        let j = 0.5 * (lo + hi);
+        let residual = delta_j(j) + g * (2.0 * j - layer_rise(j, 0.2) - layer_rise(j, 0.002)) - 12.0;
+        if residual > 0.0 { hi = j; } else { lo = j; }
+    }
+    let j = 0.5 * (lo + hi);
+    let s = layer_rise(j, 0.2);
+    let f = layer_rise(j, 0.002);
+    let temperature = &run.fluid.convection.march.temperature;
+    for (cell, &actual) in temperature.iter().enumerate() {
+        close(actual, 300.0 + [s, j, f][domain.coords(cell)[2]], 1e-10);
+    }
+    assert_eq!(temperature[domain.index(0, 0, 1)], temperature[domain.index(1, 0, 1)]);
+    let solid_delta = 3.0 * specific_energy(300.0 + s, 0.2);
+    let fluid_delta = 3.0 * specific_energy(300.0 + f, 0.002);
+    close(solid_delta + fluid_delta + delta_j(j), 12.0, 1e-12);
+    close(run.solid_records[0].solid_stored_energy_change_j, solid_delta, 1e-9);
+    let actual_j = temperature[domain.index(0, 0, 1)];
+    let actual_s = temperature[domain.index(0, 0, 0)];
+    let actual_f = temperature[domain.index(0, 0, 2)];
+    let local = delta_j(actual_j - 300.0)
+        + g * ((actual_j - actual_s) + (actual_j - actual_f)) - 12.0;
+    assert!(local.abs() < 2e-8, "junction energy defect={local}");
+    let heat = &run.fluid.convection.march.energy_records[0];
+    close(heat.stored_energy_change_j, 12.0, 1e-9);
+    close(heat.source_j, 12.0, 1e-12);
+    close(heat.boundary_outflow_j, 0.0, 1e-12);
+    close(heat.closure_j, 0.0, 2e-8);
+    assert_eq!(run.solid_endpoint.len(), 2);
+    assert!(run.solid_endpoint.iter().all(|sample|
+        sample.material_index == 0 && domain.coords(sample.cell)[2] == 0
+    ));
+    for x in 0..2 { assert_eq!(run.solid_energy_j[domain.index(x, 0, 1)], 0.0); }
+    close(run.solid_energy_j.iter().sum(), 60.0 + solid_delta, 1e-9);
+}
