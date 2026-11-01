@@ -2419,3 +2419,47 @@ This remains a compact-volume, frozen ideal-mixture engineering model with
 explicitly authored conductance. It supplies neither a validated heat-transfer
 correlation, resolved wall conduction or shared wall mass, moving-volume work,
 gas phase change, nor a second-order or entropy-stability certificate.
+
+## Distributed wall equilibrium in gravity-aware gas networks
+
+`NetworkWallOperator` extends the same prepared wall owner to explicitly
+selected finite-volume branch cells and compact plenums. The original
+`PlenumThermalOperator` name is an alias of this owner; existing plenum calls
+retain their behavior. `BranchWallContact` binds original linear/Darcy drag
+and reservoir, finite sensible, nonlinear or latent thermal storage. Original
+source, complete mesh geometry, cell volume and distinct wall amount remain
+explicit. A shared physical wall requires its own thermal owner rather than
+duplicated stored energy.
+
+`GasNetwork1d::step_with_walls` uses the existing transactional transport
+step. The shared caloric wall kernel acts on unpublished branch and plenum
+candidates over the actual accepted retry duration. Transport/thermal coupling
+is first-order splitting. Drag converts kinetic to internal energy while
+retaining total gas energy; only accepted wall heat changes that total.
+Fixed gas amount and cell volume mean no additional gravitational work during
+the wall source. Original variable heat capacity and latent h/u inventory are
+retained without constructing an equivalent gas or apparent wall heat capacity.
+
+Each accepted branch `StepReport` exposes signed axial wall impulse and
+wall heat and includes both in its residual. Impulses along differently
+oriented branches are not summed into a fictitious scalar network momentum.
+The shared source ledger closes gas plus finite-wall storage and, where
+declared, centered gravitational potential. Absolute-potential residuals
+retain the existing reference-times-mass-residual conversion. Numerical
+candidate arrays are allocated at preparation and reused. Gas, walls, clocks,
+port exchanges and reports publish together after the final cancellation
+poll; a later source refusal retains all accepted state.
+
+Seven native regressions cover exact hydrostatic/thermal rest, analytic linear
+and Darcy drag, independent variable-Cv finite-wall exchange, heat-driven
+gravity flow with potential/formation-reference invariance, retained latent
+inventory, final cancellation and later-source failure. The complete dynamics
+suite passed 94 tests, including those seven; all 14 original shared-wall
+regressions also passed (108 distinct tests). These used the original
+production crate with `experimental-euler`, without the optional
+`material` feature.
+
+This remains a frozen ideal-mixture passage/plenum model with explicit wall
+laws. It adds no gas phase change, resolved wall conduction, shared thermal
+wall network, moving-volume work, calibrated heat-transfer correlation,
+second-order splitting or entropy-stability certificate.

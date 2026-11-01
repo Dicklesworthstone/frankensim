@@ -1,13 +1,20 @@
-//! Original implicit wall storage on the unpublished compact-volume candidates.
+//! Original wall loss and implicit storage on unpublished gas candidates.
 
-use super::{Conserved, Error, FrozenGas, GasNetwork1d, allocated, poll, positive};
-use crate::dynamics::CaloricDomain;
+use super::{
+    Conserved, Error, Euler1d, FrozenGas, GasNetwork1d, Totals, allocated, poll, positive,
+};
+use crate::dynamics::{CaloricDomain, Mesh1d};
 use crate::multicomponent::network::wall_exchange::NetworkWallReport;
 use crate::multicomponent::wall_exchange::{
-    MaterialWallCaloric, WallContact, WallControl, WallDrag, WallExchangeError, WallGasCaloric,
-    WallGasState, WallThermal, exchange_caloric, exchange_caloric_with_heat_storage,
+    MaterialWallCaloric, WallCellReport, WallContact, WallControl, WallDrag, WallExchangeError,
+    WallGasCaloric, WallGasState, WallThermal, exchange_caloric,
+    exchange_caloric_with_heat_storage,
 };
 use fs_qty::{Pressure, Temperature, Time};
+
+mod branch;
+use branch::BranchBinding;
+pub use branch::BranchWallContact;
 
 /// One compact volume's thermal boundary and optional original finite storage.
 /// Distinct contacts represent distinct physical wall masses. A shared wall
@@ -38,16 +45,20 @@ pub struct NetworkThermalReport {
     pub absolute_gas_wall_potential_conservation_residual_j: Option<f64>,
 }
 
-/// Prepared finite-plenum heat exchange using the original common wall kernel.
+/// Prepared branch/plenum wall exchange using the original common wall kernel.
 ///
-/// Gas amount and volume are fixed during the source. Plenums have no bulk
-/// momentum, so this operator has no drag or moving-boundary work. Original
+/// Gas amount and volume are fixed during each source. Branch drag converts
+/// kinetic to sensible energy at fixed total energy; it does no extra heat or
+/// gravitational work. Plenums have no bulk momentum and admit no drag. Original
 /// wall h/u and latent inventory retain their declared physical convention.
 /// The source is applied after transport, over its ACTUAL accepted duration:
 /// this is first-order thermal/transport splitting, not a second-order IMEX
 /// method. Stiff heat exchange is backward Euler with bounded source inversion.
-pub struct PlenumThermalOperator<'law> {
+pub struct NetworkWallOperator<'law> {
     gas: FrozenGas,
+    plenum_count: usize,
+    branches: Vec<Option<BranchBinding>>,
+    branch_source_candidate: Vec<Totals>,
     volumes: Vec<f64>,
     contacts: Vec<WallContact>,
     candidate_contacts: Vec<WallContact>,
@@ -55,7 +66,11 @@ pub struct PlenumThermalOperator<'law> {
     last_report: Option<NetworkWallReport>,
 }
 
-impl<'law> PlenumThermalOperator<'law> {
+/// Original plenum API name for the same prepared wall owner. Branch contacts
+/// are absent unless explicitly supplied through `with_branch_contacts`.
+pub type PlenumThermalOperator<'law> = NetworkWallOperator<'law>;
+
+impl<'law> NetworkWallOperator<'law> {
     /// Bind exactly one original contact to each retained compact volume.
     pub fn new(
         network: &GasNetwork1d,
@@ -73,6 +88,9 @@ impl<'law> PlenumThermalOperator<'law> {
         };
         let mut result = Self {
             gas: network.gas().clone(),
+            plenum_count: count,
+            branches: allocated(network.branches.len(), None)?,
+            branch_source_candidate: allocated(network.branches.len(), Totals::default())?,
             volumes: allocated(count, 0.0)?,
             contacts: allocated(count, empty)?,
             candidate_contacts: allocated(count, empty)?,
@@ -81,19 +99,11 @@ impl<'law> PlenumThermalOperator<'law> {
         };
         for (i, input) in contacts.into_iter().enumerate() {
             poll(&mut cancelled)?;
-            let mut contact = WallContact {
+            let contact = WallContact {
                 drag: WallDrag::None,
                 thermal: input.thermal,
             };
-            contact.validate()?;
-            if let Some(source) = &input.heat_storage {
-                contact = source.bind_contact(contact)?;
-                source.temperature_k(contact.thermal)?;
-            } else if matches!(contact.thermal, WallThermal::Caloric { .. }) {
-                return Err(Error::Invalid(
-                    "plenum caloric wall requires its original source",
-                ));
-            }
+            let contact = admit_contact(contact, input.heat_storage.as_ref())?;
             result.volumes[i] = network.plenums[i].volume_m3;
             result.contacts[i] = contact;
             result.heat_storage[i] = input.heat_storage;
@@ -104,12 +114,12 @@ impl<'law> PlenumThermalOperator<'law> {
 
     /// Accepted contact temperatures or original h/u inventories, in plenum order.
     pub fn contacts(&self) -> &[WallContact] {
-        &self.contacts
+        &self.contacts[..self.plenum_count]
     }
 
     /// Retained original finite-storage owners in that same order.
     pub fn heat_storage(&self) -> &[Option<MaterialWallCaloric<'law>>] {
-        &self.heat_storage
+        &self.heat_storage[..self.plenum_count]
     }
 
     /// The accepted source interval. Failed complete network steps retain it.
@@ -119,7 +129,8 @@ impl<'law> PlenumThermalOperator<'law> {
 
     pub(super) fn validate_binding(&self, network: &GasNetwork1d) -> Result<(), Error> {
         if self.gas != *network.gas()
-            || self.volumes.len() != network.plenums.len()
+            || self.plenum_count != network.plenums.len()
+            || self.branches.len() != network.branches.len()
             || self
                 .volumes
                 .iter()
@@ -130,113 +141,211 @@ impl<'law> PlenumThermalOperator<'law> {
                 "plenum thermal source or volume binding differs",
             ));
         }
+        if self
+            .branches
+            .iter()
+            .zip(&network.branches)
+            .any(|(binding, branch)| {
+                binding
+                    .as_ref()
+                    .is_some_and(|binding| binding.mesh != branch.mesh)
+            })
+        {
+            return Err(Error::Invalid("branch wall geometry binding differs"));
+        }
         Ok(())
+    }
+
+    pub(super) fn branch_source_candidates(&self) -> &[Totals] {
+        &self.branch_source_candidate
     }
 
     pub(super) fn prepare(
         &mut self,
+        branches: &mut [Euler1d],
         candidates: &mut [Conserved],
         duration: Time,
         controls: WallControl,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkWallReport, Error> {
-        let mut sums = [0.0; 4];
-        let mut compensation = [0.0; 4];
-        let mut maximum_thermal_residual_j = 0.0_f64;
-        let mut maximum_iterations = 0;
+        let mut total = HeatSum::default();
+        self.branch_source_candidate.fill(Totals::default());
         for (i, state) in candidates.iter_mut().enumerate() {
             poll(cancelled)?;
-            let contact = self.contacts[i];
-            let source = self.heat_storage[i].as_ref();
-            let hint = if let Some(source) = source {
-                Some(source.temperature_k(contact.thermal)?)
-            } else {
-                match contact.thermal {
-                    WallThermal::Reservoir { temperature_k, .. }
-                    | WallThermal::Lumped { temperature_k, .. } => Some(temperature_k),
-                    _ => None,
-                }
-            };
-            let gas = FrozenCaloric {
-                gas: &self.gas,
-                density: state.density,
-                hint,
-            };
-            let update = if let Some(source) = source {
-                exchange_caloric_with_heat_storage(
-                    &gas,
-                    state.momentum,
-                    state.energy,
-                    self.volumes[i],
-                    duration,
-                    contact,
-                    source,
-                    None,
-                    controls,
-                    &mut *cancelled,
-                )?
-            } else {
-                exchange_caloric(
-                    &gas,
-                    state.momentum,
-                    state.energy,
-                    self.volumes[i],
-                    duration,
-                    contact,
-                    controls,
-                    &mut *cancelled,
-                )?
-            };
-            if update.momentum != 0.0 || !update.energy.is_finite() {
+            let report = self.prepare_cell(i, state, duration, controls, cancelled)?;
+            if state.momentum != 0.0 {
                 return Err(Error::Invalid(
                     "plenum heat produced an inadmissible conservative state",
                 ));
             }
-            // Only unpublished energy changes: amount, potential and the wave
-            // fluxes retain their original values. Heat causes no gravity work.
-            state.energy = update.energy;
-            self.candidate_contacts[i] = update.contact;
-            let report = update.report;
-            for (k, value) in [
-                report.heat_to_gas_j,
-                report.wall_energy_change_j,
-                report.external_heat_to_gas_j,
-                report.energy_residual_j,
-            ]
-            .into_iter()
-            .enumerate()
-            {
-                let increment = value - compensation[k];
-                let next = sums[k] + increment;
-                if !next.is_finite() {
-                    return Err(Error::Invalid(
-                        "unrepresentable combined plenum heat transfer",
-                    ));
-                }
-                compensation[k] = (next - sums[k]) - increment;
-                sums[k] = next;
+            total.add(report)?;
+        }
+        for (b, branch) in branches.iter_mut().enumerate() {
+            let Some(binding) = &self.branches[b] else {
+                continue;
+            };
+            let start = binding.start;
+            let mut source = [0.0; 2];
+            let mut correction = [0.0; 2];
+            for (i, state) in branch.work.candidate.iter_mut().enumerate() {
+                poll(cancelled)?;
+                let report = self.prepare_cell(start + i, state, duration, controls, cancelled)?;
+                // One branch axis only. Different support impulses are never
+                // summed into a fictitious scalar network momentum.
+                accumulate(
+                    &mut source,
+                    &mut correction,
+                    [-report.wall_impulse_ns, report.heat_to_gas_j],
+                )?;
+                total.add(report)?;
             }
-            maximum_thermal_residual_j =
-                maximum_thermal_residual_j.max(report.thermal_residual_j.abs());
-            maximum_iterations = maximum_iterations.max(report.iterations);
+            self.branch_source_candidate[b] = Totals {
+                mass: 0.0,
+                momentum: source[0],
+                energy: source[1],
+            };
         }
         poll(cancelled)?;
-        Ok(NetworkWallReport {
-            elapsed: duration,
-            heat_to_gas_j: sums[0],
-            wall_energy_change_j: sums[1],
-            external_heat_to_gas_j: sums[2],
-            energy_residual_j: sums[3],
-            drag_heating_j: 0.0,
-            maximum_thermal_residual_j,
-            maximum_iterations,
-        })
+        Ok(total.report(duration))
+    }
+
+    fn prepare_cell(
+        &mut self,
+        index: usize,
+        state: &mut Conserved,
+        duration: Time,
+        controls: WallControl,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<WallCellReport, Error> {
+        let contact = self.contacts[index];
+        let source = self.heat_storage[index].as_ref();
+        let hint = if let Some(source) = source {
+            Some(source.temperature_k(contact.thermal)?)
+        } else {
+            match contact.thermal {
+                WallThermal::Reservoir { temperature_k, .. }
+                | WallThermal::Lumped { temperature_k, .. } => Some(temperature_k),
+                _ => None,
+            }
+        };
+        let gas = FrozenCaloric {
+            gas: &self.gas,
+            density: state.density,
+            hint,
+        };
+        let update = if let Some(source) = source {
+            exchange_caloric_with_heat_storage(
+                &gas,
+                state.momentum,
+                state.energy,
+                self.volumes[index],
+                duration,
+                contact,
+                source,
+                None,
+                controls,
+                &mut *cancelled,
+            )?
+        } else {
+            exchange_caloric(
+                &gas,
+                state.momentum,
+                state.energy,
+                self.volumes[index],
+                duration,
+                contact,
+                controls,
+                &mut *cancelled,
+            )?
+        };
+        if !update.momentum.is_finite() || !update.energy.is_finite() {
+            return Err(Error::Invalid("wall source produced a non-finite state"));
+        }
+        // Only unpublished momentum/energy change. Fixed amount and volume
+        // mean no potential change; drag heating is internal conversion of E.
+        state.momentum = update.momentum;
+        state.energy = update.energy;
+        self.candidate_contacts[index] = update.contact;
+        Ok(update.report)
     }
 
     pub(super) fn commit(&mut self, report: NetworkWallReport) {
         core::mem::swap(&mut self.contacts, &mut self.candidate_contacts);
         self.last_report = Some(report);
     }
+}
+
+fn admit_contact(
+    mut contact: WallContact,
+    source: Option<&MaterialWallCaloric<'_>>,
+) -> Result<WallContact, Error> {
+    contact.validate()?;
+    if let Some(source) = source {
+        contact = source.bind_contact(contact)?;
+        source.temperature_k(contact.thermal)?;
+    } else if matches!(contact.thermal, WallThermal::Caloric { .. }) {
+        return Err(Error::Invalid("caloric wall requires its original source"));
+    }
+    Ok(contact)
+}
+
+#[derive(Default)]
+struct HeatSum {
+    values: [f64; 5],
+    correction: [f64; 5],
+    maximum_thermal_residual_j: f64,
+    maximum_iterations: usize,
+}
+
+impl HeatSum {
+    fn add(&mut self, report: WallCellReport) -> Result<(), Error> {
+        accumulate(
+            &mut self.values,
+            &mut self.correction,
+            [
+                report.heat_to_gas_j,
+                report.wall_energy_change_j,
+                report.external_heat_to_gas_j,
+                report.energy_residual_j,
+                report.drag_heating_j,
+            ],
+        )?;
+        self.maximum_thermal_residual_j = self
+            .maximum_thermal_residual_j
+            .max(report.thermal_residual_j.abs());
+        self.maximum_iterations = self.maximum_iterations.max(report.iterations);
+        Ok(())
+    }
+
+    fn report(self, duration: Time) -> NetworkWallReport {
+        NetworkWallReport {
+            elapsed: duration,
+            heat_to_gas_j: self.values[0],
+            wall_energy_change_j: self.values[1],
+            external_heat_to_gas_j: self.values[2],
+            energy_residual_j: self.values[3],
+            drag_heating_j: self.values[4],
+            maximum_thermal_residual_j: self.maximum_thermal_residual_j,
+            maximum_iterations: self.maximum_iterations,
+        }
+    }
+}
+
+fn accumulate<const N: usize>(
+    sum: &mut [f64; N],
+    correction: &mut [f64; N],
+    values: [f64; N],
+) -> Result<(), Error> {
+    for (k, value) in values.into_iter().enumerate() {
+        let increment = value - correction[k];
+        let next = sum[k] + increment;
+        if !next.is_finite() {
+            return Err(Error::Invalid("unrepresentable combined wall source"));
+        }
+        correction[k] = (next - sum[k]) - increment;
+        sum[k] = next;
+    }
+    Ok(())
 }
 
 /// Borrow the exact frozen source; do not manufacture an equivalent species
@@ -314,5 +423,7 @@ impl WallGasCaloric for FrozenCaloric<'_> {
     }
 }
 
+#[cfg(test)]
+mod branch_tests;
 #[cfg(test)]
 mod tests;

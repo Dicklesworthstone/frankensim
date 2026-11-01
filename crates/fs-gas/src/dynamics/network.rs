@@ -23,7 +23,10 @@ mod gravity;
 mod step;
 mod thermal;
 pub use gravity::{NetworkGravity, NetworkGravityReport};
-pub use thermal::{NetworkThermalReport, PlenumThermalContact, PlenumThermalOperator};
+pub use thermal::{
+    BranchWallContact, NetworkThermalReport, NetworkWallOperator, PlenumThermalContact,
+    PlenumThermalOperator,
+};
 
 /// Explicit topology bound, in addition to the aggregate cell-storage bound.
 pub const MAX_NETWORK_BRANCHES: usize = 4096;
@@ -163,7 +166,7 @@ pub struct NetworkStepReport {
     pub conservation_residual: NetworkTotals,
     /// Separate gas-plus-potential balance when a shared potential is declared.
     pub gravity: Option<NetworkGravityReport>,
-    /// Original finite-plenum thermal source and complete gas/wall balances.
+    /// Original branch/plenum wall source and complete gas/wall balances.
     pub thermal: Option<NetworkThermalReport>,
 }
 
@@ -429,6 +432,8 @@ fn empty_report() -> StepReport {
         area_momentum_impulse: 0.0,
         gravity_momentum_impulse: 0.0,
         gravity_work: 0.0,
+        wall_momentum_impulse: 0.0,
+        wall_heat: 0.0,
         conservation_residual: Totals::default(),
     }
 }

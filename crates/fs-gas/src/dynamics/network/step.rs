@@ -4,7 +4,7 @@ use super::super::{
 };
 use super::{
     Accumulator, BranchEnd, GasNetwork1d, NetworkGravityReport, NetworkStepReport,
-    NetworkThermalReport, NetworkTotals, PlenumThermalOperator, PortExchange,
+    NetworkThermalReport, NetworkTotals, NetworkWallOperator, PlenumThermalOperator, PortExchange,
 };
 use crate::multicomponent::network::wall_exchange::NetworkWallReport;
 use crate::multicomponent::wall_exchange::WallControl;
@@ -49,7 +49,8 @@ impl GasNetwork1d {
         self.step_inner(maximum_duration, controls, None, cancelled)
     }
 
-    /// Advance transport, then original implicit finite-plenum heat exchange.
+    /// Advance transport, then original wall sources on plenums and any
+    /// explicitly bound branch cells. The original plenum-only call is unchanged.
     ///
     /// Heat uses the actual accepted wave duration after all CFL retries. The
     /// complete gas and wall candidates publish together after the final poll.
@@ -67,6 +68,26 @@ impl GasNetwork1d {
             maximum_duration,
             controls,
             Some((thermal, thermal_controls)),
+            cancelled,
+        )
+    }
+
+    /// Advance the same transactional wave/wall step with distributed branch
+    /// heat and momentum loss. Stationary-wall drag retains total gas energy;
+    /// its lost kinetic energy is already available to the thermal solve.
+    /// Different branch impulses remain in their original axial coordinates.
+    pub fn step_with_walls(
+        &mut self,
+        maximum_duration: Time,
+        controls: StepControl,
+        walls: &mut NetworkWallOperator<'_>,
+        wall_controls: WallControl,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<NetworkStepReport, Error> {
+        self.step_inner(
+            maximum_duration,
+            controls,
+            Some((walls, wall_controls)),
             cancelled,
         )
     }
@@ -178,6 +199,7 @@ impl GasNetwork1d {
                 .and_then(|maximum_rate| {
                     let heat = match &mut thermal {
                         Some((operator, controls)) => Some(operator.prepare(
+                            &mut self.branches,
                             &mut self.work.plenum_candidate,
                             Time::new(dt),
                             *controls,
@@ -189,6 +211,9 @@ impl GasNetwork1d {
                 });
             match trial {
                 Ok((maximum_rate, heat)) => {
+                    let branch_sources = thermal
+                        .as_ref()
+                        .map(|(operator, _)| operator.branch_source_candidates());
                     let report = self.prepare_report(
                         (before, potential_before),
                         dt,
@@ -196,6 +221,7 @@ impl GasNetwork1d {
                         halvings,
                         first_order_retry && controls.reconstruction == Reconstruction::Muscl,
                         heat,
+                        branch_sources,
                         &mut cancelled,
                     )?;
                     // Everything after this final cancellation point is infallible.
@@ -489,6 +515,7 @@ impl GasNetwork1d {
         halvings: usize,
         first_order_retry: bool,
         heat: Option<NetworkWallReport>,
+        branch_sources: Option<&[Totals]>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<NetworkStepReport, Error> {
         let factor = 0.5 * dt;
@@ -521,13 +548,14 @@ impl GasNetwork1d {
             let gravity_impulse = factor * (a.gravity_force + b.gravity_force);
             let gravity_work = factor * (a.gravity_power + b.gravity_power);
             gravity_work_sum.add(0.0, gravity_work)?;
+            let wall = branch_sources.map_or(Totals::default(), |sources| sources[index]);
             let residual = Totals::from_array(core::array::from_fn(|k| {
                 branch_after.array()[k]
                     - branch_before.array()[k]
                     - end_change.array()[k]
                     - match k {
-                        1 => impulse + gravity_impulse,
-                        2 => gravity_work,
+                        1 => impulse + gravity_impulse + wall.momentum,
+                        2 => gravity_work + wall.energy,
                         _ => 0.0,
                     }
             }));
@@ -557,6 +585,8 @@ impl GasNetwork1d {
                 area_momentum_impulse: impulse,
                 gravity_momentum_impulse: gravity_impulse,
                 gravity_work,
+                wall_momentum_impulse: wall.momentum,
+                wall_heat: wall.energy,
                 conservation_residual: residual,
             };
             after.add(branch_after.mass, branch_after.energy)?;
