@@ -196,6 +196,10 @@ fn steady_generated_gas_and_molecular_reservoirs_share_the_existing_performance(
     };
     let text = include_str!("../../../../../examples/reed-steady-gas.performance")
         .replace("audio 48000 12000", "audio 8000 1601")
+        // The receiver band cannot exceed a tenth of the output rate (BaffledPressure::
+        // circular_outlet; qualification test circular_outlet_band_cap_refusal), so the card's
+        // 1 kHz band goes with its 48 kHz clock. At 8 kHz the cap is 800 Hz, as input() declares.
+        .replace("baffled_outlet 0 0 0.5 4 16 1000", "baffled_outlet 0 0 0.5 4 16 800")
         .replace("observer_law stokes-kirchhoff", "observer_law none")
         .replace(
             "compile_limits ",
