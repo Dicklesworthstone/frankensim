@@ -372,10 +372,11 @@ ROWS = {
                                                              ("b1.wav", "B4")], 1.0),
     "voice": ("/a/ at the six pitches it can sing", [(f"a-{n}.wav", n.replace("Ds", "D#")) for n in
                                                     ["C3", "Ds3", "A3", "C4", "D4", "F4"]], 1.0),
-    # data/instruments/descriptions/guitar/render.sh: the plain nylon trebles only (the wound basses are blocked)
-    "guitar": ("The five notes it has: three open strings (G3, B3, E4), then F#4 and F5 stopped on the B string",
-               [("gt-s1-solo-g3.wav", "G3"), ("gt-s1-solo-b3.wav", "B3"), ("gt-s1-solo-e4.wav", "E4"),
-                ("gt-s1-fret-gb4.wav", "F#4"), ("gt-s1-fret-f5.wav", "F5")], 1.6),
+    # data/instruments/descriptions/guitar/render.sh: its six Esteso cards, each note's render.wav copied in as
+    # esteso-<note>.wav (the A and D strings have no card)
+    "guitar": ("The six notes it has: open E2, G3, B3 and E4, then F#4 and F5 stopped on the B string",
+               [("esteso-e2.wav", "E2"), ("esteso-g3.wav", "G3"), ("esteso-b3.wav", "B3"), ("esteso-e4.wav", "E4"),
+                ("esteso-gb4.wav", "F#4"), ("esteso-f5.wav", "F5")], 1.6),
     "trombone": ("Six lip tensions in first position (the note is whatever the lip finds)",
                  [(f"hold-t{t}.wav", f"lip {v}") for t, v in [("5e-1", "0.5"), ("6e-1", "0.6"), ("7e-1", "0.7"),
                                                               ("8.5e-1", "0.85"), ("1e0", "1.0"), ("1.15e0", "1.15")]], 1.2),
