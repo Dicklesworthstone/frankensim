@@ -1134,6 +1134,48 @@ continued flight, a mixed-joint offset tree with full tensors and independent
 link-level momentum reconstruction, frame/Galilean covariance, reverse transfer,
 large common translation, and atomic identity/limit/work/cancellation behavior.
 
+## Continuous prescribed-inertia motion
+
+`articulated::motion::reconfigure::step::advance` and
+`advance_with_effort` consume full centroidal-tensor samples at the start,
+midpoint and end of a window. They preserve every base/joint momentum while
+transferring to the midpoint model, call the original native free-floating
+smooth owner, and transfer at the actual smooth endpoint to the final model.
+The original articulated recursion and explicit-midpoint dynamics remain the
+single numerical owners; no dense generalized mass solve is introduced.
+
+The same per-link mass, COM, topology, attachments, joints and limits are
+required throughout. This is prescribed reduced inertia with no additional
+intrinsic shape momentum, mass flux or moving-COM degree of freedom. Smooth
+tensor history, midpoint samples accurate to O(duration²), smooth resolved
+loads and adequate mode resolution give second-order refinement. Discontinuous
+changes use the separate transfer event. Symmetric placement of the transfers
+does not make the original explicit-midpoint step reversible, variational or
+energy-exact.
+
+Both transfer receipts and the complete native motion receipt are retained.
+Signed parameter work remains separate from actuator, external and internal
+body work. The complete-window budget caps the sum of absolute parameter work:
+the final transfer receives only the unused allowance, so opposite-signed
+changes cannot cancel out of admission. Actual endpoint energy and world
+momentum residuals independently audit the entire step. Lab-frame kinetic
+subtraction can lose small signals under a large common boost; the separate
+conditioned parameter-work receipts retain their own numerical meaning.
+
+Stage-dependent effort callbacks retain the native elapsed times zero and
+half-duration. The first callback sees the virtual transferred state at the
+midpoint inertia, and the second sees the native predicted midpoint state.
+No callback or elapsed time is introduced by a parameter transfer. Invalid
+models/duration, either transfer or native refusal, exhausted work or
+cancellation publish no state; external callback side effects cannot be rolled
+back. Hidden actuator storage, heat and dissipation need their own models.
+
+Three focused native regressions cover driven analytic carrier/rotor rates and
+momenta, second-order angle and parameter-work convergence, exact unchanged-model
+equivalence, a zero-net-work cycle with 28/15 J gross work, pre-callback admission,
+midpoint cancellation, and state-dependent damping with independently integrated
+mechanical and actuator work. Refinement uses 8, 16 and 32 steps over one second.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared

@@ -12,6 +12,10 @@
 //! energy source. Mass exchange, COM/attachment motion, shape velocities,
 //! contacts, constraints and fluid storage require their own physical laws.
 
+/// Continuous prescribed inertia histories through the native smooth dynamics.
+#[path = "reconfigure/step.rs"]
+pub mod step;
+
 use super::{FreeFloatingMotionState, MAX_FREE_FLOATING_STEP_LINKS};
 use crate::articulated::{
     ArticulatedError, ArticulatedModel, ArticulatedMomentum, BaseState, FreeFloatingBaseState,
