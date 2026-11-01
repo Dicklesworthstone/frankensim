@@ -4332,3 +4332,34 @@ rebuild in one native advance; no per-ray reset replenishes them. Every material
 binding, including transparent/scattering-only cells, retains source-domain
 checks at actual starts, events and endpoints. Original native thermal cloning
 owns cancellation, conservation and atomic rollback of the entire candidate.
+
+
+### Joint visible illumination and infrared thermal exchange
+
+`volumes::heating::joint::JointOpticalHeating<NI, NR>` couples distributed
+illumination and temperature-dependent volume radiation through the original
+native `CoupledObservers`. Its two wavelength packets, supported source tables,
+and optical grids remain independently specified. For example, visible incident
+watts may heat the same native enthalpy cells whose supported infrared data
+control emission, reabsorption and bath exchange. Equal wavelength counts,
+identical field pointers or invented visible-to-infrared extrapolation are not
+admission requirements. Consistent specimen/source bindings remain explicit
+model inputs; equal material names or densities do not establish that consistency.
+
+The adapter forwards every native source, transfer, timestep, interval, event
+and acceptance hook. Both owners see the same start state and accepted duration;
+conduction and latent storage retain the existing thermal implementation. Only
+absorbed illumination and signed bath heat enter external optical heat. Internal
+radiative transfers and conduction remain conservative native exchanges. Clock,
+material-domain, allocation, work or cancellation refusal discards the whole
+native candidate with both optical histories.
+
+`examples/distributed_optical_heating.rs` evolves four conducting material cells
+under six explicit weighted visible rays totaling 1300 W and a separate three-bin
+8–16 micrometre radiation packet. The two fields use independent supported,
+synthetic source tables and one native thermal state. Its CSV records per-cell
+temperatures, absorbed/bath/internal radiation accounts and a direct energy
+balance. Prescribed ray weights, spectral bins and time steps demonstrate
+integration; measured-material accuracy, spatial quadrature accuracy and
+bolometric cooling are outside that example's claims. Run with
+`cargo run -p fs-render --example distributed_optical_heating --no-default-features --features optical-heating`.

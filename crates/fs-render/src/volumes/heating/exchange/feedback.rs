@@ -339,7 +339,7 @@ impl<'g, const N: usize> TemperatureRadiativeExchange<'g, N> {
 
     // One clone per ensemble trial; copying mutable packets/rate maps several
     // times through chained public setters would waste O(cells+pairs) work.
-    fn configured_trial(
+    pub(crate) fn configured_trial(
         &self,
         seed: u64,
         histories: u32,
@@ -359,6 +359,32 @@ impl<'g, const N: usize> TemperatureRadiativeExchange<'g, N> {
         // first state happens to match the original observer's cached packet.
         result.cache_valid = false;
         Ok(result)
+    }
+
+    /// Restore all effective continuation ceilings after a bounded study.
+    pub(crate) fn restore_budget(&mut self, budget: RadiativeFeedbackBudget) {
+        self.budget = budget;
+        if let Some(current) = &mut self.current {
+            current.evaluation_limit = budget.max_source_evaluations;
+        }
+    }
+
+    /// Original compensated accounts for joint interval comparisons.
+    pub(in crate::volumes::heating) fn energy_sum(
+        &self,
+        channel: usize,
+        lane: usize,
+    ) -> super::super::CheckedSum {
+        let Some(current) = &self.current else {
+            return super::super::CheckedSum::default();
+        };
+        match channel {
+            0 => current.sums.bath[lane],
+            1 => current.sums.internal[lane],
+            2 => current.sums.external,
+            3 => current.sums.unresolved,
+            _ => unreachable!("internal radiative account channel"),
+        }
     }
     fn sums(&self) -> EnergySums<N> {
         self.current

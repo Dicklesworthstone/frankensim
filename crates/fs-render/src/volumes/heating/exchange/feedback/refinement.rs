@@ -312,15 +312,7 @@ impl<'g, const N: usize> TemperatureRadiativeExchange<'g, N> {
                                 diagnostics.work = work;
                                 if photon.maximum_normalized_width <= 1.0 {
                                     for candidate in &mut fine {
-                                        candidate.optical.budget = self.budget;
-                                        // Flat constitutive laws keep this fixed
-                                        // owner on later advances. Its effective
-                                        // ceiling must leave the trial allowance
-                                        // together with the outer observer's.
-                                        if let Some(current) = &mut candidate.optical.current {
-                                            current.evaluation_limit =
-                                                self.budget.max_source_evaluations;
-                                        }
+                                        candidate.optical.restore_budget(self.budget);
                                     }
                                     checkpoint()?;
                                     return Ok(RadiativeFeedbackEnsemble {

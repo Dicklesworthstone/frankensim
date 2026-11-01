@@ -18,6 +18,9 @@ mod exchange;
 #[path = "optical_heating/illumination.rs"]
 mod illumination;
 
+#[path = "optical_heating/joint.rs"]
+mod joint;
+
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_geom::{Point3, Vec3};
 use fs_render::volumes::VolumeGrid;

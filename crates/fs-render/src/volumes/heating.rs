@@ -34,6 +34,9 @@ pub mod temperature_field;
 /// Distributed incident absorption with shared local material preparation.
 pub mod illumination;
 
+/// Joint incident heating and thermal radiation on one native enthalpy clock.
+pub mod joint;
+
 /// Passive volumetric emission, reabsorption and bath exchange on native thermal cells.
 pub mod exchange;
 
