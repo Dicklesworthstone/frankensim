@@ -25,6 +25,9 @@ use super::{
 };
 use std::io::{self, Write};
 
+/// Infer a common gain from bounded lux measurements using the original transport.
+pub mod calibration;
+
 /// Version of the scalar-gain declaration, accumulation and output contract.
 pub const FLUX_ENCLOSURE_SEMANTICS_VERSION: u32 = 1;
 
