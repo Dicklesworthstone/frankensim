@@ -76,6 +76,7 @@ impl PengRobinsonStabilityTrialV1 {
 #[derive(Clone, Debug, PartialEq)]
 pub struct PengRobinsonStabilityV1 {
     feed: PengRobinsonPhaseRootV1,
+    feed_roots: Vec<PengRobinsonPhaseRootV1>,
     vapor_seed: PengRobinsonStabilityTrialV1,
     liquid_seed: PengRobinsonStabilityTrialV1,
     tangent_plane_tolerance: f64,
@@ -85,6 +86,17 @@ impl PengRobinsonStabilityV1 {
     #[must_use]
     pub const fn feed(&self) -> &PengRobinsonPhaseRootV1 {
         &self.feed
+    }
+    /// All volume-admissible feed roots from the same original evaluation.
+    /// Membership alone does not establish mechanical stability.
+    #[must_use]
+    pub fn feed_roots(&self) -> &[PengRobinsonPhaseRootV1] {
+        &self.feed_roots
+    }
+    /// Actual cubic EOS evaluations: one feed plus both stationary searches.
+    #[must_use]
+    pub const fn eos_evaluations(&self) -> usize {
+        1 + self.vapor_seed.iterations + self.liquid_seed.iterations
     }
     /// Stationary search initialized by normalized `z_i K_i`.
     #[must_use]
@@ -168,6 +180,7 @@ impl PengRobinsonMixtureV1 {
         }
         Ok(PengRobinsonStabilityV1 {
             feed: feed.clone(),
+            feed_roots: evaluated.phase_roots().to_vec(),
             vapor_seed,
             liquid_seed,
             tangent_plane_tolerance: options.tangent_plane_tolerance,

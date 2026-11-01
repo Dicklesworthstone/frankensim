@@ -1717,3 +1717,11 @@ two-phase flows*,
 Core regressions check the Maxwell relation, pressure-volume/energy closure,
 original ideal-Cv dependence and endpoint/reference refusal. Material-level
 regressions independently perturb full entropy-preserving equilibrium states.
+
+### Screened homogeneous and separated PT admission
+
+`eos::peng_robinson::phase_screen` composes the existing bounded tangent-plane searches and original two-phase flash. Both Wilson-seeded stationary searches must converge. A negative tangent-plane witness must resolve an admitted fugacity/material/Gibbs-checked split; failure does not fall back to the feed phase. Without a negative witness, the retained minimum-Gibbs feed root must have negative original `dp/dv|T`. Distinct mechanically stable feed roots within the declared Gibbs tolerance refuse because pressure and temperature do not determine their phase amount, including pure-fluid or azeotropic coexistence.
+
+Each result retains both search receipts, all original feed roots, the exact numerical options, and the selected homogeneous root or separated phases. Two converged nonnegative stationary searches are finite screening evidence and do not certify a global minimum over all compositions or phases. No homogeneous vapor amount or liquid/vapor label is inferred.
+
+The stability receipt reports its actual cubic EOS count (one feed plus both trial counts). A phase-selection receipt reports that observed screening work plus the original flash's conservative work ceiling when a split was attempted. The whole-call ceiling is `1 + 2*stability.maximum_iterations + 6*flash.maximum_iterations + 2`; it is not an observed EOS iteration count. Original per-iteration cancellation and a final publication checkpoint are retained.

@@ -1,4 +1,4 @@
-//! Conserved-enthalpy flash on an explicitly admitted two-phase temperature bracket.
+//! Conserved-enthalpy flash with one shared bounded temperature root engine.
 //!
 //! A safeguarded secant solve uses the actual original PT equilibrium calorics;
 //! its secant is numerical and is never exposed as a mixed heat capacity.
@@ -18,8 +18,9 @@ pub const MAX_ENTHALPY_FLASH_EVALUATIONS: usize = 128;
 /// Bounded physical tolerances and complete nested phase-solve work policy.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FlashEnthalpyControls {
-    /// Increasing original-source temperatures; both endpoints must resolve two
-    /// phases when a search is needed. An exact fixed point needs its reference inside.
+    /// Increasing original-source temperatures. The strict two-phase API requires
+    /// separated endpoints when searching; the screened API admits either phase.
+    /// An exact fixed point needs its reference inside the declared bracket.
     pub temperature_bracket: [Temperature; 2],
     /// Absolute specific-enthalpy residual tolerance [J/kg].
     pub enthalpy_tolerance_j_kg: f64,
@@ -123,14 +124,14 @@ impl FlashEnthalpySolution {
     }
 }
 
-enum Target {
+pub(super) enum Target<P> {
     Absolute(f64),
     Increment {
-        initial: CaloricSample,
+        initial: CaloricSample<P>,
         requested: f64,
     },
 }
-impl Target {
+impl<P> Target<P> {
     fn requested(&self) -> f64 {
         match self {
             Self::Absolute(value) => *value,
@@ -139,10 +140,25 @@ impl Target {
     }
 }
 
-fn spacing(value: f64) -> f64 {
+pub(super) fn spacing(value: f64) -> f64 {
     (value.next_up() - value)
         .abs()
         .max((value - value.next_down()).abs())
+}
+
+#[derive(Clone, Copy, Default)]
+pub(super) struct EnthalpyWork {
+    calls: usize,
+    eos_upper_bound: usize,
+}
+
+pub(super) struct EnthalpyOutcome<P> {
+    pub sample: CaloricSample<P>,
+    pub residual_j_kg: f64,
+    pub accepted_increment_j_kg: Option<f64>,
+    pub entropy_change_j_kg_k: Option<f64>,
+    pub flash_evaluations: usize,
+    pub eos_evaluation_upper_bound: usize,
 }
 
 impl ThermochemicalPengRobinsonModel {
@@ -165,13 +181,15 @@ impl ThermochemicalPengRobinsonModel {
                 "absolute enthalpy cannot resolve tolerance; use source increments",
             ));
         }
-        self.solve_flash_enthalpy(
+        let outcome = self.solve_flash_enthalpy(
             pressure,
             Target::Absolute(specific_enthalpy_j_kg),
             controls,
-            0,
+            EnthalpyWork::default(),
+            &mut |t, p, c| self.caloric_flash_sample(t, p, controls.flash_options, c),
             &mut cancelled,
-        )
+        )?;
+        self.publish_enthalpy_flash(outcome, &mut cancelled)
     }
 
     /// Change pressure and/or enthalpy while retaining every feed species amount.
@@ -203,15 +221,16 @@ impl ThermochemicalPengRobinsonModel {
                 "finite enthalpy increment and positive reference pressure required",
             ));
         }
-        let mut work = 0;
+        let mut work = EnthalpyWork::default();
         let initial = self.enthalpy_flash_sample(
             initial_temperature,
             initial_pressure,
             controls,
             &mut work,
+            &mut |t, p, c| self.caloric_flash_sample(t, p, controls.flash_options, c),
             &mut cancelled,
         )?;
-        self.solve_flash_enthalpy(
+        let outcome = self.solve_flash_enthalpy(
             final_pressure,
             Target::Increment {
                 initial,
@@ -219,11 +238,13 @@ impl ThermochemicalPengRobinsonModel {
             },
             controls,
             work,
+            &mut |t, p, c| self.caloric_flash_sample(t, p, controls.flash_options, c),
             &mut cancelled,
-        )
+        )?;
+        self.publish_enthalpy_flash(outcome, &mut cancelled)
     }
 
-    fn admit_enthalpy_flash(
+    pub(super) fn admit_enthalpy_flash(
         &self,
         pressure: Pressure,
         controls: FlashEnthalpyControls,
@@ -255,35 +276,39 @@ impl ThermochemicalPengRobinsonModel {
         poll(cancelled)
     }
 
-    fn enthalpy_flash_sample(
+    pub(super) fn enthalpy_flash_sample<P, C: FnMut() -> bool>(
         &self,
         t: Temperature,
         p: Pressure,
         controls: FlashEnthalpyControls,
-        work: &mut usize,
-        cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<CaloricSample, E> {
+        work: &mut EnthalpyWork,
+        evaluate: &mut impl FnMut(Temperature, Pressure, &mut C) -> Result<CaloricSample<P>, E>,
+        cancelled: &mut C,
+    ) -> Result<CaloricSample<P>, E> {
         poll(cancelled)?;
-        if *work >= controls.maximum_flash_evaluations {
+        if work.calls >= controls.maximum_flash_evaluations {
             return Err(E::WorkLimit {
-                flash_evaluations: *work,
+                flash_evaluations: work.calls,
             });
         }
-        *work += 1;
-        self.caloric_flash_sample(t, p, controls.flash_options, cancelled)
+        work.calls += 1;
+        let sample = evaluate(t, p, cancelled)?;
+        work.eos_upper_bound += sample.eos_evaluation_upper_bound;
+        Ok(sample)
     }
 
-    fn enthalpy_coordinate(&self, sample: &CaloricSample, target: &Target) -> Result<f64, E> {
+    fn enthalpy_coordinate<P>(
+        &self,
+        sample: &CaloricSample<P>,
+        target: &Target<P>,
+    ) -> Result<f64, E> {
         let value = match target {
             Target::Absolute(_) => sample.specific_h,
             Target::Increment { initial, .. } => {
                 let ideal = self
                     .source()
                     .thermodynamics()
-                    .specific_enthalpy_change(
-                        initial.phase.temperature(),
-                        sample.phase.temperature(),
-                    )
+                    .specific_enthalpy_change(initial.temperature, sample.temperature)
                     .map_err(|error| failure("original flash enthalpy increment", error))?
                     .value();
                 ideal
@@ -298,24 +323,23 @@ impl ThermochemicalPengRobinsonModel {
         }
     }
 
-    fn finish_enthalpy_flash(
+    fn finish_enthalpy_flash<P>(
         &self,
-        sample: CaloricSample,
-        target: &Target,
+        sample: CaloricSample<P>,
+        target: &Target<P>,
         coordinate: f64,
-        controls: FlashEnthalpyControls,
-        work: usize,
+        work: EnthalpyWork,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<FlashEnthalpySolution, E> {
+    ) -> Result<EnthalpyOutcome<P>, E> {
         let entropy_change = if let Target::Increment { initial, .. } = target {
             let ideal = self
                 .source()
                 .thermodynamics()
                 .specific_entropy_change(
-                    initial.phase.temperature(),
-                    initial.phase.pressure(),
-                    sample.phase.temperature(),
-                    sample.phase.pressure(),
+                    initial.temperature,
+                    initial.pressure,
+                    sample.temperature,
+                    sample.pressure,
                 )
                 .map_err(|error| failure("original flash entropy increment", error))?
                 .value();
@@ -330,41 +354,51 @@ impl ThermochemicalPengRobinsonModel {
             None
         };
         let increment = matches!(target, Target::Increment { .. }).then_some(coordinate);
-        let state = self.publish_caloric_flash(sample, cancelled)?;
         poll(cancelled)?;
-        Ok(FlashEnthalpySolution {
-            state,
+        Ok(EnthalpyOutcome {
+            sample,
             residual_j_kg: coordinate - target.requested(),
             accepted_increment_j_kg: increment,
             entropy_change_j_kg_k: entropy_change,
-            flash_evaluations: work,
-            eos_evaluation_upper_bound: work * (6 * controls.flash_options.maximum_iterations + 2),
+            flash_evaluations: work.calls,
+            eos_evaluation_upper_bound: work.eos_upper_bound,
         })
     }
 
-    fn solve_flash_enthalpy(
+    fn publish_enthalpy_flash(
         &self,
-        pressure: Pressure,
-        target: Target,
-        controls: FlashEnthalpyControls,
-        mut work: usize,
+        outcome: EnthalpyOutcome<fs_thermochem::eos::peng_robinson::flash::PengRobinsonFlashV1>,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<FlashEnthalpySolution, E> {
+        let state = self.publish_caloric_flash(outcome.sample, cancelled)?;
+        poll(cancelled)?;
+        Ok(FlashEnthalpySolution {
+            state,
+            residual_j_kg: outcome.residual_j_kg,
+            accepted_increment_j_kg: outcome.accepted_increment_j_kg,
+            entropy_change_j_kg_k: outcome.entropy_change_j_kg_k,
+            flash_evaluations: outcome.flash_evaluations,
+            eos_evaluation_upper_bound: outcome.eos_evaluation_upper_bound,
+        })
+    }
+
+    pub(super) fn solve_flash_enthalpy<P: Clone, C: FnMut() -> bool>(
+        &self,
+        pressure: Pressure,
+        target: Target<P>,
+        controls: FlashEnthalpyControls,
+        mut work: EnthalpyWork,
+        evaluate: &mut impl FnMut(Temperature, Pressure, &mut C) -> Result<CaloricSample<P>, E>,
+        cancelled: &mut C,
+    ) -> Result<EnthalpyOutcome<P>, E> {
         if let Target::Increment { initial, requested } = &target {
-            let temperature = initial.phase.temperature().value();
+            let temperature = initial.temperature.value();
             if *requested == 0.0
-                && initial.phase.pressure() == pressure
+                && initial.pressure == pressure
                 && temperature >= controls.temperature_bracket[0].value()
                 && temperature <= controls.temperature_bracket[1].value()
             {
-                return self.finish_enthalpy_flash(
-                    initial.clone(),
-                    &target,
-                    0.0,
-                    controls,
-                    work,
-                    cancelled,
-                );
+                return self.finish_enthalpy_flash(initial.clone(), &target, 0.0, work, cancelled);
             }
         }
         let mut lower = self.enthalpy_flash_sample(
@@ -372,6 +406,7 @@ impl ThermochemicalPengRobinsonModel {
             pressure,
             controls,
             &mut work,
+            evaluate,
             cancelled,
         )?;
         let mut upper = self.enthalpy_flash_sample(
@@ -379,6 +414,7 @@ impl ThermochemicalPengRobinsonModel {
             pressure,
             controls,
             &mut work,
+            evaluate,
             cancelled,
         )?;
         let mut lower_h = self.enthalpy_coordinate(&lower, &target)?;
@@ -406,8 +442,8 @@ impl ThermochemicalPengRobinsonModel {
         let mut iteration = 0;
         loop {
             poll(cancelled)?;
-            let lo = lower.phase.temperature().value();
-            let hi = upper.phase.temperature().value();
+            let lo = lower.temperature.value();
+            let hi = upper.temperature.value();
             let low_residual = lower_h - requested;
             let high_residual = upper_h - requested;
             let best_is_lower = low_residual.abs() <= high_residual.abs();
@@ -423,8 +459,7 @@ impl ThermochemicalPengRobinsonModel {
                         && last_temperature_step <= controls.temperature_tolerance_k))
             {
                 let sample = if best_is_lower { lower } else { upper };
-                return self
-                    .finish_enthalpy_flash(sample, &target, best_h, controls, work, cancelled);
+                return self.finish_enthalpy_flash(sample, &target, best_h, work, cancelled);
             }
             // Strict-interior secants retain fast smooth-branch convergence;
             // every fourth step bisects to prevent a stale endpoint stalling.
@@ -445,6 +480,7 @@ impl ThermochemicalPengRobinsonModel {
                 pressure,
                 controls,
                 &mut work,
+                evaluate,
                 cancelled,
             )?;
             let h = self.enthalpy_coordinate(&candidate, &target)?;
@@ -452,7 +488,7 @@ impl ThermochemicalPengRobinsonModel {
                 || h > upper_h + controls.enthalpy_tolerance_j_kg
             {
                 return Err(E::Invalid(
-                    "original two-phase enthalpy branch is not monotone",
+                    "original admitted phase enthalpy branch is not monotone",
                 ));
             }
             if h <= requested {

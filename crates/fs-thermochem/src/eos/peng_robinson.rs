@@ -16,6 +16,8 @@ use crate::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K;
 
 /// Bounded PT vapor-liquid equilibrium on this same cubic EOS.
 pub mod flash;
+/// Bounded homogeneous/two-phase selection with explicit stability-screen evidence.
+pub mod phase_screen;
 /// Bounded tangent-plane searches on the original mixture fugacities.
 pub mod stability;
 /// Pure-fluid coexistence and conservative phase amounts on this same EOS.

@@ -1,6 +1,8 @@
 //! Original-source multicomponent PT/PH equilibrium; no copied production EOS.
 #[path = "common/nonideal_flash.rs"]
 mod common;
+#[path = "nonideal_flash/phase_equilibrium.rs"]
+mod phase_equilibrium;
 
 use common::{METHANE, MIXTURE_MASS, controls, model, source};
 use fs_material::thermochemical_gas::nonideal::ThermochemicalPengRobinsonModel;

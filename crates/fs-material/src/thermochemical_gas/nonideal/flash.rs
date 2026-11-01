@@ -16,10 +16,14 @@ use fs_thermochem::eos::peng_robinson::{
     PengRobinsonMixtureV1, PengRobinsonPhaseRootV1,
     flash::{PengRobinsonFlashErrorV1, PengRobinsonFlashOptionsV1, PengRobinsonFlashV1},
 };
-use fs_thermochem::mixture::FrozenIdealGasMixtureEvaluationV1;
+use fs_thermochem::mixture::{
+    FrozenIdealGasMixtureEvaluationV1, FrozenIdealGasMixturePropertiesV1,
+};
 
 /// Fixed-pressure enthalpy and source-increment phase-equilibrium solves.
 pub mod enthalpy;
+/// Phase-screened homogeneous and separated states, including boundary-crossing enthalpy.
+pub mod equilibrium;
 
 /// A source, phase or bounded-work refusal; no partial flash state is returned.
 #[derive(Clone, Debug, PartialEq)]
@@ -37,7 +41,7 @@ pub enum ThermochemicalFlashError {
         /// Number of attempted original PT flashes.
         flash_evaluations: usize,
     },
-    /// The admitted two-phase endpoints do not bracket the requested enthalpy.
+    /// The admitted endpoints do not bracket the requested enthalpy.
     OutsideEnthalpyBracket,
     /// The remaining temperature interval cannot be resolved at the requested accuracy.
     UnresolvedTemperature,
@@ -82,8 +86,11 @@ fn residual_entropy(root: &PengRobinsonPhaseRootV1, fractions: &[f64], t: f64) -
 }
 
 #[derive(Clone, Debug, PartialEq)]
-struct CaloricSample {
-    phase: PengRobinsonFlashV1,
+struct CaloricSample<P = PengRobinsonFlashV1> {
+    phase: P,
+    temperature: Temperature,
+    pressure: Pressure,
+    eos_evaluation_upper_bound: usize,
     molar_volume: f64,
     liquid_mass_fraction: f64,
     vapor_mass_fraction: f64,
@@ -94,6 +101,26 @@ struct CaloricSample {
     specific_h: f64,
     specific_u: f64,
     specific_s: f64,
+}
+impl<P> CaloricSample<P> {
+    fn with_phase<Q>(self, phase: Q, eos_evaluation_upper_bound: usize) -> CaloricSample<Q> {
+        CaloricSample {
+            phase,
+            temperature: self.temperature,
+            pressure: self.pressure,
+            eos_evaluation_upper_bound,
+            molar_volume: self.molar_volume,
+            liquid_mass_fraction: self.liquid_mass_fraction,
+            vapor_mass_fraction: self.vapor_mass_fraction,
+            vapor_volume_fraction: self.vapor_volume_fraction,
+            residual_h: self.residual_h,
+            residual_u: self.residual_u,
+            entropy_correction: self.entropy_correction,
+            specific_h: self.specific_h,
+            specific_u: self.specific_u,
+            specific_s: self.specific_s,
+        }
+    }
 }
 
 /// One admitted two-phase state with the original critical/mixing law and
@@ -210,6 +237,20 @@ impl ThermochemicalPengRobinsonModel {
                 PengRobinsonFlashErrorV1::Cancelled => E::Cancelled,
                 other => E::Phase(other),
             })?;
+        let values =
+            self.two_phase_caloric_sample(temperature, pressure, &phase, reference, cancelled)?;
+        Ok(values.with_phase(phase, 6 * options.maximum_iterations + 2))
+    }
+
+    fn two_phase_caloric_sample(
+        &self,
+        temperature: Temperature,
+        pressure: Pressure,
+        phase: &PengRobinsonFlashV1,
+        reference: FrozenIdealGasMixturePropertiesV1,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<CaloricSample<()>, E> {
+        poll(cancelled)?;
         let beta = phase.vapor_fraction_mol();
         let x = phase.liquid_mole_fractions();
         let y = phase.vapor_mole_fractions();
@@ -305,7 +346,10 @@ impl ThermochemicalPengRobinsonModel {
         }
         poll(cancelled)?;
         Ok(CaloricSample {
-            phase,
+            phase: (),
+            temperature,
+            pressure,
+            eos_evaluation_upper_bound: 0,
             molar_volume,
             liquid_mass_fraction,
             vapor_mass_fraction,

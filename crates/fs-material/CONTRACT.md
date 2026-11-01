@@ -8850,3 +8850,13 @@ checks verify constitutive consistency, not experimental mixture accuracy.
 The phase enthalpy convention is documented by the original-law cubic EOS
 reference at
 <https://idaes-pse.readthedocs.io/en/stable/explanations/components/property_package/general/eos/cubic.html>.
+
+### Multicomponent enthalpy paths across screened phase boundaries
+
+`thermochemical_gas::nonideal::flash::equilibrium` adds source-bound screened homogeneous/separated PT states and fixed-pressure absolute/increment enthalpy recovery. A temperature bracket may span the mixture's liquid, coexistence and vapor regions. Every sampled state uses the original PR two-search phase screen; a witnessed instability must produce the original admitted split. Homogeneous states additionally require the original complete mechanical, Cp and Cv admission. The retained screen is finite evidence, not a global-minimum certificate; unresolved searches or amount-indeterminate equal-Gibbs roots refuse.
+
+The strict two-phase public APIs retain their existing contract. Both APIs share one bounded scalar enthalpy solver and the original two-phase caloric owner. Exact feed ideal enthalpy/entropy references occur once; phase redistribution supplies the original EOS departures and phase-resolved ideal-mixing entropy correction. Source-integrated enthalpy and entropy increments cancel species reference datums before rounding. The increment path can heat or cool across both bubble/dew boundaries. At unchanged pressure and zero increment, an admitted reference inside the bracket returns exactly after one PT selection.
+
+The shared owner admits the complete original caloric source interval, demands a representable increasing enthalpy bracket, checks sampled monotonicity, and accepts only the specified enthalpy residual together with its temperature safeguard. Absolute targets whose floating-point spacing cannot resolve tolerance refuse with guidance to use increments. Publication retains the original source receipts and polls cancellation after all closure calculations. Work receipts distinguish observed PT selections from the sum of original screening work and conservative nested-flash EOS ceilings.
+
+The existing `nonideal_flash` integration target checks independent 50-digit binary liquid/vapor and coexistence oracles; heating and cooling across both phase boundaries; the original EOS identity h-u=p/rho; exact fixed points and large species datum invariance; mandatory refusal of unresolved/negative-witness splits and pure-fluid amount ambiguity; total work, source support and final cancellation. The feature infers no mixed Cp, acoustic relaxation, transport, reactor, flow-rate or process entropy law.
