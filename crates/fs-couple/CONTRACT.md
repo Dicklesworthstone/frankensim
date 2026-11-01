@@ -11013,6 +11013,29 @@ Fixed geometry, frozen
 linear transducer, balanced mean loads and the original first-order thermal
 and acoustic-gas partitions remain explicit limits.
 
+## Real-gas feedback through finite electrical and thermal networks
+
+`DoubleActingGasPiston<G>::electromagnetic_network_candidate` and the
+material-bound forwarding path admit the original ideal or PR gas owner.
+Both chamber density, pressure and caloric laws remain in the original shared
+impulse solve. Paired boundary callbacks retain complete `G::State` midpoints;
+source-bound contacts consume their actual `FluidTransport` snapshots.
+
+Every finite-cell trial resolves the same material resistance for circuit
+current, reciprocal force/back emf and Joule heat. Both gas contact heats debit
+their named finite cells once, including shared-cell contacts. Original circuit
+storage, cell enthalpy, both gas internal-energy increments and one canonical
+wall kinetic energy close against external supply. The source-resolved moving
+body retains its density, geometry, inertia and complete accepted port history.
+
+No circuit, heat or momentum solver is duplicated. Existing nested work limits,
+source admission, thermal residuals and final atomic cancellation remain active.
+Focused dense-mixture regressions check an independent whole-system storage
+account, reciprocal electrical work, endpoint resistance and heat deposition,
+continuing source-density substitutions and late contact/cancellation refusal.
+The transducer remains the existing frozen linear reciprocal port, the solid
+inertia is rigid, and each chamber is a homogeneous closed single-phase gas.
+
 ## Acoustic loading through finite electrothermal material networks
 
 `DoubleActingGasPiston::electroacoustic_network_candidate` closes the same

@@ -4,6 +4,7 @@ use crate::circuit_enthalpy::material::{MaterialNetwork,MaterialNetworkError,Mat
 use crate::cavity_phs::piston::thermal::layers::MaterialConductionLayers;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use fs_material::conductor::ElectricalPropertyBasis;
+use fs_material::fluid_transport::FluidTransport;
 
 /// Explicit uniform conduction geometry, distinct from electrical current paths.
 #[derive(Clone,Copy,Debug,PartialEq)]
@@ -76,9 +77,9 @@ impl GasPiston {
 
 // The same source and conduction admission for single- and multi-chamber users.
 // Multi-contact callers ALSO check aggregate coverage before entering a solve.
-pub(crate) fn resolve_contact(
+pub(crate) fn resolve_contact<G: FluidTransport + ?Sized>(
     binding:&MaterialNetwork<'_>,id:CellId,state:&DepositionSimulation<'_>,
-    source:&MaterialNetworkSample,gas:&ResolvedThermochemicalGasState,geometry:GasConductionGeometry,
+    source:&MaterialNetworkSample,gas:&G,geometry:GasConductionGeometry,
 ) -> Result<ConductanceSample<ResolvedMaterialStatePoint>,MaterialNetworkError> {
     let invalid=MaterialNetworkError::Invalid;
     let cell=state.cells().get(&id).ok_or(invalid("inactive gas contact cell"))?;

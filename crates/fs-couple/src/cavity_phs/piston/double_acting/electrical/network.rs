@@ -3,6 +3,7 @@
 //! electrical-motion fixed point. No resistor loss remains an unowned heat sink.
 
 use super::*;
+use crate::cavity_phs::piston::{ClosedGasParcel, PistonGas};
 use crate::cavity_phs::piston::thermal::ThermalPistonError;
 use crate::cavity_phs::piston::thermal::boundary::double_acting::{DoubleBoundaryCandidate, DoubleBoundaryStep};
 use crate::cavity_phs::piston::thermal::boundary::double_acting::network::DoubleNetworkDrive;
@@ -12,6 +13,8 @@ use crate::circuit_enthalpy::{self, CircuitEnthalpyCandidate, CircuitEnthalpyErr
     CircuitEnthalpyReport, DrivenCoefficients};
 use crate::circuit_enthalpy::material::{MaterialNetwork, MaterialNetworkError, MaterialNetworkSample};
 use fs_material::state_point::ResolvedMaterialStatePoint;
+use fs_material::fluid_transport::FluidTransport;
+use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
 use fs_thermal::enthalpy::{DepositionSimulation, DepositionError};
 use std::collections::BTreeMap;
 
@@ -48,27 +51,27 @@ impl std::error::Error for DrivenSourceError {}
 pub type DrivenNetworkError = CircuitEnthalpyError<DrivenSourceError>;
 
 /// Original material and gas/motion proposal at the admitted thermal endpoint.
-pub struct DrivenNetworkSource {
+pub struct DrivenNetworkSource<G: PistonGas = ClosedGasParcel> {
     /// Original cells, phase, resistivity and conductivity source evaluations.
     pub material: MaterialNetworkSample,
     /// Exact paired gas proposal and both original interface source evaluations.
-    pub boundary: DoubleBoundaryCandidate<ResolvedMaterialStatePoint>,
+    pub boundary: DoubleBoundaryCandidate<ResolvedMaterialStatePoint, G>,
     /// Reciprocal native electrical/mechanical port work.
     pub motion: ElectricalMotionStep,
     /// Independent native thermal rate before inserting Joule or gas transfers [J].
     pub external_heat_j: f64,
 }
 /// All finite owners proposed together, using the original network format.
-pub struct DrivenNetworkCandidate<'m> {
-    network: CircuitEnthalpyCandidate<'m, DrivenNetworkSource>,
+pub struct DrivenNetworkCandidate<'m, G: PistonGas = ClosedGasParcel> {
+    network: CircuitEnthalpyCandidate<'m, DrivenNetworkSource<G>>,
     coupled: NetworkGasStep,
 }
 /// Reports from the original electrical, thermal and gas owners.
-pub struct DrivenNetworkReport {
+pub struct DrivenNetworkReport<T = ResolvedThermochemicalGasState> {
     /// Original network report with the original material source payload.
     pub network: CircuitEnthalpyReport<MaterialNetworkSample>,
     /// Two thermal contacts, both gases and one kinetic-energy account.
-    pub boundary: DoubleBoundaryStep,
+    pub boundary: DoubleBoundaryStep<T>,
     /// Original conductivity evaluations, not reconstructed material constants.
     pub interfaces: [ResolvedMaterialStatePoint; 2],
     /// Native force/back-emf/current and reciprocal work.
@@ -76,15 +79,15 @@ pub struct DrivenNetworkReport {
     /// Independent whole-system energy and complete nested work counts.
     pub coupled: NetworkGasStep,
 }
-impl<'m> DrivenNetworkCandidate<'m> {
+impl<'m, G: PistonGas> DrivenNetworkCandidate<'m, G> {
     /// Complete original electrical/thermal proposal and matching gas source.
-    pub const fn network(&self)->&CircuitEnthalpyCandidate<'m,DrivenNetworkSource> {&self.network}
+    pub const fn network(&self)->&CircuitEnthalpyCandidate<'m,DrivenNetworkSource<G>> {&self.network}
     /// Exact tentative shared mechanism in this network's final source evaluation.
-    pub fn piston(&self)->&DoubleActingGasPiston {self.network.report().source.boundary.piston()}
+    pub fn piston(&self)->&DoubleActingGasPiston<G> {self.network.report().source.boundary.piston()}
     /// Independent combined energy, with internal transfers excluded from supply.
     pub const fn coupled(&self)->&NetworkGasStep {&self.coupled}
     /// Publish all owners together. Neither Joule nor boundary heat is reapplied.
-    pub fn into_parts(self)->(DepositionSimulation<'m>,MaterialCircuit,DoubleActingGasPiston,DrivenNetworkReport) {
+    pub fn into_parts(self)->(DepositionSimulation<'m>,MaterialCircuit,DoubleActingGasPiston<G>,DrivenNetworkReport<G::State>) {
         let (thermal,circuit,r)=self.network.into_parts();
         let DrivenNetworkSource {material,boundary,motion,..}=r.source;
         let (piston,interfaces,boundary)=boundary.into_parts();
@@ -108,12 +111,15 @@ fn motion_error(e:ElectricalMotionError<ThermalPistonError<MaterialNetworkError>
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Couple direct electromagnetic work and both gas heat transfers to the
     /// existing finite circuit/material network. For each thermal trial the
     /// SAME endpoint resistance supplies circuit current, Joule heat and force.
     /// Velocity back emf and both heat laws close before the network residual
     /// sees their paired proposal. Every nested trial starts from original history.
+    /// Original ideal or real-gas owners supply both complete midpoints, with
+    /// independent composition, density and calorics; contacts consume their
+    /// native transport state rather than an ideal reference property view.
     ///
     /// All resistor heat is deposited by the original circuit/enthalpy owner.
     /// Contact heats debit their named finite cells once, including a shared cell.
@@ -126,7 +132,9 @@ impl DoubleActingGasPiston {
         &self,binding:&MaterialNetwork<'_>,thermal:&DepositionSimulation<'m>,target_s:f64,
         circuit:&MaterialCircuit,inputs:&[f64],drive:ElectromagneticNetworkDrive,
         controls:NetworkGasSolve,guess_j:&[f64],cancelled:impl FnMut()->bool,
-    )->Result<DrivenNetworkCandidate<'m>,DrivenNetworkError> {
+    )->Result<DrivenNetworkCandidate<'m,G>,DrivenNetworkError>
+    where G::State: FluidTransport,
+    {
         self.electromagnetic_network_candidate_with_midpoint_resistance(binding,thermal,target_s,
             circuit,inputs,drive,controls,guess_j,0.0,cancelled)
     }
@@ -138,7 +146,9 @@ impl DoubleActingGasPiston {
         &self,binding:&MaterialNetwork<'_>,thermal:&DepositionSimulation<'m>,target_s:f64,
         circuit:&MaterialCircuit,inputs:&[f64],drive:ElectromagneticNetworkDrive,
         controls:NetworkGasSolve,guess_j:&[f64],resistance_n_s_m:f64,cancelled:impl FnMut()->bool,
-    )->Result<DrivenNetworkCandidate<'m>,DrivenNetworkError> {
+    )->Result<DrivenNetworkCandidate<'m,G>,DrivenNetworkError>
+    where G::State: FluidTransport,
+    {
         let cancel=RefCell::new(cancelled);
         let check=||if (*cancel.borrow_mut())(){Err(DepositionError::Cancelled)}else{Ok(())};
         check()?;
@@ -238,17 +248,17 @@ impl DoubleActingGasPiston {
 use crate::cavity_phs::piston::material::MaterialDoubleActingGasPiston;
 
 /// Complete finite network with the original material-derived mechanical inertia.
-pub struct MaterialDrivenNetworkCandidate<'m> {
+pub struct MaterialDrivenNetworkCandidate<'m, G: PistonGas = ClosedGasParcel> {
     thermal: DepositionSimulation<'m>,
     circuit: MaterialCircuit,
-    piston: MaterialDoubleActingGasPiston,
-    report: DrivenNetworkReport,
+    piston: MaterialDoubleActingGasPiston<G>,
+    report: DrivenNetworkReport<G::State>,
 }
-impl<'m> MaterialDrivenNetworkCandidate<'m> {
+impl<'m, G: PistonGas> MaterialDrivenNetworkCandidate<'m,G> {
     /// Attach the unchanged material body to the complete proposed dynamics.
     /// Keeping the owner intact preserves its accepted port clocks and history.
     pub(in crate::cavity_phs::piston) fn from_native(
-        original:&MaterialDoubleActingGasPiston,candidate:DrivenNetworkCandidate<'m>,
+        original:&MaterialDoubleActingGasPiston<G>,candidate:DrivenNetworkCandidate<'m,G>,
     )->Result<Self,DrivenNetworkError> {
         let (thermal,circuit,next,report)=candidate.into_parts();
         let piston=original.bind_piston_candidate(next)
@@ -260,15 +270,15 @@ impl<'m> MaterialDrivenNetworkCandidate<'m> {
     /// Original electrical graph and accepted-candidate charges/fluxes.
     pub const fn circuit(&self)->&MaterialCircuit {&self.circuit}
     /// Both gas histories, shared momentum and canonical material-derived inertia.
-    pub const fn piston(&self)->&MaterialDoubleActingGasPiston {&self.piston}
+    pub const fn piston(&self)->&MaterialDoubleActingGasPiston<G> {&self.piston}
     /// All physical work and original material/interface evaluations.
-    pub const fn report(&self)->&DrivenNetworkReport {&self.report}
+    pub const fn report(&self)->&DrivenNetworkReport<G::State> {&self.report}
     /// Publish all endpoints together; no second circuit step or heat deposit.
-    pub fn into_parts(self)->(DepositionSimulation<'m>,MaterialCircuit,MaterialDoubleActingGasPiston,DrivenNetworkReport) {
+    pub fn into_parts(self)->(DepositionSimulation<'m>,MaterialCircuit,MaterialDoubleActingGasPiston<G>,DrivenNetworkReport<G::State>) {
         (self.thermal,self.circuit,self.piston,self.report)
     }
 }
-impl MaterialDoubleActingGasPiston {
+impl<G: PistonGas> MaterialDoubleActingGasPiston<G> {
     /// Preserve regional density/geometry sources through the same electromagnetic,
     /// thermal and gas solve. The rigid specimen supplies the only inertial mass.
     /// Its thermal state remains frozen; network cells may represent other bodies.
@@ -277,7 +287,9 @@ impl MaterialDoubleActingGasPiston {
         &self,binding:&MaterialNetwork<'_>,thermal:&DepositionSimulation<'m>,target_s:f64,
         circuit:&MaterialCircuit,inputs:&[f64],drive:ElectromagneticNetworkDrive,
         controls:NetworkGasSolve,guess_j:&[f64],mut cancelled:impl FnMut()->bool,
-    )->Result<MaterialDrivenNetworkCandidate<'m>,DrivenNetworkError> {
+    )->Result<MaterialDrivenNetworkCandidate<'m,G>,DrivenNetworkError>
+    where G::State: FluidTransport,
+    {
         let candidate=self.piston().electromagnetic_network_candidate(binding,thermal,target_s,circuit,inputs,
             drive,controls,guess_j,&mut cancelled)?;
         let candidate=MaterialDrivenNetworkCandidate::from_native(self,candidate)?;

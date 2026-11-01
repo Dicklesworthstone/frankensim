@@ -9,12 +9,13 @@ use super::{ConductanceSample, ResolvedThermochemicalGasState, ThermalPistonErro
 use super::super::double_acting::DoubleHeatExchangeSolve;
 use crate::cavity_phs::piston::double_acting::{DoubleActingGasPiston,
     DoublePistonInput, DoublePistonSolve, DoublePistonStep};
+use crate::cavity_phs::piston::{ClosedGasParcel, PistonGas, PistonGasState};
 
 /// Thermal boundary and shared mechanical accounts for one accepted proposal.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoubleBoundaryStep {
+pub struct DoubleBoundaryStep<T = ResolvedThermochemicalGasState> {
     /// Both source-resolved gases, ONE displacement and ONE kinetic account.
-    pub piston: DoublePistonStep,
+    pub piston: DoublePistonStep<T>,
     /// Counterpart temperatures for this trial [K], [primary, opposing].
     pub boundary_temperature_k: [f64; 2],
     /// Actual midpoint conductances [W/K], in the same face order.
@@ -36,30 +37,32 @@ pub struct DoubleBoundaryStep {
 
 /// Both gases, common momentum, and both interface evaluations accepted together.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoubleBoundaryCandidate<S> {
-    piston: DoubleActingGasPiston,
+pub struct DoubleBoundaryCandidate<S, G: PistonGas = ClosedGasParcel> {
+    piston: DoubleActingGasPiston<G>,
     sources: [S; 2],
-    step: DoubleBoundaryStep,
+    step: DoubleBoundaryStep<G::State>,
 }
-impl<S> DoubleBoundaryCandidate<S> {
+impl<S, G: PistonGas> DoubleBoundaryCandidate<S, G> {
     /// Tentative shared mechanism. Neither accepted gas was advanced in trials.
-    pub const fn piston(&self) -> &DoubleActingGasPiston { &self.piston }
+    pub const fn piston(&self) -> &DoubleActingGasPiston<G> { &self.piston }
     /// Original interface evaluations at the SAME coupled proposal.
     pub const fn sources(&self) -> &[S; 2] { &self.sources }
     /// Independent source and combined-energy admission.
-    pub const fn step(&self) -> &DoubleBoundaryStep { &self.step }
+    pub const fn step(&self) -> &DoubleBoundaryStep<G::State> { &self.step }
     /// Publish with every finite counterpart; the heat is already in the gases.
-    pub fn into_parts(self) -> (DoubleActingGasPiston, [S; 2], DoubleBoundaryStep) {
+    pub fn into_parts(self) -> (DoubleActingGasPiston<G>, [S; 2], DoubleBoundaryStep<G::State>) {
         (self.piston, self.sources, self.step)
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Solve both thermal boundaries and the shared gas/momentum equations.
     ///
     /// Every [Qa,Qb] trial advances the ORIGINAL paired piston, never two
     /// independent walls. The existing caloric/EOS/transport owners resolve both
     /// gas midpoints; both conductance laws then see that SAME physical proposal.
+    /// Each ideal or real-gas chamber retains its own composition, density and
+    /// caloric/EOS law. The callback receives the complete original gas states.
     /// The existing bounded scalar feedback owner solves both heat residuals.
     /// A total proposal limit includes all rejected inner and outer trials.
     ///
@@ -78,10 +81,10 @@ impl DoubleActingGasPiston {
     pub fn thermal_boundaries_candidate<S, E>(
         &self, input: DoublePistonInput, controls: DoublePistonSolve,
         exchange: DoubleHeatExchangeSolve, boundary_temperature_k: [f64; 2],
-        resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2])
+        resolve: impl FnMut(&[G::State; 2])
             -> Result<[ConductanceSample<S>; 2], E>,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleBoundaryCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DoubleBoundaryCandidate<S, G>, ThermalPistonError<E>> {
         self.thermal_boundaries_candidate_with_midpoint_resistance(input, controls,
             exchange, boundary_temperature_k, 0.0, resolve, cancelled)
     }
@@ -93,10 +96,10 @@ impl DoubleActingGasPiston {
         &self, input: DoublePistonInput, controls: DoublePistonSolve,
         exchange: DoubleHeatExchangeSolve, boundary_temperature_k: [f64; 2],
         resistance_n_s_m: f64,
-        mut resolve: impl FnMut(&[ResolvedThermochemicalGasState; 2])
+        mut resolve: impl FnMut(&[G::State; 2])
             -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleBoundaryCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DoubleBoundaryCandidate<S, G>, ThermalPistonError<E>> {
         poll(&mut cancelled)?;
         for face in exchange.faces { feedback::admit::<E>(face)?; }
         if !positive(input.duration_s) || !boundary_temperature_k.iter().all(|t| positive(*t))
@@ -130,7 +133,7 @@ impl DoubleActingGasPiston {
                 let mut evaluated = [0.0; 2];
                 for i in 0..2 {
                     evaluated[i] = heat::conductive_heat(input.duration_s, conductance[i],
-                        boundary_temperature_k[i], piston.midpoint[i].state().temperature)?;
+                        boundary_temperature_k[i], piston.midpoint[i].temperature_k())?;
                 }
                 let residual = [qa-evaluated[0], qb-evaluated[1]];
                 let total = (piston.gas[0].stored_energy_change_j + piston.gas[1].stored_energy_change_j)

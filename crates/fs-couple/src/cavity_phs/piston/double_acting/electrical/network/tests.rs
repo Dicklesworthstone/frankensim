@@ -1,4 +1,6 @@
 //! Real finite thermal, circuit, material and shared gas owners; synthetic cards.
+mod real_gas;
+
 use super::*;
 use crate::cavity_phs::piston::double_acting::electrical::tests as motion_fixture;
 use crate::cavity_phs::piston::thermal::double_acting::DoubleHeatExchangeSolve;
