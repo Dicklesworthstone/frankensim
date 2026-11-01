@@ -27,12 +27,16 @@ fn card_with_knots(knots: Vec<(f64, f64)>) -> InterfaceSystemCard {
     let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let lo = knots[0].0;
     let hi = knots[knots.len()-1].0;
+    card_with_response(PropertyValue::Curve { abscissa: "T".into(),
+        abscissa_dims: fs_conduction::TEMPERATURE_DIMS, knots, dims },
+        ValidityDomain::unconstrained().with("T",lo,hi).with("normal_pressure",1e6,1e6))
+}
+fn card_with_response(value: PropertyValue, validity: ValidityDomain) -> InterfaceSystemCard {
+    let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let mut claims = ClaimSet::new();
     claims.insert_claim(PropertyClaim {
         key: PropertyKey::new(fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, dims),
-        value: PropertyValue::Curve { abscissa: "T".into(), abscissa_dims: fs_conduction::TEMPERATURE_DIMS,
-            knots, dims },
-        validity: ValidityDomain::unconstrained().with("T",lo,hi).with("normal_pressure",1e6,1e6),
+        value, validity,
         uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::LinearInside,
         observations: vec![], provenance: Provenance {
             source: "synthetic contact tangent fixture, not measurements".into(),
@@ -133,5 +137,105 @@ fn g0_contact_derivatives_refuse_source_corners_domains_shapes_and_budget() {
             assert!(matches!(set.linearize_temperature(stopped,&bc,&[320.;8],1),Err(ConductionError::Cancelled {..})));
             assert!(matches!(linear.apply(stopped,&[0.;8]),Err(ConductionError::Cancelled {..})));
         });
+    });
+}
+
+fn two_sided_point() -> QueryPoint {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static));
+    QueryPoint::new().with_quantity("TA",kelvin,320.).unwrap()
+        .with_quantity("TB",kelvin,320.).unwrap()
+        .with_quantity("normal_pressure",fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS),1e6).unwrap()
+}
+fn two_sided_contacts<'m, 'c>(cx: &Cx<'_>, mesh: &'m ConductionMesh, bc: &ThermalBoundary,
+    card: &'c InterfaceSystemCard, point: &QueryPoint) -> TemperatureContacts<'m, 'c> {
+    let pairs=ThermalInterfaces::coincident_face_pairs(mesh).unwrap().into_iter().map(|pair| {
+        if mesh.boundary()[pair.side_a].vertices.iter().all(|&vertex| vertex < 4) { pair }
+        else { InterfaceFacePair { side_a:pair.side_b, side_b:pair.side_a } }
+    }).collect();
+    let law = TemperatureContact::new_two_sided("joint",
+        pairs,card,point,["TA","TB"],
+        SelectionPolicy::SingleClaimOnly).unwrap();
+    TemperatureContacts::new(cx,mesh,bc,vec![],vec![law],1).unwrap()
+}
+fn two_sided_validity() -> ValidityDomain {
+    ValidityDomain::unconstrained().with("TA",256.,384.).with("TB",256.,384.)
+        .with("normal_pressure",1e6,2e6)
+}
+
+#[test]
+fn g3_two_sided_surface_tangent_keeps_both_partials_and_the_true_transpose() {
+    context(&CancelGate::new_clock_free(),|cx| {
+        let mesh=mesh();let bc=ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card=card_with_response(PropertyValue::Surface2D {
+            axes:["TA".into(),"TB".into()],axis_dims:[fs_conduction::TEMPERATURE_DIMS;2],
+            samples:[[256.,256.],[384.,256.],[256.,384.],[384.,384.]].into_iter()
+                .map(|p|(p,0.5+(p[0]-320.)/1024.+3.*(p[1]-320.)/1024.)).collect(),
+            triangles:vec![[0,1,2],[1,3,2]],dims:fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+        },two_sided_validity());
+        let set=two_sided_contacts(cx,&mesh,&bc,&card,&two_sided_point());
+        let t=[301.,304.,307.,309.,349.,352.,355.,341.];
+        let weights=[0.9,-0.4,0.2,0.3,0.8,0.1,-0.5,0.7];
+        let linear=set.linearize_temperature(cx,&bc,&t,1).unwrap();
+        let adjoint=linear.apply_transpose(cx,&weights).unwrap();
+        for direction in [[1.,1.,1.,0.,0.,0.,0.,0.],[0.,0.,0.,0.,1.,1.,1.,0.],
+            [0.2,-0.1,0.7,0.5,-0.3,0.9,0.4,-0.6]]
+        {
+            let tangent=linear.apply(cx,&direction).unwrap();
+            near(dot(&weights,&tangent),dot(&direction,&adjoint),1e-13);
+            near(tangent.iter().sum(),0.,1e-13);
+            let h=1e-3;
+            let plus:Vec<_>=t.iter().zip(direction).map(|(t,d)|t+h*d).collect();
+            let minus:Vec<_>=t.iter().zip(direction).map(|(t,d)|t-h*d).collect();
+            let a=set.linearize_temperature(cx,&bc,&plus,1).unwrap();
+            let b=set.linearize_temperature(cx,&bc,&minus,1).unwrap();
+            for i in 0..8 {
+                near(tangent[i],(a.nodal_outflow_w()[i]-b.nodal_outflow_w()[i])/(2.*h),2e-8);
+            }
+        }
+        let r=linear.physical_contacts().states()[0].resistance.value_m2_k_per_w();
+        for (actual,load) in linear.apply(cx,&[1.;8]).unwrap().iter().zip(linear.nodal_outflow_w()) {
+            near(*actual,-(4./1024.)/r*load,1e-13);
+        }
+        assert!(set.linearize_temperature(cx,&bc,&[320.;8],1).is_ok(),"equal-gradient internal diagonal");
+    });
+}
+
+#[test]
+fn g0_surface_tangents_keep_external_pressure_fixed_and_all_thermal_validity_axes_live() {
+    context(&CancelGate::new_clock_free(),|cx| {
+        let mesh=mesh();let bc=ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card=card_with_response(PropertyValue::Surface2D {
+            axes:["TA".into(),"normal_pressure".into()],
+            axis_dims:[fs_conduction::TEMPERATURE_DIMS,fs_qty::Pressure::DIMS],
+            samples:vec![([256.,1e6],0.25),([384.,1e6],0.375),
+                ([256.,2e6],0.5),([384.,2e6],0.625)],
+            triangles:vec![[0,1,2],[1,3,2]],dims:fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+        },two_sided_validity());
+        let point=two_sided_point();
+        let set=two_sided_contacts(cx,&mesh,&bc,&card,&point);
+        let t=[320.,320.,320.,320.,336.,336.,336.,336.];
+        let linear=set.linearize_temperature(cx,&bc,&t,1).unwrap();
+        for (actual,load) in linear.apply(cx,&[1.;8]).unwrap().iter().zip(linear.nodal_outflow_w()) {
+            near(*actual,-(1./1024.)/0.3125*load,1e-13);
+        }
+        let mut at_end=t;
+        at_end[4..].fill(256.);
+        assert!(set.evaluate(cx,&bc,&at_end).is_ok());
+        assert!(set.linearize_temperature(cx,&bc,&at_end,1).is_err(),"unused TB still owns thermal validity");
+
+        // R depends only on two fixed external coordinates. Its exact sample
+        // needs no fabricated source triangle to have zero thermal partials.
+        let point=point.with_quantity("roughness",fs_qty::QuantitySpec::dimensional(fs_qty::Length::DIMS),0.001).unwrap();
+        let external=card_with_response(PropertyValue::Surface2D {
+            axes:["normal_pressure".into(),"roughness".into()],
+            axis_dims:[fs_qty::Pressure::DIMS,fs_qty::Length::DIMS],
+            samples:vec![([1e6,0.001],0.5)],triangles:vec![],
+            dims:fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+        },two_sided_validity().with("roughness",0.001,0.001));
+        let constant=two_sided_contacts(cx,&mesh,&bc,&external,&point)
+            .linearize_temperature(cx,&bc,&t,1).unwrap();
+        for actual in constant.apply(cx,&[1.;8]).unwrap() { near(actual,0.,1e-13); }
     });
 }

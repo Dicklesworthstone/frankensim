@@ -128,13 +128,6 @@ impl<'a> TemperatureContact<'a> {
     #[must_use]
     pub fn reference_resistance(&self) -> &InterfaceResistance { &self.resistance }
 
-    fn at(&self, temperature_k: f64) -> Result<InterfaceResistance, ConductionError> {
-        if !matches!(self.coordinates, TemperatureContactCoordinates::Mean(_)) {
-            return Err(invalid(self.name(), "a two-sided contact needs both independent trace temperatures"));
-        }
-        self.at_traces([temperature_k; 2])
-    }
-
     fn query_point_at(&self, temperatures_k: [f64; 2]) -> Result<QueryPoint, ConductionError> {
         let [a, b] = [positive(temperatures_k[0])?, positive(temperatures_k[1])?];
         let mut point = self.reference_point.clone();

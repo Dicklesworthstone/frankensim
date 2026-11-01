@@ -37,12 +37,12 @@ impl ThermalInterfaces {
     }
 
     /// dK_contact/dT * T, using the SAME matched trace map and consistent face
-    /// mass as the primal. The caller supplies admitted source dR/dT_interface;
-    /// T_interface is the mean of both P1 face means (six weights of 1/6).
+    /// mass as the primal. The caller supplies admitted source dR/dT_A and
+    /// dR/dT_B for the ordered P1 trace means (three weights of 1/3 per side).
     /// Absent pairs have fixed resistance. No conductivity or storage is added.
     pub(crate) fn temperature_feedback(
         &self, cx: &Cx<'_>, temperature: &[f64],
-        slopes: &std::collections::BTreeMap<super::InterfaceFacePair, f64>,
+        partials: &std::collections::BTreeMap<super::InterfaceFacePair, [f64; 2]>,
         max_face_pairs: usize,
     ) -> Result<fs_sparse::Csr, ConductionError> {
         poll(cx, 0)?;
@@ -58,10 +58,11 @@ impl ThermalInterfaces {
         for surface in &self.surfaces {
             for face in &surface.faces {
                 poll(cx, found)?;
-                let Some(&slope) = slopes.get(&face.pair) else { continue; };
+                let Some(&derivatives) = partials.get(&face.pair) else { continue; };
                 found += 1;
                 let g = finite(1.0 / face.resistance.value_m2_k_per_w())?;
-                let factor = finite(-finite(slope)? * g)?;
+                let factors = [finite(-finite(derivatives[0])? * g)?,
+                    finite(-finite(derivatives[1])? * g)?];
                 let mut jump = [0.0; 3];
                 for (i, value) in jump.iter_mut().enumerate() {
                     let sample = |v| temperature.get(v).copied()
@@ -74,15 +75,19 @@ impl ThermalInterfaces {
                         let mass = if i == j { face.area_m2 / 6.0 } else { face.area_m2 / 12.0 };
                         load = finite(load + finite(finite(g * mass)? * jump)?)?;
                     }
-                    let entry = finite(finite(factor * load)? / 6.0)?;
-                    for &column in face.side_a_vertices.iter().chain(&face.side_b_vertices) {
-                        coo.push(face.side_a_vertices[i], column, entry);
-                        coo.push(face.side_b_vertices[i], column, -entry);
+                    for (vertices, factor) in [&face.side_a_vertices, &face.side_b_vertices]
+                        .into_iter().zip(factors)
+                    {
+                        let entry = finite(finite(factor * load)? / 3.0)?;
+                        for &column in vertices {
+                            coo.push(face.side_a_vertices[i], column, entry);
+                            coo.push(face.side_b_vertices[i], column, -entry);
+                        }
                     }
                 }
             }
         }
-        if found != slopes.len() { return Err(error("contact slope names a pair outside the bound operator")); }
+        if found != partials.len() { return Err(error("contact derivative names a pair outside the bound operator")); }
         poll(cx, found)?;
         Ok(coo.assemble())
     }

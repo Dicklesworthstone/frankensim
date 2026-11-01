@@ -32,6 +32,17 @@ sample uses its first incident source cell. An isolated sample has no tangent.
 These are explicit one-sided derivatives at corners, not global smoothness or
 a numerical enclosure. Unrepresentable tangent scales refuse during preparation.
 
+`PreparedSurfaceResponse::gradient_for_axes` separately admits a classical
+derivative on an explicitly chosen coordinate subspace. It uses the same exact
+cell predicates and cached gradients, accepts equal-gradient internal edges,
+and refuses a corner or a missing two-sided neighbourhood in any varying
+coordinate. For a single varying coordinate, only cells traversed by that
+coordinate slice contribute: a fixed-pressure support boundary does not erase
+a supported thermal derivative. With both coordinates varying, exposed edges
+and unsupported wedges remain boundaries. This query neither extends source
+support nor changes the one-sided contract of `evaluate`; complete physical
+applicability and source selection still belong to the consumer.
+
 The preparation owns an immutable numeric snapshot and cached gradients. Source
 selection, `LinearInside` policy, quantity checks, applicability and receipts
 remain with the original consumer. No point query or identity hash occurs in

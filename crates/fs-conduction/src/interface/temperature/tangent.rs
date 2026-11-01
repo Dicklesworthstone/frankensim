@@ -1,13 +1,14 @@
-//! Exact linearization of the admitted per-face R(T_interface) contact law.
+//! Exact linearization of admitted per-face mean or two-sided contact laws.
 //! The original matching producer supplies its vertex correspondence and mass
 //! rule. This adds dK/dT * T; it does not replace K or finite-difference a solve.
 
 use std::collections::BTreeMap;
 use fs_exec::Cx;
-use fs_matdb::{InterpolationPolicy, PropertyValue};
+use fs_matdb::{InterpolationPolicy, PreparedSurfaceResponse, PropertyValue};
 use fs_sparse::{Coo, Csr, ops};
 use crate::{ConductionError, ThermalBoundary};
-use super::{TemperatureContact, TemperatureContactEvaluation, TemperatureContacts, finite, invalid, poll};
+use super::{InterfaceResistance, TemperatureContact, TemperatureContactCoordinates,
+    TemperatureContactEvaluation, TemperatureContacts, finite, invalid, poll, positive};
 use crate::transient::backward_euler::StepLinearization;
 
 /// A rechecked capacity endpoint with complete R(T) contact derivatives.
@@ -61,24 +62,76 @@ impl<'a> ContactCapacityLinearization<'a> {
     }
 }
 
+enum ContactDerivative<'a> {
+    Constant,
+    Curve { axis: &'a str, knots: &'a [(f64, f64)] },
+    Surface(PreparedSurfaceResponse),
+}
+
 impl TemperatureContact<'_> {
-    fn temperature_slope(&self, cx: &Cx<'_>, t: f64) -> Result<f64, ConductionError> {
-        let super::TemperatureContactCoordinates::Mean(temperature_axis) = &self.coordinates else {
-            return Err(invalid(self.name(), "two-sided contact derivatives require both source partials; a mean-temperature tangent is incomplete"));
-        };
-        // All three evaluations keep the original pin and nonthermal context.
-        // Neighbours admit the source domain; they do NOT estimate the slope.
-        for temperature in [t.next_down(), t, t.next_up()] {
-            poll(cx, 0)?;
-            self.at(temperature)?;
+    fn axis_weights(&self, axis: &str) -> [f64; 2] {
+        match &self.coordinates {
+            TemperatureContactCoordinates::Mean(temperature) => {
+                if axis == temperature { [0.5; 2] } else { [0.0; 2] }
+            }
+            TemperatureContactCoordinates::TwoSided(axes) =>
+                axes.each_ref().map(|temperature| if axis == temperature { 1.0 } else { 0.0 }),
         }
+    }
+
+    // Prepare each original source law once per complete linearization, not
+    // once per face. Fixed external axes require no artificial cell tangent:
+    // even an isolated exact source sample can be constant in temperature.
+    fn derivative_response(&self) -> Result<ContactDerivative<'_>, ConductionError> {
         let claim = self.card.claims().claim(self.resistance.receipt().selected)
             .ok_or_else(|| invalid(self.name(), "the selected contact claim is missing"))?;
         match (&claim.value, &claim.interpolation) {
-            (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => Ok(0.0),
+            (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) =>
+                Ok(ContactDerivative::Constant),
             (PropertyValue::Curve { abscissa, knots, .. }, InterpolationPolicy::LinearInside) => {
-                // A curve in a fixed nonthermal coordinate is constant in T.
-                if abscissa != temperature_axis { return Ok(0.0); }
+                if self.axis_weights(abscissa) == [0.0; 2] { return Ok(ContactDerivative::Constant); }
+                Ok(ContactDerivative::Curve { axis: abscissa, knots })
+            }
+            (PropertyValue::Surface2D { axes, .. }, InterpolationPolicy::LinearInside) => {
+                if axes.iter().all(|axis| self.axis_weights(axis) == [0.0; 2]) {
+                    return Ok(ContactDerivative::Constant);
+                }
+                claim.value.prepare_surface_response().map(ContactDerivative::Surface)
+                    .map_err(|error| invalid(self.name(), format!("contact surface derivative refused: {error}")))
+            }
+            _ => Err(invalid(self.name(), "a contact derivative requires a supported constant scalar, linear curve or original linear surface")),
+        }
+    }
+
+    fn temperature_partials(
+        &self, cx: &Cx<'_>, temperatures: [f64; 2], response: &ContactDerivative<'_>,
+    ) -> Result<[f64; 2], ConductionError> {
+        let point = self.query_point_at(temperatures)?;
+        let axes = match &self.coordinates {
+            TemperatureContactCoordinates::Mean(axis) => std::slice::from_ref(axis),
+            TemperatureContactCoordinates::TwoSided(axes) => axes.as_slice(),
+        };
+        // The actual point already passed the physical pinned query. Its
+        // neighbours admit all declared thermal validity coordinates; they do
+        // not estimate a derivative. Perturb the source coordinate directly:
+        // half-weighting a trace ULP could otherwise round back to the mean.
+        for axis in axes {
+            let t = *point.axes().get(axis)
+                .ok_or_else(|| invalid(self.name(), "contact derivative lost a thermal query coordinate"))?;
+            for temperature in [t.next_down(), t.next_up()] {
+                poll(cx, 0)?;
+                let neighbour = point.clone().with(axis, positive(temperature)?)
+                    .map_err(|error| invalid(self.name(), format!("contact derivative query refused: {error}")))?;
+                InterfaceResistance::from_card_pinned(
+                    self.name(), self.card, &neighbour, self.resistance.receipt().selected,
+                )?;
+            }
+        }
+        match response {
+            ContactDerivative::Constant => Ok([0.0; 2]),
+            ContactDerivative::Curve { axis, knots } => {
+                let t = *point.axes().get(*axis)
+                    .ok_or_else(|| invalid(self.name(), "contact curve derivative lost its source coordinate"))?;
                 let mut slope = None;
                 for (index, pair) in knots.windows(2).enumerate() {
                     if index % 256 == 0 { poll(cx, index)?; }
@@ -90,9 +143,27 @@ impl TemperatureContact<'_> {
                         slope = Some(value);
                     }
                 }
-                slope.ok_or_else(|| invalid(self.name(), "contact temperature is outside the selected curve segments"))
+                let slope = slope.ok_or_else(|| invalid(self.name(), "contact temperature is outside the selected curve segments"))?;
+                Ok(self.axis_weights(axis).map(|weight| weight * slope))
             }
-            _ => Err(invalid(self.name(), "a contact derivative requires a continuously supported constant scalar or linear curve")),
+            ContactDerivative::Surface(surface) => {
+                let mut coordinates = [0.0; 2];
+                let mut varying = [false; 2];
+                for (i, axis) in surface.axes().iter().enumerate() {
+                    coordinates[i] = *point.axes().get(axis)
+                        .ok_or_else(|| invalid(self.name(), "contact surface derivative lost its source coordinate"))?;
+                    varying[i] = self.axis_weights(axis) != [0.0; 2];
+                }
+                let gradient = surface.gradient_for_axes(coordinates, varying)
+                    .map_err(|error| invalid(self.name(), format!("contact surface derivative refused: {error}")))?;
+                let mut partials = [0.0; 2];
+                for (axis, derivative) in surface.axes().iter().zip(gradient) {
+                    for (partial, weight) in partials.iter_mut().zip(self.axis_weights(axis)) {
+                        *partial = finite(*partial + finite(weight * derivative)?)?;
+                    }
+                }
+                Ok(partials)
+            }
         }
     }
 }
@@ -122,7 +193,7 @@ impl ContactTemperatureLinearization {
     /// Nodal outward contact loads, internally conservative; not external heat.
     #[must_use]
     pub fn nodal_outflow_w(&self) -> &[f64] { &self.load }
-    /// Complete J_contact*dT, including R'(T_interface) at every face.
+    /// Complete J_contact*dT, including both trace-temperature partials at every face.
     pub fn apply(&self, cx: &Cx<'_>, direction: &[f64]) -> Result<Vec<f64>, ConductionError> {
         self.action(cx, direction, false)
     }
@@ -159,8 +230,10 @@ impl ContactTemperatureLinearization {
 impl TemperatureContacts<'_, '_> {
     /// Linearize local source laws at the supplied physical field without
     /// advancing it. Every source must admit a two-sided temperature
-    /// neighbourhood and a unique slope, including for an eventual zero seed.
-    /// A redundant equal-slope knot is admitted; a corner or domain end refuses.
+    /// neighbourhood and unique partials, including for an eventual zero seed.
+    /// Equal-slope knots and equal-gradient internal source edges are admitted;
+    /// a genuine source corner or thermal domain end refuses. Fixed external
+    /// coordinates do not acquire artificial derivative requirements.
     ///
     /// `max_face_pairs` bounds ALL fixed and variable faces. At most 36 extra
     /// entries per variable pair are staged before sparse assembly; both
@@ -181,18 +254,24 @@ impl TemperatureContacts<'_, '_> {
             return Err(invalid("<contact-tangent>", "contact tangent exceeds its paired-face or addressable storage allowance"));
         }
         let physical = self.evaluate(cx, boundary, temperature)?;
-        let mut slopes = BTreeMap::new();
+        let mut responses = BTreeMap::new();
+        for (i, law) in self.variable.iter().enumerate() {
+            poll(cx, i)?;
+            responses.insert(law.name(), (law, law.derivative_response()?));
+        }
+        let mut partials = BTreeMap::new();
         for (i, state) in physical.states().iter().enumerate() {
             poll(cx, i)?;
-            let law = self.variable.iter().find(|law| law.name() == state.interface)
+            let (law, response) = responses.get(state.interface.as_str())
                 .ok_or_else(|| invalid("<contact-tangent>", "local contact state lost its source owner"))?;
-            let slope = law.temperature_slope(cx, state.interface_temperature_k)?;
-            if slopes.insert(state.pair, slope).is_some() {
+            let derivative = law.temperature_partials(cx,
+                [state.side_a_temperature_k, state.side_b_temperature_k], response)?;
+            if partials.insert(state.pair, derivative).is_some() {
                 return Err(invalid(law.name(), "duplicate local contact derivative"));
             }
         }
         let feedback = physical.interfaces.matching.temperature_feedback(
-            cx, temperature, &slopes, max_face_pairs,
+            cx, temperature, &partials, max_face_pairs,
         )?;
         let mut coo = Coo::new(n, n);
         physical.interfaces.assemble_into(cx, &mut coo)?;

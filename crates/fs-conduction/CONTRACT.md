@@ -19,11 +19,23 @@ quadrature-point material law or an evolving mechanical contact-area model.
 
 The same snapshots feed existing capacity, primary-enthalpy and radiation
 endpoint owners; a failed source query publishes no candidate history.
-Classical derivatives must include both source partials. Until such a tangent
-is available, a two-sided law refuses the mean-only tangent entry rather than
-returning a frozen or incomplete derivative. Focused G0/G1/G3 tests cover
-ordered source queries, surface/axis reversal, actual implicit energy exchange
-and invalid coordinate or source-support refusals.
+The complete tangent and its true transpose include both source partials,
+using three P1 mean weights on each side and the original consistent face
+mass for the full nodal jump. Scalar, curve and original triangular surface
+responses share this assembly; each surface derivative is prepared once per
+law per linearization. Fixed pressure and other external axes do not become
+thermal derivative coordinates. Actual pinned source queries still admit
+both neighbours of every declared thermal coordinate, including coordinates
+that affect applicability alone. Equal-gradient cell edges are admitted;
+source corners, unsupported wedges and thermal domain ends refuse a classical
+tangent even when the primal point value is valid.
+
+Focused G0/G1/G3 tests cover ordered source queries, surface/axis reversal,
+actual implicit energy exchange, per-side finite differences, transpose and
+conservation identities, fixed-pressure support boundaries, and invalid
+coordinate or source-support refusals. A primary-enthalpy endpoint adjoint
+also checks resistance-scale, prior-enthalpy and source-density directions
+against fresh solves while a non-contact node remains inside a latent plateau.
 
 ## Source-bound implicit finite-cell contact
 

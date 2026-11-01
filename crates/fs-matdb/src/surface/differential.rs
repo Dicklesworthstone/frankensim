@@ -1,6 +1,10 @@
 //! Source-cell tangents for the original sampled scalar surface evaluator.
 
-use super::{coordinate_admitted, expanded_determinant, validate, vertices};
+use std::collections::BTreeMap;
+
+use fs_ivl::{Sign, orient2d};
+
+use super::{contains, coordinate_admitted, expanded_determinant, validate, vertices};
 use crate::{EvaluationDecision, InterpolationPolicy, MatDbError, PropertyValue};
 
 /// The canonical value and one original source cell's affine gradient.
@@ -33,6 +37,7 @@ pub struct PreparedSurfaceResponse {
     samples: Vec<([f64; 2], f64)>,
     triangles: Vec<[u32; 3]>,
     gradients: Vec<[f64; 2]>,
+    boundary_edges: Vec<[u32; 2]>,
 }
 
 impl PropertyValue {
@@ -66,11 +71,25 @@ impl PropertyValue {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
+        // Source admission already rules out crossing/overlapping cells and
+        // mismatched coincident vertices. An edge used once is exposed; cache
+        // those original vertex identities rather than rebuild topology at
+        // every nonlinear contact face.
+        let mut edge_uses = BTreeMap::<[u32; 2], usize>::new();
+        for triangle in triangles {
+            for edge in 0..3 {
+                let a = triangle[edge];
+                let b = triangle[(edge + 1) % 3];
+                *edge_uses.entry([a.min(b), a.max(b)]).or_default() += 1;
+            }
+        }
         Ok(PreparedSurfaceResponse {
             axes: axes.clone(),
             samples: samples.clone(),
             triangles: triangles.clone(),
             gradients,
+            boundary_edges: edge_uses.into_iter()
+                .filter_map(|(edge, uses)| (uses == 1).then_some(edge)).collect(),
         })
     }
 }
@@ -114,6 +133,85 @@ impl PreparedSurfaceResponse {
             evaluation,
         })
     }
+
+    /// Classical derivative on the explicitly varying source coordinates.
+    ///
+    /// All incident source cells that contribute to the requested coordinate
+    /// subspace must have the same projected gradient. Two varying coordinates
+    /// require an open source neighbourhood; one varying coordinate requires
+    /// both directions of its fixed-coordinate slice. Inactive components are
+    /// zero. Thus an external-pressure edge can support a temperature tangent
+    /// without pretending to support pressure variation. No cells, samples or
+    /// interpolation values are added, and claim applicability remains with
+    /// the caller. Work is linear in the admitted source-cell count.
+    pub fn gradient_for_axes(
+        &self, point: [f64; 2], varying_axes: [bool; 2],
+    ) -> Result<[f64; 2], MatDbError> {
+        if varying_axes == [false; 2] {
+            super::evaluate(&self.axes, &self.samples, &self.triangles, point,
+                InterpolationPolicy::LinearInside)?;
+            return Ok([0.0; 2]);
+        }
+        self.evaluate(point)?;
+        let full = varying_axes.iter().all(|&varying| varying);
+        if full && self.boundary_edges.iter().any(|&[a, b]| {
+            on_edge(self.samples[a as usize].0, self.samples[b as usize].0, point)
+        }) {
+            return Err(unsupported("surface derivative lacks an open two-coordinate neighbourhood"));
+        }
+        let varying = usize::from(!varying_axes[0]);
+        let mut supported = [false; 2];
+        let mut answer: Option<[f64; 2]> = None;
+        for (&triangle, &gradient) in self.triangles.iter().zip(&self.gradients) {
+            let positions = vertices(&self.samples, triangle);
+            if !contains(positions, point) {
+                continue;
+            }
+            let directions = if full { [true; 2] }
+                else { slice_directions(positions, point, varying) };
+            // A wedge touching a fixed-coordinate line only at this vertex
+            // cannot change the derivative of that line.
+            if !directions.iter().any(|&direction| direction) {
+                continue;
+            }
+            for side in 0..2 { supported[side] |= directions[side]; }
+            let projected = [0, 1].map(|axis| if varying_axes[axis] { gradient[axis] } else { 0.0 });
+            if answer.is_some_and(|previous| previous != projected) {
+                return Err(unsupported("surface has unequal incident gradients in a varying coordinate"));
+            }
+            answer = Some(projected);
+        }
+        if !supported.iter().all(|&side| side) {
+            return Err(unsupported("surface derivative lacks a two-sided fixed-coordinate neighbourhood"));
+        }
+        answer.ok_or_else(|| unsupported("surface point has no contributing derivative cell"))
+    }
+}
+
+fn on_edge(a: [f64; 2], b: [f64; 2], point: [f64; 2]) -> bool {
+    (0..2).all(|axis| a[axis].min(b[axis]) <= point[axis]
+        && point[axis] <= a[axis].max(b[axis]))
+        && orient2d(a, b, point) == Sign::Zero
+}
+
+// Exact local tangent cone of a containing triangle along one coordinate.
+// Only edges through the actual point constrain an infinitesimal direction.
+// Their directional orientation signs are simple transverse-coordinate
+// comparisons, avoiding a rounded or artificially displaced query point.
+fn slice_directions(triangle: [[f64; 2]; 3], point: [f64; 2], varying: usize) -> [bool; 2] {
+    let winding = orient2d(triangle[0], triangle[1], triangle[2]);
+    let mut supported = [true; 2]; // negative, positive coordinate directions
+    for edge in 0..3 {
+        let a = triangle[edge];
+        let b = triangle[(edge + 1) % 3];
+        if orient2d(a, b, point) != Sign::Zero { continue; }
+        let [first, second] = if varying == 0 { [a[1], b[1]] } else { [b[0], a[0]] };
+        let sign = if first < second { Sign::Negative }
+            else if first > second { Sign::Positive } else { Sign::Zero };
+        supported[0] &= sign == Sign::Zero || sign.flip() == winding;
+        supported[1] &= sign == Sign::Zero || sign == winding;
+    }
+    supported
 }
 
 fn unsupported(reason: &'static str) -> MatDbError {
