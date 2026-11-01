@@ -1,4 +1,4 @@
-//! Direct finite-area illuminance with bounded mesh shadows and gray extinction.
+//! Direct finite-area illuminance with bounded mesh shadows and spectral extinction.
 //!
 //! Reuse the native emitter preparation and analytical projected-triangle
 //! integral. The original interval visibility hierarchy classifies ALL rays
@@ -6,14 +6,15 @@
 //! the analytical integral, blocked patches are zero, and unresolved patches
 //! retain [0, unoccluded upper]. Bisect the largest uncertain lux contribution
 //! first. Optional homogeneous absorption and out-scattering use the original
-//! `HomogeneousMedium`; interval transmission over each entire patch is refined
-//! together with penumbrae. A work/depth limit retains the current enclosure,
-//! never a fabricated tolerance pass. No source, primitive, material or path estimator is modified.
+//! `HomogeneousMedium`; native density/optical grids retain their spectral laws.
+//! Transmission over each entire patch is refined together with penumbrae. A
+//! work/depth limit retains the current enclosure, never a fabricated tolerance
+//! pass. No source, primitive, material or path estimator is modified.
 //!
 //! This encloses selected-source DIRECT emission only. Opaque static meshes and
 //! rigid instances may occlude one another, including faces of folded sources.
-//! Reflection, refraction, in-scattering, heterogeneous/spectral media, projector
-//! optics, calibration and physical mesh fidelity remain outside the model.
+//! Reflection, refraction, in-scattering, thermal emission, projector optics,
+//! calibration, field discretization and physical mesh fidelity remain outside the model.
 //! As in the existing direct connector, the
 //! source endpoint and a declared receiver-end distance are excluded. The
 //! physical effect of that exclusion and total physical error remain unknown.
@@ -21,15 +22,19 @@
 use super::*;
 use crate::photometry::PhotometryError;
 use crate::photometry::medium::HomogeneousMedium;
+use crate::photometry::transport::PhotometricMedium;
+use crate::volumes::transport::{VolumeTransportError, enclosure::GridEnclosureBudget};
 use crate::photometry::source::validation::{EnclosureUnavailable, visibility::{Visibility, VisibilityIndex}};
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
 mod attenuation;
 use attenuation::PreparedAttenuation;
+mod grid;
+use grid::PreparedAreaGrid;
 
 /// Version of adaptive patch partitioning, shadow predicates and output scope.
-pub const AREA_OCCLUSION_SEMANTICS_VERSION: u32 = 2;
+pub const AREA_OCCLUSION_SEMANTICS_VERSION: u32 = 3;
 /// Hard ceiling on patch evaluations and reserved frontier slots per receiver.
 pub const MAX_AREA_SHADOW_PATCHES: usize = 262_144;
 
@@ -71,6 +76,8 @@ pub enum AreaOcclusionError {
     TransmissiveGeometry,
     /// Original visibility preparation/evaluation failure.
     Transport(PhotometryError),
+    /// Original physical-grid preparation, cell/node budget or arithmetic refusal.
+    Medium(VolumeTransportError),
 }
 impl core::fmt::Display for AreaOcclusionError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
@@ -89,6 +96,12 @@ impl From<AreaReferenceError> for AreaOcclusionError {
 impl From<PhotometryError> for AreaOcclusionError {
     fn from(error: PhotometryError) -> Self {
         match error { PhotometryError::Cancelled => Self::Cancelled, other => Self::Transport(other) }
+    }
+}
+
+impl From<VolumeTransportError> for AreaOcclusionError {
+    fn from(error: VolumeTransportError) -> Self {
+        match error { VolumeTransportError::Cancelled => Self::Cancelled, other => Self::Medium(other) }
     }
 }
 
@@ -125,10 +138,13 @@ pub struct OccludedAreaIlluminance {
     /// Final nonzero leaf patches with a non-singleton transmission range.
     /// This counts integration/numerical variation, not uncertain physical inputs.
     pub varying_transmittance_patches: usize,
-    /// Retained homogeneous absorption coefficient, in inverse metres.
-    pub absorption_per_m: f64,
-    /// Retained homogeneous out-scattering coefficient, in inverse metres.
-    pub scattering_per_m: f64,
+    /// Homogeneous absorption in inverse metres; `None` for a physical grid,
+    /// whose cell-specific mass coefficients cannot be replaced by one number.
+    pub absorption_per_m: Option<f64>,
+    /// Homogeneous out-scattering in inverse metres; `None` for a physical grid.
+    pub scattering_per_m: Option<f64>,
+    /// Original physical-medium snapshot; absent for homogeneous models.
+    pub physical_grid_identity: Option<ContentHash>,
     /// Selected sources, original occluders, extinction, probe and endpoint convention.
     /// This is not authenticated calibration evidence.
     pub numerical_model_identity: ContentHash,
@@ -136,9 +152,9 @@ pub struct OccludedAreaIlluminance {
     pub total_error_bound_lux: Option<f64>,
 }
 impl OccludedAreaIlluminance {
-    /// CSV labels its direct vacuum/gray-medium scope and actual termination.
+    /// Version 3 CSV labels vacuum/gray/spectral-grid scope and termination.
     pub fn write_csv_header(writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(b"index,scope,lux,numerical_lower_lux,numerical_upper_lux,numerical_error_bound_lux,requested_error_lux,termination,evaluated_patches,uncertain_visibility_patches,coarse_integral_patches,numerical_model_identity,absorption_per_m,scattering_per_m,varying_transmittance_patches,total_physical_error_bound_lux,version\n")
+        writer.write_all(b"index,scope,lux,numerical_lower_lux,numerical_upper_lux,numerical_error_bound_lux,requested_error_lux,termination,evaluated_patches,uncertain_visibility_patches,coarse_integral_patches,numerical_model_identity,absorption_per_m,scattering_per_m,varying_transmittance_patches,total_physical_error_bound_lux,version,physical_grid_identity\n")
     }
     /// Missing total error remains unknown; I/O failures propagate.
     pub fn write_csv_row(self, index: usize, writer: &mut impl Write) -> io::Result<()> {
@@ -147,16 +163,28 @@ impl OccludedAreaIlluminance {
             AreaOcclusionTermination::PatchBudget => "patch-budget",
             AreaOcclusionTermination::ResolutionLimit => "resolution-limit",
         };
-        let scope = if self.absorption_per_m == 0.0 && self.scattering_per_m == 0.0 {
+        let scope = if self.physical_grid_identity.is_some() {
+            "opaque-mesh-spectral-grid-direct-area"
+        } else if self.absorption_per_m == Some(0.0) && self.scattering_per_m == Some(0.0) {
             "opaque-mesh-vacuum-direct-area"
         } else {
             "opaque-mesh-homogeneous-gray-direct-area"
         };
-        writeln!(writer, "{index},{scope},{},{},{},{},{},{reason},{},{},{},{},{},{},{},unknown,{AREA_OCCLUSION_SEMANTICS_VERSION}",
+        write!(writer, "{index},{scope},{},{},{},{},{},{reason},{},{},{},{},",
             self.lux, self.numerical.lo, self.numerical.hi, self.numerical_error_bound_lux,
             self.requested_error_lux, self.evaluated_patches, self.uncertain_visibility_patches,
-            self.coarse_integral_patches, self.numerical_model_identity, self.absorption_per_m,
-            self.scattering_per_m, self.varying_transmittance_patches)
+            self.coarse_integral_patches, self.numerical_model_identity)?;
+        for coefficient in [self.absorption_per_m, self.scattering_per_m] {
+            match coefficient {
+                Some(value) => write!(writer, "{value},")?,
+                None => writer.write_all(b"not-applicable,")?,
+            }
+        }
+        write!(writer, "{},unknown,{AREA_OCCLUSION_SEMANTICS_VERSION},", self.varying_transmittance_patches)?;
+        match self.physical_grid_identity {
+            Some(identity) => writeln!(writer, "{identity}"),
+            None => writer.write_all(b"not-applicable\n"),
+        }
     }
 }
 
@@ -167,6 +195,7 @@ pub struct OccludedAreaReference<'scene> {
     primitives: &'scene [Primitive],
     visibility: VisibilityIndex,
     attenuation: PreparedAttenuation,
+    grid: Option<PreparedAreaGrid<'scene>>,
     identity: ContentHash,
 }
 impl<'scene> OccludedAreaReference<'scene> {
@@ -185,14 +214,14 @@ impl<'scene> OccludedAreaReference<'scene> {
             }
         }
         let sources = UnoccludedAreaReference::new(primitives, sources, preparation, cx)?;
-        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.v2");
+        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.v3");
         hash.update(&AREA_OCCLUSION_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&fs_ivl::decay::DECAY_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&sources.identity.0);
         let visibility = VisibilityIndex::prepare(primitives, &mut hash, cx)?
             .map_err(AreaOcclusionError::GeometryUnavailable)?;
         cx.checkpoint()?;
-        Ok(Self { sources, primitives, visibility, attenuation: PreparedAttenuation::vacuum(), identity: hash.finalize() })
+        Ok(Self { sources, primitives, visibility, attenuation: PreparedAttenuation::vacuum(), grid: None, identity: hash.finalize() })
     }
 
     /// Replace vacuum (or a previous medium) with the original homogeneous gray
@@ -200,11 +229,34 @@ impl<'scene> OccludedAreaReference<'scene> {
     /// rebuild geometry, modify the medium, or evaluate its phase law: scattered
     /// radiance INTO the receiver is explicitly omitted, not certified as zero.
     /// Coefficients are exact retained model inputs, not calibrated quantities.
-    /// Spatially/spectrally varying media require their native transport instead.
+    /// Replacing a physical-grid medium releases its prepared spectral metadata.
     #[must_use]
     pub fn with_homogeneous_medium(mut self, medium: &HomogeneousMedium) -> Self {
         self.attenuation = PreparedAttenuation::new(medium);
+        self.grid = None;
         self
+    }
+
+    /// Prepare direct extinction from the original homogeneous or physical-grid
+    /// medium together with the original emitter spectra. Each patch encloses
+    /// ALL source-to-receiver rays, integrates transmission by wavelength, and
+    /// shares its error budget with shadows. No field or optical map is copied.
+    /// The native cell limit and supplied node limit apply to each patch query;
+    /// a refusal returns no partial receiver. Emission and in-scattering remain
+    /// omitted even when the same medium also supplies them to the path tracer.
+    pub fn new_with_medium(
+        primitives: &'scene [Primitive], sources: &[PhotometricAreaEmitter],
+        medium: PhotometricMedium<'scene>, preparation: AreaReferenceBudget,
+        grid_budget: GridEnclosureBudget, cx: &Cx<'_>,
+    ) -> Result<Self, AreaOcclusionError> {
+        let mut result = Self::new(primitives, sources, preparation, cx)?;
+        match medium {
+            PhotometricMedium::Homogeneous(medium) => Ok(result.with_homogeneous_medium(&medium)),
+            medium => {
+                result.grid = Some(PreparedAreaGrid::new(medium, sources, grid_budget, cx)?);
+                Ok(result)
+            }
+        }
     }
 
     /// Bound one receiver. Progressive jobs reuse the bounded frontier allocation.
@@ -286,17 +338,21 @@ impl<'scene> OccludedAreaReference<'scene> {
         };
         let (lux, error) = midpoint_and_error(enclosed);
         if !error.is_finite() { return Err(AreaReferenceError::NumericalRange.into()); }
-        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.probe.v2");
+        let mut hash = DomainHasher::new("org.frankensim.photometry.occluded-area.probe.v3");
         hash.update(&self.identity.0);
-        self.attenuation.hash_into(&mut hash);
+        match &self.grid {
+            Some(grid) => grid.hash_into(&mut hash),
+            None => self.attenuation.hash_into(&mut hash),
+        }
         for value in [p.x, p.y, p.z, n.x, n.y, n.z, budget.ray_epsilon_m] { hash_float(&mut hash, value); }
         cx.checkpoint()?;
         Ok(OccludedAreaIlluminance { lux, numerical: NumericalCertificate::enclosure(enclosed.lo(), enclosed.hi()),
             numerical_error_bound_lux: error, requested_error_lux: budget.absolute_error_lux,
             termination, evaluated_patches: evaluations, uncertain_visibility_patches: uncertain,
             coarse_integral_patches: coarse, varying_transmittance_patches: varying,
-            absorption_per_m: self.attenuation.absorption_per_m(),
-            scattering_per_m: self.attenuation.scattering_per_m(),
+            absorption_per_m: self.grid.is_none().then(|| self.attenuation.absorption_per_m()),
+            scattering_per_m: self.grid.is_none().then(|| self.attenuation.scattering_per_m()),
+            physical_grid_identity: self.grid.as_ref().map(PreparedAreaGrid::identity),
             numerical_model_identity: hash.finalize(), total_error_bound_lux: None })
     }
 
@@ -325,7 +381,12 @@ impl<'scene> OccludedAreaReference<'scene> {
         let unattenuated = nonnegative(mul(face.luminance, factor));
         // Never shorten extinction by the visibility-only receiver exclusion.
         // A scalar centre-ray transmission is NOT an enclosure of a finite patch.
-        let value = if self.attenuation.is_vacuum() {
+        let value = if let Some(grid) = &self.grid {
+            let transmission = grid.photopic_transfer(cx, face.origin_face.0, origin, receiver)?;
+            patch.varying = transmission.lo() < transmission.hi() && unattenuated.hi() > 0.0;
+            if transmission == point(1.0) { unattenuated }
+            else { nonnegative(mul(unattenuated, transmission)) }
+        } else if self.attenuation.is_vacuum() {
             // Retain the original vacuum arithmetic and refinement sequence.
             unattenuated
         } else {

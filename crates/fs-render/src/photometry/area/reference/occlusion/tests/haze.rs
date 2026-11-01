@@ -35,7 +35,7 @@ fn clear_panel_refines_extinction_without_any_shadow_ambiguity() {
         assert!(fine.evaluated_patches>2 && fine.evaluated_patches<=16_384);
         assert!(fine.numerical.lo>=coarse.numerical.lo && fine.numerical.hi<=coarse.numerical.hi);
         assert_eq!(fine.numerical_model_identity,coarse.numerical_model_identity);
-        assert_eq!(fine.absorption_per_m,0.125); assert_eq!(fine.scattering_per_m,0.125);
+        assert_eq!(fine.absorption_per_m,Some(0.125)); assert_eq!(fine.scattering_per_m,Some(0.125));
         let depth=reference.illuminance(cx,&probe(0.0,0.0),AreaOcclusionBudget {
             max_depth:0,..AreaOcclusionBudget::default()
         }).unwrap();
@@ -152,10 +152,10 @@ fn rigid_placement_filters_and_cancel_resume_keep_haze_bounds_replayable() {
         full.results()[0].write_csv_row(0,&mut bytes).unwrap();
         let csv=String::from_utf8(bytes).unwrap();let rows:Vec<_>=csv.lines().collect();
         let fields:Vec<_>=rows[1].split(',').collect();
-        assert_eq!(rows[0].split(',').count(),17);assert_eq!(fields.len(),17);
+        assert_eq!(rows[0].split(',').count(),18);assert_eq!(fields.len(),18);
         assert_eq!(fields[1],"opaque-mesh-homogeneous-gray-direct-area");
         assert_eq!(&fields[12..14],&["0.125","0.125"]);
-        assert_eq!(fields[15],"unknown");assert_eq!(fields[16],"2");
+        assert_eq!(fields[15],"unknown");assert_eq!(fields[16],"3");
     });
 }
 

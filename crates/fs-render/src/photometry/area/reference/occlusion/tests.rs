@@ -183,8 +183,8 @@ fn numerical_goals_work_limits_and_output_errors_stay_explicit() {
         let r=reference.illuminance(cx,&probe(0.0,0.0),AreaOcclusionBudget {max_patch_evaluations:2,..AreaOcclusionBudget::default()}).unwrap();
         let mut csv=Vec::new();OccludedAreaIlluminance::write_csv_header(&mut csv).unwrap();r.write_csv_row(0,&mut csv).unwrap();
         let csv=String::from_utf8(csv).unwrap();let rows:Vec<_>=csv.lines().collect();
-        assert_eq!(rows[0].split(',').count(),17);assert_eq!(rows[1].split(',').count(),17);
-        assert!(rows[1].contains(",patch-budget,"));assert!(rows[1].ends_with(",unknown,2"));
+        assert_eq!(rows[0].split(',').count(),18);assert_eq!(rows[1].split(',').count(),18);
+        assert!(rows[1].contains(",patch-budget,"));assert!(rows[1].ends_with(",unknown,3,not-applicable"));
         struct Refuse;impl Write for Refuse {fn write(&mut self,_:&[u8])->io::Result<usize>{Err(io::Error::other("test sink"))}fn flush(&mut self)->io::Result<()>{Ok(())}}
         assert!(r.write_csv_row(0,&mut Refuse).is_err());
     });
@@ -224,3 +224,5 @@ fn native_shadowed_area_estimator_remains_a_separate_sampling_claim() {
 }
 
 mod haze;
+
+mod spectral_grid;
