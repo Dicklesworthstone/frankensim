@@ -146,6 +146,10 @@ pub enum PathTermination {
     /// Native single-scattering GGX rejection, not a material heat measurement.
     RejectedMicrofacet,
     Extinguished,
+    /// A straight continuation in a homogeneous medium provably misses every
+    /// native scene surface. Surviving power is measured at the retained
+    /// endpoint, not after hypothetical propagation to infinity.
+    Escaped,
     DistanceLimit,
     SurfaceLimit,
     /// A surviving molecular path exhausted its explicit collision budget.

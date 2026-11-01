@@ -433,7 +433,15 @@ impl CurvedPolarizedScene<'_> {
                 .max_contact_resolution_m
                 .max(segment.contact_resolution_m);
             let BoundaryTermination::Surface(witness) = segment.termination else {
-                result.termination = PathTermination::DistanceLimit;
+                result.termination = if self.straight_ray_escapes(
+                    result.medium,
+                    result.bundle.propagation().propagation().ray,
+                    settings.trace.event.surface_tolerance_m,
+                )? {
+                    PathTermination::Escaped
+                } else {
+                    PathTermination::DistanceLimit
+                };
                 break;
             };
             let instance = self

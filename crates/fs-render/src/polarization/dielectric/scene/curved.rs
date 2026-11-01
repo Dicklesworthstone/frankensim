@@ -29,6 +29,7 @@ use super::{
     admit_bindings, sample_boundary,
 };
 use crate::conductor::{CoherentDielectricCoating, ConductorOptics};
+use crate::charts::Ray;
 use crate::dielectric::{DielectricEvent, DielectricGlass};
 use crate::gradient_index::bundle::SecondOrderIndexField;
 use crate::gradient_index::event::{
@@ -340,6 +341,7 @@ impl<'a> CurvedPolarizedScene<'a> {
         {
             return Err(SceneError::InvalidSettings.into());
         }
+        settings.event.validate()?;
         if beam.medium()
             != self.medium_at(initial_medium, beam.ray().origin, beam.wavelength_nm())?
         {
@@ -369,6 +371,14 @@ impl<'a> CurvedPolarizedScene<'a> {
             cx.checkpoint()?;
             if result.beam.power().i == 0.0 {
                 result.termination = PathTermination::Extinguished;
+                break;
+            }
+            if self.straight_ray_escapes(
+                result.medium,
+                result.beam.ray(),
+                settings.event.surface_tolerance_m,
+            )? {
+                result.termination = PathTermination::Escaped;
                 break;
             }
             let remaining = settings.max_distance_m - result.traveled_m;
@@ -440,7 +450,15 @@ impl<'a> CurvedPolarizedScene<'a> {
                 .max_contact_resolution_m
                 .max(segment.contact_resolution_m);
             let BoundaryTermination::Surface(witness) = segment.termination else {
-                result.termination = PathTermination::DistanceLimit;
+                result.termination = if self.straight_ray_escapes(
+                    result.medium,
+                    result.beam.ray(),
+                    settings.event.surface_tolerance_m,
+                )? {
+                    PathTermination::Escaped
+                } else {
+                    PathTermination::DistanceLimit
+                };
                 break;
             };
             let instance = self
@@ -575,6 +593,18 @@ impl<'a> CurvedPolarizedScene<'a> {
         }
         cx.checkpoint()?;
         Ok(result)
+    }
+
+    fn straight_ray_escapes(
+        &self,
+        medium: usize,
+        ray: Ray,
+        tolerance_m: f64,
+    ) -> Result<bool, CurvedSceneError> {
+        // A zero gradient at one sample cannot establish a globally straight
+        // continuation. Only the explicitly homogeneous owner has that contract.
+        Ok(matches!(self.media[medium], SceneMedium::Homogeneous(_))
+            && self.boundaries.straight_ray_escapes(&ray, tolerance_m)?)
     }
 
     fn medium_identity(&self, index: usize) -> Option<ContentHash> {

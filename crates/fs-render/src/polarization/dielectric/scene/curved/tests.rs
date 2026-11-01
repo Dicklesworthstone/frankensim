@@ -95,6 +95,102 @@ fn frame() -> PolarizationFrame {
     PolarizationFrame::try_new(Vec3::new(0.0, 0.0, 1.0), Vec3::new(0.0, 1.0, 0.0)).unwrap()
 }
 
+#[test]
+fn g0_finite_receiver_misses_escape_but_short_ranges_remain_unresolved() {
+    with_cx(|cx, _| {
+        let geometry = InstanceScene::try_new(vec![plane(9, 1.0, 0.0, 0.1)]).unwrap();
+        let air = glass(1.0, 0.0);
+        let media = [SceneMedium::Homogeneous(&air)];
+        let scene = CurvedPolarizedScene::try_new(
+            cx, &geometry, &media,
+            vec![SurfaceBinding { object_id: 9, interaction: Interaction::Detector {
+                reference_axis: Vec3::new(0.0, 1.0, 0.0),
+            }}], 100_000,
+        ).unwrap();
+        let launch = |point| scene.launch_beam(
+            point, frame(), 550.0, 0, Stokes::unpolarized(1.0),
+        ).unwrap();
+        let outside = launch(Point3::new(1.0, 0.0, 0.0));
+        let escaped = scene.trace(cx, outside, 0, settings(), 1, 1).unwrap();
+        assert_eq!(escaped.termination(), PathTermination::Escaped);
+        assert_eq!(escaped.traveled_m(), 0.0);
+        assert_eq!(escaped.beam().power().i, 1.0);
+        // This ray crosses the detector's bounding box, but misses its finite
+        // triangular face. Only its propagated endpoint proves escape.
+        let missed = scene.trace(cx, launch(Point3::new(0.09, 0.09, 0.0)), 0,
+            settings(), 1, 2).unwrap();
+        assert_eq!(missed.termination(), PathTermination::Escaped);
+        assert!(missed.traveled_m() > 1.0);
+        let mut limited = settings();
+        limited.max_distance_m = 0.5;
+        let stopped = scene.trace(cx, launch(Point3::new(0.0, 0.0, 0.0)), 0,
+            limited, 1, 3).unwrap();
+        assert_eq!(stopped.termination(), PathTermination::DistanceLimit);
+        assert_eq!(stopped.beam().power().i, 1.0);
+        // Admission is not bypassed by a geometrically trivial escape.
+        limited.event.max_boundary_queries = 0;
+        assert_eq!(scene.trace(cx, outside, 0, limited, 1, 4),
+            Err(CurvedSceneError::Propagation(GradientIndexError::InvalidOptions)));
+        let stale = PolarizedBeam::try_new(outside.ray().origin, frame(), 550.0,
+            glass(1.5, 0.0), Stokes::unpolarized(1.0)).unwrap();
+        assert!(scene.trace(cx, stale, 0, settings(), 1, 4).is_err());
+
+        let bundle = scene.launch_bundle(outside.ray(), Vec3::new(0.0, 1.0, 0.0),
+            550.0, Stokes::unpolarized(1.0), 0).unwrap();
+        let propagated = scene.trace_bundle_transmitted(cx, bundle, 0,
+            bundle::CurvedBundleSettings { trace: settings(),
+                ..bundle::CurvedBundleSettings::default() }).unwrap();
+        assert_eq!(propagated.termination(), PathTermination::Escaped);
+        #[cfg(feature = "photometry")]
+        {
+            use crate::photometry::source::{SPECTRAL_BINS, wavelength_nm};
+            let mut meter = scene.power_meter(9).unwrap();
+            for bin in 0..SPECTRAL_BINS {
+                let launch = scene.launch_beam(outside.ray().origin, frame(),
+                    wavelength_nm(bin), 0, Stokes::unpolarized(1.0)).unwrap();
+                let path = scene.trace(cx, launch, 0, settings(), 1, bin as u64).unwrap();
+                meter.record_curved(bin, &path).unwrap();
+            }
+            let reading = meter.reading().unwrap().require_complete().unwrap();
+            assert_eq!(reading.radiant_stokes_w().i, 0.0);
+            assert_eq!(reading.detected_paths(), 0);
+            assert_eq!(reading.launched_paths(), SPECTRAL_BINS as u64);
+        }
+    });
+}
+
+#[test]
+fn g1_gradient_medium_can_bend_back_from_a_straight_line_escape() {
+    with_cx(|cx, _| {
+        let receiver_x = 1.2 / 0.2 * ((0.2_f64 / 1.2).cosh() - 1.0);
+        let geometry = InstanceScene::try_new(vec![plane(9, 1.0, receiver_x, 0.02)]).unwrap();
+        let field = SlabField;
+        let media = [SceneMedium::GradientIndex { field: &field, identity: ContentHash([23; 32]) }];
+        let detector = vec![SurfaceBinding { object_id: 9, interaction: Interaction::Detector {
+            reference_axis: Vec3::new(0.0, 1.0, 0.0),
+        }}];
+        let scene = CurvedPolarizedScene::try_new(cx, &geometry, &media, detector.clone(),
+            100_000).unwrap();
+        let input = scene.launch_beam(Point3::new(0.0, 0.0, 0.0), frame(), 550.0,
+            0, Stokes::unpolarized(1.0)).unwrap();
+        assert!(scene.boundaries.straight_ray_escapes(&input.ray(), 1e-7).unwrap());
+        let curved = scene.trace(cx, input, 0, settings(), 1, 1).unwrap();
+        assert_eq!(curved.termination(), PathTermination::Detected);
+        assert!((curved.beam().ray().origin.x - receiver_x).abs() < 1e-6);
+
+        // Local samples do not grant the SceneMedium::Homogeneous contract.
+        let air = glass(1.0, 0.0);
+        let uniform = HomogeneousIndexField::new(&air);
+        let borrowed = [SceneMedium::GradientIndex { field: &uniform, identity: ContentHash([24; 32]) }];
+        let unresolved_scene = CurvedPolarizedScene::try_new(cx, &geometry, &borrowed,
+            detector, 100_000).unwrap();
+        let input = unresolved_scene.launch_beam(Point3::new(0.0, 0.0, 0.0), frame(),
+            550.0, 0, Stokes::unpolarized(1.0)).unwrap();
+        let unresolved = unresolved_scene.trace(cx, input, 0, settings(), 1, 1).unwrap();
+        assert_eq!(unresolved.termination(), PathTermination::DistanceLimit);
+    });
+}
+
 struct SlabField;
 impl GradientIndexField for SlabField {
     fn sample(&self, p: Point3, _: f64) -> Result<GradientIndexSample, GradientIndexError> {

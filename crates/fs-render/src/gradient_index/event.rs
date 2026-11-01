@@ -260,7 +260,7 @@ impl Default for GradientEventOptions {
 }
 
 impl GradientEventOptions {
-    fn validate(self) -> Result<(), GradientIndexError> {
+    pub(crate) fn validate(self) -> Result<(), GradientIndexError> {
         self.integration.validate()?;
         if !self.surface_tolerance_m.is_finite()
             || self.surface_tolerance_m <= 0.0

@@ -511,6 +511,56 @@ impl<'scene> BoundaryGeometry<'scene> {
         self.instances
     }
 
+    /// Prove that a straight forward halfline cannot contact this scene.
+    ///
+    /// The prepared root encloses every transformed native surface. Outward
+    /// interval slabs enclose every possible nonnegative intersection parameter;
+    /// only disjoint slabs prove escape. The caller supplies the contact collar
+    /// used by its event solver, so near misses inside that collar stay unresolved.
+    /// Overflow, grazing and overlapping enclosures conservatively return false.
+    /// This constant-work geometric test says nothing about a ray that can bend
+    /// or scatter before reaching a surface.
+    pub fn straight_ray_escapes(
+        &self,
+        ray: &Ray,
+        contact_tolerance_m: f64,
+    ) -> Result<bool, ProximityError> {
+        let origin = point_array(ray.origin);
+        let direction = [ray.dir.x, ray.dir.y, ray.dir.z];
+        if origin.iter().chain(&direction).any(|v| !v.is_finite())
+            || direction.iter().all(|&v| v == 0.0)
+            || !contact_tolerance_m.is_finite()
+            || contact_tolerance_m < 0.0
+        {
+            return Err(ProximityError::InvalidInput);
+        }
+        let Some(root) = self.nodes.first() else {
+            return Ok(true);
+        };
+        let lower = point_array(root.bounds.min);
+        let upper = point_array(root.bounds.max);
+        let collar = Interval::new(-contact_tolerance_m, contact_tolerance_m);
+        let mut enter = 0.0_f64;
+        let mut exit = f64::INFINITY;
+        for axis in 0..3 {
+            let slab = Interval::new(lower[axis], upper[axis]) + collar;
+            if direction[axis] == 0.0 {
+                if origin[axis] < slab.lo() || origin[axis] > slab.hi() {
+                    return Ok(true);
+                }
+            } else {
+                let parameter = (slab - Interval::point(origin[axis]))
+                    / Interval::point(direction[axis]);
+                enter = enter.max(parameter.lo());
+                exit = exit.min(parameter.hi());
+                if enter > exit {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
     fn nearest(
         &self,
         cx: &Cx<'_>,
@@ -1225,6 +1275,80 @@ mod tests {
             transform,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn g0_straight_escape_uses_outward_slabs_and_retains_grazing_uncertainty() {
+        with_cx(|cx, _| {
+            let objects = [instance(
+                1,
+                SharedGeometry::mesh(triangle()),
+                RigidTransform::identity(),
+            )];
+            let geometry = BoundaryGeometry::try_new(cx, &objects, 100_000).unwrap();
+            let ray = |x, z, dx, dz| Ray {
+                origin: Point3::new(x, 0.0, z),
+                dir: Vec3::new(dx, 0.0, dz),
+            };
+            for miss in [
+                ray(2.0, -1.0, 0.0, 1.0),
+                ray(0.0, -1.0, 0.0, -1.0),
+                ray(2.0, -1.0, -0.1, 1.0),
+                ray(-2.0, -1.0, 1e-310, 1.0),
+            ] {
+                assert!(geometry.straight_ray_escapes(&miss, 0.0).unwrap());
+            }
+            for possible in [
+                ray(0.0, -1.0, 0.0, 1.0),
+                ray(2.0, -1.0, -1.0, 1.0),
+                ray(1.0, -1.0, -0.0, 1.0),
+                // A representable nonzero direction is not a parallel axis,
+                // even when the intersection parameter overflows binary64.
+                ray(0.0, -1.0, 0.0, 1e-310),
+            ] {
+                assert!(!geometry.straight_ray_escapes(&possible, 0.0).unwrap());
+            }
+            let collar = ray(1.0 + 5e-8, -1.0, 0.0, 1.0);
+            assert!(geometry.straight_ray_escapes(&collar, 0.0).unwrap());
+            assert!(!geometry.straight_ray_escapes(&collar, 1e-7).unwrap());
+            assert_eq!(
+                geometry.straight_ray_escapes(&ray(0.0, 0.0, 0.0, 0.0), 0.0),
+                Err(ProximityError::InvalidInput)
+            );
+            assert_eq!(
+                geometry.straight_ray_escapes(&collar, f64::NAN),
+                Err(ProximityError::InvalidInput)
+            );
+        });
+    }
+
+    #[test]
+    fn g3_transformed_support_and_empty_scene_keep_escape_conservative() {
+        with_cx(|cx, _| {
+            let transform = RigidTransform::try_new(
+                [0.0, 0.37_f64.sin(), 0.0, 0.37_f64.cos()],
+                [1e9, -2e9, 3e9],
+            )
+            .unwrap();
+            let objects = [instance(1, SharedGeometry::mesh(triangle()), transform)];
+            let geometry = BoundaryGeometry::try_new(cx, &objects, 100_000).unwrap();
+            for point in [
+                Point3::new(-1.0, -1.0, 0.0),
+                Point3::new(1.0, -1.0, 0.0),
+                Point3::new(0.0, 1.0, 0.0),
+                Point3::new(0.0, 0.0, 0.0),
+            ] {
+                let hit = transform.transform_point(point);
+                let direction = transform.transform_vector(Vec3::new(0.0, 0.0, 1.0));
+                let ray = Ray { origin: hit.offset(direction.scale(-2.0)), dir: direction };
+                assert!(!geometry.straight_ray_escapes(&ray, 1e-5).unwrap());
+            }
+            let empty = BoundaryGeometry::try_new(cx, &[], 100).unwrap();
+            assert!(empty.straight_ray_escapes(&Ray {
+                origin: Point3::new(0.0, 0.0, 0.0),
+                dir: Vec3::new(0.0, 0.0, 1.0),
+            }, 0.0).unwrap());
+        });
     }
 
     #[test]

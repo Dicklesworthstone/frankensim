@@ -12,8 +12,10 @@
 //! lm/W factors. Missing spectral bins are refused, not silently made black.
 //!
 //! Limited paths contribute no *detected* power yet and remain explicitly
-//! unresolved in the report; this is not an error bound. Ideal analyzers act
-//! per ray in the detector's projected frame, not through a finite-NA lens or
+//! unresolved in the report; this is not an error bound.
+//! A proved homogeneous escape contributes zero received power without being
+//! confused with a surviving path stopped by its distance or event budget.
+//! Ideal analyzers act per ray in the detector's projected frame, not through a finite-NA lens or
 //! a solved angle-dependent sensor/polarizer. Monte Carlo uncertainty, omitted
 //! wavelengths and geometry/model errors are not certified here.
 
@@ -196,6 +198,7 @@ impl SpectralPowerMeter {
             }
             PathTermination::Opaque
             | PathTermination::RejectedMicrofacet
+            | PathTermination::Escaped
             | PathTermination::Extinguished => {}
         }
         self.bins[bin] = next;
