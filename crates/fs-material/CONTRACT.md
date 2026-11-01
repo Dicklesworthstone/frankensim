@@ -8960,3 +8960,45 @@ G0/G1/G3/G4 cases exercise independent binary cubic/fugacity isochoric heating
 and cooling through phase change, partitioned heat/extensive scaling,
 independent species-datum invariance, conserved initialization, unrepresentable
 inputs, exact no-work rest, work refusal and atomic final-cancellation replay.
+
+## Constant-pressure mixture phase change with mechanical work
+
+`nonideal::flash::parcel::isobaric::IsobaricMixtureEquilibriumParcel` evolves a
+closed original mixture against a prescribed constant quasistatic pressure
+load. PT or original-reference PH initialization retains the complete model,
+mass and accepted phase state. Volume is the original additive phase volume;
+it may change while total feed composition and mass remain fixed.
+
+Heat updates reuse the existing phase-aware PH increment owner. The original
+source enthalpy increment equals supplied heat. Original NASA internal-energy
+integration and phase U departures independently supply Delta U; boundary
+work is the fixed pressure times the actual published volume change. Both
+Delta H-Q and Delta U+p Delta V-Q must pass the explicit joule tolerance
+before state and volume are updated together. Sensible and latent energy
+remain within the same source potential, with no additional latent source.
+Species formation and entropy datums cancel before increment rounding. A
+small nonzero heat input tightens the inner enthalpy tolerance so a coarse
+caller tolerance cannot erase it.
+
+Reports retain signed heat, source enthalpy/internal-energy increments,
+expansion work, volume and entropy changes, both residuals, actual PT work and
+the original conservative EOS bound. Positive work leaves the mixture.
+Zero heat preserves all accepted bits and performs no phase solve. Invalid or
+unrepresentable inventory/heat, source/phase failures, exhausted work and
+final cancellation leave the entire parcel unchanged. Cloning retains the
+original immutable source and accepted state for deterministic retry.
+
+This is a spatially uniform, closed, constant-pressure mechanical-equilibrium
+consumer. It does not integrate piston inertia, varying external pressure,
+heat-transfer rates, phase-relaxation kinetics, chemical reactions, slip or
+acoustics. Entropy change alone does not determine entropy production without
+the heat reservoir. Original finite phase-screen evidence is retained without
+promotion to a global Gibbs-minimum or measured-mixture accuracy certificate.
+
+The existing `nonideal_flash` target adds G0/G1/G3/G4 cases for independent
+binary cubic/fugacity states across both phase boundaries; original Delta U,
+Delta H and expansion-work closure; heating/cooling return paths;
+partitioned heat and extensive scaling; large independent species datums;
+small heat under coarse tolerance; initialization/refusal; exact rest; work
+exhaustion; and atomic final-cancellation replay. Synthetic NASA calorics are
+constitutive numerical tests, not experimental fluid validation.

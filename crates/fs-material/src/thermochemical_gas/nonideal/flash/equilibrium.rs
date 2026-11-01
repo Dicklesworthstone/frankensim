@@ -197,6 +197,35 @@ impl PhaseEnthalpySolution {
 }
 
 impl ThermochemicalPengRobinsonModel {
+    // Consumers retain both original states from this same immutable model.
+    // Integrate the NASA U increment before adding phase departure changes;
+    // subtracting absolute U would lose small heat under large species datums.
+    pub(super) fn phase_internal_energy_change(
+        &self,
+        initial: &ResolvedThermochemicalPhaseState,
+        final_state: &ResolvedThermochemicalPhaseState,
+    ) -> Result<f64, E> {
+        let ideal = self
+            .source()
+            .thermodynamics()
+            .specific_internal_energy_change(
+                initial.sample.temperature,
+                final_state.sample.temperature,
+            )
+            .map_err(|error| failure("original phase internal-energy increment", error))?
+            .value();
+        let change = ideal
+            + (final_state.sample.residual_u - initial.sample.residual_u)
+                / self.mechanics().molar_mass().value();
+        if change.is_finite() {
+            Ok(change)
+        } else {
+            Err(E::Invalid(
+                "original phase internal-energy increment overflow",
+            ))
+        }
+    }
+
     /// Resolve homogeneous or separated PT calorics using the original two-search
     /// screen. No absence-of-split fallback or global-minimum claim is made.
     pub fn evaluate_phase_equilibrium(

@@ -12,6 +12,9 @@ use super::{E, ThermochemicalPengRobinsonModel, poll, positive};
 use fs_qty::{Pressure, Temperature};
 use fs_thermochem::eos::peng_robinson::phase_screen::PengRobinsonPhaseScreenOptionsV1;
 
+/// Closed phase-changing inventories against a constant pressure load.
+pub mod isobaric;
+
 /// One accepted closed-vessel heat increment and its independent source balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureEquilibriumHeatStep {
