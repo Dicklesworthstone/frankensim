@@ -2558,7 +2558,8 @@ complete mode/cell/pole counts and sampled complex/resistance fit errors.
 `SIDES` is one or two independent infinite-baffle half-spaces; a body with a
 modeled interior cavity requires one exterior side. Supply an odd 33–257
 frequency count. The band must cover all retained free-body frequencies, and
-the fitter's highest 8x off-band storage poles must resolve on the mechanical
+the fitter's highest off-band storage pole (8x the band top, or 16/1.15 times
+its resonator spacing when that is higher) must resolve on the mechanical
 clock. All declared cells, fitted poles and existing material histories count
 against the original work and exact-state limits; none are silently dropped.
 The complete fit keeps the shared 5% peak/2% RMS complex and 10% peak/5% RMS

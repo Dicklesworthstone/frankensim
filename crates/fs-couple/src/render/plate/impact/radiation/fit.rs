@@ -18,6 +18,9 @@ pub const MAX_RESOLVED_TERMS:usize=512;
 /// Resolved resonators continue this many spacings past the band top, so the
 /// fitted endpoint is not a truncation edge of the representation.
 const GUARD_TERMS:usize=6;
+/// The resolved dictionary's off-band storage terms, as multiples of
+/// [`storage_base`]. They are always the dictionary's last terms.
+const STORAGE_FACTORS:[f64;7]=[1.15,1.3,1.6,2.,3.,5.,8.];
 
 pub struct Fit {
     pub model:Model,
@@ -56,13 +59,14 @@ fn dictionary(low:f64,high:f64)->Vec<(f64,f64)> {
 }
 /// In-band resonators every `spacing` rad/s from the band bottom, each with
 /// half-power bandwidth 2*spacing (zeta = spacing/omega, at most 0.5), continued
-/// GUARD_TERMS past the top; storage just above the band for the frequency-
+/// GUARD_TERMS past the top; storage above the band for the frequency-
 /// dependent added mass; and the shared sub-band and high-band terms. The
-/// storage terms carry the same travel-time bandwidth as the in-band
-/// resonators: the kernel holds no delay longer than D/c, so no term may ring
-/// longer than they do. Lossless storage did: above a board whose modes stop
-/// at the band top, each such pole was an undamped mode of the whole system,
+/// storage terms carry the travel-time bandwidth exactly, zeta*omega = spacing:
+/// the kernel holds no delay longer than D/c, so no storage term may ring
+/// longer than that. Lossless storage did: above a board whose modes stop at
+/// the band top, each such pole was an undamped mode of the whole system,
 /// heard as steady lines at 1.15..8x the top in every air-loaded piano render.
+/// The ladder starts at [`storage_base`], so that damping never needs a clamp.
 fn resolved_dictionary(low:f64,high:f64,spacing:f64)->Vec<(f64,f64)> {
     let mut poles=Vec::new();
     for &factor in &[0.35,0.55,0.80] {poles.push((low*factor,0.25));}
@@ -73,8 +77,32 @@ fn resolved_dictionary(low:f64,high:f64,spacing:f64)->Vec<(f64,f64)> {
     for j in 1..=6 {
         poles.push((det::exp(det::ln(high)+(det::ln(8.*high)-det::ln(high))*f64::from(j)/6.),0.25));
     }
-    for &factor in &[1.15,1.3,1.6,2.,3.,5.,8.] {let w=factor*high;poles.push((w,(spacing/w).min(0.5)));}
+    let base=storage_base(high,spacing);
+    for &factor in &STORAGE_FACTORS {let w=factor*base;poles.push((w,spacing/w));}
     poles
+}
+/// The storage ladder starts at 1.15x the band top or at twice the spacing,
+/// whichever is higher: 2*spacing is the lowest frequency at which
+/// zeta*omega = spacing holds with zeta <= 1/2. Below it a storage term is
+/// mostly resistance in band. A compact load's resistance is nearly rank one
+/// while its mass is not, so that resistance lands in a direction that has
+/// almost none. When the band top already clears it (every board-scale
+/// radiator), the base is `high` itself and the ladder is unchanged bit for bit.
+fn storage_base(high:f64,spacing:f64)->f64 {high.max(2.*spacing/1.15)}
+/// Every storage term must decay at least at the travel-time rate, and be at
+/// most critically damped so that zeta*omega IS its slowest decay rate. A
+/// lossless or clamped storage term refuses instead of ringing. The quotient
+/// zeta = spacing/omega, its product with omega and the threshold each round
+/// once: (1-u)^2/(1+u) >= 1-3u, and 1-2*EPSILON = 1-4u is exact.
+fn admit_storage(poles:&[(f64,f64)],spacing:f64)->Result<(),String> {
+    let first=poles.len().checked_sub(STORAGE_FACTORS.len())
+        .ok_or_else(||"resolved load fit dictionary lacks its storage terms".to_string())?;
+    for &(omega,zeta) in &poles[first..] {
+        if !(zeta<=1.) || !(zeta*omega>=spacing*(1.-2.*f64::EPSILON)) {
+            return Err(format!("resolved load fit refused: storage pole at {omega:.1} rad/s decays at {:.1} rad/s, slower than its {spacing:.1} rad/s travel-time spacing",zeta*omega));
+        }
+    }
+    Ok(())
 }
 fn normalization(p:(f64,f64))->f64 {if p.1==0. {p.0} else {2.*p.1*p.0}}
 fn kernel(w:f64,p:(f64,f64))->C64 {
@@ -263,6 +291,7 @@ fn admitted_resolved_dictionary(omega:&[f64],data:&[Vec<C64>],ports:usize,spacin
     if poles.len()>MAX_RESOLVED_TERMS {
         return Err(format!("resolved load fit needs {} terms, above its {MAX_RESOLVED_TERMS}-term ceiling",poles.len()));
     }
+    admit_storage(&poles,spacing)?;
     Ok(poles)
 }
 
@@ -481,6 +510,9 @@ mod tests {
             .map(|&w| surface.power_consistent_impedance(w, medium).unwrap()).collect();
         assert!(fit(&omega, &data, ports).is_err(), "the fixed 32-term dictionary should not resolve a 2.4 m travel time");
         let spacing = TAU * medium.sound_speed / (6.0 * surface.maximum_distance_m());
+        // The storage rule leaves this board-scale dictionary as 88b352677 built it, bit for bit.
+        assert_eq!(bits(&resolved_dictionary(omega[0], omega[128], spacing)),
+            bits(&landed_88b352677(omega[0], omega[128], spacing)));
         let resolved = fit_resolved(&omega, &data, ports, spacing).unwrap();
         assert!(resolved.rms_error <= 0.02 && resolved.resistance_rms_error <= 0.05);
         // No term at or above the band outlasts the travel time: a lossless off-band pole rang for ever.
@@ -491,6 +523,44 @@ mod tests {
         let sparse_data: Vec<Vec<C64>> = sparse.iter()
             .map(|&w| surface.power_consistent_impedance(w, medium).unwrap()).collect();
         assert!(fit_resolved(&sparse, &sparse_data, ports, spacing).is_err());
+    }
+    /// resolved_dictionary as 88b352677 built it: storage at factor*high, zeta clamped at 1/2.
+    fn landed_88b352677(low:f64,high:f64,spacing:f64)->Vec<(f64,f64)> {
+        let mut poles=Vec::new();
+        for &factor in &[0.35,0.55,0.80] {poles.push((low*factor,0.25));}
+        let in_band=((high-low)/spacing).floor() as usize;
+        for j in 0..=in_band+GUARD_TERMS {let w=low+spacing*j as f64;poles.push((w,(spacing/w).min(0.5)));}
+        for j in 1..=6 {
+            poles.push((det::exp(det::ln(high)+(det::ln(8.*high)-det::ln(high))*f64::from(j)/6.),0.25));
+        }
+        for &factor in &[1.15,1.3,1.6,2.,3.,5.,8.] {let w=factor*high;poles.push((w,(spacing/w).min(0.5)));}
+        poles
+    }
+    fn bits(poles:&[(f64,f64)])->Vec<(u64,u64)> {poles.iter().map(|&(w,z)|(w.to_bits(),z.to_bits())).collect()}
+    #[test]
+    fn storage_decays_at_the_spacing_without_a_clamp_and_lossless_storage_refuses() {
+        use std::f64::consts::TAU;
+        // The production piano board: band 90-2620 Hz, 2.355 m extent, 24.34 Hz spacing
+        // (its render reports). Its dictionary is unchanged bit for bit.
+        let (low,high,spacing)=(TAU*90.,TAU*2620.,TAU*24.34);
+        assert_eq!(bits(&resolved_dictionary(low,high,spacing)),bits(&landed_88b352677(low,high,spacing)));
+        // The shared cavity's compact exterior: the spacing is its whole 200-1800 rad/s band.
+        // The clamp held 1.15..1.6x the top at zeta*omega = 1035..1440 rad/s, below 1600.
+        let (low,high,spacing)=(200.,1800.,1600.);
+        assert!(admit_storage(&landed_88b352677(low,high,spacing),spacing).is_err(),"clamped storage must refuse");
+        let poles=resolved_dictionary(low,high,spacing);
+        admit_storage(&poles,spacing).unwrap();
+        let first=poles.len()-STORAGE_FACTORS.len();
+        assert_eq!(poles[first],(2.*spacing,0.5));
+        for &(w,z) in &poles[first..] {
+            assert!(z<=0.5 && z*w>=spacing*(1.-2.*f64::EPSILON) && w>=1.15*high,"storage {w} rad/s, zeta {z}");
+        }
+        // Planted negatives: one lossless storage pole, one damped just below the
+        // travel-time rate, and one overdamped (its slowest decay is below zeta*omega).
+        for (k,zeta) in [(poles.len()-1,0.),(first,0.5*(1.-1e-9)),(first,2.)] {
+            let mut planted=poles.clone();planted[k].1=zeta;
+            assert!(admit_storage(&planted,spacing).is_err(),"storage pole {k} with zeta {zeta} was admitted");
+        }
     }
     #[test]
     fn held_out_active_and_missing_loads_cannot_be_silently_repaired() {
