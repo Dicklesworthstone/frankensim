@@ -2,6 +2,8 @@
 mod support;
 #[path = "nonmatching_contact/temperature.rs"]
 mod temperature;
+#[path = "nonmatching_contact/steady.rs"]
+mod steady;
 use support::with_cx;
 use fs_conduction::*;
 use fs_conduction::fixtures::{box_grid,on_box_face};

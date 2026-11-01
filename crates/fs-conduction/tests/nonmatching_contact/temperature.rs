@@ -10,7 +10,7 @@ fn source_value(a: f64, b: f64) -> f64 {
     0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0
 }
 
-fn source_point() -> QueryPoint {
+pub(super) fn source_point() -> QueryPoint {
     use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
     let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
         QuantityKind::AbsoluteTemperature, ValueForm::Static,
@@ -21,7 +21,7 @@ fn source_point() -> QueryPoint {
             fs_qty::QuantitySpec::dimensional(fs_qty::Pressure::DIMS), 1e6).unwrap()
 }
 
-fn source_card(scale: f64, reverse: bool) -> InterfaceSystemCard {
+pub(super) fn source_card(scale: f64, reverse: bool) -> InterfaceSystemCard {
     let dims = AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
     let mut claims = ClaimSet::new();
     claims.insert_claim(PropertyClaim {
@@ -61,7 +61,7 @@ fn law<'a>(card: &'a InterfaceSystemCard, a: Vec<usize>, b: Vec<usize>,
         SelectionPolicy::SingleClaimOnly, options()).unwrap()
 }
 
-fn bind<'m,'c>(cx: &fs_exec::Cx<'_>, mesh: &'m ConductionMesh, bc: &ThermalBoundary,
+pub(super) fn bind<'m,'c>(cx: &fs_exec::Cx<'_>, mesh: &'m ConductionMesh, bc: &ThermalBoundary,
     card: &'c InterfaceSystemCard, a: Vec<usize>, b: Vec<usize>, reverse: bool,
 ) -> TemperatureContacts<'m,'c> {
     TemperatureContacts::with_nonmatching(cx,mesh,bc,vec![],vec![],

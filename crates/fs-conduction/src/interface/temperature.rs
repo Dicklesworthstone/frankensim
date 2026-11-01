@@ -6,6 +6,8 @@
 //! Frozen snapshots are NOT complete nonlinear-contact tangents or adjoints.
 
 pub mod capacity;
+/// Steady source-backed contact coupling with physical watt residuals.
+pub mod steady;
 /// Primary-enthalpy contact evolution, including latent phase states.
 pub mod enthalpy;
 /// Complete source-backed contact temperature Jacobian and its transpose.

@@ -29,10 +29,11 @@ pub struct ContactCapacityStep {
 }
 
 impl TemperatureContacts<'_, '_> {
-    /// Advance source-backed temperature-dependent matching contacts and k(T).
+    /// Advance source-backed temperature-dependent contact laws and k(T).
     ///
     /// Every inner linear/Newton solve receives the same immutable `old` field.
-    /// Contact is evaluated at each face pair's two-trace mean. The candidate
+    /// Matching laws use their declared face-mean coordinates; nonmatching
+    /// laws use both local traces at retained overlap quadrature. The candidate
     /// passes only when its COMPLETE nodal balance, reassembled with freshly
     /// queried endpoint resistances, meets the original absolute joule target
     /// and the existing independent energy gate. Opposing local heat errors

@@ -7,7 +7,7 @@
 //! No perfect contact, face ownership, material data or gap closure is inferred.
 mod matching;
 pub mod nonmatching;
-/// Source-backed temperature-dependent matching-contact advancement.
+/// Source-backed temperature-dependent matching and nonmatching contacts.
 pub mod temperature;
 /// Source-backed contact-area exchange on shared finite thermal inputs.
 pub mod lumped_pair;
@@ -157,7 +157,9 @@ impl ThermalInterfaces {
     }
     /// Matching: per-face-pair values in the original order. Nonmatching:
     /// resistance inherited from the original A face for each common-refinement
-    /// integration triangle, including exactly matched delegated pieces.
+    /// integration triangle, including exactly matched delegated pieces. A
+    /// pointwise temperature law returns its flattened triangle/point values;
+    /// its evaluation's quadrature_states retains the corresponding sources.
     #[must_use]
     pub fn surface_face_resistances(&self,name:&str)->Option<Vec<f64>> {
         self.nonmatching.iter().find(|s|s.name==name).map(nonmatching::Bound::resistances)

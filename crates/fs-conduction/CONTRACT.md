@@ -19,6 +19,34 @@ static resistance, not a nonlinear nonmatching temperature or pressure law.
 Focused G1/G3 fixtures cover a heterogeneous bondline on independent meshes,
 uniform-map parity, conservation, delegation and resistance-scale contraction.
 
+## Steady source-backed thermal contact
+
+`TemperatureContacts::solve_steady` couples the original steady spatial solver
+to the same pinned matching or nonmatching contact laws. The initial full
+Kelvin field is explicit; prescribed temperatures replace its fixed entries.
+Every counted inner solve uses the relaxed query field as a warm start and
+retains heterogeneous and nonlinear bulk conductivity through the original
+conduction owner. Constitutive trials do not create physical time steps.
+
+Acceptance freshly queries the source at the unchanged candidate, assembles
+its complete physical operator and checks the Euclidean free-node residual
+in watts together with the independent whole-domain heat balance. Opposing
+local contact defects cannot pass through cancellation of total heat. The
+returned physical source states, free-node residuals, reservoir reactions and
+Robin reports describe that accepted field; the retained inner report remains
+explicitly tied to its applied contact coefficients. No uncounted replacement
+solve, tolerance widening or caller-state mutation occurs on refusal.
+
+`SteadyContactConfig` declares contact iterations, relaxation, a watt residual
+target and a separate watt heat-closure tolerance. Counted nonlinear/Krylov
+work is bounded by the existing inner solver limits and the contact allowance.
+This is a bounded fixed point, with no claim of arbitrary-law convergence,
+uniqueness or a steady coupled adjoint. Pure-Neumann and fully prescribed
+limitations remain those of the existing spatial solver. Analytical slab
+regressions cover matching/nonmatching traces, Dirichlet/Robin reservoirs,
+source support and a frozen-contact candidate with cancelling global heat
+but an unacceptable local residual.
+
 ## Temperature-dependent source laws on nonmatching thermal interfaces
 
 `TemperatureContact::new_nonmatching` assigns an ordered source law to two
