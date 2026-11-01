@@ -87,6 +87,8 @@ fs-evidence = { path = "../fs-evidence" }
 workspace = true
 
 [features]
+# Coherent finite-film absorption on the original spatial thermal timeline.
+layered-wave-heating = ["fs-em/plane-wave"]
 # Bounded single-bubble dynamics coupled to native compact acoustic observation.
 cavitation = ["dep:fs-flux", "fs-flux/cavitation"]
 # Frontier rod-motion composition; native conformance remains explicitly gated.

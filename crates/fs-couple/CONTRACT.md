@@ -20229,3 +20229,56 @@ geometry/force coupling, a thermal entropy model, a switching impulse solver,
 or a new source fit. Existing graph/coordinate capacities bound allocations
 and matrix work. Cancellation and native arithmetic/domain refusal publish no
 partial charge, flux, material or contact update.
+
+## Coherent finite-film absorption on native layered thermal cells
+
+The opt-in `layered-wave-heating` feature exposes `LayeredWaveHeating` and
+`PreparedLayeredWaveHeating`. They bind the existing `PlanarDielectricLayers`
+Maxwell owner to one original `BoundLayeredThermalBody`; no second optical or
+thermal solver is introduced. One source-backed `DielectricResponse` per
+original material layer must retain its conductivity/capacity material-card
+identity and agree on shared fixed query coordinates and quantity conventions.
+The original optical state and selected constitutive laws remain accessible.
+Matching cards do not establish an experimentally matched specimen.
+
+Each optical layer is divided at the original thermal cell faces with the SAME
+epsilon, mu and Debye response in each subdivision. These equal-medium
+interfaces are identities. The original positive even/odd slab loss modes
+integrate absorption in each whole control volume, including the standing-wave
+cross terms. No depth quadrature, uniform partition of whole-layer heat,
+diagonal source-power approximation, or incoming-minus-outgoing heat estimate
+is used. Ordered cell IDs, axial thickness and physical area come only from the
+thermal body. Preparation refuses more than the native 64 optical films before
+allocating; it does not silently coarsen a finer thermal grid.
+
+Both face sources use the same angular frequency, transverse wavevector,
+polarization and exp(+i omega t) clock. Inputs are peak tangential E [V/m].
+Coherent vectors, explicit second-moment factors C=B B*, and explicitly
+independent face sources reuse one prepared field/loss operator. Factors retain
+their own mode and layer-mode work limits. Cell power queries allocate nothing
+and publish their caller-provided output only after all arithmetic and
+cancellation checks. These are spectral-line/time-ensemble quantities, not
+PSD/Hz or an inferred model of unknown coherence.
+
+`advance_to` deposits area times each normal absorbed power density times the
+physical interval exactly once through `LayeredThermalStep::with_cell_energy_j`.
+Maxwell already includes the peak-phasor factor 1/2; coupling does not apply it
+again. The native implicit thermal solver retains its nonlinear conductivity,
+capacity, contacts, original sources/reservoirs, events, material-law admission
+and energy acceptance. The endpoint keeps the authored sources unchanged.
+Reflected/transmitted energy is reported separately and never becomes heat.
+The returned optical account records its additional cell energy; the native
+thermal audit also includes the original external heat channels. Any failed
+source query, nonlinear trial, wrong timeline binding or cancellation leaves
+the accepted thermal history unchanged.
+
+Optical coefficients and illumination statistics are held over each explicitly
+requested interval. This is a fixed-geometry, frozen-optical-coefficient
+approximation: temperature-dependent optical refresh remains caller-owned;
+implicit thermo-optic feedback, phase change, thermal emission, broadband
+emissivity, mechanical feedback and measured-material accuracy are not claimed.
+Five focused test groups in `tests/layered_wave_heating.rs` cover split/unsplit
+film agreement, full source coherence, independent analytical weak-loss cell
+integrals, actual native enthalpy/temperature with authored heating, reversal
+and area scaling, opaque two-face heating, and transactional source/work/timeline
+refusals. Numerical execution is a separate validation step.

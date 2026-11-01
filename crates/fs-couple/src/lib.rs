@@ -136,6 +136,9 @@ pub mod thin_plate;
 pub mod shear_shell;
 /// Source-resolved layer temperatures driving compatible native shell deformation.
 pub mod laminate_thermal;
+/// Coherent finite-film absorption deposited once into original thermal cells.
+#[cfg(feature = "layered-wave-heating")]
+pub mod layered_wave_heating;
 pub mod tract;
 /// Source-bound dry sliding work and finite-body temperature feedback.
 pub mod tribothermal;
