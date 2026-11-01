@@ -25,10 +25,11 @@ use super::{
     CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
     CurvedVolumeFlight, MAX_POLARIZED_PATH_EVENTS, PolarizedBeam, SceneError,
 };
+use crate::volumes::VolumeGrid;
 use crate::volumes::transport::VolumeTransportError;
 use crate::volumes::transport::scattering::polarized::PolarizedScatteringError;
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, PhaseFunction};
-use fs_blake3::ContentHash;
+use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::Cx;
 use fs_geom::Point3;
 use fs_math::det;
@@ -38,6 +39,19 @@ use fs_rand::philox::philox4x32_10;
 /// Implementations must return kg/m³ for one frozen physical state.
 pub trait CurvedDensityField: Sync {
     fn density_kg_m3(&self, position: Point3) -> Result<f64, VolumeTransportError>;
+}
+
+impl CurvedDensityField for VolumeGrid<'_> {
+    fn density_kg_m3(&self, position: Point3) -> Result<f64, VolumeTransportError> {
+        if !position.x.is_finite() || !position.y.is_finite() || !position.z.is_finite() {
+            return Err(VolumeTransportError::Density { index: 0 });
+        }
+        let density = self.sigma_at([position.x, position.y, position.z]);
+        if !density.is_finite() || density < 0.0 {
+            return Err(VolumeTransportError::Density { index: 0 });
+        }
+        Ok(density)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -77,6 +91,59 @@ impl<'a> CurvedRayleighMedium<'a> {
             density: CurvedDensityProfile::Uniform(density_kg_m3),
             phase,
         })
+    }
+
+    /// Bind the native zero-copy piecewise-constant volume grid directly.
+    /// Admission validates every physical density cell, derives the exact
+    /// cell majorant, and hashes the complete immutable grid snapshot. Points
+    /// outside the grid are vacuum. No resampling or copied density buffer is
+    /// introduced. The explicit cell budget bounds the one-time scan.
+    pub fn try_new_volume_grid(
+        scattering: &'a MassScatteringSpectrum,
+        density: &'a VolumeGrid<'_>,
+        phase: &'a PhaseFunction,
+        max_grid_cells: usize,
+    ) -> Result<Self, CurvedSceneError> {
+        let cells = density
+            .dims
+            .iter()
+            .try_fold(1usize, |count, dim| count.checked_mul(*dim))
+            .ok_or_else(|| volume_error(VolumeTransportError::Grid))?;
+        if max_grid_cells == 0 || cells != density.data.len() || cells > max_grid_cells {
+            return Err(volume_error(if cells > max_grid_cells {
+                VolumeTransportError::Budget
+            } else {
+                VolumeTransportError::Grid
+            }));
+        }
+        if density.dims.contains(&0)
+            || density
+                .origin
+                .iter()
+                .chain(density.cell.iter())
+                .any(|value| !value.is_finite())
+            || density.cell.iter().any(|value| *value <= 0.0)
+        {
+            return Err(volume_error(VolumeTransportError::Grid));
+        }
+        let mut majorant = 0.0_f64;
+        let mut hash = DomainHasher::new("org.frankensim.render.curved-density-grid.v1");
+        for axis in 0..3 {
+            hash.update(&(density.dims[axis] as u64).to_le_bytes());
+            hash.update(&density.origin[axis].to_bits().to_le_bytes());
+            hash.update(&density.cell[axis].to_bits().to_le_bytes());
+        }
+        for (index, value) in density.data.iter().copied().enumerate() {
+            if !value.is_finite() || value < 0.0 {
+                return Err(volume_error(VolumeTransportError::Density { index }));
+            }
+            majorant = majorant.max(value);
+            hash.update(&value.to_bits().to_le_bytes());
+        }
+        if majorant == 0.0 {
+            return Self::try_new(scattering, 0.0, phase);
+        }
+        Self::try_new_heterogeneous(scattering, density, majorant, hash.finalize(), phase)
     }
 
     /// Bind a frozen heterogeneous density field. The positive finite majorant
@@ -393,3 +460,49 @@ fn volume_error(error: VolumeTransportError) -> CurvedSceneError {
 
 #[cfg(test)]
 mod tests;
+
+
+#[cfg(test)]
+mod grid_binding_tests {
+    use super::*;
+
+    #[test]
+    fn zero_copy_grid_derives_majorant_identity_and_null_collision_probability() {
+        let cells = [0.5, 1.5];
+        let grid = VolumeGrid::new(
+            [1, 1, 2],
+            &cells,
+            [-1.0, -1.0, 0.0],
+            [2.0, 2.0, 0.5],
+        );
+        let spectrum = MassScatteringSpectrum::constant(1.0).unwrap();
+        let phase = PhaseFunction::Rayleigh;
+        let medium =
+            CurvedRayleighMedium::try_new_volume_grid(&spectrum, &grid, &phase, 2).unwrap();
+        assert_eq!(medium.density_kg_m3(), 1.5);
+        assert!(medium.is_heterogeneous());
+        assert_ne!(medium.density_identity(), Some(ContentHash([0; 32])));
+        assert!(!medium
+            .accepts_candidate(Point3::new(0.0, 0.0, 0.25), 0.8)
+            .unwrap());
+        assert!(medium
+            .accepts_candidate(Point3::new(0.0, 0.0, 0.75), 0.9)
+            .unwrap());
+        assert!(!medium
+            .accepts_candidate(Point3::new(0.0, 0.0, 2.0), 0.0)
+            .unwrap());
+
+        let changed = [0.5, 1.4];
+        let changed_grid = VolumeGrid::new(
+            [1, 1, 2],
+            &changed,
+            [-1.0, -1.0, 0.0],
+            [2.0, 2.0, 0.5],
+        );
+        let changed_medium =
+            CurvedRayleighMedium::try_new_volume_grid(&spectrum, &changed_grid, &phase, 2).unwrap();
+        assert_ne!(medium.density_identity(), changed_medium.density_identity());
+
+        assert!(CurvedRayleighMedium::try_new_volume_grid(&spectrum, &grid, &phase, 1).is_err());
+    }
+}
