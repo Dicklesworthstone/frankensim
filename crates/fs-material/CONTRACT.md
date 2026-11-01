@@ -8924,3 +8924,39 @@ nested work/source/phase refusals; and final-cancellation replay. Synthetic
 methane/ethane Cp/R fixtures prove constitutive consistency, not empirical
 mixture-property accuracy. A consumer must still select its own mass, volume,
 heat, work, phase-relaxation and entropy assumptions.
+
+## Continuing heat-driven mixture phase equilibrium
+
+`nonideal::flash::parcel::IsochoricMixtureEquilibriumParcel` retains one immutable
+source model, conserved feed mass and fixed vessel volume. Initial conditions
+may be supplied as PT (which defines the matching vessel volume) or as mass,
+volume and original-reference specific internal energy through the U,V owner.
+The retained phase state includes the original species/reference receipts and
+the finite phase-stability evidence; no source inventory or phase label is
+inferred from a homogeneous result.
+
+`add_heat` supplies signed joules to the original internal-energy/volume solve.
+Species formation and entropy datums cancel inside the source-integrated
+increments, before rounding. Sensible and latent contributions remain parts of
+one thermodynamic potential; no additional latent heat source is applied.
+Phase compositions and amounts may change while the total feed, vessel mass
+and volume remain unchanged. Original source volume remains visible within its
+explicit residual allowance rather than being overwritten by the target.
+
+Each accepted step retains actual energy and entropy increments, separate
+energy/volume residuals, pressure and PT counts, and the original conservative
+EOS evaluation bound. Supplied heat does not identify the reservoir temperature
+or establish a process entropy-production theorem. Zero heat leaves every
+stored field unchanged and performs no phase solve. Invalid heat/inventory,
+exhausted work, source/phase refusal, failed physical balances and final
+cancellation publish no mutation. Cloning the complete parcel retains the
+source and accepted state for deterministic checkpoint/retry.
+
+This is a closed, rigid, spatially uniform caloric equilibrium consumer.
+Instantaneous phase equilibration does not supply evaporation kinetics,
+wall transport, moving-boundary work, slip, chemical reactions, acoustic
+response, global entropy-maximum certification or measured-fluid validation.
+G0/G1/G3/G4 cases exercise independent binary cubic/fugacity isochoric heating
+and cooling through phase change, partitioned heat/extensive scaling,
+independent species-datum invariance, conserved initialization, unrepresentable
+inputs, exact no-work rest, work refusal and atomic final-cancellation replay.

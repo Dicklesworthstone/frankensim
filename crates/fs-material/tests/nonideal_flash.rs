@@ -3,6 +3,8 @@
 mod common;
 #[path = "nonideal_flash/energy_volume.rs"]
 mod energy_volume;
+#[path = "nonideal_flash/parcel.rs"]
+mod parcel;
 #[path = "nonideal_flash/phase_equilibrium.rs"]
 mod phase_equilibrium;
 

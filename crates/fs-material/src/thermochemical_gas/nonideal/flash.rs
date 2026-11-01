@@ -24,6 +24,8 @@ use fs_thermochem::mixture::{
 pub mod enthalpy;
 /// Phase-screened homogeneous and separated states, including boundary-crossing enthalpy.
 pub mod equilibrium;
+/// Conserved mixture inventories with continuing rigid-vessel heat inputs.
+pub mod parcel;
 
 /// A source, phase or bounded-work refusal; no partial flash state is returned.
 #[derive(Clone, Debug, PartialEq)]
