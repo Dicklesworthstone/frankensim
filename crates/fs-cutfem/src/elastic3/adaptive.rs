@@ -14,6 +14,7 @@ pub mod dirichlet;
 pub mod enrichment;
 pub mod stress;
 mod body;
+mod mass;
 
 /// A reduced operator on independent master nodes of a balanced octree.
 pub struct AdaptiveElasticity3 {

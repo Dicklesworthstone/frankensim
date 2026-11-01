@@ -376,3 +376,121 @@ fn body_fingerprint_binds_the_discrete_map_and_sources_across_rebuilds() {
     );
     assert_ne!(zero.fingerprint(), other_zero.fingerprint());
 }
+
+#[test]
+fn consistent_material_mass_matches_native_body_force_and_has_exact_occupancy_derivative() {
+    let mut op = cartesian(true);
+    let mass = op.prepare_material_mass(100_000, poll).unwrap();
+    op.validate_material_mass(&mass).unwrap();
+    assert_eq!((mass.n(), mass.cells()), (op.n(), op.cells()));
+    assert_eq!(mass.fixed(), op.fixed());
+    for cell in 0..op.cells() {
+        assert_eq!(mass.cell_material_state(cell), op.cell_material_state(cell));
+    }
+    let fractions: Vec<_> = (0..op.cells()).map(|i| 0.2 + 0.07 * i as f64).collect();
+    let u: Vec<_> = op.nodes().iter().flat_map(|p| [p[0], 0.0, 0.0]).collect();
+    let body = op.prepare_material_body_load(&|p| [p[0], 0.0, 0.0], 100_000, poll).unwrap();
+    let applied = mass.apply(&fractions, &u, poll).unwrap();
+    for (a, b) in applied.iter().zip(body.load(&fractions, poll).unwrap()) {
+        close(*a, b, 2e-12);
+    }
+    let full = vec![1.0; op.cells()];
+    // Independent analytic moment: integral rho*x² over z in [0,.73],
+    // with densities 2 and 8 on the two half-cubes.
+    close(dot(&u, &mass.apply(&full, &u, poll).unwrap()), 0.73 * 29.0 / 12.0, 2e-11);
+    let v: Vec<_> = (0..op.n()).map(|i| ((i % 11) as f64 - 5.0) / 11.0).collect();
+    let pullback = mass.occupancy_pullback(&v, &u, poll).unwrap();
+    close(dot(&v, &applied), dot(&fractions, &pullback), 2e-13);
+    close(dot(&v, &applied), dot(&u, &mass.apply(&fractions, &v, poll).unwrap()), 2e-13);
+    let direction: Vec<_> = (0..op.cells()).map(|i| 0.02 * ((i % 3) as f64 - 1.0)).collect();
+    let h = 1e-5;
+    let plus: Vec<_> = fractions.iter().zip(&direction).map(|(r,d)| r + h*d).collect();
+    let minus: Vec<_> = fractions.iter().zip(&direction).map(|(r,d)| r - h*d).collect();
+    let fd = (dot(&v, &mass.apply(&plus, &u, poll).unwrap())
+        - dot(&v, &mass.apply(&minus, &u, poll).unwrap())) / (2.0*h);
+    close(fd, dot(&direction, &pullback), 2e-10);
+    let diagonal = mass.diagonal(&fractions, poll).unwrap();
+    let node = op.fixed().iter().position(|fixed| !*fixed).unwrap();
+    let mut unit = vec![0.0; op.n()];
+    unit[3*node] = 1.0;
+    close(mass.apply(&fractions, &unit, poll).unwrap()[3*node], diagonal[3*node], 1e-14);
+    let mut masked = u.clone();
+    for (node, &fixed) in op.fixed().iter().enumerate() {
+        if fixed {
+            masked[3*node..3*node+3].fill(1e100);
+            assert_eq!(&diagonal[3*node..3*node+3], &[0.0; 3]);
+        }
+    }
+    assert_eq!(mass.apply(&fractions, &masked, poll).unwrap(), applied);
+    op.set_scales(&vec![0.03; op.cells()]).unwrap();
+    op.validate_material_mass(&mass).unwrap();
+    assert_eq!(mass.apply(&fractions, &u, poll).unwrap(), applied);
+    assert_eq!(mass.apply(&vec![0.0; op.cells()], &u, poll).unwrap(), vec![0.0; op.n()]);
+    assert!(cartesian(true).validate_material_mass(&mass).is_err());
+}
+
+#[test]
+fn adaptive_consistent_mass_uses_the_original_hanging_transpose() {
+    for mixed in [false, true] {
+        let op = adaptive(mixed);
+        if mixed {
+            assert!(op.physical_nodes().len() > op.nodes().len());
+        }
+        let mass = op.prepare_material_mass(100_000, poll).unwrap();
+        op.validate_material_mass(&mass).unwrap();
+        let fractions: Vec<_> = (0..op.cells()).map(|i| 0.3 + 0.02 * (i % 9) as f64).collect();
+        // A global Q1 polynomial is reproduced by every hanging row and
+        // vanishes on the exact x=0 master clamp.
+        let field = |p: [f64; 3]| [p[0]*p[1], p[0]*p[2], p[0]];
+        let u: Vec<_> = op.nodes().iter().flat_map(|&p| field(p)).collect();
+        let body = op.prepare_material_body_load(&field, 100_000, poll).unwrap();
+        let applied = mass.apply(&fractions, &u, poll).unwrap();
+        for (a,b) in applied.iter().zip(body.load(&fractions, poll).unwrap()) {
+            close(*a,b,2e-12);
+        }
+        let x: Vec<_> = op.nodes().iter().flat_map(|p| [p[0],0.0,0.0]).collect();
+        close(dot(&x,&mass.apply(&vec![1.0; op.cells()], &x,poll).unwrap()),0.73*29.0/12.0,2e-11);
+        let v: Vec<_> = (0..op.n()).map(|i| ((i % 7) as f64 - 3.0) / 7.0).collect();
+        close(dot(&v,&applied),dot(&fractions,&mass.occupancy_pullback(&v,&u,poll).unwrap()),2e-12);
+        close(dot(&v,&applied),dot(&u,&mass.apply(&fractions,&v,poll).unwrap()),2e-12);
+        let mut into = vec![f64::NAN; op.n()];
+        mass.apply_into(&fractions,&u,&mut into,poll).unwrap();
+        assert_eq!(into,applied);
+        let foreign = adaptive(mixed);
+        assert!(foreign.validate_material_mass(&mass).is_err());
+        let wrapper = AdaptiveSolveSpace3::jacobi(op,100_000_000);
+        wrapper.elasticity().validate_material_mass(&mass).unwrap();
+        assert_eq!(mass.apply(&fractions,&u,poll).unwrap(),applied);
+    }
+}
+
+#[test]
+fn material_mass_refuses_unsourced_density_invalid_occupancy_and_cancelled_work() {
+    assert!(cartesian(false).prepare_material_mass(100_000,poll).is_err());
+    let op = cartesian(true);
+    assert!(op.prepare_material_mass(0,poll).is_err());
+    assert!(matches!(op.prepare_material_mass(100_000,|| ControlFlow::Break(())),Err(ElasticityError3::Cancelled)));
+    let mass = op.prepare_material_mass(100_000,poll).unwrap();
+    let occupancy = vec![1.0;op.cells()];
+    let x = vec![1.0;op.n()];
+    let mut output = vec![7.0;op.n()];
+    let mut invalid = occupancy.clone();
+    invalid[0] = f64::NAN;
+    assert!(mass.apply_into(&invalid,&x,&mut output,poll).is_err());
+    assert_eq!(output,vec![7.0;op.n()]);
+    invalid[0] = -0.01;
+    assert!(mass.apply(&invalid,&x,poll).is_err());
+    invalid[0] = 1.01;
+    assert!(mass.diagonal(&invalid,poll).is_err());
+    assert!(mass.occupancy_pullback(&x[..x.len()-1],&x,poll).is_err());
+    let mut nonfinite = x.clone();
+    nonfinite[0] = f64::INFINITY;
+    assert!(mass.apply(&occupancy,&nonfinite,poll).is_err());
+    let mut calls = 0;
+    assert!(matches!(mass.apply(&occupancy,&x,||{
+        calls += 1;
+        if calls == 8 { ControlFlow::Break(()) } else { poll() }
+    }),Err(ElasticityError3::Cancelled)));
+    assert!(matches!(mass.occupancy_pullback(&x,&x,||ControlFlow::Break(())),Err(ElasticityError3::Cancelled)));
+    assert_eq!(op.scales(),vec![1.0;op.cells()]);
+}

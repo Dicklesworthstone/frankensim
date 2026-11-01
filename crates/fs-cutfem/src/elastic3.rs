@@ -949,6 +949,10 @@ pub mod adaptive;
 pub mod body;
 pub use body::MaterialBodyLoad3;
 
+/// Consistent native-density inertia with physical-occupancy pullbacks.
+pub mod mass;
+pub use mass::MaterialMass3;
+
 /// Oriented reference-surface traction and pressure loads.
 pub mod surface;
 

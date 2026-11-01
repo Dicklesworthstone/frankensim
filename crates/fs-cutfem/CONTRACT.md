@@ -164,6 +164,33 @@ arbitrary adjoint vectors as physical states. Geometry derivatives,
 material evolution and continuum certification are outside this frozen-linear
 operator's scope.
 
+## Consistent native material inertia in three dimensions
+
+`CutElasticity3::prepare_material_mass` and the adaptive equivalent prepare
+`MaterialMass3` from the SAME retained cut-volume quadrature, Q1 basis and
+native source density as the elasticity/body-load owner. Each cell contributes
+`occupancy[cell] * integral rho0 N^T N dV`. Stiffness scales, ghost penalties
+and the SIMP ersatz modulus do not contribute inertia. Legacy elasticity
+without source density refuses preparation.
+
+The prepared cache stores symmetric scalar node pairs once and shares them
+across three components. Adaptive preparation applies the existing hanging-node
+map as `T^T M T`, with homogeneous strong clamps removed. Allocation-free
+`apply_into`, the consistent diagonal and per-cell bilinear occupancy pullbacks
+share this cache. An explicit scalar-entry cap bounds preparation; cancellation
+is polled during quadrature, constraint expansion, application and pullback.
+Errors during an in-place action require discarding the partial output.
+
+Geometry/material ownership remains bound across stiffness updates and moves;
+a separately rebuilt grid must prepare its own cache. Source states remain
+available per cell. Coefficients are kilograms for SI geometry and density.
+The matrix is the numerical consistent mass of the retained quadrature,
+without row-sum lumping, stabilization inertia or artificial support masses.
+Zero occupancy has zero mass. A positive diagonal does not prove positive
+definiteness; singular cut or void configurations remain the consumer's
+admission responsibility. This API alone claims neither a modal solution nor
+a continuum mass/error certificate.
+
 ## Three-dimensional bulk stress observations
 
 `elastic3::stress` evaluates the retained Cartesian or adaptive Q1 bulk
