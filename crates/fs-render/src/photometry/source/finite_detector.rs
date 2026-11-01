@@ -20,19 +20,21 @@
 //! measurement. Only the native homogeneous-medium escape proof makes a miss
 //! complete; a GRIN field may bend an apparently outward ray back to a surface.
 
-use super::sampling::SourceSamplingError;
+use super::sampling::{PreparedSourceSampler, SourceSamplingError};
 use super::{PhotometricSource, SPECTRAL_BINS, wavelength_nm};
 use crate::polarization::dielectric::scene::PathTermination;
 use crate::polarization::dielectric::scene::curved::{
-    CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
+    CurvedPathResult, CurvedPolarizedScene, CurvedSceneError, CurvedTraceSettings,
 };
-use crate::polarization::dielectric::scene::measurement::MeterError;
+use crate::polarization::dielectric::scene::measurement::{MeterError, SpectralPowerMeter};
 use crate::polarization::dielectric::transport::{BeamError, PolarizationFrame};
 use crate::polarization::{Stokes, photometry::PolarizedSource};
 use fs_exec::Cx;
-use fs_geom::Vec3;
-use fs_math::det;
+use fs_geom::{Point3, Vec3};
 use fs_rand::philox::philox4x32_10;
+
+mod moments;
+use moments::Moments;
 
 /// Explicit ceiling on complete spectral samples in one measurement.
 pub const MAX_FINITE_DETECTOR_SAMPLES: u32 = 1_048_576;
@@ -226,46 +228,90 @@ fn measure(
     request: FiniteDetectorRequest,
     polarization: impl Fn(usize) -> Stokes,
 ) -> Result<FiniteDetectorSpectrum, FiniteDetectorError> {
-    cx.checkpoint()?;
-    if !(2..=MAX_FINITE_DETECTOR_SAMPLES).contains(&request.samples) {
-        return Err(FiniteDetectorError::InvalidRequest);
-    }
-    let source_axis = super::unit(request.source_transverse_axis)
-        .map_err(|_| FiniteDetectorError::InvalidRequest)?;
-    let empty_meter = scene.power_meter(request.detector_object_id)?;
-    let sampler = source.prepare_direction_sampler(cx)?;
-    let powers = source
-        .spectrum()
-        .bins_w_per_lumen_nm()
-        .map(|value| value * source.flux_lm());
-    let states: [Stokes; SPECTRAL_BINS] = core::array::from_fn(polarization);
-    if powers.iter().any(|value| !value.is_finite()) {
-        return Err(FiniteDetectorError::NumericalRange);
-    }
-    let mut spectral = [Moments::default(); SPECTRAL_BINS];
-    let mut radiant = Moments::default();
-    let mut photopic = Moments::default();
-    let mut detected_paths = 0;
-    let mut received_samples = 0;
-    let mut max_contact_resolution_m = 0.0_f64;
+    let prepared = PreparedSource::new(source, cx, scene, request, polarization)?;
+    let mut accumulator = SpectrumAccumulator::new();
     for sample in 0..request.samples {
+        let meter = prepared.trace_sample(cx, scene, sample, |_, _| Ok(()))?;
+        accumulator.add(&meter, sample)?;
+    }
+    cx.checkpoint()?;
+    accumulator.finish(request.samples)
+}
+
+/// One source preparation and one native spectral transport owner, shared by
+/// total-detector and spatial sensor measurements. Visitors see real paths;
+/// a failed wavelength never returns a partially completed spectral meter.
+struct PreparedSource<'a> {
+    sampler: PreparedSourceSampler<'a>,
+    origin: Point3,
+    source_axis: Vec3,
+    powers: [f64; SPECTRAL_BINS],
+    states: [Stokes; SPECTRAL_BINS],
+    empty_meter: SpectralPowerMeter,
+    request: FiniteDetectorRequest,
+}
+impl<'a> PreparedSource<'a> {
+    fn new(
+        source: &'a PhotometricSource,
+        cx: &Cx<'_>,
+        scene: &CurvedPolarizedScene<'_>,
+        request: FiniteDetectorRequest,
+        polarization: impl Fn(usize) -> Stokes,
+    ) -> Result<Self, FiniteDetectorError> {
         cx.checkpoint()?;
+        if !(2..=MAX_FINITE_DETECTOR_SAMPLES).contains(&request.samples) {
+            return Err(FiniteDetectorError::InvalidRequest);
+        }
+        let source_axis = super::unit(request.source_transverse_axis)
+            .map_err(|_| FiniteDetectorError::InvalidRequest)?;
+        let empty_meter = scene.power_meter(request.detector_object_id)?;
+        let sampler = source.prepare_direction_sampler(cx)?;
+        let powers = source
+            .spectrum()
+            .bins_w_per_lumen_nm()
+            .map(|value| value * source.flux_lm());
+        if powers.iter().any(|value| !value.is_finite()) {
+            return Err(FiniteDetectorError::NumericalRange);
+        }
+        Ok(Self {
+            sampler,
+            origin: source.position_m(),
+            source_axis,
+            powers,
+            states: core::array::from_fn(polarization),
+            empty_meter,
+            request,
+        })
+    }
+
+    fn trace_sample(
+        &self,
+        cx: &Cx<'_>,
+        scene: &CurvedPolarizedScene<'_>,
+        sample: u32,
+        mut visit: impl FnMut(usize, &CurvedPathResult) -> Result<(), FiniteDetectorError>,
+    ) -> Result<SpectralPowerMeter, FiniteDetectorError> {
+        cx.checkpoint()?;
+        let request = self.request;
+        if sample >= request.samples {
+            return Err(FiniteDetectorError::InvalidRequest);
+        }
         // The source domain is disjoint from the native interface domain
         // 0x706f_6c32, even with the same seed and sample/path identifier.
         let random = philox4x32_10(
             [sample, 0, 0, 0x736f_7572],
             [request.seed as u32, (request.seed >> 32) as u32],
         );
-        let direction = sampler.sample(core::array::from_fn(|i| {
+        let direction = self.sampler.sample(core::array::from_fn(|i| {
             (f64::from(random[i]) + 0.5) / 4_294_967_296.0
         }))?;
-        let frame = PolarizationFrame::try_new(direction.direction, source_axis)
+        let frame = PolarizationFrame::try_new(direction.direction, self.source_axis)
             .map_err(FiniteDetectorError::SourceFrame)?;
-        let mut meter = empty_meter.clone();
+        let mut meter = self.empty_meter.clone();
         for bin in 0..SPECTRAL_BINS {
             cx.checkpoint()?;
-            let intensity = powers[bin] * direction.angular_weight();
-            let state = states[bin];
+            let intensity = self.powers[bin] * direction.angular_weight();
+            let state = self.states[bin];
             let power = physical([
                 intensity,
                 intensity * state.q,
@@ -275,7 +321,7 @@ fn measure(
             let transport_error = |error| FiniteDetectorError::Transport { sample, bin, error };
             let beam = scene
                 .launch_beam(
-                    source.position_m(),
+                    self.origin,
                     frame,
                     wavelength_nm(bin),
                     request.initial_medium,
@@ -307,84 +353,73 @@ fn measure(
                 });
             }
             meter.record_curved(bin, &path)?;
+            visit(bin, &path)?;
         }
-        let reading = meter.reading()?.require_complete()?;
-        let count = sample + 1;
-        for (bin, moments) in spectral.iter_mut().enumerate() {
-            moments.add(meter.spectral_mean_w_nm(bin)?, count)?;
-        }
-        radiant.add(reading.radiant_stokes_w(), count)?;
-        photopic.add(reading.photopic_stokes_lm(), count)?;
-        detected_paths += reading.detected_paths();
-        received_samples += u32::from(reading.detected_paths() > 0);
-        max_contact_resolution_m = max_contact_resolution_m.max(reading.max_contact_resolution_m());
+        cx.checkpoint()?;
+        Ok(meter)
     }
-    let mut bins = [Stokes::unpolarized(0.0); SPECTRAL_BINS];
-    let mut errors = [[0.0; 4]; SPECTRAL_BINS];
-    for (bin, moments) in spectral.into_iter().enumerate() {
-        bins[bin] = moments.mean()?;
-        errors[bin] = moments.standard_error(request.samples)?;
-    }
-    cx.checkpoint()?;
-    Ok(FiniteDetectorSpectrum {
-        spectral: bins,
-        spectral_error: errors,
-        radiant: radiant.mean()?,
-        photopic: photopic.mean()?,
-        radiant_error: radiant.standard_error(request.samples)?,
-        photopic_error: photopic.standard_error(request.samples)?,
-        samples: request.samples,
-        detected_paths,
-        received_samples,
-        max_contact_resolution_m,
-    })
 }
 
-/// Scaled Welford moments avoid squaring dimensionful powers (which can
-/// overflow even when both the mean and its standard error are representable).
-#[derive(Clone, Copy, Debug, Default)]
-struct Moments {
-    scale: [f64; 4],
-    mean: [f64; 4],
-    m2: [f64; 4],
+/// Whole-detector moments retain cross-pixel and spectral correlations. Image
+/// totals are measured from the same launches, never reconstructed by adding
+/// pixel variances as if different pixels were independent.
+struct SpectrumAccumulator {
+    spectral: [Moments<4>; SPECTRAL_BINS],
+    radiant: Moments<4>,
+    photopic: Moments<4>,
+    detected_paths: u64,
+    received_samples: u32,
+    max_contact_resolution_m: f64,
 }
-impl Moments {
-    fn add(&mut self, value: Stokes, count: u32) -> Result<(), FiniteDetectorError> {
-        for (axis, value) in components(value).into_iter().enumerate() {
-            let magnitude = value.abs();
-            if magnitude > self.scale[axis] {
-                let ratio = self.scale[axis] / magnitude;
-                self.mean[axis] *= ratio;
-                self.m2[axis] *= ratio * ratio;
-                self.scale[axis] = magnitude;
-            }
-            if self.scale[axis] == 0.0 {
-                continue;
-            }
-            let scaled = value / self.scale[axis];
-            let delta = scaled - self.mean[axis];
-            self.mean[axis] += delta / f64::from(count);
-            self.m2[axis] += delta * (scaled - self.mean[axis]);
-            if !self.m2[axis].is_finite() || self.m2[axis] < 0.0 {
-                return Err(FiniteDetectorError::NumericalRange);
-            }
+impl SpectrumAccumulator {
+    fn new() -> Self {
+        Self {
+            spectral: [Moments::default(); SPECTRAL_BINS],
+            radiant: Moments::default(),
+            photopic: Moments::default(),
+            detected_paths: 0,
+            received_samples: 0,
+            max_contact_resolution_m: 0.0,
         }
+    }
+    fn add(&mut self, meter: &SpectralPowerMeter, sample: u32) -> Result<(), FiniteDetectorError> {
+        let reading = meter.reading()?.require_complete()?;
+        for (bin, moments) in self.spectral.iter_mut().enumerate() {
+            moments.add_at(components(meter.spectral_mean_w_nm(bin)?), sample)?;
+        }
+        self.radiant
+            .add_at(components(reading.radiant_stokes_w()), sample)?;
+        self.photopic
+            .add_at(components(reading.photopic_stokes_lm()), sample)?;
+        self.detected_paths += reading.detected_paths();
+        self.received_samples += u32::from(reading.detected_paths() > 0);
+        self.max_contact_resolution_m = self
+            .max_contact_resolution_m
+            .max(reading.max_contact_resolution_m());
         Ok(())
     }
-    fn mean(self) -> Result<Stokes, FiniteDetectorError> {
-        physical(core::array::from_fn(|axis| {
-            self.scale[axis] * self.mean[axis]
-        }))
-    }
-    fn standard_error(self, count: u32) -> Result<[f64; 4], FiniteDetectorError> {
-        let denominator = f64::from(count) * f64::from(count - 1);
-        let errors =
-            core::array::from_fn(|axis| self.scale[axis] * det::sqrt(self.m2[axis] / denominator));
-        if errors.iter().all(|value| value.is_finite()) {
-            Ok(errors)
-        } else {
-            Err(FiniteDetectorError::NumericalRange)
+    fn finish(mut self, samples: u32) -> Result<FiniteDetectorSpectrum, FiniteDetectorError> {
+        let mut bins = [Stokes::unpolarized(0.0); SPECTRAL_BINS];
+        let mut errors = [[0.0; 4]; SPECTRAL_BINS];
+        for (bin, moments) in self.spectral.iter_mut().enumerate() {
+            moments.pad_to(samples)?;
+            bins[bin] = physical(moments.mean())?;
+            errors[bin] = moments.standard_error()?;
         }
+        self.radiant.pad_to(samples)?;
+        self.photopic.pad_to(samples)?;
+        Ok(FiniteDetectorSpectrum {
+            spectral: bins,
+            spectral_error: errors,
+            radiant: physical(self.radiant.mean())?,
+            photopic: physical(self.photopic.mean())?,
+            radiant_error: self.radiant.standard_error()?,
+            photopic_error: self.photopic.standard_error()?,
+            samples,
+            detected_paths: self.detected_paths,
+            received_samples: self.received_samples,
+            max_contact_resolution_m: self.max_contact_resolution_m,
+        })
     }
 }
 fn components(value: Stokes) -> [f64; 4] {

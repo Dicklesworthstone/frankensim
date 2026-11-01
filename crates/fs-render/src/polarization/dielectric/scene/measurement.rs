@@ -31,6 +31,9 @@ use super::super::transport::PolarizedBeam;
 use super::curved::{CurvedPathResult, CurvedPolarizedScene};
 use super::{Interaction, PathResult, PathTermination, PolarizedScene, SurfaceBinding};
 
+/// Physical finite pixels receiving the original native detector contacts.
+pub mod raster;
+
 /// Measurement admission/range errors leave the accumulator unchanged.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MeterError {
@@ -79,11 +82,18 @@ struct Bin {
 /// Accumulation order is explicit; arbitrary thread merges are not bit-identical.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SpectralPowerMeter {
-    object_id: u64,
-    frame_identity: ContentHash,
-    reference_axis: Vec3,
+    detector: DetectorBinding,
     bins: [Bin; SPECTRAL_BINS],
     max_contact_resolution_m: f64,
+}
+
+/// Shared detector identity and Stokes-frame owner, independent of accumulation.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct DetectorBinding {
+    object_id: u64,
+    geometry_identity: ContentHash,
+    frame_identity: ContentHash,
+    reference_axis: Vec3,
 }
 
 impl PolarizedScene<'_> {
@@ -101,7 +111,7 @@ impl CurvedPolarizedScene<'_> {
     }
 }
 
-impl SpectralPowerMeter {
+impl DetectorBinding {
     fn for_detector(
         geometry: &InstanceScene,
         bindings: &[SurfaceBinding],
@@ -113,10 +123,49 @@ impl SpectralPowerMeter {
         let Interaction::Detector { reference_axis } = bindings[index].interaction else {
             return Err(MeterError::NotADetector);
         };
-        Ok(SpectralPowerMeter {
+        Ok(Self {
             object_id,
             reference_axis,
+            geometry_identity: geometry.instances()[index].geometry_identity(),
             frame_identity: geometry.instances()[index].frame_identity(),
+        })
+    }
+
+    fn detected_power(
+        self,
+        input: &PolarizedBeam,
+        contact: Option<(u64, ContentHash)>,
+    ) -> Result<Option<Stokes>, MeterError> {
+        let (object_id, frame_identity) = contact.ok_or(MeterError::DetectorGeometryMismatch)?;
+        if object_id != self.object_id { return Ok(None); }
+        if frame_identity != self.frame_identity { return Err(MeterError::DetectorGeometryMismatch); }
+        let beam = input.with_reference_axis(self.reference_axis)
+            .map_err(|_| MeterError::NumericalRange)?;
+        Ok(Some(beam.power()))
+    }
+}
+
+fn validate_spectral_sample(
+    bin: usize,
+    input: &PolarizedBeam,
+    contact_resolution_m: f64,
+) -> Result<(), MeterError> {
+    if bin >= SPECTRAL_BINS { return Err(MeterError::InvalidBin); }
+    if input.wavelength_nm() != wavelength_nm(bin) { return Err(MeterError::WavelengthMismatch); }
+    if !contact_resolution_m.is_finite() || contact_resolution_m < 0.0 {
+        return Err(MeterError::NumericalRange);
+    }
+    Ok(())
+}
+
+impl SpectralPowerMeter {
+    fn for_detector(
+        geometry: &InstanceScene,
+        bindings: &[SurfaceBinding],
+        object_id: u64,
+    ) -> Result<Self, MeterError> {
+        Ok(Self {
+            detector: DetectorBinding::for_detector(geometry, bindings, object_id)?,
             bins: [Bin::default(); SPECTRAL_BINS],
             max_contact_resolution_m: 0.0,
         })
@@ -158,15 +207,7 @@ impl SpectralPowerMeter {
         contact: Option<(u64, ContentHash)>,
         contact_resolution_m: f64,
     ) -> Result<(), MeterError> {
-        if bin >= SPECTRAL_BINS {
-            return Err(MeterError::InvalidBin);
-        }
-        if input.wavelength_nm() != wavelength_nm(bin) {
-            return Err(MeterError::WavelengthMismatch);
-        }
-        if !contact_resolution_m.is_finite() || contact_resolution_m < 0.0 {
-            return Err(MeterError::NumericalRange);
-        }
+        validate_spectral_sample(bin, input, contact_resolution_m)?;
         let mut next = self.bins[bin];
         // Keep the normalizer exactly representable as a binary64 integer.
         if next.launched >= (1_u64 << 53) {
@@ -175,16 +216,7 @@ impl SpectralPowerMeter {
         next.launched += 1;
         match termination {
             PathTermination::Detected => {
-                let (object_id, frame_identity) =
-                    contact.ok_or(MeterError::DetectorGeometryMismatch)?;
-                if object_id == self.object_id {
-                    if frame_identity != self.frame_identity {
-                        return Err(MeterError::DetectorGeometryMismatch);
-                    }
-                    let beam = input
-                        .with_reference_axis(self.reference_axis)
-                        .map_err(|_| MeterError::NumericalRange)?;
-                    let s = beam.power();
+                if let Some(s) = self.detector.detected_power(input, contact)? {
                     for (sum, value) in next.stokes.iter_mut().zip([s.i, s.q, s.u, s.v]) {
                         sum.add(value)?;
                     }
