@@ -1,5 +1,6 @@
 //! Native circuit, finite cells, two gases, shared motion and original DG loads.
 //! Synthetic source cards exercise coupling, not experimental material accuracy.
+mod real_gas;
 
 use super::*;
 use crate::cavity_phs::piston::double_acting::acoustic::tests as acoustic_fixture;

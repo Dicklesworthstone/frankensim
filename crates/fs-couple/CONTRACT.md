@@ -11173,13 +11173,21 @@ inertia is rigid, and each chamber is a homogeneous closed single-phase gas.
 
 ## Acoustic loading through finite electrothermal material networks
 
-`DoubleActingGasPiston::electroacoustic_network_candidate` closes the same
+`DoubleActingGasPiston<G>::electroacoustic_network_candidate` closes the same
 acoustic reaction through the original `MaterialNetwork`,
 `circuit_enthalpy::driven_candidate`, electromagnetic velocity residual and
 paired gas/thermal boundary owner. Each thermal trial uses its own resolved
 material resistance for both native circuit current and Joule heat. Acoustic
 back-pressure changes that trial's motion, back-emf, gas temperatures and
 interface transfers before the finite-cell residual is admitted.
+
+Both native and material-bound candidates retain the original ideal or PR gas
+owner. Density, calorics and pressure remain in that owner's shared motion
+solve; contacts use its actual `FluidTransport` midpoint. Dense-mixture
+regressions independently account for both gas stores, capacitor energy, finite
+cell enthalpy, one material-derived kinetic store and original DG storage,
+losses and terminal work. They also check exact acoustic replay and continuing
+source-bound clocks, including cancellation at the wrapper's final poll.
 
 The additional affine resistance reaches every original heat/momentum trial.
 DG histories remain immutable throughout the nested electrical and thermal

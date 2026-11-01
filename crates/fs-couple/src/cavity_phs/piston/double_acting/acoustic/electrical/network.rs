@@ -14,24 +14,26 @@ use crate::cavity_phs::piston::double_acting::{DoubleActingGasPiston, DoublePist
 use crate::cavity_phs::piston::material::MaterialDoubleActingGasPiston;
 use crate::cavity_phs::piston::thermal::boundary::double_acting::network::DoubleNetworkDrive;
 use crate::cavity_phs::piston::thermal::boundary::network::NetworkGasSolve;
+use crate::cavity_phs::piston::{ClosedGasParcel, PistonGas};
 use crate::circuit_enthalpy::CircuitEnthalpyError;
 use crate::circuit_enthalpy::material::MaterialNetwork;
 use crate::dg_port::DgPortLoad;
 use crate::material_circuit::MaterialCircuit;
+use fs_material::fluid_transport::FluidTransport;
 use fs_thermal::enthalpy::DepositionSimulation;
 
 /// One immutable proposal containing the original finite circuit/heat/gas
 /// network and every additional acoustic domain. Consume all endpoints once.
-pub struct AcousticDrivenNetworkCandidate<'m> {
-    native: DrivenNetworkCandidate<'m>,
+pub struct AcousticDrivenNetworkCandidate<'m, G: PistonGas = ClosedGasParcel> {
+    native: DrivenNetworkCandidate<'m, G>,
     loads: Vec<DgPortLoad>,
     motion: AcousticMotionStep,
     total_energy_residual_j: f64,
 }
 
-impl<'m> AcousticDrivenNetworkCandidate<'m> {
+impl<'m, G: PistonGas> AcousticDrivenNetworkCandidate<'m, G> {
     /// Original cell enthalpy, charges, fluxes, source evaluations and motion.
-    pub const fn native(&self) -> &DrivenNetworkCandidate<'m> {
+    pub const fn native(&self) -> &DrivenNetworkCandidate<'m, G> {
         &self.native
     }
 
@@ -56,7 +58,7 @@ impl<'m> AcousticDrivenNetworkCandidate<'m> {
     pub fn into_parts(
         self,
     ) -> (
-        DrivenNetworkCandidate<'m>,
+        DrivenNetworkCandidate<'m, G>,
         Vec<DgPortLoad>,
         AcousticMotionStep,
         f64,
@@ -70,12 +72,14 @@ impl<'m> AcousticDrivenNetworkCandidate<'m> {
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: PistonGas> DoubleActingGasPiston<G> {
     /// Close acoustic pressure, native back-emf/current and finite material
     /// heat on the same two-gas trajectory. Each thermal trial resolves the
     /// original temperature-dependent resistance; its current supplies BOTH
     /// electromagnetic force and Joule heat. The acoustic load changes that
     /// same trial motion and therefore its back-emf and gas/interface heats.
+    /// Both chambers retain their original ideal or real-gas source laws;
+    /// conduction consumes the actual native midpoint transport states.
     ///
     /// Original circuit, gas and thermal work budgets apply to every nested
     /// proposal. Acoustic mean laws are prepared once and the original DG loads
@@ -103,7 +107,10 @@ impl DoubleActingGasPiston {
         acoustic: AcousticMotionSolve,
         guess_j: &[f64],
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<AcousticDrivenNetworkCandidate<'m>, AcousticMotionError<DrivenNetworkError>> {
+    ) -> Result<AcousticDrivenNetworkCandidate<'m, G>, AcousticMotionError<DrivenNetworkError>>
+    where
+        G::State: FluidTransport,
+    {
         let input = drive.gas.input;
         let prepared = prepare(
             faces,
@@ -181,16 +188,16 @@ impl DoubleActingGasPiston {
 
 /// The same complete network and acoustic proposal with original specimen
 /// geometry, density evidence and canonical inertia attached to live motion.
-pub struct MaterialAcousticDrivenNetworkCandidate<'m> {
-    native: MaterialDrivenNetworkCandidate<'m>,
+pub struct MaterialAcousticDrivenNetworkCandidate<'m, G: PistonGas = ClosedGasParcel> {
+    native: MaterialDrivenNetworkCandidate<'m, G>,
     loads: Vec<DgPortLoad>,
     motion: AcousticMotionStep,
     total_energy_residual_j: f64,
 }
 
-impl<'m> MaterialAcousticDrivenNetworkCandidate<'m> {
+impl<'m, G: PistonGas> MaterialAcousticDrivenNetworkCandidate<'m, G> {
     /// Original finite cells, circuit and source-bound shared mechanism.
-    pub const fn native(&self) -> &MaterialDrivenNetworkCandidate<'m> {
+    pub const fn native(&self) -> &MaterialDrivenNetworkCandidate<'m, G> {
         &self.native
     }
 
@@ -214,7 +221,7 @@ impl<'m> MaterialAcousticDrivenNetworkCandidate<'m> {
     pub fn into_parts(
         self,
     ) -> (
-        MaterialDrivenNetworkCandidate<'m>,
+        MaterialDrivenNetworkCandidate<'m, G>,
         Vec<DgPortLoad>,
         AcousticMotionStep,
         f64,
@@ -228,7 +235,7 @@ impl<'m> MaterialAcousticDrivenNetworkCandidate<'m> {
     }
 }
 
-impl MaterialDoubleActingGasPiston {
+impl<G: PistonGas> MaterialDoubleActingGasPiston<G> {
     /// Use the original source-resolved rigid specimen in the same coupled
     /// electrical, finite-heat, gas and acoustic solve. The complete proposed
     /// dynamics are retained, including port clocks required by the next
@@ -251,7 +258,9 @@ impl MaterialDoubleActingGasPiston {
         acoustic: AcousticMotionSolve,
         guess_j: &[f64],
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<MaterialAcousticDrivenNetworkCandidate<'m>, AcousticMotionError<DrivenNetworkError>>
+    ) -> Result<MaterialAcousticDrivenNetworkCandidate<'m, G>, AcousticMotionError<DrivenNetworkError>>
+    where
+        G::State: FluidTransport,
     {
         let candidate = self.piston().electroacoustic_network_candidate(
             faces,
