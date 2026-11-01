@@ -647,3 +647,69 @@ fn passivity_certificate_sees_a_negative_dc_resistance_below_its_grid() {
     assert!(repair.certificate.passive, "{repair:?}");
     assert!(hermitian_part(&repaired.eval_iw(0.0), 1).0[0] >= 0.0);
 }
+
+// Z(s) = scale * 0.2 * w0 * s / (s^2 + 2 a s + w0^2): an RLC bandpass with D = E = 0 and an analytic zero at DC,
+// Re Z(i w) = scale * 0.2 * w0 * 2 a w^2 / ((w0^2 - w^2)^2 + 4 a^2 w^2) >= 0.
+fn pure_pole_bandpass(scale: f64) -> MimoModel {
+    let (omega, a): (f64, f64) = (1300.0, 25.0);
+    let beta = det::sqrt(omega * omega - a * a);
+    let k = 0.2 * scale * omega;
+    MimoModel {
+        ports: 1,
+        poles: vec![PoleTerm::Pair {
+            pole: C64::new(-a, beta),
+            residue: C64::ZERO,
+        }],
+        residues: vec![vec![C64::new(0.5 * k, 0.5 * k * a / beta)]],
+        d: vec![0.0],
+        e: vec![0.0],
+        reciprocal: true,
+    }
+}
+
+#[test]
+fn a_pure_pole_impedance_with_an_analytic_zero_at_dc_is_not_refused_for_rounding() {
+    // The cavity terminal's zero-direct RLC (zc ~ 1.3e8) failed the DC probe at -7.4e-11: its floor was
+    // 1e-12 * max(|D|, |E|) = 0 and Z(0) is a cancellation of terms near 1e7. Scan scales so the sign of the
+    // rounding is not a lucky one, and require that the scan really contains negative DC roundings.
+    let band = (1.0, 2.0e5);
+    let mut negative = 0;
+    for i in 0..64 {
+        let model = pure_pole_bandpass(1.3e8 * (1.0 + 1e-3 * f64::from(i)));
+        let raw = hermitian_part(&model.eval_iw(0.0), 1).0[0];
+        let bound = dc_rounding_bound(&model);
+        assert!(raw.abs() <= bound, "scale {i}: raw {raw:e} exceeds its own rounding bound {bound:e}");
+        negative += usize::from(raw < 0.0);
+        let report = check_mimo_passivity(&model, band).unwrap();
+        assert!(report.passive && report.violation_freqs.is_empty(), "scale {i}: {report:?}");
+        assert_eq!(report.class, CertificateClass::GridOnly);
+    }
+    assert!(negative > 0, "no scale produced a negative DC rounding: this test would pass without the floor");
+}
+
+#[test]
+fn a_dc_violation_ten_times_the_rounding_floor_is_still_refused() {
+    // The same bandpass plus a far real pole giving a flat Re Z = -x: DC eigenvalue of Z + Z^H = -2x = -10 floor.
+    // The crossing sits at w ~ 1e-3 rad/s, below the grid's 0.1 rad/s start, so only the DC probe can see it.
+    let band = (1.0, 2.0e5);
+    for scale in [1.0, 1.3e8] {
+        let base = pure_pole_bandpass(scale);
+        let floor = dc_rounding_bound(&base);
+        let x = 5.0 * floor;
+        let q = 1.0e12;
+        let mut model = base.clone();
+        model.poles.push(PoleTerm::Real {
+            pole: -q,
+            residue: 0.0,
+        });
+        model.residues.push(vec![C64::from_re(-x * q)]);
+        let report = check_mimo_passivity(&model, band).unwrap();
+        assert_eq!(report.class, CertificateClass::GridOnly);
+        assert!(!report.passive, "scale {scale:e}: {report:?}");
+        assert_eq!(report.violation_freqs, [0.0], "scale {scale:e}: {report:?}");
+        assert!(
+            report.worst.1 == 0.0 && report.worst.0 < -8.0 * floor && report.worst.0 > -12.0 * floor,
+            "scale {scale:e}: floor {floor:e}, {report:?}"
+        );
+    }
+}

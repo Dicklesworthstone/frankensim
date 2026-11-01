@@ -910,6 +910,52 @@ fn build_grid(model: &MimoModel, band: (f64, f64)) -> Vec<f64> {
     grid
 }
 
+/// Worst-case rounding of the smallest eigenvalue of `Z(0) + Z(0)^H`, as evaluated
+/// by [`MimoModel::eval_iw`] and `hermitian_part`.
+///
+/// `Z(0) = D + sum_k R_k / (-p_k)` is a sum of `K` terms whose individual sizes can be
+/// far above the value they cancel to. Let `S = |D| + sum_k m_k |R_k| / |p_k|` entrywise,
+/// with `m_k = 1` for a real pole and `2` for a pair (its two conjugate halves). With
+/// `u = 2^-53` and `gamma_N = N u / (1 - N u)`:
+///   * each entry of `Z(0)` carries at most `gamma_{2K+6} S`: at most six roundings per
+///     term (the reciprocal of `-p_k`, the residue product, the real-part sum; the
+///     conjugate half has bitwise the same real part) plus at most two additions of a
+///     partial sum bounded by `S` per term;
+///   * the Hermitian sum `Z_ab + conj(Z_ba)` adds one rounding, and the embedding of the
+///     `n x n` complex matrix in a `2n x 2n` real one costs a factor of at most `sqrt 2`
+///     in the Frobenius norm that bounds the eigenvalue shift (Weyl); one more unit
+///     absorbs it, giving `2K + 8`;
+///   * the Jacobi eigensolve of that matrix is backward stable to `O(n u)` of its norm,
+///     counted as `4n` units.
+/// So `|delta lambda| <= gamma_N ||S + S^T||_F` with `N = 2K + 8 + 4n`, which is the
+/// floor (c = 1: the bound is already the worst case, no empirical slack is added).
+/// A DC value above `-floor` is rounding of this cancellation; one below it is a
+/// violation. Unlike the `1e-12 max(|D|, |E|)` floor, it does not vanish when
+/// `D = E = 0`.
+fn dc_rounding_bound(model: &MimoModel) -> f64 {
+    let n = model.ports;
+    let mut s: Vec<f64> = model.d.iter().map(|v| v.abs()).collect();
+    for (term, residue) in model.poles.iter().zip(&model.residues) {
+        let (multiplicity, magnitude) = match *term {
+            PoleTerm::Real { pole, .. } => (1.0, pole.abs()),
+            PoleTerm::Pair { pole, .. } => (2.0, pole.abs()),
+        };
+        for (entry, r) in s.iter_mut().zip(residue) {
+            *entry += multiplicity * r.abs() / magnitude;
+        }
+    }
+    let mut frobenius_squared = 0.0_f64;
+    for a in 0..n {
+        for b in 0..n {
+            let sum = s[a * n + b] + s[b * n + a];
+            frobenius_squared += sum * sum;
+        }
+    }
+    let units = (2 * model.poles.len() + 8 + 4 * n) as f64;
+    let u = f64::EPSILON / 2.0;
+    units * u / (1.0 - units * u) * det::sqrt(frobenius_squared)
+}
+
 /// Certify impedance-form passivity of a stable multiport model.
 ///
 /// # Errors
@@ -943,9 +989,12 @@ pub fn check_mimo_passivity(
     let (mut worst, mut violation_freqs) = grid_scan(&build_grid(model, band), lambda_min);
     // The grid starts a decade below the band, and a Hamiltonian crossing that
     // close to DC can fail the imaginary-axis test, so DC itself is probed. As
-    // for the asymptote, a DC eigenvalue within the 1e-12 floor is rounding.
+    // for the asymptote, a DC eigenvalue within the 1e-12 floor is rounding; and
+    // so is one within the derived rounding bound of the DC evaluation itself,
+    // which `tol` cannot see when D = E = 0 (a pure-pole model whose DC value is
+    // a cancellation of its own terms).
     let dc = lambda_min(0.0);
-    if !(dc >= -tol) {
+    if !(dc >= -tol.max(dc_rounding_bound(model))) {
         violation_freqs.push(0.0);
         if !(dc >= worst.0) {
             worst = (dc, 0.0);
