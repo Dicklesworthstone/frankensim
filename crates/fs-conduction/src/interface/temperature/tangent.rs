@@ -63,6 +63,9 @@ impl<'a> ContactCapacityLinearization<'a> {
 
 impl TemperatureContact<'_> {
     fn temperature_slope(&self, cx: &Cx<'_>, t: f64) -> Result<f64, ConductionError> {
+        let super::TemperatureContactCoordinates::Mean(temperature_axis) = &self.coordinates else {
+            return Err(invalid(self.name(), "two-sided contact derivatives require both source partials; a mean-temperature tangent is incomplete"));
+        };
         // All three evaluations keep the original pin and nonthermal context.
         // Neighbours admit the source domain; they do NOT estimate the slope.
         for temperature in [t.next_down(), t, t.next_up()] {
@@ -75,7 +78,7 @@ impl TemperatureContact<'_> {
             (PropertyValue::Scalar { .. }, InterpolationPolicy::ConstantWithinValidity) => Ok(0.0),
             (PropertyValue::Curve { abscissa, knots, .. }, InterpolationPolicy::LinearInside) => {
                 // A curve in a fixed nonthermal coordinate is constant in T.
-                if abscissa != &self.temperature_axis { return Ok(0.0); }
+                if abscissa != temperature_axis { return Ok(0.0); }
                 let mut slope = None;
                 for (index, pair) in knots.windows(2).enumerate() {
                     if index % 256 == 0 { poll(cx, index)?; }

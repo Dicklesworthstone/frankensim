@@ -1,5 +1,30 @@
 # CONTRACT: fs-conduction
 
+## Two-sided source laws on matching thermal interfaces
+
+`interface::temperature::TemperatureContact::new_two_sided` binds separate
+absolute-temperature source axes to the independently resolved A/B P1 trace
+means. An original interface card may therefore supply R(T_A,T_B) without
+replacing unequal body temperatures by their arithmetic mean. `new` retains
+the explicitly declared mean-temperature closure. Ordered face assignments
+and source axes are never silently sorted or exchanged; pressure, medium,
+finish, history and the selected claim stay fixed at their original context.
+
+The original source evaluator owns interpolation, holes and support limits.
+Each snapshot retains the actual local source receipt. The reported arithmetic
+mean is diagnostic for a two-sided law. Resistance is constant on each paired
+triangle at those trace means, while the original consistent face mass
+integrates its nonuniform temperature jump conservatively. This is not a
+quadrature-point material law or an evolving mechanical contact-area model.
+
+The same snapshots feed existing capacity, primary-enthalpy and radiation
+endpoint owners; a failed source query publishes no candidate history.
+Classical derivatives must include both source partials. Until such a tangent
+is available, a two-sided law refuses the mean-only tangent entry rather than
+returning a frozen or incomplete derivative. Focused G0/G1/G3 tests cover
+ordered source queries, surface/axis reversal, actual implicit energy exchange
+and invalid coordinate or source-support refusals.
+
 ## Source-bound implicit finite-cell contact
 
 `transient::deposition::contact::implicit::PreparedMaterialContact` binds the

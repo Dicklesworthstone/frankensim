@@ -236,3 +236,202 @@ fn cancelled_contact_evaluation_and_step_publish_no_candidate() {
         assert_eq!(history,before);
     });
 }
+
+fn two_sided_point(a: f64, b: f64) -> QueryPoint {
+    use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
+    let kelvin = fs_qty::QuantitySpec::semantic(SemanticType::new(
+        QuantityKind::AbsoluteTemperature, ValueForm::Static,
+    ));
+    QueryPoint::new().with_quantity("TA", kelvin, a).unwrap()
+        .with_quantity("TB", kelvin, b).unwrap()
+        .with("normal_pressure", 1e6).unwrap()
+}
+
+fn two_sided_resistance(a: f64, b: f64) -> f64 {
+    0.5 + (a - 320.0) / 1024.0 + 3.0 * (b - 320.0) / 1024.0
+}
+
+fn two_sided_card(reverse: bool) -> InterfaceSystemCard {
+    let dims = fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS;
+    let mut claims = ClaimSet::new();
+    let samples = [[256.,256.], [384.,256.], [256.,384.], [384.,384.]]
+        .into_iter().map(|p| (p, two_sided_resistance(p[0], p[1]))).collect();
+    claims.insert_claim(PropertyClaim {
+        key: PropertyKey::new(fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY, dims),
+        value: PropertyValue::Surface2D {
+            axes: ["TA".into(), "TB".into()],
+            axis_dims: [fs_conduction::TEMPERATURE_DIMS; 2],
+            samples, triangles: vec![[0,1,2], [1,3,2]], dims,
+        },
+        validity: ValidityDomain::unconstrained().with("TA",256.,384.)
+            .with("TB",256.,384.).with("normal_pressure",1e6,1e6),
+        uncertainty: UncertaintyModel::Unstated,
+        interpolation: InterpolationPolicy::LinearInside,
+        observations: vec![], provenance: Provenance {
+            source: "manufactured ordered R(TA,TB), not measured interface data".into(),
+            license: "internal-test-use".into(), artifact: None,
+        },
+    }).unwrap();
+    let side = |name: &str| SurfaceSpec { material: MaterialStateId {
+        chemistry: name.into(), phase: "solid".into(), process: "fixture".into(), revision: 0,
+    }, texture_frame: "fixed reference normal".into() };
+    let (a, b) = if reverse { ("B", "A") } else { ("A", "B") };
+    InterfaceSystemCard::assemble(side(a), side(b), SystemContext {
+        medium: "dry".into(), third_body: None, environment: "vacuum".into(), history: "unaged".into(),
+    }, claims, vec![]).unwrap()
+}
+
+fn two_sided_contacts<'m, 'c>(cx: &Cx<'_>, mesh: &'m ConductionMesh,
+    bc: &ThermalBoundary, card: &'c InterfaceSystemCard, reverse: bool,
+) -> TemperatureContacts<'m, 'c> {
+    let mut pair = ThermalInterfaces::coincident_face_pairs(mesh).unwrap()[0];
+    if mesh.boundary()[pair.side_a].vertices[0] >= 4 {
+        std::mem::swap(&mut pair.side_a, &mut pair.side_b);
+    }
+    if reverse { std::mem::swap(&mut pair.side_a, &mut pair.side_b); }
+    let axes = if reverse { ["TB", "TA"] } else { ["TA", "TB"] };
+    let law = TemperatureContact::new_two_sided("joint", vec![pair], card,
+        &two_sided_point(320.,320.), axes, SelectionPolicy::SingleClaimOnly).unwrap();
+    TemperatureContacts::new(cx,mesh,bc,vec![],vec![law],1).unwrap()
+}
+
+#[test]
+fn g1_g3_two_sided_contact_keeps_ordered_trace_queries_and_reversal() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh=mesh(); let bc=boundary(&mesh); let card=two_sided_card(false);
+        let contacts=two_sided_contacts(cx,&mesh,&bc,&card,false);
+        let field=old();
+        let evaluated=contacts.evaluate(cx,&bc,&field).unwrap();
+        let state=&evaluated.states()[0];
+        near(state.side_a_temperature_k,300.,1e-12);
+        near(state.side_b_temperature_k,360.,1e-12);
+        near(state.interface_temperature_k,330.,1e-12);
+        near(state.resistance.value_m2_k_per_w(),two_sided_resistance(300.,360.),1e-14);
+        for coordinate in [("TA",300.),("TB",360.),("normal_pressure",1e6)] {
+            assert!(state.resistance.receipt().query_point.contains(&(coordinate.0.into(),coordinate.1)));
+        }
+        let swapped=contacts.evaluate(cx,&bc,&[360.,360.,360.,360.,300.,300.,300.,300.]).unwrap();
+        near(swapped.states()[0].interface_temperature_k,state.interface_temperature_k,1e-12);
+        near(swapped.states()[0].resistance.value_m2_k_per_w(),two_sided_resistance(360.,300.),1e-14);
+        assert_ne!(swapped.states()[0].resistance.value_m2_k_per_w(),state.resistance.value_m2_k_per_w());
+        assert_eq!(swapped.states()[0].resistance.receipt().selected,state.resistance.receipt().selected);
+
+        // Reverse both named surfaces and their declared source-axis binding.
+        // Physical exchange stays identical, while the A-to-B sign reverses.
+        let reverse_card=two_sided_card(true);
+        let reverse=two_sided_contacts(cx,&mesh,&bc,&reverse_card,true).evaluate(cx,&bc,&field).unwrap();
+        near(reverse.states()[0].side_a_temperature_k,360.,1e-12);
+        near(reverse.states()[0].side_b_temperature_k,300.,1e-12);
+        near(reverse.states()[0].resistance.value_m2_k_per_w(),state.resistance.value_m2_k_per_w(),1e-14);
+        assert_eq!(reverse.states()[0].resistance.receipt().query_point,
+            state.resistance.receipt().query_point);
+        let flux=evaluated.frozen_interfaces().fluxes(&field).unwrap()[0].heat_rate_a_to_b_w;
+        let reversed_flux=reverse.frozen_interfaces().fluxes(&field).unwrap()[0].heat_rate_a_to_b_w;
+        near(flux,0.5*(300.-360.)/two_sided_resistance(300.,360.),1e-12);
+        near(flux,-reversed_flux,1e-12);
+    });
+}
+
+// Independent fixed-R P1 system: tetrahedral gradients give the two 4x4
+// stiffness blocks, and triangle integration gives +/- (1+delta_ij)/(24R).
+// Eliminating these eight linear unknowns leaves one scalar source-law root.
+fn two_sided_capacity_reference(dt: f64) -> [f64; 8] {
+    let fixed = |r: f64| {
+        let mut a = [[0.0; 8]; 8];
+        let mut b = [0.0; 8];
+        let gradients = [[-1.,-1.,-1.], [1.,0.,0.], [0.,1.,0.], [0.,0.,1.]];
+        for i in 0..8 {
+            let capacity = if i < 4 { 10.0 / 24.0 } else { 20.0 / 24.0 };
+            a[i][i] += capacity / dt;
+            b[i] = capacity / dt * if i < 4 { 300.0 } else { 360.0 };
+            if i >= 4 { b[i] += 30.0 / 24.0; }
+            for j in 0..4 {
+                a[i][i / 4 * 4 + j] += 2.0 / 6.0 * (0..3)
+                    .map(|axis| gradients[i % 4][axis] * gradients[j][axis]).sum::<f64>();
+            }
+        }
+        for i in 0..3 {
+            for j in 0..3 {
+                let value = (if i == j { 2.0 } else { 1.0 }) / (24.0 * r);
+                a[i][j] += value; a[i+4][j+4] += value;
+                a[i][j+4] -= value; a[i+4][j] -= value;
+            }
+        }
+        // Direct elimination is separate from the product's sparse Krylov and
+        // contact fixed-point owners; this tiny manufactured matrix is SPD.
+        for column in 0..8 {
+            for row in column+1..8 {
+                let factor=a[row][column]/a[column][column];
+                for j in column..8 { a[row][j] -= factor*a[column][j]; }
+                b[row] -= factor*b[column];
+            }
+        }
+        let mut t=[0.0;8];
+        for i in (0..8).rev() {
+            t[i]=(b[i]-(i+1..8).map(|j|a[i][j]*t[j]).sum::<f64>())/a[i][i];
+        }
+        t
+    };
+    let (mut lo,mut hi)=(0.25,0.75);
+    for _ in 0..80 {
+        let r=0.5*(lo+hi); let t=fixed(r);
+        let actual=two_sided_resistance(t[..3].iter().sum::<f64>()/3.,t[4..7].iter().sum::<f64>()/3.);
+        if r > actual { hi=r; } else { lo=r; }
+    }
+    fixed(0.5*(lo+hi))
+}
+
+#[test]
+fn g1_two_sided_contact_advances_real_capacity_and_matches_spatial_energy_root() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh=mesh(); let bc=boundary(&mesh); let card=two_sided_card(false);
+        let contacts=two_sided_contacts(cx,&mesh,&bc,&card,false);
+        let engine=BackwardEuler::per_element(cx,&mesh,&[
+            VolumetricHeatCapacity::declared(10.).unwrap(),
+            VolumetricHeatCapacity::declared(20.).unwrap(),
+        ]).unwrap();
+        let source=source(); let material=material(false); let initial=old(); let dt=0.35;
+        let problem=ConductionProblem {mesh:&mesh,boundary:&bc,material:&material,
+            element_materials:None,source:&source};
+        let result=contacts.advance_capacity(cx,&engine,problem,&initial,dt,step_config(),
+            Some(nonlinear()),coupling()).unwrap();
+        let expected=two_sided_capacity_reference(dt);
+        for (&t,&reference) in result.conduction.temperature.iter().zip(&expected) {
+            near(t,reference,2e-7);
+        }
+        let state=&result.physical_contacts.states()[0];
+        near(state.resistance.value_m2_k_per_w(),two_sided_resistance(
+            state.side_a_temperature_k,state.side_b_temperature_k),1e-14);
+        assert!(state.side_a_temperature_k > 300. && state.side_b_temperature_k < 360.);
+        assert!(result.iterations > 1);
+        assert!(result.physical.residual_norm_j <= coupling().residual_tolerance_j);
+        let stored:f64=result.conduction.temperature.iter().zip(&initial).enumerate()
+            .map(|(i,(&t,&old))| (if i<4 {10.} else {20.})*(t-old)/24.).sum();
+        near(stored,5.*dt,2e-8);
+        near(result.physical.stored_energy_change_j,stored,2e-8);
+        near(result.physical.energy_residual_j,0.,1e-8);
+        assert_eq!(initial,old());
+    });
+}
+
+#[test]
+fn g0_two_sided_contact_refuses_aliased_axes_wrong_units_and_one_sided_support_loss() {
+    context(&CancelGate::new_clock_free(), |cx| {
+        let mesh=mesh(); let bc=boundary(&mesh); let card=two_sided_card(false);
+        let pairs=ThermalInterfaces::coincident_face_pairs(&mesh).unwrap();
+        let point=two_sided_point(320.,320.);
+        for axes in [["TA","TA"],["TA","missing"],["","TB"]] {
+            assert!(TemperatureContact::new_two_sided("joint",pairs.clone(),&card,&point,
+                axes,SelectionPolicy::SingleClaimOnly).is_err());
+        }
+        let wrong=point.clone().with_quantity("TB",fs_qty::QuantitySpec::dimensional(
+            fs_qty::Pressure::DIMS),320.).unwrap();
+        assert!(TemperatureContact::new_two_sided("joint",pairs,&card,&wrong,
+            ["TA","TB"],SelectionPolicy::SingleClaimOnly).is_err());
+        let contacts=two_sided_contacts(cx,&mesh,&bc,&card,false);
+        // Both means are 340 K, but one source coordinate lies above 384 K.
+        assert!(contacts.evaluate(cx,&bc,&[400.,400.,400.,400.,280.,280.,280.,280.]).is_err());
+        assert!(contacts.evaluate(cx,&bc,&[280.,280.,280.,280.,400.,400.,400.,400.]).is_err());
+        assert!(contacts.evaluate(cx,&bc,&old()).is_ok());
+    });
+}

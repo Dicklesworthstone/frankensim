@@ -1,8 +1,8 @@
-//! Source-backed contact resistance evaluated at each pair's mean trace temperature.
+//! Source-backed contact resistance at explicitly declared trace coordinates.
 //!
-//! Only the explicit temperature coordinate changes. Pressure, finish, medium,
+//! Only the declared temperature coordinates change. Pressure, finish, medium,
 //! source card and selected claim remain fixed. The two bulk traces stay distinct;
-//! their arithmetic mean is a declared interface closure, not thermal equilibrium.
+//! an arithmetic mean is used only by an explicitly selected mean-temperature law.
 //! Frozen snapshots are NOT complete nonlinear-contact tangents or adjoints.
 
 pub mod capacity;
@@ -19,12 +19,25 @@ use fs_qty::{QuantitySpec, Temperature};
 use super::{InterfaceFacePair, InterfaceResistance, InterfaceSurface, ThermalInterfaces};
 use crate::{ConductionError, ConductionMesh, ThermalBoundary};
 
+/// Thermal coordinates owned by a matching-contact source law.
+///
+/// Face-pair A/B order is the source card's declared surface order. A reversal
+/// of the physical interface must reverse both the face assignment and the
+/// corresponding source coordinates; the solver never sorts the two sides.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TemperatureContactCoordinates {
+    /// One source axis follows (mean trace A + mean trace B)/2.
+    Mean(String),
+    /// Separate source axes follow the independent mean traces in A/B order.
+    TwoSided([String; 2]),
+}
+
 /// A named matching surface and one source law, selected once at a reference point.
 #[derive(Debug, Clone)]
 pub struct TemperatureContact<'a> {
     card: &'a InterfaceSystemCard,
     reference_point: QueryPoint,
-    temperature_axis: String,
+    coordinates: TemperatureContactCoordinates,
     reference: InterfaceSurface,
     resistance: InterfaceResistance,
 }
@@ -42,23 +55,62 @@ impl<'a> TemperatureContact<'a> {
         temperature_axis: &str,
         selection: SelectionPolicy,
     ) -> Result<Self, ConductionError> {
-        let name = name.into();
+        Self::bind(name.into(), face_pairs, card, point,
+            TemperatureContactCoordinates::Mean(temperature_axis.into()), selection)
+    }
+
+    /// Bind R(T_A,T_B) to the independently resolved P1 trace means.
+    ///
+    /// The two named axes must be distinct, present in the original query,
+    /// and describe positive absolute temperatures. A source may depend on
+    /// either axis or both; its original interpolation cells and validity
+    /// domain still govern every query. Pressure, medium, finish and history
+    /// remain fixed at the explicitly supplied source conditions.
+    pub fn new_two_sided(
+        name: impl Into<String>,
+        face_pairs: Vec<InterfaceFacePair>,
+        card: &'a InterfaceSystemCard,
+        point: &QueryPoint,
+        temperature_axes: [&str; 2],
+        selection: SelectionPolicy,
+    ) -> Result<Self, ConductionError> {
+        Self::bind(name.into(), face_pairs, card, point,
+            TemperatureContactCoordinates::TwoSided(temperature_axes.map(String::from)), selection)
+    }
+
+    fn bind(
+        name: String,
+        face_pairs: Vec<InterfaceFacePair>,
+        card: &'a InterfaceSystemCard,
+        point: &QueryPoint,
+        coordinates: TemperatureContactCoordinates,
+        selection: SelectionPolicy,
+    ) -> Result<Self, ConductionError> {
         let absolute = QuantitySpec::semantic(SemanticType::new(
             QuantityKind::AbsoluteTemperature, ValueForm::Static,
         ));
-        let descriptor_ok = match point.axis_quantities().get(temperature_axis) {
-            Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
-            None => temperature_axis == "T",
+        let axes = match &coordinates {
+            TemperatureContactCoordinates::Mean(axis) => std::slice::from_ref(axis),
+            TemperatureContactCoordinates::TwoSided(axes) => axes.as_slice(),
         };
-        if !descriptor_ok || !point.axes().get(temperature_axis)
-            .is_some_and(|t| t.is_finite() && *t > 0.0)
-        {
-            return Err(invalid(&name, "an explicit positive absolute-temperature coordinate is required"));
+        for (i, axis) in axes.iter().enumerate() {
+            if axis.trim().is_empty() || axes[..i].contains(axis) {
+                return Err(invalid(&name, "contact temperature coordinates must be nonblank and distinct"));
+            }
+            let descriptor_ok = match point.axis_quantities().get(axis) {
+                Some(q) => *q == absolute || *q == QuantitySpec::dimensional(Temperature::DIMS),
+                None => axis == "T",
+            };
+            if !descriptor_ok || !point.axes().get(axis)
+                .is_some_and(|t| t.is_finite() && *t > 0.0)
+            {
+                return Err(invalid(&name, "each contact temperature coordinate needs a positive absolute-temperature value"));
+            }
         }
         let resistance = InterfaceResistance::from_card(&name, card, point, selection)?;
         let reference = InterfaceSurface::new(name, face_pairs, resistance.clone())?;
         Ok(Self {
-            card, reference_point: point.clone(), temperature_axis: temperature_axis.into(),
+            card, reference_point: point.clone(), coordinates,
             reference, resistance,
         })
     }
@@ -69,14 +121,40 @@ impl<'a> TemperatureContact<'a> {
     /// Original query including fixed pressure and all other source conditions.
     #[must_use]
     pub fn reference_point(&self) -> &QueryPoint { &self.reference_point }
+    /// Explicit source-coordinate convention, including ordered axis names.
+    #[must_use]
+    pub const fn coordinates(&self) -> &TemperatureContactCoordinates { &self.coordinates }
     /// Reference source answer. Its selected claim stays pinned at every trial.
     #[must_use]
     pub fn reference_resistance(&self) -> &InterfaceResistance { &self.resistance }
 
     fn at(&self, temperature_k: f64) -> Result<InterfaceResistance, ConductionError> {
-        positive(temperature_k)?;
-        let point = self.reference_point.clone().with(&self.temperature_axis, temperature_k)
-            .map_err(|error| invalid(self.name(), format!("temperature query refused: {error}")))?;
+        if !matches!(self.coordinates, TemperatureContactCoordinates::Mean(_)) {
+            return Err(invalid(self.name(), "a two-sided contact needs both independent trace temperatures"));
+        }
+        self.at_traces([temperature_k; 2])
+    }
+
+    fn query_point_at(&self, temperatures_k: [f64; 2]) -> Result<QueryPoint, ConductionError> {
+        let [a, b] = [positive(temperatures_k[0])?, positive(temperatures_k[1])?];
+        let mut point = self.reference_point.clone();
+        match &self.coordinates {
+            TemperatureContactCoordinates::Mean(axis) => {
+                point = point.with(axis, positive(0.5 * a + 0.5 * b)?)
+                    .map_err(|error| invalid(self.name(), format!("temperature query refused: {error}")))?;
+            }
+            TemperatureContactCoordinates::TwoSided(axes) => {
+                for (axis, temperature) in axes.iter().zip([a, b]) {
+                    point = point.with(axis, temperature)
+                        .map_err(|error| invalid(self.name(), format!("temperature query refused: {error}")))?;
+                }
+            }
+        }
+        Ok(point)
+    }
+
+    fn at_traces(&self, temperatures_k: [f64; 2]) -> Result<InterfaceResistance, ConductionError> {
+        let point = self.query_point_at(temperatures_k)?;
         InterfaceResistance::from_card_pinned(
             self.name(), self.card, &point, self.resistance.receipt().selected,
         )
@@ -94,7 +172,8 @@ pub struct ContactFaceState {
     pub side_a_temperature_k: f64,
     /// P1 area mean of the independent B temperature trace, K.
     pub side_b_temperature_k: f64,
-    /// Declared closure: half of each trace mean, K.
+    /// Arithmetic mean of the two trace means, K. This is the query coordinate
+    /// only for a mean-temperature law; two-sided laws use the separate traces.
     pub interface_temperature_k: f64,
     /// Fresh positive source answer and its exact local query receipt.
     pub resistance: InterfaceResistance,
@@ -164,7 +243,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         Ok(Self { mesh, fixed, variable, variable_pairs })
     }
 
-    /// Query every local interface temperature and build one complete snapshot.
+    /// Query every declared local thermal coordinate and build one complete snapshot.
     /// All nonthermal coordinates and selected source claims stay unchanged.
     /// A single failed local query refuses the whole snapshot.
     pub fn evaluate(
@@ -199,7 +278,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
                 let a = mean(pair.side_a)?;
                 let b = mean(pair.side_b)?;
                 let temperature = positive(0.5 * a + 0.5 * b)?;
-                let resistance = law.at(temperature)?;
+                let resistance = law.at_traces([a, b])?;
                 resistances.push(resistance.clone());
                 states.push(ContactFaceState {
                     interface: law.name().into(), pair, side_a_temperature_k: a,
