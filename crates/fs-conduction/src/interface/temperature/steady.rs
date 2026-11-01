@@ -3,6 +3,9 @@
 /// Revalidated steady tangents and adjoints of the complete contact law.
 pub mod linearization;
 pub use linearization::{ContactSteadyGradient, ContactSteadyLinearization};
+/// Coupled sparse Newton iteration for strong source-law temperature feedback.
+pub mod newton;
+pub use newton::{ContactSteadyNewtonSolution, SteadyContactNewtonConfig};
 
 use fs_exec::Cx;
 use fs_solver::norm2;

@@ -107,11 +107,37 @@ impl InterfaceResistance {
         )
     }
 
+    /// Preserve the original typed query refusal for internal trial admission.
+    /// The public diagnostic and successful source receipt remain unchanged.
+    pub(crate) fn from_card_pinned_with_query_refusal(
+        interface_name: &str,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+        pinned: ClaimId,
+        on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
+    ) -> Result<Self, ConductionError> {
+        Self::from_card_selected_with_query_refusal(
+            interface_name, card, point, InterfaceClaimSelection::Pinned(pinned), on_refusal,
+        )
+    }
+
     fn from_card_selected(
         interface_name: &str,
         card: &InterfaceSystemCard,
         point: &QueryPoint,
         selection: InterfaceClaimSelection,
+    ) -> Result<Self, ConductionError> {
+        Self::from_card_selected_with_query_refusal(
+            interface_name, card, point, selection, &mut |_| {},
+        )
+    }
+
+    fn from_card_selected_with_query_refusal(
+        interface_name: &str,
+        card: &InterfaceSystemCard,
+        point: &QueryPoint,
+        selection: InterfaceClaimSelection,
+        on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
     ) -> Result<Self, ConductionError> {
         if interface_name.trim().is_empty() {
             return Err(interface_error(
@@ -133,6 +159,7 @@ impl InterfaceResistance {
             ),
         }
             .map_err(|error| {
+                on_refusal(&error);
                 interface_error(
                     interface_name,
                     format!(

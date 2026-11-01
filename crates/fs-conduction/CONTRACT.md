@@ -47,6 +47,39 @@ regressions cover matching/nonmatching traces, Dirichlet/Robin reservoirs,
 source support and a frozen-contact candidate with cancelling global heat
 but an unacceptable local residual.
 
+## Coupled Newton solve for strong thermal-contact feedback
+
+`TemperatureContacts::solve_steady_newton` solves the full steady physical
+residual through the original `fs_solver::NewtonKrylovState`. The original
+bulk-plus-frozen-contact Jacobian receives only the missing contact-temperature
+feedback; its sparse assembly and physical preconditioner are reused throughout
+each Krylov solve. Both matching face means and nonmatching overlap quadrature
+retain their independent side temperatures and exact pinned source context.
+
+The existing Armijo driver reduces trials that leave the positive Kelvin or
+admitted bulk/source temperature domains. A crate-private callback preserves
+the original typed material query error before its public diagnostic wrapper;
+only the specified domain errors are retryable. No source extrapolation, claim
+switch, finite-difference Jacobian, dense solve or repeated intersection is
+introduced. Structural/source-arithmetic errors and cancellation abort.
+
+The numerical absolute tolerance cannot exceed the separate fixed physical
+residual target; relative stopping is disabled for this entry point. Iteration,
+physical residual evaluation, Krylov and contact work have explicit limits.
+Acceptance reuses the original physical evaluation only when its free field
+matches the accepted Newton state bit for bit, then checks the free-node watt
+residual and independent reservoir heat closure. The result retains actual
+contact receipts, Dirichlet/Robin heat and the unmodified Newton report. It
+performs no hidden final PDE solve and creates no frozen-solver report.
+
+The stiff slab regressions have the independent admitted root of 100 W and
+check the actual first Newton direction, source-domain damping, local residuals
+and both reservoir reactions on matching and nonmatching meshes. A frozen
+Picard step leaves source support for the same fixture. Smooth contact
+derivatives are required at Newton fields; arbitrary-law convergence, root
+uniqueness, evolving pressure/contact area and interface storage are outside
+this stationary contact model.
+
 ## Complete steady contact tangents and adjoints
 
 `TemperatureContacts::linearize_steady_endpoint` binds the unchanged physical

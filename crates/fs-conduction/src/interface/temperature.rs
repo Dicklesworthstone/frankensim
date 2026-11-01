@@ -184,10 +184,13 @@ impl<'a> TemperatureContact<'a> {
         Ok(point)
     }
 
-    fn at_traces(&self, temperatures_k: [f64; 2]) -> Result<InterfaceResistance, ConductionError> {
+    fn at_traces_with_query_refusal(
+        &self, temperatures_k: [f64; 2],
+        on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
+    ) -> Result<InterfaceResistance, ConductionError> {
         let point = self.query_point_at(temperatures_k)?;
-        InterfaceResistance::from_card_pinned(
-            self.name(), self.card, &point, self.resistance.receipt().selected,
+        InterfaceResistance::from_card_pinned_with_query_refusal(
+            self.name(), self.card, &point, self.resistance.receipt().selected, on_refusal,
         )
     }
 }
@@ -342,6 +345,16 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
     pub fn evaluate(
         &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperatures: &[f64],
     ) -> Result<TemperatureContactEvaluation, ConductionError> {
+        self.evaluate_with_query_refusal(cx, boundary, temperatures, &mut |_| {})
+    }
+
+    /// Internal trial admission observes the original typed source refusal
+    /// before the historical public error wrapper renders it. No source is
+    /// re-queried, no geometry is rebuilt and no admissibility is relaxed.
+    pub(crate) fn evaluate_with_query_refusal(
+        &self, cx: &Cx<'_>, boundary: &ThermalBoundary, temperatures: &[f64],
+        on_refusal: &mut dyn FnMut(&fs_matdb::MatDbError),
+    ) -> Result<TemperatureContactEvaluation, ConductionError> {
         poll(cx, 0)?;
         if temperatures.len() != self.mesh.vertex_count() {
             return Err(invalid("<contact-set>", "temperature field and contact mesh differ"));
@@ -373,7 +386,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
                 let a = mean(pair.side_a)?;
                 let b = mean(pair.side_b)?;
                 let temperature = positive(0.5 * a + 0.5 * b)?;
-                let resistance = law.at_traces([a, b])?;
+                let resistance = law.at_traces_with_query_refusal([a, b], on_refusal)?;
                 resistances.push(resistance.clone());
                 states.push(ContactFaceState {
                     interface: law.name().into(), pair, side_a_temperature_k: a,
@@ -392,7 +405,7 @@ impl<'m, 'c> TemperatureContacts<'m, 'c> {
         for surface in &mut interfaces.nonmatching {
             let Some(law)=self.variable.iter().find(|law|law.name()==surface.name) else {continue;};
             *surface=surface.at_quadrature(cx,temperatures,|pair,index,weight,traces| {
-                let resistance=law.at_traces(traces)?;
+                let resistance=law.at_traces_with_query_refusal(traces,on_refusal)?;
                 quadrature_states.push(ContactQuadratureState {interface:law.name().into(),pair,
                     quadrature_index:index,weight_m2:weight,side_a_temperature_k:traces[0],
                     side_b_temperature_k:traces[1],resistance:resistance.clone()});
