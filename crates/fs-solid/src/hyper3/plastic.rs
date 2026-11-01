@@ -19,8 +19,9 @@
 //! moderate. Accurate bending in strongly plastic or nearly incompressible
 //! regimes requires a mixed/stabilized successor and mesh evidence; an affine
 //! patch does not establish that accuracy. [`dynamics`] adds endpoint inertia
-//! on this same solve. No thermal evolution, contact, follower loads or cyclic
-//! kinematic hardening is supplied here.
+//! on this same solve. [`thermal`] adds changing temperature and exact native
+//! thermoelastic/plastic accounts. Contact, follower loads and cyclic kinematic
+//! hardening are outside these paths.
 
 use std::sync::Arc;
 
@@ -37,6 +38,8 @@ use crate::linear3::TetAssemblyBudget;
 
 /// Consistent reference inertia with atomic finite-plastic motion acceptance.
 pub mod dynamics;
+/// Retained finite plastic history with evolving thermal coefficients and stretch.
+pub mod thermal;
 
 const IDENTITY: [f64; 9] = [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
 
@@ -125,9 +128,16 @@ pub struct FinitePlasticTetEnergy {
 /// independently. Reference geometry is prepared once and shared across steps.
 #[derive(Debug)]
 pub struct FinitePlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
+    material: FinitePlasticLawField<'a, L>,
+    state: FinitePlasticTetState<'a>,
+}
+
+/// Numerical history shared by fixed-temperature and thermal material owners.
+/// No constitutive source is stored or reinterpreted by this common kernel.
+#[derive(Debug)]
+struct FinitePlasticTetState<'a> {
     nodes_m: &'a [[f64; 3]],
     tetrahedra: &'a [[usize; 4]],
-    material: FinitePlasticLawField<'a, L>,
     elements: Arc<Vec<Element>>,
     budget: TetAssemblyBudget,
     displacement_m: Vec<[f64; 3]>,
@@ -135,6 +145,159 @@ pub struct FinitePlasticTetSolid<'a, L: FiniteJ2Material = FiniteJ2> {
     element_states: Vec<FiniteJ2State>,
     element_first_piola_pa: Vec<[f64; 9]>,
     stored_energy_j: f64,
+}
+
+struct EndpointWork {
+    internal_j: f64,
+    dead_load_j: f64,
+    support_j: f64,
+    residual_j: f64,
+}
+
+fn reference_size(
+    nodes: usize,
+    elements: usize,
+    budget: TetAssemblyBudget,
+) -> Result<usize, FinitePlasticTetError> {
+    if nodes == 0
+        || elements == 0
+        || nodes > budget.maximum_nodes
+        || elements > budget.maximum_tetrahedra
+    {
+        return Err(invalid(
+            "finite plastic mesh is empty or exceeds its reference budget",
+        ));
+    }
+    nodes
+        .checked_mul(3)
+        .ok_or_else(|| invalid("finite plastic displacement size overflow"))
+}
+
+fn validate_controls(
+    settings: HyperTetSettings,
+    controls: FinitePlasticStepControls,
+) -> Result<(), FinitePlasticTetError> {
+    if settings.load_steps != 1
+        || [
+            controls.equilibrium_work_tolerance_j,
+            controls.maximum_endpoint_work_defect_j,
+            controls.yield_tolerance_pa,
+        ]
+        .iter()
+        .any(|value| !value.is_finite() || *value < 0.0)
+    {
+        return Err(invalid(
+            "one physical endpoint and finite nonnegative work/yield tolerances required",
+        ));
+    }
+    Ok(())
+}
+
+impl<'a> FinitePlasticTetState<'a> {
+    fn reference_elements<L: FiniteStrainPotential>(
+        nodes_m: &'a [[f64; 3]],
+        tetrahedra: &'a [[usize; 4]],
+        material: HyperelasticLawField<'_, L>,
+        budget: TetAssemblyBudget,
+        cx: &Cx<'_>,
+    ) -> Result<Arc<Vec<Element>>, FinitePlasticTetError> {
+        let dofs = reference_size(nodes_m.len(), tetrahedra.len(), budget)?;
+        let prescribed: Vec<_> = (0..dofs).map(|dof| (dof, 0.0)).collect();
+        let problem = HyperTetProblem {
+            nodes_m,
+            tetrahedra,
+            material,
+            prescribed_m: &prescribed,
+            nodal_forces_n: &[],
+            body_force_n_m3: [0.0; 3],
+            budget,
+            settings: HyperTetSettings::default(),
+        };
+        let elements = problem.validate()?;
+        checkpoint(cx)?;
+        Ok(Arc::new(elements))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn solve_endpoint<L: FiniteStrainPotential>(
+        &self,
+        material: HyperelasticLawField<'_, L>,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        body_force_n_m3: [f64; 3],
+        settings: HyperTetSettings,
+        inertia: Option<&crate::inertia::BackwardEulerInertia<'_>>,
+        cx: &Cx<'_>,
+    ) -> Result<(HyperTetSolution, Vec<f64>), FinitePlasticTetError> {
+        let problem = HyperTetProblem {
+            nodes_m: self.nodes_m,
+            tetrahedra: self.tetrahedra,
+            material,
+            prescribed_m,
+            nodal_forces_n,
+            body_force_n_m3,
+            budget: self.budget,
+            settings,
+        };
+        let equilibrium = problem.solve_loaded_from(
+            Some(self.displacement_m.as_flattened()),
+            Some(&self.elements),
+            None,
+            None,
+            inertia,
+            cx,
+        )?;
+        let force = problem.external(&self.elements, 1.0);
+        Ok((equilibrium, force))
+    }
+
+    fn endpoint_work(
+        &self,
+        equilibrium: &HyperTetSolution,
+        force: &[f64],
+        deformation: &[[f64; 9]],
+        stress: &[[f64; 9]],
+        inertial_work_j: Option<f64>,
+        cx: &Cx<'_>,
+    ) -> Result<EndpointWork, FinitePlasticTetError> {
+        let mut internal_j = 0.0;
+        for (index, element) in self.elements.iter().enumerate() {
+            if index % 1024 == 0 {
+                checkpoint(cx)?;
+            }
+            let density = (0..9).fold(0.0, |sum, component| {
+                stress[index][component].mul_add(
+                    deformation[index][component] - self.element_deformation[index][component],
+                    sum,
+                )
+            });
+            internal_j = element.volume.mul_add(density, internal_j);
+        }
+        let old_u = self.displacement_m.as_flattened();
+        let new_u = equilibrium.displacement_m.as_flattened();
+        let dead_load_j = force
+            .iter()
+            .zip(new_u.iter().zip(old_u))
+            .fold(0.0, |sum, (force, (after, before))| {
+                force.mul_add(after - before, sum)
+            });
+        let support_j = equilibrium
+            .reactions_n
+            .iter()
+            .fold(0.0, |sum, (dof, force)| {
+                force.mul_add(new_u[*dof] - old_u[*dof], sum)
+            });
+        let mut residual_j = dead_load_j + support_j - internal_j;
+        if let Some(inertial_work_j) = inertial_work_j {
+            residual_j -= inertial_work_j;
+        }
+        Ok(EndpointWork {
+            internal_j,
+            dead_load_j,
+            support_j,
+            residual_j,
+        })
+    }
 }
 
 /// A fully accepted next solid and its native equilibrium/physical-step evidence.
@@ -283,21 +446,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
     ) -> Result<Self, FinitePlasticTetError> {
         checkpoint(cx)?;
         material.validate_count(tetrahedra.len())?;
-        // Gate sizes before allocating temporary admission supports or history.
-        if nodes_m.is_empty()
-            || tetrahedra.is_empty()
-            || nodes_m.len() > budget.maximum_nodes
-            || tetrahedra.len() > budget.maximum_tetrahedra
-        {
-            return Err(invalid(
-                "finite plastic mesh is empty or exceeds its reference budget",
-            ));
-        }
-        let dofs = nodes_m
-            .len()
-            .checked_mul(3)
-            .ok_or_else(|| invalid("finite plastic displacement size overflow"))?;
-        let prescribed: Vec<_> = (0..dofs).map(|dof| (dof, 0.0)).collect();
+        reference_size(nodes_m.len(), tetrahedra.len(), budget)?;
         let element_states: Vec<_> = (0..tetrahedra.len())
             .map(|index| material.at(index).finite_j2().initial_state())
             .collect();
@@ -309,51 +458,48 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 accepted,
             })
             .collect();
-        let problem = HyperTetProblem {
+        let elements = FinitePlasticTetState::reference_elements(
             nodes_m,
             tetrahedra,
-            material: HyperelasticLawField::PerElement(&frozen),
-            prescribed_m: &prescribed,
-            nodal_forces_n: &[],
-            body_force_n_m3: [0.0; 3],
+            HyperelasticLawField::PerElement(&frozen),
             budget,
-            settings: HyperTetSettings::default(),
-        };
-        let elements = problem.validate()?;
-        checkpoint(cx)?;
+            cx,
+        )?;
         Ok(Self {
-            nodes_m,
-            tetrahedra,
             material,
-            elements: Arc::new(elements),
-            budget,
-            displacement_m: vec![[0.0; 3]; nodes_m.len()],
-            element_deformation: vec![IDENTITY; tetrahedra.len()],
-            element_states,
-            element_first_piola_pa: vec![[0.0; 9]; tetrahedra.len()],
-            stored_energy_j: 0.0,
+            state: FinitePlasticTetState {
+                nodes_m,
+                tetrahedra,
+                elements,
+                budget,
+                displacement_m: vec![[0.0; 3]; nodes_m.len()],
+                element_deformation: vec![IDENTITY; tetrahedra.len()],
+                element_states,
+                element_first_piola_pa: vec![[0.0; 9]; tetrahedra.len()],
+                stored_energy_j: 0.0,
+            },
         })
     }
 
     /// Accepted total displacement, in original reference-node order.
     pub fn displacement_m(&self) -> &[[f64; 3]] {
-        &self.displacement_m
+        &self.state.displacement_m
     }
     /// Accepted total deformation gradients, row-major, in tetrahedron order.
     pub fn element_deformation(&self) -> &[[f64; 9]] {
-        &self.element_deformation
+        &self.state.element_deformation
     }
     /// Complete accepted plastic metrics and accumulated equivalent flow.
     pub fn element_states(&self) -> &[FiniteJ2State] {
-        &self.element_states
+        &self.state.element_states
     }
     /// Accepted first Piola stress, row-major, in tetrahedron order.
     pub fn element_first_piola_pa(&self) -> &[[f64; 9]] {
-        &self.element_first_piola_pa
+        &self.state.element_first_piola_pa
     }
     /// Physical elastic plus hardening storage over the whole reference mesh.
     pub fn stored_energy_j(&self) -> f64 {
-        self.stored_energy_j
+        self.state.stored_energy_j
     }
     /// Original borrowed law owners, including complete model cards when supplied.
     pub fn material(&self) -> FinitePlasticLawField<'a, L> {
@@ -409,20 +555,8 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<(FinitePlasticTetStep<'a, L>, Option<AcceptedMotion>), FinitePlasticTetError> {
         checkpoint(cx)?;
-        if settings.load_steps != 1
-            || [
-                controls.equilibrium_work_tolerance_j,
-                controls.maximum_endpoint_work_defect_j,
-                controls.yield_tolerance_pa,
-            ]
-            .iter()
-            .any(|value| !value.is_finite() || *value < 0.0)
-        {
-            return Err(invalid(
-                "one physical endpoint and finite nonnegative work/yield tolerances required",
-            ));
-        }
-        for (index, state) in self.element_states.iter().enumerate() {
+        validate_controls(settings, controls)?;
+        for (index, state) in self.state.element_states.iter().enumerate() {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
@@ -430,7 +564,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 .at(index)
                 .finite_j2()
                 .validate_committed(
-                    &self.element_deformation[index],
+                    &self.state.element_deformation[index],
                     state,
                     controls.yield_tolerance_pa,
                 )
@@ -440,6 +574,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 })?;
         }
         let frozen: Vec<_> = self
+            .state
             .element_states
             .iter()
             .enumerate()
@@ -448,22 +583,12 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 accepted,
             })
             .collect();
-        let problem = HyperTetProblem {
-            nodes_m: self.nodes_m,
-            tetrahedra: self.tetrahedra,
-            material: HyperelasticLawField::PerElement(&frozen),
+        let (equilibrium, force) = self.state.solve_endpoint(
+            HyperelasticLawField::PerElement(&frozen),
             prescribed_m,
             nodal_forces_n,
             body_force_n_m3,
-            budget: self.budget,
             settings,
-        };
-        let old_u = self.displacement_m.as_flattened();
-        let equilibrium = problem.solve_loaded_from(
-            Some(old_u),
-            Some(&self.elements),
-            None,
-            None,
             inertia,
             cx,
         )?;
@@ -472,11 +597,11 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             .map(|inertia| inertia.motion(new_u, cx))
             .transpose()
             .map_err(super::inertia_error)?;
-        let mut element_states = Vec::with_capacity(self.elements.len());
-        let mut element_deformation = Vec::with_capacity(self.elements.len());
-        let mut element_first_piola_pa = Vec::with_capacity(self.elements.len());
+        let mut element_states = Vec::with_capacity(self.state.elements.len());
+        let mut element_deformation = Vec::with_capacity(self.state.elements.len());
+        let mut element_first_piola_pa = Vec::with_capacity(self.state.elements.len());
         let mut energy = FinitePlasticTetEnergy {
-            stored_before_j: self.stored_energy_j,
+            stored_before_j: self.state.stored_energy_j,
             stored_after_j: 0.0,
             plastic_dissipation_j: 0.0,
             incremental_potential_j: 0.0,
@@ -486,7 +611,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
             equilibrium_work_residual_j: 0.0,
             endpoint_work_defect_j: 0.0,
         };
-        for (index, element) in self.elements.iter().enumerate() {
+        for (index, element) in self.state.elements.iter().enumerate() {
             if index % 1024 == 0 {
                 checkpoint(cx)?;
             }
@@ -497,7 +622,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 source,
             };
             let response = law
-                .response(&f, &self.element_states[index])
+                .response(&f, &self.state.element_states[index])
                 .map_err(refused)?;
             law.validate_committed(&f, &response.state, controls.yield_tolerance_pa)
                 .map_err(refused)?;
@@ -518,38 +643,22 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
                 response.incremental_potential_j_m3,
                 energy.incremental_potential_j,
             );
-            let work_density = (0..9).fold(0.0, |sum, component| {
-                response.first_piola_pa[component].mul_add(
-                    f[component] - self.element_deformation[index][component],
-                    sum,
-                )
-            });
-            energy.internal_endpoint_work_j = element
-                .volume
-                .mul_add(work_density, energy.internal_endpoint_work_j);
             element_deformation.push(f);
             element_first_piola_pa.push(response.first_piola_pa);
             element_states.push(response.state);
         }
-        let force = problem.external(&self.elements, 1.0);
-        energy.dead_load_endpoint_work_j = force
-            .iter()
-            .zip(new_u.iter().zip(old_u))
-            .fold(0.0, |sum, (force, (after, before))| {
-                force.mul_add(after - before, sum)
-            });
-        energy.support_endpoint_work_j = equilibrium
-            .reactions_n
-            .iter()
-            .fold(0.0, |sum, (dof, force)| {
-                force.mul_add(new_u[*dof] - old_u[*dof], sum)
-            });
-        energy.equilibrium_work_residual_j = energy.dead_load_endpoint_work_j
-            + energy.support_endpoint_work_j
-            - energy.internal_endpoint_work_j;
-        if let Some((_, inertia)) = &motion {
-            energy.equilibrium_work_residual_j -= inertia.inertial_work_j;
-        }
+        let work = self.state.endpoint_work(
+            &equilibrium,
+            &force,
+            &element_deformation,
+            &element_first_piola_pa,
+            motion.as_ref().map(|(_, account)| account.inertial_work_j),
+            cx,
+        )?;
+        energy.internal_endpoint_work_j = work.internal_j;
+        energy.dead_load_endpoint_work_j = work.dead_load_j;
+        energy.support_endpoint_work_j = work.support_j;
+        energy.equilibrium_work_residual_j = work.residual_j;
         energy.endpoint_work_defect_j = energy.internal_endpoint_work_j
             - (energy.stored_after_j - energy.stored_before_j)
             - energy.plastic_dissipation_j;
@@ -584,16 +693,18 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetSolid<'a, L> {
         }
         checkpoint(cx)?;
         let solid = Self {
-            nodes_m: self.nodes_m,
-            tetrahedra: self.tetrahedra,
             material: self.material,
-            elements: Arc::clone(&self.elements),
-            budget: self.budget,
-            displacement_m: equilibrium.displacement_m.clone(),
-            element_deformation,
-            element_states,
-            element_first_piola_pa,
-            stored_energy_j: energy.stored_after_j,
+            state: FinitePlasticTetState {
+                nodes_m: self.state.nodes_m,
+                tetrahedra: self.state.tetrahedra,
+                elements: Arc::clone(&self.state.elements),
+                budget: self.state.budget,
+                displacement_m: equilibrium.displacement_m.clone(),
+                element_deformation,
+                element_states,
+                element_first_piola_pa,
+                stored_energy_j: energy.stored_after_j,
+            },
         };
         Ok((
             FinitePlasticTetStep {

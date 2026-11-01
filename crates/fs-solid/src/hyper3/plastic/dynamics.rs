@@ -84,7 +84,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
         cx: &Cx<'_>,
     ) -> Result<Self, FinitePlasticTetError> {
         checkpoint(cx)?;
-        if velocity_mps.len() != solid.displacement_m.len()
+        if velocity_mps.len() != solid.state.displacement_m.len()
             || velocity_mps
                 .iter()
                 .flatten()
@@ -96,11 +96,12 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
         }
         let mass = P1ReferenceMass::new(
             solid
+                .state
                 .elements
                 .iter()
                 .map(|element| (element.nodes, element.volume)),
             reference_density_kg_m3,
-            solid.displacement_m.as_flattened().len(),
+            solid.state.displacement_m.as_flattened().len(),
             cx,
         )
         .map_err(inertia_error)?;
@@ -164,7 +165,7 @@ impl<'a, L: FiniteJ2Material> FinitePlasticTetMotion<'a, L> {
         }
         let inertia = BackwardEulerInertia::new(
             &self.mass,
-            self.solid.displacement_m.as_flattened(),
+            self.solid.state.displacement_m.as_flattened(),
             self.velocity_mps.as_flattened(),
             dt_s,
             cx,
