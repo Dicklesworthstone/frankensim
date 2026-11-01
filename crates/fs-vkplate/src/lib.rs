@@ -258,13 +258,15 @@ impl Csr {
         correction
     }
 
-    /// Whether row `i` of `mass_flux_correction` adds only signed zeros on a finite state: every
-    /// entry has a finite weight 0.5 val and a mass difference that compares equal to zero. Then
-    /// each term is (finite x +-0) x finite = +-0, and +0.0 plus +-0 is +0.0 under round to
-    /// nearest, so the row's correction is exactly +0.0 whenever every (w_j - wp_j) - xi is finite.
+    /// Whether row `i` of `mass_flux_correction` adds only signed zeros on a finite state, and its
+    /// mass is positive: every entry has a finite weight 0.5 val and a mass difference that
+    /// compares equal to zero. Then each term is (finite x +-0) x finite = +-0, and +0.0 plus +-0
+    /// is +0.0 under round to nearest, so the row's correction is exactly +0.0 whenever every
+    /// (w_j - wp_j) - xi is finite; and m_i > 0 (which a NaN fails) makes +0.0 / m_i = +0.0 too.
     fn flux_zero_row(&self, i: usize, mass: &[f64]) -> bool {
-        (self.ptr[i]..self.ptr[i + 1])
-            .all(|p| mass[self.col[p]] - mass[i] == 0.0 && (0.5 * self.val[p]).is_finite())
+        mass[i] > 0.0
+            && (self.ptr[i]..self.ptr[i + 1])
+                .all(|p| mass[self.col[p]] - mass[i] == 0.0 && (0.5 * self.val[p]).is_finite())
     }
 }
 
@@ -596,6 +598,8 @@ pub struct Body {
     /// Rows of `lap` whose mass-flux correction is a sum of signed zeros (see `flux_correction`),
     /// built with `cf` from the same mass: empty until then.
     flux_zero: Vec<bool>,
+    /// The rows `flux_zero` leaves unmarked, ascending: the only rows predict's s1 term sums.
+    flux_rows: Vec<usize>,
     /// 3-D placement for microphones: origin and outward normal (+1 up, -1 down).
     pub origin: [f64; 3],
     pub facing: f64,
@@ -982,7 +986,7 @@ impl Body {
         }
         Ok(Body {
             name: name.into(), h, n, xy, rest_z, grid_index, mass, s0: s0v, s1, lap, stiff, viscosity, modal: None, tension: s.tension, berger, vk,
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![],
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: true, area, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: s.support.is_some(), surface_t60: s0 > 0.0 || s1 > 0.0,
         })
@@ -1003,7 +1007,7 @@ impl Body {
             name: name.into(), h, n, xy, rest_z: vec![0.0; n], grid_index: BTreeMap::new(), mass: vec![mass_per_m * h; n],
             s0: vec![6.907755 / t60; n], s1: 0.0, lap: Csr::from_rows(&lrows), stiff: Csr::from_rows(&vec![BTreeMap::new(); n]), viscosity: None, modal: None,
             tension: tension / h, berger: 0.0, vk: None, // tension/h: the chain energy T/2 sum (dw)^2/h
-            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![],
+            w: vec![0.0; n], wp: vec![0.0; n], wn: vec![0.0; n], f: vec![0.0; n], bias: vec![0.0; n], tmp: vec![0.0; n], lw: vec![0.0; n], lwp: vec![0.0; n], g: vec![0.0; n], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: false, surface_t60: 6.907755 / t60 > 0.0,
         }
@@ -1079,7 +1083,7 @@ impl Body {
             name: name.into(), h: 1.0, n: 1, xy: vec![[0.0, 0.0]], rest_z: vec![0.0], grid_index: BTreeMap::new(), mass: vec![mass],
             s0: vec![0.0], s1: 0.0, lap: Csr::from_rows(&[BTreeMap::new()]), stiff: Csr::from_rows(&[BTreeMap::new()]), viscosity: None, modal: None,
             tension: 0.0, berger: 0.0, vk: None,
-            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![],
+            w: vec![0.0], wp: vec![0.0], wn: vec![0.0], f: vec![0.0], bias: vec![0.0], tmp: vec![0.0], lw: vec![0.0], lwp: vec![0.0], g: vec![0.0], psi: 0.0, psi_next: 0.0, sav: false, r_prev: 0.0, budget: 0.0, kc: 0.0, cf: vec![], flux_zero: vec![], flux_rows: vec![],
             origin: [0.0; 3], facing: 1.0, radiates: false, area: 0.0, air_mass: 0.0, head_radiation: None, radiated_j: 0.0,
             film: None, support_springs: false, surface_t60: false,
         }
@@ -1472,6 +1476,7 @@ impl Body {
         for z in &mut self.flux_zero {
             *z = flux_tests::hooked(*z);
         }
+        self.flux_rows = (0..self.n).filter(|&i| !self.flux_zero[i]).collect();
         self.kc = k;
         if let Err(e) = self.prepare_head_radiation(k) {
             // Instrument::validate_head_radiation refuses this at build time
@@ -1533,10 +1538,22 @@ impl Body {
             // div(m grad velocity), not m Lap(velocity): the latter is not
             // symmetric when thickness varies and can create mechanical energy.
             let ih2 = 1.0 / (self.h * self.h);
-            let bounded = self.flux_state_bounded();
-            for i in 0..self.n {
-                let correction = self.flux_correction(i, bounded);
-                self.tmp[i] = -((self.lw[i] - self.lwp[i]) + correction / self.mass[i]) * ih2;
+            if self.flux_state_bounded() {
+                // A marked row's c / m_i is +0.0 / m_i = +0.0 (see `flux_zero_row`), so this pass is
+                // the expression below with that +0.0, in the same order: the add stays (-0.0 + 0.0
+                // is +0.0). The unmarked rows are then recomputed with their own sum.
+                for ((t, a), b) in self.tmp[..n].iter_mut().zip(&self.lw[..n]).zip(&self.lwp[..n]) {
+                    *t = -((a - b) + 0.0) * ih2;
+                }
+                for &i in &self.flux_rows {
+                    let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                    self.tmp[i] = -((self.lw[i] - self.lwp[i]) + correction / self.mass[i]) * ih2;
+                }
+            } else {
+                for i in 0..self.n {
+                    let correction = self.lap.mass_flux_correction(i, &self.w, &self.wp, &self.mass);
+                    self.tmp[i] = -((self.lw[i] - self.lwp[i]) + correction / self.mass[i]) * ih2;
+                }
             }
         }
         let nl = self.berger > 0.0 || self.vk.is_some();

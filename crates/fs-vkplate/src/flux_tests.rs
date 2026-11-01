@@ -1,13 +1,16 @@
 //! The uniform-mass skip of the mass-flux correction is output-identical: `Body::coefs` marks the
-//! rows of the Laplacian whose correction is a sum of signed zeros, and a marked row of a bounded
-//! state returns the +0.0 that sum would. A per-thread hook rebuilds the marks as no row (the full
-//! sum everywhere, the code before the skip) or as every row (a skip forced where it is wrong), so
-//! the tests compare the skip against the full sum bit for bit and show a wrong skip is seen.
+//! rows of the Laplacian of positive mass whose correction is a sum of signed zeros, and a marked
+//! row of a bounded state takes the +0.0 that sum would (predict's s1 term runs a vector pass with
+//! +0.0 in place of c/m, then sums only the unmarked rows). A per-thread hook rebuilds the marks as
+//! no row (the full sum everywhere, the code before the skip) or as every row (a skip forced where
+//! it is wrong), so the tests compare the skip against the full sum bit for bit and show a wrong
+//! skip is seen.
 
 use std::cell::Cell;
+use std::collections::BTreeMap;
 
 use crate::live::{Live, PIECES};
-use crate::{kit, Body};
+use crate::{kit, Body, Csr};
 
 const MARKED: u8 = 0;
 const FULL_SUM: u8 = 1;
@@ -184,13 +187,36 @@ fn step_bits(b: &Body, k: f64, mode: u8) -> (Vec<u64>, u64, Vec<bool>) {
         b.linear_forces();
         b.predict(k);
         b.finish(k);
+        // predict's s1 term sums exactly the unmarked rows
+        let unmarked: Vec<usize> = (0..b.n).filter(|&i| !b.flux_zero[i]).collect();
+        assert_eq!(b.flux_rows, unmarked, "{}: the summed rows are not the unmarked rows", b.name);
         (b.wn.iter().map(|x| x.to_bits()).collect(), b.budget.to_bits(), b.flux_zero.clone())
     })
 }
 
+/// The mark takes equal, positive, finite masses only. A positive mass makes the skipped division
+/// exact: +0.0 / m is +0.0 for m > 0, but -0.0 for m < 0, and NaN for m = 0 or NaN.
+#[test]
+fn the_mark_needs_equal_positive_finite_masses() {
+    let lap = Csr::from_rows(&[
+        BTreeMap::from([(0, 1.0), (1, -1.0)]),
+        BTreeMap::from([(0, -1.0), (1, 1.0)]),
+    ]);
+    for m in [1.0, 1e-12, f64::MIN_POSITIVE, f64::MAX] {
+        assert!(lap.flux_zero_row(0, &[m, m]) && lap.flux_zero_row(1, &[m, m]), "{m} not marked");
+    }
+    for m in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert!(!lap.flux_zero_row(0, &[m, m]) && !lap.flux_zero_row(1, &[m, m]), "{m} marked");
+    }
+    assert!(!lap.flux_zero_row(0, &[1.0, 1.0 + f64::EPSILON]));
+    assert!(!lap.flux_zero_row(1, &[1.0 + f64::EPSILON, 1.0]));
+    assert!((0.0f64 / -1.0).is_sign_negative());
+}
+
 /// The planted negative at predict: a snare batter head with one node's mass raised. The rows that
-/// touch that node lose their mark and still sum (the skip equals the full sum), and forcing the
-/// skip onto every row changes the predicted head, so a wrong mark would not pass unseen.
+/// touch that node lose their mark and are exactly the rows predict sums (`step_bits` checks the
+/// list), so the skip equals the full sum; and forcing the skip onto every row changes the
+/// predicted head, so a wrong mark would not pass unseen.
 #[test]
 fn a_planted_mass_step_unmarks_its_rows_and_a_forced_skip_changes_the_head() {
     let mut spec = kit::snare();
