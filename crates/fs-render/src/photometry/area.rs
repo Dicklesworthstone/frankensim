@@ -8,6 +8,7 @@
 use super::source::{PhotometricSource, SPECTRAL_BINS, SourceError, SourceSpectrum};
 
 mod projector;
+pub mod reference;
 pub use projector::{
     GoboTransmission, MAX_GOBO_TEXELS, MAX_PROJECTOR_BEAMS, ParaxialBeamSplitter,
     ParaxialBoxDiffuser, ProjectorBeam, ThinLensProjector,
