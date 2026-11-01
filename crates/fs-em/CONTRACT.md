@@ -1,5 +1,67 @@
 # fs-em contract
 
+## Native winding circuits on nonlinear three-dimensional induction
+
+`spatial::vector_potential::induction::nonlinear::winding` connects the original
+3D Whitney A–phi history directly to native Kirchhoff circuit terminals.
+`SpatialNonlinearWindingCircuit` replaces selected original inductor placeholders
+with private power ports, retaining unrelated inductors, capacitor charges,
+transformers and external source indices. The same interface Newton owner admits
+current-input and voltage-input causality; ideal-current-driven windings need no
+invented series resistance or magnetic storage. Unsupported algebraic topologies
+remain native refusals.
+
+Each `SpatialNonlinearWindings` profile is the complete signed cellwise `J/I`
+including turns and closed return paths. Internal face continuity and exterior
+closure are checked even where tangential A is prescribed. Its original exact
+Whitney load `F` is cached once. Every terminal trial starts from the same accepted
+field and circuit histories and uses
+`V = F^T delta(A)/dt + L_end delta(I)/dt + R I` at endpoint winding current.
+Mutual response, reversible saturation, bulk eddy diffusion and admitted prescribed
+bulk-conductor motion therefore enter through the actual field rather than a
+fitted inductance. The pure insulating-core/air-core limit uses this same owner
+with empty bulk conducting support and no electric-potential unknowns.
+
+`SpatialWindingConductor` supplies the original scalar electrical source and
+explicit conductor volume fraction. Resistance is the physical integral
+`int rho |J/I|^2 / filling dV`; recovered intrinsic strand current is `I*(J/I)/filling`.
+Distinct insulated bundles may share a tetrahedron only within its total volume
+fraction. Every active profile cell needs its own source, and stranded cells are
+disjoint from resolved bulk eddy conductivity. Spatial `E dot J` heat independently
+checks terminal `R I^2`; it is not added again as bulk-conductor heat.
+
+The combined account includes native graph storage, original magnetic free energy,
+explicit omitted end self-inductance, external supply and signed mechanical work.
+Private terminal work cancels internally. Magnetic parameter work is separate;
+backward-Euler magnetic and end-inductor numerical dissipation never becomes
+constitutive heat. Stable field-energy increments are retained instead of
+subtracting aggregate magnetic stores. Independent native-work, field-pairing,
+terminal-current/voltage, local heat and complete energy gates must all pass.
+
+Original-source conductivity and linear or source-separable magnetic temperature
+refresh preserve A, physical current history, geometry, ports and circuit storage.
+The endpoint material and conductivity operators are prepared once per circuit
+candidate and shared across its terminal Newton/Jacobian trials. Unchanged sources
+reuse the prepared operators. Bounded profile storage, native graph dimensions,
+field work, nested trial counts and cancellation remain explicit. This is an
+allocating first-order coupling; no timing or error-certification claim is made.
+
+This extension admits stationary stranded profiles, scalar stranded resistivity,
+isotropic reversible/fixed-recoil magnetism and the existing scalar or tensor bulk
+conductor owner. Prescribed Eulerian motion inherits its fixed-occupancy and material
+transport restrictions; it does not move winding geometry or evolve mechanics.
+Solid terminal current injection, moving interfaces, strand skin/proximity loss,
+magnetic hysteresis, composite caloric homogenization and engineering validation
+remain separate work. The standard source/flux-linkage convention is also described
+in the [3D A–phi formulation reference](https://ansyshelp.ansys.com/public/Views/Secured/Electronics/v261/en/Subsystems/Maxwell/Content/Maxwell/APhiFormulationinMaxwell3DTransient.htm).
+
+Four G1/G3/G4 tests in `tests/spatial_induction_winding.rs` independently integrate
+Whitney linkage and source B–H energy, compare coupled two-loop backward Euler
+with unrelated native RLC trapezoidal evolution, continue nonlinear eddy history,
+and check actual trial exhaustion and late cancellation/retry. Rustfmt parsing and
+source/accounting review were performed; these newly authored native tests and the
+required `dsr quality --tool frankensim` gate have not run in this environment.
+
 ## Three-dimensional distributed windings and native mutual circuits
 
 `spatial::vector_potential::winding::SpatialWindingBasis` connects complete

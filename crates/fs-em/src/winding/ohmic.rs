@@ -456,7 +456,7 @@ pub(super) fn spatial_heat(
     Ok((cells, heat_j))
 }
 
-pub(super) fn graph_heat(
+pub(crate) fn graph_heat(
     graph: &fs_phs::circuit::CircuitGraph,
     dae: &CircuitDae,
     midpoint: &[f64],

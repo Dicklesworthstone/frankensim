@@ -485,7 +485,7 @@ fn ports(layout: &Layout, external: &[f64], currents: &[f64], voltage: &[f64]) -
     Ok(input)
 }
 
-fn native_seed(dae: &CircuitDae, accepted: &[f64], input: &[f64]) -> Result<Vec<f64>> {
+pub(crate) fn native_seed(dae: &CircuitDae, accepted: &[f64], input: &[f64]) -> Result<Vec<f64>> {
     let nd = dae.system.differential_dim();
     let mut seed = vec![0.0; dae.system.state_dim()];
     seed[..nd].copy_from_slice(&accepted[..nd]);

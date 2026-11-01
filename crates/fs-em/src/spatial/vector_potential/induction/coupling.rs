@@ -109,7 +109,6 @@ impl<C: SpatialConductorMaterial> Coupling<C> {
         let mesh = g.mesh();
         let nc = sources.iter().filter(|s| s.is_some()).count();
         if sources.len() != mesh.tets.len()
-            || nc == 0
             || nc > limits.maximum_conducting_cells
             || !positive(flux_tolerance_wb)
             || initial.len() != mesh.edges.len()

@@ -16,7 +16,11 @@
 //! and explicitly source-separable H(B,T) may refresh with the same original
 //! conductor sources and occupancy. A finite thermal consumer must close P
 //! together with magnetic entropy; it owns local Joule deposition and thermal
-//! history. No ALE, hysteresis, terminals or coupled motion is inferred.
+//! history. The winding child adds native circuit terminals to this same field
+//! history. No ALE, hysteresis or coupled mechanical trajectory is inferred.
+
+/// Native circuit terminals on this original three-dimensional field history.
+pub mod winding;
 
 use super::super::super::{
     SpatialMagneticError, dot, finite, invalid, nonlinear::SpatialNonlinearMaterial, poll,
@@ -456,7 +460,38 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
         settings: SpatialNonlinearInductionControls,
         cancelled: &mut impl FnMut() -> bool,
     ) -> Result<SpatialNonlinearInductionCandidate<'m, C>> {
+        let (problem, prepared) = self.prepare_materials(materials, conductors, cancelled)?;
+        self.step_prepared_candidate(
+            problem,
+            prepared,
+            endpoint_current_a_m2,
+            velocity_m_s,
+            duration_s,
+            settings,
+            cancelled,
+        )
+    }
+
+    // A coupled circuit holds endpoint sources fixed over all terminal-current
+    // trials. Prepare their native operators once, keeping the accepted A and
+    // source history untouched; the winding child reuses this same preparation.
+    fn prepare_materials(
+        &self,
+        materials: Vec<SpatialNonlinearMaterial>,
+        conductors: Vec<Option<C>>,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<(MagneticOwner<'m>, Arc<Prepared<C>>)> {
         poll(cancelled)?;
+        if materials == self.problem.materials() {
+            if conductors == self.conductors() {
+                return Ok((self.problem.clone(), Arc::clone(&self.prepared)));
+            }
+            let coupling = self.coupling_at(&self.problem, conductors, cancelled)?;
+            return Ok((self.problem.clone(), Arc::new(Prepared {
+                coupling,
+                permeability_bound: self.prepared.permeability_bound.clone(),
+            })));
+        }
         if materials.len() != self.problem.materials().len() {
             return Err(invalid("complete original magnetic correspondence required").into());
         }
@@ -483,18 +518,13 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearInduction<'m, C> {
         )?;
         let coupling = self.coupling_at(&problem, conductors, cancelled)?;
         let permeability_bound = permeability_bounds(problem.materials(), cancelled)?;
-        self.step_prepared_candidate(
+        Ok((
             MagneticOwner::Owned(Arc::new(problem)),
             Arc::new(Prepared {
                 coupling,
                 permeability_bound,
             }),
-            endpoint_current_a_m2,
-            velocity_m_s,
-            duration_s,
-            settings,
-            cancelled,
-        )
+        ))
     }
 
     fn coupling_at(
