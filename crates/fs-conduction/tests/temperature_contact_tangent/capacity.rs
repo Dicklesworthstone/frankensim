@@ -131,3 +131,46 @@ fn g0_capacity_contact_linearization_preserves_physical_and_work_gates() {
         });
     });
 }
+
+
+#[test]
+fn g1_coupled_capacity_newton_matches_the_existing_physical_contact_endpoint() {
+    context(&CancelGate::new_clock_free(),|cx| {
+        let mesh=mesh();
+        let bc=ThermalBoundaryBuilder::new(&mesh).adiabatic_remainder().finish().unwrap();
+        let card=card(1.);
+        let set=contacts(cx,&mesh,&bc,&card,false);
+        let capacities=[
+            VolumetricHeatCapacity::declared(10.).unwrap(),
+            VolumetricHeatCapacity::declared(20.).unwrap(),
+        ];
+        let engine=BackwardEuler::per_element(cx,&mesh,&capacities).unwrap();
+        let material=material(true);
+        let source=ScalarField::Nodal(SOURCE.to_vec());
+        let problem=ConductionProblem {mesh:&mesh,boundary:&bc,material:&material,
+            element_materials:None,source:&source};
+        let old=INITIAL.to_vec();
+        let before=old.clone();
+
+        let outer=set.advance_capacity(
+            cx,&engine,problem,&old,0.5,config(),Some(nonlinear()),coupling(),
+        ).unwrap();
+        let coupled=set.advance_capacity_newton(
+            cx,&engine,problem,&old,0.5,config(),nonlinear(),coupling(),1,
+        ).unwrap();
+
+        assert_eq!(old,before);
+        assert_eq!(coupled.iterations,1);
+        assert!(coupled.nonlinear_updates>0);
+        assert!(coupled.physical.residual_norm_j<=coupling().residual_tolerance_j);
+        near(coupled.physical.energy_residual_j,0.,config().energy_tolerance_j);
+        for (&actual,&reference) in coupled.conduction.temperature.iter()
+            .zip(&outer.conduction.temperature)
+        {
+            near(actual,reference,2e-8);
+        }
+        assert_eq!(coupled.physical_contacts.states(),coupled.applied_contacts.states());
+        assert_eq!(coupled.physical_contacts.quadrature_states(),
+            coupled.applied_contacts.quadrature_states());
+    });
+}

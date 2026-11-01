@@ -109,4 +109,64 @@ impl TemperatureContacts<'_, '_> {
             coupling.max_iterations, coupling.residual_tolerance_j,
         )))
     }
+
+    /// Advance one capacity endpoint with contact-temperature feedback in the
+    /// same Newton system as storage and nonlinear conductivity.
+    ///
+    /// This is the strong-coupling companion to `advance_capacity`. It keeps
+    /// the original outer residual target as an independent acceptance gate,
+    /// but does not freeze R(T) inside a thermal response. The explicit face
+    /// allowance bounds contact tangent assembly.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_capacity_newton(
+        &self,
+        cx: &Cx<'_>,
+        engine: &BackwardEuler<'_>,
+        problem: ConductionProblem<'_>,
+        old: &[f64],
+        dt_s: f64,
+        step_config: StepConfig,
+        nonlinear: NonlinearStepConfig,
+        coupling: ContactIterationConfig,
+        max_face_pairs: usize,
+    ) -> Result<ContactCapacityStep, ConductionError> {
+        poll(cx, 0)?;
+        self.check_mesh(problem.mesh)?;
+        coupling.admit(step_config.linear.max_iterations)?;
+        let response = engine.advance_nonlinear_prescribed_with_temperature_contacts(
+            cx, problem, self, old, dt_s, step_config, nonlinear, max_face_pairs,
+        )?;
+        let actual = response.contacts;
+        let nonlinear_step = response.step;
+        let nonlinear_updates = nonlinear_step.nonlinear_iterations;
+        let nonlinear_backtracks = nonlinear_step.backtracks;
+        let solved = nonlinear_step.step;
+        let krylov_iterations = solved.krylov_iterations;
+        let physical = engine.evaluate_prescribed_endpoint(
+            cx, problem, Some(actual.frozen_interfaces()), old, &solved.temperature,
+            dt_s, step_config, None,
+        )?;
+        if !physical.residual_norm_j.is_finite()
+            || physical.residual_norm_j > coupling.residual_tolerance_j
+            || !physical.energy_residual_j.is_finite()
+            || physical.energy_residual_j.abs() > step_config.energy_tolerance_j
+        {
+            return Err(invalid("<contact-step>", format!(
+                "coupled contact Newton endpoint fails physical gates: residual {:e} J (target {:e}), energy {:e} J (target {:e})",
+                physical.residual_norm_j, coupling.residual_tolerance_j,
+                physical.energy_residual_j, step_config.energy_tolerance_j,
+            )));
+        }
+        poll(cx, nonlinear_updates)?;
+        Ok(ContactCapacityStep {
+            conduction: solved,
+            applied_contacts: actual.clone(),
+            physical_contacts: actual,
+            physical,
+            iterations: 1,
+            krylov_iterations,
+            nonlinear_updates,
+            nonlinear_backtracks,
+        })
+    }
 }

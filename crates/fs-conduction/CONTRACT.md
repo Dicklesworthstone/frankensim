@@ -80,6 +80,29 @@ derivatives are required at Newton fields; arbitrary-law convergence, root
 uniqueness, evolving pressure/contact area and interface storage are outside
 this stationary contact model.
 
+## Coupled transient capacity contact feedback
+
+`TemperatureContacts::advance_capacity_newton` solves constant-capacity
+backward Euler with the source-backed contact response inside the same Newton
+system as nonlinear bulk conductivity. Every residual trial re-queries the
+pinned contact law at its actual trace temperatures. The tangent adds only the
+missing contact-temperature feedback to the ordinary bulk-plus-frozen-contact
+Jacobian, so the conservative contact block is counted once.
+
+The existing Armijo globalization backtracks positive-Kelvin, bulk-material and
+typed contact-source domain misses without switching claims or extrapolating
+source data. The original frozen-contact operator supplies the physical
+preconditioner. A caller-declared face cap bounds contact tangent assembly, and
+the original linear/Newton work budgets remain authoritative.
+
+Publication requires both the nonlinear solver's endpoint gate and a fresh
+complete contact endpoint audit against the caller's absolute joule residual and
+energy tolerances. The returned contact receipts therefore describe the exact
+published temperature field; no outer Picard replacement solve is hidden.
+Geometry, pressure, contact area and all nonthermal source coordinates remain
+fixed. This is backward Euler with constant prepared heat capacity; variable
+caloric storage and latent heat remain owned by the primary-enthalpy path.
+
 ## Complete steady contact tangents and adjoints
 
 `TemperatureContacts::linearize_steady_endpoint` binds the unchanged physical

@@ -9,6 +9,7 @@ use super::*;
 use crate::assemble::{AssembledSystem, assemble_jacobian_with_optional_interfaces};
 use crate::solve::LineSearch;
 use fs_solver::FgmresState;
+use crate::interface::temperature::{TemperatureContactEvaluation, TemperatureContacts};
 
 /// Explicit nonlinear work, stopping and globalization policy for one endpoint.
 /// Constant heat capacity and constant contact resistance remain prerequisites.
@@ -78,6 +79,18 @@ pub struct NonlinearStepSolution {
     pub residual_j: f64,
     /// Fixed atol + rtol * initial_residual_j gate, joules.
     pub threshold_j: f64,
+}
+
+}
+
+/// A nonlinear backward-Euler endpoint whose source-backed contact law was
+/// evaluated and differentiated at every accepted Newton field.
+#[derive(Debug)]
+pub struct ContactNonlinearStepSolution {
+    /// Original nonlinear endpoint evidence and physical thermal state.
+    pub step: NonlinearStepSolution,
+    /// Contact source states at the exact accepted endpoint.
+    pub contacts: TemperatureContactEvaluation,
 }
 
 pub(super) struct Evaluation {
@@ -241,6 +254,173 @@ impl BackwardEuler<'_> {
                 rejected += 1;
                 backtracks = backtracks.checked_add(1)
                     .ok_or_else(|| invalid("nonlinear backtrack count overflow"))?;
+                alpha *= nonlinear.line_search.shrink;
+            }
+            updates += 1;
+        }
+    }
+
+    /// Advance one prescribed endpoint with source-backed contact feedback
+    /// inside the same Newton solve as storage and nonlinear bulk conductivity.
+    ///
+    /// Every residual trial freshly evaluates the pinned contact law at the
+    /// trial temperature. The tangent adds only dK_contact/dT*T to the ordinary
+    /// bulk-plus-frozen-contact Jacobian, so the physical contact block is
+    /// counted exactly once. Source-domain trial misses backtrack through the
+    /// existing Armijo policy; no claim switching or extrapolation is allowed.
+    ///
+    /// The accepted endpoint is returned only after the original nonlinear
+    /// residual and energy gates pass. Geometry, pressure and all nonthermal
+    /// source coordinates remain fixed for the step.
+    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+    pub fn advance_nonlinear_prescribed_with_temperature_contacts(
+        &self,
+        cx: &Cx<'_>,
+        problem: ConductionProblem<'_>,
+        contacts: &TemperatureContacts<'_, '_>,
+        old: &[f64],
+        dt_s: f64,
+        config: StepConfig,
+        nonlinear: NonlinearStepConfig,
+        max_face_pairs: usize,
+    ) -> Result<ContactNonlinearStepSolution, ConductionError> {
+        poll(cx, 0)?;
+        contacts.check_mesh(problem.mesh)?;
+        nonlinear.validate()?;
+        if max_face_pairs == 0 || config.linear.restart == 0 {
+            return Err(invalid("temperature-contact Newton requires positive face and FGMRES restart budgets"));
+        }
+        let dofs = self.admit_endpoint_step(cx, problem, old, dt_s, config)?;
+        let mut temperature = old.to_vec();
+        for (slot, &vertex) in dofs.fixed().iter().enumerate() {
+            if slot % 512 == 0 { poll(cx, slot)?; }
+            temperature[vertex] = dofs.prescribed()[vertex];
+        }
+        let mut applied = contacts.evaluate(cx, problem.boundary, &temperature)?;
+        let mut ev = self.evaluate_endpoint(
+            cx, problem, Some(applied.frozen_interfaces()), old, &temperature, dt_s, &dofs,
+        )?;
+        let initial_residual_j = ev.norm;
+        let threshold_j = finite(
+            nonlinear.residual_atol_j + nonlinear.residual_rtol * initial_residual_j,
+        )?;
+        let mut updates = 0usize;
+        let mut work = 0usize;
+        let mut backtracks = 0usize;
+        let mut worst_linear_residual = 0.0_f64;
+        loop {
+            poll(cx, updates)?;
+            if ev.norm <= threshold_j {
+                let residual_j = ev.norm;
+                let step = self.finish_step(
+                    cx, problem, Some(applied.frozen_interfaces()), old, dt_s, config,
+                    &dofs, &ev.system, temperature, worst_linear_residual, work,
+                )?;
+                return Ok(ContactNonlinearStepSolution {
+                    step: NonlinearStepSolution {
+                        step,
+                        nonlinear_iterations: updates,
+                        backtracks,
+                        initial_residual_j,
+                        residual_j,
+                        threshold_j,
+                    },
+                    contacts: applied,
+                });
+            }
+            if updates == nonlinear.max_iterations {
+                return Err(ConductionError::NotConverged {
+                    iterations: updates, residual: ev.norm, threshold: threshold_j,
+                });
+            }
+            if work == config.linear.max_iterations {
+                return Err(ConductionError::LinearSolveFailed {
+                    iteration: updates, krylov_iterations: work,
+                    true_relative_residual: 1.0, tolerance: config.linear.tolerance,
+                });
+            }
+
+            let contact = contacts.linearize_temperature(
+                cx, problem.boundary, &temperature, max_face_pairs,
+            )?;
+            let bulk = assemble_jacobian_with_optional_interfaces(
+                cx, self.mesh, problem.boundary, problem.material, &temperature,
+                Some(contact.physical_contacts().frozen_interfaces()),
+                problem.element_materials,
+            )?;
+            // bulk already contains K_contact. feedback is only dK_contact/dT*T.
+            let complete = axpy_csr(&bulk, 1.0, contact.feedback(), 1.0);
+            let full = axpy_csr(&self.capacity, 1.0, &complete, dt_s);
+            let (matrix, _) = reduce_matrix_and_lift(&full, &dofs);
+            let picard = axpy_csr(&self.capacity, 1.0, &ev.system.operator, dt_s);
+            let (picard, _) = reduce_matrix_and_lift(&picard, &dofs);
+            let rhs: Vec<_> = ev.residual.iter().map(|&r| -r).collect();
+            let remaining = LinearConfig {
+                max_iterations: config.linear.max_iterations - work, ..config.linear
+            };
+            let (direction, relative, iters) =
+                solve_direction(cx, &matrix, &picard, &rhs, remaining, updates)?;
+            work += iters;
+            worst_linear_residual = worst_linear_residual.max(relative);
+
+            let mut alpha = 1.0;
+            let mut rejected = 0usize;
+            loop {
+                poll(cx, updates)?;
+                let mut trial = temperature.clone();
+                for (index, &vertex) in dofs.free().iter().enumerate() {
+                    if index % 512 == 0 { poll(cx, index)?; }
+                    trial[vertex] = temperature[vertex] + alpha * direction[index];
+                }
+                let candidate = if trial.iter().all(|t| t.is_finite() && *t > 0.0) {
+                    let mut source_domain = false;
+                    let contact_trial = match contacts.evaluate_with_query_refusal(
+                        cx, problem.boundary, &trial, &mut |error| {
+                            source_domain = matches!(
+                                error,
+                                fs_matdb::MatDbError::NoClaimInDomain { .. }
+                                    | fs_matdb::MatDbError::PinnedClaimOutOfDomain { .. }
+                                    | fs_matdb::MatDbError::OutsideKnotSpan { .. }
+                                    | fs_matdb::MatDbError::OutsideSurfaceSupport { .. }
+                            );
+                        },
+                    ) {
+                        Ok(value) => Some(value),
+                        Err(_) if source_domain => None,
+                        Err(error) => return Err(error),
+                    };
+                    match contact_trial {
+                        Some(contact_trial) => match self.evaluate_endpoint(
+                            cx, problem, Some(contact_trial.frozen_interfaces()), old,
+                            &trial, dt_s, &dofs,
+                        ) {
+                            Ok(candidate) => Some((candidate, contact_trial)),
+                            Err(ConductionError::OutsideTemperatureSpan { .. }) => None,
+                            Err(error) => return Err(error),
+                        },
+                        None => None,
+                    }
+                } else {
+                    None
+                };
+                if let Some((candidate, contact_trial)) = candidate {
+                    let sufficient =
+                        (1.0 - nonlinear.line_search.armijo_c * alpha) * ev.norm;
+                    if candidate.norm <= threshold_j || candidate.norm <= sufficient {
+                        temperature = trial;
+                        ev = candidate;
+                        applied = contact_trial;
+                        break;
+                    }
+                }
+                if rejected == nonlinear.line_search.max_backtracks {
+                    return Err(ConductionError::LineSearchFailed {
+                        iteration: updates, backtracks: rejected, smallest_step: alpha,
+                    });
+                }
+                rejected += 1;
+                backtracks = backtracks.checked_add(1)
+                    .ok_or_else(|| invalid("nonlinear contact backtrack count overflow"))?;
                 alpha *= nonlinear.line_search.shrink;
             }
             updates += 1;
