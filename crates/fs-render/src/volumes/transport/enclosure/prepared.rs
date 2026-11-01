@@ -12,6 +12,9 @@ use super::{
 use crate::volumes::transport::scattering::{MassScatteringSpectrum, ScatteringGrid};
 use fs_exec::Cx;
 
+mod scattering;
+pub use scattering::PreparedGridScattering;
+
 /// Default cap on retained coefficient intervals, across both optical tables.
 /// At 16 bytes per interval this permits 5 MiB of initialized table entries.
 /// Borrowed fields, object/stack storage, spare capacity and allocator overhead
@@ -36,6 +39,7 @@ pub struct PreparedGridExtinction<'g, 'field, const N: usize> {
     grid: &'g AbsorbingGrid<'field>,
     scattering: Option<&'g ScatteringGrid<'field>>,
     coefficients: Coefficients<N>,
+    wavelengths_nm: [f64; N],
 }
 
 impl<'field> AbsorbingGrid<'field> {
@@ -119,7 +123,7 @@ impl<'g, 'field, const N: usize> PreparedGridExtinction<'g, 'field, N> {
                 None => grid.extinction_coefficients_enclosure(wavelengths)?,
             };
             checkpoint(cx)?;
-            return Ok(Self { grid, scattering, coefficients: Coefficients::Uniform(coefficients) });
+            return Ok(Self { grid, scattering, coefficients: Coefficients::Uniform(coefficients), wavelengths_nm: *wavelengths });
         }
         let a_count = grid.absorption_palette().map_or(1, |p| p.values().len());
         let s_count = scattering.map_or(0, |s| s.scattering_palette().map_or(1, |p| p.values().len()));
@@ -149,7 +153,7 @@ impl<'g, 'field, const N: usize> PreparedGridExtinction<'g, 'field, N> {
             }
         }
         checkpoint(cx)?;
-        Ok(Self { grid, scattering, coefficients: Coefficients::Indexed { absorption: a, scattering: s } })
+        Ok(Self { grid, scattering, coefficients: Coefficients::Indexed { absorption: a, scattering: s }, wavelengths_nm: *wavelengths })
     }
 
     /// Bound attenuation over the finite endpoint segment without allocation.
