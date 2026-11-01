@@ -1,5 +1,60 @@
 # CONTRACT: fs-couple
 
+## Finite heat on nonlinear three-dimensional winding circuits
+
+`circuit_enthalpy::spatial_induction::nonlinear::winding` couples the retained
+`SpatialNonlinearWindingCircuit` to the existing finite-cell enthalpy residual.
+`SpatialWindingThermalNetwork::step_candidate` and `heat_assembly_candidate`
+return one `SpatialWindingEnthalpyCandidate` containing accepted circuit, A–phi
+and caloric histories. Every trial begins at the same original accepted state;
+source/domain refusal, failed local or global energy checks, exhausted work or
+cancellation publishes none of those histories.
+
+Original material cards are queried at each proposed caloric endpoint. Stranded
+resistivity and bulk eddy conductivity therefore affect the actual native terminal
+currents. Original source selection, electrical basis, geometry and conducting
+support are retained. Every strand, bulk conductor and authored graph resistor
+has one explicit finite heat destination. Intrinsic strand Joule heat, exact
+tetrahedral P1 bulk `E dot J` heat and native graph heat are deposited once;
+numerical magnetic and omitted-end dissipation remain a separate account.
+
+The existing nonlinear spatial material/caloric owner now has a private generic
+driver seam shared by prescribed-current and native-terminal histories. It keeps
+the same source admission, caloric preparation, heat transport, Newton iteration,
+budgets and acceptance equations. The winding candidate supplies its actual nested
+field-trial count, clipped against the outer remaining work allowance. The complete
+`HeatAssembly` entry preserves original boundary/contact/cooling/radiation payloads
+and the existing closed-radiation balance check; unrepresented electrical contacts
+or sourced ordinary graph-resistor work are refused in this entry.
+
+Without explicit magnetic caloric laws, the original magnetic constitutive law
+must remain temperature independent. Optional existing linear `mu(T)` or
+source-separable `H(B,T)` bindings close magnetic parameter work and reversible
+entropy exchange. The whole-system audit substitutes original magnetic internal
+energy for magnetic free energy while retaining every native circuit and explicit
+end-inductor store. Neither parameter work nor numerical damping is relabeled as
+material heat. Fixed recoil temperature response still needs its own entropy law.
+
+The finite-heat adapter is stationary and supplies zero velocity; thermal advection
+is not silently omitted. Original fixed geometry, fully solid constant-density
+caloric charts and first-order coupling remain authoritative. A thermally owned
+stranded tetrahedron must be fully occupied by its one original material source;
+multiple insulated bundles are allowed when their fractions sum to one within the
+explicit dimensionless roundoff allowance, at most `1e-10`, without rescaling.
+Partial-fill or mixed-material coil composites require their actual mixture caloric
+volumes and refuse here. The field/circuit owner can still represent their explicit
+electrical filling without making a finite-heat claim. Authored numeric graph
+resistances stay fixed in this entry and require complete heat routing.
+
+Three G1/G3/G4 cases in `tests/spatial_induction_winding_enthalpy.rs` cover two
+accepted intervals with original conductivity feedback, independently integrated
+geometric winding resistance and each physical heat channel; complete heat assembly
+with cooling and independent `mu(T)` field internal energy; and source/partial-fill/
+actual-budget/late-cancellation refusal with unchanged histories and deterministic
+retry. Pinned Rustfmt parsing, whitespace checks and source/physical-accounting
+review passed. These newly authored native tests, compilation and the required
+`dsr quality --tool frankensim` gate have not run in this environment.
+
 ## Original latent fractions in constitutive graph feedback
 
 `constitutive_graph::enthalpy::GraphLiquidMassFraction` binds an original finite
