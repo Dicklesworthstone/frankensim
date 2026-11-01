@@ -177,6 +177,11 @@ pub enum CurvedBundleSceneError {
     UnsupportedInteraction {
         object_id: u64,
     },
+    /// An exact prescribed branch sequence omitted this dielectric encounter.
+    /// The encounter is counted independently of conductors and detectors.
+    BranchPlanExhausted {
+        dielectric_event: usize,
+    },
     /// Tracing starts at an original, zero-distance launch, not a partial path
     /// whose geometry identity and interface departure have been discarded.
     InvalidInitialBundle,
@@ -300,6 +305,32 @@ impl CurvedPolarizedScene<'_> {
         initial_medium: usize,
         settings: CurvedBundleSettings,
         mut branches: impl FnMut(&CurvedContact, &CurvedBundleBranchContext) -> DielectricEvent,
+    ) -> Result<CurvedBundlePathResult, CurvedBundleSceneError> {
+        self.trace_bundle_with_checked_branches(
+            cx,
+            bundle,
+            initial_medium,
+            settings,
+            false,
+            |contact, context| Ok(branches(contact, context)),
+        )
+    }
+
+    // One event walk also serves exact branch plans. A policy refusal must stop
+    // at the encounter, before an invented fallback branch is propagated.
+    // Connections continue zero-power geometry to validate the receiver and
+    // complete plan; ordinary forward transport retains early extinction.
+    pub(super) fn trace_bundle_with_checked_branches(
+        &self,
+        cx: &Cx<'_>,
+        bundle: PolarizedRayBundle,
+        initial_medium: usize,
+        settings: CurvedBundleSettings,
+        continue_extinguished: bool,
+        mut branches: impl FnMut(
+            &CurvedContact,
+            &CurvedBundleBranchContext,
+        ) -> Result<DielectricEvent, CurvedBundleSceneError>,
     ) -> Result<CurvedBundlePathResult, CurvedBundleSceneError> {
         cx.checkpoint()?;
         settings.validate()?;
@@ -502,7 +533,7 @@ impl CurvedPolarizedScene<'_> {
                         target_sample,
                         total_internal_reflection,
                     };
-                    let branch = branches(&contact, &context);
+                    let branch = branches(&contact, &context)?;
                     cx.checkpoint()?;
                     result.bundle = match interaction {
                         Interaction::Dielectric {
@@ -549,7 +580,7 @@ impl CurvedPolarizedScene<'_> {
             ) {
                 break;
             }
-            if result.bundle.interface_log_power() == f64::NEG_INFINITY {
+            if !continue_extinguished && result.bundle.interface_log_power() == f64::NEG_INFINITY {
                 result.termination = PathTermination::Extinguished;
                 break;
             }

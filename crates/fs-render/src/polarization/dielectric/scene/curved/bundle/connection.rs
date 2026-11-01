@@ -16,9 +16,10 @@
 use super::super::CurvedPolarizedScene;
 use super::{CurvedBundlePathResult, CurvedBundleSceneError, CurvedBundleSettings};
 use crate::charts::Ray;
+use crate::dielectric::DielectricEvent;
 use crate::gradient_index::bundle::{BundleError, PlanarBundleProjection, ProjectionOptions};
 use crate::polarization::Stokes;
-use crate::polarization::dielectric::scene::PathTermination;
+use crate::polarization::dielectric::scene::{MAX_POLARIZED_PATH_EVENTS, PathTermination};
 use fs_exec::Cx;
 use fs_geom::{Point3, Vec3};
 use fs_math::det;
@@ -33,6 +34,21 @@ pub struct BundleConnectionLaunch {
     pub wavelength_nm: f64,
     pub normalized_source_stokes: Stokes,
     pub initial_medium: usize,
+}
+
+/// Deterministic optical branch selection, replayed from the beginning for
+/// every Newton/backtracking trial. The original source's physical Fresnel
+/// power is retained; these choices are not Monte Carlo proposal probabilities.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum BundleBranchPolicy<'a> {
+    /// Transmit whenever permitted and reflect at total internal reflection.
+    #[default]
+    TransmitOrReflectTir,
+    /// Exactly one decision per encountered dielectric boundary, including
+    /// coherent films and authored multilayers. Conductors always reflect and
+    /// do not consume decisions. The whole sequence must be consumed when the
+    /// detector is reached. Empty sequences admit paths with no dielectric hit.
+    Sequence(&'a [DielectricEvent]),
 }
 
 /// Target point on a named native planar detector, with a normal toward light.
@@ -143,6 +159,11 @@ impl BundleConnectionOptions {
 pub enum BundleConnectionError {
     InvalidTarget,
     InvalidOptions,
+    InvalidBranchPlan,
+    BranchPlanNotConsumed {
+        planned: usize,
+        consumed: usize,
+    },
     ReceiverNotReached(PathTermination),
     WrongDetector,
     NonPlanarReceiver,
@@ -244,9 +265,40 @@ impl CurvedPolarizedScene<'_> {
         target: BundleConnectionTarget,
         options: BundleConnectionOptions,
     ) -> Result<BundleConnection, BundleConnectionError> {
+        self.connect_bundle_with_policy(
+            cx,
+            launch,
+            target,
+            options,
+            BundleBranchPolicy::TransmitOrReflectTir,
+        )
+    }
+
+    /// Connect one prescribed reflected/transmitted optical branch. A plan is
+    /// replayed for every candidate launch, so Newton iteration cannot consume
+    /// decisions belonging to a later path. Geometry, local media and Fresnel
+    /// transfer remain native; no supplied leg length or contact is accepted.
+    /// This shares the transmitted connector's local-basin, visibility,
+    /// numerical-resolution and bounded-work requirements.
+    /// Exactly dark branches retain zero power while geometric continuation
+    /// validates the remaining interfaces and actual detector; they are not
+    /// confused with missing, blocked or numerically unresolved connections.
+    pub fn connect_bundle_with_policy(
+        &self,
+        cx: &Cx<'_>,
+        launch: BundleConnectionLaunch,
+        target: BundleConnectionTarget,
+        options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
+    ) -> Result<BundleConnection, BundleConnectionError> {
         options.validate()?;
+        if matches!(policy, BundleBranchPolicy::Sequence(events)
+            if events.len() > MAX_POLARIZED_PATH_EVENTS as usize)
+        {
+            return Err(BundleConnectionError::InvalidBranchPlan);
+        }
         let mut work = Work::default();
-        let first = self.connection_trial(cx, launch, options, &mut work)?;
+        let first = self.connection_trial(cx, launch, options, policy, &mut work)?;
         let signature = first.branch_signature();
         let mut current = arrival(first, target, options.projection)?;
         for iteration in 0..=options.max_iterations {
@@ -294,7 +346,7 @@ impl CurvedPolarizedScene<'_> {
                     },
                     ..launch
                 };
-                let path = self.connection_trial(cx, trial_launch, options, &mut work)?;
+                let path = self.connection_trial(cx, trial_launch, options, policy, &mut work)?;
                 // A changed visibility/topology cannot use the current smooth
                 // Jacobian. Smaller trials may remain in the admitted basin.
                 if path.branch_signature() == signature {
@@ -336,6 +388,7 @@ impl CurvedPolarizedScene<'_> {
         cx: &Cx<'_>,
         launch: BundleConnectionLaunch,
         options: BundleConnectionOptions,
+        policy: BundleBranchPolicy<'_>,
         work: &mut Work,
     ) -> Result<CurvedBundlePathResult, BundleConnectionError> {
         cx.checkpoint()
@@ -351,8 +404,48 @@ impl CurvedPolarizedScene<'_> {
             launch.normalized_source_stokes,
             launch.initial_medium,
         )?;
-        let path =
-            self.trace_bundle_transmitted(cx, bundle, launch.initial_medium, options.scene)?;
+        let path = match policy {
+            BundleBranchPolicy::TransmitOrReflectTir => self.trace_bundle_with_checked_branches(
+                cx,
+                bundle,
+                launch.initial_medium,
+                options.scene,
+                true,
+                |_, context| {
+                    Ok(if context.total_internal_reflection {
+                        DielectricEvent::Reflection
+                    } else {
+                        DielectricEvent::Transmission
+                    })
+                },
+            )?,
+            BundleBranchPolicy::Sequence(events) => {
+                let mut consumed = 0;
+                let path = self.trace_bundle_with_checked_branches(
+                    cx,
+                    bundle,
+                    launch.initial_medium,
+                    options.scene,
+                    true,
+                    |_, _| {
+                        let event = events.get(consumed).copied().ok_or(
+                            CurvedBundleSceneError::BranchPlanExhausted {
+                                dielectric_event: consumed,
+                            },
+                        )?;
+                        consumed += 1;
+                        Ok(event)
+                    },
+                )?;
+                if path.termination() == PathTermination::Detected && consumed != events.len() {
+                    return Err(BundleConnectionError::BranchPlanNotConsumed {
+                        planned: events.len(),
+                        consumed,
+                    });
+                }
+                path
+            }
+        };
         work.fields = work
             .fields
             .checked_add(path.field_evaluations())
