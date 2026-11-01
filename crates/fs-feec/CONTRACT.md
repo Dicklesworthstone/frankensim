@@ -1082,7 +1082,10 @@ normals through every admitted pressure order.
 stiffness/mass pencil to the exact hierarchical trace constraints of explicitly
 selected wall faces. Other faces retain natural zero heat flux. It returns all
 positive modes through the declared unit-diffusivity eigenvalue ceiling, with
-original inertia counts/residuals and full-coordinate shapes. The material
+original inertia counts/residuals and full-coordinate shapes. Up to `DENSE_FULL_PENCIL_DOFS` (512) free DOFs the whole pencil is solved once, densely, and the ceiling only filters
+(`DiffusionModes::dense`): the eigenvalues, shapes and residuals of the modes kept are then bit-identical for every ceiling, which
+the material caller needs because its ceiling is `max_decay_rate/diffusivity` and moves with gas pressure. Above that size the
+sparse window owner is used and its last bits follow the window. The material
 caller owns kappa/(rho*cv), source coupling, memory/work budgets and physical
 validation. Duplicate/nonboundary faces, empty thermal spaces, incomplete or
 oversized windows and cancellation refuse. The sparse modal owner is reused;
