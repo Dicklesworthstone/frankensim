@@ -315,6 +315,57 @@ fn g3_insulation_and_absent_reagents_reduce_to_the_existing_physics_owners() {
 }
 
 #[test]
+fn g3_a_reaction_of_one_part_in_a_million_keeps_its_chemical_stage_in_the_account() {
+    // The planted negative of the inert reduction above, built so that it can only be satisfied by
+    // `record_reactive_account`. The reacted gas is built by hand and stepped by the PLAIN thermal owner: that
+    // is exactly the piston the reactive path would publish if it skipped its account (the thermal stage records
+    // its own). The two pistons are equal in gas, geometry and momentum; only their accounts can differ, and
+    // they do, by the chemical stage's entropy. A rate 1e6 times smaller than the reacting fixtures' still moves
+    // the gas (extent ~5e-11 mol), so a predicate loosened to "extent < 1e-9" would publish `skipped` and fail.
+    let law = reaction(4000.0, 3.5, 1e-3);
+    let (card, key, caloric) = wall(0.2);
+    let context = point(500.0);
+    let body = thermal_body(&caloric);
+    let live = GasPiston::new(gas(&law, [1.0, 0.0, 0.0]), 1.0, 0.01, 0.0).unwrap();
+    let candidate = live
+        .reactive_thermal_layers_candidate(
+            &law,
+            drive(),
+            body,
+            chemical_controls(),
+            mechanical_controls(),
+            exchange(),
+            layers(&card, &key, &context),
+            || false,
+        )
+        .unwrap();
+    let (reacted_gas, chemistry) = law
+        .parcel_candidate(&live.gas, drive().duration_s, chemical_controls(), || false)
+        .unwrap()
+        .into_parts();
+    let mut reacted = live.clone();
+    reacted.gas = reacted_gas;
+    let skipped = reacted
+        .thermal_candidate(
+            drive(),
+            body,
+            mechanical_controls(),
+            exchange(),
+            |g, b| layers(&card, &key, &context).resolve(g, b),
+            || false,
+        )
+        .unwrap();
+    let extent = candidate.step().reaction.extent_mol;
+    assert!(extent > 0.0 && extent < 1e-9, "extent {extent:e}");
+    assert_eq!(candidate.step().reaction, chemistry);
+    assert!(chemistry.entropy_change_j_k != 0.0, "the chemical stage must have an entropy to record");
+    // Same gas, geometry and momentum (the piston equality excludes the account) ...
+    assert_eq!(candidate.piston(), skipped.piston());
+    // ... and different accounts: the reactive one carries the chemical stage's entropy, the thermal one cannot.
+    assert_ne!(candidate.piston().ports, skipped.piston().ports);
+}
+
+#[test]
 fn g4_source_refusal_wrong_clock_and_late_cancellation_preserve_all_owners() {
     let law = reaction(4000.0, 3.5, 1000.0);
     let (card, key, caloric) = wall(0.2);

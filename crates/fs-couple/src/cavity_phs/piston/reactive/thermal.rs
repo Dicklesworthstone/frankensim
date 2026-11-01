@@ -179,6 +179,11 @@ impl GasPiston {
         let (gas, reaction) = reaction
             .parcel_candidate(&self.gas, input.duration_s, kinetics, &mut cancelled)?
             .into_parts();
+        // A reaction that left the gas bitwise untouched (zero extent, or an absent reagent) has no chemical
+        // stage to account: the thermal stage below already recorded this interval exactly as the plain
+        // thermal owner does, and re-deriving its storage change from specific internal energies would only
+        // re-round it.
+        let nothing_reacted = gas == self.gas && reaction.entropy_change_j_k == 0.0;
         let mut reacted = self.clone();
         reacted.gas = gas;
         let (mut piston, thermal, thermal_step) = reacted
@@ -206,18 +211,20 @@ impl GasPiston {
         }
         // The chamber alone is an open thermal subsystem. Its one port retains
         // external heat PLUS Q; Q cancels only when the finite body is enclosed.
-        let gas_input = PistonInput {
-            heat_j: motion.gas.supplied_heat_j,
-            ..input
-        };
-        self.record_reactive_account(
-            &mut piston,
-            gas_input,
-            motion,
-            &reaction,
-            gas_energy,
-            exchange.energy_tolerance_j,
-        )?;
+        if !nothing_reacted {
+            let gas_input = PistonInput {
+                heat_j: motion.gas.supplied_heat_j,
+                ..input
+            };
+            self.record_reactive_account(
+                &mut piston,
+                gas_input,
+                motion,
+                &reaction,
+                gas_energy,
+                exchange.energy_tolerance_j,
+            )?;
+        }
         super::poll(&mut cancelled)?;
         Ok(ReactiveThermalPistonCandidate {
             piston,
