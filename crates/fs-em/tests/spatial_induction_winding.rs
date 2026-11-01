@@ -1,5 +1,7 @@
 //! G1/G3/G4: native terminals must retain the actual 3D magnetic history.
 //! These manufactured materials check the equations, not measured-device fidelity.
+#[path = "spatial_induction_winding/resistors.rs"]
+mod resistors;
 use fs_em::{
     spatial::{
         nonlinear::SpatialNonlinearMaterial,

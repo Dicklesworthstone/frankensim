@@ -19,6 +19,9 @@
 //! Material refresh retains original source claims and accepted cochains;
 //! magnetic parameter work and numerical dissipation are never labeled heat.
 
+/// Source-bound ordinary resistors on the same native graph and field history.
+pub mod resistors;
+
 use super::{
     SpatialNonlinearInduction, SpatialNonlinearInductionCandidate,
     SpatialNonlinearInductionControls, SpatialNonlinearInductionError,
@@ -29,7 +32,7 @@ use crate::{
     winding::{
         nonlinear::{
             NonlinearWindingControls, NonlinearWindingError, NonlinearWindingInitial,
-            NonlinearWindingPort, native_seed,
+            NonlinearWindingPort, native_seed, resistors::GraphResistorMaterial,
         },
         ohmic::{self, OhmicWindingError, WindingGraphResistorHeat},
     },
@@ -221,10 +224,10 @@ fn end_energy(inductances: &[f64], currents: &[f64]) -> Result<f64> {
 struct Layout {
     graph: CircuitGraph,
     dae: CircuitDae,
-    windings: SpatialNonlinearWindings,
+    windings: Rc<SpatialNonlinearWindings>,
     ports: Vec<NonlinearWindingPort>,
     external_ports: usize,
-    loads_per_a: Vec<Vec<f64>>,
+    loads_per_a: Rc<[Vec<f64>]>,
 }
 
 /// Accepted original field and original graph storage. Failed or cancelled
@@ -233,6 +236,7 @@ struct Layout {
 pub struct SpatialNonlinearWindingCircuit<'m, C: SpatialConductorMaterial = ResolvedConductorState>
 {
     layout: Rc<Layout>,
+    graph_materials: Vec<GraphResistorMaterial>,
     field: SpatialNonlinearInduction<'m, C>,
     conductors: Vec<SpatialWindingConductor>,
     cell_resistance_ohm: Vec<f64>,
@@ -248,6 +252,9 @@ pub struct SpatialNonlinearWindingStep {
     pub field: SpatialNonlinearInductionStep,
     pub cells: Vec<SpatialWindingCellHeat>,
     pub graph_resistors: Vec<WindingGraphResistorHeat>,
+    /// Source bindings for ordinary graph losses, in original branch order.
+    /// Empty for an explicitly authored numeric-resistor graph.
+    pub graph_materials: Vec<GraphResistorMaterial>,
     pub currents_a: Vec<f64>,
     pub terminal_voltage_v: Vec<f64>,
     pub inductive_voltage_v: Vec<f64>,
@@ -579,10 +586,10 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
         let layout = Rc::new(Layout {
             graph,
             dae,
-            windings,
+            windings: Rc::new(windings),
             ports: terminal_ports,
             external_ports,
-            loads_per_a,
+            loads_per_a: Rc::from(loads_per_a),
         });
         let initial_voltage = layout
             .ports
@@ -640,6 +647,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
         poll(cancelled)?;
         Ok(Self {
             layout,
+            graph_materials: Vec::new(),
             field,
             conductors,
             cell_resistance_ohm,
@@ -1142,6 +1150,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
             field: field_step,
             cells,
             graph_resistors,
+            graph_materials: self.graph_materials.clone(),
             currents_a: solver.x.clone(),
             terminal_voltage_v: trial.voltage,
             inductive_voltage_v: trial.inductive_voltage,
@@ -1162,6 +1171,7 @@ impl<'m, C: SpatialConductorMaterial> SpatialNonlinearWindingCircuit<'m, C> {
         };
         let circuit = Self {
             layout: Rc::clone(&self.layout),
+            graph_materials: self.graph_materials.clone(),
             field,
             conductors,
             cell_resistance_ohm,

@@ -1,5 +1,31 @@
 # fs-em contract
 
+## Source-bound load resistance on continuing three-dimensional windings
+
+`SpatialNonlinearWindingCircuit::with_graph_resistors` attaches the existing
+`GraphResistorMaterial` sources to every ordinary resistor on the native graph.
+Its source-resolved geometry and electrical basis determine resistance; later
+updates return a separate owner at the same physical time with exactly retained
+A, winding current/linkage, native fluxes, capacitor charges and algebraic receipt.
+Resistance changes add no magnetic-storage parameter work. The next original
+native descriptor step computes the actual stage efforts without an artificial
+initial equilibrium projection.
+
+Reassembly retains original private terminal order, source indices and all native
+storage coordinates. The unchanged Hamiltonian is checked explicitly. Winding
+profiles and exact Whitney load caches are shared through `Rc`, so an ordinary
+resistor update does not copy or rebuild those field payloads; identical source
+bindings also reuse the original native assembly. This is an allocation reduction,
+not a measured runtime claim. Every accepted state and step retains complete graph
+material bindings beside its distinct graph-local heat records. A finite thermal
+consumer separately owns original source pinning and temperature-refresh admission.
+
+The focused case in `tests/spatial_induction_winding/resistors.rs` changes source
+resistivity after nonzero-time evolution and independently checks backward-Euler
+winding response, native trapezoidal RLC response, heat, work and storage. It checks
+retained source metadata and typed cancellation/support refusals. Pinned Rustfmt
+and source/accounting review passed; native execution and DSR remain unrun here.
+
 ## Native winding circuits on nonlinear three-dimensional induction
 
 `spatial::vector_potential::induction::nonlinear::winding` connects the original
