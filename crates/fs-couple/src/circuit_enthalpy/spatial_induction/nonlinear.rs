@@ -323,7 +323,7 @@ impl SpatialMagneticThermalNetwork<'_> {
         sample: impl Fn(&S) -> &MaterialNetworkSample,
         drive: impl Fn(
             &DepositionSimulation<'_>,
-            &MaterialNetworkSample,
+            &CircuitThermalCoefficients<S>,
             Option<Vec<SpatialNonlinearMaterial>>,
             Vec<Option<C>>,
             usize,
@@ -582,7 +582,7 @@ impl SpatialMagneticThermalNetwork<'_> {
                 }
                 let proposal = drive(
                     trial,
-                    sample(&coefficients.source),
+                    &coefficients,
                     materials,
                     refreshed,
                     remaining,

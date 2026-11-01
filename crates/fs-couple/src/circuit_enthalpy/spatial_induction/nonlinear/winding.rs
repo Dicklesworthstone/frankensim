@@ -10,15 +10,19 @@ use crate::circuit_enthalpy::{
     ResistorCell,
     contacts::heat::{HeatAssembly, HeatNetworkError, HeatNetworkSample, closed_balance},
     magnetic::MagneticRoutes,
+    material::CellResistor,
 };
 use fs_em::{
     spatial::vector_potential::induction::nonlinear::winding::{
         SpatialNonlinearWindingCandidate, SpatialNonlinearWindingCircuit,
         SpatialNonlinearWindingError, SpatialNonlinearWindingStep, SpatialWindingConductor,
     },
-    winding::nonlinear::NonlinearWindingControls,
+    winding::nonlinear::{NonlinearWindingControls, resistors::GraphResistorMaterial},
 };
 use fs_exec::Cx;
+use fs_material::{
+    conductor::ElectricalPropertyBasis, field_storage::admit_source_temperature_refresh,
+};
 use fs_phs::circuit::Branch;
 use std::collections::BTreeSet;
 
@@ -60,9 +64,9 @@ fn heat_error<E: From<HeatNetworkError>>(error: HeatNetworkError) -> WindingErro
 /// Partial-fill composites require a mixture caloric owner and refuse here.
 pub struct SpatialWindingThermalNetwork<'a> {
     pub magnetic: SpatialMagneticThermalNetwork<'a>,
-    /// Every authored numeric graph resistor needs exactly one heat receiver.
-    /// Its resistance stays authored; source-resolved R(T) acts in the spatial
-    /// winding/conductor cells, not by silently assigning graph material.
+    /// Every original graph resistor needs exactly one heat receiver. Numeric
+    /// resistance stays authored unless its complete material binding is given
+    /// to `step_material_candidate` or the complete material heat assembly.
     pub graph_resistors: &'a [ResistorCell],
     /// Absolute, dimensionless allowance for summation roundoff, at most 1e-10.
     /// No fill fraction or source volume is rescaled to meet this allowance.
@@ -169,14 +173,83 @@ impl SpatialWindingThermalNetwork<'_> {
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialWindingEnthalpyCandidate<'t, 'm, MaterialNetworkSample, C>, WindingError>
     {
+        self.step_bound(
+            thermal,
+            target_s,
+            circuit,
+            external_inputs,
+            None,
+            magnetic_laws,
+            controls,
+            winding_controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Resolve every ordinary graph resistor from its own finite material body.
+    ///
+    /// Original length, area, source choices and accepted resistance must agree
+    /// before stepping. Graph bodies cannot also be whole magnetic volumes.
+    /// Each endpoint uses its own R(T), retained alongside native branch heat;
+    /// no circuit, magnetic or thermal history is restarted by source refresh.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_material_candidate<'t, 'm, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &SpatialNonlinearWindingCircuit<'m, C>,
+        external_inputs: &[f64],
+        resistors: &[CellResistor],
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        magnetic_laws: Option<&[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>]>,
+        controls: CircuitEnthalpySolve,
+        winding_controls: NonlinearWindingControls<SpatialNonlinearInductionControls>,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialWindingEnthalpyCandidate<'t, 'm, MaterialNetworkSample, C>, WindingError>
+    {
+        self.step_bound(
+            thermal,
+            target_s,
+            circuit,
+            external_inputs,
+            Some((resistors, electrical_bases)),
+            magnetic_laws,
+            controls,
+            winding_controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn step_bound<'t, 'm, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        circuit: &SpatialNonlinearWindingCircuit<'m, C>,
+        external_inputs: &[f64],
+        graph_material: Option<(&[CellResistor], &[(usize, ElectricalPropertyBasis)])>,
+        magnetic_laws: Option<&[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>]>,
+        controls: CircuitEnthalpySolve,
+        winding_controls: NonlinearWindingControls<SpatialNonlinearInductionControls>,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialWindingEnthalpyCandidate<'t, 'm, MaterialNetworkSample, C>, WindingError>
+    {
         let cancel = RefCell::new(cancelled);
         let network = MaterialNetwork {
             cells: self.magnetic.cells,
-            resistors: &[],
+            resistors: graph_material.map_or(&[], |(resistors, _)| resistors),
             links: self.magnetic.links,
         };
         let prepared = network
-            .prepare_with_bases(thermal, &[], || (*cancel.borrow_mut())())
+            .prepare_with_bases(
+                thermal,
+                graph_material.map_or(&[], |(_, bases)| bases),
+                || (*cancel.borrow_mut())(),
+            )
             .map_err(material)
             .map_err(native_error)?;
         self.step_resolved_candidate(
@@ -184,6 +257,7 @@ impl SpatialWindingThermalNetwork<'_> {
             target_s,
             circuit,
             external_inputs,
+            graph_material.map(|(resistors, _)| resistors),
             magnetic_laws,
             controls,
             winding_controls,
@@ -306,6 +380,7 @@ impl SpatialWindingThermalNetwork<'_> {
         target_s: f64,
         circuit: &SpatialNonlinearWindingCircuit<'m, C>,
         external_inputs: &[f64],
+        graph_material: Option<&[CellResistor]>,
         magnetic_laws: Option<&[SpatialMagneticThermalLaw<MagneticConstitutiveThermalLaw>]>,
         controls: CircuitEnthalpySolve,
         winding_controls: NonlinearWindingControls<SpatialNonlinearInductionControls>,
@@ -319,6 +394,26 @@ impl SpatialWindingThermalNetwork<'_> {
         let routes = self
             .routes(thermal, circuit, cancel)
             .map_err(native_error)?;
+        if graph_material.is_none() && !circuit.graph_resistor_materials().is_empty() {
+            return Err(native_error(invalid(
+                "retained graph resistor sources require their complete thermal bindings",
+            )));
+        }
+        if let Some(bindings) = graph_material {
+            if bindings.len() != routes.graph.len()
+                || bindings.iter().any(|binding| {
+                    routes.graph.get(&binding.destination.branch) != Some(&binding.destination.cell)
+                        || self.magnetic.magnetic_regions.iter().any(|region| {
+                            matches!(region, super::super::SpatialMagneticRegion::Cell { cell, .. }
+                            if *cell == binding.destination.cell)
+                        })
+                })
+            {
+                return Err(native_error(invalid(
+                    "graph material bindings need exact heat routes and separate whole-cell volumes",
+                )));
+            }
+        }
         let refresh = |sources: &MaterialNetworkSample| {
             circuit
                 .conductors()
@@ -369,6 +464,33 @@ impl SpatialWindingThermalNetwork<'_> {
                 .collect::<Result<Vec<_>, Error>>()
         };
         let initial = resolve(thermal)?;
+        if initial.resistors.len() != graph_material.map_or(0, |bindings| bindings.len()) {
+            return Err(native_error(invalid(
+                "graph thermal source coverage changed",
+            )));
+        }
+        for source in &initial.resistors {
+            check(cancel).map_err(native_error)?;
+            let Some((_, _, Branch::Resistor { ohms })) =
+                circuit.graph().branches.get(source.branch)
+            else {
+                return Err(native_error(invalid(
+                    "material graph source names a non-resistor branch",
+                )));
+            };
+            if ohms.to_bits() != source.conductor.resistance_ohm().to_bits()
+                || !circuit.graph_resistor_materials().is_empty()
+                    && !circuit.graph_resistor_materials().iter().any(|old| {
+                        old.branch == source.branch
+                            && same_graph_geometry(&old.conductor, &source.conductor)
+                            && same_material(old.conductor.material(), source.conductor.material())
+                    })
+            {
+                return Err(native_error(invalid(
+                    "accepted graph resistance/source does not match its original thermal state",
+                )));
+            }
+        }
         let accepted = refresh(sample(&initial.source)).map_err(native_error)?;
         for (original, refreshed) in circuit.conductors().iter().zip(&accepted) {
             check(cancel).map_err(native_error)?;
@@ -392,16 +514,33 @@ impl SpatialWindingThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
             resolve,
-            sample,
-            |_, samples, materials, conductors, remaining| {
-                let sources = refresh(samples).map_err(native_error)?;
+            &sample,
+            |_, coefficients, materials, conductors, remaining| {
+                let sources = refresh(sample(&coefficients.source)).map_err(native_error)?;
                 let mut inner = winding_controls;
                 inner.maximum_field_trials = inner.maximum_field_trials.min(remaining);
                 if inner.maximum_field_trials == 0 {
                     return Err(CircuitEnthalpyError::CircuitBudget);
                 }
+                let refreshed_graph;
+                let driven = if graph_material.is_some() {
+                    let sources =
+                        pinned_graph_sources(&initial.resistors, &coefficients.resistors, cancel)
+                            .map_err(native_error)?;
+                    refreshed_graph = circuit
+                        .with_graph_resistors(sources, &mut || (*cancel.borrow_mut())())
+                        .map_err(electrical)?;
+                    &refreshed_graph
+                } else {
+                    if !coefficients.resistors.is_empty() {
+                        return Err(native_error(invalid(
+                            "unowned graph resistor source appeared in a thermal trial",
+                        )));
+                    }
+                    circuit
+                };
                 let candidate = if let Some(materials) = materials {
-                    circuit.step_with_materials_candidate(
+                    driven.step_with_materials_candidate(
                         target_s,
                         &velocity,
                         materials,
@@ -412,7 +551,7 @@ impl SpatialWindingThermalNetwork<'_> {
                         &mut || (*cancel.borrow_mut())(),
                     )
                 } else {
-                    circuit.step_with_conductors_candidate(
+                    driven.step_with_conductors_candidate(
                         target_s,
                         &velocity,
                         conductors,
@@ -493,10 +632,67 @@ fn add_heat(
     Ok(())
 }
 
+fn same_graph_geometry(
+    original: &fs_material::conductor::ResolvedConductor,
+    proposed: &fs_material::conductor::ResolvedConductor,
+) -> bool {
+    original.source_basis() == proposed.source_basis()
+        && original.source_key() == proposed.source_key()
+        && original.length_m().to_bits() == proposed.length_m().to_bits()
+        && original.area_m2().to_bits() == proposed.area_m2().to_bits()
+}
+
+// A heat provider may choose transport coefficients, but it cannot replace an
+// accepted resistor's original material source while solving its temperature.
+fn pinned_graph_sources(
+    original: &[crate::material_circuit::MaterialResistor],
+    proposed: &[crate::material_circuit::MaterialResistor],
+    cancel: &RefCell<impl FnMut() -> bool>,
+) -> Result<Vec<GraphResistorMaterial>, Error> {
+    if original.len() != proposed.len() {
+        return Err(invalid("graph resistor thermal source coverage changed"));
+    }
+    let mut seen = BTreeSet::new();
+    proposed
+        .iter()
+        .map(|source| {
+            check(cancel)?;
+            let old = original
+                .iter()
+                .find(|old| old.branch == source.branch)
+                .ok_or_else(|| invalid("thermal trial changed the graph resistor branch"))?;
+            if !seen.insert(source.branch)
+                || !same_graph_geometry(&old.conductor, &source.conductor)
+            {
+                return Err(invalid(
+                    "thermal trial changed graph resistor geometry or source choice",
+                ));
+            }
+            admit_source_temperature_refresh(old.conductor.material(), source.conductor.material())
+                .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Magnetic(e)))?;
+            if old
+                .conductor
+                .with_material(source.conductor.material().clone())
+                .map_err(|e| CircuitEnthalpyError::Source(MagneticThermalError::Conductor(e)))?
+                != source.conductor
+            {
+                return Err(invalid(
+                    "graph resistor left its original electrical source law",
+                ));
+            }
+            Ok(GraphResistorMaterial {
+                branch: source.branch,
+                conductor: source.conductor.clone(),
+            })
+        })
+        .collect()
+}
+
 /// Continue the same native field/circuit/caloric history through a complete
 /// original heat assembly, including thermal contacts, radiation and coolant.
-/// Thermal boundaries remain field independent; numeric graph resistor heat
-/// routes are explicit, while spatial conductor sources follow temperature.
+/// Thermal boundaries remain field independent. Complete graph material
+/// bindings refresh their original R(T) on separate finite bodies; otherwise
+/// graph resistance stays authored. Every heat route remains explicit.
 #[allow(clippy::too_many_arguments)]
 pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialConductorMaterial>(
     provider: &A,
@@ -516,7 +712,7 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialCondu
 ) -> Result<SpatialWindingEnthalpyCandidate<'t, 'm, A::Sample, C>, WindingError<A::Error>> {
     let cancel = RefCell::new(|| cx.checkpoint().is_err());
     let prepared = provider.prepared_heat_network();
-    let bulk = prepared.thermal_material_network().map_err(heat_error)?;
+    let bulk = prepared.field_material_network().map_err(heat_error)?;
     prepared
         .admit_field_independent_boundaries(cx, &[])
         .map_err(heat_error)?;
@@ -535,6 +731,7 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialCondu
         target_s,
         circuit,
         external_inputs,
+        (!bulk.resistors.is_empty()).then_some(bulk.resistors),
         magnetic_laws,
         controls,
         winding_controls,
@@ -543,9 +740,9 @@ pub fn heat_assembly_candidate<'t, 'm, A: HeatAssembly + ?Sized, C: SpatialCondu
             let coefficients = provider
                 .resolve_heat(cx, state)
                 .map_err(|e| e.map_source(SpatialWindingThermalError::Heat))?;
-            if !coefficients.contacts.is_empty() || !coefficients.bulk.resistors.is_empty() {
+            if !coefficients.contacts.is_empty() {
                 return Err(native_error(invalid(
-                    "spatial winding heat cannot discard sourced graph/contact electrical work",
+                    "spatial winding heat cannot discard electrical contact work",
                 )));
             }
             Ok(coefficients.bulk)

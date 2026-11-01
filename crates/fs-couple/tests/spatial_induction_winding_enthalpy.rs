@@ -7,7 +7,7 @@ use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitEnthalpySolve, ResistorCell,
     contacts::{heat::MaterialHeatNetwork, material::ElectricalContactNetwork},
     magnetic::caloric::MagneticConstitutiveThermalLaw,
-    material::{MaterialCell, MaterialNetwork},
+    material::{CellResistor, MaterialCell, MaterialNetwork},
     spatial_induction::{
         SpatialMagneticRegion, SpatialMagneticThermalLaw, SpatialMagneticThermalNetwork,
         ThermalMagneticMaterial,
@@ -33,7 +33,9 @@ use fs_em::{
             nonlinear::{NonlinearVectorControls, SpatialNonlinearVectorMagnetostatics},
         },
     },
-    winding::nonlinear::{NonlinearWindingControls, NonlinearWindingInitial},
+    winding::nonlinear::{
+        NonlinearWindingControls, NonlinearWindingInitial, resistors::GraphResistorMaterial,
+    },
 };
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -41,7 +43,7 @@ use fs_matdb::{MaterialCard, PropertyKey, SelectionPolicy};
 use fs_material::{
     conductor::{ElectricalPropertyBasis, ResolvedConductorState},
     phase::{HeatCapacitySourceQuery, ResolvedHeatCapacityCurve, SolidLiquidPhase},
-    state_point::SPECIFIC_HEAT_CAPACITY_DIMS,
+    state_point::{MaterialPropertySelection, SPECIFIC_HEAT_CAPACITY_DIMS},
     thermal::source::ThermalMaterialPoint,
 };
 use fs_phs::circuit::{Branch, CircuitGraph};
@@ -743,4 +745,259 @@ fn finite_receivers_budget_source_and_late_cancellation_preserve_all_histories()
     );
     assert_eq!(original.time_s(), 0.0);
     near(heat.temperature_k(CELL).unwrap(), 300.0, 1e-12);
+}
+
+#[test]
+fn separate_material_graph_body_changes_current_and_retains_its_source_in_complete_heat() {
+    const RES_CELL: CellId = CellId(8);
+    const RES_MAT: MaterialId = MaterialId(10);
+    let run = |alpha| {
+        let coil_card = source::absolute_affine_magnetic_card(0.2, 0.0, 2.0, 0.0, BASIS);
+        let resistor_card = source::absolute_affine_magnetic_card(GRAPH_R, alpha, 2.0, 0.0, BASIS);
+        let coil_curve = curve(&coil_card);
+        let resistor_curve = curve(&resistor_card);
+        let heat = DepositionSimulation::new(
+            [(CELL, MAT), (RES_CELL, RES_MAT)]
+                .into_iter()
+                .map(|(id, material_id)| TimedEvent {
+                    time_s: 0.0,
+                    event: Event::Birth(DepositedCell {
+                        id,
+                        segment_id: 0,
+                        body_id: id.0,
+                        material_id,
+                        mass_kg: 1.0,
+                        specific_h_j_kg: 400.0,
+                        geometry: CellGeometry {
+                            start_m: [0.0; 3],
+                            end_m: [1.0, 0.0, 0.0],
+                            volume_m3: 1.0,
+                            surface_area_m2: 1.0,
+                        },
+                        boundary: Boundary {
+                            ambient_k: 300.0,
+                            htc_w_m2_k: 0.0,
+                            reservoir: None,
+                            source_w: 0.0,
+                        },
+                    }),
+                })
+                .collect(),
+            &[
+                (MAT, coil_curve.curve() as &dyn ThermalLaw),
+                (RES_MAT, resistor_curve.curve() as &dyn ThermalLaw),
+            ],
+            DepositionBudget {
+                max_cells: 2,
+                max_links: 2,
+                max_events: 2,
+                max_substeps: 1000,
+            },
+        )
+        .unwrap()
+        .advance_to(
+            0.0,
+            StepConfig {
+                max_dt_s: 0.1,
+                energy_tolerance_j: 1e-9,
+            },
+            || Ok(()),
+        )
+        .unwrap()
+        .0;
+        let p = problem(&coil_card);
+        let original = circuit(&p, 1.0);
+        let query = source::absolute_point(300.0);
+        let cells = [
+            MaterialCell {
+                cell: CELL,
+                material_id: MAT,
+                curve: coil_curve.curve(),
+                point: ThermalMaterialPoint {
+                    material: &coil_card,
+                    context: &query,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                conductivity: None,
+            },
+            MaterialCell {
+                cell: RES_CELL,
+                material_id: RES_MAT,
+                curve: resistor_curve.curve(),
+                point: ThermalMaterialPoint {
+                    material: &resistor_card,
+                    context: &query,
+                    temperature_axis: "T",
+                    liquid_fraction_axis: None,
+                },
+                conductivity: None,
+            },
+        ];
+        let routes = [ResistorCell {
+            branch: 1,
+            cell: RES_CELL,
+        }];
+        let resistors = [CellResistor {
+            destination: routes[0],
+            selection: MaterialPropertySelection::SingleClaimOnly,
+            length_m: 1.0,
+            area_m2: 1.0,
+        }];
+        let bases = [(1, BASIS)];
+        let regions = regions();
+        let layout = SpatialWindingThermalNetwork {
+            magnetic: SpatialMagneticThermalNetwork {
+                cells: &cells,
+                links: &[],
+                magnetic_regions: &regions,
+                volume_tolerance_m3: 1e-12,
+            },
+            graph_resistors: &routes,
+            fill_tolerance: 1e-12,
+        };
+        // Explicitly reconfiguring the electrical source does not establish
+        // agreement with the accepted caloric state; the coupled owner checks it.
+        let wrong = ResolvedConductorState::try_from_material_with_basis(
+            source::bundle_at(&resistor_card, &source::absolute_point(301.0), BASIS),
+            BASIS,
+        )
+        .unwrap()
+        .into_uniform_conductor(1.0, 1.0)
+        .unwrap();
+        let mismatched = original
+            .with_graph_resistors(
+                vec![GraphResistorMaterial {
+                    branch: 1,
+                    conductor: wrong,
+                }],
+                &mut || false,
+            )
+            .unwrap();
+        assert!(
+            layout
+                .step_material_candidate(
+                    &heat,
+                    0.2,
+                    &mismatched,
+                    &[10.0],
+                    &resistors,
+                    &bases,
+                    None,
+                    thermal_controls(),
+                    controls(),
+                    &[0.0; 2],
+                    || false
+                )
+                .is_err()
+        );
+        let first = layout
+            .step_material_candidate(
+                &heat,
+                0.2,
+                &original,
+                &[10.0],
+                &resistors,
+                &bases,
+                None,
+                thermal_controls(),
+                controls(),
+                &[0.0; 2],
+                || false,
+            )
+            .unwrap();
+        let verify=|before:&DepositionSimulation<'_>,after:&DepositionSimulation<'_>,
+            step:&fs_em::spatial::vector_potential::induction::nonlinear::winding::SpatialNonlinearWindingStep| {
+            let tr=after.temperature_k(RES_CELL).unwrap();
+            let r=GRAPH_R*(1.0+alpha*(tr-300.0));
+            let i=step.currents_a[0];
+            assert_eq!(step.graph_materials.len(),1);
+            near(step.graph_materials[0].conductor.resistance_ohm(),r,1e-12);
+            near(step.graph_resistors[0].heat_j,0.2*r*i*i,3e-7);
+            near(4.0*(tr-before.temperature_k(RES_CELL).unwrap()),step.graph_resistors[0].heat_j,5e-7);
+            near(4.0*(after.temperature_k(CELL).unwrap()-before.temperature_k(CELL).unwrap()),
+                step.field.heat_j+step.cells.iter().map(|cell|cell.heat_j).sum::<f64>(),5e-7);
+        };
+        verify(&heat, first.thermal(), &first.report().coupled.electrical);
+        assert!(
+            layout
+                .step_candidate(
+                    first.thermal(),
+                    0.4,
+                    first.circuit(),
+                    &[10.0],
+                    None,
+                    thermal_controls(),
+                    controls(),
+                    &[0.0; 2],
+                    || false
+                )
+                .is_err()
+        );
+        let material = MaterialNetwork {
+            cells: &cells,
+            resistors: &resistors,
+            links: &[],
+        };
+        let electrical = ElectricalContactNetwork {
+            bulk: &material,
+            contacts: &[],
+            electrical_bases: &bases,
+        };
+        let assembly = MaterialHeatNetwork {
+            electrical: &electrical,
+            thermal_contacts: &[],
+            radiation: None,
+        };
+        let gate = CancelGate::new();
+        let pool = fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default());
+        pool.scope(|arena| {
+            let cx = Cx::new(
+                &gate,
+                arena,
+                StreamKey {
+                    seed: 91,
+                    kernel_id: 3,
+                    tile: 0,
+                    iteration: 0,
+                },
+                Budget::INFINITE,
+                ExecMode::Deterministic,
+            );
+            let prepared = assembly.prepare(&cx, first.thermal()).unwrap();
+            let second = heat_assembly_candidate(
+                &prepared,
+                &cx,
+                first.thermal(),
+                0.4,
+                first.circuit(),
+                &[10.0],
+                &regions,
+                &routes,
+                1e-12,
+                1e-12,
+                None,
+                thermal_controls(),
+                controls(),
+                &[0.0; 2],
+            )
+            .unwrap();
+            verify(
+                first.thermal(),
+                second.thermal(),
+                &second.report().coupled.electrical,
+            );
+            near(second.report().total_energy_residual_j, 0.0, 5e-7);
+            assert_eq!(original.time_s(), 0.0);
+            near(heat.temperature_k(RES_CELL).unwrap(), 300.0, 1e-12);
+            (
+                first.circuit().currents_a()[0],
+                second.circuit().currents_a()[0],
+            )
+        })
+    };
+    let fixed = run(0.0);
+    let responsive = run(0.005);
+    assert!(responsive.0 < fixed.0);
+    assert!(responsive.1 < fixed.1);
 }

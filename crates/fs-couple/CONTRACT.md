@@ -1,5 +1,39 @@
 # CONTRACT: fs-couple
 
+## Finite load-resistor feedback on three-dimensional winding histories
+
+`SpatialWindingThermalNetwork::step_material_candidate` binds every ordinary
+native graph resistor to its existing `CellResistor` material body and explicit
+electrical property basis. The same source-resolved `MaterialNetwork` supplies
+endpoint `R(T)`, original conductor length/area and caloric state. A resistor
+body cannot also claim a whole magnetic field volume; its heat route and source
+geometry must describe the same separate finite receiver.
+
+Before any trial, the accepted native resistance must equal its original source
+evaluated at the accepted body temperature. Previously retained graph bindings
+must also match the original material, query, source choice, basis and geometry.
+Every endpoint refresh checks complete branch correspondence and original-source
+temperature admission, then reuses `with_graph_resistors` without changing A,
+winding current, capacitor charge or native flux history. Material providers
+cannot silently substitute a new resistor while solving its temperature.
+
+The common nonlinear spatial driver receives the already resolved thermal
+coefficients, so graph loads and field materials share one endpoint source query.
+Strand, bulk eddy and graph heat remain separate native receipts deposited once;
+the original full system energy and magnetic entropy equations are unchanged.
+`heat_assembly_candidate` supports these same complete material loads, cooling,
+contacts and radiation through the existing heat assembly. Unrepresented electrical
+contact work is still refused. The numeric-resistor API refuses omitted material
+bindings on a circuit that already retains source-bound graph loads.
+
+One additional regression in `tests/spatial_induction_winding_enthalpy.rs` uses
+separate finite winding/core and load-resistor bodies over two accepted intervals,
+including the full heat assembly. It checks independently reconstructed
+`rho(T)*length/area`, each body's physical heat, changed current, retained source
+metadata, and accepted-resistance/omitted-binding refusals. Pinned Rustfmt and
+focused source/accounting review passed; native compilation/tests and the required
+DSR gate remain unrun in this environment.
+
 ## Finite heat on nonlinear three-dimensional winding circuits
 
 `circuit_enthalpy::spatial_induction::nonlinear::winding` couples the retained
@@ -24,8 +58,8 @@ the same source admission, caloric preparation, heat transport, Newton iteration
 budgets and acceptance equations. The winding candidate supplies its actual nested
 field-trial count, clipped against the outer remaining work allowance. The complete
 `HeatAssembly` entry preserves original boundary/contact/cooling/radiation payloads
-and the existing closed-radiation balance check; unrepresented electrical contacts
-or sourced ordinary graph-resistor work are refused in this entry.
+and the existing closed-radiation balance check. Unrepresented electrical contacts
+are refused; complete graph material bindings use the source-driven load extension.
 
 Without explicit magnetic caloric laws, the original magnetic constitutive law
 must remain temperature independent. Optional existing linear `mu(T)` or
@@ -43,8 +77,9 @@ multiple insulated bundles are allowed when their fractions sum to one within th
 explicit dimensionless roundoff allowance, at most `1e-10`, without rescaling.
 Partial-fill or mixed-material coil composites require their actual mixture caloric
 volumes and refuse here. The field/circuit owner can still represent their explicit
-electrical filling without making a finite-heat claim. Authored numeric graph
-resistances stay fixed in this entry and require complete heat routing.
+electrical filling without making a finite-heat claim. `step_candidate` retains
+explicitly authored numeric graph resistances with complete heat routing;
+material-bound loads use `step_material_candidate` or the complete heat assembly.
 
 Three G1/G3/G4 cases in `tests/spatial_induction_winding_enthalpy.rs` cover two
 accepted intervals with original conductivity feedback, independently integrated
