@@ -396,7 +396,7 @@ fn paired_reservoir_observer_source(rate: u32, samples: u64) -> NsfDgPerformance
         .replace("output 32 20", "output 96 20")
         .replace("hold 32 -0.1", "hold 96 -0.1")
         .replace("matched 1 2", "baffled 1 2")
-        .replace("observation inlet-pressure", "dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257\ndg_exterior 300 100000 0\nobservation baffled 0 0 0.02 8 32 2000");
+        .replace("observation inlet-pressure", "dg_radiation computed-baffled 20 65 4 8 12 20 0.1 67108864 2 100 1e-8 64 1048576 257\ndg_exterior 300 100000 0\nobservation baffled 0 0 0.05 8 32 2000");
     let original = read(&text, 8).into_renderer();
     let observation = original.observation();
     let NsfDg { zone, load, high, limits, .. } = original.system;
@@ -435,8 +435,10 @@ fn selected_escape_observer_replays_original_rayleigh_without_mixing_breath_tile
         area_m2: dx * dx, mode_shape: vec![1.0 / (dx * dx)],
     }];
     let gas = reference(100000.0);
+    // The same 0.05 m receiver as the file's `observation baffled 0 0 0.05`: the
+    // nearest height the shared Rayleigh receiver admits.
     let mut rayleigh = BaffledPressure::new_differentiating(&surface, 1, RATE,
-        [0.0, 0.0, 0.02], (&gas).into()).unwrap();
+        [0.0, 0.0, 0.05], (&gas).into()).unwrap();
     let mut largest_escape = 0.0_f64;
     for _ in 0..64 {
         let mut pressure = [0.0]; let mut bore_pressure = [0.0];

@@ -93,8 +93,10 @@ fn upstream_material_microphone_replays_original_flows_on_an_independent_output_
     let make = || coupled(&downstream, &upstream, medium.clone(), &primary,
         &upstream_primary, ThermoviscousDgLimits::default(), &gate);
     let propagation = GasPropagation::classical(GasPropagationLimits::surface_reference());
+    // 0.05 m: the nearest height the shared Rayleigh receiver admits, and at
+    // least one output sample of travel from every tile at the 12 kHz clock.
     let observation = ApertureObservation::TubeBaffled(CircularOutletReceiver {
-        position_m: [0.01, 0.0, 0.02], radial_rings: 4, angular_points: 16,
+        position_m: [0.01, 0.0, 0.05], radial_rings: 4, angular_points: 16,
         maximum_frequency_hz: 1000.0,
     });
     // Upstream has its original circular exterior without downstream mouth

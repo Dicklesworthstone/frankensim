@@ -6,9 +6,13 @@ use crate::pcm_wav::baffled::CircularOutletReceiver;
 use crate::pcm_wav::baffled::gas::{GasPropagation, GasPropagationLimits};
 use crate::render::RenderError;
 
+/// 0.05 m is the nearest height the shared Rayleigh receiver admits
+/// (`BaffledPressure::from_loaded`). It is also at least one output sample of
+/// travel from every tile at the 8 kHz clock floor: 0.05 m * 8000 / c = 1.15
+/// samples at c = 347 m/s, against the 1-sample causal minimum.
 fn observation() -> ApertureObservation {
     ApertureObservation::TubeBaffled(CircularOutletReceiver {
-        position_m: [0.0, 0.0, 0.02],
+        position_m: [0.0, 0.0, 0.05],
         radial_rings: placement().terminal_radial_rings,
         angular_points: placement().terminal_angular_points,
         maximum_frequency_hz: 1000.0,
@@ -110,6 +114,27 @@ fn complete_field_microphone_sums_original_signed_escape_and_bore_receivers() {
     same_physical_owners(renderer.system(), &direct);
 }
 
+/// The repeating pattern of interval means between two regular clocks, from the
+/// two rates alone. Returns the original intervals per group and, for each
+/// output interval of the group, the fraction of that output interval that lies
+/// inside each original interval. In units of 1 / (source * output) seconds,
+/// original interval j spans [j * output, (j + 1) * output] and output interval
+/// k spans [k * source, (k + 1) * source], so the fraction is their overlap over
+/// `source`. No hand-typed table: the clock ratio is the only input.
+fn interval_means(source_rate: u32, output_rate: u32) -> (usize, Vec<Vec<f64>>) {
+    let (source, output) = (u64::from(source_rate), u64::from(output_rate));
+    let (mut a, mut b) = (source, output);
+    while b != 0 { (a, b) = (b, a % b); }
+    let originals = (source / a) as usize;
+    let outputs = (output / a) as usize;
+    let weights = (0..outputs as u64).map(|k| (0..originals as u64).map(|j| {
+        let low = (j * output).max(k * source);
+        let high = ((j + 1) * output).min((k + 1) * source);
+        high.saturating_sub(low) as f64 / source as f64
+    }).collect()).collect();
+    (originals, weights)
+}
+
 #[test]
 fn projected_microphone_uses_the_same_interval_means_for_every_original_surface() {
     let gate = Arc::new(CancelGate::new_clock_free());
@@ -119,16 +144,22 @@ fn projected_microphone_uses_the_same_interval_means_for_every_original_surface(
     let primary = computed_primary(&field, &exterior(), &gate);
     let make = || attach(system(&field, medium.clone(), &primary, 256, &gate), &gate);
     let propagation = GasPropagation::classical(GasPropagationLimits::surface_reference());
-    let mut whole = observed(make(), ACOUSTIC_RATE * 3 / 4, 96, 96, Arc::clone(&gate))
+    // The Rayleigh receiver admits output clocks from 8 kHz, so the output is
+    // faster than the 8 kHz original clock: two original intervals cover three
+    // 12 kHz output intervals, as in the upstream observation test.
+    let output_rate = ACOUSTIC_RATE * 3 / 2;
+    let (originals_per_group, interval_weights) = interval_means(ACOUSTIC_RATE, output_rate);
+    assert_eq!((originals_per_group, interval_weights.len()), (2, 3));
+    let mut whole = observed(make(), output_rate, 96, 96, Arc::clone(&gate))
         .with_observer_gas(&propagation).unwrap();
-    let mut parts = observed(make(), ACOUSTIC_RATE * 3 / 4, 96, 7, Arc::clone(&gate))
+    let mut parts = observed(make(), output_rate, 96, 7, Arc::clone(&gate))
         .with_observer_gas(&propagation).unwrap();
     let mut direct = make();
     let mut bore = whole.baffled_receiver().unwrap().clone();
     let mut mouths: Vec<_> = [1, 2].map(|aperture|
         (aperture, whole.reservoir_receiver_at(aperture).unwrap().clone())).to_vec();
     let mut expected = Vec::new();
-    for group in whole.drive_history().chunks_exact(4) {
+    for group in whole.drive_history().chunks_exact(originals_per_group) {
         let mut physical = Vec::new();
         for &drive in group {
             let frame = direct.step_with_drive(drive, &gate).unwrap();
@@ -143,11 +174,9 @@ fn projected_microphone_uses_the_same_interval_means_for_every_original_surface(
             }).collect();
             physical.push((terminal_flows, escape_flows));
         }
-        // Four original 8 kHz intervals cover three 6 kHz output intervals.
-        // These overlap fractions are independent of the production clock.
-        for weights in [[0.75, 0.25, 0.0, 0.0], [0.0, 0.5, 0.5, 0.0],
-            [0.0, 0.0, 0.25, 0.75]]
-        {
+        // These overlap fractions come from the two clocks, independently of
+        // the production interval clock.
+        for weights in &interval_weights {
             let mut terminal_flows = vec![0.0; primary.terminal_ports().len()];
             let mut escape_flows: Vec<_> = mouths.iter()
                 .map(|(_, receiver)| vec![0.0; receiver.input_count()]).collect();
@@ -176,7 +205,8 @@ fn projected_microphone_uses_the_same_interval_means_for_every_original_surface(
     for (&actual, expected) in a.iter().zip(expected) {
         assert!((actual - expected).abs() <= 1024.0 * f64::EPSILON * scale);
     }
-    assert_eq!(whole.system().accepted_steps(), 128);
+    // 96 outputs at 12 kHz span 96 * 8000 / 12000 original 8 kHz intervals.
+    assert_eq!(whole.system().accepted_steps(), 64);
     assert_eq!(whole.samples_rendered(), 96);
     same_physical_owners(whole.system(), &direct);
     same_physical_owners(whole.system(), parts.system());

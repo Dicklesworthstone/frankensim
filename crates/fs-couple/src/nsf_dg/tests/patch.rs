@@ -161,10 +161,34 @@ fn oriented_aperture_uses_its_area_flow_and_work_without_absorbing_the_escape_op
                 let patch = frame.coupled_patch.unwrap();
                 assert_eq!(frame.bore_exchange, patch);
                 assert_eq!(frame.inlet_flow_m3_s, patch.normal_volume_flow_m3_s);
-                assert_eq!(
+                let (total, advected, nonadvective) = (
                     frame.bore_exchange.total_energy_out_j,
-                    frame.bore_exchange.advected_stagnation_enthalpy_out_j
-                        + frame.bore_exchange.nonadvective_energy_out_j
+                    frame.bore_exchange.advected_stagnation_enthalpy_out_j,
+                    frame.bore_exchange.nonadvective_energy_out_j,
+                );
+                // The engine DEFINES the nonadvective energy of ONE original step as
+                // the difference (fs-lbm open_boundary/patch.rs), and the frame sums
+                // `substeps` such steps (characteristic_trial.rs). So the definition is
+                // bit for bit exact only for one substep.
+                if substeps == 1 {
+                    assert_eq!(nonadvective.to_bits(), (total - advected).to_bits());
+                }
+                // The identity total = advected + nonadvective is not bitwise
+                // representable. With m = substeps, each aggregate is a left-to-right
+                // sum of m per-step values (m - 1 roundings, each <= u times the
+                // partial sum, u = EPSILON / 2), n_i = fl(t_i - a_i) adds one rounding
+                // <= u |n_i| per step, and the check's own a + n one more. With the
+                // per-step values of one sign inside a step (outflow through one
+                // aperture), every partial sum is bounded by its aggregate, so
+                // |a + n - t| <= u [(m - 1) |t| + (m - 1) |a| + m |n| + |a + n|]
+                //              <= 2 m EPSILON max(|t|, |a|, |n|).
+                let sum_rounding = 2.0 * substeps as f64 * f64::EPSILON
+                    * total.abs().max(advected.abs()).max(nonadvective.abs());
+                assert!(
+                    (advected + nonadvective - total).abs() <= sum_rounding,
+                    "energy split {total:e} = {advected:e} + {nonadvective:e}, \
+                     miss {:e} against bound {sum_rounding:e} at {substeps} substeps",
+                    (advected + nonadvective - total).abs()
                 );
                 assert!(frame.pressure_residual_pa.abs() < 1e-6);
 

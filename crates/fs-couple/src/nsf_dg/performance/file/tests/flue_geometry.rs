@@ -56,10 +56,42 @@ fn slit_edge_source_binds_the_actual_solid_geometry_and_both_openings() {
     assert_eq!(reaction.pressure_bracket_pa, [-5.0, 5.0]);
     assert!(system.load().independent_mouth_response().is_ok());
     assert!(file.renderer().reservoir_receiver().is_some());
-    assert_eq!(
-        file.renderer().reservoir_observer_gas().unwrap().filters.len(),
-        27
-    );
+    // One material filter per DISTINCT source-to-receiver range, not per tile:
+    // `surface_filter_indices` maps every tile to its filter, and equal ranges
+    // are matched bit for bit, never rounded (baffled_pressure_gas.rs). The
+    // expected count is computed here from the tile coordinates the observer
+    // builds (performance/reservoir.rs), with the same grouping rule, so a later
+    // geometry change cannot leave a stale constant behind. For this example
+    // the 27 tiles are 3 columns, at -0.0505, -0.05 and -0.0495 m along the
+    // first baffle axis, by 9 rows at -2, -1.5, ..., +2 mm along the second,
+    // symmetric about the receiver's axis (0, 0, 0.2): their range takes
+    // 3 * 5 = 15 values (|y| = 0, 0.5, 1, 1.5, 2 mm).
+    let observer_gas = file.renderer().reservoir_observer_gas().unwrap();
+    let tiles = zone.reservoir_aperture().unwrap();
+    let mouth = file.renderer().reservoir_observation().unwrap();
+    let ApertureObservation::TubeBaffled(microphone) = file.renderer().observation() else {
+        panic!("the canonical file observes through the shared exterior receiver");
+    };
+    let dx = zone.law().dx_m;
+    let (first, second) = ((tiles.axis + 1) % 3, (tiles.axis + 2) % 3);
+    let sign = if tiles.high { 1.0 } else { -1.0 };
+    let (cosine, sine) = (fs_math::det::cos(mouth.angle_rad), fs_math::det::sin(mouth.angle_rad));
+    let mut ranges = std::collections::BTreeSet::new();
+    for cell in &tiles.cells {
+        let local = [(cell[first] as f64 + 0.5) * dx, sign * (cell[second] as f64 + 0.5) * dx];
+        let center = [
+            mouth.origin_m[0] + cosine * local[0] - sine * local[1],
+            mouth.origin_m[1] + sine * local[0] + cosine * local[1],
+            0.0,
+        ];
+        let range = fs_math::det::sqrt(
+            (0..3).map(|i| (microphone.position_m[i] - center[i]).powi(2)).sum::<f64>(),
+        );
+        ranges.insert(range.to_bits());
+    }
+    assert_eq!(observer_gas.surface_filter_indices.len(), tiles.cells.len());
+    assert_eq!(observer_gas.surface_filter_indices.len(), 27);
+    assert_eq!(observer_gas.filters.len(), ranges.len());
     // Source-owned material queries distinguish the actual interior solids
     // from fluid cells. The windway is not a prescribed velocity or jet card.
     for cell in [[2, 4, 2], [7, 7, 2], [14, 6, 2], [21, 8, 2]] {

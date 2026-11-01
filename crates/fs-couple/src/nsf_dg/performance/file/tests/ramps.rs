@@ -99,7 +99,7 @@ fn g0_ramp_variants_keep_physical_location_and_legacy_holds_keep_bits() {
     }
     let indexed = fixture(reference(100000.0), "dry-air 300 100000")
         .replace("initial rest",
-            "reservoir_aperture 1 low reference 1\nreservoir_cell 4 0 1\nreservoir_aperture 1 high reference 1\nreservoir_cell 7 2 1\ninitial rest")
+            "reservoir_apertures 2\nreservoir_aperture 1 low reference 1\nreservoir_cell 4 0 1\nreservoir_aperture 1 high reference 1\nreservoir_cell 7 2 1\ninitial rest")
         .replace("boundary 1\nhold 32 -0.1",
             "boundary aperture 1 1\nramp 32 100000 300 100004 302");
     let file = read(&indexed, 8);

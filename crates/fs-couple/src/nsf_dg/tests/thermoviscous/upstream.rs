@@ -208,7 +208,14 @@ fn both_full_fields_replay_original_owners_at_whole_and_selected_interfaces() {
                         let face = frame.faces[side];
                         let flow = face.normal_volume_flow_m3_s - selected.normal_volume_flow_m3_s;
                         let work = face.acoustic_pressure_work_out_j - selected.acoustic_pressure_work_out_j;
-                        let pressure = if side == 0 { -0.25 } else { 0.15 };
+                        // The drive is an acoustic offset, but the grid stores ABSOLUTE
+                        // pressure, so the complement carries the offset as represented
+                        // at the reference: (p0 + drive) - p0, the same arithmetic as the
+                        // stored face. -0.25 is exact; 0.15 at 1e5 Pa is
+                        // 0.14999999999417923, half an ulp (7.3e-12 Pa) of 1e5 away, which
+                        // is 3.9e-11 of the offset and far above 256 eps of its work.
+                        let drive = if side == 0 { -0.25 } else { 0.15 };
+                        let pressure = (gas.pressure + drive) - gas.pressure;
                         let expected = pressure * flow * dt;
                         let scale = face.acoustic_pressure_work_out_j.abs()
                             + selected.acoustic_pressure_work_out_j.abs() + expected.abs();

@@ -202,12 +202,23 @@ fn g0_named_actuation_requires_owned_bounded_controls_and_preserves_the_accepted
     for next in ["-1 0.25", "0 1000"] {
         let mut renderer = build(false, 1, |text| text
             .replace("fluid_limits 108 290 320", "fluid_limits 108 299.9 300.1")
+            // The coupled solve evaluates the declared incoming bracket at both ends
+            // before it iterates, and a face temperature outside the window refuses the
+            // step. At the default +-0.5 m/s the face reaches 300.155 K (measured; 0.31 K
+            // per m/s, rho c u = 200 Pa through (gamma - 1) / gamma T dp / p), outside
+            // this +-0.1 K window. +-0.3 m/s keeps both ends inside (+-0.093 K); the
+            // valid prefix step solves to u = 8.3e-11 m/s, far inside that bracket.
+            .replace("coupling 128 13824 -0.5 0.5", "coupling 128 13824 -0.3 0.3")
             .replace(CONTROL, &format!(
                 "boundary finite-reservoir-actuation 0 0.01 2\nhold 1 -0.00001 0.25\nhold 32 {next}")))
             .unwrap().into_renderer();
         renderer.block(&mut [0.0]).unwrap();
         let prefix = snapshot(&renderer);
-        assert!(renderer.block(&mut [0.0]).is_err());
+        let refused = renderer.block(&mut [0.0]).unwrap_err();
+        if next == "0 1000" {
+            // 1000 W over one interval heats the chamber about 1.2 K: the window refuses it.
+            assert!(format!("{refused:?}").to_lowercase().contains("window"), "{refused:?}");
+        }
         assert_eq!(snapshot(&renderer), prefix);
     }
 }
