@@ -2208,3 +2208,39 @@ parity are implementation evidence, not a force enclosure or measured material
 validation. Electrostriction, thermal/material evolution, ambient mechanical
 pressure, finite moving-mesh work and a mechanical time step remain with their
 corresponding physical owners.
+
+## Full field-derived coupled capacitance in native circuits
+
+`PlanarCapacitanceMatrix::coupled_circuit_at_voltages` transfers the original
+grounded Maxwell matrix into a prepared native `CapacitanceBlock`. Each
+nonreference electrode supplies one charge coordinate and one branch toward the
+explicit reference; its charge is the electrode's total free charge. The full
+matrix owns `q=Cv` and `H=q^T C^-1 q/2`. Either off-diagonal sign is supported when
+the actual grounded block is positive definite. No mutual coefficient is clipped
+or fitted, and the existing restricted pair-capacitor export is unchanged.
+
+The export retains the original field/material owner, reference and coordinate
+ordering, explicit graph-node map, native prepared matrix and initial charges.
+It independently compares all native electrode charges, including reconstructed
+reference charge, with original weak electrode reactions, and native H with the
+superposed original cell-field energy at the actual voltages. The existing
+mesh/electrode connectivity owner refuses unreferenced components before
+factorization; an equipotential electrode joining mesh pieces counts as a real
+connection. Native preparation owns SPD/numerical admission. Cancellation returns
+no export and leaves the original field reusable.
+
+Floating electrodes remain native nodes and charge coordinates. With no external
+current their KCL conserves total charge while mutual coupling changes voltage;
+charged floating energy is retained. This API performs no Schur elimination that
+would discard affine charge offsets or a trapped-energy constant. Append the
+returned branches together and use `block_at_branch_offset` to reindex the SAME
+shared prepared block without another factorization. Those branches and block
+jointly represent one dielectric store; branch diagonal values alone do not
+represent its coupled energy. Material and geometry remain fixed; thermal or
+mechanical coefficient changes require their existing explicit work owners.
+
+`tests/electrostatic/network/circuit.rs` checks a positive-mutual field matrix
+through actual native RC dynamics at microfarad and picofarad scales, independent
+terminal equations and recovered field energy/heat, reference and terminal
+permutation, common-voltage invariance, charged floating history, append offsets,
+physical source identity, additional-gauge refusal and cancellation replay.

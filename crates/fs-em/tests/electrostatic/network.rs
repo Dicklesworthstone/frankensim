@@ -1,6 +1,8 @@
 //! G1/G3: source-derived multi-electrode storage reaches the native circuit.
 #[path = "network/floating.rs"]
 mod floating;
+#[path = "network/circuit.rs"]
+mod circuit;
 
 use super::{controls, dielectric, limits, near, slab};
 use fs_em::electrostatic::{

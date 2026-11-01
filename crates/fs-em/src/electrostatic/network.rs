@@ -3,11 +3,15 @@
 //! Unit-electrode solutions come from the original FEEC/checked-CG owner.
 //! Their electric-energy Gram matrix is independently checked against every
 //! electrode charge reaction, reciprocity and the common-voltage nullspace.
-//! A passive circuit reduction uses -C_ij for each pair; positive off-diagonal
-//! entries refuse reduction rather than being clipped or fitted.
+//! The pair-capacitor reduction uses -C_ij and refuses positive off-diagonal
+//! entries. The full coupled-capacitance bridge retains the original grounded
+//! matrix instead, including either mutual sign when the block is passive.
 
 /// Charge-constrained floating electrodes on the original capacitance matrix.
 pub mod floating;
+/// Full original electrode charge coupling in one native capacitor block.
+pub mod circuit;
+pub use circuit::CoupledCapacitanceCircuit;
 
 use super::{
     ElectricField, ElectrostaticControls, ElectrostaticError, PlanarElectrostatics, finite, poll,
