@@ -7,6 +7,7 @@ interface GasControls {
   identity(): string;
   load(sources?: NativeWindGasSources): void;
   setAttachments(paths: readonly string[]): void;
+  addSource(component: NativeWindGasComponent): void;
   setDisabled(disabled: boolean): void;
   reset(): void;
 }
@@ -117,6 +118,17 @@ export function createNativeGasControls(changed: () => void): GasControls {
     setAttachments(next) {
       paths = [...new Set(next)];
       for (const row of rows) for (const key of keys) choices(row.inputs[key]);
+    },
+    addSource(component) {
+      // Source loading never replaces an existing association, phase policy or
+      // water identity. The empty initial row is only an unfilled UI placeholder.
+      if (!components().some(previous => keys.every(key => previous[key] === component[key]))) {
+        const empty = rows.find(row => keys.every(key => !row.inputs[key].value));
+        if (empty) keys.forEach(key => { empty.inputs[key].value = component[key]; });
+        else addRow(component);
+      }
+      enabled.checked = true;
+      controls(); changed();
     },
     setDisabled(disabled) { locked = disabled; controls(); },
     reset() {

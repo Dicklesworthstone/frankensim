@@ -686,6 +686,31 @@ Bow traces and observer-store caches are not exposed by the web adapter.
 
 ### Source-backed gas mixtures
 
+The starter menu also includes the complete existing **Flute — D4 reference
+study** and **Clarinet — G3 reference study** descriptions. These load the
+committed geometry, gestures, clocks and pressure scales verbatim. Their source
+limits stay visible: the flute uses its estimated jet card, and the clarinet
+retains its single-mode reed. The clarinet's named breath pack can be replaced
+explicitly in the source editor before editing its new primitive gas record.
+
+**Atmosphere from material data → Add original gas sources** loads the existing
+species, NASA-9 heat-capacity and pure transport sources for nitrogen, oxygen,
+carbon dioxide, helium, argon, neon, sulfur hexafluoride or water vapour. The
+original manifests and tables ship with the app as lazy assets. They remain
+editable attachments and compile through the configured native material
+compiler, with their exact three pack paths wired to the gas registry. No
+coefficient is copied into browser code. An existing edited source or conflicting
+pack binding is retained; adding the library source refuses instead of replacing it.
+
+Select **Attached thermochemical species** in Regional atmosphere, enter the
+exact species IDs and fractions, and explicitly choose the phase policy and
+water identity. Loading a source does not change those physical choices or the
+performance. The `finite_gas` record used by native reed heat feedback is also
+editable through the same controls and retains its thermochemical-only model.
+Source files and compiled packs share a 128-file allowance, enough for a
+multigas atmosphere plus the instrument's original materials; the existing
+8 MiB per-file and 32 MiB combined byte limits remain.
+
 Enable **Use attached thermochemical gas sources** to use the same species
 registry as the native `--gas-component` workflow. Attach each original species
 pack, NASA-9 model pack, and **pure transport material-card pack**, then select

@@ -337,7 +337,7 @@ test('material compilation requires original manifest inputs, new confined targe
     [{...binding, packPath:'output.wav'}], [{...binding, packPath:'../reed.pack'}],
     [{...binding, packPath:'source'}], [{...binding, packPath:'reed.pack/part'}, binding],
     [binding, {packPath:'other.pack', manifestPath:'reed.pack'}],
-    [binding, ...Array.from({length:31}, (_, i) => ({...binding, packPath:'pack-' + i}))],
+    [binding, ...Array.from({length:MAX_ATTACHMENTS - 1}, (_, i) => ({...binding, packPath:'pack-' + i}))],
     ...[{}, {chemistry:'c', phase:'s', process:'p'}, {chemistry:'c', phase:'s', process:'p', revision:-1},
       {chemistry:'c', phase:'s', process:'p', revision:4294967296},
       {chemistry:'c', phase:'s', process:'p', revision:'0'}].map(materialState => [{...binding, materialState}])]) {

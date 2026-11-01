@@ -1,0 +1,10 @@
+[
+  {"id":"nitrogen","label":"Nitrogen · N₂","species":"N2","speciesSource":"nitrogen","nasa9Source":"nitrogen-nasa9-mcbride2002","transportSource":"nitrogen-transport-lemmon2004"},
+  {"id":"oxygen","label":"Oxygen · O₂","species":"O2","speciesSource":"oxygen","nasa9Source":"oxygen-nasa9-mcbride2002","transportSource":"oxygen-transport-lemmon2004"},
+  {"id":"carbon-dioxide","label":"Carbon dioxide · CO₂","species":"CO2","speciesSource":"carbon-dioxide","nasa9Source":"carbon-dioxide-nasa9-mcbride2002","transportSource":"carbon-dioxide-transport-laesecke2017-huber2016"},
+  {"id":"helium","label":"Helium · He","species":"He","speciesSource":"helium","nasa9Source":"helium-nasa9-mcbride2002","transportSource":"helium-transport-hurly-mehl2007"},
+  {"id":"argon","label":"Argon · Ar","species":"Ar","speciesSource":"argon","nasa9Source":"argon-nasa9-mcbride2002","transportSource":"argon-transport-lemmon2004"},
+  {"id":"neon","label":"Neon · Ne","species":"Ne","speciesSource":"neon","nasa9Source":"neon-nasa9-mcbride2002","transportSource":"neon-transport-kestin1984"},
+  {"id":"sulfur-hexafluoride","label":"Sulfur hexafluoride · SF₆","species":"SF6","speciesSource":"sulfur-hexafluoride","nasa9Source":"sulfur-hexafluoride-nasa9-mcbride2002","transportSource":"sulfur-hexafluoride-transport-quinones2012-assael2012"},
+  {"id":"water-vapor","label":"Water vapour · H₂O","species":"H2O","speciesSource":"water-vapor","nasa9Source":"water-vapor-nasa9-mcbride2002","transportSource":"water-vapor-transport-iapws2008-2011"}
+]

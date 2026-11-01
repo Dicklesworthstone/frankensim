@@ -253,7 +253,7 @@ class MaterialPreparation(unittest.TestCase):
                 R.write_lab_experiment(source, root, names, {}, None, False,
                                        material_inputs=input_for("properties.tsv"))
         many = {"wire.fsmatpk": {"manifest": "original manifest", "sources":
-            [{"path": f"table-{i}.tsv", "text": "source"} for i in range(31)]}}
+            [{"path": f"table-{i}.tsv", "text": "source"} for i in range(127)]}}
         with self.assertRaisesRegex(ValueError, "source-file"):
             R.write_lab_experiment(source, root, ["wire.fsmatpk"], {}, None, False, material_inputs=many)
         self.assertFalse((root / "experiment.native.json").exists())

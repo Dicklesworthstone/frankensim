@@ -2,6 +2,8 @@ import "./native-wind.css";
 // Canonical native fixtures, bundled verbatim by Vite; no copied physics defaults.
 import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-medium-tone-hole.performance?raw";
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
+import fluteD4Source from "../../../data/instruments/descriptions/flute/flute-d4.performance?raw";
+import clarinetG3Source from "../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance?raw";
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import resolvedThermoviscousSource from "../../../crates/fs-couple/examples/resolved-thermoviscous.performance?raw";
@@ -43,12 +45,13 @@ import finiteGasStringSource from "../../../crates/fs-couple/examples/finite_gas
 import { nativeWindStatus, renderNativePerformance, type NativeWindStatus, type NativeWindAttachment, type NativeWindGasSources, type NativeStringProfiles, type NativeCoatingStrainGuard, type NativeFiniteGasStringSources, type NativeMaterialManifest, type NativeRenderer } from "./native-wind-client.mjs";
 import { el } from "./util";
 import { createNativeGasControls } from "./native-wind-gases";
+import { NATIVE_GAS_LIBRARY, loadNativeGasSource, mergeNativeGasSource } from "./native-gas-library.mjs";
 import { createNativeMaterialManifests } from "./native-material-manifests";
 import { createNativeAtmosphereControls } from "./native-atmosphere";
 import { createNativeStringProfiles } from "./native-string-profiles";
 import { createNativeFiniteGasStringControls } from "./native-finite-gas-string";
 import { createNativeComparisonPanel } from "./native-comparison";
-import { MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, prepareNativeTextExperiment, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
+import { MAX_ATTACHMENTS, MAX_REQUEST_BYTES, editableAttachmentText, editedAttachmentBytes, prepareNativeTextExperiment, serializeNativeExperiment, validateInput } from "./native-experiment.mjs";
 import stringStarterSources from "./native-string-starters.json";
 import reedStarterSources from "./native-reed-starters.json";
 
@@ -67,6 +70,15 @@ const materialStarters: Readonly<Record<string, {
   materialManifests: NativeMaterialManifest[];
   stringProfiles?: NativeStringProfiles;
 }>> = {...stringStarterSources, ...reedStarterSources};
+
+// Bundle the existing gas source tables lazily. The library declares complete
+// source triples; the browser neither copies nor evaluates their coefficients.
+const gasSourceFiles = import.meta.glob<string>([
+  "../../../data/matdb/seed-v1/*/species.tsv",
+  "../../../data/matdb/seed-v1/{nitrogen,oxygen,carbon-dioxide,helium,argon,neon,sulfur-hexafluoride,water-vapor}/manifest.tsv",
+  "../../../data/matdb/seed-v1/*-nasa9-mcbride2002/*.tsv",
+  "../../../data/matdb/seed-v1/*-transport-{lemmon2004,laesecke2017-huber2016,hurly-mehl2007,kestin1984,quinones2012-assael2012,iapws2008-2011}/*.tsv",
+], {query:"?raw", import:"default"});
 
 const EXAMPLES = [
   {
@@ -95,6 +107,24 @@ const EXAMPLES = [
     decimate: true,
     intro: "Starter: a flute jet drives a spatial duct with a radiating outlet and mouth. Change the bore and exterior gas compositions independently; the native pressure observer propagates each source through the declared exterior atmosphere.",
     help: "dg_exterior supplies density, sound speed, viscosity, conductivity and heat capacities to the shared Stokes–Kirchhoff propagation law. observer_gas selects that law and its numerical budgets; lossless is an explicit comparison. Native decimation observes the unchanged 96 kHz mechanics at 48 kHz. This short integration fixture uses an interim jet model and is not a measured flute.",
+  },
+  {
+    name: "data/instruments/descriptions/flute/flute-d4.performance",
+    label: "Flute — D4 reference study",
+    renderer: "wind",
+    source: fluteD4Source,
+    decimate: false,
+    intro: "The existing D4 flute study, with its complete bore network, gas mixture and blowing gesture. Change its atmosphere or source data and compare the native microphone pressure with the unchanged reference.",
+    help: "This is the original reference description: 288 kHz mechanics and 48 kHz output, with an exterior that follows its declared gas. Its jet card is a published-parameter estimate, not resolved turbulent flow or a qualified measured flute. Changing the atmosphere does not add missing jet physics. Geometry, excitation, output scale and all numerical budgets remain explicit in the source.",
+  },
+  {
+    name: "data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance",
+    label: "Clarinet — G3 reference study",
+    renderer: "wind",
+    source: clarinetG3Source,
+    decimate: false,
+    intro: "The existing G3 clarinet study, retaining its bore and tone-hole geometry, tongue contact, breath source and pressure gesture. Render the original description, then change its physical inputs for a comparison.",
+    help: "The original ambient pack uses the shared woodwind breath data built into the native renderer. To replace that pack, author an ambient thermochemical or mixture record in the source editor; Regional atmosphere then exposes the explicit record. This study still uses a single-mode lumped reed and does not resolve cane geometry, lips, the vocal tract or wall motion. Its unchanged 48 kHz description is a reference study, not a realism qualification.",
   },
   {
     name: "resolved-thermoviscous.performance",
@@ -431,7 +461,7 @@ const EXAMPLES = [
   },
 ];
 const exampleUrl = (name: string): string =>
-  `https://github.com/Dicklesworthstone/frankensim/blob/main/crates/fs-couple/examples/${name}`;
+  `https://github.com/Dicklesworthstone/frankensim/blob/main/${name.startsWith("data/") ? name : `crates/fs-couple/examples/${name}`}`;
 const LOCAL_FILE_LIMIT = 1_048_576; // Bound file reading even on a static host without a renderer.
 const message = (error: unknown): string => error instanceof Error ? error.message : String(error);
 
@@ -509,6 +539,13 @@ export function createNativeWindPanel(): HTMLElement {
   const attachmentIdentity = (): string => JSON.stringify(attachments.map(file => [file.path, file.sha256]));
   const materials = createNativeMaterialManifests(() => { refreshSourcePaths(); edited(); });
   const gas = createNativeGasControls(() => edited());
+  const gasSourceChoice = el("select", {"aria-label":"Gas species from original material sources"},
+    ...NATIVE_GAS_LIBRARY.map(entry => el("option", {value:entry.id}, entry.label)));
+  const addGasSource = el("button", {type:"button", class:"btn"}, "Add original gas sources");
+  const gasLibrary = el("section", {class:"nw-gas-controls", "aria-label":"Gas source library"},
+    el("h4", {}, "Atmosphere from material data"),
+    el("p", {class:"small muted"}, "Add the original species, heat-capacity and transport data from the material database. Each choice includes its source tables and compilation bindings. Set your mixture fractions in Regional atmosphere using the thermochemical model, then choose the phase policy and water identity below. Your existing source selections are retained."),
+    el("div", {class:"btn-row"}, gasSourceChoice, addGasSource));
   const profiles = createNativeStringProfiles(() => edited());
   const finiteGasString = createNativeFiniteGasStringControls(() => edited());
   const atmosphere = createNativeAtmosphereControls(currentSource, next => {
@@ -574,6 +611,7 @@ export function createNativeWindPanel(): HTMLElement {
     decimate.disabled = locked || heated;
     decimation.hidden = heated;
     gas.setDisabled(locked);
+    gasSourceChoice.disabled = addGasSource.disabled = locked;
     materials.setDisabled(locked);
     materials.setAvailable(status?.supportsMaterialManifests === true);
     atmosphere.setDisabled(otherEdit);
@@ -874,6 +912,41 @@ export function createNativeWindPanel(): HTMLElement {
     }
     controls();
   };
+  addGasSource.addEventListener("click", () => {
+    if (rendering || loadingFile || editingAttachment || atmosphere.hasDraft()) return;
+    const id = gasSourceChoice.value;
+    const entry = NATIVE_GAS_LIBRARY.find(item => item.id === id);
+    if (!entry) return;
+    let bindings: NativeMaterialManifest[] | undefined;
+    try { bindings = materials.read(); }
+    catch (error) { showResult(message(error), true); return; }
+    loadingFile = true; controls();
+    showResult(`Loading original ${entry.label} material sources…`);
+    void loadNativeGasSource(id, async path => {
+      const read = gasSourceFiles[`../../../${path}`];
+      if (!read) throw new Error(`Original gas source is unavailable: ${path}`);
+      return read();
+    }).then(async added => {
+      const merged = mergeNativeGasSource(attachments, bindings, added, status?.maximumAttachments);
+      const nextAttachments = await Promise.all(merged.attachments.map(async file => {
+        const previous = attachments.find(item => item === file);
+        if (previous) return previous;
+        const digest = await crypto.subtle.digest("SHA-256", new Uint8Array(file.bytes));
+        const sha256 = Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, "0")).join("");
+        return {...file, sha256};
+      }));
+      // Publish all original files and bindings together. A missing chunk,
+      // conflicting source, or exceeded budget leaves the current model intact.
+      attachments = nextAttachments;
+      materials.load(merged.materialManifests);
+      drawAttachments();
+      gas.addSource(added.component);
+      edited();
+      showResult(`${entry.label} sources added. Use the exact species ID ${entry.species} in your thermochemical gas records. Choose the phase policy and water identity, then render with the native material compiler configured.`);
+    }).catch(error => {
+      showResult(`Gas sources were not added: ${message(error)} Your current sources are unchanged.`, true);
+    }).finally(() => { loadingFile = false; controls(); });
+  });
   const replaceAttachedSource = async (target: Attached, bytes: Uint8Array): Promise<void> => {
     const maximumFile = Math.min(8 * 1024 * 1024, status?.maximumAttachmentFileBytes ?? 8 * 1024 * 1024);
     const maximumTotal = Math.min(32 * 1024 * 1024, status?.maximumAttachmentBytes ?? 32 * 1024 * 1024);
@@ -993,7 +1066,7 @@ export function createNativeWindPanel(): HTMLElement {
     const selected = Array.from(attachmentFile.files ?? []);
     attachmentFile.value = "";
     if (!selected.length || rendering || loadingFile) return;
-    const maxFiles = Math.min(32, status?.maximumAttachments ?? 32);
+    const maxFiles = Math.min(MAX_ATTACHMENTS, status?.maximumAttachments ?? MAX_ATTACHMENTS);
     const maxFileBytes = Math.min(8 * 1024 * 1024, status?.maximumAttachmentFileBytes ?? 8 * 1024 * 1024);
     const maxBytes = Math.min(32 * 1024 * 1024, status?.maximumAttachmentBytes ?? 32 * 1024 * 1024);
     const total = attachments.reduce((sum, file) => sum + file.bytes.byteLength, 0)
@@ -1094,7 +1167,7 @@ export function createNativeWindPanel(): HTMLElement {
     atmosphere.element,
     el("div", { class: "nw-source-head" }, el("label", { for: "native-wind-source" }, "Performance source"),
       sourceInfo),
-    source, attachmentPanel, attachmentEditor, materials.element, profiles.element, finiteGasString.element, gas.element, decimation,
+    source, attachmentPanel, attachmentEditor, materials.element, profiles.element, finiteGasString.element, gasLibrary, gas.element, decimation,
     el("div", { class: "btn-row nw-actions" }, render, cancel, openExperiment, saveExperiment, open, attach, reset, check,
       file, experimentFile, attachmentFile, replacementFile),
     result, playback, comparison.element);

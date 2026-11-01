@@ -295,7 +295,7 @@ def write_lab_experiment(source: Path, output: Path, attachments: list[str], pro
                          **({"materialState": inputs["materialState"]} if "materialState" in inputs else {})})
     sizes = [len(data) for data in files.values()] + [len(original[name]) for name in material_inputs]
     source_bytes = source.read_bytes()
-    if (len(files) + len(bindings) > 32 or any(not size or size > 8 * 1024 * 1024 for size in sizes)
+    if (len(files) + len(bindings) > 128 or any(not size or size > 8 * 1024 * 1024 for size in sizes)
             or sum(sizes) > 32 * 1024 * 1024 or not source_bytes or len(source_bytes) > 1024 * 1024):
         raise ValueError("portable experiment exceeds the existing source-file or byte limits")
     packet = {"format": "frankensim-native-wind-input-v1", "renderer": "strings",

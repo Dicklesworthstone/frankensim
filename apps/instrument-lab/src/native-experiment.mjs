@@ -2,7 +2,10 @@
 // Browser editing and the loopback service share these byte/path bounds; only
 // the Rust performer interprets physical records or material coefficients.
 export const MAX_SOURCE_BYTES = 1024 * 1024;
-export const MAX_ATTACHMENTS = 32;
+// Eight source-backed gas species need 48 original tables/manifests and 24
+// compiled packs, before the instrument's own materials and body geometry.
+// Keep the same per-file and aggregate byte budgets.
+export const MAX_ATTACHMENTS = 128;
 export const MAX_ATTACHMENT_FILE_BYTES = 8 * 1024 * 1024;
 export const MAX_ATTACHMENT_BYTES = 32 * 1024 * 1024;
 export const MAX_REQUEST_BYTES = 4 * Math.ceil((MAX_SOURCE_BYTES + MAX_ATTACHMENT_BYTES) / 3) + 65536;
@@ -128,7 +131,8 @@ function validateFiniteGasString(value, renderer, attachedNames, gasSources, dec
   return {solidPath:value.solidPath, gasRecordPath:value.gasRecordPath};
 }
 
-function admitAttachmentPath(path, names) {
+/** Shared source-editor/wire admission; add a path only after all checks pass. */
+export function admitAttachmentPath(path, names) {
   if (typeof path !== 'string' || utf8Bytes(path) > 512 || !path
       || path.startsWith('-') || path.includes('\\') || path.includes(':') || /[\u0000-\u0020\u007f]/.test(path)
       || path.split('/').some(part => !part || part === '.' || part === '..' || part.startsWith('.')))
@@ -210,7 +214,7 @@ export function validateInput(bytes, bundled = false) {
   catch { throw new NativeWindError(400, 'Experiment must be UTF-8 JSON.'); }
   if (packet?.format !== 'frankensim-native-wind-input-v1' || !Array.isArray(packet.attachments)
       || packet.attachments.length > MAX_ATTACHMENTS)
-    throw new NativeWindError(400, 'Experiment requires its version and at most 32 source attachments.');
+    throw new NativeWindError(400, `Experiment requires its version and at most ${MAX_ATTACHMENTS} source attachments.`);
   if (Object.keys(packet).some(key => !['format', 'source', 'attachments', 'decimate', 'gasSources', 'renderer', 'stringProfiles', 'coatingStrainGuard', 'finiteGasString', 'materialManifests'].includes(key))
       || (packet.decimate !== undefined && typeof packet.decimate !== 'boolean'))
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');

@@ -7,6 +7,22 @@ import {editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment
 
 const fixture = name => readFile(new URL(`../../../crates/fs-couple/examples/${name}`, import.meta.url), 'utf8');
 
+test('finite reed gas inventory remains editable through its original thermochemical owner', async () => {
+  const source = await fixture('material_modal_valve/paired-dg-finite-gas.performance');
+  const inventory = nativeGasRegions(source).find(region => region.key === 'finite_gas');
+  assert.ok(inventory);
+  assert.deepEqual(inventory.supportedKinds, ['thermochemical']);
+  assert.equal(editNativeGasRegion(source, inventory, inventory.values), source);
+  const changed = editNativeGasRegion(source, inventory, {...inventory.values, pressure:'90000'}, true);
+  assert.equal(changed, source.replaceAll('300 95000 mole 1 N2 1', '300 90000 mole 1 N2 1'));
+  assert.equal(nativeGasRegions(changed).find(region => region.key === 'ambient').values.pressure, '90000');
+  assert.ok(nativeGasRegions(changed).filter(region => region.field)
+    .every(region => region.values.pressure === '90000'));
+  assert.throws(() => editNativeGasRegion(source, inventory, {...inventory.values, kind:'mixture'}), /supports thermochemical/);
+  assert.throws(() => editNativeGasRegion(source, inventory, {kind:'moist-air', temperature:'300',
+    pressure:'95000', humidity:'0', components:[]}), /supports thermochemical/);
+});
+
 
 test('attached finite gas records expose their original state without inventing a performance owner', async () => {
   const source = await fixture('finite_gas_string/nitrogen-reservoir.gas');

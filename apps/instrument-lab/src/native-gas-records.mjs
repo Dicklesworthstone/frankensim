@@ -1,6 +1,6 @@
 // Edit primitive gas data in the native source. Constitutive evaluation and
 // physical domain admission remain in fs_material::gas_species::input.
-const standalone = new Set(['gas', 'cavity_gas', 'ambient', 'exterior', 'dg_exterior', 'dg_chimney_gas']);
+const standalone = new Set(['gas', 'cavity_gas', 'ambient', 'exterior', 'dg_exterior', 'dg_chimney_gas', 'finite_gas']);
 const segments = new Set(['cylinder', 'cone', 'hole', 'duct_section']);
 const numeric = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i;
 const finite = value => typeof value === 'string' && numeric.test(value) && Number.isFinite(Number(value));
@@ -36,7 +36,7 @@ export function nativeGasRegions(source) {
     if (first < 0 || first >= words.length) continue;
     const fields = words.slice(first);
     const resolvedPrimary = resolved && key === 'gas';
-    const supportedKinds = bare ? ['thermochemical']
+    const supportedKinds = bare || key === 'finite_gas' ? ['thermochemical']
       : resolvedPrimary ? ['dry-air', 'mixture', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
     let kind = fields[0], count, consumed, values, pressureIndex;
     if (kind === 'dry-air') {
