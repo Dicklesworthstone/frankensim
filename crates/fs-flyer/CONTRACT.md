@@ -362,6 +362,54 @@ refusals. This adds instantaneous constrained impacts; continuous loop
 integration, collision discovery and cross-tree hydrodynamic mass remain
 separate.
 
+### Sustained contact through the coupled fluid-aware midpoint
+
+`partitioned::articulated::contact::step_with_contacts` advances one articulated
+tree through sustained fixed-feature Coulomb contact using the original coupled
+Lie midpoint integrator. Contact reactions use the complete dry-plus-fluid
+effective inertia, including the original analytic fluid bias and implicit joint
+spring/damper elimination. One simultaneous contact solve acts on half of the
+effective contact mobility, because a full endpoint impulse changes midpoint
+velocity by one half of its endpoint response. The reaction receipt is aligned
+with the previous response that generated the accepted midpoint iterate;
+actual midpoint normal, cone and complementarity conditions are reconstructed
+independently before publication.
+
+Resolved incoming closing active contacts require the separate physical impact
+reset. Arithmetic-sized negative normal speeds remain unprojected and are
+returned with per-contact allowances derived from uncancelled native point and
+support motion and the original free velocity response. Solver tolerances and
+absolute speed floors do not enter that admission. Unresolved friction
+stopping/reversal, release/recontact, negative actual gaps and artificial
+internal spatial couples refuse. Contact within a declared positive activation
+band remains explicitly a finite-resolution reaction, not a repaired gap.
+
+The required `ContactPath` callback must admit the complete original
+constant-midpoint-twist / linear-joint configuration path, continued witness and
+frozen-frame validity, and omitted-feature coverage. Initial, actual midpoint
+and endpoint nonpenetration checks alone do not establish continuous collision
+detection. The callback's admission and a final cancellation check precede
+publication; inputs remain unchanged on refusal.
+
+The result exposes actual signed reaction, normal, tangential and translating
+support work, plus the external spatial impulse about the world origin. The
+auxiliary Coulomb solver's impact-loss diagnostic is not physical friction heat.
+Redundant reactions retain the original unique-velocity versus unique-impulse
+distinction and the common-support-translation restriction for determined work.
+There is no claim of unique local support loads, automatic heat allocation,
+exact finite-step nonlinear energy/momentum conservation, automatic event
+localization, cross-tree sustained contact or cross-tree hydrodynamic coupling.
+This bounded consumer admits at most 21 fixed-frame point contacts on one
+existing admitted articulated tree.
+
+G0/G1/G3 regressions advance 20 consecutive returned-state sliding and sticking
+steps, check rotated/translated conveyor work and support release, preserve
+redundant-support motion under contact permutation, and exercise resolved
+impact, stopping, curved/interior penetration, cancellation and internal-couple
+refusals. An independent supported prismatic-joint oracle verifies complete
+implicit carrier recoil with and without fluid inertia and balances kinetic,
+spring, gravity, damping and actuator work.
+
 ### Mechanical travel stops with coupled recoil and support
 
 `partitioned::articulated::stops::step_with_stops` advances the original coupled

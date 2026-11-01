@@ -516,9 +516,9 @@ where
                 duration,
                 config.smooth,
                 &evaluate,
-                |mass, increment, cancel| {
+                |context, increment, cancel| {
                     let next = support(
-                        mass,
+                        context.mass,
                         increment,
                         &initial,
                         stops,

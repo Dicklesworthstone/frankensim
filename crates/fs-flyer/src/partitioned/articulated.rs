@@ -28,6 +28,10 @@ use fs_mbd::articulated::{ArticulatedError, ArticulatedModel, BaseState, forward
 #[path = "articulated/stops.rs"]
 pub mod stops;
 
+/// Sustained Coulomb contact through the original coupled Lie midpoint.
+#[path = "articulated/contact.rs"]
+pub mod contact;
+
 /// Link cap for the compact aircraft coupling lane, including fixed links.
 pub const MAX_ARTICULATED_LINKS: usize = 256;
 
@@ -198,8 +202,14 @@ where
     )
 }
 
-// Travel-stop support changes the accepted simultaneous velocity response,
-// not the shared geometry, stage loads, memory or Lie midpoint integrator.
+// Contact consumers change only the simultaneous velocity response. Every
+// consumer sees the SAME admitted midpoint geometry and complete mass factor.
+struct VelocityResponseContext<'a> {
+    mass: &'a PreparedArticulatedMass,
+    kinematics: &'a GeneralizedKinematics,
+    midpoint: &'a ArticulatedState,
+}
+
 #[allow(clippy::too_many_arguments)]
 fn step_with_velocity_response<F, R>(
     model: &ArticulatedModel,
@@ -216,7 +226,7 @@ fn step_with_velocity_response<F, R>(
 where
     F: Fn(f64, &ArticulatedState, &GeneralizedKinematics) -> Result<ArticulatedLoads, Refusal>,
     R: FnMut(
-        &PreparedArticulatedMass,
+        VelocityResponseContext<'_>,
         &mut [f64],
         &mut dyn FnMut() -> bool,
     ) -> Result<bool, Refusal>,
@@ -389,7 +399,15 @@ where
             .collect();
         let acceleration = mass.solve(&rhs)?;
         let mut increment: Vec<_> = acceleration.iter().map(|a| dt_s * a).collect();
-        let response_ready = response(&mass, &mut increment, &mut is_cancelled)?;
+        let response_ready = response(
+            VelocityResponseContext {
+                mass: &mass,
+                kinematics: &dry.kinematics,
+                midpoint: &midpoint,
+            },
+            &mut increment,
+            &mut is_cancelled,
+        )?;
         let mut next = [0.0; 6 + MAX_CONTROL_COORDS];
         for i in 0..6 {
             next[native_index(i)] = increment[i];
