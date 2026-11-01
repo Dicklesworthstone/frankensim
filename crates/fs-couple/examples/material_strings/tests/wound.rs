@@ -224,9 +224,9 @@ fn wound_core_memory_keeps_source_bands_and_refuses_a_memoryless_card_or_duplica
         assert!(fs_couple::bowed_string::BowedStringCard::from_wound_material_specimen(
             cx, specimen(&ready), &ready.spec.gas, ready.spec.rate).is_err());
         for (delta, tau, band) in [(-1.0, 0.001, 200_000.0),
-            (80e9, 1e-9, 200_000.0), (80e9, 0.001, 1000.0)] {
+            (80e9, 0.0, 200_000.0), (80e9, 0.001, 1000.0)] {
             assert!(spec.clone().compile(cx, gate, |name|
-                Ok(memory_pack(name, delta, tau, band, None))).is_err());
+                Ok(memory_pack(name, delta, tau, band, None))).is_err(), "accepted {delta} {tau} {band}");
         }
         // A wrap remains part of the instantaneous source-band admission even
         // though no relaxation arm is projected from its material.

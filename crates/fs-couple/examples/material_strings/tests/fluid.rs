@@ -199,9 +199,29 @@ fn optional_flow_record_is_strict_ordered_and_never_truncates_declared_memory() 
         "cylinder-gas-loading 0.001 0.0001 12", "cylinder-gas-loading 0.001 3001 12",
         "cylinder-gas-loading 0.001 30 0", "cylinder-gas-loading 0.001 30 4097",
         "cylinder-gas-loading NaN 30 12", "cylinder-gas-loading 0.001 30 12 ignored",
-        "cylinder-gas-loading 0.001 30 64",
     ] {
         assert!(input::Spec::parse(bytes.replace(FLOW, invalid).as_bytes()).is_err(), "accepted {invalid}");
+    }
+    // Every interval adds one memory coordinate per fluid-loaded string mode to
+    // both the modes and the links. The first count the complete budget refuses
+    // is derived from the crate's own ceilings, not typed in, so a later cap
+    // change re-derives it instead of going stale.
+    let flow = |n: usize| bytes.replace(FLOW, &format!("cylinder-gas-loading 0.001 30 {n}"));
+    let dims = |n: usize| input::Spec::parse(flow(n).as_bytes()).unwrap().network_dimensions(false).unwrap();
+    let ((m12, l12, _), (m13, l13, _)) = (dims(12), dims(13));
+    let loaded: usize = small().strings.iter()
+        .map(|w| w.bending_modes * if w.polarizations.is_some() { 2 } else { 1 } + w.twist_modes).sum();
+    assert_eq!((m13 - m12, l13 - l12), (loaded, loaded));
+    let (m0, l0) = (m12 - 12 * loaded, l12 - 12 * loaded);
+    let fits = |n: usize| m0 + n * loaded <= input::MAX_TOTAL_MODES
+        && l0 + n * loaded <= fs_couple::render::schedule::force::coupled::MAX_MODAL_CONNECTIONS
+        && (m0 + n * loaded) as u128 * ((l0 + n * loaded + 1) as u128).pow(2) <= input::MAX_WORK as u128;
+    let first = (12..=4096).find(|&n| !fits(n))
+        .expect("the 4096-interval record bound must reach the complete budget");
+    assert_eq!(dims(first - 1).0, m0 + (first - 1) * loaded);
+    match input::Spec::parse(flow(first).as_bytes()) {
+        Ok(_) => panic!("accepted {first} intervals past the complete budget"),
+        Err(error) => assert!(error.to_string().contains("complete instrument"), "{error}"),
     }
     assert!(input::Spec::parse(bytes.replace(FLOW, &format!("{FLOW}\n{FLOW}")).as_bytes()).is_err());
     let reordered = bytes.replace(&format!("{FLOW}\n"), "")

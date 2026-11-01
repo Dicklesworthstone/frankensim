@@ -96,13 +96,56 @@ fn v3_requires_explicit_directions_and_counts_both_planes_against_the_budget() {
             "polarizations two NaN 0 1 0",
         ),
         ("polarizations two 0.6 0.8 1 0\n", ""),
-        ("0.001 4 3 0.8", "0.001 63 3 0.8"),
     ] {
         assert!(
             input::Spec::parse(text.replace(from, to).as_bytes()).is_err(),
             "accepted {to}"
         );
     }
+    // Both planes count. The first string count whose two-plane strings at the
+    // per-field bound exceed the complete mode ceiling is derived from the
+    // crate's own constants, not typed in; its one-plane twin is admitted.
+    let two = "polarizations two 0.6 0.8 1 0";
+    let block = "string wire.fsmatpk 0.5 0.0003 extension 0.4998 0.001 4 3 0.8 3000 0.1\n\
+        section bonded 0.0002 1\nlayer sleeve.fsmatpk 0.0003\npolarizations two 0.6 0.8 1 0\n";
+    let full = block.replace(
+        "0.001 4 3 0.8",
+        &format!("0.001 {} 3 0.8", input::MAX_MODES),
+    );
+    let strings = |k: usize, planes: &str| {
+        text.replace(
+            &format!("strings 1\n{block}"),
+            &format!("strings {k}\n{}", full.repeat(k)),
+        )
+        .replace(two, planes)
+    };
+    let modes = |k: usize, planes: &str| {
+        input::Spec::parse(strings(k, planes).as_bytes())
+            .unwrap()
+            .network_dimensions(false)
+            .unwrap()
+            .0
+    };
+    let per_string = modes(2, two) - modes(1, two);
+    let base = modes(1, two) - per_string;
+    let k = (2..=8)
+        .find(|&k| base + k * per_string > input::MAX_TOTAL_MODES)
+        .expect("the 8-string record must reach the complete mode ceiling on two planes");
+    assert_eq!(modes(k - 1, two), base + (k - 1) * per_string);
+    match input::Spec::parse(strings(k, two).as_bytes()) {
+        Ok(_) => panic!(
+            "accepted {k} two-plane strings at {} modes",
+            base + k * per_string
+        ),
+        Err(error) => assert!(
+            error.to_string().contains("including gas memory, exceeds"),
+            "{error}"
+        ),
+    }
+    assert_eq!(
+        modes(k, "polarizations single"),
+        base + k * (per_string - input::MAX_MODES)
+    );
     assert!(
         input::Spec::parse(
             text.replace("polarizations two 0.6 0.8 1 0", "polarizations single")

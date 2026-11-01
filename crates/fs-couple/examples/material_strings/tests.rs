@@ -186,12 +186,35 @@ fn missing_loss_band_and_cancel_refuse_instead_of_constructing_a_fallback_materi
 #[test]
 fn malformed_or_unobserved_controls_and_unbounded_decoder_counts_refuse() {
     let text=include_str!("pluck.material-strings");
-    for (from,to) in [("strings 1","strings 999999999"),("4 3 0.8","128 128 0.8"),
+    for (from,to) in [("strings 1","strings 999999999"),
         ("wire.fsmatpk","../wire.fsmatpk"),("force 0 0 0","force 4096 0 0"),
         ("force 0 0 0","force 0 1 0"),("events\t0","events\t18446744073709551615"),
         ("tracks\t1","tracks\t0"),("initial\tbow\t0e0\t0e0\t2e-1","initial\tbow\t0e0\t0e0\t2e-1\textra"),
         ("O2 0.2","unknown 0.2"),("audio 48000","audio 0")] {
         assert!(input::Spec::parse(text.replace(from,to).as_bytes()).is_err(),"accepted {to}");
+    }
+    // Mode counts are derived from the crate's own ceilings, not typed in:
+    // one past the per-field decoder bound on each field, then the first
+    // string count whose full-bound strings exceed the complete mode ceiling.
+    let over=input::MAX_MODES+1;
+    for to in [format!("{over} 3 0.8"),format!("4 {over} 0.8")] {
+        match input::Spec::parse(text.replace("4 3 0.8",&to).as_bytes()) {
+            Ok(_)=>panic!("accepted {to}"),
+            Err(error)=>assert!(error.to_string().contains(&format!("count exceeds {}",input::MAX_MODES)),"{error}"),
+        }
+    }
+    let line="string wire.fsmatpk 0.5 0.0003 20 4 3 0.8 3000 0.1\n";
+    let full=line.replace("4 3 0.8",&format!("{m} {m} 0.8",m=input::MAX_MODES));
+    let strings=|k:usize| text.replace(&format!("strings 1\n{line}"),&format!("strings {k}\n{}",full.repeat(k)));
+    let modes=|k:usize| input::Spec::parse(strings(k).as_bytes()).unwrap().network_dimensions(false).unwrap().0;
+    let per_string=modes(2)-modes(1);
+    let base=modes(1)-per_string;
+    let k=(2..=8).find(|&k| base+k*per_string>input::MAX_TOTAL_MODES)
+        .expect("the 8-string record must reach the complete mode ceiling at the per-field bound");
+    assert_eq!(modes(k-1),base+(k-1)*per_string);
+    match input::Spec::parse(strings(k).as_bytes()) {
+        Ok(_)=>panic!("accepted {k} strings at {} modes",base+k*per_string),
+        Err(error)=>assert!(error.to_string().contains("including gas memory, exceeds"),"{error}"),
     }
     assert!(input::Spec::parse(format!("{text}unconsumed\n").as_bytes()).is_err());
     assert!(input::Spec::parse(include_bytes!("pluck-and-bow.material-strings")).is_ok());
