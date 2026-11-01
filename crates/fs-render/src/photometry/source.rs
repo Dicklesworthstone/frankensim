@@ -29,6 +29,8 @@ mod ray_partition;
 pub mod validation;
 /// Calibrated irradiance from differentiated curved ray bundles.
 pub mod bundle;
+/// Prepared sampling of calibrated angular source profiles.
+pub mod sampling;
 
 /// Spectral bins shared with the existing spectral renderer.
 pub const SPECTRAL_BINS: usize = QUAD_BINS;
