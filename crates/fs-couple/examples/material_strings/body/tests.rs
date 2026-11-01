@@ -25,7 +25,8 @@ fn pack_with_shear(name:&str, viscosity:f64, shear_scale:f64, omit:Option<&str>)
         values.push((key,DynViscosity::DIMS,value*viscosity));
     }
     for (key,value) in VISCOSITY.into_iter().zip([3e5,6e4,4e4,1e4,4e3,-3e3]) {
-        values.push((key,DynViscosity::DIMS,value*viscosity));
+        // A zero viscosity times the negative entry is -0.0, which the pack format refuses as non-canonical.
+        values.push((key,DynViscosity::DIMS,value*viscosity+0.0));
     }
     let provenance=Provenance {source:"synthetic tensor body test".into(),license:"CC0-1.0".into(),
         artifact:Some(fs_blake3::ContentHash([8;32]))};

@@ -8,6 +8,20 @@ fn fiber_pack(rho: f64, omit_axial_loss: bool) -> NormalizedPack {
 
 fn fiber_elastic_pack(rho: f64, young: f64, omit_axial_loss: bool) -> NormalizedPack {
     let mut claims = ClaimSet::new();
+    let provenance = Provenance {
+        source: "manufactured fiber integration fixture; not measured horsehair".into(),
+        license: "CC0-1.0".into(),
+        artifact: Some(fs_blake3::ContentHash([11; 32])),
+    };
+    let observation = claims
+        .register_observation(ObservationDataset {
+            specimen: "synthetic fiber".into(),
+            method: "manufactured fiber integration fixture".into(),
+            artifact: fs_blake3::ContentHash([11; 32]),
+            caveats: "not measured horsehair data".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
     for (key, dims, value) in [
         ("density", Density::DIMS, rho),
         ("young_modulus", Pressure::DIMS, young),
@@ -26,12 +40,8 @@ fn fiber_elastic_pack(rho: f64, young: f64, omit_axial_loss: bool) -> Normalized
                     .with("omega", 0.0, 200_000.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: vec![],
-                provenance: Provenance {
-                    source: "manufactured fiber integration fixture; not measured horsehair".into(),
-                    license: "CC0-1.0".into(),
-                    artifact: Some(fs_blake3::ContentHash([11; 32])),
-                },
+                observations: vec![observation],
+                provenance: provenance.clone(),
             })
             .unwrap();
     }
@@ -1179,6 +1189,13 @@ fn quasistatic_text() -> String {
 
 fn quasistatic_pack(young: f64, viscosity: Option<f64>) -> NormalizedPack {
     let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(ObservationDataset {
+        specimen: "synthetic quasistatic fiber".into(),
+        method: "synthetic quasistatic fiber integration test".into(),
+        artifact: fs_blake3::ContentHash([13; 32]), caveats: "not measured hair data".into(),
+        provenance: Provenance { source: "synthetic quasistatic fiber integration test".into(),
+            license: "CC0-1.0".into(), artifact: Some(fs_blake3::ContentHash([13; 32])) },
+    }).unwrap();
     for (name, dims, value) in [
         ("young_modulus_static", Pressure::DIMS, Some(young)),
         ("density", Density::DIMS, Some(1100.0)),
@@ -1190,7 +1207,7 @@ fn quasistatic_pack(young: f64, viscosity: Option<f64>) -> NormalizedPack {
             validity: ValidityDomain::unconstrained()
                 .with("frequency", 0.0, 0.0).with("relative_humidity_known", 0.0, 0.0),
             uncertainty: UncertaintyModel::Unstated,
-            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![],
+            interpolation: InterpolationPolicy::ConstantWithinValidity, observations: vec![observation],
             provenance: Provenance { source: "synthetic quasistatic fiber integration test".into(),
                 license: "CC0-1.0".into(), artifact: None },
         }).unwrap();

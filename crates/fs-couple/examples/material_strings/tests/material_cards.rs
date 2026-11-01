@@ -264,10 +264,19 @@ fn typed(
 ) -> NormalizedMaterialCardPack {
     let base = pack(name, 7800.0, 200_000.0, None);
     let mut claims = ClaimSet::new();
+    // The base claims' observation ids belong to the base set; the retyped claims cite one manufactured dataset.
+    let artifact = base.source_artifact();
+    let observation = claims.register_observation(fs_matdb::ObservationDataset {
+        specimen: format!("manufactured typed axes over {name}"),
+        method: "manufactured typed-axis fixture".into(), artifact,
+        caveats: "not measured data".into(),
+        provenance: Provenance { source: "manufactured typed-axis fixture".into(),
+            license: "CC0-1.0".into(), artifact: Some(artifact) },
+    }).unwrap();
     let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
     for (_, original) in base.claims().claims_ordered() {
         let mut claim = original.clone();
-        claim.observations.clear();
+        claim.observations = vec![observation.clone()];
         claim.validity = ValidityDomain::unconstrained()
             .with_quantity("T", quantity(temperature_kind), 280.0, 320.0)
             .with_quantity("omega", quantity(frequency_kind), 0.0, 200_000.0);
@@ -330,10 +339,19 @@ fn held_pack(name: &str, typed: bool, conflict: bool) -> NormalizedMaterialCardP
     use fs_qty::semantic::{CompositionBasis, MoistureBasis};
     let base = pack(name, 7800.0, 200_000.0, None);
     let mut claims = ClaimSet::new();
+    // The base claims' observation ids belong to the base set; the held surfaces cite one manufactured dataset.
+    let artifact = base.source_artifact();
+    let observation = claims.register_observation(fs_matdb::ObservationDataset {
+        specimen: format!("manufactured held surface over {name}"),
+        method: "manufactured held-environment fixture".into(), artifact,
+        caveats: "not measured temperature or moisture data".into(),
+        provenance: Provenance { source: "manufactured held-environment fixture".into(),
+            license: "CC0-1.0".into(), artifact: Some(artifact) },
+    }).unwrap();
     let quantity = |kind| QuantitySpec::semantic(SemanticType::new(kind, ValueForm::Static));
     for (_, original) in base.claims().claims_ordered() {
         let mut claim = original.clone();
-        claim.observations.clear();
+        claim.observations = vec![observation.clone()];
         let (value, dims) = match &claim.value {
             PropertyValue::Scalar { value, dims } => (*value, *dims),
             _ => panic!("manufactured base has scalar coefficients"),

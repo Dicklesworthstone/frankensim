@@ -8,6 +8,7 @@ fn film_material(name: &str, cp: f64) -> NormalizedPack {
         return material(name, 20.0, None);
     }
     let mut claims = ClaimSet::new();
+    let observation = observed(&mut claims, name, [51; 32]);
     for (key, dims, cold, hot) in [
         ("density", Density::DIMS, 1000.0, 1000.0),
         ("shear_modulus", Pressure::DIMS, 8e6, 8e6),
@@ -18,6 +19,7 @@ fn film_material(name: &str, cp: f64) -> NormalizedPack {
     ] {
         let mut source = claim(key, dims, cold, ValidityDomain::unconstrained()
             .with("T", 280.0, 320.0).with("omega", 0.0, 400_000.0));
+        source.observations = vec![observation];
         if cold != hot {
             source.value = PropertyValue::Curve { abscissa: "T".into(),
                 abscissa_dims: fs_qty::Temperature::DIMS, knots: vec![(280.0, cold), (320.0, hot)], dims };

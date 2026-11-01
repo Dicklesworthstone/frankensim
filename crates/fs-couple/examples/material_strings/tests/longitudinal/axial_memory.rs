@@ -206,6 +206,12 @@ fn g3_full_strain_memory_relaxes_at_the_actual_static_preload_before_playback() 
 
 fn fiber_memory_pack(high:f64)->NormalizedPack {
     let mut claims=ClaimSet::new();
+    let observation=claims.register_observation(fs_matdb::ObservationDataset {
+        specimen:"synthetic ribbon band".into(),method:"manufactured ribbon band-admission fixture".into(),
+        artifact:fs_blake3::ContentHash([13;32]),caveats:"not measured horsehair data".into(),
+        provenance:Provenance {source:"manufactured ribbon band-admission fixture; not measured horsehair".into(),
+            license:"test-only".into(),artifact:Some(fs_blake3::ContentHash([13;32]))},
+    }).unwrap();
     for (name,dims,value,upper) in [
         ("density",Density::DIMS,1300.0,200_000.0),
         ("young_modulus",Pressure::DIMS,3e9,200_000.0),
@@ -218,7 +224,7 @@ fn fiber_memory_pack(high:f64)->NormalizedPack {
             value:PropertyValue::Scalar {value,dims},
             validity:ValidityDomain::unconstrained().with("T",280.0,320.0).with("omega",0.0,upper),
             uncertainty:UncertaintyModel::Unstated,interpolation:InterpolationPolicy::ConstantWithinValidity,
-            observations:vec![],provenance:Provenance {
+            observations:vec![observation],provenance:Provenance {
                 source:"manufactured ribbon band-admission fixture; not measured horsehair".into(),
                 license:"test-only".into(),artifact:None},
         }).unwrap();

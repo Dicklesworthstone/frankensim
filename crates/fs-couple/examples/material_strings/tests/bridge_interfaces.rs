@@ -8,13 +8,17 @@ pub(crate) fn interface(k: f64, c: f64, outer: &str, body: &str, band: f64) -> N
     let provenance = Provenance { source: "synthetic bridge interface".into(),
         license: "CC0-1.0".into(), artifact: Some(artifact) };
     let mut claims = ClaimSet::new();
+    let observation = claims.register_observation(fs_matdb::ObservationDataset {
+        specimen: "synthetic bridge joint".into(), method: "synthetic bridge interface".into(), artifact,
+        caveats: "not measured joint data".into(), provenance: provenance.clone(),
+    }).unwrap();
     for (name, value, dims) in [("normal_stiffness", k, interface_stiffness_per_area_dims()),
         ("normal_viscosity", c, interface_viscosity_per_area_dims())] {
         claims.insert_claim(PropertyClaim { key: PropertyKey::new(name, dims),
             value: PropertyValue::Scalar { value, dims },
             validity: ValidityDomain::unconstrained().with("T", 280.0, 320.0).with("omega", 0.0, band),
             uncertainty: UncertaintyModel::Unstated, interpolation: InterpolationPolicy::ConstantWithinValidity,
-            observations: vec![], provenance: provenance.clone() }).unwrap();
+            observations: vec![observation.clone()], provenance: provenance.clone() }).unwrap();
     }
     let claims = NormalizedPack::new("synthetic-bridge-interface", "synthetic-v1", artifact,
         "CC0-1.0 synthetic redistribution permitted", claims, vec![], vec![]).unwrap();

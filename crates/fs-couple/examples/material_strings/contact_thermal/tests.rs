@@ -32,8 +32,20 @@ fn claim(name: &str, dims: Dims, value: f64, validity: ValidityDomain) -> Proper
     }
 }
 
+/// The raw observation every compiled fixture pack must retain: a manufactured record, not measured data.
+fn observed(claims: &mut ClaimSet, specimen: &str, artifact: [u8; 32]) -> fs_matdb::ObservationId {
+    let artifact = fs_blake3::ContentHash(artifact);
+    claims.register_observation(fs_matdb::ObservationDataset {
+        specimen: specimen.into(), method: "MANUFACTURED finite-cell dry-heat integration".into(), artifact,
+        caveats: "manufactured fixture; not measured bow, rosin, hair or string data".into(),
+        provenance: Provenance { source: "MANUFACTURED finite-cell dry-heat integration".into(),
+            license: "CC0-1.0".into(), artifact: Some(artifact) },
+    }).unwrap()
+}
+
 fn material(name: &str, cp: f64, omit: Option<&str>) -> NormalizedPack {
     let mut claims = ClaimSet::new();
+    let observation = observed(&mut claims, name, [47; 32]);
     let fiber = name == "fiber.fsmatpk";
     for (key, dims, value) in [
         ("density", Density::DIMS, if fiber { 1300.0 } else { 7800.0 }),
@@ -47,8 +59,10 @@ fn material(name: &str, cp: f64, omit: Option<&str>) -> NormalizedPack {
         ("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS, 0.2),
     ] {
         if Some(key) != omit {
-            claims.insert_claim(claim(key, dims, value, ValidityDomain::unconstrained()
-                .with("T", 280.0, 320.0).with("omega", 0.0, 400_000.0))).unwrap();
+            let mut item = claim(key, dims, value, ValidityDomain::unconstrained()
+                .with("T", 280.0, 320.0).with("omega", 0.0, 400_000.0));
+            item.observations = vec![observation];
+            claims.insert_claim(item).unwrap();
         }
     }
     NormalizedPack::new(name, "manufactured-v1", fs_blake3::ContentHash([47; 32]),
@@ -57,9 +71,12 @@ fn material(name: &str, cp: f64, omit: Option<&str>) -> NormalizedPack {
 
 fn interface(receiver: &str) -> NormalizedInterfacePack {
     let mut claims = ClaimSet::new();
+    let observation = observed(&mut claims, "manufactured dry contact", [48; 32]);
     for (key, value) in [("mu_static", 0.8), ("mu_kinetic", 0.4)] {
-        claims.insert_claim(claim(key, Dims::NONE, value, ValidityDomain::unconstrained()
-            .with("T", 280.0, 320.0).with("p", 0.0, 1e6).with("v", 0.0, 10.0))).unwrap();
+        let mut item = claim(key, Dims::NONE, value, ValidityDomain::unconstrained()
+            .with("T", 280.0, 320.0).with("p", 0.0, 1e6).with("v", 0.0, 10.0));
+        item.observations = vec![observation];
+        claims.insert_claim(item).unwrap();
     }
     let claims = NormalizedPack::new("manufactured-dry-contact", "manufactured-v1",
         fs_blake3::ContentHash([48; 32]), "manufactured CC0 fixture", claims, vec![], vec![]).unwrap();
@@ -246,6 +263,11 @@ fn native_dry_profiles_refuse_wrong_participants_missing_thermal_data_and_false_
 fn temperature_interface(slope: f64) -> NormalizedInterfacePack {
     let original = interface("body.fsmatpk");
     let mut claims = ClaimSet::new();
+    // The copied claims keep their observation, so its record comes across first.
+    let source = original.card().claims();
+    for id in source.observation_ids() {
+        claims.register_observation(source.observation(id).unwrap().clone()).unwrap();
+    }
     for (_, item) in original.card().claims().claims_ordered() {
         let mut item = item.clone();
         if item.key.name() == "mu_kinetic" {

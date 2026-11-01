@@ -10,6 +10,15 @@ fn interface(mu: f64, surface: &str, p_min: f64) -> NormalizedInterfacePack {
         artifact: Some(artifact),
     };
     let mut claims = ClaimSet::new();
+    let observation = claims
+        .register_observation(fs_matdb::ObservationDataset {
+            specimen: "synthetic bow contact".into(),
+            method: "synthetic bow-interface test".into(),
+            artifact,
+            caveats: "not measured rosin or hair data".into(),
+            provenance: provenance.clone(),
+        })
+        .unwrap();
     for (name, value, dims) in [
         ("mu_static", 0.8, Dims::NONE),
         ("mu_kinetic", mu, Dims::NONE),
@@ -30,7 +39,7 @@ fn interface(mu: f64, surface: &str, p_min: f64) -> NormalizedInterfacePack {
                     .with("v", 0.0, 10.0),
                 uncertainty: UncertaintyModel::Unstated,
                 interpolation: InterpolationPolicy::ConstantWithinValidity,
-                observations: vec![],
+                observations: vec![observation.clone()],
                 provenance: provenance.clone(),
             })
             .unwrap();
