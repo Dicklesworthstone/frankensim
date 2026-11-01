@@ -13108,6 +13108,52 @@ cover uniform equivalence, local travel times, source-only gas substitutions,
 full-matrix reaction/pressure and lossless exterior-work closure. Compiler
 checks do not establish numerical convergence or instrument realism.
 
+### Prepared source coherence through the loaded exterior
+
+`RadiatingNetwork::prepare_sources` explicitly supplies the complete source and
+scalar-load partition of the original graph's non-opening ports. Prescribed
+flow, finite scalar pressure generators and a full reciprocal source bank can
+coexist. The returned `PreparedRadiatingNetwork` borrows the original geometry,
+regional gas records and source/load definitions; source coordinates retain
+their canonical labels and distinct open-circuit Pa versus graph-inflow m³/s
+units. The original single-source driving-point partition is replaced explicitly.
+
+One original batch BEM factorization supplies every unit-opening solution.
+Those same retained solutions produce BOTH the complete mutual radiation load
+and the existing receiver pressure/gradient rows; the harmonic observation owner
+checks their exact source traces, surface, frequency and medium before reuse.
+One `PreparedNetworkSources` boundary factorization supplies all source columns,
+including the retained-wave route at an open-port pole. Cold composition forms
+source-to-receiver p/u columns for coherent sweeps. No observation refactors a
+boundary, substitutes internal pressure for microphone pressure, or adds a loss.
+
+Factor-major source second moments satisfy C=B Bᴴ in the declared mixed SI
+units. Each factor is mapped through the solved OUTWARD opening flows before
+forming receiver products. Independent generators still create correlated
+openings; the direct-column path preserves those correlations. Original owners
+compute complete network p-p/U-U/p-U moments, signed source/interface work,
+Hermitian internal-source dissipation, mean-square exterior pressure, velocity
+cross moments, and active/reactive intensity. First-order microphones project
+actual near-field p/u and retain complex cross-receiver spectra. The common
+peak-phasor time average 1/2 occurs once; none of these are per-Hz densities.
+
+Coherent and statistical buffers borrow their exact preparation and hide all
+outputs after refusal or cancellation. Applications allocate nothing. Sources,
+openings and factor rank are capped at 32; original duct and harmonic work
+budgets remain explicit. Source-to-opening factor mapping adds at most 32³
+complex products, polled between factors. Cold field storage and composition
+work also fit the original exterior allowance. Exterior surface power is the
+signed opening p/U work already present in network external-load power, never
+a second debit or a claimed enclosing far-field power integral.
+
+Focused regressions define independent assembled BEM field parity, an analytic
+antisymmetric source mode with zero exterior radiation and positive internal
+loss, mixed-unit dense covariance and microphone cross-spectrum references,
+legacy flow parity, exact half-wave pole preparation, and transactional refusal.
+This remains fixed-geometry, homogeneous-exterior, rigid-wall harmonic physics;
+spatial refinement, measured validation and causal time-domain realization are
+not established by these algebraic compositions or compiler checks.
+
 ## Prescribed-volume finite gas networks
 
 `prescribed_gas::step_candidate` composes the original same-snapshot finite-nozzle network with original NASA-9 midpoint heat/volume proposals for explicitly driven chambers and finite reservoirs. All drives and endpoint solvers cover the same parcel identities; concurrent inlet/outlet enthalpy is counted once. Gross gas `p_mid * dV` work, exterior-pressure work and net work to the prescribed drive remain separate. Actual local storage balances include transported enthalpy; the complete finite network closes `sum(dU) + sum(W_gross) - sum(Q_external) = 0` before all original owners can be returned atomically. The original graph-size, source, inventory, withdrawal and pressure-crossing limits remain active.

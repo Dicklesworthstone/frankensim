@@ -21,6 +21,12 @@ use fs_blake3::{ContentHash, DomainHasher};
 use fs_exec::CancelGate;
 use fs_duct::network::NetworkMedia;
 
+mod prepared;
+pub use prepared::{
+    PreparedRadiatingMicrophones, PreparedRadiatingNetwork, RadiatingSourceResponse,
+    RadiatingSourceStatistics,
+};
+
 /// One actual opening on a closed, outward-oriented, capped surface. All other
 /// panels are rigid. Panels cannot belong to two different flow coordinates.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -52,11 +58,19 @@ pub enum ExteriorNetworkError {
     Duct(DuctError),
     /// Original surface geometry, radiation or receiver refusal.
     Bem(HelmholtzError),
+    /// Original harmonic field or microphone-observation refusal.
+    Observation(fs_bem::observation_transfers::TransferError),
     /// Requested cancellation, without a partial response.
     Cancelled,
 }
 impl From<DuctError> for ExteriorNetworkError { fn from(e:DuctError)->Self { Self::Duct(e) } }
 impl From<HelmholtzError> for ExteriorNetworkError { fn from(e:HelmholtzError)->Self { Self::Bem(e) } }
+impl From<fs_bem::observation_transfers::TransferError> for ExteriorNetworkError {
+    fn from(e:fs_bem::observation_transfers::TransferError)->Self {
+        if matches!(e,fs_bem::observation_transfers::TransferError::Cancelled) { Self::Cancelled }
+        else { Self::Observation(e) }
+    }
+}
 impl core::fmt::Display for ExteriorNetworkError {
     fn fmt(&self,f:&mut core::fmt::Formatter<'_>)->core::fmt::Result { write!(f,"exterior network: {self:?}") }
 }
@@ -226,24 +240,7 @@ impl RadiatingNetwork {
         if !omega.is_finite() || omega<=0.0 || !finite(injected_volume_flow) {
             return Err(bad("harmonic frequency must be positive and the physical source finite"));
         }
-        let medium=Medium{density:self.gas.density,sound_speed:self.gas.sound_speed};
-        let fields:Vec<_>=self.traces.iter().map(Vec::as_slice).collect();
-        let solutions=helmholtz::solve_radiation_batch(&self.surface,omega/self.gas.sound_speed,
-            medium,&fields,Formulation::BurtonMiller)?;
-        poll(gate)?;
-        let p=self.patches.len(); let mut z=vec![C64::ZERO;p*p];
-        for (column,solution) in solutions.iter().enumerate() {
-            for (row,patch) in self.patches.iter().enumerate() {
-                let mut pressure=C64::ZERO;
-                for &panel in &patch.panels {
-                    pressure=pressure+solution.pressure[panel].scale(self.surface.areas()[panel]/self.areas[row]);
-                }
-                if !finite(pressure) { return Err(bad("projected opening pressure overflow")); }
-                z[row*p+column]=pressure;
-            }
-        }
-        let boundary=CoupledTermination{omega,labels:self.driving.coupled_labels().to_vec(),z,
-            source_id:format!("fs-bem:network-openings:{}",self.boundary_hash)};
+        let (boundary,solutions)=self.exterior_basis(omega,gate)?;
         // Complete Hermitian passivity is checked by the original duct owner.
         // A coarse active BEM matrix refuses; it is not repaired or diagonalized.
         let response=match &self.media {
@@ -253,7 +250,7 @@ impl RadiatingNetwork {
         poll(gate)?;
         let labels:Vec<_>=self.driving.network().nodes.iter().filter_map(|n|match &n.boundary {
             NodeBoundary::Port{label}=>Some(label.as_str()), _=>None }).collect();
-        let mut outward_flows_m3_s=Vec::with_capacity(p); let mut power=0.0;
+        let mut outward_flows_m3_s=Vec::with_capacity(self.patches.len()); let mut power=0.0;
         for patch in &self.patches {
             let index=labels.iter().position(|&label|label==patch.port).ok_or_else(||bad("opening label lost"))?;
             let flow=-response.port_inflows[index]*injected_volume_flow;
@@ -280,6 +277,33 @@ impl RadiatingNetwork {
         Ok(RadiatingNetworkSample{inlet:HarmonicNetworkPort{omega,schema:self.driving.schema.clone(),
             pressure,outward_volume_flow:-injected_volume_flow}, response,boundary,outward_flows_m3_s,
             receiver_fields,exterior_surface_power_w:power})
+    }
+
+    // Both legacy single-flow evaluation and prepared multi-source evaluation
+    // project this exact exterior basis. No observer owns a second load solve.
+    fn exterior_basis(&self,omega:f64,gate:&CancelGate)
+        ->Result<(CoupledTermination,Vec<helmholtz::RadiationSolution>),ExteriorNetworkError> {
+        poll(gate)?;
+        let medium=Medium{density:self.gas.density,sound_speed:self.gas.sound_speed};
+        let fields:Vec<_>=self.traces.iter().map(Vec::as_slice).collect();
+        let solutions=helmholtz::solve_radiation_batch(&self.surface,omega/self.gas.sound_speed,
+            medium,&fields,Formulation::BurtonMiller)?;
+        poll(gate)?;
+        let p=self.patches.len(); let mut z=vec![C64::ZERO;p*p];
+        for (column,solution) in solutions.iter().enumerate() {
+            for (row,patch) in self.patches.iter().enumerate() {
+                let mut pressure=C64::ZERO;
+                for &panel in &patch.panels {
+                    pressure=pressure+solution.pressure[panel].scale(self.surface.areas()[panel]/self.areas[row]);
+                }
+                if !finite(pressure) { return Err(bad("projected opening pressure overflow")); }
+                z[row*p+column]=pressure;
+            }
+        }
+        let boundary=CoupledTermination{omega,labels:self.driving.coupled_labels().to_vec(),z,
+            source_id:format!("fs-bem:network-openings:{}",self.boundary_hash)};
+        poll(gate)?;
+        Ok((boundary,solutions))
     }
 }
 

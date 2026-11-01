@@ -1,6 +1,8 @@
 use super::*;
 use crate::driving_point::network::tests::{graph, schema, gas};
 
+mod prepared;
+
 fn budget()->ExteriorNetworkBudget {
     ExteriorNetworkBudget{max_panels:128,max_field_entries:4096,max_solve_terms:2_000_000}
 }
