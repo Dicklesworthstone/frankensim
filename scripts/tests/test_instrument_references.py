@@ -4,6 +4,7 @@ Run: python3 -I scripts/tests/test_instrument_references.py -v
 Every test prints one IRPDATA line for scripts/e2e/instrument_data.sh. Artifact digests are sha256
 (the stdlib has no BLAKE3). Tolerance everywhere: an exact sha256 match and an exact byte count.
 """
+import ast
 import contextlib
 import functools
 import hashlib
@@ -295,6 +296,51 @@ class ReferenceTests(unittest.TestCase):
         entries = [json.loads(line) for line in result.stdout.splitlines()]
         self.assertGreater(len(entries), 0)
         self.assertEqual({entry["instrument"] for entry in entries}, {"Violin"})
+
+    def test_audition_covers_every_explorer_family_with_existing_pins(self):
+        result = subprocess.run(["bash", str(FETCH), "--audition", "--list"],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        entries = [json.loads(line) for line in result.stdout.splitlines()]
+        source = ast.parse((ROOT / "apps/instrument-explorer/tools/build.py").read_text())
+        families = next(ast.literal_eval(node.value) for node in source.body
+                        if isinstance(node, ast.Assign)
+                        and any(isinstance(target, ast.Name) and target.id == "FAMILIES"
+                                for target in node.targets))
+        self.assertTrue({family[0] for family in families}
+                        <= {entry["audition_family"] for entry in entries})
+        self.assertEqual(len(entries), len({entry["id"] for entry in entries}))
+        self.assertLess(sum(entry["bytes"] for entry in entries), 600_000_000)
+        for recording in entries:
+            original = json.loads((MANIFEST.parent / recording["source_manifest"]).read_text())
+            pin = next(item for item in original["files"] if item["id"] == recording["id"])
+            self.assertEqual({key: recording[key] for key in pin}, pin)
+            if recording.get("kind") == "archive":
+                self.assertTrue(recording.get("members"), recording["id"])
+            self.assertIn(recording["licence"], {item["id"] for item in original["licences"]})
+
+    def test_audition_fetches_only_selected_existing_manifest_recordings(self):
+        with tempfile.TemporaryDirectory() as directory:
+            directory = Path(directory)
+            payload = b"unaltered reference recording"
+            original = directory / "original.wav"
+            original.write_bytes(payload)
+            selected = dict(entry(payload, original.as_uri()), instrument="Violin")
+            unselected = dict(entry(b"must not fetch"), id="other", path="other.wav")
+            (directory / "sources.json").write_text(json.dumps({"files": [selected, unselected]}))
+            cohort = directory / "cohort.json"
+            cohort.write_text(json.dumps({"files": [], "audition": {
+                "sources.json": {"violin": [selected["id"]]}}}))
+            destination = directory / "refs"
+            destination.mkdir()
+            env = dict(os.environ, FRANKENSIM_REFERENCE_DIR=str(destination))
+            result = subprocess.run(["bash", str(FETCH), "--audition", "--manifest", str(cohort)],
+                                    env=env, capture_output=True, text=True, timeout=30)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            events = [json.loads(line) for line in result.stdout.splitlines()]
+            self.assertEqual([event["id"] for event in events], [selected["id"]])
+            self.assertEqual((destination / selected["path"]).read_bytes(), payload)
+            self.assertFalse((destination / unselected["path"]).exists())
 
     def test_id_selection_does_not_fetch_unselected_files(self):
         with tempfile.TemporaryDirectory() as directory:

@@ -1,7 +1,7 @@
 # Real instrument reference recordings
 
 `references-supplemental.json`, together with its `baseline_ids` from
-`references.json`, supplies actual recordings for all 27 families in
+`references.json`, supplies actual recordings for all 28 families in
 `apps/instrument-explorer/tools/build.py`, plus a separate tenor saxophone,
 splash cymbal and all nine drum-kit comparison states. Originals remain
 outside Git. The existing Iowa manifest has
@@ -18,6 +18,29 @@ claim that any instrument now sounds realistic.
 Set `FRANKENSIM_REFERENCE_DIR` to an existing directory on the reference volume.
 The fetcher verifies SHA-256 and byte length, refuses changed files and preserves
 the originals. It does not resample, normalize or retune.
+
+For a first listening pass across every current family, use the bounded
+`--audition` selection. It resolves IDs into the existing manifests, including
+the separate snare card, piano, voice and drums. It also includes the independent
+tenor saxophone and splash cymbal. Its coverage test reads the explorer's actual
+family table so adding a family cannot silently omit its reference.
+
+```sh
+# Review the exact sources, licenses, hashes, paths and family mapping first.
+bash data/instruments/fetch-references.sh --audition --list
+
+# Download unchanged originals; archives retain only their pinned audio members.
+bash data/instruments/fetch-references.sh --audition
+
+# The existing selectors also work within this smaller selection.
+bash data/instruments/fetch-references.sh --audition --instrument Cello
+```
+
+`references-supplemental.json` owns this selection under `audition`; it does not
+copy the recordings' metadata or alter their grading eligibility. Some sources
+are phrases with an unknown room or processing chain. In particular, the Commons
+duduk is a listening reference, not a screened note for quantitative grading.
+Recordings remain independent checks of physics predictions.
 
 ```sh
 # Listing needs neither a destination nor network access.

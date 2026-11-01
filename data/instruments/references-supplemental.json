@@ -31,6 +31,44 @@
     "uiowa-xylophone-xylophone-hardrubber-mf-c5b5",
     "uiowa-marimba-marimba-yarn-mf-c4b4"
   ],
+  "audition": {
+    "references.json": {
+      "clarinet": ["uiowa-bbclarinet-bbclar-mf-c4b4", "uiowa-bbclarinet-bbclar-ambient-silence"],
+      "saxophone": ["uiowa-altosaxophone-altosax-novib-mf-c4b4"],
+      "oboe": ["uiowa-oboe-oboe-mf-c4b4"],
+      "bassoon": ["uiowa-bassoon-bassoon-mf-c3b3"],
+      "flute": ["uiowa-flute-flute-nonvib-mf-c5b5"],
+      "trumpet": ["uiowa-bbtrumpet-trumpet-novib-mf-c4b4"],
+      "trombone": ["uiowa-tenortrombone-tenortrombone-mf-c3b3"],
+      "horn": ["uiowa-frenchhorn-horn-mf-c4b4"],
+      "tuba": ["uiowa-tuba-tuba-mf-c2b2"],
+      "violin": ["uiowa-violin2012-violin-arco-mf-sulg-g3b3-mono", "uiowa-violin2012-violin-arco-mf-sula-a4b4-mono", "uiowa-violin2012-violin-pizz-mf-sula-a4b4-mono"],
+      "viola": ["uiowa-viola2012-viola-arco-sula-mf-a4b4-mono"],
+      "cello": ["uiowa-cello2012-cello-arco-mf-sulc-c2b2-mono", "uiowa-cello2012-cello-arco-mf-sula-a3ab4-mono", "uiowa-cello2012-cello-pizz-mf-sulc-c2b2-mono"],
+      "double-bass": ["uiowa-doublebass2012-bass-arco-sule-mf-e1b1-mono"],
+      "guitar": ["uiowa-guitar-guitar-mf-sulb-b3-mono"],
+      "marimba": ["uiowa-marimba-marimba-yarn-mf-c4b4"],
+      "xylophone": ["uiowa-xylophone-xylophone-hardrubber-mf-c5b5"]
+    },
+    "references-supplemental.json": {
+      "guitar-steel": ["freepats-steel-guitar"],
+      "recorder": ["vcsl-recorder-c4", "vcsl-recorder-e4"],
+      "organ": ["vcsl-organ-c3"],
+      "voice": ["spectmorph-mirko-ah-c4"],
+      "piano": ["uiowa-piano-pp-a4", "uiowa-piano-mf-a4", "uiowa-piano-ff-a4"],
+      "timpani": ["vcsl-timpani1-hit-v2", "vcsl-timpani1-hit-v4"],
+      "kit": ["salamander-drumkit-archive"],
+      "tenor-saxophone": ["vcsl-tenor-saxophone-c3-nv-vl2"],
+      "splash-cymbal": ["uiowa-splash-stick-normal-pp", "uiowa-splash-stick-normal-mf", "uiowa-splash-stick-normal-ff"]
+    },
+    "references-screened.json": {
+      "vibraphone": ["vcsl-vibes_soft_c5_v1_rr1_main"],
+      "tin-whistle": ["commons-baidin-feidhlimidh-tinwhistled"],
+      "pan-pipes": ["commons-registro-sonoro-del-siku---suli---ira---sonido-individual-de-cada-caña"],
+      "duduk": ["commons-sound-of-armenian-duduk"],
+      "snare": ["vcsl-snare3m_hitsn_v3_rr2_mid"]
+    }
+  },
   "licences": [
     {
       "id": "lampis-transients-cc-by-4",

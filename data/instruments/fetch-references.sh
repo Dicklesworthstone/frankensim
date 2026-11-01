@@ -7,6 +7,8 @@
 #   --id ID             select a recording (repeatable); combined selectors intersect.
 #   --list              print selected manifest entries without downloading or requiring a destination.
 #   --manifest PATH     use another reference manifest with the same file fields.
+#   --audition          acquire the small all-family selection in references-supplemental.json;
+#                       references resolve to existing manifests and archives retain only pinned members.
 #   --members           acquire checksum-pinned archive members. Tar sources stream without being
 #                       retained; ZIP sources are cached for random access, without a full unzip.
 #   --zip-ranges        with --members, read ZIP members by HTTP ranges instead of fetching the
@@ -48,10 +50,14 @@ modes.add_argument("--pin", action="store_true", help="report remote or local di
 parser.add_argument("--instrument", action="append", default=[], help="exact instrument name, repeatable and case-insensitive")
 parser.add_argument("--id", action="append", default=[], help="exact recording ID, repeatable")
 parser.add_argument("--list", action="store_true", help="list selected manifest entries without downloading")
-parser.add_argument("--manifest", default=manifest, help="reference manifest JSON")
+parser.add_argument("--manifest", help="reference manifest JSON (audition defaults to the supplement)")
+parser.add_argument("--audition", action="store_true", help="fetch the all-family listening selection, not the complete corpus")
 parser.add_argument("--members", action="store_true", help="extract only pinned archive members; tar streams, ZIP caches the source for random access")
 parser.add_argument("--zip-ranges", action="store_true", help="with --members, fetch ZIP ranges and verify member pins only, not the complete archive hash")
 args = parser.parse_args(sys.argv[4:])
+args.manifest = args.manifest or (os.path.join(os.path.dirname(manifest), "references-supplemental.json") if args.audition else manifest)
+if args.audition:
+    args.members = True
 if args.zip_ranges and (not args.members or args.pin):
     parser.error("--zip-ranges requires --members and existing member pins (not --pin)")
 mode = "--pin" if args.pin else "--verify"
@@ -63,7 +69,7 @@ refused = 0
 def emit(event, entry, observed, size, start):
     print(json.dumps({
         "utc": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "event": event, "id": entry["id"], "url": entry["url"],
+        "event": event, "id": entry["id"], "url": entry["url"], "path": entry["path"],
         "sha256_expected": entry["sha256"], "sha256_observed": observed, "bytes": size,
         "dest_mount": mount, "elapsed_ms": round((time.monotonic() - start) * 1000.0, 3), "host": host,
     }), flush=True)
@@ -275,7 +281,24 @@ def fetch_members(entry, start):
 
 
 with open(args.manifest) as source:
-    files = json.load(source)["files"]
+    selection = json.load(source)
+files = selection["files"]
+if args.audition:
+    if not selection.get("audition"):
+        parser.error("manifest has no audition selection")
+    files, seen = [], set()
+    for filename, families in selection["audition"].items():
+        with open(os.path.join(os.path.dirname(args.manifest), filename)) as source:
+            source_files = {entry["id"]: entry for entry in json.load(source)["files"]}
+        for family, recording_ids in families.items():
+            for recording_id in recording_ids:
+                if recording_id not in source_files:
+                    parser.error(f"audition recording {recording_id!r} is absent from {filename}")
+                entry = dict(source_files[recording_id], audition_family=family, source_manifest=filename)
+                if entry["id"] in seen:
+                    parser.error(f"duplicate audition recording {entry['id']!r}")
+                seen.add(entry["id"])
+                files.append(entry)
 instruments = {f.get("instrument", "").casefold() for f in files}
 ids = {f["id"] for f in files}
 unknown = [name for name in args.instrument if name.casefold() not in instruments]
