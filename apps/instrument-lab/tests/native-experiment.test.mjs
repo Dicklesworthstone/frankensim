@@ -326,6 +326,24 @@ test('material manifest experiments retain original source data, explicit identi
   assert.deepEqual(changed.materialManifests, restored.materialManifests);
 });
 
+test('native preparation admits 128 original and compiled sources together and refuses the 129th', () => {
+  const source = 'frankensim-material-modal-valve-v1\n';
+  const files = Array.from({length:96}, (_, index) => ({
+    path:`sources/${index}.tsv`, bytes:encode(`original source ${index}\n`),
+  }));
+  const materialManifests = Array.from({length:32}, (_, index) => ({
+    packPath:`packs/${index}.pack`, manifestPath:files[index].path,
+  }));
+  const packet = serializeNativeExperiment(source, files, {materialManifests});
+  const admitted = serviceInput(encode(packet), true);
+  assert.equal(admitted.attachments.length + admitted.materialManifests.length, 128);
+  assert.deepEqual(admitted.attachments, files);
+  assert.deepEqual(admitted.materialManifests, materialManifests);
+  const oversized = JSON.parse(packet);
+  oversized.materialManifests.push({packPath:'packs/one-too-many.pack', manifestPath:files[32].path});
+  assert.throws(() => serviceInput(encode(JSON.stringify(oversized)), true), /source-file limit/);
+});
+
 test('material compilation requires original manifest inputs, new confined targets and explicit complete identities', () => {
   const source = 'frankensim-material-modal-valve-v1\n';
   const files = [{path:'source/manifest.tsv', bytes:encode('original source')}];

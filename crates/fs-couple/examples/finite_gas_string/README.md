@@ -95,7 +95,7 @@ pack, initial gas record and nozzle reservoir record must be explicitly attached
 Names are exact relative paths beneath the scenario's directory. The existing
 native attachment reader snapshots those bytes before physical source loading;
 unlisted files are refused even when they exist on the host. Its limits remain
-32 files, 8 MiB per file and 32 MiB combined. Ordinary CLI path resolution is
+128 files, 8 MiB per file and 32 MiB combined. Ordinary CLI path resolution is
 unchanged when `--self-contained` is absent.
 
 `--history-output` writes the complete original CSV to a new file instead of

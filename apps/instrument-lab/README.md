@@ -764,7 +764,7 @@ only after successful native execution and a complete 48 kHz mono PCM16 WAV.
 Source or solver refusals remain visible; cancellation terminates the native
 child and removes that job's temporary files.
 
-The local adapter admits one render at a time, at most 1 MiB of source, 32 attached
+The local adapter admits one render at a time, at most 1 MiB of source, 128 attached
 files (8 MiB each, 32 MiB combined), 16 MiB of WAV, 16 MiB of heated-string CSV,
 256 KiB of process diagnostics
 and 60 seconds per request. A versioned JSON/base64 envelope carries attachments;

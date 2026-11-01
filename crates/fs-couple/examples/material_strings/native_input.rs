@@ -32,7 +32,7 @@ impl SourceOptions {
                     .ok_or("--attached-source needs a UTF-8 relative path")?;
                 options.names.push(name.to_owned());
                 if options.names.len() > super::attachments::MAX_FILES {
-                    return Err("at most 32 attached source files may be supplied".into());
+                    return Err(format!("at most {} attached source files may be supplied", super::attachments::MAX_FILES).into());
                 }
             } else { retained.push(arg.clone()); }
         }

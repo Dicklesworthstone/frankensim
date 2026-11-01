@@ -62,7 +62,7 @@ fn options(args: &[String]) -> Result<(&str, &str, usize, bool, ObservationPolic
                 let path = iter.next().map(String::as_str).filter(|value| !value.starts_with('-'))
                     .ok_or_else(|| "--attached-source needs a relative source path".to_string())?;
                 if attached_sources.len() == attachments::MAX_FILES {
-                    return Err("--attached-source allows at most 32 files".into());
+                    return Err(format!("--attached-source allows at most {} files", attachments::MAX_FILES));
                 }
                 attached_sources.push(path);
             }

@@ -5,7 +5,7 @@ use std::fs::{self, File, Metadata};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
-pub(super) const MAX_FILES: usize = 32;
+pub(super) const MAX_FILES: usize = 128;
 const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 const MAX_TOTAL_BYTES: usize = 32 * 1024 * 1024;
 
@@ -79,7 +79,7 @@ impl AttachedSources {
     /// The web adapter supplies a fresh private directory containing regular files.
     pub(super) fn load(parent: &Path, names: &[&str]) -> Result<Self, String> {
         if names.len() > MAX_FILES {
-            return Err("--attached-source allows at most 32 files".into());
+            return Err(format!("--attached-source allows at most {MAX_FILES} files"));
         }
         let mut admitted = BTreeSet::new();
         for &name in names {
@@ -214,6 +214,27 @@ mod tests {
             changed.get("materials/wall.pack"),
             Some(b"later material replacement".as_slice())
         );
+    }
+
+    #[test]
+    fn original_sources_and_compiled_packs_fit_128_files_but_not_129() {
+        let dir = directory();
+        fs::create_dir(dir.join("sources")).unwrap();
+        let names = (0u32..128)
+            .map(|index| {
+                let name = format!("sources/{index}.pack");
+                fs::write(dir.join(&name), index.to_le_bytes()).unwrap();
+                name
+            })
+            .collect::<Vec<_>>();
+        let mut paths = names.iter().map(String::as_str).collect::<Vec<_>>();
+        let sources = AttachedSources::load(&dir, &paths).unwrap();
+        for (index, name) in names.iter().enumerate() {
+            assert_eq!(sources.get(name), Some((index as u32).to_le_bytes().as_slice()));
+        }
+        paths.push("sources/one-too-many.pack");
+        let error = AttachedSources::load(&dir, &paths).err().unwrap();
+        assert_eq!(error, "--attached-source allows at most 128 files");
     }
 
     #[test]
