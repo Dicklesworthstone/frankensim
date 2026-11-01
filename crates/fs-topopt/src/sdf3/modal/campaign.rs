@@ -220,66 +220,6 @@ impl<O: AdaptiveSdf3Elasticity> Sdf3EigenfrequencyCampaignState3<O> {
     #[must_use]
     pub fn control_checkpoint(&self) -> SolveControlCheckpoint { self.control }
     #[must_use]
-
-    /// Detach all validated grid/probe/candidate state from the borrowed
-    /// callback. The returned control receipt must be used to construct the
-    /// next SolveControl; otherwise resume refuses before any physics work.
-    pub fn detach(self) -> Sdf3EigenfrequencyCampaignState3<O> {
-        let control = self.control.checkpoint_state();
-        Sdf3EigenfrequencyCampaignState3 {
-            current: self.current,
-            tree: self.tree,
-            options: self.options,
-            grids: self.grids,
-            probes: self.probes,
-            checked: self.checked,
-            pending: self.pending,
-            rejected: self.rejected,
-            attempts: self.attempts,
-            terminal: self.terminal,
-            control,
-        }
-    }
-
-    /// Rebind a detached campaign to a new callback/control owner. Completed
-    /// probes and freshly rechecked pending candidates are reused exactly; no
-    /// geometry, modal solve, gradient gate or optimizer step is replayed.
-    pub fn resume(
-        state: Sdf3EigenfrequencyCampaignState3<O>,
-        control: &'a mut SolveControl<'callback>,
-        build: B,
-    ) -> Result<Self, Sdf3EigenfrequencyAdaptiveError3> {
-        if state.control != control.checkpoint_state() {
-            return Err(invalid("modal campaign resume would change budget or cumulative work"));
-        }
-        state.current.study.operator().validate_material_mass(&state.current.mass)?;
-        state.current.study.require_material_body_recipe("sdf3-modal-campaign-material-recipe")?;
-        let point = state.current.recheck.as_ref().and_then(|r| r.as_ref().ok())
-            .ok_or_else(|| invalid("modal campaign resume lacks a rechecked current design"))?;
-        admit(&state.current.study, &point.rho, state.current.goal, state.current.options.design)?;
-        check_tree(state.current.study.operator(), &state.tree, control)?;
-        if let Some((tree, candidate)) = &state.pending {
-            if !candidate.completed_and_rechecked() {
-                return Err(invalid("modal campaign pending candidate lost its physical recheck"));
-            }
-            check_tree(candidate.study.operator(), tree, control)?;
-        }
-        Ok(Self {
-            current: state.current,
-            tree: state.tree,
-            options: state.options,
-            control,
-            build,
-            grids: state.grids,
-            probes: state.probes,
-            checked: state.checked,
-            pending: state.pending,
-            rejected: state.rejected,
-            attempts: state.attempts,
-            terminal: state.terminal,
-        })
-    }
-
     pub fn current(&self) -> &Sdf3EigenfrequencyRefit3<O> { &self.current }
     #[must_use]
     pub fn tree(&self) -> &Octree3 { &self.tree }
@@ -365,6 +305,65 @@ where
         Ok(Self {
             current, tree, options, control, build, grids, probes: Vec::new(),
             checked: None, pending: None, rejected: None, attempts: 0, terminal: None,
+        })
+    }
+
+    /// Detach all validated grid/probe/candidate state from the borrowed
+    /// callback. The returned control receipt must be used to construct the
+    /// next SolveControl; otherwise resume refuses before any physics work.
+    pub fn detach(self) -> Sdf3EigenfrequencyCampaignState3<O> {
+        let control = self.control.checkpoint_state();
+        Sdf3EigenfrequencyCampaignState3 {
+            current: self.current,
+            tree: self.tree,
+            options: self.options,
+            grids: self.grids,
+            probes: self.probes,
+            checked: self.checked,
+            pending: self.pending,
+            rejected: self.rejected,
+            attempts: self.attempts,
+            terminal: self.terminal,
+            control,
+        }
+    }
+
+    /// Rebind a detached campaign to a new callback/control owner. Completed
+    /// probes and freshly rechecked pending candidates are reused exactly; no
+    /// geometry, modal solve, gradient gate or optimizer step is replayed.
+    pub fn resume(
+        state: Sdf3EigenfrequencyCampaignState3<O>,
+        control: &'a mut SolveControl<'callback>,
+        build: B,
+    ) -> Result<Self, Sdf3EigenfrequencyAdaptiveError3> {
+        if state.control != control.checkpoint_state() {
+            return Err(invalid("modal campaign resume would change budget or cumulative work"));
+        }
+        state.current.study.operator().validate_material_mass(&state.current.mass)?;
+        state.current.study.require_material_body_recipe("sdf3-modal-campaign-material-recipe")?;
+        let point = state.current.recheck.as_ref().and_then(|r| r.as_ref().ok())
+            .ok_or_else(|| invalid("modal campaign resume lacks a rechecked current design"))?;
+        admit(&state.current.study, &point.rho, state.current.goal, state.current.options.design)?;
+        check_tree(state.current.study.operator(), &state.tree, control)?;
+        if let Some((tree, candidate)) = &state.pending {
+            if !candidate.completed_and_rechecked() {
+                return Err(invalid("modal campaign pending candidate lost its physical recheck"));
+            }
+            check_tree(candidate.study.operator(), tree, control)?;
+        }
+        Ok(Self {
+            current: state.current,
+            tree: state.tree,
+            options: state.options,
+            control,
+            build,
+            grids: state.grids,
+            probes: state.probes,
+            checked: state.checked,
+            pending: state.pending,
+            rejected: state.rejected,
+            attempts: state.attempts,
+            terminal: state.terminal,
         })
     }
 
