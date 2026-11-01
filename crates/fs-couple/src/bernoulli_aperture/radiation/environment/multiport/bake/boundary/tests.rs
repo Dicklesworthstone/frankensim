@@ -420,6 +420,10 @@ fn observation_windows_cannot_supply_missing_causal_load_support() {
         },
     );
     let mut config = observer_options();
+    // The owner itself cannot resolve above the porous card's validity (150..1600 Hz):
+    // observer_options()' 2 kHz is refused at construction (LocalBoundary::admit_band), so the
+    // owner is built at the card's top. This test was born red (08b8b970d) with 2 kHz here.
+    config.highest_omega = TAU * 1600.0;
     config.lower_window = Some(LowerBandWindow::try_new(150.0, 400.0).unwrap());
     let owner = IterativeBoundaryObservation::for_surface(
         &surface,
@@ -432,19 +436,26 @@ fn observation_windows_cannot_supply_missing_causal_load_support() {
         &gate,
     )
     .unwrap();
+    // The bake band must reach the mechanical Nyquist (admit_common: band top >= rate / 2), so
+    // the clock is 3.2 kHz to put that top at the card's 1.6 kHz. The bake's source grid then
+    // reaches down to band_hi / (2 * frequency_samples - 1) = 12.4 Hz, below the card's 150 Hz.
+    // The window passes from 400 Hz but supplies no support there, so the local-wall refusal is
+    // on the LOW side (the high side is already bounded by the owner).
     assert!(matches!(
         bake_boundary_mimo(
             &owner,
             air,
-            4000,
-            [400.0, 2000.0],
+            3200,
+            [400.0, 1600.0],
             options(),
             limits(),
             sampling(),
             &gate
         ),
         Err(BoundaryMimoBakeError::Source(
-            IterativeObservationError::Transfer(TransferError::Invalid(_))
+            IterativeObservationError::Transfer(TransferError::Invalid(
+                "physical load band exceeds local-wall source support"
+            ))
         ))
     ));
 
@@ -482,6 +493,10 @@ fn observation_windows_cannot_supply_missing_causal_load_support() {
             sampling(),
             &gate
         ),
-        Err(BoundaryMimoBakeError::Source(_))
+        Err(BoundaryMimoBakeError::Source(
+            IterativeObservationError::Transfer(TransferError::Invalid(
+                "lossless wall resonance requires a pressure-release boundary owner"
+            ))
+        ))
     ));
 }
