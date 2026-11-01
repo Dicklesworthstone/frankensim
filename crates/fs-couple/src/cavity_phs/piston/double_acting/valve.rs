@@ -8,14 +8,13 @@
 
 /// One finite material/phase body exchanges heat with both metered gases.
 pub mod thermal;
+/// Native material dispatch for metered flow and closed caloric increments.
+pub mod constitutive;
+pub use constitutive::MeteredPistonGas;
 
-use super::super::{GasEnergyError, PistonError, invalid, poll, positive};
+use super::super::{ClosedGasParcel, PistonError, PistonGas, PistonGasState, invalid, poll, positive};
 use super::{DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve, DoublePistonStep};
-use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferStep;
-use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::{
-    GasNozzle, GasNozzleFlow, GasNozzleStepSolve,
-};
-use fs_qty::Temperature;
+use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzle;
 
 /// One straight metering edge uncovering a fixed rectangular window.
 ///
@@ -51,9 +50,9 @@ pub struct MeteringValveOpening {
 
 impl RectangularMeteringValve {
     /// Evaluate the exact rectangular overlap without moving either gas.
-    pub fn opening(
+    pub fn opening<G: PistonGas>(
         &self,
-        piston: &DoubleActingGasPiston,
+        piston: &DoubleActingGasPiston<G>,
     ) -> Result<MeteringValveOpening, PistonError> {
         if !positive(self.reference_primary_volume_m3)
             || !self.edge_height_at_reference_m.is_finite()
@@ -105,7 +104,7 @@ pub enum ValveDirection {
 
 /// Native transport and motion, with one enclosing energy and inventory audit.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoublePistonValveStep {
+pub struct DoublePistonValveStep<G: MeteredPistonGas = ClosedGasParcel> {
     /// Original opening used by the held nozzle flow over this interval.
     pub opening: MeteringValveOpening,
     /// Opening at the final wall position, used by the next accepted interval.
@@ -113,11 +112,11 @@ pub struct DoublePistonValveStep {
     /// None for closed or initially equilibrated transport.
     pub direction: Option<ValveDirection>,
     /// Native source-bearing throat state, mass rate and choking admission.
-    pub flow: GasNozzleFlow,
+    pub flow: G::Flow,
     /// Original species and total-enthalpy transfer in its actual donor order.
-    pub transfer: GasMassTransferStep,
+    pub transfer: G::Transfer,
     /// Both gas pressure works and the single shared wall momentum.
-    pub piston: DoublePistonStep,
+    pub piston: DoublePistonStep<G::State>,
     /// Transfer plus subsequent native caloric storage, [primary, opposing] [J].
     /// These displayed values retain each original species' formation datum.
     pub gas_energy_change_j: [f64; 2],
@@ -131,41 +130,42 @@ pub struct DoublePistonValveStep {
 
 /// Complete immutable proposal; neither accepted gas nor wall has advanced.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoublePistonValveCandidate {
-    piston: DoubleActingGasPiston,
-    step: DoublePistonValveStep,
+pub struct DoublePistonValveCandidate<G: MeteredPistonGas = ClosedGasParcel> {
+    piston: DoubleActingGasPiston<G>,
+    step: DoublePistonValveStep<G>,
 }
-impl DoublePistonValveCandidate {
-    pub const fn piston(&self) -> &DoubleActingGasPiston {
+impl<G: MeteredPistonGas> DoublePistonValveCandidate<G> {
+    pub const fn piston(&self) -> &DoubleActingGasPiston<G> {
         &self.piston
     }
-    pub const fn step(&self) -> &DoublePistonValveStep {
+    pub const fn step(&self) -> &DoublePistonValveStep<G> {
         &self.step
     }
-    pub fn into_parts(self) -> (DoubleActingGasPiston, DoublePistonValveStep) {
+    pub fn into_parts(self) -> (DoubleActingGasPiston<G>, DoublePistonValveStep<G>) {
         (self.piston, self.step)
     }
 }
 
 // The finite-thermal adapter uses this same transport and final account. Only
 // the original two-gas mechanical/thermal step between them varies.
-pub(super) struct ValveTransfer {
+pub(super) struct ValveTransfer<G: MeteredPistonGas = ClosedGasParcel> {
     opening: MeteringValveOpening,
     direction: Option<ValveDirection>,
-    flow: GasNozzleFlow,
-    transfer: GasMassTransferStep,
+    flow: G::Flow,
+    transfer: G::Transfer,
     temperature_k: [f64; 2],
+    density_kg_m3: [f64; 2],
     mass_kg: [f64; 2],
 }
 
-impl DoubleActingGasPiston {
+impl<G: MeteredPistonGas> DoubleActingGasPiston<G> {
     pub(super) fn prepare_valve(
         &self,
         geometry: RectangularMeteringValve,
         duration_s: f64,
-        exchange: GasNozzleStepSolve,
+        exchange: G::NozzleSolve,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<(Self, ValveTransfer), PistonError> {
+    ) -> Result<(Self, ValveTransfer<G>), PistonError> {
         poll(cancelled)?;
         let opening = geometry.opening(self)?;
         let nozzle = GasNozzle {
@@ -173,9 +173,9 @@ impl DoubleActingGasPiston {
             discharge_coefficient: geometry.discharge_coefficient,
         };
         let primary = self.primary.gas();
-        let forward = primary.state().state().pressure >= self.opposing.state().state().pressure;
-        let (candidate, flow) = if forward {
-            primary.through_nozzle_to(
+        let forward = primary.state().pressure_pa() >= self.opposing.state().pressure_pa();
+        let (donor, receiver, transfer, flow) = if forward {
+            primary.through_metering_nozzle(
                 &self.opposing,
                 nozzle,
                 duration_s,
@@ -183,7 +183,7 @@ impl DoubleActingGasPiston {
                 &mut *cancelled,
             )?
         } else {
-            self.opposing.through_nozzle_to(
+            self.opposing.through_metering_nozzle(
                 primary,
                 nozzle,
                 duration_s,
@@ -191,18 +191,18 @@ impl DoubleActingGasPiston {
                 &mut *cancelled,
             )?
         };
-        let (donor, receiver, transfer) = candidate.into_parts();
         let (primary, opposing) = if forward {
             (donor, receiver)
         } else {
             (receiver, donor)
         };
         let temperature_k = [
-            primary.state().state().temperature,
-            opposing.state().state().temperature,
+            primary.state().temperature_k(),
+            opposing.state().temperature_k(),
         ];
+        let density_kg_m3 = [primary.state().density_kg_m3(), opposing.state().density_kg_m3()];
         let mass_kg = [primary.mass_kg(), opposing.mass_kg()];
-        let direction = (transfer.transferred_mass_kg > 0.0).then_some(if forward {
+        let direction = (G::transferred_mass_kg(&transfer) > 0.0).then_some(if forward {
             ValveDirection::PrimaryToOpposing
         } else {
             ValveDirection::OpposingToPrimary
@@ -219,6 +219,7 @@ impl DoubleActingGasPiston {
                 flow,
                 transfer,
                 temperature_k,
+                density_kg_m3,
                 mass_kg,
             },
         ))
@@ -229,13 +230,13 @@ impl DoubleActingGasPiston {
         &self,
         geometry: RectangularMeteringValve,
         input: DoublePistonInput,
-        exchange: GasNozzleStepSolve,
+        exchange: G::NozzleSolve,
         total_energy_tolerance_j: f64,
-        transfer: ValveTransfer,
+        transfer: ValveTransfer<G>,
         mut next: Self,
-        piston: DoublePistonStep,
+        piston: DoublePistonStep<G::State>,
         cancelled: &mut impl FnMut() -> bool,
-    ) -> Result<DoublePistonValveCandidate, PistonError> {
+    ) -> Result<DoublePistonValveCandidate<G>, PistonError> {
         poll(cancelled)?;
         if !positive(total_energy_tolerance_j) {
             return Err(invalid(
@@ -244,7 +245,7 @@ impl DoubleActingGasPiston {
         }
         let endpoint_opening = geometry.opening(&next)?;
         let gases = [next.primary.gas(), &next.opposing];
-        let pressures = gases.map(|g| g.state().state().pressure);
+        let pressures = gases.map(|g| g.state().pressure_pa());
         if matches!(transfer.direction, Some(ValveDirection::PrimaryToOpposing))
             && pressures[0] < pressures[1]
             || matches!(transfer.direction, Some(ValveDirection::OpposingToPrimary))
@@ -265,32 +266,14 @@ impl DoubleActingGasPiston {
             // The original mechanical owner preserves the post-transfer model
             // and mass. Re-evaluate its ACTUAL endpoint caloric increment, not
             // a copied first-law residual or a subtraction of absolute energies.
-            motion_energy[i] = gases[i].mass_kg()
-                * gases[i]
-                    .model()
-                    .thermodynamics()
-                    .specific_internal_energy_change(
-                        Temperature::new(transfer.temperature_k[i]),
-                        Temperature::new(gases[i].state().state().temperature),
-                    )
-                    .map_err(|error| {
-                        GasEnergyError::Material(fs_material::MaterialError::State {
-                            what: format!("metering-valve endpoint caloric increment: {error}"),
-                        })
-                    })?
-                    .value();
+            motion_energy[i] = gases[i].closed_energy_change_j(
+                transfer.density_kg_m3[i], transfer.temperature_k[i],
+            )?;
         }
-        let transferred = if transfer.direction == Some(ValveDirection::OpposingToPrimary) {
-            [
-                transfer.transfer.receiver_energy_change_j,
-                transfer.transfer.donor_energy_change_j,
-            ]
-        } else {
-            [
-                transfer.transfer.donor_energy_change_j,
-                transfer.transfer.receiver_energy_change_j,
-            ]
-        };
+        let mut transferred = G::transfer_energy_change_j(&transfer.transfer);
+        if transfer.direction == Some(ValveDirection::OpposingToPrimary) {
+            transferred.swap(0, 1);
+        }
         let gas_energy_change_j = std::array::from_fn(|i| transferred[i] + motion_energy[i]);
         let mass_residual = (gases[0].mass_kg() - self.primary.gas().mass_kg())
             + (gases[1].mass_kg() - self.opposing.mass_kg());
@@ -304,7 +287,7 @@ impl DoubleActingGasPiston {
         // residual is its whole-pair storage change. Summing two displayed
         // formation-energy totals here would destroy a small thermal signal.
         let gas_change =
-            (motion_energy[0] + motion_energy[1]) + transfer.transfer.energy_residual_j;
+            (motion_energy[0] + motion_energy[1]) + G::transfer_energy_residual_j(&transfer.transfer);
         let residual = ((gas_change + kinetic) - input.heat_j[0] - input.heat_j[1]) - force_work;
         if !motion_energy
             .iter()
@@ -318,7 +301,7 @@ impl DoubleActingGasPiston {
                 residual,
             ])
             .all(|value| value.is_finite())
-            || mass_residual.abs() > exchange.transfer.mass_tolerance_kg
+            || mass_residual.abs() > G::mass_tolerance_kg(exchange)
             || residual.abs() > total_energy_tolerance_j
         {
             return Err(invalid(
@@ -359,7 +342,7 @@ impl DoubleActingGasPiston {
         &self,
         next: &mut Self,
         input: DoublePistonInput,
-        report: &DoublePistonValveStep,
+        report: &DoublePistonValveStep<G>,
         stored: f64,
         kinetic: f64,
         force_work: f64,
@@ -371,7 +354,7 @@ impl DoubleActingGasPiston {
             .piston
             .midpoint
             .each_ref()
-            .map(|gas| gas.state().temperature);
+            .map(|gas| gas.temperature_k());
         // Preserve actual mechanical/heat observations and the original tick.
         // The native mass-transfer report has no mixing-entropy account; the
         // closed typed audit must not silently omit that part of this interval.
@@ -401,6 +384,9 @@ impl DoubleActingGasPiston {
     /// donor/receiver solve roles; these roles follow the actual pressure order.
     /// Heat and applied force then enter the original two-gas midpoint solve.
     /// The final pressure-order gate includes that heating and motion.
+    /// Ideal and PR gas owners keep their native nozzle controls, species laws
+    /// and reports. Real-gas caloric work uses actual post-transfer density and
+    /// temperature, including a newly mixed receiving composition.
     ///
     /// This is a first-order frozen-opening split. It supplies no jet recoil,
     /// viscous valve calibration, metering-edge friction, contact stop, resolved
@@ -419,11 +405,11 @@ impl DoubleActingGasPiston {
         &self,
         geometry: RectangularMeteringValve,
         input: DoublePistonInput,
-        exchange: GasNozzleStepSolve,
+        exchange: G::NozzleSolve,
         controls: DoublePistonSolve,
         total_energy_tolerance_j: f64,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoublePistonValveCandidate, PistonError> {
+    ) -> Result<DoublePistonValveCandidate<G>, PistonError> {
         self.valve_candidate_with_midpoint_resistance(
             geometry, input, exchange, controls, total_energy_tolerance_j, 0.0, cancelled,
         )
@@ -436,12 +422,12 @@ impl DoubleActingGasPiston {
         &self,
         geometry: RectangularMeteringValve,
         input: DoublePistonInput,
-        exchange: GasNozzleStepSolve,
+        exchange: G::NozzleSolve,
         controls: DoublePistonSolve,
         total_energy_tolerance_j: f64,
         resistance_n_s_m: f64,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DoublePistonValveCandidate, PistonError> {
+    ) -> Result<DoublePistonValveCandidate<G>, PistonError> {
         poll(&mut cancelled)?;
         if !resistance_n_s_m.is_finite() || resistance_n_s_m < 0.0 {
             return Err(invalid("invalid metered midpoint force resistance"));
@@ -481,11 +467,11 @@ impl DoubleActingGasPiston {
         &mut self,
         geometry: RectangularMeteringValve,
         input: DoublePistonInput,
-        exchange: GasNozzleStepSolve,
+        exchange: G::NozzleSolve,
         controls: DoublePistonSolve,
         total_energy_tolerance_j: f64,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DoublePistonValveStep, PistonError> {
+    ) -> Result<DoublePistonValveStep<G>, PistonError> {
         let candidate = self.valve_candidate(
             geometry,
             input,
@@ -503,3 +489,6 @@ impl DoubleActingGasPiston {
 
 #[cfg(test)]
 pub(super) mod tests;
+
+#[cfg(test)]
+mod real_gas;

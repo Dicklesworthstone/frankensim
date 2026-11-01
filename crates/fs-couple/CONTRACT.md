@@ -11432,7 +11432,7 @@ numerical or measured physical validation.
 
 ## One finite thermal body on the moving two-gas valve
 
-`DoubleActingGasPiston::thermal_valve_candidate` composes the metering valve
+`DoubleActingGasPiston<G>::thermal_valve_candidate` composes the metering valve
 with the existing two-face finite-enthalpy thermal owner. Native compressible
 species/enthalpy transport is sampled once at the original opening. Every
 bounded heat/momentum trial then starts from that same post-transfer pair and
@@ -11475,7 +11475,7 @@ wall coordinate. `RectangularMeteringValve` derives edge displacement from
 the primary volume and its original face area; the exposed area is the exact
 window overlap. It creates no second position state and does not clamp motion.
 
-`DoubleActingGasPiston::valve_candidate` and `step_with_valve` select the
+`DoubleActingGasPiston<G>::valve_candidate` and `step_with_valve` select the
 donor from actual initial pressures, call the original compressible nozzle and
 species/total-enthalpy transfer once, then call the original two-gas midpoint
 pressure-work and single-wall momentum solve. Different gas compositions,
@@ -11483,6 +11483,24 @@ source caloric laws, temperatures and densities retain their original owners.
 Native throat/choking, source-domain, gross donor-fraction and transfer
 conservation gates remain active. Final pressure ordering is checked again
 after the actual heat and motion.
+
+`MeteredPistonGas` dispatches to the existing ideal or PR nozzle and transfer
+owner, retaining its native control and report types. Compatible PR mixtures
+transport actual species, with all new pair interactions explicitly sourced.
+The subsequent closed motion measures energy from both post-transfer density
+and temperature through the retained mixture law. It never applies an ideal
+temperature-only caloric increment to a changing-density real gas.
+
+The same generic thermal path supplies complete original gas midpoints to both
+contacts. `MaterialDoubleActingGasPiston` forwards valve and thermal-valve
+candidates without reconstructing the moving owner: original density claims,
+geometry, canonical inertia and accepted port history remain attached. A
+separate thermal body's heating does not silently change rigid specimen mass.
+Additional dense-mixture regressions cover both native flow directions,
+species and independent U+K, continuing position-controlled opening, reciprocal
+finite-body heat, 1000/8000 kg/m3 source-inertia substitutions, and late atomic
+refusal. These extend the original algorithms; no flow or motion solver is
+duplicated.
 
 The endpoint audit independently re-evaluates post-transfer caloric increments,
 actual wall kinetic change and force work. The original transfer's conserved

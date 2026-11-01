@@ -12,6 +12,8 @@ pub mod acoustic;
 pub mod solid;
 /// State-dependent finite-body power retaining original material inertia.
 pub mod power;
+/// Moving metering valves retaining original density-derived rigid inertia.
+pub mod valve;
 
 use super::{ClosedGasParcel, GasPiston, PistonError, PistonGas, PistonInput, PistonSolve, PistonStep};
 use fs_mbd_material::ResolvedBody;

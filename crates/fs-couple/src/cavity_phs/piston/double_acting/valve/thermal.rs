@@ -4,7 +4,8 @@
 //! flows with the existing enthalpy/momentum owner. Every heat trial sees the
 //! same post-transfer gases; it cannot move more mass or debit the body twice.
 
-use super::{DoublePistonValveStep, RectangularMeteringValve};
+use super::{DoublePistonValveStep, MeteredPistonGas, RectangularMeteringValve};
+use crate::cavity_phs::piston::ClosedGasParcel;
 use crate::cavity_phs::piston::double_acting::{
     DoubleActingGasPiston, DoublePistonInput, DoublePistonSolve,
 };
@@ -13,16 +14,16 @@ use crate::cavity_phs::piston::thermal::double_acting::{
 };
 use crate::cavity_phs::piston::thermal::{ConductanceSample, ThermalPistonError};
 use fs_material::phase::{EquilibriumPhaseState, UniformEnthalpyStep, UniformEnthalpyStepInput};
+#[cfg(test)]
 use fs_material::thermochemical_gas::ResolvedThermochemicalGasState;
-use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzleStepSolve;
 
 /// One accepted transport, thermal and shared-wall proposal. Native gas and
 /// mechanical accounts appear once, inside `valve.piston`.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoubleThermalValveStep {
+pub struct DoubleThermalValveStep<G: MeteredPistonGas = ClosedGasParcel> {
     /// Original valve/motion report; its gas heats include the two accepted
     /// body exchanges. Those exchanges are internal to this enclosing report.
-    pub valve: DoublePistonValveStep,
+    pub valve: DoublePistonValveStep<G>,
     /// Body phase at midpoint enthalpy, evaluated by its original source chart.
     pub thermal_midpoint: EquilibriumPhaseState,
     /// Actual source conductance at each accepted gas/body midpoint [W/K].
@@ -49,14 +50,14 @@ pub struct DoubleThermalValveStep {
 /// Return the gas pair, common wall and finite thermal endpoint together.
 /// Neither accepted piston nor external body is mutated by construction.
 #[derive(Clone, Debug, PartialEq)]
-pub struct DoubleThermalValveCandidate<S> {
-    piston: DoubleActingGasPiston,
+pub struct DoubleThermalValveCandidate<S, G: MeteredPistonGas = ClosedGasParcel> {
+    piston: DoubleActingGasPiston<G>,
     thermal: UniformEnthalpyStep<[S; 2]>,
-    step: DoubleThermalValveStep,
+    step: DoubleThermalValveStep<G>,
 }
 
-impl<S> DoubleThermalValveCandidate<S> {
-    pub const fn piston(&self) -> &DoubleActingGasPiston {
+impl<S, G: MeteredPistonGas> DoubleThermalValveCandidate<S, G> {
+    pub const fn piston(&self) -> &DoubleActingGasPiston<G> {
         &self.piston
     }
 
@@ -66,22 +67,22 @@ impl<S> DoubleThermalValveCandidate<S> {
         &self.thermal
     }
 
-    pub const fn step(&self) -> &DoubleThermalValveStep {
+    pub const fn step(&self) -> &DoubleThermalValveStep<G> {
         &self.step
     }
 
     pub fn into_parts(
         self,
     ) -> (
-        DoubleActingGasPiston,
+        DoubleActingGasPiston<G>,
         UniformEnthalpyStep<[S; 2]>,
-        DoubleThermalValveStep,
+        DoubleThermalValveStep<G>,
     ) {
         (self.piston, self.thermal, self.step)
     }
 }
 
-impl DoubleActingGasPiston {
+impl<G: MeteredPistonGas> DoubleActingGasPiston<G> {
     /// Exchange native species/enthalpy through the moving metering edge, then
     /// jointly solve the existing two-face finite-body heat and wall momentum.
     ///
@@ -110,15 +111,15 @@ impl DoubleActingGasPiston {
         input: DoublePistonInput,
         body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve,
-        flow: GasNozzleStepSolve,
+        flow: G::NozzleSolve,
         exchange: DoubleHeatExchangeSolve,
         total_energy_tolerance_j: f64,
         resolve: impl FnMut(
-            &[ResolvedThermochemicalGasState; 2],
+            &[G::State; 2],
             EquilibriumPhaseState,
         ) -> Result<[ConductanceSample<S>; 2], E>,
         cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleThermalValveCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DoubleThermalValveCandidate<S, G>, ThermalPistonError<E>> {
         self.thermal_valve_candidate_with_midpoint_resistance(
             geometry, input, body, controls, flow, exchange,
             total_energy_tolerance_j, 0.0, resolve, cancelled,
@@ -134,16 +135,16 @@ impl DoubleActingGasPiston {
         input: DoublePistonInput,
         body: UniformEnthalpyStepInput<'_>,
         controls: DoublePistonSolve,
-        flow: GasNozzleStepSolve,
+        flow: G::NozzleSolve,
         exchange: DoubleHeatExchangeSolve,
         total_energy_tolerance_j: f64,
         resistance_n_s_m: f64,
         resolve: impl FnMut(
-            &[ResolvedThermochemicalGasState; 2],
+            &[G::State; 2],
             EquilibriumPhaseState,
         ) -> Result<[ConductanceSample<S>; 2], E>,
         mut cancelled: impl FnMut() -> bool,
-    ) -> Result<DoubleThermalValveCandidate<S>, ThermalPistonError<E>> {
+    ) -> Result<DoubleThermalValveCandidate<S, G>, ThermalPistonError<E>> {
         if cancelled() {
             return Err(ThermalPistonError::Cancelled);
         }

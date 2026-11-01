@@ -4,6 +4,7 @@ use crate::cavity_phs::piston::tests::{controls as single_controls, drive, gas};
 use crate::cavity_phs::piston::{GasPiston, PistonSolve};
 use fs_material::thermochemical_gas::energy::parcel::ClosedGasParcel;
 use fs_material::thermochemical_gas::energy::parcel::transfer::GasMassTransferSolve;
+use fs_material::thermochemical_gas::energy::parcel::transfer::nozzle::GasNozzleStepSolve;
 use fs_thermochem::UNIVERSAL_GAS_CONSTANT_J_PER_MOL_K as R;
 
 pub(in crate::cavity_phs::piston::double_acting) fn controls() -> DoublePistonSolve {
