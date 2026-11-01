@@ -11,6 +11,8 @@
 //! square of the mean is not the reflected energy. This linear ideal-end,
 //! lossless spatial rung does not qualify a nonlinear junction, real exterior
 //! radiation or a spatial/clock accuracy band without separate refinement.
+//! A port mouth exposes both faces; an attached physical admittance load is
+//! interconnected before preparation, retaining its full state and losses.
 
 use fs_duct::RadiusProfile;
 use fs_duct::modal::ModeCount;
@@ -18,10 +20,15 @@ use fs_duct::modal::time_domain::{
     ModalEnd, ModalGalerkinSource, ModalTimeError, assemble_lossless,
 };
 use fs_material::gas::GasState;
+use fs_phs::PortHamiltonian;
 use fs_phs::linear_exact::{
-    LinearSplitBudget, MultiportScatteringStepRecord, PreparedMultiportScatteringZoh,
-    ScatteringPortRecord,
+    LinearSplitBudget, MAX_LINEAR_EXPONENTIAL_BLOCK_DIM, MultiportScatteringStepRecord,
+    PreparedMultiportScatteringZoh, ScatteringPortRecord,
 };
+
+#[path = "continuous/load.rs"]
+mod load;
+pub use load::{ModalAdmittanceLoad, ModalLoadSource};
 
 /// Prepared full-state modal region and its accepted physical history.
 ///
@@ -30,17 +37,20 @@ use fs_phs::linear_exact::{
 /// is a wave-coordinate choice, not a matched evanescent characteristic.
 pub struct ContinuousModalLine {
     source: ModalGalerkinSource,
+    load_source: Option<ModalLoadSource>,
     flow: PreparedMultiportScatteringZoh,
     state: Vec<f64>,
     next: Vec<f64>,
     mean_pressures: Vec<f64>,
     reflected_means: Vec<f64>,
     ports: Vec<ScatteringPortRecord>,
+    held_inputs: Vec<f64>,
 }
 
 impl ContinuousModalLine {
     /// Prepare original geometry, every retained coordinate and all inlet
-    /// modes. The shared exact owner admits the complete dense work; no
+    /// modes, plus every mouth mode for `ModalEnd::Ports`. The shared exact
+    /// owner admits the complete dense work; no
     /// resolution is reduced to fit. Cancellation is polled during spatial
     /// assembly and after bounded exact-flow preparation.
     ///
@@ -67,25 +77,137 @@ impl ContinuousModalLine {
             &mut cancelled,
         )?;
         let (source, system) = image.into_parts();
-        let states = 2 * source.coordinates();
-        let count = source.modes().0;
-        let reference = source.inlet_reference_impedance();
-        let selected: Vec<_> = (0..count).map(|mode| (mode, reference)).collect();
+        Self::prepare(source, system, None, duration, budget, &mut cancelled)
+    }
+
+    /// Attach a quiescent complete original modal load to every mouth mode, then
+    /// prepare ONE exact coupled evolution. The load sees actual mouth pressure
+    /// and returns outward duct flow: U_duct=-U_load, P_load=P_duct. Every
+    /// mutual term, material memory coordinate and physical loss is retained.
+    ///
+    /// The source mouth must have the same original radial basis and radius;
+    /// both gases must share static pressure. Their density/composition may
+    /// differ. Only the inlet modes remain externally driven wave ports.
+    /// Accepted state is [duct q; duct M*P; complete original load state].
+    ///
+    /// # Errors
+    /// Mismatched source coordinates/equilibrium, complete-state capacity,
+    /// nonquadratic or nonpassive source structure, cancellation or preparation.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_loaded(
+        profile: &RadiusProfile,
+        gas: &GasState,
+        modes: ModeCount,
+        elements: usize,
+        load: ModalAdmittanceLoad,
+        duration: f64,
+        budget: LinearSplitBudget,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let declaration = load.source();
+        let radius = profile.outlet_radius();
+        if declaration.modes() != modes
+            || (declaration.radius_m() - radius).abs() > 128.0 * f64::EPSILON * radius
+            || declaration.gas().pressure.to_bits() != gas.pressure.to_bits()
+        {
+            return Err(ModalTimeError::Invalid(
+                "modal mouth/load require identical mode coordinates and radius and equal static pressure",
+            ));
+        }
+        let image = assemble_lossless(
+            profile,
+            gas,
+            modes,
+            elements,
+            ModalEnd::Ports,
+            budget.max_modes,
+            &mut cancelled,
+        )?;
+        let (source, duct) = image.into_parts();
+        let (load_source, load, direct) = load.into_parts();
+        let states = duct
+            .state_dim()
+            .checked_add(load.as_ref().map_or(0, PortHamiltonian::state_dim))
+            .ok_or(ModalTimeError::Invalid(
+                "complete loaded state count overflow",
+            ))?;
+        let inputs = if load.is_some() { modes.0 } else { 2 * modes.0 };
+        let block = states
+            .checked_add(inputs)
+            .and_then(|n| n.checked_add(1))
+            .and_then(|n| n.checked_mul(2))
+            .ok_or(ModalTimeError::Invalid(
+                "complete loaded exact-flow block overflow",
+            ))?;
+        if states > budget.max_modes || block > MAX_LINEAR_EXPONENTIAL_BLOCK_DIM {
+            return Err(ModalTimeError::Invalid(
+                "complete duct and original load exceed authored/exact-flow capacity",
+            ));
+        }
+        let mouth: Vec<_> = (modes.0..2 * modes.0).collect();
+        let duct = duct.with_port_conductance(&mouth, &direct)?;
+        let system = if let Some(load) = load {
+            let pairs: Vec<_> = (0..modes.0).map(|mode| (modes.0 + mode, mode)).collect();
+            fs_phs::interconnect(duct, load, &pairs)?
+        } else {
+            // These original mouth source inputs remain present and held at
+            // zero. Their physical direct load already acts through R.
+            duct
+        };
+        Self::prepare(
+            source,
+            system,
+            Some(load_source),
+            duration,
+            budget,
+            &mut cancelled,
+        )
+    }
+
+    fn prepare(
+        source: ModalGalerkinSource,
+        system: PortHamiltonian,
+        load_source: Option<ModalLoadSource>,
+        duration: f64,
+        budget: LinearSplitBudget,
+        cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<Self, ModalTimeError> {
+        let states = system.state_dim();
+        let inputs = system.port_dim();
+        let count = if load_source.is_some() {
+            source.modes().0
+        } else {
+            inputs
+        };
+        let selected: Vec<_> = (0..count)
+            .map(|port| {
+                (
+                    port,
+                    if port < source.modes().0 {
+                        source.inlet_reference_impedance()
+                    } else {
+                        source.mouth_reference_impedance()
+                    },
+                )
+            })
+            .collect();
         let flow = PreparedMultiportScatteringZoh::new_owned(system, &selected, duration, budget)?;
         if cancelled() {
             return Err(fs_duct::DuctError::Cancelled {
-                completed_steps: elements,
+                completed_steps: source.elements(),
             }
             .into());
         }
         Ok(Self {
             source,
+            load_source,
             flow,
             state: vec![0.0; states],
             next: vec![0.0; states],
-            mean_pressures: vec![0.0; count],
+            mean_pressures: vec![0.0; inputs],
             reflected_means: vec![0.0; count],
             ports: vec![ScatteringPortRecord::default(); count],
+            held_inputs: vec![0.0; inputs],
         })
     }
 
@@ -93,25 +215,51 @@ impl ContinuousModalLine {
     pub const fn source(&self) -> &ModalGalerkinSource {
         &self.source
     }
-    /// Accepted canonical physical state [potential; M*pressure].
+    /// Original attached load's physical mouth and gas, if present.
+    pub const fn load_source(&self) -> Option<&ModalLoadSource> {
+        self.load_source.as_ref()
+    }
+    /// Complete interconnected physical system used by the exact flow.
+    /// Frequency-domain consumers can use the same source through fs-phs's
+    /// harmonic owner without reconstructing or refitting the load.
+    pub fn system(&self) -> &PortHamiltonian {
+        self.flow.system()
+    }
+    /// Accepted complete state: duct [potential; M*pressure], followed by every
+    /// original load coordinate when attached.
     pub fn state(&self) -> &[f64] {
         &self.state
+    }
+    /// Original duct coordinates, without any load-state substitution.
+    pub fn duct_state(&self) -> &[f64] {
+        &self.state[..2 * self.source.coordinates()]
+    }
+    /// Complete accepted original load coordinates; empty for an unbound mouth.
+    pub fn load_state(&self) -> &[f64] {
+        &self.state[2 * self.source.coordinates()..]
     }
     /// Actual exact-flow interval [s].
     pub fn duration(&self) -> f64 {
         self.flow.duration()
     }
-    /// Stored physical acoustic energy [J], with original spatial quadratics.
+    /// Total stored physical energy [J], with original duct and load storage.
     pub fn stored_energy_j(&self) -> f64 {
         self.flow.system().hamiltonian(&self.state)
     }
-    /// Accepted interval-mean reflected pressure waves [Pa], in mode order.
+    /// Accepted interval-mean reflected pressure waves [Pa]. External order is
+    /// inlet modes, then mouth modes only when that face remains a wave port.
     pub fn incoming(&self) -> &[f64] {
         &self.reflected_means
     }
-    /// Accepted interval-mean inlet modal pressure [Pa].
+    /// Accepted interval-mean pressure at every remaining original system port
+    /// [Pa]. A purely conductive load retains the unforced mouth source slots
+    /// after the inlet slots; a dynamic interconnection consumes those slots.
     pub fn mean_pressures(&self) -> &[f64] {
         &self.mean_pressures
+    }
+    /// Number of external incident/reflected wave channels.
+    pub fn port_count(&self) -> usize {
+        self.ports.len()
     }
     /// Independently integrated incident/outgoing energy and boundary work.
     /// Zero entries before the first accepted push represent no interval.
@@ -120,7 +268,8 @@ impl ContinuousModalLine {
     }
 
     /// Same-interval affine relation b_bar=free+direct*a, using accepted
-    /// physical history. The caller supplies N and N*N output buffers.
+    /// physical history. The caller supplies P and P*P output buffers, where
+    /// P is N for a loaded/ideal mouth or 2N for an external port mouth.
     /// There is no extra sample of delay or history commit during this query.
     ///
     /// # Errors
@@ -130,18 +279,18 @@ impl ContinuousModalLine {
         free: &mut [f64],
         direct: &mut [f64],
     ) -> Result<(), ModalTimeError> {
-        // All original inputs are selected waves, so their supplied values
-        // are ignored by the shared affine relation. Reuse an existing N slice.
+        // Selected entries are ignored by the relation. Any remaining mouth
+        // forcing inputs are zero; their actual direct load already acts in R.
         self.flow
-            .average_relation_into(&self.state, &self.reflected_means, free, direct)?;
-        let count = self.source.modes().0;
+            .average_relation_into(&self.state, &self.held_inputs, free, direct)?;
+        let count = self.ports.len();
         for mode in 0..count {
             direct[mode * count + mode] -= 1.0;
         }
         Ok(())
     }
 
-    /// Consume one held incident pressure wave per ORIGINAL inlet mode.
+    /// Consume one held incident pressure wave per ORIGINAL external port.
     /// Commit physical history only after the complete coupled candidate
     /// and every independent energy account succeed. No warm allocation.
     ///
@@ -153,9 +302,15 @@ impl ContinuousModalLine {
         &mut self,
         incident: &[f64],
     ) -> Result<MultiportScatteringStepRecord, ModalTimeError> {
+        if incident.len() != self.ports.len() || incident.iter().any(|v| !v.is_finite()) {
+            return Err(ModalTimeError::Invalid(
+                "one finite incident wave is required per external modal port",
+            ));
+        }
+        self.held_inputs[..incident.len()].copy_from_slice(incident);
         let record = self.flow.step_into(
             &self.state,
-            incident,
+            &self.held_inputs,
             &mut self.next,
             &mut self.mean_pressures,
             &mut self.ports,

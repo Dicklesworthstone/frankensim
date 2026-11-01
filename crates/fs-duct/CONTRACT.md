@@ -2529,3 +2529,10 @@ reflection matrix against the continuous Riccati authority over h=4/8/16
 elements and a separate N=1/2/4 taper rung, including live cross-mode
 reflection and reciprocity. These are bounded witnesses, not a general band
 certificate. Capacity/cancellation refuse explicitly.
+
+
+## Two-face continuous modal ports
+
+`modal::time_domain::ModalEnd::Ports` retains every mouth coordinate and exposes all retained modes on both faces. Original port order is inlet modes followed by mouth modes; each input is volume flow into the region and each output is conjugate modal pressure. The right-face input therefore has the opposite sign to positive axial flow. No characteristic matching law is substituted for an evanescent mode. The two wave-coordinate references use the actual inlet and outlet areas separately.
+
+The original smooth-profile mass/stiffness assembly, radial roots, coupling matrix, canonical state, cancellation and complete-state capacity remain the owners. No coordinate is removed to fit a budget. The new full two-face cylinder regression checks the complete impedance matrix for propagating and evanescent modes, its axial convergence on three rungs, and the corresponding bounded reflection matrix. The lossless, axisymmetric, fixed-gas spatial model retains its original limits; these ports do not supply higher-mode viscothermal loss, an exterior radiation law or a nonlinear interface certificate.

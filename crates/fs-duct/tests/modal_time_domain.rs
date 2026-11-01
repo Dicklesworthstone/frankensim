@@ -77,6 +77,7 @@ fn authority(
     let termination = match end {
         ModalEnd::Rigid => Termination::Closed,
         ModalEnd::PressureRelease => Termination::IdealOpen,
+        ModalEnd::Ports => panic!("ideal-end authority requires an ideal end"),
     };
     let exact = mm_profile_impedance(
         profile,
@@ -118,6 +119,7 @@ fn uniform_all_mode_ideal_ends_follow_propagating_and_evanescent_formulas() {
                         * match end {
                             ModalEnd::Rigid => 1.0 / tangent,
                             ModalEnd::PressureRelease => -tangent,
+                            ModalEnd::Ports => unreachable!(),
                         }
                 } else {
                     let alpha = det::sqrt(-squared);
@@ -126,6 +128,7 @@ fn uniform_all_mode_ideal_ends_follow_propagating_and_evanescent_formulas() {
                         * match end {
                             ModalEnd::Rigid => (1.0 + e) / (1.0 - e),
                             ModalEnd::PressureRelease => (1.0 - e) / (1.0 + e),
+                            ModalEnd::Ports => unreachable!(),
                         }
                 };
                 exact[mode * 3 + mode] = C64::new(0.0, imaginary);
@@ -253,4 +256,87 @@ fn source_preserves_all_coordinates_and_refuses_capacity_or_cancellation() {
             completed_steps: 1
         }))
     ));
+}
+
+#[test]
+fn both_face_ports_converge_to_the_full_analytic_cylinder_impedance() {
+    let gas = air();
+    let (radius, length, modes) = (0.05, 0.04, 3);
+    let profile = RadiusProfile::exponential(radius, 0.0, length).unwrap();
+    for hz in [700.0, 5000.0] {
+        let omega = TAU * hz;
+        let k0 = omega / gas.sound_speed;
+        let mut errors = Vec::new();
+        let mut reflection_error = 0.0;
+        for elements in [4, 8, 16] {
+            let image = assemble_lossless(
+                &profile,
+                &gas,
+                ModeCount(modes),
+                elements,
+                ModalEnd::Ports,
+                124,
+                || false,
+            )
+            .unwrap();
+            let source = image.source();
+            let ports = 2 * modes;
+            assert_eq!(source.port_count(), ports);
+            assert_eq!(source.nodes_m().len(), elements + 1);
+            assert_eq!(image.system().port_dim(), ports);
+            let z0 = source.inlet_reference_impedance();
+            assert_eq!(source.mouth_reference_impedance(), z0);
+            let mut expected = vec![C64::ZERO; ports * ports];
+            for (mode, &gamma) in source.radial_eigenvalues().iter().enumerate() {
+                let squared = k0 * k0 - (gamma / radius).powi(2);
+                // P'=i*rho*omega*U/S; the two boundary flows both point IN.
+                // Hence Z_00=Z_LL=i*Zc*cot(kL), Z_0L=Z_L0=i*Zc*csc(kL).
+                let (diagonal, transfer) = if squared > 0.0 {
+                    let k = det::sqrt(squared);
+                    let scale = z0 * k0 / k / det::sin(k * length);
+                    (scale * det::cos(k * length), scale)
+                } else {
+                    let alpha = det::sqrt(-squared);
+                    let e = det::exp(-alpha * length);
+                    let scale = -z0 * k0 / alpha / (1.0 - e * e);
+                    (scale * (1.0 + e * e), scale * 2.0 * e)
+                };
+                expected[mode * ports + mode] = C64::new(0.0, diagonal);
+                expected[(modes + mode) * ports + modes + mode] = C64::new(0.0, diagonal);
+                expected[mode * ports + modes + mode] = C64::new(0.0, transfer);
+                expected[(modes + mode) * ports + mode] = C64::new(0.0, transfer);
+            }
+            let harmonic =
+                HarmonicModel::from_ode(image.system(), harmonic_budget(), || false).unwrap();
+            let factor = harmonic.factor(omega, || false).unwrap();
+            let mut actual = vec![C64::ZERO; ports * ports];
+            for column in 0..ports {
+                let mut input = vec![C64::ZERO; ports];
+                input[column] = C64::ONE;
+                let response = factor.response(&input, || false).unwrap();
+                for row in 0..ports {
+                    actual[row * ports + column] = response.output[row];
+                    if row % modes != column % modes {
+                        assert!(response.output[row].abs() < 1.0e-10 * z0);
+                    }
+                }
+            }
+            errors.push(distance(&actual, &expected) / z0);
+            reflection_error = distance(
+                &reflection(&actual, z0, ports),
+                &reflection(&expected, z0, ports),
+            );
+        }
+        assert!(errors[0] > 1.0e-4, "live axial defect required: {errors:?}");
+        assert!(
+            errors[1] < 0.4 * errors[0] && errors[2] < 0.35 * errors[1],
+            "hz={hz}, errors={errors:?}"
+        );
+        // Keep raw impedance convergence above, including its physical pole
+        // sensitivity. The bounded scattering matrix is the reflection QoI.
+        assert!(
+            reflection_error < 0.025,
+            "hz={hz}, reflection_error={reflection_error:e}, impedance_errors={errors:?}"
+        );
+    }
 }

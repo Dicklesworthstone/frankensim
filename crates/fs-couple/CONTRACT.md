@@ -20003,3 +20003,14 @@ internal energy for T and integrates the original polarization dynamics with
 s(T), chi(T) and tau(T), then compares native timestep refinement. Existing
 temperature-independent nonlinear and linear Debye profiles remain regression
 cases. All material data are authored numerical fixtures.
+
+
+## Complete modal loads and bidirectional reflection
+
+`mm_line::continuous::ContinuousModalLine` now drives and observes every mode at both faces when its source has `ModalEnd::Ports`. Each face retains its own original rho*c/S wave reference. The prepared exact owner independently integrates all incident/reflected energies and retains its current-window coupled mean map.
+
+`new_loaded` accepts a quiescent `ModalAdmittanceLoad` containing the complete original pressure-input/volume-flow-output port-Hamiltonian source and an optional original symmetric PSD direct conductance. Every mouth mode is bound in its declared original radial order. Geometry/radius and static-pressure mismatches refuse; interior and load gas density or composition may differ. The source's units, normalization and physical validity remain its producer's responsibility. This declaration never promotes a fitted matrix to a physical energy law.
+
+The direct matrix enters the shared `with_port_conductance` owner as G D G^T; the dynamic source enters the existing skew interconnection before ONE complete exact exponential. All load coordinates, mutual terms, material-memory storage and original resistance survive. Physical load loss remains separate from reference-wave exchange. A purely conductive source introduces no fictitious state: original mouth forcing slots stay present at zero input while only inlet slots are selected as external wave channels. Warm steps reuse the held-input buffer and all exact-owner scratch; refusal preserves accepted physical history and output accounts.
+
+Focused regressions cover bidirectional coherent pulses with unequal face references, a dynamically loaded cylinder against an independent analytic impedance on 12/24/48 axial elements, live mutual-mode reflection with direct and dynamic losses, exact held-wave subdivision, a matched conductive mouth, and source/capacity/transactional refusal. The source and runtime targets together pass 13 focused native checks (5 new and 8 existing), using actual original material/modal/math/algebra/PH source. This is component validation, not a Cargo/DSR gate or full-band BEM radiation qualification. The load may be an admitted complete physical system; no nonlinear forcing, azimuthal modes, sourced higher-mode losses, arbitrary direct nonsymmetric law or closed-loop frequency-error certificate is supplied.

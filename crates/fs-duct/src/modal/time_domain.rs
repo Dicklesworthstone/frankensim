@@ -11,7 +11,9 @@
 //! Every axial/radial coordinate is retained. The pressure-release mouth
 //! constrains its endpoint potential to zero; a rigid mouth is the natural
 //! zero-flow boundary. Canonical state is [q; p=M q_dot], output is inlet
-//! modal pressure, input is volume flow INTO the region. Both propagating
+//! modal pressure, input is volume flow INTO the region. A port mouth retains
+//! every endpoint coordinate and exposes every modal pressure/flow pair, with
+//! the same inward-flow convention on both faces. Both propagating
 //! and evanescent behavior follow from the same transverse stiffness.
 //!
 //! This is a spatial approximation of the existing finite-mode operator.
@@ -26,13 +28,17 @@ use fs_material::gas::GasState;
 use fs_phs::linear_exact::MAX_LINEAR_EXPONENTIAL_BLOCK_DIM;
 use fs_phs::{PhsError, PortHamiltonian, QuadraticStorage};
 
-/// Actual ideal boundary on every retained far-end mode.
+/// Actual boundary on every retained far-end mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ModalEnd {
     /// Zero modal flow; the natural boundary of the weak form.
     Rigid,
     /// Zero modal pressure; endpoint potentials are fixed at zero.
     PressureRelease,
+    /// Expose every mouth mode as a physical port. Inputs are volume flow
+    /// INTO the duct, opposite the axial flow at the mouth; outputs are modal
+    /// pressure. Port order is all inlet modes, then all mouth modes.
+    Ports,
 }
 
 /// Refusal from the physical duct source or the existing structural owner.
@@ -82,6 +88,7 @@ pub struct ModalGalerkinSource {
     stiffness: Vec<f64>,
     inverse_mass: Vec<f64>,
     inlet_reference: f64,
+    mouth_reference: f64,
 }
 impl ModalGalerkinSource {
     /// Original continuous radius and slope owner.
@@ -132,6 +139,16 @@ impl ModalGalerkinSource {
     pub const fn inlet_reference_impedance(&self) -> f64 {
         self.inlet_reference
     }
+    /// Common real mouth modal wave reference rho*c/S [Pa s/m³]. This uses
+    /// the actual outlet area; it is not an evanescent matching impedance.
+    pub const fn mouth_reference_impedance(&self) -> f64 {
+        self.mouth_reference
+    }
+    /// Physical flow-input / pressure-output count. A port mouth contributes
+    /// every retained mode, in the same order as the inlet.
+    pub fn port_count(&self) -> usize {
+        self.modes.0 * if self.end == ModalEnd::Ports { 2 } else { 1 }
+    }
 }
 
 /// Complete original spatial system and its source description.
@@ -172,8 +189,10 @@ fn cancelled_at(
 /// The complete state must fit both the caller's ceiling and the existing
 /// exact-ZOH dense block capacity; resolution is never silently reduced.
 ///
-/// The single zero-frequency plane-potential gauge at a rigid mouth remains
-/// represented. A release endpoint is a physical Dirichlet constraint.
+/// The zero-frequency plane-potential gauge at a rigid or port mouth remains
+/// represented. A release endpoint is a physical Dirichlet constraint. With
+/// `ModalEnd::Ports`, inlet and mouth inputs are both flows INTO this region;
+/// their outputs are pressures in the original radial basis.
 ///
 /// # Errors
 /// Original gas/profile/mode refusals, cancellation, zero resolution, complete
@@ -192,7 +211,7 @@ pub fn assemble_lossless(
     modes.validate()?;
     let n = modes.0;
     let nodes = elements
-        .checked_add(usize::from(end == ModalEnd::Rigid))
+        .checked_add(usize::from(end != ModalEnd::PressureRelease))
         .ok_or(ModalTimeError::Invalid("axial node count overflow"))?;
     let coordinates = nodes
         .checked_mul(n)
@@ -200,8 +219,9 @@ pub fn assemble_lossless(
     let states = coordinates
         .checked_mul(2)
         .ok_or(ModalTimeError::Invalid("modal state count overflow"))?;
+    let ports = n * if end == ModalEnd::Ports { 2 } else { 1 };
     let block = states
-        .checked_add(n)
+        .checked_add(ports)
         .and_then(|v| v.checked_add(1))
         .and_then(|v| v.checked_mul(2))
         .ok_or(ModalTimeError::Invalid("modal exact-flow block overflow"))?;
@@ -218,6 +238,10 @@ pub fn assemble_lossless(
     // coherence, area and inlet impedance admission to the original owner.
     let inlet_reference =
         crate::segment_wave(gas, profile.inlet_radius(), 1.0, LossModel::Lossless)?
+            .characteristic_impedance
+            .re;
+    let mouth_reference =
+        crate::segment_wave(gas, profile.outlet_radius(), 1.0, LossModel::Lossless)?
             .characteristic_impedance
             .re;
     let h = profile.length() / elements as f64;
@@ -329,7 +353,7 @@ pub fn assemble_lossless(
     }
     let mut q = vec![0.0; states * states];
     let mut j = vec![0.0; states * states];
-    let mut g = vec![0.0; states * n];
+    let mut g = vec![0.0; states * ports];
     for row in 0..coordinates {
         j[row * states + coordinates + row] = 1.0;
         j[(coordinates + row) * states + row] = -1.0;
@@ -340,7 +364,12 @@ pub fn assemble_lossless(
         }
     }
     for mode in 0..n {
-        g[(coordinates + mode) * n + mode] = 1.0;
+        g[(coordinates + mode) * ports + mode] = 1.0;
+        if end == ModalEnd::Ports {
+            // Both physical inputs point into the region. Integration by
+            // parts gives +P_in*U_in + P_mouth*U_mouth in the power balance.
+            g[(2 * coordinates - n + mode) * ports + n + mode] = 1.0;
+        }
     }
     if q.iter().any(|v| !v.is_finite()) {
         return Err(ModalTimeError::Invalid(
@@ -349,7 +378,7 @@ pub fn assemble_lossless(
     }
     let system = PortHamiltonian::new(
         states,
-        n,
+        ports,
         j,
         vec![0.0; states * states],
         g,
@@ -369,6 +398,7 @@ pub fn assemble_lossless(
             stiffness,
             inverse_mass,
             inlet_reference,
+            mouth_reference,
         },
         system,
     })
