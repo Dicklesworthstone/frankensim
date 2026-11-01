@@ -287,6 +287,23 @@ entire selected modal group. Incoming stiffness scales remain unchanged.
 The example `material_modal_sdf3` exercises the complete minimum-kg journey
 with explicitly authored heterogeneous material inputs.
 
+`sdf3::modal::refinement` assesses a design on two actual native adaptive
+spaces. The fine probe inherits the coarse physical occupancy and stiffness
+through the existing material/constraint-checked transfer; it does not refilter
+raw controls. Both grids independently solve the same selected low modal
+group through the shared cluster-admission owner. Native kg and geometric
+volume are reintegrated on each grid, and changes are normalized using the
+original design goal and frequency reference.
+
+The whole selected eigenspace is compared in the fine native mass metric,
+using the existing small-matrix Cholesky owner. This comparison is invariant
+under rotations within a selected repeated eigenspace. Optional local marks
+contract native stiffness and inertia residuals with the fine-subspace
+projection correction, sum signed modal contributions, then apply the existing
+Dörfler selector to their absolute cell values. These marks are a diagnostic
+heuristic, not a certified DWR correction or eigenvalue error bound. Both
+operators restore incoming scales on success and every returned error.
+
 ## Native material body loads on raw-SDF designs
 
 Prepare an acceleration load with the native Cartesian or adaptive operator's

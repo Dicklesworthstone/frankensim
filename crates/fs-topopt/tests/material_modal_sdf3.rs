@@ -433,3 +433,6 @@ fn both_design_goals_use_real_modes_and_recheck_the_original_physical_limit() {
         assert_eq!(study.operator().scales(), incoming);
     }
 }
+
+#[path = "material_modal_sdf3/adaptive.rs"]
+mod adaptive;

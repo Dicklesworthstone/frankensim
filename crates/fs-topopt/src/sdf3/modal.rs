@@ -7,6 +7,7 @@
 //! belong to both native operators.
 
 pub mod design;
+pub mod refinement;
 
 use fs_cutfem::elastic3::mass::MaterialMass3;
 use fs_sparse::precond::Precond;
@@ -286,6 +287,60 @@ pub fn controlled_sdf3_eigenpairs<O: Sdf3Elasticity>(
     })
 }
 
+/// One selected cluster and the same outer-gap admission on every native grid.
+/// This helper evaluates modes only; assessment does not request a design
+/// gradient at a transferred physical field or impose a strain amplitude.
+pub(super) fn selected_modes<O: Sdf3Elasticity>(
+    elasticity: &O,
+    mass: &MaterialMass3,
+    occupancy: &[f64],
+    options: Sdf3EigenfrequencyOptions3,
+    control: &mut SolveControl<'_>,
+) -> Result<(MatrixFreeEigenReport, Option<f64>), MatrixFreeEigenError> {
+    let free = elasticity
+        .fixed()
+        .iter()
+        .filter(|fixed| !**fixed)
+        .count()
+        .checked_mul(3)
+        .ok_or(GeneralizedError::InvalidInput("free dimension overflows"))?;
+    let count = options.solver.count;
+    if count == 0 || count > free {
+        return Err(GeneralizedError::InvalidInput(
+            "mode count must lie in 1..=free dofs",
+        ));
+    }
+    let guarded = count < free;
+    let mut solver = options.solver;
+    if guarded {
+        if count >= 64 {
+            return Err(GeneralizedError::InvalidInput(
+                "selected cluster requires an additional guard mode within the 64-mode cap",
+            ));
+        }
+        solver.count += 1;
+        solver.oversampling = solver.oversampling.saturating_sub(1);
+    }
+    let mut modal = controlled_sdf3_eigenpairs(elasticity, mass, occupancy, solver, control)?;
+    let next = if guarded {
+        let last = modal.values[count - 1];
+        let next = modal.values[count];
+        let scale = last.abs().max(next.abs());
+        let gap = next - last;
+        let tolerance = (64.0 * f64::EPSILON + 2.0 * solver.relative_tolerance) * scale;
+        if !gap.is_finite() || gap <= tolerance {
+            return Err(GeneralizedError::Breakdown(CLUSTER_CROSSING));
+        }
+        modal.values.truncate(count);
+        modal.modes.truncate(count);
+        modal.relative_residuals.truncate(count);
+        Some(next)
+    } else {
+        None
+    };
+    Ok((modal, next))
+}
+
 impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
     /// Source-material modes, smooth minimum, physical inventories and exact
     /// discrete design derivatives through the SAME filter/projection/SIMP map.
@@ -330,31 +385,6 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
         self.operator.validate_material_mass(mass).map_err(|_| {
             GeneralizedError::InvalidInput("sdf3 modal mass does not match the native operator")
         })?;
-        let free = self
-            .operator
-            .fixed()
-            .iter()
-            .filter(|fixed| !**fixed)
-            .count()
-            .checked_mul(3)
-            .ok_or(GeneralizedError::InvalidInput("free dimension overflows"))?;
-        let count = options.solver.count;
-        if count == 0 || count > free {
-            return Err(GeneralizedError::InvalidInput(
-                "mode count must lie in 1..=free dofs",
-            ));
-        }
-        let guarded = count < free;
-        let mut solver = options.solver;
-        if guarded {
-            if count >= 64 {
-                return Err(GeneralizedError::InvalidInput(
-                    "selected cluster requires an additional guard mode within the 64-mode cap",
-                ));
-            }
-            solver.count += 1;
-            solver.oversampling = solver.oversampling.saturating_sub(1);
-        }
         let design = self
             .design(rho, control)
             .map_err(GeneralizedError::Operator)?;
@@ -372,25 +402,8 @@ impl<O: Sdf3Elasticity> CutDensityStudy3<O> {
             .set_scales(&design.scales)
             .map_err(|_| GeneralizedError::Operator(failure("sdf3-eigen-scales")))?;
         let result = (|| {
-            let mut modal =
-                controlled_sdf3_eigenpairs(&self.operator, mass, &occupancy, solver, control)?;
-            let next_eigenvalue = if guarded {
-                let last = modal.values[count - 1];
-                let next = modal.values[count];
-                let scale = last.abs().max(next.abs());
-                let gap = next - last;
-                let tolerance =
-                    (64.0 * f64::EPSILON + 2.0 * solver.relative_tolerance) * scale;
-                if !gap.is_finite() || gap <= tolerance {
-                    return Err(GeneralizedError::Breakdown(CLUSTER_CROSSING));
-                }
-                modal.values.truncate(count);
-                modal.modes.truncate(count);
-                modal.relative_residuals.truncate(count);
-                Some(next)
-            } else {
-                None
-            };
+            let (mut modal, next_eigenvalue) =
+                selected_modes(&self.operator, mass, &occupancy, options, control)?;
             let (aggregate, weights) = smooth_min(&modal.values, options.aggregation_beta);
             let mut stiffness = vec![0.0; self.cells()];
             let mut inertia = vec![0.0; self.cells()];
