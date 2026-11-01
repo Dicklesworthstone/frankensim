@@ -18,7 +18,9 @@
 //! through the same nonlinear/time owner with a bounded sparse Krylov solve.
 
 use super::*;
-use crate::enthalpy::backward_euler::{BackwardEulerStep, BackwardEulerTrial, StepCoefficients};
+use crate::enthalpy::backward_euler::{
+    BackwardEulerStep, BackwardEulerTrial, StepCoefficients, resolvable_increment_j,
+};
 use crate::enthalpy::entropy::EntropyAudit;
 use fs_la::tridiagonal::{TridiagonalError, TridiagonalWorkspace};
 
@@ -736,9 +738,7 @@ impl<'a> ImplicitConductionChain<'a> {
                     // This does NOT discard a heat/source term: the original
                     // residual still charges all endpoint heat to this cell,
                     // and both local and whole-call joule gates remain intact.
-                    if h == cell.specific_h_j_kg {
-                        value = 0.0;
-                    }
+                    value = resolvable_increment_j(cell.specific_h_j_kg, value, cell.mass_kg);
                     representable |= value != workspace.energy[i];
                     workspace.proposal[i] = value;
                 }

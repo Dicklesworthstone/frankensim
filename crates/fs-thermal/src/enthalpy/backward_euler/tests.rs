@@ -271,6 +271,49 @@ fn g0_events_cannot_be_skipped_or_silently_applied_to_other_physics() {
 }
 
 #[test]
+fn g0_resolvable_increment_is_zero_exactly_when_the_stored_coordinate_cannot_move() {
+    // 1.0 has spacing 2^-52 above and 2^-53 below: half a spacing ties back to 1.0 and the next float past it moves h.
+    let up_tie = f64::EPSILON / 2.0;
+    let down_tie = f64::EPSILON / 4.0;
+    let zero = 0.0_f64.to_bits();
+    for dead in [up_tie, up_tie / 2.0, 1e-30, f64::MIN_POSITIVE, -down_tie, -down_tie / 2.0, -1e-30, -0.0] {
+        assert_eq!(resolvable_increment_j(1.0, dead, 1.0).to_bits(), zero, "{dead:e}");
+    }
+    for live in [up_tie.next_up(), (-down_tie).next_down(), 1.0, -0.5, f64::EPSILON] {
+        assert_ne!(1.0 + live, 1.0, "{live:e}");
+        assert_eq!(resolvable_increment_j(1.0, live, 1.0).to_bits(), live.to_bits(), "{live:e}");
+    }
+    // The boundary scales with the cell mass: 2 kg halves the specific increment, so the joule threshold doubles.
+    assert_eq!(resolvable_increment_j(1.0, 2.0 * up_tie, 2.0).to_bits(), zero);
+    let live_2kg = 2.0 * up_tie.next_up();
+    assert_eq!(resolvable_increment_j(1.0, live_2kg, 2.0).to_bits(), live_2kg.to_bits());
+    // A nonfinite value is not a dead increment: it passes through for the owner's refusal.
+    assert!(resolvable_increment_j(1.0, f64::NAN, 1.0).is_nan());
+    assert_eq!(resolvable_increment_j(1.0, f64::INFINITY, 1.0), f64::INFINITY);
+    // Dry-contact fixture magnitudes (h about 5.9e3 J/kg, 3.1e-6 kg cells): a 1e-9 J difference step moves h, 1e-20 J cannot.
+    assert_eq!(resolvable_increment_j(5863.0, 1e-20, 3.12e-6).to_bits(), zero);
+    assert_eq!(resolvable_increment_j(5863.0, 1e-9, 3.12e-6).to_bits(), 1e-9_f64.to_bits());
+}
+
+#[test]
+fn g4_a_projected_iterate_evaluates_while_the_raw_subresolution_increment_is_still_refused() {
+    let old = simulation(&LATENT, vec![cell(1, 1.0, 40.0)], None, vec![]);
+    let step = BackwardEulerStep::new(&old, 0.5, || Ok(())).unwrap();
+    // The guard is unchanged: a nonzero increment that cannot move h is refused when passed to evaluate directly.
+    assert!(step.evaluate(&[1e-30], empty, || Ok(())).is_err());
+    // The projected iterate is the exactly representable zero and evaluates; a resolvable one is left bit for bit.
+    let projected = step.resolvable_increments_j(&[1e-30]);
+    assert_eq!(projected[0].to_bits(), 0.0_f64.to_bits());
+    assert!(step.evaluate(&projected, empty, || Ok(())).is_ok());
+    let live = step.resolvable_increments_j(&[0.25]);
+    assert_eq!(live[0].to_bits(), 0.25_f64.to_bits());
+    assert!(step.evaluate(&live, empty, || Ok(())).is_ok());
+    // Nonfinite and wrong-length vectors are not repaired: evaluate still refuses them.
+    assert!(step.evaluate(&step.resolvable_increments_j(&[f64::NAN]), empty, || Ok(())).is_err());
+    assert!(step.evaluate(&step.resolvable_increments_j(&[0.0, 1e-30]), empty, || Ok(())).is_err());
+}
+
+#[test]
 fn g4_invalid_trials_and_every_cancelled_evaluation_leave_the_old_history_untouched() {
     let old = simulation(&LATENT, vec![cell(1, 1.0, 40.0)], None, vec![]);
     let step = BackwardEulerStep::new(&old, 0.5, || Ok(())).unwrap();

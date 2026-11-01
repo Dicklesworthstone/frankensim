@@ -727,8 +727,12 @@ impl MultiFrictionModalSystem {
             if x.len() != unknown_count {
                 return Err(LayerThermalError::Invalid("incomplete cell and interface-temperature iterate"));
             }
+            // The generic Newton-Krylov solve proposes arbitrary cell-energy iterates, and a far-field component can fall
+            // below its cell's enthalpy resolution. Such a component is the exactly representable zero, as fs-thermal's
+            // implicit conduction driver proposes; the residual below still charges every joule, and `evaluate` still
+            // refuses a nonzero increment that cannot move the coordinate when one is passed to it directly.
             step.evaluate(
-                &x[..cell_count],
+                &step.resolvable_increments_j(&x[..cell_count]),
                 |endpoint| {
                     checkpoint()?;
                     if trials.get() >= controls.maximum_mechanical_trials {

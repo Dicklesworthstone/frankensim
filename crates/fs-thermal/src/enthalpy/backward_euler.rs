@@ -93,6 +93,26 @@ pub struct StepCoefficients<T> {
     pub payload: T,
 }
 
+/// The exactly representable form of a candidate cell energy increment [J].
+///
+/// A nonzero increment that cannot change the cell's stored specific enthalpy
+/// (`specific_h + increment / mass` rounds back to `specific_h`) is returned as
+/// exactly `0.0`; any other value, including a nonfinite one, is returned
+/// unchanged. This is the one owner of the predicate for Newton and line-search
+/// iterates whose far-field components fall below the enthalpy coordinate's
+/// resolution (`CONTRACT.md`, implicit conduction). It projects an ITERATE only:
+/// the residual still charges every joule of source and flux, and the refusal in
+/// [`BackwardEulerStep::evaluate`] of a nonzero increment that cannot move the
+/// coordinate is unchanged for any vector passed to it directly.
+#[must_use]
+pub fn resolvable_increment_j(specific_h_j_kg: f64, increment_j: f64, mass_kg: f64) -> f64 {
+    if specific_h_j_kg + increment_j / mass_kg == specific_h_j_kg {
+        0.0
+    } else {
+        increment_j
+    }
+}
+
 /// One frozen initial state and time interval for an externally solved residual.
 pub struct BackwardEulerStep<'s, 'm> {
     initial: &'s DepositionSimulation<'m>,
@@ -151,6 +171,26 @@ impl<'s, 'm> BackwardEulerStep<'s, 'm> {
     /// Stable ordering of energy-increment unknowns and residual components.
     pub fn cell_ids(&self) -> &[CellId] {
         &self.ids
+    }
+    /// A Newton or line-search iterate with every component that cannot change
+    /// its cell's stored enthalpy replaced by exactly `0.0`
+    /// ([`resolvable_increment_j`]), in `cell_ids()` order. A generic solver
+    /// that differentiates or line-searches over cell energies calls this on the
+    /// iterate before [`Self::evaluate`]. A vector of the wrong length is
+    /// returned unchanged so `evaluate` still refuses it.
+    #[must_use]
+    pub fn resolvable_increments_j(&self, energy_increments_j: &[f64]) -> Vec<f64> {
+        if energy_increments_j.len() != self.ids.len() {
+            return energy_increments_j.to_vec();
+        }
+        self.ids
+            .iter()
+            .zip(energy_increments_j)
+            .map(|(id, &joules)| {
+                let cell = &self.initial.cells[id];
+                resolvable_increment_j(cell.specific_h_j_kg, joules, cell.mass_kg)
+            })
+            .collect()
     }
     /// Actual physical duration, not an explicit CFL-limited approximation.
     pub const fn duration_s(&self) -> f64 {
