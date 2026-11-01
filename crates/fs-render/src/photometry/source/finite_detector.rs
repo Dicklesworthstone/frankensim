@@ -36,6 +36,9 @@ use fs_rand::philox::philox4x32_10;
 mod moments;
 use moments::Moments;
 
+/// Spatially resolved physical sensor measurements through native refraction.
+pub mod image;
+
 /// Explicit ceiling on complete spectral samples in one measurement.
 pub const MAX_FINITE_DETECTOR_SAMPLES: u32 = 1_048_576;
 
@@ -56,6 +59,9 @@ pub struct FiniteDetectorRequest {
 #[derive(Clone, Debug, PartialEq)]
 pub enum FiniteDetectorError {
     InvalidRequest,
+    InvalidPixel,
+    AllocationRefused,
+    Raster(crate::polarization::dielectric::scene::measurement::raster::RasterError),
     Sampling(SourceSamplingError),
     SourceFrame(BeamError),
     Transport {
@@ -92,6 +98,15 @@ impl From<MeterError> for FiniteDetectorError {
 impl From<SourceSamplingError> for FiniteDetectorError {
     fn from(error: SourceSamplingError) -> Self {
         Self::Sampling(error)
+    }
+}
+impl From<crate::polarization::dielectric::scene::measurement::raster::RasterError>
+    for FiniteDetectorError
+{
+    fn from(
+        error: crate::polarization::dielectric::scene::measurement::raster::RasterError,
+    ) -> Self {
+        Self::Raster(error)
     }
 }
 

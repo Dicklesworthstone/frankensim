@@ -18,7 +18,7 @@ use fs_blake3::hash_domain;
 use fs_exec::{CancelGate, ExecMode, StreamKey};
 use fs_geom::Point3;
 
-fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
+pub(super) fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     let gate = CancelGate::new();
     fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
         let cx = Cx::new(
@@ -37,7 +37,7 @@ fn with_cx(f: impl FnOnce(&Cx<'_>, &CancelGate)) {
     });
 }
 
-fn source(distribution: AngularDistribution) -> PhotometricSource {
+pub(super) fn source(distribution: AngularDistribution) -> PhotometricSource {
     PhotometricSource::try_new(
         RigidTransform::try_new([0.0, 0.0, 0.0, 1.0], [0.0, 0.0, -1.0]).unwrap(),
         1200.0,
@@ -48,7 +48,7 @@ fn source(distribution: AngularDistribution) -> PhotometricSource {
     .unwrap()
 }
 
-fn glass(index: f64, absorption: f64) -> DielectricGlass {
+pub(super) fn glass(index: f64, absorption: f64) -> DielectricGlass {
     DielectricGlass::new(
         CauchyIor::try_constant(index).unwrap(),
         BeerLambertAbsorption::try_constant(absorption).unwrap(),
@@ -56,7 +56,7 @@ fn glass(index: f64, absorption: f64) -> DielectricGlass {
     )
 }
 
-fn square(id: u64, z: f64, half_width: f64, positive: bool) -> GeometryInstance {
+pub(super) fn square(id: u64, z: f64, half_width: f64, positive: bool) -> GeometryInstance {
     let triangles = if positive {
         vec![[0, 1, 2], [0, 2, 3]]
     } else {
@@ -79,7 +79,7 @@ fn square(id: u64, z: f64, half_width: f64, positive: bool) -> GeometryInstance 
     .unwrap()
 }
 
-fn detector() -> SurfaceBinding {
+pub(super) fn detector() -> SurfaceBinding {
     SurfaceBinding {
         object_id: 9,
         interaction: Interaction::Detector {
@@ -88,7 +88,7 @@ fn detector() -> SurfaceBinding {
     }
 }
 
-fn request(samples: u32) -> FiniteDetectorRequest {
+pub(super) fn request(samples: u32) -> FiniteDetectorRequest {
     FiniteDetectorRequest {
         detector_object_id: 9,
         source_transverse_axis: Vec3::new(0.0, 1.0, 0.0),
@@ -114,7 +114,7 @@ fn request(samples: u32) -> FiniteDetectorRequest {
     }
 }
 
-fn close(actual: f64, expected: f64, tolerance: f64) {
+pub(super) fn close(actual: f64, expected: f64, tolerance: f64) {
     assert!(
         (actual - expected).abs() <= tolerance,
         "actual={actual:e}, expected={expected:e}, tolerance={tolerance:e}"
