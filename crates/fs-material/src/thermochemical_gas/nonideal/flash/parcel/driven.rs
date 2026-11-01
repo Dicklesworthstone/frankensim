@@ -49,6 +49,20 @@ pub struct DrivenMixtureEquilibriumStep {
     pub eos_evaluation_upper_bound: usize,
 }
 
+/// One accepted driven endpoint with an explicit thermal-reservoir entropy audit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct DrivenReservoirEquilibriumStep {
+    /// The underlying accepted energy/volume equilibrium and first-law ledger.
+    pub equilibrium: DrivenMixtureEquilibriumStep,
+    /// Reservoir entropy change, `-Q / T_reservoir` [J/K].
+    pub reservoir_entropy_change_j_k: f64,
+    /// System plus reservoir entropy change [J/K].
+    ///
+    /// Values slightly below zero may be admitted only within the caller's
+    /// explicit numerical tolerance and remain visible rather than being clipped.
+    pub entropy_production_j_k: f64,
+}
+
 /// Closed mixture inventory driven by externally accounted heat and boundary work.
 ///
 /// This is the general conserved-energy counterpart of the specialized isochoric
@@ -274,6 +288,68 @@ impl DrivenMixtureEquilibriumParcel {
         self.state = solved.into_state();
         self.volume_m3 = final_volume_m3;
         self.specific_volume_m3_kg = final_specific_volume;
+        Ok(report)
+    }
+
+    /// Apply one heat/work/volume change and require consistency with a single
+    /// held-temperature thermal reservoir.
+    ///
+    /// The first-law endpoint is solved on a private clone. The reservoir loses
+    /// the heat supplied to the mixture, so the combined entropy production is
+    /// `Delta S_system - Q/T_reservoir`. A candidate below the explicit
+    /// tolerance is refused before publishing either state or physical volume.
+    ///
+    /// This audits only the declared reservoir and the closed mixture. Mechanical
+    /// work carries no entropy in this model; friction, finite-temperature wall
+    /// gradients, multiple reservoirs and actuator dissipation need their own
+    /// entropy owners and must not be hidden in this check.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_with_reservoir(
+        &mut self,
+        final_volume_m3: f64,
+        heat_j: f64,
+        boundary_work_by_mixture_j: f64,
+        reservoir_temperature: Temperature,
+        entropy_tolerance_j_k: f64,
+        controls: PhaseEnergyVolumeControls,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<DrivenReservoirEquilibriumStep, E> {
+        poll(&mut cancelled)?;
+        let reservoir_temperature_k = reservoir_temperature.value();
+        if !positive(reservoir_temperature_k)
+            || !positive(entropy_tolerance_j_k)
+            || spacing(reservoir_temperature_k) >= reservoir_temperature_k
+        {
+            return Err(E::Invalid(
+                "positive representable reservoir temperature and entropy tolerance required",
+            ));
+        }
+        let mut candidate = self.clone();
+        let equilibrium = candidate.advance(
+            final_volume_m3,
+            heat_j,
+            boundary_work_by_mixture_j,
+            controls,
+            &mut cancelled,
+        )?;
+        let reservoir_entropy_change_j_k = -heat_j / reservoir_temperature_k;
+        let entropy_production_j_k =
+            equilibrium.entropy_change_j_k + reservoir_entropy_change_j_k;
+        if !reservoir_entropy_change_j_k.is_finite()
+            || !entropy_production_j_k.is_finite()
+            || entropy_production_j_k < -entropy_tolerance_j_k
+        {
+            return Err(E::Invalid(
+                "driven-mixture reservoir coupling violates the admitted entropy balance",
+            ));
+        }
+        let report = DrivenReservoirEquilibriumStep {
+            equilibrium,
+            reservoir_entropy_change_j_k,
+            entropy_production_j_k,
+        };
+        poll(&mut cancelled)?;
+        *self = candidate;
         Ok(report)
     }
 }

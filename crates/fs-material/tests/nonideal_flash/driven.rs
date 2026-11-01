@@ -160,3 +160,59 @@ fn g4_refusal_and_final_cancellation_leave_complete_state_unchanged() {
         .unwrap();
     assert_eq!(parcel, control);
 }
+
+
+#[test]
+fn g1_reservoir_audit_accepts_second_law_and_refuses_too_cold_source_atomically() {
+    let make = || {
+        DrivenMixtureEquilibriumParcel::from_pressure_temperature(
+            source(),
+            0.2,
+            Temperature::new(220.0),
+            Pressure::new(3e6),
+            controls().phase.phase_options(),
+            || false,
+        )
+        .unwrap()
+    };
+    let final_volume = 0.2 / 36.471_975_375_322_785;
+    let delta_u = 0.2 * 303_558.384_745_911_1;
+    let heat = 80_000.0;
+    let work = heat - delta_u;
+
+    let mut accepted = make();
+    let report = accepted
+        .advance_with_reservoir(
+            final_volume,
+            heat,
+            work,
+            Temperature::new(2_000.0),
+            1e-8,
+            controls(),
+            || false,
+        )
+        .unwrap();
+    close(accepted.state().temperature_k(), 280.0, 5e-7);
+    close(accepted.state().pressure_pa(), 3e6, 0.03);
+    close(report.reservoir_entropy_change_j_k, -40.0, 1e-12);
+    assert!(report.entropy_production_j_k >= -1e-8);
+    close(
+        report.entropy_production_j_k,
+        report.equilibrium.entropy_change_j_k - 40.0,
+        0.0,
+    );
+
+    let mut refused = make();
+    let before = refused.clone();
+    let err = refused.advance_with_reservoir(
+        final_volume,
+        heat,
+        work,
+        Temperature::new(200.0),
+        1e-8,
+        controls(),
+        || false,
+    );
+    assert!(err.is_err());
+    assert_eq!(refused, before);
+}
