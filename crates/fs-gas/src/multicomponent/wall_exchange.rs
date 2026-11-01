@@ -193,7 +193,7 @@ impl WallControl {
         }
         Ok(())
     }
-    fn tolerance(self, scale: f64) -> f64 {
+    pub(crate) fn tolerance(self, scale: f64) -> f64 {
         self.absolute_energy_tolerance_j + self.relative_energy_tolerance * scale
     }
 }
@@ -556,7 +556,7 @@ pub(crate) fn exchange_caloric(
 /// storage. A source without an exact tangent uses the same bounded bisection.
 /// State-dependent conductance need not be monotone; the accepted root still
 /// satisfies its original heat equation, without a uniqueness claim.
-fn solve_scalar(
+pub(crate) fn solve_scalar(
     mut lo: f64,
     mut hi: f64,
     initial: f64,

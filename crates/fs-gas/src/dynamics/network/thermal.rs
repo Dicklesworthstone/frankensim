@@ -16,6 +16,10 @@ mod branch;
 use branch::BranchBinding;
 pub use branch::BranchWallContact;
 
+mod shared;
+use shared::SharedWalls;
+pub use shared::{SharedWall, SharedWallControl, SharedWallGas, SharedWallPort, SharedWallReport};
+
 /// One compact volume's thermal boundary and optional original finite storage.
 /// Distinct contacts represent distinct physical wall masses. A shared wall
 /// requires its own thermal owner, rather than duplicating its stored energy.
@@ -63,6 +67,7 @@ pub struct NetworkWallOperator<'law> {
     contacts: Vec<WallContact>,
     candidate_contacts: Vec<WallContact>,
     heat_storage: Vec<Option<MaterialWallCaloric<'law>>>,
+    shared: Option<SharedWalls<'law>>,
     last_report: Option<NetworkWallReport>,
 }
 
@@ -95,6 +100,7 @@ impl<'law> NetworkWallOperator<'law> {
             contacts: allocated(count, empty)?,
             candidate_contacts: allocated(count, empty)?,
             heat_storage: allocated(count, None)?,
+            shared: None,
             last_report: None,
         };
         for (i, input) in contacts.into_iter().enumerate() {
@@ -205,6 +211,17 @@ impl<'law> NetworkWallOperator<'law> {
                 energy: source[1],
             };
         }
+        if let Some(shared) = &mut self.shared {
+            total.add(shared.prepare(
+                &self.gas,
+                branches,
+                candidates,
+                &mut self.branch_source_candidate,
+                duration,
+                controls,
+                cancelled,
+            )?)?;
+        }
         poll(cancelled)?;
         Ok(total.report(duration))
     }
@@ -271,6 +288,9 @@ impl<'law> NetworkWallOperator<'law> {
 
     pub(super) fn commit(&mut self, report: NetworkWallReport) {
         core::mem::swap(&mut self.contacts, &mut self.candidate_contacts);
+        if let Some(shared) = &mut self.shared {
+            shared.commit();
+        }
         self.last_report = Some(report);
     }
 }
@@ -425,5 +445,7 @@ impl WallGasCaloric for FrozenCaloric<'_> {
 
 #[cfg(test)]
 mod branch_tests;
+#[cfg(test)]
+mod shared_tests;
 #[cfg(test)]
 mod tests;

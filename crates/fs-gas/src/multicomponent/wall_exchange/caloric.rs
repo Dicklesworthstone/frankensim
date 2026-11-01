@@ -42,11 +42,11 @@ enum Storage<'law> {
     Energy(EnergyStorage<'law>),
 }
 
-struct StorageUpdate {
-    contact: WallContact,
-    temperature_k: f64,
-    energy_change_j: f64,
-    temperature_slope_k_per_j: Option<f64>,
+pub(crate) struct StorageUpdate {
+    pub(crate) contact: WallContact,
+    pub(crate) temperature_k: f64,
+    pub(crate) energy_change_j: f64,
+    pub(crate) temperature_slope_k_per_j: Option<f64>,
 }
 
 impl<'law> MaterialWallCaloric<'law> {
@@ -249,7 +249,7 @@ impl<'law> MaterialWallCaloric<'law> {
     }
 
     /// Signed heat into gas that reaches each end of the wall source domain.
-    fn heat_limits(
+    pub(crate) fn heat_limits(
         &self,
         contact: WallContact,
         gas_temperature: f64,
@@ -274,7 +274,11 @@ impl<'law> MaterialWallCaloric<'law> {
         }
     }
 
-    fn after(&self, contact: WallContact, heat: f64) -> Result<StorageUpdate, WallExchangeError> {
+    pub(crate) fn after(
+        &self,
+        contact: WallContact,
+        heat: f64,
+    ) -> Result<StorageUpdate, WallExchangeError> {
         match &self.storage {
             Storage::Energy(source) => source.after(contact, heat),
             #[cfg(feature = "material")]

@@ -2482,3 +2482,69 @@ This remains a frozen ideal-mixture passage/plenum model with explicit wall
 laws. It adds no gas phase change, resolved wall conduction, shared thermal
 wall network, moving-volume work, calibrated heat-transfer correlation,
 second-order splitting or entropy-stability certificate.
+
+## Shared finite walls across frozen gas networks
+
+With `experimental-euler`, `dynamics::network::NetworkWallOperator::with_shared_walls`
+binds one finite original solid inventory to several branch or plenum gas
+control volumes. A `SharedWall` owns that storage once; its `SharedWallPort`
+values identify the original gas cells and their complete nonnegative
+conductances in W/K. Sharing heat never mixes their mass or species. Local
+contacts must be adiabatic without competing finite storage, and a gas target
+may belong to only one shared group. Existing local linear/Darcy drag remains
+active and converts kinetic energy to internal energy before thermal exchange.
+The shared storage's own conductance is zero: every actual film belongs to its
+declared interface.
+
+Each group solves the simultaneous backward-Euler equations
+`Q_i = dt G_i (T_wall,new - T_gas,i,new)` and
+`Delta E_wall + sum(Q_i) = 0`. The unknown is an energy increment about the
+initial wall state, not a difference of large absolute energy totals. Every
+gas response reuses the original frozen-source caloric adapter and existing
+safeguarded reservoir solver. Original source capacity integrals or T(h/u)
+supply the wall storage and temperature, including latent plateaus; no fitted
+gas Cv, apparent latent capacity, or repeated copy of the physical wall mass
+is introduced. When original tangents exist, the scalar derivative uses the
+individual gas heat responses and wall tangent; otherwise the same safeguarded
+owner bisects. All interfaces retain the same solved endpoint wall state.
+Reprojecting that state after convergence would change stiff interface fluxes
+and is not performed.
+
+Acceptance checks the actual represented wall and gas storage changes and
+each original endpoint heat equation against the joule allowances. Large gas
+formation-energy gauges cancel through the existing sensible-energy owner.
+An original wall coordinate that cannot represent the required exchange must
+meet the same actual-storage residual; a small solver update alone is never
+acceptance. Original wall enthalpy retains its source's pressure-work convention
+and is not relabelled as rigid-vessel internal energy.
+
+The source uses the actual duration accepted by the transport retry.
+Per-branch signed heat is added to the existing branch residual, while the
+single wall inventory enters the global gas/wall and gravity-aware accounts
+once. Fixed gas mass and volume produce no extra gravitational work during
+heating. All branch/plenum fields, wall inventories, clocks and reports publish
+together after the final cancellation poll. Source-domain refusal, insufficient
+nested work, or cancellation preserves the preceding accepted history.
+Prepared gas-response arrays and compensated reductions are reused.
+
+`SharedWallControl` bounds the total original gas primitive/caloric and wall
+state queries across all groups, brackets and final checks in one source
+attempt; each original inversion retains its own bounds, and complete network
+retries retain their existing cap. `SharedWallReport` retains the accepted
+coupled storage residual, maximum individual wall and interface residuals,
+actual source-query count, outer iterations and interface-solve count.
+
+This is a fixed-geometry, spatially uniform common wall with explicitly
+authored conductances. Transport/source splitting remains first order.
+Initial wall temperatures must lie in the original gas caloric interval.
+Spatial wall gradients, moving geometry, multiple shared groups on one gas
+cell, inferred material conductivities and empirical heat-transfer qualification
+remain separate capabilities. The scalar solve does not establish a general
+discrete entropy theorem.
+
+Seven focused physical regressions cover an independent three-body
+backward-Euler solution with drag heating, nonlinear-Cv equilibration and stiff
+passive response, large independent gas energy datums, exact hydrostatic and
+thermal rest at a large common potential datum, one original latent inventory,
+heat-driven field motion, source/work/overlap refusal, and final cancellation
+with deterministic history replay.
