@@ -41,6 +41,9 @@ use std::io::{self, Write};
 /// Propagate declared scalar fixture-flux uncertainty through this same transport.
 pub mod flux;
 
+/// Numerically bounded single-scattered radiance with shared source/visibility owners.
+pub mod scattering;
+
 mod angular;
 pub use angular::MAX_ANGULAR_CELLS_PER_ENCLOSURE;
 mod spectral_medium;
