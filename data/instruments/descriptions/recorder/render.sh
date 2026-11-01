@@ -18,7 +18,11 @@
 # diameter sqrt(D (D - 0.3 mm)), the midpoint (u-condition), which gives a 6.650 mm window wall. Each open hole's chimney row carries
 # `inner LOCAL_BORE_RADIUS`, its inner length t_i = b (0.82 - 0.193 d - 1.09 d^2 + 1.27 d^3 - 0.71 d^4), d = b / a (Dubos et al. 1999 as
 # corrected by Dalmont et al. 2002, as Garcia Mayen et al., HAL hal-03230052, 2021, eq. 11 and Ernoult and Fabre 2017 eq. 17 give it), on the
-# local bore the chimney comes from: 1.70 to 2.03 mm. The holes' matching volume and series inertance are not represented.
+# local bore the chimney comes from: 1.70 to 2.03 mm. The words `matching series` after it add the same source's matching length
+# t_m = b d (1 + 0.207 d^3) / 8 (eq. 12; 0.119 to 0.161 mm) and series length t_a = -b d^2 / (1.78 tanh(1.84 t/b) + 0.94 + 0.540 d
+# + 0.285 d^2) (eq. 10; -0.113 to -0.170 mm, taken off the bore on each side of the hole, with -Z_a/4 on the chimney). These are open-hole
+# forms: the closed holes' matching volume and series length are not represented. On the R1 port the two move the passive first modes
+# by 0, -1.3, -2.1 and -2.6 cents (f1, a1, b-flat1, b1; comment 8373 and its result).
 # Hole 7 (5.25 mm, chimney (32.0 - 14.02) / 2 mm) opens 24 mm below the foot's upper end:
 # its position is not published, the dimensions row is DERIVED from the 16.0 mm tenon socket and the 32.0 mm bulb, with the bracket 18 to
 # 30 mm in unknowns.tsv (u-hole-7-position); it is open in a1, b-flat1 and b1 and closed in f1.
@@ -79,6 +83,9 @@
 # crescendos (a viscous windway jet slower than the minimum at a control tick is refused; the crescendo starts at 3 Pa for that reason); 8192
 # control ticks for the 7 s files; the pressure release lasts 10.5 ms because a release that ends exactly on a control tick can leave a
 # rounding-sized pressure that the jet domain check refuses.
+# Every loss_section count is the largest the clock admits, floor(L / (4 c dt)) with c dt = 1.1992 mm (the breath gas at 288 kHz), so
+# each can be re-derived from its section's length. Section 19 (33.6 mm) takes 7 with 0.07 % to spare; on the a1, b-flat1 and b1 cards
+# the open holes' series lengths shorten it to 33.481, 33.533 and 33.533 mm, and the same rule gives 6.
 #
 # SEED=<n> re-renders with another jet seed into $OUT/seed-<n> (seed-independence check).
 set -euo pipefail

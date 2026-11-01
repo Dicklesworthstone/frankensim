@@ -1174,11 +1174,14 @@ pub(super) fn flue_provenance(p: &FlueFilePerformance) -> String {
     };
     // Present only when a row adds one, so other cards' provenance is unchanged.
     let hole_inner_json = if p.hole_inner_lengths().is_empty() { String::new() } else {
-        format!(",\"hole_inner_lengths\":{{\"law\":\"t_i = b (0.82 - 0.193 d - 1.09 d^2 + 1.27 d^3 - 0.71 d^4), d = b/a: Dubos et al. 1999 as corrected by Dalmont et al. 2002, as given by Garcia Mayen et al. (HAL hal-03230052, 2021) eq. 11 and Ernoult and Fabre 2017 eq. 17\",\"reference_plane\":\"chimney measured on the hole axis from the main bore's wall; t_i added once to it\",\"not_added\":\"matching volume t_m, series length t_a, outer-end terms beyond the outlet load\",\"holes\":[{}]}}",
+        let opt = |v: Option<f64>| v.map_or_else(|| "null".to_string(), |v| format!("{v:e}"));
+        format!(",\"hole_inner_lengths\":{{\"law\":\"t_i = b (0.82 - 0.193 d - 1.09 d^2 + 1.27 d^3 - 0.71 d^4), d = b/a: Dubos et al. 1999 as corrected by Dalmont et al. 2002, as given by Garcia Mayen et al. (HAL hal-03230052, 2021) eq. 11 and Ernoult and Fabre 2017 eq. 17\",\"matching_law\":\"t_m = b d (1 + 0.207 d^3) / 8, Garcia Mayen et al. eq. 12, added to the chimney (row word matching)\",\"series_law\":\"t_a = -b d^2 / (1.78 tanh(1.84 t/b) + 0.94 + 0.540 d + 0.285 d^2), Garcia Mayen et al. eq. 10, t the chimney (row word series): Z_a/2 each side of the junction, each bore section there shortened by (|t_a|/2)(r_i/a)^2, and Z_h = Z_s - Z_a/4 as d^2 |t_a| / 4 of chimney; the shortened bore also loses S_a |t_a| of volume, which the source's series mass does not carry\",\"reference_plane\":\"chimney measured on the hole axis from the main bore's wall; t_i added once to it\",\"not_added\":\"any term on a closed hole (these are open-hole forms); t_m or t_a where the hole's entry is null; outer-end terms beyond the outlet load\",\"holes\":[{}]}}",
             p.hole_inner_lengths().iter().map(|h| format!(
-                "{{\"section\":{},\"hole_radius_m\":{:e},\"bore_radius_m\":{:e},\"chimney_m\":{:e},\"inner_length_m\":{:e},\"network_length_m\":{:e}}}",
+                "{{\"section\":{},\"hole_radius_m\":{:e},\"bore_radius_m\":{:e},\"chimney_m\":{:e},\"inner_length_m\":{:e},\"matching_length_m\":{},\"series_length_m\":{},\"series_bore\":{},\"network_length_m\":{:e}}}",
                 h.section, h.hole_radius_m, h.bore_radius_m, h.chimney_m, h.inner_length_m,
-                h.chimney_m + h.inner_length_m)).collect::<Vec<_>>().join(","))
+                opt(h.matching_length_m), opt(h.series_length_m),
+                h.series_bore.map_or_else(|| "null".to_string(), |[(i, a), (j, b)]| format!("[[{i},{a:e}],[{j},{b:e}]]")),
+                h.network_length_m)).collect::<Vec<_>>().join(","))
     };
     let (phase, details) = network.fractional_sections().expect("file selects fractional travel");
     let actual_length: f64 = details.iter().map(|s|s.realized_dc_length_m).sum();

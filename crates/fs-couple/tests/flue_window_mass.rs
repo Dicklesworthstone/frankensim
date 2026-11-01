@@ -8,6 +8,8 @@
 //! recorder cards' window at Ernoult and Fabre 2017's mass, moved from their
 //! edge plane to the card's junction, and their side holes' inner length:
 //! a measured tonehole run end to end through the card's own hole code.
+//! Then the open holes' matching volume and series length, and the same
+//! tonehole measured through the card's code by its source's tube-reversed method.
 
 use fs_bem::wall_window::{
     CoverSide, WallWindow, WallWindowOptions, WindowCheeks, WindowCover, WindowRamp,
@@ -649,7 +651,8 @@ fn inner_length_is_the_dubos_dalmont_law_on_open_side_holes_only() {
     assert_eq!(HoleInnerLength::law(0.0, 0.0073), None);
     assert_eq!(HoleInnerLength::law(0.008, 0.0073), None);
 
-    let base = recorder_a1();
+    // `inner` alone: the card's rows without their `matching series` words.
+    let base = recorder_a1().replace(" matching series", "");
     let file = parse(&base).unwrap();
     let holes = file.hole_inner_lengths();
     assert_eq!(holes.len(), 2, "a1 opens holes 6 and 7");
@@ -776,4 +779,239 @@ fn a_measured_tonehole_through_the_cards_hole_code() {
     assert!((with - 0.014098).abs() <= 0.05e-3, "prediction with inner: {with}");
     assert!((without - 0.011940).abs() <= 0.05e-3, "prediction without inner: {without}");
     assert!(without < 0.0129, "the planted negative: the origin hole code falls below the envelope");
+}
+
+/// Garcia Mayen et al. (HAL hal-03230052, 2021): the matching length t_m
+/// (eq. 12) and the series length t_a (eq. 10) of an open hole, added by the
+/// words `matching` and `series` after `inner`, on the a1 card's two open holes.
+#[test]
+fn matching_and_series_are_garcia_mayen_eqs_12_and_10_on_open_holes() {
+    // Their tonehole (b 4, a 7.3, t 8.5 mm): "the matching length correction is tm = 0.3 mm".
+    let t_m = HoleInnerLength::matching_law(0.004, 0.0073).unwrap();
+    assert!((t_m - 0.0003).abs() < 0.05e-3, "{t_m}");
+    // An independent evaluation (scratchpad tmta_predict.py, posted in comment 8373).
+    for (value, expected) in [
+        (t_m, 2.833_027_581e-4),
+        (HoleInnerLength::series_law(0.004, 0.0073, 0.0085).unwrap(), -3.874_077_049e-4),
+        (HoleInnerLength::matching_law(0.002675, 0.0075740).unwrap(), 1.191_721_669e-4),
+        (HoleInnerLength::series_law(0.002675, 0.0075740, 0.0049260).unwrap(), -1.134_087_121e-4),
+        (HoleInnerLength::matching_law(0.002625, 0.0070111).unwrap(), 1.241_867_624e-4),
+        (HoleInnerLength::series_law(0.002625, 0.0070111, 0.0089889).unwrap(), -1.242_261_817e-4),
+    ] {
+        assert!((value / expected - 1.0).abs() < 1e-8, "{value} vs {expected}");
+    }
+    assert_eq!(HoleInnerLength::matching_law(0.008, 0.0073), None);
+    assert_eq!(HoleInnerLength::series_law(0.004, 0.0073, 0.0), None);
+
+    let base = recorder_a1();
+    let bare = parse(&base.replace(" matching series", "")).unwrap();
+    let file = parse(&base).unwrap();
+    let card = &bare.renderer().voice().network().expect("graph").source().graph;
+    let graph = &file.renderer().voice().network().expect("graph").source().graph;
+    let holes = file.hole_inner_lengths();
+    assert_eq!(holes.len(), 2, "a1 opens holes 6 and 7");
+    let mut bore_lengths: Vec<f64> = card.sections.iter().map(|s| s.length_m).collect();
+    for (hole, (section, bore)) in holes.iter().zip([(18, [17, 19]), (20, [19, 21])]) {
+        let (b, a, t) = (hole.hole_radius_m, hole.bore_radius_m, hole.chimney_m);
+        let t_m = HoleInnerLength::matching_law(b, a).unwrap();
+        let t_a = HoleInnerLength::series_law(b, a, t).unwrap();
+        assert_eq!(hole.section, section);
+        assert_eq!(hole.inner_length_m.to_bits(), HoleInnerLength::law(b, a).unwrap().to_bits());
+        assert_eq!(hole.matching_length_m.map(f64::to_bits), Some(t_m.to_bits()));
+        assert_eq!(hole.series_length_m.map(f64::to_bits), Some(t_a.to_bits()));
+        let d = b / a;
+        let chimney = t + hole.inner_length_m + t_m + d * d * -t_a / 4.0;
+        assert_eq!(hole.network_length_m.to_bits(), chimney.to_bits());
+        assert_eq!(graph.sections[section].length_m.to_bits(), chimney.to_bits(),
+            "t_i, t_m and the shunt's -Z_a/4 are each added once, to the chimney");
+        for ((j, share), want) in hole.series_bore.expect("series").into_iter().zip(bore) {
+            let ratio = card.sections[j].radius_m / a;
+            assert_eq!(j, want);
+            assert_eq!(share.to_bits(), (-t_a / 2.0 * ratio * ratio).to_bits());
+            bore_lengths[j] -= share;
+        }
+    }
+    for (j, (section, row)) in graph.sections.iter().zip(&card.sections).enumerate() {
+        let want = if [18, 20].contains(&j) { section.length_m } else { bore_lengths[j] };
+        assert_eq!(section.length_m.to_bits(), want.to_bits(),
+            "Z_a/2 on each side: only the bore at each hole is shortened, by its share, once per hole (section {j}, row {})",
+            row.length_m);
+    }
+
+    let row = "duct_section 18 19 0.0049260 0.0026750 1e-10 inner 0.0075740 matching series";
+    assert!(base.contains(row));
+    let refused_for = |text: &str, why: &str| {
+        matches!(parse(text), Err(FlueInputError::Input { what, .. }) if what.contains(why))
+    };
+    // The words follow the radius, in their order, and only on an `inner` row.
+    assert!(parse(&base.replace(row, &row.replace("matching series", "series matching"))).is_err());
+    assert!(parse(&base.replace(row, &row.replace("inner 0.0075740 ", ""))).is_err());
+    // A bore section at the hole must stay longer than its share of t_a.
+    assert!(refused_for(&base.replace("duct_section 16 18 0.0293000 0.0078525 1e-10",
+        "duct_section 16 18 0.0000500 0.0078525 1e-10"), "longer than its share"));
+    // One gas on the hole and its two bore sections.
+    assert!(refused_for(&base.replace("duct_section 16 18 0.0293000 0.0078525 1e-10",
+        "duct_section 16 18 0.0293000 0.0078525 1e-10 gas 298.15 101325 0"),
+        "one gas"));
+    // Section 19's loss cells are the largest count the clock admits: 7 fits the row's 33.6 mm
+    // (quarters 0.07 % over one transit sample), not the 33.481 mm left after both holes' t_a shares.
+    assert!(base.contains("loss_section 19 6 200 3000"));
+    assert!(parse(&base.replace("loss_section 19 6 200 3000", "loss_section 19 7 200 3000")).is_err());
+    assert!(parse(&base.replace(" matching series", "").replace("loss_section 19 6 200 3000",
+        "loss_section 19 7 200 3000")).is_ok());
+    // `matching` alone adds t_m only.
+    let only = parse(&base.replace(" matching series", " matching")).unwrap();
+    let hole = only.hole_inner_lengths()[0];
+    assert_eq!((hole.series_length_m, hole.series_bore), (None, None));
+    assert_eq!(hole.network_length_m.to_bits(),
+        (hole.chimney_m + hole.inner_length_m + hole.matching_length_m.unwrap()).to_bits());
+}
+
+type Complex = (f64, f64);
+
+fn c_sub(a: Complex, b: Complex) -> Complex { (a.0 - b.0, a.1 - b.1) }
+
+fn c_mul(a: Complex, b: Complex) -> Complex { (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0) }
+
+fn c_div(a: Complex, b: Complex) -> Complex {
+    let d = b.0 * b.0 + b.1 * b.1;
+    ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+}
+
+fn c_sqrt(z: Complex) -> Complex {
+    let m = fs_math::det::sqrt(z.0 * z.0 + z.1 * z.1);
+    let re = fs_math::det::sqrt(0.5 * (m + z.0));
+    let im = fs_math::det::sqrt(0.5 * (m - z.0));
+    (re, if z.1 < 0.0 { -im } else { im })
+}
+
+/// The inlet impedance of Garcia Mayen et al.'s tube through the card's own
+/// code: a line l1, their hole (b 4 mm, t 8.5 mm, the card's compact baffled
+/// outlet) with the duct row's `words`, and a line l2 to a rigid end, all on
+/// a = 7.3 mm. Impulse-driven at the inlet; Z_in = P/U by DTFT at each
+/// frequency. Returns Z_in and (density, sound speed) of the main tube and hole.
+fn tonehole_input_impedance(words: &str, l1: f64, l2: f64, frequencies: &[f64])
+    -> (Vec<Complex>, (f64, f64), (f64, f64))
+{
+    let mut text = String::new();
+    for line in recorder_a1().lines() {
+        if line.starts_with("duct_node") || line.starts_with("duct_section")
+            || line.starts_with("loss_section") || line.starts_with("outlet ")
+            || line.starts_with("mouth_radiation") || line.starts_with("mouth_reaction")
+            || line.starts_with("window ")
+        {
+            continue;
+        }
+        let line = match line {
+            "network 25 24" => format!("network 4 3\nduct_node inlet\nduct_node junction\nduct_node reflection -1\nduct_node reflection 1\nduct_section 0 1 {l1} 0.0073 1e-10\nduct_section 1 2 0.0085 0.004 1e-10 {words}\nduct_section 1 3 {l2} 0.0073 1e-10"),
+            "viscothermal sections 13" => "viscothermal none".to_string(),
+            "outlets 24 2" => "outlets 2 0".to_string(),
+            other => other.to_string(),
+        };
+        text.push_str(&line);
+        text.push('\n');
+    }
+    let file = parse(&text).unwrap();
+    let network = file.renderer().voice().network().expect("graph");
+    let gases = network.section_gases().to_vec();
+    let (policy, _) = network.fractional_sections().expect("fractional travel");
+    let dt = 1.0 / f64::from(file.info().mechanics_rate_hz);
+    let (mut wave, _, _) = network
+        .graph()
+        .clone()
+        .realize_fractional_waveguide(&gases, dt, policy, &CancelGate::new_clock_free())
+        .unwrap();
+    let n = 1 << 16;
+    let (mut p, mut u) = (Vec::with_capacity(n), Vec::with_capacity(n));
+    for i in 0..n {
+        let frame = wave.step(if i == 0 { 1.0 } else { 0.0 }).unwrap();
+        p.push(frame.inlet_pressure_pa);
+        u.push(frame.inlet_flow_m3_s);
+    }
+    let peak = p.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let tail = p[n - 4096..].iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    assert!(tail < 1e-9 * peak, "the response must have died away: {tail} of {peak}");
+    let dtft = |x: &[f64], omega: f64| {
+        x.iter().enumerate().fold((0.0, 0.0), |(re, im), (i, v)| {
+            let phase = omega * i as f64;
+            (re + v * fs_math::det::cos(phase), im - v * fs_math::det::sin(phase))
+        })
+    };
+    let z = frequencies.iter().map(|&f| {
+        let omega = core::f64::consts::TAU * f * dt;
+        c_div(dtft(&p, omega), dtft(&u, omega))
+    }).collect();
+    (z, (gases[0].density, gases[0].sound_speed), (gases[1].density, gases[1].sound_speed))
+}
+
+/// Their measured tonehole (a 7.3, b 4, t 8.5 mm; L1 44, L2 74 mm) through the
+/// card's own hole code, by their tube-reversed method (eqs. 15-26): the same
+/// tube in both orientations, rigid far end; Z1 and Z2 projected with the
+/// nominal lossless lines (eqs. 17-19), Z_h from eq. 25 (the passive root),
+/// Z_a from eq. 24, Z_s = Z_h + Z_a / 4 (eq. 26); t_s = Im(Z_s) / (k Z_ch)
+/// and t_a = Im(Z_a) / (k Z_c), averaged over 400-600 Hz. Unlike one
+/// orientation, this sees the series term. Pass rule and prediction, posted
+/// before the run (comment 8373): `inner matching series` inside their
+/// measured 12.9-14.4 mm; it reads t_s 14.364 and t_a -0.387 mm (the law),
+/// each within 0.05 mm; matching minus origin +0.288 and series minus origin
+/// -0.021 mm on t_s, within 0.05 mm; the planted negative, the origin `inner`
+/// row, reads t_a within 0.05 mm of zero (so misses the law by 0.387 mm) and
+/// t_s 14.098 within 0.05 mm.
+#[test]
+fn the_measured_tonehole_by_their_tube_reversed_method() {
+    let (l1, l2) = (0.044, 0.074);
+    let frequencies: Vec<f64> = (0..=20).map(|i| 400.0 + 10.0 * f64::from(i)).collect();
+    let measure = |words: &str| -> (f64, f64) {
+        let (forward, main, hole) = tonehole_input_impedance(words, l1, l2, &frequencies);
+        let (reverse, _, _) = tonehole_input_impedance(words, l2, l1, &frequencies);
+        let zc = main.0 * main.1 / (core::f64::consts::PI * 0.0073 * 0.0073);
+        let zch = hole.0 * hole.1 / (core::f64::consts::PI * 0.004 * 0.004);
+        let (mut ts, mut ta) = (0.0, 0.0);
+        for ((&f, &z_in), &z_rev) in frequencies.iter().zip(&forward).zip(&reverse) {
+            let omega = core::f64::consts::TAU * f;
+            let k = omega / main.1;
+            // Eq. 19: Z1 = (A Z_in - B) / (-C Z_in + A) for a lossless line of length l.
+            let project = |z: Complex, l: f64| {
+                let (a, s) = (fs_math::det::cos(k * l), fs_math::det::sin(k * l));
+                c_div(c_sub(c_mul((a, 0.0), z), (0.0, zc * s)), c_sub((a, 0.0), c_mul((0.0, s / zc), z)))
+            };
+            let rigid = |l: f64| (0.0, -zc / fs_math::det::tan(k * l));
+            let (z1, z1p) = (project(z_in, l1), project(z_rev, l2));
+            let (z2, z2p) = (rigid(l2), rigid(l1));
+            // Eq. 23.
+            let a = c_sub(c_sub(z1p, z1), c_sub(z2p, z2));
+            let b = c_mul((2.0, 0.0), c_sub(c_mul(z1p, z2p), c_mul(z1, z2)));
+            let c = c_sub(c_mul(c_mul(z2p, z2), c_sub(z1p, z1)), c_mul(c_mul(z1p, z1), c_sub(z2p, z2)));
+            // Eq. 25, the root with a positive real part; eq. 24; eq. 26.
+            let b_2a = c_div(b, c_mul((2.0, 0.0), a));
+            let mut zh = c_sqrt(c_sub(c_mul(b_2a, b_2a), c_div(c, a)));
+            if zh.0 < 0.0 { zh = (-zh.0, -zh.1); }
+            let za = c_sub(c_mul((-1.0, 0.0), c_div(b, a)), c_mul((2.0, 0.0), zh));
+            let zs = (zh.0 + za.0 / 4.0, zh.1 + za.1 / 4.0);
+            ts += zs.1 / (omega / hole.1 * zch);
+            ta += za.1 / (k * zc);
+        }
+        let n = frequencies.len() as f64;
+        (ts / n, ta / n)
+    };
+    let origin = measure("inner 0.0073");
+    let matching = measure("inner 0.0073 matching");
+    let series = measure("inner 0.0073 series");
+    let full = measure("inner 0.0073 matching series");
+    let law = HoleInnerLength::series_law(0.004, 0.0073, 0.0085).unwrap();
+    for (name, (ts, ta)) in [("inner", origin), ("inner matching", matching), ("inner series", series),
+        ("inner matching series", full)]
+    {
+        eprintln!("tube-reversed, 400-600 Hz: {name:22} t_s {:.4} mm, t_a {:+.4} mm", ts * 1e3, ta * 1e3);
+    }
+    eprintln!("t_a law {:+.4} mm; matching - origin {:+.4} mm; series - origin {:+.4} mm",
+        law * 1e3, (matching.0 - origin.0) * 1e3, (series.0 - origin.0) * 1e3);
+    assert!((0.0129..=0.0144).contains(&full.0), "inside the measured envelope: {}", full.0);
+    assert!((full.0 - 0.014_364).abs() <= 0.05e-3, "prediction: {}", full.0);
+    assert!((full.1 - law).abs() <= 0.05e-3, "the series term is the law: {} vs {law}", full.1);
+    assert!(((matching.0 - origin.0) - 0.000_288).abs() <= 0.05e-3, "t_m counted once");
+    assert!(((series.0 - origin.0) + 0.000_021).abs() <= 0.05e-3, "series alone on t_s");
+    assert!(origin.1.abs() <= 0.05e-3, "the origin hole has no series term: {}", origin.1);
+    assert!((origin.1 - law).abs() > 0.05e-3, "the planted negative misses the series law");
+    assert!((origin.0 - 0.014_098).abs() <= 0.05e-3, "the origin row by this method: {}", origin.0);
 }

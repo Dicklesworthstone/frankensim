@@ -47,9 +47,9 @@ duct_section 14 15 0.0045260 0.0029000 1e-10
 duct_section 14 16 0.0318000 0.0082542 1e-10
 duct_section 16 17 0.0046850 0.0032000 1e-10
 duct_section 16 18 0.0293000 0.0078525 1e-10
-duct_section 18 19 0.0049260 0.0026750 1e-10 inner 0.0075740
+duct_section 18 19 0.0049260 0.0026750 1e-10 inner 0.0075740 matching series
 duct_section 18 20 0.0336000 0.0072673 1e-10
-duct_section 20 21 0.0089889 0.0026250 1e-10 inner 0.0070111
+duct_section 20 21 0.0089889 0.0026250 1e-10 inner 0.0070111 matching series
 duct_section 20 22 0.0287667 0.0066784 1e-10
 duct_section 22 23 0.0287667 0.0062393 1e-10
 duct_section 23 24 0.0287667 0.0062090 1e-10
@@ -71,7 +71,7 @@ loss_section 11 7 200 3000
 loss_section 13 8 200 3000
 loss_section 15 6 200 3000
 loss_section 17 6 200 3000
-loss_section 19 7 200 3000
+loss_section 19 6 200 3000
 loss_section 21 5 200 3000
 loss_section 22 5 200 3000
 loss_section 23 5 200 3000
