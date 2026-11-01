@@ -29,8 +29,11 @@
 #             production row is 0.1 90; the window is 180 here because this jet crosses 37 b to the labium against about 9 on the
 #             whistle. NUMERICS=1 also renders the forced short card at spacing 0.05 and 0.2 (window 180) and window 90 and 360
 #             (spacing 0.1) into $OUT/numerics. Spacing 0.2 moves the 4.68 kHz line 0.8 cents. The window does NOT converge on this
-#             pipe: at 90, 180 and 360 the dominant line is 6.37, 4.68 and 7.44 kHz. So the forced arm's sounding mode is not a
-#             result, only that it is a high one (status.json).
+#             pipe: at 90 and 180 the dominant line is 6.37 and 4.68 kHz. The 360 row (7.44 kHz) is outside fs-aeroac's stated range
+#             (CONTRACT.md invariant 14: windows at or below about 150 b/U0; beyond about 200 round-off grows until every station
+#             blows up), so it is no evidence. The card's own 180 is above 150 too; a run of the card's integration measured the
+#             round-off mode inside its window at under 1e-7 of the response at the window's end (pexfp.381 comments 8416-8417).
+#             So the forced arm's sounding mode is not a result, only that it is a high one (status.json).
 #
 # Numerical controls forced by the generic route (none is a physical parameter, none was tuned): mechanics clock 720 kHz, because the mouth
 # channel (the 0.5 mm wall) must span one transit sample (at least 686 kHz); jet history 262144 samples (65536 is refused at 720 kHz for a
