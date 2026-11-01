@@ -524,6 +524,36 @@ pub struct PronyState {
     pub dissipated: f64,
 }
 
+/// Differential response of the SAME scalar Maxwell spring used by
+/// [`prony_ramp`]. The surrounding dynamics integrator owns time integration.
+///
+/// For spring strain `q`, total strain rate `rate` and positive relaxation
+/// time `tau`, returns `(dq/dt, heat_rate / modulus) = (rate-q/tau, q²/tau)`.
+/// Multiplication by the original modulus and volume/section integral gives
+/// physical power. This does not approximate a measured loss factor by a
+/// dashpot or change the exact-ramp constitutive history.
+///
+/// # Errors
+/// Refuses nonfinite data, nonpositive time and unrepresentable rate or loss.
+pub fn prony_rate(q: f64, rate: f64, tau: f64) -> Result<(f64, f64), ViscoError> {
+    if !q.is_finite() || !rate.is_finite() || !tau.is_finite() || tau <= 0.0 {
+        return Err(ViscoError::Parameters {
+            what: "Maxwell differential response needs finite strain/rate and positive time",
+        });
+    }
+    let relaxation = q / tau;
+    let derivative = rate - relaxation;
+    let heat = q * relaxation;
+    if !derivative.is_finite() || !heat.is_finite() || heat < 0.0
+        || q != 0.0 && heat == 0.0
+    {
+        return Err(ViscoError::Parameters {
+            what: "Maxwell differential rate or physical power is unrepresentable",
+        });
+    }
+    Ok((derivative, heat))
+}
+
 /// Exact scalar Maxwell response to a prescribed linear strain ramp.
 ///
 /// `q0` is the initial elastic branch strain, `delta` the total strain
@@ -1460,6 +1490,22 @@ impl ThermoelasticZener {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maxwell_differential_power_closes_the_original_ramp_law() {
+        for (q, rate, tau) in [(0.3, -0.2, 0.7), (-0.3, 0.2, 0.7), (0.0, 2.0, 3.0)] {
+            let (derivative, heat) = prony_rate(q, rate, tau).unwrap();
+            assert!(heat >= 0.0);
+            assert!((q * derivative + heat - q * rate).abs() < 1e-15);
+            let dt = 1e-7;
+            let (next, _, loss) = prony_ramp(q, rate * dt, dt / tau);
+            assert!(((next - q) / dt - derivative).abs() < 1e-7);
+            assert!((loss / dt - heat).abs() < 1e-7);
+        }
+        assert!(prony_rate(0.1, 0.2, 0.0).is_err());
+        assert!(prony_rate(f64::NAN, 0.2, 1.0).is_err());
+        assert!(prony_rate(1e300, 0.0, 1e-300).is_err());
+    }
 
     fn lcg(seed: &mut u64) -> f64 {
         *seed = seed

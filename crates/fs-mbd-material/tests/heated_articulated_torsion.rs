@@ -1,6 +1,8 @@
 //! G1/G3/G4: original shaft materials drive motion, layer heat and thermal feedback.
 #[path = "heating/common.rs"]
 mod common;
+#[path = "heated_articulated_torsion/relaxation.rs"]
+mod relaxation;
 use common::{budget, region};
 use fs_evidence::ValidityDomain;
 use fs_ga::{Mat3, Se3, Vec3};
@@ -221,7 +223,14 @@ fn shaft_at_temperature<'a>(
     cards: &[&'a MaterialCard],
     temperature_k: f64,
 ) -> TorsionalJointShaft<'a> {
-    let requirements = [
+    shaft_with_requirements(cards, temperature_k, &[])
+}
+fn shaft_with_requirements<'a>(
+    cards: &[&'a MaterialCard],
+    temperature_k: f64,
+    extra: &[ScalarPropertyRequirement],
+) -> TorsionalJointShaft<'a> {
+    let mut requirements = [
         (
             DENSITY_PROPERTY,
             Density::DIMS,
@@ -240,7 +249,8 @@ fn shaft_at_temperature<'a>(
         (G, Pressure::DIMS, ScalarAdmissibility::StrictlyPositive),
         (ETA, DynViscosity::DIMS, ScalarAdmissibility::NonNegative),
     ]
-    .map(|(name, dims, range)| ScalarPropertyRequirement::try_new(name, dims, range).unwrap());
+    .map(|(name, dims, range)| ScalarPropertyRequirement::try_new(name, dims, range).unwrap()).to_vec();
+    requirements.extend_from_slice(extra);
     let layers = cards
         .iter()
         .enumerate()

@@ -49,6 +49,7 @@ mod member;
 /// Original material torsion, Kelvin–Voigt shear loss and finite-layer heat.
 pub mod torsion;
 use torsion::{BoundTorsion, TorsionalJointShaft, TorsionalShaftState};
+use torsion::ShaftRelaxation;
 
 /// Component tolerances follow the actual generalized-coordinate ordering.
 #[derive(Clone, Debug, PartialEq)]
@@ -317,6 +318,26 @@ impl<'a> HeatedArticulatedMotion<'a> {
     /// Shaft source bands must cover the declared complete transient bandwidth.
     pub fn with_torsional_joint_shafts(
         &self, shafts: Vec<TorsionalJointShaft<'a>>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        self.attach_torsional_joint_shafts(shafts.into_iter().map(|shaft| (shaft, None)).collect(), checkpoint)
+    }
+
+    /// Attach the original per-layer Maxwell spectra and explicit spring memory
+    /// to these same shaft coordinates. Memory rates and physical arm losses
+    /// participate in every native RK stage; each arm heats its own finite cell.
+    /// Thermal source refresh preserves spring twist, with storage changes
+    /// charged to the existing parameter-work account. No relaxation history is
+    /// reset between advances. At most 128 arms total share the attempt budget.
+    pub fn with_relaxing_torsional_joint_shafts(
+        &self, shafts: Vec<(TorsionalJointShaft<'a>, ShaftRelaxation)>,
+        checkpoint: impl FnMut() -> Result<(), DepositionError>,
+    ) -> Result<Self, Error> {
+        self.attach_torsional_joint_shafts(shafts.into_iter().map(|(shaft, memory)| (shaft, Some(memory))).collect(), checkpoint)
+    }
+
+    fn attach_torsional_joint_shafts(
+        &self, shafts: Vec<(TorsionalJointShaft<'a>, Option<ShaftRelaxation>)>,
         mut checkpoint: impl FnMut() -> Result<(), DepositionError>,
     ) -> Result<Self, Error> {
         checkpoint()?;
@@ -327,15 +348,25 @@ impl<'a> HeatedArticulatedMotion<'a> {
         }
         let mut candidate = self.clone();
         let mut inventory = BTreeSet::new();
-        for shaft in shafts {
+        let mut arms = 0;
+        for (shaft, relaxation) in shafts {
             checkpoint()?;
             if shaft.cells.len() != shaft.law.reference().layers().len()
                 || shaft.cells.iter().any(|cell| !inventory.insert(*cell)) {
                 return Err(Error::Invalid("one finite layer inventory per torsional shaft required"));
             }
-            candidate.motion.torsion.push(BoundTorsion::new(shaft, self.configuration(),
+            let mut bound = BoundTorsion::new(shaft, self.configuration(),
                 &self.motion.expansion.regions, &self.thermal, &self.motion.position,
-                &self.motion.velocity, &mut checkpoint)?);
+                &self.motion.velocity, &mut checkpoint)?;
+            if let Some(relaxation) = relaxation {
+                bound.install_relaxation(relaxation, self.motion.position[bound.dof],
+                    self.motion.velocity[bound.dof], &mut checkpoint)?;
+            }
+            arms += bound.spring_twists().len();
+            if arms > fs_material::section::relaxation::MAX_SECTION_RELAXATION_BRANCHES {
+                return Err(Error::Budget("at most 128 Maxwell arms across the articulated shafts"));
+            }
+            candidate.motion.torsion.push(bound);
         }
         candidate.motion.energy()?;
         checkpoint()?;
@@ -690,6 +721,7 @@ struct IntegratedMotion {
     friction: f64,
     dry_steps: Vec<DissipationStep>,
     squeeze_losses: Vec<f64>,
+    shaft_memories: Vec<Vec<f64>>,
     heat_w: BTreeMap<CellId, f64>,
     numerical: f64,
     attempts: usize,
@@ -704,6 +736,7 @@ impl Motion<'_> {
             self.gravity,
             &self.axial,
             &self.torsion,
+            None,
         )
     }
     fn integrate(
@@ -749,6 +782,15 @@ impl Motion<'_> {
             .map(|(&u, &scale)| u / scale)
             .collect();
         normalized.resize(scales.len(), 0.0);
+        let mut memory_offsets = Vec::with_capacity(self.torsion.len());
+        for shaft in &self.torsion {
+            memory_offsets.push(scales.len());
+            let twists = shaft.spring_twists();
+            scales.extend(std::iter::repeat_n(shaft.spring_tolerance(), twists.len()));
+            scales.extend(std::iter::repeat_n(shaft.definition.absolute_loss_tolerance_j, twists.len()));
+            normalized.extend(twists.iter().map(|&twist| twist / shaft.spring_tolerance()));
+            normalized.resize(scales.len(), 0.0);
+        }
         let mut state = AdaptiveState::new(start_s, &normalized, dt_s);
         let external = vec![Wrench::default(); model.link_count()];
         let source_error = RefCell::new(None);
@@ -780,10 +822,20 @@ impl Motion<'_> {
                     out[index] = response.dissipated_power_w / scales[index];
                 }
                 for (j, shaft) in self.torsion.iter().enumerate() {
-                    let (torque, power, _) = shaft.response(physical[shaft.dof], physical[n + shaft.dof])?;
+                    let count = shaft.spring_twists().len();
+                    let start = memory_offsets[j];
+                    let twists = &physical[start..start + count];
+                    let rate = physical[n + shaft.dof];
+                    let (mut torque, power, _) = shaft.kelvin_response(physical[shaft.dof], rate)?;
+                    if count != 0 { torque = finite(torque + shaft.memory_response(twists)?.0)?; }
                     effort[shaft.dof] = finite(effort[shaft.dof] + torque)?;
                     let index = 2 * n + self.bearings.len() + self.brakes.len() + self.squeeze.len() + j;
                     out[index] = power / scales[index];
+                    for (arm, &twist) in twists.iter().enumerate() {
+                        let (derivative, heat) = shaft.memory_rate(arm, twist, rate)?;
+                        out[start + arm] = derivative / scales[start + arm];
+                        out[start + count + arm] = heat / scales[start + count + arm];
+                    }
                 }
                 let response = forward_dynamics(
                     model,
@@ -835,7 +887,9 @@ impl Motion<'_> {
         let physical: Vec<_> = state.u.iter().zip(&scales).map(|(&x, &s)| x * s).collect();
         let position = physical[..n].to_vec();
         let velocity = physical[n..2 * n].to_vec();
-        let after_motion = energy(model, self.base, &position, &velocity, self.gravity, &self.axial, &self.torsion)?;
+        let shaft_memories: Vec<Vec<f64>> = self.torsion.iter().zip(&memory_offsets)
+            .map(|(shaft, &start)| physical[start..start + shaft.spring_twists().len()].to_vec()).collect();
+        let after_motion = energy(model, self.base, &position, &velocity, self.gravity, &self.axial, &self.torsion, Some(&shaft_memories))?;
         let applied = finite(
             self.effort
                 .iter()
@@ -893,10 +947,13 @@ impl Motion<'_> {
             squeeze_losses.push(loss);
         }
         let shaft_start = 2 * n + self.bearings.len() + self.brakes.len() + self.squeeze.len();
-        for (shaft, &loss) in self.torsion.iter().zip(&physical[shaft_start..]) {
-            shaft.response(position[shaft.dof], velocity[shaft.dof])?;
+        for (j, (shaft, &loss)) in self.torsion.iter().zip(&physical[shaft_start..]).enumerate() {
+            shaft.response_at_memory(position[shaft.dof], velocity[shaft.dof], &shaft_memories[j])?;
             shaft.deposit_loss(loss, dt_s, &mut heat_w)?;
             viscous = finite(viscous + loss)?;
+            let count = shaft.spring_twists().len();
+            let start = memory_offsets[j] + count;
+            viscous = finite(viscous + shaft.deposit_memory_losses(&physical[start..start + count], dt_s, &mut heat_w)?)?;
         }
         let numerical = finite(after_motion.change_from(before)? - applied + viscous + friction)?;
         checkpoint()?;
@@ -910,6 +967,7 @@ impl Motion<'_> {
             friction,
             dry_steps,
             squeeze_losses,
+            shaft_memories,
             heat_w,
             numerical,
             attempts: report.attempts,
@@ -987,6 +1045,7 @@ impl DepositionObserver for Motion<'_> {
             friction,
             dry_steps,
             squeeze_losses,
+            shaft_memories,
             numerical,
             attempts,
             ..
@@ -1020,10 +1079,11 @@ impl DepositionObserver for Motion<'_> {
             checkpoint()?;
             member.refresh(thermal, &self.expansion.configuration, &position, checkpoint)?;
         }
-        for shaft in &mut self.torsion {
+        for (shaft, memory) in self.torsion.iter_mut().zip(shaft_memories) {
+            shaft.accept_spring_twists(memory)?;
             shaft.refresh(thermal, &position, &next_velocity, checkpoint)?;
         }
-        let after = energy(model, self.base, &position, &next_velocity, self.gravity, &self.axial, &self.torsion)?;
+        let after = energy(model, self.base, &position, &next_velocity, self.gravity, &self.axial, &self.torsion, None)?;
         let parameter = after.change_from(after_motion)?;
         for bearing in &mut self.bearings {
             checkpoint()?;
@@ -1071,6 +1131,7 @@ fn energy(
     gravity: Vec3,
     axial: &[BoundAxial<'_>],
     torsion: &[BoundTorsion<'_>],
+    shaft_memories: Option<&[Vec<f64>]>,
 ) -> Result<MechanicalEnergy, Error> {
     let kinematics = forward_kinematics(model, base, q, velocity)?;
     let mut kinetic = 0.0;
@@ -1092,8 +1153,9 @@ fn energy(
     for member in axial {
         elastic = finite(elastic + member.response(q[member.dof])?.1)?;
     }
-    for shaft in torsion {
-        elastic = finite(elastic + shaft.response(q[shaft.dof], velocity[shaft.dof])?.2)?;
+    for (i, shaft) in torsion.iter().enumerate() {
+        let twists = shaft_memories.map_or_else(|| shaft.spring_twists(), |memories| memories[i].as_slice());
+        elastic = finite(elastic + shaft.response_at_memory(q[shaft.dof], velocity[shaft.dof], twists)?.2)?;
     }
     Ok(MechanicalEnergy {
         kinetic_j: kinetic,

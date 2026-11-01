@@ -284,6 +284,55 @@ gravitational work and transactional source/cancellation/work-budget refusal.
 These synthetic analytical cases establish implementation behavior, not measured
 material validity or an accuracy claim for rapid thermal actuation.
 
+## Original Maxwell memory in heated articulated shafts (MR03/MR21)
+
+`HeatedArticulatedMotion::with_relaxing_torsional_joint_shafts` consumes the
+original `ConcentricTorsionalSection::with_prony_torsion` source binding. Each
+layer keeps its own equilibrium shear modulus, modulus increments, relaxation
+times and finite heat cell. A source spectrum is never replaced by a fitted
+single dashpot or an averaged time constant. Explicit Kelvin shear viscosity
+continues as a separately sourced parallel loss mechanism.
+
+Each original Maxwell spring contributes a persistent elastic twist z. With
+`k_j = delta_G_j J_i/L`, the SAME native ABA/RK45 stages integrate
+`dz/dt = omega-z/tau_j`, add torque `-k_j z`, retain energy `k_j z²/2`, and
+integrate physical heat `k_j z²/tau_j`. The scalar differential law comes from
+`fs_material::visco::prony_rate`, beside that owner's original exact-ramp law.
+There is one time integrator and one mechanical energy account. Every arm's
+integrated heat is deposited into its own original finite material cell, once,
+alongside the original Kelvin/journal/brake/squeeze transfers. Neither a
+mechanical energy defect nor a coefficient-change work term becomes heat.
+
+Initial spring twists are explicit; relaxed and instantaneously strained
+specimens have different histories even at the same current shaft angle.
+Accepted twists survive continuation and cloning. At a thermal endpoint,
+source-pinned moduli and times are resolved at the actual layer temperatures;
+the same twist is retained. Its storage jump joins the existing signed
+parameter-work account and absolute work budget. Every equilibrium/arm source
+must cover the complete original-to-current temperature path and the declared
+DC-to-maximum frequency band. Small-shear bounds apply to both total shaft
+twist and each original layer spring. There are at most 128 arms across the
+mechanism, with explicit twist and loss accuracy scales sharing the original
+RK attempt budget. The additional constitutive arithmetic allocates nothing
+and queries no sources inside mechanical stages.
+
+This is a frozen-coefficient thermal split on fixed reference shaft geometry.
+Refinement remains necessary; this does not claim unconditional numerical
+stability, reciprocal thermoelastic heating, finite-strain plasticity,
+time-temperature superposition, distributed torsional modes, or a spectrum
+that was absent from the original source data. An explicit empty spectrum
+retains the original Kelvin shaft path and numerical state exactly. Failed
+source admission, strain/work limits, integrator exhaustion or cancellation
+publish neither thermal nor mechanical history.
+
+G1/G3/G4 source regressions use an independent three-exponential solution of
+the coupled oscillator, analytical integrals of both Kelvin and Maxwell heat,
+unequal per-layer coefficients and heat capacities, material substitutions,
+continuation, finite heating of the original spectrum, explicit history
+restart, empty-spectrum parity and late cancellation/domain refusal. Native
+compilation and execution remain unverified in this delivery environment;
+formatter parsing and analytical review do not establish those results.
+
 ## Material-driven torsional shafts on heated articulated motion (MR21)
 
 `articulated_motion::torsion::TorsionalJointShaft` binds the original concentric

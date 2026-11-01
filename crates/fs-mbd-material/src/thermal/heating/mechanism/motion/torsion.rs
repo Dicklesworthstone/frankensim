@@ -17,6 +17,10 @@ use fs_mbd::articulated::JointKind;
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::collections::BTreeMap;
 
+/// Source-resolved Maxwell memory on these same shaft coordinates.
+pub mod relaxation;
+pub use relaxation::{ShaftRelaxation, ShaftRelaxationState};
+
 /// Lumped circular shaft compliance/loss on one actual revolute coordinate.
 /// Its layer masses already belong to the original child/parent rigid links.
 /// Axial/hoop stress, noncircular warping, slip and distributed torsional waves
@@ -54,6 +58,9 @@ pub struct TorsionalShaftState {
     pub generalized_torque_nm: f64,
     pub elastic_energy_j: f64,
     pub dissipated_power_w: f64,
+    /// Each original Maxwell spring's persistent elastic twist, when attached.
+    /// Torque, power and elastic energy above include these arms.
+    pub relaxation: Option<ShaftRelaxationState>,
 }
 
 #[derive(Clone)]
@@ -62,6 +69,7 @@ pub(super) struct BoundTorsion<'a> {
     pub dof: usize,
     pub state: TorsionalShaftState,
     inventory: MemberInventory<'a>,
+    relaxation: Option<ShaftRelaxation>,
 }
 impl<'a> BoundTorsion<'a> {
     pub fn new(
@@ -109,12 +117,14 @@ impl<'a> BoundTorsion<'a> {
             generalized_torque_nm: 0.0,
             elastic_energy_j: 0.0,
             dissipated_power_w: 0.0,
+            relaxation: None,
         };
         let mut result = Self {
             dof: inventory.dof,
             definition,
             state,
             inventory,
+            relaxation: None,
         };
         result.update(position[result.dof], velocity[result.dof])?;
         checkpoint()?;
@@ -123,6 +133,19 @@ impl<'a> BoundTorsion<'a> {
 
     /// Allocation-free effort, physical dissipation and the same potential.
     pub fn response(&self, q: f64, rate: f64) -> Result<(f64, f64, f64), Error> {
+        self.response_at_memory(q, rate, self.spring_twists())
+    }
+
+    pub fn response_at_memory(&self, q: f64, rate: f64, memory: &[f64]) -> Result<(f64, f64, f64), Error> {
+        let (torque, power, energy) = self.kelvin_response(q, rate)?;
+        if memory.is_empty() && self.spring_twists().is_empty() {
+            return Ok((torque, power, energy));
+        }
+        let (memory_torque, memory_power, memory_energy) = self.memory_response(memory)?;
+        Ok((finite(torque + memory_torque)?, finite(power + memory_power)?, finite(energy + memory_energy)?))
+    }
+
+    pub fn kelvin_response(&self, q: f64, rate: f64) -> Result<(f64, f64, f64), Error> {
         let twist = finite(q - self.definition.reference_joint_angle_rad)?;
         let curvature = finite(twist / self.definition.reference_length_m)?;
         let shear = finite(self.state.section.shear().elastic().outer_radius_m() * curvature)?;
@@ -193,12 +216,17 @@ impl<'a> BoundTorsion<'a> {
     ) -> Result<(), Error> {
         let phases = self.inventory.phases(thermal, checkpoint)?;
         let section = resolve(&self.definition, &self.inventory, &phases, checkpoint)?;
+        let relaxation = match &self.relaxation {
+            Some(definition) => Some(self.resolve_relaxation(definition, &section, self.spring_twists(), checkpoint)?),
+            None => None,
+        };
         self.state.stiffness_nm_rad =
             finite(section.stiffness_n_m2() / self.definition.reference_length_m)?;
         self.state.viscous_resistance_nm_s =
             finite(section.viscous_stiffness_n_m2_s() / self.definition.reference_length_m)?;
         self.state.phases = phases;
         self.state.section = section;
+        self.state.relaxation = relaxation;
         self.update(position[self.dof], velocity[self.dof])?;
         checkpoint()?;
         Ok(())
