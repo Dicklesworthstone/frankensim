@@ -1,6 +1,6 @@
 //! Bounded single-scattered haze radiance along an explicit camera segment.
 //!
-//! For q(t)=camera+t*(end-camera), integrate, in cd/m²,
+//! In a homogeneous gray medium, for q(t)=camera+t*(end-camera), integrate, in cd/m²,
 //! sigma_s * |end-camera| * sum_i I_i(q-source_i) p(mu_i)
 //! * exp(-sigma_t*(|q-source_i|+t*|end-camera|)) / |q-source_i|² dt.
 //! Both directions in mu describe photon propagation, as in the original phase
@@ -14,8 +14,11 @@
 //! Occluded camera intervals contribute zero; no nominal first-hit distance is
 //! promoted into an exact boundary. Refine the largest radiance uncertainty.
 //!
-//! This is the single-scattering term of the original homogeneous gray model,
-//! not a total image or a replacement path tracer. Native nominal calculations
+//! Homogeneous gray media retain their original scalar arithmetic. Physical
+//! grids integrate each cell's rho*kappa_s*phase over the whole panel using
+//! native interval column traversal, then apply both spectral transmission
+//! legs before the retained observer sum. No density/phase midpoint can miss
+//! a thin layer. This is single scattering, not a total image or replacement tracer. Native nominal calculations
 //! are untouched. Higher scattering orders, surface terms, thermal emission,
 //! finite-source optics, calibration, spectral/field/model discrepancy and the
 //! physical effect of endpoint exclusions remain unbounded. The transport
@@ -34,9 +37,11 @@ use fs_ivl::decay::exp_neg;
 use std::{cmp::Ordering, collections::BinaryHeap, io::{self, Write}};
 
 mod phase;
+mod grid;
+use grid::GridScattering;
 
 /// Version of the target integral, phase enclosure, visibility and output scope.
-pub const SCATTER_ENCLOSURE_SEMANTICS_VERSION: u32 = 1;
+pub const SCATTER_ENCLOSURE_SEMANTICS_VERSION: u32 = 2;
 /// Hard ceiling on source-panel evaluations and retained frontier entries.
 pub const MAX_SCATTER_ENCLOSURE_PANELS: usize = 262_144;
 
@@ -86,8 +91,10 @@ pub enum ScatterEnclosureError {
     Budget,
     /// Allocation of bounded frontier/output storage failed.
     Allocation,
-    /// Physical-grid media need a separate heterogeneous in-scattering enclosure.
+    /// The legacy homogeneous-only entry point cannot admit a physical grid.
     HomogeneousOnly,
+    /// Original grid traversal, optical domain, phase or storage refusal.
+    PhysicalMedium(crate::volumes::transport::VolumeTransportError),
     /// The phase law is not a wavelength-independent admitted native law.
     UnsupportedPhase,
     /// Separation from a point-source singularity was not proved for the whole ray.
@@ -110,6 +117,14 @@ impl core::fmt::Display for ScatterEnclosureError {
 impl std::error::Error for ScatterEnclosureError {}
 impl From<PhotometryError> for ScatterEnclosureError {
     fn from(e: PhotometryError) -> Self { Self::Transport(e) }
+}
+impl From<crate::volumes::transport::VolumeTransportError> for ScatterEnclosureError {
+    fn from(error: crate::volumes::transport::VolumeTransportError) -> Self {
+        match error {
+            crate::volumes::transport::VolumeTransportError::Cancelled => Self::Transport(PhotometryError::Cancelled),
+            other => Self::PhysicalMedium(other),
+        }
+    }
 }
 impl From<fs_exec::Cancelled> for ScatterEnclosureError {
     fn from(_: fs_exec::Cancelled) -> Self { Self::Transport(PhotometryError::Cancelled) }
@@ -143,8 +158,11 @@ pub struct EnclosedSingleScatter {
     pub evaluations: usize,
     /// Final possibly nonzero panels with unresolved camera or light visibility.
     pub uncertain_visibility_panels: usize,
-    /// Original source/geometry/gray coefficients/phase, endpoints and semantics.
+    /// Original sources, geometry, medium and phase inputs, endpoints and semantics.
     pub numerical_model_identity: ContentHash,
+    /// Original physical-grid snapshot, or None for the homogeneous gray model.
+    /// A grid's thermal/phase metadata may be retained even when irrelevant to a lane.
+    pub medium_identity: Option<ContentHash>,
     /// Higher scattering orders remain unknown, not zero.
     pub omitted_multiple_scattering_bound_cd_m2: Option<f64>,
     /// Calibration, construction, geometry/model discrepancy and total error unknown.
@@ -153,7 +171,7 @@ pub struct EnclosedSingleScatter {
 impl EnclosedSingleScatter {
     /// Separate component-scoped CSV, not a certificate for a full image.
     pub fn write_csv_header(writer: &mut impl Write) -> io::Result<()> {
-        writer.write_all(b"index,scope,luminance_cd_m2,numerical_lower_cd_m2,numerical_upper_cd_m2,numerical_error_bound_cd_m2,requested_error_cd_m2,termination,evaluations,uncertain_visibility_panels,numerical_model_identity,omitted_multiple_scattering_bound_cd_m2,total_physical_error_bound_cd_m2,version\n")
+        writer.write_all(b"index,scope,luminance_cd_m2,numerical_lower_cd_m2,numerical_upper_cd_m2,numerical_error_bound_cd_m2,requested_error_cd_m2,termination,evaluations,uncertain_visibility_panels,numerical_model_identity,omitted_multiple_scattering_bound_cd_m2,total_physical_error_bound_cd_m2,medium_identity,version\n")
     }
     /// Stream round-trip values with explicit unknown omitted and physical errors.
     pub fn write_csv_row(self, index: usize, writer: &mut impl Write) -> io::Result<()> {
@@ -162,50 +180,106 @@ impl EnclosedSingleScatter {
             ScatterEnclosureTermination::PanelBudget => "panel-budget",
             ScatterEnclosureTermination::ResolutionLimit => "resolution-limit",
         };
-        writeln!(writer, "{index},homogeneous-gray-single-scatter,{},{},{},{},{},{status},{},{},{},unknown,unknown,{SCATTER_ENCLOSURE_SEMANTICS_VERSION}",
+        let scope = if self.medium_identity.is_some() { "physical-grid-spectral-single-scatter" } else { "homogeneous-gray-single-scatter" };
+        write!(writer, "{index},{scope},{},{},{},{},{},{status},{},{},{},unknown,unknown,",
             self.luminance_cd_m2, self.numerical.lo, self.numerical.hi,
             self.numerical_error_bound_cd_m2, self.requested_error_cd_m2,
-            self.evaluations, self.uncertain_visibility_panels, self.numerical_model_identity)
+            self.evaluations, self.uncertain_visibility_panels, self.numerical_model_identity)?;
+        match self.medium_identity {
+            Some(identity) => write!(writer, "{identity}")?,
+            None => writer.write_all(b"not-applicable")?,
+        }
+        writeln!(writer, ",{SCATTER_ENCLOSURE_SEMANTICS_VERSION}")
     }
 }
 
 /// Prepared native source and visibility metadata, shared by all camera segments.
 /// No geometry, source table, spectrum or phase table is independently reconstructed.
-pub struct HomogeneousScatterReference<'a, 'scene> {
+pub struct SingleScatterReference<'a, 'scene> {
     scene: &'a PhotometricScene<'scene>,
     visibility: VisibilityIndex,
-    extinction: Interval,
-    scattering: f64,
-    phase: &'a PhaseFunction,
+    medium: ScatteringMedium<'a, 'scene>,
     identity: ContentHash,
 }
+
+enum ScatteringMedium<'a, 'scene> {
+    Gray { extinction: Interval, scattering: f64, phase: &'a PhaseFunction },
+    Grid(GridScattering<'scene>),
+}
+impl ScatteringMedium<'_, '_> {
+    fn active(&self) -> bool {
+        match self { Self::Gray { scattering, .. } => *scattering > 0.0, Self::Grid(g) => g.active() }
+    }
+    fn identity(&self) -> Option<ContentHash> {
+        match self { Self::Gray { .. } => None, Self::Grid(g) => Some(g.identity()) }
+    }
+}
+
+/// Backward-compatible homogeneous-only entry point. The numerical engine is
+/// shared with SingleScatterReference; this constructor still refuses grids.
+pub struct HomogeneousScatterReference<'a, 'scene>(SingleScatterReference<'a, 'scene>);
 impl<'a, 'scene> HomogeneousScatterReference<'a, 'scene> {
-    /// Admit the existing gray medium and supported opaque geometry/source laws.
+    /// Retain the historical homogeneous-only admission contract.
     pub fn new(scene: &'a PhotometricScene<'scene>, cx: &Cx<'_>) -> Result<Self, ScatterEnclosureError> {
         cx.checkpoint()?;
-        let medium = scene.medium.homogeneous().ok_or(ScatterEnclosureError::HomogeneousOnly)?;
-        let phase = medium.phase_ref();
-        if matches!(phase, PhaseFunction::SpectralTable(_) | PhaseFunction::SpectralMixture(_)) {
-            return Err(ScatterEnclosureError::UnsupportedPhase);
-        }
+        if scene.medium.homogeneous().is_none() { return Err(ScatterEnclosureError::HomogeneousOnly); }
+        SingleScatterReference::new(scene, cx).map(Self)
+    }
+}
+impl<'a, 'scene> core::ops::Deref for HomogeneousScatterReference<'a, 'scene> {
+    type Target = SingleScatterReference<'a, 'scene>;
+    fn deref(&self) -> &Self::Target { &self.0 }
+}
+
+impl<'a, 'scene> SingleScatterReference<'a, 'scene> {
+    /// Prepare original fixtures, opaque geometry and homogeneous or physical-grid
+    /// media once. Grids retain independently indexed optical and spectral phase
+    /// laws; source spectra stay inside the wavelength integral. This does not
+    /// include thermal light, surface terms, finite emitters or higher orders.
+    pub fn new(scene: &'a PhotometricScene<'scene>, cx: &Cx<'_>) -> Result<Self, ScatterEnclosureError> {
+        Self::with_grid_budget(scene, crate::volumes::transport::enclosure::GridEnclosureBudget::default(), cx)
+    }
+
+    /// Declare optional grid traversal work before any rays can be evaluated.
+    /// Original per-segment cell limits also remain binding. Exhaustion refuses
+    /// the current receiver rather than returning a partial spectral sum.
+    pub fn with_grid_budget(scene: &'a PhotometricScene<'scene>, grid_budget: crate::volumes::transport::enclosure::GridEnclosureBudget,
+        cx: &Cx<'_>) -> Result<Self, ScatterEnclosureError> {
+        cx.checkpoint()?;
+        if grid_budget.max_nodes_per_segment == 0 { return Err(ScatterEnclosureError::Budget); }
         for primitive in scene.primitives {
             cx.checkpoint()?;
             if matches!(primitive.material, crate::tracer::Material::Dielectric { .. }) {
                 return Err(ScatterEnclosureError::Unavailable(EnclosureUnavailable::GeometryVisibility));
             }
         }
-        let (identity, visibility) = match prepare(scene, cx)? {
-            Prepared::Available { identity, visibility, .. } => (identity, visibility),
+        let (identity, visibility, prepared_medium) = match prepare(scene, cx)? {
+            Prepared::Available { identity, visibility, medium } => (identity, visibility, medium),
             Prepared::Unavailable(reason) => return Err(ScatterEnclosureError::Unavailable(reason)),
         };
-        let mut hash = DomainHasher::new("org.frankensim.photometry.single-scatter.v1");
+        let mut hash = DomainHasher::new("org.frankensim.photometry.single-scatter.v2");
         hash.update(&SCATTER_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
+        hash.update(&crate::volumes::transport::enclosure::PHASE_ENCLOSURE_SEMANTICS_VERSION.to_le_bytes());
         hash.update(&identity.0);
-        phase.hash_into(&mut hash);
+        let medium = match prepared_medium {
+            super::spectral_medium::PreparedMedium::Gray { .. } => {
+                let medium = scene.medium.homogeneous().ok_or(ScatterEnclosureError::HomogeneousOnly)?;
+                let phase = medium.phase_ref();
+                if matches!(phase, PhaseFunction::SpectralTable(_) | PhaseFunction::SpectralMixture(_)) {
+                    return Err(ScatterEnclosureError::UnsupportedPhase);
+                }
+                phase.hash_into(&mut hash);
+                ScatteringMedium::Gray {
+                    extinction: add(point(medium.absorption_per_m()), point(medium.scattering_per_m())),
+                    scattering: medium.scattering_per_m(), phase,
+                }
+            }
+            super::spectral_medium::PreparedMedium::Grid { packet, .. } => {
+                ScatteringMedium::Grid(GridScattering::new(scene, packet, grid_budget, cx)?)
+            }
+        };
         cx.checkpoint()?;
-        Ok(Self { scene, visibility,
-            extinction: add(point(medium.absorption_per_m()), point(medium.scattering_per_m())),
-            scattering: medium.scattering_per_m(), phase, identity: hash.finalize() })
+        Ok(Self { scene, visibility, medium, identity: hash.finalize() })
     }
 
     /// Enclose one camera segment. Jobs amortize frontier allocation across rays.
@@ -236,7 +310,7 @@ impl<'a, 'scene> HomogeneousScatterReference<'a, 'scene> {
             cx.checkpoint()?;
             let mut panel = Panel { source, lo: 0.0, hi: 1.0, minimum_distance: 0.0,
                 depth: 0, order: evaluations, range: zero(), uncertain: false };
-            if self.scattering > 0.0 && fixture.flux_lm() > 0.0 {
+            if self.medium.active() && fixture.flux_lm() > 0.0 {
                 let offset = difference(coordinates(fixture.position_m()), camera);
                 // Convex squared distance has its minimum at the clamped
                 // projection. Enclose that projection, not a sampled near miss.
@@ -299,7 +373,8 @@ impl<'a, 'scene> HomogeneousScatterReference<'a, 'scene> {
             numerical: NumericalCertificate::enclosure(enclosed.lo(), enclosed.hi()),
             numerical_error_bound_cd_m2: error, requested_error_cd_m2: budget.absolute_error_cd_m2,
             termination, evaluations, uncertain_visibility_panels: uncertain,
-            numerical_model_identity: hash.finalize(), omitted_multiple_scattering_bound_cd_m2: None,
+            numerical_model_identity: hash.finalize(), medium_identity: self.medium.identity(),
+            omitted_multiple_scattering_bound_cd_m2: None,
             total_error_bound_cd_m2: None })
     }
 
@@ -333,26 +408,36 @@ impl<'a, 'scene> HomogeneousScatterReference<'a, 'scene> {
         let cosine = dot(towards_unit, ray.delta.map(|v| v / ray.length));
         if !finite(cosine) { return Err(ScatterEnclosureError::NumericalRange); }
         let mu = Interval::new(cosine.lo().clamp(-1.0, 1.0), cosine.hi().clamp(-1.0, 1.0));
-        let phase = phase::enclose(self.phase, mu, cx)?;
-        // The sum of both leg lengths is convex along the camera segment:
-        // its maximum is at a panel endpoint. Triangle inequality supplies an
-        // independent lower bound, including the exact collinear path limit.
-        let offset = difference(origin, ray.camera);
-        let straight = norm(offset).ok_or(ScatterEnclosureError::NumericalRange)?;
-        let mut upper = 0.0_f64;
-        for endpoint in [panel.lo, panel.hi] {
-            let radius = norm(difference(offset, ray.delta.map(|v| v * point(endpoint))))
-                .ok_or(ScatterEnclosureError::NumericalRange)?;
-            upper = upper.max(add(radius, mul(point(endpoint), ray.length)).hi());
-        }
-        let path = add(radius, mul(t, ray.length));
-        let lower = path.lo().max(straight.lo());
-        let upper = path.hi().min(upper);
-        if lower > upper { return Err(ScatterEnclosureError::NumericalRange); }
-        let transmission = exp_neg(mul(self.extinction, Interval::new(lower, upper)))
-            .ok_or(ScatterEnclosureError::NumericalRange)?;
-        let value = mul(mul(mul(nonnegative(intensity / radius / radius), transmission), phase),
-            mul(mul(point(self.scattering), ray.length), nonnegative(point(panel.hi)-point(panel.lo))));
+        let value = match &self.medium {
+            ScatteringMedium::Gray { extinction, scattering, phase } => {
+                let phase = phase::enclose(phase, mu, cx)?;
+                // The sum of both leg lengths is convex along the camera segment:
+                // its maximum is at a panel endpoint. Triangle inequality supplies an
+                // independent lower bound, including the exact collinear path limit.
+                let offset = difference(origin, ray.camera);
+                let straight = norm(offset).ok_or(ScatterEnclosureError::NumericalRange)?;
+                let mut upper = 0.0_f64;
+                for endpoint in [panel.lo, panel.hi] {
+                    let radius = norm(difference(offset, ray.delta.map(|v| v * point(endpoint))))
+                        .ok_or(ScatterEnclosureError::NumericalRange)?;
+                    upper = upper.max(add(radius, mul(point(endpoint), ray.length)).hi());
+                }
+                let path = add(radius, mul(t, ray.length));
+                let lower = path.lo().max(straight.lo());
+                let upper = path.hi().min(upper);
+                if lower > upper { return Err(ScatterEnclosureError::NumericalRange); }
+                let transmission = exp_neg(mul(*extinction, Interval::new(lower, upper)))
+                    .ok_or(ScatterEnclosureError::NumericalRange)?;
+                mul(mul(mul(nonnegative(intensity / radius / radius), transmission), phase),
+                    mul(mul(point(*scattering), ray.length), nonnegative(point(panel.hi)-point(panel.lo))))
+            }
+            ScatteringMedium::Grid(grid) => {
+                let start = std::array::from_fn(|i| ray.camera[i] + ray.delta[i] * point(panel.lo));
+                let end = std::array::from_fn(|i| ray.camera[i] + ray.delta[i] * point(panel.hi));
+                let response = grid.response(cx, panel.source, origin, ray.camera, start, end, position, mu)?;
+                mul(nonnegative(intensity / radius / radius), response)
+            }
+        };
         if !finite(value) { return Err(ScatterEnclosureError::NumericalRange); }
         panel.uncertain = value.hi() > 0.0 && (camera_state == Visibility::Uncertain || light_state == Visibility::Uncertain);
         panel.range = if panel.uncertain { Interval::new(0.0, value.hi()) } else { value };
@@ -397,13 +482,13 @@ impl Workspace {
 /// are reused. A failed/cancelled segment is unpublished and can be retried;
 /// completed segments remain bit-identical under different advance partitions.
 pub struct ScatterEnclosureJob<'a, 'scene, 'field> {
-    reference: &'a HomogeneousScatterReference<'scene, 'field>,
+    reference: &'a SingleScatterReference<'scene, 'field>,
     segments: &'a [ScatterSegment], budget: ScatterEnclosureBudget,
     workspace: Workspace, values: Vec<EnclosedSingleScatter>,
 }
 impl<'a, 'scene, 'field> ScatterEnclosureJob<'a, 'scene, 'field> {
     /// Borrow finite camera segments without copying geometry or phase data.
-    pub fn new(reference: &'a HomogeneousScatterReference<'scene, 'field>, segments: &'a [ScatterSegment],
+    pub fn new(reference: &'a SingleScatterReference<'scene, 'field>, segments: &'a [ScatterSegment],
         budget: ScatterEnclosureBudget, cx: &Cx<'_>) -> Result<Self, ScatterEnclosureError> {
         cx.checkpoint()?;
         if segments.len() > reference.scene.options.max_outputs { return Err(ScatterEnclosureError::Budget); }
@@ -453,3 +538,6 @@ fn midpoint_error(range: Interval) -> (f64, f64) {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod grid_tests;

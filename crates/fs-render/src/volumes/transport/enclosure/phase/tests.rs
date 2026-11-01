@@ -39,7 +39,7 @@ fn cross_section_weighted_mixtures_are_not_equal_weight_phase_averages() {
             ScatteringMixtureComponent{mass_weight:0.25,scattering:MassScatteringSpectrum::constant(0.5).unwrap(),phase:PhaseFunction::Isotropic},
             ScatteringMixtureComponent{mass_weight:0.75,scattering:MassScatteringSpectrum::rayleigh(400.0,2.0).unwrap(),phase:PhaseFunction::Rayleigh},
         ];
-        let phase=PhaseFunction::SpectralMixture(SpectralPhaseMixture::try_new(cx,&components,OpticalMixtureBudget::default()).unwrap());
+        let phase=PhaseFunction::SpectralMixture(SpectralPhaseMixture::try_new(cx,&components,OpticalMixtureBudget { max_components: 2 }).unwrap());
         for lambda in [400.0,550.0,700.0] {
             for mu in [-1.0,0.0,0.5,1.0] {
                 let r=400.0/lambda;let a=0.125;let b=1.5*r*r*r*r;
@@ -49,7 +49,7 @@ fn cross_section_weighted_mixtures_are_not_equal_weight_phase_averages() {
             }
         }
         let zeros=[ScatteringMixtureComponent{mass_weight:0.0,..components[0].clone()}];
-        let empty=PhaseFunction::SpectralMixture(SpectralPhaseMixture::try_new(cx,&zeros,OpticalMixtureBudget::default()).unwrap());
+        let empty=PhaseFunction::SpectralMixture(SpectralPhaseMixture::try_new(cx,&zeros,OpticalMixtureBudget { max_components: 2 }).unwrap());
         assert_eq!(empty.enclosure_at(cx,500.0,Interval::point(1.0)).unwrap(),
             PhaseFunction::Isotropic.enclosure_cosine(cx,Interval::point(1.0)).unwrap());
     });

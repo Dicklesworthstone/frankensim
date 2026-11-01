@@ -216,7 +216,7 @@ fn csv_keeps_component_bounds_separate_from_unbounded_multiple_scattering() {
         let result=HomogeneousScatterReference::new(&scene,cx).unwrap().enclose(cx,segment(),budget()).unwrap();
         let mut bytes=Vec::new();EnclosedSingleScatter::write_csv_header(&mut bytes).unwrap();result.write_csv_row(0,&mut bytes).unwrap();
         let csv=String::from_utf8(bytes).unwrap();let rows:Vec<_>=csv.lines().collect();
-        assert_eq!(rows[0].split(',').count(),14);let fields:Vec<_>=rows[1].split(',').collect();assert_eq!(fields.len(),14);
+        assert_eq!(rows[0].split(',').count(),15);let fields:Vec<_>=rows[1].split(',').collect();assert_eq!(fields.len(),15);
         assert_eq!(&fields[11..13],&["unknown","unknown"]);assert_eq!(fields[7],"tolerance-met");
         assert_eq!(fields[2].parse::<f64>().unwrap().to_bits(),result.luminance_cd_m2.to_bits());
         struct Refuse;impl Write for Refuse {
