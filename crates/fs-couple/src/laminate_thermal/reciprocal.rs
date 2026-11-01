@@ -6,16 +6,17 @@
 //! it is never an elastic-energy residual relabeled as dissipation. Mechanical
 //! work uses endpoint-average stress times the actual compatible strain change.
 //!
-//! This lane admits temperature-INDEPENDENT elastic sources over each complete
-//! declared interval. Instantaneous CTE may vary affinely and every thermal
-//! cell retains its own temperature. Fixed elasticity keeps the native whole-
-//! stack Whitney shear correction fixed: its physical work/storage and the
-//! numerical drilling gauge are audited separately, without fictitious local
-//! shear entropy. General Q(T) potentials exist in fs-material, but their
-//! reciprocal use here requires the nonlocal shear-temperature derivatives.
+//! Original elastic coefficients and instantaneous CTE may vary affinely on
+//! each complete source interval; the resulting plane-stress operator need not
+//! be affine. Every thermal cell retains its own temperature. The whole-stack
+//! Whitney shear potential supplies NONLOCAL layer entropy conjugates. A
+//! symmetric coordinate-increment path partitions its temperature work, never
+//! its stored energy or a solver residual, among the original thermal cells.
+//! Full-box entropy-capacity bounds admit these mixed thermal dependencies.
 //!
 //! A bounded outer iteration reuses the original sparse implicit conduction
-//! solve and one immutable native mechanical factorization. Every trial starts
+//! solve. Constant elastic sources reuse one native mechanical factorization;
+//! varying sources rebuild the original shell at the actual temperature. Every trial starts
 //! from the accepted caloric history. Both owners advance only after local
 //! heat, native material work, and combined energy gates pass. This is a
 //! quasistatic endpoint scheme, generally first order in time; it is not exact
@@ -30,6 +31,10 @@ pub mod dynamic;
 
 use super::*;
 use fs_material::elastic::thermal::ThermoelasticError;
+use fs_material::laminate::thermal::shear::{
+    LaminateShearThermoelasticError, ResolvedLaminateShearThermoelastic,
+    bounds::LaminateShearCapacityBound,
+};
 use fs_material::laminate::thermal::thermoelastic::{
     AffineLaminaThermoelastic, ResolvedLaminaThermoelastic,
 };
@@ -53,6 +58,7 @@ pub struct LaminateThermoelasticControls {
 pub enum LaminateThermoelasticError {
     Invalid(&'static str),
     Source(ThermoelasticError),
+    Shear(LaminateShearThermoelasticError),
     Shell(LaminateShellError),
     Native(PlateError),
     Thermal(DepositionError),
@@ -89,6 +95,10 @@ pub struct ReciprocalLaminateState {
     cells: Vec<LaminateCellPotential>,
     loads: Vec<f64>,
     shear_energy_j: f64,
+    shear_internal_energy_j: f64,
+    shear_entropy_j_k: Vec<f64>,
+    // Constant elasticity keeps the allocation-free original shear fast path.
+    shear_potential: Option<ResolvedLaminateShearThermoelastic>,
     gauge_energy_j: f64,
     gauge_force: Vec<f64>,
 }
@@ -99,8 +109,18 @@ impl ReciprocalLaminateState {
     pub fn cell_potentials(&self) -> &[LaminateCellPotential] {
         &self.cells
     }
+    /// Native corrected-shear Helmholtz free energy, integrated over the shell.
     pub const fn transverse_shear_energy_j(&self) -> f64 {
         self.shear_energy_j
+    }
+    /// One physical shear internal energy U = Psi + sum_i T_i S_i. This is
+    /// NOT allocated among layers with arbitrary energy fractions.
+    pub const fn transverse_shear_internal_energy_j(&self) -> f64 {
+        self.shear_internal_energy_j
+    }
+    /// Whole-stack shear entropy conjugate to each ORIGINAL cell temperature.
+    pub fn transverse_shear_entropy_j_k(&self) -> &[f64] {
+        &self.shear_entropy_j_k
     }
     /// Numerical gauge storage; never deposited as physical heat.
     pub const fn drilling_gauge_energy_j(&self) -> f64 {
@@ -115,8 +135,18 @@ impl ReciprocalLaminateState {
 pub struct LaminateThermoelasticCellReport {
     pub mechanical_work_j: f64,
     pub thermal_strain_work_j: f64,
+    /// Polarized in-plane work from the original change of Q(T) at fixed
+    /// elastic-strain endpoints: V e0^T (Q1-Q0) e1 / 2.
+    pub stiffness_temperature_work_j: f64,
     pub internal_energy_change_j: f64,
     pub elastic_entropy_change_j_k: f64,
+    /// Shear temperature work on the declared symmetric coordinate path.
+    pub shear_stiffness_temperature_work_j: f64,
+    pub shear_entropy_change_j_k: f64,
+    /// Change of T_i S_i for the nonlocal shear entropy conjugate.
+    pub shear_temperature_entropy_change_j: f64,
+    pub shear_reversible_heat_j: f64,
+    /// Total original-cell exchange: in-plane plus nonlocal shear heat.
     pub reversible_heat_j: f64,
     pub applied_heat_j: f64,
     pub heat_defect_j: f64,
@@ -136,12 +166,17 @@ pub struct LaminateThermoelasticReport {
     pub reversible_heat_j: f64,
     pub elastic_internal_energy_change_j: f64,
     pub transverse_shear_energy_change_j: f64,
+    pub transverse_shear_internal_energy_change_j: f64,
     pub transverse_shear_work_j: f64,
+    pub transverse_shear_reversible_heat_j: f64,
     pub drilling_gauge_energy_change_j: f64,
     pub drilling_gauge_work_j: f64,
+    /// Explicit numerical input from changing the drilling stabilization.
+    /// Its independent polarized work is NEVER deposited as material heat.
+    pub drilling_gauge_parameter_work_j: f64,
     pub mechanical_work_residual_j: f64,
-    /// Caloric + elastic internal + shear + numerical gauge changes, minus
-    /// external heat and external mechanical work. A dynamic wrapper also
+    /// Caloric + plane/shear internal + numerical gauge changes, minus
+    /// external heat, mechanical work and numerical gauge parameter work. A dynamic wrapper also
     /// includes and separately reports its complete native kinetic change.
     pub combined_energy_residual_j: f64,
     pub maximum_heat_defect_j: f64,
@@ -153,13 +188,14 @@ pub struct ReciprocalLaminateStep<'m> {
     pub report: LaminateThermoelasticReport,
 }
 
-/// Retained native equilibrium, original source intervals, and fixed sparse
-/// factorization. The caller retains its original caloric timeline; subsequent
+/// Retained native equilibrium and original source intervals. Constant elastic
+/// sources cache their sparse factorization; varying sources rebuild the actual
+/// native section/operator. The caller retains its original caloric timeline; subsequent
 /// steps verify its exact accepted temperatures/time before any solve.
 pub struct ReciprocalLayeredThermalShell<'s, 'b, 'a> {
     source: &'s LayeredThermalShell<'b, 'a>,
     laws: Vec<AffineLaminaThermoelastic>,
-    solver: PreparedMitcStatic,
+    solver: Option<PreparedMitcStatic>,
     state: ReciprocalLaminateState,
     quadrature: Vec<([f64; 3], f64)>,
 }
@@ -168,8 +204,10 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
     /// One interval per original thermal cell / mechanical sublamina. The
     /// declared principal engineering component bound covers both TOTAL and
     /// elastic strains; native Bernstein hulls admit the whole facet/layer.
-    /// The original caloric capacity plus a conservative elastic contribution
-    /// must be positive over that entire strain/temperature envelope.
+    /// The original caloric/in-plane entropy derivatives must dominate the
+    /// absolute row sums of the whole-stack shear entropy Hessian throughout
+    /// that entire strain/temperature envelope. This sufficient full-box
+    /// positive-definiteness bound may conservatively refuse a valid material.
     #[allow(clippy::too_many_arguments)]
     pub fn try_new(
         source: &'s LayeredThermalShell<'b, 'a>,
@@ -190,6 +228,7 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
         let body = source.thermal.prepared_body();
         let area = body.conduction().area_m2();
         let mut laws = Vec::with_capacity(temperature_ranges_k.len());
+        let mut entropy_diagonal_lower = Vec::with_capacity(temperature_ranges_k.len());
         let mut cell = 0;
         for (layer, &count) in body.layer_cell_counts().iter().enumerate() {
             let storage = &body.storages()[layer];
@@ -204,11 +243,6 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
                     maximum_absolute_engineering_strain,
                 )
                 .map_err(LaminateThermoelasticError::Source)?;
-                if !law.is_temperature_independent_elasticity() {
-                    return Err(invalid(
-                        "reciprocal native laminate requires fixed elastic sources; variable Whitney shear entropy is not yet owned",
-                    ));
-                }
                 if range[0] < span[0] || range[1] > span[1] {
                     return Err(invalid(
                         "original caloric chart must cover the complete elastic source interval",
@@ -233,11 +267,17 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
                 let elastic_minimum = law
                     .minimum_heat_capacity_j_k(volume)
                     .map_err(LaminateThermoelasticError::Source)?;
-                if finite(minimum + elastic_minimum)? <= 0.0 {
+                let total_minimum = finite((minimum + elastic_minimum).next_down())?;
+                if total_minimum <= 0.0 {
                     return Err(invalid(
                         "caloric plus elastic capacity is not positive over the complete admitted envelope",
                     ));
                 }
+                // A positive lower bound for Ccal + Cplane divided by the
+                // largest admitted T bounds its entropy derivative. The
+                // material bound also includes raw local shear, which only
+                // makes this estimate more conservative, never less so.
+                entropy_diagonal_lower.push(finite((total_minimum / range[1]).next_down())?);
                 laws.push(law);
                 cell += 1;
             }
@@ -245,8 +285,31 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
         let shell = source
             .resolve(thermal, external_load_6n, &mut cancelled)
             .map_err(LaminateThermoelasticError::Shell)?;
-        let solver = PreparedMitcStatic::try_new(Arc::clone(&shell.model), &mut cancelled)
-            .map_err(LaminateThermoelasticError::Native)?;
+        let fixed_elasticity = laws
+            .iter()
+            .all(AffineLaminaThermoelastic::is_temperature_independent_elasticity);
+        let solver = if fixed_elasticity {
+            Some(
+                PreparedMitcStatic::try_new(Arc::clone(&shell.model), &mut cancelled)
+                    .map_err(LaminateThermoelasticError::Native)?,
+            )
+        } else {
+            let bound = LaminateShearCapacityBound::try_new(&laws, &shell.material, &mut cancelled)
+                .map_err(LaminateThermoelasticError::Shear)?;
+            for (&diagonal, &row_sum) in entropy_diagonal_lower
+                .iter()
+                .zip(bound.entropy_hessian_absolute_row_sums_j_m2_k2())
+            {
+                check(&mut cancelled)?;
+                let shear_bound = finite((area * row_sum).next_up())?;
+                if diagonal <= shear_bound {
+                    return Err(invalid(
+                        "coupled entropy capacity is not positive over the complete temperature/strain box",
+                    ));
+                }
+            }
+            None
+        };
         let quadrature = integration_rule();
         let proposal = assemble_state(
             source,
@@ -327,7 +390,7 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
                 .resolve_with_solver(
                     &thermal,
                     external_load_6n,
-                    Some(&self.solver),
+                    self.solver.as_ref(),
                     &mut cancelled,
                 )
                 .map_err(LaminateThermoelasticError::Shell)?;
@@ -380,7 +443,9 @@ struct Proposal {
     state: ReciprocalLaminateState,
     mechanical_work: Vec<f64>,
     expansion_work: Vec<f64>,
+    stiffness_work: Vec<f64>,
     shear_work: f64,
+    shear_temperature_work: Vec<f64>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -403,17 +468,45 @@ fn assemble_state(
     let mut cells = vec![LaminateCellPotential::default(); laws.len()];
     let mut mechanical_work = vec![0.0; laws.len()];
     let mut expansion_work = vec![0.0; laws.len()];
+    let mut stiffness_work = vec![0.0; laws.len()];
     let mut shear_energy = 0.0;
     let mut shear_work = 0.0;
+    let mut shear_entropy = vec![0.0; laws.len()];
+    let mut shear_temperature_work = vec![0.0; laws.len()];
     let section = shell.material.prepared().section();
     let shear = section.shear_pa_m();
-    if let Some(old) = previous {
-        if old.shell.material.prepared().section().shear_pa_m() != shear {
+    let fixed_elasticity = laws
+        .iter()
+        .all(AffineLaminaThermoelastic::is_temperature_independent_elasticity);
+    let shear_potential = if fixed_elasticity {
+        if previous.is_some_and(|old| old.shell.material.prepared().section().shear_pa_m() != shear)
+        {
             return Err(invalid(
                 "fixed reciprocal shear section changed unexpectedly",
             ));
         }
-    }
+        None
+    } else {
+        Some(
+            ResolvedLaminateShearThermoelastic::try_new(laws, &shell.material, &mut *cancelled)
+                .map_err(LaminateThermoelasticError::Shear)?,
+        )
+    };
+    // Temperature-coordinate work is a property of this one source section,
+    // prepared once before the spatial quadrature. Its two sweeps telescope
+    // to H1-H0 and reverse sign on reversing the endpoint pair.
+    let shear_increment = match (previous, &shear_potential) {
+        (Some(old), Some(next)) => Some(
+            old.shear_potential
+                .as_ref()
+                .ok_or_else(|| {
+                    invalid("varying shear potential must retain its original accepted endpoint")
+                })?
+                .temperature_increment(next, &mut *cancelled)
+                .map_err(LaminateThermoelasticError::Shear)?,
+        ),
+        _ => None,
+    };
     let zero = ShellStrainPoint {
         membrane: [0.0; 3],
         gradient_per_m: [0.0; 3],
@@ -438,12 +531,28 @@ fn assemble_state(
             let gamma = rotate_shear(points[i].transverse_shear, section_angle);
             let stress = shear_stress(shear, gamma);
             shear_energy = finite(shear_energy + 0.5 * area * weight * dot2(gamma, stress))?;
+            if let Some(potential) = &shear_potential {
+                // Cached analytic gradients, with no per-quadrature source
+                // resolution, AD or temporary entropy allocation. The whole
+                // principal strain envelope is admitted below by Bernstein.
+                for (entropy, gradient) in shear_entropy
+                    .iter_mut()
+                    .zip(potential.stiffness_temperature_derivatives_pa_m_k())
+                {
+                    *entropy = finite(
+                        *entropy - 0.5 * area * weight * dot2(gamma, shear_stress(gradient, gamma)),
+                    )?;
+                }
+            }
             if let Some(old) = previous {
                 old_points[i] = old.shell.strain_fields[element]
                     .at_barycentric(lambda)
                     .map_err(LaminateThermoelasticError::Native)?;
                 let old_gamma = rotate_shear(old_points[i].transverse_shear, section_angle);
-                let old_stress = shear_stress(shear, old_gamma);
+                let old_stress = shear_stress(
+                    old.shell.material.prepared().section().shear_pa_m(),
+                    old_gamma,
+                );
                 shear_work = finite(
                     shear_work
                         + 0.5
@@ -453,6 +562,20 @@ fn assemble_state(
                                 .map(|k| (stress[k] + old_stress[k]) * (gamma[k] - old_gamma[k]))
                                 .sum::<f64>(),
                 )?;
+                if let Some(increment) = &shear_increment {
+                    for (work, delta_h) in shear_temperature_work
+                        .iter_mut()
+                        .zip(increment.stiffness_coordinate_increments_pa_m())
+                    {
+                        *work = finite(
+                            *work
+                                + 0.5
+                                    * area
+                                    * weight
+                                    * dot2(old_gamma, shear_stress(delta_h, gamma)),
+                        )?;
+                    }
+                }
             }
         }
         for (layer, geometry) in section.layer_integrals().iter().enumerate() {
@@ -520,6 +643,20 @@ fn assemble_state(
                                 .sum::<f64>();
                         mechanical_work[layer] = finite(mechanical_work[layer] + work)?;
                         expansion_work[layer] = finite(expansion_work[layer] + expansion)?;
+                        if !fixed_elasticity {
+                            let q0 = old.sources[layer].stiffness_derivatives_pa()[0];
+                            let q1 = resolved[layer].stiffness_derivatives_pa()[0];
+                            let mut parameter_work = 0.0;
+                            for row in 0..3 {
+                                for col in 0..3 {
+                                    parameter_work += old_at.elastic_strain_engineering[row]
+                                        * (q1[3 * row + col] - q0[3 * row + col])
+                                        * at.elastic_strain_engineering[col];
+                                }
+                            }
+                            stiffness_work[layer] =
+                                finite(stiffness_work[layer] + 0.5 * volume * parameter_work)?;
+                        }
                     }
                 }
             }
@@ -532,6 +669,15 @@ fn assemble_state(
         "source plane potential and original native material storage disagree",
     )?;
     let (gauge_energy, gauge_force) = drilling_storage(&shell, tolerance, cancelled)?;
+    let shear_internal_energy = finite(
+        shear_energy
+            + shell
+                .temperatures_k()
+                .iter()
+                .zip(&shear_entropy)
+                .map(|(t, s)| t * s)
+                .sum::<f64>(),
+    )?;
     check(cancelled)?;
     Ok(Proposal {
         state: ReciprocalLaminateState {
@@ -540,12 +686,17 @@ fn assemble_state(
             cells,
             loads: loads.to_vec(),
             shear_energy_j: shear_energy,
+            shear_internal_energy_j: shear_internal_energy,
+            shear_entropy_j_k: shear_entropy,
+            shear_potential,
             gauge_energy_j: gauge_energy,
             gauge_force,
         },
         mechanical_work,
         expansion_work,
+        stiffness_work,
         shear_work,
+        shear_temperature_work,
     })
 }
 
@@ -602,6 +753,7 @@ fn account(
     let mut heat_defect_abs = 0.0;
     let mut maximum = 0.0_f64;
     let mut reversible = 0.0;
+    let mut shear_reversible = 0.0;
     let mut internal_change = 0.0;
     for i in 0..applied.len() {
         check(cancelled)?;
@@ -609,25 +761,42 @@ fn account(
         let b = &next.cells[i];
         let mechanical = proposal.mechanical_work[i];
         let expansion = proposal.expansion_work[i];
-        let residual = finite(b.free_energy_j - a.free_energy_j - mechanical - expansion)?;
+        let stiffness = proposal.stiffness_work[i];
+        let residual =
+            finite(b.free_energy_j - a.free_energy_j - mechanical - expansion - stiffness)?;
         gate(
             residual,
             tolerance,
             "native layer work does not close its original free energy",
         )?;
         let du = finite(b.internal_energy_j - a.internal_energy_j)?;
-        let desired = finite(mechanical - du)?;
+        let shear_entropy_change = finite(next.shear_entropy_j_k[i] - old.shear_entropy_j_k[i])?;
+        let shear_ts_change = finite(
+            next.shell.temperatures_k()[i] * next.shear_entropy_j_k[i]
+                - old.shell.temperatures_k()[i] * old.shear_entropy_j_k[i],
+        )?;
+        // Delta Psi_s = W_s + sum_i W_temperature,i and U_s = Psi_s +
+        // sum_i T_i S_i. This is an original-coordinate thermal work split,
+        // not a per-layer allocation of stored energy or a residual repair.
+        let shear_heat = finite(-proposal.shear_temperature_work[i] - shear_ts_change)?;
+        let desired = finite(mechanical - du + shear_heat)?;
         let defect = finite(desired - applied[i])?;
         heat_defect_sum = finite(heat_defect_sum + defect)?;
         heat_defect_abs = finite(heat_defect_abs + defect.abs())?;
         maximum = maximum.max(defect.abs());
         reversible = finite(reversible + desired)?;
+        shear_reversible = finite(shear_reversible + shear_heat)?;
         internal_change = finite(internal_change + du)?;
         cells.push(LaminateThermoelasticCellReport {
             mechanical_work_j: mechanical,
             thermal_strain_work_j: expansion,
+            stiffness_temperature_work_j: stiffness,
             internal_energy_change_j: du,
             elastic_entropy_change_j_k: b.entropy_j_k - a.entropy_j_k,
+            shear_stiffness_temperature_work_j: proposal.shear_temperature_work[i],
+            shear_entropy_change_j_k: shear_entropy_change,
+            shear_temperature_entropy_change_j: shear_ts_change,
+            shear_reversible_heat_j: shear_heat,
             reversible_heat_j: desired,
             applied_heat_j: applied[i],
             heat_defect_j: defect,
@@ -674,16 +843,29 @@ fn account(
             .sum(),
     )?;
     let shear_change = finite(next.shear_energy_j - old.shear_energy_j)?;
+    let shear_internal_change = finite(next.shear_internal_energy_j - old.shear_internal_energy_j)?;
     let gauge_change = finite(next.gauge_energy_j - old.gauge_energy_j)?;
+    let gauge_parameter_work = if old.shear_potential.is_some() {
+        // Symmetric Kg gives this independent polarized change-of-operator
+        // work. Do not define it as an energy residual and do not send it to
+        // any caloric cell: the numerical stabilization has no physical heat.
+        finite(
+            (0..q0.len())
+                .map(|i| 0.5 * (q0[i] * next.gauge_force[i] - q1[i] * old.gauge_force[i]))
+                .sum(),
+        )?
+    } else {
+        0.0
+    };
     gate(
-        shear_change - proposal.shear_work,
+        shear_change - proposal.shear_work - proposal.shear_temperature_work.iter().sum::<f64>(),
         tolerance,
-        "fixed native shear work/storage mismatch",
+        "native shear mechanical and temperature work do not close its free energy",
     )?;
     gate(
-        gauge_change - gauge_work,
+        gauge_change - gauge_work - gauge_parameter_work,
         tolerance,
-        "fixed numerical gauge work/storage mismatch",
+        "numerical gauge mechanical and parameter work do not close its storage",
     )?;
     let mechanical_residual = finite(
         inertia.kinetic_energy_change_j + membrane_work + proposal.shear_work + gauge_work
@@ -697,10 +879,12 @@ fn account(
     // Use the original compensated caloric residual, avoiding subtraction of
     // large enthalpy datums. Desired heat is not substituted for applied heat.
     let combined = finite(
-        heat.energy.residual_j - heat_defect_sum + mechanical_residual + shear_change
+        heat.energy.residual_j - heat_defect_sum + mechanical_residual + shear_internal_change
             - proposal.shear_work
+            + shear_reversible
             + gauge_change
-            - gauge_work,
+            - gauge_work
+            - gauge_parameter_work,
     )?;
     Ok(LaminateThermoelasticReport {
         cells,
@@ -711,9 +895,12 @@ fn account(
         reversible_heat_j: reversible,
         elastic_internal_energy_change_j: internal_change,
         transverse_shear_energy_change_j: shear_change,
+        transverse_shear_internal_energy_change_j: shear_internal_change,
         transverse_shear_work_j: proposal.shear_work,
+        transverse_shear_reversible_heat_j: shear_reversible,
         drilling_gauge_energy_change_j: gauge_change,
         drilling_gauge_work_j: gauge_work,
+        drilling_gauge_parameter_work_j: gauge_parameter_work,
         mechanical_work_residual_j: mechanical_residual,
         combined_energy_residual_j: combined,
         maximum_heat_defect_j: maximum,

@@ -121,6 +121,9 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
     /// inertia cannot establish this full dynamic state. Free massless drilling
     /// directions must satisfy the native homogeneous gauge in both initial
     /// displacement and velocity; director-axis gauge efforts are unsupported.
+    /// Elastic coefficients must remain constant over their original intervals.
+    /// A temperature-dependent condensation basis needs additional inertial
+    /// transport terms and is not obtained by refreshing a static operator.
     pub fn begin_transient(
         self,
         nodal_velocity_6n: &[f64],
@@ -131,6 +134,15 @@ impl<'s, 'b, 'a> ReciprocalLayeredThermalShell<'s, 'b, 'a> {
         check(&mut cancelled)?;
         if !energy_tolerance_j.is_finite() || energy_tolerance_j <= 0.0 {
             return Err(invalid("positive finite launch energy tolerance required"));
+        }
+        if self
+            .laws
+            .iter()
+            .any(|law| !law.is_temperature_independent_elasticity())
+        {
+            return Err(invalid(
+                "dynamic laminate requires fixed elastic sources; a moving condensation basis needs inertial transport",
+            ));
         }
         let native =
             EnrichedMitcShell::try_new(Arc::clone(&self.state.shell.model), &mut cancelled)

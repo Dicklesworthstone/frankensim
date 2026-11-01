@@ -298,29 +298,55 @@ One declared temperature interval per actual thermal cell pins the original
 plane-stress potential and integrated expansion. Native Bernstein controls and
 both layer faces admit the complete total/elastic principal strain envelope.
 The original piecewise-affine caloric capacity plus a conservative full-interval
-elastic contribution must remain positive. Caloric/source population and work
+in-plane contribution must remain positive. With varying elasticity, the
+resulting entropy-derivative diagonal must also dominate the whole-temperature-
+box absolute row sums of the nonlocal shear entropy Hessian. This sufficient
+Gershgorin bound admits a positive coupled entropy-capacity matrix throughout
+the declared envelope. It can conservatively refuse broad boxes; callers may
+declare a physically justified narrower temperature/strain domain. Pointwise
+capacity samples never replace that admission. Caloric/source population and work
 constraints must describe the same unloaded material path; card identity alone
 does not establish that experimental compatibility.
 
-This reciprocal lane requires all original elastic source support knots to be
-constant over their declared intervals. CTE may vary affinely, and cells keep
-independent temperatures. Fixed elasticity keeps the native whole-stack Whitney
-shear correction fixed. Temperature-varying elastic snapshots and the new
-material potential derivatives remain available separately; general reciprocal
-use requires ownership of the nonlocal Whitney temperature derivatives.
+Original elastic coefficients and instantaneous CTE may vary affinely, with
+every cell retaining its independent temperature and source-integrated thermal
+strain. The source-derived Q(T) and corrected shear H(T) need not themselves be
+affine. Each varying-material proposal rebuilds the native section, equilibrium
+operator, thermal load and recovered internal director displacement. Reference
+mass, geometry, support constraints and the original caloric owner stay fixed.
+Exactly constant elastic sources keep their cached native factorization and
+allocation-free quadrature shear path.
 
 At the original triangle quadrature and two points through every layer, endpoint
 average stress times compatible strain change gives mechanical work. The SAME
-potential supplies `S=-Psi_T` and `U=Psi+T*S`; reversible cell heat is mechanical
-work minus the change of that internal energy. It is not free-energy loss or a
-solver residual. Independently integrated physical shear and numerical drilling
-storage/work are reported separately, with no fabricated heat from the gauge.
-Native physical energy and nodal work cross-check the material integration.
+potential supplies `S=-Psi_T` and `U=Psi+T*S`; in-plane reversible heat is
+mechanical work minus the change of that internal energy. The independent free-
+energy identity retains both integrated-expansion work and polarized modulus
+work `V*e0^T*(Q1-Q0)*e1/2`. Neither becomes dissipative heat by itself.
+
+The corrected whole-stack shear potential supplies one internal energy
+`U_s=Psi_s+sum(T_i*S_s,i)`. Analytic nonlocal gradients provide its entropy
+conjugates. Symmetric spatial-order/reverse-order coordinate sweeps partition
+`H1-H0` into `delta_H_i`; physical shear heat to original cell i is
+`-A*g0^T*delta_H_i*g1/2-delta(T_i*S_s,i)`, integrated over the native quadrature.
+No stored shear energy or solver residual is arbitrarily split among cells.
+Section derivatives and coordinate increments are prepared once per endpoint
+pair, outside facet quadrature. These finite-step paths require refinement and
+do not establish exact continuum entropy transport or arbitrary layer-order
+invariance. Native physical energy and nodal work independently cross-check
+the complete in-plane and shear integration.
+
+Numerical drilling storage and work remain separately reported. When its
+stiffness changes, the independently polarized numerical parameter work
+`(q0·fg1-q1·fg0)/2` enters only the numerical/external account. It never heats a
+material cell. The combined gate closes caloric plus plane/shear internal
+storage plus gauge storage against external heat, external mechanical work and
+that explicit numerical parameter input.
 
 Bounded outer iterations restart the original sparse implicit conduction solver
 from accepted heat history. Interval-only reversible joules update through its
-existing source port. One immutable shared native model and scaled LDLT factor
-serve every mechanical candidate. Publication requires local heat consistency,
+existing source port. Constant elasticity shares one scaled LDLT factor; varying
+elasticity solves the actual source-resolved operator. Publication requires local heat consistency,
 summed absolute heat defects, physical/gauge work closure and a combined energy
 gate, followed by a final cancellation checkpoint. Failure leaves both accepted
 histories unchanged; stale temperature/time pairing refuses. The report separates
@@ -335,6 +361,11 @@ bending with nonzero transverse work, energy closure and atomic refusals.
 The existing one-way fixtures share source/mesh helpers without changing their
 CLT oracles. Targeted compiler metadata checks cover these entries; numerical
 execution and experimental material validation remain separate requirements.
+`tests/laminate_thermoelastic_softening.rs` adds independent restrained-heating
+cubic and constant-traction references, accepted-temperature prestress, a
+two-layer through-thickness shear oracle, source/capacity refusals and late
+cancellation. Those cases exercise stiffness changes through the original
+finite heat cells without replacing their mass or energy datum.
 
 ### Reciprocal finite heat with retained shell inertia
 
@@ -347,6 +378,9 @@ in the invertible native `y=Tq+Br` basis. Observation uses their actual strain
 polynomials and stress; no later heat trial resets them to a static thermal
 lift. Fixed elasticity, mass, reference geometry and stationary supports remain
 required, while original cells keep unequal temperatures and integrated CTE.
+Transferring a varying-elasticity quasistatic owner into this dynamic lane now
+explicitly refuses: refreshing its condensation basis without inertial transport
+would not preserve the original physical trajectory.
 
 Every outer trial restarts heat and motion from the same accepted histories.
 One midpoint effective sparse factor serves all trials at the chosen dt and

@@ -409,48 +409,43 @@ fn g1_spatial_bending_and_native_transverse_work_close_energy_and_preserve_atomi
 }
 
 #[test]
-fn g0_reciprocal_admission_refuses_changing_elasticity_and_nonpositive_combined_capacity() {
-    for excessive_expansion in [false, true] {
-        let cards = [if excessive_expansion {
-            card_with_coefficients("capacity refusal", 0.0, 1e-3, 0.0, CP)
-        } else {
-            card("variable elastic source")
-        }];
-        let body = prepare_body(&cards, &[1], 1.0);
-        let laws = body.thermal_laws(false).unwrap();
-        let bound = body.bind(&laws, ids()).unwrap();
-        let thermal = initial(&bound, &[T0]);
-        let shell = LayeredThermalShell::try_new(
-            &bound,
-            mechanical(&cards),
-            ReferenceSurface::Midsurface,
-            discretization(),
-            limits(),
-            || false,
-        )
-        .unwrap();
-        let result = ReciprocalLayeredThermalShell::try_new(
-            &shell,
-            &thermal,
-            &[0.0; 24],
-            &[[280.0, 360.0]],
-            0.1,
-            controls(),
-            || false,
-        );
-        let expected = if excessive_expansion {
-            "capacity is not positive"
-        } else {
-            "fixed elastic sources"
-        };
-        assert!(
-            matches!(result,Err(LaminateThermoelasticError::Invalid(message)) if message.contains(expected))
-        );
-        assert_eq!(thermal.time_s(), 0.0);
-        close(
-            bound.cell_temperatures(&thermal, || Ok(())).unwrap()[0],
-            T0,
-            0.0,
-        );
-    }
+fn g0_reciprocal_admission_refuses_nonpositive_combined_capacity() {
+    let cards = [card_with_coefficients(
+        "capacity refusal",
+        0.0,
+        1e-3,
+        0.0,
+        CP,
+    )];
+    let body = prepare_body(&cards, &[1], 1.0);
+    let laws = body.thermal_laws(false).unwrap();
+    let bound = body.bind(&laws, ids()).unwrap();
+    let thermal = initial(&bound, &[T0]);
+    let shell = LayeredThermalShell::try_new(
+        &bound,
+        mechanical(&cards),
+        ReferenceSurface::Midsurface,
+        discretization(),
+        limits(),
+        || false,
+    )
+    .unwrap();
+    let result = ReciprocalLayeredThermalShell::try_new(
+        &shell,
+        &thermal,
+        &[0.0; 24],
+        &[[280.0, 360.0]],
+        0.1,
+        controls(),
+        || false,
+    );
+    assert!(
+        matches!(result,Err(LaminateThermoelasticError::Invalid(message)) if message.contains("capacity is not positive"))
+    );
+    assert_eq!(thermal.time_s(), 0.0);
+    close(
+        bound.cell_temperatures(&thermal, || Ok(())).unwrap()[0],
+        T0,
+        0.0,
+    );
 }
