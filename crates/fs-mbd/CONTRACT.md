@@ -1328,6 +1328,38 @@ steps over one second; empty-row equivalence, gross work and midpoint cancellati
 are also exercised. This remains a constant ideal-joint model, excluding
 time-dependent ratios, constraint engagement, backlash and general contact.
 
+## Full-inertia rigid RATTLE projection
+
+`rigid_rattle::PointPlaneRattle` implements the canonical
+`fs_time::se3::RattleProjection` seam for one fixed world plane acting on one
+material point of the original COM-referenced rigid body. The scalar constraint
+is `g = n·(x + R r - p)=0`; in body coordinates its Jacobian is
+`J=[r×n_b,n_b]`. Both configuration and tangent corrections use the actual
+kinetic metric `diag(I_body,mI)`: `delta = M^-1 J^T lambda`. Full products
+of inertia therefore affect how an offset-point correction divides between
+rotation and translation. There is no diagonal-inertia shortcut, reference-point
+clamp, penalty stiffness or velocity clipping.
+
+Position projection uses bounded Newton corrections on SE(3) and independently
+rechecks the actual material-point gap after every accepted correction. Velocity
+projection is the exact scalar mass-metric tangent projection at the supplied
+pose and rechecks the actual point normal speed. The implementation exposes the
+physical scalar mobility `J M^-1 J^T` and a receipt containing removed position
+and velocity violations plus final residuals. Invalid geometry, a zero normal,
+nonfinite response or exhausted nonlinear iterations refuses without publishing
+a partial candidate.
+
+This module is deliberately a reusable projection owner rather than a contact
+law or collision detector. It does not infer unilateral activation, restitution,
+friction, support work, continuous contact force, multiple simultaneous
+constraints or event timing. The caller selects when a bilateral point/plane
+constraint is physically active and composes this projection with an
+`fs-time` variational/SE(3) step. The two focused tests verify a nonprincipal
+full tensor against the independent momentum-covector condition
+`M delta = J^T lambda`, show that products of inertia create cross-axis angular
+correction, verify nonlinear gap closure and tangent closure, and cover explicit
+invalid-geometry refusal.
+
 ## Articulated point/plane impact response
 
 `articulated_impact::resolve_articulated_plane_impact` resolves one declared

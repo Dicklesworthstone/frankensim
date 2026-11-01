@@ -37,6 +37,8 @@ pub mod otis;
 pub mod otto;
 pub mod planar_drive;
 pub mod robot_models;
+/// Full-inertia RATTLE projection for rigid material-point constraints.
+pub mod rigid_rattle;
 pub mod rocket;
 pub mod roomba;
 pub mod salisbury;
