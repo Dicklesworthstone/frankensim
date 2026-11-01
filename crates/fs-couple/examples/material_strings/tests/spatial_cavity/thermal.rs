@@ -74,12 +74,13 @@ fn authored_thermal_air_changes_shared_motion_and_survives_source_gas_loading() 
         let frame = loaded.performance.bank().system().last_frame().unwrap();
         assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
 
-        let doubled = ready(cx, gate, source(&PERFORMANCE.replace("293.15 101325",
-            "293.15 202650")), THERMAL_BODY, 700.0);
-        let doubled_thermal = doubled.performance.bank().source().bank()
+        // Half the ordinary pressure (exact in binary): the named gas model admits [10000, 200000] Pa, which excludes 2 atm.
+        let halved = ready(cx, gate, source(&PERFORMANCE.replace("293.15 101325",
+            "293.15 50662.5")), THERMAL_BODY, 700.0);
+        let halved_thermal = halved.performance.bank().source().bank()
             .spatial_cavity().unwrap().thermal_loss().unwrap();
-        assert!((doubled_thermal.diffusivity_m2_s() / diffusivity - 0.5).abs() < 1e-10);
-        assert_eq!(doubled_thermal.diffusion_modes().eigenvalues_per_m2, eigenvalues);
+        assert!((diffusivity / halved_thermal.diffusivity_m2_s() - 0.5).abs() < 1e-10);
+        assert_eq!(halved_thermal.diffusion_modes().eigenvalues_per_m2, eigenvalues);
         let flow = PERFORMANCE.replace("cavity none", "cylinder-gas-loading 0.01 4 2\ncavity none");
         let mut fluid = ready(cx, gate, source(&flow), THERMAL_BODY, 700.0);
         let bank = fluid.performance.bank().source().bank();

@@ -268,8 +268,18 @@ fn temperature_interface(slope: f64) -> NormalizedInterfacePack {
     for id in source.observation_ids() {
         claims.register_observation(source.observation(id).unwrap().clone()).unwrap();
     }
+    // The sourced Coulomb owner refuses a query whose nominal pressure is not a typed static pressure, and `interface()`
+    // declares T, p and v bare for the non-thermal paths. The same ranges are declared here with the quantities the
+    // resolver builds its query in (as tests/bow_interfaces.rs held_environment::source does); T stays bare, which the
+    // owner admits as the legacy kelvin axis.
+    let typed = || fs_evidence::ValidityDomain::unconstrained()
+        .with("T", 280.0, 320.0)
+        .with_quantity("p", fs_qty::QuantitySpec::semantic(fs_qty::semantic::SemanticType::new(
+            fs_qty::semantic::QuantityKind::Pressure, fs_qty::semantic::ValueForm::Static)), 0.0, 1e6)
+        .with_quantity("v", fs_qty::QuantitySpec::dimensional(fs_qty::Velocity::DIMS), 0.0, 10.0);
     for (_, item) in original.card().claims().claims_ordered() {
         let mut item = item.clone();
+        item.validity = typed();
         if item.key.name() == "mu_kinetic" {
             item.value = PropertyValue::Curve { abscissa: "T".into(),
                 abscissa_dims: fs_qty::Temperature::DIMS,

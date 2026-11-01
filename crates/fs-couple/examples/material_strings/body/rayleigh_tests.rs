@@ -58,7 +58,9 @@ fn computed_air_load_changes_motion_and_streams_the_same_accepted_pressure() {
 fn gas_and_grain_data_rebuild_the_actual_same_basis_radiation_matrix() {
     scoped(|cx, gate| {
         let a = ready(cx, gate, selected(101_325.0), profile());
-        let b = ready(cx, gate, selected(202_650.0), profile());
+        // Half an atmosphere: the named gas model admits [10000, 200000] Pa, so the 2:1 pressure pair this test needs
+        // is 50662.5 : 101325 (exact in binary), not 101325 : 202650.
+        let b = ready(cx, gate, selected(50_662.5), profile());
         let turned = Profile::parse(include_str!("../orthotropic.body")
             .replace("grain 0.17", "grain 0.87").as_bytes()).unwrap();
         let c = ready(cx, gate, selected(101_325.0), turned);
@@ -68,11 +70,11 @@ fn gas_and_grain_data_rebuild_the_actual_same_basis_radiation_matrix() {
         assert_eq!(ar.specimen_identity, br.specimen_identity);
         assert_ne!(ar.specimen_identity, cr.specimen_identity);
         assert_eq!(ar.gas.sound_speed, br.gas.sound_speed);
-        assert_eq!(2.0*ar.gas.density, br.gas.density);
+        assert_eq!(ar.gas.density, 2.0*br.gas.density);
         let impedance = |ready: &Ready| ready.performance.bank().source().bank()
             .body_radiation().unwrap().model().impedance(core::f64::consts::TAU*100.0).unwrap();
         let za = impedance(&a); let zb = impedance(&b); let zc = impedance(&c);
-        assert!((zb[0]-za[0].scale(2.0)).abs() <= 1e-8 * za[0].abs().max(1e-12));
+        assert!((za[0]-zb[0].scale(2.0)).abs() <= 1e-8 * zb[0].abs().max(1e-12));
         assert!((zc[0]-za[0]).abs() > 1e-10 * za[0].abs().max(1e-12));
     });
 }

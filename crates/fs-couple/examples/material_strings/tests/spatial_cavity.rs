@@ -111,12 +111,13 @@ fn authored_volume_reaches_shared_body_and_string_motion_before_preload_and_pcm(
 fn source_pressure_composition_and_solid_substitutions_rebuild_physical_storage() {
     scoped(|cx,gate| {
         let ordinary = ready(cx,gate,source(PERFORMANCE),BODY,700.0);
-        let doubled = ready(cx,gate,source(&PERFORMANCE.replace("293.15 101325", "293.15 202650")),BODY,700.0);
+        // Half the ordinary pressure (exact in binary): the named gas model admits [10000, 200000] Pa, which excludes 2 atm.
+        let halved = ready(cx,gate,source(&PERFORMANCE.replace("293.15 101325", "293.15 50662.5")),BODY,700.0);
         let dense = ready(cx,gate,source(PERFORMANCE),BODY,1400.0);
         let mixed = ready(cx,gate,source(&PERFORMANCE.replace("mole 2 N2 0.8 O2 0.2",
             "mole 3 N2 0.7 O2 0.2 CO2 0.1")),BODY,700.0);
         let a = ordinary.performance.bank().source().bank().spatial_cavity().unwrap();
-        let b = doubled.performance.bank().source().bank().spatial_cavity().unwrap();
+        let b = halved.performance.bank().source().bank().spatial_cavity().unwrap();
         let d = dense.performance.bank().source().bank().spatial_cavity().unwrap();
         let m = mixed.performance.bank().source().bank().spatial_cavity().unwrap();
         assert_eq!(a.basis_identity(),b.basis_identity());
@@ -124,7 +125,7 @@ fn source_pressure_composition_and_solid_substitutions_rebuild_physical_storage(
         assert_ne!(a.basis_identity(),d.basis_identity());
         assert_eq!(a.positions(),d.positions());
         assert_eq!(a.tetrahedra(),m.tetrahedra());
-        assert!((uniform_stiffness(&doubled)/uniform_stiffness(&ordinary)-2.0).abs() < 1e-9);
+        assert!((uniform_stiffness(&ordinary)/uniform_stiffness(&halved)-2.0).abs() < 1e-9);
         assert!((uniform_stiffness(&dense)/uniform_stiffness(&ordinary)-0.5).abs() < 1e-8);
         assert_eq!(*m.gas(),mixed.spec.gas);
         let ratio = m.modal_report().frequency_hz[1]/a.modal_report().frequency_hz[1];
