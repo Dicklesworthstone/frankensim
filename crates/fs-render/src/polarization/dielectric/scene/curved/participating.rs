@@ -254,12 +254,57 @@ impl<'a, 'scene, 'optics> CurvedRayleighScene<'a, 'scene, 'optics> {
         )
     }
 
-    /// Flight draws are [CDF variate, phase cosine variate, phase azimuth
-    /// variate], all in [0,1). The first gives `-ln(1-u)/sigma_s` metres of
-    /// actual arc length. A surface winning the race starts a fresh flight in
-    /// its selected medium, using exponential memorylessness. Interfaces and
-    /// colliding packets retain their original physical power exactly once.
-    /// Deterministic custom sampler for the original uniform-density path.\n    /// Heterogeneous density needs an independent fourth acceptance variate\n    /// and therefore refuses here rather than correlating acceptance and phase.\n    #[allow(clippy::too_many_arguments)]\n    pub fn trace_with_samples(\n        &self,\n        cx: &Cx<'_>,\n        beam: PolarizedBeam,\n        initial_medium: usize,\n        settings: CurvedRayleighTraceSettings,\n        surface_samples: impl FnMut(u32) -> [f64; 3],\n        mut flight_samples: impl FnMut(u32) -> [f64; 3],\n    ) -> Result<CurvedRayleighPath, CurvedSceneError> {\n        self.trace_with_tracking_samples_impl(\n            cx, beam, initial_medium, settings, surface_samples,\n            |flight| { let d = flight_samples(flight); [d[0], d[1], d[2], 0.0] },\n            false,\n        )\n    }\n\n    #[allow(clippy::too_many_arguments)]
+    /// Deterministic custom sampler for the original uniform-density path.
+    /// Heterogeneous density needs an independent fourth acceptance variate
+    /// and therefore refuses here rather than correlating acceptance and phase.
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace_with_samples(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        mut flight_samples: impl FnMut(u32) -> [f64; 3],
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_impl(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            |flight| {
+                let draw = flight_samples(flight);
+                [draw[0], draw[1], draw[2], 0.0]
+            },
+            false,
+        )
+    }
+
+    /// Deterministic custom sampler for uniform or heterogeneous density.
+    /// Draws are [majorant CDF, phase cosine, phase azimuth, delta acceptance].
+    #[allow(clippy::too_many_arguments)]
+    pub fn trace_with_tracking_samples(
+        &self,
+        cx: &Cx<'_>,
+        beam: PolarizedBeam,
+        initial_medium: usize,
+        settings: CurvedRayleighTraceSettings,
+        surface_samples: impl FnMut(u32) -> [f64; 3],
+        flight_samples: impl FnMut(u32) -> [f64; 4],
+    ) -> Result<CurvedRayleighPath, CurvedSceneError> {
+        self.trace_with_tracking_samples_impl(
+            cx,
+            beam,
+            initial_medium,
+            settings,
+            surface_samples,
+            flight_samples,
+            true,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn trace_with_tracking_samples_impl(
         &self,
         cx: &Cx<'_>,
