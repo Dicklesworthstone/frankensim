@@ -17,6 +17,7 @@ OUT_DIR/jobs.txt: `<mode> <out.wav> <args...>` per render; OUT_DIR/plan.json: ho
 import json
 import math
 import os
+import re
 import sys
 from decimal import Decimal
 
@@ -317,9 +318,23 @@ for pitch in ["C3", "C4"]:
                                          notes=notes, join="legato", how=VOICE_HOW, vibrato_hz=VIBRATO_HZ)
 
 # ---------------------------------------------------------------- lip valves: one render per phrase
+def lip_holds(fam, notes):
+    """Each held note's (pre-stress, sustain Pa), read from the HOLDS default of the family's render.sh: one
+    `pre-stress:attack-Pa:sustain-Pa` per hold, in the order of `notes`. A copy kept here went stale once (render.sh
+    retuned F4, Bb4 and D5 after the reflection moved to the junction's own sample; the phrases kept 1.42, 1.9, 2.42
+    and played 30-40 cents sharp of the holds), so the phrases read the graded holds' embouchure itself."""
+    found = re.findall(r'^HOLDS=\$\{HOLDS-"([^"]*)"\}$', "\n".join(read(f"{SRC}/{fam}/render.sh")), re.M)
+    if len(found) != 1:
+        sys.exit(f"{fam}/render.sh: expected one HOLDS default, found {len(found)}")
+    holds = [h.split(":") for h in found[0].split()]
+    if len(holds) != len(notes) or any(len(h) != 3 for h in holds):
+        sys.exit(f"{fam}/render.sh: HOLDS {found[0]!r} is not one pre-stress:attack:sustain per note of {notes}")
+    return {n: (float(pre), float(sustain)) for n, (pre, _, sustain) in zip(notes, holds)}
+
+
 LIP = {
     "trumpet": dict(head="trumpet-open.head", rate=32000, attack=1.4e4,
-                    t={"Bb3": (0.93, 5.71e3), "F4": (1.42, 8.56e3), "Bb4": (1.9, 1.142e4), "D5": (2.42, 1.439e4)}),
+                    t=lip_holds("trumpet", ["Bb3", "F4", "Bb4", "D5"])),
 }
 
 
