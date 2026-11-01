@@ -18,6 +18,9 @@ pub mod isobaric;
 /// Closed mixture compression and expansion at conserved entropy.
 pub mod isentropic;
 
+/// Coupled heat, boundary-work and volume changes through U,V equilibrium.
+pub mod driven;
+
 /// One accepted closed-vessel heat increment and its independent source balance.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct MixtureEquilibriumHeatStep {
