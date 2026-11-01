@@ -11,13 +11,18 @@ use super::circuit::response::{
     thermal::ConductionResponseFieldThermalCandidate,
 };
 use super::response::ConductionResponseEnthalpyCandidate;
+use super::spatial::{
+    SpatialConductionEnthalpyCandidate, SpatialConductionRegion, SpatialConductionThermalNetwork,
+};
 use super::*;
 use crate::circuit_enthalpy::contacts::heat::{
     HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, closed_balance,
 };
 use crate::circuit_enthalpy::{ResistorCell, field_storage::FieldThermalBinding};
 use fs_em::conduction::response::{ConductionResponseControls, PlanarConductionResponse};
+use fs_em::spatial::conduction::{SpatialConduction, SpatialConductionBoundary};
 use fs_exec::Cx;
+use fs_material::conductor::spatial::SpatialConductorMaterial;
 
 fn heat_error(error: HeatNetworkError) -> Error {
     match error {
@@ -27,6 +32,85 @@ fn heat_error(error: HeatNetworkError) -> Error {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    /// Close actual tetrahedral current and local Joule heat with this complete
+    /// source-defined thermal-contact, conductive-layer and radiation assembly.
+    ///
+    /// The original 3D field owner refreshes every scalar or oriented principal
+    /// conductivity at the SAME proposed enthalpy endpoint as the heat assembly.
+    /// Every tetrahedron keeps its original material/card and finite receiving
+    /// volume; native E.J enters once. Contact resistance and emissivity are
+    /// re-evaluated from their pinned source laws on every nonlinear trial.
+    /// Neither a second thermal timeline nor a fitted electrical resistor is
+    /// introduced. Source failures and cancellation publish neither endpoint.
+    ///
+    /// The original fixed-geometry and confined phase-chart restrictions of
+    /// [`SpatialConductionThermalNetwork::step_candidate`] apply. Thermal-contact
+    /// resistance is not an electrical surface resistance; graph electrical
+    /// bindings refuse rather than disappearing. Interface/emissivity laws must
+    /// be independent of E/J/B/H because this assembly owns no surface field.
+    /// Closed-enclosure radiation is internal exchange: external non-electrical
+    /// heat is `report.non_electrical_heat_j - dt * source.radiation_net_power_w()`.
+    /// Its signed numerical net is checked against the original energy allowance.
+    /// This first-order coupling still requires temporal/spatial refinement.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_spatial_conduction_candidate<'t, C: SpatialConductorMaterial>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        boundary: &SpatialConductionBoundary,
+        regions: &[SpatialConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
+        let cancel = RefCell::new(|| cx.checkpoint().is_err());
+        check(&cancel)?;
+        let bulk = self.thermal_material_network().map_err(heat_error)?;
+        self.admit_field_independent_boundaries(cx, &[])
+            .map_err(heat_error)?;
+        let layout = SpatialConductionThermalNetwork {
+            cells: bulk.cells,
+            links: bulk.links,
+            regions,
+            volume_tolerance_m3,
+        };
+        let next = layout.step_resolved_candidate(
+            thermal,
+            target_s,
+            problem,
+            boundary,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            |trial| {
+                let coefficients = self.resolve(cx, trial).map_err(heat_error)?;
+                if !coefficients.contacts.is_empty() || !coefficients.bulk.resistors.is_empty() {
+                    return Err(invalid(
+                        "3D current cannot silently omit graph electrical work",
+                    ));
+                }
+                Ok(coefficients.bulk)
+            },
+            |sample| &sample.material,
+            &cancel,
+        )?;
+        let report = next.report();
+        closed_balance(
+            target_s - thermal.time_s(),
+            report.total_energy_residual_j,
+            &report.source,
+            controls.total_energy_tolerance_j,
+        )
+        .map_err(heat_error)?;
+        check(&cancel)?;
+        Ok(next)
+    }
+
     /// Advance nonlinear spatial current, native electrical contacts and sourced
     /// R(T)/C(T)/L(T) with this complete heat assembly at ONE finite endpoint.
     ///

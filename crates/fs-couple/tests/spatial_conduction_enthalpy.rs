@@ -1,6 +1,8 @@
 //! G1/G3/G4: actual tetrahedral current closes material and finite heat feedback.
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
+#[path = "spatial_conduction_enthalpy/heat.rs"]
+mod heat;
 use common::{config, initial, near};
 use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,
