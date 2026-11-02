@@ -111,8 +111,9 @@ conductance; no replacement conductivity is introduced.
 
 Neighbor-cell temperatures drive conduction; film temperatures also drive
 the contact constitutive law. Version 4 can additionally route the original fiber material's hereditary
-loss to its finite body. Thermal reassembly of strings, body and hair still
-requires their corresponding thermomechanical owners.
+loss to its finite body and explicitly feed its temperature into the original
+fiber relaxation rates. Storage-modulus, density and geometric changes still
+require their corresponding thermomechanical owners.
 
 ## Moving dry-contact profiles
 
@@ -272,7 +273,7 @@ block after `series`, before `links`:
 ```text
 material-heat-budget MAX_DIMENSION MAX_DENSE_BYTES MAX_MULTIPLY_TERMS
 fiber-heat N
-fiber-body STRIP LAYER CELL_ID
+fiber-body STRIP LAYER CELL_ID [source-temperature]
 ```
 
 Repeat `fiber-body` for each selected physical material region. `STRIP` is
@@ -316,13 +317,55 @@ contact routes and source-derived conductive links lets that heat change
 contact temperature, traction and the same accepted pressure history.
 The existing command, trace, decimation and PCM paths consume this owner.
 
-This bulk hereditary route currently requires fixed density, geometry and
-source mechanical coefficients throughout the admitted temperature interval.
-It does not freeze a temperature-dependent relaxation time or modulus and
-call that thermal feedback. Temperature-dependent body laws require their
-own thermomechanical continuation. Film temperature-dependent laws continue
-to use the existing simultaneous thermal/contact solve. Unselected physical
-losses keep their original external-loss account.
+Without the optional `source-temperature` word, the bulk hereditary route
+retains its fixed-coefficient behavior: density, geometry and source mechanical
+coefficients must stay fixed throughout the admitted temperature interval.
+A temperature-dependent source law is refused instead of silently frozen.
+
+### Source-temperature relaxation feedback
+
+Add `source-temperature` to each selected `fiber-body` record to feed that
+finite cell's temperature back into its original linear Maxwell relaxation
+times. For example, the following selects an existing strip, radial layer and
+cell; it supplies no additional constitutive number:
+
+```text
+fiber-body STRIP LAYER CELL_ID source-temperature
+```
+
+The original `bow_fiber_memory` record still selects every modulus increment
+and time property. The fiber geometry owner supplies the exact branch-to-property
+mapping, including axial and bending memories. No property name is guessed.
+Source identity, the whole physical volume and mass, the caloric domain, and
+current native rates are admitted before output is opened. Missing properties
+and incompatible sources or schedules refuse without advancing either clock.
+
+Accepted relaxation times govern the complete current mechanical interval.
+The original trajectory integral deposits that interval's material heat into
+the same finite cell. Its accepted endpoint temperature selects the times for
+the next interval. Before publication, the original owner rebuilds propagation,
+all scalar and multi-contact responses, and every attached material-heat
+integral. Stored strain, stiffness and modal state remain intact; changing a
+relaxation time contributes no parameter work. This is a **first-order
+partition in temperature** and requires time refinement, not a fully implicit
+same-step relaxation-time solve.
+
+This opt-in supports fixed reference density, geometry and storage moduli,
+fully solid caloric states, linear material memories, fixed contact/support
+maps and prescribed normal loads. `bow_fiber_strain`, nonlinear storage,
+solved normal contacts/stops, and moving bow/fiber/stop programs require their
+corresponding compositions and refuse on this route. Existing fixed-map dry
+footprints, retained film heat, sliding thermal counterfaces, conductive links
+and explicit series-drive heat remain connected. String omitted-mode compliance
+retains its original mechanical storage and numerical-loss account.
+
+The source material's heat capacity and relaxation-time claims now affect the
+same physical pressure history through temperature, material memory and contact
+reaction. They do not modify output gain or supply missing horsehair/rosin data.
+Other body coefficient changes still require their thermomechanical owners.
+Film temperature-dependent laws continue to use the original simultaneous
+thermal/contact solve. Unselected physical losses keep their original
+external-loss account.
 
 ## Scope and output
 
@@ -346,9 +389,12 @@ trial starts from accepted string, film and drive histories, and film plastic
 heat, reversible affine-modulus exchange and explicitly routed drive loss enter
 the same finite enthalpy network. String/body constitutive coefficients stay at
 their declared source state. Version 4 explicitly routes source fiber hereditary
-heat into its finite bodies; bulk string heating and thermal expansion still
-require their corresponding physical owners. Solid caloric state, affine film `G(T)` and the
-existing residual-compliance exclusion remain required.
+heat into its finite bodies; its `source-temperature` option additionally updates
+the original linear fiber relaxation rates under the bounded scope above.
+Bulk string heating, thermal expansion and body storage-modulus evolution still
+require their corresponding physical owners. Solid caloric state and the
+existing affine film `G(T)` admission remain required. Omitted string modes keep
+their original storage and numerical loss, which is never deposited as heat.
 
 The render log records material/caloric identities, actual cell masses and
 initial temperatures, then final temperatures and stored enthalpies.
@@ -378,3 +424,15 @@ the same `PressureRenderer` trait. `into_thermal()` recovers accepted thermal
 history for continuation; no mechanical or thermal state is reset.
 Moving dry surfaces select `with_dry_contact_thermal_network(...)` through the
 same performance loop, finite thermal owner, observer, trace and PCM writer.
+
+For source-temperature fiber rates, the same performance gains
+`.with_material_relaxation_temperature(rates)`. The rates come from
+`fiber_material_rate_heat_destination`, which derives their property selectors
+from the original fiber material spectrum. The frontend's optional record wires
+these existing owners together; it adds no separate time step or sound engine.
+
+When continuing a rate-enabled library performance, use
+`into_thermal_with_material_rates()` to retain the accepted thermal network,
+updated source snapshots/heat integrals and rate bindings together. Rebuilding
+those bodies from their initial source temperatures would discard required
+continuation state and is refused by the original rate admission.

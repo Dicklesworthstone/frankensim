@@ -15,6 +15,8 @@ use crate::render::schedule::force::coupled::contact::friction::multiple::layer:
 use fs_exec::CancelGate;
 use fs_thermal::enthalpy::{DepositionSimulation, backward_euler::StepCoefficients};
 use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination;
+use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::rates::MaterialRelaxationTemperature;
+use crate::acoustic_realize::AcousticRealizeError;
 use std::marker::PhantomData;
 
 type TrialHeatSource<'p, 't, S, E> = dyn Fn(&DepositionSimulation<'t>, &[FrictionPortFrame])
@@ -40,6 +42,7 @@ pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
     series_heat: Vec<SeriesDriveHeatDestination>,
     dry: Vec<BowDryContactHeat<'m>>,
     material_heat: Vec<MaterialRelaxationHeatDestination<'m>>,
+    material_rates: Vec<MaterialRelaxationTemperature>,
     controls: LayerThermalSolve,
     gate: &'g CancelGate,
     resolve: F,
@@ -50,6 +53,24 @@ pub struct ContactThermalPerformance<'p, 't, 'm, 'g, F, S, E> {
 }
 
 impl MultiBowPerformance {
+    /// Admit source-selected finite-body relaxation rates without advancing the
+    /// original schedule, mechanics or heat. The fixed-map, linear-memory scope
+    /// is checked here and by the same native rate/source admission used at each
+    /// step. Other film, dry-footprint and conductive heat routes are retained.
+    pub fn admit_material_relaxation_temperature(
+        &self, thermal: &DepositionSimulation<'_>,
+        material_heat: &[MaterialRelaxationHeatDestination<'_>],
+        rates: &[MaterialRelaxationTemperature], gate: &CancelGate,
+    ) -> Result<(), RenderError> {
+        if self.bank.bow_station_motion_limits().is_some() || self.bow_station_motion.is_some()
+            || self.stop_motion.is_some() || self.stop_station_motion.is_some()
+            || self.fiber_support.is_some() {
+            return Err(render_invalid("source material-rate feedback requires fixed contact maps and supports"));
+        }
+        self.bank.system.admit_material_rate_thermal_feedback(thermal, material_heat, rates, gate)
+            .map_err(|error| RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string())))
+    }
+
     /// Render canonical bow/force controls with the existing contact/heat solve.
     /// `resolve` supplies OTHER heat and original-link conductances only; routed
     /// plastic/reversible/series-drive heat is already owned by the transaction.
@@ -132,6 +153,7 @@ impl MultiBowPerformance {
             series_heat,
             dry,
             material_heat,
+            material_rates: Vec::new(),
             controls,
             gate,
             resolve,
@@ -182,6 +204,23 @@ impl<'p, 't, F, S, E> ContactThermalPerformance<'p, 't, '_, '_, F, S, E> {
 }
 
 impl<'m, F, S, E> ContactThermalPerformance<'_, '_, 'm, '_, F, S, E> {
+    /// Feed each selected finite body's temperature into its original memory
+    /// rate. Accepted rates govern this interval and endpoint rates the next;
+    /// the original native owner refreshes propagation, contact and heat caches.
+    /// This first-order partition retains storage/internal strains and requires
+    /// time refinement. No source property or receiving mass is inferred here.
+    pub fn with_material_relaxation_temperature(
+        mut self, rates: Vec<MaterialRelaxationTemperature>,
+    ) -> Result<Self, RenderError> {
+        if !self.material_rates.is_empty() {
+            return Err(render_invalid("material rate feedback binds once to the original finite heat routes"));
+        }
+        self.performance.admit_material_relaxation_temperature(
+            &self.thermal, &self.material_heat, &rates, self.gate)?;
+        self.material_rates = rates;
+        Ok(self)
+    }
+
     /// Add original distributed-body heat to an already declared film or dry
     /// thermal performance. Every source route remains distinct from contact
     /// plasticity and from any explicitly routed lumped series-drive loss.
@@ -213,10 +252,21 @@ impl<F, S, E> ContactThermalPerformance<'_, '_, '_, '_, F, S, E> {
         self.last_frame.as_ref()
     }
 }
-impl<'t, F, S, E> ContactThermalPerformance<'_, 't, '_, '_, F, S, E> {
-    /// Release the performance borrow and recover all accepted heat history.
+impl<'t, 'm, F, S, E> ContactThermalPerformance<'_, 't, 'm, '_, F, S, E> {
+    /// Release the performance borrow and recover accepted finite heat history.
+    /// Rate-feedback continuation must also retain its updated material source
+    /// and integral owners: use `into_thermal_with_material_rates` in that case.
     pub fn into_thermal(self) -> DepositionSimulation<'t> {
         self.thermal
+    }
+
+    /// Recover all accepted finite-body continuation state without rebuilding
+    /// initial source snapshots or losing the updated original heat integrals.
+    pub fn into_thermal_with_material_rates(self) -> (
+        DepositionSimulation<'t>, Vec<MaterialRelaxationHeatDestination<'m>>,
+        Vec<MaterialRelaxationTemperature>,
+    ) {
+        (self.thermal, self.material_heat, self.material_rates)
     }
 }
 
@@ -245,6 +295,7 @@ where
             series_heat,
             dry,
             material_heat,
+            material_rates,
             controls,
             gate,
             resolve,
@@ -262,13 +313,27 @@ where
             for (guess, cell) in energy_guess_j.iter_mut().zip(thermal.cells().values()) {
                 *guess = cell.mass_kg * cell.specific_h_j_kg;
             }
-            let accepted = bank.step_with_material_contact_thermal_motion(thermal, bindings, series_heat,
-                dry, material_heat, *controls, energy_guess_j, forces, drives,
-                motion.bow_stations, motion.stop_stations, motion.stop_offsets_m, gate,
-                |endpoint, ports| match trial_resolve.as_ref() {
+            let source = |endpoint: &DepositionSimulation<'t>, ports: &[FrictionPortFrame]|
+                match trial_resolve.as_ref() {
                     Some(source) => source(endpoint, ports),
                     None => resolve(endpoint),
-                })?;
+                };
+            let accepted = if material_rates.is_empty() {
+                bank.step_with_material_contact_thermal_motion(thermal, bindings, series_heat,
+                    dry, material_heat, *controls, energy_guess_j, forces, drives,
+                    motion.bow_stations, motion.stop_stations, motion.stop_offsets_m, gate, source)?
+            } else {
+                if motion.bow_stations.is_some() || motion.stop_stations.is_some()
+                    || motion.stop_offsets_m.is_some() {
+                    return Err(render_invalid("material rate feedback cannot discard scheduled contact motion"));
+                }
+                let failure = |error: crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::LayerThermalError<E>|
+                    RenderError::Voice(AcousticRealizeError::Nonlinear(error.to_string()));
+                let routes = bank.fixed_dry_heat_routes(dry).map_err(failure)?;
+                bank.step_with_material_rate_thermal_feedback(thermal, bindings, series_heat,
+                    &routes, material_heat, material_rates, *controls, energy_guess_j,
+                    forces, drives, gate, source).map_err(failure)?.0
+            };
             let pressure = accepted.mechanics.observer_pressure_pa;
             *last_frame = Some(accepted);
             Ok(pressure)

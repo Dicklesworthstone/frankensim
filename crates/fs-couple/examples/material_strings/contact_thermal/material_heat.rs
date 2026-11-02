@@ -3,13 +3,16 @@
 //! cells supply a caloric discretization, never substitute damping or a heat split.
 use super::*;
 use fs_couple::render::schedule::force::coupled::coefficients::heat::MaterialHeatBudget;
-use fs_couple::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::material::MaterialRelaxationHeatDestination;
+use fs_couple::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::{
+    material::MaterialRelaxationHeatDestination, rates::MaterialRelaxationTemperature,
+};
 
 #[derive(Clone, Debug)]
 pub(super) struct FiberRoute {
     strip: usize,
     layer: usize,
     cell: CellId,
+    pub(super) source_temperature: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -35,6 +38,11 @@ pub(super) fn parse(
         let mut row = rows.row("fiber-body")?;
         let route = FiberRoute {
             strip: row.parse()?, layer: row.parse()?, cell: CellId(row.parse()?),
+            source_temperature: match row.words.next() {
+                None => false,
+                Some("source-temperature") => true,
+                _ => return Err("fiber-body accepts only the explicit source-temperature rate option".into()),
+            },
         };
         row.end()?;
         if !cells.iter().any(|cell| cell.id == route.cell)
@@ -61,9 +69,9 @@ pub(super) fn parse(
 impl Prepared {
     pub(super) fn material_routes<'a>(
         &'a self, ready: &Ready, network: &DepositionSimulation<'_>, gate: &CancelGate,
-    ) -> Result<Vec<MaterialRelaxationHeatDestination<'a>>> {
-        let Some(declaration) = &self.profile.material_heat else { return Ok(Vec::new()); };
-        if declaration.fibers.is_empty() { return Ok(Vec::new()); }
+    ) -> Result<(Vec<MaterialRelaxationHeatDestination<'a>>, Vec<MaterialRelaxationTemperature>)> {
+        let Some(declaration) = &self.profile.material_heat else { return Ok((Vec::new(), Vec::new())); };
+        if declaration.fibers.is_empty() { return Ok((Vec::new(), Vec::new())); }
         let count = declaration.fibers.len();
         let budget = MaterialHeatBudget {
             max_dense_bytes: declaration.budget.max_dense_bytes / count,
@@ -71,29 +79,46 @@ impl Prepared {
             ..declaration.budget
         };
         let mut routes = Vec::with_capacity(count);
+        let mut rates = Vec::new();
         for route in &declaration.fibers {
             poll(gate)?;
             let index = self.profile.cells.iter().position(|cell| cell.id == route.cell)
                 .ok_or("fiber heat lost its original receiving cell")?;
             let cell = &self.profile.cells[index];
             let source = &self.sources[index];
-            let destination = ready.performance.bank().fiber_material_heat_destination(
-                route.strip, route.layer, route.cell, &source.card, &source.curve,
-                "T", budget, gate,
-            )?;
+            let (destination, rate) = if route.source_temperature {
+                let (heat, rate) = ready.performance.bank().fiber_material_rate_heat_destination(
+                    route.strip, route.layer, route.cell, &source.card, &source.curve,
+                    "T", budget, gate,
+                )?;
+                (heat, Some(rate))
+            } else {
+                (ready.performance.bank().fiber_material_heat_destination(
+                    route.strip, route.layer, route.cell, &source.card, &source.curve,
+                    "T", budget, gate,
+                )?, None)
+            };
             if destination.source.state_coordinate("T")
                 .is_none_or(|temperature| temperature.to_bits() != cell.temperatures[1].to_bits())
             {
                 return Err("fiber body and its finite thermal cell require one initial source temperature".into());
             }
-            // Reuse the original admission, including source identity, whole
-            // annular-layer volume/mass, caloric law, temperature domain and
-            // complete fixed-coefficient hereditary heat. This runs BEFORE
-            // the output file is opened and repeats in every physical trial.
-            destination.admit::<std::convert::Infallible>(network)?;
+            // Fixed routes keep their existing admission. Explicit rate routes
+            // use the original source/volume/operator admission together below,
+            // including exact branch-to-property roles from the fiber producer.
+            if let Some(rate) = rate {
+                rates.push(rate);
+            } else {
+                destination.admit::<std::convert::Infallible>(network)?;
+            }
             routes.push(destination);
         }
+        if !rates.is_empty() {
+            // Read-only preflight: no advance and no output creation precedes
+            // the actual native source, schedule and fixed-map admission.
+            ready.performance.admit_material_relaxation_temperature(network, &routes, &rates, gate)?;
+        }
         poll(gate)?;
-        Ok(routes)
+        Ok((routes, rates))
     }
 }

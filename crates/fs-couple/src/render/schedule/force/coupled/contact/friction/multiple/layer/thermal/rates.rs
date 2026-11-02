@@ -279,6 +279,21 @@ impl RateContinuation<'_> {
 }
 
 impl MultiFrictionModalSystem {
+    /// Read-only source/body/rate admission for the same thermal continuation.
+    /// Reuse this before opening output or binding a performance. It validates
+    /// the original operator and pinned material roles without staging motion,
+    /// refreshing coefficients, depositing heat or advancing either clock.
+    /// Contact-film and dry-heat bindings keep their own admission owners.
+    pub fn admit_material_rate_thermal_feedback(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        material_heat: &[MaterialRelaxationHeatDestination<'_>],
+        rates: &[MaterialRelaxationTemperature],
+        gate: &CancelGate,
+    ) -> Result<(), LayerThermalError<Infallible>> {
+        RateContinuation::new(self, material_heat, rates, thermal, gate).map(|_| ())
+    }
+
     /// Original finite-body/contact heat with explicit source tau(T) feedback.
     /// Accepted rates drive this complete interval; endpoint rates drive the
     /// next. All propagation, contact response and source heat-integral caches

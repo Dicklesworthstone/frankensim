@@ -87,6 +87,19 @@ impl<'a> BowDryContactHeat<'a> {
 }
 
 impl MultiBowStringBank {
+    // The original fixed string/fiber crossing, including source-coordinate
+    // origins and edge-roundoff handling, shared by ordinary and rate feedback.
+    pub(in super::super) fn fixed_dry_heat_routes<'a, E>(
+        &self, dry: &[BowDryContactHeat<'a>],
+    ) -> Result<Vec<DryContactHeat<'a>>, LayerThermalError<E>> {
+        let centres = self.source.bows.iter().map(|bow|
+            bow.location.station_fraction * self.cards[bow.location.string].length_m)
+            .collect::<Vec<_>>();
+        let fiber_centre = self.source.fiber_ribbon().map(|fiber|
+            fiber.station_fraction() * fiber.model().geometry().length_m);
+        dry.iter().map(|route| route.at(&centres, fiber_centre)).collect()
+    }
+
     /// Advance moving dry bow/string/fiber footprints, contact work, original
     /// finite heat cells and pressure together. The usual station projection,
     /// normal co-location, support inertia and endpoint source checks are shared
@@ -158,21 +171,7 @@ impl MultiBowStringBank {
                     what: "bow migration needs admitted station motion",
                 });
             }
-            let centres = self
-                .source
-                .bows
-                .iter()
-                .map(|bow| bow.location.station_fraction * self.cards[bow.location.string].length_m)
-                .collect::<Vec<_>>();
-            let fiber_centre = self
-                .source
-                .fiber_ribbon()
-                .map(|fiber| fiber.station_fraction() * fiber.model().geometry().length_m);
-            let routes = dry
-                .iter()
-                .map(|route| route.at(&centres, fiber_centre))
-                .collect::<Result<Vec<_>, LayerThermalError<E>>>()
-                .map_err(failure)?;
+            let routes = self.fixed_dry_heat_routes(dry).map_err(failure)?;
             self.system
                 .step_with_dry_contact_thermal_network(
                     thermal,

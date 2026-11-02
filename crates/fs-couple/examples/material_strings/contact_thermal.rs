@@ -595,6 +595,10 @@ impl Prepared {
         })
     }
     pub fn describe(&self) {
+        if self.profile.material_heat.as_ref().is_some_and(|routes|
+            routes.fibers.iter().any(|route| route.source_temperature)) {
+            eprintln!("fiber_material_rates=original source tau(T); fixed storage/maps; accepted interval rates, endpoint rates for next interval; first-order temperature partition");
+        }
         eprintln!(
             "contact_thermal=source-bound finite solid cells; adiabatic exterior; retained films with optional sliding thermal counterfaces or moving dry footprints; original sample clock"
         );
@@ -636,7 +640,7 @@ impl Prepared {
     ) -> Result<(W, WavStreamSummary)> {
         let network = self.network(gate)?;
         let film_routes = self.film_routes(ready, &network)?;
-        let material_heat = self.material_routes(ready, &network, gate)?;
+        let (material_heat, material_rates) = self.material_routes(ready, &network, gate)?;
         let bindings = self
             .profile
             .films
@@ -663,6 +667,9 @@ impl Prepared {
             network, bindings, self.profile.series.clone(), dry, material_heat,
             self.profile.controls, gate, resolve,
         )?;
+        if !material_rates.is_empty() {
+            performance = performance.with_material_relaxation_temperature(material_rates)?;
+        }
         if !film_routes.is_empty() {
             performance = performance.with_trial_heat_source(|endpoint, ports|
                 self.resolve_with_films(endpoint, ports, &film_routes))?;
