@@ -100,6 +100,73 @@ fn original_group_heat_matches_complete_native_loss_and_analytic_constrained_his
 }
 
 #[test]
+fn material_viscosity_and_memory_match_separate_native_loss_accounts() {
+    let gate = CancelGate::new_clock_free();
+    // The fixture's independent native component resistances are 2*.02*20=.8
+    // and 2*.02*30=1.2. Two physical regions contribute .3 and .5 to the first;
+    // a third owns the second. The joint dashpot remains outside material heat.
+    let sources = [
+        MaterialViscousHeatSource::from_material_region(0, 0, vec![(0, 0.3)]),
+        MaterialViscousHeatSource::from_material_region(0, 1, vec![(0, 0.5)]),
+        MaterialViscousHeatSource::from_material_region(1, 0, vec![(1, 1.2)]),
+    ];
+    for prepared in [false, true] {
+        let mut system = network(prepared);
+        let mut channel = system.prepare_material_heat_with_viscosity(
+            &[0..1, 1..3], &sources, budget(), &gate).unwrap();
+        for sample in 0..3 {
+            if sample == 1 {
+                let memory = system.material_memory().to_vec();
+                let rates = [MaterialRelaxationTime { branch: 1, relaxation_time_s: 0.03 }];
+                system.set_material_relaxation_times(&rates, &gate).unwrap();
+                channel = channel.prepare_after_material_rates(&system, &rates, &gate).unwrap();
+                assert_eq!(system.material_memory(), memory);
+            }
+            let input = [-0.3, 0.6];
+            let memory = system.material_memory().to_vec();
+            let energy = system.total_energy_j().unwrap();
+            let heat = channel.evaluate(&system, &input, &gate).unwrap();
+            assert_eq!(heat.len(), 5);
+            assert_eq!(system.material_memory(), memory);
+            assert_eq!(system.total_energy_j().unwrap(), energy);
+            system.stage_inner(&input, Some(&gate)).unwrap();
+            assert_eq!(channel.evaluate_staged(&system, &gate).unwrap(), heat);
+            near(heat[..2].iter().sum(), system.staged_frame.material_dissipation_j);
+            near(heat[2..].iter().sum(), system.staged_frame.component_dissipation_j);
+            assert!(heat.iter().all(|h| *h > 0.0));
+            assert!(system.staged_frame.connection_dissipation_j > 0.0);
+            system.publish_staged();
+        }
+        assert!(system.admit_material_viscosity([&sources[0], &sources[0]], &gate).is_err());
+        let excess = MaterialViscousHeatSource::from_material_region(0, 2, vec![(0, 0.1)]);
+        assert!(system.admit_material_viscosity(sources.iter().chain([&excess]), &gate).is_err());
+        let other_component = MaterialViscousHeatSource::from_material_region(0, 3, vec![(1, 0.1)]);
+        assert!(system.admit_material_viscosity([&other_component], &gate).is_err());
+        // Pure Kelvin bodies require no fictitious hereditary branch or state.
+        let only_viscosity = system.prepare_material_heat_with_viscosity(
+            &[], &sources, budget(), &gate).unwrap();
+        let heat = only_viscosity.evaluate(&system, &[0.0; 2], &gate).unwrap();
+        near(heat.iter().sum(), system.step_under_gate(&[0.0; 2], &gate).unwrap().component_dissipation_j);
+    }
+    let mut kelvin = CoupledModalSystem::new(vec![model(0.01, 0.03, 20.0)],
+        vec![], config(), &gate).unwrap();
+    let source = kelvin.prepare_material_heat_with_viscosity(&[], &sources[..2], budget(), &gate).unwrap();
+    assert!(kelvin.material_memory().is_empty());
+    kelvin.stage_inner(&[0.0], Some(&gate)).unwrap();
+    let heat: f64 = source.evaluate_staged(&kelvin, &gate).unwrap().iter().sum();
+    // Independent closed-form damped oscillator energy, with no material
+    // history, force input, connection or alternative integrator in the oracle.
+    let (omega, decay, time) = (20.0_f64, 0.4_f64, 0.001_f64);
+    let wd = (omega*omega - decay*decay).sqrt();
+    let (sin, cos) = (wd*time).sin_cos();
+    let q = (-decay*time).exp() * (0.01*cos + (0.03+decay*0.01)/wd*sin);
+    let v = (-decay*time).exp() * (0.03*cos - (decay*0.03+omega*omega*0.01)/wd*sin);
+    near(heat, 0.5*(0.03_f64.powi(2)+(omega*0.01).powi(2)-v*v-(omega*q).powi(2)));
+    near(heat, kelvin.staged_frame.component_dissipation_j);
+    assert_eq!(kelvin.staged_frame.material_dissipation_j, 0.0);
+}
+
+#[test]
 fn stale_rate_and_spring_caches_refuse_then_reprepare_without_erasing_history() {
     let gate=CancelGate::new_clock_free();let mut system=network(false);
     let old=system.prepare_material_heat(&[0..3],budget(),&gate).unwrap();

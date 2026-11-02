@@ -102,9 +102,9 @@ pub(super) fn parse(
         return Err("material heat aggregate resources cannot cover all declared bodies".into());
     }
     Ok(Routes {
-        // A string layer can occupy one bending and one torsional source block.
-        // The original integral charges both against this same aggregate budget.
-        budget: MaterialHeatBudget { max_groups: 2, max_dimension,
+        // One bending block, one torsional block, and the same region's native
+        // viscosity rows all consume this one original aggregate budget.
+        budget: MaterialHeatBudget { max_groups: 3, max_dimension,
             max_dense_bytes, max_multiply_terms },
         fibers, strings,
     })

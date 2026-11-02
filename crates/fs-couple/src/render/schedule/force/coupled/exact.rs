@@ -1157,7 +1157,9 @@ fn stage_candidate(network: &mut CoupledModalSystem, external: &[f64], candidate
     // Move the SAME original state/held input after the ledger has observed it;
     // no extra vector allocation or cloning is added to a contact trial.
     // Varying-force trajectories need their own independent heat integrals.
-    if !network.relaxation_branches.is_empty() && external_work.is_none() {
+    // A purely viscous material has no Maxwell states, but its source heat
+    // observes this same held-input path. Retain the existing vectors by move.
+    if external_work.is_none() {
         network.staged_material_trajectory = Some((x, u));
     }
     Ok(())

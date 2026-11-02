@@ -120,8 +120,8 @@ pub struct LayerThermalFrame<S> {
     /// Already included in the mechanical report, so removed once from the
     /// combined external loss account. Never includes stored spring energy.
     pub routed_series_drive_heat_j: f64,
-    /// Original linear Maxwell and nonlinear hereditary source losses.
-    /// Both already belong to network_dissipation_j and are removed exactly once
+    /// Original material viscosity, linear Maxwell and nonlinear hereditary losses.
+    /// All already belong to network_dissipation_j and are removed exactly once
     /// from the combined external loss account after entering their finite bodies.
     pub routed_material_heat_j: f64,
     /// Original dry friction loss delivered to the same finite thermal cells.
@@ -640,6 +640,10 @@ impl MultiFrictionModalSystem {
         let mut heated_branches = BTreeSet::new();
         let mut heated_histories = BTreeSet::new();
         let mut heated_material_cells = BTreeSet::new();
+        self.core.network.admit_material_viscosity(material_heat.iter()
+            .filter_map(|route| route.channel.as_ref())
+            .flat_map(|channel| channel.viscosity_sources()), gate)
+            .map_err(ModalFrictionError::from)?;
         for route in material_heat {
             checkpoint()?;
             if !heated_material_cells.insert(route.cell) {
@@ -821,47 +825,51 @@ impl MultiFrictionModalSystem {
                     }
                     let mut material_loss = Vec::with_capacity(material_heat.len());
                     let (mut material_heat_j, mut linear_material_heat_j,
-                        mut nonlinear_material_heat_j) = (0.0, 0.0, 0.0);
+                        mut viscous_material_heat_j, mut nonlinear_material_heat_j) = (0.0, 0.0, 0.0, 0.0);
                     for route in material_heat {
                         checkpoint()?;
                         if let Some(rates) = material_rates { rates.admit_route(route, endpoint)?; }
                         else { route.admit(endpoint)?; }
-                        let linear = match &route.channel {
+                        let (linear, viscous) = match &route.channel {
                             Some(channel) => {
                                 let groups = channel.evaluate_staged(&system.core.network, gate)
                                     .map_err(ModalFrictionError::from)?;
-                                let (mut sum, mut correction) = (0.0_f64, 0.0_f64);
-                                for heat in groups {
+                                let (mut sum, mut correction) = ([0.0_f64; 2], [0.0_f64; 2]);
+                                for (group, heat) in groups.into_iter().enumerate() {
                                     let heat = number(heat)?;
                                     if heat < 0.0 {
                                         return Err(LayerThermalError::Invalid("material source group heat must be nonnegative"));
                                     }
-                                    let next = number(sum + heat)?;
-                                    correction = number(correction + if sum.abs() >= heat.abs() {
-                                        (sum - next) + heat
-                                    } else { (heat - next) + sum })?;
-                                    sum = next;
+                                    let kind = usize::from(group >= channel.groups().len());
+                                    let next = number(sum[kind] + heat)?;
+                                    correction[kind] = number(correction[kind] + if sum[kind].abs() >= heat.abs() {
+                                        (sum[kind] - next) + heat
+                                    } else { (heat - next) + sum[kind] })?;
+                                    sum[kind] = next;
                                 }
-                                number(sum + correction)?
+                                (number(sum[0] + correction[0])?, number(sum[1] + correction[1])?)
                             },
-                            None => 0.0,
+                            None => (0.0, 0.0),
                         };
                         let mut nonlinear = 0.0;
                         for source in &route.nonlinear_channels {
                             checkpoint()?;
                             nonlinear = number(nonlinear + source.evaluate_staged(&system.core)?)?;
                         }
-                        if linear < 0.0 || nonlinear < 0.0 {
+                        if linear < 0.0 || viscous < 0.0 || nonlinear < 0.0 {
                             return Err(LayerThermalError::Invalid("material resistance heat must be nonnegative"));
                         }
-                        let heat_j = number(linear + nonlinear)?;
+                        let heat_j = number(number(linear + viscous)? + nonlinear)?;
                         linear_material_heat_j = number(linear_material_heat_j + linear)?;
+                        viscous_material_heat_j = number(viscous_material_heat_j + viscous)?;
                         nonlinear_material_heat_j = number(nonlinear_material_heat_j + nonlinear)?;
                         material_heat_j = number(material_heat_j + heat_j)?;
                         material_loss.push((route.cell, heat_j));
                     }
                     if linear_material_heat_j - system.core.network.staged_frame.material_dissipation_j
                         > controls.total_energy_tolerance_j
+                        || viscous_material_heat_j - system.core.network.staged_frame.component_dissipation_j
+                            > controls.total_energy_tolerance_j
                         || nonlinear_material_heat_j - system.core.staged_material_history_heat_j()?
                             > controls.total_energy_tolerance_j {
                         return Err(LayerThermalError::Invalid("routed material heat exceeds its original independent physical loss"));

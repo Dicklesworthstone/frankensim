@@ -391,23 +391,33 @@ transverse planes when present, together with every original shear-memory arm
 and torsional mode of that layer. Bending and torsion may occupy separate native
 history blocks; their independently integrated losses enter this one cell, with
 the physical mass and caloric storage counted once. Zero source arms contribute
-no history or heat.
+no history or heat. Original Kelvin-Voigt bending and shear viscosities also
+deposit their own layer losses. Their velocity rows use the actual annular
+`eta_b * I` and `eta_s * J` operators and the existing native modal mass basis,
+including admitted transverse added mass. They are integrated along the same
+complete contact trajectory, not inferred from total decay or endpoint power.
 The original constitutive selectors determine the rates; the heat declaration
 contains no new damping, modal heat fraction or fitted coefficient. String and
 fiber routes share the declared aggregate work/byte budgets and cannot reuse
 each other's receiving cells or a film cell. Original files without the optional
 list retain their prior behavior.
 
-This route admits original bonded `bending-loss prony` sections and explicit
-`bending-memory` selections on homogeneous or bonded sections. The producer
+This route admits original homogeneous/bonded Kelvin-Voigt sections, bonded
+`bending-loss prony` sections, and explicit `bending-memory` selections. A purely
+Kelvin-Voigt body needs no invented Maxwell history. The producer
 keeps the native source/body/additional-memory ordering, so the chosen layer
 cannot accidentally heat or update another string's histories. Original elastic
-torsion and `torsion-memory` are supported when parallel shear viscosity is
-explicitly zero. Each additional source group uses the original integral's
-work and memory budget. Homogeneous
+torsion and `torsion-memory` retain their original parallel shear viscosity.
+The thermal account checks viscous heat against native component dissipation
+and hereditary heat against native Maxwell dissipation before depositing both
+once. Distinct layers may act on the same modal velocity; repeating one original
+layer or exceeding the original modal resistance refuses. Ambient gas and joint
+resistance do not enter these material sources.
+Each additional source group uses the original integral's work and memory
+budget. Homogeneous
 intrinsic spectra without the retained section-role binding, retained
-axial waves, geometric stretching, measured/wound reductions and parallel
-intrinsic bending/shear viscosity, modal or tension loss refuse. Those cases require their
+axial waves, geometric stretching, measured/wound reductions, constant-loss shear
+proxies, modal or tension loss refuse. Those cases require their
 complete physical heat routing, rather than dropping unowned dissipation.
 Gas drag and body/contact/radiation losses keep their separate owners.
 
@@ -415,8 +425,11 @@ Gas drag and body/contact/radiation losses keep their separate owners.
 continuation as the fiber option below. The accepted layer temperature updates
 all of that layer's original bending and shear time properties for the next interval.
 Geometry, reference mass, moduli, prestress and material strain storage remain
-fixed; this is not thermal expansion or a temperature-dependent elastic pencil.
-Finite-cell conductivity can carry the actual bending heat into other declared
+fixed; viscosity must also be fixed throughout the admitted temperature domain.
+An `eta(T)` source refuses even with this option, which only continues original
+Maxwell time properties. A body without such histories uses the plain record.
+This is not thermal expansion or a temperature-dependent elastic pencil.
+Finite-cell conductivity can carry the actual material heat into other declared
 body/contact cells through the existing links. No temperature-dependent source
 law is invented when the material card lacks it.
 

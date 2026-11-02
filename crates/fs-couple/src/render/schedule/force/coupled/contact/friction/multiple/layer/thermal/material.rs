@@ -1,4 +1,4 @@
-//! Finite-body receiving cells for original Maxwell resistance channels.
+//! Finite-body receiving cells for original Maxwell and viscosity channels.
 //!
 //! The source geometry supplies the receiving material volume. All heat of
 //! that body enters its explicit uniform cell; there is no fitted partition.
@@ -10,6 +10,7 @@
 
 use super::*;
 use crate::render::schedule::force::coupled::coefficients::heat::{MaterialHeatIntegral, MaterialHeatBudget};
+use crate::render::schedule::force::coupled::coefficients::heat::viscosity::MaterialViscousHeatSource;
 use fs_material::state_point::ResolvedMaterialStatePoint;
 use crate::render::schedule::force::coupled::contact::friction::nonlinear::history::MaterialHistoryHeatChannel;
 use fs_qty::Temperature;
@@ -30,8 +31,9 @@ pub struct MaterialRelaxationHeatDestination<'a> {
     pub density_property: &'a str,
     pub volume_m3: f64,
     pub source: ResolvedMaterialStatePoint,
-    /// Original linear Maxwell source integral, when the body retains linear
-    /// material channels (including bending beside nonlinear axial strain).
+    /// Original linear Maxwell and/or material-viscous source integral, when
+    /// the body retains linear material channels. Viscous rows observe original
+    /// component resistance independently of gas drag or other material layers.
     pub channel: Option<MaterialHeatIntegral>,
     /// Original independently evaluated nonlinear constitutive sources for this
     /// same physical volume. Their losses come from the accepted DG candidate,
@@ -51,7 +53,8 @@ impl MaterialRelaxationHeatDestination<'_> {
         time_properties: &[&str]) -> Result<(), LayerThermalError<E>> {
         let bad = LayerThermalError::Invalid;
         if self.channel.as_ref().is_some_and(|channel|
-            channel.groups().is_empty() || channel.groups().iter().any(|range| range.is_empty()))
+            (channel.groups().is_empty() && channel.viscosity_sources().is_empty())
+                || channel.groups().iter().any(|range| range.is_empty()))
             || self.channel.is_none() && self.nonlinear_channels.is_empty()
             || self.nonlinear_channels.len() > 256 {
             return Err(bad("complete nonempty original material source ranges must own each finite body volume"));
@@ -133,5 +136,14 @@ impl MultiFrictionModalSystem {
         &self, branches: &[core::ops::Range<usize>], budget: MaterialHeatBudget, gate: &CancelGate,
     ) -> Result<MaterialHeatIntegral, ModalFrictionError> {
         Ok(self.core.network.prepare_material_heat(branches, budget, gate)?)
+    }
+
+    /// Original geometry producers retain exact source-region viscosity rows
+    /// beside material-memory branches in the same trajectory integral.
+    pub(crate) fn prepare_material_heat_with_viscosity(
+        &self, branches: &[core::ops::Range<usize>], viscosity: &[MaterialViscousHeatSource],
+        budget: MaterialHeatBudget, gate: &CancelGate,
+    ) -> Result<MaterialHeatIntegral, ModalFrictionError> {
+        Ok(self.core.network.prepare_material_heat_with_viscosity(branches, viscosity, budget, gate)?)
     }
 }

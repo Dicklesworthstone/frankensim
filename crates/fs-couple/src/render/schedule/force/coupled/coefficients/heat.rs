@@ -1,11 +1,15 @@
 //! Integrated material heat on the original complete held-force trajectory.
 //!
-//! Each source row is (sqrt(k) b.q-z)/sqrt(tau), not a share of total loss.
+//! Memory rows are (sqrt(k) b.q-z)/sqrt(tau); original viscous rows are
+//! sqrt(c) v. Neither is a share of total loss.
 //! The original modal/connection/Maxwell coefficients define the observation
 //! generator; `PreparedSourceLoss` owns its positive integral. No physical state
 //! or second mechanical time stepper is stored here. Held-effort contact trials
 //! supply their actual original staged input. External acoustic owners and
 //! varying-force trajectories require their own complete source integral.
+/// Original source-region viscosity in the same mass-normalized trajectory.
+pub mod viscosity;
+use viscosity::MaterialViscousHeatSource;
 use super::super::*;
 use core::ops::Range;
 use fs_phs::{PreparedStepError, RelaxationBranch};
@@ -28,6 +32,7 @@ pub struct MaterialHeatBudget {
 pub struct MaterialHeatIntegral {
     signature: Signature,
     ranges: Vec<Range<usize>>,
+    viscosity: Vec<MaterialViscousHeatSource>,
     integrals: Vec<PreparedSourceLoss>,
     rest_force: Vec<f64>,
     budget: MaterialHeatBudget,
@@ -108,11 +113,23 @@ impl CoupledModalSystem {
     pub fn prepare_material_heat(
         &self, ranges: &[Range<usize>], budget: MaterialHeatBudget, gate: &CancelGate,
     ) -> Result<MaterialHeatIntegral, ModalCouplingError> {
+        self.prepare_material_heat_with_viscosity(ranges, &[], budget, gate)
+    }
+
+    /// Geometry producers append the original viscous source rows without
+    /// changing the native mechanics, coordinates or loss integrator.
+    pub(crate) fn prepare_material_heat_with_viscosity(
+        &self, ranges: &[Range<usize>], viscosity: &[MaterialViscousHeatSource],
+        budget: MaterialHeatBudget, gate: &CancelGate,
+    ) -> Result<MaterialHeatIntegral, ModalCouplingError> {
         poll(Some(gate))?;
         self.require_time_domain()?;
-        if self.radiation.is_some() || ranges.is_empty() || ranges.len() > budget.max_groups {
+        let groups = ranges.len().checked_add(viscosity.len())
+            .ok_or_else(|| invalid("material source group extent overflow"))?;
+        if self.radiation.is_some() || groups == 0 || groups > budget.max_groups {
             return Err(invalid("material heat needs bounded groups on an original modal/Maxwell trajectory without external acoustic state"));
         }
+        self.admit_material_viscosity(viscosity, gate)?;
         let m = self.mode_count();
         let arms = self.relaxation_branches.len();
         let n = m.checked_mul(2).and_then(|n| n.checked_add(arms))
@@ -131,15 +148,17 @@ impl CoupledModalSystem {
         let signatures = m.checked_mul(2)
             .and_then(|v| self.connections.len().checked_mul(2*m+9).and_then(|k| v.checked_add(k)))
             .and_then(|v| arms.checked_mul(2*m+5).and_then(|k| v.checked_add(k)))
-            .and_then(|v| v.checked_add(self.offsets.len()));
+            .and_then(|v| v.checked_add(self.offsets.len()))
+            .and_then(|v| viscosity.iter().try_fold(v, |n, source|
+                source.rates_per_s().len().checked_mul(3)?.checked_add(n)));
         let bytes = d.checked_mul(d).and_then(|v| v.checked_mul(40))
-            .and_then(|v| v.checked_mul(ranges.len()))
+            .and_then(|v| v.checked_mul(groups))
             .and_then(|v| v.checked_add(n.checked_mul(n)?.checked_mul(8)?))
             .and_then(|v| v.checked_add(signatures?))
             .and_then(|v| v.checked_mul(8));
         let work = (d as u64).checked_pow(3)
             .and_then(|v| v.checked_mul(4096))
-            .and_then(|v| v.checked_mul(ranges.len() as u64))
+            .and_then(|v| v.checked_mul(groups as u64))
             .and_then(|v| v.checked_add((m as u64).checked_pow(2)?
                 .checked_mul((self.connections.len()+arms+1) as u64)?.checked_mul(16)?));
         if n == 0 || d > 256 || d > budget.max_dimension
@@ -188,9 +207,9 @@ impl CoupledModalSystem {
             flow[z*n+z] = finite(-1.0/branch.relaxation_time_s)?;
         }
         let native_budget = DenseExponentialBudget { max_dimension: budget.max_dimension,
-            max_dense_bytes: budget.max_dense_bytes/ranges.len(),
-            max_multiply_terms: budget.max_multiply_terms/ranges.len() as u64 };
-        let mut integrals = Vec::with_capacity(ranges.len());
+            max_dense_bytes: budget.max_dense_bytes/groups,
+            max_multiply_terms: budget.max_multiply_terms/groups as u64 };
+        let mut integrals = Vec::with_capacity(groups);
         for range in ranges {
             poll(Some(gate))?;
             let mut rows = vec![0.0; n*range.len()];
@@ -204,17 +223,30 @@ impl CoupledModalSystem {
             integrals.push(PreparedSourceLoss::new_controlled(n,m,&flow,&input,&rows,self.dt,
                 native_budget,||gate.is_requested()).map_err(prepared_error)?);
         }
+        for source in viscosity {
+            poll(Some(gate))?;
+            let mut rows = vec![0.0; n*source.rates_per_s().len()];
+            for (row, &(mode, rate)) in source.rates_per_s().iter().enumerate() {
+                rows[row*n+2*mode+1] = fs_math::det::sqrt(rate);
+            }
+            integrals.push(PreparedSourceLoss::new_controlled(n,m,&flow,&input,&rows,self.dt,
+                native_budget,||gate.is_requested()).map_err(prepared_error)?);
+        }
         let signature = Signature { offsets: self.offsets.clone(), modes, columns: self.columns.clone(),
             damping: (0..self.columns.len()).map(|i| damping_column(self,i).to_vec()).collect(),
             laws: self.connections.iter().map(|l| (l.stiffness_n_m,l.damping_n_s_m,l.rest_extension_m)).collect(),
             branches: self.relaxation_branches.clone(), dt: self.dt };
         poll(Some(gate))?;
-        Ok(MaterialHeatIntegral { signature, ranges: ranges.to_vec(), integrals, rest_force, budget })
+        Ok(MaterialHeatIntegral { signature, ranges: ranges.to_vec(), viscosity: viscosity.to_vec(),
+            integrals, rest_force, budget })
     }
 }
 
 impl MaterialHeatIntegral {
     pub fn groups(&self) -> &[Range<usize>] { &self.ranges }
+    /// Original material-viscous regions, ordered after hereditary groups in
+    /// heat observations. An empty list preserves the original memory-only API.
+    pub fn viscosity_sources(&self) -> &[MaterialViscousHeatSource] { &self.viscosity }
     pub const fn duration_s(&self) -> f64 { self.signature.dt }
 
     /// Reuse the original source groups and resource budget after an explicitly
@@ -229,7 +261,7 @@ impl MaterialHeatIntegral {
             || !self.signature.matches_rates(network, rates, gate)? {
             return Err(invalid("material heat rate refresh must retain every original non-rate coefficient"));
         }
-        network.prepare_material_heat(&self.ranges, self.budget, gate)
+        network.prepare_material_heat_with_viscosity(&self.ranges, &self.viscosity, self.budget, gate)
     }
 
     /// True only while the original complete linear coefficients remain intact.
@@ -240,7 +272,8 @@ impl MaterialHeatIntegral {
         self.signature.matches(network,gate)
     }
 
-    /// Physical joules in original group order from one accepted START state
+    /// Physical joules in original group order (memory ranges, then viscous
+    /// regions) from one accepted START state
     /// under held generalized forces. No clock/state is advanced. A thermal
     /// caller must admit this account with the corresponding native step, not
     /// deposit it and then attempt mechanics. Evaluation has bounded O(G*n²)

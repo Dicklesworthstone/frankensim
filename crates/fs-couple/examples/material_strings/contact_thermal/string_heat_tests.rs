@@ -146,6 +146,20 @@ fn torsional_ready(
     cp: f64,
     explicit: bool,
 ) -> Ready {
+    viscous_ready(cx, gate, profile, cp, explicit, [0.0; 2], false, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn viscous_ready(
+    cx: &Cx<'_>,
+    gate: &CancelGate,
+    profile: &Profile,
+    cp: f64,
+    explicit: bool,
+    viscosity: [f64; 2],
+    only_kelvin: bool,
+    varying_viscosity: bool,
+) -> Ready {
     let mut specification = spec(profile, explicit);
     for wire in &mut specification.strings {
         wire.twist_modes = 1;
@@ -159,6 +173,13 @@ fn torsional_ready(
             };
             2
         ]);
+        if only_kelvin {
+            wire.bending_loss = input::BendingLoss::KelvinVoigt;
+            wire.torsion_memory = None;
+        }
+    }
+    if only_kelvin {
+        specification.bending_memory = None;
     }
     specification
         .compile(cx, gate, |name| {
@@ -173,12 +194,13 @@ fn torsional_ready(
                     .unwrap();
             }
             for (_, property) in base.claims().claims_ordered() {
-                if property.key.name() != SHEAR_ETA {
+                if ![ETA, SHEAR_ETA].contains(&property.key.name()) {
                     claims.insert_claim(property.clone()).unwrap();
                 }
             }
             for (key, dims, value) in [
-                (SHEAR_ETA, DynViscosity::DIMS, 0.0),
+                (ETA, DynViscosity::DIMS, viscosity[0]),
+                (SHEAR_ETA, DynViscosity::DIMS, viscosity[1]),
                 ("shear_delta", Pressure::DIMS, 30e9),
                 ("shear_time", fs_qty::Time::DIMS, 0.0005),
             ] {
@@ -197,6 +219,15 @@ fn torsional_ready(
                         abscissa: "T".into(),
                         abscissa_dims: fs_qty::Temperature::DIMS,
                         knots: vec![(280.0, 0.0002), (320.0, 0.0008)],
+                        dims,
+                    };
+                    property.interpolation = InterpolationPolicy::LinearInside;
+                }
+                if varying_viscosity && key == ETA {
+                    property.value = PropertyValue::Curve {
+                        abscissa: "T".into(),
+                        abscissa_dims: fs_qty::Temperature::DIMS,
+                        knots: vec![(280.0, value), (320.0, value * 2.0)],
                         dims,
                     };
                     property.interpolation = InterpolationPolicy::LinearInside;
@@ -496,7 +527,19 @@ fn v4_string_heat_refuses_incomplete_material_routes_before_advancing() {
         let original = twist
             .compile(cx, gate, |name| Ok(pack(name, 20.0, false)))
             .unwrap();
-        assert!(profile.prepare(&original, gate).is_err());
+        // The original torsional viscosity now has its own native heat rows.
+        let prepared = profile.prepare(&original, gate).unwrap();
+        let network = prepared.network(gate).unwrap();
+        let (routes, _) = prepared.material_routes(&original, &network, gate).unwrap();
+        assert_eq!(
+            routes[0]
+                .channel
+                .as_ref()
+                .unwrap()
+                .viscosity_sources()
+                .len(),
+            1
+        );
 
         let profile = Profile::parse(text(true).as_bytes()).unwrap();
         let original = torsional_ready(cx, gate, &profile, 0.001, false);
@@ -523,5 +566,122 @@ fn v4_string_heat_refuses_incomplete_material_routes_before_advancing() {
         );
         assert_eq!(system.material_memory(), before);
         assert_eq!(original.performance.samples_rendered(), 0);
+    });
+}
+
+#[test]
+fn v4_string_heat_uses_source_viscosities_with_one_layer_inventory_and_native_history() {
+    scoped(|cx, gate| {
+        for only_kelvin in [false, true] {
+            let profile = Profile::parse(text(!only_kelvin).as_bytes()).unwrap();
+            let mut observations = Vec::new();
+            for scale in [1.0, 3.0] {
+                let viscosity = [2e9 * scale, 2e5 * scale];
+                let mut ready = viscous_ready(
+                    cx,
+                    gate,
+                    &profile,
+                    0.001,
+                    true,
+                    viscosity,
+                    only_kelvin,
+                    false,
+                );
+                let prepared = profile.prepare(&ready, gate).unwrap();
+                let network = prepared.network(gate).unwrap();
+                let mass = network.cells()[&CellId(30)].mass_kg;
+                let (routes, rates) = prepared.material_routes(&ready, &network, gate).unwrap();
+                let channel = routes[0].channel.as_ref().unwrap();
+                assert_eq!(channel.groups().is_empty(), only_kelvin);
+                let [source] = channel.viscosity_sources() else {
+                    panic!("one original annulus");
+                };
+                assert_eq!((source.component(), source.region()), (1, 1));
+                // Independent annular geometry and native mass-normalized
+                // velocity powers, including both planes and the twist mode.
+                let inertia = core::f64::consts::PI * (OUTER.powi(4) - CORE.powi(4)) / 4.0;
+                let mu = 7800.0 * core::f64::consts::PI * OUTER.powi(2);
+                let rotary = 7800.0 * core::f64::consts::PI * OUTER.powi(4) / 2.0;
+                let k = core::f64::consts::PI / 0.5;
+                let first = viscosity[0] * inertia * k.powi(4) / mu;
+                let twist = viscosity[1] * 2.0 * inertia * k.powi(2) / rotary;
+                let expected = [
+                    (5, first),
+                    (6, first * 16.0),
+                    (7, first),
+                    (8, first * 16.0),
+                    (9, twist),
+                ];
+                assert_eq!(source.rates_per_s().len(), expected.len());
+                for (&(mode, rate), (index, value)) in source.rates_per_s().iter().zip(expected) {
+                    assert_eq!(mode, index);
+                    assert!((rate - value).abs() <= 2e-13 * value);
+                }
+                let memory = ready.performance.bank().system().material_memory().len();
+                assert_eq!(memory, if only_kelvin { 0 } else { 20 });
+                let renderer = ready
+                    .performance
+                    .with_material_contact_thermal_network(
+                        network,
+                        vec![],
+                        vec![],
+                        routes,
+                        profile.controls,
+                        gate,
+                        |endpoint| prepared.resolve(endpoint),
+                    )
+                    .unwrap();
+                let mut renderer = if only_kelvin {
+                    renderer
+                } else {
+                    renderer
+                        .with_material_relaxation_temperature(rates)
+                        .unwrap()
+                };
+                let mut pressure = [0.0; 6];
+                let mut heat = 0.0;
+                for sample in &mut pressure {
+                    renderer.block(std::slice::from_mut(sample)).unwrap();
+                    let frame = renderer.last_frame().unwrap();
+                    heat += frame.routed_material_heat_j;
+                    assert!(
+                        frame.total_energy_residual_j.abs()
+                            <= profile.controls.total_energy_tolerance_j
+                    );
+                }
+                let temperature = renderer.thermal().temperature_k(CellId(30)).unwrap();
+                let cell = &renderer.thermal().cells()[&CellId(30)];
+                assert!(heat > 0.0 && temperature > INITIAL);
+                assert!((cell.mass_kg * cell.specific_h_j_kg - heat).abs() < 4e-12);
+                assert_eq!(
+                    renderer
+                        .performance()
+                        .bank()
+                        .system()
+                        .material_memory()
+                        .len(),
+                    memory
+                );
+                observations.push((pressure, temperature, mass));
+            }
+            assert_eq!(observations[0].2, observations[1].2);
+            assert_ne!(observations[0].0, observations[1].0);
+            assert_ne!(observations[0].1, observations[1].1);
+            let varying = viscous_ready(
+                cx,
+                gate,
+                &profile,
+                0.001,
+                true,
+                [2e9, 2e5],
+                only_kelvin,
+                true,
+            );
+            assert!(
+                profile.prepare(&varying, gate).is_err(),
+                "temperature-dependent viscosity requires an original native coefficient continuation"
+            );
+            assert_eq!(varying.performance.samples_rendered(), 0);
+        }
     });
 }

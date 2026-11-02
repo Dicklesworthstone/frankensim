@@ -3,6 +3,7 @@
 //! mass or invented heat partition replaces the physical annular inventory.
 use super::*;
 use crate::render::schedule::force::coupled::coefficients::heat::MaterialHeatBudget;
+use crate::render::schedule::force::coupled::coefficients::heat::viscosity::MaterialViscousHeatSource;
 use crate::render::schedule::force::coupled::contact::friction::multiple::layer::thermal::{
     material::MaterialRelaxationHeatDestination, rates::MaterialRelaxationTemperature,
 };
@@ -16,11 +17,14 @@ use fs_material::{
 };
 use fs_thermal::enthalpy::CellId;
 
+mod viscosity;
+
 struct Source {
     material: ResolvedMaterialStatePoint,
     volume_m3: f64,
     branches: Vec<Range<usize>>,
     times: Vec<(usize, String)>,
+    viscosity: Vec<MaterialViscousHeatSource>,
 }
 
 // Unwrap the same physical section. Torsional loss is collected separately in
@@ -101,6 +105,46 @@ fn layer_source(
             vec![start..start + times.len()]
         },
         times,
+        viscosity: Vec::new(),
+    })
+}
+
+fn elastic_source(
+    source: &MaterialStringSource,
+    layer: usize,
+    length_m: f64,
+) -> Result<Source, ReciprocalStringError> {
+    let (material, area) = match source {
+        MaterialStringSource::Homogeneous(specimen) if layer == 0 => {
+            (specimen.material().clone(), specimen.area_m2())
+        }
+        MaterialStringSource::Concentric { section, .. } => {
+            let original = section
+                .elastic()
+                .layers()
+                .get(layer)
+                .ok_or_else(|| invalid("string heat names no original material layer"))?;
+            (
+                original.material.clone(),
+                section.elastic().layer_integrals()[layer].area_m2(),
+            )
+        }
+        _ => {
+            return Err(invalid(
+                "string heat needs its original homogeneous or bonded loss section",
+            ));
+        }
+    };
+    let volume_m3 = area * length_m;
+    if !volume_m3.is_finite() || volume_m3 <= 0.0 {
+        return Err(invalid("string heat requires its physical layer volume"));
+    }
+    Ok(Source {
+        material,
+        volume_m3,
+        branches: Vec::new(),
+        times: Vec::new(),
+        viscosity: Vec::new(),
     })
 }
 
@@ -114,11 +158,6 @@ impl MultiBowStringBank {
         let mut source = self.string_bending_heat_source(string, layer, gate)?;
         let bank = &self.source.bank;
         if let Some(twist) = bank.strings[string].source.torsion_source() {
-            if twist.section().viscous_stiffness_n_m2_s() != 0.0 {
-                return Err(invalid(
-                    "string body heat cannot omit parallel intrinsic shear viscosity",
-                ));
-            }
             // The torsion constructor retains this same section. Check the
             // full original bundle and volume rather than infer a heat split
             // from GJ/EI or from the relative vibration amplitudes.
@@ -186,7 +225,8 @@ impl MultiBowStringBank {
                 source.times.extend(torsion.times);
             }
         }
-        if source.branches.is_empty() {
+        source.viscosity = self.string_viscous_heat_source(string, layer, gate)?;
+        if source.branches.is_empty() && source.viscosity.is_empty() {
             return Err(invalid(
                 "string heat requires positive original material loss channels",
             ));
@@ -217,9 +257,6 @@ impl MultiBowStringBank {
         let string_model = source.resolved_transverse_string()?;
         if string_model.damping_ratio != 0.0
             || string_model.rayleigh.is_some()
-            || string_model
-                .kelvin_voigt_bending
-                .is_some_and(|law| law.viscous_stiffness_n_m2_s != 0.0)
             || string_model
                 .tension_loss_factor
                 .is_some_and(|loss| loss != 0.0)
@@ -276,14 +313,16 @@ impl MultiBowStringBank {
                 "homogeneous intrinsic spectra need their complete original layer-role binding",
             ));
         }
-        let image = bank.string_bending_relaxation.as_ref().ok_or_else(|| {
-            invalid("string heat requires an original source-selected bending spectrum")
-        })?;
-        let selected = image
+        let Some(image) = bank.string_bending_relaxation.as_ref() else {
+            return elastic_source(source, layer, card.length_m);
+        };
+        let Some(selected) = image
             .layered_selections()
             .iter()
             .position(|selection| selection.string == string)
-            .ok_or_else(|| invalid("string heat names a string without selected bending memory"))?;
+        else {
+            return elastic_source(source, layer, card.length_m);
+        };
         let prefix = image
             .channels()
             .iter()
@@ -319,11 +358,12 @@ impl MultiBowStringBank {
     /// area and full supported span supply its volume; the existing heat owner
     /// integrates actual resistance loss along the original mechanical path.
     ///
-    /// Original bonded Prony sections and explicit homogeneous/bonded layered
-    /// bending spectra are supported, including original torsional Prony memory
-    /// or elastic twist. Disjoint bending/torsion blocks heat the SAME annular
+    /// Original homogeneous/bonded Kelvin-Voigt sources, bonded Prony sections,
+    /// and explicit layered bending spectra are supported, including torsional
+    /// Prony memory and native shear viscosity. Their original source operators
+    /// and disjoint bending/torsion blocks heat the SAME annular
     /// cell once. Axial histories, geometric stretching, measured/wound sections
-    /// and parallel intrinsic bending/shear viscosity or modal loss refuse
+    /// and modal/tension loss or constant-loss shear proxies refuse
     /// rather than silently losing part of one material body's heat. Gas drag,
     /// body/contact loss and radiation retain their independent owners. Stored
     /// coefficients and reference geometry remain fixed; all source and caloric
@@ -343,7 +383,7 @@ impl MultiBowStringBank {
         let source = self.string_heat_source(string, layer, gate)?;
         let channel = self
             .system
-            .prepare_material_heat(&source.branches, budget, gate)
+            .prepare_material_heat_with_viscosity(&source.branches, &source.viscosity, budget, gate)
             .map_err(ReciprocalStringError::Friction)?;
         Ok(MaterialRelaxationHeatDestination {
             cell,
@@ -382,9 +422,14 @@ impl MultiBowStringBank {
         ReciprocalStringError,
     > {
         let source = self.string_heat_source(string, layer, gate)?;
+        if source.times.is_empty() {
+            return Err(invalid(
+                "source-temperature relaxation feedback needs original nonzero Maxwell histories",
+            ));
+        }
         let channel = self
             .system
-            .prepare_material_heat(&source.branches, budget, gate)
+            .prepare_material_heat_with_viscosity(&source.branches, &source.viscosity, budget, gate)
             .map_err(ReciprocalStringError::Friction)?;
         Ok((
             MaterialRelaxationHeatDestination {
