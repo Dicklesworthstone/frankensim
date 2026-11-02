@@ -1333,6 +1333,24 @@ byte/coefficient refusals, and cancelled coupled-step replay. They do not
 establish turbulent DNS agreement, shock interaction, wall behavior, dynamic
 heat closure, or physical coefficient calibration.
 
+`with_dynamic_thermal_sgs` on the same frozen-gas owners independently fits
+momentum viscosity and temperature diffusivity using
+`DynamicThermalSubgridConfig { momentum, heat }`. The shared scalar Germano
+fit consumes the same-stage density, velocity and temperature; it does not
+derive diffusivity from a prescribed Prandtl number or divide by the momentum
+fit. Thus a zero eddy viscosity can coexist with nonzero modeled heat flux.
+The existing face flux adds the average of `rho*alpha_t` times its original
+source Cp to conductivity, and uses that total conductivity in the original
+parabolic stability estimate and conservative total-energy update. The
+authored heat-to-molecular diffusivity bound is checked as `k_t/k_m` using the
+same face material state; active modeled heat with zero molecular conductivity
+refuses this finite ratio bound. Zero modeled heat preserves original
+molecular arithmetic. The complete additional SGS payload is nominally
+256 bytes/cell, including the reusable scalar filter and thermal staging.
+Existing local and fixed-Prandtl dynamic constructors retain their semantics.
+This remains a periodic low-Mach gradient-diffusion exploration model; it
+does not close all filtered compressible energy terms or qualify turbulence.
+
 ### Evolving composition on the shared Cartesian discretization
 
 `compressible::mixture::MixtureEuler2d` advances every canonical species mass

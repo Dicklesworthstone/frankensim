@@ -25,7 +25,10 @@ pub use fs_lbm::sgs3::{SgsModel, SgsUse};
 
 mod dynamic;
 pub use dynamic::DynamicSubgridConfig;
+pub use fs_lbm::sgs3::dynamic::scalar::DynamicScalarConfig;
 pub use fs_lbm::sgs3::dynamic::{DynamicAveraging, DynamicSgsConfig, DynamicSgsReport};
+mod thermal;
+pub use thermal::DynamicThermalSubgridConfig;
 
 /// Explicit subgrid controls; enabling the Cargo feature alone changes no flow.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -81,7 +84,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn subgrid_config(&self) -> Option<SubgridConfig> {
         self.sgs.as_ref().and_then(|s| match &s.closure {
             SubgridClosure::Local { config, .. } => Some(*config),
-            SubgridClosure::Dynamic(_) => None,
+            SubgridClosure::Dynamic(_) | SubgridClosure::DynamicThermal(_) => None,
         })
     }
 }
@@ -99,20 +102,7 @@ enum SubgridClosure {
         filter_width: f64,
     },
     Dynamic(dynamic::DynamicTransport),
-}
-
-impl SubgridClosure {
-    fn heat_and_ratio(&self) -> (f64, f64) {
-        match self {
-            Self::Local { config, .. } => {
-                (config.turbulent_prandtl, config.maximum_eddy_to_molecular)
-            }
-            Self::Dynamic(dynamic) => (
-                dynamic.config.turbulent_prandtl,
-                dynamic.config.model.maximum_eddy_to_molecular,
-            ),
-        }
-    }
+    DynamicThermal(thermal::DynamicThermalTransport),
 }
 
 impl SubgridTransport {
@@ -147,6 +137,9 @@ impl SubgridTransport {
                 filter_width,
             } => (*config, *widths, *filter_width),
             SubgridClosure::Dynamic(dynamic) => {
+                return dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled);
+            }
+            SubgridClosure::DynamicThermal(dynamic) => {
                 return dynamic.prepare(primitive, &mut self.dynamic_viscosity, cancelled);
             }
         };
@@ -191,12 +184,34 @@ impl SubgridTransport {
         molecular_conductivity: f64,
     ) -> Result<(f64, f64), MolecularError> {
         let mu_t = 0.5 * self.dynamic_viscosity[left] + 0.5 * self.dynamic_viscosity[right];
+        let (prandtl, maximum_ratio) = match &self.closure {
+            SubgridClosure::Local { config, .. } => {
+                (config.turbulent_prandtl, config.maximum_eddy_to_molecular)
+            }
+            SubgridClosure::Dynamic(dynamic) => (
+                dynamic.config.turbulent_prandtl,
+                dynamic.config.model.maximum_eddy_to_molecular,
+            ),
+            SubgridClosure::DynamicThermal(dynamic) => {
+                return dynamic.face_coefficients(
+                    gas,
+                    left,
+                    right,
+                    axis,
+                    face,
+                    temperature,
+                    pressure,
+                    mu_t,
+                    molecular_mu,
+                    molecular_conductivity,
+                );
+            }
+        };
         // Preserve the original molecular arithmetic and source calls exactly.
         if mu_t == 0.0 {
             return Ok((molecular_mu, molecular_conductivity));
         }
         let ratio = mu_t / molecular_mu;
-        let (prandtl, maximum_ratio) = self.closure.heat_and_ratio();
         if !ratio.is_finite() || ratio > maximum_ratio {
             return Err(MolecularError::SubgridViscosityRatio {
                 axis,

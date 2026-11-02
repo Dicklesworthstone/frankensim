@@ -100,6 +100,14 @@ pub enum MolecularError {
         observed: f64,
         maximum: f64,
     },
+    /// A face exceeds the authored modeled/molecular thermal-diffusivity ratio.
+    #[cfg(feature = "experimental-sgs")]
+    SubgridThermalDiffusivityRatio {
+        axis: usize,
+        face: usize,
+        observed: f64,
+        maximum: f64,
+    },
     /// An SSP stage exceeds the declared parabolic estimate.
     ParabolicNumber { observed: f64, maximum: f64 },
     /// The complete duration exceeds the caller's attempt budget.

@@ -63,7 +63,7 @@ impl<L: TransportLaw> MolecularTransport3d<L> {
     pub fn dynamic_subgrid_config(&self) -> Option<DynamicSubgridConfig> {
         self.sgs.as_ref().and_then(|sgs| match &sgs.closure {
             SubgridClosure::Dynamic(dynamic) => Some(dynamic.config),
-            SubgridClosure::Local { .. } => None,
+            SubgridClosure::Local { .. } | SubgridClosure::DynamicThermal(_) => None,
         })
     }
 }
@@ -77,12 +77,25 @@ fn required_bytes(cells: usize) -> Result<usize, MolecularError> {
         .ok_or(MolecularError::Invalid("dynamic SGS workspace overflow"))
 }
 
-fn admit_bytes(required: usize, maximum: usize) -> Result<(), MolecularError> {
+pub(super) fn admit_bytes(required: usize, maximum: usize) -> Result<(), MolecularError> {
     if required > maximum {
         Err(DynamicSgsError::WorkspaceBytes { required, maximum }.into())
     } else {
         Ok(())
     }
+}
+
+pub(super) fn admit_domain(flow: &Euler3d) -> Result<(), MolecularError> {
+    if (0..3).any(|axis| flow.boundaries.axis(axis) != AxisBoundaries::Periodic)
+        || flow.grid.shape.iter().any(|&n| n < 3)
+        || flow.grid.spacing[1] != flow.grid.spacing[0]
+        || flow.grid.spacing[2] != flow.grid.spacing[0]
+    {
+        return Err(MolecularError::Invalid(
+            "dynamic SGS requires a periodic isotropic grid with at least three cells per axis",
+        ));
+    }
+    Ok(())
 }
 
 pub(super) struct DynamicTransport {
@@ -99,15 +112,7 @@ impl SubgridTransport {
         maximum_bytes: usize,
     ) -> Result<Self, MolecularError> {
         config.validate()?;
-        if (0..3).any(|axis| flow.boundaries.axis(axis) != AxisBoundaries::Periodic)
-            || flow.grid.shape.iter().any(|&n| n < 3)
-            || flow.grid.spacing[1] != flow.grid.spacing[0]
-            || flow.grid.spacing[2] != flow.grid.spacing[0]
-        {
-            return Err(MolecularError::Invalid(
-                "dynamic SGS requires a periodic isotropic grid with at least three cells per axis",
-            ));
-        }
+        admit_domain(flow)?;
         let n = flow.states.len();
         admit_bytes(required_bytes(n)?, maximum_bytes)?;
         let dynamic = DynamicTransport {

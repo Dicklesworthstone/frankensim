@@ -85,11 +85,8 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, MolecularError> {
         poll(&mut cancelled)?;
-        let sgs = sgs::SubgridTransport::new_dynamic(
-            &flow,
-            config,
-            maximum_subgrid_workspace_bytes,
-        )?;
+        let sgs =
+            sgs::SubgridTransport::new_dynamic(&flow, config, maximum_subgrid_workspace_bytes)?;
         poll(&mut cancelled)?;
         let mut result = Self::new(flow, law, &mut cancelled)?;
         result.molecular.sgs = Some(sgs);
@@ -101,6 +98,37 @@ impl<L: TransportLaw> MolecularEuler3d<L> {
     #[cfg(feature = "experimental-sgs")]
     pub fn dynamic_subgrid_config(&self) -> Option<sgs::DynamicSubgridConfig> {
         self.molecular.dynamic_subgrid_config()
+    }
+
+    /// Fit momentum and temperature transport independently through both
+    /// molecular halves of the existing atomic conservative composition.
+    /// The byte budget covers additional SGS arrays, excluding original flow
+    /// and molecular workspaces. No fixed turbulent Prandtl number is used.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn with_dynamic_thermal_sgs(
+        flow: Euler3d,
+        law: L,
+        config: sgs::DynamicThermalSubgridConfig,
+        maximum_subgrid_workspace_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, MolecularError> {
+        poll(&mut cancelled)?;
+        let sgs = sgs::SubgridTransport::new_dynamic_thermal(
+            &flow,
+            config,
+            maximum_subgrid_workspace_bytes,
+        )?;
+        poll(&mut cancelled)?;
+        let mut result = Self::new(flow, law, &mut cancelled)?;
+        result.molecular.sgs = Some(sgs);
+        poll(&mut cancelled)?;
+        Ok(result)
+    }
+
+    /// Exact dynamic momentum/heat controls; other closure choices return None.
+    #[cfg(feature = "experimental-sgs")]
+    pub fn dynamic_thermal_subgrid_config(&self) -> Option<sgs::DynamicThermalSubgridConfig> {
+        self.molecular.dynamic_thermal_subgrid_config()
     }
 
     /// Exact local controls; `None` for molecular-only or dynamic SGS flow.
