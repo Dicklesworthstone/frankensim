@@ -14,6 +14,7 @@
 use super::{NsfError, NsfGrid3, NsfOpenState, NsfReservoirTileState};
 use crate::lattice3::Lattice3;
 use fs_atmo::mann_field::HomogeneousMannField;
+use fs_atmo::mann_field::filter::MannBoxFilter;
 use fs_math::det;
 
 /// Every flow, frame, clock and work choice is caller-authored.
@@ -117,6 +118,14 @@ pub struct NsfFrozenMannInflow {
     config: NsfFrozenMannConfig,
     maximum_wavenumber_rad_m: f64,
     convection_speed_m_s: f64,
+    averaging: Option<SpatialAverage>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct SpatialAverage {
+    dx_m: f64,
+    face_axis: Option<usize>,
+    filter: MannBoxFilter,
 }
 
 fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
@@ -194,7 +203,92 @@ impl NsfFrozenMannInflow {
             config,
             maximum_wavenumber_rad_m,
             convection_speed_m_s,
+            averaging: None,
         })
+    }
+
+    /// Resolve the inlet velocity as the exact average over a ghost cell's
+    /// physical volume. The filter is prepared once from this grid's dx and
+    /// the authored rotation; using a different dx later refuses. This is the
+    /// velocity of the resolved field, not an average of nonlinear mass,
+    /// momentum or total-energy fluxes. Unresolved kinetic energy is omitted,
+    /// with no RMS restoration or inferred SGS pressure/energy correction.
+    pub fn with_cell_average<L: Lattice3<27>>(
+        self,
+        grid: &NsfGrid3<L>,
+        maximum_filter_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, NsfFrozenMannError> {
+        self.prepare_average(grid.law.dx_m, None, maximum_filter_bytes, cancelled)
+    }
+
+    /// Average over a dx-by-dx square parallel to this aperture, centered on
+    /// each existing exterior ghost center. The original ghost location and
+    /// boundary owner are retained. A later aperture with a different normal
+    /// or a grid with different dx refuses rather than reusing the wrong filter.
+    pub fn with_face_average<L: Lattice3<27>>(
+        self,
+        grid: &NsfGrid3<L>,
+        aperture: usize,
+        maximum_filter_bytes: usize,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, NsfFrozenMannError> {
+        let axis = grid
+            .reservoir_aperture_at(aperture)
+            .ok_or(NsfFrozenMannError::Input(
+                "face average requires an existing reservoir aperture",
+            ))?
+            .axis;
+        self.prepare_average(grid.law.dx_m, Some(axis), maximum_filter_bytes, cancelled)
+    }
+
+    fn prepare_average(
+        mut self,
+        dx_m: f64,
+        face_axis: Option<usize>,
+        maximum_filter_bytes: usize,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, NsfFrozenMannError> {
+        if cancelled() {
+            return Err(NsfFrozenMannError::Cancelled);
+        }
+        // R maps field to grid; its ROW i is R^T e_i in the field frame.
+        let half_edges = core::array::from_fn(|axis| {
+            if face_axis == Some(axis) {
+                [0.0; 3]
+            } else {
+                self.config.field_to_grid[axis].map(|v| 0.5 * dx_m * v)
+            }
+        });
+        let filter = MannBoxFilter::prepare(
+            self.snapshot.model(),
+            half_edges,
+            maximum_filter_bytes,
+            &mut cancelled,
+        )
+        .map_err(|error| {
+            if error.code == "mann-filter-cancelled" {
+                NsfFrozenMannError::Cancelled
+            } else {
+                NsfFrozenMannError::Atmosphere(error)
+            }
+        })?;
+        self.averaging = Some(SpatialAverage {
+            dx_m,
+            face_axis,
+            filter,
+        });
+        Ok(self)
+    }
+
+    /// Prepared observation filter, including its physical half-edge vectors.
+    /// Pass it to `snapshot().covariance_filtered` for the retained field's
+    /// represented space-time covariance. The frozen inlet itself has no OU
+    /// amplitude decorrelation: its temporal covariance is the zero-lag field
+    /// covariance evaluated at the convection-displaced separation.
+    #[must_use]
+    pub fn spatial_filter(&self) -> Option<&MannBoxFilter> {
+        self.averaging.as_ref().map(|averaging| &averaging.filter)
     }
 
     #[must_use]
@@ -240,6 +334,15 @@ impl NsfFrozenMannInflow {
             ))?;
         let axis = source.axis;
         let high = source.high;
+        if let Some(averaging) = &self.averaging {
+            if averaging.dx_m != grid.law.dx_m
+                || averaging.face_axis.is_some_and(|normal| normal != axis)
+            {
+                return Err(NsfFrozenMannError::Input(
+                    "prepared Mann average requires the original grid spacing and aperture normal",
+                ));
+            }
+        }
         let count = source.cells.len();
         let mode_samples = count
             .checked_mul(self.snapshot.model().mode_count())
@@ -309,7 +412,11 @@ impl NsfFrozenMannInflow {
                         .map(|i| self.config.field_to_grid[i][a] * displacement[i])
                         .sum::<f64>()
             });
-            let fluctuation = self.snapshot.sample(point_field)?.u;
+            let fluctuation = match self.spatial_filter() {
+                Some(filter) => self.snapshot.sample_filtered(point_field, filter)?,
+                None => self.snapshot.sample(point_field)?,
+            }
+            .u;
             let velocity_m_s = core::array::from_fn(|a| {
                 self.config.mean_velocity_m_s[a] + dot(self.config.field_to_grid[a], fluctuation)
             });

@@ -9,6 +9,14 @@ use fs_atmo::mann_field::{MannQuadrature, MannSpectralModel};
 use fs_material::gas::{GasSpec, GasState};
 
 fn build_grid(workers: usize, reverse_tiles: bool) -> NsfGrid3<D3q27> {
+    build_grid_with_apertures(workers, reverse_tiles, false)
+}
+
+fn build_grid_with_apertures(
+    workers: usize,
+    reverse_tiles: bool,
+    extra_face: bool,
+) -> NsfGrid3<D3q27> {
     let spec = NsfSpec {
         dims: [9; 3],
         periodic: [false; 3],
@@ -33,6 +41,25 @@ fn build_grid(workers: usize, reverse_tiles: bool) -> NsfGrid3<D3q27> {
         cells.reverse();
     }
     let gas = GasState::try_new(&spec.gas, spec.temperature_k, spec.pressure_pa).unwrap();
+    let state = NsfOpenState {
+        density_kg_m3: gas.density,
+        velocity_m_s: [0.0; 3],
+        temperature_k: gas.temperature,
+    };
+    let mut apertures = vec![NsfReservoirAperture {
+        axis: 1,
+        high: false,
+        cells,
+        state,
+    }];
+    if extra_face {
+        apertures.push(NsfReservoirAperture {
+            axis: 2,
+            high: false,
+            cells: vec![[4, 4, 0]],
+            state,
+        });
+    }
     NsfGrid3::new(spec, |_| false, |_| (1.0, [0.0; 3], 293.15))
         .unwrap()
         .with_characteristic_axis(NsfCharacteristicAxis {
@@ -46,16 +73,7 @@ fn build_grid(workers: usize, reverse_tiles: bool) -> NsfGrid3<D3q27> {
             maximum_relative_perturbation: 0.05,
         })
         .unwrap()
-        .with_reservoir_aperture(NsfReservoirAperture {
-            axis: 1,
-            high: false,
-            cells,
-            state: NsfOpenState {
-                density_kg_m3: gas.density,
-                velocity_m_s: [0.0; 3],
-                temperature_k: gas.temperature,
-            },
-        })
+        .with_reservoir_apertures(apertures)
         .unwrap()
 }
 
@@ -91,6 +109,102 @@ fn config() -> NsfFrozenMannConfig {
         reference_time_s: 1e-8,
         maximum_mode_samples: 9 * 16,
     }
+}
+
+#[test]
+fn g1_filtered_mann_inlet_uses_rotated_physical_face_and_volume_averages() {
+    for face in [true, false] {
+        let mut grid = build_grid(1, false);
+        let controls = config();
+        let inlet = NsfFrozenMannInflow::new(snapshot(10.0), controls).unwrap();
+        let inlet = if face {
+            inlet.with_face_average(&grid, 0, 16 * 8, || false).unwrap()
+        } else {
+            inlet.with_cell_average(&grid, 16 * 8, || false).unwrap()
+        };
+        let dx = grid.law.dx_m;
+        let expected_edges = [
+            [0.0, -0.5 * dx, 0.0],
+            if face { [0.0; 3] } else { [0.5 * dx, 0.0, 0.0] },
+            [0.0, 0.0, 0.5 * dx],
+        ];
+        let filter = inlet.spatial_filter().unwrap();
+        assert_eq!(filter.half_edges_m(), expected_edges);
+        let retained = inlet.snapshot().clone();
+        let applied = inlet.apply(&mut grid, 0).unwrap();
+        let mut differs_from_point = false;
+        for tile in grid.reservoir_aperture_tile_states(0).unwrap() {
+            let x = (tile.cell[0] as f64 + 0.5) * dx;
+            let y = -0.5 * dx
+                - controls.convection_velocity_m_s[1]
+                    * (applied.sampled_time_s - controls.reference_time_s);
+            let z = (tile.cell[2] as f64 + 0.5) * dx;
+            let at = [
+                controls.grid_origin_in_field_m[0] + y,
+                controls.grid_origin_in_field_m[1] - x,
+                controls.grid_origin_in_field_m[2] + z,
+            ];
+            let filtered = retained.sample_filtered(at, filter).unwrap().u;
+            let point = retained.sample(at).unwrap().u;
+            differs_from_point |= filtered
+                .iter()
+                .zip(point)
+                .any(|(a, b)| (a - b).abs() > 1e-9);
+            let expected = [
+                -filtered[1],
+                controls.mean_velocity_m_s[1] + filtered[0],
+                filtered[2],
+            ];
+            for axis in 0..3 {
+                assert!((tile.state.velocity_m_s[axis] - expected[axis]).abs() < 1e-12);
+            }
+        }
+        assert!(differs_from_point);
+        assert_eq!(inlet.snapshot(), &retained);
+        assert_eq!(inlet.apply(&mut grid, 0).unwrap(), applied);
+    }
+}
+
+#[test]
+fn g4_filtered_mann_inlet_refuses_budget_cancellation_spacing_and_face_mismatch() {
+    let mut grid = build_grid_with_apertures(1, false, true);
+    let make = || NsfFrozenMannInflow::new(snapshot(2.0), config()).unwrap();
+    assert!(matches!(
+        make().with_cell_average(&grid, 16 * 8 - 1, || false),
+        Err(NsfFrozenMannError::Atmosphere(error)) if error.code == "mann-filter-budget"
+    ));
+    let mut polls = 0;
+    assert!(matches!(
+        make().with_cell_average(&grid, 16 * 8, || {
+            polls += 1;
+            polls == 4
+        }),
+        Err(NsfFrozenMannError::Cancelled)
+    ));
+    let inlet = make()
+        .with_face_average(&grid, 0, 16 * 8, || false)
+        .unwrap();
+    let before = (grid.state_hash(), grid.force.clone(), grid.div.clone());
+    assert!(matches!(
+        inlet.apply(&mut grid, 1),
+        Err(NsfFrozenMannError::Input(_))
+    ));
+    assert_eq!(
+        (grid.state_hash(), grid.force.clone(), grid.div.clone()),
+        before
+    );
+    // Alter only the test fixture's spatial chart to exercise reuse admission;
+    // the refusal must precede sampling or material/boundary publication.
+    grid.law.dx_m *= 2.0;
+    let before = (grid.state_hash(), grid.force.clone(), grid.div.clone());
+    assert!(matches!(
+        inlet.apply(&mut grid, 0),
+        Err(NsfFrozenMannError::Input(_))
+    ));
+    assert_eq!(
+        (grid.state_hash(), grid.force.clone(), grid.div.clone()),
+        before
+    );
 }
 
 fn sgs(maximum_eddy_to_molecular: f64) -> crate::nsf3::NsfSgsConfig {
