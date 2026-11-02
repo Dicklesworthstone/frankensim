@@ -29,6 +29,16 @@ same original material identities. Replacing a material file re-resolves the
 original structural laws and their coupled pressure response; it does not
 select a different instrument solver.
 
+With `bow_fibers` or `bow_compliance`, an ordered dry bow interface must match
+both the actual exposed string material (surface A) and the original homogeneous
+fiber material (surface B). Swapping hair for a different material therefore
+requires the matching interface data; the old material's friction cannot remain
+silently active. This check precedes body/modal preparation. Rosin declared as
+the interface's third body remains separate from the fiber backing. Explicit
+retained shear layers keep their own constitutive owner, and numerical research
+friction inputs remain explicitly unsourced. The identity check does not infer
+an unknown friction law from the bulk elastic modulus or density.
+
 Legacy claim packs (`FSMATPK`) retain their historical synthetic
 `source-pack:<pack_id>` association and exact numerical behavior. The binary
 header chooses the decoder, independently of the filename suffix. A malformed
@@ -1129,6 +1139,13 @@ Bulk substitution also requires a compatible interface source for that pair.
 This is a fixed-state linear bilateral joint, not a model of a shaped bridge,
 separation, slip, adhesive failure or changing contact area.
 
+Ordinary source-defined spring/dashpot bridges also accept
+`residual-flexibility exact-static-green`. The original material coefficients
+and ordered surfaces remain unchanged; only the retained string operator sees
+the series compliance of its omitted modes. Source bandwidth is checked after
+that condensation. Constant-loss anchors remain unsupported because their
+frequency-dependent series law is not the existing viscous approximation.
+
 After building the wire and body packs above, the synthetic complete example is:
 
 ```bash
@@ -2060,8 +2077,8 @@ pitch changes.
   Every run prints `linear_frequency_upper_bound_rad_s`, the coupled stiffness
   bound the Nyquist guard checks.
 - Refused: a released static preload with stops (use `forces retain`), receiver
-  stops, moving or migrating stops, bound nonlinear storage, material bridge
-  interfaces, additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
+  stops, moving or migrating stops, bound nonlinear storage,
+  additional directed translational bridges, rotational and constant-loss bridges, and a string with other than
   one bridge connection.
 - Bow ports retain their original maps unless the separate record below is supplied.
 

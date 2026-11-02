@@ -300,6 +300,15 @@ impl Inputs {
         if self.research.is_some() {
             return Ok(());
         }
+        // Both available hair owners currently describe homogeneous exposed
+        // fibers. A declared third body (e.g. rosin) remains part of the ordered
+        // interface context, not a replacement for its surface-B participant.
+        // Retained shear-layer contacts have their own explicit material owner.
+        let receiver = spec.bow_fibers.as_ref().map(|fiber| fiber.pack.as_str())
+            .or_else(|| spec.bow_compliance.as_ref().map(|hair| hair.pack.as_str()))
+            .map(|path| catalog.get(path).map(|entry| entry.card.id())
+                .ok_or("bow receiver material has not been resolved"))
+            .transpose()?;
         for track in spec.schedule.tracks() {
             if self.layers.as_ref().is_some_and(|layers| layers.contains_track(&track.id))
                 || self.mindlin.as_ref().is_some_and(|mindlin| mindlin.contains_track(&track.id)) {
@@ -334,6 +343,12 @@ impl Inputs {
                     track.id
                 )
                 .into());
+            }
+            if receiver.is_some_and(|material| &source.state.surface_materials()[1] != material) {
+                return Err(format!(
+                    "bow interface {:?} surface B does not match its actual fiber material",
+                    track.id
+                ).into());
             }
         }
         Ok(())

@@ -426,6 +426,15 @@ impl input::Spec {
             poll(gate)?;
             sources.push(wire.resolve_source(&mut catalog, &mut loader, &self, gate)?);
         }
+        // Source friction names BOTH contacting materials. Resolve the actual
+        // hair card before checking that pair, so swapping a compliant or
+        // resolved fiber cannot silently retain another material's interface.
+        // The later mechanical compiler reuses this same budgeted catalog.
+        if let Some(path) = self.bow_fibers.as_ref().map(|fiber| fiber.pack.as_str())
+            .or_else(|| self.bow_compliance.as_ref().map(|hair| hair.pack.as_str()))
+        {
+            load_pack(path, &mut catalog, &mut loader)?;
+        }
         self.friction.validate_surfaces(&self, &catalog)?;
         let bank=if let Some(body_profile)=&profile {
             body_profile.compile_with_preparation(&self,sources,&mut catalog,&mut loader,
@@ -451,13 +460,15 @@ impl input::Spec {
                     preparation,self.bow_law(0)?.clone(),settings.clone(),gate)?,
             }
         };
-        let bank = if self.bridge_interfaces.bindings().is_empty() { bank } else {
-            bank.with_material_bridge_interfaces(self.bridge_interfaces.bindings().to_vec(), gate)?
-        };
         // Every body route selects preparation during construction, before
         // original string histories or later attachments enlarge its state.
         // Omitted bending modes in series with every bridge, before any stop binds (pexfp.299).
         let bank = if self.residual_flexibility { bank.with_residual_flexibility(gate)? } else { bank };
+        // Validate the source domain against the actual condensed operator,
+        // retaining the original physical joint coefficients and identities.
+        let bank = if self.bridge_interfaces.bindings().is_empty() { bank } else {
+            bank.with_material_bridge_interfaces(self.bridge_interfaces.bindings().to_vec(), gate)?
+        };
         let bank = if self.rotational_bridges.is_empty() { bank } else {
             let mut joints = Vec::with_capacity(self.rotational_bridges.len());
             for (joint, &separation_m) in self.rotational_bridges.iter().zip(&baselines) {

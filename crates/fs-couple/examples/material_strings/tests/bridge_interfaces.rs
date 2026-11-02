@@ -89,6 +89,35 @@ fn changing_only_interface_source_changes_reciprocal_pressure_without_rewriting_
 }
 
 #[test]
+fn sourced_bridge_and_residual_compliance_reach_the_same_native_performer() {
+    scoped(|cx, gate| {
+        let declared = |source: input::Spec| {
+            let text = String::from_utf8(source.bytes).unwrap().replace("cavity neck",
+                "residual-flexibility exact-static-green\ncavity neck");
+            input::Spec::parse(text.as_bytes()).unwrap()
+        };
+        let mut reference = compile(cx, gate, declared(spec()), 7800.0);
+        let prepare = |k, c| {
+            let mut s = declared(sourced_spec());
+            load(&mut s, gate, interface(k, c, "wire.fsmatpk", "body.fsmatpk", 200_000.0));
+            compile(cx, gate, s, 7800.0)
+        };
+        let mut sourced = prepare(30e6, 1000.0);
+        assert!(sourced.performance.bank().source().bank().residual_flexibility());
+        assert_eq!(sourced.performance.bank().source().bank()
+            .material_bridge_interfaces()[0].interface.stiffness_n_m(), 3000.0);
+        let expected = pressure(&mut reference, 128);
+        assert_eq!(expected, pressure(&mut sourced, 37));
+        assert_eq!(expected, pressure(&mut prepare(30e6, 1000.0), 1));
+        let mut changed = prepare(60e6, 4000.0);
+        let actual = pressure(&mut changed, 37);
+        assert!(actual.iter().zip(&expected).any(|(a, b)| (a - b).abs() > 1e-15));
+        let frame = changed.performance.bank().system().last_frame().unwrap();
+        assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+    });
+}
+
+#[test]
 fn missing_stale_mismatched_and_out_of_band_sources_refuse_before_output() {
     scoped(|cx, gate| {
         let mut calls = 0;

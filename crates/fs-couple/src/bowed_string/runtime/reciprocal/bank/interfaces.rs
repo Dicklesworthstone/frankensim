@@ -220,6 +220,11 @@ impl ReciprocalStringBank {
     /// binds its bridge's dashpot at a constant loss factor, which prepares the
     /// SAME network again before playback (the prepared owner is required).
     /// Later fluid, cavity and rotational rebuilds keep the anchor.
+    /// Ordinary spring/dashpot laws also compose with residual flexibility in
+    /// either binding order: the source retains physical k/c, while assembly
+    /// uses k/(1+kG) and c/(1+kG)^2. The latter is the existing first-order
+    /// viscous approximation, not a broadband series law. Constant-loss
+    /// anchors cannot use that condensation and remain unsupported there.
     pub fn with_material_bridge_interfaces(
         mut self,
         bindings: Vec<MaterialBridgeInterface>,
@@ -234,9 +239,11 @@ impl ReciprocalStringBank {
                 "material bridges require one nonempty bounded set of source bindings",
             ));
         }
-        if self.source.residual_flexibility {
-            // Its links are already softened; an interface law would re-anchor them.
-            return Err(invalid("material bridge interfaces are not wired with residual flexibility"));
+        if self.source.residual_flexibility
+            && bindings.iter().any(|binding|
+                binding.interface.constant_loss_reference_omega_rad_s().is_some())
+        {
+            return Err(invalid("residual flexibility does not support constant-loss bridge anchors"));
         }
         let mut seen = vec![false; self.source.strings.len()];
         for binding in &bindings {

@@ -197,6 +197,67 @@ fn source_binding_preserves_live_state_and_material_data_changes_actual_pressure
 }
 
 #[test]
+fn source_bridges_and_omitted_string_compliance_compose_in_either_order() {
+    with_cx(|cx, gate| {
+        let (raw, original) = sourced(cx, gate, 3e7, 1e3);
+        let uncorrected_upper = raw.system().linear_frequency_upper_bound_rad_s();
+        let mut reference = raw.with_residual_flexibility(gate).unwrap();
+        assert!(reference.system().linear_frequency_upper_bound_rad_s() < uncorrected_upper);
+        let mut source_first = bind(sourced(cx, gate, 3e7, 1e3).0, original.clone(), gate)
+            .with_residual_flexibility(gate).unwrap();
+        let mut residual_first = bind(
+            sourced(cx, gate, 3e7, 1e3).0.with_residual_flexibility(gate).unwrap(),
+            original.clone(), gate);
+        let (changed, changed_law) = sourced(cx, gate, 1.2e8, 4e3);
+        let mut changed = bind(changed.with_residual_flexibility(gate).unwrap(), changed_law, gate);
+        for bank in [&source_first, &residual_first] {
+            assert!(bank.source().residual_flexibility());
+            // The numerical series reduction must never overwrite the physical
+            // joint, or a later reconstruction would condense its stiffness twice.
+            let connection = &bank.source().strings()[0].connections[0];
+            assert_eq!(connection.stiffness_n_m, original.stiffness_n_m());
+            assert_eq!(connection.damping_n_s_m, original.damping_n_s_m());
+            assert_eq!(bank.source().material_bridge_interfaces()[0].interface, original);
+        }
+        let zero = vec![0.0; reference.system().mode_count()];
+        let mut pressure_delta = 0.0;
+        for _ in 0..128 {
+            let expected = *reference.step(&zero, drive()).unwrap();
+            assert_eq!(expected, *source_first.step(&zero, drive()).unwrap());
+            assert_eq!(expected, *residual_first.step(&zero, drive()).unwrap());
+            let frame = changed.step(&zero, drive()).unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+            pressure_delta += (expected.observer_pressure_pa - frame.observer_pressure_pa).abs();
+        }
+        assert!(pressure_delta > 1e-12, "source changes must reach the corrected coupled pressure");
+        // Attaching provenance to an already-playing corrected system also
+        // retains its accepted motion, time and pressure history exactly.
+        let previous = *reference.system().last_frame().unwrap();
+        let mut bound_live = bind(reference, original, gate);
+        assert_eq!(bound_live.system().samples_rendered(), 128);
+        assert_eq!(bound_live.system().last_frame(), Some(&previous));
+        assert_eq!(*bound_live.step(&zero, drive()).unwrap(),
+            *source_first.step(&zero, drive()).unwrap());
+    });
+}
+
+#[test]
+fn constant_loss_material_bridges_do_not_inherit_viscous_series_condensation() {
+    with_cx(|cx, gate| {
+        let (bank, original) = sourced(cx, gate, 3e7, 1e3);
+        let anchored = anchored_interface(original.resolved().surface_materials().clone(),
+            3e7, 1e3, 293.15, (0.0, 100_000.0), Some(1000.0));
+        let binding = MaterialBridgeInterface { string: 0, interface: anchored.clone() };
+        let residual = bank.with_residual_flexibility(gate).unwrap();
+        assert!(residual.with_material_bridge_interfaces(vec![binding], gate).is_err());
+        let prepared = sourced(cx, gate, 3e7, 1e3).0.with_prepared_linear_propagation(
+            PreparedModalBudget { max_modes: 1024, max_dense_bytes: 1 << 30,
+                max_multiply_terms: 1 << 50 }, gate).unwrap();
+        assert!(bind(prepared, anchored, gate).with_residual_flexibility(gate).is_err());
+    });
+}
+
+#[test]
 fn exact_original_interface_survives_scheduled_performance() {
     with_cx(|cx, gate| {
         let (bank, original) = sourced(cx, gate, 3e7, 1e3);

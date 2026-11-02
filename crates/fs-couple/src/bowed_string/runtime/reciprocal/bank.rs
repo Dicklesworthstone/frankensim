@@ -413,14 +413,20 @@ impl ReciprocalStringBank {
     ///
     /// # Errors
     /// After motion, playback or bound nonlinear storage; repeated; beside
-    /// rotational bridges, material bridge interfaces, a directed bridge with a
+    /// rotational bridges, constant-loss bridge anchors, a directed bridge with a
     /// nonzero cross term or a string with other than one bridge connection; or
     /// the original assembly's own refusals.
     pub fn with_residual_flexibility(mut self, gate: &CancelGate) -> Result<Self, ReciprocalStringError> {
         poll(gate)?;
-        if self.system.has_nonlinear_potentials() || self.source.residual_flexibility
-            || !self.source.material_bridge_interfaces.is_empty() {
-            return Err(invalid("residual flexibility binds once, before nonlinear storage and without material bridge interfaces"));
+        if self.system.has_nonlinear_potentials() || self.source.residual_flexibility {
+            return Err(invalid("residual flexibility binds once, before nonlinear storage"));
+        }
+        // Ordinary source laws still describe the original physical k and c.
+        // Assembly condenses their numerical connection, not their material
+        // identity. A constant-loss anchor requires a different, frequency-
+        // dependent series reduction and cannot reuse this viscous formula.
+        if !self.source.constant_loss_bridges().is_empty() {
+            return Err(invalid("residual flexibility does not support constant-loss bridge anchors"));
         }
         if self.system.samples_rendered() != 0
             || self.system.components()[..self.cards.len()].iter().flat_map(|c| c.states())

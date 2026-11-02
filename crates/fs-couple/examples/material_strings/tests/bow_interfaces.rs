@@ -132,6 +132,98 @@ fn canonical_material_card_binds_the_same_named_surface_to_the_bow() {
     });
 }
 
+fn material_ribbon_spec(resolved_waves: bool) -> input::Spec {
+    let text = if resolved_waves {
+        include_str!("../fiber-ribbon.material-strings")
+    } else {
+        include_str!("../compliant-ribbon.material-strings")
+    };
+    let text = text.replace("48000 4096", "48000 256").replace(
+        "friction coulomb 0.8 0.4",
+        concat!("friction interfaces 1\n",
+            "bow-interface bow bow.fsintpk 293.15 0.0001 2 0 stribeck ",
+            "mu_static mu_kinetic stribeck_speed viscous_per_speed"),
+    );
+    input::Spec::parse(text.as_bytes()).unwrap()
+}
+
+fn ribbon_material(resolved_waves: bool, replacement: bool) -> fs_matdb::NormalizedMaterialCardPack {
+    let young = if replacement { 6e9 } else { 3e9 };
+    let claims = if resolved_waves {
+        super::fibers::fiber_elastic_pack(1300.0, young, false)
+    } else {
+        super::fibers::quasistatic_pack(young, Some(1e6))
+    };
+    fs_matdb::NormalizedMaterialCardPack::new(MaterialStateId {
+        chemistry: if replacement { "manufactured stiff fiber" } else { "manufactured soft fiber" }.into(),
+        phase: "solid".into(), process: "synthetic fixture".into(), revision: 0,
+    }, claims).unwrap()
+}
+
+fn ribbon_interface(material: &MaterialStateId) -> NormalizedInterfacePack {
+    let original = interface(0.4, "wire.fsmatpk", 0.1);
+    let mut receiver = original.card().surface_b().clone();
+    receiver.material = material.clone();
+    NormalizedInterfacePack::new(original.card().surface_a().clone(), receiver,
+        original.card().context().clone(), original.claims_pack().clone()).unwrap()
+}
+
+#[test]
+fn a_hair_material_swap_cannot_silently_keep_another_surfaces_friction() {
+    scoped(|cx, gate| {
+        for resolved_waves in [false, true] {
+            let original = ribbon_material(resolved_waves, false);
+            let replacement = ribbon_material(resolved_waves, true);
+            let source = ribbon_interface(original.card().id());
+            let mut spec = material_ribbon_spec(resolved_waves);
+            let fiber_path = spec.bow_fibers.as_ref().map(|fiber| fiber.pack.clone())
+                .or_else(|| spec.bow_compliance.as_ref().map(|fiber| fiber.pack.clone())).unwrap();
+            spec.friction.load(gate, |_| Ok(source.clone())).unwrap();
+            let mut loaded = Vec::new();
+            let error = spec.compile(cx, gate, |path| -> Result<MaterialPack> {
+                loaded.push(path.to_owned());
+                Ok(if path == fiber_path { replacement.clone().into() }
+                    else { pack(path, 7800.0, 200_000.0, None).into() })
+            }).err().expect("an old ordered interface must not survive the material swap");
+            assert!(error.to_string().contains("surface B does not match"), "{error}");
+            assert_eq!(loaded, ["wire.fsmatpk".to_owned(), fiber_path],
+                "mismatched contact must refuse before body preparation");
+        }
+    });
+}
+
+#[test]
+fn matched_fiber_and_interface_sources_reach_the_original_pressure_solver() {
+    scoped(|cx, gate| {
+        for resolved_waves in [false, true] {
+            let make = |replacement| {
+                let material = ribbon_material(resolved_waves, replacement);
+                let source = ribbon_interface(material.card().id());
+                // Rosin is still the declared third body; selecting another
+                // backing fiber must not relabel it as that material.
+                assert_eq!(source.card().context().third_body.as_deref(), Some("synthetic rosin"));
+                let mut spec = material_ribbon_spec(resolved_waves);
+                let fiber_path = spec.bow_fibers.as_ref().map(|fiber| fiber.pack.clone())
+                    .or_else(|| spec.bow_compliance.as_ref().map(|fiber| fiber.pack.clone())).unwrap();
+                spec.friction.load(gate, |_| Ok(source.clone())).unwrap();
+                spec.compile(cx, gate, |path| -> Result<MaterialPack> { Ok(if path == fiber_path {
+                    material.clone().into()
+                } else { pack(path, 7800.0, 200_000.0, None).into() }) }).unwrap()
+            };
+            let mut original = make(false);
+            let mut replacement = make(true);
+            assert_eq!(original.spec.bytes, replacement.spec.bytes);
+            let reference = pressure(&mut original, 37);
+            let changed = pressure(&mut replacement, 128);
+            assert!(reference.iter().any(|value| value.abs() > 1e-12));
+            assert!(reference.iter().zip(changed).any(|(a, b)| (a - b).abs() > 1e-15),
+                "the actual fiber constitutive change must reach joint pressure");
+            let frame = replacement.performance.bank().system().last_frame().unwrap();
+            assert!(frame.energy_residual_j.abs() <= frame.energy_tolerance_j);
+        }
+    });
+}
+
 fn ribbon_spec(spec: input::Spec, record: &str) -> Result<input::Spec> {
     let text = String::from_utf8(spec.bytes)?.replace(
         "\nforces ", &format!("\nbow_ribbon {record}\nforces "));

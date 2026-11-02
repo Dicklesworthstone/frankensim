@@ -1,7 +1,7 @@
 # Real instrument reference recordings
 
-`references-supplemental.json`, together with its `baseline_ids` from
-`references.json`, supplies actual recordings for all 28 families in
+`references.json`, `references-supplemental.json` and
+`references-screened.json` supply actual recordings for all 28 families in
 `apps/instrument-explorer/tools/build.py`, plus a separate tenor saxophone,
 splash cymbal and all nine drum-kit comparison states. Originals remain
 outside Git. The existing Iowa manifest has
@@ -41,6 +41,16 @@ copy the recordings' metadata or alter their grading eligibility. Some sources
 are phrases with an unknown room or processing chain. In particular, the Commons
 duduk is a listening reference, not a screened note for quantitative grading.
 Recordings remain independent checks of physics predictions.
+
+The audition selection contains 41 source entries and retains 67 audio files
+(180,442,407 bytes), including the ambient control and the kit's 27 original
+comparison hits. The two source archives are streamed and fully hashed before
+their selected members are published; their source payloads total 549,227,910
+bytes. This does not fetch the 12.3 GB Iowa corpus or the large research archives.
+On 2026-11-01 all 67 retained recordings matched their existing pins and passed
+complete FFmpeg decoding (1,373.217 seconds of audio). The first kit transfer
+ended early and was refused; a complete retry matched the original archive
+digest. No source hash or grading eligibility was changed.
 
 ```sh
 # Listing needs neither a destination nor network access.
@@ -194,6 +204,23 @@ additional piano, organ, steel-string guitar and percussion comparisons above.
 These checks streamed the actual recordings through memory; they do not claim
 a persistent audio cache or improved simulation fidelity. The new `--members`
 path was also exercised against the real pan-pipe and steel-string archives.
+
+## Independent material-substitution measurements
+
+[Mayer and Pàmies-Vilà (2026)](https://dael.euracoustics.org/confs/fa2026/data/articles/000295.pdf)
+measured the same cello with nine interchangeable bridges: the original maple
+bridge and eight bridges made with different polymers, infill and fabrication
+methods. Their [open dataset](https://zenodo.org/records/20797149) contains the
+impact-force and acceleration recordings, with repeated bridge exchanges and
+reported temperature and humidity. This is a useful independent test of a
+material change propagating into structural response, before comparing music.
+
+The paper describes drawing the bridge model from the original, but neither
+the article nor the dataset's file list supplies complete cello geometry or a
+ready solver assembly. These measurements have not been imported here as
+constitutive properties or substituted for a physical cello body. A measured
+bridge response must remain a validation observation; it is not an invitation
+to fit the sound or invent missing geometry.
 
 ## Synchronized cello motion and sound
 

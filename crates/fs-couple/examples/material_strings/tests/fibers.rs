@@ -6,7 +6,7 @@ fn fiber_pack(rho: f64, omit_axial_loss: bool) -> NormalizedPack {
     fiber_elastic_pack(rho, 3e9, omit_axial_loss)
 }
 
-fn fiber_elastic_pack(rho: f64, young: f64, omit_axial_loss: bool) -> NormalizedPack {
+pub(super) fn fiber_elastic_pack(rho: f64, young: f64, omit_axial_loss: bool) -> NormalizedPack {
     let mut claims = ClaimSet::new();
     let provenance = Provenance {
         source: "manufactured fiber integration fixture; not measured horsehair".into(),
@@ -1272,7 +1272,7 @@ fn quasistatic_text() -> String {
     include_str!("../compliant-ribbon.material-strings").replace("48000 4096", "48000 256")
 }
 
-fn quasistatic_pack(young: f64, viscosity: Option<f64>) -> NormalizedPack {
+pub(super) fn quasistatic_pack(young: f64, viscosity: Option<f64>) -> NormalizedPack {
     let mut claims = ClaimSet::new();
     let observation = claims.register_observation(ObservationDataset {
         specimen: "synthetic quasistatic fiber".into(),

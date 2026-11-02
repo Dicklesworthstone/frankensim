@@ -114,12 +114,27 @@ counts native field solves, including finite-difference and fresh final
 acceptance. Cancellation, source refusal, budget exhaustion and unsupported
 event windows publish neither thermal state nor endpoint electrical operator.
 
+`PreparedHeatNetwork::step_spatial_conduction_candidate` now connects this SAME
+3D field/enthalpy residual to source-defined thermal contacts, integrated
+conductive layers and closed-enclosure radiation. It uses the original source
+cards and receiving volumes; contact pressure, conductivity and emissivity data
+changes therefore reach actual temperatures, current density and terminal work.
+Every nonlinear trial refreshes the complete heat assembly. Its original
+interface/emissivity samples are retained with the accepted tetrahedral field.
+Graph electrical work cannot be silently omitted, and field-dependent thermal
+boundaries refuse without an interface-field owner. Radiation's signed numerical
+net is checked as internal exchange rather than external energy supply.
+
 Synthetic G1/G3/G4 cases compare independent two-cell electrothermal elimination,
 material swaps, voltage/current reversal, tetrahedral subdivision, continuation,
 and source T/f surface feedback through an isothermal latent interval in both
 conductivity/resistivity bases. Scalar and oriented material snapshots produce
 the same admitted aligned limit. Final cancellation, work-budget, foreign-source
 and receiving-volume refusals retain retryable original inputs.
+`tests/spatial_conduction_enthalpy/heat.rs` adds independent contact/radiation
+balance, source-only contact-pressure and emissivity substitutions, continuing
+field/heat history, source-domain refusal and cancellation. These are authored
+synthetic numerical cases, not measured-device qualification.
 
 This fixed-geometry, memoryless DC closure adds no thermal spatial-resolution
 claim beyond its authored finite cells, phase-density motion, electrical contact
@@ -2920,6 +2935,22 @@ through actual pressure and sympathetic body response, retaining the original
 energy-balance assertions. These are numerical coupling checks, not physical
 instrument qualification. Helical winding, axial/torsional memory, evolving
 temperature and finite-strain material history remain outside this binding.
+
+### Source-defined bridges with omitted string compliance
+
+`ReciprocalStringBank::with_material_bridge_interfaces` and
+`with_residual_flexibility` compose in either order for ordinary sourced
+spring/dashpot joints. Original material identities, selected state, validity
+domains, area and physical k/c remain in the source; the existing assembly
+condenses the retained connection once to k/(1+kG) and c/(1+kG)^2. Later
+source reconstruction retains that distinction. Binding a source to an already
+corrected live system preserves its motion and pressure history. The native
+`material_strings` entry validates the final condensed frequency bound.
+The spring reduction is static; the dashpot is first order in c G omega.
+Constant-loss anchors require a different series law and refuse in either
+binding order. Focused G3 tests compare unchanged trajectories under binding
+order and source attachment, then vary the joint data through actual reciprocal
+pressure. These do not establish broadband continuum or instrument fidelity.
 
 ### Material string bank rotational bridges
 
