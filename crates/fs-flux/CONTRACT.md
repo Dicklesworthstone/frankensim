@@ -2037,6 +2037,16 @@ bulk volumes change conservatively. Film thickness, cells, initial profiles and
 per-species diffusivities are explicit independent inputs. Initial film water
 and solute are additional physical inventory, never silently taken from bulks.
 
+`TransientFilm::from_cells` additionally accepts nonuniform cell widths and
+cell-major species diffusivities. Each interior face combines the two actual
+half-cell diffusion resistances in series, preserving slow barrier layers and
+the original exponential advection fit. Storage and balance use each cell's
+own volume; `film_cell_volume_m3(side, cell)` exposes that volume. The uniform
+constructor remains available. Coefficients are positive and fixed in time;
+concentration is continuous across internal faces, with no inferred partition
+coefficient or sorbed storage. Focused regressions cover analytical resistance,
+both flow directions, high material contrast and nonuniform spatial refinement.
+
 Each call accepts one backward-Euler step. Original exponentially fitted donor
 coefficients form a positive implicit amount system for each species. Native
 `fs_la::tridiagonal::TridiagonalWorkspace` solves it in linear work per species;

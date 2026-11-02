@@ -9,9 +9,17 @@
 //! The two terminal half cells and membrane use the original polarization law;
 //! its reconstructed surface concentrations supply the osmotic driving force.
 //!
-//! This is an isothermal, neutral, ideal dilute film model with explicit constant
-//! diffusivities and negligible film hydraulic loss. It does not infer crossflow,
-//! turbulence, ionic fields, concentration-dependent diffusion, or heat storage.
+//! Cell widths and species diffusivities may vary across a film. Interior faces
+//! use the two half-cell diffusion resistances in series, including at material
+//! jumps. In the resistance coordinate `s = integral(dx / D)`, the original
+//! steady face equation is `dc/ds = Jv*c - Js`, so the same exponential fit also
+//! covers piecewise-constant D without averaging away a slow barrier layer.
+//!
+//! This is an isothermal, neutral, ideal dilute film model with cellwise constant
+//! diffusivities and negligible film hydraulic loss. Concentration is continuous
+//! across internal faces: no partition coefficient or sorbed inventory is
+//! implied. It does not infer crossflow, turbulence, ionic fields,
+//! concentration-dependent diffusion, or heat storage.
 //! Cell averages approximate center concentrations; spatial refinement and time
 //! refinement are separate obligations. Each call accepts ONE first-order
 //! implicit step, with bounded root work but no temporal error estimate or
@@ -103,17 +111,18 @@ fn zeros(len: usize) -> Result<Box<[f64]>> {
     Ok(data.into_boxed_slice())
 }
 
-/// Explicit uniform geometry, species diffusivities, and an initial profile.
+/// Explicit cell geometry, species diffusivities, and an initial profile.
 /// Diffusivity and thickness are independent: a steady `D/thickness` coefficient
 /// alone cannot specify either solvent storage or the diffusion time scale.
 #[derive(Clone, Debug)]
 pub struct TransientFilm {
-    thickness_m: f64,
-    cells: usize,
+    cell_widths_m: Box<[f64]>,
+    species_count: usize,
     diffusivity_m2_s: Box<[f64]>,
     initial_concentrations_mol_m3: Box<[f64]>,
 }
 impl TransientFilm {
+    /// Uniform cells, with one diffusivity per species throughout the film.
     /// Concentrations are cell-major, with the original bulk species ordering
     /// within each cell. Cells on BOTH sides are ordered left to right.
     pub fn new(
@@ -137,12 +146,55 @@ impl TransientFilm {
                 "invalid finite film geometry, diffusivities or concentration layout",
             ));
         }
+        Self::from_cells(
+            vec![thickness_m / cells as f64; cells],
+            diffusivity_m2_s.len(),
+            diffusivity_m2_s.repeat(cells),
+            initial_concentrations_mol_m3,
+        )
+    }
+
+    /// Nonuniform cells with positive, time-independent D [m²/s] per species
+    /// and cell. Both flattened arrays are cell-major in original bulk species
+    /// order. Cells on BOTH sides run left to right; each width owns actual
+    /// solvent storage, not just a face resistance. Zero species admits water
+    /// storage with empty coefficient and concentration arrays.
+    pub fn from_cells(
+        cell_widths_m: Vec<f64>,
+        species_count: usize,
+        diffusivity_m2_s: Vec<f64>,
+        initial_concentrations_mol_m3: Vec<f64>,
+    ) -> Result<Self> {
+        let cells = cell_widths_m.len();
+        if cells == 0
+            || cells > MAX_TRANSIENT_FILM_CELLS
+            || species_count > MAX_OSMOTIC_SPECIES
+            || cell_widths_m.iter().any(|&dx| !positive(dx))
+            || !positive(cell_widths_m.iter().sum())
+            || diffusivity_m2_s.len() != cells * species_count
+            || initial_concentrations_mol_m3.len() != cells * species_count
+            || diffusivity_m2_s.iter().any(|&d| !positive(d))
+            || initial_concentrations_mol_m3
+                .iter()
+                .any(|&c| !nonnegative(c))
+        {
+            return Err(invalid(
+                "invalid layered film widths, species diffusivities or concentration layout",
+            ));
+        }
         Ok(Self {
-            thickness_m,
-            cells,
+            cell_widths_m: cell_widths_m.into_boxed_slice(),
+            species_count,
             diffusivity_m2_s: diffusivity_m2_s.into_boxed_slice(),
             initial_concentrations_mol_m3: initial_concentrations_mol_m3.into_boxed_slice(),
         })
+    }
+
+    fn half_cell_permeance(&self, cell: usize, species: usize) -> Result<FilmPermeance> {
+        Ok(FilmPermeance::from_diffusion_layer(
+            self.diffusivity_m2_s[cell * self.species_count + species],
+            0.5 * self.cell_widths_m[cell],
+        )?)
     }
 }
 
@@ -190,9 +242,8 @@ pub struct TransientStepReport {
 }
 
 struct FilmGeometry {
-    cells: usize,
-    cell_volume_m3: f64,
-    interior: MembraneTransport,
+    cell_volumes_m3: Box<[f64]>,
+    interior: Box<[MembraneTransport]>,
     outer_half_cell: MembraneTransport,
 }
 struct Workspace {
@@ -232,34 +283,55 @@ pub struct TransientOsmoticPair {
 // These are concentration-transfer operators only. Their zero hydraulic
 // permeance is never sampled: the membrane supplies the SAME water flux to
 // every interface; no artificial pressure/selectivity belongs to film cells.
-fn film_operator(film: &TransientFilm, distance_m: f64) -> Result<MembraneTransport> {
-    let solutes = film
-        .diffusivity_m2_s
-        .iter()
-        .map(|&d| {
-            let k = FilmPermeance::from_diffusion_layer(d, distance_m)?;
-            Ok((
-                ReflectionCoefficient::new(0.0)?,
-                SolutePermeance::new(k.value())?,
-            ))
+fn film_operator(
+    film: &TransientFilm,
+    cell: usize,
+    neighbor: Option<usize>,
+) -> Result<MembraneTransport> {
+    let solutes = (0..film.species_count)
+        .map(|species| -> Result<_> {
+            let a = film.half_cell_permeance(cell, species)?.value();
+            let k = match neighbor {
+                None => a,
+                Some(other) => {
+                    let b = film.half_cell_permeance(other, species)?.value();
+                    // 1 / (1/a + 1/b), without overflowing reciprocal
+                    // resistances or the product a*b at strong material jumps.
+                    a.min(b) / (1.0 + a.min(b) / a.max(b))
+                }
+            };
+            if !positive(k) {
+                return Err(invalid("series film permeance is not representable"));
+            }
+            Ok((ReflectionCoefficient::new(0.0)?, SolutePermeance::new(k)?))
         })
-        .collect::<core::result::Result<Vec<_>, OsmosisError>>()?;
+        .collect::<Result<Vec<_>>>()?;
     Ok(MembraneTransport::new(
         HydraulicPermeance::new(0.0)?,
         solutes,
     )?)
 }
-fn prepare_film(film: &TransientFilm, area: f64) -> Result<FilmGeometry> {
-    let dx = film.thickness_m / film.cells as f64;
-    let volume = area * dx;
-    if !positive(volume) {
-        return Err(invalid("film cell water volume is not representable"));
-    }
+fn prepare_film(film: &TransientFilm, area: f64, side: usize) -> Result<FilmGeometry> {
+    let cells = film.cell_widths_m.len();
+    let cell_volumes_m3 = film
+        .cell_widths_m
+        .iter()
+        .map(|&dx| {
+            let volume = area * dx;
+            if positive(volume) {
+                Ok(volume)
+            } else {
+                Err(invalid("film cell water volume is not representable"))
+            }
+        })
+        .collect::<Result<Box<[_]>>>()?;
+    let interior = (0..cells - 1)
+        .map(|cell| film_operator(film, cell, Some(cell + 1)))
+        .collect::<Result<Box<[_]>>>()?;
     Ok(FilmGeometry {
-        cells: film.cells,
-        cell_volume_m3: volume,
-        interior: film_operator(film, dx)?,
-        outer_half_cell: film_operator(film, 0.5 * dx)?,
+        cell_volumes_m3,
+        interior,
+        outer_half_cell: film_operator(film, if side == 0 { 0 } else { cells - 1 }, None)?,
     })
 }
 
@@ -290,21 +362,26 @@ impl TransientOsmoticPair {
             || definitions
                 .iter()
                 .flatten()
-                .any(|f| f.diffusivity_m2_s.len() != count)
+                .any(|f| f.species_count != count)
         {
             return Err(invalid(
                 "transient films require common neutral ideal species, solvent and temperature",
             ));
         }
-        let film_cells: usize = definitions.iter().flatten().map(|f| f.cells).sum();
+        let film_cells: usize = definitions
+            .iter()
+            .flatten()
+            .map(|f| f.cell_widths_m.len())
+            .sum();
         let rows = film_cells + 2;
         // Conservative owned-heap bound: accepted/trial amounts, candidate
         // bulks, five matrix/RHS arrays, the original LU workspace, and all
-        // boxed membrane/film coefficients. The initial supplied profile is
-        // also covered while construction copies it into actual molar storage.
-        let workspace_bytes = (3 * rows * count + 4 * count + 10 * rows) * size_of::<f64>()
+        // boxed membrane/film coefficients. The initial supplied profile and
+        // cellwise coefficient/width arrays are also covered during setup.
+        let workspace_bytes = (4 * rows * count + 4 * count + 12 * rows) * size_of::<f64>()
             + rows * size_of::<bool>()
-            + (5 * count) * size_of::<(ReflectionCoefficient, SolutePermeance)>()
+            + ((film_cells + 1) * count) * size_of::<(ReflectionCoefficient, SolutePermeance)>()
+            + film_cells * size_of::<MembraneTransport>()
             + 2 * count * size_of::<Option<FilmPermeance>>()
             + size_of::<Self>();
         if workspace_bytes > maximum_workspace_bytes {
@@ -314,42 +391,41 @@ impl TransientOsmoticPair {
             }
             .into());
         }
-        let half_films = |film: &Option<TransientFilm>| -> Result<Vec<Option<FilmPermeance>>> {
+        let half_films = |side: usize| -> Result<Vec<Option<FilmPermeance>>> {
+            let film = &definitions[side];
             match film {
-                Some(f) => f
-                    .diffusivity_m2_s
-                    .iter()
-                    .map(|&d| {
-                        Ok(Some(FilmPermeance::from_diffusion_layer(
-                            d,
-                            0.5 * f.thickness_m / f.cells as f64,
-                        )?))
-                    })
-                    .collect(),
+                Some(f) => {
+                    let cell = if side == 0 {
+                        f.cell_widths_m.len() - 1
+                    } else {
+                        0
+                    };
+                    (0..count)
+                        .map(|species| Ok(Some(f.half_cell_permeance(cell, species)?)))
+                        .collect()
+                }
                 None => Ok(vec![None; count]),
             }
         };
-        let membrane = PolarizedMembraneTransport::new(
-            membrane,
-            half_films(&definitions[0])?,
-            half_films(&definitions[1])?,
-        )?;
+        let membrane = PolarizedMembraneTransport::new(membrane, half_films(0)?, half_films(1)?)?;
         let films = [
             definitions[0]
                 .as_ref()
-                .map(|f| prepare_film(f, membrane_area_m2))
+                .map(|f| prepare_film(f, membrane_area_m2, 0))
                 .transpose()?,
             definitions[1]
                 .as_ref()
-                .map(|f| prepare_film(f, membrane_area_m2))
+                .map(|f| prepare_film(f, membrane_area_m2, 1))
                 .transpose()?,
         ];
         let mut film_amounts = zeros(film_cells * count)?;
         let mut offset = 0;
         for side in 0..2 {
             if let (Some(definition), Some(geometry)) = (&definitions[side], &films[side]) {
-                for &concentration in &definition.initial_concentrations_mol_m3 {
-                    let amount = concentration * geometry.cell_volume_m3;
+                for (index, &concentration) in
+                    definition.initial_concentrations_mol_m3.iter().enumerate()
+                {
+                    let amount = concentration * geometry.cell_volumes_m3[index / count];
                     if !nonnegative(amount) || concentration > 0.0 && amount == 0.0 {
                         return Err(invalid("initial film amount is not representable"));
                     }
@@ -403,16 +479,21 @@ impl TransientOsmoticPair {
     pub fn film_cell_count(&self, side: usize) -> Option<usize> {
         self.films
             .get(side)
-            .map(|f| f.as_ref().map_or(0, |f| f.cells))
+            .map(|f| f.as_ref().map_or(0, |f| f.cell_volumes_m3.len()))
     }
-    /// Actual fixed water volume of one cell; None for an absent/invalid side.
-    pub fn film_cell_volume_m3(&self, side: usize) -> Option<f64> {
-        self.films.get(side)?.as_ref().map(|f| f.cell_volume_m3)
+    /// Actual fixed water volume; None for an absent/invalid side or cell.
+    pub fn film_cell_volume_m3(&self, side: usize, cell: usize) -> Option<f64> {
+        self.films
+            .get(side)?
+            .as_ref()?
+            .cell_volumes_m3
+            .get(cell)
+            .copied()
     }
     /// Actual cell inventory in the original species order. Both film profiles
     /// are indexed left to right, including the film on the right of the membrane.
     pub fn film_solute_moles(&self, side: usize, cell: usize) -> Option<&[f64]> {
-        if cell >= self.films.get(side)?.as_ref()?.cells {
+        if cell >= self.films.get(side)?.as_ref()?.cell_volumes_m3.len() {
             return None;
         }
         let offset = if side == 0 { 0 } else { self.left_cells() };
@@ -428,7 +509,7 @@ impl TransientOsmoticPair {
                 .films
                 .iter()
                 .flatten()
-                .map(|f| f.cells as f64 * f.cell_volume_m3)
+                .flat_map(|f| f.cell_volumes_m3.iter())
                 .sum::<f64>()
     }
     /// Include the two bulks AND every stored film cell in each species balance.
@@ -442,7 +523,9 @@ impl TransientOsmoticPair {
         Ok(())
     }
     fn left_cells(&self) -> usize {
-        self.films[0].as_ref().map_or(0, |f| f.cells)
+        self.films[0]
+            .as_ref()
+            .map_or(0, |f| f.cell_volumes_m3.len())
     }
     fn amount(&self, cell: usize, species: usize) -> f64 {
         if cell == 0 {
@@ -465,12 +548,12 @@ impl TransientOsmoticPair {
             self.films[0]
                 .as_ref()
                 .expect("left film cell")
-                .cell_volume_m3
+                .cell_volumes_m3[cell - 1]
         } else {
             self.films[1]
                 .as_ref()
                 .expect("right film cell")
-                .cell_volume_m3
+                .cell_volumes_m3[cell - self.left_cells() - 1]
         }
     }
 
@@ -527,7 +610,12 @@ impl TransientOsmoticPair {
                     let operator = if edge == 0 || edge + 2 == self.rows {
                         &film.outer_half_cell
                     } else {
-                        &film.interior
+                        let local = if side == 0 {
+                            edge - 1
+                        } else {
+                            edge - middle - 1
+                        };
+                        &film.interior[local]
                     };
                     operator.solute_stream_coefficients(species, flux)?
                 };
@@ -763,7 +851,7 @@ impl TransientOsmoticPair {
             .films
             .iter()
             .flatten()
-            .map(|f| f.cell_volume_m3 * f.cells as f64)
+            .flat_map(|f| f.cell_volumes_m3.iter())
             .sum();
         let water_residual = finite((vl + vr + film_water) - before_water)?;
         if water_residual.abs()

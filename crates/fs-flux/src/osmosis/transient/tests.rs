@@ -103,6 +103,231 @@ fn explicit_geometry_layout_and_workspace_admission() {
 }
 
 #[test]
+fn layered_cells_retain_local_storage_and_conserve_positive_inventories() {
+    for (widths, diffusivities, profile) in [
+        (vec![0.0], vec![1e-9], vec![1.0]),
+        (vec![f64::NAN], vec![1e-9], vec![1.0]),
+        (vec![1e-4], vec![0.0], vec![1.0]),
+        (vec![1e-4, 2e-4], vec![1e-9], vec![1.0, 2.0]),
+    ] {
+        assert!(TransientFilm::from_cells(widths, 1, diffusivities, profile).is_err());
+    }
+    let mut pair = TransientOsmoticPair::new(
+        [bulk(&[0.0], 1e-6, 0.0), bulk(&[50.0], 1e-6, 0.0)],
+        1e-4,
+        membrane(0.0, 0.0, 2e-6, 1),
+        Some(
+            TransientFilm::from_cells(
+                vec![1e-5, 3e-5, 6e-5],
+                1,
+                vec![1e-9, 1e-13, 2e-9],
+                vec![100.0, 20.0, 0.0],
+            )
+            .unwrap(),
+        ),
+        Some(
+            TransientFilm::from_cells(vec![2e-5, 8e-5], 1, vec![4e-10, 1e-9], vec![0.0, 50.0])
+                .unwrap(),
+        ),
+        1 << 20,
+    )
+    .unwrap();
+    close(pair.film_cell_volume_m3(0, 1).unwrap(), 3e-9, 1e-15, 0.0);
+    close(pair.film_cell_volume_m3(1, 1).unwrap(), 8e-9, 1e-15, 0.0);
+    assert_eq!(pair.film_cell_volume_m3(0, 3), None);
+    assert_eq!(pair.film_cell_volume_m3(2, 0), None);
+    let mut amount = [0.0];
+    pair.total_solute_moles_into(&mut amount).unwrap();
+    let original = 50e-6 + 1e-4 * (1e-5 * 100.0 + 3e-5 * 20.0 + 8e-5 * 50.0);
+    close(amount[0], original, 1e-15, 0.0);
+    close(pair.total_solvent_volume_m3(), 2.02e-6, 1e-15, 0.0);
+    let before = snapshot(&pair);
+    let mut polls = 0;
+    assert!(matches!(
+        pair.step(100.0, TransientStepControls::default(), || {
+            polls += 1;
+            polls == 10
+        }),
+        Err(TransientOsmosisError::Network(
+            OsmoticNetworkError::Cancelled
+        ))
+    ));
+    assert_eq!(snapshot(&pair), before);
+    pair.step(100.0, TransientStepControls::default(), || false)
+        .unwrap();
+    pair.total_solute_moles_into(&mut amount).unwrap();
+    close(amount[0], original, 1e-12, 1e-19);
+    for side in 0..2 {
+        for cell in 0..pair.film_cell_count(side).unwrap() {
+            let c = pair.film_solute_moles(side, cell).unwrap()[0]
+                / pair.film_cell_volume_m3(side, cell).unwrap();
+            assert!((0.0..=100.0).contains(&c));
+        }
+    }
+}
+
+#[test]
+fn heterogeneous_steady_flux_matches_series_resistance_at_both_membrane_faces() {
+    let widths = [vec![0.5e-4, 1.5e-4], vec![0.2e-4, 1.8e-4]];
+    let diffusivities = [vec![1e-9, 1e-11], vec![2e-10, 4e-9]];
+    let resistance = [
+        0.5e-4 / 1e-9 + 1.5e-4 / 1e-11,
+        0.2e-4 / 2e-10 + 1.8e-4 / 4e-9,
+    ];
+    let permeability = 2e-6;
+    let mut pair = TransientOsmoticPair::new(
+        [bulk(&[100.0], 1.0, 0.0), bulk(&[0.0], 1.0, 0.0)],
+        1e-4,
+        membrane(0.0, 0.0, permeability, 1),
+        Some(
+            TransientFilm::from_cells(widths[0].clone(), 1, diffusivities[0].clone(), vec![0.0; 2])
+                .unwrap(),
+        ),
+        Some(
+            TransientFilm::from_cells(widths[1].clone(), 1, diffusivities[1].clone(), vec![0.0; 2])
+                .unwrap(),
+        ),
+        1 << 20,
+    )
+    .unwrap();
+    let mut report = pair
+        .step(1e4, TransientStepControls::default(), || false)
+        .unwrap();
+    for _ in 0..19 {
+        report = pair
+            .step(1e4, TransientStepControls::default(), || false)
+            .unwrap();
+    }
+    let cl = pair.bulks()[0].solution().solute_moles()[0];
+    let cr = pair.bulks()[1].solution().solute_moles()[0];
+    let flux = (cl - cr) / (resistance[0] + 1.0 / permeability + resistance[1]);
+    close(
+        report.membrane_left_concentration_mol_m3[0],
+        cl - flux * resistance[0],
+        2e-7,
+        1e-8,
+    );
+    close(
+        report.membrane_right_concentration_mol_m3[0],
+        cr + flux * resistance[1],
+        2e-7,
+        1e-8,
+    );
+    close(
+        permeability
+            * (report.membrane_left_concentration_mol_m3[0]
+                - report.membrane_right_concentration_mol_m3[0]),
+        flux,
+        2e-7,
+        1e-14,
+    );
+    assert_eq!(report.solvent_transfer_m3, 0.0);
+    // The original 100 mol remains split across BOTH bulks and all four cells.
+    let mut total = [0.0];
+    pair.total_solute_moles_into(&mut total).unwrap();
+    close(total[0], 100.0, 5e-14, 1e-13);
+}
+
+#[test]
+fn layered_films_preserve_exponential_polarization_in_both_flow_directions() {
+    let widths = [1e-5, 3e-5, 6e-5];
+    let diffusivities = [2e-9, 5e-10, 1e-9];
+    let resistance: f64 = widths.iter().zip(diffusivities).map(|(dx, d)| dx / d).sum();
+    for pressure_right in [101_325.0, 501_325.0] {
+        let mut pair = TransientOsmoticPair::new(
+            [
+                bulk(&[50.0], 1.0, 101_325.0),
+                bulk(&[100.0], 1.0, pressure_right),
+            ],
+            1e-4,
+            membrane(2e-11, 1.0, 0.0, 1),
+            Some(
+                TransientFilm::from_cells(
+                    widths.to_vec(),
+                    1,
+                    diffusivities.to_vec(),
+                    vec![50.0; 3],
+                )
+                .unwrap(),
+            ),
+            Some(
+                TransientFilm::from_cells(
+                    widths.into_iter().rev().collect(),
+                    1,
+                    diffusivities.into_iter().rev().collect(),
+                    vec![100.0; 3],
+                )
+                .unwrap(),
+            ),
+            1 << 20,
+        )
+        .unwrap();
+        let mut report = pair
+            .step(100.0, TransientStepControls::default(), || false)
+            .unwrap();
+        for _ in 0..19 {
+            report = pair
+                .step(100.0, TransientStepControls::default(), || false)
+                .unwrap();
+        }
+        let concentration = |side: usize| {
+            let b = pair.bulks()[side].solution();
+            b.solute_moles()[0] / b.solvent_volume_m3()
+        };
+        let peclet = report.volume_flux_m_s * resistance;
+        close(
+            report.membrane_left_concentration_mol_m3[0],
+            concentration(0) * peclet.exp(),
+            2e-6,
+            1e-8,
+        );
+        close(
+            report.membrane_right_concentration_mol_m3[0],
+            concentration(1) * (-peclet).exp(),
+            2e-6,
+            1e-8,
+        );
+        assert_eq!(report.volume_flux_m_s < 0.0, pressure_right > 200_000.0);
+    }
+}
+
+#[test]
+fn refining_nonuniform_diffusion_layers_resolves_transient_uptake() {
+    let uptake = |cells_per_layer: usize| {
+        let mut widths = vec![1e-4 / cells_per_layer as f64; cells_per_layer];
+        widths.extend(vec![2e-4 / cells_per_layer as f64; cells_per_layer]);
+        let mut diffusivities = vec![1e-9; cells_per_layer];
+        diffusivities.extend(vec![1e-10; cells_per_layer]);
+        let mut pair = TransientOsmoticPair::new(
+            [bulk(&[100.0], 1e-3, 0.0), bulk(&[0.0], 1e-3, 0.0)],
+            1e-4,
+            membrane(0.0, 1.0, 0.0, 1),
+            Some(
+                TransientFilm::from_cells(widths, 1, diffusivities, vec![0.0; 2 * cells_per_layer])
+                    .unwrap(),
+            ),
+            None,
+            1 << 20,
+        )
+        .unwrap();
+        for _ in 0..250 {
+            pair.step(0.2, TransientStepControls::default(), || false)
+                .unwrap();
+        }
+        (0..2 * cells_per_layer)
+            .map(|cell| pair.film_solute_moles(0, cell).unwrap()[0])
+            .sum::<f64>()
+    };
+    let reference = uptake(32);
+    let coarse = (uptake(1) - reference).abs();
+    let fine = (uptake(2) - reference).abs();
+    assert!(
+        fine < 0.7 * coarse,
+        "layered transient refinement errors: {coarse:e}, {fine:e}"
+    );
+}
+
+#[test]
 fn pure_water_counts_film_storage_and_exact_pressure_work() {
     let empty_film = || TransientFilm::new(1e-3, 3, vec![], vec![]).unwrap();
     let mut pair = TransientOsmoticPair::new(
@@ -122,7 +347,12 @@ fn pure_water_counts_film_storage_and_exact_pressure_work() {
     close(report.solvent_transfer_m3, 1e-7, 1e-12, 1e-20);
     close(report.pressure_work_into_solution_j, 0.01, 1e-12, 1e-16);
     close(pair.total_solvent_volume_m3(), initial_water, 1e-15, 0.0);
-    close(pair.film_cell_volume_m3(0).unwrap(), 1e-6 / 3.0, 1e-15, 0.0);
+    close(
+        pair.film_cell_volume_m3(0, 0).unwrap(),
+        1e-6 / 3.0,
+        1e-15,
+        0.0,
+    );
     assert_eq!(report.species_count, 0);
 }
 
