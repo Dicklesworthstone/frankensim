@@ -383,7 +383,7 @@ impl HyperProblem<'_> {
                 "mean-dilatation Newton controls must be finite and positive",
             ));
         }
-        self.solve_with_projection(Some((&prepared, cx)))
+        self.solve_with_projection(Some(super::Reduction::MeanDilatation(&prepared, cx)))
     }
 
     /// Unconstrained forces and exact condensed-energy Hessian, per unit thickness.

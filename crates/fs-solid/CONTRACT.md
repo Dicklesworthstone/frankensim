@@ -262,6 +262,35 @@ continuation, complete rollback and source/history refusals. All fatigue data
 in those tests is explicitly synthetic; the regressions are implementation
 checks, not experimental material calibration.
 
+## Finite-strain traction-free plane stress
+
+`HyperProblem::solve_plane_stress(PlaneStressSettings, &Cx)` runs the original
+load-stepped Newton solver on P1 triangles and Q1 quadrilaterals while the native
+`fs-material` energy relaxes all three transverse nominal tractions at each
+quadrature point. Thickness contraction and anisotropic transverse shear are
+solved, not prescribed. The in-plane force and Schur-complement tangent derive
+from the same reduced energy; supports, dead tractions and reactions retain the
+original reference-thickness convention. `plane_stress_states` exposes the
+actual relaxed 3-D deformation and local equilibrium residual.
+
+Reference gradients and quadrature are prepared once per solve. Energy-only
+line searches use the material's three-direction local Newton path without
+forming full constitutive Hessians. The global solver checks the true linear
+residual, polls cancellation between quadrature points and bounded Krylov
+chunks, and refuses nonconvergence, folded/inverted elements, invalid controls
+and material-domain violations without returning a partial solution.
+
+G0/G1/G3 tests in `tests/hyper_plane_stress.rs` cover an independently derived
+finite Neo-Hookean uniaxial traction solve with lateral/thickness contraction,
+nodal energy/force/tangent consistency on P1 and skew Q1 elements with tilted
+fibres, rigid-motion invariance, and domain/cancellation refusals. This is a
+thin in-plane continuum: no shell bending, wrinkling, global injectivity,
+fully incompressible formulation, general stability or convergence certificate
+is implied. Existing `solve()` and continuation retain plane-strain semantics.
+`cargo run -p fs-solid --example hyperelastic_plane_stress` solves a thin coupon
+under nominal traction and reports displacement, relaxed thickness and support
+reaction. Its constitutive coefficients are explicitly authored model inputs.
+
 ## Finite-strain Q1 mean dilatation
 
 `HyperProblem::solve_mean_dilatation(&Cx)` adds an opt-in plane-strain Q1

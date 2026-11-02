@@ -1,7 +1,7 @@
-//! Plane-strain finite-strain hyperelasticity: kinematics, weak forms,
+//! Finite-strain plane hyperelasticity: kinematics, weak forms,
 //! and the globalized Newton loop. Constitutive behavior comes from
 //! fs-material cards (exact AD Piola stress and consistent 9×9
-//! tangent); this module embeds the 2D displacement gradient into the
+//! tangent); the default embeds the 2D displacement gradient into the
 //! 3D deformation gradient (F₃₃ = 1), integrates the residual
 //! `∫ P : ∇δu`, and assembles the consistent tangent
 //! `∫ ∇δu : A : ∇Δu`.
@@ -15,6 +15,8 @@
 //! [`mean_dilatation`] adds an explicit Q1 condensed-volumetric formulation
 //! for quasi-incompressible finite compression, sharing this Newton driver.
 //! Its energy and stress recovery differ from the default pointwise law.
+//! [`plane_stress`] instead relaxes all three transverse tractions for thin
+//! continua and uses the corresponding reduced energy and consistent tangent.
 
 use crate::SolidError;
 use crate::mesh2::{Mesh2, Patch, quad_points, shapes_at};
@@ -27,11 +29,19 @@ use std::collections::BTreeMap;
 
 /// Opt-in Q1 mean-dilatation finite-strain compression.
 pub mod mean_dilatation;
+/// Traction-free thickness relaxation on the original hyperelastic energy.
+pub mod plane_stress;
 
-type Projection<'a, 'cx> = Option<(&'a mean_dilatation::Prepared, &'a Cx<'cx>)>;
+#[derive(Clone, Copy)]
+enum Reduction<'a, 'cx> {
+    MeanDilatation(&'a mean_dilatation::Prepared, &'a Cx<'cx>),
+    PlaneStress(&'a plane_stress::Prepared, &'a Cx<'cx>),
+}
+
+type Projection<'a, 'cx> = Option<Reduction<'a, 'cx>>;
 
 fn checkpoint(projection: Projection<'_, '_>) -> Result<(), SolidError> {
-    if let Some((_, cx)) = projection {
+    if let Some(Reduction::MeanDilatation(_, cx) | Reduction::PlaneStress(_, cx)) = projection {
         cx.checkpoint().map_err(|_| SolidError::Cancelled)?;
     }
     Ok(())
@@ -73,7 +83,8 @@ pub struct NewtonReport {
 /// A displacement/traction field on a patch.
 pub type VecField<'m> = &'m dyn Fn(f64, f64) -> [f64; 2];
 
-/// A finite-strain problem on a body-fitted mesh (plane strain).
+/// A finite-strain problem on a body-fitted mesh (plane strain by default).
+/// [`Self::solve_plane_stress`] admits traction-free thickness relaxation.
 pub struct HyperProblem<'m> {
     /// The mesh.
     pub mesh: &'m Mesh2,
@@ -213,7 +224,12 @@ impl HyperProblem<'_> {
         projection: Projection<'_, '_>,
     ) -> Result<(Vec<f64>, fs_sparse::Csr), SolidError> {
         match projection {
-            Some((prepared, cx)) => prepared.assemble(self, u, load, fixed, cx),
+            Some(Reduction::MeanDilatation(prepared, cx)) => {
+                prepared.assemble(self, u, load, fixed, cx)
+            }
+            Some(Reduction::PlaneStress(prepared, cx)) => {
+                prepared.assemble(self, u, load, fixed, cx)
+            }
             None => self.assemble(u, load, fixed),
         }
     }
@@ -225,11 +241,21 @@ impl HyperProblem<'_> {
         projection: Projection<'_, '_>,
     ) -> Result<Option<f64>, SolidError> {
         match projection {
-            Some((prepared, cx)) => match prepared.potential_energy(self, u, load, cx) {
-                Ok(energy) => Ok(Some(energy)),
-                Err(SolidError::MaterialRefused { .. }) => Ok(None),
-                Err(error) => Err(error),
-            },
+            Some(reduction) => {
+                let energy = match reduction {
+                    Reduction::MeanDilatation(prepared, cx) => {
+                        prepared.potential_energy(self, u, load, cx)
+                    }
+                    Reduction::PlaneStress(prepared, cx) => {
+                        prepared.potential_energy(self, u, load, cx)
+                    }
+                };
+                match energy {
+                    Ok(energy) => Ok(Some(energy)),
+                    Err(SolidError::MaterialRefused { .. }) => Ok(None),
+                    Err(error) => Err(error),
+                }
+            }
             None => Ok(self.try_energy(u, load)),
         }
     }

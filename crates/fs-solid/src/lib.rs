@@ -11,8 +11,8 @@
 //! - [`linear`]: plane-strain/plane-stress small-strain elasticity;
 //!   standard displacement elements plus the B-BAR dilatation
 //!   projection (the measured locking-free formulation).
-//! - [`hyper2d`]: plane-strain finite-strain hyperelasticity through
-//!   fs-material cards (Neo-Hookean, Mooney–Rivlin): exact residuals
+//! - [`hyper2d`]: plane-strain and traction-free plane-stress finite-strain
+//!   hyperelasticity through the native fs-material energies: exact residuals
 //!   and consistent tangents from the 3D deformation gradient,
 //!   Newton with backtracking line search and load stepping.
 //! - [`cutfront`]: a source-compatible legacy constructor that validates an
