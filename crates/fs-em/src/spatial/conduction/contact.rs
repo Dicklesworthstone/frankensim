@@ -123,7 +123,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         )
     }
 
-    fn bind_contacts(
+    pub(super) fn bind_contacts(
         mut self,
         contacts: Vec<SpatialConductionContact>,
         axes: Vec<[Option<String>; 2]>,
@@ -277,7 +277,7 @@ impl<C: SpatialConductorMaterial> SpatialConduction<C> {
         &self.contact_liquid_mass_fraction_axes
     }
 
-    fn contact_response(
+    pub(super) fn contact_response(
         &self,
         voltage: &[f64],
         cancelled: &mut impl FnMut() -> bool,

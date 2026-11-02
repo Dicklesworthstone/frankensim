@@ -3,12 +3,15 @@
 
 use super::*;
 use fs_em::conduction::{ConductionContact, ConductionContactResponse};
-use fs_material::electrical_interface::ELECTRICAL_CONTACT_RESISTANCE_PROPERTY;
+use fs_material::electrical_interface::{
+    ELECTRICAL_CONTACT_RESISTANCE_PROPERTY, ResolvedElectricalInterface,
+};
 use fs_material::state_point::ResolvedInterfaceStatePoint;
 use fs_material::thermal::interface::ThermalInterfacePoint;
 
 /// Explicit thermal ownership of one original surface contact. Contact indices
-/// refer to `PlanarConduction::contacts()` in its canonical edge order.
+/// refer to the original conduction owner's `contacts()` in canonical trace
+/// order, for either planar edges or matching tetrahedral faces.
 #[derive(Clone, Copy, Debug)]
 pub struct ConductionContactThermal<'a> {
     pub contact: usize,
@@ -22,13 +25,13 @@ pub struct ConductionContactThermal<'a> {
 
 /// Actual surface field and its heat destinations at the accepted endpoint.
 #[derive(Clone, Debug, PartialEq)]
-pub struct ConductionContactHeat {
+pub struct ConductionContactHeat<R = ConductionContactResponse> {
     pub contact: usize,
-    /// Derived from the two original adjacent triangles' thermal routes, in
+    /// Derived from the two original adjacent volume cells' thermal routes, in
     /// source A/B order; these are not independent user-selected receivers.
     pub cells: [CellId; 2],
     pub heat_fraction_to_first: f64,
-    pub response: ConductionContactResponse,
+    pub response: R,
 }
 
 pub(super) struct PreparedContacts<'a, 'm> {
@@ -103,6 +106,73 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 cells: Vec::new(),
             });
         }
+        let trace = mesh
+            .boundary_trace()
+            .map_err(|_| invalid("spatial contact lost its original exterior traces"))?;
+        let edge_key = |mut edge: [usize; 2]| {
+            edge.sort_unstable();
+            edge
+        };
+        let edges: BTreeMap<_, _> = trace
+            .edges
+            .iter()
+            .map(|edge| {
+                (
+                    edge_key(edge.oriented_vertices.map(|v| v as usize)),
+                    edge.source_face,
+                )
+            })
+            .collect();
+        let adjacent = originals
+            .iter()
+            .map(|contact| {
+                check(cancel)?;
+                let [first, second] = [contact.first_vertices, contact.second_vertices]
+                    .map(|vertices| edges.get(&edge_key(vertices)).copied());
+                match (first, second) {
+                    (Some(first), Some(second)) => Ok([first, second]),
+                    _ => Err(invalid("spatial contact has no original adjacent triangle")),
+                }
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let sources = originals
+            .iter()
+            .map(|contact| &contact.source)
+            .collect::<Vec<_>>();
+        Self::new_for_sources(
+            network,
+            &sources,
+            &adjacent,
+            liquid_mass_fraction_axes,
+            bindings,
+            routes,
+            accepted,
+            cancel,
+        )
+    }
+
+    // Geometry owners supply their original adjacent volumes; source pinning,
+    // caloric coordinates and two-sided heat ownership are identical in 2D/3D.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn new_for_sources(
+        network: &ConductionThermalNetwork<'_>,
+        originals: &[&ResolvedElectricalInterface],
+        adjacent_volumes: &[[usize; 2]],
+        liquid_mass_fraction_axes: &[[Option<String>; 2]],
+        bindings: &'a [ConductionContactThermal<'m>],
+        routes: &[CellId],
+        accepted: &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Self, Error> {
+        check(cancel)?;
+        if bindings.len() != originals.len()
+            || adjacent_volumes.len() != originals.len()
+            || liquid_mass_fraction_axes.len() != originals.len()
+        {
+            return Err(invalid(
+                "every spatial electrical contact requires its source, adjacent volumes and heat partition",
+            ));
+        }
         let mut ordered = vec![None; bindings.len()];
         for binding in bindings {
             check(cancel)?;
@@ -122,25 +192,8 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 binding.ok_or_else(|| invalid("spatial contact thermal binding is absent"))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let trace = mesh
-            .boundary_trace()
-            .map_err(|_| invalid("spatial contact lost its original exterior traces"))?;
-        let edge_key = |mut edge: [usize; 2]| {
-            edge.sort_unstable();
-            edge
-        };
-        let edges: BTreeMap<_, _> = trace
-            .edges
-            .iter()
-            .map(|edge| {
-                (
-                    edge_key(edge.oriented_vertices.map(|v| v as usize)),
-                    edge.source_face,
-                )
-            })
-            .collect();
         let mut cells = Vec::with_capacity(bindings.len());
-        for (contact, binding) in originals.iter().zip(&bindings) {
+        for (adjacent, binding) in adjacent_volumes.iter().zip(&bindings) {
             check(cancel)?;
             if liquid_mass_fraction_axes[binding.contact]
                 .each_ref()
@@ -152,15 +205,9 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 ));
             }
             let mut receivers = [CellId(0); 2];
-            for (side, vertices) in [contact.first_vertices, contact.second_vertices]
-                .into_iter()
-                .enumerate()
-            {
-                let face = edges
-                    .get(&edge_key(vertices))
-                    .ok_or_else(|| invalid("spatial contact has no original adjacent triangle"))?;
+            for (side, face) in adjacent.iter().enumerate() {
                 let cell = *routes.get(*face).ok_or_else(|| {
-                    invalid("spatial contact adjacent triangle lacks a heat receiver")
+                    invalid("spatial contact adjacent volume lacks a heat receiver")
                 })?;
                 let bulk = network
                     .cells
@@ -181,12 +228,12 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             cells.push(receivers);
         }
         let prepared = Self { bindings, cells };
-        let refreshed = prepared.refresh_contacts(originals, accepted, cancel)?;
-        if refreshed.iter().zip(originals).any(|(new, old)| {
-            new.first_vertices != old.first_vertices
-                || new.second_vertices != old.second_vertices
-                || !same_interface(new.source.resolved(), old.source.resolved())
-        }) {
+        let refreshed = prepared.refresh_sources(originals, accepted, cancel)?;
+        if refreshed
+            .iter()
+            .zip(originals)
+            .any(|(new, old)| !same_interface(new.resolved(), old.resolved()))
+        {
             return Err(invalid(
                 "accepted electrical contacts must match both actual thermal states and original source context",
             ));
@@ -209,6 +256,28 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
         sample: &MaterialNetworkSample,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<Vec<ConductionContact>, Error> {
+        let originals_sources = originals
+            .iter()
+            .map(|contact| &contact.source)
+            .collect::<Vec<_>>();
+        let refreshed = self.refresh_sources(&originals_sources, sample, cancel)?;
+        Ok(originals
+            .iter()
+            .zip(refreshed)
+            .map(|(original, source)| ConductionContact {
+                first_vertices: original.first_vertices,
+                second_vertices: original.second_vertices,
+                source,
+            })
+            .collect())
+    }
+
+    pub(super) fn refresh_sources(
+        &self,
+        originals: &[&ResolvedElectricalInterface],
+        sample: &MaterialNetworkSample,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<Vec<ResolvedElectricalInterface>, Error> {
         if originals.len() != self.bindings.len() {
             return Err(invalid(
                 "spatial contact source coverage changed during feedback",
@@ -232,7 +301,6 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 .at([first, second])
                 .map_err(|error| material(MaterialNetworkError::Material(error)))?;
             let source = original
-                .source
                 .at_query_point(binding.point.interface, &point)
                 .map_err(|error| {
                     material(MaterialNetworkError::Material(
@@ -252,19 +320,15 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                     "contact response requires owned thermal/phase or typed fixed external coordinates",
                 ));
             }
-            contacts.push(ConductionContact {
-                first_vertices: original.first_vertices,
-                second_vertices: original.second_vertices,
-                source,
-            });
+            contacts.push(source);
         }
         Ok(contacts)
     }
 
-    pub(super) fn heat(
+    pub(super) fn heat<R: Clone>(
         &self,
-        response: &[ConductionContactResponse],
-    ) -> Result<Vec<ConductionContactHeat>, Error> {
+        response: &[R],
+    ) -> Result<Vec<ConductionContactHeat<R>>, Error> {
         if response.len() != self.bindings.len() {
             return Err(invalid(
                 "spatial contact heat coverage changed during feedback",
@@ -292,28 +356,40 @@ pub(super) fn deposit(
 ) -> Result<(), Error> {
     for contact in contacts {
         checkpoint()?;
-        let power = contact.response.power_w;
-        let fraction = contact.heat_fraction_to_first;
-        let first = finite(power * fraction)?;
-        let second = finite(power - first)?;
-        if power < 0.0
-            || first < 0.0
-            || second < 0.0
-            || (power > 0.0
-                && ((fraction > 0.0 && first == 0.0) || (fraction < 1.0 && second == 0.0)))
-        {
-            return Err(invalid("spatial contact heat partition is unrepresentable"));
+        deposit_partition(
+            contact.cells,
+            contact.heat_fraction_to_first,
+            contact.response.power_w,
+            powers,
+        )?;
+    }
+    Ok(())
+}
+
+pub(super) fn deposit_partition(
+    cells: [CellId; 2],
+    fraction: f64,
+    power: f64,
+    powers: &mut BTreeMap<CellId, f64>,
+) -> Result<(), Error> {
+    let first = finite(power * fraction)?;
+    let second = finite(power - first)?;
+    if power < 0.0
+        || first < 0.0
+        || second < 0.0
+        || (power > 0.0 && ((fraction > 0.0 && first == 0.0) || (fraction < 1.0 && second == 0.0)))
+    {
+        return Err(invalid("spatial contact heat partition is unrepresentable"));
+    }
+    for (cell, power) in cells.into_iter().zip([first, second]) {
+        let previous = powers.get(&cell).copied().unwrap_or(0.0);
+        let combined = finite(previous + power)?;
+        if power != 0.0 && previous == combined {
+            return Err(invalid(
+                "spatial contact heat disappeared in receiving cell power",
+            ));
         }
-        for (cell, power) in contact.cells.into_iter().zip([first, second]) {
-            let previous = powers.get(&cell).copied().unwrap_or(0.0);
-            let combined = finite(previous + power)?;
-            if power != 0.0 && previous == combined {
-                return Err(invalid(
-                    "spatial contact heat disappeared in receiving cell power",
-                ));
-            }
-            powers.insert(cell, combined);
-        }
+        powers.insert(cell, combined);
     }
     Ok(())
 }

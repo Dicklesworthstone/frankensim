@@ -2,10 +2,12 @@
 //!
 //! Each proposed endpoint refreshes the complete original source bundles at
 //! the actual T/liquid mass fraction, rebuilds only the conductivity Hodge, and
-//! deposits the native per-tetrahedron E.J powers once. Native thermal storage,
+//! deposits native bulk and explicitly partitioned interface Joule work once.
+//! Native thermal storage,
 //! source/conductance resolution, Newton work limits, events and acceptance
 //! remain with the existing circuit/enthalpy and material-network owners.
 
+use super::contacts::{self, ConductionContactThermal};
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, ConductionLink,
     ConductionRegion, ConductionThermalError, ConductionThermalNetwork, DrivenCoefficients,
@@ -17,8 +19,8 @@ use crate::circuit_enthalpy::CircuitThermalCoefficients;
 use fs_em::{
     conduction::ConductionControls,
     spatial::conduction::{
-        SpatialConduction, SpatialConductionBoundary, SpatialConductionError,
-        SpatialConductionField,
+        SpatialConduction, SpatialConductionBoundary, SpatialConductionContact,
+        SpatialConductionContactResponse, SpatialConductionError, SpatialConductionField,
     },
 };
 use fs_feec::weighted::WeightedAssemblyLimits;
@@ -49,9 +51,15 @@ pub struct SpatialConductionThermalStep {
     pub start_s: f64,
     pub end_s: f64,
     pub field: SpatialConductionField,
+    /// Exact triangular contact response and the explicit A/B heat partition.
+    /// Its heat is already included in the finite cells and `heat_j` once.
+    pub contacts: Vec<SpatialConductionContactHeat>,
     pub heat_j: f64,
     pub supplied_work_j: f64,
 }
+
+pub type SpatialConductionContactHeat =
+    contacts::ConductionContactHeat<SpatialConductionContactResponse>;
 
 struct Candidate<C> {
     problem: SpatialConduction<C>,
@@ -140,6 +148,47 @@ impl SpatialConductionThermalNetwork<'_> {
         initial_energy_increments_j: &[f64],
         cancelled: impl FnMut() -> bool,
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C>, Error> {
+        self.step_contact_candidate(
+            thermal,
+            target_s,
+            problem,
+            boundary,
+            &[],
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+            cancelled,
+        )
+    }
+
+    /// Advance the original tetrahedral field and every finite caloric cell
+    /// with source-bound resistance on matching triangular material contacts.
+    /// Every interface is refreshed at BOTH actual endpoint temperatures and
+    /// owned liquid mass fractions while its pressure/history and selected
+    /// source claims stay pinned. Its exact surface work is divided between the
+    /// original adjacent volume receivers using an explicit physical fraction;
+    /// no equal split, effective contact temperature or surrogate resistor is
+    /// inferred. Bulk E.J and surface heat enter the same native residual once.
+    ///
+    /// All contacts require a binding. `step_candidate` is the empty-binding
+    /// case and refuses contacts without their thermal source/heat ownership.
+    /// Fixed matching traces, zero interface storage and the confined-phase
+    /// density rules still apply. Rejected trials publish neither state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_contact_candidate<'t, C: SpatialConductorMaterial>(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        boundary: &SpatialConductionBoundary,
+        contacts: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<SpatialConductionEnthalpyCandidate<'t, C>, Error> {
         let cancel = RefCell::new(cancelled);
         check(&cancel)?;
         self.admit_step(
@@ -163,6 +212,7 @@ impl SpatialConductionThermalNetwork<'_> {
             target_s,
             problem,
             boundary,
+            contacts,
             assembly,
             field_controls,
             controls,
@@ -201,6 +251,13 @@ impl SpatialConductionThermalNetwork<'_> {
                 .tets
                 .len()
                 .checked_mul(36)
+                .and_then(|bulk| {
+                    problem
+                        .contacts()
+                        .len()
+                        .checked_mul(36)
+                        .and_then(|contact| bulk.checked_add(contact))
+                })
                 .is_none_or(|n| n > assembly.max_triplets)
         {
             return Err(invalid(
@@ -220,6 +277,7 @@ impl SpatialConductionThermalNetwork<'_> {
         target_s: f64,
         problem: &SpatialConduction<C>,
         boundary: &SpatialConductionBoundary,
+        contact_bindings: &[ConductionContactThermal<'_>],
         assembly: WeightedAssemblyLimits,
         field_controls: ConductionControls,
         controls: CircuitEnthalpySolve,
@@ -237,6 +295,11 @@ impl SpatialConductionThermalNetwork<'_> {
             controls,
             initial_energy_increments_j,
         )?;
+        if contact_bindings.len() != problem.contacts().len() {
+            return Err(invalid(
+                "every tetrahedral electrical contact needs explicit source and heat ownership",
+            ));
+        }
         // The existing geometry-independent inventory and heat routing owner
         // consumes the actual tetrahedral volumes. No surrogate planar mesh is
         // constructed and no second mass/density admission rule is introduced.
@@ -306,6 +369,21 @@ impl SpatialConductionThermalNetwork<'_> {
                 "accepted tetrahedral conductor differs from its actual thermal state",
             ));
         }
+        let contact_sources = problem
+            .contacts()
+            .iter()
+            .map(|contact| &contact.source)
+            .collect::<Vec<_>>();
+        let contact_owner = contacts::PreparedContacts::new_for_sources(
+            &route_owner,
+            &contact_sources,
+            problem.contact_cells(),
+            problem.contact_liquid_mass_fraction_axes(),
+            contact_bindings,
+            &routes,
+            sample(&accepted.source),
+            cancel,
+        )?;
         let (thermal, problem, report) = cell_driver_candidate(
             thermal,
             target_s,
@@ -319,9 +397,25 @@ impl SpatialConductionThermalNetwork<'_> {
                         "3D current cannot silently omit graph electrical work",
                     ));
                 }
+                let refreshed_contacts = contact_owner.refresh_sources(
+                    &contact_sources,
+                    sample(&coefficients.source),
+                    cancel,
+                )?;
+                let refreshed_contacts = problem
+                    .contacts()
+                    .iter()
+                    .zip(refreshed_contacts)
+                    .map(|(original, source)| SpatialConductionContact {
+                        first_vertices: original.first_vertices,
+                        second_vertices: original.second_vertices,
+                        source,
+                    })
+                    .collect();
                 let next = problem
-                    .with_conductors(
+                    .with_conductors_and_contacts(
                         refresh(sample(&coefficients.source))?,
+                        refreshed_contacts,
                         assembly,
                         &mut || (*cancel.borrow_mut())(),
                     )
@@ -338,6 +432,7 @@ impl SpatialConductionThermalNetwork<'_> {
                         "3D Joule heat and independently supplied terminal work do not close",
                     ));
                 }
+                let contacts = contact_owner.heat(&field.contacts)?;
                 Ok(DrivenCoefficients {
                     circuit: Candidate {
                         problem: next,
@@ -345,6 +440,7 @@ impl SpatialConductionThermalNetwork<'_> {
                             start_s: thermal.time_s(),
                             end_s: target_s,
                             field,
+                            contacts,
                             heat_j,
                             supplied_work_j,
                         },
@@ -356,7 +452,21 @@ impl SpatialConductionThermalNetwork<'_> {
                 })
             },
             |candidate, _dt, checkpoint| {
-                route_owner.deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)
+                let mut powers = route_owner.deposit_power(
+                    &candidate.step.field.cell_power_w,
+                    &routes,
+                    checkpoint,
+                )?;
+                for contact in &candidate.step.contacts {
+                    checkpoint()?;
+                    contacts::deposit_partition(
+                        contact.cells,
+                        contact.heat_fraction_to_first,
+                        contact.response.power_w,
+                        &mut powers,
+                    )?;
+                }
+                Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;

@@ -67,6 +67,51 @@ impl PreparedHeatNetwork<'_, '_> {
         controls: CircuitEnthalpySolve,
         initial_energy_increments_j: &[f64],
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
+        self.step_spatial_conduction_contact_candidate(
+            cx,
+            thermal,
+            target_s,
+            problem,
+            boundary,
+            &[],
+            regions,
+            volume_tolerance_m3,
+            assembly,
+            field_controls,
+            controls,
+            initial_energy_increments_j,
+        )
+    }
+
+    /// The same complete 3D material/heat endpoint with native electrical
+    /// resistance on matching triangular faces. Every electrical contact keeps
+    /// its original two thermal receivers, pinned source law and explicit heat
+    /// split. Its resistance sees both endpoint temperatures/phases, separately
+    /// from the original thermal-contact and radiosity laws in this assembly.
+    /// The native field supplies exact bulk E.J plus surface voltage-jump work;
+    /// those powers enter the existing finite enthalpy residual exactly once.
+    ///
+    /// A binding is required for every contact. The empty-binding entry point
+    /// refuses unmatched electrical contacts. Geometry, source validity, fixed
+    /// pressure/history, confined phase charts and field-independent heat-law
+    /// restrictions of `step_spatial_conduction_candidate` still apply. Neither
+    /// source failure nor a rejected/cancelled nonlinear trial publishes state.
+    #[allow(clippy::too_many_arguments)]
+    pub fn step_spatial_conduction_contact_candidate<'t, C: SpatialConductorMaterial>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        boundary: &SpatialConductionBoundary,
+        contacts: &[contacts::ConductionContactThermal<'_>],
+        regions: &[SpatialConductionRegion],
+        volume_tolerance_m3: f64,
+        assembly: WeightedAssemblyLimits,
+        field_controls: ConductionControls,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+    ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, HeatNetworkSample>, Error> {
         let cancel = RefCell::new(|| cx.checkpoint().is_err());
         check(&cancel)?;
         let bulk = self.thermal_material_network().map_err(heat_error)?;
@@ -83,6 +128,7 @@ impl PreparedHeatNetwork<'_, '_> {
             target_s,
             problem,
             boundary,
+            contacts,
             assembly,
             field_controls,
             controls,
