@@ -77,6 +77,31 @@ enum StackLayers<'a> {
     Mixed(CoherentCoatingStack<'a>),
 }
 
+/// Native coherent reflection/transmission and positive absorption in finite
+/// dielectric coating films. All fractions refer to incident ray power, not
+/// camera radiance. The real-index exit medium receives transmitted radiation;
+/// its subsequent bulk absorption is a separate physical transport operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DielectricLayerPowerBalance {
+    /// Original signed, power-normalized Mueller fields and native Snell policy.
+    pub fresnel: PolarizedFresnel,
+    /// Total finite-film absorption, ordered s, p. This is a positive sum of
+    /// physical dissipative work, independent of the rounded R+T residual.
+    pub absorbed: [f64; 2],
+    layers: [[f64; 2]; MAX_COHERENT_STACK_LAYERS],
+    layer_count: usize,
+}
+
+impl DielectricLayerPowerBalance {
+    /// Per-film s/p absorption in the original authored outside-to-inside order.
+    /// Reverse incidence changes the coherent solution, never this association
+    /// with physical layer identities. Zero-thickness/lossless layers stay zero.
+    #[must_use]
+    pub fn layer_absorbed(&self) -> &[[f64; 2]] {
+        &self.layers[..self.layer_count]
+    }
+}
+
 impl<'a> DielectricCoatingStack<'a> {
     /// Layers are authored outside first; at most 64 physical films are admitted.
     /// An empty or entirely zero-thickness stack preserves the bare interface.
@@ -161,6 +186,55 @@ impl<'a> DielectricCoatingStack<'a> {
         Ok(self
             .fresnel_polarized(wavelength_nm, reverse, cosine, eta_i, eta_t)?
             .scalar)
+    }
+
+    /// Resolve physical coating heat without subtracting reflected and
+    /// transmitted power. The existing factored-wave solve supplies both its
+    /// native R/T response and bounded interface histories; analytical positive
+    /// even/odd film work retains weak losses below the R+T rounding scale.
+    ///
+    /// `reverse` reverses optical traversal and expects the caller's incident/
+    /// exit indices and corresponding angle. Returned layers always retain
+    /// authored order. This allocation-free query keeps the original 64-layer,
+    /// spectral-support, coherence and exact-grazing admission rules.
+    pub fn layer_power_balance(
+        self,
+        wavelength_nm: f64,
+        reverse: bool,
+        cosine: f64,
+        eta_i: f64,
+        eta_t: f64,
+    ) -> Result<DielectricLayerPowerBalance, DielectricError> {
+        super::validate_wavelength(wavelength_nm)?;
+        let bare = fresnel_dielectric_polarized(cosine, eta_i, eta_t)?;
+        let mut result = DielectricLayerPowerBalance {
+            fresnel: bare,
+            absorbed: [0.0; 2],
+            layers: [[0.0; 2]; MAX_COHERENT_STACK_LAYERS],
+            layer_count: self.layer_count(),
+        };
+        if !self.is_active() {
+            return Ok(result);
+        }
+        if cosine == 0.0 {
+            return Err(DielectricError::InvalidInterface);
+        }
+        let exit = exit_normal_wave(bare.scalar, cosine, eta_i, eta_t);
+        let response = match self.layers {
+            StackLayers::Transparent(layers) => crate::conductor::lossless_stack_transmission(
+                layers, wavelength_nm, eta_i, eta_t, cosine, reverse, exit,
+            ).map_err(|_| DielectricError::InvalidInterface)?,
+            StackLayers::Mixed(stack) => {
+                let work = stack.transmission_with_absorption(
+                    wavelength_nm, eta_i, eta_t, cosine, reverse, exit,
+                ).map_err(|_| DielectricError::InvalidInterface)?;
+                result.absorbed = work.absorbed;
+                result.layers = work.layers;
+                work.response
+            }
+        };
+        result.fresnel = polarized_response(response, bare, self.layer_count())?;
+        Ok(result)
     }
 }
 
@@ -398,3 +472,6 @@ fn exit_normal_wave(native: FresnelDielectric, cosine: f64, eta_i: f64, eta_t: f
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod absorption_tests;

@@ -148,10 +148,9 @@ impl<const N: usize> SurfacePowerResponse<N> {
     /// come from the native power-normalized Mueller solution, without the
     /// camera transport's radiance eta-squared factor.
     ///
-    /// Unlike the opaque direct-flux path, this owner's film absorption is a
-    /// residual of R+T. A lossy lane must exceed its original per-layer floating
-    /// allowance; unresolved weak loss refuses. A lossless stack receives
-    /// exactly zero heat, even when its computed R+T has roundoff.
+    /// Positive coherent film work retains weak absorption even when the
+    /// original R+T rounds to one. Lossless films contribute exactly zero;
+    /// neither transmitted scene power nor floating-point residuals become heat.
     #[allow(clippy::too_many_arguments)]
     pub fn from_dielectric_stack(
         wavelengths_nm: [f64; N],
@@ -179,36 +178,22 @@ impl<const N: usize> SurfacePowerResponse<N> {
             &s_power_fraction,
         );
         hash_values(&mut hash, transmitted_eta);
-        let allowance = 512.0 * f64::EPSILON * (layers.len() + 1) as f64;
         let mut reflected = [0.0; N];
         let mut transmitted = [0.0; N];
         let mut absorbed = [0.0; N];
         for lane in 0..N {
             let wavelength = wavelengths_nm[lane];
-            let response = stack.fresnel_polarized(
+            let response = stack.layer_power_balance(
                 wavelength,
                 reverse,
                 incidence_cosine,
                 incident_eta[lane],
                 transmitted_eta[lane],
             )?;
-            reflected[lane] = polarized_power(response.reflection, s_power_fraction[lane])?;
-            transmitted[lane] = polarized_power(response.transmission, s_power_fraction[lane])?;
-            let mut lossy = false;
-            for layer in layers {
-                if let CoatingLayer::Absorbing(film) = layer {
-                    lossy |= film.thickness_m() > 0.0 && film.complex_ior(wavelength)?.k() > 0.0;
-                }
-            }
-            if lossy {
-                let loss = (1.0 - reflected[lane]) - transmitted[lane];
-                if !loss.is_finite() || loss <= allowance {
-                    return Err(invalid(
-                        "coating absorption is below the native power-balance resolution",
-                    ));
-                }
-                absorbed[lane] = loss;
-            }
+            reflected[lane] = polarized_power(response.fresnel.reflection, s_power_fraction[lane])?;
+            transmitted[lane] =
+                polarized_power(response.fresnel.transmission, s_power_fraction[lane])?;
+            absorbed[lane] = mix(response.absorbed, s_power_fraction[lane]);
         }
         Self::finish(hash, wavelengths_nm, reflected, transmitted, absorbed)
     }

@@ -13,7 +13,9 @@ use fs_math::det;
 use crate::spectral::{LAMBDA_MAX, LAMBDA_MIN, LiftedSpectrum, lift_rgb};
 
 mod coating;
-pub use coating::{DielectricCoating, DielectricCoatingStack, DielectricInterface};
+pub use coating::{
+    DielectricCoating, DielectricCoatingStack, DielectricInterface, DielectricLayerPowerBalance,
+};
 
 const PI: f64 = core::f64::consts::PI;
 const MIN_ROUGHNESS_ALPHA: f64 = 1.0e-4;

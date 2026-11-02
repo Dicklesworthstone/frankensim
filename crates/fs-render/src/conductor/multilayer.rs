@@ -264,7 +264,7 @@ impl CoherentPeriodicCoating {
         let geometry = Geometry::new(wavelength_nm, incident_eta, substrate, cosine)?;
         let mut prepared = [absorption::Layer::IDENTITY; MAX_COHERENT_UNIT_CELL_LAYERS];
         for (slot, layer) in prepared.iter_mut().zip(self.unit_cell()) {
-            *slot = absorption::Layer::new(
+            *slot = absorption::Layer::new::<false>(
                 ComplexIor {
                     eta: layer.ior.eval_unchecked(wavelength_nm),
                     k: layer.extinction_k,
@@ -310,6 +310,14 @@ pub(crate) struct CoherentTransmission {
     pub(crate) transmitted: [[f64; 2]; 2],
     pub(crate) bare_equivalent: bool,
     pub(crate) lossless: bool,
+}
+
+/// Native transmitted/reflected fields plus positive work in finite films.
+/// The real-index exit half-space receives transmitted radiation, never heat.
+pub(crate) struct CoherentLayerTransmission {
+    pub(crate) response: CoherentTransmission,
+    pub(crate) absorbed: [f64; 2],
+    pub(crate) layers: [[f64; 2]; MAX_COHERENT_STACK_LAYERS],
 }
 
 pub(crate) fn lossless_stack_transmission(
@@ -420,6 +428,44 @@ impl<'a> CoherentCoatingStack<'a> {
         Ok(result.transmission_result(lossless))
     }
 
+    /// Retain the original power-normalized transmission solve while resolving
+    /// each film's work from its incident port waves, rather than an R+T deficit.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn transmission_with_absorption(
+        self,
+        wavelength_nm: f64,
+        incident_eta: f64,
+        exit_eta: f64,
+        cosine: f64,
+        reverse: bool,
+        exit_normal: [f64; 2],
+    ) -> Result<CoherentLayerTransmission, ConductorError> {
+        if !exit_eta.is_finite() || !(1.0..=3.0).contains(&exit_eta) {
+            return Err(ConductorError::InvalidSample);
+        }
+        let mut geometry = Geometry::new(
+            wavelength_nm, incident_eta, ComplexIor { eta: exit_eta, k: 0.0 }, cosine,
+        )?;
+        geometry.exit_normal = Some(Complex::new(exit_normal[0], exit_normal[1]));
+        let mut lossless = true;
+        let (response, mut work) = absorption::transmitting_partition(
+            geometry, self.layers.len(), |index| {
+                let index = if reverse { self.layers.len() - 1 - index } else { index };
+                let (ior, thickness) = self.layer(index, wavelength_nm)?;
+                lossless &= thickness == 0.0 || ior.k == 0.0;
+                absorption::Layer::new::<true>(ior, thickness, geometry)
+            },
+        )?;
+        if reverse {
+            work.layers[..self.layers.len()].reverse();
+        }
+        Ok(CoherentLayerTransmission {
+            response: response.transmission_result(lossless),
+            absorbed: work.absorbed,
+            layers: work.layers,
+        })
+    }
+
     /// Unpolarized reflected power. Only the supplied substrate's complex-IOR
     /// table is used: this explicit stack replaces any coating attached to it.
     /// The opaque substrate makes total absorption `1-R`; this does not resolve
@@ -477,7 +523,7 @@ impl<'a> CoherentCoatingStack<'a> {
         )?;
         absorption::partition(geometry, self.layers.len(), |index| {
             let (ior, thickness) = self.layer(index, wavelength_nm)?;
-            absorption::Layer::new(ior, thickness, geometry)
+            absorption::Layer::new::<false>(ior, thickness, geometry)
         })
     }
 

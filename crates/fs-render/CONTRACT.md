@@ -94,6 +94,21 @@ differentiable lift). Pure Rust throughout.
   heat source or a certificate for sub-ULP losses. Absorbing coatings can remove
   power under external total internal reflection while transmitted power remains
   zero. Existing bare-interface arithmetic and identities are retained.
+  `DielectricCoatingStack::layer_power_balance` additionally supplies positive
+  total and per-film s/p absorption from that same native transmitting solve.
+  It retains factored incident port waves at each boundary and contracts the
+  original analytical even/odd dissipative modes; no heat is computed by
+  subtracting reflected/transmitted fluxes. Weak film losses survive a rounded
+  unit `R+T`, including external TIR with zero transmitted power. The original
+  Mueller/Snell result remains unchanged. Reverse incidence reverses optical
+  traversal while returned per-layer heat stays in authored outside-to-inside
+  order. Lossless/zero-thickness films contribute exactly zero; the real-index
+  exit half-space receives transmitted radiation, never film heat. Storage and
+  work remain bounded by 64 layers and evaluation allocates nothing. Tests
+  compare independent oblique forward/reverse Poynting balances, matched-index
+  Beer--Lambert weak loss, opaque limits, exact lossless behavior and native
+  source/grazing refusals. This adds no bulk-heat double counting, finite
+  coherence averaging, rough-film scattering or inferred optical data.
   Smooth/GGX sampling, hero packet weights and forced splits, forward/reverse
   BSDF PDFs, bidirectional transport, slab/manifold connectors and direct
   photometric/thermal/volume-light receivers consume the same coating response.
@@ -4565,9 +4580,10 @@ Opaque conductors use direct boundary flux. Clear dielectric transmission is a
 separate outgoing power channel, never heat; subsequent bulk absorption belongs
 to volume transport. Transmitting absorbing films use their original
 power-normalized Mueller R/T solution without the camera's radiance eta-squared
-factor. Lossless films receive exactly zero heat. Positive film loss must exceed
-the original per-layer floating-point allowance; unresolved weak loss refuses.
-That allowance is not a certified material/numerical error bound.
+factor. Positive coherent film-work integrals retain weak absorption independently
+of rounded R/T; lossless films receive exactly zero heat. The thermal observer
+retains even sub-roundoff absorbed energy in native enthalpy storage. Its power
+closure allowance is not a certified material/numerical error bound.
 
 Explicit gray diffuse absorption equals the original constant emissivity at
 every supplied wavelength. Spectral diffuse absorption uses the original

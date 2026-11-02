@@ -223,7 +223,7 @@ fn gray_and_spectral_kirchhoff_absorption_retain_their_distinct_source_support()
 }
 
 #[test]
-fn lossless_stacks_add_no_heat_and_unresolved_weak_film_loss_refuses() {
+fn lossless_stacks_add_no_heat_and_weak_film_absorption_reaches_native_storage() {
     let films = [
         CoherentDielectricCoating::try_new(
             CauchyIor::try_constant(1.4).unwrap(),
@@ -283,24 +283,55 @@ fn lossless_stacks_add_no_heat_and_unresolved_weak_film_loss_refuses() {
         assert!(accepted.energy().transmitted_j[lane] > 0.0);
     }
     let weak = CoherentAbsorbingCoating::try_new(
-        KNOTS.map(|wavelength| CoatingIorSample::try_new(wavelength, 1.8, 1e-20).unwrap()),
+        KNOTS.map(|wavelength| CoatingIorSample::try_new(wavelength, 1.0, 1e-20).unwrap()),
         100e-9,
         optical_source(197),
     )
     .unwrap();
-    assert!(matches!(
-        SurfacePowerResponse::from_dielectric_stack(
-            [580.0],
-            &[CoatingLayer::Absorbing(&weak)],
-            [1.0],
-            [1.5],
-            1.0,
-            false,
-            [0.5],
-            ContentHash([198; 32]),
-        ),
-        Err(SurfaceHeatingError::Invalid(_))
-    ));
+    let response = SurfacePowerResponse::from_dielectric_stack(
+        [580.0],
+        &[CoatingLayer::Absorbing(&weak)],
+        [1.0],
+        [1.0],
+        1.0,
+        false,
+        [0.5],
+        ContentHash([198; 32]),
+    )
+    .unwrap();
+    // The real indices match; interface reflection is O(k^2). Beer-Lambert's
+    // leading loss remains representable far below the rounding of R+T.
+    let expected_fraction = 4.0 * core::f64::consts::PI * 1e-20 * 100.0 / 580.0;
+    assert!(response.absorbed_fraction()[0] > 0.0);
+    assert!((response.absorbed_fraction()[0] / expected_fraction - 1.0).abs() < 1e-12);
+    let input = SurfaceOpticalHeating::try_new(
+        &[source(
+            2,
+            CellId(11),
+            response,
+            &[segment(0.0, 0.5, [8.0], [8.0])],
+        )],
+        &original,
+        limits(),
+        SurfaceHeatingTolerance {
+            power_roundoff_w: 1e-12,
+        },
+        || Ok(()),
+    )
+    .unwrap();
+    let (heated, accepted, audit) = original
+        .advance_observed(&input, 0.5, config(0.25), || Ok(()))
+        .unwrap();
+    let expected_j = 4.0 * expected_fraction;
+    for actual in [
+        heated.cells()[&CellId(11)].specific_h_j_kg,
+        accepted.energy().absorbed_j[0],
+        accepted.energy().thermal_input_j,
+        audit.external_heat_j,
+    ] {
+        assert!(actual > 0.0);
+        assert!((actual / expected_j - 1.0).abs() < 1e-12);
+    }
 }
 
 #[test]
