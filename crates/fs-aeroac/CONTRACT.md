@@ -112,6 +112,19 @@ material scaling and domain/representability refusals.
   antialiasing belong to the consumer. This is prescribed compact 3D pressure
   in a quiescent lossless medium, without finite-size validation, scattering,
   absorption, feedback, transient force particle velocity or SPL qualification.
+- `curle3d::moving::trajectory::PreparedSourceTrajectory` binds a finite C2
+  quintic position history to the original microphone and fluid. Its position,
+  velocity and acceleration come from the same accepted-knot interpolant.
+  Outward `fs_ivl` Bernstein hulls admit speed and continuous receiver clearance
+  over complete spans, with bounded subdivision, storage and cancellation;
+  inconclusive bounds refuse. The resulting global subsonic bound makes the
+  arrival map monotone and supplies a conservative Doppler-rate ceiling.
+  Allocation-free safeguarded retarded queries reuse the original pressure law,
+  preserve the requested receiver clock, and check the light-cone residual at
+  the actual public f64 source time. Missing trajectory history never
+  extrapolates. Bounds apply to this interpolant, not the source integrator's
+  error or physical model; finite-source and receiver bandwidth admission remain
+  separate. Existing uniform-motion queries retain their analytic fast path.
 - `curle3d::PreparedCompactSourceObserver` prepares actual 3D source positions
   at one frequency and checked material state. `CompactSourcePhasor` explicitly
   separates volume injection Q [m³/s] from force ON the fluid F [N]. In

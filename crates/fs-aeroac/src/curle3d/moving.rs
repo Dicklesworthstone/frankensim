@@ -20,6 +20,9 @@ use crate::AeroacError;
 use fs_material::fluid_acoustics::FluidAcousticState;
 use fs_math::{dd::Dd, det};
 
+/// Finite C2 source trajectories with whole-interval motion/clearance admission.
+pub mod trajectory;
+
 /// Physical source and its fixed-frame derivatives at one emission time.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct CompactSourceStrength {

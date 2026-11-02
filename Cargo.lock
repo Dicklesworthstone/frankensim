@@ -938,6 +938,7 @@ name = "fs-aeroac"
 version = "0.0.1"
 dependencies = [
  "fs-fft",
+ "fs-ivl",
  "fs-lbm",
  "fs-material",
  "fs-math",
