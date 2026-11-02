@@ -2568,3 +2568,28 @@ loss or thermal source. The existing declared dissipation convention remains
 responsible for pressure-work/heat accounting. This is an instantaneous
 operating point on prescribed saturation: liquid storage, gas pressure,
 Richards evolution, wetting fronts and hysteresis are not advanced.
+
+### Spatial material response within native graph branches
+
+`natural_circulation::distributed_response` compiles independently sampled
+hydraulic sections on each original branch. Original bulk viscosity supplies
+`A = sum(a_i mu_i)`; the conserved reference density supplies
+`B = sum(b_i rho0)`. The native graph then uses the same signed law
+`dp = A Q + B Q |Q|`. A cold, viscous section therefore affects the actual
+network flow instead of disappearing into one branch-average property.
+
+The adapter reuses the existing material/correlation compiler once, with
+bounded linear section work and compensated positive resistance sums. The
+temporary batch graph is never solved. Original nodes, endpoints, branch
+identities and declared exchange order are preserved. Every section retains
+its material owner, original law, source classification, loss evaluation and
+heat evidence. Native summed coefficients carry an explicitly derived
+engineering allowance; the original evidence is not promoted.
+
+Authored section factors and wetted areas must partition the actual geometry.
+Subdivision never restarts a developing-flow inlet. Material samples, spatial
+refinement and integrated gravity remain the coupled owner's responsibility.
+The original source/Reynolds/correlation restrictions apply at every query;
+unsupported states and over-budget section counts refuse. Regression sources
+cover unequal-viscosity parallel flow, reversal, geometry subdivision, actual
+exponential wall heat and convergence toward independently integrated drag.

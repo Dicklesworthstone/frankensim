@@ -467,6 +467,7 @@ fn poll(cx: &Cx<'_>) -> Result<(), NaturalCirculationError> {
     cx.checkpoint().map_err(|_| NaturalCirculationError::Interrupted)
 }
 
+pub mod distributed_response;
 pub mod material_response;
 pub mod response;
 
