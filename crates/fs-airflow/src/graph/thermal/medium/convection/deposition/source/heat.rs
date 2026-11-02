@@ -25,7 +25,7 @@ use fs_couple::circuit_enthalpy::{
     CircuitThermalCoefficients,
     contacts::{
         self, ContactThermalCoefficients, ContactThermalSample,
-        heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork},
+        heat::{HeatNetworkError, HeatNetworkSample, PreparedHeatNetwork, ThermalContactPressure},
     },
 };
 use fs_couple::material_circuit::MaterialCircuit;
@@ -35,8 +35,8 @@ use fs_qty::Temperature;
 
 /// Original source failures and the complete closed-system energy gate.
 #[derive(Debug)]
-pub enum ConvectionHeatError<E> {
-    Heat(HeatNetworkError),
+pub enum ConvectionHeatError<E, H = HeatNetworkError> {
+    Heat(H),
     Convection(SourceCellConvectionError<E>),
     /// Closed enclosure radiation is internal exchange. Its net numerical
     /// defect may not masquerade as external supply in the combined balance.
@@ -46,20 +46,20 @@ pub enum ConvectionHeatError<E> {
     },
     Cancelled,
 }
-impl<E> From<DepositionError> for ConvectionHeatError<E> {
+impl<E, H: From<HeatNetworkError>> From<DepositionError> for ConvectionHeatError<E, H> {
     fn from(error: DepositionError) -> Self {
         HeatNetworkError::from(error).into()
     }
 }
-impl<E> From<HeatNetworkError> for ConvectionHeatError<E> {
+impl<E, H: From<HeatNetworkError>> From<HeatNetworkError> for ConvectionHeatError<E, H> {
     fn from(error: HeatNetworkError) -> Self {
         match error {
             HeatNetworkError::Cancelled => Self::Cancelled,
-            other => Self::Heat(other),
+            other => Self::Heat(other.into()),
         }
     }
 }
-impl<E> From<SourceCellConvectionError<E>> for ConvectionHeatError<E> {
+impl<E, H> From<SourceCellConvectionError<E>> for ConvectionHeatError<E, H> {
     fn from(error: SourceCellConvectionError<E>) -> Self {
         match error {
             SourceCellConvectionError::Convection(ConvectionSourceError::Cancelled) => {
@@ -69,17 +69,17 @@ impl<E> From<SourceCellConvectionError<E>> for ConvectionHeatError<E> {
         }
     }
 }
-impl<E: core::fmt::Debug> core::fmt::Display for ConvectionHeatError<E> {
+impl<E: core::fmt::Debug, H: core::fmt::Debug> core::fmt::Display for ConvectionHeatError<E, H> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         write!(f, "material convection/heat network: {self:?}")
     }
 }
-impl<E: core::fmt::Debug> std::error::Error for ConvectionHeatError<E> {}
+impl<E: core::fmt::Debug, H: core::fmt::Debug> std::error::Error for ConvectionHeatError<E, H> {}
 
 /// Every heat-transfer source evaluated at one actual thermal state.
 #[derive(Debug)]
-pub struct ConvectionHeatSample<F, L = F> {
-    pub heat: HeatNetworkSample,
+pub struct ConvectionHeatSample<F, L = F, H = HeatNetworkSample> {
+    pub heat: H,
     /// Exchange with prescribed reservoirs, already in the source-power map.
     pub convection: ResolvedCellConvectionSources<F>,
     /// Reciprocal exchange with actual finite fluid cells, already in the
@@ -94,28 +94,36 @@ impl<F, L> ConvectionHeatSample<F, L> {
         &self,
         checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
     ) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>, HeatNetworkError> {
-        let mut additional = self.heat.explicit_source_conductance_bounds_w_k(checkpoint)?;
-        for sample in self.convection.convection().samples() {
-            checkpoint()?;
-            let g = sample.evaluation.as_ref().map_or(0.0, |evaluation| {
-                evaluation.coefficient.value.value() * sample.exposed_area_m2
-            });
-            let sum = additional.get(&sample.cell).copied().unwrap_or(0.0) + g;
-            if !g.is_finite() || g < 0.0 || !sum.is_finite() {
-                return Err(HeatNetworkError::Invalid(
-                    "combined convection/radiation conductance is unrepresentable",
-                ));
-            }
-            additional.insert(sample.cell, sum);
-        }
-        checkpoint()?;
-        Ok(additional)
+        let additional = self.heat.explicit_source_conductance_bounds_w_k(checkpoint)?;
+        add_convection_bounds(additional, &self.convection, checkpoint)
     }
 }
 
-impl<F, L> AsRef<HeatNetworkSample> for ConvectionHeatSample<F, L> {
+fn add_convection_bounds<F>(
+    mut additional: std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>,
+    convection: &ResolvedCellConvectionSources<F>,
+    checkpoint: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<std::collections::BTreeMap<fs_thermal::enthalpy::CellId, f64>, HeatNetworkError> {
+    for sample in convection.convection().samples() {
+        checkpoint()?;
+        let g = sample.evaluation.as_ref().map_or(0.0, |evaluation| {
+            evaluation.coefficient.value.value() * sample.exposed_area_m2
+        });
+        let sum = additional.get(&sample.cell).copied().unwrap_or(0.0) + g;
+        if !g.is_finite() || g < 0.0 || !sum.is_finite() {
+            return Err(HeatNetworkError::Invalid(
+                "combined convection/radiation conductance is unrepresentable",
+            ));
+        }
+        additional.insert(sample.cell, sum);
+    }
+    checkpoint()?;
+    Ok(additional)
+}
+
+impl<F, L, H: AsRef<HeatNetworkSample>> AsRef<HeatNetworkSample> for ConvectionHeatSample<F, L, H> {
     fn as_ref(&self) -> &HeatNetworkSample {
-        &self.heat
+        self.heat.as_ref()
     }
 }
 
@@ -158,7 +166,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
-        self.resolve_combined::<F, F, E>(cx, thermal, None)
+        self.resolve_combined::<F, F, E>(cx, thermal, None, &[])
     }
 
     /// Resolve finite fluid links AND prescribed fluid reservoirs on the same
@@ -186,11 +194,32 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
     {
+        self.resolve_with_links_and_contact_pressures(
+            cx, thermal, links, maximum_links, resolve_links, &[],
+        )
+    }
+
+    // Shared by the ordinary entry and the pressure-aware HeatAssembly view.
+    // Finite links and reservoir sources are each evaluated and added once.
+    fn resolve_with_links_and_contact_pressures<F: ThermalFluidTransport, L: ThermalFluidTransport, E>(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        links: &[SourceConvectiveLink],
+        maximum_links: usize,
+        resolve_links: impl Fn(
+            &SourceConvectiveLink, &DepositionSimulation<'_>, Temperature,
+        ) -> Result<L, E>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>
+    where
+        R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
+    {
         cx.checkpoint().map_err(|_| ConvectionHeatError::Cancelled)?;
         let finite = evaluate_source_link_convection(
             thermal, links, maximum_links, resolve_links, || cx.checkpoint().is_err(),
         )?;
-        self.resolve_combined(cx, thermal, Some(finite))
+        self.resolve_combined(cx, thermal, Some(finite), pressures)
     }
 
     fn resolve_combined<F: ThermalFluidTransport, L, E>(
@@ -198,6 +227,7 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
         finite_convection: Option<ResolvedLinkConvection<L>>,
+        pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<ConvectionHeatSample<F, L>>, ConvectionHeatError<E>>
     where
         R: Fn(&SourceConvectiveCell, &DepositionSimulation<'_>, Temperature) -> Result<F, E>,
@@ -205,10 +235,10 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
         cx.checkpoint()
             .map_err(|_| ConvectionHeatError::Cancelled)?;
         let mut coefficients = match &finite_convection {
-            Some(finite) => self.heat.resolve_with_link_conductances(
-                cx, thermal, finite.conductances_w_k(),
+            Some(finite) => self.heat.resolve_with_link_conductances_and_contact_pressures(
+                cx, thermal, finite.conductances_w_k(), pressures,
             ),
-            None => self.heat.resolve(cx, thermal),
+            None => self.heat.resolve_heat_with_contact_pressures(cx, thermal, pressures),
         }?;
         let convection = evaluate_source_cell_convection(
             thermal,
@@ -384,7 +414,9 @@ impl<R> SourceConvectionHeatNetwork<'_, '_, '_, '_, R> {
     }
 }
 
-fn circuit_error<E>(error: ConvectionHeatError<E>) -> CircuitEnthalpyError<ConvectionHeatError<E>> {
+fn circuit_error<E, H>(
+    error: ConvectionHeatError<E, H>,
+) -> CircuitEnthalpyError<ConvectionHeatError<E, H>> {
     match error {
         ConvectionHeatError::Cancelled => CircuitEnthalpyError::Cancelled,
         other => CircuitEnthalpyError::Source(other),

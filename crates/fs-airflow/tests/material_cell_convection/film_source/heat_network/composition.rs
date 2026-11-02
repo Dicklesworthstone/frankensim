@@ -6,14 +6,21 @@ use fs_airflow::graph::thermal::medium::convection::deposition::source::{
 };
 use fs_couple::circuit_enthalpy::contacts::{
     ContactThermalCoefficients,
-    heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, observe_heat_assembly},
+    heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, ThermalContactPressure,
+        observe_heat_assembly},
 };
+use fs_conduction::transient::deposition::contact::{ContactCell, MaterialContactLink};
+use fs_conduction::{AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS, AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY};
+use fs_couple::circuit_enthalpy::material::ConductionLink;
 use fs_exec::Cx;
+use fs_matdb::{ClaimSelection, InterfaceSystemCard, SurfaceSpec, SystemContext};
+use fs_material::thermal::interface::ThermalInterfacePoint;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 
 const FLUID: CellId = CellId(72);
 const LINK: u64 = 17;
+const PRESSURE_LINK: u64 = 18;
 const FLUID_CP: f64 = 4000.0;
 
 // Diagnostic counting changes neither a source result nor physical history.
@@ -49,8 +56,16 @@ impl<A: HeatAssembly + ?Sized> HeatAssembly for Counted<'_, A> {
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_heat_with_contact_pressures(cx, thermal, &[])
+    }
+    fn resolve_heat_with_contact_pressures(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         self.resolves.set(self.resolves.get() + 1);
-        self.inner.resolve_heat(cx, thermal)
+        self.inner.resolve_heat_with_contact_pressures(cx, thermal, pressures)
     }
 }
 
@@ -137,6 +152,13 @@ fn initial<'a>(
     body: &'a ResolvedHeatCapacityCurve,
     fluid: &'a ResolvedHeatCapacityCurve,
 ) -> DepositionSimulation<'a> {
+    initial_with_pressure_contact(body, fluid, false)
+}
+fn initial_with_pressure_contact<'a>(
+    body: &'a ResolvedHeatCapacityCurve,
+    fluid: &'a ResolvedHeatCapacityCurve,
+    pressure_contact: bool,
+) -> DepositionSimulation<'a> {
     let mut events = [(BODY, 0, CP * 30.0), (FLUID, 1, FLUID_CP * 10.0)]
         .map(|(id, material, specific_h_j_kg)| TimedEvent {
             time_s: 0.0,
@@ -172,6 +194,18 @@ fn initial<'a>(
             conductance_w_k: 0.0,
         }),
     });
+    if pressure_contact {
+        events.push(TimedEvent {
+            time_s: 0.0,
+            event: Event::Contact(ThermalLink {
+                id: PRESSURE_LINK,
+                a: BODY,
+                b: FLUID,
+                area_m2: 0.5 * SURFACE,
+                conductance_w_k: 0.0,
+            }),
+        });
+    }
     DepositionSimulation::new(
         events,
         &[
@@ -180,8 +214,8 @@ fn initial<'a>(
         ],
         DepositionBudget {
             max_cells: 2,
-            max_links: 1,
-            max_events: 3,
+            max_links: if pressure_contact { 2 } else { 1 },
+            max_events: if pressure_contact { 4 } else { 3 },
             max_substeps: 100,
         },
     )
@@ -503,5 +537,274 @@ fn nested_complete_sources_share_one_native_timeline_and_retain_both_error_types
             layer.resolve_heat(&cx, &thermal),
             Err(CircuitEnthalpyError::Cancelled)
         ));
+    });
+}
+
+#[test]
+fn contact_pressure_reaches_nested_coolant_without_repeating_heat_sources() {
+    // Two original finite liquid cells; separate patches carry Fourier/contact
+    // exchange and finite convection. Remaining area sees prescribed reservoirs.
+    let (card, curve) = coolant();
+    let thermal = initial_with_pressure_contact(&curve, &curve, true);
+    let saved_cells = thermal.cells().clone();
+    let saved_links = thermal.links().clone();
+    let temperatures = [BODY, FLUID].map(|cell| thermal.temperature_k(cell).unwrap());
+    let contexts = temperatures.map(fluid_point);
+    let conductivity = PropertyKey::with_quantity(
+        THERMAL_CONDUCTIVITY_PROPERTY,
+        QuantitySpec::semantic(SemanticType::new(
+            QuantityKind::ThermalConductivity,
+            ValueForm::Static,
+        )),
+    );
+    let cells = [BODY, FLUID]
+        .into_iter()
+        .enumerate()
+        .map(|(i, cell)| MaterialCell {
+            cell,
+            material_id: MaterialId(i as u64),
+            curve: curve.curve(),
+            point: ThermalMaterialPoint {
+                material: &card,
+                context: &contexts[i],
+                temperature_axis: "T",
+                liquid_fraction_axis: None,
+            },
+            conductivity: Some((&conductivity, MaterialPropertySelection::SingleClaimOnly)),
+        })
+        .collect::<Vec<_>>();
+    let fourier = [ConductionLink {
+        link: PRESSURE_LINK,
+        distance_a_m: 0.05,
+        distance_b_m: 0.05,
+    }];
+    let bulk = MaterialNetwork {
+        cells: &cells,
+        resistors: &[],
+        links: &fourier,
+    };
+    let electrical = ElectricalContactNetwork {
+        bulk: &bulk,
+        contacts: &[],
+        electrical_bases: &[],
+    };
+    let pressure_quantity =
+        QuantitySpec::semantic(SemanticType::new(QuantityKind::Pressure, ValueForm::Static));
+    let mut claims = ClaimSet::new();
+    let pin = claims
+        .insert_claim(PropertyClaim {
+            key: PropertyKey::new(
+                AREA_SPECIFIC_THERMAL_RESISTANCE_PROPERTY,
+                AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            ),
+            value: PropertyValue::Curve {
+                abscissa: "normal_pressure".into(),
+                abscissa_dims: fs_qty::Pressure::DIMS,
+                knots: vec![(100000.0, 0.02), (200000.0, 0.01)],
+                dims: AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+            },
+            validity: ValidityDomain::unconstrained()
+                .with_quantity("Ta", temperature_quantity(), 280.0, 320.0)
+                .with_quantity("Tb", temperature_quantity(), 280.0, 320.0)
+                .with_quantity("normal_pressure", pressure_quantity, 100000.0, 200000.0),
+            interpolation: InterpolationPolicy::LinearInside,
+            uncertainty: UncertaintyModel::Unstated,
+            observations: vec![],
+            provenance: Provenance {
+                source: "manufactured composed pressure-contact fixture".into(),
+                license: "CC0-1.0".into(),
+                artifact: None,
+            },
+        })
+        .unwrap();
+    let interface = InterfaceSystemCard::assemble(
+        SurfaceSpec {
+            material: card.id().clone(),
+            texture_frame: "first".into(),
+        },
+        SurfaceSpec {
+            material: card.id().clone(),
+            texture_frame: "second".into(),
+        },
+        SystemContext {
+            medium: "manufactured finite contact".into(),
+            third_body: None,
+            environment: "fixed".into(),
+            history: "original preparation".into(),
+        },
+        claims,
+        vec![],
+    )
+    .unwrap();
+    let context = QueryPoint::new()
+        .with_quantity("Ta", temperature_quantity(), temperatures[0])
+        .unwrap()
+        .with_quantity("Tb", temperature_quantity(), temperatures[1])
+        .unwrap()
+        .with_quantity("normal_pressure", pressure_quantity, 100000.0)
+        .unwrap()
+        .with("lot", 7.0)
+        .unwrap();
+    let contacts = [MaterialContactLink {
+        link: PRESSURE_LINK,
+        sides: [0, 1].map(|i| ContactCell {
+            cell: [BODY, FLUID][i],
+            material_id: MaterialId(i as u64),
+            curve: curve.curve(),
+        }),
+        point: ThermalInterfacePoint {
+            interface: &interface,
+            materials: [&card, &card],
+            context: &context,
+            temperature_axes: ["Ta", "Tb"],
+            liquid_fraction_axes: [None, None],
+            mean_temperature_axis: None,
+        },
+        selection: ClaimSelection::Pinned(pin),
+    }];
+    let heat = MaterialHeatNetwork {
+        electrical: &electrical,
+        thermal_contacts: &contacts,
+        radiation: None,
+    };
+    let links = [SourceConvectiveLink {
+        link: LINK,
+        fluid_cell: FLUID,
+        characteristic_length: Length::new(0.1),
+        property_temperature: ConvectionPropertyTemperature::FilmMean,
+        law: forced(),
+    }];
+    let fluid = liquid_law(&card);
+    let initial_links = evaluate_source_link_convection(
+        &thermal,
+        &links,
+        1,
+        |_, _, t| fluid.at_temperature(t),
+        || false,
+    )
+    .unwrap();
+    let inner_cells = [reservoir(FLUID)];
+    let outer_cells = [reservoir(BODY)];
+    let gate = fs_exec::CancelGate::new_clock_free();
+    fs_alloc::ArenaPool::new(fs_alloc::ArenaConfig::default()).scope(|arena| {
+        let cx = Cx::new(
+            &gate,
+            arena,
+            fs_exec::StreamKey {
+                seed: 189,
+                kernel_id: 92,
+                tile: 0,
+                iteration: 0,
+            },
+            fs_exec::Budget::INFINITE,
+            fs_exec::ExecMode::Deterministic,
+        );
+        let prepared = heat
+            .prepare_with_link_conductances(&cx, &thermal, initial_links.conductances_w_k())
+            .unwrap();
+        let network = SourceConvectionHeatNetwork {
+            heat: &prepared,
+            cells: &inner_cells,
+            maximum_cells: 1,
+            resolve_fluid: |_: &SourceConvectiveCell, _: &DepositionSimulation<'_>, t| {
+                fluid.at_temperature(t)
+            },
+        };
+        let finite = network.with_links(&links, 1, |_, _, t| fluid.at_temperature(t));
+        let counted = Counted {
+            inner: &finite,
+            resolves: Cell::new(0),
+            bounds: Cell::new(0),
+        };
+        let layer = SourceConvectionHeatLayer {
+            inner: &counted,
+            cells: &outer_cells,
+            maximum_cells: 1,
+            resolve_fluid: |_: &SourceConvectiveCell, _: &DepositionSimulation<'_>, t| {
+                fluid.at_temperature(t)
+            },
+        };
+        let k = temperatures.map(|t| 0.5 + 0.002 * (t - 300.0));
+        let area = 0.5 * SURFACE;
+        let bulk_g = area / (0.05 / k[0] + 0.05 / k[1]);
+        let expected_reservoir_g = temperatures.map(|t| 0.5 * conductance(0.5 * (t + 300.0)));
+        for (index, (pressure_pa, resistance)) in
+            [(100000.0, 0.02), (200000.0, 0.01)].into_iter().enumerate()
+        {
+            let pressures = [ThermalContactPressure {
+                link: PRESSURE_LINK,
+                pressure_axis: "normal_pressure",
+                pressure_pa,
+            }];
+            let resolved = layer
+                .resolve_heat_with_contact_pressures(&cx, &thermal, &pressures)
+                .unwrap();
+            assert_eq!(counted.resolves.get(), index + 1);
+            near(
+                resolved.bulk.conductances_w_k[&PRESSURE_LINK],
+                1.0 / (1.0 / bulk_g + resistance / area),
+                1e-12,
+            );
+            near(
+                resolved.bulk.conductances_w_k[&LINK],
+                conductance(0.5 * (temperatures[0] + temperatures[1])),
+                1e-10,
+            );
+            for (i, cell) in [BODY, FLUID].into_iter().enumerate() {
+                // Reciprocal contact/coolant exchange is absent from external powers.
+                near(
+                    resolved.bulk.sources_w[&cell],
+                    expected_reservoir_g[i] * (300.0 - temperatures[i]),
+                    1e-10,
+                );
+            }
+            let sample = &resolved.bulk.source.heat.heat.thermal_contacts[0];
+            assert_eq!(sample.cells, [BODY, FLUID]);
+            assert_eq!(sample.interface.receipt().selected, pin);
+            for (axis, expected) in [
+                ("normal_pressure", pressure_pa),
+                ("Ta", temperatures[0]),
+                ("Tb", temperatures[1]),
+                ("lot", 7.0),
+            ] {
+                assert_eq!(
+                    sample
+                        .interface
+                        .receipt()
+                        .query_point
+                        .iter()
+                        .find(|(name, _)| name == axis)
+                        .unwrap()
+                        .1,
+                    expected
+                );
+            }
+            near(sample.interface.value_m2_k_per_w(), resistance, 1e-12);
+            near(sample.bulk_conductance_w_k, bulk_g, 1e-12);
+            let inner = &resolved.bulk.source.heat;
+            assert_eq!(inner.finite_convection.as_ref().unwrap().samples().len(), 1);
+            assert_eq!(inner.convection.materials()[0].cell, FLUID);
+            assert_eq!(resolved.bulk.source.convection.materials()[0].cell, BODY);
+            let bounds = layer
+                .explicit_source_conductance_bounds_w_k(&resolved.bulk.source, &mut || Ok(()))
+                .unwrap();
+            assert_eq!(counted.resolves.get(), index + 1);
+            for (i, cell) in [BODY, FLUID].into_iter().enumerate() {
+                near(bounds[&cell], expected_reservoir_g[i], 1e-12);
+            }
+        }
+        let invalid = [ThermalContactPressure {
+            link: PRESSURE_LINK,
+            pressure_axis: "normal_pressure",
+            pressure_pa: 300000.0,
+        }];
+        assert!(
+            layer
+                .resolve_heat_with_contact_pressures(&cx, &thermal, &invalid)
+                .is_err()
+        );
+        assert_eq!(thermal.cells(), &saved_cells);
+        assert_eq!(thermal.links(), &saved_links);
+        assert_eq!(context.axes()["normal_pressure"], 100000.0);
     });
 }

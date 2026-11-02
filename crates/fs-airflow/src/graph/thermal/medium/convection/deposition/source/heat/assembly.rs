@@ -5,6 +5,7 @@
 
 use super::{
     ConvectionHeatError, ConvectionHeatSample, SourceConvectionHeatNetwork, circuit_error,
+    composition::admit_disjoint_reservoirs,
 };
 use crate::graph::thermal::medium::convection::deposition::source::{
     SourceConvectiveCell, links::SourceConvectiveLink,
@@ -14,7 +15,7 @@ use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError,
     contacts::{
         ContactThermalCoefficients,
-        heat::{HeatAssembly, PreparedHeatNetwork},
+        heat::{HeatAssembly, PreparedHeatNetwork, ThermalContactPressure},
     },
 };
 use fs_exec::Cx;
@@ -33,6 +34,18 @@ where
         self.heat
     }
 
+    fn admit_additional_reservoir_convection(
+        &self,
+        cx: &Cx<'_>,
+        cells: &std::collections::BTreeSet<fs_thermal::enthalpy::CellId>,
+    ) -> Result<(), CircuitEnthalpyError<Self::Error>> {
+        admit_disjoint_reservoirs(cx, self.cells, cells)
+            .map_err(ConvectionHeatError::<E>::from)
+            .map_err(circuit_error)?;
+        self.heat.admit_additional_reservoir_convection(cx, cells)
+            .map_err(|error| error.map_source(ConvectionHeatError::<E>::from))
+    }
+
     fn explicit_source_conductance_bounds_w_k(
         &self,
         sample: &Self::Sample,
@@ -48,7 +61,17 @@ where
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
-        self.resolve(cx, thermal).map_err(circuit_error)
+        self.resolve_heat_with_contact_pressures(cx, thermal, &[])
+    }
+
+    fn resolve_heat_with_contact_pressures(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_combined::<F, F, E>(cx, thermal, None, pressures)
+            .map_err(circuit_error)
     }
 }
 
@@ -107,6 +130,14 @@ where
         self.network.heat
     }
 
+    fn admit_additional_reservoir_convection(
+        &self,
+        cx: &Cx<'_>,
+        cells: &std::collections::BTreeSet<fs_thermal::enthalpy::CellId>,
+    ) -> Result<(), CircuitEnthalpyError<Self::Error>> {
+        self.network.admit_additional_reservoir_convection(cx, cells)
+    }
+
     fn explicit_source_conductance_bounds_w_k(
         &self,
         sample: &Self::Sample,
@@ -122,13 +153,23 @@ where
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_heat_with_contact_pressures(cx, thermal, &[])
+    }
+
+    fn resolve_heat_with_contact_pressures(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         self.network
-            .resolve_with_links(
+            .resolve_with_links_and_contact_pressures(
                 cx,
                 thermal,
                 self.links,
                 self.maximum_links,
                 &self.resolve_links,
+                pressures,
             )
             .map_err(circuit_error)
     }

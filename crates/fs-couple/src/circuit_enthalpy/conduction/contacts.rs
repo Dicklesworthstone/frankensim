@@ -8,10 +8,6 @@ use fs_material::electrical_interface::{
 };
 use fs_material::state_point::ResolvedInterfaceStatePoint;
 use fs_material::thermal::interface::ThermalInterfacePoint;
-use fs_qty::{
-    Pressure,
-    semantic::{QuantityKind, ValueForm},
-};
 
 /// Explicit thermal ownership of one original surface contact. Contact indices
 /// refer to the original conduction owner's `contacts()` in canonical trace
@@ -252,29 +248,12 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
                 invalid("solved pressure requires an original electrical contact")
             })?;
             let axis = pressure.axis;
-            if axis.trim().is_empty()
-                || !binding.point.context.axes().contains_key(axis)
-                || binding
-                    .point
-                    .context
-                    .axis_quantities()
-                    .get(axis)
-                    .is_none_or(|quantity| {
-                        quantity.dims() != Pressure::DIMS
-                            || quantity.semantic_type().is_some_and(|semantic| {
-                                semantic.kind() != QuantityKind::Pressure
-                                    || semantic.form() != ValueForm::Static
-                            })
-                    })
-                || binding.point.temperature_axes.contains(&axis)
-                || binding.point.liquid_fraction_axes.contains(&Some(axis))
-                || binding.point.mean_temperature_axis == Some(axis)
-                || pressure_axes
-                    .insert(pressure.contact, axis.to_owned())
-                    .is_some()
+            binding.point.admit_pressure_axis(axis)
+                .map_err(|error| material(MaterialNetworkError::Material(error)))?;
+            if pressure_axes.insert(pressure.contact, axis.to_owned()).is_some()
             {
                 return Err(invalid(
-                    "solved contact pressure requires a unique distinct original static pressure coordinate in pascals",
+                    "solved contact pressure requires one original coordinate per contact",
                 ));
             }
         }
@@ -389,16 +368,12 @@ impl<'a, 'm> PreparedContacts<'a, 'm> {
             let [Some(first), Some(second)] = phases else {
                 return Err(invalid("spatial contact lost a receiving material state"));
             };
-            let mut point = binding
-                .point
-                .at([first, second])
-                .map_err(|error| material(MaterialNetworkError::Material(error)))?;
-            if let Some(pressure_pa) = pressure_values[binding.contact] {
+            let point = if let Some(pressure_pa) = pressure_values[binding.contact] {
                 let axis = &self.pressure_axes[&binding.contact];
-                point = point
-                    .with(axis, pressure_pa)
-                    .map_err(|_| invalid("original mechanical pressure coordinate refused"))?;
-            }
+                binding.point.at_pressure([first, second], axis, pressure_pa)
+            } else {
+                binding.point.at([first, second])
+            }.map_err(|error| material(MaterialNetworkError::Material(error)))?;
             let source = original
                 .at_query_point(binding.point.interface, &point)
                 .map_err(|error| {

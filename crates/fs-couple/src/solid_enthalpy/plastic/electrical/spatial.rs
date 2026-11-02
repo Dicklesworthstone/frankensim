@@ -6,6 +6,8 @@
 
 pub mod pressure;
 pub use pressure::SpatialElectricalContactPressure;
+pub mod thermal;
+pub use thermal::SpatialElectricalThermalContact;
 
 use super::*;
 use crate::circuit_enthalpy::conduction::contacts::ConductionContactThermal;
@@ -261,6 +263,62 @@ impl<'m> ThermoplasticSolid<'m> {
         cx: &Cx<'_>,
     ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
     {
+        self.advance_spatial_electrothermal_contact_candidate(
+            thermal,
+            problem,
+            assembly,
+            drive,
+            contact_bindings,
+            pressure_bindings,
+            &[],
+            target_s,
+            prescribed_m,
+            nodal_forces_n,
+            settings,
+            controls,
+            guess_j,
+            cx,
+        )
+    }
+
+    /// Share the SAME native solved pressure between original electrical and
+    /// thermal interface laws at each mechanical/caloric endpoint. Explicit
+    /// mappings retain one ordered interface card, original caloric receivers
+    /// and pressure role. The complete heat assembly refreshes its pinned
+    /// thermal contact BEFORE the original bulk/contact series composition.
+    /// Conductive exchange remains an internal link, not a second heat source.
+    ///
+    /// Thermal links retain their reference face area and original bulk paths,
+    /// consistently with the existing small-strain heat formulation. Electrical
+    /// traces retain the native actual X+u metric; this does not infer deformed
+    /// geometry for arbitrary Fourier, layer, radiation or reservoir paths.
+    /// Unsupported heat providers refuse selected pressure inputs explicitly.
+    /// All matching-face, pressure agreement and atomic-candidate guarantees of
+    /// [`Self::advance_spatial_electrical_pressure_contact_candidate`] apply.
+    #[allow(clippy::too_many_arguments)]
+    pub fn advance_spatial_electrothermal_contact_candidate<
+        't,
+        'd,
+        'p,
+        A: HeatAssembly + ?Sized,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        problem: &SpatialConduction<ResolvedConductorState>,
+        assembly: &A,
+        drive: impl Into<SpatialConductionDrive<'d>>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        thermal_contact_bindings: &[SpatialElectricalThermalContact],
+        target_s: f64,
+        prescribed_m: &[(usize, f64)],
+        nodal_forces_n: &[(usize, f64)],
+        settings: IncrementSettings,
+        controls: SpatialElectricalSolidSolve,
+        guess_j: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<SpatialElectricalSolidCandidate<'m, 't, A::Sample>, ElectricalSolidError<A::Error>>
+    {
         self.advance_spatial_electrical_with_motion_candidate(
             thermal,
             problem,
@@ -268,6 +326,7 @@ impl<'m> ThermoplasticSolid<'m> {
             drive,
             contact_bindings,
             pressure_bindings,
+            thermal_contact_bindings,
             target_s,
             prescribed_m,
             nodal_forces_n,
@@ -297,6 +356,7 @@ impl<'m> ThermoplasticSolid<'m> {
         drive: impl Into<SpatialConductionDrive<'d>>,
         contact_bindings: &[ConductionContactThermal<'_>],
         pressure_bindings: &[SpatialElectricalContactPressure<'p>],
+        thermal_contact_bindings: &[SpatialElectricalThermalContact],
         target_s: f64,
         prescribed_m: &[(usize, f64)],
         nodal_forces_n: &[(usize, f64)],
@@ -366,16 +426,32 @@ impl<'m> ThermoplasticSolid<'m> {
                 SolidHeatError::Cancelled => ElectricalSolidError::Cancelled,
                 other => ElectricalSolidError::Binding(other),
             })?;
+        let thermal_routes = thermal::routes::<A::Error>(
+            self,
+            thermal,
+            problem,
+            contact_bindings,
+            pressure_bindings,
+            thermal_contact_bindings,
+            prepared,
+            cx,
+        )
+        .map_err(source_error)?;
+        let accepted_thermal_pressures =
+            thermal::values::<A::Error>(&thermal_routes, &accepted_pressures, cx)
+                .map_err(source_error)?;
         let bulk = prepared.thermal_material_network().map_err(heat_error)?;
         prepared
             .admit_field_independent_boundaries(cx, &[])
             .map_err(heat_error)?;
-        let initial = assembly.resolve_heat(cx, thermal).map_err(|e| match e {
-            CircuitEnthalpyError::Cancelled => ElectricalSolidError::Cancelled,
-            other => {
-                ElectricalSolidError::Coupled(other.map_source(ElectricalSolidSourceError::Heat))
-            }
-        })?;
+        let initial = assembly
+            .resolve_heat_with_contact_pressures(cx, thermal, &accepted_thermal_pressures)
+            .map_err(|e| match e {
+                CircuitEnthalpyError::Cancelled => ElectricalSolidError::Cancelled,
+                other => ElectricalSolidError::Coupled(
+                    other.map_source(ElectricalSolidSourceError::Heat),
+                ),
+            })?;
         if !initial.contacts.is_empty() || !initial.bulk.resistors.is_empty() {
             return Err(ElectricalSolidError::Invalid(
                 "spatial solid current cannot discard graph electrical work",
@@ -446,11 +522,37 @@ impl<'m> ThermoplasticSolid<'m> {
                     ));
                 }
                 trials.set(trials.get() + 1);
+                let mechanical = (|| {
+                    let h = self
+                        .enthalpies::<Infallible>(endpoint, false, cx)
+                        .map_err(ElectricalSolidSourceError::Mechanical)?;
+                    self.mechanics_with_motion::<Infallible>(
+                        &h,
+                        prescribed_m,
+                        nodal_forces_n,
+                        settings,
+                        mechanics,
+                        dt,
+                        velocity_mps,
+                        cx,
+                    )
+                    .map_err(ElectricalSolidSourceError::Mechanical)
+                })()
+                .map_err(CircuitEnthalpyError::Source)?;
+                let pressures = pressure::sample::<A::Error>(
+                    &pressure_routes,
+                    &mechanical.solution.element_stress,
+                    cx,
+                )
+                .map_err(CircuitEnthalpyError::Source)?;
+                let thermal_pressures =
+                    thermal::values::<A::Error>(&thermal_routes, &pressures, cx)
+                        .map_err(CircuitEnthalpyError::Source)?;
                 let ContactThermalCoefficients {
                     bulk: mut coefficients,
                     contacts,
                 } = assembly
-                    .resolve_heat(cx, endpoint)
+                    .resolve_heat_with_contact_pressures(cx, endpoint, &thermal_pressures)
                     .map_err(|e| e.map_source(ElectricalSolidSourceError::Heat))?;
                 if !contacts.is_empty() || !coefficients.resistors.is_empty() {
                     return Err(CircuitEnthalpyError::Invalid(
@@ -458,21 +560,6 @@ impl<'m> ThermoplasticSolid<'m> {
                     ));
                 }
                 (|| {
-                    let h = self
-                        .enthalpies::<Infallible>(endpoint, false, cx)
-                        .map_err(ElectricalSolidSourceError::Mechanical)?;
-                    let mechanical = self
-                        .mechanics_with_motion::<Infallible>(
-                            &h,
-                            prescribed_m,
-                            nodal_forces_n,
-                            settings,
-                            mechanics,
-                            dt,
-                            velocity_mps,
-                            cx,
-                        )
-                        .map_err(ElectricalSolidSourceError::Mechanical)?;
                     let radiation_net_j =
                         number(dt * coefficients.source.as_ref().radiation_net_power_w())?;
                     let external_heat_j = number(

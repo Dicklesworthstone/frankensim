@@ -9,7 +9,7 @@ use fs_couple::circuit_enthalpy::{
     CircuitEnthalpyError, CircuitThermalCoefficients,
     contacts::{
         ContactThermalCoefficients,
-        heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork},
+        heat::{HeatAssembly, HeatNetworkError, PreparedHeatNetwork, ThermalContactPressure},
     },
 };
 use fs_exec::Cx;
@@ -109,6 +109,15 @@ where
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        self.resolve_heat_with_contact_pressures(cx, thermal, &[])
+    }
+
+    fn resolve_heat_with_contact_pressures(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         cx.checkpoint()
             .map_err(|_| CircuitEnthalpyError::Cancelled)?;
         if self.cells.len() > self.maximum_cells || self.cells.len() > thermal.cells().len() {
@@ -133,7 +142,7 @@ where
             .map_err(|error| error.map_source(ConvectionHeatError::Heat))?;
         let mut coefficients = self
             .inner
-            .resolve_heat(cx, thermal)
+            .resolve_heat_with_contact_pressures(cx, thermal, pressures)
             .map_err(|error| error.map_source(ConvectionHeatError::Heat))?;
         let convection: ResolvedCellConvectionSources<F> = evaluate_source_cell_convection(
             thermal,

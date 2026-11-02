@@ -71,10 +71,10 @@ impl<'n, 'a> PreparedHeatNetwork<'n, 'a> {
                 "one nonempty integrated conduction binding is required",
             ));
         }
-        let initial = self.resolve_with_optional_links(cx, thermal, additional_links)?;
+        let initial = self.resolve_with_optional_links(cx, thermal, additional_links, &[])?;
         self.admit_integrated_conduction(cx, thermal, model, &initial.bulk.source)?;
         self.integrated_conduction = Some(IntegratedConduction { model, controls });
-        self.resolve_with_optional_links(cx, thermal, additional_links)?;
+        self.resolve_with_optional_links(cx, thermal, additional_links, &[])?;
         check(cx)?;
         Ok(self)
     }

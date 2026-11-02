@@ -43,6 +43,19 @@ pub struct MaterialContactLink<'a> {
     pub selection: ClaimSelection,
 }
 
+/// An original thermal interface's pressure supplied by its mechanical owner.
+/// Link identity, ordered materials, source selection and thermal geometry stay
+/// with the existing contact. Only the explicitly named pressure axis evolves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ThermalContactPressure<'a> {
+    /// Original material thermal-link identity.
+    pub link: u64,
+    /// Existing static-pressure role, distinct from both thermal states.
+    pub pressure_axis: &'a str,
+    /// Finite nonnegative compression in pascals.
+    pub pressure_pa: f64,
+}
+
 /// Complete contact result for one trial, retained with its bulk source payload.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContactLinkSample {
@@ -99,21 +112,47 @@ pub struct ContactInterfaceState {
 /// solver. Its nonlinear and temporal accuracy belong to the calling integrator.
 pub fn apply_material_contacts(
     thermal: &DepositionSimulation<'_>, contacts: &[MaterialContactLink<'_>],
+    bulk_conductances: &mut BTreeMap<u64, f64>, cancelled: impl FnMut() -> bool,
+) -> Result<Vec<ContactLinkSample>, ConductionError> {
+    apply_material_contacts_with_pressures(thermal, contacts, &[], bulk_conductances, cancelled)
+}
+
+/// The same original bulk/contact series composition at mechanically supplied
+/// interface pressures. Unselected contacts retain their authored conditions.
+/// Every pressure names a unique existing contact and a distinct original
+/// static-pressure coordinate; other state/history coordinates remain intact.
+///
+/// Both thermal states, source pins, reference areas and bulk conductances keep
+/// their original owners. This does not infer contact mechanics or transform
+/// thermal geometry. All source/series evaluation finishes before publication.
+pub fn apply_material_contacts_with_pressures(
+    thermal: &DepositionSimulation<'_>, contacts: &[MaterialContactLink<'_>],
+    pressures: &[ThermalContactPressure<'_>],
     bulk_conductances: &mut BTreeMap<u64, f64>, mut cancelled: impl FnMut() -> bool,
 ) -> Result<Vec<ContactLinkSample>, ConductionError> {
     check(&mut cancelled)?;
-    if contacts.len() > MAX_MATERIAL_NETWORK_CONTACTS || contacts.len() > thermal.links().len() {
+    if contacts.len() > MAX_MATERIAL_NETWORK_CONTACTS || contacts.len() > thermal.links().len()
+        || pressures.len() > contacts.len() {
         return Err(invalid("complete bounded active contact bindings required"));
     }
     let mut ordered: Vec<_> = contacts.iter().collect();
     ordered.sort_by_key(|c| c.link);
+    let mut pressure_by_link = BTreeMap::new();
+    for pressure in pressures {
+        check(&mut cancelled)?;
+        if ordered.binary_search_by_key(&pressure.link, |contact| contact.link).is_err()
+            || pressure_by_link.insert(pressure.link, pressure).is_some() {
+            return Err(invalid("mechanical pressure must name each selected original thermal contact once"));
+        }
+    }
     let mut samples = Vec::with_capacity(ordered.len());
     for (index, binding) in ordered.iter().enumerate() {
         check(&mut cancelled)?;
         if index > 0 && ordered[index-1].link == binding.link {
             return Err(invalid("a physical link cannot receive duplicate contact resistance"));
         }
-        let source = resolve_contact(thermal, binding)?;
+        let source = resolve_contact_at_pressure(
+            thermal, binding, pressure_by_link.get(&binding.link).copied())?;
         let bulk = *bulk_conductances.get(&binding.link).ok_or_else(|| invalid("contact lacks explicit bulk conductance"))?;
         if !bulk.is_finite() || bulk < 0.0 || !source.area_m2.is_finite() || source.area_m2 < 0.0 {
             return Err(invalid("finite nonnegative bulk conductance and contact area required"));
@@ -142,6 +181,13 @@ pub fn apply_material_contacts(
 fn resolve_contact(
     thermal: &DepositionSimulation<'_>, binding: &MaterialContactLink<'_>,
 ) -> Result<ContactInterfaceState, ConductionError> {
+    resolve_contact_at_pressure(thermal, binding, None)
+}
+
+fn resolve_contact_at_pressure(
+    thermal: &DepositionSimulation<'_>, binding: &MaterialContactLink<'_>,
+    pressure: Option<&ThermalContactPressure<'_>>,
+) -> Result<ContactInterfaceState, ConductionError> {
     let link = thermal.links().get(&binding.link).ok_or_else(|| invalid("inactive thermal contact"))?;
     if [binding.sides[0].cell, binding.sides[1].cell] != [link.a, link.b] {
         return Err(invalid("caloric sides must retain the original ordered link endpoints"));
@@ -156,7 +202,11 @@ fn resolve_contact(
             .map_err(|e| invalid(&e.to_string()))
     };
     let phases = [phase(binding.sides[0])?, phase(binding.sides[1])?];
-    let point = binding.point.at(phases).map_err(|e| invalid(&e.to_string()))?;
+    let point = if let Some(pressure) = pressure {
+        binding.point.at_pressure(phases, pressure.pressure_axis, pressure.pressure_pa)
+    } else {
+        binding.point.at(phases)
+    }.map_err(|e| invalid(&e.to_string()))?;
     let name = format!("thermal-link-{}", binding.link);
     let interface = match binding.selection {
         ClaimSelection::Policy(policy) => InterfaceResistance::from_card(&name, binding.point.interface, &point, policy)?,

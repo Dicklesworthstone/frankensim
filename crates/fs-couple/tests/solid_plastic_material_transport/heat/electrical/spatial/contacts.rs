@@ -2,7 +2,9 @@
 //! mechanical contact/tie solver. All material/interface laws are manufactured.
 #[path = "contacts/pressure.rs"]
 mod pressure;
-use super::terminals::{PRISM_NODES, PRISM_TETS, current_drive, prism_thermal_cells};
+#[path = "contacts/thermal.rs"]
+mod thermal;
+use super::terminals::{PRISM_NODES, PRISM_TETS, current_drive, prism_thermal_cells_with_links};
 use super::*;
 use fs_couple::circuit_enthalpy::{
     conduction::{contacts::ConductionContactThermal, spatial::SpatialConductionThermalStep},
@@ -25,6 +27,7 @@ const CURRENT: f64 = 0.015;
 const FRACTION: f64 = 0.25;
 const TA_SLOPE: f64 = 0.003;
 const TB_SLOPE: f64 = 0.007;
+const CONTACT_LINK: u64 = 200;
 
 fn contact_controls() -> SpatialElectricalSolidSolve {
     let mut controls = spatial_controls();
@@ -135,6 +138,7 @@ fn with_contact<R>(
             fraction: FRACTION,
             mean_temperature_axis: None,
             expansion: false,
+            thermal_contact_area_m2: None,
         },
         run,
     )
@@ -149,6 +153,7 @@ struct ContactFixture {
     fraction: f64,
     mean_temperature_axis: Option<&'static str>,
     expansion: bool,
+    thermal_contact_area_m2: Option<f64>,
 }
 
 fn with_contact_fixture<R>(
@@ -170,6 +175,7 @@ fn with_contact_fixture<R>(
         fraction,
         mean_temperature_axis,
         expansion,
+        thermal_contact_area_m2,
     } = fixture;
     let (nodes, tets) = specimen_mesh();
     let material = &f.cards[1];
@@ -187,7 +193,18 @@ fn with_contact_fixture<R>(
         heat_fraction_to_first: fraction,
     }];
     with_cx(|_, cx| {
-        let thermal = prism_thermal_cells(caloric.curve(), MATS[1], &nodes, &tets, &IDS);
+        let links: Vec<_> = thermal_contact_area_m2
+            .into_iter()
+            .map(|area_m2| ThermalLink {
+                id: CONTACT_LINK,
+                a: IDS[2],
+                b: IDS[3],
+                area_m2,
+                conductance_w_k: 0.0,
+            })
+            .collect();
+        let thermal =
+            prism_thermal_cells_with_links(caloric.curve(), MATS[1], &nodes, &tets, &IDS, &links);
         let solid = ThermoplasticSolid::try_new(
             &thermal,
             &nodes,
@@ -212,13 +229,41 @@ fn with_contact_fixture<R>(
             cx,
         )
         .unwrap();
-        let selections = vec![None; IDS.len()];
+        let selections = vec![
+            thermal_contact_area_m2.map(|_| (
+                f.conductivity.clone(),
+                MaterialPropertySelection::SingleClaimOnly,
+            ));
+            IDS.len()
+        ];
         let cells = solid.thermal_material_cells(&selections).unwrap();
-        // Independent finite capacities, no authored intercell heat links.
+        let conduction: Vec<_> = links
+            .iter()
+            .map(|link| ConductionLink {
+                link: link.id,
+                distance_a_m: L / 4.0,
+                distance_b_m: L / 4.0,
+            })
+            .collect();
+        let contacts: Vec<_> = links
+            .iter()
+            .map(|link| MaterialContactLink {
+                link: link.id,
+                sides: [link.a, link.b].map(|cell| ContactCell {
+                    cell,
+                    material_id: MATS[1],
+                    curve: caloric.curve(),
+                }),
+                point: bindings[0].point,
+                selection: ClaimSelection::Policy(SelectionPolicy::SingleClaimOnly),
+            })
+            .collect();
+        // Optional original reference-area Fourier/contact path. Each side
+        // keeps its finite caloric cell, even with no authored heat links.
         let bulk = MaterialNetwork {
             cells: &cells,
             resistors: &[],
-            links: &[],
+            links: &conduction,
         };
         let electrical = ElectricalContactNetwork {
             bulk: &bulk,
@@ -227,7 +272,7 @@ fn with_contact_fixture<R>(
         };
         let network = MaterialHeatNetwork {
             electrical: &electrical,
-            thermal_contacts: &[],
+            thermal_contacts: &contacts,
             radiation: None,
         };
         let prepared = network.prepare(cx, &thermal).unwrap();

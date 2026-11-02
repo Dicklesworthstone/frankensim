@@ -9,8 +9,8 @@ use fs_bem::{
     helmholtz::molecular::{MolecularError, MolecularExterior, MolecularNearFieldOptions},
     observation_transfers::{
         HarmonicField, LocalBoundary, MolecularBemObservation, MolecularObservationError,
-        MolecularObservationFormulation, MolecularResponseLimits, PreparedMolecularResponse,
-        ReceiverSpec, SourceId, TransferError, molecular::MolecularReceiverError,
+        MolecularObservationFormulation, MolecularReceiverError, MolecularResponseLimits,
+        PreparedMolecularResponse, ReceiverSpec, SourceId, TransferError,
     },
 };
 use fs_la::eigen_complex::LuComplex;

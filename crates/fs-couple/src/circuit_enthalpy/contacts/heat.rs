@@ -10,7 +10,9 @@ use super::{CircuitEnthalpyCandidate, CircuitEnthalpyError, CircuitEnthalpyInput
 use crate::circuit_enthalpy::material::{DirectionalConductionLink, MaterialNetworkError, MaterialNetworkSample};
 use fs_conduction::ConductionError;
 use fs_conduction::transient::deposition::contact::{
-    ContactLinkSample, MaterialContactLink, apply_material_contacts};
+    ContactLinkSample, MaterialContactLink, apply_material_contacts,
+    apply_material_contacts_with_pressures};
+pub use fs_conduction::transient::deposition::contact::ThermalContactPressure;
 use fs_conduction::transient::deposition::radiation::{
     MaterialRadiation, RadiatingCell, RadiationCellError, RadiationCellSources};
 use fs_exec::Cx;
@@ -290,6 +292,12 @@ impl<'a> MaterialHeatNetwork<'a> {
 }
 
 impl PreparedHeatNetwork<'_, '_> {
+    /// Original pinned interfaces for native multiphysics correspondence checks.
+    /// This exposes no coefficient cache and cannot change source selection.
+    pub(crate) fn thermal_contact_bindings(&self) -> &[MaterialContactLink<'_>] {
+        &self.thermal_contacts
+    }
+
     // Native field/circuit consumers may resolve ordinary graph resistors but
     // have no series-contact owner. Never silently drop electrical interfaces.
     pub(crate) fn field_material_network(
@@ -393,7 +401,19 @@ impl PreparedHeatNetwork<'_, '_> {
     pub fn resolve(&self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>)
         -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError>
     {
-        self.resolve_with_optional_links(cx, thermal, None)
+        self.resolve_with_optional_links(cx, thermal, None, &[])
+    }
+
+    /// Resolve this complete original assembly at externally solved interface
+    /// pressures. The original contact owner refreshes both thermal states and
+    /// the selected pressure coordinate before applying resistance in series
+    /// with freshly resolved bulk transport. Source pins and reference thermal
+    /// geometry remain fixed; no pressure or area is inferred from electrical G.
+    pub fn resolve_heat_with_contact_pressures(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
+        self.resolve_with_optional_links(cx, thermal, None, pressures)
     }
 
     /// Resolve additional physical link laws alongside the same bulk/contact,
@@ -405,12 +425,23 @@ impl PreparedHeatNetwork<'_, '_> {
         &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
         additional_links: &BTreeMap<u64, f64>,
     ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
-        self.resolve_with_optional_links(cx, thermal, Some(additional_links))
+        self.resolve_with_optional_links(cx, thermal, Some(additional_links), &[])
+    }
+
+    /// Compose the same mechanical contact pressures with disjoint additional
+    /// finite-link laws, retaining original coolant/reservoir heat ownership.
+    /// Additional links cannot also own a material thermal-contact resistance.
+    pub fn resolve_with_link_conductances_and_contact_pressures(
+        &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
+        additional_links: &BTreeMap<u64, f64>, pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
+        self.resolve_with_optional_links(cx, thermal, Some(additional_links), pressures)
     }
 
     fn resolve_with_optional_links(
         &self, cx: &Cx<'_>, thermal: &DepositionSimulation<'_>,
         additional_links: Option<&BTreeMap<u64, f64>>,
+        pressures: &[ThermalContactPressure<'_>],
     ) -> Result<ContactThermalCoefficients<HeatNetworkSample>, HeatNetworkError> {
         check(cx)?;
         admit_additional_contact_links(&self.thermal_contacts, additional_links)?;
@@ -422,7 +453,8 @@ impl PreparedHeatNetwork<'_, '_> {
         }?;
         let integrated_conduction = self.resolve_integrated_conduction(cx, thermal,
             &mut coefficients.bulk.conductances_w_k, &mut coefficients.bulk.source)?;
-        let thermal_contacts = apply_material_contacts(thermal, &self.thermal_contacts,
+        let thermal_contacts = apply_material_contacts_with_pressures(
+            thermal, &self.thermal_contacts, pressures,
             &mut coefficients.bulk.conductances_w_k, || cx.checkpoint().is_err())?;
         let radiation = if let Some(original) = self.network.radiation {
             let source = MaterialRadiation { enclosure: original.enclosure, cells: &self.radiating_cells,

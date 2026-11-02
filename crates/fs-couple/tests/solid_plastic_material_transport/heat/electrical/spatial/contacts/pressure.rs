@@ -102,6 +102,7 @@ fn fixture(beta: f64, accepted_pressure: f64, wrong_kind: bool) -> ContactFixtur
         fraction: 0.5,
         mean_temperature_axis: Some("Tm"),
         expansion: true,
+        thermal_contact_area_m2: None,
     }
 }
 

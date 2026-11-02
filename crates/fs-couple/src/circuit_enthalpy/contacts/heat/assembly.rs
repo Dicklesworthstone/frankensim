@@ -1,7 +1,7 @@
 //! One complete heat evaluation shared by native coupled physical owners.
 use super::{
     CircuitEnthalpyError, ContactThermalCoefficients, DepositionSimulation, HeatNetworkError,
-    HeatNetworkSample, PreparedHeatNetwork, as_circuit_error,
+    HeatNetworkSample, PreparedHeatNetwork, ThermalContactPressure, as_circuit_error,
 };
 use fs_exec::Cx;
 
@@ -29,6 +29,25 @@ pub trait HeatAssembly {
 
     /// The exact original prepared owner, including its admission and routing.
     fn prepared_heat_network(&self) -> &PreparedHeatNetwork<'_, '_>;
+
+    /// Admit an outer prescribed-fluid convection layer on the named cells.
+    /// Composed providers must reject overlap with their existing reservoir
+    /// declarations even when sampled heat flux is zero. Native boundary and
+    /// exposed-area checks still belong to the actual convection evaluator.
+    fn admit_additional_reservoir_convection(
+        &self,
+        cx: &Cx<'_>,
+        cells: &std::collections::BTreeSet<fs_thermal::enthalpy::CellId>,
+    ) -> Result<(), CircuitEnthalpyError<Self::Error>> {
+        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        if cells.is_empty() {
+            Ok(())
+        } else {
+            Err(CircuitEnthalpyError::Source(HeatNetworkError::Invalid(
+                "heat assembly has not declared prescribed-reservoir convection ownership",
+            ).into()))
+        }
+    }
 
     /// Additional explicit-source rate bounds [W/K] at the exact resolved sample.
     ///
@@ -58,6 +77,27 @@ pub trait HeatAssembly {
         cx: &Cx<'_>,
         thermal: &DepositionSimulation<'_>,
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>>;
+
+    /// Complete heat evaluation with explicitly owned mechanical pressures on
+    /// original thermal interfaces. Composed providers must forward these to
+    /// their original contact resolver while retaining all additional sources
+    /// and finite links exactly once. A provider that has not implemented that
+    /// composition refuses a nonempty request instead of freezing pressure.
+    fn resolve_heat_with_contact_pressures(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)?;
+        if pressures.is_empty() {
+            self.resolve_heat(cx, thermal)
+        } else {
+            Err(CircuitEnthalpyError::Source(HeatNetworkError::Invalid(
+                "heat assembly does not own mechanical contact-pressure continuation",
+            ).into()))
+        }
+    }
 }
 
 impl AsRef<HeatNetworkSample> for HeatNetworkSample {
@@ -72,6 +112,17 @@ impl HeatAssembly for PreparedHeatNetwork<'_, '_> {
 
     fn prepared_heat_network(&self) -> &PreparedHeatNetwork<'_, '_> {
         self
+    }
+
+    fn admit_additional_reservoir_convection(
+        &self,
+        cx: &Cx<'_>,
+        _cells: &std::collections::BTreeSet<fs_thermal::enthalpy::CellId>,
+    ) -> Result<(), CircuitEnthalpyError<Self::Error>> {
+        // This owner adds bulk/contact transport and radiation, not a fluid
+        // reservoir. Actual cell boundaries and occupied surface coverage are
+        // admitted by the original convection owner at the candidate state.
+        cx.checkpoint().map_err(|_| CircuitEnthalpyError::Cancelled)
     }
 
     fn explicit_source_conductance_bounds_w_k(
@@ -89,5 +140,15 @@ impl HeatAssembly for PreparedHeatNetwork<'_, '_> {
         thermal: &DepositionSimulation<'_>,
     ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
         self.resolve(cx, thermal).map_err(as_circuit_error)
+    }
+
+    fn resolve_heat_with_contact_pressures(
+        &self,
+        cx: &Cx<'_>,
+        thermal: &DepositionSimulation<'_>,
+        pressures: &[ThermalContactPressure<'_>],
+    ) -> Result<ContactThermalCoefficients<Self::Sample>, CircuitEnthalpyError<Self::Error>> {
+        PreparedHeatNetwork::resolve_heat_with_contact_pressures(self, cx, thermal, pressures)
+            .map_err(as_circuit_error)
     }
 }

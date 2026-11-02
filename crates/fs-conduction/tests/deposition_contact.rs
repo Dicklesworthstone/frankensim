@@ -90,3 +90,64 @@ fn mismatched_caloric_instances_order_and_missing_bulk_inputs_refuse() {
     g.insert(7,0.0); let report=apply_material_contacts(&old,&[contact],&mut g,||false).unwrap();
     assert_eq!(report[0].conductance_w_k,0.0); assert_eq!(g[&7],0.0);
 }
+
+#[test]
+fn solved_pressure_refreshes_the_pinned_contact_once_and_refusal_preserves_the_map() {
+    use fs_evidence::ValidityDomain;
+    use fs_matdb::PropertyValue;
+    use fs_qty::{Pressure, QuantitySpec, Temperature};
+
+    let cards = [bulk("A"), bulk("B")];
+    let curves = [curve(&cards[0]), curve(&cards[1])];
+    let thermal = initial(&curves, 1.0);
+    let pressure_quantity = QuantitySpec::dimensional(Pressure::DIMS);
+    let context = point().with_quantity("pressure", pressure_quantity, 200000.0).unwrap();
+    let mut resistance = claim("pressure", Pressure::DIMS, 1.0);
+    resistance.value = PropertyValue::Curve {
+        abscissa: "pressure".into(), abscissa_dims: Pressure::DIMS,
+        knots: vec![(100000.0, 2.0), (300000.0, 1.0)],
+        dims: fs_conduction::AREA_SPECIFIC_THERMAL_RESISTANCE_DIMS,
+    };
+    resistance.validity = ValidityDomain::unconstrained()
+        .with_quantity("pressure", pressure_quantity, 100000.0, 300000.0)
+        .with_quantity("aT", QuantitySpec::dimensional(Temperature::DIMS), 300.0, 800.0)
+        .with_quantity("bT", QuantitySpec::dimensional(Temperature::DIMS), 300.0, 800.0)
+        .with("lot", 7.0, 7.0);
+    let mut claims = ClaimSet::new();
+    let pin = claims.insert_claim(resistance).unwrap();
+    let source = interface(&cards, claims);
+    let contacts = [MaterialContactLink {
+        link: 7, sides: sides(&curves), point: binding(&cards, &source, &context),
+        selection: ClaimSelection::Pinned(pin),
+    }];
+    let pressure = ThermalContactPressure {
+        link: 7, pressure_axis: "pressure", pressure_pa: 300000.0,
+    };
+    let original = BTreeMap::from([(7, 2.0), (99, 123.0)]);
+    let mut conductance = original.clone();
+    let samples = apply_material_contacts_with_pressures(
+        &thermal, &contacts, &[pressure], &mut conductance, || false,
+    ).unwrap();
+    // G = 1 / (1/G_bulk + R''/A). Both unequal surface temperatures and the
+    // full original source pin survive; a second contact term would give 0.4.
+    assert!((conductance[&7] - 2.0 / 3.0).abs() < 1e-14);
+    assert_eq!(conductance[&99], 123.0);
+    assert_eq!(samples[0].interface.receipt().selected, pin);
+    assert_eq!(samples[0].interface.value_m2_k_per_w(), 1.0);
+    assert_eq!(samples[0].phases.map(|phase| phase.temperature_k()), [400.0, 350.0]);
+    assert_eq!(samples[0].series.as_ref().unwrap().terms().len(), 2);
+    assert_eq!(context.axes()["pressure"], 200000.0);
+    assert_eq!(context.axes()["lot"], 7.0);
+
+    for bad in [
+        ThermalContactPressure { pressure_pa: 400000.0, ..pressure },
+        ThermalContactPressure { link: 8, ..pressure },
+        ThermalContactPressure { pressure_axis: "aT", ..pressure },
+    ] {
+        let mut candidate = original.clone();
+        assert!(apply_material_contacts_with_pressures(
+            &thermal, &contacts, &[bad], &mut candidate, || false,
+        ).is_err());
+        assert_eq!(candidate, original);
+    }
+}

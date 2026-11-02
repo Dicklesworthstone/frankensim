@@ -12,8 +12,8 @@ layer = "L3"
 
 [features]
 default = []
-compartment-fire = ["dep:fs-gas", "dep:fs-la", "dep:fs-thermal", "dep:fs-thermochem"]
-transient-transport = ["dep:fs-thermal"]
+compartment-fire = ["dep:fs-gas", "dep:fs-la", "dep:fs-thermochem"]
+transient-transport = []
 
 [dependencies]
 fs-blake3 = { path = "../fs-blake3" }
@@ -26,7 +26,9 @@ fs-couple = { path = "../fs-couple" }
 fs-evidence = { path = "../fs-evidence" }
 fs-gas = { path = "../fs-gas", features = ["experimental-euler"], optional = true }
 fs-la = { path = "../fs-la", optional = true }
-fs-thermal = { path = "../fs-thermal", optional = true }
+# Native convection/heat composition always uses the original finite cells and
+# observers, independently of the optional transport and compartment-fire drivers.
+fs-thermal = { path = "../fs-thermal" }
 fs-thermochem = { path = "../fs-thermochem", optional = true }
 # Cancellation checkpoints at conjugate outer-iteration boundaries.
 fs-exec = { path = "../fs-exec" }
@@ -52,8 +54,6 @@ fs-em = { path = "../fs-em" }
 fs-feec = { path = "../fs-feec" }
 # Exercise the original nonideal EOS branch through material-bound flow and heat.
 fs-thermochem = { path = "../fs-thermochem" }
-# Reuse the native graph's cell identities and signed mass-flow connections.
-fs-thermal = { path = "../fs-thermal" }
 # Test-only authority for the declared base-to-fin bondline cards in the
 # plate-fin end-to-end fixture.
 fs-matdb = { path = "../fs-matdb" }

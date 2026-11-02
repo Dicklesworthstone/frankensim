@@ -67,8 +67,19 @@ pub(super) fn prism_thermal_cells<'a>(
     tets: &[[usize; 4]],
     cells: &[CellId],
 ) -> DepositionSimulation<'a> {
+    prism_thermal_cells_with_links(curve, material_id, nodes, tets, cells, &[])
+}
+
+pub(super) fn prism_thermal_cells_with_links<'a>(
+    curve: &'a dyn ThermalLaw,
+    material_id: MaterialId,
+    nodes: &[[f64; 3]],
+    tets: &[[usize; 4]],
+    cells: &[CellId],
+    links: &[ThermalLink],
+) -> DepositionSimulation<'a> {
     assert_eq!(tets.len(), cells.len());
-    let events = tets
+    let mut events: Vec<_> = tets
         .iter()
         .enumerate()
         .map(|(i, &tet)| {
@@ -94,13 +105,17 @@ pub(super) fn prism_thermal_cells<'a>(
             }
         })
         .collect();
+    events.extend(links.iter().map(|&link| TimedEvent {
+        time_s: 0.0,
+        event: Event::Contact(link),
+    }));
     DepositionSimulation::new(
         events,
         &[(material_id, curve)],
         DepositionBudget {
             max_cells: cells.len(),
-            max_links: 0,
-            max_events: cells.len(),
+            max_links: links.len(),
+            max_events: cells.len() + links.len(),
             max_substeps: 1000,
         },
     )

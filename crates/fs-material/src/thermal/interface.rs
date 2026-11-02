@@ -3,7 +3,7 @@
 use super::source::{ThermalMaterialError, ThermalMaterialPoint};
 use crate::phase::EquilibriumPhaseState;
 use fs_matdb::{InterfaceSystemCard, MaterialCard, QueryPoint};
-use fs_qty::{Dims, QuantitySpec, Temperature};
+use fs_qty::{Dims, Pressure, QuantitySpec, Temperature};
 use fs_qty::semantic::{QuantityKind, SemanticType, ValueForm};
 
 /// Canonical ordered-interface resistance property, shared by spatial and
@@ -120,6 +120,48 @@ impl ThermalInterfacePoint<'_> {
                 .map_err(|e| ThermalMaterialError::Coordinate(e.to_string()))?;
         }
         Ok(point)
+    }
+
+    /// Admit one original static compressive-pressure coordinate supplied by
+    /// another physical owner. Equal SI dimensions alone do not turn stress,
+    /// acoustic pressure or a waveform into a static interface pressure.
+    /// Thermal/phase roles stay distinct, and legacy dimensional Pa is retained.
+    pub fn admit_pressure_axis(&self, axis: &str) -> Result<(), ThermalMaterialError> {
+        if axis.trim().is_empty()
+            || !self.context.axes().contains_key(axis)
+            || self.context.axis_quantities().get(axis).is_none_or(|quantity| {
+                quantity.dims() != Pressure::DIMS
+                    || quantity.semantic_type().is_some_and(|semantic| {
+                        semantic.kind() != QuantityKind::Pressure
+                            || semantic.form() != ValueForm::Static
+                    })
+            })
+            || self.temperature_axes.contains(&axis)
+            || self.liquid_fraction_axes.contains(&Some(axis))
+            || self.mean_temperature_axis == Some(axis)
+        {
+            return Err(ThermalMaterialError::Invalid(
+                "solved contact pressure requires a distinct original static pressure coordinate in pascals",
+            ));
+        }
+        Ok(())
+    }
+
+    /// The same ordered thermal state at an explicitly owned normal pressure.
+    /// The caller supplies the mechanical pressure; no traction, area, mean
+    /// temperature or history is inferred here. Original source evaluators still
+    /// own all supported-domain checks and pinning at the returned query point.
+    pub fn at_pressure(
+        &self, states: [EquilibriumPhaseState; 2], pressure_axis: &str, pressure_pa: f64,
+    ) -> Result<QueryPoint, ThermalMaterialError> {
+        self.admit_pressure_axis(pressure_axis)?;
+        if !pressure_pa.is_finite() || pressure_pa < 0.0 {
+            return Err(ThermalMaterialError::Invalid(
+                "interface pressure requires finite nonnegative compression",
+            ));
+        }
+        self.at(states)?.with(pressure_axis, pressure_pa)
+            .map_err(|error| ThermalMaterialError::Coordinate(error.to_string()))
     }
 
     /// Whether a source axis follows a declared evolving thermal coordinate.

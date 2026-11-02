@@ -351,7 +351,7 @@ fn moving_material_rate_source_refusal_restores_warm_geometry_heat_and_history()
     let failure = system.step_with_material_rate_thermal_geometry(&mut heat, &[], &[], &[],
         &mut routes, &rates, controls(1), &[energy], &[0.0], &[drive(0.02, 0.001)],
         &[geometry(2.5)], Some(&[endpoint(2.0, 3.0)]), config, &gate, |s, _| other(s))
-        .unwrap_err();
+        .err().expect("unrepresentable endpoint relaxation rate must refuse");
     assert!(matches!(failure, LayerThermalError::Invalid(
         "source relaxation time and rate must be positive representable values")));
     assert_eq!(system.port(0).unwrap().left, geometry(1.5).left);
