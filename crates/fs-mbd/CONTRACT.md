@@ -3359,3 +3359,21 @@ Only shear strengths change here: normal thermodynamics, poses and heat transpor
 remain with their own owners. The additional `adhesive_multiple` regression
 checks identical constant-claim mechanics at different temperatures, source
 ordering, foreign-card/changed-area refusal and retry from unchanged endpoints.
+
+`tangential_friction::adhesive::trajectory` accepts the original source-owned
+fixed-ray relaxation through a finite stop and any remaining zero-drive rest.
+It prepares the actual complete pair mobility and applies only the analytically
+integrated point/free-couple impulses. Body velocities are never overwritten or
+clipped. Actual native endpoints must agree with the located event; per-body and
+global momentum, original uniform-disk force/moment, moving-phase heat, normal
+closure and full kinetic work are independently audited. Stationary dwell does
+not multiply the moving traction power by the full requested duration.
+
+Both `prepare_rigid_adhesive_trajectory` and its atomic application retain the
+original source geometry and strengths. Detached zero-area sources remain exact
+no-ops even for separated moving points. Poses, normal evolution, external drive,
+thermal changes and curved velocity paths remain outside this held-geometry
+branch. Four focused groups in `tests/adhesive_trajectory.rs` cover finite support
+recoil through pure-spin arrest at zero/tensile load, a full-mobility coupled rim
+ray, tangent-gauge covariance, gap detachment, curved-path refusal, cancellation,
+late native angular-momentum refusal and deterministic retry.

@@ -1412,3 +1412,22 @@ zero-strength rows, physical reorder/tangent covariance, full-matrix work,
 cancellation and deterministic retry. Existing Hertz and rolling multiple-
 contact targets remain the regression gate for the shared engine.
 
+`AdhesiveWrenchContact::relax_velocity` resolves a continuous fixed-ray branch
+through a finite stopping event. It uses the original uniform-disk wrench and
+complete positive-definite body mobility in `[u_x,u_y,a*spin]`. Homogeneity
+keeps the wrench constant precisely when `W*w = -q/t_stop`; ray admission is
+limited to arithmetic roundoff and retains the original matrix, displacement,
+work and effort gates. The moving phase integrates impulse, slip, spin and
+native heat analytically. After the located zero, a no-drive static remainder
+has zero reaction and adds no heat. Actual nonzero rates never acquire the
+larger static strength before that event. Curved velocity paths explicitly
+refuse even for tiny requested durations; there is no velocity clipping,
+friction ellipse, smoothing or artificial dissipation.
+
+This branch freezes real area, shear strengths and body response. It does not
+advance poses or the normal law, admit external drives, or approximate curved
+paths. Seven groups in `tests/adhesive_relaxation.rs` cover independent pure
+translation/spin and full three-coordinate coupled rim solutions, stationary
+dwell, time partition, tangent-gauge/reversal covariance, zero kinetic strength,
+tiny moving states, unchanged dimensional gates and cancellation/atomic retry.
+

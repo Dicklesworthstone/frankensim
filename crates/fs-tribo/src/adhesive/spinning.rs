@@ -26,6 +26,9 @@ use crate::{TriboError, finite, nonnegative_finite};
 /// Static/sliding response under the actual three-coordinate body compliance.
 pub mod contact;
 
+/// Continuous fixed-ray relaxation through a located finite stopping event.
+pub mod relaxation;
+
 /// Independently supplied solid-contact geometry and uniform junction strength.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AdhesiveSlidingPatchParameters {

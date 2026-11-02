@@ -9,11 +9,16 @@
 //!
 //! This is a held-geometry impulse phase. Normal evolution, poses, mixed-mode
 //! peeling, partial-slip elasticity and the destination of frictional heat
-//! remain with their existing owners. Endpoint reversals require a refined
-//! physical interval; a zero midpoint is never silently turned into arrest.
+//! remain with their existing owners. Held-effort endpoint reversals require a
+//! refined physical interval; [`trajectory`] explicitly resolves invariant-ray
+//! finite arrest and its stationary remainder. A zero midpoint is never silently
+//! turned into endpoint arrest.
 
 /// Simultaneous source-owned junctions sharing actual native body recoil.
 pub mod multiple;
+
+/// Continuous fixed-ray impulse phases that resolve finite arrest and rest.
+pub mod trajectory;
 
 use fs_contact::interface_binding::adhesive_shear::spinning::SourceAdhesiveSlidingPatch;
 use fs_exec::CancelGate;

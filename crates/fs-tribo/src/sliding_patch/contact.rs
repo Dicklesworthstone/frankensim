@@ -930,6 +930,15 @@ impl Factor {
     }
 }
 
+/// Reuse the original circular-response symmetry and positive-pivot gates.
+/// Trajectory owners retain their original matrix for independent work checks.
+pub(crate) fn validate_circular_response(
+    input: Matrix,
+    config: HertzWrenchConfig,
+) -> Result<(), HertzWrenchError> {
+    admit_matrix(input, config).map(|_| ())
+}
+
 fn admit_matrix(
     input: Matrix,
     config: HertzWrenchConfig,
