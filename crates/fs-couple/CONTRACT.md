@@ -12,15 +12,43 @@ Continuous coupled force files (`render::schedule::force::file::coupled_tones`):
   only with an accepted network sample. Rejected steps retain accepted phase,
   event cursor, state and work/heat. File-wide source payload and all phase arrays
   are reserved before the remaining dense byte budget is admitted; projection,
-  clock, guard-frequency and original physical limits remain binding. The
-  initial CLI path observes only real instantaneous pressure/velocity maps;
-  imaginary natural-mode quadrature, contact/friction schemas and receiver
-  extensions explicitly refuse. This is an authored reduced assembly path,
+  clock, guard-frequency and original physical limits remain binding. Without an explicit sampled receiver, the CLI observes real instantaneous
+  pressure/velocity maps; imaginary natural-mode quadrature and contact/friction
+  schemas refuse. The optional complete-network causal receiver is specified below. This is an authored reduced assembly path,
   not a radiation or instrument-validation claim. `coupled_tones/tests.rs`
   compares actual file callbacks with an independent coupled normal-coordinate
   solution, exact preload, physical work/heat and partition-invariant phase,
   and checks transactional and admission refusals. See
   `examples/COUPLED_CONTINUOUS_FORCES.md` for units, limits and a complete file.
+
+## Coupled causal receivers in performance files
+
+The v2 continuous-tone adapter accepts an optional `coupled_broadband` suffix
+followed by one existing `transfer`/frequency/withheld block spanning the complete
+voice-major modal basis. The original mechanical parser, signed port compiler,
+static preload, events and continuous phases are retained. Supplied sampled
+transfers replace legacy observation maps before tone preparation; they do not
+change mechanical coefficients or add reaction loads. The shared receiver owns
+the network pressure ceiling. Phase and held-event publication wait for the
+source/filter/delay transaction to succeed.
+
+Transfer samples use pressure per generalized modal velocity in the original
+signed normalization and exp(-i omega t), with the declared propagation delay.
+The file exposes a separate bounded receiver preparation allowance and reuses
+the existing complete transfer-row parser, fit controls and actual sampled-delay
+held-out gate. `music_render modal` writes fit/delay/producer evidence as
+EstimateOnly before the usual explicit observation decimation and PCM scale.
+The acoustic histories start at zero; mechanical preload supplies no acoustic
+prehistory. Fractional delay and held-out samples retain their approximation
+scope, and these authored transfers do not establish instrument validity.
+
+`examples/coupled_broadband_tones.performance` supplies two signed first-order
+pressure transfers, including negative direct gain, with an explicit three-sample
+delay. File-to-callback regressions bind every modal transfer row, preserve
+bitwise phase/output across callback partitions, compare every accepted physical
+state and work/heat frame with the neutral-map source, and refuse incomplete
+bases, bad clocks, held-out misfit and insufficient preparation budgets. See
+`examples/COUPLED_CONTINUOUS_FORCES.md` for units and complete record semantics.
 
 ## Continuous physical tones in modal performance files
 

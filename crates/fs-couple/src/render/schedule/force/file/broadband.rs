@@ -95,42 +95,8 @@ impl BroadbandModalPerformance {
         let mut bundles = Vec::with_capacity(count);
         let mut settings = Vec::with_capacity(count);
         for voice in &parsed.voices {
-            let modes = voice.model.modes().len();
-            let mut row = reader.row("transfer").map_err(|e| e.to_string())?;
-            let source_id = row.word().map_err(|e| e.to_string())?.to_owned();
-            let propagation_delay_s = row.scalar().map_err(|e| e.to_string())?;
-            let producer_relative_error_estimate = row.scalar().map_err(|e| e.to_string())?;
-            let controls = BroadbandModalControls {
-                fit_order: row.parse().map_err(|e| e.to_string())?,
-                fit_iterations: row.parse().map_err(|e| e.to_string())?,
-                delay_kernel_half_len: row.parse().map_err(|e| e.to_string())?,
-                max_held_out_rel_error: row.scalar().map_err(|e| e.to_string())?,
-            };
-            let training: usize = row.parse().map_err(|e| e.to_string())?;
-            let held: usize = row.parse().map_err(|e| e.to_string())?;
-            row.finish().map_err(|e| e.to_string())?;
-            admit_modal_samples(modes, training, held).map_err(|e| e.to_string())?;
-            let mut omega_rad_s = Vec::with_capacity(training);
-            let mut per_mode = vec![Vec::with_capacity(training); modes];
-            for _ in 0..training {
-                let (omega, values) = read_frequency(&mut reader, "frequency", modes)?;
-                omega_rad_s.push(omega);
-                for (column, value) in per_mode.iter_mut().zip(values) {
-                    column.push(value);
-                }
-            }
-            let mut held_out = Vec::with_capacity(held);
-            for _ in 0..held {
-                held_out.push(read_frequency(&mut reader, "withheld", modes)?);
-            }
-            bundles.push(ModalTransferSamples {
-                source_id,
-                propagation_delay_s,
-                producer_relative_error_estimate,
-                omega_rad_s,
-                per_mode,
-                held_out,
-            });
+            let (samples, controls) = read_transfer(&mut reader, voice.model.modes().len())?;
+            bundles.push(samples);
             settings.push(controls);
         }
         if reader.lines.next().is_some() {
@@ -212,6 +178,53 @@ impl BroadbandModalPerformance {
         self.tone_count
     }
 }
+
+/// One complete solver-neutral transfer block in its original signed mode order.
+/// Shared by independent voices and the complete coupled-network receiver.
+pub(super) fn read_transfer(
+    reader: &mut Reader<'_>,
+    modes: usize,
+) -> Result<(ModalTransferSamples, BroadbandModalControls), String> {
+    let mut row = reader.row("transfer").map_err(|e| e.to_string())?;
+    let source_id = row.word().map_err(|e| e.to_string())?.to_owned();
+    let propagation_delay_s = row.scalar().map_err(|e| e.to_string())?;
+    let producer_relative_error_estimate = row.scalar().map_err(|e| e.to_string())?;
+    let controls = BroadbandModalControls {
+        fit_order: row.parse().map_err(|e| e.to_string())?,
+        fit_iterations: row.parse().map_err(|e| e.to_string())?,
+        delay_kernel_half_len: row.parse().map_err(|e| e.to_string())?,
+        max_held_out_rel_error: row.scalar().map_err(|e| e.to_string())?,
+    };
+    let training: usize = row.parse().map_err(|e| e.to_string())?;
+    let held: usize = row.parse().map_err(|e| e.to_string())?;
+    row.finish().map_err(|e| e.to_string())?;
+    admit_modal_samples(modes, training, held).map_err(|e| e.to_string())?;
+    let mut omega_rad_s = Vec::with_capacity(training);
+    let mut per_mode = vec![Vec::with_capacity(training); modes];
+    for _ in 0..training {
+        let (omega, values) = read_frequency(reader, "frequency", modes)?;
+        omega_rad_s.push(omega);
+        for (column, value) in per_mode.iter_mut().zip(values) {
+            column.push(value);
+        }
+    }
+    let mut held_out = Vec::with_capacity(held);
+    for _ in 0..held {
+        held_out.push(read_frequency(reader, "withheld", modes)?);
+    }
+    Ok((
+        ModalTransferSamples {
+            source_id,
+            propagation_delay_s,
+            producer_relative_error_estimate,
+            omega_rad_s,
+            per_mode,
+            held_out,
+        },
+        controls,
+    ))
+}
+
 fn read_frequency(
     reader: &mut Reader<'_>,
     kind: &str,

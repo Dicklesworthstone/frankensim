@@ -17,17 +17,21 @@ use crate::render::{
 };
 use fs_exec::CancelGate;
 
+#[path = "coupled_tones/broadband.rs"]
+mod broadband;
+
 const MAX_TONES: usize = 32;
 const MAX_STORAGE_BYTES: usize = 128 * 1024 * 1024;
 const MAX_PREPARATION_WORK: u64 = 100_000_000_000;
 
 /// A v2 assembly with continuous physical port forces and its original held
 /// controls. Every spring, dashpot, state and work/heat channel stays in the
-/// complete coupled owner. The observation is the supplied real instantaneous
-/// pressure/velocity map; no acoustic propagation or validity is inferred.
+/// complete coupled owner. Observation uses the supplied real instantaneous
+/// pressure/velocity map or an explicitly sampled complete-network causal
+/// receiver; neither implies instrument validity or an acoustic reaction load.
 pub struct CoupledTonePerformance {
     info: ModalPerformanceInfo,
-    source: CoupledModalTones,
+    source: broadband::Source,
     held: Vec<f64>,
     events: Vec<ProjectedForceEvent>,
     cosine: Vec<f64>,
@@ -65,8 +69,10 @@ impl CoupledTonePerformance {
     ///
     /// Static preload solves the complete original spring equilibrium under
     /// pre-window held loads. It does not assume tones ran before the window.
-    /// Contact/friction schemas, imaginary pressure maps and receiver extensions
-    /// refuse; they are never replaced by this admitted linear trajectory.
+    /// An optional `coupled_broadband` suffix supplies one causal receiver over
+    /// all flattened modal velocities; see `examples/COUPLED_CONTINUOUS_FORCES.md`.
+    /// Without it, imaginary constant pressure maps refuse. Contact/friction
+    /// schemas are never replaced by this admitted linear trajectory.
     pub fn from_bytes(bytes: &[u8], max_block: usize) -> Result<Self, String> {
         if bytes.len() > MAX_MODAL_PERFORMANCE_BYTES {
             return Err("coupled tone input exceeds 4 MiB".into());
@@ -144,9 +150,7 @@ impl CoupledTonePerformance {
                 &mut parsed.force_config.max_projection_terms,
             )?);
         }
-        if reader.lines.next().is_some() {
-            return Err("unexpected trailing coupled-tone record".into());
-        }
+        let receiver = broadband::ReceiverSpec::read_optional(&mut reader, parsed.info.modes)?;
         let mut offsets = Vec::with_capacity(parsed.voices.len());
         let mut modes = 0;
         for voice in &parsed.voices {
@@ -187,7 +191,14 @@ impl CoupledTonePerformance {
                 PhysicalForceInput::new(voice.port_shapes, voice.initial_force_n)
                     .map_err(|e| e.to_string())?,
             );
-            models.push(voice.model);
+            models.push(if receiver.is_some() {
+                // The sampled receiver owns observation. Clearing only the
+                // legacy map permits its complex narrow-band metadata without
+                // altering any physical coordinate, preload or heat channel.
+                voice.model.without_pressure_transfers()
+            } else {
+                voice.model
+            });
         }
         let (initial, mut events) =
             ProjectedForceProgram::compile(inputs, parsed.events, parsed.force_config)
@@ -211,6 +222,7 @@ impl CoupledTonePerformance {
         }
         let source =
             CoupledModalTones::new(network, &omega, budget, &gate).map_err(|e| e.to_string())?;
+        let source = broadband::Source::new(source, receiver, parsed.info.sample_rate_hz, &gate)?;
         let mut info = parsed.info;
         info.input_hash = fs_blake3::hash_domain(MODAL_COUPLED_PERFORMANCE_HASH_DOMAIN, bytes);
         Ok(Self {
@@ -243,6 +255,13 @@ impl CoupledTonePerformance {
     pub fn continuous_force_tones(&self) -> usize {
         self.source.tone_count() - 1
     }
+    /// The explicit sampled receiver's fit, delay and held-out evidence, when
+    /// present. Producer samples and this interpolation remain EstimateOnly.
+    pub fn broadband_report(
+        &self,
+    ) -> Option<&crate::modal_acoustic_time::broadband::BroadbandModalReport> {
+        self.source.report()
+    }
 
     fn step(&mut self) -> Result<f64, RenderError> {
         let tones = self.source.tone_count();
@@ -268,12 +287,12 @@ impl CoupledTonePerformance {
             self.cosine[mode * tones] = self.next_cosine[mode * tones];
         }
         let pressure = match self.source.step(&self.cosine, &self.sine) {
-            Ok(frame) => frame.observer_pressure_pa,
+            Ok(pressure) => pressure,
             Err(error) => {
                 for (mode, &held) in self.held.iter().enumerate() {
                     self.cosine[mode * tones] = held;
                 }
-                return Err(RenderError::Coupled(error));
+                return Err(error);
             }
         };
         for (mode, held) in self.held.iter_mut().enumerate() {
@@ -342,3 +361,7 @@ impl PressureRenderer for CoupledTonePerformance {
 #[cfg(test)]
 #[path = "coupled_tones/tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "coupled_tones/broadband_tests.rs"]
+mod broadband_tests;
