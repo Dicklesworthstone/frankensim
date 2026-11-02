@@ -2513,7 +2513,7 @@ pub fn interconnect(
 /// force = `n` × pressure, volume-flow = `n` × velocity.
 ///
 /// # Errors
-/// [`PhsError::BadPortPairing`] on a bad port index; [`PhsError::NotPsd`]
+/// [`PhsError::BadPortPairing`] on a bad port index; [`PhsError::Unadmitted`]
 /// on a non-finite ratio; admission errors on the composite.
 pub fn transformer(
     a: PortHamiltonian,
@@ -2526,7 +2526,7 @@ pub fn transformer(
         return Err(PhsError::BadPortPairing);
     }
     if !ratio.is_finite() {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "transformer ratio",
         });
     }
@@ -2771,7 +2771,7 @@ pub fn reduce_galerkin(
 /// `c < 0`).
 pub fn mass_spring_damper(m: f64, k: f64, c: f64) -> Result<PortHamiltonian, PhsError> {
     if m <= 0.0 || k < 0.0 || c < 0.0 {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "msd parameters",
         });
     }
@@ -2801,7 +2801,7 @@ pub struct NeckEnds {
 /// linear in `ka`, so the admitted evaluation point does not matter.
 ///
 /// # Errors
-/// [`PhsError::NotPsd`] on a non-physical radius.
+/// [`PhsError::Unadmitted`] on a non-physical radius.
 pub fn neck_end_correction(radius: f64, flange: MouthFlange) -> Result<f64, PhsError> {
     let (density, sound_speed) = (1.0, 1.0);
     let omega = 0.5 * sound_speed / radius;
@@ -2919,7 +2919,7 @@ pub enum MouthFlange {
 /// far-field observer model.
 ///
 /// # Errors
-/// [`PhsError::NotPsd`] on non-physical inputs or `ka > 1`.
+/// [`PhsError::Unadmitted`] on non-physical inputs or `ka > 1`.
 pub fn compact_radiation_impedance(
     density: f64,
     sound_speed: f64,
@@ -2936,13 +2936,13 @@ pub fn compact_radiation_impedance(
         && radius.is_finite()
         && omega.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "compact radiation parameters",
         });
     }
     let ka = omega / sound_speed * radius;
     if ka > 1.0 {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "compact radiation ka > 1 (low-ka fit ceiling)",
         });
     }
@@ -2964,7 +2964,7 @@ pub fn compact_radiation_impedance(
 /// It does not represent an unbaffled pipe or a nonuniform vibrating face.
 ///
 /// # Errors
-/// [`PhsError::NotPsd`] on non-positive/non-finite parameters or derived
+/// [`PhsError::Unadmitted`] on non-positive/non-finite parameters or derived
 /// values outside the representable finite positive range.
 pub fn baffled_piston_impedance(
     density: f64,
@@ -2981,7 +2981,7 @@ pub fn baffled_piston_impedance(
         && radius.is_finite()
         && omega.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "baffled piston radiation parameters",
         });
     }
@@ -2990,14 +2990,14 @@ pub fn baffled_piston_impedance(
     let z0 = density * sound_speed / area;
     let x = 2.0 * ka;
     if ![ka, area, z0, x].iter().all(|v| v.is_finite() && *v > 0.0) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "baffled piston derived scale",
         });
     }
     let r = z0 * fs_math::special::one_minus_two_j1_over_x(x);
     let reactance = -z0 * (2.0 * fs_math::special::struve_h1(x) / x);
     if !(r > 0.0 && r.is_finite() && reactance.is_finite() && reactance < 0.0) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "baffled piston unrepresentable impedance",
         });
     }
@@ -3140,8 +3140,19 @@ impl SourceResistance {
         let count=self.terms.len();
         let mut rows=vec![0.0;count.max(self.n)*self.n];
         for (row,(i,j,value)) in self.terms.into_iter().enumerate() {
+            // frankensim-4cfql: a finite negative coefficient makes its rank-one term value·w·wᵀ
+            // not positive semidefinite. That is about the term, not a proof that the assembled R
+            // is indefinite. A non-finite coefficient is a domain refusal. Zero terms are never
+            // recorded.
+            if value.is_finite() && value < 0.0 {
+                return Err(PhsError::NotPsd {
+                    what: "source resistor coefficient",
+                });
+            }
             if !value.is_finite() || value <= 0.0 {
-                return Err(PhsError::NotPsd { what:"source resistor coefficient" });
+                return Err(PhsError::Unadmitted {
+                    what: "source resistor coefficient",
+                });
             }
             let weight=det::sqrt(value);
             rows[row*self.n+i]=weight;
@@ -3220,7 +3231,7 @@ fn foster_radiation_series(
     n: usize,
 ) -> Result<Vec<(f64, f64)>, PhsError> {
     if n == 0 || !(radius > 0.0 && sound_speed > 0.0 && omega_pin > 0.0) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "radiation Foster window",
         });
     }
@@ -3230,7 +3241,7 @@ fn foster_radiation_series(
     }
     let omega_lo = (omega_pin / 8.0).min(omega_hi / 4.0).max(omega_hi / 64.0);
     if !(omega_lo > 0.0 && omega_hi > omega_lo) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "radiation Foster window",
         });
     }
@@ -3269,7 +3280,7 @@ pub fn helmholtz_resonator_radiating(
     neck_resistance: f64,
 ) -> Result<PortHamiltonian, PhsError> {
     if !(neck_resistance >= 0.0 && neck_resistance.is_finite()) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "neck viscothermal resistance must be finite and non-negative",
         });
     }
@@ -3308,7 +3319,7 @@ pub fn helmholtz_resonator_exterior_mouth(
     neck_resistance: f64,
 ) -> Result<PortHamiltonian, PhsError> {
     if !(neck_resistance >= 0.0 && neck_resistance.is_finite()) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "neck viscothermal resistance must be finite and non-negative",
         });
     }
@@ -3380,10 +3391,10 @@ pub fn series_impedance_ports(
 /// this capacitor remains a DAE Dirac structure.
 ///
 /// # Errors
-/// [`PhsError::NotPsd`] if `compliance` is not positive and finite.
+/// [`PhsError::Unadmitted`] if `compliance` is not positive and finite.
 pub fn common_effort_capacitor(compliance: f64) -> Result<PortHamiltonian, PhsError> {
     if !(compliance > 0.0 && compliance.is_finite()) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "common-effort compliance",
         });
     }
@@ -3531,7 +3542,7 @@ fn helmholtz_parts_with(
         && sound_speed.is_finite()
         && resistance.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "helmholtz resonator parameters",
         });
     }
@@ -3600,7 +3611,7 @@ pub fn lc_ladder_terminated(
     r_load: f64,
 ) -> Result<PortHamiltonian, PhsError> {
     if r_load < 0.0 || !r_load.is_finite() {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "lc ladder termination resistance",
         });
     }
@@ -3738,7 +3749,7 @@ pub struct WallPin {
 /// shunt `L = σ/A_w`, `C = A_w/K`, `R = r/A_w`.
 ///
 /// # Errors
-/// [`PhsError::NotPsd`] on a non-physical pin or `ω`.
+/// [`PhsError::Unadmitted`] on a non-physical pin or `ω`.
 pub fn wall_specific_impedance(wall: &WallPin, omega: f64) -> Result<C64, PhsError> {
     if !(wall.surface_density > 0.0
         && wall.surface_density.is_finite()
@@ -3749,7 +3760,7 @@ pub fn wall_specific_impedance(wall: &WallPin, omega: f64) -> Result<C64, PhsErr
         && omega > 0.0
         && omega.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "wall pin and frequency",
         });
     }
@@ -3765,7 +3776,7 @@ pub fn wall_specific_impedance(wall: &WallPin, omega: f64) -> Result<C64, PhsErr
 /// As [`wall_specific_impedance`], plus a non-physical radius.
 pub fn wall_admittance_per_metre(wall: &WallPin, radius: f64, omega: f64) -> Result<C64, PhsError> {
     if !(radius > 0.0 && radius.is_finite()) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "wall radius",
         });
     }
@@ -3914,7 +3925,7 @@ fn spherical_cone_wall(
         || !(density > 0.0 && sound_speed > 0.0)
         || (inlets != 1 && inlets != 2)
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "spherical cone parameters",
         });
     }
@@ -3927,7 +3938,7 @@ fn spherical_cone_wall(
             && pin.prandtl.is_finite())
             || pin.foster_branches > 8)
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "viscothermal pin parameters",
         });
     }
@@ -4082,7 +4093,7 @@ fn spherical_cone_wall(
     let mut pad_i = 0usize;
     for tap in taps {
         if !tap_valid(tap) {
-            return Err(PhsError::NotPsd {
+            return Err(PhsError::Unadmitted {
                 what: "acoustic tap station and neck",
             });
         }
@@ -4386,7 +4397,7 @@ pub fn acoustic_chain_outlet_wall(
     let mut last_radius = 0.0;
     for s in sections {
         if !(s.length > 0.0 && s.radius > 0.0 && s.outlet() > 0.0) || s.cells == 0 {
-            return Err(PhsError::NotPsd {
+            return Err(PhsError::Unadmitted {
                 what: "acoustic section parameters",
             });
         }
@@ -4398,7 +4409,7 @@ pub fn acoustic_chain_outlet_wall(
         || !(density > 0.0 && sound_speed > 0.0)
         || (inlets != 1 && inlets != 2)
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "acoustic chain parameters",
         });
     }
@@ -4411,7 +4422,7 @@ pub fn acoustic_chain_outlet_wall(
             && pin.prandtl.is_finite())
             || pin.foster_branches > 8)
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "viscothermal pin parameters",
         });
     }
@@ -4566,7 +4577,7 @@ pub fn acoustic_chain_outlet_wall(
     let mut pad_i = 0usize;
     for tap in taps {
         if !tap_valid(tap) {
-            return Err(PhsError::NotPsd {
+            return Err(PhsError::Unadmitted {
                 what: "acoustic tap station and neck",
             });
         }
@@ -4740,7 +4751,7 @@ fn apply_closed_pad(
     let vol = core::f64::consts::PI * tap.neck_radius * tap.neck_radius * tap.neck_length;
     let c_h = vol / (density * sound_speed * sound_speed);
     if !(c_h > 0.0 && c_h.is_finite()) || q[tap_q * n + tap_q] <= 0.0 {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "closed pad volume",
         });
     }
@@ -4813,7 +4824,7 @@ fn wall_state_count(n_cells: usize, wall: Option<&WallPin>) -> Result<usize, Phs
         && w.resistance >= 0.0
         && w.resistance.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "wall pin surface density, stiffness, and resistance",
         });
     }
@@ -4833,7 +4844,7 @@ fn apply_cell_wall(
     junction_scale: f64,
 ) -> Result<(), PhsError> {
     if !(area > 0.0 && area.is_finite()) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "wall cell area",
         });
     }
@@ -4841,7 +4852,7 @@ fn apply_cell_wall(
     let l_w = wall.surface_density / area;
     let r_w = wall.resistance / area;
     if !(c_w > 0.0 && l_w > 0.0 && r_w.is_finite()) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "wall cell LCR",
         });
     }
@@ -4916,7 +4927,7 @@ fn tap_open_budget(
     let mut n_tap_foster = 0usize;
     for tap in taps {
         if !tap_valid(tap) {
-            return Err(PhsError::NotPsd {
+            return Err(PhsError::Unadmitted {
                 what: "acoustic tap station and neck",
             });
         }
@@ -4961,7 +4972,7 @@ fn apply_tap_line(
     let dx = length.max(1.0e-6) / TAP_LINE_CELLS as f64;
     let area = core::f64::consts::PI * radius * radius;
     if !(area > 0.0 && density > 0.0 && sound_speed > 0.0) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "acoustic tap line geometry",
         });
     }
@@ -5100,7 +5111,9 @@ fn bessel_series_and_shunt(
     if ![radius, density, omega, pin.prandtl].iter().all(|v| v.is_finite() && *v > 0.0)
         || ![inertance, compliance, pin.dynamic_viscosity].iter().all(|v| v.is_finite() && *v >= 0.0)
         || !(pin.gamma >= 1.0 && pin.gamma.is_finite()) {
-        return Err(PhsError::NotPsd { what: "Bessel viscothermal pin parameters" });
+        return Err(PhsError::Unadmitted {
+            what: "Bessel viscothermal pin parameters",
+        });
     }
     if pin.dynamic_viscosity == 0.0 { return Ok((0.0, 0.0, 1.0, 1.0)); }
     let rv = radius * det::sqrt(omega * density / pin.dynamic_viscosity);
@@ -5112,7 +5125,9 @@ fn bessel_series_and_shunt(
         series.im, 1.0 + (pin.gamma - 1.0) * ft.re);
     if ![result.0,result.1,result.2,result.3].iter().all(|v| v.is_finite() && *v >= 0.0)
         || result.2 <= 0.0 || result.3 <= 0.0 {
-        return Err(PhsError::NotPsd { what: "Bessel viscothermal pin response" });
+        return Err(PhsError::Unadmitted {
+            what: "Bessel viscothermal pin response",
+        });
     }
     Ok(result)
 }
@@ -5143,7 +5158,7 @@ pub fn foster_sqrt_omega_terms(
         || !(omega_lo > 0.0)
         || !(omega_hi > omega_lo && omega_hi.is_finite())
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "Foster √ω window",
         });
     }
@@ -5164,7 +5179,7 @@ pub fn foster_sqrt_omega_terms(
         })
         .collect();
     if terms.iter().any(|&(g, p)| !(g > 0.0 && g.is_finite() && p.is_finite())) {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "Foster √ω window",
         });
     }
@@ -5178,7 +5193,7 @@ pub fn foster_sqrt_omega_terms(
 pub fn foster_match_re(samples: &[(f64, f64)], n: usize) -> Result<Vec<(f64, f64)>, PhsError> {
     if n == 0 || n > 8 || samples.len() != n || samples.iter().any(|&(w, r)| !(w > 0.0 && r >= 0.0))
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "Foster match samples",
         });
     }
@@ -5214,7 +5229,9 @@ fn bessel_series_resistance(inertance: f64, radius: f64, density: f64, mu: f64, 
     let rv = radius * det::sqrt(omega * density / mu);
     let value = (C64::new(0.0, omega * inertance) / zk_one_minus_f(rv)?).re;
     if !(value >= 0.0 && value.is_finite()) {
-        return Err(PhsError::NotPsd { what: "Bessel series resistance" });
+        return Err(PhsError::Unadmitted {
+            what: "Bessel series resistance",
+        });
     }
     Ok(value)
 }
@@ -5232,7 +5249,9 @@ fn bessel_shunt_conductance(
     // Y = j ω C (1 + (γ−1) F_t); Re Y = −ω C (γ−1) Im F_t.
     let value = -omega * compliance * (pin.gamma - 1.0) * f.im;
     if !(value >= 0.0 && value.is_finite()) {
-        return Err(PhsError::NotPsd { what: "Bessel shunt conductance" });
+        return Err(PhsError::Unadmitted {
+            what: "Bessel shunt conductance",
+        });
     }
     Ok(value)
 }
@@ -5310,7 +5329,7 @@ pub fn slice_linear_taper(
     slices: usize,
 ) -> Result<Vec<AcousticSection>, PhsError> {
     if !(inlet_radius > 0.0 && outlet_radius > 0.0 && length > 0.0) || slices == 0 {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "linear taper",
         });
     }
@@ -5364,7 +5383,7 @@ pub fn modal_bank_ports(
     let mut g = vec![0.0; n * m];
     for i in 0..nm {
         if omegas[i] <= 0.0 || zetas[i] < 0.0 {
-            return Err(PhsError::NotPsd {
+            return Err(PhsError::Unadmitted {
                 what: "modal parameters",
             });
         }
@@ -5403,7 +5422,7 @@ pub fn moving_end_waveguide(
         || zetas.len() != n_modes
         || !(length > 0.0 && tension > 0.0 && lin_density > 0.0)
     {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "moving-end waveguide parameters",
         });
     }
@@ -5452,7 +5471,7 @@ impl Storage for DuffingStorage {
 /// Admission errors on non-physical parameters.
 pub fn duffing_oscillator(m: f64, k: f64, k3: f64, c: f64) -> Result<PortHamiltonian, PhsError> {
     if m <= 0.0 || k < 0.0 || k3 < 0.0 || c < 0.0 {
-        return Err(PhsError::NotPsd {
+        return Err(PhsError::Unadmitted {
             what: "duffing parameters",
         });
     }
@@ -5665,6 +5684,70 @@ mod quadratic_storage_pattern {
         assert!(storage.cols.len() > n && storage.cols.len() < n * n / 4, "{}", storage.cols.len());
         let mut draws = Draws(0x0376_2002);
         assert_bitwise(&storage, n, &mut draws, 400);
+    }
+}
+
+/// frankensim-4cfql: the scalar domain refusals of this file are `Unadmitted`, displayed
+/// `refused: {what}`, and claim nothing about definiteness. Planted negatives: a
+/// negative-definite `R` and a negative source-resistor term still report `NotPsd`; a
+/// non-finite source-resistor coefficient does not.
+#[cfg(test)]
+mod refusal_labels {
+    use super::{
+        PhsError, PortHamiltonian, QuadraticStorage, SourceResistance, WallPin, duffing_oscillator,
+        wall_admittance_per_metre,
+    };
+
+    #[test]
+    fn domain_refusals_are_unadmitted_and_definiteness_failures_stay_not_psd() {
+        let wall = WallPin {
+            surface_density: 1.0,
+            stiffness_per_area: 1.0,
+            resistance: 1.0,
+        };
+        for (refused, what) in [
+            (
+                duffing_oscillator(0.0, 1.0, 0.0, 0.0).err(),
+                "duffing parameters",
+            ),
+            (
+                wall_admittance_per_metre(&wall, 0.0, 1.0).err(),
+                "wall radius",
+            ),
+        ] {
+            assert_eq!(refused, Some(PhsError::Unadmitted { what }));
+            let text = refused.unwrap().to_string();
+            assert_eq!(text, format!("refused: {what}"));
+            assert!(!text.contains("positive semidefinite") && !text.contains("NotPsd"));
+        }
+        let storage = Box::new(QuadraticStorage::new(vec![1.0, 0.0, 0.0, 1.0], 2).unwrap());
+        let bad_r = PortHamiltonian::new(
+            2,
+            1,
+            vec![0.0, 1.0, -1.0, 0.0],
+            vec![0.0, 0.0, 0.0, -0.5],
+            vec![0.0, 1.0],
+            storage,
+        );
+        assert_eq!(bad_r.err(), Some(PhsError::NotPsd { what: "R" }));
+        let mut negative = SourceResistance::new(2);
+        negative.edge(0, 1, -1.0);
+        assert_eq!(
+            negative.finish().err(),
+            Some(PhsError::NotPsd {
+                what: "source resistor coefficient"
+            })
+        );
+        for value in [f64::NAN, f64::INFINITY] {
+            let mut non_finite = SourceResistance::new(2);
+            non_finite.edge(0, 1, value);
+            assert_eq!(
+                non_finite.finish().err(),
+                Some(PhsError::Unadmitted {
+                    what: "source resistor coefficient"
+                })
+            );
+        }
     }
 }
 

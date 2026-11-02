@@ -441,7 +441,7 @@ inventoried and measured in fs-couple `tests/integrator_warping_audit.rs`.
   `p/U = (rho c/S) [1 - 2J1(2ka)/(2ka) - i 2H1(2ka)/(2ka)]`.
   Area converts to mean p/v; area squared converts to force/velocity.
   No rings parameter or numerical surface discretization. Nonpositive,
-  nonfinite or unrepresentable derived scales refuse with NotPsd.
+  nonfinite or unrepresentable derived scales refuse with `Unadmitted`.
   G2 `piston_closed_form_certified` targets 1e-13 relative at independent
   analytic landmarks, resistance's 1e-12 low-ka band and the high-ka limit.
   At ka=1e-3 the cubic reactance correction is 2.26e-10: the leading-term
@@ -536,9 +536,15 @@ central native qualification. The refusals of `zk.rs` and
 `refused: {what}`: domain, resolution and convergence refusals that claim
 nothing about definiteness (frankensim-986oi). There is one exception. A
 negative eigenvalue of the `ZkDiffusive` Jacobi measure is
-`PhsError::NotPsd`, the variant that means a negative eigenvalue. Domain
-refusals elsewhere in fs-phs that still return NotPsd are not moved by
-this change.
+`PhsError::NotPsd`, the variant that means a negative eigenvalue. The
+scalar domain refusals of `lib.rs` are `Unadmitted` as well
+(frankensim-4cfql). `NotPsd` in fs-phs now comes only from eigenvalue
+tests (`require_psd`, which admits each named `R` and `Q`; the split `Q`
+check of `linear_exact`; the ZK Jacobi measure) and from one scalar
+site. A finite negative source-resistor coefficient keeps `NotPsd`,
+because its rank-one term `value·w·wᵀ` is then not positive
+semidefinite. That is a statement about the term, not a proof that the
+assembled `R` is indefinite. A non-finite coefficient is `Unadmitted`.
 
 1. Admission rejects non-skew `J`, asymmetric or non-PSD `R`, non-PSD
    `Q`, and bad dimensions by name.
