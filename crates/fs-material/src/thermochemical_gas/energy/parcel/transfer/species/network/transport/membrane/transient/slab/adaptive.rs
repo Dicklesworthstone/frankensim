@@ -34,7 +34,7 @@ pub struct MembraneDiffusionAdvanceControls {
     /// Original implicit calls, including all rejected full/half probes.
     pub maximum_evaluations: usize,
     pub absolute_pressure_tolerance_pa: f64,
-    /// Every sorbed cell, finite reservoir and integrated face is compared.
+    /// Every mobile cell, separate immobile pool, finite reservoir and face is compared.
     pub absolute_amount_tolerance_mol: f64,
     /// Multiplies each coordinate's change, never its absolute pressure datum.
     pub relative_tolerance: f64,
@@ -93,7 +93,7 @@ pub struct FiniteMembraneAdvanceBalance {
     pub pressures_after_pa: [f64; 2],
     pub amount_changes_mol: [f64; 2],
     pub reservoir_residuals_mol: [f64; 2],
-    /// Reservoir plus sorbed changes, computed from original-to-final states.
+    /// Reservoir plus all membrane storage, computed from original-to-final states.
     pub closed_amount_residual_mol: f64,
 }
 
@@ -112,6 +112,7 @@ pub struct MembraneDiffusionAdvanceReport {
     pub face_amounts_mol: Vec<f64>,
     /// Sum of absolute transfers, retaining physical direction reversals.
     pub gross_face_amounts_mol: Vec<f64>,
+    /// Mobile plus any explicit immobile storage.
     pub stored_before_mol: f64,
     pub stored_after_mol: f64,
     pub stored_change_mol: f64,
@@ -151,6 +152,19 @@ pub(crate) trait Native: Clone {
     type Workspace;
     type Error;
     fn membrane(&self) -> &MembraneDiffusionState;
+    /// One separate immobile inventory per cell, when the original owner has it.
+    fn immobile_amounts(&self) -> Option<&[f64]> {
+        None
+    }
+    /// Direct linear owners keep their original controls. Iterative owners may
+    /// tighten them to the additional absolute audit, never relax native limits.
+    fn accuracy_controls(
+        &self,
+        requested: MembraneDiffusionSolve,
+        _absolute_limit_mol: f64,
+    ) -> MembraneDiffusionSolve {
+        requested
+    }
     fn reservoirs(&self) -> Option<Reservoirs> {
         None
     }
@@ -292,8 +306,31 @@ fn probe<S: Native>(
         });
     }
     *calls += 1;
+    let (_, per_inventory) = algebraic_budget(state, span, window, controls)?;
+    let mut limit = per_inventory;
+    for (i, cell) in state.membrane().model.cells.iter().enumerate() {
+        if i % 128 == 0 {
+            poll(cancelled)?;
+        }
+        limit = limit.min(pressure_allowance(
+            per_inventory,
+            cell.capacity_mol_m2_pa * state.membrane().model.area_m2,
+            controls,
+        )?);
+    }
+    if let Some(reservoirs) = state.reservoirs() {
+        for capacity in reservoirs.capacities {
+            limit = limit.min(pressure_allowance(per_inventory, capacity, controls)?);
+        }
+    }
     let result = state
-        .native_step(reservoirs, span, controls.step, work, cancelled)
+        .native_step(
+            reservoirs,
+            span,
+            state.accuracy_controls(controls.step, limit),
+            work,
+            cancelled,
+        )
         .map_err(|e| {
             if S::is_cancelled(&e) {
                 Error::Cancelled
@@ -304,13 +341,82 @@ fn probe<S: Native>(
     algebraic_balance(state, &result.0, &result.1, window, controls, cancelled)?;
     Ok(result)
 }
-// Native solves are direct factorizations: their controls admit or refuse a
-// measured residual; they do not tune iteration accuracy. Keep their original
-// checks, including relative-only requests, and independently bound each amount
+// Direct native factorizations admit/refuse measured residuals. Iterative
+// owners can additionally tighten their solve through accuracy_controls. Keep
+// original checks, including relative-only requests, and independently bound each amount
 // equation before estimating temporal error. The amount allowance is shared
 // across inventories so large solubility/capacity contrasts cannot hide a large
 // state error behind a small per-row pressure error. Accepted durations sum to
 // the window, so the balance allowance never grows with the number of steps.
+fn algebraic_budget<S: Native>(
+    state: &S,
+    duration: f64,
+    window: f64,
+    controls: MembraneDiffusionAdvanceControls,
+) -> Result<(f64, f64), S::Error> {
+    let inventories = state.membrane().model.cells.len()
+        + state.immobile_amounts().map_or(0, <[f64]>::len)
+        + if state.reservoirs().is_some() { 2 } else { 0 };
+    let global = (0.01 * controls.absolute_amount_tolerance_mol)
+        .min((0.01 * controls.amount_balance_tolerance_mol) * (duration / window));
+    let per_inventory = global / inventories as f64;
+    if !positive(per_inventory) {
+        return Err(Error::Invalid(
+            "algebraic share of membrane accuracy/balance budget underflowed",
+        ));
+    }
+    Ok((global, per_inventory))
+}
+fn pressure_allowance<E>(
+    per_inventory: f64,
+    capacity: f64,
+    controls: MembraneDiffusionAdvanceControls,
+) -> Result<f64, E> {
+    let amount = per_inventory.min((0.01 * controls.absolute_pressure_tolerance_pa) * capacity);
+    if positive(amount) {
+        Ok(amount)
+    } else {
+        Err(Error::Invalid(
+            "algebraic pressure/storage budget underflowed",
+        ))
+    }
+}
+fn cell_changes<S: Native>(old: &S, new: &S, i: usize) -> Result<(f64, f64), S::Error> {
+    let model = &old.membrane().model;
+    let mobile = finite(
+        (model.cells[i].capacity_mol_m2_pa * model.area_m2)
+            * (new.membrane().partial_pressures_pa[i] - old.membrane().partial_pressures_pa[i]),
+    )?;
+    let immobile = match old.immobile_amounts() {
+        Some(before) => {
+            finite(new.immobile_amounts().expect("fixed immobile storage")[i] - before[i])?
+        }
+        None => 0.0,
+    };
+    Ok((mobile, immobile))
+}
+fn stored_amount<S: Native>(
+    state: &S,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<f64, S::Error> {
+    let mut total = Sum::default();
+    add(
+        &mut total,
+        state
+            .membrane()
+            .stored_amount_mol()
+            .map_err(|_| Error::Invalid("unrepresentable mobile stored amount"))?,
+    )?;
+    if let Some(amounts) = state.immobile_amounts() {
+        for (i, &amount) in amounts.iter().enumerate() {
+            if i % 128 == 0 {
+                poll(cancelled)?;
+            }
+            add(&mut total, amount)?;
+        }
+    }
+    Ok(total.value)
+}
 fn algebraic_balance<S: Native>(
     old: &S,
     new: &S,
@@ -320,40 +426,20 @@ fn algebraic_balance<S: Native>(
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<(), S::Error> {
     let model = &old.membrane().model;
-    let inventories = model.cells.len() + if old.reservoirs().is_some() { 2 } else { 0 };
-    let global = (0.01 * controls.absolute_amount_tolerance_mol)
-        .min((0.01 * controls.amount_balance_tolerance_mol) * (report.duration_s / window));
-    let per_inventory = global / inventories as f64;
-    if !positive(per_inventory) {
-        return Err(Error::Invalid(
-            "algebraic share of membrane accuracy/balance budget underflowed",
-        ));
-    }
-    let allowance = |capacity: f64| -> Result<f64, S::Error> {
-        let amount = per_inventory.min((0.01 * controls.absolute_pressure_tolerance_pa) * capacity);
-        if positive(amount) {
-            Ok(amount)
-        } else {
-            Err(Error::Invalid(
-                "algebraic pressure/storage budget underflowed",
-            ))
-        }
-    };
+    let (global, per_inventory) = algebraic_budget(old, report.duration_s, window, controls)?;
     for (i, cell) in model.cells.iter().enumerate() {
         if i % 128 == 0 {
             poll(cancelled)?;
         }
         let capacity = cell.capacity_mol_m2_pa * model.area_m2;
-        let delta = finite(
-            capacity
-                * (new.membrane().partial_pressures_pa[i] - old.membrane().partial_pressures_pa[i]),
-        )?;
+        let (mobile, immobile) = cell_changes(old, new, i)?;
+        let delta = finite(mobile + immobile)?;
         let incoming = face_amount(report, i, model.area_m2)?;
         let outgoing = face_amount(report, i + 1, model.area_m2)?;
         balance(
             Some(i),
             finite(delta - (incoming - outgoing))?,
-            allowance(capacity)?,
+            pressure_allowance(per_inventory, capacity, controls)?,
         )?;
     }
     balance(None, report.amount_residual_mol, global)?;
@@ -369,7 +455,7 @@ fn algebraic_balance<S: Native>(
             let delta =
                 finite(before.capacities[side] * (after.pressures[side] - before.pressures[side]))?;
             let residual = finite(delta + outward[side])?;
-            let tolerance = allowance(before.capacities[side])?;
+            let tolerance = pressure_allowance(per_inventory, before.capacities[side], controls)?;
             if residual.abs() > tolerance {
                 return Err(Error::ReservoirBalance {
                     reservoir: side,
@@ -434,6 +520,21 @@ fn distance<S: Native>(
             model.cells[i].capacity_mol_m2_pa * model.area_m2,
             c,
         )?);
+    }
+    if let Some(before) = old.immobile_amounts() {
+        let a = a.immobile_amounts().expect("fixed immobile storage");
+        let b = b.immobile_amounts().expect("fixed immobile storage");
+        for i in 0..before.len() {
+            if i % 128 == 0 {
+                poll(cancelled)?;
+            }
+            error = error.max(ratio(
+                a[i] - b[i],
+                (a[i] - before[i]).abs().max((b[i] - before[i]).abs()),
+                c.absolute_amount_tolerance_mol,
+                c.relative_tolerance,
+            )?);
+        }
     }
     if let Some(initial) = old.reservoirs() {
         let (a, b) = (
@@ -603,12 +704,12 @@ pub(crate) fn advance<S: Native>(
         if i % 128 == 0 {
             poll(&mut cancelled)?;
         }
-        let delta = finite(
-            (model.cells[i].capacity_mol_m2_pa * model.area_m2)
-                * (state.membrane().partial_pressures_pa[i]
-                    - initial.membrane().partial_pressures_pa[i]),
-        )?;
-        add(&mut change, delta)?;
+        let (mobile, immobile) = cell_changes(initial, &state, i)?;
+        let delta = finite(mobile + immobile)?;
+        add(&mut change, mobile)?;
+        if initial.immobile_amounts().is_some() {
+            add(&mut change, immobile)?;
+        }
         let residual = finite(delta - (signed[i].value - signed[i + 1].value))?;
         balance(Some(i), residual, controls.amount_balance_tolerance_mol)?;
         maximum_cell_residual = maximum_cell_residual.max(residual.abs());
@@ -660,14 +761,8 @@ pub(crate) fn advance<S: Native>(
         suggested_step_s: step,
         face_amounts_mol: signed.into_iter().map(|s| s.value).collect(),
         gross_face_amounts_mol: gross.into_iter().map(|s| s.value).collect(),
-        stored_before_mol: initial
-            .membrane()
-            .stored_amount_mol()
-            .map_err(|_| Error::Invalid("unrepresentable original sorbed amount"))?,
-        stored_after_mol: state
-            .membrane()
-            .stored_amount_mol()
-            .map_err(|_| Error::Invalid("unrepresentable final sorbed amount"))?,
+        stored_before_mol: stored_amount(initial, &mut cancelled)?,
+        stored_after_mol: stored_amount(&state, &mut cancelled)?,
         stored_change_mol: change.value,
         amount_residual_mol: residual,
         maximum_cell_amount_residual_mol: maximum_cell_residual,

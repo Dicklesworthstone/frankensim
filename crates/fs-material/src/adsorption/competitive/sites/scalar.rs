@@ -50,7 +50,12 @@ pub fn backward_euler_site(initial: f64, capacity: f64, adsorption_rate: f64,
     let change = wa * vacant0 - wd * initial;
     let occupied = if change.abs() < 0.5 * initial { initial + change }
         else { inverse * initial + wa * capacity };
-    let vacancy = inverse * vacant0 + wd * capacity;
+    // An empty population with no integrated adsorption remains exactly empty.
+    // Evaluating the two complementary weights separately can otherwise round
+    // vacancy one ULP above capacity. This analytical limit also keeps the
+    // nonzero derivative with respect to adsorption at zero loading.
+    let vacancy = if initial == 0.0 && qa == 0.0 { capacity }
+        else { inverse * vacant0 + wd * capacity };
     let incoming = qa * vacancy;
     let outgoing = qd * occupied;
     let derivative = (duration_s * inverse) * vacancy;
@@ -99,5 +104,30 @@ mod tests {
         assert_eq!(equilibrium.gross_adsorption_mol,equilibrium.gross_desorption_mol);
         assert_eq!(backward_euler_site(0.0,1.0,0.0,2.0,1.0).unwrap().occupied_moles,0.0);
         assert!(backward_euler_site(1.1,1.0,1.0,1.0,1.0).is_err());
+    }
+    #[test]
+    fn empty_sites_preserve_inventory_at_small_steps_and_retain_the_uptake_jacobian() {
+        let capacity = 1e-6;
+        let desorption = 0.5;
+        for duration in [0.0625, 0.03125, 1e-12, 1e6] {
+            let step = backward_euler_site(0.0,capacity,0.0,desorption,duration).unwrap();
+            assert_eq!(step.occupied_moles,0.0);
+            assert_eq!(step.vacancy_moles,capacity);
+            assert_eq!(step.occupied_change_mol,0.0);
+            assert_eq!(step.gross_adsorption_mol,0.0);
+            assert_eq!(step.gross_desorption_mol,0.0);
+            assert_eq!(step.maximum_balance_residual_mol,0.0);
+            let derivative = duration/(1.0+duration*desorption)*capacity;
+            assert!(step.adsorption_rate_derivative_mol_s>0.0);
+            assert!((step.adsorption_rate_derivative_mol_s-derivative).abs()
+                <=4.0*f64::EPSILON*derivative);
+        }
+        // A small positive adsorption perturbation must create the amount
+        // predicted by the zero-loading Jacobian used in the coupled Newton solve.
+        let empty = backward_euler_site(0.0,capacity,0.0,desorption,0.0625).unwrap();
+        let perturbed = backward_euler_site(0.0,capacity,1e-6,desorption,0.0625).unwrap();
+        assert!((perturbed.occupied_moles/1e-6-empty.adsorption_rate_derivative_mol_s).abs()
+            <=1e-7*empty.adsorption_rate_derivative_mol_s);
+        assert_eq!(perturbed.occupied_moles+perturbed.vacancy_moles,capacity);
     }
 }

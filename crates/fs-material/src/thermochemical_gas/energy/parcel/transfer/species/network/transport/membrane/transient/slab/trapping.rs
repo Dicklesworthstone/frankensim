@@ -449,5 +449,7 @@ impl FiniteTrappingMembraneDiffusionState {
     }
 }
 
+pub mod adaptive;
+
 #[cfg(test)]
 mod tests;

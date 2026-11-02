@@ -8103,6 +8103,32 @@ quadratic solutions, the native Henry limit, finite nonlinear equilibrium,
 saturation-delayed breakthrough, preload/desorption history, seals and atomic
 nonlinear/cancellation refusal; these are not measured polymer validation.
 
+### Adaptive finite-trap membrane windows
+
+`membrane::transient::slab::trapping::adaptive` reuses the original membrane
+full-step/two-half-step controller for simultaneous Henry diffusion and finite
+Langmuir kinetics. Mobile pressure, mobile amount, trapped amount, finite
+reservoir inventories and integrated face transfers enter separate local
+accuracy tests. A constant total loading cannot hide unresolved exchange
+between mobile and trapped stores. Only accepted native halves contribute to
+the physical timeline and signed/gross face totals.
+
+The shared native adapter exposes optional immobile inventories and may tighten
+iterative algebraic controls; original controls are never relaxed. Per-probe
+and original-to-final balances include both stores. Reports retain separate
+mobile/trapped amounts and changes, plus finite-reservoir and closed balances.
+Reusable native workspaces, explicit evaluation/iteration/backtrack limits and
+bounded cancellation retain transactional failure. The empty, zero-adsorption
+scalar limit keeps exactly zero loading and exactly full vacancy without
+discarding its nonzero adsorption-rate derivative.
+
+Focused G0/G1/G3 regressions compare sealed exchange against its continuous
+Riccati solution, refine finite-reservoir transport against native steps, check
+work/native/cancellation refusal and exact target times, and exercise the
+scalar empty-site limit. These local temporal estimates do not certify a
+whole-window or spatial error bound, measured membrane accuracy, changing
+temperature, sorption heat, competitive species or swelling.
+
 ### Original-source binding for finite membrane traps
 
 `membrane::transient::trapping::ResolvedTrappingMembraneDiffusion` attaches
