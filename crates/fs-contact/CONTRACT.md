@@ -1116,7 +1116,8 @@ creates assembled energy is refused. All impact loss remains unallocated
 mechanical loss, not an automatic thermal or friction-heat source.
 
 This bounded owner retains a cap of 21 active contacts. Numerically SPD rows
-use a positive weighted contraction witness for unique impulses; admitted
+use a positive weighted contraction witness or the full-rank candidate energy
+criterion below for unique impulses; admitted
 semidefinite rows use the separate velocity-image witness described below.
 Distinct independently checked passive roots return `Nonunique`; a checked
 root without a sufficient witness returns `UnresolvedDeterminacy`. General
@@ -1157,7 +1158,16 @@ mechanics owner still checks the actual event geometry and momentum response.
 
 `frictional_multicontact` separates numerical PSD/rank admission from physical Coulomb determinacy. It reuses original `fs-la` eigendecomposition, checks original-matrix spectral and orthogonality residuals and a separated numerical rank, and retains the unmodified mobility for every nonlinear, cone, complementarity and work check. No compliance or dropped physical row is introduced.
 
-`UniqueImpulses` retains the independent-row contraction result. `UniqueVelocity(PsdVelocityWitness)` has an explicit `PsdVelocityCriterion`: `NormalRangeObservable` uses the earlier friction-weighted normal-range feedback bound; `CandidateFrictionDirection` uses subgradients of an audited candidate. For any second Coulomb root, norm monotonicity gives `E + delta_p_n dot C delta_v_t <= 0`, with `E = delta_p^T W delta_p`. When this bilinear feedback annihilates the admitted mobility nullspace and its symmetric energy form is positive on the range, all roots have the same `W*p`, even when individual normal reactions vary. The report retains actual weighted directions, normalized null coupling, energy margin, spectral/orthogonality residuals and traction/subgradient residuals. Near-zero slip uses the declared sticking resolution; sliding directions and null coupling are checked relative to friction magnitude, including tiny coefficients.
+`UniqueImpulses` retains the independent-row contraction result. When that
+sufficient bound fails, the same checked candidate energy criterion may admit
+the full positive spectrum without dropping any direction. Then
+`impulse_energy_witness` records rank equal to the active dimension and the
+global positive energy margin; `contraction_bound` remains one and its weights
+empty. Strong normal/tangent coupling therefore need not reject a determined
+friction response merely because a block norm bound exceeds one. The extra
+bounded spectral work runs only after the contraction fast path fails.
+
+`UniqueVelocity(PsdVelocityWitness)` has an explicit `PsdVelocityCriterion`: `NormalRangeObservable` uses the earlier friction-weighted normal-range feedback bound; `CandidateFrictionDirection` uses subgradients of an audited candidate. For any second Coulomb root, norm monotonicity gives `E + delta_p_n dot C delta_v_t <= 0`, with `E = delta_p^T W delta_p`. When this bilinear feedback annihilates the admitted mobility nullspace and its symmetric energy form is positive on the range, all roots have the same `W*p`, even when individual normal reactions vary. On a full-rank mobility this also determines every impulse coordinate. The report retains actual weighted directions, normalized null coupling, energy margin, spectral/orthogonality residuals and traction/subgradient residuals. Near-zero slip uses the declared sticking resolution; sliding directions and null coupling are checked relative to friction magnitude, including tiny coefficients.
 
 A bounded SVD may propose a coherent traction representative, but it must preserve the ORIGINAL mobility image to roundoff and pass the complete original law/work audit before use. Neither representative nor minimum norm assigns a physical pressure distribution, per-contact heat, or independently moving-support work. Distinct checked velocity roots report `Nonunique`; two different impulse gauges alone do not. Unproved determinacy still refuses. These are sufficient floating-point admissions, not interval uniqueness or general Painleve classification.
 

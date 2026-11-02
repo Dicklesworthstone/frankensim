@@ -40,6 +40,29 @@ pub(super) fn admit(
     config: SpdOrthantConfig,
     cancelled: &mut impl FnMut() -> bool,
 ) -> Result<Option<RangeAdmission>, FrictionalContactError> {
+    Ok(admit_spectrum(original, d, config, cancelled)?
+        .filter(|admission| !admission.null.is_empty()))
+}
+
+/// The same checked spectrum on a full-rank mobility. This is requested only
+/// when the cheaper block-contraction witness could not establish uniqueness.
+/// A numerically discarded direction cannot earn an impulse-uniqueness claim.
+pub(super) fn admit_positive_definite(
+    original: &[f64],
+    d: usize,
+    config: SpdOrthantConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<RangeAdmission>, FrictionalContactError> {
+    Ok(admit_spectrum(original, d, config, cancelled)?
+        .filter(|admission| admission.null.is_empty()))
+}
+
+fn admit_spectrum(
+    original: &[f64],
+    d: usize,
+    config: SpdOrthantConfig,
+    cancelled: &mut impl FnMut() -> bool,
+) -> Result<Option<RangeAdmission>, FrictionalContactError> {
     poll(cancelled)?;
     if d == 0 || d > config.max_variables || d > 63 {
         return Ok(None);
@@ -117,7 +140,7 @@ pub(super) fn admit(
             return Ok(None);
         }
     }
-    if retained.is_empty() || null.is_empty() {
+    if retained.is_empty() {
         return Ok(None);
     }
     Ok(Some(RangeAdmission {

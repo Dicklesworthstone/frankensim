@@ -8,8 +8,9 @@
 //! using exact branch Jacobian actions and cached local linearizations. Existing
 //! numerical owners provide matrix admission and nonlinear globalization.
 //!
-//! Independent contact rows use a weighted contraction witness for impulse
-//! determinacy. A separate PSD range witness admits redundant rows only when
+//! Independent contact rows use a weighted contraction witness or a positive
+//! candidate energy form for impulse determinacy. A separate PSD range witness
+//! admits redundant rows only when
 //! the coupled law determines velocity despite a possible contact-impulse gauge.
 //! It does not manufacture per-contact load authority from that gauge. Without
 //! a determinacy witness, distinct checked roots report nonuniqueness and an
@@ -35,7 +36,8 @@ pub mod elliptic;
 /// What the numerical witness establishes about this accepted response.
 #[derive(Clone, Debug, PartialEq)]
 pub enum FrictionalContactDeterminacy {
-    /// All contact impulse coordinates are determined by the admitted law.
+    /// All contact impulse coordinates are determined by the admitted law,
+    /// through block contraction or the result's full-rank energy witness.
     UniqueImpulses,
     /// The active contact mobility image `W_active*p` is determined, while
     /// impulses can differ by a mobility-null vector. For an actual complete
@@ -80,8 +82,10 @@ pub enum PsdVelocityCriterion {
     },
 }
 
-/// Sufficient numerical determinacy witness on a semidefinite mobility range.
-/// The admission is floating point, not an interval rank/uniqueness proof.
+/// Sufficient numerical determinacy witness on a positive mobility range.
+/// When rank equals dimension, a positive candidate energy form determines
+/// impulses as well as velocities. A rank-deficient witness determines only
+/// the mobility image. Admission is floating point, not an interval proof.
 #[derive(Clone, Debug, PartialEq)]
 pub struct PsdVelocityWitness {
     pub dimension: usize,
@@ -138,7 +142,7 @@ pub struct FrictionalContactConfig {
     /// shared across all branch probes. Actions use quadratic work; the PSD
     /// lane caches one at-most-63-row dense SVD per Newton point for its
     /// numerical right inverse, with cancellation before/after factorization.
-    /// PSD determinacy additionally uses at most two bounded range-energy
+    /// Energy determinacy additionally uses at most two bounded range-energy
     /// eigendecompositions and one 63-by-21 representative SVD per solve;
     /// these fixed-size admission calls are outside the Newton callback count.
     pub maximum_evaluations: usize,
@@ -201,12 +205,19 @@ pub struct FrictionalContactResult {
     pub passivity_residual: f64,
     pub residuals: FrictionalContactResiduals,
     /// Weighted block maximum-norm impulse contraction bound, strictly below
-    /// one for UniqueImpulses. It is one for UniqueVelocity, which carries its
-    /// own range witness. This is numerical admission, not an interval proof.
+    /// one when that witness applies. Otherwise one: full-rank energy admission
+    /// uses `impulse_energy_witness`, and UniqueVelocity carries its own witness.
+    /// This is numerical admission, not an interval proof.
     pub contraction_bound: f64,
     /// Positive weights [normal magnitude, tangential Euclidean norm] for each
     /// contact in active_indices order, allowing independent witness checking.
     pub contraction_weights: Vec<f64>,
+    /// Optional global candidate energy proof for independent rows whose block
+    /// contraction test failed. Its rank is the entire active dimension, so
+    /// equal mobility images imply equal impulses. The original contact law,
+    /// passivity checks and Newton solve are unchanged; this is not a branch-
+    /// local Jacobian nonsingularity test or a compliance regularization.
+    pub impulse_energy_witness: Option<PsdVelocityWitness>,
     /// Minimum SPD pivot, or zero for the admitted semidefinite range lane.
     pub minimum_normalized_pivot: f64,
     pub evaluations: usize,
@@ -489,12 +500,37 @@ pub fn solve_frictional_contacts(
             }
         }
     }
+    // A strong normal/tangent coupling can defeat the block norm bound even
+    // when the law has exactly one impulse. Reuse the global candidate energy
+    // argument on the FULL positive range before refusing that physical solve.
+    // E + delta_p_n dot C delta_v_t <= 0 holds against every other Coulomb
+    // root; positive energy coercivity forces delta_p=0 for an SPD mobility.
+    // The spectral work is skipped on the existing contraction fast path.
+    if range_admission.is_none() && witness.is_none() && d > 0 {
+        let admission =
+            range::admit_positive_definite(&matrix, d, config.matrix, &mut **cancel.borrow_mut())?;
+        if let Some(admission) = admission {
+            let velocity: Vec<_> = active
+                .iter()
+                .flat_map(|&i| result.relative_velocities_after[i])
+                .collect();
+            result.impulse_energy_witness = normal_gauge::direction_witness(
+                &admission,
+                &mu,
+                &point,
+                &velocity,
+                None,
+                config,
+                &mut **cancel.borrow_mut(),
+            )?;
+        }
+    }
     if let Some(witness) = range_witness {
         result.determinacy = FrictionalContactDeterminacy::UniqueVelocity(witness);
     } else if let Some((bound, weights)) = witness {
         result.contraction_bound = bound;
         result.contraction_weights = weights;
-    } else {
+    } else if result.impulse_energy_witness.is_none() {
         // A second, genuinely loaded branch probe can reveal the separating /
         // compressive ambiguity that a zero/frictionless pair of seeds misses.
         let mut seed = vec![0.0; d];
@@ -743,6 +779,7 @@ fn audit(
         residuals: r,
         contraction_bound: 1.0,
         contraction_weights: vec![],
+        impulse_energy_witness: None,
         minimum_normalized_pivot: 0.0,
         evaluations: 0,
         nonlinear: None,

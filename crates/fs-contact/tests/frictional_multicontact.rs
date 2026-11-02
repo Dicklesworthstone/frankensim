@@ -1,6 +1,6 @@
 use fs_contact::frictional_multicontact::{
-    FrictionalContact, FrictionalContactConfig, FrictionalContactError, NormalVelocityLaw,
-    solve_frictional_contacts,
+    FrictionalContact, FrictionalContactConfig, FrictionalContactDeterminacy,
+    FrictionalContactError, NormalVelocityLaw, PsdVelocityCriterion, solve_frictional_contacts,
 };
 
 #[path = "frictional_multicontact/normal_gauge.rs"]
@@ -111,6 +111,73 @@ fn coupled_sticking_and_explicit_target_have_distinct_normal_laws() {
         target_out.contraction_bound < 1.0,
         "large mu alone does not imply ambiguity"
     );
+}
+
+#[test]
+fn strong_oblique_friction_uses_global_energy_without_weakening_the_law() {
+    let w = [1.0, 0.8, 0.0, 0.8, 1.0, 0.0, 0.0, 0.0, 1.0];
+    let c = contact(1, [-1.0, 2.0, 0.0], 0.8);
+    let out = solve(&[c], &w);
+    // Independent sliding equations: pn + 0.8 pt = 1, pt = -0.8 pn.
+    // The block Lipschitz matrix has spectral radius sqrt(0.8*1.6)>1,
+    // but W+sym(N^T C T W) has leading minors 1.64, 0.2, 0.2>0.
+    close(out.impulses[0][0], 25.0 / 9.0);
+    close(out.impulses[0][1], -20.0 / 9.0);
+    close(out.relative_velocities_after[0][0], 0.0);
+    close(out.relative_velocities_after[0][1], 2.0);
+    close(out.dissipated_energy, 35.0 / 6.0);
+    assert_eq!(
+        out.determinacy,
+        FrictionalContactDeterminacy::UniqueImpulses
+    );
+    assert_eq!(out.contraction_bound, 1.0);
+    assert!(out.contraction_weights.is_empty());
+    let witness = out.impulse_energy_witness.as_ref().unwrap();
+    assert_eq!(witness.dimension, 3);
+    assert_eq!(witness.rank, 3);
+    assert!(out.minimum_normalized_pivot > 0.0);
+    let PsdVelocityCriterion::CandidateFrictionDirection {
+        weighted_directions,
+        energy_coercivity_lower_bound,
+        traction_residual,
+        ..
+    } = &witness.criterion
+    else {
+        panic!("expected the global candidate energy criterion");
+    };
+    close(weighted_directions[0][0], 0.8);
+    close(weighted_directions[0][1], 0.0);
+    assert!(*energy_coercivity_lower_bound > 0.1);
+    assert!(*traction_residual < 1e-9);
+
+    // The same physical event after rotating the arbitrary tangent gauge.
+    let angle: f64 = 0.61;
+    let q = [
+        [1.0, 0.0, 0.0],
+        [0.0, angle.cos(), angle.sin()],
+        [0.0, -angle.sin(), angle.cos()],
+    ];
+    let mut rotated = c;
+    let mut rotated_w = [0.0; 9];
+    for i in 0..3 {
+        rotated.relative_velocity[i] = (0..3).map(|j| q[i][j] * c.relative_velocity[j]).sum();
+        for j in 0..3 {
+            for a in 0..3 {
+                for b in 0..3 {
+                    rotated_w[3 * i + j] += q[i][a] * w[3 * a + b] * q[j][b];
+                }
+            }
+        }
+    }
+    let rotated = solve(&[rotated], &rotated_w);
+    for i in 0..3 {
+        close(
+            rotated.impulses[0][i],
+            (0..3).map(|j| q[i][j] * out.impulses[0][j]).sum(),
+        );
+    }
+    close(rotated.relative_work, out.relative_work);
+    assert!(rotated.impulse_energy_witness.is_some());
 }
 
 fn shared_body_case() -> (Vec<FrictionalContact>, Vec<f64>, Vec<[f64; 3]>) {
@@ -266,9 +333,10 @@ fn two_passive_coulomb_roots_are_reported_instead_of_arbitrary_selection() {
         }
         e => panic!("missed competing physical branches: {e:?}"),
     }
-    // This case has a root but lies outside the sufficient contraction bound.
+    // A different unique sliding root sits exactly at the sufficient energy
+    // criterion's zero margin. Neither witness may silently promote it.
     let unresolved = solve_frictional_contacts(
-        &[contact(2, [-1.0, 2.0, 0.0], 0.8)],
+        &[contact(2, [-1.0, 100.0, 0.0], 1.2)],
         &w,
         Default::default(),
         || false,

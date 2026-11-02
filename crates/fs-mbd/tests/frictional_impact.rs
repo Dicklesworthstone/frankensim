@@ -248,6 +248,52 @@ fn g1_off_centre_impact_retains_normal_tangent_coupling_and_rotated_inertia() {
 }
 
 #[test]
+fn g1_strongly_coupled_friction_resolves_native_momenta_beyond_block_contraction() {
+    let properties = [property(5.0, Vec3::new(1.25, 1.25, 1.25))];
+    let mut bodies = [body(
+        Vec3::new(0.0, 0.0, 1.0),
+        UnitQuaternion::IDENTITY,
+        Vec3::new(10.0, 0.0, -5.0),
+    )];
+    let before = bodies;
+    let point = RigidImpactPoint {
+        body: 0,
+        arm_body: Vec3::new(1.0, 0.0, -1.0),
+    };
+    let report = apply_rigid_frictional_impacts(
+        &mut bodies,
+        &properties,
+        &[plane(point, 0.8, 0.0)],
+        controls(),
+        &CancelGate::new(),
+    )
+    .unwrap();
+    // Wnn=Wtt=1/m+1/I=1; Wnt=1/I=.8, all from actual body inertia.
+    // Simultaneous sliding: pn+.8pt=1 and pt=-.8pn. The old block
+    // contraction check refused this unique response despite positive energy.
+    close(report.contact.impulses[0][0], 25.0 / 9.0);
+    close(report.contact.impulses[0][1], -20.0 / 9.0);
+    close_vector(
+        bodies[0].linear_momentum_world(),
+        Vec3::new(70.0 / 9.0, 0.0, -20.0 / 9.0),
+    );
+    close_vector(
+        bodies[0].angular_momentum_body(),
+        Vec3::new(0.0, -5.0 / 9.0, 0.0),
+    );
+    assert_eq!(bodies[0].pose(), before[0].pose());
+    close(report.contact.relative_velocities_after[0][0], 0.0);
+    close(report.contact.relative_velocities_after[0][1], 2.0);
+    close(report.kinetic_before_j, 12.5);
+    close(report.kinetic_after_j, 20.0 / 3.0);
+    close(report.contact.dissipated_energy, 35.0 / 6.0);
+    close(report.total_energy_residual_j, 0.0);
+    close_vector(report.linear_momentum_residual_ns, Vec3::ZERO);
+    close_vector(report.angular_momentum_residual_nms, Vec3::ZERO);
+    assert!(report.contact.impulse_energy_witness.is_some());
+}
+
+#[test]
 fn g1_sticking_restitution_and_moving_support_work_close_native_energy() {
     let properties = [property(2.0, Vec3::new(1.0, 1.0, 1.0))];
     let mut bodies = [body(
