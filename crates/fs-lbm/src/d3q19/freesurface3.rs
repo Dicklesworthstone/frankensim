@@ -45,6 +45,8 @@ use fs_exec::CancelGate;
 use super::sparse::{SparseError3, SparseGrid3, demorton3, morton3};
 use super::{CollisionError3, E3, OPP3, Q3, TILE, equilibrium3};
 
+pub mod rheology;
+
 mod initial;
 pub use initial::FreeSurfaceInitialCell3;
 mod pressure;

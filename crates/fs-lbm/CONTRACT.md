@@ -1,5 +1,33 @@
 # CONTRACT: fs-lbm
 
+## Prepared analytic rheology in the native sparse free surface
+
+`d3q19::freesurface3::rheology::FreeSurfaceRheology3` supplies prepared
+Newtonian, power-law, Carreau and regularized Herschel--Bulkley laws to the
+existing sparse VOF wet-cell BGK relaxation hook. This complements the
+pre-existing source-resolved material rheology owner. A uniform law requires
+no dense field; a spatial `RheologyField<3>` covers the full domain in fixed
+Eulerian global coordinates, including newly wet cells after sparse-slot
+reshuffles. SI laws prepared through `MaterialScaling::bind_rheology` enter
+this same constitutive path.
+
+The shared force-corrected stress inversion supplies persistent Morton-key/
+lane relaxation warm starts and endpoint floor/cap statistics. Each step
+uses one native candidate clone and admits every endpoint wet cell before
+publishing populations, phase, mass, relaxation and statistics together.
+Law rebinds and typed constitutive, native and cancellation refusals are
+atomic. The returned collision statistics and retained next-endpoint
+statistics describe distinct physical states. Gas and unlocated carry have
+no constitutive stress; zero-mass wet collision ghosts do.
+
+Fallible preparation and inversion reuse the original local kernel, while
+legacy APIs keep their panic contract and successful arithmetic. A positive-
+infinite trial strain may recover a finite limiting root; an unrepresentable
+accepted strain refuses. Five focused regressions cover manufactured stress
+and actual forced collision, Newtonian/uniform-field reduction, phase/slot
+association, rollback and fallible-kernel limiting behavior. No advected
+material label, inferred mixture law, thermal owner or yield history is added.
+
 ## Source-caloric molecular viscous self-heating
 
 With `enthalpy-coupling`, `MaterialChtFluid` exposes

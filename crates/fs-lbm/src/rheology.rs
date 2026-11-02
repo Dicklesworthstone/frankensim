@@ -256,6 +256,13 @@ impl Rheology {
         self.prepare_validated()
     }
 
+    /// Fallible preparation for transactional callers; the constitutive owner
+    /// and prepared constant-law fast path are shared with the scalar API.
+    pub(crate) fn try_prepare(self) -> Result<PreparedRheology, &'static str> {
+        self.check_parameters()?;
+        Ok(self.prepare_validated())
+    }
+
     fn prepare_validated(self) -> PreparedRheology {
         let constant = match self {
             Self::Newtonian { nu } => Some(nu),
@@ -358,16 +365,21 @@ pub(crate) struct LocalRelaxation {
 }
 
 impl LocalRelaxation {
-    fn from_target(target: f64, numerator: f64, fixed_rate: f64) -> Self {
+    fn from_target(target: f64, numerator: f64, fixed_rate: f64) -> Result<Self, &'static str> {
+        if target.is_nan() || target < 0.0 {
+            return Err("invalid apparent relaxation");
+        }
         let tau = target.clamp(TAU_FLOOR, TAU_CAP);
         let shear_rate = combined_strain_rate(numerator / tau, fixed_rate);
-        require_nonnegative_finite("applied shear rate", shear_rate);
-        Self {
+        if !shear_rate.is_finite() || shear_rate < 0.0 {
+            return Err("applied shear rate is unrepresentable");
+        }
+        Ok(Self {
             tau,
             shear_rate,
             floored: target < TAU_FLOOR,
             capped: target > TAU_CAP,
-        }
+        })
     }
 }
 
@@ -393,7 +405,18 @@ impl PreparedRheology {
     /// is increasing, giving a unique positive root. The previous tau is
     /// only a warm start; it never determines the returned constitutive rate.
     pub(crate) fn solve(&self, numerator: f64, previous_tau: f64) -> LocalRelaxation {
-        self.solve_with_fixed_strain(numerator, 0.0, previous_tau)
+        self.try_solve(numerator, previous_tau)
+            .unwrap_or_else(|reason| panic!("{reason}"))
+    }
+
+    /// The same bounded solve with a refusal instead of an unwind, so a
+    /// transactional flow owner can preserve its complete accepted state.
+    pub(crate) fn try_solve(
+        &self,
+        numerator: f64,
+        previous_tau: f64,
+    ) -> Result<LocalRelaxation, &'static str> {
+        self.try_solve_with_fixed_strain(numerator, 0.0, previous_tau)
     }
 
     /// Independently relaxed trace modes contribute a fixed orthogonal strain
@@ -406,8 +429,22 @@ impl PreparedRheology {
         fixed_rate: f64,
         previous_tau: f64,
     ) -> LocalRelaxation {
-        require_nonnegative_finite("non-equilibrium strain numerator", numerator);
-        require_nonnegative_finite("independent strain rate", fixed_rate);
+        self.try_solve_with_fixed_strain(numerator, fixed_rate, previous_tau)
+            .unwrap_or_else(|reason| panic!("{reason}"))
+    }
+
+    fn try_solve_with_fixed_strain(
+        &self,
+        numerator: f64,
+        fixed_rate: f64,
+        previous_tau: f64,
+    ) -> Result<LocalRelaxation, &'static str> {
+        if !numerator.is_finite() || numerator < 0.0 {
+            return Err("non-equilibrium strain numerator must be finite and nonnegative");
+        }
+        if !fixed_rate.is_finite() || fixed_rate < 0.0 {
+            return Err("independent strain rate must be finite and nonnegative");
+        }
         if let Some(tau) = self.constant_tau {
             return LocalRelaxation::from_target(tau, numerator, fixed_rate);
         }
@@ -421,17 +458,22 @@ impl PreparedRheology {
         let target = |tau: f64| {
             let variable_rate = numerator / tau;
             let rate = combined_strain_rate(variable_rate, fixed_rate);
+            if rate.is_nan() {
+                return Err("constitutive shear rate is unrepresentable");
+            }
             let (nu, slope) = self.law.viscosity_and_slope(rate);
             // Zero/overflow may result from an extreme power law. Their
             // positive limiting responses still classify a floor/cap, while
             // NaN or a negative apparent viscosity cannot be published.
-            assert!(!nu.is_nan() && nu >= 0.0, "invalid apparent viscosity");
+            if nu.is_nan() || nu < 0.0 {
+                return Err("invalid apparent viscosity");
+            }
             let fraction = if fixed_rate == 0.0 {
                 1.0
             } else {
                 (variable_rate / rate).powi(2)
             };
-            (0.5 + nu / CS2, 1.0 + slope * fraction / (CS2 * tau))
+            Ok((0.5 + nu / CS2, 1.0 + slope * fraction / (CS2 * tau)))
         };
         let (mut lo, mut hi) = (TAU_FLOOR, TAU_CAP);
         let mut tau = if previous_tau.is_finite() {
@@ -439,7 +481,7 @@ impl PreparedRheology {
         } else {
             0.5 * (lo + hi)
         };
-        let (mut next, mut derivative) = target(tau);
+        let (mut next, mut derivative) = target(tau)?;
         if (tau == lo && next <= lo) || (tau == hi && next >= hi) {
             return LocalRelaxation::from_target(next, numerator, fixed_rate);
         }
@@ -450,13 +492,13 @@ impl PreparedRheology {
         // A settled cell needs only the warm-start evaluation above. If it
         // changes, only the endpoint in the root's direction is evaluated.
         if initial_residual < 0.0 {
-            let cap_target = if tau == hi { next } else { target(hi).0 };
+            let cap_target = if tau == hi { next } else { target(hi)?.0 };
             if cap_target >= hi {
                 return LocalRelaxation::from_target(cap_target, numerator, fixed_rate);
             }
             lo = tau;
         } else {
-            let floor_target = if tau == lo { next } else { target(lo).0 };
+            let floor_target = if tau == lo { next } else { target(lo)?.0 };
             if floor_target <= lo {
                 return LocalRelaxation::from_target(floor_target, numerator, fixed_rate);
             }
@@ -486,9 +528,9 @@ impl PreparedRheology {
             };
             previous_step = (candidate - tau).abs();
             tau = candidate;
-            (next, derivative) = target(tau);
+            (next, derivative) = target(tau)?;
         }
-        panic!("local rheology did not converge within its bounded solve");
+        Err("local rheology did not converge within its bounded solve")
     }
 }
 
@@ -1310,6 +1352,39 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fallible_local_rheology_preserves_results_and_refuses_unrepresentable_rates() {
+        assert!(Rheology::Newtonian { nu: -1.0 }.try_prepare().is_err());
+        for law in mixed_laws() {
+            let prepared = law.try_prepare().unwrap();
+            for numerator in [0.0, 0.001, 0.1] {
+                let fallible = prepared.try_solve(numerator, 0.8).unwrap();
+                let legacy = prepared.solve(numerator, 0.8);
+                assert_eq!(fallible.tau.to_bits(), legacy.tau.to_bits());
+                assert_eq!(fallible.shear_rate.to_bits(), legacy.shear_rate.to_bits());
+            }
+            assert!(prepared.try_solve(f64::NAN, 0.8).is_err());
+        }
+        // An overflowing warm-start trial can have a finite limiting root.
+        let asymptotic = Rheology::Carreau {
+            nu0: 0.9, nu_inf: 0.6, lambda: 1.0, n: 0.5,
+        }.try_prepare().unwrap();
+        let recovered = asymptotic.try_solve(0.9 * f64::MAX, TAU_FLOOR).unwrap();
+        assert_eq!(recovered.tau, 0.5 + 0.6 / CS2);
+        assert!(recovered.shear_rate.is_finite());
+        assert!(!recovered.floored && !recovered.capped);
+        let small = Rheology::Newtonian { nu: 0.1 }.try_prepare().unwrap();
+        assert!(small.try_solve(f64::MAX, 0.8).is_err());
+        let large = Rheology::Newtonian { nu: 1.0 }.try_prepare().unwrap();
+        assert!(
+            large
+                .try_solve(f64::MAX, 0.8)
+                .unwrap()
+                .shear_rate
+                .is_finite()
+        );
     }
 
     /// Invert manufactured stresses over both thinning and thickening
