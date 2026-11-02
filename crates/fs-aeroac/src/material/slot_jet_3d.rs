@@ -7,11 +7,11 @@
 
 use super::{
     ForceSpectrum, JetPhysicalState, MAX_PHYSICAL_MACH, MaterialAeroacError, acoustic_from_scaling,
-    check_force_bin, fit_force_harmonics, invalid,
+    check_force_bin, fit_force_harmonics, fit_force_tones, invalid,
 };
 use crate::slot_jet_3d::{SlotJet3dConfig, SlotJet3dDiagnostics, run_slot_jet_3d, validate_config};
 use crate::{AeroacError, SCOPE_STATEMENT};
-use fs_fft::harmonic::HarmonicFitPlan;
+use fs_fft::harmonic::{HarmonicFitPlan, ToneFitPlan};
 use fs_lbm::d3q19::CollisionModel3;
 use fs_lbm::material::{MaterialScaling, plan_scaling_from_material};
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
@@ -328,6 +328,59 @@ impl SlotJet3dForceHarmonics {
     }
 }
 
+/// Joint DC and arbitrary-tone fit of the original periodic-cell forces [N].
+/// Known frequencies may be inharmonic or belong to independent sources;
+/// they are not rounded to harmonic orders or to FFT bins.
+pub struct SlotJet3dForceTones {
+    acoustic: FluidAcousticState,
+    span_m: f64,
+    frequencies_hz: Vec<f64>,
+    force_n: Vec<[C64; 2]>,
+    /// Simultaneously fitted constant `(Fx, Fy)` forces [N].
+    pub dc_force_n: [f64; 2],
+    /// Unweighted sample residual RMS [N]; not a confidence interval.
+    /// Unmodeled tones or frequency errors can also bias fitted amplitudes.
+    pub residual_rms_n: [f64; 2],
+}
+
+impl SlotJet3dForceTones {
+    /// Exact positive frequencies [Hz], in the fit plan's increasing order.
+    #[must_use]
+    pub fn frequencies_hz(&self) -> &[f64] {
+        &self.frequencies_hz
+    }
+    /// Peak force phasors [N], aligned with `frequencies_hz()`, exp(-i omega t).
+    /// Phase is measured from the first recorded force sample.
+    #[must_use]
+    pub fn force_n(&self) -> &[[C64; 2]] {
+        &self.force_n
+    }
+    /// Original periodic span represented by the integrated forces [m].
+    #[must_use]
+    pub const fn span_m(&self) -> f64 {
+        self.span_m
+    }
+    /// Frozen fluid used by the actual source and acoustic wavenumbers.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Read a fitted tone and its actual same-fluid acoustic wavenumber.
+    /// `index` is zero-based in `frequencies_hz()`; an absent index refuses.
+    /// The force stays in N; no isolated 3-D radiator or span conversion.
+    pub fn force_tone(&self, index: usize) -> Result<SlotJet3dForceLine, AeroacError> {
+        let frequency_hz =
+            *self
+                .frequencies_hz
+                .get(index)
+                .ok_or(AeroacError::InvalidParameter {
+                    what: "requested force tone was not fitted",
+                })?;
+        force_line(self.acoustic, self.force_n[index], frequency_hz)
+    }
+}
+
 fn force_line(
     acoustic: FluidAcousticState,
     force_n: [C64; 2],
@@ -425,6 +478,23 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialSlotJet3dRun<'_, F> {
             residual_rms_n: summary.map(|s| s.residual_rms),
         })
     }
+
+    /// Jointly fit arbitrary declared tones on the original physical clock.
+    /// One shared L1 factorization separates DC and all tones for both force
+    /// axes. Noncommensurate lines retain their true frequencies, phase from
+    /// sample zero, and forces integrated over the actual periodic span.
+    /// No noise, stationarity or absent spatial-radiation model is inferred.
+    pub fn fit_force_tones(&self, plan: &ToneFitPlan) -> Result<SlotJet3dForceTones, AeroacError> {
+        let (force_n, summary) = fit_force_tones(&self.force_series_n, self.timestep_s, plan)?;
+        Ok(SlotJet3dForceTones {
+            acoustic: self.acoustic,
+            span_m: self.span_m,
+            frequencies_hz: plan.frequencies_hz().to_vec(),
+            force_n,
+            dc_force_n: summary.map(|s| s.dc),
+            residual_rms_n: summary.map(|s| s.residual_rms),
+        })
+    }
 }
 
 impl MaterialSlotJet3dRun<'_, GasState> {
@@ -432,5 +502,72 @@ impl MaterialSlotJet3dRun<'_, GasState> {
     #[must_use]
     pub const fn gas(&self) -> &GasState {
         self.material
+    }
+}
+
+#[cfg(test)]
+mod tone_tests {
+    use super::*;
+    use fs_fft::harmonic::HarmonicFitBudget;
+
+    #[test]
+    fn g1_arbitrary_tones_retain_integrated_force_and_periodic_span() {
+        let n = 512;
+        let dt = 0.00025;
+        let frequencies = [137.3, 211.7];
+        let expected = [
+            [C64::new(0.02, -0.01), C64::new(-0.004, 0.008)],
+            [C64::new(-0.003, 0.005), C64::new(0.006, 0.002)],
+        ];
+        let record: Vec<_> = (0..n)
+            .map(|i| {
+                let mut force = [0.05, -0.03];
+                for (frequency, phasors) in frequencies.iter().zip(expected) {
+                    let phase = core::f64::consts::TAU * frequency * i as f64 * dt;
+                    for axis in 0..2 {
+                        force[axis] +=
+                            phasors[axis].re * phase.cos() + phasors[axis].im * phase.sin();
+                    }
+                }
+                force
+            })
+            .collect();
+        let plan = ToneFitPlan::new(
+            n,
+            dt,
+            &frequencies,
+            HarmonicFitBudget {
+                max_workspace_bytes: 1_000_000,
+                min_reciprocal_condition: 1e-10,
+            },
+        )
+        .unwrap();
+        let (force_n, summary) = fit_force_tones(&record, dt, &plan).unwrap();
+        let fitted = SlotJet3dForceTones {
+            acoustic: FluidAcousticState::try_new(1.2, 340.0).unwrap(),
+            span_m: 0.013,
+            frequencies_hz: frequencies.to_vec(),
+            force_n,
+            dc_force_n: summary.map(|s| s.dc),
+            residual_rms_n: summary.map(|s| s.residual_rms),
+        };
+        assert_eq!(fitted.span_m(), 0.013);
+        assert_eq!(fitted.frequencies_hz(), frequencies);
+        for (index, amplitude) in expected.iter().enumerate() {
+            let line = fitted.force_tone(index).unwrap();
+            assert_eq!(line.frequency_hz, frequencies[index]);
+            assert_eq!(
+                line.acoustic_wavenumber_rad_m,
+                core::f64::consts::TAU * frequencies[index] / 340.0
+            );
+            for axis in 0..2 {
+                assert!((line.force_n[axis] - amplitude[axis]).abs() < 1e-12);
+                assert!(fitted.residual_rms_n[axis] < 1e-12);
+            }
+        }
+        assert!((fitted.dc_force_n[0] - 0.05).abs() < 1e-12);
+        assert!((fitted.dc_force_n[1] + 0.03).abs() < 1e-12);
+        assert!(fitted.force_tone(2).is_err());
+        assert!(fitted.force_tone(usize::MAX).is_err());
     }
 }

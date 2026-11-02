@@ -16,10 +16,10 @@
 pub mod slot_jet_3d;
 pub use slot_jet_3d::{
     MaterialSlotJet3d, MaterialSlotJet3dRun, SlotJet3dForceHarmonics, SlotJet3dForceLine,
-    SlotJet3dForceSpectrum, SlotJet3dSetup,
+    SlotJet3dForceSpectrum, SlotJet3dForceTones, SlotJet3dSetup,
 };
 
-use fs_fft::harmonic::{HarmonicFitPlan, HarmonicFitSummary};
+use fs_fft::harmonic::{HarmonicFitError, HarmonicFitPlan, HarmonicFitSummary, ToneFitPlan};
 use fs_lbm::core2::CollisionModel2;
 use fs_lbm::material::{MaterialLbmError, MaterialScaling, plan_scaling_from_material};
 use fs_material::MaterialError;
@@ -301,7 +301,7 @@ pub struct ObservedJetLine {
     /// Physical frequency [Hz].
     pub frequency_hz: f64,
     /// Complex peak force per span [N/m], in exp(-i omega t) convention.
-    /// FFT observations use Hann coherent gain; fitted harmonics use the
+    /// FFT observations use Hann coherent gain; fitted tones use the
     /// joint least-squares amplitudes without a window-gain approximation.
     pub force_n_m: [C64; 2],
     /// Same-medium Curle pressure and its existing scope boundary.
@@ -416,6 +416,68 @@ impl JetForceHarmonics {
     }
 }
 
+/// Joint DC and arbitrary-frequency fit of the actual 2-D surface forces.
+///
+/// The declared frequencies may be noncommensurate, such as independent
+/// shedding tones. They are measured from the same force record, with no
+/// integer-harmonic rounding, source synthesis or invented phase locking.
+pub struct JetForceTones {
+    acoustic: FluidAcousticState,
+    frequencies_hz: Vec<f64>,
+    force_n_m: Vec<[C64; 2]>,
+    /// Simultaneously fitted constant `(Fx, Fy)` forces [N/m].
+    pub dc_force_n_m: [f64; 2],
+    /// Unweighted sample residual RMS for each force component [N/m].
+    /// Unmodeled tones or frequency errors can also bias fitted amplitudes.
+    pub residual_rms_n_m: [f64; 2],
+}
+
+impl JetForceTones {
+    /// Exact positive frequencies [Hz], in the shared plan's increasing order.
+    #[must_use]
+    pub fn frequencies_hz(&self) -> &[f64] {
+        &self.frequencies_hz
+    }
+
+    /// Complex peak `(Fx, Fy)` amplitudes [N/m], aligned with `frequencies_hz()`.
+    /// Phase is referenced to the first recorded sample, in exp(-i omega t).
+    #[must_use]
+    pub fn force_n_m(&self) -> &[[C64; 2]] {
+        &self.force_n_m
+    }
+
+    /// Exact source medium retained for every physical radiation path.
+    #[must_use]
+    pub const fn acoustic(&self) -> FluidAcousticState {
+        self.acoustic
+    }
+
+    /// Radiate a fitted tone at its true frequency in the original fluid.
+    /// `index` is zero-based in `frequencies_hz()`; an absent index refuses.
+    /// No FFT-bin lookup, spectral interpolation or harmonic-order inference.
+    pub fn observe_tone(
+        &self,
+        index: usize,
+        observer_m: [f64; 2],
+        source_m: [f64; 2],
+    ) -> Result<ObservedJetLine, AeroacError> {
+        let frequency_hz =
+            *self
+                .frequencies_hz
+                .get(index)
+                .ok_or(AeroacError::InvalidParameter {
+                    what: "requested force tone was not fitted",
+                })?;
+        observe_force(
+            self.acoustic,
+            self.force_n_m[index],
+            frequency_hz,
+            observer_m,
+            source_m,
+        )
+    }
+}
+
 fn observe_force(
     acoustic: FluidAcousticState,
     force_n_m: [C64; 2],
@@ -515,6 +577,22 @@ impl<F: FluidTransport + FluidAcoustics + ?Sized> MaterialJetLabiumRun<'_, F> {
             acoustic: self.acoustic,
             harmonics: plan.harmonics().to_vec(),
             fundamental_hz: plan.fundamental_hz(),
+            force_n_m,
+            dc_force_n_m: summary.map(|s| s.dc),
+            residual_rms_n_m: summary.map(|s| s.residual_rms),
+        })
+    }
+
+    /// Fit the actual force record at declared, possibly noncommensurate tones.
+    /// The common L1 plan jointly resolves DC and every tone; both force axes
+    /// reuse its factorization and scratch on the original count and clock.
+    /// Known frequencies are inputs, not estimated pitches. This does not
+    /// remove aliasing, or establish stationarity or source compactness.
+    pub fn fit_force_tones(&self, plan: &ToneFitPlan) -> Result<JetForceTones, AeroacError> {
+        let (force_n_m, summary) = fit_force_tones(&self.force_series_n_m, self.timestep_s, plan)?;
+        Ok(JetForceTones {
+            acoustic: self.acoustic,
+            frequencies_hz: plan.frequencies_hz().to_vec(),
             force_n_m,
             dc_force_n_m: summary.map(|s| s.dc),
             residual_rms_n_m: summary.map(|s| s.residual_rms),
@@ -669,15 +747,48 @@ fn fit_force_harmonics(
     timestep_s: f64,
     plan: &HarmonicFitPlan,
 ) -> Result<(Vec<[C64; 2]>, [HarmonicFitSummary; 2]), AeroacError> {
-    if plan.sample_count() != forces.len() || plan.timestep_s().to_bits() != timestep_s.to_bits() {
+    fit_force_components(
+        forces,
+        timestep_s,
+        plan.sample_count(),
+        plan.timestep_s(),
+        plan.harmonics().len(),
+        |samples, scratch, phasors| plan.fit_into(samples, scratch, phasors),
+    )
+}
+
+fn fit_force_tones(
+    forces: &[[f64; 2]],
+    timestep_s: f64,
+    plan: &ToneFitPlan,
+) -> Result<(Vec<[C64; 2]>, [HarmonicFitSummary; 2]), AeroacError> {
+    fit_force_components(
+        forces,
+        timestep_s,
+        plan.sample_count(),
+        plan.timestep_s(),
+        plan.frequencies_hz().len(),
+        |samples, scratch, phasors| plan.fit_into(samples, scratch, phasors),
+    )
+}
+
+fn fit_force_components(
+    forces: &[[f64; 2]],
+    timestep_s: f64,
+    sample_count: usize,
+    plan_timestep_s: f64,
+    tone_count: usize,
+    fit: impl Fn(&[f64], &mut [f64], &mut [fs_fft::C64]) -> Result<HarmonicFitSummary, HarmonicFitError>,
+) -> Result<(Vec<[C64; 2]>, [HarmonicFitSummary; 2]), AeroacError> {
+    if sample_count != forces.len() || plan_timestep_s.to_bits() != timestep_s.to_bits() {
         return Err(AeroacError::InvalidParameter {
-            what: "harmonic fit plan must match the original force record and sample clock",
+            what: "tone or harmonic fit plan must match the original force record and sample clock",
         });
     }
     let mut axis_samples = vec![0.0; forces.len()];
     let mut scratch = vec![0.0; forces.len()];
-    let mut phasors = vec![fs_fft::C64::default(); plan.harmonics().len()];
-    let mut forces_fitted = vec![[C64::ZERO; 2]; plan.harmonics().len()];
+    let mut phasors = vec![fs_fft::C64::default(); tone_count];
+    let mut forces_fitted = vec![[C64::ZERO; 2]; tone_count];
     let fit_axis = |axis: usize,
                     samples: &mut [f64],
                     scratch: &mut [f64],
@@ -687,9 +798,7 @@ fn fit_force_harmonics(
         for (sample, force) in samples.iter_mut().zip(forces) {
             *sample = force[axis];
         }
-        let summary = plan
-            .fit_into(samples, scratch, phasors)
-            .map_err(AeroacError::HarmonicFit)?;
+        let summary = fit(samples, scratch, phasors).map_err(AeroacError::HarmonicFit)?;
         for (force, phasor) in fitted.iter_mut().zip(phasors) {
             force[axis] = C64::new(phasor.re, phasor.im);
         }

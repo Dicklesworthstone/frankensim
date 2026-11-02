@@ -7,7 +7,7 @@ use fs_aeroac::jetlab::run_jet_labium;
 use fs_aeroac::material::{
     JetLabiumSetup, JetPhysicalState, MaterialJetLabium, MaterialJetLabiumRun,
 };
-use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitPlan};
+use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitPlan, ToneFitPlan};
 use fs_lbm::core2::CollisionModel2;
 use fs_material::fluid_acoustics::{FluidAcousticState, FluidAcoustics};
 use fs_material::fluid_transport::{FluidTransport, FluidTransportState};
@@ -189,6 +189,34 @@ fn g0_actual_lattice_force_and_frequency_have_correct_physical_units() {
         )
         .unwrap();
     assert_eq!(fitted_line.field.pressure, reference.pressure);
+    let tones = ToneFitPlan::new(
+        plan.sample_count(),
+        dt,
+        &[
+            plan.fundamental_hz(),
+            2.0 * plan.fundamental_hz(),
+            3.0 * plan.fundamental_hz(),
+        ],
+        HarmonicFitBudget {
+            max_workspace_bytes: 1_048_576,
+            min_reciprocal_condition: 1e-10,
+        },
+    )
+    .unwrap();
+    let tone_fit = run.fit_force_tones(&tones).unwrap();
+    assert_eq!(tone_fit.acoustic(), run.acoustic());
+    let tone_line = tone_fit.observe_tone(1, observer, source).unwrap();
+    assert_eq!(tone_line.frequency_hz, fitted_line.frequency_hz);
+    for axis in 0..2 {
+        assert!(
+            (tone_line.force_n_m[axis] - fitted_line.force_n_m[axis]).abs()
+                < 1e-10 * fitted_line.force_n_m[axis].abs().max(1e-30)
+        );
+    }
+    assert!(
+        (tone_line.field.pressure - fitted_line.field.pressure).abs()
+            < 1e-10 * fitted_line.field.pressure.abs().max(1e-30)
+    );
     let prepared = run
         .prepare_coherent_observer(frequency, observer, &[source, source], 2)
         .unwrap();

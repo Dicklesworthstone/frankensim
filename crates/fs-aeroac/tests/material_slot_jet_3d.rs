@@ -4,7 +4,7 @@
 use fs_aeroac::SCOPE_STATEMENT;
 use fs_aeroac::material::{JetPhysicalState, MaterialSlotJet3d, SlotJet3dSetup};
 use fs_aeroac::slot_jet_3d::run_slot_jet_3d;
-use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitPlan};
+use fs_fft::harmonic::{HarmonicFitBudget, HarmonicFitPlan, ToneFitPlan};
 use fs_lbm::d3q19::CollisionModel3;
 use fs_material::fluid_acoustics::FluidAcoustics;
 use fs_material::gas::GasState;
@@ -181,6 +181,35 @@ fn g0_actual_3d_force_uses_volume_mass_and_shared_physical_spectrum() {
         core::f64::consts::TAU * fitted_line.frequency_hz / run.acoustic().sound_speed_m_s(),
     );
     assert!(fitted.force_harmonic(4).is_err());
+    let tones = ToneFitPlan::new(
+        plan.sample_count(),
+        dt,
+        &[
+            plan.fundamental_hz(),
+            2.0 * plan.fundamental_hz(),
+            3.0 * plan.fundamental_hz(),
+        ],
+        HarmonicFitBudget {
+            max_workspace_bytes: 1_048_576,
+            min_reciprocal_condition: 1e-10,
+        },
+    )
+    .unwrap();
+    let tone_fit = run.fit_force_tones(&tones).unwrap();
+    assert_eq!(tone_fit.acoustic(), run.acoustic());
+    assert_eq!(tone_fit.span_m(), run.span_m());
+    let tone_line = tone_fit.force_tone(1).unwrap();
+    assert_eq!(tone_line.frequency_hz, fitted_line.frequency_hz);
+    assert_eq!(
+        tone_line.acoustic_wavenumber_rad_m,
+        fitted_line.acoustic_wavenumber_rad_m
+    );
+    for axis in 0..2 {
+        assert!(
+            (tone_line.force_n[axis] - fitted_line.force_n[axis]).abs()
+                < 1e-10 * fitted_line.force_n[axis].abs().max(1e-30)
+        );
+    }
     for bin in [0, 32, usize::MAX] {
         assert!(run.force_spectral_line(bin).is_err());
         assert!(spectrum.force_spectral_line(bin).is_err());

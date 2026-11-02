@@ -147,3 +147,95 @@ fn g3_joint_force_fit_preserves_phase_and_physical_force_scaling() {
         close(summary[axis].dc, baseline[axis].dc * scale, 3e-14);
     }
 }
+
+#[test]
+fn g1_noncommensurate_force_tones_preserve_weak_lines_and_true_frequency_radiation() {
+    let n = 1024;
+    let dt = 1.0 / 4000.0;
+    // First two tones are closer than one FFT bin; the third is inharmonic.
+    let frequencies = [132.7, 134.1, 267.2578];
+    let amplitudes = [
+        [C64::new(1.3, -0.2), C64::new(0.0, 0.3)],
+        [C64::new(0.00001, 0.00002), C64::new(0.025, -0.07)],
+        [C64::new(-0.15, 0.04), C64::new(-0.03, 0.25)],
+    ];
+    let dc = [0.4, -0.8];
+    let record: Vec<_> = (0..n)
+        .map(|i| {
+            let mut force = dc;
+            for (frequency, phasors) in frequencies.iter().zip(amplitudes) {
+                let theta = TAU * frequency * i as f64 * dt;
+                for axis in 0..2 {
+                    force[axis] += phasors[axis].re * theta.cos() + phasors[axis].im * theta.sin();
+                }
+            }
+            force
+        })
+        .collect();
+    let plan = ToneFitPlan::new(n, dt, &frequencies, budget()).unwrap();
+    let (force, summary) = fit_force_tones(&record, dt, &plan).unwrap();
+    for (actual, expected) in force.iter().zip(amplitudes) {
+        for axis in 0..2 {
+            assert!((actual[axis] - expected[axis]).abs() < 3e-11);
+        }
+    }
+    for axis in 0..2 {
+        close(summary[axis].dc, dc[axis], 3e-12);
+        assert!(summary[axis].residual_rms < 3e-12);
+    }
+    let acoustic = FluidAcousticState::try_new(1.2, 340.0).unwrap();
+    let fitted = JetForceTones {
+        acoustic,
+        frequencies_hz: plan.frequencies_hz().to_vec(),
+        force_n_m: force,
+        dc_force_n_m: summary.map(|s| s.dc),
+        residual_rms_n_m: summary.map(|s| s.residual_rms),
+    };
+    assert_eq!(fitted.frequencies_hz(), frequencies);
+    for index in 0..frequencies.len() {
+        let observed = fitted.observe_tone(index, [0.4, 0.3], [0.0, 0.0]).unwrap();
+        assert_eq!(observed.frequency_hz, frequencies[index]);
+        let expected = dipole_pressure(
+            amplitudes[index],
+            TAU * frequencies[index] / 340.0,
+            [0.4, 0.3],
+            [0.0, 0.0],
+        )
+        .unwrap();
+        assert!((observed.field.pressure - expected.pressure).abs() < 1e-10);
+        assert_eq!(observed.field.scope, SCOPE_STATEMENT);
+    }
+    assert!(
+        fitted
+            .observe_tone(usize::MAX, [0.4, 0.3], [0.0, 0.0])
+            .is_err()
+    );
+}
+
+#[test]
+fn g0_g3_tone_force_fit_preserves_harmonic_results_and_original_clock_refusals() {
+    let n = 128;
+    let dt = 1.0 / 8000.0;
+    let f0 = 132.7;
+    let record = harmonic_record(n, dt, f0);
+    let harmonic = HarmonicFitPlan::new(n, dt, f0, &[1, 2, 3], budget()).unwrap();
+    let tones = ToneFitPlan::new(n, dt, &[f0, 2.0 * f0, 3.0 * f0], budget()).unwrap();
+    let (h, hs) = fit_force_harmonics(&record, dt, &harmonic).unwrap();
+    let (t, ts) = fit_force_tones(&record, dt, &tones).unwrap();
+    for (a, b) in h.iter().zip(t) {
+        for axis in 0..2 {
+            assert!((a[axis] - b[axis]).abs() < 3e-12);
+        }
+    }
+    for axis in 0..2 {
+        close(hs[axis].dc, ts[axis].dc, 3e-12);
+    }
+    assert!(fit_force_tones(&record[..n - 1], dt, &tones).is_err());
+    assert!(fit_force_tones(&record, 2.0 * dt, &tones).is_err());
+    let mut invalid = record;
+    invalid[17][1] = f64::INFINITY;
+    assert!(matches!(
+        fit_force_tones(&invalid, dt, &tones),
+        Err(AeroacError::HarmonicFit(HarmonicFitError::NonFinite { .. }))
+    ));
+}
