@@ -383,6 +383,35 @@ span and reports independently recomputed Fourier-law and boundary residuals.
 The immutable input is unchanged on failure. Layer/knot caps bound work, and
 the solver checks the existing executor cancellation gate between layers.
 
+`LayeredWall::solve_with_generation` extends that same constant-conductivity
+owner with a declared uniform volumetric source in every layer, in W/m3.
+It integrates `dq/dx = s` and `dT/dx = -q/k` analytically. The face fluxes
+therefore differ by the layer's generated heat per area; every contact and
+surface film uses its own local flux. One scalar balance closes the two
+reservoir temperatures, with work linear in the layers and retained source
+knots and no mesh or iterative solve. Original material tables, cards,
+receipts, contact assumptions and source densities remain in the result.
+
+The result reports both outward reservoir heat rates, total generation and
+energy residual, separate layer faces, spatial mean temperatures and exact
+quadratic extrema with their positions. Both faces and every interior
+extremum must be positive Kelvin and within that material's source span; a
+supported pair of faces cannot conceal an unsupported hot spot or cold spot.
+Signed source densities declare production/removal without inventing a Joule,
+reaction or refrigeration mechanism. Fourier/film/contact residuals recomputed
+from the rounded temperatures and the final boundary defect are numerical
+diagnostics, not material uncertainty or an experimental validation claim.
+The existing nonlinear and spatial owners remain necessary for k(T),
+temperature-dependent generation and lateral heat spreading.
+
+Seven focused G0/G1/G3/G4 regressions in `tests/layered/generation.rs` encode
+the independently derived heated-slab parabola, unequal reservoir heat split,
+heterogeneous contacts, signed and cancelling sources, reversal, area scaling,
+subdivision, zero-generation parity, original receipts and interior support
+refusals. Native execution was blocked in the authoring environment by shared
+disk exhaustion and the unchanged asupersync dependency exceeding the shared
+8 GiB memory limit; no passing Cargo result is claimed for this addition.
+
 Varying conductivity is refused by the constant solve entry point. The separate
 `LayeredWall::solve_temperature_dependent` entry point integrates every positive
 piecewise-linear source segment with a scaled analytic inverse and bounded

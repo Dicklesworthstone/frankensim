@@ -317,3 +317,6 @@ fn g4_cancellation_and_failed_trials_leave_the_input_unchanged() {
         20.0,
     );
 }
+
+#[path = "layered/generation.rs"]
+mod generation;

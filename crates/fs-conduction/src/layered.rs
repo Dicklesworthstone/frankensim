@@ -4,8 +4,9 @@
 //! Separate constant and positive piecewise-linear conductivity solves retain
 //! source curves without freezing them at a representative temperature. Surface
 //! films are explicit area-specific resistances, including explicit zero for
-//! perfect contact or a prescribed surface temperature. There is no volumetric
-//! heating, lateral spreading, radiation, moisture transport or transient claim.
+//! perfect contact or a prescribed surface temperature. The constant-conductivity
+//! generation path also resolves uniform volumetric heating within each layer.
+//! There is no lateral spreading, radiation, moisture transport or transient claim.
 
 use fs_blake3::ContentHash;
 use fs_exec::Cx;
@@ -17,6 +18,8 @@ mod nonlinear;
 pub use nonlinear::{
     NonlinearLayerTemperatures, NonlinearLayeredWallSolution, NonlinearWallOptions,
 };
+mod generation;
+pub use generation::{GeneratedLayerTemperatures, GeneratedLayeredWallSolution};
 
 /// Maximum layers in one bounded planar solve.
 pub const MAX_LAYERED_WALL_LAYERS: usize = 256;
