@@ -242,6 +242,25 @@ impl TensorProny {
     /// Returned tensor uses the crate's tensor-shear Voigt convention.
     /// A nonzero Kelvin viscosity requires positive dt; its tangent is C_kv/dt.
     pub fn tangent(&self, dt_s: f64) -> Result<Tangent6> {
+        let mut c = self.tangent_mandel(dt_s)?;
+        for i in 0..6 {
+            for j in 0..6 {
+                c[i][j] *= WEIGHTS[j] / WEIGHTS[i];
+            }
+        }
+        if c.iter().flatten().any(|v| !v.is_finite()) {
+            return Err(invalid("tangent overflow"));
+        }
+        Ok(c)
+    }
+
+    /// Exact endpoint derivative in work-conjugate Mandel coordinates.
+    /// This is `C_eq + sum b_j C_j + C_kv/dt`, with
+    /// `b_j = (1-exp(-dt/tau_j))/(dt/tau_j)`. It is independent of the
+    /// accepted history, retains every anisotropic cross term, and is SPD.
+    /// The same tangent drives load-controlled solid creep; no reference
+    /// frequency or equivalent viscous damping matrix is substituted.
+    pub fn tangent_mandel(&self, dt_s: f64) -> Result<Tangent6> {
         if !dt_s.is_finite() || dt_s < 0.0 {
             return Err(invalid("time step must be finite and nonnegative"));
         }
@@ -258,11 +277,6 @@ impl TensorProny {
         if let Some(kv) = self.kv_pa_s().filter(|c| c.iter().flatten().any(|v| *v != 0.0)) {
             if dt_s == 0.0 { return Err(invalid("Kelvin viscosity has no finite instantaneous strain tangent")); }
             for i in 0..6 { for j in 0..6 { c[i][j] += kv[i][j]/dt_s; } }
-        }
-        for i in 0..6 {
-            for j in 0..6 {
-                c[i][j] *= WEIGHTS[j] / WEIGHTS[i];
-            }
         }
         if c.iter().flatten().any(|v| !v.is_finite()) {
             return Err(invalid("tangent overflow"));

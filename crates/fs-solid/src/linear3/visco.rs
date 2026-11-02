@@ -12,7 +12,8 @@
 //! Histories borrow their immutable prepared system, so neither geometry nor
 //! laws can change underneath internal variables. Updates are transactional,
 //! including cancellation and nonfinite-result refusals. Prescribed nodal
-//! histories are inputs; this module is not a displacement time integrator.
+//! histories and load-controlled quasistatic creep share the same material
+//! histories. Inertial displacement evolution belongs to a separate owner.
 
 use super::hex::{
     HexConnectivity, HexElasticProblem, HexFamily, HexPoint, HexQuadrature, hex20_point,
@@ -31,6 +32,8 @@ use fs_sparse::{Coo, Csr};
 
 mod project;
 pub use project::{ProjectedViscoSolid, SolidProjectionBudget};
+mod quasistatic;
+pub use quasistatic::{ViscoQuasistaticOperator, ViscoQuasistaticStep};
 
 /// Geometry and explicit quadrature; material frames must already be resolved.
 #[derive(Clone, Copy)]
@@ -201,6 +204,9 @@ pub struct ViscoElements {
     equilibrium: TetElasticAssembly,
     full_dofs: usize,
     internal_variables: usize,
+    // Free-body modal/history use remains admitted; load control requires the
+    // existing geometric rigid-mode constraint admission on every component.
+    static_constraint_error: Option<TetElasticError>,
 }
 
 /// Storage/loss matrices in the equilibrium assembly's free-DOF order.
@@ -656,11 +662,23 @@ impl ViscoElements {
                 }
             }
         }
+        let static_constraint_error = match mesh {
+            SolidMeshRef::Tet4 { elements, .. } =>
+                super::validate_rigid_mode_constraints(nodes, elements, fixed),
+            SolidMeshRef::Tet10 { elements, .. } =>
+                super::validate_rigid_mode_constraints(nodes, elements, fixed),
+            SolidMeshRef::Hex { elements: HexConnectivity::Hex20(elements), .. } =>
+                super::validate_rigid_mode_constraints(nodes, elements, fixed),
+            SolidMeshRef::Hex { elements: HexConnectivity::Hex27(elements), .. } =>
+                super::validate_rigid_mode_constraints(nodes, elements, fixed),
+        }.err();
+        checkpoint(cx)?;
         Ok(Self {
             elements: prepared,
             equilibrium: eq,
             full_dofs: nodes.len() * 3,
             internal_variables: needed,
+            static_constraint_error,
         })
     }
 
@@ -818,6 +836,7 @@ impl ViscoElements {
             system: self,
             histories,
             energy: ViscoEnergy::default(),
+            displacement_m: vec![0.0; self.full_dofs],
         })
     }
 }
@@ -845,6 +864,7 @@ pub struct ViscoElementState<'a> {
     system: &'a ViscoElements,
     histories: Vec<Vec<TensorPronyState>>,
     energy: ViscoEnergy,
+    displacement_m: Vec<f64>,
 }
 
 /// Work-conjugate force observation for one admitted prescribed-history step.
@@ -862,6 +882,11 @@ pub struct ViscoForceStep {
 }
 
 impl ViscoElementState<'_> {
+    /// Accepted full node-major displacement, including prescribed supports [m].
+    pub fn displacement_m(&self) -> &[f64] {
+        &self.displacement_m
+    }
+
     /// Read the current constitutive energy ledger.
     pub const fn energy(&self) -> ViscoEnergy {
         self.energy
@@ -953,6 +978,7 @@ impl ViscoElementState<'_> {
             .collect();
         self.histories = histories;
         self.energy = energy;
+        self.displacement_m.copy_from_slice(u_new);
         Ok(ViscoForceStep {
             full_force_n: force,
             reduced_force_n,

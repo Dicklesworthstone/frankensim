@@ -697,6 +697,25 @@ work-conjugate full forces, exact material work/heat integration, canonical
 elastic mass/stiffness parity, quadrature/state-budget refusals, and curved
 HEX27 storage/loss convergence against an analytic spatial integral.
 
+`ViscoElements::quasistatic_operator(dt, cx)` prepares a reusable sparse
+consistent tangent for one positive duration; `ViscoElementState::step_quasistatic`
+solves endpoint nodal loads and prescribed support motion through the shared
+Jacobi-preconditioned CG owner. The original full Mandel Kelvin/Prony tensors,
+quadrature and accepted branch histories remain intact. Each step solves free
+displacement increments, independently checks the original internal-force
+residual, and returns complete displacements, support reactions and constitutive
+storage/work/heat. Support motion contributes its actual integrated material
+work. All connected components must pass the existing rigid-motion constraint
+admission, and every original material band must include DC for sustained-load
+creep. Failed solves, source-domain violations and cancellation preserve the
+accepted displacement and memory. This is fixed-material quasistatic evolution
+without inertia: each affine displacement ramp has exact constitutive
+integration, while a continuously prescribed load trajectory requires time-step
+convergence. DC admission does not certify that trajectory's transient spectrum.
+`tests/visco_quasistatic.rs` checks analytic Maxwell/Kelvin creep convergence,
+independent heat, nonproportional coupling, moving supports, tangent derivatives
+and transactional refusals.
+
 `ViscoElements::modes` solves the storage-dispersive ordered eigenproblem
 `lambda(K'(omega), M) = omega^2` using the existing dense fs-modal eigensolver
 and an explicit frequency bracket, iteration/tolerance budget, and a dense
