@@ -799,3 +799,170 @@ fn source_support_and_late_cancellation_preserve_both_accepted_histories() {
         assert_eq!(field.contacts(), original_contacts);
     }
 }
+
+#[test]
+fn capacitor_discharge_refreshes_two_sided_contact_sources_and_deposits_surface_work_once() {
+    use fs_couple::circuit_enthalpy::conduction::spatial::circuit::SpatialConductionCircuit;
+    use fs_phs::circuit::{Branch, CircuitGraph};
+    let r0 = 0.75;
+    for upper in [1000.0, 300.0001] {
+        let (a, ca) = material(1.0, 1.0, 0.002);
+        let (b, cb) = material(3.0, 2.0, 0.0);
+        let cards = [a, b];
+        let curves = [ca, cb];
+        let context = point(300.0);
+        let interface = interface(&cards, r0, upper);
+        let ip = interface_point(300.0, 1e5);
+        let surface = surface_bindings(&cards, &interface, &ip);
+        let field = specimen(&cards, &interface, &ip);
+        let [positive, negative] = electrodes(&field, 2.0);
+        let thermal = initial(&curves, 999.0, None);
+        let key = PropertyKey::new("thermal_conductivity", THERMAL_CONDUCTIVITY_DIMS);
+        let cells = bindings(&cards, &curves, &context, &key);
+        let regions = regions();
+        let layout = SpatialConductionThermalNetwork {
+            cells: &cells,
+            links: &LINKS,
+            regions: &regions,
+            volume_tolerance_m3: 1e-12,
+        };
+        let response = SpatialConductanceControls {
+            maximum_terminals: 2,
+            maximum_field_solves: 1,
+            maximum_response_values: 1000,
+            maximum_dense_work: 1000,
+            reference_voltage_v: 1.0,
+            coefficient_tolerance_s: 1e-10,
+        };
+        let circuit = SpatialConductionCircuit::new(
+            field,
+            CircuitGraph {
+                node_count: 2,
+                branches: vec![(1, 0, Branch::Capacitor { farads: 1.0 })],
+                transformers: vec![],
+            },
+            vec![negative, positive],
+            vec![0, 1],
+            0.0,
+            vec![],
+            vec![4.0],
+            &[],
+            response,
+            field_controls(),
+            || false,
+        )
+        .unwrap();
+        let next = layout.step_circuit_candidate(
+            &thermal,
+            0.5,
+            &circuit,
+            &[],
+            &surface,
+            response,
+            limits(),
+            field_controls(),
+            config(),
+            &[0.0; 2],
+            || false,
+        );
+        if upper < 301.0 {
+            assert!(next.is_err());
+            near(circuit.charges_c()[0], 4.0);
+            assert_eq!(thermal.time_s(), 0.0);
+            near(
+                circuit.problem().contacts()[0]
+                    .source
+                    .resolved()
+                    .state_coordinate("Ta")
+                    .unwrap(),
+                300.0,
+            );
+            continue;
+        }
+        let next = next.unwrap();
+        // Independent BE elimination for a proposed midpoint current, then
+        // capacitor closure I*(R_total(Ta,Tb)+dt/(2C))=q_old.
+        let endpoint = |current: f64| {
+            let s = 0.5 * current * current;
+            let a = 1.5 - s * (0.002 + 0.25 * r0 * 0.003);
+            let b = -0.5 - s * 0.25 * r0 * 0.007;
+            let c = -0.5 - s * 0.75 * r0 * 0.003;
+            let d = 2.5 - s * 0.75 * r0 * 0.007;
+            let ra = s * (1.0 + 0.25 * r0);
+            let rb = s * (3.0 + 0.75 * r0);
+            let theta = [
+                (ra * d - b * rb) / (a * d - b * c),
+                (a * rb - c * ra) / (a * d - b * c),
+            ];
+            let contact = r0 * (1.0 + 0.003 * theta[0] + 0.007 * theta[1]);
+            let resistance = 4.0 + 0.002 * theta[0] + contact;
+            (
+                theta,
+                contact,
+                resistance,
+                current * (resistance + 0.25) - 4.0,
+            )
+        };
+        let (mut lo, mut hi) = (0.0, 4.0 / (4.0 + r0 + 0.25));
+        assert!(endpoint(lo).3 < 0.0 && endpoint(hi).3 > 0.0);
+        for _ in 0..90 {
+            let mid = 0.5 * (lo + hi);
+            if endpoint(mid).3 < 0.0 {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let current = 0.5 * (lo + hi);
+        let (theta, contact, resistance, _) = endpoint(current);
+        let final_charge = 4.0 - 0.5 * current;
+        near(next.circuit().charges_c()[0], final_charge);
+        near(
+            next.thermal().temperature_k(CellId(30)).unwrap(),
+            300.0 + theta[0],
+        );
+        near(
+            next.thermal().temperature_k(CellId(10)).unwrap(),
+            300.0 + theta[1],
+        );
+        let step = &next.report().electrical;
+        near(step.terminal_current_a[1], current);
+        near(step.terminal_voltage_v[1], current * resistance);
+        near(step.spatial.heat_j, 0.5 * current * current * resistance);
+        near(step.supplied_work_j, 0.0);
+        near(step.native.supplied, 0.0);
+        near(
+            step.stored_change_j,
+            0.5 * (final_charge * final_charge - 16.0),
+        );
+        near(step.native.dissipated, step.spatial.heat_j);
+        near(step.energy_residual_j, 0.0);
+        near(next.report().total_energy_residual_j, 0.0);
+        near(
+            next.thermal().energy_j() - thermal.energy_j(),
+            step.spatial.heat_j,
+        );
+        assert_eq!(step.spatial.contacts.len(), 2);
+        for (heat, source) in step
+            .spatial
+            .contacts
+            .iter()
+            .zip(next.circuit().problem().contacts())
+        {
+            near(heat.heat_fraction_to_first, 0.25);
+            near(heat.response.current_a, -0.5 * current);
+            near(heat.response.power_w, 0.5 * current * current * contact);
+            near(source.source.resistance_ohm_m2(), contact);
+            near(
+                source.source.resolved().state_coordinate("Ta").unwrap(),
+                300.0 + theta[0],
+            );
+            near(
+                source.source.resolved().state_coordinate("Tb").unwrap(),
+                300.0 + theta[1],
+            );
+        }
+        assert_eq!(thermal.time_s(), 0.0);
+        near(circuit.charges_c()[0], 4.0);
+    }
+}

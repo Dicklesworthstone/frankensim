@@ -1,4 +1,6 @@
 //! G1/G3/G4: actual tetrahedral current closes material and finite heat feedback.
+#[path = "spatial_conduction_enthalpy/circuit.rs"]
+mod circuit;
 #[path = "circuit_enthalpy/common.rs"]
 mod common;
 #[path = "spatial_conduction_enthalpy/contacts.rs"]

@@ -64,7 +64,7 @@ fn electrical(error: CircuitError) -> Error {
     CircuitEnthalpyError::Circuit(MaterialCircuitError::Circuit(error))
 }
 
-fn consistent(
+pub(super) fn consistent(
     dae: &CircuitDae,
     fluxes: &[f64],
     charges: &[f64],

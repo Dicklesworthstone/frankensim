@@ -9,6 +9,9 @@
 //! source/conductance resolution, Newton work limits, events and acceptance
 //! remain with the existing circuit/enthalpy and material-network owners.
 
+/// Native multi-electrode current coupled to finite circuit storage.
+pub mod circuit;
+
 use super::contacts::{self, ConductionContactThermal, SolvedContactPressure};
 use super::{
     CircuitEnthalpyError, CircuitEnthalpyReport, CircuitEnthalpySolve, ConductionLink,
@@ -464,23 +467,176 @@ impl SpatialConductionThermalNetwork<'_> {
         reference_volumes_m3: Option<&[f64]>,
         trial_positions: impl Fn(&S) -> Result<Option<Vec<[f64; 3]>>, CircuitEnthalpyError<E>>,
         accepted_pressures: &[SolvedContactPressure<'p>],
-        trial_pressures: impl Fn(
-            &S,
-        ) -> Result<Vec<SolvedContactPressure<'p>>, CircuitEnthalpyError<E>>,
+        trial_pressures: impl Fn(&S) -> Result<Vec<SolvedContactPressure<'p>>, CircuitEnthalpyError<E>>,
         cancel: &RefCell<impl FnMut() -> bool>,
     ) -> Result<SpatialConductionEnthalpyCandidate<'t, C, S>, CircuitEnthalpyError<E>> {
         let drive = drive.into();
+        let dt = finite(target_s - thermal.time_s())?;
+        let (thermal, problem, report) = self.step_driver_candidate_with_geometry(
+            thermal,
+            target_s,
+            problem,
+            contact_bindings,
+            assembly,
+            controls,
+            initial_energy_increments_j,
+            resolve,
+            sample,
+            reference_volumes_m3,
+            trial_positions,
+            accepted_pressures,
+            trial_pressures,
+            |next, contact_owner, remaining| {
+                check(cancel).map_err(map_conduction_error)?;
+                let field_solves = match drive {
+                    SpatialConductionDrive::TerminalCurrents { terminals, .. } => terminals
+                        .len()
+                        .checked_sub(1)
+                        .filter(|&n| n > 0)
+                        .ok_or_else(|| {
+                            map_conduction_error(invalid(
+                                "multi-terminal current needs at least two electrodes",
+                            ))
+                        })?,
+                    _ => 1,
+                };
+                if field_solves > remaining {
+                    return Err(CircuitEnthalpyError::CircuitBudget);
+                }
+                // A total-current source changes its terminal voltage at every
+                // nonlinear trial. Solve on the refreshed native operator so
+                // bulk/contact I²R(T,f) feeds back into this same endpoint.
+                let field = match drive {
+                    SpatialConductionDrive::Boundary(boundary) => {
+                        next.solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
+                    }
+                    SpatialConductionDrive::TotalCurrent {
+                        positive_faces,
+                        negative_faces,
+                        current_a,
+                        reference_voltage_v,
+                    } => next.solve_current_with_reference_voltage(
+                        positive_faces,
+                        negative_faces,
+                        current_a,
+                        reference_voltage_v,
+                        field_controls,
+                        &mut || (*cancel.borrow_mut())(),
+                    ),
+                    SpatialConductionDrive::TerminalCurrents {
+                        terminals,
+                        currents_a,
+                        response,
+                    } => {
+                        let matrix = next
+                            .conductance_matrix(terminals, response, field_controls, &mut || {
+                                (*cancel.borrow_mut())()
+                            })
+                            .map_err(field_error)
+                            .map_err(map_conduction_error)?;
+                        matrix.field_at_currents(
+                            currents_a,
+                            field_controls.current_tolerance_a,
+                            field_controls.power_tolerance_w,
+                            &mut || (*cancel.borrow_mut())(),
+                        )
+                    }
+                }
+                .map_err(field_error)
+                .map_err(map_conduction_error)?;
+                let heat_j = finite(dt * field.power_w)?;
+                let supplied_work_j = finite(
+                    dt * drive
+                        .supplied_power_w(&next, &field)
+                        .map_err(map_conduction_error)?,
+                )?;
+                if (field.power_w > 0.0 && heat_j == 0.0)
+                    || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
+                {
+                    return Err(map_conduction_error(invalid(
+                        "3D Joule heat and independently supplied terminal work do not close",
+                    )));
+                }
+                let contacts = contact_owner
+                    .heat(&field.contacts)
+                    .map_err(map_conduction_error)?;
+                Ok((
+                    Candidate {
+                        problem: next,
+                        step: SpatialConductionThermalStep {
+                            start_s: thermal.time_s(),
+                            end_s: target_s,
+                            field,
+                            contacts,
+                            heat_j,
+                            supplied_work_j,
+                        },
+                    },
+                    field_solves,
+                ))
+            },
+            |candidate| &candidate.step,
+            cancel,
+        )?;
+        Ok(SpatialConductionEnthalpyCandidate {
+            thermal,
+            problem,
+            report,
+        })
+    }
+
+    // One source/contact/receiving-state owner for prescribed drives and the
+    // native finite circuit. Only the electrical driver and its ledger vary.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    pub(super) fn step_driver_candidate_with_geometry<
+        't,
+        'p,
+        C: SpatialConductorMaterial,
+        S,
+        E: From<ConductionThermalError>,
+        D: ThermalDriver,
+    >(
+        &self,
+        thermal: &DepositionSimulation<'t>,
+        target_s: f64,
+        problem: &SpatialConduction<C>,
+        contact_bindings: &[ConductionContactThermal<'_>],
+        assembly: WeightedAssemblyLimits,
+        controls: CircuitEnthalpySolve,
+        initial_energy_increments_j: &[f64],
+        resolve: impl Fn(
+            &DepositionSimulation<'t>,
+        ) -> Result<CircuitThermalCoefficients<S>, CircuitEnthalpyError<E>>,
+        sample: impl Fn(&S) -> &MaterialNetworkSample,
+        reference_volumes_m3: Option<&[f64]>,
+        trial_positions: impl Fn(&S) -> Result<Option<Vec<[f64; 3]>>, CircuitEnthalpyError<E>>,
+        accepted_pressures: &[SolvedContactPressure<'p>],
+        trial_pressures: impl Fn(&S) -> Result<Vec<SolvedContactPressure<'p>>, CircuitEnthalpyError<E>>,
+        solve: impl Fn(
+            SpatialConduction<C>,
+            &contacts::PreparedContacts<'_, '_>,
+            usize,
+        ) -> Result<(D, usize), CircuitEnthalpyError<E>>,
+        spatial_step: impl Fn(&D) -> &SpatialConductionThermalStep,
+        cancel: &RefCell<impl FnMut() -> bool>,
+    ) -> Result<
+        (
+            DepositionSimulation<'t>,
+            D::Model,
+            CircuitEnthalpyReport<S, D::Step>,
+        ),
+        CircuitEnthalpyError<E>,
+    > {
         check(cancel).map_err(map_conduction_error)?;
-        let dt = self
-            .admit_step(
-                thermal,
-                target_s,
-                problem,
-                assembly,
-                controls,
-                initial_energy_increments_j,
-            )
-            .map_err(map_conduction_error)?;
+        self.admit_step(
+            thermal,
+            target_s,
+            problem,
+            assembly,
+            controls,
+            initial_energy_increments_j,
+        )
+        .map_err(map_conduction_error)?;
         if contact_bindings.len() != problem.contacts().len() {
             return Err(map_conduction_error(invalid(
                 "every tetrahedral electrical contact needs explicit source and heat ownership",
@@ -586,28 +742,13 @@ impl SpatialConductionThermalNetwork<'_> {
             cancel,
         )
         .map_err(map_conduction_error)?;
-        let (thermal, problem, report) = cell_driver_candidate(
+        let (thermal, model, report) = cell_driver_candidate(
             thermal,
             target_s,
             controls,
             initial_energy_increments_j,
             |trial, remaining| {
                 check(cancel).map_err(map_conduction_error)?;
-                let field_solves = match drive {
-                    SpatialConductionDrive::TerminalCurrents { terminals, .. } => terminals
-                        .len()
-                        .checked_sub(1)
-                        .filter(|&n| n > 0)
-                        .ok_or_else(|| {
-                            map_conduction_error(invalid(
-                                "multi-terminal current needs at least two electrodes",
-                            ))
-                        })?,
-                    _ => 1,
-                };
-                if field_solves > remaining {
-                    return Err(CircuitEnthalpyError::CircuitBudget);
-                }
                 let coefficients = resolve(trial)?;
                 if !coefficients.resistors.is_empty() {
                     return Err(map_conduction_error(invalid(
@@ -667,86 +808,21 @@ impl SpatialConductionThermalNetwork<'_> {
                 }
                 .map_err(field_error)
                 .map_err(map_conduction_error)?;
-                // A total-current source changes its terminal voltage at every
-                // nonlinear trial. Solve on the refreshed native operator so
-                // bulk/contact I²R(T,f) feeds back into this same endpoint.
-                let field = match drive {
-                    SpatialConductionDrive::Boundary(boundary) => {
-                        next.solve(boundary, field_controls, &mut || (*cancel.borrow_mut())())
-                    }
-                    SpatialConductionDrive::TotalCurrent {
-                        positive_faces,
-                        negative_faces,
-                        current_a,
-                        reference_voltage_v,
-                    } => next.solve_current_with_reference_voltage(
-                        positive_faces,
-                        negative_faces,
-                        current_a,
-                        reference_voltage_v,
-                        field_controls,
-                        &mut || (*cancel.borrow_mut())(),
-                    ),
-                    SpatialConductionDrive::TerminalCurrents {
-                        terminals,
-                        currents_a,
-                        response,
-                    } => {
-                        let matrix = next
-                            .conductance_matrix(terminals, response, field_controls, &mut || {
-                                (*cancel.borrow_mut())()
-                            })
-                            .map_err(field_error)
-                            .map_err(map_conduction_error)?;
-                        matrix.field_at_currents(
-                            currents_a,
-                            field_controls.current_tolerance_a,
-                            field_controls.power_tolerance_w,
-                            &mut || (*cancel.borrow_mut())(),
-                        )
-                    }
-                }
-                .map_err(field_error)
-                .map_err(map_conduction_error)?;
-                let heat_j = finite(dt * field.power_w)?;
-                let supplied_work_j = finite(
-                    dt * drive
-                        .supplied_power_w(&next, &field)
-                        .map_err(map_conduction_error)?,
-                )?;
-                if (field.power_w > 0.0 && heat_j == 0.0)
-                    || (heat_j - supplied_work_j).abs() > controls.total_energy_tolerance_j
-                {
-                    return Err(map_conduction_error(invalid(
-                        "3D Joule heat and independently supplied terminal work do not close",
-                    )));
-                }
-                let contacts = contact_owner
-                    .heat(&field.contacts)
-                    .map_err(map_conduction_error)?;
+                let (driver, circuit_trials) = solve(next, &contact_owner, remaining)?;
                 Ok(DrivenCoefficients {
-                    circuit: Candidate {
-                        problem: next,
-                        step: SpatialConductionThermalStep {
-                            start_s: thermal.time_s(),
-                            end_s: target_s,
-                            field,
-                            contacts,
-                            heat_j,
-                            supplied_work_j,
-                        },
-                    },
+                    circuit: driver,
                     sources_w: coefficients.sources_w,
                     conductances_w_k: coefficients.conductances_w_k,
                     source: coefficients.source,
-                    circuit_trials: field_solves,
+                    circuit_trials,
                 })
             },
             |candidate, _dt, checkpoint| {
+                let step = spatial_step(candidate);
                 let mut powers = route_owner
-                    .deposit_power(&candidate.step.field.cell_power_w, &routes, checkpoint)
+                    .deposit_power(&step.field.cell_power_w, &routes, checkpoint)
                     .map_err(map_conduction_error)?;
-                for contact in &candidate.step.contacts {
+                for contact in &step.contacts {
                     checkpoint()?;
                     contacts::deposit_partition(
                         contact.cells,
@@ -761,10 +837,6 @@ impl SpatialConductionThermalNetwork<'_> {
             || (*cancel.borrow_mut())(),
         )?;
         check(cancel).map_err(map_conduction_error)?;
-        Ok(SpatialConductionEnthalpyCandidate {
-            thermal,
-            problem,
-            report,
-        })
+        Ok((thermal, model, report))
     }
 }

@@ -16563,6 +16563,39 @@ modal mechanics and backward-Euler conduction. Both time integrations require
 refinement. No moving footprint, evolving normal geometry, temperature-dependent
 elastic entropy closure, measured calibration or full workspace build is claimed.
 
+## Native multi-electrode circuit storage on the spatial enthalpy timeline
+
+`circuit_enthalpy::conduction::spatial::circuit::SpatialConductionCircuit`
+binds original electrode face sets one-to-one to native circuit nodes and retains
+branch-ordered capacitor charge and inductor flux.
+`SpatialConductionThermalNetwork::step_circuit_candidate` refreshes complete
+scalar/tensor and two-sided electrical-contact sources at each receiving
+temperature/phase proposal, extracts the full native terminal matrix, and
+advances the existing finite C/L descriptor from the same accepted coordinates.
+Actual midpoint terminal voltages recover combined E/J and bulk/contact Joule
+power, deposited once through the original caloric routes and explicit interface
+partitions. Electrical storage, thermal history and source field publish jointly.
+
+Independent gates compare circuit currents with electrode reactions, compensated
+terminal sum I_i(V_i-V_ref) with the positive conductance factor, recovered local
+heat and native dissipation, fixed-C/L coordinate energy increments with
+descriptor storage, and authored source-port work with native supply. Each
+residual evaluation charges N-1 field basis solves plus one native circuit step
+before extraction. Original source support, volume/phase/contact ownership,
+cancellation and joint acceptance remain in the existing owners. The shared
+driver seam preserves the prescribed/moving consumer's accepted and trial
+mechanical contact-pressure inputs.
+
+The initial circuit consumer admits fixed geometry, fixed authored C/L, source
+ports and ideal transformers. Separate graph resistors and source-dependent
+storage require additional heat/reversible-work bindings and refuse here.
+Native midpoint electrical work enters the existing backward-Euler thermal
+residual; this does not remove independent spatial and time-refinement needs.
+
+Synthetic regressions cover signed two-interval three-electrode RLC/source
+feedback and capacitor discharge through temperature-dependent two-sided
+contacts, including source-support, work-budget and cancellation refusal.
+
 ## Nonlinear spatial conduction and finite material heat share one endpoint
 
 `ConductionThermalNetwork::step_response_candidate` places the original
