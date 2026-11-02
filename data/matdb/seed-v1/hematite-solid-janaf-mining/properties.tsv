@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	identity	Pure crystalline Fe2O3 hematite thermochemical reference	NIST Chemistry WebBook CAS 1317-60-8 molecular weight	Fe2O3; source molecular weight 159.688 gives molar mass 159.688 g/mol. The source explicitly identifies hematite, not the same-formula maghemite polymorph or a measured ore blend. No specimen or phase proportions are supplied. The independent hematite-nist-shomate-caloric pack retains its own sensible-heat curve and branch conditions.
+observation	standard	Fe2O3(cr), hematite, at 298.15 K and 100000 Pa standard pressure	NIST-JANAF Fe-030 literal 298.15 K row	Retain formation enthalpy -825.503 kJ/mol and absolute molar entropy 87.400 J/(mol K), with the JANAF elemental reference convention. These are the literal JANAF table values, not the rounded WebBook formation scalar or the Shomate coefficient H. Source uncertainty is unstated in the retained table. The reference point supplies a mixed-phase reaction-energy term; no elevated-temperature phase stability, transition energy, kinetics or process heat loss is inferred.
+scalar	mass	identity	molar_mass	159.688	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	298.15	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-825.503	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	87.400	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1

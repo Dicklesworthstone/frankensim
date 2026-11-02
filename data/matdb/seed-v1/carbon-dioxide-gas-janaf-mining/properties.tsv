@@ -1,0 +1,33 @@
+frankensim.matdb-source.v1
+observation	identity	Pure CO2 gas standard-state thermochemical reference	NIST Chemistry WebBook CAS 124-38-9 molecular weight	CO2; source molecular weight 44.0095 gives molar mass 44.0095 g/mol. Gas identity is explicit: these values are not CO2(aq), carbonic acid, bicarbonate, carbonate or liquid CO2. The NASA gas-species and transport packs remain separately identified models. This ordinary material pack supplies standard formation-energy inputs to a mixed-phase reaction sum and does not create a new gas EOS.
+observation	standard	CO2(g) at 298.15 K and 100000 Pa standard pressure	NIST-JANAF C-095 literal 298.15 K row	Retain formation enthalpy -393.522 kJ/mol and absolute molar entropy 213.795 J/(mol K), with the JANAF elemental reference and ideal-gas standard-state convention. These are the literal JANAF values, not rounded WebBook scalars or alternate CODATA evaluations. Source uncertainty is unstated in the retained table. No real-gas pressure response, dissolution enthalpy, gas-liquid equilibrium or elevated-temperature formation property is supplied.
+scalar	mass	identity	molar_mass	44.0095	g/mol	constant
+uncertainty	mass	unstated	-	-	-	-
+validity	mass	temperature	298.15	298.15	K
+validity	mass	pressure	100000	100000	Pa
+validity	mass	phase	1	1	1
+validity	mass	standard_state	1	1	1
+validity	mass	reference_convention	1	1	1
+validity	mass	purity	1	1	1
+validity	mass	reference	1	1	1
+validity	mass	specimen	0	0	1
+scalar	formation	standard	hf	-393.522	kJ/mol	constant
+uncertainty	formation	unstated	-	-	-	-
+validity	formation	temperature	298.15	298.15	K
+validity	formation	pressure	100000	100000	Pa
+validity	formation	phase	1	1	1
+validity	formation	standard_state	1	1	1
+validity	formation	reference_convention	1	1	1
+validity	formation	purity	1	1	1
+validity	formation	reference	1	1	1
+validity	formation	specimen	0	0	1
+scalar	entropy298	standard	entropy	213.795	J/mol/K	constant
+uncertainty	entropy298	unstated	-	-	-	-
+validity	entropy298	temperature	298.15	298.15	K
+validity	entropy298	pressure	100000	100000	Pa
+validity	entropy298	phase	1	1	1
+validity	entropy298	standard_state	1	1	1
+validity	entropy298	reference_convention	1	1	1
+validity	entropy298	purity	1	1	1
+validity	entropy298	reference	1	1	1
+validity	entropy298	specimen	0	0	1
