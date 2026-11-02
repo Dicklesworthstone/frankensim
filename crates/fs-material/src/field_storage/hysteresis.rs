@@ -33,6 +33,8 @@ pub mod vector;
 pub mod source;
 /// One magnetic history shared by multiple windings with physical leakage.
 pub mod shared;
+/// Classical thin-lamination eddy reaction from the original Ohmic material.
+pub mod lamination;
 
 /// One polarization contribution; the sum of saturation values is the total
 /// saturation polarization. No normalization or hidden branch weight is used.

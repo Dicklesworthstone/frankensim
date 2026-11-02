@@ -2,6 +2,7 @@
 use super::*;
 
 mod heat;
+mod lamination;
 use fs_material::field_storage::{
     MAGNETIC_PERMEABILITY_DIMS,
     hysteresis::source::{HysteresisBranchSources, HysteresisSources, ResolvedScalarHysteresis},

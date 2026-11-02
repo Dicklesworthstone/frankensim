@@ -10,7 +10,9 @@
 //! Every thermal trial restarts the same accepted circuit and magnetic memory,
 //! including the original gap and momentum when native motion is represented.
 //! Core heat enters its whole fixed solid volume; graph resistor heat enters
-//! its original receiving cells. No core-loss map, eddy fit, numerical defect
+//! its original receiving cells. The explicit lamination reduction can add
+//! classical source-conductivity eddy reaction at that SAME core port/volume.
+//! No core-loss map, eddy fit, numerical defect
 //! or duplicate thermal source is added. Endpoint transport plus thermal BE
 //! gives first-order coupled accuracy in general, requiring time refinement.
 
@@ -36,6 +38,10 @@ use fs_material::{
 };
 use fs_thermal::enthalpy::{CellId, DepositionError, DepositionSimulation};
 use std::{cell::RefCell, collections::BTreeMap, sync::Arc};
+
+/// Explicit physical lamination shunt on the original single-core circuit.
+pub mod lamination;
+use lamination::HystereticLamination;
 
 pub(super) mod sealed {
     pub trait History {}
@@ -176,6 +182,7 @@ impl<H: HystereticThermalHistory> ThermalDriver for MagneticDriver<H> {
 pub enum HystereticThermalError<E = HeatNetworkError> {
     Material(MaterialNetworkError),
     Magnetic(HystereticCircuitError),
+    Lamination(fs_material::conductor::ConductorError),
     Heat(E),
 }
 impl<E: core::fmt::Debug> core::fmt::Display for HystereticThermalError<E> {
@@ -202,6 +209,9 @@ fn magnetic<E>(e: HystereticCircuitError) -> Error<E> {
         HystereticCircuitError::TrialBudget => CircuitEnthalpyError::CircuitBudget,
         other => CircuitEnthalpyError::Source(HystereticThermalError::Magnetic(other)),
     }
+}
+fn lamination_error<E>(e: fs_material::conductor::ConductorError) -> Error<E> {
+    CircuitEnthalpyError::Source(HystereticThermalError::Lamination(e))
 }
 fn heat<E: From<HeatNetworkError>>(e: HeatNetworkError) -> Error<E> {
     match e {
@@ -238,6 +248,7 @@ pub struct ThermalHystereticCircuit<'n, 'a, H: HystereticThermalHistory = Hyster
     core_density_kg_m3: f64,
     core_temperature_interval_k: [f64; 2],
     core_binding: Option<&'n MaterialCell<'a>>,
+    lamination: Option<HystereticLamination>,
 }
 impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
     /// Bind the core to a distinct whole fixed-volume solid caloric cell.
@@ -295,6 +306,33 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
         core_cell: CellId,
         core_temperature_interval_k: [f64; 2],
         initial_link_conductances_w_k: &BTreeMap<u64, f64>,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, Error> {
+        Self::bind_with_lamination_option(
+            circuit,
+            thermal,
+            network,
+            electrical_bases,
+            core_cell,
+            core_temperature_interval_k,
+            initial_link_conductances_w_k,
+            None,
+            cancelled,
+        )
+    }
+
+    // Only the single-core child may admit a physically bound core resistor.
+    // Ordinary and shared-core entry points retain their original inventory rule.
+    #[allow(clippy::too_many_arguments)]
+    fn bind_with_lamination_option(
+        circuit: H,
+        thermal: &DepositionSimulation<'_>,
+        network: &'n MaterialNetwork<'a>,
+        electrical_bases: &[(usize, ElectricalPropertyBasis)],
+        core_cell: CellId,
+        core_temperature_interval_k: [f64; 2],
+        initial_link_conductances_w_k: &BTreeMap<u64, f64>,
+        lamination: Option<HystereticLamination>,
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<Self, Error> {
         if cancelled() {
@@ -306,10 +344,12 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
             || !high.is_finite()
             || low <= 0.0
             || high <= low
-            || network
-                .resistors
-                .iter()
-                .any(|r| r.destination.cell == core_cell)
+            || network.resistors.iter().any(|r| {
+                r.destination.cell == core_cell
+                    && lamination
+                        .as_ref()
+                        .is_none_or(|l| r.destination.branch != l.branch)
+            })
         {
             return Err(invalid(
                 "matching clocks, positive core temperature interval and distinct core/winding cells required",
@@ -354,6 +394,10 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                 "accepted circuit resistor sources must match the actual thermal endpoint",
             ));
         }
+        let lamination = lamination
+            .map(|loss| loss.refresh(circuit.uniform_core(), &initial.resistors))
+            .transpose()
+            .map_err(lamination_error)?;
         let core_binding = if let Some(source) = circuit.uniform_core().source() {
             let cell = thermal
                 .cells()
@@ -401,6 +445,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
             core_density_kg_m3: density,
             core_temperature_interval_k,
             core_binding,
+            lamination,
         };
         let _ = result.core_query(thermal)?;
         if cancelled() {
@@ -417,6 +462,13 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
     }
     pub const fn core_temperature_interval_k(&self) -> [f64; 2] {
         self.core_temperature_interval_k
+    }
+
+    /// Physical lamination and its accepted source-conductivity shunt, if bound.
+    /// Pinning heat remains the original core receipt; eddy heat remains the
+    /// native resistor receipt at this explicit branch.
+    pub const fn lamination(&self) -> Option<&HystereticLamination> {
+        self.lamination.as_ref()
     }
 
     fn core_query<E>(
@@ -688,6 +740,10 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                         .map_err(magnetic)?,
                     None => self.circuit.clone(),
                 };
+                if let Some(loss) = &self.lamination {
+                    loss.refresh(beginning.uniform_core(), &coefficients.resistors)
+                        .map_err(lamination_error)?;
+                }
                 let (model, step) = beginning
                     .step_for_heat(
                         target_s,
@@ -722,7 +778,7 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                             "resistor heat cannot be represented as a thermal rate",
                         ));
                     }
-                    powers.insert(cell, power);
+                    add_heat(&mut powers, cell, power)?;
                 }
                 checkpoint()?;
                 let core_heat = candidate.step.core_heat_j();
@@ -732,12 +788,18 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                         "core pinning heat cannot be represented as a thermal rate",
                     ));
                 }
-                powers.insert(self.core_cell, core_power);
+                add_heat(&mut powers, self.core_cell, core_power)?;
                 Ok(powers)
             },
             || (*cancel.borrow_mut())(),
         )?;
         check()?;
+        let lamination = self
+            .lamination
+            .as_ref()
+            .map(|loss| loss.refresh(circuit.uniform_core(), circuit.native_circuit().resistors()))
+            .transpose()
+            .map_err(lamination_error)?;
         Ok(HystereticEnthalpyCandidate {
             thermal,
             circuit: Self {
@@ -749,10 +811,30 @@ impl<'n, 'a, H: HystereticThermalHistory> ThermalHystereticCircuit<'n, 'a, H> {
                 core_density_kg_m3: self.core_density_kg_m3,
                 core_temperature_interval_k: self.core_temperature_interval_k,
                 core_binding: self.core_binding,
+                lamination,
             },
             report,
         })
     }
+}
+
+// Native Joule and pinning work can share the same physical core volume.
+// Accumulate them; never overwrite one loss receipt with another.
+fn add_heat<E>(
+    powers: &mut BTreeMap<CellId, f64>,
+    cell: CellId,
+    power: f64,
+) -> Result<(), Error<E>> {
+    let previous = powers.get(&cell).copied().unwrap_or(0.0);
+    let total = previous + power;
+    if !power.is_finite() || power < 0.0 || !total.is_finite() || (power > 0.0 && total == previous)
+    {
+        return Err(invalid(
+            "combined physical magnetic heat is unrepresentable",
+        ));
+    }
+    powers.insert(cell, total);
+    Ok(())
 }
 
 /// Both publishable histories. The report's legacy deposited_joule_j field

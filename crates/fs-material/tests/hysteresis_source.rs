@@ -15,6 +15,9 @@ use fs_material::{
 use fs_qty::{Dims, QuantitySpec, Temperature};
 use std::sync::Arc;
 
+#[path = "hysteresis_source/lamination.rs"]
+mod lamination;
+
 fn point(temperature: f64) -> QueryPoint {
     QueryPoint::new()
         .with_quantity(
