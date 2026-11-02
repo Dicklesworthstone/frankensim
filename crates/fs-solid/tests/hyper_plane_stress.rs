@@ -276,3 +276,158 @@ fn g0_rejects_folded_domains_bad_controls_and_cancellation_without_partial_outpu
         ));
     });
 }
+
+#[test]
+fn g1_exact_incompressible_traction_solve_preserves_volume_and_ignores_bulk_penalties() {
+    with_cx(|cx, _| {
+        let (mu, axial): (f64, f64) = (2.0, 1.4);
+        // Independent incompressible NH uniaxial solution: t = axial^-1/2,
+        // Pxx = mu (axial - axial^-2), W = mu/2 (axial² + 2/axial - 3).
+        let lateral = 1.0 / axial.sqrt();
+        let nominal = mu * (axial - 1.0 / (axial * axial));
+        let left = |_: f64, y: f64| [0.0, (lateral - 1.0) * y];
+        let pull = |_: f64, _: f64| [nominal, 0.0];
+        let local = PlaneStressSettings::default();
+        for mesh in [
+            Mesh2::triangles(2.0, 1.0, 2, 2),
+            Mesh2::quads(2.0, 1.0, 2, 2),
+        ] {
+            let mut first_displacement = None;
+            for lambda in [0.0, 40.0, 1e300] {
+                let law = nh(mu, lambda);
+                let mut p = problem(&mesh, &law);
+                p.dirichlet = vec![(Patch::Left, &left)];
+                p.traction = vec![(Patch::Right, &pull)];
+                let (u, report) = p.solve_incompressible_plane_stress(local, cx).unwrap();
+                assert_eq!(report.histories.len(), p.settings.load_steps);
+                for (v, [x, y]) in u.iter().zip(&mesh.nodes) {
+                    close(v[0], (axial - 1.0) * x, 2e-8);
+                    close(v[1], (lateral - 1.0) * y, 2e-8);
+                }
+                if let Some(first) = &first_displacement {
+                    assert_eq!(&u, first, "bulk coefficient entered the exact constraint");
+                } else {
+                    first_displacement = Some(u.clone());
+                }
+                let flat: Vec<f64> = u.iter().flatten().copied().collect();
+                for state in p
+                    .incompressible_plane_stress_states(&flat, local, cx)
+                    .unwrap()
+                {
+                    let f = state.deformation_gradient;
+                    close((f[0] * f[4] - f[1] * f[3]) * f[8], 1.0, 4e-15);
+                    close(f[8], lateral, 2e-8);
+                    close(state.piola[0], nominal, 2e-8);
+                    close(state.piola[3], 0.0, 2e-8);
+                    // The original NH remainder includes -mu ln J; this fixes
+                    // the multiplier gauge used by pressure recovery.
+                    close(state.pressure_pa, mu * (lateral * lateral - 1.0), 2e-8);
+                    for i in [2, 5, 8] {
+                        close(state.full_piola[i], 0.0, 2e-10);
+                    }
+                }
+                let (residual, _) = p
+                    .incompressible_plane_stress_residual_and_tangent(&flat, 1.0, local, cx)
+                    .unwrap();
+                let reaction: f64 = mesh
+                    .patch_nodes(Patch::Left)
+                    .iter()
+                    .map(|&i| residual[2 * i])
+                    .sum();
+                close(reaction, -nominal, 2e-8);
+                let storage = p
+                    .incompressible_plane_stress_potential_energy(&flat, 1.0, local, cx)
+                    .unwrap()
+                    + nominal * (axial - 1.0) * 2.0;
+                close(storage, mu * (axial * axial + 2.0 / axial - 3.0), 2e-8);
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_incompressible_skew_element_potential_force_and_tangent_include_pressure_relaxation() {
+    with_cx(|cx, _| {
+        let local = PlaneStressSettings::default();
+        let fibre = Hyperelastic::new(
+            HyperelasticModel::HolzapfelGasserOgden {
+                c10: 1.0,
+                k1: 1.8,
+                k2: 1.1,
+                dispersion: 0.05,
+                fibres: vec![[0.8, 0.0, 0.6]],
+                invariants: FibreInvariants::Full,
+                volumetric: Volumetric::Quadratic { kappa: 1e300 },
+            },
+            4.0,
+        )
+        .unwrap();
+        for law in [nh(2.0, 40.0), fibre] {
+            for mesh in [
+                Mesh2::triangles(1.0, 0.7, 1, 1),
+                Mesh2::mapped_quads(2, 1, &|x, y| [x + 0.15 * x * y + 0.1 * y, y + 0.1 * x]),
+            ] {
+                let traction = |x: f64, y: f64| [0.1 + x * 0.04, -0.03 * y];
+                let mut p = problem(&mesh, &law);
+                p.traction = vec![(Patch::Right, &traction)];
+                let u: Vec<f64> = mesh
+                    .nodes
+                    .iter()
+                    .flat_map(|[x, y]| [0.14 * x + 0.03 * x * y, -0.04 * y + 0.02 * x * y])
+                    .collect();
+                let (force, tangent) = p
+                    .incompressible_plane_stress_residual_and_tangent(&u, 0.7, local, cx)
+                    .unwrap();
+                let h = 2e-6;
+                for col in 0..u.len() {
+                    let mut plus = u.clone();
+                    let mut minus = u.clone();
+                    plus[col] += h;
+                    minus[col] -= h;
+                    let ep = p
+                        .incompressible_plane_stress_potential_energy(&plus, 0.7, local, cx)
+                        .unwrap();
+                    let em = p
+                        .incompressible_plane_stress_potential_energy(&minus, 0.7, local, cx)
+                        .unwrap();
+                    close((ep - em) / (2.0 * h), force[col], 3e-7);
+                    let rp = p
+                        .incompressible_plane_stress_residual_and_tangent(&plus, 0.7, local, cx)
+                        .unwrap()
+                        .0;
+                    let rm = p
+                        .incompressible_plane_stress_residual_and_tangent(&minus, 0.7, local, cx)
+                        .unwrap()
+                        .0;
+                    for row in 0..u.len() {
+                        close((rp[row] - rm[row]) / (2.0 * h), tangent.get(row, col), 5e-6);
+                        close(tangent.get(row, col), tangent.get(col, row), 5e-11);
+                    }
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn g0_incompressible_thickness_domain_and_cancellation_remain_enforced() {
+    with_cx(|cx, gate| {
+        let local = PlaneStressSettings::default();
+        let mesh = Mesh2::quads(1.0, 1.0, 1, 1);
+        let mut law = nh(2.0, 40.0);
+        law.stretch_limit = 2.0;
+        let p = problem(&mesh, &law);
+        // The in-plane stretches are allowed, but volume conservation would
+        // require F22 = 1/4, outside the unchanged lower bound 1/2.
+        let stretch: Vec<f64> = mesh.nodes.iter().flat_map(|[x, y]| [*x, *y]).collect();
+        assert!(matches!(
+            p.incompressible_plane_stress_states(&stretch, local, cx),
+            Err(SolidError::MaterialRefused { .. })
+        ));
+        gate.request();
+        assert!(matches!(
+            p.solve_incompressible_plane_stress(local, cx),
+            Err(SolidError::Cancelled)
+        ));
+    });
+}

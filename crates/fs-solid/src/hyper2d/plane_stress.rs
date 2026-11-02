@@ -12,6 +12,7 @@ use crate::SolidError;
 use crate::mesh2::{quad_points, shapes_at};
 use fs_exec::Cx;
 use fs_material::hyper::Hyperelastic;
+use fs_material::hyper::incompressible_plane_stress::IncompressiblePlaneStressState;
 use fs_material::hyper::plane_stress::{PlaneStressSettings, PlaneStressState};
 use fs_sparse::{Coo, Csr};
 use std::collections::BTreeMap;
@@ -42,6 +43,12 @@ struct Element {
     points: Vec<Point>,
 }
 
+#[derive(Clone, Copy)]
+enum Constraint {
+    FiniteBulk,
+    Incompressible,
+}
+
 impl Element {
     // A bilinear quad's in-plane Jacobian is affine in reference coordinates:
     // positivity at every corner excludes a folded corner hidden from Gauss
@@ -65,12 +72,14 @@ pub(super) struct Prepared {
     ndof: usize,
     elements: Vec<Element>,
     local: PlaneStressSettings,
+    constraint: Constraint,
 }
 
 impl Prepared {
     fn new(
         problem: &HyperProblem<'_>,
         local: PlaneStressSettings,
+        constraint: Constraint,
         cx: &Cx<'_>,
     ) -> Result<Self, SolidError> {
         checkpoint(cx)?;
@@ -92,7 +101,14 @@ impl Prepared {
             problem.material.model.clone(),
             problem.material.stretch_limit,
         )
-        .and_then(|law| law.plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local))
+        .and_then(|law| match constraint {
+            Constraint::FiniteBulk => law
+                .plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
+                .map(|_| ()),
+            Constraint::Incompressible => law
+                .incompressible_plane_stress_state(&[1.0, 0.0, 0.0, 1.0], local)
+                .map(|_| ()),
+        })
         .map_err(|error| material_error(0, error))?;
         for (_, edges) in &mesh.patches {
             if edges
@@ -165,6 +181,7 @@ impl Prepared {
             ndof,
             elements,
             local,
+            constraint,
         })
     }
 
@@ -211,10 +228,17 @@ impl Prepared {
         let mut residual = vec![0.0; self.ndof];
         let mut coo = Coo::new(self.ndof, self.ndof);
         self.for_points(u, load, cx, |index, element, point, f| {
-            let response = problem
-                .material
-                .plane_stress(&f, self.local)
-                .map_err(|error| material_error(index, error))?;
+            let (piola, tangent) = match self.constraint {
+                Constraint::FiniteBulk => problem
+                    .material
+                    .plane_stress(&f, self.local)
+                    .map(|response| (response.piola, response.tangent)),
+                Constraint::Incompressible => problem
+                    .material
+                    .incompressible_plane_stress(&f, self.local)
+                    .map(|response| (response.piola, response.tangent)),
+            }
+            .map_err(|error| material_error(index, error))?;
             for (a, &na) in element.nodes[..element.arity].iter().enumerate() {
                 for i in 0..2 {
                     let ia = 2 * na + i;
@@ -222,8 +246,8 @@ impl Prepared {
                         continue;
                     }
                     residual[ia] += point.weight
-                        * (response.piola[2 * i] * point.gradients[a][0]
-                            + response.piola[2 * i + 1] * point.gradients[a][1]);
+                        * (piola[2 * i] * point.gradients[a][0]
+                            + piola[2 * i + 1] * point.gradients[a][1]);
                     for (b, &nb) in element.nodes[..element.arity].iter().enumerate() {
                         for k in 0..2 {
                             let ib = 2 * nb + k;
@@ -233,7 +257,7 @@ impl Prepared {
                             let mut value = 0.0;
                             for j in 0..2 {
                                 for l in 0..2 {
-                                    value += response.tangent[2 * i + j][2 * k + l]
+                                    value += tangent[2 * i + j][2 * k + l]
                                         * point.gradients[a][j]
                                         * point.gradients[b][l];
                                 }
@@ -272,11 +296,18 @@ impl Prepared {
     ) -> Result<f64, SolidError> {
         let mut potential = 0.0;
         self.for_points(u, load, cx, |index, _, point, f| {
-            let state = problem
-                .material
-                .plane_stress_state(&f, self.local)
-                .map_err(|error| material_error(index, error))?;
-            potential += point.weight * state.energy_density_pa;
+            let energy_density = match self.constraint {
+                Constraint::FiniteBulk => problem
+                    .material
+                    .plane_stress_state(&f, self.local)
+                    .map(|state| state.energy_density_pa),
+                Constraint::Incompressible => problem
+                    .material
+                    .incompressible_plane_stress_state(&f, self.local)
+                    .map(|state| state.energy_density_pa),
+            }
+            .map_err(|error| material_error(index, error))?;
+            potential += point.weight * energy_density;
             Ok(())
         })?;
         problem.for_traction(load, |dof, value| potential -= value * u[dof])?;
@@ -301,6 +332,31 @@ impl HyperProblem<'_> {
         local: PlaneStressSettings,
         cx: &Cx<'_>,
     ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_plane_stress_constrained(local, Constraint::FiniteBulk, cx)
+    }
+
+    /// Solve an exactly volume-preserving thin hyperelastic continuum.
+    ///
+    /// The original material remainder supplies energy and transverse shear
+    /// relaxation; `det F = 1` fixes thickness and traction equilibrium fixes
+    /// the pressure multiplier. No bulk penalty or pressure mesh is needed for
+    /// this plane-stress reduction. This is not a general 3-D mixed element.
+    /// Material stretch bounds, global equilibrium and cancellation retain the
+    /// same gates as [`Self::solve_plane_stress`].
+    pub fn solve_incompressible_plane_stress(
+        &self,
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
+        self.solve_plane_stress_constrained(local, Constraint::Incompressible, cx)
+    }
+
+    fn solve_plane_stress_constrained(
+        &self,
+        local: PlaneStressSettings,
+        constraint: Constraint,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<[f64; 2]>, NewtonReport), SolidError> {
         if !self.settings.tol.is_finite()
             || self.settings.tol <= 0.0
             || self.settings.max_iters == 0
@@ -311,7 +367,7 @@ impl HyperProblem<'_> {
                 "plane-stress Newton controls must be finite and positive",
             ));
         }
-        let prepared = Prepared::new(self, local, cx)?;
+        let prepared = Prepared::new(self, local, constraint, cx)?;
         self.solve_with_projection(Some(Reduction::PlaneStress(&prepared, cx)))
     }
 
@@ -324,7 +380,13 @@ impl HyperProblem<'_> {
         local: PlaneStressSettings,
         cx: &Cx<'_>,
     ) -> Result<(Vec<f64>, Csr), SolidError> {
-        Prepared::new(self, local, cx)?.assemble(self, u, load, &BTreeMap::new(), cx)
+        Prepared::new(self, local, Constraint::FiniteBulk, cx)?.assemble(
+            self,
+            u,
+            load,
+            &BTreeMap::new(),
+            cx,
+        )
     }
 
     /// Reduced total potential, including work of the original dead tractions.
@@ -336,7 +398,7 @@ impl HyperProblem<'_> {
         local: PlaneStressSettings,
         cx: &Cx<'_>,
     ) -> Result<f64, SolidError> {
-        Prepared::new(self, local, cx)?.potential_energy(self, u, load, cx)
+        Prepared::new(self, local, Constraint::FiniteBulk, cx)?.potential_energy(self, u, load, cx)
     }
 
     /// Recover the actual relaxed three-dimensional states, in element order
@@ -347,12 +409,66 @@ impl HyperProblem<'_> {
         local: PlaneStressSettings,
         cx: &Cx<'_>,
     ) -> Result<Vec<PlaneStressState>, SolidError> {
-        let prepared = Prepared::new(self, local, cx)?;
+        let prepared = Prepared::new(self, local, Constraint::FiniteBulk, cx)?;
         let mut states = Vec::new();
         prepared.for_points(u, 0.0, cx, |index, _, _, f| {
             states.push(
                 self.material
                     .plane_stress_state(&f, local)
+                    .map_err(|error| material_error(index, error))?,
+            );
+            Ok(())
+        })?;
+        Ok(states)
+    }
+
+    /// Unconstrained forces and the Hessian of the exactly incompressible
+    /// reduced potential, per unit reference thickness. Support residuals at
+    /// equilibrium are reactions, including the recovered pressure contribution.
+    pub fn incompressible_plane_stress_residual_and_tangent(
+        &self,
+        u: &[f64],
+        load: f64,
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<(Vec<f64>, Csr), SolidError> {
+        Prepared::new(self, local, Constraint::Incompressible, cx)?.assemble(
+            self,
+            u,
+            load,
+            &BTreeMap::new(),
+            cx,
+        )
+    }
+
+    /// Exactly incompressible reduced energy minus original dead-load work.
+    /// Neither the energy nor its derivatives use a finite bulk modulus.
+    pub fn incompressible_plane_stress_potential_energy(
+        &self,
+        u: &[f64],
+        load: f64,
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<f64, SolidError> {
+        Prepared::new(self, local, Constraint::Incompressible, cx)?
+            .potential_energy(self, u, load, cx)
+    }
+
+    /// Recover volume-preserving 3-D states, physical first Piola stress and
+    /// the material remainder's pressure multiplier, in element/quadrature
+    /// order. The multiplier's gauge is not the mean Cauchy pressure.
+    pub fn incompressible_plane_stress_states(
+        &self,
+        u: &[f64],
+        local: PlaneStressSettings,
+        cx: &Cx<'_>,
+    ) -> Result<Vec<IncompressiblePlaneStressState>, SolidError> {
+        let prepared = Prepared::new(self, local, Constraint::Incompressible, cx)?;
+        let mut states = Vec::new();
+        prepared.for_points(u, 0.0, cx, |index, _, _, f| {
+            states.push(
+                self.material
+                    .incompressible_plane_stress_state(&f, local)
                     .map_err(|error| material_error(index, error))?,
             );
             Ok(())

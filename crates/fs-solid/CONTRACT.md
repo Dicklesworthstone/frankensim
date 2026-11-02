@@ -291,6 +291,32 @@ is implied. Existing `solve()` and continuation retain plane-strain semantics.
 under nominal traction and reports displacement, relaxed thickness and support
 reaction. Its constitutive coefficients are explicitly authored model inputs.
 
+## Exactly incompressible finite-strain plane stress
+
+`HyperProblem::solve_incompressible_plane_stress(PlaneStressSettings, &Cx)`
+uses the same P1/Q1 geometry, integration, Newton solver and boundary loads as
+the finite-bulk plane-stress path. At each point the native material reduction
+enforces `det F = 1`, relaxes transverse shear and recovers the traction-free
+pressure multiplier. Its reduced energy, forces and tangent do not use a bulk
+penalty. The stored constitutive bulk coefficient can span finite scales
+without changing this explicitly selected incompressible problem.
+
+`incompressible_plane_stress_states` recovers physical first Piola stress,
+volume-preserving 3-D deformation and the original material remainder's
+pressure multiplier. This multiplier's gauge is not mean Cauchy pressure.
+The corresponding potential and residual/tangent APIs retain reference-thickness
+work conjugacy and reaction recovery. Original material stretch bounds apply to
+the actual relaxed thickness; an allowed in-plane stretch does not override them.
+
+G0/G1 tests in `tests/hyper_plane_stress.rs` independently recover incompressible
+Neo-Hookean uniaxial contraction, stress, energy and support reaction on triangles
+and quads; show bulk-coefficient independence through `1e300`; differentiate
+assembled reduced energy/forces for tilted fibres on skew elements; and check
+thickness-domain/cancellation refusals. The existing example accepts
+`--incompressible`. This is the exact thin-continuum volume constraint, not a
+general 3-D mixed formulation, shell bending model or arbitrary-mesh stability
+certificate.
+
 ## Finite-strain Q1 mean dilatation
 
 `HyperProblem::solve_mean_dilatation(&Cx)` adds an opt-in plane-strain Q1

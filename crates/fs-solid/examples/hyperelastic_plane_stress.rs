@@ -1,6 +1,7 @@
 //! A thin hyperelastic coupon under a dead nominal traction.
 //!
 //! Run: cargo run -p fs-solid --example hyperelastic_plane_stress
+//! Exact volume constraint: append `-- --incompressible`.
 //! Coefficients are declared model inputs, not a fit to a named material.
 
 use fs_alloc::{ArenaConfig, ArenaPool};
@@ -10,6 +11,12 @@ use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::{HyperProblem, Mesh2, NewtonSettings, Patch, SolidError};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let arguments: Vec<String> = std::env::args().skip(1).collect();
+    let incompressible = match arguments.as_slice() {
+        [] => false,
+        [argument] if argument == "--incompressible" => true,
+        _ => return Err("usage: hyperelastic_plane_stress [--incompressible]".into()),
+    };
     let mesh = Mesh2::quads(0.02, 0.01, 4, 2);
     let reference_thickness_m = 0.001;
     let material = Hyperelastic::new(
@@ -48,18 +55,38 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ExecMode::Deterministic,
         );
         let local = PlaneStressSettings::default();
-        let (displacement, report) = problem.solve_plane_stress(local, &cx)?;
+        let (displacement, report) = if incompressible {
+            problem.solve_incompressible_plane_stress(local, &cx)?
+        } else {
+            problem.solve_plane_stress(local, &cx)?
+        };
         let flat: Vec<f64> = displacement.iter().flatten().copied().collect();
-        let states = problem.plane_stress_states(&flat, local, &cx)?;
-        let min_thickness = states
+        let thickness_stretches: Vec<f64> = if incompressible {
+            problem
+                .incompressible_plane_stress_states(&flat, local, &cx)?
+                .iter()
+                .map(|state| state.deformation_gradient[8])
+                .collect()
+        } else {
+            problem
+                .plane_stress_states(&flat, local, &cx)?
+                .iter()
+                .map(|state| state.deformation_gradient[8])
+                .collect()
+        };
+        let min_thickness = thickness_stretches
             .iter()
-            .map(|s| s.deformation_gradient[8] * reference_thickness_m)
+            .map(|stretch| stretch * reference_thickness_m)
             .fold(f64::INFINITY, f64::min);
-        let max_thickness = states
+        let max_thickness = thickness_stretches
             .iter()
-            .map(|s| s.deformation_gradient[8] * reference_thickness_m)
+            .map(|stretch| stretch * reference_thickness_m)
             .fold(0.0, f64::max);
-        let (residual, _) = problem.plane_stress_residual_and_tangent(&flat, 1.0, local, &cx)?;
+        let (residual, _) = if incompressible {
+            problem.incompressible_plane_stress_residual_and_tangent(&flat, 1.0, local, &cx)?
+        } else {
+            problem.plane_stress_residual_and_tangent(&flat, 1.0, local, &cx)?
+        };
         // The native 2-D solve uses unit REFERENCE thickness. Convert the
         // integrated reaction to this coupon's force only after the solve.
         let reaction_n = reference_thickness_m
@@ -70,6 +97,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 .sum::<f64>();
         let max_extension = displacement.iter().map(|u| u[0]).fold(0.0, f64::max);
         println!("Plane-stress hyperelastic coupon: 20 x 10 x 1 mm reference geometry");
+        println!("Exact incompressibility: {incompressible}");
         println!("Maximum axial displacement: {max_extension:.9e} m");
         println!("Relaxed thickness: {min_thickness:.9e} .. {max_thickness:.9e} m");
         println!("Axial support reaction: {reaction_n:.9e} N");
