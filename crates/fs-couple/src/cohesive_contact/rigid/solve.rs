@@ -30,7 +30,11 @@ impl RigidCohesiveSystem<'_> {
     ) -> Result<(Evaluation, [Wrench; 2], usize, Work), RigidCohesiveError> {
         let mut work = Work {
             evaluations: 0,
-            material_evaluations: 0,
+            material_evaluations: if self.thermal_active {
+                self.sites.len()
+            } else {
+                0
+            },
         };
         let mut x = pack(self.last_wrenches);
         let mut value = self.evaluate(x, loads, None, &mut work, gate)?;
@@ -203,10 +207,11 @@ impl RigidCohesiveSystem<'_> {
                 ));
             }
             work.material_evaluations += 1;
+            let point = self.point_for_step(index)?;
             let frame = compose(after[0].pose().orientation(), site.frame_in_a)?;
             let new_separation = separation(&after, site.arms_body_m)?;
             let (trial, pressure) = if friction_forces.is_some() {
-                site.point.trial_with_damage_weighted_compression(
+                point.trial_with_damage_weighted_compression(
                     frame,
                     new_separation,
                     self.dt_s,
@@ -214,8 +219,7 @@ impl RigidCohesiveSystem<'_> {
                 )?
             } else {
                 (
-                    site.point
-                        .trial(frame, new_separation, self.dt_s, self.config.objective)?,
+                    point.trial(frame, new_separation, self.dt_s, self.config.objective)?,
                     0.0,
                 )
             };
@@ -408,13 +412,13 @@ impl RigidCohesiveSystem<'_> {
         }
         finite(mechanical)?;
         finite(external_work)?;
+        let [parameter_work, thermal_storage, thermal_damage] = self.temperature_accounts(gate)?;
+        let fracture = finite(trial.fracture + thermal_damage)?;
         let old_energy = self.total_energy_j()?;
         let energy_residual = finite(
-            mechanical + trial.storage - old_energy
-                + trial.fracture
-                + trial.viscous
-                + trial.friction
-                - external_work,
+            mechanical + trial.storage - old_energy + fracture + trial.viscous + trial.friction
+                - external_work
+                - parameter_work,
         )?;
         let energy_tolerance = finite(
             self.config.energy_absolute_tolerance_j
@@ -423,9 +427,10 @@ impl RigidCohesiveSystem<'_> {
                         + mechanical.abs()
                         + trial.storage.abs()
                         + external_work.abs()
-                        + trial.fracture
+                        + fracture
                         + trial.viscous
-                        + trial.friction),
+                        + trial.friction
+                        + parameter_work.abs()),
         )?;
         balance(
             "actual rigid/cohesive energy",
@@ -461,7 +466,10 @@ impl RigidCohesiveSystem<'_> {
             mechanical_energy_j: mechanical,
             cohesive_stored_energy_j: trial.storage,
             external_work_j: external_work,
-            fracture_dissipation_j: trial.fracture,
+            fracture_dissipation_j: fracture,
+            parameter_work_j: parameter_work,
+            thermal_stored_change_j: thermal_storage,
+            thermal_damage_dissipation_j: thermal_damage,
             viscous_dissipation_j: trial.viscous,
             friction_dissipation_j: trial.friction,
             cohesive_spatial_work_j: trial.spatial_work,

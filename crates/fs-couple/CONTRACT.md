@@ -17245,7 +17245,8 @@ gates. Late refusals leave an identical retry possible. Failed bonds retain
 fragment motion and damage; the original compression penalty provides
 frictionless reclosure within its declared domain.
 
-Source conditions, attachments and topology are fixed. This is a bounded local
+Ordinary steps keep source conditions fixed; explicit temperature updates are
+described below. Attachments and topology remain fixed. This is a bounded local
 branch solve over straight local constitutive paths, not a proof of global
 softening-branch uniqueness or intrastep trajectory accuracy. Rotation-chart
 and original material/rate limits remain mandatory. Bond creation, healing,
@@ -17255,6 +17256,44 @@ covariance, finite-patch peeling with separate fracture/viscous losses, full
 native free motion after failure, reclosure, gravity/external work, source and
 geometry refusal, work-budget/cancellation refusal, strict energy refusal, and
 late body-budget rollback with bit-identical retry.
+
+### Temperature-dependent adhesion on the original native rigid pair
+
+`RigidCohesiveSystem::step_with_temperature[_under_gate]` accepts one original
+source-temperature successor per existing site, in site order. The original
+objective owner transfers common- or mixed-mode history once at fixed accepted
+geometry before any Newton evaluation. Reusable per-site scratch supplies these
+same transferred points to the existing twelve-unknown native wrench solve;
+mechanical probes do not repeat thermal damage or coefficient work. Original
+source claims, ordered materials, physical mode, site areas, attachment arms,
+full body inertias, poses, momenta and accepted clock remain bound.
+
+The final original body audit balances kinetic/gravitational plus cohesive
+storage change and all physical losses against mechanical load work and signed
+`parameter_work_j`. `fracture_dissipation_j` includes thermal and mechanical
+fracture exactly once; `thermal_damage_dissipation_j` identifies its thermal
+subset. `thermal_stored_change_j` is the fixed-jump change before either body
+moves. Per-site observations retain the same distinctions. Parameter work is
+not a mechanical port or an inferred heat source. Each initial history transfer
+consumes one original material-evaluation allowance. Following ordinary steps
+retain accepted source temperatures with zero new thermal work.
+
+Both bodies, every site/source, observations and clock publish only after the
+existing force, rotation, geometry, energy, momentum and final cancellation
+checks. Partial source staging and late failures leave accepted state unchanged;
+the thermal scratch selector resets before any Result returns. Enabled
+damaged-area friction explicitly refuses this update because its separate
+source/history temperature transfer is not implemented; its coefficients are
+never silently frozen or disabled.
+
+This is a prescribed-temperature first-order staggered composition. Thermal
+expansion, heat transport, fracture-heat partition, cure, measured thermal
+calibration, continuous temperature-path validation and global softening-root
+uniqueness remain outside it. Focused native regressions compare independent
+heterogeneous-temperature midpoint oscillators, finite rotating mixed-mode
+patch work/momentum and frame covariance, source/late-body/cancellation rollback,
+material budgets and the friction boundary. Their runtime execution remains
+blocked here by the unchanged pinned executor dependency's memory requirement.
 
 ## Molecular gas refresh on continuing DG ports
 

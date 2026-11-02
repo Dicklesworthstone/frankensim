@@ -1,4 +1,6 @@
 //! G1/G3/G4: original rigid bodies, finite bonded geometry, fracture and retry.
+#[path = "rigid_cohesive/temperature.rs"]
+mod temperature;
 use fs_couple::cohesive_contact::objective::{
     ObjectiveCohesiveConfig, ObjectiveCohesivePoint, source::SourceBoundObjectiveCohesivePoint,
 };

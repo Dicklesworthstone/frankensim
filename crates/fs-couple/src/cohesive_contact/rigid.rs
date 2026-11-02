@@ -18,8 +18,10 @@
 //!
 //! Accepted poses, momenta, every material point, observations and the clock
 //! publish together after independent original energy/momentum checks. Failure
-//! modifies only reusable scratch. Source conditions and attachment topology
-//! stay fixed. Complete failure preserves the fragments and irreversible
+//! modifies only reusable scratch. Ordinary steps keep source conditions fixed;
+//! an explicit temperature step transfers every site's original history before
+//! the same native solve. Attachment topology stays fixed. Complete failure
+//! preserves the fragments and irreversible
 //! history; the original normal compression penalty allows frictionless
 //! reclosure. Optional sourced damaged-area friction is solved jointly with
 //! these same bodies. No bond creation, healing, collision search,
@@ -29,7 +31,7 @@ use super::objective::{
     ObjectiveCohesiveConfig, ObjectiveCohesiveError, cayley_increment,
     source::{
         SourceBoundObjectiveCohesiveError, SourceBoundObjectiveCohesivePoint,
-        SourceBoundObjectiveCohesiveStep,
+        SourceBoundObjectiveCohesiveStep, SourceBoundObjectiveCohesiveTemperatureStep,
     },
 };
 use fs_exec::CancelGate;
@@ -42,6 +44,7 @@ use fs_mbd::{
 
 mod friction;
 mod solve;
+mod temperature;
 pub use friction::{
     RigidDamageFrictionConfig, RigidDamageFrictionSite, RigidDamageFrictionSiteFrame,
 };
@@ -224,7 +227,14 @@ pub struct RigidCohesiveSiteFrame {
     pub discrete_force_on_a_n: Vec3,
     pub frame_couple_on_a_n_m: Vec3,
     pub stored_energy_j: f64,
+    /// Total new fracture loss, including the thermal subset below exactly once.
     pub fracture_dissipation_j: f64,
+    /// Signed coefficient work supplied at fixed original geometry [J].
+    pub parameter_work_j: f64,
+    /// Fixed-jump storage change before the native mechanical solve [J].
+    pub thermal_stored_change_j: f64,
+    /// Fixed-jump thermal damage release; subset of fracture_dissipation_j [J].
+    pub thermal_damage_dissipation_j: f64,
     pub viscous_dissipation_j: f64,
     pub spatial_work_j: f64,
     /// Original source and actual objective friction work, when enabled.
@@ -239,8 +249,16 @@ pub struct RigidCohesiveFrame {
     /// Kinetic plus the original uniform-gravity potential of both bodies.
     pub mechanical_energy_j: f64,
     pub cohesive_stored_energy_j: f64,
+    /// Mechanical load work only; coefficient work is reported separately.
     pub external_work_j: f64,
+    /// Total thermal and mechanical fracture loss during this accepted step.
     pub fracture_dissipation_j: f64,
+    /// Signed work supplied by the explicitly prescribed interface temperatures.
+    pub parameter_work_j: f64,
+    /// Sum of fixed-jump storage changes before either native body moves.
+    pub thermal_stored_change_j: f64,
+    /// Thermal damage release, already included in fracture_dissipation_j.
+    pub thermal_damage_dissipation_j: f64,
     pub viscous_dissipation_j: f64,
     pub friction_dissipation_j: f64,
     pub cohesive_spatial_work_j: f64,
@@ -328,6 +346,8 @@ pub struct RigidCohesiveSystem<'a> {
     time_s: f64,
     linear_solve: LuWorkspace,
     staged_sites: Vec<Option<SourceBoundObjectiveCohesiveStep<'a>>>,
+    staged_temperature: Vec<Option<SourceBoundObjectiveCohesiveTemperatureStep<'a>>>,
+    thermal_active: bool,
     site_frames: Vec<Option<RigidCohesiveSiteFrame>>,
     last_wrenches: [Wrench; 2],
     last_frame: Option<RigidCohesiveFrame>,
@@ -384,6 +404,11 @@ impl<'a> RigidCohesiveSystem<'a> {
             .try_reserve_exact(sites.len())
             .map_err(|_| RigidCohesiveError::Budget("site workspace allocation"))?;
         staged_sites.resize_with(sites.len(), || None);
+        let mut staged_temperature = Vec::new();
+        staged_temperature
+            .try_reserve_exact(sites.len())
+            .map_err(|_| RigidCohesiveError::Budget("thermal site workspace allocation"))?;
+        staged_temperature.resize_with(sites.len(), || None);
         let mut site_frames = Vec::new();
         site_frames
             .try_reserve_exact(sites.len())
@@ -399,6 +424,8 @@ impl<'a> RigidCohesiveSystem<'a> {
             time_s: 0.0,
             linear_solve: LuWorkspace::new(12)?,
             staged_sites,
+            staged_temperature,
+            thermal_active: false,
             site_frames,
             last_wrenches: [Wrench::ZERO; 2],
             last_frame: None,
@@ -498,7 +525,9 @@ impl<'a> RigidCohesiveSystem<'a> {
         let frame = self.audit(
             candidate, wrenches, loads, next_step, next_time, iterations, work, gate,
         )?;
-        if self.staged_sites.iter().any(Option::is_none) {
+        if self.staged_sites.iter().any(Option::is_none)
+            || (self.thermal_active && self.staged_temperature.iter().any(Option::is_none))
+        {
             return Err(RigidCohesiveError::Invalid("incomplete staged patch"));
         }
         poll(gate)?;
@@ -511,6 +540,18 @@ impl<'a> RigidCohesiveSystem<'a> {
                 .as_ref()
                 .expect("complete staged patch checked");
             let numerical = step.numerical();
+            let (parameter_work, thermal_storage, thermal_damage) = if self.thermal_active {
+                let thermal = self.staged_temperature[index]
+                    .as_ref()
+                    .expect("complete thermal stage checked");
+                (
+                    thermal.parameter_work_j,
+                    thermal.stored_change_j,
+                    thermal.damage_dissipated_j,
+                )
+            } else {
+                (0.0, 0.0, 0.0)
+            };
             site.point = step.point();
             self.site_frames[index] = Some(RigidCohesiveSiteFrame {
                 jump_m: numerical.point.material().jump_m(),
@@ -520,7 +561,11 @@ impl<'a> RigidCohesiveSystem<'a> {
                 stored_energy_j: numerical.point.area_m2()
                     * numerical.point.material().stored_energy_j_m2(),
                 fracture_dissipation_j: numerical.point.area_m2()
-                    * numerical.material.equilibrium.energy.dissipated,
+                    * numerical.material.equilibrium.energy.dissipated
+                    + thermal_damage,
+                parameter_work_j: parameter_work,
+                thermal_stored_change_j: thermal_storage,
+                thermal_damage_dissipation_j: thermal_damage,
                 viscous_dissipation_j: numerical.point.area_m2()
                     * numerical.material.viscous_dissipated_j_m2,
                 spatial_work_j: numerical.spatial_work_j,
