@@ -5729,8 +5729,8 @@ components and reverse-debt cycles against analytic local energy balances.
 ### Bounded local conversion carries physical liquid momentum
 
 `ConversionRedistribution3::ConservativeLocal` is an explicit native timestep
-option, also selectable on `MaterialFreeSurface3` before binding enthalpy or
-rheology. Existing Local and LegacyGlobal trajectories retain their arithmetic.
+option, also selectable on `MaterialFreeSurface3` or the already bound
+`MaterialFreeSurfaceEnthalpy3`. Existing Local and LegacyGlobal trajectories retain their arithmetic.
 The new mode completes signed over/undershoots at zero conversion tolerance and
 routes each excess/debt only to adjacent interfaces with actual available
 capacity/mass. Dry ghosts cannot pay debt, full cells cannot overfill, and no
@@ -5753,11 +5753,35 @@ normal and prescribed-pressure steps publish the complete candidate atomically.
 
 This closes conversion's represented linear momentum, not the full streaming
 integrator's momentum/energy balance, angular momentum, capillary surface energy
-or phase-density volume sources. The separate resolved thermocapillary fill
-owner still requires Local. Native regressions cover unequal densities, Guo
+or phase-density volume sources. Native regressions cover unequal densities, Guo
 forces, advancing/receding and disconnected fronts, actual before/routes/after
 mass continuity, a real collision/stream/conversion step, zero-pressure replay,
 co-moving identity and late public-step rollback.
+
+### Conservative conversion on the resolved thermocapillary thermal trajectory
+
+`MaterialFreeSurfaceEnthalpy3::with_conversion_redistribution` selects the native
+mode after attaching planar, height-graph or local sourced thermocapillarity.
+The original thermal step still advances one flow/enthalpy clock, reconstructs
+surface traction and pressure, and re-admits the same material sources.
+
+Resolved-fill completion checks actual interface mass against its canonical
+population density. An already bounded ConservativeLocal endpoint retains its
+populations, exact native routes and signed conversion-energy receipt. An
+unresolved private candidate delegates to the same momentum-carrying native
+conversion, appends its actual routes, then checks the resulting bounds. It
+does not apply a second mass-only projection or overwrite the step's receipt
+with an empty conversion. The original enthalpy solve consumes the complete
+before/routes/after account; numerical kinetic change never becomes heat.
+
+Occupied surface volume remains `mass/density`, so integrated Marangoni force
+is the patch traction even with unequal numerical densities. Native regressions
+exercise that balance, three real thermocapillary timesteps, preserved geometry
+receipts, and unresolved-candidate momentum/route closure. Full material tests
+cover the original source/caloric owner and transactional thermal refusal.
+Existing slope, cut-volume and source/phase-density gates remain mandatory.
+Vanishing cut films still refuse; this does not supply thermal expansion,
+phase-density volume flux, a liquid EOS or pressure-work closure.
 
 ### Density-consistent physical state at free-surface ingress and conversion
 

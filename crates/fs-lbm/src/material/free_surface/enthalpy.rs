@@ -39,7 +39,7 @@ use fs_qty::Temperature;
 use super::{MaterialFreeSurface3, MaterialLbmError};
 use super::wetting::{FreeSurfaceWettingError, WettingBinding};
 use crate::d3q19::freesurface3::transport::MassLocation3;
-use crate::d3q19::freesurface3::{FreeSurface3, FreeSurfaceError3};
+use crate::d3q19::freesurface3::{ConversionRedistribution3, FreeSurface3, FreeSurfaceError3};
 use crate::material::plan_momentum_scaling;
 
 mod transport;
@@ -495,6 +495,21 @@ impl MaterialFreeSurfaceEnthalpy3<'_, '_> {
     #[must_use]
     pub const fn flow(&self) -> &MaterialFreeSurface3<'_> {
         &self.flow
+    }
+
+    /// Select conversion on this original thermal trajectory, including an
+    /// already bound planar, height-graph or local thermocapillary surface.
+    ///
+    /// ConservativeLocal carries physical momentum with actual mass routes.
+    /// Resolved geometry consumes those same bounded fills, and enthalpy uses
+    /// the same routes. Numerical conversion kinetic change remains a separate
+    /// lattice receipt; it is never deposited as heat. The next normal thermal
+    /// step retains all source, geometry, phase/density and rollback gates.
+    /// This selection changes no accepted temperature, source, inventory or time.
+    #[must_use]
+    pub fn with_conversion_redistribution(mut self, model: ConversionRedistribution3) -> Self {
+        self.flow = self.flow.with_conversion_redistribution(model);
+        self
     }
 
     /// Accepted specific enthalpy [J/kg] at a native wet cell.

@@ -14,6 +14,9 @@ use fs_material::state_point::{
 #[path = "height_graph/local.rs"]
 mod local;
 
+#[path = "height_graph/conservative.rs"]
+mod conservative;
+
 const DX: f64 = 0.001;
 const DT: f64 = 0.001;
 

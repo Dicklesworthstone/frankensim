@@ -350,7 +350,8 @@ impl<'a> MaterialFreeSurface3<'a> {
     /// rheological owner. ConservativeLocal retains actual adjacent mass and
     /// physical momentum; it refuses unsupported remaps transactionally and
     /// exposes its numerical kinetic change through lattice().
-    /// The separate resolved thermocapillary fill owner still requires Local.
+    /// Resolved thermocapillary geometry also consumes the same conservative
+    /// routes and bounded inventories; its original shape/source gates remain.
     #[must_use]
     pub fn with_conversion_redistribution(mut self, model: ConversionRedistribution3) -> Self {
         self.lattice = self.lattice.with_conversion_redistribution(model);

@@ -8,6 +8,9 @@
 
 use super::*;
 
+#[cfg(test)]
+mod conservative;
+
 impl FreeSurface3 {
     fn interface_mass_and_density(
         &self,
@@ -36,6 +39,9 @@ impl FreeSurface3 {
     /// threshold; subsequent local transfers finish its residuals. Every mass
     /// movement uses the existing companion-field route budget, and each
     /// unfinished round must consume a route. Unlocated carry refuses.
+    /// ConservativeLocal reuses its momentum-carrying native conversion and
+    /// exact routes. An already bounded endpoint keeps its accepted conversion
+    /// receipt and populations, rather than running a second mass-only remap.
     ///
     /// The original trace.before remains untouched. The caller must advect
     /// enthalpy with the amended routes and trace.after, then admit source and
@@ -48,7 +54,9 @@ impl FreeSurface3 {
         gate: &CancelGate,
     ) -> Result<(), FreeSurfaceError3> {
         check_cancel(gate)?;
-        if self.redistribution != ConversionRedistribution3::Local || self.carry != 0.0 {
+        if !matches!(self.redistribution,
+            ConversionRedistribution3::Local | ConversionRedistribution3::ConservativeLocal)
+            || self.carry != 0.0 {
             return Err(FreeSurfaceError3::Transport(
                 "resolved interface geometry requires local routes and no unlocated carry",
             ));
@@ -70,6 +78,14 @@ impl FreeSurface3 {
                 check_cancel(gate)?;
                 trace.after = self.mass_snapshot();
                 return Ok(());
+            }
+            if self.redistribution == ConversionRedistribution3::ConservativeLocal {
+                // This same owner closes both momentum and signed inventory.
+                // Recheck its actual density/fill bounds on the next pass;
+                // leave trace.before and any earlier native routes intact.
+                self.apply_conversions_with_tolerance(Some(trace), 0.0)?;
+                check_cancel(gate)?;
+                continue;
             }
             let routes_before = trace.routes.len();
             for &(key, lane) in &defects {
