@@ -2409,6 +2409,42 @@ The authored four-note `music_lane.sh --fixture midi-reed` exercises MIDI,
 lowering, model-only resolution, schedule rendering, replay and named refusal.
 This fixture is plumbing evidence and makes no reed realism claim.
 
+### Continuous force ramps through the complete modal network
+
+`CoupledModalSystem::into_linear_forcing` prepares fixed-clock continuous linear
+force records for every original retained coordinate. `LinearForceModalSystem`
+keeps the original component damping, signed spring and dashpot columns,
+prepared constant-loss damping columns, Maxwell internal strains and reciprocal
+radiation states in one generator. The wrapper retains all accepted history and
+provides read-only system access; changing coefficients or attachments requires
+consuming it and preparing the changed system again.
+
+External work integrates the actual linear force times velocity, independently
+of the energy residual. Each component, physical connection, material and
+radiation loss integrates its original positive source squares along that same
+trajectory through `fs_phs::linear_exact::PreparedSourceLoss`. Each connection's
+port work is minus its spring-energy change and its independently integrated
+loss. No endpoint quadrature, total-energy remainder, diagonal modal reduction
+or numerical dissipation supplies physical heat.
+
+The original exact block, `LinearSplit`, `PreparedQuadraticFlow`, candidate
+admission and publication owners remain authoritative. Additional impulse-valued
+force coordinates carry the affine drive without changing physical storage.
+Original state, reaction, pressure, energy, endpoint material-domain and
+cancellation gates run before the complete history and port account publish.
+Held-only material-trajectory queries remain unavailable for a ramp; no finite
+thermal receiver or nonlinear held-contact reaction is implicitly reinterpreted.
+
+Cold preparation admits total cache/workspace bytes and multiply terms before
+dense assembly. Twice the complete physical-plus-force-record dimension must
+fit the shared 256-coordinate positive-integral capacity; larger configurations
+refuse without dropping states. Warm steps reuse flow and positive heat factors,
+while retaining existing candidate and port-account allocations. There is no
+new allocation-free whole-system or measured real-time claim. Focused tests
+compare complete motion, four heat channels and signed work with independently
+integrated continuous equations, force-ramp subdivision, equal-endpoint held
+forcing, free/critical/overdamped scalar physics and transactional refusal.
+
 ### Port-schema adoption contract
 
 `PortedModule` exposes stable local schemas, coordinate charts, internal N-way

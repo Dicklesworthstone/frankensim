@@ -14,6 +14,7 @@ use fs_phs::{PortHamiltonian, QuadraticStorage, ResistanceWitness, StepRecord};
 
 pub(super) mod prepared;
 pub(super) mod dg;
+pub(super) mod linear_forcing;
 #[cfg(test)]
 mod heat_cache_tests;
 
@@ -525,7 +526,21 @@ impl ExactBlock {
         links: &[ConnectionLaw], branches: Vec<fs_phs::RelaxationBranch>,
         poles: &[crate::render::plate::impact::radiation::Pole], gate: &CancelGate,
     ) -> Result<Self, ModalCouplingError> {
+        Self::new_with_damping_columns(modes, columns, links, branches, poles, None, gate)
+    }
+
+    fn new_with_damping_columns(
+        modes: &[crate::modal_acoustic_time::ModalAcousticMode], columns: &[Vec<f64>],
+        links: &[ConnectionLaw], branches: Vec<fs_phs::RelaxationBranch>,
+        poles: &[crate::render::plate::impact::radiation::Pole],
+        damping_columns: Option<&[Option<Vec<f64>>]>, gate: &CancelGate,
+    ) -> Result<Self, ModalCouplingError> {
         let count = modes.len();
+        if damping_columns.is_some_and(|rows| rows.len() != links.len()
+            || rows.iter().flatten().any(|row| row.len() != count
+                || row.iter().any(|value| !value.is_finite()))) {
+            return Err(invalid("complete original damping columns required"));
+        }
         let n = count
             .checked_mul(2)
             .ok_or_else(|| invalid("full linear state extent"))?;
@@ -578,14 +593,16 @@ impl ExactBlock {
         let mut component_r = r.clone();
         let mut connection_r = vec![0.0; n * n];
         let mut rest_force = vec![0.0; count];
-        for (column, link) in columns.iter().zip(links) {
+        for (index, (column, link)) in columns.iter().zip(links).enumerate() {
             poll(Some(gate))?;
+            let damping_column = damping_columns.and_then(|rows| rows[index].as_deref())
+                .unwrap_or(column);
             let row = if link.damping_n_s_m == 0.0 {
                 None
             } else {
                 let weight = finite(det::sqrt(link.damping_n_s_m))?;
                 let mut row = vec![0.0; n];
-                for (i, value) in column.iter().enumerate() {
+                for (i, value) in damping_column.iter().enumerate() {
                     row[2 * i + 1] = finite(weight * value)?;
                 }
                 source_rows.extend_from_slice(&row);
@@ -597,7 +614,7 @@ impl ExactBlock {
                 for b in 0..count {
                     q[(2 * a) * n + 2 * b] += link.stiffness_n_m * column[a] * column[b];
                     connection_r[(2 * a + 1) * n + 2 * b + 1] +=
-                        link.damping_n_s_m * column[a] * column[b];
+                        link.damping_n_s_m * damping_column[a] * damping_column[b];
                 }
             }
         }

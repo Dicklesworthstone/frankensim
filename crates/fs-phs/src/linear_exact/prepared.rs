@@ -105,6 +105,7 @@ impl PreparedQuadraticFlow {
             cancelled,
             None,
             None,
+            None,
         )
     }
 
@@ -137,6 +138,7 @@ impl PreparedQuadraticFlow {
             cancelled,
             Some((generator_per_s, extra_scales)),
             None,
+            None,
         )
     }
 
@@ -154,12 +156,35 @@ impl PreparedQuadraticFlow {
     ) -> Result<Self, PreparedStepError> {
         Self::prepare(
             sys, split, dt, &[], linear_forms, budget, cancelled, None,
-            Some(frequencies),
+            Some(frequencies), None,
         )
     }
 
     pub(super) fn source_scales(&self) -> &[f64] {
         &self.source_scales
+    }
+
+    /// Retain the same extended generator and physical base storage while
+    /// supplying the complete original-coordinate input map. This supports
+    /// force-record states whose derivatives, rather than the mechanical
+    /// coordinates, receive the held input. The input count remains the base
+    /// system's port count. Input units and work forms belong to the caller;
+    /// no passivity or physical meaning is inferred for the added coordinates.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_extended_input_controlled(
+        sys: &PortHamiltonian,
+        split: &LinearSplit,
+        generator_per_s: &[f64],
+        extra_scales: &[f64],
+        input_map: &[f64],
+        dt: f64,
+        quadratic_forms: &[Vec<f64>],
+        linear_forms: &[Vec<f64>],
+        budget: DenseExponentialBudget,
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<Self, PreparedStepError> {
+        Self::prepare(sys, split, dt, quadratic_forms, linear_forms, budget,
+            cancelled, Some((generator_per_s, extra_scales)), None, Some(input_map))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -173,6 +198,7 @@ impl PreparedQuadraticFlow {
         mut cancelled: impl FnMut() -> bool,
         extension: Option<(&[f64], &[f64])>,
         tones: Option<&[f64]>,
+        input_override: Option<&[f64]>,
     ) -> Result<Self, PreparedStepError> {
         check_cancel(&mut cancelled)?;
         let (base_n, ports) = (split.n, split.m);
@@ -180,6 +206,7 @@ impl PreparedQuadraticFlow {
             if frequencies.is_empty()
                 || ports == 0
                 || extension.is_some()
+                || input_override.is_some()
                 || frequencies.iter().any(|v| !v.is_finite() || *v < 0.0)
             {
                 return Err(refuse(
@@ -252,6 +279,7 @@ impl PreparedQuadraticFlow {
             || extension.is_some_and(|(a, scales)| {
                 a.len() != n * n || !finite(a) || scales.iter().any(|v| !v.is_finite() || *v <= 0.0)
             })
+            || input_override.is_some_and(|input| input.len() != n * m || !finite(input))
         {
             return Err(refuse(
                 "prepared quadratic requires matching exact storage/structure and finite observations/clock",
@@ -392,8 +420,14 @@ impl PreparedQuadraticFlow {
             check_cancel(&mut cancelled)?;
             generator[i * d..i * d + n].copy_from_slice(&balanced[i * n..(i + 1) * n]);
             for p in 0..ports {
-                for j in 0..base_n {
-                    physical_input[i * ports + p] += forward[i * n + j] * sys.g[j * ports + p];
+                if let Some(input) = input_override {
+                    for j in 0..n {
+                        physical_input[i * ports + p] += forward[i * n + j] * input[j * ports + p];
+                    }
+                } else {
+                    for j in 0..base_n {
+                        physical_input[i * ports + p] += forward[i * n + j] * sys.g[j * ports + p];
+                    }
                 }
             }
         }
@@ -576,10 +610,13 @@ impl PreparedQuadraticFlow {
         Ok((state, input))
     }
 
-    // Shared contractions for allocating evaluation and a prepared exact owner.
-    // Output is numerical scratch; the public caller publishes only on success.
+    /// Shared allocation-free contractions using caller-owned scratch.
+    /// `z` has states + inputs + one entries; `balanced` and `endpoint` cover
+    /// every state; `integrals` covers the declared quadratic and linear forms.
+    /// Outputs are candidate scratch and can change on refusal. The caller
+    /// admits physical budgets and publishes accepted state only after success.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn evaluate_into(
+    pub fn evaluate_into(
         &self, state: &[f64], input: &[f64], z: &mut [f64], balanced: &mut [f64],
         endpoint: &mut [f64], integrals: &mut [f64],
     ) -> Result<(), PhsError> {

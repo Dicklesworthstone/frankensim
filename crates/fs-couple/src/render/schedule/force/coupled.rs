@@ -27,6 +27,8 @@ pub mod harmonic;
 pub mod radiation;
 pub mod damping;
 pub mod coefficients;
+/// Complete-network continuous force records with independent physical heat.
+pub mod linear_forcing;
 pub use exact::prepared::{MAX_PREPARED_MODAL_MODES, PreparedModalBudget};
 
 /// One attachment in a component's unchanged mass-normalized modal basis.

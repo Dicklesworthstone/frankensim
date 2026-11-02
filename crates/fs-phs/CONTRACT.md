@@ -1227,7 +1227,33 @@ also pass after the shared heat extension. These are bounded numerical checks.
 
 ## Source-square heat on an unchanged linear trajectory
 
-`linear_exact::PreparedSourceLoss` observes `x'=A*x+B*u` under held inputs and integrates the explicitly supplied positive source square `||S*x(t)||²`. It reuses the existing positive Gauss/QR integration kernel without reconstructing a different generator or advancing physical state. The prepared integral retains the exact generator, input map, source rows and duration. The complete doubled observation dimension is capped at 256 with explicit dense-byte/work admission; no state is truncated. Warm evaluation is a positive quadratic contraction with cancellation checks. Source-row meaning and complete domain energy admission remain the caller's responsibility; no passivity claim for arbitrary A is inferred. `tests/source_loss.rs` contains analytic forced and silent-mode cases, independent nonnormal-trajectory quadrature, and budget/nonfinite/cancellation refusals. These new cases have not yet been executed in the authoring environment because compilation of the unchanged pinned runtime dependency was killed and the shared filesystem filled.
+`linear_exact::PreparedSourceLoss` observes `x'=A*x+B*u` under held inputs and
+integrates the explicitly supplied positive source square `||S*x(t)||²`. It
+reuses the existing positive Gauss/QR integration kernel without reconstructing
+a different generator or advancing physical state. The prepared integral retains
+the exact generator, input map, source rows and duration. The complete doubled
+observation dimension is capped at 256 with explicit dense-byte/work admission;
+no state is truncated. Warm evaluation is a positive quadratic contraction with
+cancellation checks. `evaluate_into_controlled` performs the same contractions
+with caller-owned `2*n` scratch and no warm allocation. Source-row meaning and
+complete domain energy admission remain the caller's responsibility; no passivity
+claim for arbitrary A is inferred.
+
+`PreparedQuadraticFlow::new_extended_input_controlled` retains the original
+physical storage transform and exact generator/Gramian kernels while accepting
+an explicit complete input map for extended coordinates. This permits a force
+record to evolve continuously while the record's derivative is held. Its signed
+work form and positive source heat still refer to the same original trajectory.
+No storage or passivity meaning is inferred for added coordinates. The original
+held-port preparation keeps its existing input assembly and arithmetic. Public
+`evaluate_into` exposes the unchanged candidate-only contractions with supplied
+scratch; callers retain physical admission and transactional publication.
+
+All three `tests/source_loss.rs` cases pass against the complete actual fs-phs
+source in bounded native execution: analytic forced and silent modes,
+independent nonnormal-trajectory quadrature, and budget/nonfinite/cancellation
+refusals. All eight `tests/stiff_energy.rs` cases also pass after this extension.
+This is numerical-owner validation, not a full workspace Cargo execution.
 
 
 ## Shared complete common-flow constraint algebra

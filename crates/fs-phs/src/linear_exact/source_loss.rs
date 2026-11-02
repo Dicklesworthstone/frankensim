@@ -128,12 +128,29 @@ impl PreparedSourceLoss {
         &self,
         initial: &[f64],
         held_inputs: &[f64],
+        cancelled: impl FnMut() -> bool,
+    ) -> Result<f64, PreparedStepError> {
+        let mut coordinates = if self.root.is_empty() { Vec::new() }
+            else { vec![0.0; 2 * self.n] };
+        self.evaluate_into_controlled(initial, held_inputs, &mut coordinates, cancelled)
+    }
+
+    /// The identical positive source integral with caller-owned `2*n` scratch
+    /// (unused and permitted empty when the source is identically zero).
+    /// No allocation or exponential occurs during a successful warm call.
+    /// Scratch can change on refusal; no physical state is retained here.
+    pub fn evaluate_into_controlled(
+        &self,
+        initial: &[f64],
+        held_inputs: &[f64],
+        coordinates: &mut [f64],
         mut cancelled: impl FnMut() -> bool,
     ) -> Result<f64, PreparedStepError> {
         poll(&mut cancelled)?;
         let n = self.n;
         if initial.len() != n
             || held_inputs.len() != self.m
+            || (!self.root.is_empty() && coordinates.len() != 2 * n)
             || !finite(initial)
             || !finite(held_inputs)
         {
@@ -145,7 +162,6 @@ impl PreparedSourceLoss {
         if self.root.is_empty() {
             return Ok(0.0);
         }
-        let mut coordinates = vec![0.0; 2 * n];
         let root_rate = det::sqrt(self.rate);
         for i in 0..n {
             poll(&mut cancelled)?;
@@ -167,7 +183,7 @@ impl PreparedSourceLoss {
                 .sum::<f64>();
             coordinates[n + i] = (free + forcing) / self.rate;
         }
-        if !finite(&coordinates) {
+        if !finite(coordinates) {
             return Err(
                 refuse("source loss initial output or derivative is unrepresentable").into(),
             );
@@ -177,7 +193,7 @@ impl PreparedSourceLoss {
             poll(&mut cancelled)?;
             let output = row
                 .iter()
-                .zip(&coordinates)
+                .zip(coordinates.iter())
                 .map(|(a, x)| a * x)
                 .sum::<f64>();
             loss += output * output;
