@@ -3733,12 +3733,13 @@ focused native-source lane passed four tests: the three-rung time order was
 floating-point roundoff. The native inertia unit lane passed nine tests.
 
 `FullMaterial` is displacement-only and a very large bulk modulus may still
-lock. The exact mixed formulation below avoids a bulk penalty; general
-finite-bulk conservative mixing, nonlinear modal reduction, contact,
-viscoelastic dissipation and a frequency-matched linear propagator remain
-separate. Centered time integration has phase error even when its discrete work
-balance closes. The finite fixtures above do not satisfy the separate
-10,000-step/long-horizon, frequency-matching and complete port/checkpoint
+lock. The exact and original finite-bulk mixed formulations below supply
+separate pressure treatments. Nonlinear modal reduction, contact, viscoelastic
+dissipation and the frequency-exact finite-rotation nonlinear split remain
+separate. Centered nonlinear time integration has phase error even when its
+discrete work balance closes; the complete-coordinate exact linear owner below
+has its own scope. The bounded nonlinear fixtures do not satisfy the separate
+long-horizon, nonlinear frequency-matching and complete port/checkpoint
 obligations of bead `frankensim-irp-v5-instrument-realism-pexfp.62`.
 
 ## Conservative exact-incompressible P2/P1 motion
@@ -3841,3 +3842,65 @@ These tests construct independent pencils in the native assembly type; they
 do not execute the original geometry assembly frontends. The native lane
 compiled the complete original fs-phs crate and was rerun against the current
 shared propagator. No full-workspace Cargo result is claimed.
+
+## Original finite-bulk conservative P2/P1 motion
+
+`ConservativeFormulation::OriginalMaterial` extends the same quadratic solid
+owner with the ORIGINAL finite-compliance bulk energy. It accepts
+`DiscreteBulkSettings`, an explicit relative weak-volume allowance and a local
+discrete-volume-work allowance. Quadratic and log-squared laws use their own
+native secant inverses. Actual geometric and retained bulk volumes must both
+remain inside the caller's positive-volume branch; no clipping, averaged modulus
+or surrogate quadratic law is used.
+
+At each reference quadrature point, accepted `Jbar_before` is frozen.
+The interval P1 pressure determines `Jbar_after` through
+`p_alg = Delta U / Delta Jbar`. The spatial equation is
+`integral N_p (det(F_after)-Jbar_after) dV = 0`. Actual geometric pressure
+work uses the objective discrete cofactor. Its two distinct pressure/displacement
+cross-blocks remain unchanged, and the pressure block is the negative original
+secant compliance. The symmetric preconditioner retains that pressure block,
+so a finite-compliance body with fully prescribed displacement can still solve
+its pressure equations. This does not add a gauge to the exact-constraint mode.
+
+Physical storage is the original remainder at actual F plus original U at
+retained Jbar. `bulk_volume_ratios()` exposes those values in reference
+element/quadrature order; `bulk_stored_energy_j()` exposes their storage.
+The energy record separately reports bulk storage before/after, local bulk work
+and its storage defect. Its constraint-work defect subtracts both bulk work and
+pressure dotted with the weak-volume change. Bulk constitutive work, pressure
+storage work, weak volume, complete physical energy and cumulative work must
+all pass before the new displacement, velocity, pressure and volume history
+are published together.
+
+`prepare_with_pressure` takes a compatible P1 initial ENDPOINT bulk pressure.
+Original `pressure_potential` reconstructs Jbar, and the initial weak-volume
+equations must close against the supplied displacement. `prepare` uses zero
+initial pressure and refuses incompatible initial geometry. No initial
+displacement, velocity or volume is silently projected. In particular, arbitrary
+geometric quadrature volumes are not copied into a mixed state: unresolved
+pressure-space components would alternate under the quadratic secant.
+Compressible initial velocity is admitted. Subsequent accepted volumes follow
+the solved original history and are never reset to geometric determinants or
+reprojected to endpoint pressure. Interval pressure thereafter remains an
+algorithmic work multiplier, not endpoint Cauchy pressure.
+
+G0/G1 tests in `tests/mixed_conservative_bulk.rs` passed all six native
+cases, alongside all four full-material and three exact-constraint regressions.
+Independent original-energy, rational consistent-mass, momentum and weak-volume
+calculations cover freely deforming/spinning bodies, heterogeneous quadrature
+moduli, fully prescribed dilation/compression, compatible prestressed
+initialization and immutable domain/budget/cancellation refusal. Over 32 free
+steps, maximum energy drift was `1.14e-13 J` for quadratic bulk and
+`2.09e-13 J` for logarithmic bulk, with nonzero bulk-energy exchange.
+The logarithmic trajectory ladder compares displacement, velocity AND retained
+volume at 8/16/32 steps against a 128-step reference; observed orders were
+1.961 and 2.057. This is bounded time-convergence evidence for the retained
+nonlinear history, not a pointwise incompressibility or mesh-independent
+stability claim.
+
+`examples/conservative_elastic_motion.rs` now executes FullMaterial,
+OriginalMaterial and ExactIncompressible with explicit controls and reports
+physical bulk storage separately. All three 32-step native example runs passed.
+Contact, material relaxation, moving-support linear exponentials and a
+frequency-exact nonlinear finite-rotation split remain separate capabilities.

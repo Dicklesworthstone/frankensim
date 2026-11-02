@@ -1,11 +1,14 @@
 //! Release a sheared, spinning quadratic tetrahedron without artificial damping.
 //! Run `cargo run -p fs-solid --example conservative_elastic_motion`.
 //!
-//! Both runs start from the same volume-preserving deformation and velocity.
-//! FullMaterial retains the finite bulk stiffness. ExactIncompressible enforces
-//! continuous P1 weak volume constraints and never evaluates its unused bulk
-//! modulus. The pressure printed for that run is an interval work multiplier,
-//! not an endpoint Cauchy pressure. Weak volume moments are not pointwise J=1.
+//! All runs start from the same volume-preserving deformation and velocity.
+//! FullMaterial uses the complete elastic energy. OriginalMaterial retains the
+//! native finite bulk energy at constitutive volumes constrained weakly to the
+//! geometric volumes; ExactIncompressible enforces weak J=1 without a penalty.
+//! Both mixed paths use continuous P1 pressure. Printed pressure is an interval
+//! work multiplier, not endpoint Cauchy pressure; weak volume moments do not
+//! imply pointwise volume equality. The bulk-storage column is blank where the
+//! displacement-only FullMaterial owner does not expose a separate bulk ledger.
 //!
 //! All quantities use SI units: a 1 m reference edge, density 6 kg/m^3, and
 //! Mooney-Rivlin coefficients c10=4 Pa, c01=2 Pa give a deliberately soft demo.
@@ -15,6 +18,7 @@
 use fs_alloc::{ArenaConfig, ArenaPool};
 use fs_exec::{Budget, CancelGate, Cx, ExecMode, StreamKey};
 use fs_material::hyper::discrete_gradient::DiscreteGradientSettings;
+use fs_material::hyper::discrete_gradient::bulk::DiscreteBulkSettings;
 use fs_material::hyper::{Hyperelastic, HyperelasticModel};
 use fs_solid::hyper3::mixed::conservative::{ConservativeFormulation, ConservativeTetDefinition};
 use fs_solid::hyper3::mixed::{MixedLawField, MixedUpSettings};
@@ -78,6 +82,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         let formulations = [
             ("full", ConservativeFormulation::FullMaterial, 60.0),
             (
+                "finite_bulk",
+                ConservativeFormulation::OriginalMaterial {
+                    bulk: DiscreteBulkSettings {
+                        minimum_volume_ratio: 0.25,
+                        maximum_volume_ratio: 2.5,
+                        maximum_iterations: 96,
+                        absolute_pressure_tolerance_pa: 1e-11,
+                        relative_pressure_tolerance: 1e-12,
+                        absolute_work_tolerance_pa: 1e-10,
+                        relative_work_tolerance: 1e-12,
+                    },
+                    maximum_relative_volume_residual: 1e-9,
+                    maximum_point_volume_work_defect: 1e-12,
+                },
+                60.0,
+            ),
+            (
                 "exact",
                 ConservativeFormulation::ExactIncompressible {
                     maximum_relative_volume_residual: 1e-9,
@@ -88,7 +109,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             ),
         ];
         println!(
-            "mode,time_s,corner_x_m,stored_j,kinetic_j,energy_drift_j,interval_balance_j,min_det_f,max_weak_volume_m3,max_interval_pressure_pa"
+            "mode,time_s,corner_x_m,stored_j,bulk_stored_j,kinetic_j,energy_drift_j,interval_balance_j,min_det_f,max_weak_volume_m3,max_interval_pressure_pa"
         );
         for (name, formulation, kappa) in formulations {
             let material = Hyperelastic::new(
@@ -124,18 +145,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // must close within 2e-9 J; a refusal leaves solid unchanged.
                 let step = solid.advance(0.01, &[], &[], [0.; 3], settings, 2e-9, &cx)?;
                 if interval == 1 || interval % 8 == 0 {
-                    let exact = !step.pressure_residual_m3.is_empty();
-                    let weak_volume = exact.then(|| {
+                    let mixed = !step.pressure_residual_m3.is_empty();
+                    let bulk = mixed.then(|| step.solid.bulk_stored_energy_j());
+                    let weak_volume = mixed.then(|| {
                         step.pressure_residual_m3.iter().map(|v| v.abs()).fold(0.0, f64::max)
                     });
-                    let pressure = exact.then(|| {
+                    let pressure = mixed.then(|| {
                         step.solid.algorithmic_pressure_pa().iter().map(|v| v.abs()).fold(0.0, f64::max)
                     });
                     println!(
-                        "{name},{:.3},{:.9},{:.9},{:.9},{:.3e},{:.3e},{:.9},{},{}",
+                        "{name},{:.3},{:.9},{:.9},{},{:.9},{:.3e},{:.3e},{:.9},{},{}",
                         step.solid.time_s(),
                         nodes[1][0] + step.solid.displacement_m()[1][0],
                         step.solid.stored_energy_j(),
+                        bulk.map(|v| format!("{v:.9}")).unwrap_or_default(),
                         step.solid.kinetic_energy_j(),
                         step.solid.total_energy_j() - initial_energy_j,
                         step.energy.balance_error_j,

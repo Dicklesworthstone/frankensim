@@ -47,6 +47,9 @@ impl ConservativeTetSolid<'_> {
         let mut pressure_residual_m3 = vec![0.0; np];
         let mut matrix = with_tangent.then(|| Coo::new(nu + np, nu + np));
         let mut stored_j = 0.0;
+        let mut bulk_stored_j = 0.0;
+        let mut bulk_work_j = 0.0;
+        let mut bulk_volume_ratios = Vec::with_capacity(self.bulk_points.len());
         let mut material_work_j = 0.0;
         let mut pressure_work_j = 0.0;
         let mut min_det_f = f64::INFINITY;
@@ -81,7 +84,7 @@ impl ConservativeTetSolid<'_> {
                         .map_err(|error| material_error(e, q, error))?,
                 };
                 let volume_response = match volume_controls {
-                    Some((_, _, tolerance)) if with_tangent => Some(
+                    Some((_, tolerance)) if with_tangent => Some(
                         frozen
                             .volume_response(&f, tolerance)
                             .map_err(|error| material_error(e, q, error))?,
@@ -90,7 +93,7 @@ impl ConservativeTetSolid<'_> {
                 };
                 let volume_state = match (&volume_response, volume_controls) {
                     (Some(response), _) => Some(response.state),
-                    (_, Some((_, _, tolerance))) => Some(
+                    (_, Some((_, tolerance))) => Some(
                         frozen
                             .volume_state(&f, tolerance)
                             .map_err(|error| material_error(e, q, error))?,
@@ -106,6 +109,21 @@ impl ConservativeTetSolid<'_> {
                     })
                 };
                 let det_f = determinant(&f);
+                self.definition.formulation.admit_geometric_volume(det_f)?;
+                let bulk = if self.bulk_points.is_empty() {
+                    None
+                } else {
+                    Some(
+                        self.bulk_points[e * self.mesh.points_per_element + q]
+                            .response(pressure)
+                            .map_err(|error| material_error(e, q, error))?,
+                    )
+                };
+                if let Some(bulk) = &bulk {
+                    bulk_stored_j = point.weight_m3.mul_add(bulk.energy_after_pa, bulk_stored_j);
+                    bulk_work_j = point.weight_m3.mul_add(bulk.work_pa, bulk_work_j);
+                    bulk_volume_ratios.push(bulk.volume_ratio_after);
+                }
                 min_det_f = min_det_f.min(det_f);
                 stored_j = point.weight_m3.mul_add(state.energy_after_pa, stored_j);
                 material_work_j = point.weight_m3.mul_add(state.work_pa, material_work_j);
@@ -121,11 +139,14 @@ impl ConservativeTetSolid<'_> {
                         .weight_m3
                         .mul_add(pressure * volume.volume_work, pressure_work_j);
                     for a in 0..4 {
+                        let target_volume = bulk.as_ref().map_or(1.0, |b| b.volume_ratio_after);
                         local_r[30 + a] +=
-                            point.weight_m3 * point.pressure_shapes[a] * (det_f - 1.0);
+                            point.weight_m3 * point.pressure_shapes[a] * (det_f - target_volume);
                     }
                 }
                 if !stored_j.is_finite()
+                    || !bulk_stored_j.is_finite()
+                    || !bulk_work_j.is_finite()
                     || !material_work_j.is_finite()
                     || !pressure.is_finite()
                     || !pressure_work_j.is_finite()
@@ -145,6 +166,16 @@ impl ConservativeTetSolid<'_> {
                     }
                 }
                 if let Some(response) = response {
+                    if let Some(bulk) = &bulk {
+                        for a in 0..4 {
+                            for b in 0..4 {
+                                local_k[30 + a][30 + b] -= point.weight_m3
+                                    * point.pressure_shapes[a]
+                                    * point.pressure_shapes[b]
+                                    * bulk.compliance_per_pa;
+                            }
+                        }
+                    }
                     // Reuse each right shape contraction for every test shape:
                     // 9*30*3 + 30*30*3 products instead of 30*30*9.
                     let a_gradient: [[f64; 30]; 9] = core::array::from_fn(|ij| {
@@ -246,10 +277,19 @@ impl ConservativeTetSolid<'_> {
             }
         }
         checkpoint(cx)?;
+        stored_j += bulk_stored_j;
+        if !stored_j.is_finite() {
+            return Err(invalid(
+                "total conservative elastic storage is unrepresentable",
+            ));
+        }
         Ok(Evaluation {
             forces_n,
             tangent,
             stored_j,
+            bulk_stored_j,
+            bulk_work_j,
+            bulk_volume_ratios,
             material_work_j,
             pressure_work_j,
             pressure_residual_m3,

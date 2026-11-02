@@ -24,6 +24,7 @@ use std::sync::Arc;
 use fs_exec::Cx;
 use fs_material::MaterialError;
 use fs_material::hyper::Hyperelastic;
+use fs_material::hyper::discrete_gradient::bulk::{DiscreteBulkPoint, DiscreteBulkSettings};
 use fs_material::hyper::discrete_gradient::{
     DiscreteGradientPoint, DiscreteGradientSettings, EnergyPart,
 };
@@ -58,22 +59,55 @@ pub enum ConservativeFormulation {
         /// Dimensionless absolute local allowance for Gd:DeltaF = DeltaJ.
         maximum_point_volume_work_defect: f64,
     },
+    /// Original finite-compliance bulk energy on retained quadrature volumes.
+    /// P1 interval pressure is the original U secant, not an endpoint pressure.
+    /// Both geometric and retained volumes must stay in the declared bracket.
+    OriginalMaterial {
+        bulk: DiscreteBulkSettings,
+        maximum_relative_volume_residual: f64,
+        maximum_point_volume_work_defect: f64,
+    },
 }
 
 impl ConservativeFormulation {
-    fn volume_controls(self) -> Option<(f64, f64, f64)> {
+    fn volume_controls(self) -> Option<(f64, f64)> {
         match self {
             Self::FullMaterial => None,
             Self::ExactIncompressible {
                 maximum_relative_volume_residual,
-                maximum_initial_relative_volume_rate_per_s,
                 maximum_point_volume_work_defect,
+                ..
+            }
+            | Self::OriginalMaterial {
+                maximum_relative_volume_residual,
+                maximum_point_volume_work_defect,
+                ..
             } => Some((
                 maximum_relative_volume_residual,
-                maximum_initial_relative_volume_rate_per_s,
                 maximum_point_volume_work_defect,
             )),
         }
+    }
+
+    fn bulk_settings(self) -> Option<DiscreteBulkSettings> {
+        match self {
+            Self::OriginalMaterial { bulk, .. } => Some(bulk),
+            _ => None,
+        }
+    }
+
+    fn admit_geometric_volume(self, volume: f64) -> Result<(), ConservativeTetError> {
+        if let Some(settings) = self.bulk_settings() {
+            if !volume.is_finite()
+                || volume < settings.minimum_volume_ratio
+                || volume > settings.maximum_volume_ratio
+            {
+                return Err(invalid(
+                    "geometric volume is outside the original-bulk bracket",
+                ));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -224,18 +258,31 @@ impl<'a> ConservativeTetDefinition<'a> {
         velocity_mps: &[[f64; 3]],
         cx: &Cx<'_>,
     ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
+        self.prepare_with_pressure(displacement_m, velocity_mps, &[], cx)
+    }
+
+    /// Supply explicit P1 initial pressure in sorted corner-node order. An empty
+    /// slice means zero. OriginalMaterial uses the physical ENDPOINT pressure
+    /// to initialize each retained volume through U'(Jbar)=p, then admits the
+    /// weak geometric-volume constraint. ExactIncompressible uses it only as a
+    /// Newton predictor. Initial displacement/velocity are never projected.
+    pub fn prepare_with_pressure(
+        &self,
+        displacement_m: &[[f64; 3]],
+        velocity_mps: &[[f64; 3]],
+        initial_pressure_pa: &[f64],
+        cx: &Cx<'_>,
+    ) -> Result<ConservativeTetSolid<'a>, ConservativeTetError> {
         checkpoint(cx)?;
         if self
             .formulation
             .volume_controls()
-            .is_some_and(|(relative, rate, local)| {
-                [relative, rate, local]
-                    .iter()
-                    .any(|v| !v.is_finite() || *v < 0.0)
+            .is_some_and(|(relative, local)| {
+                [relative, local].iter().any(|v| !v.is_finite() || *v < 0.0)
             })
         {
             return Err(invalid(
-                "finite nonnegative exact-volume allowances required",
+                "finite nonnegative mixed-volume allowances required",
             ));
         }
         if displacement_m.len() != self.nodes_m.len()
@@ -287,11 +334,25 @@ impl<'a> ConservativeTetDefinition<'a> {
             )
             .map_err(inertia_error)?,
         );
-        let (frozen, stored_energy_j, pressure_residual_m3) =
-            self.freeze_points(&mesh, displacement_m, cx)?;
-        self.admit_volume(&mesh, &pressure_residual_m3)?;
-        self.admit_initial_volume_rate(&mesh, &frozen, velocity_mps, cx)?;
-        let algorithmic_pressure_pa = vec![0.0; pressure_residual_m3.len()];
+        let np = if self.formulation.volume_controls().is_some() {
+            mesh.pressure_nodes.len()
+        } else {
+            0
+        };
+        if (!initial_pressure_pa.is_empty() && initial_pressure_pa.len() != np)
+            || initial_pressure_pa.iter().any(|p| !p.is_finite())
+        {
+            return Err(invalid("initial pressure must cover the pressure nodes"));
+        }
+        let algorithmic_pressure_pa = if initial_pressure_pa.is_empty() {
+            vec![0.0; np]
+        } else {
+            initial_pressure_pa.to_vec()
+        };
+        let frozen =
+            self.freeze_points(&mesh, displacement_m, None, &algorithmic_pressure_pa, cx)?;
+        self.admit_volume(&mesh, &frozen.pressure_residual_m3)?;
+        self.admit_initial_volume_rate(&mesh, &frozen.points, velocity_mps, cx)?;
         let momentum = mass
             .action(velocity_mps.as_flattened(), cx)
             .map_err(inertia_error)?;
@@ -301,7 +362,7 @@ impl<'a> ConservativeTetDefinition<'a> {
                 .iter()
                 .zip(momentum)
                 .fold(0.0, |sum, (v, mv)| v.mul_add(mv, sum));
-        let initial_total_energy_j = stored_energy_j + kinetic_energy_j;
+        let initial_total_energy_j = frozen.stored_energy_j + kinetic_energy_j;
         if !initial_total_energy_j.is_finite()
             || !kinetic_energy_j.is_finite()
             || kinetic_energy_j < 0.0
@@ -313,12 +374,15 @@ impl<'a> ConservativeTetDefinition<'a> {
             definition: *self,
             mesh,
             mass,
-            points: frozen,
+            points: frozen.points,
+            bulk_points: frozen.bulk_points,
+            bulk_volume_ratios: frozen.bulk_volume_ratios,
             displacement_m: displacement_m.to_vec(),
             velocity_mps: velocity_mps.to_vec(),
             algorithmic_pressure_pa,
-            pressure_residual_m3,
-            stored_energy_j,
+            pressure_residual_m3: frozen.pressure_residual_m3,
+            stored_energy_j: frozen.stored_energy_j,
+            bulk_stored_energy_j: frozen.bulk_stored_energy_j,
             kinetic_energy_j,
             initial_total_energy_j,
             cumulative_work_j: 0.0,
@@ -331,20 +395,36 @@ impl<'a> ConservativeTetDefinition<'a> {
         &self,
         mesh: &PreparedMixedMesh,
         u: &[[f64; 3]],
+        retained_bulk_volumes: Option<&[f64]>,
+        initial_pressure_pa: &[f64],
         cx: &Cx<'_>,
-    ) -> Result<(Vec<DiscreteGradientPoint<'a>>, f64, Vec<f64>), ConservativeTetError> {
-        let mut points = Vec::with_capacity(mesh.elements.len() * mesh.points_per_element);
+    ) -> Result<FrozenState<'a>, ConservativeTetError> {
+        let count = mesh.elements.len() * mesh.points_per_element;
+        let mut points = Vec::with_capacity(count);
         let mut energy = 0.0;
-        let exact = self.formulation.volume_controls().is_some();
-        let mut pressure_residual_m3 = vec![0.0; if exact { mesh.pressure_nodes.len() } else { 0 }];
+        let mixed = self.formulation.volume_controls().is_some();
+        let bulk_settings = self.formulation.bulk_settings();
+        if retained_bulk_volumes
+            .is_some_and(|volumes| bulk_settings.is_none() || volumes.len() != count)
+        {
+            return Err(invalid(
+                "retained bulk volumes must cover the original quadrature",
+            ));
+        }
+        let mut bulk_points = Vec::with_capacity(if bulk_settings.is_some() { count } else { 0 });
+        let mut bulk_volume_ratios = Vec::with_capacity(bulk_points.capacity());
+        let mut bulk_stored_energy_j = 0.0;
+        let mut pressure_residual_m3 = vec![0.0; if mixed { mesh.pressure_nodes.len() } else { 0 }];
         for (e, element) in mesh.elements.iter().enumerate() {
             for (q, point) in element.points.iter().enumerate() {
                 checkpoint(cx)?;
                 let law = law_at(self.material, e, q, mesh.points_per_element);
                 let f = deformation(element, point, u);
+                let j = determinant(&f);
+                self.formulation.admit_geometric_volume(j)?;
                 let frozen = DiscreteGradientPoint::try_new(
                     law,
-                    if exact {
+                    if mixed {
                         EnergyPart::Remainder
                     } else {
                         EnergyPart::Full
@@ -354,8 +434,36 @@ impl<'a> ConservativeTetDefinition<'a> {
                 )
                 .map_err(|error| material_error(e, q, error))?;
                 energy += point.weight_m3 * frozen.energy_before_pa();
-                if exact {
-                    let residual = determinant(&f) - 1.0;
+                let bulk_volume = if let Some(settings) = bulk_settings {
+                    // A compatible initial endpoint pressure avoids unresolved
+                    // volume components that would alternate under a quadratic
+                    // secant. Later endpoints retain their solved volume;
+                    // replacing it by det(F) would destroy physical bulk work.
+                    let bulk = match retained_bulk_volumes {
+                        Some(volumes) => DiscreteBulkPoint::try_new(
+                            law,
+                            volumes[e * mesh.points_per_element + q],
+                            settings,
+                        ),
+                        None => {
+                            let pressure = (0..4).fold(0.0, |s, a| {
+                                point.pressure_shapes[a]
+                                    .mul_add(initial_pressure_pa[element.pressure_indices[a]], s)
+                            });
+                            DiscreteBulkPoint::from_endpoint_pressure(law, pressure, settings)
+                        }
+                    }
+                    .map_err(|error| material_error(e, q, error))?;
+                    let ratio = bulk.accepted_volume_ratio();
+                    bulk_stored_energy_j += point.weight_m3 * bulk.energy_before_pa();
+                    bulk_points.push(bulk);
+                    bulk_volume_ratios.push(ratio);
+                    ratio
+                } else {
+                    1.0
+                };
+                if mixed {
+                    let residual = j - bulk_volume;
                     for a in 0..4 {
                         pressure_residual_m3[element.pressure_indices[a]] +=
                             point.weight_m3 * point.pressure_shapes[a] * residual;
@@ -364,10 +472,19 @@ impl<'a> ConservativeTetDefinition<'a> {
                 points.push(frozen);
             }
         }
-        if !energy.is_finite() {
+        let stored_energy_j = energy + bulk_stored_energy_j;
+        if !energy.is_finite() || !bulk_stored_energy_j.is_finite() || !stored_energy_j.is_finite()
+        {
             return Err(invalid("physical elastic storage is unrepresentable"));
         }
-        Ok((points, energy, pressure_residual_m3))
+        Ok(FrozenState {
+            points,
+            bulk_points,
+            bulk_volume_ratios,
+            stored_energy_j,
+            bulk_stored_energy_j,
+            pressure_residual_m3,
+        })
     }
 
     fn admit_volume(
@@ -375,10 +492,10 @@ impl<'a> ConservativeTetDefinition<'a> {
         mesh: &PreparedMixedMesh,
         residual: &[f64],
     ) -> Result<(), ConservativeTetError> {
-        if let Some((relative, _, _)) = self.formulation.volume_controls() {
+        if let Some((relative, _)) = self.formulation.volume_controls() {
             let maximum_abs_m3 = relative * mesh.total_volume_m3;
             if !maximum_abs_m3.is_finite() {
-                return Err(invalid("exact-volume allowance is unrepresentable"));
+                return Err(invalid("mixed-volume allowance is unrepresentable"));
             }
             for (a, &residual_m3) in residual.iter().enumerate() {
                 if !residual_m3.is_finite() || residual_m3.abs() > maximum_abs_m3 {
@@ -400,11 +517,16 @@ impl<'a> ConservativeTetDefinition<'a> {
         velocity_mps: &[[f64; 3]],
         cx: &Cx<'_>,
     ) -> Result<(), ConservativeTetError> {
-        let Some((_, relative_rate, local)) = self.formulation.volume_controls() else {
+        let ConservativeFormulation::ExactIncompressible {
+            maximum_initial_relative_volume_rate_per_s: relative_rate,
+            maximum_point_volume_work_defect: local,
+            ..
+        } = self.formulation
+        else {
             return Ok(());
         };
         let maximum_abs_m3_s = relative_rate * mesh.total_volume_m3;
-        if !maximum_abs_m3_s.is_finite() {
+        if !maximum_abs_m3_s.is_finite() || relative_rate < 0.0 {
             return Err(invalid(
                 "initial exact-volume rate allowance is unrepresentable",
             ));
@@ -453,6 +575,15 @@ impl<'a> ConservativeTetDefinition<'a> {
     }
 }
 
+struct FrozenState<'a> {
+    points: Vec<DiscreteGradientPoint<'a>>,
+    bulk_points: Vec<DiscreteBulkPoint>,
+    bulk_volume_ratios: Vec<f64>,
+    stored_energy_j: f64,
+    bulk_stored_energy_j: f64,
+    pressure_residual_m3: Vec<f64>,
+}
+
 /// Immutable accepted finite-strain motion and its original reference inventory.
 #[derive(Debug)]
 pub struct ConservativeTetSolid<'a> {
@@ -460,11 +591,14 @@ pub struct ConservativeTetSolid<'a> {
     mesh: Arc<PreparedMixedMesh>,
     mass: Arc<ReferenceMass>,
     points: Vec<DiscreteGradientPoint<'a>>,
+    bulk_points: Vec<DiscreteBulkPoint>,
+    bulk_volume_ratios: Vec<f64>,
     displacement_m: Vec<[f64; 3]>,
     velocity_mps: Vec<[f64; 3]>,
     algorithmic_pressure_pa: Vec<f64>,
     pressure_residual_m3: Vec<f64>,
     stored_energy_j: f64,
+    bulk_stored_energy_j: f64,
     kinetic_energy_j: f64,
     initial_total_energy_j: f64,
     cumulative_work_j: f64,
@@ -476,12 +610,19 @@ pub struct ConservativeTetSolid<'a> {
 pub struct ConservativeTetEnergy {
     pub stored_before_j: f64,
     pub stored_after_j: f64,
+    /// Original U at retained mixed quadrature volumes; zero in other modes.
+    pub bulk_stored_before_j: f64,
+    pub bulk_stored_after_j: f64,
+    /// Algorithmic bulk work p*(Jbar_after-Jbar_before).
+    pub bulk_work_j: f64,
+    pub bulk_constitutive_work_error_j: f64,
+    /// Full-material work, or remainder work when pressure owns the bulk.
     pub material_work_j: f64,
     pub pressure_work_j: f64,
     pub dead_load_work_j: f64,
     pub support_work_j: f64,
     pub constitutive_work_error_j: f64,
-    /// Actual pressure work minus p dotted with the endpoint weak-volume change.
+    /// Actual pressure work minus bulk work and p dotted with the weak-volume change.
     pub constraint_work_error_j: f64,
     pub equilibrium_work_error_j: f64,
     /// External/support work minus physical stored and kinetic changes.
@@ -493,8 +634,8 @@ pub struct ConservativeTetEnergy {
 #[derive(Debug)]
 pub struct ConservativeTetStep<'a> {
     pub solid: ConservativeTetSolid<'a>,
-    /// None only for fully prescribed FullMaterial motion. Exact volume always
-    /// has algebraic pressure equations and admits their independent rank.
+    /// None only for fully prescribed FullMaterial motion. Mixed formulations
+    /// retain algebraic pressure equations and admit their coupled factorization.
     pub newton: Option<NewtonReport>,
     pub reactions_n: Vec<(usize, f64)>,
     pub energy: ConservativeTetEnergy,
@@ -507,6 +648,9 @@ struct Evaluation {
     forces_n: Vec<f64>,
     tangent: Option<Csr>,
     stored_j: f64,
+    bulk_stored_j: f64,
+    bulk_work_j: f64,
+    bulk_volume_ratios: Vec<f64>,
     material_work_j: f64,
     pressure_work_j: f64,
     pressure_residual_m3: Vec<f64>,
@@ -528,13 +672,22 @@ impl<'a> ConservativeTetSolid<'a> {
             &self.mesh.pressure_nodes
         }
     }
-    /// Algebraic multipliers for the last accepted interval, initialized at zero.
+    /// Algebraic multipliers for the last accepted interval. At time zero this
+    /// returns the supplied initial pressure (zero with `prepare`).
     /// These are not endpoint Cauchy pressures and carry no inertia or storage.
     pub fn algorithmic_pressure_pa(&self) -> &[f64] {
         &self.algorithmic_pressure_pa
     }
     pub fn stored_energy_j(&self) -> f64 {
         self.stored_energy_j
+    }
+    /// Original finite-bulk volumes in reference element/quadrature order.
+    /// Empty for FullMaterial and ExactIncompressible.
+    pub fn bulk_volume_ratios(&self) -> &[f64] {
+        &self.bulk_volume_ratios
+    }
+    pub fn bulk_stored_energy_j(&self) -> f64 {
+        self.bulk_stored_energy_j
     }
     pub fn kinetic_energy_j(&self) -> f64 {
         self.kinetic_energy_j
@@ -725,8 +878,9 @@ impl<'a> ConservativeTetSolid<'a> {
                 }
                 .into());
             }
-            // A solved initial residual does not establish independent pressure
-            // equations. The endpoint constraint block must still have full rank.
+            // A solved initial residual does not establish an admissible mixed
+            // factorization. Exact constraints require independent rows; finite
+            // bulk retains its original nonzero pressure compliance instead.
             if np > 0 {
                 endpoint.ensure_linearization(&newton.x)?;
             }
@@ -772,6 +926,7 @@ impl<'a> ConservativeTetSolid<'a> {
             .fold(0.0, |s, (d, f)| f.mul_add(du[*d], s));
         let work_j = dead_load_work_j + support_work_j;
         let stored_change_j = evaluation.stored_j - self.stored_energy_j;
+        let bulk_change_j = evaluation.bulk_stored_j - self.bulk_stored_energy_j;
         let increment = work_j - self.work_correction_j;
         let cumulative_work_j = self.cumulative_work_j + increment;
         let work_correction_j = (cumulative_work_j - self.cumulative_work_j) - increment;
@@ -783,12 +938,19 @@ impl<'a> ConservativeTetSolid<'a> {
         let energy = ConservativeTetEnergy {
             stored_before_j: self.stored_energy_j,
             stored_after_j: evaluation.stored_j,
+            bulk_stored_before_j: self.bulk_stored_energy_j,
+            bulk_stored_after_j: evaluation.bulk_stored_j,
+            bulk_work_j: evaluation.bulk_work_j,
+            bulk_constitutive_work_error_j: evaluation.bulk_work_j - bulk_change_j,
             material_work_j: evaluation.material_work_j,
             pressure_work_j: evaluation.pressure_work_j,
             dead_load_work_j,
             support_work_j,
-            constitutive_work_error_j: evaluation.material_work_j - stored_change_j,
-            constraint_work_error_j: evaluation.pressure_work_j - algebraic_pressure_work_j,
+            constitutive_work_error_j: evaluation.material_work_j
+                - (stored_change_j - bulk_change_j),
+            constraint_work_error_j: evaluation.pressure_work_j
+                - evaluation.bulk_work_j
+                - algebraic_pressure_work_j,
             equilibrium_work_error_j: work_j
                 - evaluation.material_work_j
                 - evaluation.pressure_work_j
@@ -800,8 +962,12 @@ impl<'a> ConservativeTetSolid<'a> {
         };
         for (quantity, value) in [
             ("constitutive work", energy.constitutive_work_error_j),
+            ("original bulk work", energy.bulk_constitutive_work_error_j),
             ("constraint work identity", energy.constraint_work_error_j),
-            ("exact-volume pressure work", energy.pressure_work_j),
+            (
+                "pressure storage work",
+                energy.pressure_work_j - bulk_change_j,
+            ),
             ("momentum work", energy.equilibrium_work_error_j),
             ("kinetic work", inertia_energy.balance_error_j),
             ("total work", energy.balance_error_j),
@@ -809,13 +975,26 @@ impl<'a> ConservativeTetSolid<'a> {
         ] {
             gate(quantity, value, maximum_work_error_j)?;
         }
-        let (points, stored_energy_j, pressure_residual_m3) =
-            self.definition.freeze_points(&self.mesh, &u, cx)?;
+        let frozen = self.definition.freeze_points(
+            &self.mesh,
+            &u,
+            self.definition
+                .formulation
+                .bulk_settings()
+                .map(|_| evaluation.bulk_volume_ratios.as_slice()),
+            &pressure_pa,
+            cx,
+        )?;
         self.definition
-            .admit_volume(&self.mesh, &pressure_residual_m3)?;
+            .admit_volume(&self.mesh, &frozen.pressure_residual_m3)?;
         gate(
             "accepted physical storage",
-            stored_energy_j - evaluation.stored_j,
+            frozen.stored_energy_j - evaluation.stored_j,
+            maximum_work_error_j,
+        )?;
+        gate(
+            "accepted original bulk storage",
+            frozen.bulk_stored_energy_j - evaluation.bulk_stored_j,
             maximum_work_error_j,
         )?;
         checkpoint(cx)?;
@@ -824,12 +1003,15 @@ impl<'a> ConservativeTetSolid<'a> {
                 definition: self.definition,
                 mesh: Arc::clone(&self.mesh),
                 mass: Arc::clone(&self.mass),
-                points,
+                points: frozen.points,
+                bulk_points: frozen.bulk_points,
+                bulk_volume_ratios: frozen.bulk_volume_ratios,
                 displacement_m: u,
                 velocity_mps,
                 algorithmic_pressure_pa: pressure_pa,
-                pressure_residual_m3,
-                stored_energy_j,
+                pressure_residual_m3: frozen.pressure_residual_m3,
+                stored_energy_j: frozen.stored_energy_j,
+                bulk_stored_energy_j: frozen.bulk_stored_energy_j,
                 kinetic_energy_j: inertia_energy.kinetic_after_j,
                 initial_total_energy_j: self.initial_total_energy_j,
                 cumulative_work_j,
@@ -959,6 +1141,11 @@ impl Endpoint<'_, '_, '_, '_> {
                     // A redundant endpoint constraint then remains singular.
                     symmetric.push(row, col, value);
                     symmetric.push(col, row, value);
+                } else if self.free[row] >= nu && self.free[col] >= nu {
+                    // Original finite bulk has a negative symmetric compliance
+                    // block. Keeping it admits driven fully prescribed bodies;
+                    // the exact-constraint branch still has zero compliance.
+                    symmetric.push(row, col, value);
                 }
             }
         }
