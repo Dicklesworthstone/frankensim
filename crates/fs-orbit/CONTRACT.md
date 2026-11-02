@@ -44,10 +44,14 @@ API — never instrument-shaped.
 - Canonical unknown ordering: DC block, then per-harmonic
   `Re`/`Im` blocks, state-major; the packing is the seed format.
 - A converged residual below the relative tolerance is the ONLY
-  accepted orbit evidence; the trivial equilibrium is refused BY
-  NAME (`TrivialCollapse`) in both HB and shooting — a zero solution
-  satisfies every autonomous balance and must never be claimed as a
-  cycle.
+  accepted discrete-balance evidence. Autonomous/backbone HB solves
+  refuse equilibrium by name (`TrivialCollapse`), checking the full
+  non-DC spectrum rather than the fundamental alone. The existing
+  absolute autonomous collapse threshold is 1e-9 in packed state units.
+  Forced HB solves admit DC, zero, arbitrarily small, and higher-harmonic
+  responses: their period is prescribed, not inferred from a cycle.
+  Equilibrium deflation applies only to autonomous/backbone anchors.
+  Shooting retains its separate equilibrium check.
 - Conservative families carry a parity/phase nullspace: the Newton
   step regularizes a singular factorization with a FIXED Tikhonov
   jitter (deterministic); the converged residual gate is unchanged.
@@ -97,6 +101,11 @@ cross-validating the same vdP orbit to 1e-12 relative period with
 Floquet classification (trivial multiplier 1 + transverse 8.6e-4);
 refusals by name including `TorusSuspected` on a constructed
 incommensurate two-center fixture; bitwise determinism.
+
+The G1/G3 analytic regressions in `tests/harmonic_balance.rs` compare
+higher-harmonic forced oscillator coefficients (including their phase and
+velocity) with the closed-form transfer function, exercise small and DC
+forced responses, and retain autonomous-equilibrium refusal.
 
 ## No-claim boundaries
 

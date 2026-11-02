@@ -171,11 +171,12 @@ pub struct HbBudget {
     pub max_newton: usize,
     /// Relative residual tolerance.
     pub tolerance: f64,
-    /// Deflate the equilibrium manifold: multiply the residual used
-    /// for STEPS by `1 + (s0/|X_1|)^2` (s0 = a tenth of the seed's
-    /// first-harmonic norm) so Newton is repelled from constant
-    /// solutions. Convergence is still judged on the PLAIN residual —
-    /// deflation shapes the search, never the evidence.
+    /// Deflate the equilibrium manifold for autonomous/backbone solves:
+    /// multiply the residual used for STEPS by `1 + (s0/|X_ac|)^2`,
+    /// where `X_ac` contains all non-DC coefficients and s0 is a tenth
+    /// of the seed's non-DC norm. Forced responses may legitimately be
+    /// constant or arbitrarily small, so this option does not deflate
+    /// them. Convergence is judged on the PLAIN residual.
     pub deflate_equilibrium: bool,
 }
 
@@ -497,26 +498,17 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
     let nn = free.len();
     let mut res = vec![0.0f64; pack.coeff_len()];
     let mut trace = Vec::new();
-    let first_harm_norm = |u: &[f64]| -> f64 {
-        det::sqrt(
-            (0..d)
-                .map(|k| {
-                    let re = u[pack.re_index(1, k)];
-                    let im = u[pack.im_index(1, k)];
-                    re * re + im * im
-                })
-                .sum::<f64>(),
-        )
-    };
-    let deflation_s0 = if budget.deflate_equilibrium {
-        0.1 * first_harm_norm(&u).max(1.0e-12)
+    let oscillatory_norm = |u: &[f64]| norm(&u[d..pack.coeff_len()]);
+    let autonomous_anchor = !matches!(anchor, HbAnchor::Forced { .. });
+    let deflation_s0 = if budget.deflate_equilibrium && autonomous_anchor {
+        0.1 * oscillatory_norm(&u).max(1.0e-12)
     } else {
         0.0
     };
     let deflate = |u: &[f64]| -> f64 {
         if deflation_s0 > 0.0 {
-            let h1 = first_harm_norm(u).max(1.0e-15);
-            1.0 + (deflation_s0 / h1) * (deflation_s0 / h1)
+            let ac = oscillatory_norm(u).max(1.0e-15);
+            1.0 + (deflation_s0 / ac) * (deflation_s0 / ac)
         } else {
             1.0
         }
@@ -542,16 +534,10 @@ pub fn solve_hb_seeded<P: OrbitProblem>(
         // ~1600 stretched the scale).
         let scale = norm(&u[..pack.coeff_len()]).max(1.0);
         if rn < budget.tolerance * scale {
-            // Trivial-collapse guard: an all-zero harmonic content is
-            // the equilibrium, not an orbit.
-            let first_harm: f64 = (0..d)
-                .map(|k| {
-                    let re = u[pack.re_index(1, k)];
-                    let im = u[pack.im_index(1, k)];
-                    det::sqrt(re * re + im * im)
-                })
-                .sum();
-            if first_harm < 1.0e-9 {
+            // Only an unknown-period solve must exclude equilibrium:
+            // a forced response can be DC, small, or contain no fundamental.
+            // Count every non-DC harmonic when detecting autonomous collapse.
+            if autonomous_anchor && oscillatory_norm(&u) < 1.0e-9 {
                 return Err(OrbitError::TrivialCollapse);
             }
             let (coeffs, omega_u) = pack.unpack(&u);
