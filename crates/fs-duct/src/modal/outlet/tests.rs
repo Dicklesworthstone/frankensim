@@ -63,7 +63,8 @@ fn one_mode_outlet_reproduces_the_scalar_chain_in_both_junction_directions() {
 
 // Independently solve ALL forward-left/backward-right waves at once. No
 // recursive impedance conversion or production transfer helper appears here.
-fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize)
+fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize,
+    ideal: Option<Termination>)
     -> (Vec<C64>,Vec<C64>)
 {
     let stations = stations_of(duct,1).unwrap();
@@ -116,7 +117,12 @@ fn direct(duct: &Duct, gas: &GasState, omega: f64, loss: LossModel, n: usize)
     zload[0] = C64::from_re(0.7*gas.density*gas.sound_speed/(core::f64::consts::PI*radius*radius));
     for mode in 0..n {
         for col in 0..dimension {
-            a[(row+mode)*dimension+col] = pout[mode*dimension+col]-zload[mode]*uout[mode*dimension+col];
+            a[(row+mode)*dimension+col] = match ideal {
+                Some(Termination::Closed) => uout[mode*dimension+col],
+                Some(Termination::IdealOpen) => pout[mode*dimension+col],
+                None => pout[mode*dimension+col]-zload[mode]*uout[mode*dimension+col],
+                _ => unreachable!("only ideal boundaries are used by this oracle"),
+            };
         }
     }
     let scales: Vec<_> = a.chunks(dimension).map(|r|
@@ -155,11 +161,113 @@ fn complete_flow_map_matches_simultaneous_modal_junction_equations() {
                     let actual = mouth_response_load(&duct,&gas,omega,loss,load,n,1).unwrap();
                     let original = mm_input_impedance_load(&duct,&gas,omega,loss,load,n,1).unwrap();
                     assert_eq!(actual.input.impedance_matrix,original.impedance_matrix);
-                    let (z,t) = direct(&duct,&gas,omega,loss,n);
+                    let (z,t) = direct(&duct,&gas,omega,loss,n,None);
                     let zscale = z.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
                     let tscale = t.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
                     for (&a,&b) in actual.input.impedance_matrix.iter().zip(&z) { close(a,b,zscale); }
                     for (&a,&b) in actual.flow_map.iter().zip(&t) { close(a,b,tscale); }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn modal_junctions_cross_local_pressure_and_flow_nodes() {
+    // A quarter/half-wave downstream section puts a zero or pole of its
+    // impedance exactly at the radius junction. The complete duct response
+    // remains finite and must agree with a simultaneous pressure/flow solve.
+    let gas = air();
+    let downstream_length = 0.04;
+    for radii in [[0.006,0.012], [0.012,0.006]] {
+        let duct = Duct { segments: vec![
+            Segment::Cylinder { radius: radii[0], length: 0.03 },
+            Segment::Cylinder { radius: radii[1], length: downstream_length },
+        ] };
+        for n in [1,2,4] {
+            for termination in [Termination::Closed, Termination::IdealOpen] {
+                for phase in [core::f64::consts::FRAC_PI_2, core::f64::consts::PI] {
+                    for detuning in [-1e-10, 0.0, 1e-10] {
+                        let omega = gas.sound_speed*(phase+detuning)/downstream_length;
+                        let actual = mouth_response(&duct,&gas,omega,LossModel::Lossless,
+                            termination,n,1).unwrap();
+                        let original = mm_input_impedance(&duct,&gas,omega,LossModel::Lossless,
+                            termination,n,1).unwrap();
+                        assert_eq!(actual.input.impedance_matrix,original.impedance_matrix);
+                        let (z,t) = direct(&duct,&gas,omega,LossModel::Lossless,n,Some(termination));
+                        let zscale = z.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+                        let tscale = t.iter().map(|v|v.abs()).fold(0.0_f64,f64::max);
+                        for (&a,&b) in actual.input.impedance_matrix.iter().zip(&z) { close(a,b,zscale); }
+                        for (&a,&b) in actual.flow_map.iter().zip(&t) { close(a,b,tscale.max(1.0)); }
+                        if termination == Termination::Closed {
+                            assert!(actual.flow_map.iter().all(|&v|v==C64::ZERO));
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn mixed_modal_nodes_preserve_junction_continuity_and_lossless_power() {
+    // Exact +1/-1 reflection eigenvalues cannot pass through either an
+    // impedance chart or an admittance chart. They are valid standing-wave
+    // modes, and must coexist with mode conversion at a real radius change.
+    let n = 3;
+    let gammas = j1_roots(n-1).unwrap();
+    let f = junction_projection(0.006,0.009,&gammas,n);
+    let mut downstream_r = vec![C64::ZERO;n*n];
+    downstream_r[0] = C64::ONE;
+    downstream_r[n+1] = -C64::ONE;
+    downstream_r[2*n+2] = C64::new(0.6,0.8);
+    for expansion in [false,true] {
+        let geometry = prepared::PreparedJunction {
+            expansion, projection: f.clone(), transpose: transpose(&f,n),
+        };
+        for evanescent in [false,true] {
+            let mut down = vec![C64::from_re(1.2e6),C64::from_re(2.1e6),C64::from_re(3.4e6)];
+            let mut up = vec![C64::from_re(1.7e6),C64::from_re(2.8e6),C64::from_re(4.6e6)];
+            if evanescent {
+                down[1] = C64::new(0.0,-2.1e6);
+                up[1] = C64::new(0.0,-2.8e6);
+            }
+            assert!(impedance_from_reflection(&downstream_r,&down,n).is_err());
+            // Retaining identity as an observation extracts a_d = J a_u
+            // from the SAME factorization used for the returned reflection.
+            let mut transfer = Some(identity(n));
+            let reflected = junction(&mut transfer,&downstream_r,&down,&up,&geometry,n).unwrap();
+            let j = transfer.unwrap();
+            let no_observation = junction(&mut None,&downstream_r,&down,&up,&geometry,n).unwrap();
+            assert_eq!(reflected,no_observation);
+            let mut p_down = downstream_r.clone();
+            let mut p_up = reflected.clone();
+            for mode in 0..n {
+                p_down[mode*n+mode] = p_down[mode*n+mode]+C64::ONE;
+                p_up[mode*n+mode] = p_up[mode*n+mode]+C64::ONE;
+            }
+            let p_down = mat_mul(&p_down,&j,n);
+            let u_down = mat_mul(&terminal_flow(&downstream_r,&down,n),&j,n);
+            let u_up = terminal_flow(&reflected,&up,n);
+            let (p_left,p_right,u_left,u_right) = if expansion {
+                (p_up.clone(),mat_mul(&f,&p_down,n),u_down.clone(),mat_mul(&geometry.transpose,&u_up,n))
+            } else {
+                (p_down,mat_mul(&f,&p_up,n),u_up.clone(),mat_mul(&geometry.transpose,&u_down,n))
+            };
+            for (&a,&b) in p_left.iter().zip(&p_right) { close(a,b,1.0); }
+            for (&a,&b) in u_left.iter().zip(&u_right) { close(a,b,1e-6); }
+            if !evanescent {
+                // R* diag(1/Zc) R = diag(1/Zc) includes cross-mode energy,
+                // so per-entry clipping could not satisfy this invariant.
+                for row in 0..n {
+                    for col in 0..n {
+                        let mut power = C64::ZERO;
+                        for mode in 0..n {
+                            power = power+reflected[mode*n+row].conj()*reflected[mode*n+col]/up[mode];
+                        }
+                        let expected = if row==col { up[row].recip() } else { C64::ZERO };
+                        close(power,expected,1e-6);
+                    }
                 }
             }
         }

@@ -476,6 +476,11 @@ pipe `Z_in = +i Zc cot(kL)`.
   Junctions solve the original pressure/flow constraints in forward-wave
   coordinates with one LU shared by reflection and mouth transmission.
   Internal pressure or flow nodes need no impedance/admittance inversion.
+  Focused outlet regressions compare quarter-/half-wave junction nodes with an
+  independent simultaneous wave solve, enforce both continuity equations at
+  exact mixed `R=+1/-1` eigenvalues with propagating and evanescent modes, and
+  check full lossless cross-mode power conservation. These checks do not
+  extend the existing modal truncation, staircase or loss-model claims.
   `mm_input_impedance_load` supplies an explicit finite plane-mode impedance
   with nonnegative resistance to that same recurrence. It retains every
   interior modal coupling and the matched higher-mode mouth closure. Runtime
