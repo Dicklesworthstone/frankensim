@@ -11,6 +11,12 @@ use super::{
 use crate::ConductionError;
 use fs_exec::Cx;
 
+mod solid;
+pub use solid::{
+    GeneratedSolidRadialSolution, SolidRadialGeometry, SolidRadialLayerTemperatures,
+    SolidRadialLayeredBody,
+};
+
 /// Fixed radial symmetry. Cylinders have insulated ends; spheres have full
 /// solid angle. The positive inner radius is a physical reservoir boundary.
 /// A solid centre, axial/lateral spreading and evolving geometry are not implied.
@@ -83,14 +89,9 @@ impl RadialLayeredWall {
         radii_m.push(inner);
         let mut radius = inner;
         for (index, layer) in wall.layers.iter().enumerate() {
-            let shape =
-                LayerShape::radial(kind, radius, inner, layer.thickness_m).ok_or_else(|| {
-                    invalid("radial layer metrics are nonpositive or unrepresentable")
-                })?;
+            let shape = admit_shell_shape(kind, radius, inner, layer.thickness_m, area)?;
             radius = finite("outer layer radius", radius + layer.thickness_m)?;
             let ratio = shape.area_ratio(layer.thickness_m);
-            positive("outer layer area", ratio * area)?;
-            positive("physical layer volume", shape.volume() * area)?;
             if let Some(&resistance) = wall.contact_resistances_m2_k_per_w.get(index) {
                 contacts.push(reference_resistance(resistance, ratio)?);
             }
@@ -372,4 +373,21 @@ fn scaled(value: f64, scale: f64, what: &'static str) -> Result<f64, ConductionE
         return Err(invalid("nonzero radial heat rate or flux underflowed"));
     }
     Ok(result)
+}
+
+fn admit_shell_shape(
+    kind: RadialKind,
+    inner: f64,
+    reference: f64,
+    thickness: f64,
+    reference_area: f64,
+) -> Result<LayerShape, ConductionError> {
+    let shape = LayerShape::radial(kind, inner, reference, thickness)
+        .ok_or_else(|| invalid("radial layer metrics are nonpositive or unrepresentable"))?;
+    positive(
+        "outer layer area",
+        shape.area_ratio(thickness) * reference_area,
+    )?;
+    positive("physical layer volume", shape.volume() * reference_area)?;
+    Ok(shape)
 }

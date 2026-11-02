@@ -26,8 +26,9 @@ pub use generation::{GeneratedLayerTemperatures, GeneratedLayeredWallSolution};
 mod geometry;
 mod radial;
 pub use radial::{
-    NonlinearGeneratedRadialLayerTemperatures, NonlinearGeneratedRadialWallSolution,
-    RadialLayeredWall, RadialWallGeometry,
+    GeneratedSolidRadialSolution, NonlinearGeneratedRadialLayerTemperatures,
+    NonlinearGeneratedRadialWallSolution, RadialLayeredWall, RadialWallGeometry,
+    SolidRadialGeometry, SolidRadialLayerTemperatures, SolidRadialLayeredBody,
 };
 mod nonlinear_generation;
 pub use nonlinear_generation::{

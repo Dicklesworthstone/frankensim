@@ -614,6 +614,43 @@ original PDE, and material/field rotation covariance with conserved energy.
 cargo test -p fs-conduction --test material_enthalpy
 ```
 
+## Centre-regular generated solid cylinders and spheres
+
+`layered::SolidRadialLayeredBody` binds an original `LayeredWall` to a solid
+core followed by concentric shells. The first physical layer thickness is the
+core radius. Symmetry requires Q(0)=0 and zero inner film; the only reservoir is
+outside the body. Cylinders have insulated endcaps and spheres cover the full
+solid angle. Original material tables, cards, receipts, physical contacts and
+the outer film remain retained.
+
+`solve_temperature_dependent_with_generation` admits one signed uniform
+volumetric source per layer. Enclosed source determines every radial heat rate.
+For a core, q(r)=s r/m and K(T_c)-K(T(r))=s r^2/(2m), with m=2 for cylinders and
+m=3 for spheres. This explicit regular limit never evaluates a hollow-shell
+logarithm or inverse radius at zero. The outer film fixes its face temperature;
+one inward pass uses the original source-segment Kirchhoff inverse, shared shell
+moments and actual-area contact jumps. No inlet-flux shooting or second material
+law is introduced. Work is linear in layer count after the existing bounded
+source preparation; cancellation retains the original layer/segment checkpoints.
+
+Every face and possible internal extremum must remain inside the declared
+common original source interval. The result reports actual areas, signed local
+Q/A flux, total face heat, layer generation, hot/cold spots and the one-reservoir
+balance against an independently accumulated source-times-volume inventory.
+The centre has exactly zero area and regular zero local flux.
+`temperature_at` and `heat_flux_at` recover the retained nonlinear profiles.
+Constitutive and film defects are independently recovered from the rounded
+temperatures; absolute flux tolerances use the core's outer area as reference.
+
+This is fixed radially symmetric steady conduction with generation independent
+of temperature. It supplies no transient heat capacity, phase-front motion,
+reaction/Joule feedback or material uncertainty enclosure.
+Five integration regressions cover signed nonlinear exact profiles, real shell
+contacts/films, independently derived internal cold spots and source refusal,
+homogeneous subdivision, length scaling, zero source and cancellation. Two
+native unit tests exercise the actual regular core geometry and dimensional
+generation integrals across signed sources and physical scales.
+
 ## Sourced planar layered steady conduction
 
 `layered::LayeredWall` solves an ordered equal-area planar stack from the existing

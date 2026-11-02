@@ -213,3 +213,56 @@ impl LayerShape {
 fn positive(x: f64) -> bool {
     x.is_finite() && x > 0.0
 }
+
+/// Regular solid centre. The reference area is the core's outer face.
+/// Symmetry fixes Q(0)=0; its singular hollow reciprocal-area integral is
+/// never evaluated. Uniform generation gives q(r)=s*r/m, m=2 or3.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(super) struct SolidCore {
+    kind: RadialKind,
+    radius: f64,
+    volume: f64,
+}
+
+impl SolidCore {
+    pub(super) fn new(kind: RadialKind, radius: f64) -> Option<Self> {
+        let dimension = match kind {
+            RadialKind::Cylindrical => 2.0,
+            RadialKind::Spherical => 3.0,
+        };
+        let volume = radius / dimension;
+        (positive(radius) && positive(volume)).then_some(Self {
+            kind,
+            radius,
+            volume,
+        })
+    }
+
+    pub(super) fn radius(self) -> f64 {
+        self.radius
+    }
+    pub(super) fn volume(self) -> f64 {
+        self.volume
+    }
+
+    pub(super) fn area_ratio(self, position: f64) -> f64 {
+        let ratio = position / self.radius;
+        match self.kind {
+            RadialKind::Cylindrical => ratio,
+            RadialKind::Spherical => ratio * ratio,
+        }
+    }
+
+    pub(super) fn local_flux(self, generated: f64, position: f64) -> f64 {
+        generated * (position / self.radius)
+    }
+
+    /// K(Tcentre)-K(T(r))=s*r²/(2*m), in W/m.
+    pub(super) fn potential_drop(self, generated: f64, position: f64) -> f64 {
+        (0.5 * position) * self.local_flux(generated, position)
+    }
+}
+
+#[cfg(test)]
+#[path = "geometry/solid_tests.rs"]
+mod solid_tests;

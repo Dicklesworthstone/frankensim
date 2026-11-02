@@ -3,6 +3,8 @@
 mod generation;
 #[path = "layered_nonlinear/radial.rs"]
 mod radial;
+#[path = "layered_nonlinear/solid_radial.rs"]
+mod solid_radial;
 mod support;
 
 use fs_conduction::layered::{LayeredWall, NonlinearWallOptions, PlanarThermalLayer};
