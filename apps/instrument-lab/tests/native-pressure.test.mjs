@@ -12,20 +12,20 @@ import {createNativeWindServer} from '../tools/serve-native-wind.mjs';
 import {validateWave} from '../tools/native-wind-protocol.mjs';
 import {nativeWindStatus, renderNativePerformance, renderNativeWindBundle} from '../src/native-wind-client.mjs';
 
-function wave(samples = [8000, -8000, 4000, -4000], junk = false) {
+function wave(samples = [8000, -8000, 4000, -4000], junk = false, rate = 48000) {
   const extra = junk ? 10 : 0, out = Buffer.alloc(44 + extra + samples.length * 2);
   out.write('RIFF'); out.writeUInt32LE(out.length - 8, 4); out.write('WAVE', 8);
   let pos = 12;
   if (junk) { out.write('JUNK', pos); out.writeUInt32LE(1, pos + 4); out[pos + 8] = 255; pos += 10; }
   out.write('fmt ', pos); out.writeUInt32LE(16, pos + 4); out.writeUInt16LE(1, pos + 8);
-  out.writeUInt16LE(1, pos + 10); out.writeUInt32LE(48000, pos + 12);
-  out.writeUInt32LE(96000, pos + 16); out.writeUInt16LE(2, pos + 20); out.writeUInt16LE(16, pos + 22);
+  out.writeUInt16LE(1, pos + 10); out.writeUInt32LE(rate, pos + 12);
+  out.writeUInt32LE(2 * rate, pos + 16); out.writeUInt16LE(2, pos + 20); out.writeUInt16LE(16, pos + 22);
   pos += 24; out.write('data', pos); out.writeUInt32LE(samples.length * 2, pos + 4);
   samples.forEach((sample, i) => out.writeInt16LE(sample, pos + 8 + 2 * i));
   return out;
 }
 function receipt(bytes, changes = {}) {
-  return {format:PRESSURE_RECEIPT_FORMAT, renderer:'wind', sampleRateHz:48000,
+  return {format:PRESSURE_RECEIPT_FORMAT, renderer:'wind', sampleRateHz:inspectNativeWave(bytes).sampleRateHz,
     samples:inspectNativeWave(bytes).samples, fullScalePa:200, clippedSamples:0,
     wavSha256:createHash('sha256').update(bytes).digest('hex'), ...changes};
 }
@@ -41,6 +41,24 @@ test('one WAV reader handles padded chunks and offset byte views without alterin
     assert.deepEqual([...nativePcmSamples(view)], [32767 / 32768, -1, 0, 12 / 32768]);
     assert.deepEqual(view, bytes);
   }
+});
+
+test('lip pressure measurements retain the native source clock and refuse cross-rate comparisons', async () => {
+  for (const rate of [8000, 16000, 24000, 44100, 192000]) {
+    const a = wave([1000, -1000], false, rate), b = wave([500, -500], false, rate);
+    const aReceipt = receipt(a, {renderer:'lip'}), bReceipt = receipt(b, {renderer:'lip'});
+    assert.equal(inspectNativeWave(a).sampleRateHz, rate);
+    assert.equal(validateWave(a, 1024, 'lip'), a);
+    assert.deepEqual(await verifyPressureReceipt(aReceipt, a, 'lip'), aReceipt);
+    const comparison = compareNativePressure(a, aReceipt, b, bReceipt);
+    assert.equal(comparison.durationSeconds, 2 / rate);
+    close(comparison.rmsB / comparison.rmsA, 0.5);
+    assert.throws(() => validateWave(a), /output clock/);
+    assert.throws(() => validatePressureReceipt(receipt(a), inspectNativeWave(a)), /calibration/);
+    const other = wave([1000, -1000], false, 48000);
+    assert.throws(() => compareNativePressure(a, aReceipt, other, receipt(other)), /same native output sample rate/);
+  }
+  for (const rate of [0, 7999, 192001]) assert.throws(() => inspectNativeWave(wave([1], false, rate)), /WAV/);
 });
 
 test('service and browser share refusal of incomplete or non-native PCM', () => {

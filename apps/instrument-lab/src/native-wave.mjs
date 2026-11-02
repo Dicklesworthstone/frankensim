@@ -4,21 +4,24 @@ export const NATIVE_WAVE_LIMIT = 16 * 1024 * 1024;
 export const PRESSURE_RECEIPT_HEADER = 'X-Native-Pressure-Receipt';
 export const PRESSURE_RECEIPT_FORMAT = 'frankensim-native-pressure-v1';
 
-export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT) {
-  const bad = () => { throw new Error('Native renderer did not produce a complete 48 kHz mono PCM16 WAV.'); };
+export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT, renderer) {
+  const bad = () => { throw new Error('Native renderer did not produce a complete mono PCM16 WAV on its supported output clock.'); };
   if (!(bytes instanceof Uint8Array) || bytes.byteLength < 44 || bytes.byteLength > limit) bad();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   const tag = at => view.getUint32(at, false);
   if (tag(0) !== 0x52494646 || tag(8) !== 0x57415645 || view.getUint32(4, true) + 8 !== bytes.byteLength) bad();
-  let position = 12, format = false, dataOffset = -1, dataBytes = 0;
+  let position = 12, format = false, sampleRateHz = 0, dataOffset = -1, dataBytes = 0;
   while (position + 8 <= bytes.byteLength) {
     const name = tag(position), size = view.getUint32(position + 4, true), start = position + 8;
     const end = start + size;
     if (end > bytes.byteLength) bad();
     if (name === 0x666d7420) {
+      if (size < 16) bad();
+      sampleRateHz = view.getUint32(start + 4, true);
       if (format || size < 16 || view.getUint16(start, true) !== 1
-          || view.getUint16(start + 2, true) !== 1 || view.getUint32(start + 4, true) !== 48000
-          || view.getUint32(start + 8, true) !== 96000 || view.getUint16(start + 12, true) !== 2
+          || view.getUint16(start + 2, true) !== 1 || sampleRateHz < 8000 || sampleRateHz > 192000
+          || (renderer !== undefined && renderer !== 'lip' && sampleRateHz !== 48000)
+          || view.getUint32(start + 8, true) !== 2 * sampleRateHz || view.getUint16(start + 12, true) !== 2
           || view.getUint16(start + 14, true) !== 16) bad();
       format = true;
     } else if (name === 0x64617461) {
@@ -28,15 +31,16 @@ export function inspectNativeWave(bytes, limit = NATIVE_WAVE_LIMIT) {
     position = end + (size & 1);
   }
   if (position !== bytes.byteLength || !format || dataOffset === -1) bad();
-  return Object.freeze({sampleRateHz:48000, samples:dataBytes / 2, dataOffset, dataBytes});
+  return Object.freeze({sampleRateHz, samples:dataBytes / 2, dataOffset, dataBytes});
 }
 
 /** Calibration is emitted by the native writer, never guessed from input text. */
 export function validatePressureReceipt(value, info, renderer) {
   if (!value || value.format !== PRESSURE_RECEIPT_FORMAT
-      || !['wind', 'strings', 'resolved', 'finite-gas-string'].includes(value.renderer)
+      || !['wind', 'strings', 'resolved', 'finite-gas-string', 'lip', 'voice'].includes(value.renderer)
       || (renderer !== undefined && value.renderer !== renderer)
       || value.sampleRateHz !== info.sampleRateHz || value.samples !== info.samples
+      || (value.renderer !== 'lip' && info.sampleRateHz !== 48000)
       || !Number.isFinite(value.fullScalePa) || value.fullScalePa <= 0
       || !Number.isSafeInteger(value.clippedSamples) || value.clippedSamples < 0
       || value.clippedSamples > info.samples
@@ -69,6 +73,9 @@ export function nativePcmSamples(bytes) {
 export function compareNativePressure(aBytes, aReceipt, bBytes, bReceipt) {
   const aInfo = inspectNativeWave(aBytes), bInfo = inspectNativeWave(bBytes);
   const a = validatePressureReceipt(aReceipt, aInfo), b = validatePressureReceipt(bReceipt, bInfo);
+  if (a.sampleRateHz !== b.sampleRateHz) {
+    throw new Error('Use the same native output sample rate for A and B, then render again. The comparison does not resample either result.');
+  }
   if (a.fullScalePa !== b.fullScalePa) {
     throw new Error('Use the same native full-scale pressure for A and B, then render again. No automatic level matching is applied.');
   }

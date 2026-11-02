@@ -17,6 +17,8 @@ export interface NativeGasRegion {
   label: string;
   values: NativeGasValues;
   pressureSpan: [number, number] | null;
+  /** Original optional moist_air keyword used by lip/voice descriptions. */
+  moistAirPrefix?: boolean;
   /** Station metadata is inherited from one complete native dg_bore field. */
   field?: {
     columns: string[];

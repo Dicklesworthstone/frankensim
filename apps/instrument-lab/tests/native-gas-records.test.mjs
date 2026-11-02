@@ -7,6 +7,28 @@ import {editableAttachmentText, editedAttachmentBytes, serializeNativeExperiment
 
 const fixture = name => readFile(new URL(`../../../crates/fs-couple/examples/${name}`, import.meta.url), 'utf8');
 
+test('brass and voice moist_air edits retain their original prefix, comments and native gas ownership', async () => {
+  const voice = await readFile(new URL('../../../data/instruments/descriptions/voice/tom1999-a-C3-speech-comf-flanagan.performance', import.meta.url), 'utf8');
+  const lip = 'frankensim-lip-performance-v1\r\n# original bore and lip sources\r\nambient\tmoist_air\t293.15 101325 0\r\n';
+  for (const source of [voice, lip]) {
+    const regions = nativeGasRegions(source);
+    assert.equal(regions.length, 1);
+    const [region] = regions;
+    assert.equal(region.moistAirPrefix, true);
+    assert.equal(editNativeGasRegion(source, region, region.values), source);
+    const changed = editNativeGasRegion(source, region, {...region.values, pressure:'90000'});
+    assert.equal(changed, source.slice(0, region.start)
+      + `moist_air ${region.values.temperature} 90000 ${region.values.humidity}` + source.slice(region.end));
+    const mixture = editNativeGasRegion(source, region, {kind:'mixture', temperature:'300', pressure:'95000',
+      basis:'mass', components:[{species:'N2', fraction:'0.9'}, {species:'He', fraction:'0.1'}]});
+    assert.equal(mixture, source.slice(0, region.start) + 'mixture 300 95000 mass 2 N2 0.9 He 0.1' + source.slice(region.end));
+    const [next] = nativeGasRegions(mixture);
+    assert.equal(next.values.kind, 'mixture');
+    assert.equal(next.moistAirPrefix, undefined);
+  }
+  assert.deepEqual(nativeGasRegions(lip.replace('frankensim-lip-performance-v1', 'frankensim-reed-performance-v1')), []);
+});
+
 test('finite reed gas inventory remains editable through its original thermochemical owner', async () => {
   const source = await fixture('material_modal_valve/paired-dg-finite-gas.performance');
   const inventory = nativeGasRegions(source).find(region => region.key === 'finite_gas');

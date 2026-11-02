@@ -10,7 +10,7 @@ import {fileURLToPath} from 'node:url';
 import {DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, MAX_LOG_BYTES, MAX_OUTPUT_BYTES, MAX_SOURCE_BYTES,
   MAX_ATTACHMENTS, MAX_ATTACHMENT_FILE_BYTES, MAX_ATTACHMENT_BYTES, MAX_REQUEST_BYTES,
   MAX_HISTORY_BYTES, FINITE_GAS_STRING_RESULT_FORMAT, FINITE_GAS_STRING_SCHEMAS,
-  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
+  NativeWindError, SUPPORTED_SCHEMAS, STRING_SCHEMAS, RESOLVED_SCHEMAS, LIP_SCHEMAS, VOICE_SCHEMAS, validateInput, validateWave} from './native-wind-protocol.mjs';
 
 import {nativePressureReceipt} from './native-pressure-receipt.mjs';
 import {PRESSURE_RECEIPT_HEADER} from '../src/native-wave.mjs';
@@ -97,6 +97,11 @@ function runNative(engine, input, output, dir, signal, outputLimit, experiment, 
     const args = experiment.renderer === 'finite-gas-string'
       ? [input, finiteGasString.solidPath, output, '--gas-record', finiteGasString.gasRecordPath,
         '--self-contained', '--history-output', history, '--require-sample-rate', '48000', ...sourceArgs, ...gasArgs]
+      // These performers parse inline geometry/gestures only. Their sole
+      // external inputs are the exact gas paths admitted above and staged in
+      // this private directory; neither accepts wind's attachment flags.
+      : experiment.renderer === 'lip' || experiment.renderer === 'voice'
+        ? [...command, input, output, ...gasArgs]
       : [...command, input, output,
         '--self-contained', ...(decimate ? ['--decimate'] : []), ...sourceArgs, ...gasArgs, ...profileArgs, ...coatingArgs];
     const outputs = [[output, outputLimit, 'WAV'],
@@ -148,13 +153,13 @@ function runNativeCommand(engine, args, dir, signal, outputs, label) {
     if (signal.aborted) abort();
   });
 }
-async function readWave(output, limit) {
+async function readWave(output, limit, renderer) {
   let file;
   try {
     file = await open(output, constants.O_RDONLY | (constants.O_NOFOLLOW || 0));
     const info = await file.stat();
     if (!info.isFile() || info.size > limit) throw new NativeWindError(502, 'Native WAV exceeds the output limit or is not a regular file.');
-    return validateWave(await file.readFile(), limit);
+    return validateWave(await file.readFile(), limit, renderer);
   } catch (error) {
     if (error instanceof NativeWindError) throw error;
     throw new NativeWindError(502, 'Native renderer did not leave a readable WAV.');
@@ -242,9 +247,10 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         return send(200,
         {available:!closing && (wind || strings || finiteGasString),
           renderers:{wind:!closing && wind, strings:!closing && strings, resolved:!closing && wind,
+            lip:!closing && wind, voice:!closing && wind,
             'finite-gas-string':!closing && finiteGasString}, busy:active !== null, token,
           maximumSourceBytes:MAX_SOURCE_BYTES, maximumOutputBytes, maximumHistoryBytes, timeoutMs,
-          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : []),
+          supportedSchemas:[...(wind ? [...SUPPORTED_SCHEMAS, ...RESOLVED_SCHEMAS, ...LIP_SCHEMAS, ...VOICE_SCHEMAS] : []), ...(strings ? STRING_SCHEMAS : []),
             ...(finiteGasString ? FINITE_GAS_STRING_SCHEMAS : [])],
           maximumAttachments:MAX_ATTACHMENTS, maximumAttachmentFileBytes:MAX_ATTACHMENT_FILE_BYTES,
           maximumAttachmentBytes:MAX_ATTACHMENT_BYTES, maximumRequestBytes:MAX_REQUEST_BYTES, supportsGasSources:true, supportsPressureReceipts:true,
@@ -277,7 +283,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
           ? 'Native material-string executable is unavailable. Build material_strings and configure its absolute path.'
           : experiment.renderer === 'finite-gas-string'
             ? 'Native finite-gas string executable is unavailable. Build finite_gas_string and configure its absolute path.'
-          : 'Native wind/resolved-flow executable is unavailable. Build music_render and configure its absolute path.');
+          : 'Native music_render executable is unavailable. Build it and configure its absolute path.');
         if (experiment.materialManifests && !await available(materialCompiler))
           throw new NativeWindError(503, 'Native material compiler is unavailable. Build xtask and configure --material-compiler with its absolute path.');
         if (controller.signal.aborted) throw controller.signal.reason;
@@ -292,7 +298,7 @@ export function createNativeWindServer({engine = process.env.FSIM_MUSIC_RENDER |
         }
         experiment = await compileMaterialManifests(materialCompiler, experiment, dir, controller.signal);
         const diagnostics = await runNative(selectedEngine, input, output, dir, controller.signal, maximumOutputBytes, experiment, maximumHistoryBytes);
-        const wave = await readWave(output, maximumOutputBytes);
+        const wave = await readWave(output, maximumOutputBytes, experiment.renderer ?? 'wind');
         if (controller.signal.aborted) throw controller.signal.reason;
         let receipt;
         try { receipt = await nativePressureReceipt(experiment.renderer ?? 'wind', output, diagnostics, wave); }

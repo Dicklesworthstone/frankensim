@@ -1,5 +1,5 @@
 // Transport only. Source parsing, material laws and synthesis belong to the selected native performer.
-import {NATIVE_WAVE_LIMIT, PRESSURE_RECEIPT_HEADER, verifyPressureReceipt} from './native-wave.mjs';
+import {NATIVE_WAVE_LIMIT, PRESSURE_RECEIPT_HEADER, inspectNativeWave, verifyPressureReceipt} from './native-wave.mjs';
 import {MAX_HISTORY_BYTES, FINITE_GAS_STRING_RESULT_FORMAT,
   serializeNativeExperiment, validateInput} from './native-experiment.mjs';
 
@@ -65,13 +65,9 @@ async function boundedResponse(response, maximumBytes, label, type) {
   return new Blob(chunks, {type});
 }
 
-async function boundedWave(response, maximumBytes) {
+async function boundedWave(response, maximumBytes, renderer) {
   const wave = await boundedResponse(response, maximumBytes, 'WAV', 'audio/wav');
-  const header = new DataView(await wave.slice(0, 12).arrayBuffer());
-  if (wave.size < 44 || header.getUint32(0, false) !== 0x52494646
-    || header.getUint32(8, false) !== 0x57415645 || header.getUint32(4, true) !== wave.size - 8) {
-    throw new Error("The native renderer returned an invalid WAV.");
-  }
+  inspectNativeWave(new Uint8Array(await wave.arrayBuffer()), maximumBytes, renderer);
   return wave;
 }
 
@@ -123,7 +119,10 @@ export async function renderNativePerformance(source, attachments, status, optio
 
 async function sendNativeWind(source, attachments, status, options, signal, request) {
   const renderer = options.renderer === undefined ? 'wind' : options.renderer;
-  if (!['wind', 'strings', 'resolved', 'finite-gas-string'].includes(renderer)) throw new Error("Choose a supported native physical performer.");
+  if (!['wind', 'strings', 'resolved', 'finite-gas-string', 'lip', 'voice'].includes(renderer)) throw new Error("Choose a supported native physical performer.");
+  if ((renderer === 'lip' || renderer === 'voice') && status.renderers?.[renderer] !== true) {
+    throw new Error(`The ${renderer} renderer is unavailable. Update music_render and the local server.`);
+  }
   if (renderer === 'strings' && status.renderers?.strings !== true) {
     throw new Error("The material-string renderer is unavailable. Configure material_strings on the local server.");
   }
@@ -154,6 +153,8 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
   if (options.decimate !== undefined && typeof options.decimate !== 'boolean') {
     throw new Error("Choose whether to use native decimation explicitly.");
   }
+  if (options.decimate && (renderer === 'lip' || renderer === 'voice'))
+    throw new Error('Lip and voice performances keep their declared native output clock; external decimation is unavailable.');
   if (options.gasSources !== undefined) {
     if (!options.gasSources || typeof options.gasSources !== "object"
         || !Array.isArray(options.gasSources.components) || !options.gasSources.components.length) {
@@ -197,7 +198,8 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     if (new TextEncoder().encode(body).byteLength > status.maximumRequestBytes) {
       throw new Error("The complete experiment exceeds the renderer's request limit.");
     }
-    if (renderer === 'finite-gas-string' || options.finiteGasString !== undefined || options.coatingStrainGuard !== undefined || options.materialManifests !== undefined)
+    if (renderer === 'finite-gas-string' || renderer === 'lip' || renderer === 'voice'
+        || options.finiteGasString !== undefined || options.coatingStrainGuard !== undefined || options.materialManifests !== undefined)
       validateInput(new TextEncoder().encode(body), true);
   }
   const response = await request(RENDER_URL, {
@@ -218,7 +220,7 @@ async function sendNativeWind(source, attachments, status, options, signal, requ
     await response.body?.cancel();
     throw new Error("The native renderer returned an unexpected response instead of audio.");
   }
-  const wave = await boundedWave(response, status.maximumOutputBytes);
+  const wave = await boundedWave(response, status.maximumOutputBytes, renderer);
   const header = response.headers.get(PRESSURE_RECEIPT_HEADER);
   let receipt = null;
   if (header !== null) {

@@ -4,6 +4,7 @@ import reedExampleSource from "../../../crates/fs-couple/examples/reed-two-mediu
 import flueExampleSource from "../../../crates/fs-couple/examples/flue-nolle.performance?raw";
 import fluteD4Source from "../../../data/instruments/descriptions/flute/flute-d4.performance?raw";
 import clarinetG3Source from "../../../data/instruments/descriptions/clarinet/performances/BbClar.mf.G3.performance?raw";
+import voiceTractSource from "../../../data/instruments/descriptions/voice/tom1999-a-C3-speech-comf-flanagan.performance?raw";
 import flueDgSource from "../../../crates/fs-couple/examples/flue-dg-baffled.performance?raw";
 import resolvedDgSource from "../../../crates/fs-couple/examples/resolved-dg.performance?raw";
 import resolvedThermoviscousSource from "../../../crates/fs-couple/examples/resolved-thermoviscous.performance?raw";
@@ -131,6 +132,15 @@ const EXAMPLES = [
     decimate: false,
     intro: "The existing G3 clarinet study, retaining its bore and tone-hole geometry, tongue contact, breath source and pressure gesture. Render the original description, then change its physical inputs for a comparison.",
     help: "The original ambient pack uses the shared woodwind breath data built into the native renderer. To replace that pack, author an ambient thermochemical or mixture record in the source editor; Regional atmosphere then exposes the explicit record. This study still uses a single-mode lumped reed and does not resolve cane geometry, lips, the vocal tract or wall motion. Its unchanged 48 kHz description is a reference study, not a realism qualification.",
+  },
+  {
+    name: "data/instruments/descriptions/voice/tom1999-a-C3-speech-comf-flanagan.performance",
+    label: "Voice — measured vocal-tract study",
+    renderer: "voice",
+    source: voiceTractSource,
+    decimate: false,
+    intro: "The existing Tom et al. vocal-tract study, with its original area measurements, fold parameters, yielding wall and pressure history. Change the ambient gas or physical source records and render the native mouth-pressure radiation.",
+    help: "The source keeps its provenance comments and declared 48 kHz output with 96 kHz mechanics. The fold remains the existing lumped two-mass model; this does not add tissue geometry, nasal branches or head diffraction. Shared mixture or attached thermochemical sources drive fold flow, tract losses and the exterior microphone. No spectral fit, retuning or playback-level matching is applied to your edits.",
   },
   {
     name: "resolved-thermoviscous.performance",
@@ -494,11 +504,14 @@ export function createNativeWindPanel(): HTMLElement {
   let selectedExample = EXAMPLES[0]!;
   const renderer = el("select", {id: "native-performance-renderer", class: "btn"},
     el("option", {value: "wind"}, "Wind — reeds, jets and material valves"),
+    el("option", {value: "lip"}, "Brass — lip valve, bore and radiated pressure"),
+    el("option", {value: "voice"}, "Voice — glottal source and vocal tract"),
     el("option", {value: "resolved"}, "Resolved flow — physical gas fields and spatial duct"),
     el("option", {value: "strings"}, "Strings — materials, bow/contact and shared body"),
     el("option", {value: "finite-gas-string"}, "Heated string — electrical, thermal and finite-gas feedback"));
   const selectedRenderer = (): NativeRenderer =>
-    renderer.value === "strings" || renderer.value === "resolved" || renderer.value === "finite-gas-string" ? renderer.value : "wind";
+    renderer.value === "strings" || renderer.value === "resolved" || renderer.value === "finite-gas-string"
+      || renderer.value === "lip" || renderer.value === "voice" ? renderer.value : "wind";
   const rendererAvailable = (next: NativeWindStatus | null): boolean => {
     const selected = selectedRenderer();
     return Boolean(next?.available && (selected === "wind"
@@ -632,8 +645,9 @@ export function createNativeWindPanel(): HTMLElement {
     renderer.disabled = locked;
     attach.disabled = locked;
     const heated = selectedRenderer() === "finite-gas-string";
-    decimate.disabled = locked || heated;
-    decimation.hidden = heated;
+    const sourceClock = heated || selectedRenderer() === "lip" || selectedRenderer() === "voice";
+    decimate.disabled = locked || sourceClock;
+    decimation.hidden = sourceClock;
     gas.setDisabled(locked);
     gasSourceChoice.disabled = addGasSource.disabled = locked;
     materials.setDisabled(locked);
@@ -881,7 +895,7 @@ export function createNativeWindPanel(): HTMLElement {
     void loadExample(selected);
   });
   renderer.addEventListener("change", () => {
-    if (selectedRenderer() === "finite-gas-string") decimate.checked = false;
+    if (["finite-gas-string", "lip", "voice"].includes(selectedRenderer())) decimate.checked = false;
     edited(); void checkConnection();
   });
   const refreshSourcePaths = (): void => {
@@ -1181,7 +1195,7 @@ export function createNativeWindPanel(): HTMLElement {
       el("summary", {}, "About the source and local renderer"),
       sourceHelp,
       el("p", {}, "Wind and material-string descriptions use their original native loaders. Attach the exact material packs and artifacts named by the source, including subdirectory paths. Changing a pack changes its physical properties; missing data and unsupported states remain native refusals. Keep the same declared pressure scale when comparing renders."),
-      el("p", {}, "Rendering uses the local music_render, material_strings or finite_gas_string executable. The heated string performer evolves its material and finite atmosphere together and returns synchronized CSV observations with the WAV. The hosted review page can show and edit the source; audio is available through the local renderer server. Wind and material-string decimation retains the original mechanics; heated strings require a declared 48 kHz clock."),
+      el("p", {}, "Rendering uses the local music_render, material_strings or finite_gas_string executable. The heated string performer evolves its material and finite atmosphere together and returns synchronized CSV observations with the WAV. The hosted review page can show and edit the source; audio is available through the local renderer server. Wind and material-string decimation retains the original mechanics; heated strings require a declared 48 kHz clock. Brass uses an original frankensim-lip-performance-v1 file from your native render workflow and keeps its declared output rate. Voice keeps its native 48 kHz output and authored mechanics substeps. Both share the atmosphere and source-pack controls."),
       el("p", {}, "Open experiment loads a complete native source packet, including its original material files, manifest bindings, gas associations and specimen profiles. Save experiment keeps the current configuration in that same format; neither action renders sound. The material-string launcher can prepare these packets directly from a physical assembly."),
       el("p", {}, canonical,
         " · ", el("a", {href: "https://github.com/Dicklesworthstone/frankensim/tree/main/crates/fs-couple/examples/material_strings", target: "_blank", rel: "noopener"}, "String source-pack instructions"),

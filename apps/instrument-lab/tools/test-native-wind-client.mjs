@@ -10,7 +10,7 @@ const status = { available: true, busy: false, token: "test-session",
 const json = (value, code = 200) => new Response(JSON.stringify(value), {
   status: code, headers: { "Content-Type": "application/json" },
 });
-function wave() {
+function wave(rate = 48000) {
   const bytes = new Uint8Array(48);
   const view = new DataView(bytes.buffer);
   bytes.set(new TextEncoder().encode("RIFF"), 0);
@@ -19,8 +19,8 @@ function wave() {
   view.setUint32(16, 16, true);
   view.setUint16(20, 1, true);
   view.setUint16(22, 1, true);
-  view.setUint32(24, 48_000, true);
-  view.setUint32(28, 96_000, true);
+  view.setUint32(24, rate, true);
+  view.setUint32(28, 2 * rate, true);
   view.setUint16(32, 2, true);
   view.setUint16(34, 16, true);
   bytes.set(new TextEncoder().encode("data"), 36);
@@ -93,10 +93,40 @@ test("success requires the native WAV media type and a complete RIFF container",
   })), /unexpected response/);
   const invalid = wave();
   invalid[0] = 0;
-  await assert.rejects(renderNativeWind("source", status, undefined, async () => audio(invalid)), /invalid WAV/);
-  await assert.rejects(renderNativeWind("source", status, undefined, async () => audio(new Uint8Array(2))), /invalid WAV/);
+  await assert.rejects(renderNativeWind("source", status, undefined, async () => audio(invalid)), /PCM16 WAV/);
+  await assert.rejects(renderNativeWind("source", status, undefined, async () => audio(new Uint8Array(2))), /PCM16 WAV/);
   const truncated = wave().slice(0, 46);
-  await assert.rejects(renderNativeWind("source", status, undefined, async () => audio(truncated)), /invalid WAV/);
+  await assert.rejects(renderNativeWind("source", status, undefined, async () => audio(truncated)), /PCM16 WAV/);
+});
+
+test('lip and voice client requests retain exact gas packs, source comments and native output clocks', async () => {
+  const connected = {...status, renderers:{wind:true, strings:false, lip:true, voice:true}, supportsGasSources:true,
+    maximumAttachments:128, maximumAttachmentFileBytes:8 * 1024 * 1024,
+    maximumAttachmentBytes:32 * 1024 * 1024, maximumRequestBytes:46 * 1024 * 1024};
+  const sourceFiles = ['gas/species', 'gas/nasa9', 'gas/transport'].map((path, i) => ({path, bytes:new Uint8Array([0, 255, i])}));
+  const gasSources = {components:[{speciesPath:'gas/species', nasa9Path:'gas/nasa9', transportPath:'gas/transport'}],
+    phase:'frozen', waterSpecies:null};
+  for (const renderer of ['lip', 'voice']) {
+    const source = `${renderer === 'voice' ? '# Original provenance before the voice schema\r\n' : ''}frankensim-${renderer}-performance-v1\r\nambient thermochemical 300 95000 mole 1 N2 1\r\n`;
+    const nativeWave = wave(renderer === 'lip' ? 16000 : 48000);
+    const result = await renderNativePerformance(source, sourceFiles, connected, {renderer, gasSources}, undefined,
+      async (_, options) => {
+        const input = validateInput(new TextEncoder().encode(options.body), true);
+        assert.equal(input.renderer, renderer); assert.deepEqual(input.source, new TextEncoder().encode(source));
+        assert.deepEqual(input.attachments, sourceFiles); assert.deepEqual(input.gasSources, gasSources);
+        return audio(nativeWave);
+      });
+    assert.deepEqual(new Uint8Array(await result.wave.arrayBuffer()), nativeWave);
+    const never = async () => assert.fail('unsupported native family/source must not be submitted');
+    await assert.rejects(renderNativePerformance(source, sourceFiles, {...connected, renderers:{wind:true}},
+      {renderer, gasSources}, undefined, never), /renderer is unavailable/);
+    await assert.rejects(renderNativePerformance(source, sourceFiles, connected,
+      {renderer, gasSources, decimate:true}, undefined, never), /external decimation/);
+    await assert.rejects(renderNativePerformance(source, sourceFiles, connected,
+      {renderer, gasSources:{...gasSources, components:[{...gasSources.components[0], speciesPath:'../outside'}]}}, undefined, never), /exact paths/);
+  }
+  await assert.rejects(renderNativePerformance('frankensim-voice-performance-v1\n', [], connected,
+    {renderer:'voice'}, undefined, async () => audio(wave(16000))), /output clock/);
 });
 
 test("both advertised and streamed oversized outputs are refused before preview allocation", async () => {

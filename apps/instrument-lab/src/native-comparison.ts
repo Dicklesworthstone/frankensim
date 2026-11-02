@@ -138,7 +138,7 @@ export function createNativeComparisonPanel(pausePreview: () => void) {
     el('div', {class:'btn-row'}, play, stopButton, aButton, bButton),
     el('label', {class:'nc-control'}, 'Shared simulation time ', seek, position),
     el('label', {class:'nc-control'}, 'Shared listening volume ', volume, volumeText),
-    el('p', {class:'small muted'}, 'A/B switching uses a 5 ms crossfade on one running clock. It does not restart either note, normalize loudness, or alter downloaded audio. Device playback may resample; the measurements use original 48 kHz PCM.'));
+    el('p', {class:'small muted'}, 'A/B switching uses a 5 ms crossfade on one running clock. It does not restart either note, normalize loudness, or alter downloaded audio. Device playback may resample; the measurements use original PCM at the native output rate. A and B must use the same rate.'));
   refresh();
   return {element, stop,
     async setCurrent(result: NativePerformanceResult, label: string, details: string, signal?: AbortSignal): Promise<void> {

@@ -2,7 +2,7 @@
 import {compareNativePressure, nativePcmSamples} from './native-wave.mjs';
 
 export class NativeComparisonPlayback {
-  constructor(createContext = () => new AudioContext({sampleRate:48000})) {
+  constructor(createContext = () => new AudioContext()) {
     this.createContext = createContext;
     this.context = null;
     this.data = null;
@@ -12,6 +12,7 @@ export class NativeComparisonPlayback {
     this.side = 'a';
     this.volume = 0.25;
     this.duration = 0;
+    this.sampleRateHz = 0;
     this.startedAt = 0;
     this.offsetSeconds = 0;
     this.mix = {from:0, to:0, start:0, end:0};
@@ -27,6 +28,7 @@ export class NativeComparisonPlayback {
     this.data = data;
     this.buffers = null;
     this.duration = comparison.durationSeconds;
+    this.sampleRateHz = comparison.sampleRateHz;
     return comparison;
   }
 
@@ -51,7 +53,7 @@ export class NativeComparisonPlayback {
     if (epoch !== this.epoch) return false;
     if (!this.buffers) {
       this.buffers = this.data.map(samples => {
-        const buffer = context.createBuffer(1, samples.length, 48000);
+        const buffer = context.createBuffer(1, samples.length, this.sampleRateHz);
         buffer.copyToChannel(samples, 0); return buffer;
       });
     }

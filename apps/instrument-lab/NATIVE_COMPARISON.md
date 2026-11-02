@@ -1,8 +1,38 @@
 # Calibrated native material comparisons
 
-The native wind/string panel retains two rendered results, not two browser
+The native performance panel retains two rendered results, not two browser
 synthesizers. Material substitution, atmosphere evaluation and physical time
 integration remain in the selected native executable.
+
+## Brass and voice atmosphere experiments
+
+The **Brass** and **Voice** performers call the existing `music_render lip` and
+`music_render voice` commands. Select the original vocal-tract study or open
+your own `frankensim-voice-performance-v1` file. For brass, select **Brass** and
+open an original `frankensim-lip-performance-v1` file from the native workflow
+(for example, a performance assembled by the existing trumpet/trombone render
+scripts). No measured brass specimen is invented for the browser.
+
+**Regional atmosphere** recognizes their original `ambient moist_air` records,
+retains that spelling when editing temperature/pressure/humidity, and can replace
+them with the shared `mixture` or `thermochemical` records. The existing source
+library, attached original packs, and material-manifest compiler work for both
+performers. Explicit gas-source associations pass to the native command as
+`--gas-component SPECIES NASA9 TRANSPORT`, with the declared water identity and
+phase policy. Only attached or compiled paths are accepted. The native owners
+evaluate the gas and propagate it into source flow, duct losses and radiation;
+the browser never derives replacement coefficients.
+
+Lip performances retain their declared native output clock (8–192 kHz within
+the native model's own admission limits). Voice retains its 48 kHz output and
+authored mechanics substeps. Neither accepts the wind/string decimation option.
+Downloaded WAVs keep their original PCM and rate; playback buffers use that
+rate, so a 16 kHz brass result is not played three times faster. Calibrated A/B
+requires equal native rates and never resamples one result to match the other.
+
+These are the existing lip and glottal physics models: the lip island and vocal
+fold remain lumped, and neither gains measured tissue geometry from this wiring.
+Original source provenance and limitations remain in the performance files.
 
 ## Compare a change
 
@@ -87,7 +117,7 @@ pressure calibrated at the listener's physical headphones. Pressure reconstructi
 uses the native encoder's `i16::MAX` scale (32767). Web Audio playback uses its
 normal signed PCM conversion (32768) equally on both sides.
 
-A and B must have exactly the same native pressure full scale and no reported
+A and B must have exactly the same native output rate and pressure full scale and no reported
 encoder clips. Different scales or clipping disable calibrated comparison;
 changing the playback slider cannot repair lost pressure. Missing legacy
 calibration still permits ordinary WAV playback but not calibrated A/B.
@@ -99,7 +129,7 @@ For unequal durations, playback and statistics explicitly use only the common
 prefix from simulation time zero; complete downloads are unaffected. A silent
 reference produces an undefined level ratio rather than a made-up finite dB
 value. The audio device may resample playback; measurements always use the
-original 48 kHz mono PCM16 samples.
+original mono PCM16 samples at their native output rate.
 
 Each WAV retains the native service's 16 MiB limit. Two captured WAVs and their
 bounded decoded playback copies are retained in browser memory. The service's

@@ -19,6 +19,8 @@ export const STRING_SCHEMAS = ['frankensim-material-strings-v1', 'frankensim-mat
 export const RESOLVED_SCHEMAS = ['frankensim-resolved-dg-performance-v1',
   'frankensim-resolved-thermoviscous-dg-performance-v1'];
 export const FINITE_GAS_STRING_SCHEMAS = ['frankensim-finite-gas-string-v1'];
+export const LIP_SCHEMAS = ['frankensim-lip-performance-v1'];
+export const VOICE_SCHEMAS = ['frankensim-voice-performance-v1'];
 
 export class NativeWindError extends Error {
   constructor(status, message) { super(message); this.status = status; }
@@ -27,21 +29,29 @@ export class NativeWindError extends Error {
 const utf8Bytes = value => new TextEncoder().encode(value).byteLength;
 
 export function validateSource(bytes, renderer = 'wind') {
-  if (!['wind', 'strings', 'resolved', 'finite-gas-string'].includes(renderer)) throw new NativeWindError(400, 'Choose a supported native physical performer.');
+  if (!['wind', 'strings', 'resolved', 'finite-gas-string', 'lip', 'voice'].includes(renderer)) throw new NativeWindError(400, 'Choose a supported native physical performer.');
   if (!(bytes instanceof Uint8Array) || !bytes.length) throw new NativeWindError(400, 'Choose or enter a performance file.');
   if (bytes.length > MAX_SOURCE_BYTES) throw new NativeWindError(413, 'Performance exceeds the 1 MiB input limit.');
   let text;
   try { text = new TextDecoder('utf-8', {fatal:true, ignoreBOM:true}).decode(bytes); }
   catch { throw new NativeWindError(400, 'Performance must contain valid UTF-8 bytes.'); }
   const schemas = renderer === 'strings' ? STRING_SCHEMAS : renderer === 'resolved' ? RESOLVED_SCHEMAS
-    : renderer === 'finite-gas-string' ? FINITE_GAS_STRING_SCHEMAS : SUPPORTED_SCHEMAS;
-  if (!schemas.includes(text.split(/\r?\n/, 1)[0]))
+    : renderer === 'finite-gas-string' ? FINITE_GAS_STRING_SCHEMAS
+    : renderer === 'lip' ? LIP_SCHEMAS : renderer === 'voice' ? VOICE_SCHEMAS : SUPPORTED_SCHEMAS;
+  // VoiceDescription accepts provenance comments before its schema. Inspect
+  // only that header and pass the entire original source to its native owner.
+  const header = renderer === 'voice'
+    ? text.split(/\r?\n/).map(line => line.trim()).find(line => line && !line.startsWith('#'))
+    : text.split(/\r?\n/, 1)[0];
+  if (!schemas.includes(header))
     throw new NativeWindError(400, renderer === 'strings'
       ? 'Choose an original material-string performance supported by material_strings.'
       : renderer === 'resolved'
         ? 'Choose an original resolved-flow performance supported by music_render resolved.'
         : renderer === 'finite-gas-string'
           ? 'Choose an original heated string scenario supported by finite_gas_string.'
+        : renderer === 'lip' || renderer === 'voice'
+          ? `Choose an original ${renderer} performance supported by music_render ${renderer}.`
         : 'Choose a native reed, flue or material-valve performance supported by music_render wind.');
   // Do not trim, normalize newlines, parse records, or re-encode admitted bytes.
   return bytes;
@@ -224,6 +234,8 @@ export function validateInput(bytes, bundled = false) {
     throw new NativeWindError(400, 'Experiment contains unsupported fields or an invalid native decimation option.');
   const renderer = packet.renderer === undefined ? 'wind' : packet.renderer;
   const source = validateSource(decodedBase64(packet.source, MAX_SOURCE_BYTES), renderer);
+  if (packet.decimate && (renderer === 'lip' || renderer === 'voice'))
+    throw new NativeWindError(400, 'Lip and voice performances keep their declared native output clock; external decimation is unavailable.');
   const names = new Set(['input.performance', 'output.wav', 'output.provenance.json']);
   if (renderer === 'finite-gas-string') names.add('output.history.csv');
   let total = 0;

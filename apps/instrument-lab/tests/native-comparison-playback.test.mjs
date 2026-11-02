@@ -5,27 +5,27 @@ import {createHash} from 'node:crypto';
 import {NativeComparisonPlayback} from '../src/native-comparison-playback.mjs';
 import {PRESSURE_RECEIPT_FORMAT} from '../src/native-wave.mjs';
 
-function wave(value, count = 4800) {
+function wave(value, count = 4800, rate = 48000) {
   const bytes = Buffer.alloc(44 + 2 * count);
   bytes.write('RIFF'); bytes.writeUInt32LE(bytes.length - 8, 4); bytes.write('WAVEfmt ', 8);
   bytes.writeUInt32LE(16, 16); bytes.writeUInt16LE(1, 20); bytes.writeUInt16LE(1, 22);
-  bytes.writeUInt32LE(48000, 24); bytes.writeUInt32LE(96000, 28);
+  bytes.writeUInt32LE(rate, 24); bytes.writeUInt32LE(2 * rate, 28);
   bytes.writeUInt16LE(2, 32); bytes.writeUInt16LE(16, 34); bytes.write('data', 36);
   bytes.writeUInt32LE(2 * count, 40);
   for (let i = 0; i < count; i++) bytes.writeInt16LE(value, 44 + 2 * i);
   return bytes;
 }
 const receipt = bytes => ({format:PRESSURE_RECEIPT_FORMAT, renderer:'strings', samples:(bytes.length - 44) / 2,
-  sampleRateHz:48000, fullScalePa:200, clippedSamples:0, wavSha256:createHash('sha256').update(bytes).digest('hex')});
-function context() {
+  sampleRateHz:bytes.readUInt32LE(24), fullScalePa:200, clippedSamples:0, wavSha256:createHash('sha256').update(bytes).digest('hex')});
+function context(expectedRate = 48000) {
   const sourceNodes = [], gainNodes = [];
   const node = () => ({connections:[], disconnects:0,
     connect(other) { this.connections.push(other); }, disconnect() { this.disconnects++; }});
   return {currentTime:10, state:'suspended', destination:{}, sourceNodes, gainNodes,
     async resume() { this.state = 'running'; }, async close() { this.state = 'closed'; },
     createBuffer(channels, count, rate) {
-      assert.equal(channels, 1); assert.equal(rate, 48000);
-      return {data:new Float32Array(count), copyToChannel(samples, channel) { assert.equal(channel, 0); this.data.set(samples); }};
+      assert.equal(channels, 1); assert.equal(rate, expectedRate);
+      return {sampleRate:rate, data:new Float32Array(count), copyToChannel(samples, channel) { assert.equal(channel, 0); this.data.set(samples); }};
     },
     createBufferSource() {
       const source = {...node(), starts:[], stops:0, onended:null,
@@ -69,6 +69,25 @@ test('both native streams use one clock, offset, window and shared volume withou
   assert.deepEqual(ctx.gainNodes[2].gain.events.at(-1), ['ramp', 1, 10.05]);
   first.onended(); assert.equal(player.playing, false);
   assert.ok(ctx.sourceNodes.every(node => node.disconnects === 1));
+});
+
+test('brass playback keeps source-rate buffers and physical duration without stretching PCM', async () => {
+  const ctx = context(16000), player = new NativeComparisonPlayback(() => ctx);
+  const a = wave(8000, 3200, 16000), b = wave(4000, 3200, 16000);
+  const aReceipt = {...receipt(a), renderer:'lip'}, bReceipt = {...receipt(b), renderer:'lip'};
+  const result = player.setPair(a, aReceipt, b, bReceipt);
+  assert.equal(result.sampleRateHz, 16000); near(result.durationSeconds, 0.2);
+  await player.play(0.05);
+  for (const source of ctx.sourceNodes) {
+    assert.equal(source.buffer.sampleRate, 16000);
+    assert.equal(source.buffer.data.length, 3200);
+    near(source.starts[0][1], 0.05); near(source.starts[0][2], 0.15);
+  }
+  assert.equal(ctx.sourceNodes[0].buffer.data[0], 8000 / 32768);
+  const other = wave(4000, 9600, 48000);
+  assert.throws(() => player.setPair(a, aReceipt, other, receipt(other)), /same native output sample rate/);
+  assert.equal(player.playing, true); near(player.duration, 0.2);
+  await player.close();
 });
 
 test('rapid switches continue complementary crossfades rather than restarting either note', async () => {

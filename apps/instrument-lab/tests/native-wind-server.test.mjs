@@ -26,7 +26,7 @@ async function setup(options = {}) {
   const fixture = `#!${process.execPath}
 // Synthetic process fixture: never presented as native physics.
 import {readFileSync, writeFileSync, statSync} from 'node:fs';
-const args = process.argv.slice(2), offset = ['wind', 'resolved'].includes(args[0]) ? 1 : 0;
+const args = process.argv.slice(2), offset = ['wind', 'resolved', 'lip', 'voice'].includes(args[0]) ? 1 : 0;
 const finite = args.includes('--history-output');
 const inputPath = args[offset], outputPath = args[finite ? 2 : offset + 1], input = readFileSync(inputPath);
 const text = input.toString(), requested = /^# read-files (.+)$/m.exec(text);
@@ -45,7 +45,13 @@ const wav = Buffer.alloc(48); wav.write('RIFF'); wav.writeUInt32LE(40, 4); wav.w
 wav.writeUInt32LE(16, 16); wav.writeUInt16LE(1, 20); wav.writeUInt16LE(1, 22); wav.writeUInt32LE(48000, 24);
 wav.writeUInt32LE(96000, 28); wav.writeUInt16LE(2, 32); wav.writeUInt16LE(16, 34); wav.write('data', 36); wav.writeUInt32LE(4, 40);
 if (text.includes('test-wrong-rate')) { wav.writeUInt32LE(16000, 24); wav.writeUInt32LE(32000, 28); }
+const nativeRate = /^# test-native-rate (\\d+)$/m.exec(text);
+if (nativeRate) { wav.writeUInt32LE(Number(nativeRate[1]), 24); wav.writeUInt32LE(2 * Number(nativeRate[1]), 28); }
 writeFileSync(outputPath, wav);
+if (['lip', 'voice'].includes(args[0])) writeFileSync(outputPath.replace(/\\.wav$/, '.provenance.json'), JSON.stringify({
+ schema:'frankensim-music-render-provenance-v1', sample_rate_hz:wav.readUInt32LE(24), samples:2,
+ full_scale_pa:20, clipped_samples:0,
+}));
 if (finite) {
  const history = text.includes('test-history-large') ? Buffer.alloc(257, 49)
   : text.includes('test-history-invalid') ? Buffer.from([255])
@@ -90,7 +96,7 @@ const native = {skip:process.platform === 'win32'};
 test('material strings reuse the exact source packet, gas associations and explicit profile paths', native, async () => {
   const app = await setup({withStrings:true, engine:null});
   try {
-    assert.deepEqual(app.initial.renderers, {wind:false, strings:true, resolved:false, 'finite-gas-string':false});
+    assert.deepEqual(app.initial.renderers, {wind:false, strings:true, resolved:false, lip:false, voice:false, 'finite-gas-string':false});
     assert.equal(app.initial.supportsCoatingStrainGuard, true);
     assert.equal(app.initial.available, true);
     assert.ok(app.initial.supportedSchemas.includes('frankensim-material-strings-v3'));
@@ -114,6 +120,70 @@ test('material strings reuse the exact source packet, gas associations and expli
     assert.deepEqual(receipt.files.map(file => [file.path, file.bytes]), files.map(([path, bytes]) => [path, bytes.toString('base64')]));
     await until(async () => !(await app.status()).busy);
     assert.equal((await app.run()).status, 503, 'a configured string performer must not substitute for a missing wind performer');
+  } finally { await app.cleanup(); }
+});
+
+test('lip and voice carry edited atmospheres, original comments and exact gas sources to their own native command', native, async () => {
+  const app = await setup();
+  try {
+    const originalVoice = await readFile(new URL('../../../data/instruments/descriptions/voice/tom1999-a-C3-speech-comf-flanagan.performance', import.meta.url), 'utf8');
+    assert.ok(originalVoice.startsWith('# Voice performance:'));
+    for (const renderer of ['lip', 'voice']) {
+      assert.equal(app.initial.renderers[renderer], true);
+      assert.ok(app.initial.supportedSchemas.includes(`frankensim-${renderer}-performance-v1`));
+      const original = renderer === 'voice' ? originalVoice
+        : 'frankensim-lip-performance-v1\n# Synthetic transport witness; no acoustic claim\nambient moist_air 293.15 101325 0\n';
+      const [ambient] = nativeGasRegions(original);
+      const changed = editNativeGasRegion(original, ambient, {kind:'thermochemical', temperature:'310', pressure:'90000',
+        basis:'mole', components:[{species:'source-N2', fraction:'0.8'}, {species:'source-He', fraction:'0.2'}]});
+      const components = [0, 1].map(i => ({speciesPath:`gas/${i}/species`, nasa9Path:`gas/${i}/nasa9`, transportPath:`gas/${i}/transport`}));
+      const names = components.flatMap(component => Object.values(component));
+      const files = names.map((path, i) => ({path, bytes:Buffer.from([0, 255, i, 13, 10])}));
+      const rate = renderer === 'lip' ? 16000 : 48000;
+      const source = changed + `\n# read-files ${JSON.stringify(names)}\n# test-native-rate ${rate}\n`;
+      const response = await app.runBundle(serializeNativeExperiment(source, files, {renderer,
+        gasSources:{components, waterSpecies:null, phase:'frozen'}}));
+      assert.equal(response.status, 200);
+      const wav = Buffer.from(await response.arrayBuffer());
+      assert.equal(wav.readUInt32LE(24), rate);
+      const calibration = JSON.parse(response.headers.get('x-native-pressure-receipt'));
+      assert.equal(calibration.renderer, renderer); assert.equal(calibration.sampleRateHz, rate);
+      const record = JSON.parse(await readFile(app.receipt, 'utf8'));
+      assert.equal(record.bytes, Buffer.from(source).toString('base64'));
+      assert.deepEqual(record.args, [renderer, join(record.cwd, 'input.performance'), join(record.cwd, 'output.wav'),
+        '--gas-water', 'none', '--gas-phase', 'frozen',
+        ...components.flatMap(component => ['--gas-component', ...Object.values(component)])]);
+      assert.deepEqual(record.files.map(file => [file.path, file.bytes]), files.map(file => [file.path, file.bytes.toString('base64')]));
+      await until(async () => !(await app.status()).busy);
+    }
+  } finally { await app.cleanup(); }
+});
+
+test('lip and voice refuse unsupported decimation and unbound sources before invoking the native executable', native, async () => {
+  const app = await setup();
+  try {
+    for (const renderer of ['lip', 'voice']) {
+      const source = `frankensim-${renderer}-performance-v1\n# original\n`;
+      for (const options of [{decimate:true}, {gasSources:{components:[{speciesPath:'../outside', nasa9Path:'n', transportPath:'t'}],
+        waterSpecies:null, phase:'frozen'}}, {stringProfiles:{}}]) {
+        const response = await app.runBundle(serializeNativeExperiment(source, [], {renderer, ...options}));
+        assert.equal(response.status, 400);
+        await response.arrayBuffer();
+        await until(async () => !(await app.status()).busy);
+      }
+    }
+    await assert.rejects(readFile(app.receipt), {code:'ENOENT'});
+    const response = await app.runBundle(serializeNativeExperiment('frankensim-lip-performance-v1\n# test-refuse\n', [], {renderer:'lip'}));
+    assert.equal(response.status, 400);
+    assert.match((await response.json()).error, /synthetic parser refusal/);
+  } finally { await app.cleanup(); }
+});
+
+test('voice output keeps the native 48 kHz requirement while lip output retains its own clock', native, async () => {
+  const app = await setup();
+  try {
+    const response = await app.runBundle(serializeNativeExperiment('frankensim-voice-performance-v1\n# test-wrong-rate\n', [], {renderer:'voice'}));
+    assert.equal(response.status, 502); assert.match((await response.json()).error, /output clock/);
   } finally { await app.cleanup(); }
 });
 

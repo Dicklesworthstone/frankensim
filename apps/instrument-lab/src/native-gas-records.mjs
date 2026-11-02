@@ -14,6 +14,7 @@ export function nativeGasRegions(source) {
   const regions = [], rows = [];
   const records = sourceRows(source);
   const resolved = resolvedSchemas.has(records[0]);
+  const namedMoistAir = ['frankensim-lip-performance-v1', 'frankensim-voice-performance-v1'].includes(records[0]);
   // The finite-atmosphere owners read one original thermochemical record from
   // an attached file, without a performance keyword or a second gas model.
   const gasRecord = records.length === 1 && /^thermochemical(?:\s|$)/.test(records[0]);
@@ -35,6 +36,7 @@ export function nativeGasRegions(source) {
     }
     if (first < 0 || first >= words.length) continue;
     const fields = words.slice(first);
+    const moistAirPrefix = namedMoistAir && key === 'ambient' && fields[0] === 'moist_air';
     const resolvedPrimary = resolved && key === 'gas';
     const supportedKinds = bare || key === 'finite_gas' ? ['thermochemical']
       : resolvedPrimary ? ['dry-air', 'mixture', 'thermochemical'] : ['moist-air', 'mixture', 'thermochemical'];
@@ -54,12 +56,13 @@ export function nativeGasRegions(source) {
       values = {kind, temperature:fields[1], pressure:fields[2], basis:fields[3], components};
       pressureIndex = first + 2;
     } else {
-      consumed = inherited ? 2 : 3;
-      if (fields.length < consumed || !fields.slice(0, consumed).every(finite)) continue;
+      const offset = moistAirPrefix ? 1 : 0;
+      consumed = (inherited ? 2 : 3) + offset;
+      if (fields.length < consumed || !fields.slice(offset, consumed).every(finite)) continue;
       kind = 'moist-air';
-      values = {kind, temperature:fields[0], pressure:inherited ? '' : fields[1],
-        humidity:fields[inherited ? 1 : 2], components:[]};
-      pressureIndex = inherited ? null : first + 1;
+      values = {kind, temperature:fields[offset], pressure:inherited ? '' : fields[offset + 1],
+        humidity:fields[offset + (inherited ? 1 : 2)], components:[]};
+      pressureIndex = inherited ? null : first + offset + 1;
     }
     if (!supportedKinds.includes(kind)) continue;
     // duct_section may continue with its original loss declaration. Other
@@ -71,6 +74,7 @@ export function nativeGasRegions(source) {
     const pressureToken = pressureIndex === null ? null : tokens[pressureIndex];
     regions.push({source, start, end, line:line + 1, key, inherited, supportedKinds,
       label:`${bare ? 'Attached thermochemical gas' : key}${inherited ? ' gas' : ''} · line ${line + 1}`, values,
+      ...(moistAirPrefix ? {moistAirPrefix:true} : {}),
       pressureSpan:pressureToken ? [match.index + pressureToken.index, match.index + pressureToken.index + pressureToken[0].length] : null});
   }
   return [...regions, ...fieldStationRegions(source, rows, regions)].sort((a, b) => a.start - b.start);
@@ -210,7 +214,8 @@ export function editNativeGasRegion(source, region, values, commonPressure = fal
     }
   }
   const text = gasText(values, region.inherited);
-  const next = region.field ? [values.temperature, ...values.components.map(component => component.fraction)].join(' ') : text;
+  const next = region.field ? [values.temperature, ...values.components.map(component => component.fraction)].join(' ')
+    : region.moistAirPrefix && values.kind === 'moist-air' ? 'moist_air ' + text : text;
   const edits = [];
   if (JSON.stringify(values) !== JSON.stringify(region.values)) edits.push([region.start, region.end, next]);
   if (commonPressure) {
