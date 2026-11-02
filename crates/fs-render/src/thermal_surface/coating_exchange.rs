@@ -56,13 +56,13 @@ pub struct CoatingExchangeRates {
 }
 
 #[derive(Clone, Copy, Debug)]
-struct SpectralNode {
-    wavelength_nm: f64,
+pub(super) struct SpectralNode {
+    pub(super) wavelength_nm: f64,
     // Numerical factorization of area * angular extraction * wavelength width.
     // These two positive scales enter the original log-scaled Planck owner
     // separately, even when their product would underflow or overflow.
-    coefficient: f64,
-    weight: f64,
+    pub(super) coefficient: f64,
+    pub(super) weight: f64,
 }
 
 /// Reusable hemispherical exchange response for a declared isothermal stack.
@@ -299,6 +299,8 @@ pub enum CoatingExchangeError {
     Area,
     /// Independent film/substrate temperatures need an internal-exchange model.
     Nonisothermal,
+    /// Each authored film and exactly the optional opaque substrate need a temperature.
+    TemperatureChannels,
     /// A closed two-surface gap requires opaque half spaces on both sides.
     OpaqueRequired,
     /// The two source-supported bands have no positive-width intersection.
@@ -366,7 +368,7 @@ pub(super) fn validate_isothermal(
     Ok(())
 }
 
-fn positive_product(first: f64, second: f64) -> Result<f64, ThermalSurfaceError> {
+pub(super) fn positive_product(first: f64, second: f64) -> Result<f64, ThermalSurfaceError> {
     let value = first * second;
     if !value.is_finite() || value < 0.0 || (first > 0.0 && second > 0.0 && value == 0.0) {
         Err(ThermalSurfaceError::Unrepresentable)
@@ -375,7 +377,7 @@ fn positive_product(first: f64, second: f64) -> Result<f64, ThermalSurfaceError>
     }
 }
 
-fn scaled_factors(
+pub(super) fn scaled_factors(
     area: f64,
     extraction: f64,
     wavelength_width: f64,
@@ -409,12 +411,12 @@ fn scaled_factors(
 }
 
 #[derive(Default)]
-struct Sum {
+pub(super) struct Sum {
     value: f64,
     correction: f64,
 }
 impl Sum {
-    fn add(&mut self, value: f64) -> Result<(), ThermalSurfaceError> {
+    pub(super) fn add(&mut self, value: f64) -> Result<(), ThermalSurfaceError> {
         let next = self.value + value;
         if !value.is_finite() || !next.is_finite() {
             return Err(ThermalSurfaceError::Unrepresentable);
@@ -427,7 +429,7 @@ impl Sum {
         self.value = next;
         Ok(())
     }
-    fn value(&self) -> Result<f64, ThermalSurfaceError> {
+    pub(super) fn value(&self) -> Result<f64, ThermalSurfaceError> {
         let total = self.value + self.correction;
         if total.is_finite() {
             Ok(total)

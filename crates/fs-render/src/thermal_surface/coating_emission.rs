@@ -287,6 +287,25 @@ impl CoatingThermalEmission {
         wavelength_nm: f64,
         cosine: f64,
     ) -> Result<[f64; 2], CoatingEmissionError> {
+        Ok(self
+            .reciprocal_layer_absorption(wavelength_nm, cosine)?
+            .total)
+    }
+
+    /// One original coherent solve supplies every layer's positive reciprocal
+    /// work. Temperatures and Planck radiance are not evaluated. The native
+    /// transmitting owner preserves authored layer order under reverse incidence.
+    pub(super) fn reciprocal_layer_absorption(
+        &self,
+        wavelength_nm: f64,
+        cosine: f64,
+    ) -> Result<ReciprocalLayerAbsorption, CoatingEmissionError> {
+        let mut result = ReciprocalLayerAbsorption {
+            films: [[0.0; 2]; MAX_COHERENT_STACK_LAYERS],
+            film_count: self.film_count(),
+            substrate: None,
+            total: [0.0; 2],
+        };
         self.with_layers(|layers| match self.exit {
             Exit::Opaque { substrate, .. } => {
                 let work = CoherentCoatingStack::try_new(layers)?.layer_power_balance(
@@ -305,22 +324,28 @@ impl CoatingThermalEmission {
                         absorbed[pol].add(fraction[pol]);
                     }
                 }
-                Ok(absorbed.map(PositiveSum::value))
+                result.films[..layers.len()].copy_from_slice(work.layer_absorbed());
+                result.substrate = Some(work.substrate_absorbed);
+                result.total = absorbed.map(PositiveSum::value);
+                Ok(result)
             }
             Exit::Transmitting {
                 opposite_ior,
                 reverse,
-            } => Ok(
-                DielectricCoatingStack::try_mixed_in_band(layers, self.wavelength_bounds_nm)?
-                    .layer_power_balance(
+            } => {
+                let work =
+                    DielectricCoatingStack::try_mixed_in_band(layers, self.wavelength_bounds_nm)?
+                        .layer_power_balance(
                         wavelength_nm,
                         reverse,
                         cosine,
                         1.0,
                         opposite_ior.eval(wavelength_nm)?,
-                    )?
-                    .absorbed,
-            ),
+                    )?;
+                result.films[..layers.len()].copy_from_slice(work.layer_absorbed());
+                result.total = work.absorbed;
+                Ok(result)
+            }
         })
     }
 
@@ -468,6 +493,20 @@ impl CoatingThermalEmission {
     #[must_use]
     pub const fn optical_identity(&self) -> ContentHash {
         self.optical_identity
+    }
+}
+
+/// Allocation-free reciprocal work in authored film order. This is shared by
+/// emission-derived thermal responses, not a second optical calculation.
+pub(super) struct ReciprocalLayerAbsorption {
+    films: [[f64; 2]; MAX_COHERENT_STACK_LAYERS],
+    film_count: usize,
+    pub(super) substrate: Option<[f64; 2]>,
+    total: [f64; 2],
+}
+impl ReciprocalLayerAbsorption {
+    pub(super) fn film_absorbed(&self) -> &[[f64; 2]] {
+        &self.films[..self.film_count]
     }
 }
 

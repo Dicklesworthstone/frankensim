@@ -5531,3 +5531,50 @@ conduction, shared latent-state optical laws, canonical multi-gap ordering,
 events/continuation, physical area limits and both work-budget channels.
 
 <!-- native-coating-gap:end -->
+
+<!-- coating-external-bath:start -->
+### Exterior baths exchange heat with each original coating layer
+
+`CoatingExternalBathResponse` prepares the contribution of one selected exterior
+vacuum port to every authored film and the optional opaque substrate. Each
+channel retains its own uniform local temperature. Its signed outward watts are
+the channel's escaped emission minus absorption of that port's isotropic black
+bath, integrated only over the original common wavelength band. An explicitly
+empty incoming vacuum bath has zero incident radiance; it does not authorize a
+zero material temperature. The positive reciprocal work of the matched incoming
+mode supplies both terms. This is the layer integral of Greffet et al.'s local
+Kirchhoff relation, Phys. Rev. X 8, 021008 (2018), equations (5)--(6),
+<https://doi.org/10.1103/PhysRevX.8.021008>.
+
+This operator supplies EXTERIOR boundary terms. It does not compute radiation
+emitted by one layer and absorbed by another. Such internal transfers cancel in
+the specimen total but may change individual layer temperatures; accurate total
+external energy alone is not complete nonisothermal radiative evolution. The
+native thermal caller remains responsible for any needed internal redistribution.
+An internally isothermal specimen or a single absorbing thermal subsystem has no
+additional internal radiative redistribution in its aggregate thermal account.
+
+One original coherent solve at each wavelength/cosine supplies all film channels
+simultaneously. Independent s/p work enters the same projected hemispherical
+integral as the existing isothermal owner. Angular data are reduced immediately;
+only `(film_count + opaque_substrate_count) * wavelength_bins` spectral slots are
+retained, including explicit lossless/zero-thickness channels. A distinct budget
+bounds that total storage and the coherent solve count before allocation. Queries
+use fixed bounded channel storage, original scaled Planck differences/secants and
+compensated sums, with no allocation or optical solve. Temperatures do not change
+the prepared identity; changed resolved optical laws invalidate it.
+
+Transmitting stacks retain authored layer order under reverse observation. Each
+physical vacuum-facing side has its own external port and may have an independent
+bath. A material-side port is not turned into vacuum by reversing traversal, and
+transmitted radiation is never a thermal destination. The existing finite-band,
+local-equilibrium, planar, coherent, reciprocal and passive assumptions remain.
+No diffuse view factor, infrared extrapolation or internal-transfer coefficient
+is inferred.
+
+Five focused groups verify independent oblique Fresnel/Beer depth work with SI
+Planck sources and quadrature refinement, isothermal reduction and asymmetric
+reverse routing, a complete two-bath single-film reference using independent
+Fresnel amplitude sums, positive weak-loss/subnormal conductances, and empty/dark
+channels, exact slot/work budgets, temperature shape and late cancellation.
+<!-- coating-external-bath:end -->

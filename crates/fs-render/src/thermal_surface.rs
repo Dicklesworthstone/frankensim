@@ -44,12 +44,17 @@ pub use coating_emission::{CoatingEmissionError, CoatingEmissionSample, CoatingT
 
 mod coating_exchange;
 pub use coating_exchange::{
-    CoatingExchangeBudget, CoatingExchangeError, CoatingExchangeQuadrature,
-    CoatingExchangeRates, CoatingExchangeResponse,
+    CoatingExchangeBudget, CoatingExchangeError, CoatingExchangeQuadrature, CoatingExchangeRates,
+    CoatingExchangeResponse,
 };
 
 mod coating_gap;
 pub use coating_gap::CoatingGapResponse;
+
+mod coating_external;
+pub use coating_external::{
+    CoatingExternalBathBudget, CoatingExternalBathRates, CoatingExternalBathResponse,
+};
 
 /// Physical incident surface absorption on the original native thermal clock.
 #[cfg(feature = "optical-heating")]
