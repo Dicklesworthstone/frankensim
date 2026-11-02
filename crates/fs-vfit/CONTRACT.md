@@ -39,6 +39,20 @@ to parallel biquad sections and discrete state-space.
   every LS column-equilibrated (physical scales like |Z| ~ 1e7
   otherwise poison the QR). Weight presets: uniform, inverse-magnitude
   (honest at antiresonances), log-band — recorded in `FitReport`.
+- `vf::vector_fit_transfer(omega, h, opts)` — the same relaxed relocation,
+  normalization, stable conjugate-closed poles and column-equilibrated QR for
+  general signed observations. Its final residue solve allows either sign of
+  fitted d/e; disabled direct terms remain exactly zero. Pressure transfer or
+  signed modal overlap is not an impedance and receives no positive-realness
+  claim. The original `vector_fit`, fixed-pole residue fit and Loewner paths
+  retain their existing nonnegative direct-term policy. Acoustic data still
+  require the documented convention conjugation; fit and held-out errors keep
+  their existing meaning. Three native signed-transfer tests recover proper
+  and improper known operators, signed mode reversal and off-grid response,
+  preserve disabled terms and the original impedance constraints, and pin
+  bitwise identical positive-data results. The existing six-pole recovery and
+  passivity-repair regressions also pass; no workspace-wide qualification is
+  asserted.
 - `vf::fit_auto_order` — ascending-order selection; a plateau
   terminates the ascent only AFTER a >= 10x cliff has been seen
   (executed observation: under-resolved orders sit on a

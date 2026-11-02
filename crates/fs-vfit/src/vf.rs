@@ -16,9 +16,9 @@
 //!
 //! Sign constraints `d >= 0`, `e >= 0` (impedance-form asymptotic
 //! passivity) are enforced INSIDE the solve as an exact active-set on
-//! the two bound constraints: if the unconstrained optimum violates a
-//! bound, the bound is active at the optimum of this convex problem, so
-//! the column is removed and the system re-solved.
+//! the two bound constraints by enumerating feasible active sets. General
+//! signed transfer data uses [`vector_fit_transfer`], which shares the same
+//! relocation and QR but imposes no impedance sign bounds on the final fit.
 
 use crate::model::{PoleTerm, RationalModel};
 use fs_la::eigen_complex::{EigFailure, eig};
@@ -310,6 +310,39 @@ pub(crate) fn terms_with_residues(terms: &[PoleTerm], coords: &[f64]) -> Vec<Pol
 /// Typed [`VfError`] on degenerate input, order, eigensolve failure, or
 /// sigma collapse. Never panics on finite input.
 pub fn vector_fit(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<FitOutcome, VfError> {
+    vector_fit_with_policy(omega, h, opts, DirectTermPolicy::Impedance)
+}
+
+/// Fit a general signed transfer with the same relaxed relocation and final
+/// column-equilibrated residue solve as [`vector_fit`], allowing either sign
+/// for fitted `d` and `e`. A signed observation (for example pressure from a
+/// signed mode overlap) is not an impedance and need not be positive real.
+///
+/// `fit_d=false` and `fit_e=false` still pin their respective terms to zero.
+/// Stable poles and conjugate closure remain; passivity is not inferred. Data
+/// use `s=i*omega`, so acoustic `exp(-i*omega*t)` samples must be conjugated.
+///
+/// # Errors
+/// The same input, order, eigensolve and sigma-collapse refusals as [`vector_fit`].
+pub fn vector_fit_transfer(
+    omega: &[f64],
+    h: &[C64],
+    opts: &FitOptions,
+) -> Result<FitOutcome, VfError> {
+    vector_fit_with_policy(omega, h, opts, DirectTermPolicy::SignedTransfer)
+}
+
+enum DirectTermPolicy {
+    Impedance,
+    SignedTransfer,
+}
+
+fn vector_fit_with_policy(
+    omega: &[f64],
+    h: &[C64],
+    opts: &FitOptions,
+    policy: DirectTermPolicy,
+) -> Result<FitOutcome, VfError> {
     validate(omega, h, opts)?;
     // Normalize the data to O(1) magnitude (fit H/scale, multiply the
     // linear parameters back at the end — exact by the scaling
@@ -332,7 +365,7 @@ pub fn vector_fit(omega: &[f64], h: &[C64], opts: &FitOptions) -> Result<FitOutc
             break;
         }
     }
-    let (model, weighted_rms, max_abs) = residue_pass(omega, h, &weights, &terms, opts);
+    let (model, weighted_rms, max_abs) = residue_pass(omega, h, &weights, &terms, opts, policy);
     Ok(FitOutcome {
         model: rescale_model(model, h_scale),
         report: FitReport {
@@ -594,16 +627,30 @@ pub(crate) fn pole_movement(old: &[PoleTerm], new: &[PoleTerm]) -> f64 {
     worst
 }
 
-/// Final residue-only pass (`sigma == 1`) with the `d >= 0`, `e >= 0`
-/// bound constraints resolved by exact active-set on the two bounds.
+/// Final residue-only pass (`sigma == 1`). Impedances retain their exact
+/// two-bound active set; general signed observations use the same unconstrained
+/// QR once, preserving both requested direct terms and their physical signs.
 fn residue_pass(
     omega: &[f64],
     h: &[C64],
     weights: &[f64],
     terms: &[PoleTerm],
     opts: &FitOptions,
+    policy: DirectTermPolicy,
 ) -> (RationalModel, f64, f64) {
     let order: usize = terms.iter().map(PoleTerm::state_dim).sum();
+    if matches!(policy, DirectTermPolicy::SignedTransfer) {
+        let (coords, d, e) = residue_solve(
+            omega, h, weights, terms, order, opts.fit_d, opts.fit_e,
+        );
+        let model = RationalModel {
+            terms: terms_with_residues(terms, &coords),
+            d,
+            e,
+        };
+        let (wrms, maxabs) = fit_errors(omega, h, weights, &model);
+        return (model, wrms, maxabs);
+    }
     // EXACT active-set on the two bound constraints d >= 0, e >= 0:
     // enumerate all four bound combinations, keep the FEASIBLE
     // candidate with the smallest weighted error (review finding: the
@@ -728,7 +775,9 @@ pub fn residue_fit_at_poles(
     let h_scale = magnitude_scale(h);
     let h_norm: Vec<C64> = h.iter().map(|v| v.scale(1.0 / h_scale)).collect();
     let weights: Vec<f64> = h_norm.iter().map(|&v| opts.weights.weight(v)).collect();
-    let (model, weighted_rms, max_abs) = residue_pass(omega, &h_norm, &weights, terms, opts);
+    let (model, weighted_rms, max_abs) = residue_pass(
+        omega, &h_norm, &weights, terms, opts, DirectTermPolicy::Impedance,
+    );
     Ok(FitOutcome {
         model: rescale_model(model, h_scale),
         report: FitReport {

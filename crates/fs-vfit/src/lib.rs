@@ -18,6 +18,8 @@
 //! real impulse responses enforced by conjugate-closed storage
 //! ([`model::PoleTerm`]). Passivity is impedance-form positive
 //! realness `Re H(i*omega) >= 0`.
+//! Signed observation transfers use [`vector_fit_transfer`] without the
+//! impedance direct-term sign bounds; that entry infers no passivity.
 //!
 //! LOAD-BEARING for acoustics consumers: FrankenSim's acoustics stack
 //! (fs-duct, fs-bem, ...) uses the `e^{-i*omega*t}` convention, the
@@ -51,4 +53,6 @@ pub mod vf;
 pub mod waveguide;
 
 pub use model::{PoleTerm, RationalModel, StateSpace};
-pub use vf::{FitOptions, FitOutcome, FitReport, VfError, WeightPreset, vector_fit};
+pub use vf::{
+    FitOptions, FitOutcome, FitReport, VfError, WeightPreset, vector_fit, vector_fit_transfer,
+};
