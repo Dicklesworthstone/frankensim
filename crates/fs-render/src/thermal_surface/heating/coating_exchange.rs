@@ -6,6 +6,9 @@
 //! Each patch exchanges with its selected exterior vacuum port. Other ports or
 //! spectral bands need separately composed owners. This is not bolometric heat.
 
+/// Conservative mutual exchange between opaque native coating specimens.
+pub mod gap;
+
 use super::{
     CoatingOpticsModel, NativeCoatingEmission, NativeCoatingEmissionError, StatefulCoatingLayer,
     SubstrateOpticsModel, SurfaceHeatingError, SurfaceHeatingReceiver,
@@ -146,6 +149,69 @@ struct CellBinding {
     caloric: Option<[u8; 32]>,
     storage: ThermalStorageBasis,
 }
+impl CellBinding {
+    fn capture(
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+    ) -> Result<Self, NativeCoatingExchangeError> {
+        let cell = thermal
+            .cells()
+            .get(&id)
+            .ok_or_else(|| invalid("radiative receiver must already be active"))?;
+        Ok(Self {
+            material: cell.material_id,
+            mass_kg: cell.mass_kg,
+            geometry: cell.geometry,
+            caloric: thermal.material_caloric_identity(cell.material_id)?,
+            storage: thermal.material_storage_basis(cell.material_id)?,
+        })
+    }
+
+    fn temperature(
+        &self,
+        thermal: &DepositionSimulation<'_>,
+        id: CellId,
+    ) -> Result<f64, NativeCoatingExchangeError> {
+        let cell = thermal
+            .cells()
+            .get(&id)
+            .ok_or_else(|| invalid("radiative receiver is inactive"))?;
+        if cell.material_id != self.material
+            || cell.mass_kg != self.mass_kg
+            || cell.geometry != self.geometry
+            || thermal.material_caloric_identity(cell.material_id)? != self.caloric
+            || thermal.material_storage_basis(cell.material_id)? != self.storage
+        {
+            return Err(invalid(
+                "radiative receiver must retain its native material, caloric law, mass and geometry",
+            ));
+        }
+        Ok(thermal.temperature_k(id)?)
+    }
+
+    fn hash(&self, id: CellId, hash: &mut DomainHasher) {
+        hash.update(&id.0.to_le_bytes());
+        hash.update(&self.material.0.to_le_bytes());
+        for value in [
+            self.mass_kg,
+            self.geometry.volume_m3,
+            self.geometry.surface_area_m2,
+        ]
+        .into_iter()
+        .chain(self.geometry.start_m)
+        .chain(self.geometry.end_m)
+        {
+            hash.update(&value.to_bits().to_le_bytes());
+        }
+        hash.update(&[u8::from(
+            self.storage == ThermalStorageBasis::InternalEnergy,
+        )]);
+        hash.update(&[u8::from(self.caloric.is_some())]);
+        if let Some(caloric) = self.caloric {
+            hash.update(&caloric);
+        }
+    }
+}
 #[derive(Debug)]
 struct Model {
     sources: Vec<CoatingExchangeSource>,
@@ -234,40 +300,16 @@ impl NativeCoatingExchange {
             if source.stack.films().len() > MAX_COHERENT_STACK_LAYERS {
                 return Err(NativeCoatingExchangeError::Budget);
             }
-            let cell = thermal
-                .cells()
-                .get(&source.receiver.thermal_cell)
-                .ok_or_else(|| invalid("radiative receiver must already be active"))?;
-            cells.entry(cell.id).or_insert(CellBinding {
-                material: cell.material_id,
-                mass_kg: cell.mass_kg,
-                geometry: cell.geometry,
-                caloric: thermal.material_caloric_identity(cell.material_id)?,
-                storage: thermal.material_storage_basis(cell.material_id)?,
-            });
-            for film in source.stack.films() {
-                if let CoatingOpticsModel::Law(law) = film {
-                    if laws.insert((0, *law.identity().as_bytes())) {
-                        rows = rows
-                            .checked_add(law.row_count())
-                            .ok_or(NativeCoatingExchangeError::Budget)?;
-                    }
-                }
-            }
-            if let IsothermalCoatingStack::Opaque {
-                substrate: SubstrateOpticsModel::Law(law),
-                ..
-            } = &source.stack
-            {
-                if laws.insert((1, *law.identity().as_bytes())) {
-                    rows = rows
-                        .checked_add(law.row_count())
-                        .ok_or(NativeCoatingExchangeError::Budget)?;
-                }
-            }
-            if rows > budget.max_total_optical_knots {
-                return Err(NativeCoatingExchangeError::Budget);
-            }
+            let id = source.receiver.thermal_cell;
+            cells
+                .entry(id)
+                .or_insert(CellBinding::capture(thermal, id)?);
+            admit_law_rows(
+                &source.stack,
+                &mut laws,
+                &mut rows,
+                budget.max_total_optical_knots,
+            )?;
         }
         let mut owner = Self {
             model: Arc::new(Model {
@@ -292,26 +334,7 @@ impl NativeCoatingExchange {
         let mut hash = DomainHasher::new("org.frankensim.render.native-coating-exchange.v1");
         hash.update(&thermal.time_s().to_bits().to_le_bytes());
         for (&id, binding) in &owner.model.cells {
-            hash.update(&id.0.to_le_bytes());
-            hash.update(&binding.material.0.to_le_bytes());
-            for value in [
-                binding.mass_kg,
-                binding.geometry.volume_m3,
-                binding.geometry.surface_area_m2,
-            ]
-            .into_iter()
-            .chain(binding.geometry.start_m)
-            .chain(binding.geometry.end_m)
-            {
-                hash.update(&value.to_bits().to_le_bytes());
-            }
-            hash.update(&[u8::from(
-                binding.storage == ThermalStorageBasis::InternalEnergy,
-            )]);
-            hash.update(&[u8::from(binding.caloric.is_some())]);
-            if let Some(caloric) = binding.caloric {
-                hash.update(&caloric);
-            }
+            binding.hash(id, &mut hash);
         }
         for (source, patch) in owner.model.sources.iter().zip(&owner.patches) {
             for id in [
@@ -391,21 +414,7 @@ impl NativeCoatingExchange {
         let mut temperatures = BTreeMap::new();
         for (&id, binding) in &self.model.cells {
             check()?;
-            let cell = thermal
-                .cells()
-                .get(&id)
-                .ok_or_else(|| invalid("radiative receiver is inactive"))?;
-            if cell.material_id != binding.material
-                || cell.mass_kg != binding.mass_kg
-                || cell.geometry != binding.geometry
-                || thermal.material_caloric_identity(cell.material_id)? != binding.caloric
-                || thermal.material_storage_basis(cell.material_id)? != binding.storage
-            {
-                return Err(invalid(
-                    "radiative receiver must retain its native material, caloric law, mass and geometry",
-                ));
-            }
-            temperatures.insert(id, thermal.temperature_k(id)?);
+            temperatures.insert(id, binding.temperature(thermal, id)?);
         }
         let selected: Vec<_> = self.model.cells.keys().copied().collect();
         let available = thermal.exposed_areas_m2(&selected, &mut *check)?;
@@ -654,22 +663,39 @@ fn resolve_emitter(
     maximum_rows: usize,
     check: &mut dyn FnMut() -> Result<(), DepositionError>,
 ) -> Result<CoatingThermalEmission, NativeCoatingExchangeError> {
-    let films: Vec<_> = source
-        .stack
+    resolve_stack_emitter(
+        &source.stack,
+        source.receiver,
+        source.source_identity,
+        thermal,
+        maximum_rows,
+        check,
+    )
+}
+
+fn resolve_stack_emitter(
+    stack: &IsothermalCoatingStack,
+    receiver: SurfaceHeatingReceiver,
+    source_identity: ContentHash,
+    thermal: &DepositionSimulation<'_>,
+    maximum_rows: usize,
+    check: &mut dyn FnMut() -> Result<(), DepositionError>,
+) -> Result<CoatingThermalEmission, NativeCoatingExchangeError> {
+    let films: Vec<_> = stack
         .films()
         .iter()
         .map(|optics| StatefulCoatingLayer {
-            receiver: source.receiver,
+            receiver,
             optics: optics.clone(),
         })
         .collect();
-    let snapshot = match &source.stack {
+    let snapshot = match stack {
         IsothermalCoatingStack::Opaque { substrate, .. } => NativeCoatingEmission::try_opaque(
             thermal,
             &films,
-            source.receiver,
+            receiver,
             substrate,
-            source.source_identity,
+            source_identity,
             maximum_rows,
             check,
         )?,
@@ -682,12 +708,44 @@ fn resolve_emitter(
             &films,
             *opposite_ior,
             *reverse,
-            source.source_identity,
+            source_identity,
             maximum_rows,
             check,
         )?,
     };
     Ok(snapshot.emitter().clone())
+}
+
+fn admit_law_rows(
+    stack: &IsothermalCoatingStack,
+    laws: &mut BTreeSet<(u8, [u8; 32])>,
+    rows: &mut usize,
+    maximum: usize,
+) -> Result<(), NativeCoatingExchangeError> {
+    for film in stack.films() {
+        if let CoatingOpticsModel::Law(law) = film {
+            if laws.insert((0, *law.identity().as_bytes())) {
+                *rows = rows
+                    .checked_add(law.row_count())
+                    .ok_or(NativeCoatingExchangeError::Budget)?;
+            }
+        }
+    }
+    if let IsothermalCoatingStack::Opaque {
+        substrate: SubstrateOpticsModel::Law(law),
+        ..
+    } = stack
+    {
+        if laws.insert((1, *law.identity().as_bytes())) {
+            *rows = rows
+                .checked_add(law.row_count())
+                .ok_or(NativeCoatingExchangeError::Budget)?;
+        }
+    }
+    if *rows > maximum {
+        return Err(NativeCoatingExchangeError::Budget);
+    }
+    Ok(())
 }
 
 // Preserve an original checkpoint error across the optical owner's own error type.

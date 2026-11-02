@@ -5458,3 +5458,49 @@ reversal/equilibrium/cache identities, and opaque/isothermal/domain/work-budget/
 late-cancellation refusals. No bolometric continuation of finite source data or
 internal exchange between independently heated films is claimed.
 <!-- coating-gap-exchange:end -->
+
+<!-- native-coating-gap:start -->
+
+## Conservative mutual coating exchange on native caloric stores
+
+`thermal_surface::heating::coating_exchange::gap::NativeCoatingGapExchange`
+connects independent opaque coating specimens through declared physical vacuum
+gaps. Each `CoatingGapLink` has two distinct native receivers, one common area,
+original source identities and explicit spectral/angular quadrature. Each side
+is internally isothermal; different sides retain independent native temperature
+and exact-caloric enthalpy-dependent optical laws. The original
+`CoatingGapResponse` owns their supported-band, polarized multiple-reflection
+exchange in the phase-averaged far-field, parallel/full-view-factor model.
+
+The original `DepositionObserver::heat_transfers` channel applies the SAME
+signed watts to both caloric stores. Radiation is internal transfer, never
+external source heat and never a conductive contact. Per-link accepted energy
+and per-cell net radiation are diagnostic accounts of that same heat, not
+additional storage. Native masses, geometry, caloric/storage identities,
+conduction, other boundaries and events remain authoritative.
+
+All gap areas assigned to each receiver must fit its current native exposed
+area. Distinct links declare disjoint physical patches, including when sharing
+a receiver. Separate radiation owners must not double-own these patches/bands.
+The owner rechecks coverage and every material/temperature domain at events and
+accepted states. Geometry, occlusion, finite-edge escape and nonunit view factors
+are not inferred from cell coordinates.
+
+The two source-state keys retain both T and h bits. Unchanged optical identities
+reuse the immutable joint angular/spectral response; unchanged source states
+also reuse its Planck rates. Unique law rows share one preparation budget across
+all sides. Link/rate/optical budgets bound work, with two original coherent
+solves per quadrature node. The native `DepositionBudget.max_links` independently
+bounds submitted internal transfers. Fixed-coefficient secants accumulate at
+both endpoints and compose with the native conduction/source timestep bound;
+nonlinear state-law and time accuracy require timestep refinement.
+
+Accepted-start pair watts are charged before endpoint optical refresh. Native
+candidate cloning retains the original simulation/observer on domain, coverage,
+budget or late-cancellation refusal. Focused integration witnesses cover direct
+SI Planck power, zero external heat and unequal caloric masses, equilibrium and
+fixed-optics cache reuse, independent two-body RK4 refinement with native
+conduction, shared latent-state optical laws, canonical multi-gap ordering,
+events/continuation, physical area limits and both work-budget channels.
+
+<!-- native-coating-gap:end -->
