@@ -262,6 +262,9 @@ pub struct Spec {
     pub shell_receiver_quadrature: fs_bem::near_field::Options,
     /// One-way receiver through the body profile's closed acoustic skin; nothing is fed back.
     pub one_way_observer: Option<OneWayShellObserverOptions>,
+    /// Original exterior molecular compression law, shared by skin playback,
+    /// harmonic receiver and the omitted-boundary-reaction receipt.
+    pub observer_molecular: Option<RelaxationState>,
     pub cavity: Option<MaterialBodyCavity>, pub friction: bow_interfaces::Inputs,
     /// The explicit contact-thermal profile requires original film density.
     pub contact_thermal: bool,
@@ -897,6 +900,14 @@ impl Spec {
                 maximum_boundary_terms, workers, rule,
             })
         } else { None };
+        let observer_molecular = if r.lines.clone().next()
+            .and_then(|line| line.split_ascii_whitespace().next()) == Some("observer_molecular") {
+            let mut row = r.row("observer_molecular")?;
+            let law = fs_material::relaxation::input::read_relaxation(&mut row.words)?;
+            row.end()?;
+            let medium = fs_material::relaxation::input::medium_from_record(&gas_record)?;
+            Some(law.evaluate(&medium)?)
+        } else { None };
         let mut row = r.row("cavity")?;
         let cavity = match row.word()? {
             "none" => None,
@@ -1227,7 +1238,7 @@ impl Spec {
             gas, gas_record, cavity_gas_record, cavity_molecular, body, strings, material_states, bridge_interfaces: bridge_interfaces::Inputs::new(bridge_sources)?,
             rotational_bridges, translational_bridges, cylinder_gas_loading, prepared_linear, residual_flexibility, bow_residual_flexibility, geometric_stretching, stretching_memory,
             longitudinal_waves, longitudinal_loss, longitudinal_memory, axial_bearings, bending_memory, body_radiation, shell_bem_angular_refinement,
-            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
+            plate_observer, shell_observer, shell_receiver_quadrature, one_way_observer, observer_molecular, cavity, friction, contact_thermal: false, dry_contact_thermal: false, retained_string_films: false, bow_ribbon, bow_compliance, bow_fibers,
             bow_station_motion, forces, schedule };
         spec.validate_material_states()?;
         spec.bow_station_program(&CancelGate::new_clock_free())?;
@@ -1310,6 +1321,12 @@ impl Spec {
             return Err("shell angular refinement requires the original BEM owner and level 0..2".into());
         }
         self.shell_receiver_quadrature.validate()?;
+        if let Some(molecular) = &self.observer_molecular {
+            if self.one_way_observer.is_none() || self.body_radiation.is_some()
+                || molecular.gas() != &self.gas {
+                return Err("observer_molecular requires its original exterior gas and a one-way skin receiver without a reciprocal air load".into());
+            }
+        }
         if let Some(observer) = &self.plate_observer {
             observer.validate(self.rate)?;
             if !matches!(self.body_radiation, Some(BodyRadiation::Rayleigh(_)))

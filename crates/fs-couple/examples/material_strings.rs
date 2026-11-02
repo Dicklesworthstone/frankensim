@@ -643,7 +643,10 @@ impl input::Spec {
             let skin=profile.as_ref().and_then(|body|body.acoustic_skin(&self))
                 .ok_or("one_way_observer requires a body profile that declares its closed acoustic skin")?;
             let store=profile.as_ref().and_then(|body|body.observer_store());
-            performance=performance.with_one_way_shell_observer(observer.clone(),&skin,store,gate)?;
+            performance=if let Some(molecular)=&self.observer_molecular {
+                performance.with_one_way_molecular_shell_observer(
+                    observer.clone(),&skin,molecular.clone(),store,gate)?
+            } else { performance.with_one_way_shell_observer(observer.clone(),&skin,store,gate)? };
         }
         performance.validate_sample_rate(self.rate)?;performance.validate_sample_count(self.samples)?;poll(gate)?;
         Ok(Ready { spec:self,catalog,performance,body_profile:profile,rotational_bridge_baselines_m:baselines,stop_profile,body_radiation })
@@ -1065,13 +1068,19 @@ fn run(raw:&[std::ffi::OsString])->Result<()> {
             Some(_) => "the skin's own computed air load reacts on the two-way body modes and the mouth; the rest stay one-way",
             None => "no air reaction enters the mechanics",
         };
-        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; two_way_load={:?}; two_way_modes={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; setup_key={}; setup_loaded={}; setup_entry={:?}; skin finite-distance pressure replaces compact pressure; {feedback}; homogeneous exterior without molecular absorption",
+        let exterior=if report.molecular.is_some() {
+            "material molecular compression in triangle-CBIE boundary and receiver; no exterior shear/thermal diffusion"
+        } else { "homogeneous exterior without molecular absorption" };
+        eprintln!("one_way_observer={:?}; body_modes={}; apertures={}; surface_panels={}; two_way_load={:?}; two_way_modes={}; largest_anchor_distance_m={}; plain_cbie_limit_rad_per_m={}; pass_Hz={}; taper_stop_Hz={}; geometric_delays_s={:?}; reconstruction_latency_samples={}; boundary_terms={}; replay_terms={}; rule={:?}; setup_key={}; setup_loaded={}; setup_entry={:?}; skin finite-distance pressure replaces compact pressure; {feedback}; {exterior}",
             report.options.receiver,report.body_modes,report.apertures,report.surface_panels,
             report.two_way_load.map(|key|key.to_hex()),report.two_way_modes,
             report.largest_anchor_distance_m,report.plain_cbie_limit_rad_per_m,transfer.pass_band_upper_hz,
             transfer.taper_stop_hz,transfer.geometric_delays_s,transfer.filter_latency_samples,
             report.boundary_terms,report.replay_terms,report.options.rule,report.setup_key.to_hex(),
             report.setup_loaded,ready.body_profile.as_ref().and_then(|body|body.observer_store_entry(&report.setup_key)));
+        if let Some(molecular)=&report.molecular {
+            eprintln!("observer_molecular={molecular:?}");
+        }
         for (mode,bound) in report.modes.iter().enumerate() {
             eprintln!("one_way_mode={mode}; f_Hz={}; wood_zeta={}; radiation_zeta={}; added_mass_shift={}; half_power_bandwidth_Hz={}; nearest_spacing_Hz={}; largest_mixing={}; mixing_mode={:?}; one_way={}",
                 bound.frequency_hz,bound.wood_zeta,bound.radiation_zeta,bound.added_mass_shift,

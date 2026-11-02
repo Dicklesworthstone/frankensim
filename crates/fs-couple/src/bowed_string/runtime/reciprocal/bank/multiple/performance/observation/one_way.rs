@@ -22,6 +22,12 @@
 //! below the bound, where Burton--Miller overstates low-ka resistance); they
 //! are estimates on that skin, not a convergence certificate.
 //!
+//! An explicitly supplied molecular medium instead uses the original complex
+//! triangle-CBIE owner for BOTH observation and the omitted-reaction receipt.
+//! Its full band must lie below the geometry's conservative CBIE bound. The
+//! reciprocal Galerkin load has no such material extension and cannot be
+//! combined with this declaration.
+//!
 //! The transfer and the receipt depend only on the transfer declaration and the
 //! body-mode frequencies, so a [`OneWaySetupStore`] may keep them between
 //! renders of one body; see `one_way_store.rs`.
@@ -30,7 +36,7 @@ use super::super::MultiBowPerformance;
 use super::{BoundReport, BoundShellObserver, ShellObserverError, invalid, poll};
 use fs_bem::helmholtz::{self, Medium, PanelRule};
 use fs_bem::observation_transfers::{
-    BemObservation, MAX_OBSERVATION_RUNGS, ObservationTransferBake, ProducerUncertainty,
+    BemObservation, MAX_OBSERVATION_RUNGS, MolecularBemObservation, ObservationTransferBake, ProducerUncertainty,
     ReceiverSpec, SourceId, TransferDeclaration, TransferError,
 };
 use fs_bem::panel3d::SpherePanels;
@@ -38,6 +44,7 @@ use fs_bem::radiation_policy::GeometryPolicy;
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
+use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 use fs_plate::shell::ShellMesh;
 use fs_vfit::observation::MAX_OBSERVATION_ENTRIES;
@@ -143,6 +150,8 @@ pub struct OneWayShellObserverOptions {
     /// Retained FIR multiply-add terms per accepted sample, all four outputs.
     pub maximum_replay_terms: u64,
     /// Boundary quadrature of the transfer and the receipt; it must integrate triangles.
+    /// The molecular triangle-CBIE path conservatively reserves all panel pairs
+    /// against this rule's pair allowance.
     pub panel_rule: PanelRule,
     pub maximum_skin_panels: usize,
     /// Largest admitted distance from a skin vertex to its anchored point [m].
@@ -180,6 +189,8 @@ pub struct OneWayModeBound {
 pub struct OneWayShellObserverReport {
     pub options: OneWayShellObserverOptions,
     pub gas: GasState,
+    /// Original evaluated caloric reservoirs, when the exterior has molecular loss.
+    pub molecular: Option<RelaxationState>,
     pub body_modes: usize,
     pub apertures: usize,
     pub surface_panels: usize,
@@ -618,6 +629,68 @@ pub(super) fn frequency_terms(panels: usize, sources: usize) -> Option<u64> {
         .checked_mul(p.checked_add(1)?.checked_mul(batches)?.checked_add(sources as u64)?)
 }
 
+/// Triangle-CBIE's conservative 512 kernel terms per panel pair, plus each
+/// original capped source batch's factorization and every right-hand side.
+pub(super) fn molecular_frequency_terms(panels: usize, sources: usize) -> Option<u64> {
+    let p = panels as u64;
+    let batches = sources.div_ceil(helmholtz::MAX_RADIATION_FIELDS_PER_BATCH) as u64;
+    p.checked_mul(p)?
+        .checked_mul(p.checked_add(512)?.checked_mul(batches)?.checked_add(sources as u64)?)
+}
+
+/// One molecular source/band admission shared by time playback and harmonic
+/// inspection. Modal receipt frequencies and every positive FIR bin use this
+/// same operator; harmonic inspection adds no taper or reconstruction latency.
+pub(super) fn molecular_owner<'a>(
+    surface: &'a SpherePanels, molecular: &RelaxationState,
+    sources: &[SourceId], fields: &[Vec<f64>], options: &OneWayShellObserverOptions,
+    rate: u32, omega: &[f64],
+) -> Result<MolecularBemObservation<'a>, ShellObserverError> {
+    let finest = options.fft_lengths.last().copied()
+        .ok_or_else(|| invalid("missing molecular observer FFT ladder"))?;
+    let mut lower = core::f64::consts::TAU * f64::from(rate) / finest as f64;
+    let mut upper = core::f64::consts::TAU * options.taper_stop_hz;
+    for &w in omega { lower = lower.min(w); upper = upper.max(w); }
+    let n = surface.areas().len();
+    let pairs = n.checked_mul(n).ok_or_else(|| invalid("molecular skin extent overflow"))?;
+    let pair_allowance = match options.panel_rule {
+        PanelRule::Triangle { max_pairs } | PanelRule::TriangleNear { max_pairs } => max_pairs,
+        PanelRule::Centroid => return Err(invalid("molecular skin requires triangle integration")),
+    };
+    if pairs > pair_allowance {
+        return Err(invalid("molecular triangle-CBIE exceeds its complete panel-pair allowance"));
+    }
+    let limits = helmholtz::laplace::complex::ComplexOptions {
+        max_panels: options.maximum_skin_panels,
+        max_bytes: pairs.checked_mul(32).ok_or_else(|| invalid("molecular skin storage overflow"))?,
+        max_work: (pairs as u64).checked_mul(512)
+            .ok_or_else(|| invalid("molecular skin assembly work overflow"))?,
+    };
+    Ok(MolecularBemObservation::new(surface, molecular.clone(), sources, fields,
+        core::slice::from_ref(&options.receiver), options.minimum_clearance_m,
+        [lower, upper], limits)?)
+}
+
+enum SkinObservation<'a> {
+    Homogeneous(BemObservation<'a>),
+    Molecular(MolecularBemObservation<'a>),
+}
+impl SkinObservation<'_> {
+    fn operator_hash(&self) -> ContentHash {
+        match self { Self::Homogeneous(owner) => owner.operator_hash(), Self::Molecular(owner) => owner.operator_hash() }
+    }
+    fn geometric_delays_s(&self) -> Vec<f64> {
+        match self { Self::Homogeneous(owner) => owner.geometric_delays_s(), Self::Molecular(owner) => owner.geometric_delays_s() }
+    }
+    fn bake(&self, declaration: &TransferDeclaration, gate: &CancelGate)
+        -> Result<ObservationTransferBake, ShellObserverError> {
+        Ok(match self {
+            Self::Homogeneous(owner) => owner.bake(declaration, || gate.is_requested())?,
+            Self::Molecular(owner) => owner.bake(declaration, || gate.is_requested())?,
+        })
+    }
+}
+
 /// Original modal velocities and physical aperture flows, shared by playback
 /// and harmonic observation. Aperture shares multiply the input, never the
 /// unit-volume-flow trace, so their interference retains its physical phase.
@@ -660,11 +733,31 @@ impl MultiBowPerformance {
     /// refusals; a bank that has accepted any sample; a damaged kept entry and
     /// the store's own failures.
     pub fn with_one_way_shell_observer(
-        mut self,
+        self,
         options: OneWayShellObserverOptions,
         skin: &ShellAcousticSkin,
         store: Option<&dyn OneWaySetupStore>,
         gate: &CancelGate,
+    ) -> Result<Self, ShellObserverError> {
+        self.with_skin_observer(options, skin, None, store, gate)
+    }
+
+    /// The same physical skin sources in an explicitly declared relaxing gas.
+    /// Its complex compression law changes boundary pressure, receiver phase,
+    /// attenuation and the omitted-reaction receipt together. This observer is
+    /// one-way: the current reciprocal Galerkin loading cannot consume that
+    /// law and is explicitly refused. No air-only absorption correlation or
+    /// post-sum filter is substituted for missing molecular data.
+    pub fn with_one_way_molecular_shell_observer(
+        self, options: OneWayShellObserverOptions, skin: &ShellAcousticSkin,
+        molecular: RelaxationState, store: Option<&dyn OneWaySetupStore>, gate: &CancelGate,
+    ) -> Result<Self, ShellObserverError> {
+        self.with_skin_observer(options, skin, Some(molecular), store, gate)
+    }
+
+    fn with_skin_observer(
+        mut self, options: OneWayShellObserverOptions, skin: &ShellAcousticSkin,
+        molecular: Option<RelaxationState>, store: Option<&dyn OneWaySetupStore>, gate: &CancelGate,
     ) -> Result<Self, ShellObserverError> {
         poll(gate)?;
         if self.poisoned
@@ -679,6 +772,12 @@ impl MultiBowPerformance {
         let source = self.bank.source.bank();
         let rate = source.options().sample_rate_hz;
         options.validate(rate)?;
+        if molecular.as_ref().is_some_and(|m| m.gas() != source.gas()) {
+            return Err(invalid("molecular observer must retain the original exterior gas"));
+        }
+        if molecular.is_some() && source.body_radiation().is_some() {
+            return Err(invalid("molecular skin observation has no matching reciprocal exterior load"));
+        }
         // The skin maps skin velocity to the receiver whether or not the air
         // reacts, so a two-way load on this same skin keeps this observer.
         let (two_way_load, two_way_modes) = match source.body_radiation() {
@@ -771,7 +870,10 @@ impl MultiBowPerformance {
         // Every positive bin below the stop band on the finest grid, plus one solve per mode.
         let frequency_samples =
             (options.taper_stop_hz * finest as f64 / f64::from(rate)).ceil() as usize;
-        let boundary_terms = frequency_terms(surface_panels, source_count)
+        let per_frequency = if molecular.is_some() {
+            molecular_frequency_terms(surface_panels, source_count)
+        } else { frequency_terms(surface_panels, source_count) };
+        let boundary_terms = per_frequency
             .and_then(|t| t.checked_mul((frequency_samples + mode_count) as u64))
             .ok_or_else(|| invalid("one-way boundary work overflow"))?;
         if boundary_terms > options.maximum_boundary_terms {
@@ -783,7 +885,12 @@ impl MultiBowPerformance {
             density: gas.density,
             sound_speed: gas.sound_speed,
         };
-        let owner = BemObservation::new_ruled_burton_miller(
+        let omega: Vec<f64> = body
+            .modes().iter().map(|m| m.angular_frequency_rad_s).collect();
+        let owner = if let Some(material) = &molecular {
+            SkinObservation::Molecular(molecular_owner(&traces.surface, material, &sources,
+                &fields, &options, rate, &omega)?)
+        } else { SkinObservation::Homogeneous(BemObservation::new_ruled_burton_miller(
             &traces.surface,
             medium,
             &sources,
@@ -791,15 +898,10 @@ impl MultiBowPerformance {
             core::slice::from_ref(&options.receiver),
             options.minimum_clearance_m,
             options.panel_rule,
-        )?;
+        )?) };
         let producer = owner.operator_hash();
         let declaration = options.declaration(rate, sources, owner.geometric_delays_s(), producer);
         declaration.admit_work()?;
-        let omega: Vec<f64> = body
-            .modes()
-            .iter()
-            .map(|m| m.angular_frequency_rad_s)
-            .collect();
         let setup_key = setup_store::setup_key(&declaration, &omega);
         let kept = match store {
             Some(store) => store.load(&setup_key).map_err(ShellObserverError::Store)?,
@@ -810,11 +912,21 @@ impl MultiBowPerformance {
             setup_store::KeptSetup::decode(&entry, &setup_key, mode_count)?.into_parts(&declaration)
         } else {
             let transfer = helmholtz::with_dense_workers(options.workers, || {
-                owner.bake(&declaration, || gate.is_requested())
+                owner.bake(&declaration, gate)
             })?;
             poll(gate)?;
             // The receipt: each mode's impedance row at its own frequency, on the same skin and rule.
-            let (impedance, limit) = impedance_rows(
+            let (impedance, limit) = if let SkinObservation::Molecular(owner) = &owner {
+                let mut rows = Vec::with_capacity(mode_count);
+                for (mode, &w) in omega.iter().enumerate() {
+                    poll(gate)?;
+                    let mut row = helmholtz::with_dense_workers(options.workers, ||
+                        owner.impedance_row(w, mode, || gate.is_requested()))?;
+                    row.truncate(mode_count);
+                    rows.push(row);
+                }
+                (rows, owner.plain_cbie_limit_rad_per_m())
+            } else { impedance_rows(
                 &traces.surface,
                 &traces.modes,
                 &omega,
@@ -822,7 +934,7 @@ impl MultiBowPerformance {
                 options.panel_rule,
                 options.workers,
                 gate,
-            )?;
+            )? };
             (transfer, impedance, limit)
         };
         let observer = transfer.observer()?;
@@ -856,6 +968,7 @@ impl MultiBowPerformance {
         }
         let report = OneWayShellObserverReport {
             gas,
+            molecular,
             body_modes: mode_count,
             apertures: skin.apertures.len(),
             surface_panels,

@@ -50,6 +50,8 @@ pub enum ShellObserverError {
     /// The original connected mechanics refused a continuous response.
     Dynamics(crate::bowed_string::runtime::reciprocal::ReciprocalStringError),
     Transfer(TransferError),
+    /// The same material compression law in the skin reaction and receiver.
+    Molecular(fs_bem::observation_transfers::MolecularObservationError),
     /// Shared Rayleigh receiver or material propagation admission.
     Plate(String),
     /// A one-way setup store's own read or write failure.
@@ -64,6 +66,11 @@ impl core::fmt::Display for ShellObserverError {
 impl std::error::Error for ShellObserverError {}
 impl From<TransferError> for ShellObserverError {
     fn from(error: TransferError) -> Self { Self::Transfer(error) }
+}
+impl From<fs_bem::observation_transfers::MolecularObservationError> for ShellObserverError {
+    fn from(error: fs_bem::observation_transfers::MolecularObservationError) -> Self {
+        Self::Molecular(error)
+    }
 }
 fn poll(gate: &CancelGate) -> Result<(), ShellObserverError> {
     if gate.is_requested() { Err(ShellObserverError::Cancelled) } else { Ok(()) }

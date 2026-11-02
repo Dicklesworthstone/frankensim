@@ -11,12 +11,13 @@ use crate::bowed_string::runtime::reciprocal::bank::multiple::MultiBowStringBank
 use fs_bem::helmholtz::{self, Medium};
 use fs_bem::near_field::Options as ReceiverQuadrature;
 use fs_bem::observation_transfers::{
-    BemObservation, ReciprocalBemObservation, ReceiverSpec, SourceId, TransferError,
+    BemObservation, MolecularBemObservation, ReciprocalBemObservation, ReceiverSpec, SourceId, TransferError,
 };
 use fs_bem::panel3d::SpherePanels;
 use fs_blake3::ContentHash;
 use fs_exec::CancelGate;
 use fs_material::gas::GasState;
+use fs_material::relaxation::RelaxationState;
 use fs_math::c64::C64;
 
 /// Reuse one explicitly selected playback source/receiver declaration. Only
@@ -24,6 +25,8 @@ use fs_math::c64::C64;
 pub enum ShellHarmonicReceiverSelection<'a> {
     Loaded { options: &'a ShellObserverOptions, quadrature: ReceiverQuadrature },
     Skin { options: &'a OneWayShellObserverOptions, skin: &'a ShellAcousticSkin },
+    MolecularSkin { options: &'a OneWayShellObserverOptions, skin: &'a ShellAcousticSkin,
+        molecular: &'a RelaxationState },
 }
 
 /// Physical scope of the raw producer. The skin observer retains its original
@@ -32,6 +35,7 @@ pub enum ShellHarmonicReceiverSelection<'a> {
 pub struct ShellHarmonicReceiverReport {
     pub receiver: ReceiverSpec,
     pub gas: GasState,
+    pub molecular: Option<RelaxationState>,
     pub formulation: &'static str,
     pub operator_identity: ContentHash,
     pub loading_identity: Option<ContentHash>,
@@ -61,7 +65,7 @@ pub struct ShellReceiverHarmonicResponse {
 
 enum Kind {
     Loaded(ShellObserverOptions, ReceiverQuadrature),
-    Skin(OneWayShellObserverOptions),
+    Skin(OneWayShellObserverOptions, Option<RelaxationState>),
 }
 
 /// Geometry and complete physical input map of one immutable borrowed bank.
@@ -119,6 +123,16 @@ impl<'a> ShellHarmonicReceiver<'a> {
             }
             Ok((binding,report))
         }).transpose()?;
+        let molecular = match &selection {
+            ShellHarmonicReceiverSelection::MolecularSkin { molecular, .. } => Some((*molecular).clone()),
+            _ => None,
+        };
+        if molecular.as_ref().is_some_and(|m| m.gas() != &gas) {
+            return Err(invalid("molecular harmonic receiver lost its original exterior gas"));
+        }
+        if molecular.is_some() && loading.is_some() {
+            return Err(invalid("molecular harmonic receiver has no matching reciprocal exterior load"));
+        }
         let (surface, fields, sources, addresses, kind, receiver, pass_band_upper_hz,
             formulation, skin_hash, loaded_body_modes) = match selection {
             ShellHarmonicReceiverSelection::Loaded {options,quadrature} => {
@@ -149,7 +163,8 @@ impl<'a> ShellHarmonicReceiver<'a> {
                     options.receiver.clone(),options.pass_band_upper_hz,
                     "reciprocal_p1_p0",None,body_modes)
             }
-            ShellHarmonicReceiverSelection::Skin {options,skin} => {
+            ShellHarmonicReceiverSelection::Skin {options,skin}
+            | ShellHarmonicReceiverSelection::MolecularSkin {options,skin,..} => {
                 options.validate(source.options().sample_rate_hz)?;
                 if source.spatial_cavity().is_some() {
                     return Err(invalid("skin harmonic receiver has no spatial cavity mouth binding"));
@@ -179,21 +194,26 @@ impl<'a> ShellHarmonicReceiver<'a> {
                 }
                 let (sources,addresses,fields) = one_way::observation_inputs(
                     source,components,body_modes,skin,&traces)?;
-                let work = one_way::frequency_terms(traces.surface.areas().len(),sources.len())
+                let frequency_work = if molecular.is_some() {
+                    one_way::molecular_frequency_terms(traces.surface.areas().len(), sources.len())
+                } else { one_way::frequency_terms(traces.surface.areas().len(), sources.len()) };
+                let work = frequency_work
                     .and_then(|w|w.checked_mul(frequency_samples as u64))
                     .ok_or_else(||invalid("harmonic skin sweep work overflow"))?;
                 if work>options.maximum_boundary_terms {
                     return Err(invalid("harmonic skin sweep exceeds its original boundary allowance"));
                 }
-                (traces.surface,fields,sources,addresses,Kind::Skin(options.clone()),
+                let formulation = if molecular.is_some() { "molecular_triangle_cbie" }
+                    else { "ruled_burton_miller" };
+                (traces.surface,fields,sources,addresses,Kind::Skin(options.clone(),molecular.clone()),
                     options.receiver.clone(),options.pass_band_upper_hz,
-                    "ruled_burton_miller",Some(identity),loaded)
+                    formulation,Some(identity),loaded)
             }
         };
         let sizes: Vec<_> = components.iter().map(|c|c.modes().len()).collect();
         let coordinates = flatten_coordinates(&sizes,&addresses)?;
         let report = ShellHarmonicReceiverReport {
-            receiver,gas,formulation,operator_identity:ContentHash([0;32]),
+            receiver,gas,molecular,formulation,operator_identity:ContentHash([0;32]),
             loading_identity:loading.map(|(_,l)|l.loading_identity),skin_identity:skin_hash,
             body_modes,opening_ports:sources.len()-body_modes,surface_panels:surface.areas().len(),
             loaded_body_modes,one_way_body_modes:body_modes-loaded_body_modes,
@@ -230,7 +250,17 @@ impl<'a> ShellHarmonicReceiver<'a> {
                 report.operator_identity=owner.operator_hash();
                 (FrequencyOwner::Loaded(owner),work)
             }
-            Kind::Skin(options) => {
+            Kind::Skin(options, Some(material)) => {
+                let body = &self.bank.system().components()[self.bank.source().bank().strings().len()];
+                let omega: Vec<_> = body.modes().iter().map(|m| m.angular_frequency_rad_s).collect();
+                let owner = one_way::molecular_owner(&self.surface, material, &self.sources,
+                    &self.fields, options, self.bank.source().bank().options().sample_rate_hz, &omega)?;
+                let work = one_way::molecular_frequency_terms(self.surface.areas().len(),self.sources.len())
+                    .ok_or_else(|| invalid("molecular harmonic skin receiver work overflow"))?;
+                report.operator_identity = owner.operator_hash();
+                (FrequencyOwner::Molecular(owner, options.workers), work)
+            }
+            Kind::Skin(options, None) => {
                 let owner = BemObservation::new_ruled_burton_miller(&self.surface,medium,
                     &self.sources,&self.fields,core::slice::from_ref(&report.receiver),
                     options.minimum_clearance_m,options.panel_rule)?;
@@ -249,6 +279,7 @@ impl<'a> ShellHarmonicReceiver<'a> {
 enum FrequencyOwner<'a> {
     Loaded(ReciprocalBemObservation<'a>),
     Skin(BemObservation<'a>,usize),
+    Molecular(MolecularBemObservation<'a>,usize),
 }
 
 /// One receiver bound to one original bank and source geometry. Queries are
@@ -274,10 +305,14 @@ impl PreparedShellHarmonicReceiver<'_, '_> {
     fn sample(&self,omega:f64,gate:&CancelGate)->Result<Vec<C64>,ShellObserverError> {
         poll(gate)?;
         let row = match &self.owner {
-            FrequencyOwner::Loaded(owner) => owner.frequency_sample(omega,||gate.is_requested()),
+            FrequencyOwner::Loaded(owner) => owner.frequency_sample(omega,||gate.is_requested())
+                .map_err(TransferError::Helmholtz)?,
             FrequencyOwner::Skin(owner,workers) =>
-                helmholtz::with_dense_workers(*workers,||owner.frequency_sample(omega)),
-        }.map_err(TransferError::Helmholtz)?;
+                helmholtz::with_dense_workers(*workers,||owner.frequency_sample(omega))
+                    .map_err(TransferError::Helmholtz)?,
+            FrequencyOwner::Molecular(owner,workers) =>
+                helmholtz::with_dense_workers(*workers,||owner.frequency_sample(omega,||gate.is_requested()))?,
+        };
         poll(gate)?;
         Ok(row)
     }

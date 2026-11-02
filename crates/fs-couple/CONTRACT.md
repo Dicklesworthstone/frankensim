@@ -7355,6 +7355,23 @@ projection work are reserved before mechanics; skin work counts every actual
 source mapping, invalid inputs and combined/batched work; they do not execute
 a BEM solve. Full bank/microphone integration tests remain authored and unrun.
 
+`with_one_way_molecular_shell_observer` and harmonic receiver selection
+`MolecularSkin` bind the same original `RelaxationState` to the shared
+`MolecularBemObservation` owner. The molecular compression law supplies complex
+propagation while the inviscid momentum boundary keeps `q = i * rho * omega * v`.
+Playback, boundary reaction estimates and harmonic pressure/gradients therefore
+share the source law; no downstream equalizer substitutes for the exterior
+solve. The operator identity includes the complete gas and reservoir state.
+The FIR's exact travel-time prefix uses the frozen sound speed; harmonic queries
+retain physical complex phase without FIR latency. The original triangle CBIE
+is admitted only when the entire observation band lies below its geometric
+resonance-exclusion bound, with existing boundary-pair/work limits enforced.
+Reciprocal loaded-shell observation is not extended by this one-way owner, and
+an incompatible loaded selection refuses. The native `observer_molecular`
+record binds the same source in ordinary playback and loaded body-response
+inspection. This remains a frozen exterior with molecular compression memory,
+not a new model of exterior shear, wall transport or evolving mean gas.
+
 The frontend `--loaded-body-response` exports bridge mobilities, signed shell
 volume velocities, native and selected receiver pressure in Pa/N, supplied and
 component/connection/coating/other-material/radiation power, stored energy and
@@ -8625,6 +8642,32 @@ regression definitions require native execution; source review alone does
 not establish numerical or experimental qualification.
 
 ## Finite enthalpy heating through a pressure-loaded solid valve
+
+`render::schedule::reed::source::SourceReedPerformance` connects the existing
+`BeatingReedSource` contract to the finite native TMM performer. The source's
+own checked reduction supplies all six mechanical coefficients, including
+dynamic mass, stiffness and damping; no additional reduction or material-name
+dispatch is introduced. Native `reed source` selection is explicit. A missing
+source, coexistence with numerical mechanics, nonmassive source image or
+source-owned attack/pressure refuses. Original structural admission errors
+remain typed and never select default coefficients. The source and admission
+remain retained beside the same gas, field, gesture, lay, TMM, terminal-load,
+observer and finite-horizon owners. The performance input hash still identifies
+only the authored bytes; it does not identify the separately bound structure.
+Source-bound `tongue_contact` refuses because its authored cantilever force
+projection is not the arbitrary source's mode; a source-projected contact map
+is required before that control can be admitted.
+This is the source owner's admitted single-mode approximation, not a resolved
+double reed or a measured instrument qualification.
+
+`heated_valve_sound --performance FILE` consumes this bridge through its
+existing normalized material-card and thermal geometry/reduction path, with
+explicit source selection and physical baffled observation. Its frozen
+authored gas cannot replace a simultaneous finite thermal reservoir, so that
+combination refuses. Density-only regression holds static stiffness and closing
+pressure fixed while changing mass, resonance and actual microphone pressure;
+further regressions exercise stiffness, damping, atmosphere, callback parity,
+original coefficient-path equivalence and source-admission refusals.
 
 `solid_enthalpy::valve` binds each accepted P1 material/caloric state to the
 existing thermal pressure-valve reducer. `advance_pressure_valve_to` advances

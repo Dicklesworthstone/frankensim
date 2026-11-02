@@ -2868,6 +2868,52 @@ and its spacing. The command prints one line per mode and the list of modes
 outside that rule, which would have to be fed back. These are estimates on the
 declared skin, not a convergence certificate, and they do not change the render.
 
+### Material molecular propagation through the skin
+
+Immediately after `one_way_observer`, before `cavity`, an optional record binds
+the shared molecular compression law to the original exterior `gas` record:
+
+```text
+observer_molecular iso9613-terrestrial-air
+```
+
+The shared `declared N ...` species/reservoir/collision-rate grammar from
+`fs-material::relaxation::input` is also accepted. It requires explicit data for
+every species, including zero-reservoir species. Temperature, pressure, mixture
+fractions and collision partners all enter that material evaluation. The ISO
+law retains its terrestrial-air composition limits; it does not become a
+correlation for helium, carbon dioxide or an arbitrary mixture. Legacy `gas air`
+has no species authority and refuses this record. These are exterior data;
+`cavity_molecular` continues to describe the independently declared interior.
+
+This selects the existing complex triangle-CBIE molecular owner. Its complex
+wavenumber changes the skin pressure, finite receiver pressure and gradient,
+and every mode's omitted-reaction receipt together. The Neumann source stays
+`i rho omega v`; no extra absorption filter or travel delay is applied after
+adding the sources. The causal FIR's exact prefix uses the material's frozen
+sound speed. Raw harmonic body-response exports use the same material boundary
+owner, without the playback reconstruction latency or taper. Changing reservoir
+capacities or collision rates invalidates a kept setup even if equilibrium
+density and sound speed are unchanged.
+
+The entire taper band **and** every body-mode receipt frequency must be below
+the geometry's conservative triangle-CBIE resonance-exclusion bound. A wider
+band refuses; no boundary formulation is switched inside a Fourier transfer.
+This path uses the original triangle-CBIE integration rule and its explicit
+512-kernel-terms-per-panel-pair reservation. The dense work allowance also
+includes each source batch's factorization and every right-hand side. The
+`MAX_PAIRS` allowance conservatively reserves all panel pairs on this path. The
+receiver retains the molecular owner's existing centroid Green evaluation;
+the FIR ladder does not certify its spatial accuracy. This is inviscid momentum
+with relaxing compression; exterior shear diffusion, thermal diffusion, mean
+flow and wall boundary layers are outside its scope.
+
+`observer_molecular` currently requires a **one-way** skin receiver without any
+`body-radiation` load. The reciprocal Galerkin load does not yet consume the same
+complex compression law, so combining them refuses instead of reporting a
+material-aware microphone on an incompatible lossless exterior reaction. The
+report still states the physical reaction omitted by this one-way approximation.
+
 The transfer and the receipt are the expensive part (hours on a 3000-panel skin).
 They depend only on the transfer declaration and the body-mode frequencies. The
 declaration's hash binds the skin operator (panels, every source trace, gas,

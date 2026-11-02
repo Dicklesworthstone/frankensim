@@ -67,6 +67,102 @@ fn skinned(text: &str, cx: &Cx<'_>, gate: &CancelGate) -> Ready {
         .unwrap()
 }
 
+// Manufactured molecular reservoirs on the existing manufactured shell. These
+// coefficients exercise wiring; they are not measured nitrogen/oxygen data.
+fn molecular_source(p_tau: f64) -> String {
+    source("").replace("120 400", "100 250").replace("cavity none\n", &format!(
+        "observer_molecular declared 2 N2 1 vibration 1 900 1 power {p_tau} 293.15 0 200 500 O2 0\ncavity none\n"))
+}
+
+fn coarse_skin() -> String {
+    // The parent's 20 outward faces use the original 12 shell vertices, each
+    // still anchored to its original node. This is an explicitly coarse skin.
+    let fine = own_skin();
+    let triangles: Vec<Vec<usize>> = SHELL.lines().filter(|line| line.starts_with("triangle "))
+        .map(|line| line.split_ascii_whitespace().skip(1).take(3)
+            .map(|v| v.parse().unwrap()).collect()).collect();
+    let mut out = format!("{}skin-triangles 20\n", fine.split("skin-triangles ").next().unwrap());
+    for group in triangles.chunks_exact(4) {
+        out += &format!("skin-triangle {} {} {}\n", group[0][0], group[1][0], group[2][0]);
+    }
+    out + "skin-apertures 0\n"
+}
+
+#[test]
+fn molecular_skin_data_reaches_playback_harmonic_receiver_and_omitted_reaction_together() {
+    use fs_couple::bowed_string::runtime::reciprocal::bank::multiple::performance::observation::harmonic::{
+        ShellHarmonicReceiver, ShellHarmonicReceiverSelection,
+    };
+    use fs_math::c64::C64;
+    scoped(|cx, gate| {
+        let skin_text = coarse_skin();
+        let mut a = compiled(&molecular_source(25.33125), &skin_text, cx, gate);
+        let mut b = compiled(&molecular_source(202.65), &skin_text, cx, gate);
+        let ra = a.performance.one_way_shell_observer().unwrap().clone();
+        let rb = b.performance.one_way_shell_observer().unwrap().clone();
+        assert_eq!(ra.gas, rb.gas);
+        assert!(ra.molecular.is_some() && rb.molecular.is_some());
+        assert_ne!(ra.setup_key, rb.setup_key, "rates must invalidate a kept setup even at identical rho/c");
+        assert_ne!(ra.transfer().declaration_hash, rb.transfer().declaration_hash);
+        assert_ne!(ra.modes, rb.modes, "the reaction receipt must use the same material as the microphone");
+        let harmonic = |ready: &Ready, extra_latency: usize| {
+            let skin = ready.body_profile.as_ref().unwrap().acoustic_skin(&ready.spec).unwrap();
+            let mut options = ready.spec.one_way_observer.clone().unwrap();
+            options.filter_latency_samples += extra_latency;
+            let receiver = ShellHarmonicReceiver::new(ready.performance.bank(),
+                ShellHarmonicReceiverSelection::MolecularSkin { options: &options, skin: &skin,
+                    molecular: ready.spec.observer_molecular.as_ref().unwrap() }, 1, gate).unwrap();
+            let prepared = receiver.prepare(gate).unwrap();
+            assert_eq!(prepared.report().formulation, "molecular_triangle_cbie");
+            assert_eq!(prepared.report().loaded_body_modes, 0);
+            prepared.bridge_harmonic_response(core::f64::consts::TAU*60.0, 0,
+                C64::ONE, 500_000_000_000, gate).unwrap().receiver_pressure_pa
+        };
+        let pa = harmonic(&a, 0);
+        let pb = harmonic(&b, 0);
+        assert!((pa-pb).abs() > 1e-4*pa.abs());
+        assert_eq!(pa, harmonic(&a, 1), "playback latency must not rotate physical pressure");
+        let mut reference = ra.transfer().observer().unwrap();
+        let mut outputs = [Vec::new(), Vec::new()];
+        for _ in 0..a.spec.samples {
+            let mut first = [0.0];
+            let mut second = [0.0];
+            a.performance.block(&mut first).unwrap();
+            b.performance.block(&mut second).unwrap();
+            let body = a.spec.strings.len();
+            let velocity: Vec<_> = a.performance.bank().system().components()[body].states()
+                .iter().map(|state| state.velocity_m_sqrt_kg_per_s).collect();
+            assert_eq!(first[0], reference.step(&velocity).unwrap()[0]);
+            outputs[0].push(first[0]);
+            outputs[1].push(second[0]);
+        }
+        assert_ne!(outputs[0], outputs[1]);
+        assert!(outputs[0].iter().any(|v| v.abs() > 1e-14));
+        for (ca, cb) in a.performance.bank().system().components().iter()
+            .zip(b.performance.bank().system().components()) {
+            assert_eq!(ca.states(), cb.states(), "one-way molecular propagation cannot change mechanics");
+        }
+    });
+}
+
+#[test]
+fn molecular_skin_refuses_missing_species_stale_gas_and_unsupported_reciprocal_load() {
+    let source = molecular_source(101.325);
+    let mut spec = input::Spec::parse(source.as_bytes()).unwrap();
+    assert_eq!(spec.observer_molecular.as_ref().unwrap().gas(), &spec.gas);
+    for text in [
+        source.replace(&RECORD.replace("120 400", "100 250"), ""),
+        source.replace("declared 2 N2", "declared 1 N2").replace(" O2 0\n", "\n"),
+        source.replace("200 500 O2 0", "200 500 O2 0 trailing"),
+        source.replace("cavity none\n", "observer_molecular declared 2 N2 0 O2 0\ncavity none\n"),
+        source.replace("one_way_observer front", &format!("{SKIN_LOAD}one_way_observer front")),
+    ] {
+        assert!(input::Spec::parse(text.as_bytes()).is_err());
+    }
+    spec.gas = input::Spec::parse(source.replace("101325", "202650").as_bytes()).unwrap().gas;
+    assert!(spec.validate_shell_observer().is_err());
+}
+
 #[test]
 fn one_way_listener_replays_the_accepted_body_modes_through_the_shell_s_own_skin() {
     scoped(|cx, gate| {

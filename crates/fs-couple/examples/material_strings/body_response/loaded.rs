@@ -58,9 +58,10 @@ impl Options {
             (None, Some(options)) => {
                 let skin = profile.and_then(|body| body.acoustic_skin(spec))
                     .ok_or("harmonic skin receiver requires the original profile's acoustic skin")?;
-                self.write_loaded(bank, Some(ShellHarmonicReceiverSelection::Skin {
-                    options, skin: &skin,
-                }), maximum_work, gate)
+                let selection = if let Some(molecular) = &spec.observer_molecular {
+                    ShellHarmonicReceiverSelection::MolecularSkin { options, skin: &skin, molecular }
+                } else { ShellHarmonicReceiverSelection::Skin { options, skin: &skin } };
+                self.write_loaded(bank, Some(selection), maximum_work, gate)
             }
             (None, None) => self.write_loaded(bank, None, maximum_work, gate),
             _ => Err("loaded response requires one physical receiver declaration".into()),
