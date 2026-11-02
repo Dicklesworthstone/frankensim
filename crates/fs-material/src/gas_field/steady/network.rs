@@ -4,8 +4,9 @@
 //! Each accepted mixture retains the original NASA-9 and transport sources;
 //! density, sound speed and viscosity are consequences of that one state.
 //! This is fixed-pressure, well-mixed, low-Mach steady transport. Prescribed
-//! flows and wall conductances are inputs, not predictions of a pressure-drop
-//! or turbulence model. Reference cell masses only set pseudo-time relaxation.
+//! flows and wall boundary data are inputs, not predictions of a pressure-drop
+//! or turbulence model. Source-bound walls can replace supplied conductances;
+//! reference cell masses only set pseudo-time relaxation.
 
 use super::{GasInjection, MAX_STEADY_GAS_CELLS, MAX_STEADY_GAS_INJECTIONS,
     PrimitiveGasState, SteadyGasError, SteadyGasSolve, bad, point_at, poll, positive,
@@ -34,6 +35,7 @@ pub struct GasNetworkCell {
     /// Branch/nozzle throat speeds require their own geometry and model.
     pub flow_area_m2: f64,
     /// Supplied total wall conductance [W/K], including zero insulation.
+    /// A material-wall binding replaces this scalar with the original source law.
     pub wall_conductance_w_k: f64,
     /// Prescribed wall reservoir temperature [K].
     pub wall_temperature_k: f64,
@@ -100,7 +102,8 @@ impl SteadyGasNetworkSolution {
     pub fn mass_flow_kg_s(&self) -> &[f64] { &self.mass_flow_kg_s }
     /// Net inward power at each published state [W].
     pub fn cell_power_residuals_w(&self) -> &[f64] { &self.cell_power_residuals_w }
-    /// Bounds include each caloric reconstruction's absolute flux correction.
+    /// Bounds include each caloric reconstruction's absolute flux correction
+    /// and, for material-wall solves, the constitutive flux residual bound.
     pub fn cell_power_residual_bounds_w(&self) -> &[f64] { &self.cell_power_residual_bounds_w }
     /// Largest per-cell conservative steady residual bound [W].
     pub fn maximum_power_residual_bound_w(&self) -> f64 {
@@ -125,8 +128,18 @@ impl SteadyGasNetwork {
     /// No partial, unconverged, supersaturated or out-of-source state is returned.
     /// The residual is a balance check, not a spatial discretization error bound.
     pub fn solve(
-        &self, controls: SteadyGasSolve, mut cancelled: impl FnMut() -> bool,
+        &self, controls: SteadyGasSolve, cancelled: impl FnMut() -> bool,
     ) -> Result<SteadyGasNetworkSolution, SteadyGasError> {
+        self.solve_with_observer(controls, (), cancelled)
+    }
+
+    // The fixed-conductance and material-wall paths share this one physical solve.
+    pub(super) fn solve_with_observer<O: fs_thermal::enthalpy::DepositionObserver>(
+        &self, controls: SteadyGasSolve, wall_observer: O,
+        mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SteadyGasNetworkSolution, SteadyGasError>
+    where SteadyGasError: From<O::Error>,
+    {
         poll(&mut cancelled)?;
         let count = self.cells.len();
         if count == 0 || count > MAX_STEADY_GAS_CELLS
@@ -204,7 +217,7 @@ impl SteadyGasNetwork {
         }
         let species = self.source.thermodynamics().components().iter()
             .map(|component| component.species().to_string()).collect();
-        let observer = Advected::new((), self.flows.clone(), MAX_STEADY_GAS_CONNECTIONS)?
+        let observer = Advected::new(wall_observer, self.flows.clone(), MAX_STEADY_GAS_CONNECTIONS)?
             .with_boundaries(boundaries, MAX_STEADY_GAS_CONNECTIONS)?
             .with_stationary_species(species, inlet_species, count, 128)?;
         let stationary = observer.stationary_species().expect("just admitted").clone();

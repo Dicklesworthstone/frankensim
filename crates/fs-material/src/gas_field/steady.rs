@@ -7,13 +7,17 @@
 //! becomes the same AxialGasField consumed by ducts, reeds and radiation.
 //!
 //! This model has prescribed positive through-flow and perfectly mixed axial
-//! control volumes. Wall temperatures and total conductances are supplied
+//! control volumes. Wall reservoir temperatures and either total conductances
+//! or source conductivity, geometry and explicit film resistance are supplied
 //! physical data. It does not predict pressure drop, wall heat-transfer
 //! coefficients, turbulence, diffusion, reaction or condensation. No transient
 //! density/mass history or finite-Mach acoustic accuracy is claimed.
 
 /// Shared source-bound steady transport on branched and recirculating graphs.
 pub mod network;
+
+/// Source-bound wall heat on this same enthalpy and acoustic-field solve.
+pub mod wall;
 
 /// Equilibrium liquid-water removal through the same species/enthalpy observer.
 pub mod condensation;
@@ -43,7 +47,7 @@ pub struct AxialGasCell {
     /// Gas-facing wall area [m2].
     pub wall_area_m2: f64,
     /// Supplied TOTAL conductance to the wall [W/K], including zero insulation.
-    /// A different material/flow requires the corresponding resolved conductance.
+    /// A material-wall binding replaces this scalar with the original source law.
     pub wall_conductance_w_k: f64,
     /// Prescribed wall reservoir temperature [K].
     pub wall_temperature_k: f64,
@@ -164,6 +168,7 @@ impl SteadyGasSolution {
     /// plus the actual closure corrections on its upstream/outgoing enthalpy fluxes.
     pub fn cell_power_residuals_w(&self) -> &[f64] { &self.cell_power_residuals_w }
     /// Conservative maximum W residual including absolute closure-flux defects.
+    /// Material-wall solves also include their constitutive flux residual bound.
     /// This bounds BOTH the emitted-grid balance and the exact supplied-inlet
     /// balance; common inverse errors cannot cancel a source enthalpy mismatch.
     pub fn maximum_power_residual_bound_w(&self) -> f64 { self.maximum_power_residual_bound_w }
@@ -265,7 +270,14 @@ impl SteadyAxialGas {
     ) -> Result<SteadyGasSolution, SteadyGasError> {
         poll(&mut cancelled)?;
         let network = self.to_network()?;
-        let mut solution = network.solve(controls, &mut cancelled)?;
+        let solution = network.solve(controls, &mut cancelled)?;
+        self.finish_network_solution(&network, solution, controls, cancelled)
+    }
+
+    fn finish_network_solution(
+        &self, network: &SteadyGasNetwork, mut solution: network::SteadyGasNetworkSolution,
+        controls: SteadyGasSolve, mut cancelled: impl FnMut() -> bool,
+    ) -> Result<SteadyGasSolution, SteadyGasError> {
         // The upstream boundary is an enthalpy-balanced mixture of all supplies
         // entering cell zero, before any of its wall heat is exchanged.
         let upstream_h = solution.inlet_enthalpy_w[0] / solution.inlet_mass_kg_s[0];

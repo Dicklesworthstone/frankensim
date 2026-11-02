@@ -17,6 +17,9 @@ pub use stack::{LayerStackConduction, LayerStackResponse, MAX_CONDUCTION_LAYERS}
 mod geometry;
 pub use geometry::LayerGeometry;
 
+mod reservoir;
+pub use reservoir::{ReservoirLayerGeometry, ReservoirLayerResponse};
+
 /// Endpoint coefficients for the original conservative thermal network.
 pub mod network;
 /// Source-qualified preparation on an original pure-phase caloric branch.
