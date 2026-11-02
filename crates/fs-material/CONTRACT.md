@@ -7991,6 +7991,36 @@ unloading, seals, amount conservation and transactional cancellation. Source
 regressions check original receipts, local domains, ordered identities and
 unsupported coefficient bases without claiming measured membrane accuracy.
 
+### Finite immobile trapping during membrane breakthrough
+
+`membrane::transient::slab::trapping` couples mobile Henry storage S*q to an
+explicit finite Langmuir site population in each selected layer. Only mobile
+solute transports through the original D*S face law. The immobile pool obeys
+finite adsorption/desorption kinetics with explicit capacity per membrane
+volume, pressure affinity and desorption rate. Initial trapped loading is an
+independent declared inventory. Saturation, delayed breakthrough, preloading
+history and unloading emerge from the coupled conservation equations.
+
+The allocation-free scalar limit of the original competitive-site owner
+analytically eliminates each backward-Euler site inventory and supplies its
+positive rate derivative. The original multicomponent site entry point reuses
+this same one-species limit. Remaining mobile pressures and optional finite
+pressure-capacity reservoirs share one nonlinear tridiagonal solve using native
+fs-la LU, bounded Newton iterations and positivity-preserving backtracking.
+There is no diffusion/uptake splitting or transport of the trapped pool.
+
+Reusable O(cells) scratch, bounded cancellation and immutable candidates retain
+transactional failure. Original local, membrane, reservoir and closed-system
+amount checks include mobile and trapped changes. Reports distinguish both
+inventories, gross adsorption/desorption and boundary/interface transport.
+The coefficients and temperature are fixed; competitive trap populations,
+swelling, sorption heat and a total energy closure are not inferred. A single
+implicit step is first-order and requires time/space refinement. Six authored
+membrane regressions plus two scalar-site checks cover independent rational/
+quadratic solutions, the native Henry limit, finite nonlinear equilibrium,
+saturation-delayed breakthrough, preload/desorption history, seals and atomic
+nonlinear/cancellation refusal; these are not measured polymer validation.
+
 ### Accuracy-controlled transient membrane windows
 
 `membrane::transient::slab::adaptive` supplies bounded backward-Euler

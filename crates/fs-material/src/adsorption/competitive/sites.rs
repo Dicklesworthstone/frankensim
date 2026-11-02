@@ -2,6 +2,10 @@
 //! A diagonal-plus-rank-one solve costs O(species), not O(species^3).
 use super::*;
 
+/// Allocation-free one-species limit and its analytic rate derivative.
+pub mod scalar;
+pub use scalar::{ScalarSiteError, ScalarSiteStep, backward_euler_site};
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompetitiveSiteStep {
     pub initial_moles: Vec<f64>,
@@ -29,6 +33,15 @@ pub fn backward_euler_sites(
     }
     let vacancy0 = finite(capacity - sum(initial.iter().copied())?)?;
     if vacancy0 < 0.0 { return Err(invalid("competitive loadings exceed their ONE shared site capacity")); }
+    if n == 1 {
+        let step = backward_euler_site(initial[0], capacity, adsorption[0], desorption[0], duration)
+            .map_err(|error| invalid(error.message()))?;
+        poll(&mut cancelled)?;
+        return Ok(CompetitiveSiteStep { initial_moles: initial.to_vec(),
+            final_moles: vec![step.occupied_moles], gross_adsorption_mol: vec![step.gross_adsorption_mol],
+            gross_desorption_mol: vec![step.gross_desorption_mol], vacancy_moles: [vacancy0, step.vacancy_moles],
+            maximum_balance_residual_mol: step.maximum_balance_residual_mol });
+    }
     let mut result = CompetitiveSiteStep { initial_moles: initial.to_vec(),
         final_moles: initial.to_vec(), gross_adsorption_mol: vec![0.0; n],
         gross_desorption_mol: vec![0.0; n], vacancy_moles: [vacancy0; 2],

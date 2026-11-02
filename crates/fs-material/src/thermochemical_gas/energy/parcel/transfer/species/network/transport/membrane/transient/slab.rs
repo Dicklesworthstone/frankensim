@@ -550,3 +550,5 @@ mod tests;
 pub mod finite;
 /// Accuracy-controlled windows over the original implicit diffusion steps.
 pub mod adaptive;
+/// Finite immobile site uptake coupled implicitly to mobile Henry diffusion.
+pub mod trapping;
